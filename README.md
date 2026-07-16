@@ -13,7 +13,7 @@ It runs in Node, the browser, and workers, with no native dependencies.
 Extracted from the de:volt application's `@devolt/simcore` package. MIT.
 
 **Status: 0.x.** The device registry is the stability surface; the API can
-still move. What is here is covered by 1,379 tests across 78 files, run twice
+still move. What is here is covered by 1,602 tests across 88 files, run twice
 per change — once per linear-solver backend.
 
 ## Install
