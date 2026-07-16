@@ -1,0 +1,1568 @@
+{
+  "id": "tc-memory-rom-lab",
+  "name": "74LS189 RAM plus 28C16 and 28C256 EEPROM display lab",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "u1_74ls189",
+      "kind": "74ls189",
+      "position": {
+        "x": 131,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a0",
+          "label": "A0",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "/cs",
+          "label": "/CS",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "/we",
+          "label": "/WE",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "d1",
+          "label": "D1",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "/o1",
+          "label": "/O1",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "d2",
+          "label": "D2",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "/o2",
+          "label": "/O2",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "d3",
+          "label": "D3",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "/o3",
+          "label": "/O3",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "d4",
+          "label": "D4",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "/o4",
+          "label": "/O4",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "a3",
+          "label": "A3",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS189 16x4 RAM"
+    },
+    {
+      "id": "u2_28c16",
+      "kind": "28c16",
+      "position": {
+        "x": 511,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a7",
+          "label": "A7",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "a6",
+          "label": "A6",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a5",
+          "label": "A5",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "a4",
+          "label": "A4",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "a3",
+          "label": "A3",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "a0",
+          "label": "A0",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 160,
+            "y": 55
+          }
+        },
+        {
+          "id": "a10",
+          "label": "A10",
+          "offset": {
+            "x": 179,
+            "y": 55
+          }
+        },
+        {
+          "id": "/ce",
+          "label": "/CE",
+          "offset": {
+            "x": 198,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 217,
+            "y": 55
+          }
+        },
+        {
+          "id": "io0",
+          "label": "I/O0",
+          "offset": {
+            "x": 217,
+            "y": 0
+          }
+        },
+        {
+          "id": "io1",
+          "label": "I/O1",
+          "offset": {
+            "x": 198,
+            "y": 0
+          }
+        },
+        {
+          "id": "io2",
+          "label": "I/O2",
+          "offset": {
+            "x": 179,
+            "y": 0
+          }
+        },
+        {
+          "id": "io3",
+          "label": "I/O3",
+          "offset": {
+            "x": 160,
+            "y": 0
+          }
+        },
+        {
+          "id": "io4",
+          "label": "I/O4",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "io5",
+          "label": "I/O5",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "io6",
+          "label": "I/O6",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "io7",
+          "label": "I/O7",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "a9",
+          "label": "A9",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "a8",
+          "label": "A8",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "/we",
+          "label": "/WE",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5,
+        "contents": "PwZbT2ZtfQd/bw=="
+      },
+      "label": "28C16 seven-segment ROM"
+    },
+    {
+      "id": "u3_28c256",
+      "kind": "28c256",
+      "position": {
+        "x": 891,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a14",
+          "label": "A14",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "a12",
+          "label": "A12",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a7",
+          "label": "A7",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "a6",
+          "label": "A6",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "a5",
+          "label": "A5",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "a4",
+          "label": "A4",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "a3",
+          "label": "A3",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 160,
+            "y": 55
+          }
+        },
+        {
+          "id": "a0",
+          "label": "A0",
+          "offset": {
+            "x": 179,
+            "y": 55
+          }
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 198,
+            "y": 55
+          }
+        },
+        {
+          "id": "a10",
+          "label": "A10",
+          "offset": {
+            "x": 217,
+            "y": 55
+          }
+        },
+        {
+          "id": "/ce",
+          "label": "/CE",
+          "offset": {
+            "x": 236,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 255,
+            "y": 55
+          }
+        },
+        {
+          "id": "io0",
+          "label": "I/O0",
+          "offset": {
+            "x": 255,
+            "y": 0
+          }
+        },
+        {
+          "id": "io1",
+          "label": "I/O1",
+          "offset": {
+            "x": 236,
+            "y": 0
+          }
+        },
+        {
+          "id": "io2",
+          "label": "I/O2",
+          "offset": {
+            "x": 217,
+            "y": 0
+          }
+        },
+        {
+          "id": "io3",
+          "label": "I/O3",
+          "offset": {
+            "x": 198,
+            "y": 0
+          }
+        },
+        {
+          "id": "io4",
+          "label": "I/O4",
+          "offset": {
+            "x": 179,
+            "y": 0
+          }
+        },
+        {
+          "id": "io5",
+          "label": "I/O5",
+          "offset": {
+            "x": 160,
+            "y": 0
+          }
+        },
+        {
+          "id": "io6",
+          "label": "I/O6",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "io7",
+          "label": "I/O7",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "a9",
+          "label": "A9",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "a8",
+          "label": "A8",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "a13",
+          "label": "A13",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "a11",
+          "label": "A11",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "/we",
+          "label": "/WE",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5,
+        "contents": "qlXwD4FCJBg="
+      },
+      "label": "28C256 pattern ROM"
+    },
+    {
+      "id": "ram_o1_r",
+      "kind": "resistor",
+      "position": {
+        "x": 291,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "ram_o1 current limit"
+    },
+    {
+      "id": "ram_o1_led",
+      "kind": "led",
+      "position": {
+        "x": 348,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "ram_o1 indicator"
+    },
+    {
+      "id": "ram_o2_r",
+      "kind": "resistor",
+      "position": {
+        "x": 310,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "ram_o2 current limit"
+    },
+    {
+      "id": "ram_o2_led",
+      "kind": "led",
+      "position": {
+        "x": 367,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "ram_o2 indicator"
+    },
+    {
+      "id": "ram_o3_r",
+      "kind": "resistor",
+      "position": {
+        "x": 310,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "ram_o3 current limit"
+    },
+    {
+      "id": "ram_o3_led",
+      "kind": "led",
+      "position": {
+        "x": 367,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "ram_o3 indicator"
+    },
+    {
+      "id": "ram_o4_r",
+      "kind": "resistor",
+      "position": {
+        "x": 291,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "ram_o4 current limit"
+    },
+    {
+      "id": "ram_o4_led",
+      "kind": "led",
+      "position": {
+        "x": 348,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "ram_o4 indicator"
+    },
+    {
+      "id": "rom16_io0_r",
+      "kind": "resistor",
+      "position": {
+        "x": 785,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "rom16_io0 current limit"
+    },
+    {
+      "id": "rom16_io0_led",
+      "kind": "led",
+      "position": {
+        "x": 842,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "rom16_io0 indicator"
+    },
+    {
+      "id": "rom256_io0_r",
+      "kind": "resistor",
+      "position": {
+        "x": 1165,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "rom256_io0 current limit"
+    },
+    {
+      "id": "rom256_io0_led",
+      "kind": "led",
+      "position": {
+        "x": 1222,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "rom256_io0 indicator"
+    }
+  ],
+  "wires": [
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u1_74ls189-/cs",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u1_74ls189",
+      "to_pin": "/cs",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u1_74ls189-d2",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u1_74ls189",
+      "to_pin": "d2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u1_74ls189-gnd",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u1_74ls189",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u1_74ls189-a3",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u1_74ls189",
+      "to_pin": "a3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u1_74ls189-a2",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u1_74ls189",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a7",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a7",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a6",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a6",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a5",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a5",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a4",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a3",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a2",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a1",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a0",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a0",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-/oe",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "/oe",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a10",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a10",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-/ce",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "/ce",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-gnd",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a9",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a9",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u2_28c16-a8",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u2_28c16",
+      "to_pin": "a8",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a14",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a14",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a12",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a12",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a7",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a7",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a6",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a6",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a5",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a5",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a4",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a3",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a2",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a1",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a0",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a0",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-/oe",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "/oe",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a10",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a10",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-/ce",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "/ce",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-gnd",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a9",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a9",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a8",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a8",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a13",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a13",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-u3_28c256-a11",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "u3_28c256",
+      "to_pin": "a11",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-ram_o1_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "ram_o1_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-ram_o2_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "ram_o2_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-ram_o3_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "ram_o3_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-ram_o4_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "ram_o4_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-rom16_io0_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "rom16_io0_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-rom256_io0_led-k",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "rom256_io0_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-vcc_5v-neg",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-k-u1_74ls189-a0-gnd_ref-gnd",
+      "from_component": "u1_74ls189",
+      "from_pin": "a0",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u1_74ls189-d1",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u1_74ls189",
+      "to_pin": "d1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u1_74ls189-d3",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u1_74ls189",
+      "to_pin": "d3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u1_74ls189-d4",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u1_74ls189",
+      "to_pin": "d4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u1_74ls189-a1",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u1_74ls189",
+      "to_pin": "a1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u1_74ls189-vcc",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u1_74ls189",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u2_28c16-/we",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u2_28c16",
+      "to_pin": "/we",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u2_28c16-vcc",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u2_28c16",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u3_28c256-/we",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u3_28c256",
+      "to_pin": "/we",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-u3_28c256-vcc",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "u3_28c256",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_28c256-vcc-u1_74ls189-/we-vcc_5v-pos",
+      "from_component": "u1_74ls189",
+      "from_pin": "/we",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o1_r-a-u1_74ls189-/o1-ram_o1_r-a",
+      "from_component": "u1_74ls189",
+      "from_pin": "/o1",
+      "to_component": "ram_o1_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o2_r-a-u1_74ls189-/o2-ram_o2_r-a",
+      "from_component": "u1_74ls189",
+      "from_pin": "/o2",
+      "to_component": "ram_o2_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o3_r-a-u1_74ls189-/o3-ram_o3_r-a",
+      "from_component": "u1_74ls189",
+      "from_pin": "/o3",
+      "to_component": "ram_o3_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o4_r-a-u1_74ls189-/o4-ram_o4_r-a",
+      "from_component": "u1_74ls189",
+      "from_pin": "/o4",
+      "to_component": "ram_o4_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom16_io0_r-a-u2_28c16-io0-rom16_io0_r-a",
+      "from_component": "u2_28c16",
+      "from_pin": "io0",
+      "to_component": "rom16_io0_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_r-a-u3_28c256-io0-rom256_io0_r-a",
+      "from_component": "u3_28c256",
+      "from_pin": "io0",
+      "to_component": "rom256_io0_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o1_led-a-ram_o1_r-b-ram_o1_led-a",
+      "from_component": "ram_o1_r",
+      "from_pin": "b",
+      "to_component": "ram_o1_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o2_led-a-ram_o2_r-b-ram_o2_led-a",
+      "from_component": "ram_o2_r",
+      "from_pin": "b",
+      "to_component": "ram_o2_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o3_led-a-ram_o3_r-b-ram_o3_led-a",
+      "from_component": "ram_o3_r",
+      "from_pin": "b",
+      "to_component": "ram_o3_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-ram_o4_led-a-ram_o4_r-b-ram_o4_led-a",
+      "from_component": "ram_o4_r",
+      "from_pin": "b",
+      "to_component": "ram_o4_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom16_io0_led-a-rom16_io0_r-b-rom16_io0_led-a",
+      "from_component": "rom16_io0_r",
+      "from_pin": "b",
+      "to_component": "rom16_io0_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-rom256_io0_led-a-rom256_io0_r-b-rom256_io0_led-a",
+      "from_component": "rom256_io0_r",
+      "from_pin": "b",
+      "to_component": "rom256_io0_led",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

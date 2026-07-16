@@ -1,0 +1,1495 @@
+{
+  "id": "tc-register-bus-adder",
+  "name": "74LS173 register, 74LS245 bus transceiver, 74LS157 mux, and 74LS283 adder",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "u1_74ls173",
+      "kind": "74ls173",
+      "position": {
+        "x": 150,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "m",
+          "label": "M",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "n",
+          "label": "N",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "q1",
+          "label": "Q1",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "q2",
+          "label": "Q2",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "q3",
+          "label": "Q3",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "q4",
+          "label": "Q4",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "clk",
+          "label": "CLK",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "/clr",
+          "label": "/CLR",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "d1",
+          "label": "D1",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "d2",
+          "label": "D2",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "d3",
+          "label": "D3",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "d4",
+          "label": "D4",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "g1",
+          "label": "G1",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "g2",
+          "label": "G2",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS173 4-bit register"
+    },
+    {
+      "id": "u2_74ls245",
+      "kind": "74ls245",
+      "position": {
+        "x": 416,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "dir",
+          "label": "DIR",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "a3",
+          "label": "A3",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "a4",
+          "label": "A4",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "a5",
+          "label": "A5",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "a6",
+          "label": "A6",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "a7",
+          "label": "A7",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "a8",
+          "label": "A8",
+          "offset": {
+            "x": 160,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 179,
+            "y": 55
+          }
+        },
+        {
+          "id": "b8",
+          "label": "B8",
+          "offset": {
+            "x": 179,
+            "y": 0
+          }
+        },
+        {
+          "id": "b7",
+          "label": "B7",
+          "offset": {
+            "x": 160,
+            "y": 0
+          }
+        },
+        {
+          "id": "b6",
+          "label": "B6",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "b5",
+          "label": "B5",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "b4",
+          "label": "B4",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "b3",
+          "label": "B3",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "b2",
+          "label": "B2",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "b1",
+          "label": "B1",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS245 bus transceiver"
+    },
+    {
+      "id": "u3_74ls157",
+      "kind": "74ls157",
+      "position": {
+        "x": 720,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "sel",
+          "label": "SEL",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "1a",
+          "label": "1A",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "1b",
+          "label": "1B",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "1y",
+          "label": "1Y",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "2a",
+          "label": "2A",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "2b",
+          "label": "2B",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "2y",
+          "label": "2Y",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "4y",
+          "label": "4Y",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "4b",
+          "label": "4B",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "4a",
+          "label": "4A",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "3y",
+          "label": "3Y",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "3b",
+          "label": "3B",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "3a",
+          "label": "3A",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS157 quad mux"
+    },
+    {
+      "id": "u4_74ls283",
+      "kind": "74ls283",
+      "position": {
+        "x": 1005,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "s2",
+          "label": "S2",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "b2",
+          "label": "B2",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "s1",
+          "label": "S1",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "b1",
+          "label": "B1",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "c0",
+          "label": "C0",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "c4",
+          "label": "C4",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "s4",
+          "label": "S4",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "b4",
+          "label": "B4",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "a4",
+          "label": "A4",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "s3",
+          "label": "S3",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "a3",
+          "label": "A3",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "b3",
+          "label": "B3",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS283 4-bit adder"
+    },
+    {
+      "id": "clock_register",
+      "kind": "clock",
+      "position": {
+        "x": -35,
+        "y": 265
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "out",
+          "label": "Q",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "frequency": 2,
+        "duty": 0.5
+      },
+      "label": "Register clock"
+    },
+    {
+      "id": "adder_s1_r",
+      "kind": "resistor",
+      "position": {
+        "x": 1165,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "adder_s1 current limit"
+    },
+    {
+      "id": "adder_s1_led",
+      "kind": "led",
+      "position": {
+        "x": 1222,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "adder_s1 indicator"
+    },
+    {
+      "id": "adder_s2_r",
+      "kind": "resistor",
+      "position": {
+        "x": 899,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "adder_s2 current limit"
+    },
+    {
+      "id": "adder_s2_led",
+      "kind": "led",
+      "position": {
+        "x": 956,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "adder_s2 indicator"
+    },
+    {
+      "id": "adder_s3_r",
+      "kind": "resistor",
+      "position": {
+        "x": 1165,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "adder_s3 current limit"
+    },
+    {
+      "id": "adder_s3_led",
+      "kind": "led",
+      "position": {
+        "x": 1222,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "adder_s3 indicator"
+    },
+    {
+      "id": "adder_s4_r",
+      "kind": "resistor",
+      "position": {
+        "x": 1184,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "adder_s4 current limit"
+    },
+    {
+      "id": "adder_s4_led",
+      "kind": "led",
+      "position": {
+        "x": 1241,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "adder_s4 indicator"
+    },
+    {
+      "id": "adder_c4_r",
+      "kind": "resistor",
+      "position": {
+        "x": 899,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "adder_c4 current limit"
+    },
+    {
+      "id": "adder_c4_led",
+      "kind": "led",
+      "position": {
+        "x": 956,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "adder_c4 indicator"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_014",
+      "from_component": "clock_register",
+      "from_pin": "gnd",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-n",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "n",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-gnd",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-/clr",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "/clr",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-d2",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "d2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-d4",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "d4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-g1",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "g1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u1_74ls173-g2",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u1_74ls173",
+      "to_pin": "g2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u2_74ls245-gnd",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u2_74ls245",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u2_74ls245-/oe",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u2_74ls245",
+      "to_pin": "/oe",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u3_74ls157-sel",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u3_74ls157",
+      "to_pin": "sel",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u3_74ls157-1b",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u3_74ls157",
+      "to_pin": "1b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u3_74ls157-gnd",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u3_74ls157",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u3_74ls157-/oe",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u3_74ls157",
+      "to_pin": "/oe",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u3_74ls157-3b",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u3_74ls157",
+      "to_pin": "3b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u4_74ls283-b2",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u4_74ls283",
+      "to_pin": "b2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u4_74ls283-c0",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u4_74ls283",
+      "to_pin": "c0",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u4_74ls283-gnd",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u4_74ls283",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-u4_74ls283-b3",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "u4_74ls283",
+      "to_pin": "b3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-adder_s1_led-k",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "adder_s1_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-adder_s2_led-k",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "adder_s2_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-adder_s3_led-k",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "adder_s3_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-adder_s4_led-k",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "adder_s4_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-adder_c4_led-k",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "adder_c4_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-vcc_5v-neg",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-k-u1_74ls173-m-gnd_ref-gnd",
+      "from_component": "u1_74ls173",
+      "from_pin": "m",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u2_74ls245-a1-u1_74ls173-q1-u2_74ls245-a1",
+      "from_component": "u1_74ls173",
+      "from_pin": "q1",
+      "to_component": "u2_74ls245",
+      "to_pin": "a1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u2_74ls245-a2-u1_74ls173-q2-u2_74ls245-a2",
+      "from_component": "u1_74ls173",
+      "from_pin": "q2",
+      "to_component": "u2_74ls245",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u2_74ls245-a3-u1_74ls173-q3-u2_74ls245-a3",
+      "from_component": "u1_74ls173",
+      "from_pin": "q3",
+      "to_component": "u2_74ls245",
+      "to_pin": "a3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u2_74ls245-a4-u1_74ls173-q4-u2_74ls245-a4",
+      "from_component": "u1_74ls173",
+      "from_pin": "q4",
+      "to_component": "u2_74ls245",
+      "to_pin": "a4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74ls173-clk-u1_74ls173-clk-clock_register-out",
+      "from_component": "u1_74ls173",
+      "from_pin": "clk",
+      "to_component": "clock_register",
+      "to_pin": "out",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u1_74ls173-d3",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u1_74ls173",
+      "to_pin": "d3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u1_74ls173-vcc",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u1_74ls173",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u2_74ls245-dir",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u2_74ls245",
+      "to_pin": "dir",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u2_74ls245-vcc",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u2_74ls245",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u3_74ls157-2b",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u3_74ls157",
+      "to_pin": "2b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u3_74ls157-4b",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u3_74ls157",
+      "to_pin": "4b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u3_74ls157-vcc",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u3_74ls157",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u4_74ls283-b1",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u4_74ls283",
+      "to_pin": "b1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u4_74ls283-b4",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u4_74ls283",
+      "to_pin": "b4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-u4_74ls283-vcc",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "u4_74ls283",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-vcc-u1_74ls173-d1-vcc_5v-pos",
+      "from_component": "u1_74ls173",
+      "from_pin": "d1",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_74ls157-4a-u2_74ls245-b4-u3_74ls157-4a",
+      "from_component": "u2_74ls245",
+      "from_pin": "b4",
+      "to_component": "u3_74ls157",
+      "to_pin": "4a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_74ls157-3a-u2_74ls245-b3-u3_74ls157-3a",
+      "from_component": "u2_74ls245",
+      "from_pin": "b3",
+      "to_component": "u3_74ls157",
+      "to_pin": "3a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_74ls157-2a-u2_74ls245-b2-u3_74ls157-2a",
+      "from_component": "u2_74ls245",
+      "from_pin": "b2",
+      "to_component": "u3_74ls157",
+      "to_pin": "2a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u3_74ls157-1a-u2_74ls245-b1-u3_74ls157-1a",
+      "from_component": "u2_74ls245",
+      "from_pin": "b1",
+      "to_component": "u3_74ls157",
+      "to_pin": "1a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-a1-u3_74ls157-1y-u4_74ls283-a1",
+      "from_component": "u3_74ls157",
+      "from_pin": "1y",
+      "to_component": "u4_74ls283",
+      "to_pin": "a1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-a2-u3_74ls157-2y-u4_74ls283-a2",
+      "from_component": "u3_74ls157",
+      "from_pin": "2y",
+      "to_component": "u4_74ls283",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-a4-u3_74ls157-4y-u4_74ls283-a4",
+      "from_component": "u3_74ls157",
+      "from_pin": "4y",
+      "to_component": "u4_74ls283",
+      "to_pin": "a4",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u4_74ls283-a3-u3_74ls157-3y-u4_74ls283-a3",
+      "from_component": "u3_74ls157",
+      "from_pin": "3y",
+      "to_component": "u4_74ls283",
+      "to_pin": "a3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s2_r-a-u4_74ls283-s2-adder_s2_r-a",
+      "from_component": "u4_74ls283",
+      "from_pin": "s2",
+      "to_component": "adder_s2_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s1_r-a-u4_74ls283-s1-adder_s1_r-a",
+      "from_component": "u4_74ls283",
+      "from_pin": "s1",
+      "to_component": "adder_s1_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_r-a-u4_74ls283-c4-adder_c4_r-a",
+      "from_component": "u4_74ls283",
+      "from_pin": "c4",
+      "to_component": "adder_c4_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s4_r-a-u4_74ls283-s4-adder_s4_r-a",
+      "from_component": "u4_74ls283",
+      "from_pin": "s4",
+      "to_component": "adder_s4_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s3_r-a-u4_74ls283-s3-adder_s3_r-a",
+      "from_component": "u4_74ls283",
+      "from_pin": "s3",
+      "to_component": "adder_s3_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s1_led-a-adder_s1_r-b-adder_s1_led-a",
+      "from_component": "adder_s1_r",
+      "from_pin": "b",
+      "to_component": "adder_s1_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s2_led-a-adder_s2_r-b-adder_s2_led-a",
+      "from_component": "adder_s2_r",
+      "from_pin": "b",
+      "to_component": "adder_s2_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s3_led-a-adder_s3_r-b-adder_s3_led-a",
+      "from_component": "adder_s3_r",
+      "from_pin": "b",
+      "to_component": "adder_s3_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_s4_led-a-adder_s4_r-b-adder_s4_led-a",
+      "from_component": "adder_s4_r",
+      "from_pin": "b",
+      "to_component": "adder_s4_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-adder_c4_led-a-adder_c4_r-b-adder_c4_led-a",
+      "from_component": "adder_c4_r",
+      "from_pin": "b",
+      "to_component": "adder_c4_led",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

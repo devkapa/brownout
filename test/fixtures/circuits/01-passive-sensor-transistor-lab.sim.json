@@ -1,0 +1,1662 @@
+{
+  "id": "tc-passive-sensor-transistor-lab",
+  "name": "Passive sensor and transistor breadboard lab",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "supply_9v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 9
+      },
+      "label": "9 V supply for fuse test"
+    },
+    {
+      "id": "fuse_main",
+      "kind": "fuse",
+      "position": {
+        "x": 139,
+        "y": 164
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "rNormal": 0.1,
+        "iRating": 1,
+        "currentLimit": 0.5
+      },
+      "label": "Input fuse"
+    },
+    {
+      "id": "sw_power",
+      "kind": "switch",
+      "position": {
+        "x": 215,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 38,
+            "y": 55
+          }
+        }
+      ],
+      "params": {
+        "closed": 0,
+        "momentary": 0
+      },
+      "label": "SPST power switch"
+    },
+    {
+      "id": "r_red",
+      "kind": "resistor",
+      "position": {
+        "x": 253,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 330,
+        "tolerance": 0.05
+      },
+      "label": "Red LED resistor"
+    },
+    {
+      "id": "led_power",
+      "kind": "led",
+      "position": {
+        "x": 310,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "Power LED"
+    },
+    {
+      "id": "btn_step",
+      "kind": "push_button",
+      "position": {
+        "x": 386,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 38,
+            "y": 55
+          }
+        }
+      ],
+      "params": {
+        "closed": 0,
+        "momentary": 1
+      },
+      "label": "Momentary button"
+    },
+    {
+      "id": "r_yellow",
+      "kind": "resistor",
+      "position": {
+        "x": 424,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "Button LED resistor"
+    },
+    {
+      "id": "led_button",
+      "kind": "led",
+      "position": {
+        "x": 481,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ffcc00",
+        "vf": 2.1,
+        "iRated": 0.02
+      },
+      "label": "Button LED"
+    },
+    {
+      "id": "sw_select",
+      "kind": "spdt_switch",
+      "position": {
+        "x": 576,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "com",
+          "label": "COM",
+          "offset": {
+            "x": 19,
+            "y": 55
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "position": 0
+      },
+      "label": "SPDT colour select"
+    },
+    {
+      "id": "led_green_sel",
+      "kind": "led",
+      "position": {
+        "x": 633,
+        "y": 309
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "Green selection LED"
+    },
+    {
+      "id": "led_blue_sel",
+      "kind": "led",
+      "position": {
+        "x": 690,
+        "y": 347
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "Blue selection LED"
+    },
+    {
+      "id": "r_green_sel",
+      "kind": "resistor",
+      "position": {
+        "x": 101,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "r_green_sel current limit"
+    },
+    {
+      "id": "r_blue_sel",
+      "kind": "resistor",
+      "position": {
+        "x": 120,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "r_blue_sel current limit"
+    },
+    {
+      "id": "pot_divider",
+      "kind": "potentiometer",
+      "position": {
+        "x": 785,
+        "y": 174
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "cw",
+          "label": "CW",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "wiper",
+          "label": "W",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "ccw",
+          "label": "CCW",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "rTotal": 10000,
+        "taper": "linear",
+        "position": 0.65
+      },
+      "label": "Panel potentiometer divider"
+    },
+    {
+      "id": "trim_bias",
+      "kind": "trimmer",
+      "position": {
+        "x": 861,
+        "y": 212
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "cw",
+          "label": "CW",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "wiper",
+          "label": "W",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "ccw",
+          "label": "CCW",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "rTotal": 50000,
+        "position": 0.35
+      },
+      "label": "Trim bias divider"
+    },
+    {
+      "id": "ldr_top",
+      "kind": "ldr",
+      "position": {
+        "x": 785,
+        "y": 295
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "rDark": 1000000,
+        "rLight": 500,
+        "lux": 45
+      },
+      "label": "LDR light sensor"
+    },
+    {
+      "id": "therm_bottom",
+      "kind": "thermistor",
+      "position": {
+        "x": 709,
+        "y": 333
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "rNominal": 10000,
+        "beta": 3950,
+        "tempC": 35
+      },
+      "label": "NTC thermistor"
+    },
+    {
+      "id": "led_pot_dim",
+      "kind": "led",
+      "position": {
+        "x": 861,
+        "y": 366
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "Pot dimmer LED"
+    },
+    {
+      "id": "r_pot_dim",
+      "kind": "resistor",
+      "position": {
+        "x": 139,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 680,
+        "tolerance": 0.05
+      },
+      "label": "r_pot_dim current limit"
+    },
+    {
+      "id": "cap_filter",
+      "kind": "capacitor",
+      "position": {
+        "x": 918,
+        "y": 366
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      },
+      "label": "RC filter capacitor"
+    },
+    {
+      "id": "ind_choke",
+      "kind": "inductor",
+      "position": {
+        "x": 918,
+        "y": 164
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "inductance": 0.001
+      },
+      "label": "Supply choke"
+    },
+    {
+      "id": "r_lc_damp",
+      "kind": "resistor",
+      "position": {
+        "x": 215,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 10,
+        "tolerance": 0.05
+      },
+      "label": "r_lc_damp current limit"
+    },
+    {
+      "id": "q_npn",
+      "kind": "bjt_npn",
+      "position": {
+        "x": 1032,
+        "y": 305
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "e",
+          "label": "E",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "Is": 1e-18,
+        "betaF": 50,
+        "betaR": 0.1,
+        "nF": 1,
+        "nR": 1
+      },
+      "label": "NPN low-side LED driver"
+    },
+    {
+      "id": "q_pnp",
+      "kind": "bjt_pnp",
+      "position": {
+        "x": 1108,
+        "y": 343
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "e",
+          "label": "E",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "Is": 1e-18,
+        "betaF": 50,
+        "betaR": 0.1,
+        "nF": 1,
+        "nR": 1
+      },
+      "label": "PNP high-side LED driver"
+    },
+    {
+      "id": "q_nmos",
+      "kind": "nmos",
+      "position": {
+        "x": 1013,
+        "y": 174
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "d",
+          "label": "D",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "g",
+          "label": "G",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "s",
+          "label": "S",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vto": 0.7,
+        "k": 0.02,
+        "lambda": 0.02
+      },
+      "label": "N-MOS low-side driver"
+    },
+    {
+      "id": "q_pmos",
+      "kind": "pmos",
+      "position": {
+        "x": 1089,
+        "y": 212
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "d",
+          "label": "D",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "g",
+          "label": "G",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "s",
+          "label": "S",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vto": 0.7,
+        "k": 0.02,
+        "lambda": 0.02
+      },
+      "label": "P-MOS high-side driver"
+    },
+    {
+      "id": "led_bicolor",
+      "kind": "bicolor_led",
+      "position": {
+        "x": 1165,
+        "y": 305
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a1",
+          "label": "A1",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 19,
+            "y": 19
+          }
+        },
+        {
+          "id": "a2",
+          "label": "A2",
+          "offset": {
+            "x": 0,
+            "y": 38
+          }
+        }
+      ],
+      "params": {
+        "color1": "#ff4a4a",
+        "vf1": 1.8,
+        "color2": "#4aff4a",
+        "vf2": 2,
+        "iRated": 0.02
+      },
+      "label": "Bicolour LED"
+    },
+    {
+      "id": "led_rgb",
+      "kind": "rgb_led",
+      "position": {
+        "x": 1184,
+        "y": 174
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "r_a",
+          "label": "R",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "g_a",
+          "label": "G",
+          "offset": {
+            "x": 0,
+            "y": 19
+          }
+        },
+        {
+          "id": "b_a",
+          "label": "B",
+          "offset": {
+            "x": 0,
+            "y": 38
+          }
+        },
+        {
+          "id": "com_k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 19
+          }
+        }
+      ],
+      "params": {
+        "iRated": 0.02
+      },
+      "label": "RGB LED"
+    },
+    {
+      "id": "led_white",
+      "kind": "led",
+      "position": {
+        "x": 1241,
+        "y": 347
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "white",
+        "vf": 3.2,
+        "iRated": 0.02
+      },
+      "label": "White load LED"
+    },
+    {
+      "id": "led_amber",
+      "kind": "led",
+      "position": {
+        "x": 1184,
+        "y": 216
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "Amber load LED"
+    },
+    {
+      "id": "r_bicolor_a2",
+      "kind": "resistor",
+      "position": {
+        "x": 234,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 680,
+        "tolerance": 0.05
+      },
+      "label": "r_bicolor_a2 current limit"
+    },
+    {
+      "id": "r_rgb_k",
+      "kind": "resistor",
+      "position": {
+        "x": 101,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 680,
+        "tolerance": 0.05
+      },
+      "label": "r_rgb_k current limit"
+    },
+    {
+      "id": "r_white_load",
+      "kind": "resistor",
+      "position": {
+        "x": 329,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 2200,
+        "tolerance": 0.05
+      },
+      "label": "r_white_load current limit"
+    },
+    {
+      "id": "r_amber_load",
+      "kind": "resistor",
+      "position": {
+        "x": 120,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 680,
+        "tolerance": 0.05
+      },
+      "label": "r_amber_load current limit"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_006",
+      "from_component": "supply_9v",
+      "from_pin": "neg",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-btn_step-a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "btn_step",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-sw_select-com",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "sw_select",
+      "to_pin": "com",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-pot_divider-cw",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "pot_divider",
+      "to_pin": "cw",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-trim_bias-cw",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "trim_bias",
+      "to_pin": "cw",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-ldr_top-a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "ldr_top",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-ind_choke-a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "ind_choke",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-q_pnp-e",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "q_pnp",
+      "to_pin": "e",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-q_pmos-s",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "q_pmos",
+      "to_pin": "s",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-led_rgb-r_a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "led_rgb",
+      "to_pin": "r_a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-led_rgb-g_a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "led_rgb",
+      "to_pin": "g_a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-led_rgb-b_a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "led_rgb",
+      "to_pin": "b_a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-led_amber-a",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "led_amber",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_amber-a-fuse_main-a-vcc_5v-pos",
+      "from_component": "fuse_main",
+      "from_pin": "a",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sw_power-a-fuse_main-b-sw_power-a",
+      "from_component": "fuse_main",
+      "from_pin": "b",
+      "to_component": "sw_power",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_red-a-sw_power-b-r_red-a",
+      "from_component": "sw_power",
+      "from_pin": "b",
+      "to_component": "r_red",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_power-a-r_red-b-led_power-a",
+      "from_component": "r_red",
+      "from_pin": "b",
+      "to_component": "led_power",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_button-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_button",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_green_sel-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_green_sel",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_blue_sel-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_blue_sel",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-pot_divider-ccw",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "pot_divider",
+      "to_pin": "ccw",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-trim_bias-ccw",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "trim_bias",
+      "to_pin": "ccw",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-therm_bottom-b",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "therm_bottom",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_pot_dim-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_pot_dim",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-cap_filter-b",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "cap_filter",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-q_npn-e",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "q_npn",
+      "to_pin": "e",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-q_nmos-s",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "q_nmos",
+      "to_pin": "s",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_bicolor-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_bicolor",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-led_white-k",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "led_white",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-vcc_5v-neg",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_white-k-led_power-k-gnd_ref-gnd",
+      "from_component": "led_power",
+      "from_pin": "k",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_yellow-a-btn_step-b-r_yellow-a",
+      "from_component": "btn_step",
+      "from_pin": "b",
+      "to_component": "r_yellow",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_button-a-r_yellow-b-led_button-a",
+      "from_component": "r_yellow",
+      "from_pin": "b",
+      "to_component": "led_button",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_green_sel-a-sw_select-b-r_green_sel-a",
+      "from_component": "sw_select",
+      "from_pin": "b",
+      "to_component": "r_green_sel",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_blue_sel-a-sw_select-c-r_blue_sel-a",
+      "from_component": "sw_select",
+      "from_pin": "c",
+      "to_component": "r_blue_sel",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_green_sel-b-led_green_sel-a-r_green_sel-b",
+      "from_component": "led_green_sel",
+      "from_pin": "a",
+      "to_component": "r_green_sel",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_blue_sel-b-led_blue_sel-a-r_blue_sel-b",
+      "from_component": "led_blue_sel",
+      "from_pin": "a",
+      "to_component": "r_blue_sel",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-q_nmos-g-pot_divider-wiper-ldr_top-b",
+      "from_component": "pot_divider",
+      "from_pin": "wiper",
+      "to_component": "ldr_top",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-q_nmos-g-pot_divider-wiper-r_pot_dim-a",
+      "from_component": "pot_divider",
+      "from_pin": "wiper",
+      "to_component": "r_pot_dim",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-q_nmos-g-pot_divider-wiper-q_nmos-g",
+      "from_component": "pot_divider",
+      "from_pin": "wiper",
+      "to_component": "q_nmos",
+      "to_pin": "g",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-q_pmos-g-trim_bias-wiper-therm_bottom-a",
+      "from_component": "trim_bias",
+      "from_pin": "wiper",
+      "to_component": "therm_bottom",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-q_pmos-g-trim_bias-wiper-q_pmos-g",
+      "from_component": "trim_bias",
+      "from_pin": "wiper",
+      "to_component": "q_pmos",
+      "to_pin": "g",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_pot_dim-b-led_pot_dim-a-r_pot_dim-b",
+      "from_component": "led_pot_dim",
+      "from_pin": "a",
+      "to_component": "r_pot_dim",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_lc_damp-b-cap_filter-a-r_lc_damp-b",
+      "from_component": "cap_filter",
+      "from_pin": "a",
+      "to_component": "r_lc_damp",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_lc_damp-a-ind_choke-b-r_lc_damp-a",
+      "from_component": "ind_choke",
+      "from_pin": "b",
+      "to_component": "r_lc_damp",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_amber_load-b-q_nmos-d-r_rgb_k-b",
+      "from_component": "q_nmos",
+      "from_pin": "d",
+      "to_component": "r_rgb_k",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_amber_load-b-q_nmos-d-r_amber_load-b",
+      "from_component": "q_nmos",
+      "from_pin": "d",
+      "to_component": "r_amber_load",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_white_load-a-q_pmos-d-r_bicolor_a2-a",
+      "from_component": "q_pmos",
+      "from_pin": "d",
+      "to_component": "r_bicolor_a2",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_white_load-a-q_pmos-d-r_white_load-a",
+      "from_component": "q_pmos",
+      "from_pin": "d",
+      "to_component": "r_white_load",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_bicolor_a2-b-led_bicolor-a1-led_bicolor-a2",
+      "from_component": "led_bicolor",
+      "from_pin": "a1",
+      "to_component": "led_bicolor",
+      "to_pin": "a2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_bicolor_a2-b-led_bicolor-a1-r_bicolor_a2-b",
+      "from_component": "led_bicolor",
+      "from_pin": "a1",
+      "to_component": "r_bicolor_a2",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_amber_load-a-led_rgb-com_k-led_amber-k",
+      "from_component": "led_rgb",
+      "from_pin": "com_k",
+      "to_component": "led_amber",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_amber_load-a-led_rgb-com_k-r_rgb_k-a",
+      "from_component": "led_rgb",
+      "from_pin": "com_k",
+      "to_component": "r_rgb_k",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_amber_load-a-led_rgb-com_k-r_amber_load-a",
+      "from_component": "led_rgb",
+      "from_pin": "com_k",
+      "to_component": "r_amber_load",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_white_load-b-led_white-a-r_white_load-b",
+      "from_component": "led_white",
+      "from_pin": "a",
+      "to_component": "r_white_load",
+      "to_pin": "b",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

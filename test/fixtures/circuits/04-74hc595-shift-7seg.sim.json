@@ -1,0 +1,925 @@
+{
+  "id": "tc-74hc595-shift-7seg",
+  "name": "74HC595 serial-in shift register driving common-anode 7-seg",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "u1_74hc595",
+      "kind": "74hc595",
+      "position": {
+        "x": 245,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "qb",
+          "label": "QB",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "qc",
+          "label": "QC",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "qd",
+          "label": "QD",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "qe",
+          "label": "QE",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "qf",
+          "label": "QF",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "qg",
+          "label": "QG",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "qh",
+          "label": "QH",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "qh2",
+          "label": "QH'",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "/srclr",
+          "label": "/SRCLR",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "srclk",
+          "label": "SRCLK",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "rclk",
+          "label": "RCLK",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "ser",
+          "label": "SER",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "qa",
+          "label": "QA",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74HC595 shift register"
+    },
+    {
+      "id": "disp_ca",
+      "kind": "seg7_ca",
+      "position": {
+        "x": 747,
+        "y": 174
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "g",
+          "label": "g",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "f",
+          "label": "f",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "com",
+          "label": "COM",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        },
+        {
+          "id": "a",
+          "label": "a",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "b",
+          "offset": {
+            "x": 76,
+            "y": 0
+          }
+        },
+        {
+          "id": "e",
+          "label": "e",
+          "offset": {
+            "x": 0,
+            "y": 131
+          }
+        },
+        {
+          "id": "d",
+          "label": "d",
+          "offset": {
+            "x": 19,
+            "y": 131
+          }
+        },
+        {
+          "id": "com2",
+          "label": "COM",
+          "offset": {
+            "x": 38,
+            "y": 131
+          }
+        },
+        {
+          "id": "c",
+          "label": "c",
+          "offset": {
+            "x": 57,
+            "y": 131
+          }
+        },
+        {
+          "id": "dp",
+          "label": "dp",
+          "offset": {
+            "x": 76,
+            "y": 131
+          }
+        }
+      ],
+      "params": {},
+      "label": "Common-anode 7-seg display"
+    },
+    {
+      "id": "pulse_srclk",
+      "kind": "pulse_source",
+      "position": {
+        "x": -35,
+        "y": 265
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0,
+        "tr": 0.000001,
+        "tf": 0.000001,
+        "pw": 0.03,
+        "per": 0.08
+      },
+      "label": "Shift clock"
+    },
+    {
+      "id": "pulse_rclk",
+      "kind": "pulse_source",
+      "position": {
+        "x": -35,
+        "y": 325
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0,
+        "tr": 0.000001,
+        "tf": 0.000001,
+        "pw": 0.04,
+        "per": 0.48
+      },
+      "label": "Latch clock"
+    },
+    {
+      "id": "clock_serial_data",
+      "kind": "clock",
+      "position": {
+        "x": -35,
+        "y": 385
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "out",
+          "label": "Q",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "frequency": 1.7,
+        "duty": 0.55
+      },
+      "label": "Serial data"
+    },
+    {
+      "id": "sr_qa_r",
+      "kind": "resistor",
+      "position": {
+        "x": 139,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "sr_qa current limit"
+    },
+    {
+      "id": "sr_qa_led",
+      "kind": "led",
+      "position": {
+        "x": 196,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "sr_qa indicator"
+    },
+    {
+      "id": "sr_qb_r",
+      "kind": "resistor",
+      "position": {
+        "x": 139,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "sr_qb current limit"
+    },
+    {
+      "id": "sr_qb_led",
+      "kind": "led",
+      "position": {
+        "x": 196,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "sr_qb indicator"
+    },
+    {
+      "id": "sr_qc_r",
+      "kind": "resistor",
+      "position": {
+        "x": 120,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "sr_qc current limit"
+    },
+    {
+      "id": "sr_qc_led",
+      "kind": "led",
+      "position": {
+        "x": 177,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "sr_qc indicator"
+    },
+    {
+      "id": "sr_qd_r",
+      "kind": "resistor",
+      "position": {
+        "x": 405,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "sr_qd current limit"
+    },
+    {
+      "id": "sr_qd_led",
+      "kind": "led",
+      "position": {
+        "x": 462,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "blue",
+        "vf": 3
+      },
+      "label": "sr_qd indicator"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_006",
+      "from_component": "pulse_srclk",
+      "from_pin": "neg",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "w_007",
+      "from_component": "pulse_rclk",
+      "from_pin": "neg",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "w_008",
+      "from_component": "clock_serial_data",
+      "from_pin": "gnd",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "bb-pin-sr_qb_r-a-u1_74hc595-qb-disp_ca-b",
+      "from_component": "u1_74hc595",
+      "from_pin": "qb",
+      "to_component": "disp_ca",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qb_r-a-u1_74hc595-qb-sr_qb_r-a",
+      "from_component": "u1_74hc595",
+      "from_pin": "qb",
+      "to_component": "sr_qb_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qc_r-a-u1_74hc595-qc-disp_ca-c",
+      "from_component": "u1_74hc595",
+      "from_pin": "qc",
+      "to_component": "disp_ca",
+      "to_pin": "c",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qc_r-a-u1_74hc595-qc-sr_qc_r-a",
+      "from_component": "u1_74hc595",
+      "from_pin": "qc",
+      "to_component": "sr_qc_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_r-a-u1_74hc595-qd-disp_ca-d",
+      "from_component": "u1_74hc595",
+      "from_pin": "qd",
+      "to_component": "disp_ca",
+      "to_pin": "d",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_r-a-u1_74hc595-qd-sr_qd_r-a",
+      "from_component": "u1_74hc595",
+      "from_pin": "qd",
+      "to_component": "sr_qd_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-e-u1_74hc595-qe-disp_ca-e",
+      "from_component": "u1_74hc595",
+      "from_pin": "qe",
+      "to_component": "disp_ca",
+      "to_pin": "e",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-f-u1_74hc595-qf-disp_ca-f",
+      "from_component": "u1_74hc595",
+      "from_pin": "qf",
+      "to_component": "disp_ca",
+      "to_pin": "f",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-g-u1_74hc595-qg-disp_ca-g",
+      "from_component": "u1_74hc595",
+      "from_pin": "qg",
+      "to_component": "disp_ca",
+      "to_pin": "g",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-dp-u1_74hc595-qh-disp_ca-dp",
+      "from_component": "u1_74hc595",
+      "from_pin": "qh",
+      "to_component": "disp_ca",
+      "to_pin": "dp",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-u1_74hc595-/oe",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "u1_74hc595",
+      "to_pin": "/oe",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-sr_qa_led-k",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "sr_qa_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-sr_qb_led-k",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "sr_qb_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-sr_qc_led-k",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "sr_qc_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-sr_qd_led-k",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "sr_qd_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-vcc_5v-neg",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-k-u1_74hc595-gnd-gnd_ref-gnd",
+      "from_component": "u1_74hc595",
+      "from_pin": "gnd",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-com2-u1_74hc595-/srclr-u1_74hc595-vcc",
+      "from_component": "u1_74hc595",
+      "from_pin": "/srclr",
+      "to_component": "u1_74hc595",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-com2-u1_74hc595-/srclr-disp_ca-com",
+      "from_component": "u1_74hc595",
+      "from_pin": "/srclr",
+      "to_component": "disp_ca",
+      "to_pin": "com",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-com2-u1_74hc595-/srclr-disp_ca-com2",
+      "from_component": "u1_74hc595",
+      "from_pin": "/srclr",
+      "to_component": "disp_ca",
+      "to_pin": "com2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-disp_ca-com2-u1_74hc595-/srclr-vcc_5v-pos",
+      "from_component": "u1_74hc595",
+      "from_pin": "/srclr",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc595-srclk-u1_74hc595-srclk-pulse_srclk-pos",
+      "from_component": "u1_74hc595",
+      "from_pin": "srclk",
+      "to_component": "pulse_srclk",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc595-rclk-u1_74hc595-rclk-pulse_rclk-pos",
+      "from_component": "u1_74hc595",
+      "from_pin": "rclk",
+      "to_component": "pulse_rclk",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc595-ser-u1_74hc595-ser-clock_serial_data-out",
+      "from_component": "u1_74hc595",
+      "from_pin": "ser",
+      "to_component": "clock_serial_data",
+      "to_pin": "out",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qa_r-a-u1_74hc595-qa-disp_ca-a",
+      "from_component": "u1_74hc595",
+      "from_pin": "qa",
+      "to_component": "disp_ca",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qa_r-a-u1_74hc595-qa-sr_qa_r-a",
+      "from_component": "u1_74hc595",
+      "from_pin": "qa",
+      "to_component": "sr_qa_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qa_led-a-sr_qa_r-b-sr_qa_led-a",
+      "from_component": "sr_qa_r",
+      "from_pin": "b",
+      "to_component": "sr_qa_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qb_led-a-sr_qb_r-b-sr_qb_led-a",
+      "from_component": "sr_qb_r",
+      "from_pin": "b",
+      "to_component": "sr_qb_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qc_led-a-sr_qc_r-b-sr_qc_led-a",
+      "from_component": "sr_qc_r",
+      "from_pin": "b",
+      "to_component": "sr_qc_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-sr_qd_led-a-sr_qd_r-b-sr_qd_led-a",
+      "from_component": "sr_qd_r",
+      "from_pin": "b",
+      "to_component": "sr_qd_led",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

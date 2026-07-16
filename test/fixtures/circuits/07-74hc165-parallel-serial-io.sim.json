@@ -1,0 +1,595 @@
+{
+  "id": "tc-74hc165-parallel-serial-io",
+  "name": "74HC165 parallel-in serial-out switch reader",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "u1_74hc165",
+      "kind": "74hc165",
+      "position": {
+        "x": 283,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "/pl",
+          "label": "/PL",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "cp",
+          "label": "CP",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "d4",
+          "label": "D4",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "d5",
+          "label": "D5",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "d6",
+          "label": "D6",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "d7",
+          "label": "D7",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "/q7",
+          "label": "/Q7",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "ds",
+          "label": "DS",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "d0",
+          "label": "D0",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "d1",
+          "label": "D1",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "d2",
+          "label": "D2",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "d3",
+          "label": "D3",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "q7",
+          "label": "Q7",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "cp_inh",
+          "label": "CP_INH",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74HC165 PISO shift register"
+    },
+    {
+      "id": "pulse_165_cp",
+      "kind": "pulse_source",
+      "position": {
+        "x": -35,
+        "y": 265
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0,
+        "tr": 0.000001,
+        "tf": 0.000001,
+        "pw": 0.08,
+        "per": 0.25
+      },
+      "label": "165 shift clock"
+    },
+    {
+      "id": "pulse_165_load",
+      "kind": "pulse_source",
+      "position": {
+        "x": -35,
+        "y": 325
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "v1": 5,
+        "v2": 0,
+        "td": 0,
+        "tr": 0.000001,
+        "tf": 0.000001,
+        "pw": 0.12,
+        "per": 2
+      },
+      "label": "165 active-low load"
+    },
+    {
+      "id": "piso_q7_r",
+      "kind": "resistor",
+      "position": {
+        "x": 177,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "piso_q7 current limit"
+    },
+    {
+      "id": "piso_q7_led",
+      "kind": "led",
+      "position": {
+        "x": 234,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "green",
+        "vf": 2
+      },
+      "label": "piso_q7 indicator"
+    },
+    {
+      "id": "piso_nq7_r",
+      "kind": "resistor",
+      "position": {
+        "x": 462,
+        "y": 314
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "piso_nq7 current limit"
+    },
+    {
+      "id": "piso_nq7_led",
+      "kind": "led",
+      "position": {
+        "x": 519,
+        "y": 328
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "piso_nq7 indicator"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_008",
+      "from_component": "pulse_165_cp",
+      "from_pin": "neg",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "w_009",
+      "from_component": "pulse_165_load",
+      "from_pin": "neg",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0,
+      "color": "#111827"
+    },
+    {
+      "id": "bb-pin-u1_74hc165-pl-u1_74hc165-/pl-pulse_165_load-pos",
+      "from_component": "u1_74hc165",
+      "from_pin": "/pl",
+      "to_component": "pulse_165_load",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-cp-u1_74hc165-cp-pulse_165_cp-pos",
+      "from_component": "u1_74hc165",
+      "from_pin": "cp",
+      "to_component": "pulse_165_cp",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-u1_74hc165-d6",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "u1_74hc165",
+      "to_pin": "d6",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-u1_74hc165-gnd",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "u1_74hc165",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-u1_74hc165-ds",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "u1_74hc165",
+      "to_pin": "ds",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-u1_74hc165-d1",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "u1_74hc165",
+      "to_pin": "d1",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-u1_74hc165-cp_inh",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "u1_74hc165",
+      "to_pin": "cp_inh",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-piso_q7_led-k",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "piso_q7_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-piso_nq7_led-k",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "piso_nq7_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-vcc_5v-neg",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-k-u1_74hc165-d4-gnd_ref-gnd",
+      "from_component": "u1_74hc165",
+      "from_pin": "d4",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-u1_74hc165-d7",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "u1_74hc165",
+      "to_pin": "d7",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-u1_74hc165-d0",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "u1_74hc165",
+      "to_pin": "d0",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-u1_74hc165-d2",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "u1_74hc165",
+      "to_pin": "d2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-u1_74hc165-d3",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "u1_74hc165",
+      "to_pin": "d3",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-u1_74hc165-vcc",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "u1_74hc165",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u1_74hc165-vcc-u1_74hc165-d5-vcc_5v-pos",
+      "from_component": "u1_74hc165",
+      "from_pin": "d5",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_r-a-u1_74hc165-/q7-piso_nq7_r-a",
+      "from_component": "u1_74hc165",
+      "from_pin": "/q7",
+      "to_component": "piso_nq7_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_q7_r-a-u1_74hc165-q7-piso_q7_r-a",
+      "from_component": "u1_74hc165",
+      "from_pin": "q7",
+      "to_component": "piso_q7_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_q7_led-a-piso_q7_r-b-piso_q7_led-a",
+      "from_component": "piso_q7_r",
+      "from_pin": "b",
+      "to_component": "piso_q7_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-piso_nq7_led-a-piso_nq7_r-b-piso_nq7_led-a",
+      "from_component": "piso_nq7_r",
+      "from_pin": "b",
+      "to_component": "piso_nq7_led",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

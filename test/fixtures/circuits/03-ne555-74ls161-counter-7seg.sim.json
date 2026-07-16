@@ -1,0 +1,1111 @@
+{
+  "id": "tc-ne555-74ls161-counter-7seg",
+  "name": "NE555 clock to 74LS161 counter and common-cathode 7-seg",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "vcc_5v",
+      "kind": "voltage_source",
+      "position": {
+        "x": -30,
+        "y": 112
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 60,
+            "y": 20
+          }
+        },
+        {
+          "id": "neg",
+          "label": "-",
+          "offset": {
+            "x": 3,
+            "y": 20
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V bench supply"
+    },
+    {
+      "id": "gnd_ref",
+      "kind": "ground",
+      "position": {
+        "x": -20,
+        "y": 180
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 10,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "Ground reference"
+    },
+    {
+      "id": "u1_ne555",
+      "kind": "ne555",
+      "position": {
+        "x": 169,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "1",
+          "label": "GND",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "2",
+          "label": "TRIG",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "3",
+          "label": "OUT",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "4",
+          "label": "RST",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "5",
+          "label": "CTL",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "6",
+          "label": "THR",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "7",
+          "label": "DIS",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "8",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {},
+      "label": "NE555 astable clock"
+    },
+    {
+      "id": "u2_74ls161",
+      "kind": "74ls161",
+      "position": {
+        "x": 435,
+        "y": 250
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "/clr",
+          "label": "/CLR",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "clk",
+          "label": "CLK",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "d",
+          "label": "D",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "enp",
+          "label": "ENP",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "rco",
+          "label": "RCO",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "qd",
+          "label": "QD",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "qc",
+          "label": "QC",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "qb",
+          "label": "QB",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "qa",
+          "label": "QA",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "/load",
+          "label": "/LOAD",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "ent",
+          "label": "ENT",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vcc": 5
+      },
+      "label": "74LS161 binary counter"
+    },
+    {
+      "id": "disp_cc",
+      "kind": "seg7_cc",
+      "position": {
+        "x": 861,
+        "y": 174
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "g",
+          "label": "g",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "f",
+          "label": "f",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        },
+        {
+          "id": "com",
+          "label": "COM",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        },
+        {
+          "id": "a",
+          "label": "a",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "b",
+          "offset": {
+            "x": 76,
+            "y": 0
+          }
+        },
+        {
+          "id": "e",
+          "label": "e",
+          "offset": {
+            "x": 0,
+            "y": 131
+          }
+        },
+        {
+          "id": "d",
+          "label": "d",
+          "offset": {
+            "x": 19,
+            "y": 131
+          }
+        },
+        {
+          "id": "com2",
+          "label": "COM",
+          "offset": {
+            "x": 38,
+            "y": 131
+          }
+        },
+        {
+          "id": "c",
+          "label": "c",
+          "offset": {
+            "x": 57,
+            "y": 131
+          }
+        },
+        {
+          "id": "dp",
+          "label": "dp",
+          "offset": {
+            "x": 76,
+            "y": 131
+          }
+        }
+      ],
+      "params": {},
+      "label": "Common-cathode 7-seg binary pattern"
+    },
+    {
+      "id": "r_555_ra",
+      "kind": "resistor",
+      "position": {
+        "x": 310,
+        "y": 164
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 10000,
+        "tolerance": 0.05
+      },
+      "label": "555 RA"
+    },
+    {
+      "id": "r_555_rb",
+      "kind": "resistor",
+      "position": {
+        "x": 367,
+        "y": 202
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 100000,
+        "tolerance": 0.05
+      },
+      "label": "555 RB"
+    },
+    {
+      "id": "c_555_timing",
+      "kind": "capacitor",
+      "position": {
+        "x": 310,
+        "y": 347
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      },
+      "label": "555 timing capacitor"
+    },
+    {
+      "id": "c_555_control",
+      "kind": "capacitor",
+      "position": {
+        "x": 614,
+        "y": 235
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "capacitance": 1e-8
+      },
+      "label": "555 control bypass"
+    },
+    {
+      "id": "counter_qa_r",
+      "kind": "resistor",
+      "position": {
+        "x": 633,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "counter_qa current limit"
+    },
+    {
+      "id": "counter_qa_led",
+      "kind": "led",
+      "position": {
+        "x": 690,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "counter_qa indicator"
+    },
+    {
+      "id": "counter_qb_r",
+      "kind": "resistor",
+      "position": {
+        "x": 291,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "counter_qb current limit"
+    },
+    {
+      "id": "counter_qb_led",
+      "kind": "led",
+      "position": {
+        "x": 348,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "counter_qb indicator"
+    },
+    {
+      "id": "counter_qc_r",
+      "kind": "resistor",
+      "position": {
+        "x": 709,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "counter_qc current limit"
+    },
+    {
+      "id": "counter_qc_led",
+      "kind": "led",
+      "position": {
+        "x": 766,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "counter_qc indicator"
+    },
+    {
+      "id": "counter_qd_r",
+      "kind": "resistor",
+      "position": {
+        "x": 956,
+        "y": 183
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 10
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 10
+          }
+        }
+      ],
+      "params": {
+        "resistance": 470,
+        "tolerance": 0.05
+      },
+      "label": "counter_qd current limit"
+    },
+    {
+      "id": "counter_qd_led",
+      "kind": "led",
+      "position": {
+        "x": 1013,
+        "y": 197
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 15
+          }
+        }
+      ],
+      "params": {
+        "color": "#ff8800",
+        "vf": 2,
+        "iRated": 0.02
+      },
+      "label": "counter_qd indicator"
+    }
+  ],
+  "wires": [
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-u2_74ls161-a",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-u2_74ls161-b",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-u2_74ls161-c",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "c",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-u2_74ls161-d",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "d",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-u2_74ls161-gnd",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-disp_cc-com",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "disp_cc",
+      "to_pin": "com",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-disp_cc-com2",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "disp_cc",
+      "to_pin": "com2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-c_555_timing-b",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "c_555_timing",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-c_555_control-b",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "c_555_control",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-counter_qa_led-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "counter_qa_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-counter_qb_led-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "counter_qb_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-counter_qc_led-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "counter_qc_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-counter_qd_led-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "counter_qd_led",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-vcc_5v-neg",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "vcc_5v",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-k-u1_ne555-1-gnd_ref-gnd",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "gnd_ref",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-c_555_timing-a-u1_ne555-2-u1_ne555-6",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "u1_ne555",
+      "to_pin": "6",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-c_555_timing-a-u1_ne555-2-r_555_rb-b",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "r_555_rb",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-c_555_timing-a-u1_ne555-2-c_555_timing-a",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "c_555_timing",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-u2_74ls161-clk-u1_ne555-3-u2_74ls161-clk",
+      "from_component": "u1_ne555",
+      "from_pin": "3",
+      "to_component": "u2_74ls161",
+      "to_pin": "clk",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u1_ne555-8",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u1_ne555",
+      "to_pin": "8",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u2_74ls161-/clr",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "/clr",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u2_74ls161-enp",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "enp",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u2_74ls161-/load",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "/load",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u2_74ls161-ent",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "ent",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-u2_74ls161-vcc",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-r_555_ra-a",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "r_555_ra",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_ra-a-u1_ne555-4-vcc_5v-pos",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "vcc_5v",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-c_555_control-a-u1_ne555-5-c_555_control-a",
+      "from_component": "u1_ne555",
+      "from_pin": "5",
+      "to_component": "c_555_control",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_rb-a-u1_ne555-7-r_555_ra-b",
+      "from_component": "u1_ne555",
+      "from_pin": "7",
+      "to_component": "r_555_ra",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_rb-a-u1_ne555-7-r_555_rb-a",
+      "from_component": "u1_ne555",
+      "from_pin": "7",
+      "to_component": "r_555_rb",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_r-a-u2_74ls161-qd-disp_cc-g",
+      "from_component": "u2_74ls161",
+      "from_pin": "qd",
+      "to_component": "disp_cc",
+      "to_pin": "g",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_r-a-u2_74ls161-qd-counter_qd_r-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qd",
+      "to_component": "counter_qd_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qc_r-a-u2_74ls161-qc-disp_cc-f",
+      "from_component": "u2_74ls161",
+      "from_pin": "qc",
+      "to_component": "disp_cc",
+      "to_pin": "f",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qc_r-a-u2_74ls161-qc-disp_cc-e",
+      "from_component": "u2_74ls161",
+      "from_pin": "qc",
+      "to_component": "disp_cc",
+      "to_pin": "e",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qc_r-a-u2_74ls161-qc-counter_qc_r-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qc",
+      "to_component": "counter_qc_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qb_r-a-u2_74ls161-qb-disp_cc-d",
+      "from_component": "u2_74ls161",
+      "from_pin": "qb",
+      "to_component": "disp_cc",
+      "to_pin": "d",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qb_r-a-u2_74ls161-qb-disp_cc-c",
+      "from_component": "u2_74ls161",
+      "from_pin": "qb",
+      "to_component": "disp_cc",
+      "to_pin": "c",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qb_r-a-u2_74ls161-qb-counter_qb_r-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qb",
+      "to_component": "counter_qb_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qa_r-a-u2_74ls161-qa-disp_cc-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qa",
+      "to_component": "disp_cc",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qa_r-a-u2_74ls161-qa-disp_cc-b",
+      "from_component": "u2_74ls161",
+      "from_pin": "qa",
+      "to_component": "disp_cc",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qa_r-a-u2_74ls161-qa-counter_qa_r-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qa",
+      "to_component": "counter_qa_r",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qa_led-a-counter_qa_r-b-counter_qa_led-a",
+      "from_component": "counter_qa_r",
+      "from_pin": "b",
+      "to_component": "counter_qa_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qb_led-a-counter_qb_r-b-counter_qb_led-a",
+      "from_component": "counter_qb_r",
+      "from_pin": "b",
+      "to_component": "counter_qb_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qc_led-a-counter_qc_r-b-counter_qc_led-a",
+      "from_component": "counter_qc_r",
+      "from_pin": "b",
+      "to_component": "counter_qc_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-counter_qd_led-a-counter_qd_r-b-counter_qd_led-a",
+      "from_component": "counter_qd_r",
+      "from_pin": "b",
+      "to_component": "counter_qd_led",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {
+    "rail-top-0": "+5V",
+    "rail-top-1": "GND",
+    "rail-bottom-0": "+5V",
+    "rail-bottom-1": "GND"
+  }
+}

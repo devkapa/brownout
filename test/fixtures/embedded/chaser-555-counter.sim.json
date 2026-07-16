@@ -1,0 +1,913 @@
+{
+  "id": "fixture-chaser-555-counter",
+  "name": "NE555 clock and 74LS161 counter",
+  "nets": [],
+  "wires": [
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-u2_74ls161-a",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-u2_74ls161-b",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-u2_74ls161-c",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "c",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-u2_74ls161-d",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "d",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-u2_74ls161-gnd",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "u2_74ls161",
+      "to_pin": "gnd",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-r_clk_pulldown-b",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "r_clk_pulldown",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-led_qa-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "led_qa",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-led_qb-k",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "led_qb",
+      "to_pin": "k",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-capacitor-5a4d4b40-a",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "capacitor-5a4d4b40",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-capacitor-a2c13c83-a",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "capacitor-a2c13c83",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-a-u1_ne555-1-bench_psu-283d1eee-neg",
+      "from_component": "u1_ne555",
+      "from_pin": "1",
+      "to_component": "bench_psu-283d1eee",
+      "to_pin": "neg",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-5a4d4b40-b-u1_ne555-2-u1_ne555-6",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "u1_ne555",
+      "to_pin": "6",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-5a4d4b40-b-u1_ne555-2-r_555_rb-b",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "r_555_rb",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-5a4d4b40-b-u1_ne555-2-capacitor-5a4d4b40-b",
+      "from_component": "u1_ne555",
+      "from_pin": "2",
+      "to_component": "capacitor-5a4d4b40",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-spdt_switch-0f0d1f8b-b-u1_ne555-3-spdt_switch-0f0d1f8b-b",
+      "from_component": "u1_ne555",
+      "from_pin": "3",
+      "to_component": "spdt_switch-0f0d1f8b",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u1_ne555-8",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u1_ne555",
+      "to_pin": "8",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u2_74ls161-/clr",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "/clr",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u2_74ls161-enp",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "enp",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u2_74ls161-/load",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "/load",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u2_74ls161-ent",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "ent",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-u2_74ls161-vcc",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "u2_74ls161",
+      "to_pin": "vcc",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-r_555_ra-a",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "r_555_ra",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-btn_step-b2",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "btn_step",
+      "to_pin": "b2",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-btn_step-b2-u1_ne555-4-bench_psu-283d1eee-pos",
+      "from_component": "u1_ne555",
+      "from_pin": "4",
+      "to_component": "bench_psu-283d1eee",
+      "to_pin": "pos",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-capacitor-a2c13c83-b-u1_ne555-5-capacitor-a2c13c83-b",
+      "from_component": "u1_ne555",
+      "from_pin": "5",
+      "to_component": "capacitor-a2c13c83",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_rb-a-u1_ne555-7-r_555_ra-b",
+      "from_component": "u1_ne555",
+      "from_pin": "7",
+      "to_component": "r_555_ra",
+      "to_pin": "b",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_555_rb-a-u1_ne555-7-r_555_rb-a",
+      "from_component": "u1_ne555",
+      "from_pin": "7",
+      "to_component": "r_555_rb",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-spdt_switch-0f0d1f8b-com-u2_74ls161-clk-spdt_switch-0f0d1f8b-com",
+      "from_component": "u2_74ls161",
+      "from_pin": "clk",
+      "to_component": "spdt_switch-0f0d1f8b",
+      "to_pin": "com",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_qb_led-a-u2_74ls161-qb-r_qb_led-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qb",
+      "to_component": "r_qb_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-r_qa_led-a-u2_74ls161-qa-r_qa_led-a",
+      "from_component": "u2_74ls161",
+      "from_pin": "qa",
+      "to_component": "r_qa_led",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-spdt_switch-0f0d1f8b-c-btn_step-a-spdt_switch-0f0d1f8b-c",
+      "from_component": "btn_step",
+      "from_pin": "a",
+      "to_component": "spdt_switch-0f0d1f8b",
+      "to_pin": "c",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_qa-a-r_qa_led-b-led_qa-a",
+      "from_component": "r_qa_led",
+      "from_pin": "b",
+      "to_component": "led_qa",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led_qb-a-r_qb_led-b-led_qb-a",
+      "from_component": "r_qb_led",
+      "from_pin": "b",
+      "to_component": "led_qb",
+      "to_pin": "a",
+      "resistance": 0
+    }
+  ],
+  "netLabel": {
+    "n0": "555 OUT",
+    "n1": "CLK",
+    "n2": "QA",
+    "n3": "QB",
+    "n4": "+5V",
+    "gnd": "GND"
+  },
+  "components": [
+    {
+      "id": "u1_ne555",
+      "kind": "ne555",
+      "pins": [
+        {
+          "id": "1",
+          "label": "GND",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "2",
+          "label": "TRIG",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "3",
+          "label": "OUT",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "4",
+          "label": "RST",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "5",
+          "label": "CTL",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "6",
+          "label": "THR",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "7",
+          "label": "DIS",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "8",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "label": "NE555 astable clock",
+      "params": {},
+      "position": {
+        "x": 178,
+        "y": 190
+      },
+      "rotation": 0
+    },
+    {
+      "id": "u2_74ls161",
+      "kind": "74ls161",
+      "pins": [
+        {
+          "id": "/clr",
+          "label": "/CLR",
+          "offset": {
+            "x": 8,
+            "y": 55
+          }
+        },
+        {
+          "id": "clk",
+          "label": "CLK",
+          "offset": {
+            "x": 27,
+            "y": 55
+          }
+        },
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 46,
+            "y": 55
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 65,
+            "y": 55
+          }
+        },
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 84,
+            "y": 55
+          }
+        },
+        {
+          "id": "d",
+          "label": "D",
+          "offset": {
+            "x": 103,
+            "y": 55
+          }
+        },
+        {
+          "id": "enp",
+          "label": "ENP",
+          "offset": {
+            "x": 122,
+            "y": 55
+          }
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 141,
+            "y": 55
+          }
+        },
+        {
+          "id": "rco",
+          "label": "RCO",
+          "offset": {
+            "x": 141,
+            "y": 0
+          }
+        },
+        {
+          "id": "qd",
+          "label": "QD",
+          "offset": {
+            "x": 122,
+            "y": 0
+          }
+        },
+        {
+          "id": "qc",
+          "label": "QC",
+          "offset": {
+            "x": 103,
+            "y": 0
+          }
+        },
+        {
+          "id": "qb",
+          "label": "QB",
+          "offset": {
+            "x": 84,
+            "y": 0
+          }
+        },
+        {
+          "id": "qa",
+          "label": "QA",
+          "offset": {
+            "x": 65,
+            "y": 0
+          }
+        },
+        {
+          "id": "/load",
+          "label": "/LOAD",
+          "offset": {
+            "x": 46,
+            "y": 0
+          }
+        },
+        {
+          "id": "ent",
+          "label": "ENT",
+          "offset": {
+            "x": 27,
+            "y": 0
+          }
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 8,
+            "y": 0
+          }
+        }
+      ],
+      "label": "74LS161 binary counter",
+      "params": {
+        "vcc": 5
+      },
+      "position": {
+        "x": 311,
+        "y": 190
+      },
+      "rotation": 0
+    },
+    {
+      "id": "r_555_ra",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 95,
+            "y": 0
+          }
+        }
+      ],
+      "label": "RA 4.7 kOhm",
+      "params": {
+        "tolerance": 0.05,
+        "resistance": 4700
+      },
+      "position": {
+        "x": 110,
+        "y": 152
+      },
+      "rotation": 0
+    },
+    {
+      "id": "r_555_rb",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        }
+      ],
+      "label": "RB 10 kOhm",
+      "params": {
+        "tolerance": 0.05,
+        "resistance": 10000
+      },
+      "position": {
+        "x": 205,
+        "y": 133
+      },
+      "rotation": 0
+    },
+    {
+      "id": "btn_step",
+      "kind": "push_button",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        },
+        {
+          "id": "a2",
+          "offset": {
+            "x": 0,
+            "y": 55
+          },
+          "label": "A"
+        },
+        {
+          "id": "b2",
+          "offset": {
+            "x": 38,
+            "y": 55
+          },
+          "label": "B"
+        }
+      ],
+      "label": "Manual step",
+      "params": {
+        "closed": 0,
+        "momentary": 1
+      },
+      "position": {
+        "x": 585,
+        "y": 190
+      },
+      "rotation": 0
+    },
+    {
+      "id": "r_clk_pulldown",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 57
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": -7,
+            "y": 122
+          }
+        }
+      ],
+      "label": "CLK pull-down",
+      "params": {
+        "tolerance": 0.05,
+        "resistance": 100000
+      },
+      "position": {
+        "x": 547,
+        "y": 264
+      },
+      "rotation": 0
+    },
+    {
+      "id": "r_qa_led",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        }
+      ],
+      "label": "QA current limit",
+      "params": {
+        "tolerance": 0.05,
+        "resistance": 470
+      },
+      "position": {
+        "x": 471,
+        "y": 114
+      },
+      "rotation": 0
+    },
+    {
+      "id": "led_qa",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "label": "QA indicator",
+      "params": {
+        "vf": 2,
+        "color": "#f59e0b",
+        "iRated": 0.02
+      },
+      "position": {
+        "x": 490,
+        "y": 152
+      },
+      "rotation": 0
+    },
+    {
+      "id": "r_qb_led",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "label": "QB current limit",
+      "params": {
+        "tolerance": 0.05,
+        "resistance": 470
+      },
+      "position": {
+        "x": 566,
+        "y": 114
+      },
+      "rotation": 0
+    },
+    {
+      "id": "led_qb",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "label": "QB indicator",
+      "params": {
+        "vf": 2.1,
+        "color": "#22c55e",
+        "iRated": 0.02
+      },
+      "position": {
+        "x": 604,
+        "y": 171
+      },
+      "rotation": 0
+    },
+    {
+      "id": "bench_psu-283d1eee",
+      "kind": "bench_psu",
+      "pins": [
+        {
+          "id": "pos",
+          "label": "+",
+          "offset": {
+            "x": 130,
+            "y": 55
+          }
+        },
+        {
+          "id": "neg",
+          "label": "−",
+          "offset": {
+            "x": 130,
+            "y": 75
+          }
+        }
+      ],
+      "label": "Bench PSU",
+      "params": {
+        "iLimit": 1,
+        "voltage": 5
+      },
+      "position": {
+        "x": 100,
+        "y": -80
+      },
+      "rotation": 0
+    },
+    {
+      "id": "capacitor-5a4d4b40",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 15
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": -57,
+            "y": 15
+          }
+        }
+      ],
+      "label": "Timing Capacitor 10µf",
+      "params": {
+        "style": "electrolytic",
+        "capacitance": 0.000009999999999999999
+      },
+      "position": {
+        "x": 281,
+        "y": 137
+      },
+      "rotation": 0
+    },
+    {
+      "id": "capacitor-a2c13c83",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": -19,
+            "y": 15
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": -76,
+            "y": 15
+          }
+        }
+      ],
+      "label": "Control Bypass Capacitor 10nf",
+      "params": {
+        "style": "ceramic",
+        "capacitance": 0.000001
+      },
+      "position": {
+        "x": 319,
+        "y": 156
+      },
+      "rotation": 0
+    },
+    {
+      "id": "spdt_switch-0f0d1f8b",
+      "kind": "spdt_switch",
+      "position": {
+        "x": 509,
+        "y": 190
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "com",
+          "label": "COM",
+          "offset": {
+            "x": 19,
+            "y": 55
+          },
+          "function": "passive"
+        },
+        {
+          "id": "b",
+          "label": "B",
+          "offset": {
+            "x": 0,
+            "y": 0
+          },
+          "function": "passive"
+        },
+        {
+          "id": "c",
+          "label": "C",
+          "offset": {
+            "x": 38,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "position": 0
+      },
+      "label": "Auto/Manual"
+    }
+  ],
+  "schema_version": 2,
+  "environment": {
+    "lux": 100,
+    "temperatureC": 25
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "id": "fixture-arduino-uno-usb-blink",
+  "name": "Arduino UNO R3 USB breadboard starter",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "uno",
+      "kind": "arduino_uno",
+      "position": {
+        "x": 250,
+        "y": 480
+      },
+      "rotation": 0,
+      "pins": [],
+      "params": {
+        "vcc": 5,
+        "hex": "",
+        "usb_power": 1
+      },
+      "label": "Arduino UNO R3"
+    },
+    {
+      "id": "r1",
+      "kind": "resistor",
+      "position": {
+        "x": 510,
+        "y": 245
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "resistance": 220,
+        "tolerance": 0.05
+      },
+      "label": "220 Ω"
+    },
+    {
+      "id": "led1",
+      "kind": "led",
+      "position": {
+        "x": 567,
+        "y": 245
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "label": "A",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "k",
+          "label": "K",
+          "offset": {
+            "x": 19,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "color": "red",
+        "vf": 1.8
+      },
+      "label": "D13 LED"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w-d13",
+      "from_component": "uno",
+      "from_pin": "d13",
+      "to_component": "r1",
+      "to_pin": "a",
+      "resistance": 0,
+      "color": "#ef4444",
+      "waypoints": [
+        {
+          "x": 354,
+          "y": 430
+        },
+        {
+          "x": 510,
+          "y": 430
+        }
+      ]
+    },
+    {
+      "id": "bb-pin-led1-a-r1-b-led1-a",
+      "from_component": "r1",
+      "from_pin": "b",
+      "to_component": "led1",
+      "to_pin": "a",
+      "resistance": 0
+    },
+    {
+      "id": "bb-pin-led1-k-led1-k-uno-gnd",
+      "from_component": "led1",
+      "from_pin": "k",
+      "to_component": "uno",
+      "to_pin": "gnd",
+      "resistance": 0
+    }
+  ],
+  "nets": [],
+  "netLabel": {}
+}

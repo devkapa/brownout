@@ -1,0 +1,258 @@
+{
+  "id": "fixture-arduino-uno-pwm-rgb-led",
+  "name": "Arduino UNO R3 PWM RGB LED",
+  "schema_version": 1,
+  "components": [
+    {
+      "id": "uno",
+      "kind": "arduino_uno",
+      "position": {
+        "x": 250,
+        "y": 200
+      },
+      "rotation": 0,
+      "pins": [],
+      "params": {
+        "vcc": 5,
+        "hex": "",
+        "usb_power": 1
+      },
+      "label": "Arduino UNO R3"
+    },
+    {
+      "id": "r_r",
+      "kind": "resistor",
+      "position": {
+        "x": 560,
+        "y": 140
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "resistance": 220,
+        "tolerance": 0.05
+      },
+      "label": "220 Ω R"
+    },
+    {
+      "id": "r_g",
+      "kind": "resistor",
+      "position": {
+        "x": 560,
+        "y": 200
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "resistance": 220,
+        "tolerance": 0.05
+      },
+      "label": "220 Ω G"
+    },
+    {
+      "id": "r_b",
+      "kind": "resistor",
+      "position": {
+        "x": 560,
+        "y": 260
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "a",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 57,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "resistance": 220,
+        "tolerance": 0.05
+      },
+      "label": "220 Ω B"
+    },
+    {
+      "id": "rgb1",
+      "kind": "rgb_led",
+      "position": {
+        "x": 680,
+        "y": 195
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "r_a",
+          "label": "R+",
+          "offset": {
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "g_a",
+          "label": "G+",
+          "offset": {
+            "x": 11,
+            "y": 0
+          }
+        },
+        {
+          "id": "b_a",
+          "label": "B+",
+          "offset": {
+            "x": 22,
+            "y": 0
+          }
+        },
+        {
+          "id": "com_k",
+          "label": "K",
+          "offset": {
+            "x": 33,
+            "y": 0
+          }
+        }
+      ],
+      "params": {
+        "vf_r": 1.8,
+        "vf_g": 2,
+        "vf_b": 3
+      },
+      "label": "RGB LED"
+    },
+    {
+      "id": "bat1",
+      "kind": "battery_pack",
+      "position": {
+        "x": 250,
+        "y": 380
+      },
+      "rotation": 0,
+      "pins": [
+        {
+          "id": "pos",
+          "offset": {
+            "x": 100,
+            "y": 10
+          }
+        },
+        {
+          "id": "neg",
+          "offset": {
+            "x": 100,
+            "y": 40
+          }
+        }
+      ],
+      "params": {
+        "voltage": 5
+      },
+      "label": "5 V"
+    }
+  ],
+  "wires": [
+    {
+      "id": "w-d3-rr",
+      "from_component": "uno",
+      "from_pin": "d3",
+      "to_component": "r_r",
+      "to_pin": "a",
+      "waypoints": []
+    },
+    {
+      "id": "w-d5-rg",
+      "from_component": "uno",
+      "from_pin": "d5",
+      "to_component": "r_g",
+      "to_pin": "a",
+      "waypoints": []
+    },
+    {
+      "id": "w-d6-rb",
+      "from_component": "uno",
+      "from_pin": "d6",
+      "to_component": "r_b",
+      "to_pin": "a",
+      "waypoints": []
+    },
+    {
+      "id": "w-rr-ra",
+      "from_component": "r_r",
+      "from_pin": "b",
+      "to_component": "rgb1",
+      "to_pin": "r_a",
+      "waypoints": []
+    },
+    {
+      "id": "w-rg-ga",
+      "from_component": "r_g",
+      "from_pin": "b",
+      "to_component": "rgb1",
+      "to_pin": "g_a",
+      "waypoints": []
+    },
+    {
+      "id": "w-rb-ba",
+      "from_component": "r_b",
+      "from_pin": "b",
+      "to_component": "rgb1",
+      "to_pin": "b_a",
+      "waypoints": []
+    },
+    {
+      "id": "w-comk-gnd",
+      "from_component": "rgb1",
+      "from_pin": "com_k",
+      "to_component": "bat1",
+      "to_pin": "neg",
+      "waypoints": []
+    },
+    {
+      "id": "w-vcc-5v",
+      "from_component": "bat1",
+      "from_pin": "pos",
+      "to_component": "uno",
+      "to_pin": "5v",
+      "waypoints": []
+    }
+  ],
+  "nets": []
+}
