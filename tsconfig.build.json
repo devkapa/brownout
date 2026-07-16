@@ -9,8 +9,21 @@
     "rootDir": "src",
     "outDir": "dist",
     "declaration": true,
-    "declarationMap": true,
     "sourceMap": true,
+    // Sources are EMBEDDED in the .js.map rather than referenced. The "files"
+    // allowlist deliberately ships dist without src, so a map that only points
+    // at ../src/*.ts resolves to nothing in an installed package: runners that
+    // default to --enable-source-maps (vitest, next, tsx) would rewrite frames
+    // to node_modules/brownout/src/*.ts paths that were never published, making
+    // traces worse than shipping no maps at all. Inlining keeps every map
+    // self-contained.
+    //
+    // WHY declarationMap is off: it has no inlineSources equivalent — a
+    // .d.ts.map can only ever REFERENCE ../src/*.ts. With src unpublished it
+    // could never resolve, so emitting one just ships 62 dead files. Consumers
+    // navigate to the .d.ts instead; go-to-definition into real TS is what
+    // shipping src would buy, and that trade is deliberately declined here.
+    "inlineSources": true,
     // Keep the incremental state out of dist: the "files" allowlist ships the
     // whole dist directory and build metadata must not reach the tarball.
     "tsBuildInfoFile": "./.tsbuildinfo"

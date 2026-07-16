@@ -1,7 +1,7 @@
 {
   "name": "brownout",
   "version": "0.1.0",
-  "description": "Brownout is a mixed-signal circuit simulation engine in TypeScript",
+  "description": "Mixed-signal circuit simulation engine: sparse MNA solver, SPICE netlist subset, small-signal AC, and cycle-accurate AVR/RP2040 co-simulation",
   "license": "MIT",
   "type": "module",
   "repository": "github:devkapa/brownout",
@@ -9,14 +9,22 @@
   "keywords": [
     "circuit-simulation",
     "circuit-simulator",
+    "simulation",
     "spice",
+    "netlist",
+    "ngspice",
     "mna",
+    "nodal-analysis",
+    "transient-analysis",
     "electronics",
     "mixed-signal",
+    "analog",
     "eda",
     "arduino",
     "avr",
+    "avr8js",
     "rp2040",
+    "rp2040js",
     "raspberry-pi-pico",
     "microcontroller",
     "emulator"
@@ -26,6 +34,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "LICENSE",
     "README.md",
     "NOTICE"
@@ -50,6 +59,10 @@
       "types": "./dist/analysis.d.ts",
       "import": "./dist/analysis.js"
     },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "import": "./dist/host.js"
+    },
     "./physics": {
       "types": "./dist/physics.d.ts",
       "import": "./dist/physics.js"
@@ -66,11 +79,17 @@
   },
   "scripts": {
     "build": "rm -rf dist .tsbuildinfo && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
     "bench": "tsx scripts/benchmark-linear-scale.ts",
-    "check:package": "publint && attw --pack . --profile esm-only"
+    "check:package": "publint && attw --pack . --profile esm-only",
+    "example:rc": "tsx examples/rc-transient.ts",
+    "example:bode": "tsx examples/spice-bode.ts",
+    "example:device": "tsx examples/custom-device.ts",
+    "typecheck:examples": "tsc -p examples/tsconfig.json",
+    "examples": "pnpm run build && pnpm run typecheck:examples && pnpm run example:rc && pnpm run example:bode && pnpm run example:device"
   },
   "peerDependencies": {
     "avr8js": "^0.21.0",

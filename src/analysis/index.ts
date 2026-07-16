@@ -2,11 +2,12 @@
 // Wave C adds trace-csv and operating-point modules co-located here.
 // Wave E1 adds sweep job types, the sweep runner, and worker message types.
 //
-// WHY analysis-worker-client is excluded from this barrel:
-//   It constructs a `new Worker(new URL(...))` which is a DOM/browser API.
-//   Importing it in a vitest test (Node) or a server-side context would throw.
-//   The client is exported from its own package.json exports entry instead so
-//   callers can import it directly only in browser contexts.
+// WHY analysis-worker-client is absent entirely:
+//   It constructs a `new Worker(new URL(...))` which is a DOM/browser API, so
+//   importing it in Node (vitest, SSR) would throw. That transport shell is
+//   app-domain and was not extracted, so — unlike in simcore, where the client
+//   shipped behind its own exports entry — brownout has no such module and no
+//   such entry. A browser host adapter belongs behind "./host" if one lands.
 export * from "./measure.js";
 export * from "./trace-csv.js";
 export * from "./operating-point.js";

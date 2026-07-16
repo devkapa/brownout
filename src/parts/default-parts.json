@@ -3,12 +3,7 @@
   "parts": [
     {
       "uid": "supply-5v",
-      "name": "Battery Pack",
-      "description": "4 \u00d7 AA alkaline holder with chemistry-shaped discharge, internal resistance and runtime depletion.",
       "kind": "battery_pack",
-      "category": "sources",
-      "width": 100,
-      "height": 50,
       "default_params": {
         "voltage": 6,
         "rInternal": 0.9,
@@ -39,17 +34,12 @@
           "nominal": 6,
           "max": 6.4
         },
-        "notes": "4\u00d7AA alkaline model. Chemistry OCV is ~6.4 V fresh, then follows a piecewise discharge curve; internal resistance rises with depletion and cold. Capacity is coulomb-counted from a 2.5 Ah moderate-drain reference. Recovery, self-discharge, aging, cell imbalance and self-heating are not modelled."
+        "notes": "4×AA alkaline model. Chemistry OCV is ~6.4 V fresh, then follows a piecewise discharge curve; internal resistance rises with depletion and cold. Capacity is coulomb-counted from a 2.5 Ah moderate-drain reference. Recovery, self-discharge, aging, cell imbalance and self-heating are not modelled."
       }
     },
     {
       "uid": "supply-var",
-      "name": "Bench PSU",
-      "description": "Adjustable DC bench power supply.",
       "kind": "bench_psu",
-      "category": "sources",
-      "width": 140,
-      "height": 90,
       "default_params": {
         "voltage": 9,
         "iLimit": 1
@@ -83,18 +73,13 @@
     },
     {
       "uid": "pulse-source",
-      "name": "Pulse Generator",
-      "description": "Signal generator: rectangular pulsed voltage.",
       "kind": "pulse_gen",
-      "category": "sources",
-      "width": 140,
-      "height": 90,
       "default_params": {
         "v1": 0,
         "v2": 5,
         "td": 0,
-        "tr": 1e-06,
-        "tf": 1e-06,
+        "tr": 0.000001,
+        "tf": 0.000001,
         "pw": 0.0005,
         "per": 0.001
       },
@@ -127,12 +112,7 @@
     },
     {
       "uid": "clock-1khz",
-      "name": "Clock Generator",
-      "description": "Signal generator: square-wave clock output.",
       "kind": "clock_gen",
-      "category": "sources",
-      "width": 140,
-      "height": 90,
       "default_params": {
         "frequency": 1000,
         "duty": 0.5
@@ -163,12 +143,7 @@
     },
     {
       "uid": "signal-gen",
-      "name": "Signal Generator",
-      "description": "A bench function generator producing DC, sine, square, pulse, triangle, ramp, piecewise-linear, or noise signals.",
       "kind": "signal_gen",
-      "category": "sources",
-      "width": 140,
-      "height": 90,
       "default_params": {
         "waveform": "sine",
         "amplitude": 2.5,
@@ -177,8 +152,8 @@
         "phaseDeg": 0,
         "duty": 0.5,
         "delay": 0,
-        "tr": 1e-06,
-        "tf": 1e-06,
+        "tr": 0.000001,
+        "tf": 0.000001,
         "pw": 0.0005,
         "pwl": "",
         "seed": 1,
@@ -209,17 +184,12 @@
           "nominal": 5,
           "max": 24
         },
-        "notes": "V(t) = offset + amplitude x unit(t). For noise, unit(t) is deterministic zero-mean Gaussian noise updated at 10 kSa/s and held between updates; amplitude is its 1-sigma RMS voltage and the zero-order hold has 5 kHz one-sided equivalent noise bandwidth. rSource is the series output resistance (50 \u03a9 bench default). PWL points are specified as absolute volts using t:v,t:v pairs."
+        "notes": "V(t) = offset + amplitude x unit(t). For noise, unit(t) is deterministic zero-mean Gaussian noise updated at 10 kSa/s and held between updates; amplitude is its 1-sigma RMS voltage and the zero-order hold has 5 kHz one-sided equivalent noise bandwidth. rSource is the series output resistance (50 Ω bench default). PWL points are specified as absolute volts using t:v,t:v pairs."
       }
     },
     {
       "uid": "resistor",
-      "name": "Resistor",
-      "description": "Ohmic resistor (configurable resistance).",
       "kind": "resistor",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "resistance": 220,
         "tolerance": 0.05
@@ -253,26 +223,21 @@
           },
           "continuous_temperature_max_c": 155,
           "absolute_temperature_max_c": 155,
-          "r_theta_condition": "Derived from a 0.25 W P70 derating curve reaching a 155 \u00b0C film hot spot.",
+          "r_theta_condition": "Derived from a 0.25 W P70 derating curve reaching a 155 °C film hot spot.",
           "assumptions": [
             "The 8 s one-pole time constant is a teaching-model assumption.",
             "Lead length, PCB copper, resistor technology, and airflow can materially change the thermal path."
           ]
         },
-        "notes": "Quarter-watt axial-film reference: 0.25 W through 70 \u00b0C ambient, then linear derating to 0 W at a 155 \u00b0C film limit. For an identified resistor, solved I\u00b2R loss drives the persistent one-pole body temperature and ambient-adjusted power allowance. Temperature is reported but does not change resistance because temperature coefficient is not modelled.",
+        "notes": "Quarter-watt axial-film reference: 0.25 W through 70 °C ambient, then linear derating to 0 W at a 155 °C film limit. For an identified resistor, solved I²R loss drives the persistent one-pole body temperature and ambient-adjusted power allowance. Temperature is reported but does not change resistance because temperature coefficient is not modelled.",
         "value_tol": 0.05
       }
     },
     {
       "uid": "capacitor",
-      "name": "Capacitor",
-      "description": "Capacitor with configurable series resistance and dielectric leakage.",
       "kind": "capacitor",
-      "category": "passive",
-      "width": 40,
-      "height": 30,
       "default_params": {
-        "capacitance": 1e-06,
+        "capacitance": 0.000001,
         "esr": 1,
         "leakageResistance": 10000000,
         "style": "electrolytic"
@@ -302,12 +267,7 @@
     },
     {
       "uid": "diode-rectifier",
-      "name": "Diode",
-      "description": "Silicon rectifier diode (1N4001-style).",
       "kind": "diode",
-      "category": "passive",
-      "width": 36,
-      "height": 20,
       "default_params": {
         "vf": 0.7
       },
@@ -338,12 +298,7 @@
     },
     {
       "uid": "diode-zener",
-      "name": "Zener Diode",
-      "description": "Zener diode \u2014 voltage regulation via reverse breakdown.",
       "kind": "zener_diode",
-      "category": "passive",
-      "width": 36,
-      "height": 20,
       "default_params": {
         "vf": 0.7,
         "vz": 5.1
@@ -367,22 +322,17 @@
         }
       ],
       "electrical_specs": {
-        "p_max": 1.0,
+        "p_max": 1,
         "vf": 0.7,
         "if_max": 0.1,
         "iz_knee": 0.005,
-        "notes": "Reverse breakdown voltage set by `vz` param (e.g. 5.1V). iz_knee is the knee current at the rated vz (default 5 mA). vz is not varied by Monte Carlo v1 \u2014 the engine does not apply vz via a params override.",
+        "notes": "Reverse breakdown voltage set by `vz` param (e.g. 5.1V). iz_knee is the knee current at the rated vz (default 5 mA). vz is not varied by Monte Carlo v1 — the engine does not apply vz via a params override.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "tvs-diode",
-      "name": "TVS Diode",
-      "description": "Transient Voltage Suppressor \u2014 clamps fast voltage spikes by entering reverse breakdown.",
       "kind": "tvs_diode",
-      "category": "passive",
-      "width": 36,
-      "height": 20,
       "default_params": {
         "vbr": 6.8,
         "bidirectional": 0
@@ -409,18 +359,13 @@
         "p_max": 0.4,
         "vr_max": 6.8,
         "iz_knee": 0.005,
-        "notes": "Breakdown voltage set by `vbr` param (default 6.8 V). bidirectional=0 (default) for unidirectional, 1 for symmetric bidirectional clamping. For reverse-overvoltage, the vr_max check is suppressed below vbr \u2014 normal operation.",
+        "notes": "Breakdown voltage set by `vbr` param (default 6.8 V). bidirectional=0 (default) for unidirectional, 1 for symmetric bidirectional clamping. For reverse-overvoltage, the vr_max check is suppressed below vbr — normal operation.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "diode-schottky",
-      "name": "Schottky Diode",
-      "description": "Schottky barrier diode \u2014 low forward voltage drop.",
       "kind": "schottky_diode",
-      "category": "passive",
-      "width": 36,
-      "height": 20,
       "default_params": {
         "vf": 0.3
       },
@@ -451,12 +396,7 @@
     },
     {
       "uid": "inductor",
-      "name": "Inductor",
-      "description": "Inductor with configurable winding resistance and lumped core loss.",
       "kind": "inductor",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "inductance": 0.001,
         "dcr": 5,
@@ -486,12 +426,7 @@
     },
     {
       "uid": "led-red",
-      "name": "Red LED",
-      "description": "Red-coloured light emitting diode. Vf \u2248 1.8 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "red",
         "vf": 1.8
@@ -527,25 +462,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-green",
-      "name": "Green LED",
-      "description": "Green-coloured light emitting diode. Vf \u2248 2.0 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "green",
         "vf": 2
@@ -581,25 +511,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-blue",
-      "name": "Blue LED",
-      "description": "Blue-coloured light emitting diode. Vf \u2248 3.0 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "blue",
         "vf": 3
@@ -635,25 +560,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-white",
-      "name": "White LED",
-      "description": "White-coloured light emitting diode. Vf \u2248 3.2 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "white",
         "vf": 3.2,
@@ -690,25 +610,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-yellow",
-      "name": "Yellow LED",
-      "description": "Yellow LED. Vf \u2248 2.1 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "#ffcc00",
         "vf": 2.1,
@@ -745,25 +660,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-amber",
-      "name": "Amber LED",
-      "description": "Amber LED. Vf \u2248 2.0 V.",
       "kind": "led",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "color": "#ff8800",
         "vf": 2,
@@ -800,25 +710,20 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 125,
-          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm\u00b2 pad area per lead.",
+          "r_theta_condition": "5 mm through-hole reference on FR4 with at least 16 mm² pad area per lead.",
           "assumptions": [
             "The 2 s one-pole time constant is a teaching-model assumption.",
             "One package fit is applied across LED colours; die construction changes exact thermal and optical behaviour.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf \u00d7 If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
+        "notes": "The 20 mA current ceiling and 75 mW package envelope both apply. For an identified LED, solved Vf × If loss drives the persistent one-pole junction temperature; that temperature feeds the nonlinear junction law and the ambient-adjusted power allowance is reported. Optical efficacy and the overload-failure threshold do not change with temperature, and no reversible shutdown is claimed.",
         "vf_tol": 0.05
       }
     },
     {
       "uid": "led-bicolor",
-      "name": "Bicolour LED",
-      "description": "Two-colour LED with shared cathode. Red at a1/k, green at a2/k.",
       "kind": "bicolor_led",
-      "category": "output",
-      "width": 30,
-      "height": 40,
       "default_params": {
         "color1": "#ff4a4a",
         "vf1": 1.8,
@@ -857,17 +762,12 @@
     },
     {
       "uid": "led-rgb",
-      "name": "RGB LED",
-      "description": "RGB LED with common cathode. Pins: r_a, g_a, b_a, com_k.",
       "kind": "rgb_led",
-      "category": "output",
-      "width": 40,
-      "height": 50,
       "default_params": {
         "iRated": 0.02,
         "vf_r": 1.8,
-        "vf_g": 2.0,
-        "vf_b": 3.0
+        "vf_g": 2,
+        "vf_b": 3
       },
       "pin_layout": [
         {
@@ -912,12 +812,7 @@
     },
     {
       "uid": "switch-spst",
-      "name": "Switch (SPST)",
-      "description": "Single-pole single-throw toggle.",
       "kind": "switch",
-      "category": "input",
-      "width": 60,
-      "height": 30,
       "default_params": {
         "closed": 0,
         "momentary": 0
@@ -943,12 +838,7 @@
     },
     {
       "uid": "switch-push",
-      "name": "Push Button",
-      "description": "Momentary push button. Closes while held.",
       "kind": "push_button",
-      "category": "input",
-      "width": 60,
-      "height": 30,
       "default_params": {
         "closed": 0,
         "momentary": 1
@@ -990,12 +880,7 @@
     },
     {
       "uid": "switch-push-dpdt",
-      "name": "DPDT Push Switch",
-      "description": "6-pin DPDT latching (self-locking) push switch. position=0 latches the two centre commons to the left throws; position=1 latches them to the right throws. Break-before-make.",
       "kind": "push_dpdt",
-      "category": "input",
-      "width": 60,
-      "height": 56,
       "default_params": {
         "position": 0
       },
@@ -1052,12 +937,7 @@
     },
     {
       "uid": "switch-spdt",
-      "name": "SPDT Switch",
-      "description": "Single-pole double-throw switch. position=0 \u2192 COM\u2194B; position=1 \u2192 COM\u2194C.",
       "kind": "spdt_switch",
-      "category": "input",
-      "width": 60,
-      "height": 50,
       "default_params": {
         "position": 0
       },
@@ -1089,12 +969,7 @@
     },
     {
       "uid": "bjt-npn",
-      "name": "NPN Transistor",
-      "description": "Generic NPN BJT (Ebers-Moll transport model with forward Early effect).",
       "kind": "bjt_npn",
-      "category": "active",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "Is": 1e-14,
         "betaF": 100,
@@ -1137,12 +1012,7 @@
     },
     {
       "uid": "bjt-pnp",
-      "name": "PNP Transistor",
-      "description": "Generic PNP BJT (Ebers-Moll transport model with forward Early effect).",
       "kind": "bjt_pnp",
-      "category": "active",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "Is": 1e-14,
         "betaF": 100,
@@ -1185,12 +1055,7 @@
     },
     {
       "uid": "nmos",
-      "name": "N-Channel MOSFET",
-      "description": "Generic enhancement NMOS (level-1 channel, body diode and lumped gate capacitances).",
       "kind": "nmos",
-      "category": "active",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "vto": 0.7,
         "k": 0.02,
@@ -1231,12 +1096,7 @@
     },
     {
       "uid": "pmos",
-      "name": "P-Channel MOSFET",
-      "description": "Generic enhancement PMOS (level-1 channel, body diode and lumped gate capacitances).",
       "kind": "pmos",
-      "category": "active",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "vto": 0.7,
         "k": 0.02,
@@ -1277,12 +1137,7 @@
     },
     {
       "uid": "ne555",
-      "name": "NE555 Timer",
-      "description": "Classic 555 timer \u2014 astable / monostable oscillator.",
       "kind": "ne555",
-      "category": "ic",
-      "width": 80,
-      "height": 50,
       "default_params": {},
       "pin_layout": [
         {
@@ -1361,12 +1216,7 @@
     },
     {
       "uid": "potentiometer",
-      "name": "Potentiometer",
-      "description": "3-terminal variable resistor with linear or log taper.",
       "kind": "potentiometer",
-      "category": "passive",
-      "width": 60,
-      "height": 60,
       "default_params": {
         "rTotal": 10000,
         "taper": "linear",
@@ -1403,12 +1253,7 @@
     },
     {
       "uid": "trimmer",
-      "name": "Trimmer",
-      "description": "PCB-mount variable resistor, adjusted by screwdriver.",
       "kind": "trimmer",
-      "category": "passive",
-      "width": 60,
-      "height": 60,
       "default_params": {
         "rTotal": 10000,
         "position": 0.5
@@ -1444,12 +1289,7 @@
     },
     {
       "uid": "fuse",
-      "name": "Fuse",
-      "description": "Overcurrent protection fuse.",
       "kind": "fuse",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "rNormal": 0.1,
         "iRating": 1
@@ -1478,12 +1318,7 @@
     },
     {
       "uid": "ptc-fuse",
-      "name": "PTC Resettable Fuse",
-      "description": "Generic radial-leaded polymeric PTC resettable fuse; can recover after fault or power removal and cooling.",
       "kind": "ptc_fuse",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "iHold": 0.5,
         "rNormal": 0.5
@@ -1507,17 +1342,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "`iHold` is the 25 \u00b0C hold-current setting. The simulator uses a simplified trip/cool-down model; real trip time, trip current, hot resistance, and ambient derating require the selected device's curves."
+        "notes": "`iHold` is the 25 °C hold-current setting. The simulator uses a simplified trip/cool-down model; real trip time, trip current, hot resistance, and ambient derating require the selected device's curves."
       }
     },
     {
       "uid": "photoresistor",
-      "name": "LDR",
-      "description": "Light-dependent resistor. Resistance decreases with illuminance.",
       "kind": "ldr",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "rDark": 1000000,
         "rLight": 500,
@@ -1543,17 +1373,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "GL5528-class model: ~10\u201320 k\u03a9 at 10 lux, gamma ~0.7, dark resistance ~1 M\u03a9."
+        "notes": "GL5528-class model: ~10–20 kΩ at 10 lux, gamma ~0.7, dark resistance ~1 MΩ."
       }
     },
     {
       "uid": "thermistor-ntc",
-      "name": "Thermistor (NTC)",
-      "description": "Negative-temperature-coefficient thermistor. Resistance decreases with temperature.",
       "kind": "thermistor",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "rNominal": 10000,
         "beta": 3950,
@@ -1579,17 +1404,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Resistance at 25\u00b0C set by `rNominal`; B-parameter via `beta`. A one-pole self-heating model uses the 7 mW/K dissipation factor and 15 s thermal time constant defaults."
+        "notes": "Resistance at 25°C set by `rNominal`; B-parameter via `beta`. A one-pole self-heating model uses the 7 mW/K dissipation factor and 15 s thermal time constant defaults."
       }
     },
     {
       "uid": "ic-74ls00",
-      "name": "74LS00",
-      "description": "Quad 2-input NAND gate (14-pin DIP).",
       "kind": "74ls00",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -1724,12 +1544,7 @@
     },
     {
       "uid": "ic-74ls04",
-      "name": "74LS04",
-      "description": "Hex inverter (14-pin DIP).",
       "kind": "74ls04",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -1864,12 +1679,7 @@
     },
     {
       "uid": "ic-74ls08",
-      "name": "74LS08",
-      "description": "Quad 2-input AND gate (14-pin DIP).",
       "kind": "74ls08",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -2004,12 +1814,7 @@
     },
     {
       "uid": "ic-74ls32",
-      "name": "74LS32",
-      "description": "Quad 2-input OR gate (14-pin DIP).",
       "kind": "74ls32",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -2144,12 +1949,7 @@
     },
     {
       "uid": "ic-74ls86",
-      "name": "74LS86",
-      "description": "Quad 2-input XOR gate (14-pin DIP).",
       "kind": "74ls86",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -2284,12 +2084,7 @@
     },
     {
       "uid": "ic-74ls161",
-      "name": "74LS161",
-      "description": "4-bit synchronous binary counter with asynchronous clear (16-pin DIP).",
       "kind": "74ls161",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -2440,12 +2235,7 @@
     },
     {
       "uid": "ic-74ls173",
-      "name": "74LS173",
-      "description": "4-bit D-type register with 3-state outputs (16-pin DIP).",
       "kind": "74ls173",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -2596,12 +2386,7 @@
     },
     {
       "uid": "ic-74ls189",
-      "name": "74LS189",
-      "description": "64-bit (16\u00d74) static RAM with inverted outputs (16-pin DIP).",
       "kind": "74ls189",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -2752,12 +2537,7 @@
     },
     {
       "uid": "ic-74ls157",
-      "name": "74LS157",
-      "description": "Quad 2:1 multiplexer (16-pin DIP).",
       "kind": "74ls157",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -2908,12 +2688,7 @@
     },
     {
       "uid": "ic-74ls283",
-      "name": "74LS283",
-      "description": "4-bit binary full adder with fast carry (16-pin DIP).",
       "kind": "74ls283",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -3064,12 +2839,7 @@
     },
     {
       "uid": "ic-74ls245",
-      "name": "74LS245",
-      "description": "Octal 3-state bus transceiver (20-pin DIP).",
       "kind": "74ls245",
-      "category": "ic",
-      "width": 80,
-      "height": 100,
       "default_params": {
         "vcc": 5
       },
@@ -3252,12 +3022,7 @@
     },
     {
       "uid": "ic-74hc595",
-      "name": "74HC595",
-      "description": "8-bit serial-in, parallel-out shift register with output latches (16-pin DIP).",
       "kind": "74hc595",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -3409,12 +3174,7 @@
     },
     {
       "uid": "ic-74hc165",
-      "name": "74HC165",
-      "description": "8-bit parallel-in, serial-out shift register (16-pin DIP).",
       "kind": "74hc165",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -3566,12 +3326,7 @@
     },
     {
       "uid": "ic-74hc14",
-      "name": "74HC14",
-      "description": "Hex Schmitt-trigger inverter (14-pin DIP).",
       "kind": "74hc14",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -3710,12 +3465,7 @@
     },
     {
       "uid": "ic-74hc138",
-      "name": "74HC138",
-      "description": "3-to-8 line decoder / demultiplexer (16-pin DIP).",
       "kind": "74hc138",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -3867,12 +3617,7 @@
     },
     {
       "uid": "ic-74ls47",
-      "name": "74LS47",
-      "description": "BCD-to-7-segment decoder/driver with open-collector outputs (16-pin DIP).",
       "kind": "74ls47",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -4016,7 +3761,7 @@
         "io_max": 0.024,
         "v_input": {
           "v_il_max": 0.8,
-          "v_ih_min": 2.0
+          "v_ih_min": 2
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 35,
@@ -4025,12 +3770,7 @@
     },
     {
       "uid": "ic-74hc74",
-      "name": "74HC74",
-      "description": "Dual D flip-flop with async preset and clear, rising-edge triggered (14-pin DIP).",
       "kind": "74hc74",
-      "category": "ic",
-      "width": 80,
-      "height": 60,
       "default_params": {
         "vcc": 5
       },
@@ -4162,17 +3902,12 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 25,
-        "notes": "Both /PRE and /CLR LOW simultaneously is an undefined state per the TI SN74HC74 datasheet (SCLS108) \u2014 Q and /Q both go HIGH while asserted, which is logically inconsistent. Do not rely on this state."
+        "notes": "Both /PRE and /CLR LOW simultaneously is an undefined state per the TI SN74HC74 datasheet (SCLS108) — Q and /Q both go HIGH while asserted, which is logically inconsistent. Do not rely on this state."
       }
     },
     {
       "uid": "ic-cd4017",
-      "name": "CD4017",
-      "description": "Decade counter/divider with 10 decoded outputs (16-pin DIP, CMOS-4000).",
       "kind": "cd4017",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -4325,12 +4060,7 @@
     },
     {
       "uid": "ic-cd4511",
-      "name": "CD4511",
-      "description": "BCD-to-7-segment latch/decoder/driver with push-pull active-high outputs (16-pin DIP, CMOS-4000).",
       "kind": "cd4511",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -4483,12 +4213,7 @@
     },
     {
       "uid": "ic-cd4060",
-      "name": "CD4060",
-      "description": "14-stage binary ripple counter with built-in oscillator (16-pin DIP, CMOS-4000).",
       "kind": "cd4060",
-      "category": "ic",
-      "width": 80,
-      "height": 80,
       "default_params": {
         "vcc": 5
       },
@@ -4643,12 +4368,7 @@
     },
     {
       "uid": "ic-28c16",
-      "name": "28C16",
-      "description": "2Kx8 EEPROM \u2014 programmable contents, combinational read (24-pin DIP).",
       "kind": "28c16",
-      "category": "ic",
-      "width": 80,
-      "height": 104,
       "default_params": {
         "vcc": 5,
         "contents": ""
@@ -4864,12 +4584,7 @@
     },
     {
       "uid": "ic-28c256",
-      "name": "28C256",
-      "description": "32Kx8 EEPROM \u2014 programmable contents, combinational read (28-pin DIP).",
       "kind": "28c256",
-      "category": "ic",
-      "width": 80,
-      "height": 120,
       "default_params": {
         "vcc": 5,
         "contents": ""
@@ -5117,12 +4832,7 @@
     },
     {
       "uid": "seg7-cc",
-      "name": "7-Seg (CC)",
-      "description": "Single-digit 7-segment display with two internally bonded common-cathode leads.",
       "kind": "seg7_cc",
-      "category": "output",
-      "width": 60,
-      "height": 80,
       "default_params": {},
       "pin_layout": [
         {
@@ -5212,12 +4922,7 @@
     },
     {
       "uid": "seg7-ca",
-      "name": "7-Seg (CA)",
-      "description": "Single-digit 7-segment display with two internally bonded common-anode leads.",
       "kind": "seg7_ca",
-      "category": "output",
-      "width": 60,
-      "height": 80,
       "default_params": {},
       "pin_layout": [
         {
@@ -5307,12 +5012,7 @@
     },
     {
       "uid": "ic-arduino-uno",
-      "name": "Arduino UNO R3",
-      "description": "ATmega328P-based microcontroller board. Upload a compiled .hex sketch; digital and analog I/O pins connect to the circuit.",
       "kind": "arduino_uno",
-      "category": "mcu",
-      "width": 263,
-      "height": 204,
       "default_params": {
         "vcc": 5,
         "hex": "",
@@ -5564,12 +5264,7 @@
     },
     {
       "uid": "ic-raspberry-pi-pico",
-      "name": "RP2040 MicroPython Board",
-      "description": "Generic RP2040 (dual Cortex-M0+) MicroPython development board on a 40-pin castellated DIP-style footprint. Plugs directly into a breadboard straddling the centre gap; micro-USB powers VBUS and the 3V3 pin feeds the rails. Write MicroPython in the code panel; from machine import Pin/PWM/ADC.",
       "kind": "raspberry_pi_pico",
-      "category": "mcu",
-      "width": 377,
-      "height": 131,
       "default_params": {
         "vcc": 3.3,
         "script": "",
@@ -5901,12 +5596,7 @@
     },
     {
       "uid": "ic-microbit",
-      "name": "BBC micro:bit V1",
-      "description": "BBC micro:bit V1 MicroPython board with a 5x5 LED display, buttons A/B, and sensors, running the real micro:bit MicroPython. Write `from microbit import *` in the code panel \u2014 the same code taught via Grok Academy and python.microbit.org. The P0/P1/P2 edge pads (plus 3V/GND) wire to the breadboard. Toggle the Inspector's Breakout board switch to dock it into an edge-connector GPIO breakout that exposes six more pins (P8, P12-P16) in one through-hole pad row.",
       "kind": "microbit",
-      "category": "mcu",
-      "width": 226,
-      "height": 194,
       "default_params": {
         "script": "",
         "power": 1,
@@ -5933,7 +5623,7 @@
         {
           "id": "p2",
           "offset": {
-            "x": 113.0,
+            "x": 113,
             "y": 161.7
           },
           "function": "io"
@@ -5958,12 +5648,7 @@
     },
     {
       "uid": "ic-arduino-nano",
-      "name": "Arduino Nano (classic)",
-      "description": "ATmega328P microcontroller on a 30-pin DIP-style board. Plugs directly into a breadboard straddling the centre gap; mini-USB powers the rails through the 5V pin. Upload a compiled .hex sketch to drive the pins.",
       "kind": "arduino_nano",
-      "category": "mcu",
-      "width": 282,
-      "height": 131,
       "default_params": {
         "vcc": 5,
         "hex": "",
@@ -6231,12 +5916,7 @@
     },
     {
       "uid": "ferrite-bead",
-      "name": "Ferrite Bead",
-      "description": "Two-terminal ferrite bead for HF noise suppression on power and signal lines. Modelled as a DC series resistor (rDc) \u2014 HF suppression is above the simulator's bandwidth.",
       "kind": "ferrite_bead",
-      "category": "passive",
-      "width": 60,
-      "height": 20,
       "default_params": {
         "rDc": 0.5
       },
@@ -6265,12 +5945,7 @@
     },
     {
       "uid": "resistor-array",
-      "name": "Resistor Array",
-      "description": "4\u00d7isolated resistor network in a DIP-8 package. Four independent resistors share a common value. Pins a1..a4 on one side, b1..b4 on the other.",
       "kind": "resistor_array",
-      "category": "passive",
-      "width": 73,
-      "height": 55,
       "default_params": {
         "resistance": 10000
       },
@@ -6342,20 +6017,15 @@
       ],
       "electrical_specs": {
         "p_max": 0.125,
-        "notes": "4 isolated resistors, each rated 125 mW (0.5 W total package). Tolerance \u00b15% (same as individual resistors). All four share the single `resistance` param.",
+        "notes": "4 isolated resistors, each rated 125 mW (0.5 W total package). Tolerance ±5% (same as individual resistors). All four share the single `resistance` param.",
         "value_tol": 0.05
       }
     },
     {
       "uid": "cap-ceramic",
-      "name": "Ceramic Capacitor",
-      "description": "MLCC ceramic capacitor \u2014 small, non-polarised, good high-frequency response. Default 100 nF for decoupling.",
       "kind": "capacitor",
-      "category": "passive",
-      "width": 40,
-      "height": 30,
       "default_params": {
-        "capacitance": 1e-07,
+        "capacitance": 1e-7,
         "esr": 0.05,
         "leakageResistance": 1000000000,
         "style": "ceramic"
@@ -6379,18 +6049,13 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Non-polarised; either terminal can connect to the higher-voltage node. The ESR and leakage defaults are representative. Tolerance is typically \u00b110% for X7R/Y5V dielectrics, better for C0G/NP0. ESR frequency dependence, dielectric absorption, voltage coefficient, and breakdown are not modelled.",
+        "notes": "Non-polarised; either terminal can connect to the higher-voltage node. The ESR and leakage defaults are representative. Tolerance is typically ±10% for X7R/Y5V dielectrics, better for C0G/NP0. ESR frequency dependence, dielectric absorption, voltage coefficient, and breakdown are not modelled.",
         "value_tol": 0.1
       }
     },
     {
       "uid": "cap-electrolytic",
-      "name": "Electrolytic Capacitor",
-      "description": "Aluminium electrolytic capacitor \u2014 polarised, large capacitance values, for bulk power filtering and timing. Default 100 \u00b5F.",
       "kind": "capacitor",
-      "category": "passive",
-      "width": 40,
-      "height": 30,
       "default_params": {
         "capacitance": 0.0001,
         "esr": 0.2,
@@ -6416,20 +6081,15 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Polarised: pin a is positive (+), pin b is negative (\u2212). The ESR and leakage defaults are representative. Tolerance is typically \u221220%/+80%. Reverse polarity can damage a real part, but polarity damage, ESR frequency/temperature dependence, dielectric absorption, and breakdown are not modelled.",
+        "notes": "Polarised: pin a is positive (+), pin b is negative (−). The ESR and leakage defaults are representative. Tolerance is typically −20%/+80%. Reverse polarity can damage a real part, but polarity damage, ESR frequency/temperature dependence, dielectric absorption, and breakdown are not modelled.",
         "value_tol": 0.1
       }
     },
     {
       "uid": "cap-film",
-      "name": "Film Capacitor",
-      "description": "Polyester or polypropylene film capacitor \u2014 non-polarised, stable, low-distortion. Typical values 1 nF\u201310 \u00b5F. Default 1 \u00b5F.",
       "kind": "capacitor",
-      "category": "passive",
-      "width": 40,
-      "height": 30,
       "default_params": {
-        "capacitance": 1e-06,
+        "capacitance": 0.000001,
         "esr": 0.1,
         "leakageResistance": 1000000000,
         "style": "film"
@@ -6453,18 +6113,13 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Non-polarised; either terminal can connect to the higher-voltage node. The ESR and leakage defaults are representative. Tolerance is typically \u00b15\u201310% for polyester (PET), \u00b11\u20132% for polypropylene (PP). ESR frequency dependence, dielectric absorption, and breakdown are not modelled.",
+        "notes": "Non-polarised; either terminal can connect to the higher-voltage node. The ESR and leakage defaults are representative. Tolerance is typically ±5–10% for polyester (PET), ±1–2% for polypropylene (PP). ESR frequency dependence, dielectric absorption, and breakdown are not modelled.",
         "value_tol": 0.1
       }
     },
     {
       "uid": "dip-switch",
-      "name": "DIP Switch",
-      "description": "Classic red through-hole DIP switch. N independent SPST positions in one package \u2014 each position connects its two pins when on. Configurable 2\u20138 positions.",
       "kind": "dip_switch",
-      "category": "input",
-      "width": 65,
-      "height": 55,
       "default_params": {
         "positions": 4,
         "sw1": 0,
@@ -6539,17 +6194,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Typical contact rating 100 mA at 50 V DC (low-level signal switching only). Contact resistance \u2264 100 m\u03a9. Insulation resistance \u2265 100 M\u03a9. Operating life 1 000\u201310 000 cycles per position."
+        "notes": "Typical contact rating 100 mA at 50 V DC (low-level signal switching only). Contact resistance ≤ 100 mΩ. Insulation resistance ≥ 100 MΩ. Operating life 1 000–10 000 cycles per position."
       }
     },
     {
       "uid": "lm358",
-      "name": "LM358",
-      "description": "Dual general-purpose op-amp (single-supply, DIP-8). Two independent op-amps sharing a single supply.",
       "kind": "lm358",
-      "category": "analog_ic",
-      "width": 80,
-      "height": 50,
       "default_params": {
         "openLoopGain": 100000,
         "gbw": 1000000,
@@ -6648,17 +6298,12 @@
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "Typical model defaults: 100 dB DC gain, 1 MHz GBW, 0.3 V/\u00b5s slew, 40 mA source and 20 mA sink limits, and 50 \u03a9 output resistance. Output can swing to ~20 mV above GND but only to ~VCC\u22121.5 V. The transient model is one dominant pole with hard slew/current/rail clamps. Input common-mode limits, input offset/bias/noise, additional poles and phase margin, capacitive-load instability, crossover distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 80.9 \u00b0C/W and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
+        "notes": "Typical model defaults: 100 dB DC gain, 1 MHz GBW, 0.3 V/µs slew, 40 mA source and 20 mA sink limits, and 50 Ω output resistance. Output can swing to ~20 mV above GND but only to ~VCC−1.5 V. The transient model is one dominant pole with hard slew/current/rail clamps. Input common-mode limits, input offset/bias/noise, additional poles and phase margin, capacitive-load instability, crossover distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 80.9 °C/W and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
       }
     },
     {
       "uid": "mcp6002",
-      "name": "MCP6002",
-      "description": "Dual rail-to-rail op-amp (1.8-6 V single-supply, DIP-8). Rail-to-rail input and output for low-voltage designs.",
       "kind": "mcp6002",
-      "category": "analog_ic",
-      "width": 80,
-      "height": 50,
       "default_params": {
         "openLoopGain": 100000,
         "gbw": 1000000,
@@ -6753,21 +6398,16 @@
           "r_theta_condition": "Microchip 8-lead PDIP package thermal resistance.",
           "assumptions": [
             "The 12 s one-pole time constant is a teaching-model assumption.",
-            "The 1.18 W envelope is derived from 125 \u00b0C at 25 \u00b0C ambient and is not a guaranteed functional output-power rating.",
+            "The 1.18 W envelope is derived from 125 °C at 25 °C ambient and is not a guaranteed functional output-power rating.",
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "Typical model defaults: 100 dB DC gain, 1 MHz GBW, 0.6 V/\u00b5s slew, \u00b123 mA output-current limits, and 50 \u03a9 output resistance. Rail-to-rail input/output is approximated with 20 mV output headroom; quiescent current is ~100 \u00b5A per amplifier. The transient model is one dominant pole with hard slew/current/rail clamps. Input offset/bias/noise, additional poles and phase margin, capacitive-load instability, crossover distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 85 \u00b0C/W and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
+        "notes": "Typical model defaults: 100 dB DC gain, 1 MHz GBW, 0.6 V/µs slew, ±23 mA output-current limits, and 50 Ω output resistance. Rail-to-rail input/output is approximated with 20 mV output headroom; quiescent current is ~100 µA per amplifier. The transient model is one dominant pole with hard slew/current/rail clamps. Input offset/bias/noise, additional poles and phase margin, capacitive-load instability, crossover distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 85 °C/W and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
       }
     },
     {
       "uid": "lm386",
-      "name": "LM386",
-      "description": "Audio power amplifier (4-12 V, DIP-8). Fixed-gain amplifier self-biased to mid-supply for DC-coupled audio.",
       "kind": "lm386",
-      "category": "analog_ic",
-      "width": 80,
-      "height": 50,
       "default_params": {
         "gain": 20,
         "gbw": 6000000,
@@ -6866,17 +6506,12 @@
             "No reversible thermal shutdown is claimed."
           ]
         },
-        "notes": "Output self-biases to VS/2. Typical model defaults: gain \u00d720, effective 6 MHz GBW (about 300 kHz closed-loop bandwidth at \u00d720), 0.3 V/\u00b5s slew, \u00b1250 mA output-current limits, and 2 \u03a9 output resistance. Gain pin (1/8): open=20, 1.2 k\u03a9 path=50, bypass capacitor=200. The transient model is one dominant pole with hard slew/current/rail clamps. Coupling/bypass capacitor networks, speaker impedance versus frequency, additional poles, crossover and clipping distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 53.4 \u00b0C/W, the 1.25 W package limit, and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
+        "notes": "Output self-biases to VS/2. Typical model defaults: gain ×20, effective 6 MHz GBW (about 300 kHz closed-loop bandwidth at ×20), 0.3 V/µs slew, ±250 mA output-current limits, and 2 Ω output resistance. Gain pin (1/8): open=20, 1.2 kΩ path=50, bypass capacitor=200. The transient model is one dominant pole with hard slew/current/rail clamps. Coupling/bypass capacitor networks, speaker impedance versus frequency, additional poles, crossover and clipping distortion, and overload-recovery time are not modelled. For an identified PDIP-8 device, solved package power drives a persistent one-pole junction temperature using 53.4 °C/W, the 1.25 W package limit, and an assumed 12 s time constant; the ambient-adjusted power allowance is reported. Temperature does not alter the electrical macro-model, and no reversible thermal shutdown is claimed."
       }
     },
     {
       "uid": "lm393",
-      "name": "LM393",
-      "description": "Dual general-purpose open-collector comparator (2-36 V single-supply, DIP-8). Two independent comparators with open-collector outputs that require external pull-up resistors.",
       "kind": "lm393",
-      "category": "analog_ic",
-      "width": 80,
-      "height": 50,
       "default_params": {},
       "pin_layout": [
         {
@@ -6956,16 +6591,11 @@
     },
     {
       "uid": "reg-7805",
-      "name": "7805 Voltage Regulator",
-      "description": "Fixed +5 V conventional linear regulator (TO-220). Holds output at 5 V when input is at least 7 V; enters dropout when input headroom is less than 2 V above output.",
       "kind": "linear_reg",
-      "category": "power",
-      "width": 40,
-      "height": 60,
       "default_params": {
-        "vout": 5.0,
-        "vdropout": 2.0,
-        "iLimit": 1.0
+        "vout": 5,
+        "vdropout": 2,
+        "iLimit": 1
       },
       "pin_layout": [
         {
@@ -6994,7 +6624,7 @@
         }
       ],
       "electrical_specs": {
-        "p_max": 15.0,
+        "p_max": 15,
         "thermal": {
           "r_theta_ja_c_per_w": 23.9,
           "time_constant_s": 15,
@@ -7012,21 +6642,16 @@
           },
           "assumptions": [
             "The 15 s one-pole time constant is a teaching-model assumption.",
-            "The 135 \u00b0C restart threshold is assumed because one universal restart value is not specified.",
+            "The 135 °C restart threshold is assumed because one universal restart value is not specified.",
             "The 15 W headline rating requires a suitable heatsink."
           ]
         },
-        "notes": "Output 5.0 V \u00b14%. Dropout is about 2 V, so input must be at least 7 V for full regulation. The 1.0 A setting is an electrical limit, not a guaranteed thermally safe current. For the identified TO-220, solved regulator loss drives a persistent one-pole junction temperature using 23.9 \u00b0C/W, and the ambient-adjusted power allowance is reported. Crossing 150 \u00b0C shuts the output down; regulation resumes only after cooling to 135 \u00b0C. The time constant and restart point are compact-model assumptions."
+        "notes": "Output 5.0 V ±4%. Dropout is about 2 V, so input must be at least 7 V for full regulation. The 1.0 A setting is an electrical limit, not a guaranteed thermally safe current. For the identified TO-220, solved regulator loss drives a persistent one-pole junction temperature using 23.9 °C/W, and the ambient-adjusted power allowance is reported. Crossing 150 °C shuts the output down; regulation resumes only after cooling to 135 °C. The time constant and restart point are compact-model assumptions."
       }
     },
     {
       "uid": "reg-ams1117-33",
-      "name": "AMS1117 3.3V Regulator",
-      "description": "Labeled breakout/module carrying a fixed +3.3 V AMS1117 LDO. The canvas exposes semantic IN, GND, and OUT terminals rather than bare SOT-223 lead positions.",
       "kind": "linear_reg",
-      "category": "power",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "vout": 3.3,
         "vdropout": 1.1,
@@ -7059,7 +6684,7 @@
         }
       ],
       "electrical_specs": {
-        "p_max": 1.0,
+        "p_max": 1,
         "thermal": {
           "r_theta_ja_c_per_w": 90,
           "time_constant_s": 8,
@@ -7069,7 +6694,7 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 150,
-          "r_theta_condition": "Small SOT-223 carrier assumption; PCB copper can move thermal resistance roughly from 55 to 90 \u00b0C/W.",
+          "r_theta_condition": "Small SOT-223 carrier assumption; PCB copper can move thermal resistance roughly from 55 to 90 °C/W.",
           "shutdown": {
             "trip_c": 165,
             "restart_c": 145,
@@ -7077,23 +6702,18 @@
           },
           "assumptions": [
             "The 8 s one-pole time constant is a teaching-model assumption.",
-            "The 145 \u00b0C restart threshold is a compact-model assumption.",
-            "The 165 \u00b0C protection point is above the 150 \u00b0C absolute rating and is not an operating target."
+            "The 145 °C restart threshold is a compact-model assumption.",
+            "The 165 °C protection point is above the 150 °C absolute rating and is not an operating target."
           ]
         },
-        "notes": "Output 3.3 V \u00b12%. LDO dropout is about 1.1 V, so input must be at least 4.4 V. The 800 mA setting is an electrical limit, not a guaranteed thermally safe current. For the identified carrier, solved regulator loss drives a persistent one-pole junction temperature using 90 \u00b0C/W, and the ambient-adjusted power allowance is reported. Crossing 165 \u00b0C shuts the output down; regulation resumes only after cooling to 145 \u00b0C. Copper area, time constant, and restart point are explicit model assumptions, and the protection point is above the 150 \u00b0C absolute rating."
+        "notes": "Output 3.3 V ±2%. LDO dropout is about 1.1 V, so input must be at least 4.4 V. The 800 mA setting is an electrical limit, not a guaranteed thermally safe current. For the identified carrier, solved regulator loss drives a persistent one-pole junction temperature using 90 °C/W, and the ambient-adjusted power allowance is reported. Crossing 165 °C shuts the output down; regulation resumes only after cooling to 145 °C. Copper area, time constant, and restart point are explicit model assumptions, and the protection point is above the 150 °C absolute rating."
       }
     },
     {
       "uid": "reg-ams1117-50",
-      "name": "AMS1117 5.0V Regulator",
-      "description": "Labeled breakout/module carrying a fixed +5 V AMS1117 LDO. Lower dropout reduces required input headroom, but not dissipation at the same Vin, Vout, and load current.",
       "kind": "linear_reg",
-      "category": "power",
-      "width": 40,
-      "height": 60,
       "default_params": {
-        "vout": 5.0,
+        "vout": 5,
         "vdropout": 1.1,
         "iLimit": 0.8
       },
@@ -7124,7 +6744,7 @@
         }
       ],
       "electrical_specs": {
-        "p_max": 1.0,
+        "p_max": 1,
         "thermal": {
           "r_theta_ja_c_per_w": 90,
           "time_constant_s": 8,
@@ -7134,7 +6754,7 @@
           },
           "continuous_temperature_max_c": 125,
           "absolute_temperature_max_c": 150,
-          "r_theta_condition": "Small SOT-223 carrier assumption; PCB copper can move thermal resistance roughly from 55 to 90 \u00b0C/W.",
+          "r_theta_condition": "Small SOT-223 carrier assumption; PCB copper can move thermal resistance roughly from 55 to 90 °C/W.",
           "shutdown": {
             "trip_c": 165,
             "restart_c": 145,
@@ -7142,24 +6762,19 @@
           },
           "assumptions": [
             "The 8 s one-pole time constant is a teaching-model assumption.",
-            "The 145 \u00b0C restart threshold is a compact-model assumption.",
-            "The 165 \u00b0C protection point is above the 150 \u00b0C absolute rating and is not an operating target."
+            "The 145 °C restart threshold is a compact-model assumption.",
+            "The 165 °C protection point is above the 150 °C absolute rating and is not an operating target."
           ]
         },
-        "notes": "Output 5.0 V \u00b12%. LDO dropout is about 1.1 V, so input must be at least 6.1 V. The 800 mA setting is an electrical limit, not a guaranteed thermally safe current. For the identified carrier, solved regulator loss drives a persistent one-pole junction temperature using 90 \u00b0C/W, and the ambient-adjusted power allowance is reported. Crossing 165 \u00b0C shuts the output down; regulation resumes only after cooling to 145 \u00b0C. Copper area, time constant, and restart point are explicit model assumptions, and the protection point is above the 150 \u00b0C absolute rating."
+        "notes": "Output 5.0 V ±2%. LDO dropout is about 1.1 V, so input must be at least 6.1 V. The 800 mA setting is an electrical limit, not a guaranteed thermally safe current. For the identified carrier, solved regulator loss drives a persistent one-pole junction temperature using 90 °C/W, and the ambient-adjusted power allowance is reported. Crossing 165 °C shuts the output down; regulation resumes only after cooling to 145 °C. Copper area, time constant, and restart point are explicit model assumptions, and the protection point is above the 150 °C absolute rating."
       }
     },
     {
       "uid": "lm317",
-      "name": "LM317 Adjustable Regulator",
-      "description": "Labeled three-terminal breakout/module abstraction based on the conventional LM317 adjustable linear regulator. Holds V_out \u2212 V_adj = 1.25 V; external R1 (out\u2192adj) and R2 (adj\u2192gnd) set the output.",
       "kind": "lm317",
-      "category": "power",
-      "width": 40,
-      "height": 60,
       "default_params": {
         "vref": 1.25,
-        "vdropout": 2.0,
+        "vdropout": 2,
         "iLimit": 1.5
       },
       "pin_layout": [
@@ -7189,7 +6804,7 @@
         }
       ],
       "electrical_specs": {
-        "p_max": 20.0,
+        "p_max": 20,
         "thermal": {
           "r_theta_ja_c_per_w": 37.9,
           "time_constant_s": 15,
@@ -7208,21 +6823,16 @@
           },
           "assumptions": [
             "The 15 s one-pole time constant is a teaching-model assumption.",
-            "Internal thermal shutdown is specified, but the 150/135 \u00b0C thresholds are compact-model assumptions.",
+            "Internal thermal shutdown is specified, but the 150/135 °C thresholds are compact-model assumptions.",
             "The 20 W headline rating requires suitable heatsinking."
           ]
         },
-        "notes": "Internal reference Vref is 1.25 V between OUT and ADJ. Dropout is about 2 V, so input must exceed output by 2 V. The 1.5 A setting is an electrical limit, not a guaranteed thermally safe current. For the identified TO-220, solved regulator loss drives a persistent one-pole junction temperature using 37.9 \u00b0C/W, and the ambient-adjusted power allowance is reported. Crossing the assumed 150 \u00b0C threshold shuts the output down; regulation resumes only after cooling to the assumed 135 \u00b0C restart point. A real LM317 also has adjustment-pin current and a minimum-load requirement, which this electrical model omits."
+        "notes": "Internal reference Vref is 1.25 V between OUT and ADJ. Dropout is about 2 V, so input must exceed output by 2 V. The 1.5 A setting is an electrical limit, not a guaranteed thermally safe current. For the identified TO-220, solved regulator loss drives a persistent one-pole junction temperature using 37.9 °C/W, and the ambient-adjusted power allowance is reported. Crossing the assumed 150 °C threshold shuts the output down; regulation resumes only after cooling to the assumed 135 °C restart point. A real LM317 also has adjustment-pin current and a minimum-load requirement, which this electrical model omits."
       }
     },
     {
       "uid": "tl431",
-      "name": "TL431",
-      "description": "Programmable precision shunt voltage reference (TO-92). Holds the REF pin at an internal 2.495 V bandgap reference by sinking current through the cathode-to-anode path.",
       "kind": "tl431",
-      "category": "analog_ic",
-      "width": 40,
-      "height": 60,
       "default_params": {},
       "pin_layout": [
         {
@@ -7252,17 +6862,12 @@
       ],
       "electrical_specs": {
         "p_max": 0.5,
-        "notes": "Internal reference voltage Vref=2.495 V (+/-0.5%). Minimum cathode voltage ~2 V (must stay above Vref). Cathode current range 1 mA to 100 mA. REF input draws ~2 \u00b5A bias current. Anode = GND-side terminal."
+        "notes": "Internal reference voltage Vref=2.495 V (+/-0.5%). Minimum cathode voltage ~2 V (must stay above Vref). Cathode current range 1 mA to 100 mA. REF input draws ~2 µA bias current. Anode = GND-side terminal."
       }
     },
     {
       "uid": "battery-9v",
-      "name": "9 V Battery",
-      "description": "PP3/6LR61 9 V alkaline battery with snap connector. 1.5 \u03a9 internal resistance models real voltage sag under load.",
       "kind": "battery_pack",
-      "category": "sources",
-      "width": 100,
-      "height": 50,
       "default_params": {
         "voltage": 9,
         "rInternal": 1.5,
@@ -7289,8 +6894,8 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 6.0,
-          "nominal": 9.0,
+          "min": 6,
+          "nominal": 9,
           "max": 9.6
         },
         "notes": "PP3 / 6LR61 alkaline. Runtime charge is coulomb-counted from a 0.55 Ah low-drain reference. Chemistry OCV and internal resistance change with charge; resistance also rises in cold ambient conditions. High-current rate-capacity loss, recovery, self-discharge, aging and self-heating are not modelled."
@@ -7298,12 +6903,7 @@
     },
     {
       "uid": "battery-coin-cr2032",
-      "name": "CR2032 Coin Cell",
-      "description": "3 V lithium coin cell (CR2032). 10 \u03a9 internal resistance limits peak current, modelling the high impedance of a coin cell.",
       "kind": "battery_pack",
-      "category": "sources",
-      "width": 100,
-      "height": 50,
       "default_params": {
         "voltage": 3,
         "rInternal": 10,
@@ -7330,25 +6930,20 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 2.0,
-          "nominal": 3.0,
+          "min": 2,
+          "nominal": 3,
           "max": 3.2
         },
-        "notes": "CR2032 lithium coin cell. Runtime charge is coulomb-counted from a 235 mAh, 15 k\u03a9 / 21 \u00b0C reference. Chemistry OCV and internal resistance change with charge; resistance rises strongly in cold ambient conditions. Pulse-load capacity loss, recovery, self-discharge, aging and self-heating are not modelled."
+        "notes": "CR2032 lithium coin cell. Runtime charge is coulomb-counted from a 235 mAh, 15 kΩ / 21 °C reference. Chemistry OCV and internal resistance change with charge; resistance rises strongly in cold ambient conditions. Pulse-load capacity loss, recovery, self-discharge, aging and self-heating are not modelled."
       }
     },
     {
       "uid": "dcdc-buck-5v",
-      "name": "DC-DC Buck Converter",
-      "description": "Non-isolated step-down (buck) switching converter module. Converts a higher input voltage to a regulated 5 V output at up to 2 A with 85% efficiency; IN\u2212 and OUT\u2212 share one internal return.",
       "kind": "dcdc_converter",
-      "category": "power",
-      "width": 80,
-      "height": 60,
       "default_params": {
-        "vout": 5.0,
+        "vout": 5,
         "eta": 0.85,
-        "iLimit": 2.0,
+        "iLimit": 2,
         "vdropout": 1.5
       },
       "pin_layout": [
@@ -7387,23 +6982,18 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 7.0,
-          "nominal": 12.0,
-          "max": 35.0
+          "min": 7,
+          "nominal": 12,
+          "max": 35
         },
         "eta": 0.85,
-        "iLimit_max": 2.0,
-        "notes": "Behavioural non-isolated buck model: IN\u2212 and OUT\u2212 are one internal return. Within the declared 7\u201335 V input range, the output regulates at vout (CV), current-limits at iLimit (CC), or follows the averaged maximum-duty ceiling Vout=Vin\u2212vdropout (default 1.5 V). It cannot boost. Present-solve input draw satisfies Iin=Pout/(eta\u00d7Vin), including load and regime changes. Below UVLO, above maximum input, or with reversed polarity, it is OFF. Switching ripple and control-loop transients are omitted."
+        "iLimit_max": 2,
+        "notes": "Behavioural non-isolated buck model: IN− and OUT− are one internal return. Within the declared 7–35 V input range, the output regulates at vout (CV), current-limits at iLimit (CC), or follows the averaged maximum-duty ceiling Vout=Vin−vdropout (default 1.5 V). It cannot boost. Present-solve input draw satisfies Iin=Pout/(eta×Vin), including load and regime changes. Below UVLO, above maximum input, or with reversed polarity, it is OFF. Switching ripple and control-loop transients are omitted."
       }
     },
     {
       "uid": "relay-spdt-5v",
-      "name": "5 V SPDT Relay",
-      "description": "Electromechanical single-pole double-throw relay. A coil (coil_a/coil_b) magnetically actuates a contact arm that switches COM between NO (normally-open) and NC (normally-closed). Add a flyback diode anti-parallel across the coil to suppress the inductive kick when the driver turns off.",
       "kind": "relay",
-      "category": "electromech",
-      "width": 100,
-      "height": 60,
       "default_params": {
         "coilR": 70,
         "coilL": 0.05,
@@ -7454,9 +7044,9 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 3.0,
-          "nominal": 5.0,
-          "max": 12.0
+          "min": 3,
+          "nominal": 5,
+          "max": 12
         },
         "coilR_min": 70,
         "vPull_max": 3.5,
@@ -7466,12 +7056,7 @@
     },
     {
       "uid": "uln2003a",
-      "name": "ULN2003A",
-      "description": "7-channel Darlington sink array (DIP-16). Each channel accepts a logic input and sinks up to 500 mA through an open-collector NPN Darlington pair. TTL/CMOS compatible inputs (Vih \u2265 2.5 V). Internal catch diodes on each output; connect COM to the load supply to suppress inductive kicks without an external flyback diode.",
       "kind": "uln2003",
-      "category": "driver",
-      "width": 80,
-      "height": 80,
       "default_params": {},
       "pin_layout": [
         {
@@ -7615,12 +7200,7 @@
     },
     {
       "uid": "uln2803a",
-      "name": "ULN2803A",
-      "description": "8-channel Darlington sink array (DIP-18). Same as ULN2003A but with 8 channels and CMOS/TTL-compatible inputs. Inputs 1-8 on left, COM and OUT8-OUT1 on right. Ideal for driving 8-bit parallel loads from a microcontroller port or shift register.",
       "kind": "uln2803",
-      "category": "driver",
-      "width": 80,
-      "height": 90,
       "default_params": {},
       "pin_layout": [
         {
@@ -7780,12 +7360,7 @@
     },
     {
       "uid": "buzzer-active-5v",
-      "name": "Active Buzzer",
-      "description": "Active piezo/magnetic buzzer with internal oscillator. Apply a DC voltage (2\u20135 V) to make it sound \u2014 no external frequency source needed. Electrically a resistive load (~16\u201332 \u03a9 coil). The internal oscillator runs at a fixed frequency (typically 2 kHz) when the DC level exceeds ~1.5 V.",
       "kind": "buzzer",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "type": "active",
         "resistance": 32
@@ -7809,17 +7384,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Active buzzer: DC threshold 1.5 V for internal oscillator to run. Passive buzzer: must be driven with an AC/PWM signal; frequency reported from zero-crossing detection. Both types modelled as a fixed resistor (resistance param, default 32 \u03a9). No audio synthesis \u2014 sounding state and detected frequency only."
+        "notes": "Active buzzer: DC threshold 1.5 V for internal oscillator to run. Passive buzzer: must be driven with an AC/PWM signal; frequency reported from zero-crossing detection. Both types modelled as a fixed resistor (resistance param, default 32 Ω). No audio synthesis — sounding state and detected frequency only."
       }
     },
     {
       "uid": "buzzer-passive-5v",
-      "name": "Passive Buzzer",
-      "description": "Passive piezo buzzer without internal oscillator. Must be driven with an AC or PWM signal at audio frequency (200 Hz\u20138 kHz). Electrically a resistive load (~16\u201332 \u03a9). The pitch is determined by the drive frequency; use with a clock generator or PWM output.",
       "kind": "buzzer",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "type": "passive",
         "resistance": 32
@@ -7848,12 +7418,7 @@
     },
     {
       "uid": "speaker-8ohm",
-      "name": "8 Ohm Speaker",
-      "description": "Small 8 \u03a9 permanent-magnet speaker for breadboard audio circuits. The voice coil is modelled as a resistive load (8 \u03a9 nominal). Signal-present is detected when the terminal voltage has a peak-to-peak amplitude above 50 mV over a 5 ms window. No audio synthesis \u2014 readout only.",
       "kind": "speaker",
-      "category": "output",
-      "width": 30,
-      "height": 30,
       "default_params": {
         "resistance": 8
       },
@@ -7876,17 +7441,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Voice coil modelled as pure resistance (8 \u03a9 default). AC reactance of the coil inductance is ignored at audio frequencies for this simplified model. Signal-present detection uses a 5 ms sliding window; peak-to-peak amplitude \u2265 50 mV registers as sounding."
+        "notes": "Voice coil modelled as pure resistance (8 Ω default). AC reactance of the coil inductance is ignored at audio frequencies for this simplified model. Signal-present detection uses a 5 ms sliding window; peak-to-peak amplitude ≥ 50 mV registers as sounding."
       }
     },
     {
       "uid": "l293d",
-      "name": "L293D Dual H-Bridge",
-      "description": "Quadruple half-H driver capable of driving two DC motors bidirectionally or four independent loads. Four independent half-bridges (OUT1\u2013OUT4) are enabled in pairs: EN12 enables channels 1+2, EN34 enables 3+4. A separate motor supply (VCC2/VM, up to 36 V) drives the output stage while VCC1 (4.5\u20137 V) powers the logic. Internal recirculating clamp diodes on every output suppress inductive kickback from motor windings when VM is supplied \u2014 no external flyback diode needed across motor terminals.",
       "kind": "l293d",
-      "category": "driver",
-      "width": 80,
-      "height": 60,
       "default_params": {},
       "pin_layout": [
         {
@@ -8025,17 +7585,12 @@
           "max": 7
         },
         "io_max": 0.6,
-        "notes": "VCC1 (logic, 4.5\u20137 V) and VCC2/VM (motor rail, 4.5\u201336 V) are separate supplies. Output stage R_on = 2 \u03a9 per side (1.4 V total drop at 1 A across both output transistors). Internal clamp diodes on each output pin recirculate inductive kickback to VM \u2014 suppress missing-flyback when VM is wired. io_max 0.6 A continuous per channel (1.2 A peak)."
+        "notes": "VCC1 (logic, 4.5–7 V) and VCC2/VM (motor rail, 4.5–36 V) are separate supplies. Output stage R_on = 2 Ω per side (1.4 V total drop at 1 A across both output transistors). Internal clamp diodes on each output pin recirculate inductive kickback to VM — suppress missing-flyback when VM is wired. io_max 0.6 A continuous per channel (1.2 A peak)."
       }
     },
     {
       "uid": "tb6612",
-      "name": "TB6612FNG Dual H-Bridge",
-      "description": "Dual full-H-bridge motor driver module (modelled as a 16-pin DIP-compatible breakout). Two independent H-bridge channels (A and B) each support forward, reverse, brake, and coast modes via two direction inputs plus a PWM input. A shared STBY pin puts both channels into hi-Z standby. Internal freewheeling diodes on every output suppress inductive kickback when VM is supplied.",
       "kind": "tb6612",
-      "category": "driver",
-      "width": 80,
-      "height": 60,
       "default_params": {},
       "pin_layout": [
         {
@@ -8174,24 +7729,19 @@
           "max": 5.5
         },
         "io_max": 1.2,
-        "notes": "VCC (logic, 2.7\u20135.5 V) and VM (motor rail, 2.5\u201313.5 V) are separate supplies. R_on = 2 \u03a9 per output side (simplified; real device specifies on-resistance as Vce_sat ~0.5 V at 1 A). PWM duty-cycle averaging for speed control is a Wave 7 motor-dynamics feature \u2014 in this model PWM is treated as a binary enable: HIGH=active, LOW=coast. Internal freewheeling diodes suppress inductive kickback when VM is wired. io_max 1.2 A continuous per channel."
+        "notes": "VCC (logic, 2.7–5.5 V) and VM (motor rail, 2.5–13.5 V) are separate supplies. R_on = 2 Ω per output side (simplified; real device specifies on-resistance as Vce_sat ~0.5 V at 1 A). PWM duty-cycle averaging for speed control is a Wave 7 motor-dynamics feature — in this model PWM is treated as a binary enable: HIGH=active, LOW=coast. Internal freewheeling diodes suppress inductive kickback when VM is wired. io_max 1.2 A continuous per channel."
       }
     },
     {
       "uid": "dc-motor",
-      "name": "DC Motor",
-      "description": "Generic brushed DC motor. Modelled as a series R+L winding (windingR, windingL) with a back-EMF source proportional to rotor speed (Vbemf = Ke \u00d7 omega). Torque is generated by winding current (Tm = Kt \u00d7 i). Rotor dynamics: J \u00d7 d\u03c9/dt = Kt\u00d7i \u2212 b\u00d7\u03c9 \u2212 loadTorque. Use an H-bridge driver (L293D, TB6612) for bidirectional control; a bare transistor switch requires a flyback diode across the motor terminals.",
       "kind": "dc_motor",
-      "category": "output",
-      "width": 40,
-      "height": 40,
       "default_params": {
         "windingR": 5,
         "windingL": 0.002,
         "Ke": 0.01,
         "Kt": 0.01,
-        "inertia": 1e-05,
-        "friction": 1e-05,
+        "inertia": 0.00001,
+        "friction": 0.00001,
         "loadTorque": 0
       },
       "pin_layout": [
@@ -8213,25 +7763,20 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Winding modelled as series R+L with backward-Euler Norton companion. Back-EMF = Ke \u00d7 omega opposes applied voltage (motor convention), causing current to decrease as speed rises. Stall current = V / windingR (omega=0). No-load steady-state: omega = (V \u2212 R \u00d7 i_ss) / Ke, i_ss = b \u00d7 omega_ss / Kt. Rotor dynamics use forward-Euler (stable when h << J/b). omega is a simulator readout and back-EMF driver only \u2014 no mechanical coupling to external loads. windingR and windingL must be > 0; inertia must be > 0."
+        "notes": "Winding modelled as series R+L with backward-Euler Norton companion. Back-EMF = Ke × omega opposes applied voltage (motor convention), causing current to decrease as speed rises. Stall current = V / windingR (omega=0). No-load steady-state: omega = (V − R × i_ss) / Ke, i_ss = b × omega_ss / Kt. Rotor dynamics use forward-Euler (stable when h << J/b). omega is a simulator readout and back-EMF driver only — no mechanical coupling to external loads. windingR and windingL must be > 0; inertia must be > 0."
       }
     },
     {
       "uid": "servo-sg90",
-      "name": "Hobby Servo (SG90)",
-      "description": "PWM-controlled rotary position actuator. A 1\u20132 ms HIGH pulse updates a target between 0\u00b0 and 180\u00b0; the shaft then moves toward that target at a finite, supply-scaled speed. The default idle load draws about 15 mA at 5 V.",
       "kind": "servo",
-      "category": "output",
-      "width": 76,
-      "height": 60,
       "default_params": {
         "idleR": 330,
         "movingCurrent": 0.15,
         "maxSpeedDegPerSecond": 600,
         "nominalVoltage": 4.8,
         "minimumOperatingVoltage": 4.5,
-        "minPulseMs": 1.0,
-        "maxPulseMs": 2.0,
+        "minPulseMs": 1,
+        "maxPulseMs": 2,
         "minAngle": 0,
         "maxAngle": 180
       },
@@ -8265,20 +7810,15 @@
         "vcc_range": {
           "min": 4.5,
           "nominal": 4.8,
-          "max": 6.0
+          "max": 6
         },
         "if_max": 0.7,
-        "notes": "Signal is a truly high-impedance physical input; no 1 M\u03a9 pull-down is present. Solver regularisation of a floating net is numerical only and does not represent a physical load. A falling PWM edge decodes targetAngle from the 1\u20132 ms pulse, while angle reports the actual shaft position. Actual angle travels without overshoot at 600\u00b0/s at 4.8 V and scales linearly with solved supply, giving 625\u00b0/s at 5 V. Below the 4.5 V model brownout threshold, velocity becomes zero while targetAngle is retained. At rest, V+ to GND uses idleR=330 \u03a9. While moving, the 150 mA at 4.8 V teaching assumption becomes a 32 \u03a9 equivalent load. Torque, stall mechanics/current limiting, acceleration, backlash, control hunting, gearbox compliance and heating are not modelled."
+        "notes": "Signal is a truly high-impedance physical input; no 1 MΩ pull-down is present. Solver regularisation of a floating net is numerical only and does not represent a physical load. A falling PWM edge decodes targetAngle from the 1–2 ms pulse, while angle reports the actual shaft position. Actual angle travels without overshoot at 600°/s at 4.8 V and scales linearly with solved supply, giving 625°/s at 5 V. Below the 4.5 V model brownout threshold, velocity becomes zero while targetAngle is retained. At rest, V+ to GND uses idleR=330 Ω. While moving, the 150 mA at 4.8 V teaching assumption becomes a 32 Ω equivalent load. Torque, stall mechanics/current limiting, acceleration, backlash, control hunting, gearbox compliance and heating are not modelled."
       }
     },
     {
       "uid": "stepper-bipolar-nema17",
-      "name": "Bipolar Stepper Motor (NEMA 17)",
-      "description": "4-wire bipolar stepper motor with two independent coils (A and B). Energise the coils in the 4-phase full-step sequence to advance the shaft one step at a time. Default: 200 steps/rev (1.8\u00b0/step). Drive with an H-bridge such as L293D or TB6612. Unipolar/ULN2003 5-wire steppers are not modelled in this wave.",
       "kind": "stepper",
-      "category": "output",
-      "width": 92,
-      "height": 50,
       "default_params": {
         "coilR": 10,
         "coilL": 0.01,
@@ -8319,17 +7859,12 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Each coil is a series R+L Norton companion (backward-Euler, same as relay coil). No back-EMF in v1. Step detection uses committed current sign post-solve: signA = sign(iA), signB = sign(iB), deadband \u00b11 mA. Phase sequence: (A+,B+)=0, (A-,B+)=1, (A-,B-)=2, (A+,B-)=3. Sequential phase advance +1 (mod 4) increments position; \u22121 (mod 4) decrements. Non-sequential jump holds. Stepper coils are inductive \u2014 flyback diagnostic fires for bare-transistor drive; suppressed by L293D/TB6612 with VM powered. Unipolar/ULN2003 variant deferred."
+        "notes": "Each coil is a series R+L Norton companion (backward-Euler, same as relay coil). No back-EMF in v1. Step detection uses committed current sign post-solve: signA = sign(iA), signB = sign(iB), deadband ±1 mA. Phase sequence: (A+,B+)=0, (A-,B+)=1, (A-,B-)=2, (A+,B-)=3. Sequential phase advance +1 (mod 4) increments position; −1 (mod 4) decrements. Non-sequential jump holds. Stepper coils are inductive — flyback diagnostic fires for bare-transistor drive; suppressed by L293D/TB6612 with VM powered. Unipolar/ULN2003 variant deferred."
       }
     },
     {
       "uid": "max7219-matrix",
-      "name": "MAX7219 8x8 LED Matrix",
-      "description": "SPI-controlled 8x8 LED matrix driver module. The MAX7219 accepts 16-bit serial frames (register address + data) over a 3-wire SPI-compatible interface (DIN/CLK/CS). Each step() decodes sub-step MCU pin events for accurate multi-frame replay, or falls back to sampled levels for discrete drive. Registers: digit/row 0x01-0x08 store the 8 row bytes; 0x0A sets intensity (0-15); 0x0B sets scan limit (0-7 rows active); 0x0C enables/disables (1=normal, 0=shutdown); 0x0F = display test (all LEDs on). Single-device only in v1 (no daisy-chain DOUT). Decode mode raw only (0x00; BCD mode not simulated).",
       "kind": "max7219",
-      "category": "display",
-      "width": 96,
-      "height": 60,
       "default_params": {},
       "pin_layout": [
         {
@@ -8375,8 +7910,8 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 4.0,
-          "nominal": 5.0,
+          "min": 4,
+          "nominal": 5,
           "max": 5.5
         },
         "logic_family": "CMOS",
@@ -8390,12 +7925,7 @@
     },
     {
       "uid": "hd44780-lcd",
-      "name": "HD44780 16x2 LCD",
-      "description": "HD44780-compatible 16-character x 2-line character LCD module. Accepts 4-bit or 8-bit parallel interface via RS/RW/E control lines and D0-D7 data lines. Command subset simulated: clear (0x01), return home (0x02/0x03), entry mode set (0x04-0x07), display on/off (0x08-0x0F), function set (0x20-0x3F) for 4-bit/8-bit and 1-line/2-line selection, set CGRAM address (0x40-0x7F, data writes ignored in v1), set DDRAM address (0x80-0xFF). DDRAM address map: 0x00-0x0F = line 1, 0x40-0x4F = line 2 (only the first 16 positions of each 40-byte bank are visible). Cursor/display shift command (0x10-0x1F) accepted but not rendered. RW pin is sampled but read-back is not supported; tie RW to GND. No custom CGRAM glyphs in v1. ASCII 0x20-0x7E rendered; codes outside this range display as space.",
       "kind": "hd44780",
-      "category": "display",
-      "width": 160,
-      "height": 60,
       "default_params": {},
       "pin_layout": [
         {
@@ -8530,7 +8060,7 @@
       "electrical_specs": {
         "vcc_range": {
           "min": 4.5,
-          "nominal": 5.0,
+          "nominal": 5,
           "max": 5.5
         },
         "logic_family": "CMOS",
@@ -8544,12 +8074,7 @@
     },
     {
       "uid": "hcsr04",
-      "name": "Ultrasonic Distance Sensor (HC-SR04)",
-      "description": "Ultrasonic time-of-flight distance sensor. Fires a short ultrasonic pulse from one transducer and times how long the echo takes to return on the other, so a microcontroller can compute range. Wide-supply model (3.0-5.5 V) so 3.3 V boards (micro:bit, RP2040) and 5 V boards (Arduino) can both drive it directly.",
       "kind": "hcsr04",
-      "category": "input",
-      "width": 100,
-      "height": 64,
       "default_params": {
         "distanceCm": 50,
         "noEcho": 0
@@ -8590,8 +8115,8 @@
       ],
       "electrical_specs": {
         "vcc_range": {
-          "min": 3.0,
-          "nominal": 5.0,
+          "min": 3,
+          "nominal": 5,
           "max": 5.5
         },
         "notes": "Wide-supply model: functional 3.0-5.5 V, matching HC-SR04P and common 3.3 V-tolerant clones. A classic HC-SR04 module is commonly specified 5 V-only, so treat direct 3.3 V operation as clone-dependent on real hardware. Below 3.0 V (VCC-GND) the sensor is inert: ECHO is forced low/hi-Z and TRIG pulses are ignored. TRIG is a 1 MOhm pulldown input, armed by a rising edge; the sensor schedules an echo on the following falling edge (re-triggering while an echo is pending/active is ignored, matching real module behaviour). ECHO timing: rises at trigFall + 250 microseconds, then falls 58.0 microseconds/cm x distanceCm later, or after a 38 millisecond timeout when noEcho (out-of-range) is set. ECHO drives push-pull to the sensor's own committed VCC through the house 50 ohm gate output resistance."

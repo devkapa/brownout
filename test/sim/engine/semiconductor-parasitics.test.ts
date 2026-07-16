@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from "vitest";
 import rawCatalog from "../../helpers/catalog.js";
-import type { PartCatalog } from "../../../src/circuit/types.js";
 import {
   bjtCurrents,
   stampBJT,
@@ -15,7 +14,7 @@ import {
 import { MNA } from "../../../src/sim/engine/mna.js";
 import { SimEngine, thermalVoltage, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
-const catalog = rawCatalog as unknown as PartCatalog;
+const catalog = rawCatalog;
 
 function voltageSource(id: string, voltage: number): SimCircuit["components"][number] {
   return {

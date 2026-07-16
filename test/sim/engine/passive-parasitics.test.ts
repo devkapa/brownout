@@ -8,7 +8,6 @@
 
 import { describe, expect, it } from "vitest";
 import rawCatalog from "../../helpers/catalog.js";
-import type { PartCatalog } from "../../../src/circuit/types.js";
 import {
   capacitorCompanion,
   capacitorInternalVoltage,
@@ -19,7 +18,7 @@ import {
 } from "../../../src/sim/engine/elements.js";
 import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
-const catalog = rawCatalog as unknown as PartCatalog;
+const catalog = rawCatalog;
 
 function source(id: string, voltage: number): SimCircuit["components"][number] {
   return {

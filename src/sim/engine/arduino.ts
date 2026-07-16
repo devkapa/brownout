@@ -17,20 +17,46 @@ import type { MicrocontrollerCore } from "./mcu.js";
  *
  *   import { setAvr8Module } from "brownout/mcu";
  *   setAvr8Module(await import("avr8js"));
+ *
+ * INTERNAL USE ONLY — never name this type in an exported signature. tsc erases
+ * it from private fields and non-exported functions, but it would EMIT it into
+ * the shipped .d.ts from any public position (see Avr8ModuleLike below).
  */
 type Avr8Module = typeof import("avr8js");
 
+/**
+ * Structural stand-in for the avr8js module namespace, used for the PUBLIC
+ * registration seam.
+ *
+ * WHY not `typeof import("avr8js")` here: this type lands in the signatures of
+ * setAvr8Module/getAvr8Module, so tsc writes it into arduino.d.ts. A shipped
+ * declaration that resolves avr8js makes `tsc` fail for the analog-only
+ * consumer the README sells ("no MCU emulators pulled in") — the peer is not
+ * installed, so the reference dangles unless they set skipLibCheck. Keeping
+ * avr8js in internal positions only is exactly why rp2040js never reaches the
+ * Pico wrapper's .d.ts, where the seam is typed as a brownout-owned ctor.
+ *
+ * CPU is the only member the seam itself touches (the interop probe below); the
+ * wrapper's real avr8js typing lives on its private fields, which are erased.
+ */
+export interface Avr8ModuleLike {
+  CPU: unknown;
+}
+
 let _avr8: Avr8Module | null = null;
 
-export function setAvr8Module(mod: Avr8Module): void {
+export function setAvr8Module(mod: Avr8ModuleLike): void {
   // Hosts hand us whatever their loader produced. Node's CJS interop can wrap
   // avr8js's CommonJS build as { default: exports }, so accept both shapes
   // rather than making every host care about interop details.
-  const viaDefault = (mod as { default?: Avr8Module }).default;
-  _avr8 = typeof mod.CPU === "function" ? mod : (viaDefault ?? mod);
+  const viaDefault = (mod as { default?: Avr8ModuleLike }).default;
+  const resolved = typeof mod.CPU === "function" ? mod : (viaDefault ?? mod);
+  // The structural seam is deliberately loose (hosts pass an unvalidated module
+  // namespace); the wrapper's internals need the real avr8js shape.
+  _avr8 = resolved as unknown as Avr8Module;
 }
 
-export function getAvr8Module(): Avr8Module | null {
+export function getAvr8Module(): Avr8ModuleLike | null {
   return _avr8;
 }
 

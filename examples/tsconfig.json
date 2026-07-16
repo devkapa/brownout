@@ -1,0 +1,15 @@
+{
+  // The examples import through the package's OWN name ("brownout",
+  // "brownout/host", ...). Node and tsc both resolve a self-reference through
+  // the exports map into dist/, which is the whole point — the examples are
+  // the executable proof that the published entry points resolve and are
+  // typed. The consequence is that this project only typechecks AFTER a
+  // build, so it is deliberately kept out of the root tsconfig's `include`
+  // (which must stay green on a fresh clone) and gated behind its own script:
+  //
+  //   pnpm run build && pnpm run typecheck:examples
+  //
+  // `pnpm run examples` chains both in that order.
+  "extends": "../tsconfig.json",
+  "include": ["**/*.ts"]
+}

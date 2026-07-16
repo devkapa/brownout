@@ -1,12 +1,10 @@
 import type { Net } from "./engine/sim-engine.js";
 
 export const DEFAULT_SCOPE_CHANNELS = 4;
-// Non-entitled fallback: the channel cap used when no entitlement limit is
-// available (e.g. during SSR or before the entitlements store initialises).
+// Fallback ceiling for reconcileScopeSelection when a caller passes no explicit
+// maxChannels. A host that derives its own cap (render budget, plot series
+// limit) passes options.maxChannels; this only bounds the default path.
 export const MAX_SCOPE_CHANNELS = 8;
-// The hard upper bound for Pro subscribers. Kept here so scope-channel logic
-// stays co-located rather than being duplicated across UI and tests.
-export const PRO_MAX_SCOPE_CHANNELS = 16;
 
 export interface ScopeChannel {
   id: string;

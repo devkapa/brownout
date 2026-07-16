@@ -62,10 +62,9 @@
 
 import { describe, expect, it } from "vitest";
 import rawCatalog from "../../helpers/catalog.js";
-import type { PartCatalog } from "../../../src/circuit/types.js";
 import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
-const catalog = rawCatalog as unknown as PartCatalog;
+const catalog = rawCatalog;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

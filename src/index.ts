@@ -6,14 +6,18 @@
  * only what they use: "brownout/spice" (netlist interop), "brownout/ac"
  * (small-signal AC), "brownout/analysis" (offline runners), "brownout/physics"
  * (battery/thermal/servo sidecars + telemetry), "brownout/mcu" (MCU cores and
- * emulator registration).
+ * emulator registration), "brownout/host" (host adapters + the step-controller
+ * contract).
  *
- * Deliberately NOT exported anywhere yet: the host-loop tooling
- * (adaptive-step, worker protocol messages, meter/scope/trace DSP). Those are
- * the transport-adapter contract and land with the "./host" entry in phase
- * B3 — exporting them from the core now would freeze their shape before the
- * host adapters exist. The one exception is the ArduinoState readout type,
- * which appears in SimEngine's public getArduinoState() signature.
+ * Deliberately NOT exported from THIS barrel: the host-loop tooling. The core
+ * is transport-free — it must stay importable where there is no loop and no
+ * clock — so anything that owns a loop or encodes a policy about time lives
+ * behind "./host" instead. The adaptive-step controller (estimateStepError,
+ * nextStepFactor) and HeadlessRunner ship there as of phase B3. Still
+ * unexported anywhere, pending an adapter that freezes their shape: the worker
+ * protocol messages and the meter/scope/trace DSP. The one exception to the
+ * rule is the ArduinoState readout type, which appears in SimEngine's public
+ * getArduinoState() signature.
  *
  * Naming note: circuit/types.ts and engine/graph.ts both declare a `Net`.
  * The circuit-document shape keeps the bare name (this barrel re-exports the

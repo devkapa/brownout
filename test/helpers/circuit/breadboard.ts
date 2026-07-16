@@ -1167,7 +1167,9 @@ export function breadboardToSimCircuit(circuit: Circuit): Circuit {
   const electricalBoards = boards.filter((board) => !board.params.visualOnly);
   const aliasWires = breadboardAliasWires(circuit, electricalBoards);
   const boardIds = new Set(boards.map((b) => b.id));
-  const { editorMode: _editorMode, ...rest } = circuit;
+  // The engine's Circuit no longer models the app's legacy editorMode field, so
+  // there is nothing left to strip here — the spread carries only engine data.
+  const { ...rest } = circuit;
   return {
     ...rest,
     components: circuit.components.filter((c) => c.kind !== "breadboard"),
@@ -1187,12 +1189,11 @@ export function defaultBreadboardComponent(): CircuitComponent {
     rotation: 0,
     pins: [],
     params: { railTopVcc: 5, railBotVcc: 5 },
-    label: "",
   };
 }
 
 export function ensureBreadboardCircuit(circuit: Circuit): Circuit {
-  const { editorMode: _editorMode, ...rest } = circuit;
+  const { ...rest } = circuit;
   return {
     ...rest,
     components: circuit.components,

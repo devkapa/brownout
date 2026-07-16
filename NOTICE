@@ -1,7 +1,14 @@
 Brownout — third-party notices
 
-This package redistributes the following third-party material. The Brownout
-source itself is MIT licensed (see LICENSE).
+Brownout, Copyright (c) 2026 de:volt, MIT licensed (see LICENSE). The engine
+was extracted from the de:volt application's `@devolt/simcore` package; the
+copyright holder is unchanged by the extraction.
+
+This file records the third-party material Brownout redistributes. Sections 1
+through 3 cover the published npm package; section 4 covers a binary that
+exists in the repository but is NOT published (the `files` allowlist in
+package.json ships only `dist`, `docs`, `LICENSE`, `README.md`, and this
+file).
 
 --------------------------------------------------------------------------
 1. RP2040 boot ROM (revision B1)
@@ -52,3 +59,24 @@ source itself is MIT licensed (see LICENSE).
    https://github.com/wokwi/rp2040js
    Copyright (c) Uri Shaked and contributors.
    License: MIT
+
+--------------------------------------------------------------------------
+4. MicroPython firmware — repository test fixture, NOT in the published
+   package
+   File: test/fixtures/firmware/pico-micropython.uf2
+
+   Copyright (c) 2013-2026 Damien P. George and contributors.
+   License: MIT
+
+   MicroPython v1.28.0 (2026-04-06), board target RPI_PICO, mirrored from
+   https://micropython.org/resources/firmware/RPI_PICO-20260406-v1.28.0.uf2
+   SHA-256: 00aedb8431ebea83b470ef909509f16432c5b1b43e8f6eaf015f6f9560bc8152
+
+   Bundled so the Pico integration suites run without an app checkout. The
+   package tarball excludes `test/`, so this binary is not redistributed on
+   npm — a consumer supplies its own firmware through setMcuFirmware().
+
+   The RPI_PICO port additionally contains pico-sdk components under
+   BSD-3-Clause. Consult the upstream v1.28.0 licence tree before
+   redistributing this binary or updating it; the provenance record in
+   test/fixtures/firmware/README.md must be updated with it.

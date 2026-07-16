@@ -19,13 +19,12 @@
 
 import { describe, expect, it } from "vitest";
 import rawCatalog from "../../helpers/catalog.js";
-import type { PartCatalog } from "../../../src/circuit/types.js";
 import { buildNets } from "../../../src/sim/engine/graph.js";
 import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { analyzeLive } from "../../helpers/diagnostics/live.js";
 import type { DiagnosticsInput, LiveReadings } from "../../helpers/diagnostics/index.js";
 
-const catalog = rawCatalog as unknown as PartCatalog;
+const catalog = rawCatalog;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

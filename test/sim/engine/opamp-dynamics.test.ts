@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from "vitest";
 import rawCatalog from "../../helpers/catalog.js";
-import type { PartCatalog } from "../../../src/circuit/types.js";
 import {
   opAmpCurrentLimitMode,
   opAmpDominantPoleCompanion,
@@ -17,7 +16,7 @@ import { runAcSweep } from "../../../src/analysis/run-ac-sweep.js";
 import type { AcSweepSpec } from "../../../src/analysis/jobs.js";
 import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
-const catalog = rawCatalog as unknown as PartCatalog;
+const catalog = rawCatalog;
 
 function voltageSource(id: string, voltage: number): SimCircuit["components"][number] {
   return {

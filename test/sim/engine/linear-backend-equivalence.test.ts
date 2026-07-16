@@ -24,13 +24,47 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { MNA } from "../../../src/sim/engine/mna.js";
 import { SparseMNA } from "../../../src/sim/engine/sparse-mna.js";
-import { createLinearSystem, setLinearSystemBackendForTests } from "../../../src/sim/engine/linear-system.js";
+import {
+  SPARSE_BACKEND_THRESHOLD,
+  createLinearSystem,
+  setLinearSystemBackendForTests,
+} from "../../../src/sim/engine/linear-system.js";
 import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
 // The hook is global state; a failed assertion mid-test must never leak a
 // forced backend into unrelated suites running in the same worker.
 afterEach(() => {
   setLinearSystemBackendForTests(null);
+});
+
+/**
+ * Guards the `test:sparse` lane itself, not the solver.
+ *
+ * The lane is a package script (SIMCORE_LINEAR_BACKEND=sparse vitest run) whose
+ * only coupling to the engine is a string literal read in linear-system.ts.
+ * Nothing else ties the two together, and the failure mode is silent: rename or
+ * drop that variable in src and the lane keeps passing — as a second copy of the
+ * dense lane, still reporting a full green corpus while testing the sparse
+ * backend zero times. This asserts the coupling directly, sized below
+ * SPARSE_BACKEND_THRESHOLD so auto-selection cannot supply a false pass: at this
+ * size, sparse is reachable ONLY via the environment override.
+ */
+describe("test:sparse lane wiring", () => {
+  const laneRequestsSparse = process.env.SIMCORE_LINEAR_BACKEND === "sparse";
+
+  it(`honours SIMCORE_LINEAR_BACKEND below the auto threshold (lane requests sparse: ${
+    process.env.SIMCORE_LINEAR_BACKEND ?? "unset"
+  })`, () => {
+    const system = createLinearSystem(4);
+    expect(4).toBeLessThan(SPARSE_BACKEND_THRESHOLD);
+    if (laneRequestsSparse) {
+      expect(system).toBeInstanceOf(SparseMNA);
+    } else {
+      // Default lane: auto-selection must still pick dense this far below the
+      // threshold, which is what makes the sparse assertion above meaningful.
+      expect(system).toBeInstanceOf(MNA);
+    }
+  });
 });
 
 /** Deterministic PRNG so every generated system is reproducible from its seed. */

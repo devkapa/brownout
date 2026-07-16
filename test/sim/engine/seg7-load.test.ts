@@ -467,7 +467,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
             { id: "dp", label: "dp", offset: { x: 76, y: 131 } },
           ],
           params: {},
-          label: "",
         },
         {
           id: "bat",
@@ -479,7 +478,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
             { id: "neg", label: "-", offset: { x: 0, y: 19 } },
           ],
           params: { voltage: 5, cells: 3 },
-          label: "",
         },
       ],
       wires: [
@@ -490,7 +488,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
           to_component: "disp",
           to_pin: "a",
           resistance: 0,
-          color: "#dc2626",
         },
         {
           id: "w2",
@@ -499,7 +496,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
           to_component: "disp",
           to_pin: "com",
           resistance: 0,
-          color: "#111827",
         },
       ],
     } as Circuit;
@@ -533,7 +529,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
         { id: "b", label: "b", offset: { x: 19, y: 0 } },
       ],
       params: { resistance: 330 },
-      label: "",
     });
     // Re-route bat.pos → r1.a → r1.b → disp.a  (instead of direct bat → disp.a)
     const wires = circuit.wires as Circuit["wires"];
@@ -545,7 +540,6 @@ describe("static diagnostic guard — seg7 without series resistor", () => {
       to_component: "disp",
       to_pin: "a",
       resistance: 0,
-      color: "#111827",
     });
     const simCircuit = breadboardToSimCircuit(circuit);
     const nets = buildNets(simCircuit);
