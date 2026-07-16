@@ -1,0 +1,103 @@
+{
+  "name": "brownout",
+  "version": "0.1.0",
+  "description": "Brownout is a mixed-signal circuit simulation engine in TypeScript",
+  "license": "MIT",
+  "type": "module",
+  "repository": "github:devkapa/brownout",
+  "homepage": "https://github.com/devkapa/brownout#readme",
+  "keywords": [
+    "circuit-simulation",
+    "circuit-simulator",
+    "spice",
+    "mna",
+    "electronics",
+    "mixed-signal",
+    "eda",
+    "arduino",
+    "avr",
+    "rp2040",
+    "raspberry-pi-pico",
+    "microcontroller",
+    "emulator"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "NOTICE"
+  ],
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./spice": {
+      "types": "./dist/spice.d.ts",
+      "import": "./dist/spice.js"
+    },
+    "./ac": {
+      "types": "./dist/ac.d.ts",
+      "import": "./dist/ac.js"
+    },
+    "./analysis": {
+      "types": "./dist/analysis.d.ts",
+      "import": "./dist/analysis.js"
+    },
+    "./physics": {
+      "types": "./dist/physics.d.ts",
+      "import": "./dist/physics.js"
+    },
+    "./mcu": {
+      "types": "./dist/mcu.d.ts",
+      "import": "./dist/mcu.js"
+    },
+    "./mcu/rp2040": {
+      "types": "./dist/mcu/rp2040.d.ts",
+      "import": "./dist/mcu/rp2040.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
+    "bench": "tsx scripts/benchmark-linear-scale.ts",
+    "check:package": "publint && attw --pack . --profile esm-only"
+  },
+  "peerDependencies": {
+    "avr8js": "^0.21.0",
+    "rp2040js": "^1.3.3"
+  },
+  "peerDependenciesMeta": {
+    "avr8js": {
+      "optional": true
+    },
+    "rp2040js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/node": "^22.19.17",
+    "avr8js": "^0.21.0",
+    "esbuild": "^0.27.7",
+    "publint": "^0.2.12",
+    "rp2040js": "^1.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

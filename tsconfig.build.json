@@ -1,0 +1,21 @@
+{
+  // Build config: real artifacts via plain tsc — no bundler, preserving the
+  // module graph one-to-one so consumers can tree-shake (e.g. drop the MCU
+  // cores when they only want the analog solver).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // Keep the incremental state out of dist: the "files" allowlist ships the
+    // whole dist directory and build metadata must not reach the tarball.
+    "tsBuildInfoFile": "./.tsbuildinfo"
+  },
+  // Composite projects must list every program file explicitly, including
+  // JSON modules (TS6307) — a bare "src" include only matches .ts files.
+  "include": ["src/**/*.ts", "src/**/*.json"]
+}
