@@ -78,6 +78,10 @@
       "types": "./dist/mcu/rp2040.d.ts",
       "import": "./dist/mcu/rp2040.js"
     },
+    "./internals/*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

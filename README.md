@@ -244,10 +244,37 @@ install.
 | `brownout/host` | Headless Node runner + the step-controller contract for out-of-tree adapters |
 | `brownout/mcu` | MicrocontrollerCore contract, mcuFactory, firmware + emulator registration |
 | `brownout/mcu/rp2040` | RP2040Mcu wrapper (statically imports rp2040js; load lazily) |
+| `brownout/internals/*` | Every module by its source path. **No stability guarantee** — see below |
 
-Anything not exported from these entries is internal. The `@brownout/*` npm
-scope is reserved for standalone host adapters — nothing is published there
-yet.
+The eight curated entries are the supported API and the only thing semver
+covers. The `@brownout/*` npm scope is reserved for standalone host adapters —
+nothing is published there yet.
+
+### `brownout/internals/*`
+
+`brownout/internals/sim/engine/elements` reaches `dist/sim/engine/elements.js`,
+and so on for any module in the build. It exists because the curated entries
+are chosen for people simulating circuits, while some callers need the pieces
+underneath: `stampBJT` to unit-test a companion model, `signalGenVoltage` to
+draw a waveform preview without running a solve, `thresholdsFor` to render a
+logic family's levels in a UI. de:volt — the application this engine was
+extracted from — reaches through it for exactly those reasons, and white-box
+tests live there by nature.
+
+The terms, so nobody is surprised:
+
+- **Semver does not apply.** These paths mirror the internal file layout. A
+  patch release may move, rename, or delete any of them. Only the curated
+  entries above are stable.
+- **Pin an exact version** if you depend on them, and read the changelog
+  before upgrading.
+- **If you need something here permanently, open an issue** — that is the
+  signal to promote it into a curated entry, where it gets a stability
+  contract.
+
+The alternative was to widen the curated entries until they covered every
+internal, which would have made all of it public API by accident. Naming the
+escape hatch honestly is the cheaper trade.
 
 ## Part library injection
 
