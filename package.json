@@ -30,11 +30,14 @@
     "emulator"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.3"
   },
+  "packageManager": "pnpm@10.33.0",
   "files": [
     "dist",
     "docs",
+    "!docs/releasing.md",
+    "!docs/packaging-verification.md",
     "LICENSE",
     "README.md",
     "NOTICE"
@@ -85,6 +88,7 @@
     "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
     "bench": "tsx scripts/benchmark-linear-scale.ts",
     "check:package": "publint && attw --pack . --profile esm-only",
+    "release": "changeset publish",
     "example:rc": "tsx examples/rc-transient.ts",
     "example:bode": "tsx examples/spice-bode.ts",
     "example:device": "tsx examples/custom-device.ts",
@@ -105,6 +109,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@changesets/cli": "^2.31.1",
     "@types/node": "^22.19.17",
     "avr8js": "^0.21.0",
     "esbuild": "^0.27.7",

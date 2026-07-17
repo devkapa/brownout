@@ -1,0 +1,91 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  build:
+    # Pinned, not `ubuntu-latest`. GitHub migrates the `-latest` label to a new
+    # LTS gradually over 1-2 months, and ubuntu-26.04 is already in public
+    # preview — so `-latest` will move on its own schedule. That would swap the
+    # apt ngspice version under the cross-validation envelopes with no signal at
+    # all, which is exactly the drift the caveat in docs/releasing.md warns
+    # about. Move this deliberately and re-run the crossval when you do.
+    runs-on: ubuntu-24.04
+    strategy:
+      # One version failing should still report the other; a Node-specific
+      # break is exactly the thing the matrix exists to localize.
+      fail-fast: false
+      matrix:
+        # The manifest promises "engines.node": ">=20.18.3", so the lane holds
+        # both ends of that promise: 20.18.3 is the exact floor admitted, 22 is
+        # the LTS most consumers actually run. Versions between them are
+        # interpolation, and 24+ is not promised — gating on it would test a
+        # claim the package does not make.
+        #
+        # 20.18.3 is pinned exactly, NOT "20". This leg tests the floor itself,
+        # which is the whole point: setup-node resolves a bare "20" to the
+        # newest 20.x, which would sail past a broken floor without noticing.
+        # The floor is load-bearing — part-library.js imports JSON with an
+        # import attribute, a SyntaxError before 20.10.0 and an
+        # ExperimentalWarning until 20.18.3. docs/packaging-verification.md
+        # owns the measurements. If you move engines.node, move this pin with
+        # it; they are one promise written twice.
+        node: [20.18.3, 22]
+    steps:
+      # Pinned to commit SHAs rather than tags: a tag is mutable and can be
+      # repointed at new code, so a tag pin trusts whoever owns the action repo
+      # forever. The trailing comment is the human-readable version — keep the
+      # two in sync. release.yml pins the same four.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          # Must equal package.json's `packageManager`, or action-setup throws
+          # "Multiple versions of pnpm specified".
+          version: 10.33.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      # The ngspice cross-validation suite is the SPICE subset's credibility
+      # asset, and it self-skips (describe.skipIf) when no binary is found.
+      # Without this step CI would report green on seven cases it never ran.
+      # ngspice lives in the universe component, which is enabled on the
+      # GitHub-hosted Ubuntu images; apt puts it at /usr/bin/ngspice, which the
+      # suite probes both via PATH and by absolute path, so no NGSPICE_BIN
+      # override is needed. The --version call is not decoration: it is the
+      # exact probe findNgspice() uses to accept a candidate, so passing it here
+      # means discovery cannot come up empty later. Recommends are left in —
+      # shaving the image is not worth an unverified guess about what ngspice
+      # needs to run a deck headless.
+      - name: Install ngspice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ngspice
+          ngspice --version
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: pnpm run test
+      # Standing equivalence lane: the full corpus replayed through the sparse
+      # linear backend. Auto mode only engages it above 64 unknowns, so the
+      # default run alone never exercises sparse on the small fixtures.
+      - run: pnpm run test:sparse
+      # A green `pnpm test` above does not prove the cross-validation ran: a
+      # skipped describe block still exits 0. The summary case prints this line
+      # only after all seven decks have been compared against a live ngspice,
+      # so grep it and fail the lane if it is absent. `shell: bash` supplies
+      # `-o pipefail`, which is what makes a vitest failure survive the tee.
+      - name: Prove the ngspice cross-validation ran
+        shell: bash
+        run: |
+          pnpm exec vitest run test/sim/engine/spice-ngspice-crossval.test.ts 2>&1 \
+            | tee "${RUNNER_TEMP}/crossval.log"
+          grep -q '\[ngspice-crossval\] summary:' "${RUNNER_TEMP}/crossval.log"
+      - run: pnpm run check:package
+      - run: pnpm run examples

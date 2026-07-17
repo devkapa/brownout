@@ -3,7 +3,7 @@
     "target": "ES2022",
     // No "dom" lib on purpose: the engine must typecheck with zero browser
     // globals. Node globals (performance, setTimeout, atob) come from
-    // @types/node, which the >=20 engines floor already implies.
+    // @types/node, which the >=20.18.3 engines floor already implies.
     "lib": ["ES2022"],
     "types": ["node"],
     // NodeNext everywhere: the published dist is plain tsc output that Node

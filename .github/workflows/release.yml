@@ -1,0 +1,142 @@
+name: release
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a run that might be mid-publish: a half-published release is
+  # worse than a queued one, and npm publishes are not idempotent.
+  cancel-in-progress: false
+jobs:
+  release:
+    # Pinned, not `ubuntu-latest`. GitHub migrates the `-latest` label to a new
+    # LTS gradually over 1-2 months, and ubuntu-26.04 is already in public
+    # preview — so `-latest` will move on its own schedule. That would swap the
+    # apt ngspice version under the cross-validation envelopes with no signal at
+    # all. Move this deliberately and re-run the crossval when you do.
+    runs-on: ubuntu-24.04
+    # A permissions block is a whitelist — anything unlisted drops to none.
+    permissions:
+      contents: write # commit the version bump, push the tag, cut the release
+      pull-requests: write # open and refresh the "Version Packages" PR
+      # Mints the OIDC token npm exchanges for a short-lived publish grant.
+      # This is the whole reason no NPM_TOKEN secret exists in this repo. It
+      # grants nothing else: per GitHub's OIDC docs, id-token: write only
+      # authorizes requesting a token, and it is what populates the
+      # ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN variables that npm and
+      # changesets/action look for.
+      id-token: write
+    steps:
+      # Third-party and first-party actions alike are pinned to commit SHAs, not
+      # tags. This job holds `id-token: write` and `contents: write`; a tag is
+      # mutable and can be repointed at new code by whoever owns the repo, so a
+      # tag pin would let an upstream compromise reach the publish grant. The
+      # trailing comment is the human-readable version — keep the two in sync.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          # Pinned to 10.x deliberately. pnpm's own docs: "Since v11, pnpm
+          # publish is implemented natively and no longer delegates to the npm
+          # CLI" — so on 10.x the npm below is what actually talks to the
+          # registry and performs the OIDC exchange, which is the better-trodden
+          # path (pnpm 11.0.8 shipped an OIDC publish regression, pnpm#11513).
+          # Moving to pnpm 11 makes pnpm, not npm, the trusted-publishing
+          # client: re-verify the publish end to end before bumping this.
+          # Must equal package.json's `packageManager`, or action-setup throws
+          # "Multiple versions of pnpm specified".
+          version: 10.33.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          # npm's trusted-publishing docs require Node >= 22.14.0. This only
+          # constrains the publisher, not consumers — the package still
+          # supports Node >= 20.18.3 and ci.yml proves it on that exact floor.
+          node-version: 22
+          cache: pnpm
+      # Node 22 ships npm 10.x, and trusted publishing needs npm >= 11.5.1
+      # (npm docs, "Trusted publishing for npm packages"). Without this the
+      # publish falls back to looking for a token that does not exist and fails.
+      #
+      # Pinned to the 11 major, NOT `@latest`. `latest` is npm 12 today, whose
+      # engines are `^22.22.2 || ^24.15.0 || >=26.0.0` — that clears the Node 22
+      # line above by a single minor, and an npm 13 that raises the floor to
+      # Node 24 would break this step with no warning. npm 12 also already broke
+      # the surface changesets depends on (it wraps `npm info --json` output in
+      # an array); the pipeline survives that only because the lockfile pins a
+      # @changesets/cli carrying the unwrap patch. npm 11's engines are
+      # `^20.17.0 || >=22.9.0`, which Node 22 satisfies with real margin.
+      - run: npm install -g npm@11
+      - run: pnpm install --frozen-lockfile
+      # The ngspice cross-validation self-skips (describe.skipIf) when no binary
+      # is found, so the gate below would report green on seven cases it never
+      # ran. Install it for the same reason ci.yml does.
+      - name: Install ngspice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ngspice
+          ngspice --version
+      # === The publish gate ===
+      #
+      # This duplicates ci.yml on purpose. ci.yml and release.yml both fire on
+      # `push: main` independently, so without these steps release.yml would
+      # publish whatever compiles — `prepack` runs `build` and nothing else, and
+      # a commit that builds but fails every test would go to the registry. An
+      # npm version is immutable once published, so this is not a mistake you
+      # can take back.
+      # `needs:` cannot cross workflows. `workflow_run:` genuinely could chain
+      # this after ci.yml (checking out `event.workflow_run.head_sha` to pin the
+      # tested commit), and that would save the duplicate minutes — it is a
+      # legitimate alternative, not an impossible one. It is not used here
+      # because it moves the gate one level of indirection away from the publish
+      # it protects, and every failure mode it adds (wrong conclusion check,
+      # wrong ref checked out) fails OPEN, i.e. publishes. Inline fails closed.
+      # Node 22 only: this proves the tree the publish packs; ci.yml owns the
+      # 20.18.3 floor leg.
+      - run: pnpm run typecheck
+      - run: pnpm run build
+      - run: pnpm run test
+      - run: pnpm run test:sparse
+      # A green `pnpm test` does not prove the cross-validation ran: a skipped
+      # describe block still exits 0. The summary case prints this line only
+      # after all seven decks have been compared against a live ngspice.
+      # `shell: bash` supplies `-o pipefail`, which is what makes a vitest
+      # failure survive the tee.
+      - name: Prove the ngspice cross-validation ran
+        shell: bash
+        run: |
+          pnpm exec vitest run test/sim/engine/spice-ngspice-crossval.test.ts 2>&1 \
+            | tee "${RUNNER_TEMP}/crossval.log"
+          grep -q '\[ngspice-crossval\] summary:' "${RUNNER_TEMP}/crossval.log"
+      - run: pnpm run check:package
+      # === End of gate ===
+      #
+      # Two modes, one action, driven by whether .changeset/ holds any pending
+      # changesets:
+      #   - changesets present -> open/refresh the "Version Packages" PR
+      #     (version bump + CHANGELOG).
+      #   - none present (i.e. the owner just merged that PR) -> run the publish
+      #     script, tag, and cut the GitHub release.
+      # So the owner's single action is "merge the Version Packages PR".
+      #
+      # NOTE: the PR this opens is authored by GITHUB_TOKEN, and per GitHub's
+      # own docs a `pull_request` event raised by GITHUB_TOKEN creates workflow
+      # runs in an approval-required state. So ci.yml does NOT start on that PR
+      # by itself — someone with write access must click "Approve workflows to
+      # run". docs/releasing.md carries this as a required step. The gate above
+      # is what makes that survivable: even if nobody approves, the publish
+      # cannot proceed on a red tree.
+      # Pinned to an exact tag's SHA: changesets/action publishes no moving v1
+      # tag, and v2.0.0-next.* renames these inputs.
+      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        with:
+          publish: pnpm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `changeset publish` shells out to `pnpm publish` (it detects the
+          # lockfile) and passes only --access/--tag/--no-git-checks — never
+          # --provenance. So the flag has to arrive as npm config instead.
+          # Under trusted publishing npm attests by default, so this is
+          # belt-and-braces rather than the thing that turns provenance on.
+          # It lives here rather than in package.json publishConfig because
+          # publishConfig would also fire on the owner's local first publish,
+          # where there is no CI for npm to attest to and the publish errors.
+          NPM_CONFIG_PROVENANCE: true

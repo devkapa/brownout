@@ -23,8 +23,13 @@ npm install brownout            # engine only — no MCU emulators pulled in
 npm install avr8js rp2040js     # optional peers, only if you co-simulate MCUs
 ```
 
-Node >= 20. ESM-only (`"type": "module"`); CJS consumers can reach it through
-dynamic `import()`.
+Node >= 20.18.3. ESM-only (`"type": "module"`); CJS consumers can reach it
+through dynamic `import()`. The floor is not arbitrary: the part library
+imports its JSON with an import attribute (`with { type: "json" }`), which is a
+SyntaxError before 20.10.0 and prints an ExperimentalWarning until 20.18.3 —
+so 20.18.3 is the oldest runtime on which the package loads cleanly and
+silently. Measured, not inferred:
+[`docs/packaging-verification.md`](docs/packaging-verification.md).
 
 ## Quick start
 
@@ -124,7 +129,10 @@ seven decks inside the documented subset, not a general claim of SPICE parity.
 The `.tran` residual is dominated by fixed-step trapezoidal integration
 against ngspice's adaptive-step reference — a method difference, not an error
 in either engine. The suite skips when no ngspice binary is present, so it is
-an opt-in local check rather than a CI gate. Envelopes and method notes:
+opt-in locally — but CI installs ngspice and fails the lane if the suite
+skipped rather than ran, so every merge has cleared these envelopes against a
+live reference (CI's ngspice is Ubuntu's packaged build, not the Homebrew 46
+the table above was measured on). Envelopes and method notes:
 `docs/physics-reference-benchmarks.md`.
 
 ### Scale
@@ -217,8 +225,12 @@ install-avr8js error (an explicit "run this" request should not look like a
 solver bug). A Pico without firmware or module stays inert until both are
 registered; a reload boots it.
 
-Consumers without the optional peers installed need `skipLibCheck` (the
-TypeScript default) so the `.d.ts` files do not chase avr8js/rp2040js types.
+Neither peer is needed to typecheck. `brownout/mcu` and `brownout/mcu/rp2040`
+both resolve with avr8js/rp2040js absent, and they do so under
+`skipLibCheck: false` — the published `.d.ts` files keep peer types out of
+public seams (`arduino.d.ts` uses a structural stand-in for the avr8js module
+namespace), so nothing in a public signature chases a package you did not
+install.
 
 ## Entry points
 
@@ -292,7 +304,9 @@ name; it is engine API carried over as-is, so renaming it (with a deprecation
 window) is deliberately deferred.
 
 The ngspice cross-validation suite runs wherever an ngspice binary exists and
-skips otherwise; point `NGSPICE_BIN` at one outside the probed locations.
+skips otherwise; point `NGSPICE_BIN` at one outside the probed locations. CI
+installs ngspice and then greps the suite's own summary line to prove it ran —
+a silent skip there would make a green build a lie about the headline claim.
 
 `src/` deliberately mirrors `packages/simcore/src` in the de:volt monorepo
 (`sim/engine/**`, `sim/*.ts` sidecars, `analysis/**`, `circuit/*.ts`) even
@@ -342,6 +356,10 @@ document or product catalog. See **Part library injection** below.
 - [`docs/spice-subset.md`](docs/spice-subset.md) — the netlist grammar,
   directive support, `.model` parameter mapping, and per-device fidelity
   notes.
+- [`docs/releasing.md`](docs/releasing.md) — the owner's release runbook:
+  npm trusted publishing, provenance, and the changesets flow.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the two test lanes, the bit-identity
+  contract, and the rules for changing a number or citing prior art.
 
 ## License
 
