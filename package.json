@@ -1,6 +1,6 @@
 {
   "name": "brownout",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Mixed-signal circuit simulation engine: sparse MNA solver, SPICE netlist subset, small-signal AC, and cycle-accurate AVR/RP2040 co-simulation",
   "license": "MIT",
   "type": "module",
