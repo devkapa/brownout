@@ -14,6 +14,10 @@ export * from "./operating-point.js";
 export * from "./jobs.js";
 export * from "./run-sweep.js";
 export * from "./run-ac-sweep.js";
+// Wave A5 follow-on: worker-hostable driver for the linearized small-signal AC
+// analysis (the fast Bode path), with progress + cooperative-cancel hooks the
+// bare runSmallSignalAc lacks. Composes it unchanged — see the file header.
+export * from "./run-small-signal-ac-sweep.js";
 export * from "./run-monte-carlo.js";
 export * from "./job-messages.js";
 export * from "./checked-step.js";
