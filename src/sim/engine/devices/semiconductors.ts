@@ -684,6 +684,52 @@ export const rgbLedModel: DeviceModel = {
   },
 };
 
+// Over-rating dwell before transistor_overcurrent latches, in seconds of
+// accepted simulated time. Long enough that the load-time 1 ps seed and a
+// single switching-edge step (Cgd displacement, capacitive inrush through a
+// saturated switch) never announce, short enough to be immediate at human
+// timescales. The 4:1 recovery ratio keeps a genuinely over-rated PWM load
+// latching within a few periods while brief edge spikes bleed away.
+const TRANSISTOR_OVERCURRENT_DWELL_S = 1e-4;
+const TRANSISTOR_OVERCURRENT_RECOVERY = 0.25;
+
+/**
+ * Advisory only (Wave: engine warnings). Compares the committed collector or
+ * drain current against the catalog i_c_max; no SOA, no self-heating, no
+ * damage integration — the part keeps conducting exactly as before, which
+ * is why this is a SimWarning and not a SimFailure. Parts without a catalog
+ * rating are silent rather than guessed at.
+ */
+function commitTransistorOvercurrentWarning(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  h: number,
+): void {
+  if (ctx.hasWarning(comp.id, "transistor_overcurrent")) return;
+  const limit = ctx.electricalSpecs(comp)?.i_c_max;
+  if (limit === undefined || !(limit > 0)) return;
+  const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
+  const terminal = comp.kind === "nmos" || comp.kind === "pmos" ? "drain" : "collector";
+  ctx.recordAccumulatedWarning(
+    "transistor_overcurrent",
+    comp.id,
+    "",
+    current > limit ? 1 : 0,
+    TRANSISTOR_OVERCURRENT_RECOVERY,
+    h,
+    TRANSISTOR_OVERCURRENT_DWELL_S,
+    () => ({
+      componentId: comp.id,
+      code: "transistor_overcurrent",
+      since: ctx.simTime() + h,
+      value: current,
+      limit,
+      message:
+        `${comp.id} is carrying ${(current * 1000).toFixed(0)} mA of ${terminal} current against its ${(limit * 1000).toFixed(0)} mA rating.`,
+    }),
+  );
+}
+
 export const bjtModel: DeviceModel = {
   kinds: ["bjt_npn", "bjt_pnp"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -784,6 +830,9 @@ export const bjtModel: DeviceModel = {
       vt,
       earlyVoltage,
     ).ic);
+  },
+  updateFailures: (ctx, comp, _x, h) => {
+    commitTransistorOvercurrentWarning(ctx, comp, h);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // The exact Ebers-Moll Jacobian stampBJT writes, evaluated at the raw OP
@@ -920,6 +969,9 @@ export const mosfetModel: DeviceModel = {
       ? -cgd * (currentVgd - previousVgd) / h
       : 0;
     ctx.setElementCurrent(comp.id, channelCurrent + bodyDrainCurrent + cgdDrainCurrent);
+  },
+  updateFailures: (ctx, comp, _x, h) => {
+    commitTransistorOvercurrentWarning(ctx, comp, h);
   },
   acStamp: (ctx, comp, ac, omega) => {
     // Channel gm/gds at the OP — the same piecewise Shichman-Hodges Jacobian

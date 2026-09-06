@@ -101,6 +101,7 @@ examples`).
 | SPICE subset | Netlist parser (R/C/L/K/V/I/D/Q/M/J, `.subckt`, `.model`), directive runner (`.op`/`.tran`/`.dc`/`.ac`), line-numbered errors, warnings for every unmapped parameter | `brownout/spice`, `docs/spice-subset.md` |
 | Offline analyses | DC sweep, temperature sweep, AC sweep, seeded Monte Carlo (deterministic and order-independent), operating point, trace measurement, CSV | `brownout/analysis` |
 | Physics sidecars | Chemistry battery model with coulomb counting, one-pole package thermal with regulator shutdown hysteresis, servo travel/brownout, i2t failure with latched-open branches | `brownout/physics` |
+| Engine warnings | Latched, session-only advisories that never alter the solve: `transistor_overcurrent` (collector/drain current past the catalog `i_c_max`, after a 100 us dwell) and `missing_flyback` (a winding switched by a transistor or switch with no diode on its switch node, from the loaded graph). `getWarnings()` reads the latched set; `takeNewWarnings()` drains each once for a host's warning channel; `resetFailures()` clears them with failures | `sim-engine.ts`, `engine-warnings.test.ts` |
 | MCU co-simulation | Cycle-accurate AVR and RP2040 with sub-step pin-event timing; firmware advances only after accepted electrical steps | `brownout/mcu` |
 | Determinism | Analyses bit-reproducible; steps accepted only on converged Newton + non-singular matrix + finite values + relative residual <= 1e-8; rejected steps roll back and never advance firmware | `sim-engine.ts`, `state-rollback-derived.test.ts` |
 

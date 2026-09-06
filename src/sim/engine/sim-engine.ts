@@ -556,6 +556,7 @@ interface ElementState {
   hcsr04: Map<string, Hcsr04EngineState>;   // S18b compId → HC-SR04 TRIG/ECHO state machine
   failureStress: Map<string, number>; // failure key → accumulated normalized damage/energy
   failures: Map<string, SimFailure>; // failure key → latched runtime failure
+  warnings: Map<string, SimWarning>; // warning key → latched advisory (never alters a stamp)
   icState: Map<string, Record<string, number>>; // compId → named state slots for IC timing/sequential storage
   arduinos: Map<string, MicrocontrollerCore>; // compId → running MCU core (any board)
   eeproms: Map<string, EepromState>;
@@ -578,6 +579,34 @@ export interface SimFailure {
   message: string;
   pinId?: string;
   value?: number;
+  limit?: number;
+}
+
+/**
+ * Stable engine warning codes. Additive: hosts key labels on these strings,
+ * so a code is never renamed once published.
+ */
+export type SimWarningCode = "transistor_overcurrent" | "missing_flyback";
+
+/**
+ * A latched, session-only advisory: a condition the engine measured (or saw
+ * in the loaded topology) that a host should surface once. Unlike a
+ * SimFailure it never alters a stamp, so the solved trajectory is identical
+ * with and without it. It latches per (code, component, pin) exactly the way
+ * failures do — carried across load() for a same-id, same-kind component,
+ * cleared by resetFailures() — which is what lets takeNewWarnings() announce
+ * each condition once rather than once per accepted step.
+ */
+export interface SimWarning {
+  componentId: string;
+  code: SimWarningCode;
+  /** Simulation time, in seconds, when this warning latched. */
+  since: number;
+  message: string;
+  pinId?: string;
+  /** Measured quantity behind the warning, when there is one (e.g. amps). */
+  value?: number;
+  /** The rating the measurement was held against, in the same unit as value. */
   limit?: number;
 }
 
@@ -726,6 +755,8 @@ export interface StateSnapshot {
   hcsr04: Map<string, Hcsr04EngineState>;    // S18b — HC-SR04 TRIG/ECHO state machine
   failureStress: Map<string, number>;
   failures: Map<string, SimFailure>;
+  /** Optional for compatibility with snapshots created before engine warnings. */
+  warnings?: Map<string, SimWarning>;
   icState: Map<string, Record<string, number>>;
   eeproms: Map<string, EepromState>;
   ptcs: Map<string, PtcState>;
@@ -767,6 +798,7 @@ export type ErrorStateSnapshot = Pick<
   | "hcsr04"
   | "failureStress"
   | "failures"
+  | "warnings"
   | "icState"
   | "ptcs"
   | "thermalTemps"
@@ -829,6 +861,61 @@ function failureKey(kind: SimFailureKind, componentId: string, pinId = ""): stri
 
 function failureKeyComponentId(key: string): string | null {
   return key.split("\x00")[1] ?? null;
+}
+
+// Same shape as failureKey on purpose: warning dwell accumulates in
+// state.failureStress alongside failure stress (the code and kind sets are
+// disjoint, so the keys cannot collide), which gives warnings the identical
+// snapshot/rollback, load carry-forward (failureKeyComponentId) and reset
+// semantics without a second accumulator.
+function warningKey(code: SimWarningCode, componentId: string, pinId = ""): string {
+  return `${code}\x00${componentId}\x00${pinId}`;
+}
+
+// ─── Engine warnings: static topology check ────────────────────────────────
+//
+// missing_flyback is evaluated from the loaded graph, not the solve: the
+// compact transistor models have no breakdown, so the engine cannot observe
+// the damage a real kickback does, but it can see the topology that produces
+// one. The check is deliberately narrow — a switching device directly on a
+// winding's floating net, with no diode-like part on that net — so an LC
+// filter on a rail, a buck/boost inductor with its freewheeling diode on the
+// switch node, or a coil clamped across its terminals never trips it. Driver
+// ICs with internal clamps (ULN2003/2803, L293D, TB6612) are not switching
+// kinds here; a host's own rule engine owns those suppression rules.
+const FLYBACK_SWITCH_KINDS = new Set<string>([
+  "bjt_npn", "bjt_pnp", "nmos", "pmos",
+  "switch", "push_button", "spdt_switch", "push_dpdt", "dip_switch",
+]);
+const FLYBACK_CLAMP_KINDS = new Set<string>([
+  "diode", "schottky_diode", "zener_diode", "tvs_diode", "led",
+]);
+// A switch pin on a rail net does not interrupt a winding's current; only a
+// switch on the winding's floating side can.
+const FLYBACK_RAIL_KINDS = new Set<string>([
+  "voltage_source", "battery_pack", "bench_psu",
+  "arduino_uno", "arduino_nano", "raspberry_pi_pico", "microbit",
+]);
+
+/** The two terminals of a component's inductive winding, if it has one. */
+function inductiveWindingPins(comp: SimComponent): { pins: [string, string]; noun: string } | null {
+  const has = (id: string): boolean => comp.pins.some((pin) => pin.id === id);
+  switch (comp.kind) {
+    case "inductor":
+      return comp.pins.length >= 2 ? { pins: [comp.pins[0]!.id, comp.pins[1]!.id], noun: "winding" } : null;
+    case "relay":
+      return has("coil_a") && has("coil_b") ? { pins: ["coil_a", "coil_b"], noun: "coil" } : null;
+    case "dc_motor":
+      return has("m1") && has("m2") ? { pins: ["m1", "m2"], noun: "winding" } : null;
+    default:
+      return null;
+  }
+}
+
+function formatInductance(henries: number): string {
+  if (henries >= 1) return `${henries.toFixed(2)} H`;
+  if (henries >= 1e-3) return `${(henries * 1e3).toFixed(1)} mH`;
+  return `${(henries * 1e6).toFixed(1)} uH`;
 }
 
 // Gate output resistance: 50 Ω minimum → stiff enough for typical LED/resistor
@@ -1403,6 +1490,7 @@ export class SimEngine {
     hcsr04: new Map(),   // S18b
     failureStress: new Map(),
     failures: new Map(),
+    warnings: new Map(),
     icState: new Map(),
     arduinos: new Map(),
     eeproms: new Map(),
@@ -1429,6 +1517,10 @@ export class SimEngine {
   private _stateUpdateComponents: SimComponent[] = [];
   private _digitalUpdateComponents: SimComponent[] = [];
   private _failureUpdateComponents: SimComponent[] = [];
+  // Warning keys latched since the host last drained takeNewWarnings(), in
+  // latch order. Pruned wherever state.warnings shrinks (rollback, reload,
+  // reset) so a host never announces a warning the engine no longer holds.
+  private _unannouncedWarnings: string[] = [];
   private _thermalComponents: SimComponent[] = [];
   private _staticIdealSourceIds = new Set<string>();
   private _staticStampComponents: SimComponent[] = [];
@@ -1921,6 +2013,16 @@ export class SimEngine {
         },
       },
       hasFailure: (compId, kind, pinId = "") => engine._hasFailure(compId, kind, pinId),
+      hasWarning: (compId, code, pinId = "") => engine.state.warnings.has(warningKey(code, compId, pinId)),
+      recordAccumulatedWarning: (code, componentId, pinId, stressRate, recoveryRate, h, threshold, makeWarning) =>
+        engine._recordAccumulatedWarning(
+          warningKey(code, componentId, pinId),
+          stressRate,
+          recoveryRate,
+          h,
+          threshold,
+          makeWarning,
+        ),
       recordAccumulatedStress: (kind, componentId, pinId, stressRate, recoveryRate, h, threshold, makeFailure) =>
         engine._recordAccumulatedStress(
           failureKey(kind, componentId, pinId),
@@ -1965,6 +2067,7 @@ export class SimEngine {
       hcsr04: new Map([...this.state.hcsr04].map(([k, v]) => [k, { ...v }])), // S18b
       failureStress: new Map(this.state.failureStress),
       failures: new Map([...this.state.failures].map(([k, v]) => [k, { ...v }])),
+      warnings: new Map([...this.state.warnings].map(([k, v]) => [k, { ...v }])),
       icState: new Map([...this.state.icState].map(([k, v]) => [k, { ...v }])),
       eeproms: new Map(
         [...this.state.eeproms].map(([k, v]) => [k, {
@@ -2040,6 +2143,9 @@ export class SimEngine {
       failures: new Map(
         [...this.state.failures].map(([key, value]) => [key, { ...value }]),
       ),
+      warnings: new Map(
+        [...this.state.warnings].map(([key, value]) => [key, { ...value }]),
+      ),
       icState: new Map(
         [...this.state.icState].map(([key, value]) => [key, { ...value }]),
       ),
@@ -2095,6 +2201,10 @@ export class SimEngine {
     this.state.hcsr04 = new Map([...(snap.hcsr04 ?? new Map())].map(([k, v]) => [k, { ...v }])); // S18b
     this.state.failureStress = new Map(snap.failureStress ?? new Map());
     this.state.failures = new Map([...(snap.failures ?? new Map())].map(([k, v]) => [k, { ...v }]));
+    this.state.warnings = new Map([...(snap.warnings ?? new Map())].map(([k, v]) => [k, { ...v }]));
+    // A warning latched by the trial being rolled back was never a committed
+    // observation; it leaves the announce queue with the state.
+    this._pruneUnannouncedWarnings();
     this.state.icState = new Map([...(snap.icState ?? new Map())].map(([k, v]) => [k, { ...v }]));
     this.state.eeproms = new Map(
       [...(snap.eeproms ?? new Map())].map(([k, v]) => [k, {
@@ -2129,6 +2239,27 @@ export class SimEngine {
     return Object.fromEntries([...this.state.failures].map(([k, v]) => [k, { ...v }]));
   }
 
+  /** Every currently latched engine warning, keyed like failures. */
+  getWarnings(): Record<string, SimWarning> {
+    return Object.fromEntries([...this.state.warnings].map(([k, v]) => [k, { ...v }]));
+  }
+
+  /**
+   * Warnings latched since the previous call, in latch order, then marks
+   * them announced. A host forwards these on its warning channel once; the
+   * full latched set stays readable through getWarnings(). A warning that
+   * was rolled back or reloaded away before being drained is never returned.
+   */
+  takeNewWarnings(): SimWarning[] {
+    const out: SimWarning[] = [];
+    for (const key of this._unannouncedWarnings) {
+      const warning = this.state.warnings.get(key);
+      if (warning) out.push({ ...warning });
+    }
+    this._unannouncedWarnings = [];
+    return out;
+  }
+
   /** Returns the set of component IDs whose PTC fuse is currently tripped. */
   getPtcTripped(): ReadonlySet<string> {
     const result = new Set<string>();
@@ -2157,6 +2288,11 @@ export class SimEngine {
   resetFailures(): void {
     this.state.failures.clear();
     this.state.failureStress.clear();
+    // Warnings clear with failures (one "Clear failures" action in a host).
+    // A topology warning whose condition still holds re-latches below and is
+    // announced again, mirroring how a still-overloaded part re-fails.
+    this.state.warnings.clear();
+    this._unannouncedWarnings = [];
     // PTC state is separate from the latched failure framework but still
     // controllable by the user via the "Clear failures" toolbar button —
     // a power-cycle (which the toolbar simulates) unlatches a tripped PTC.
@@ -2175,6 +2311,7 @@ export class SimEngine {
     // last trusted state internally and marks lastConverged=false; worker/UI
     // callers must then withhold those retained electrical values.
     if (this.circuit) {
+      this._evaluateStaticWarnings();
       this._rebuildStaticStampBase();
       // A cleared failure re-opens/re-closes branches instantly; that is a
       // discontinuity for the trapezoidal history, so re-anchor with one BE
@@ -2262,6 +2399,7 @@ export class SimEngine {
     const prevHcsr04 = this.state.hcsr04;     // S18b
     const prevFailureStress = this.state.failureStress;
     const prevFailures = this.state.failures;
+    const prevWarnings = this.state.warnings;
     const prevIcState = this.state.icState;
     const prevArduinos = this.state.arduinos;
     const prevEeproms = this.state.eeproms;
@@ -2286,6 +2424,7 @@ export class SimEngine {
       hcsr04: new Map(),   // S18b
       failureStress: new Map(),
       failures: new Map(),
+      warnings: new Map(),
       icState: new Map(),
       arduinos: new Map(),
       eeproms: new Map(),
@@ -2571,6 +2710,9 @@ export class SimEngine {
         for (const [key, failure] of prevFailures) {
           if (failure.componentId === c.id) this.state.failures.set(key, { ...failure });
         }
+        for (const [key, warning] of prevWarnings) {
+          if (warning.componentId === c.id) this.state.warnings.set(key, { ...warning });
+        }
         for (const [key, stress] of prevFailureStress) {
           if (failureKeyComponentId(key) === c.id) this.state.failureStress.set(key, stress);
         }
@@ -2699,6 +2841,10 @@ export class SimEngine {
     // time: preserve the exact capacitor/inductor initial conditions that were
     // stamped. Active device state may still resolve from the powered OP (which
     // is how compact oscillators start without energizing unrelated passives).
+    // Topology warnings are re-derived from the graph just built: a carried
+    // missing_flyback whose diode has since been added drops here, and a
+    // newly switched winding latches (and is announced) here.
+    this._evaluateStaticWarnings();
     const initializedCaps = new Map(this.state.caps);
     const initializedInds = new Map(this.state.inds);
     // The 1 ps seed's post-solve update would replace the carried trap
@@ -2786,6 +2932,7 @@ export class SimEngine {
       hcsr04: new Map(),   // S18b
       failureStress: new Map(),
       failures: new Map(),
+      warnings: new Map(),
       icState: new Map(),
       arduinos: new Map(),
       eeproms: new Map(),
@@ -5115,6 +5262,99 @@ export class SimEngine {
     } else {
       this.state.failureStress.delete(key);
     }
+  }
+
+  // ─── Engine warnings (advisory; never alter the solve) ──────────────────
+
+  private _latchWarning(key: string, warning: SimWarning): void {
+    if (this.state.warnings.has(key)) return;
+    this.state.warnings.set(key, warning);
+    this._unannouncedWarnings.push(key);
+  }
+
+  private _pruneUnannouncedWarnings(): void {
+    this._unannouncedWarnings = this._unannouncedWarnings.filter((key) => this.state.warnings.has(key));
+  }
+
+  /**
+   * _recordAccumulatedStress's twin for warnings: the same dwell integrator
+   * (shared accumulator map, see warningKey), latching a SimWarning instead
+   * of a SimFailure. A latched warning is inert to the solve.
+   */
+  private _recordAccumulatedWarning(
+    key: string,
+    stressRate: number,
+    recoveryRate: number,
+    h: number,
+    threshold: number,
+    makeWarning: () => SimWarning,
+  ): void {
+    if (this.state.warnings.has(key)) return;
+    const previous = this.state.failureStress.get(key) ?? 0;
+    const stress = Math.max(
+      0,
+      previous + (stressRate > 0 ? stressRate : -Math.max(0, recoveryRate)) * h,
+    );
+    if (stress >= threshold) {
+      this._latchWarning(key, makeWarning());
+      this.state.failureStress.delete(key);
+    } else if (stress > 0) {
+      this.state.failureStress.set(key, stress);
+    } else {
+      this.state.failureStress.delete(key);
+    }
+  }
+
+  /**
+   * Re-derive every topology warning from the current graph (see the
+   * FLYBACK_* constants). Latches new conditions, drops ones that no longer
+   * hold, and leaves an already-latched, still-true condition untouched so it
+   * is not announced twice across reloads.
+   */
+  private _evaluateStaticWarnings(): void {
+    const circuit = this.circuit;
+    if (!circuit) return;
+    const pinsByNet = new Map(this.nets.map((net) => [net.id, net.pins]));
+    const kindOf = (componentId: string): string => this._componentById.get(componentId)?.kind ?? "";
+    for (const comp of circuit.components) {
+      const winding = inductiveWindingPins(comp);
+      const key = warningKey("missing_flyback", comp.id);
+      let switchedBy: string | null = null;
+      if (winding) {
+        const netA = this._netIdForPin(comp.id, winding.pins[0]);
+        const netB = this._netIdForPin(comp.id, winding.pins[1]);
+        if (netA && netB && netA !== netB) {
+          for (const netId of [netA, netB]) {
+            const pins = pinsByNet.get(netId) ?? [];
+            if (netId === "gnd" || pins.some(([cid]) => FLYBACK_RAIL_KINDS.has(kindOf(cid)))) continue;
+            const sw = pins.find(([cid]) => cid !== comp.id && FLYBACK_SWITCH_KINDS.has(kindOf(cid)));
+            if (!sw) continue;
+            if (pins.some(([cid]) => FLYBACK_CLAMP_KINDS.has(kindOf(cid)))) continue;
+            switchedBy = sw[0];
+            break;
+          }
+        }
+      }
+      if (switchedBy && winding) {
+        const inductance = comp.kind === "inductor"
+          ? Math.max(1e-12, Number(comp.params.inductance ?? 1e-3))
+          : undefined;
+        const label = inductance === undefined ? comp.id : `${comp.id} (${formatInductance(inductance)})`;
+        this._latchWarning(key, {
+          componentId: comp.id,
+          code: "missing_flyback",
+          since: this.simTime,
+          ...(inductance === undefined ? {} : { value: inductance }),
+          message:
+            `${label} is switched by ${switchedBy} with no diode across its ${winding.noun}, so turning ${switchedBy} off will drive an inductive voltage spike into it.`,
+        });
+      } else {
+        this.state.warnings.delete(key);
+      }
+    }
+    // Reload can drop a component (or its condition) before its warning was
+    // drained; the announce queue follows the map.
+    this._pruneUnannouncedWarnings();
   }
 
   private _solve(h: number): void {

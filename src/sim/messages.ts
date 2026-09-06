@@ -362,4 +362,11 @@ export type WorkerOut =
       /** Versioned structured physics readouts; optional for protocol backward compatibility. */
       physicsTelemetry?: PhysicsTelemetrySnapshot;
     }
-  | { type: "warn"; code: string; message: string };
+  | {
+      type: "warn";
+      /** Stable code — an engine SimWarningCode, or a host/transport code. */
+      code: string;
+      message: string;
+      /** Set when the warning is about one component (engine warnings always are). */
+      componentId?: string;
+    };

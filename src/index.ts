@@ -43,6 +43,8 @@ export type {
   SolverDiagnosticsSnapshot,
   SimFailure,
   SimFailureKind,
+  SimWarning,
+  SimWarningCode,
   BatteryRuntimeReadout,
   ThermalRuntimeReadout,
   LogicThresholds,

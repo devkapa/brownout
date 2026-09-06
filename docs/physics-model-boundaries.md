@@ -54,6 +54,17 @@ Included:
 - Latched-open resistor, fuse, diode/LED and passive-network failures remove
   their electrical branch. Resetting a failure re-solves the restored topology
   before a new reading is published.
+- Latched engine warnings (`SimWarning`) beside failures: a BJT or MOSFET
+  whose committed collector/drain current exceeds its catalog `i_c_max` for
+  100 us of accepted simulated time (`transistor_overcurrent`), and an
+  inductor, relay coil, or motor winding whose floating net carries a
+  transistor or mechanical switch and no diode-like part (`missing_flyback`,
+  evaluated from the loaded graph). A warning is advisory: it changes no
+  stamp, so the trajectory is bit-identical with or without it, and it
+  latches once per condition per component until `resetFailures()`. Neither
+  is a damage model — no SOA, no self-heating, no observed kickback; parts
+  without a catalog rating stay silent, and driver ICs with internal clamps
+  (ULN2003/2803, L293D, TB6612) are not treated as switches.
 - A true DC operating point (`dcOperatingPoint()`) with a gmin-stepping,
   source-stepping, and pseudo-transient rescue ladder for hard nonlinear
   startups.

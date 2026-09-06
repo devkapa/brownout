@@ -64,6 +64,7 @@ import { SimEngine } from "../sim/engine/sim-engine.js";
 import type {
   SimCircuit,
   SimFailure,
+  SimWarning,
   SolverDiagnosticsSnapshot,
 } from "../sim/engine/sim-engine.js";
 
@@ -168,6 +169,8 @@ export interface HeadlessSnapshot {
   elementI: Record<string, number>;
   digitalState: Record<string, number>;
   failures: Record<string, SimFailure>;
+  /** Latched engine advisories (SimEngine.getWarnings()); inert to the solve. */
+  warnings: Record<string, SimWarning>;
   solver: SolverDiagnosticsSnapshot;
 }
 
@@ -322,6 +325,7 @@ export class HeadlessRunner {
       elementI: { ...this._engine.getElementI() },
       digitalState: { ...this._engine.digitalState },
       failures: this._engine.getFailures(),
+      warnings: this._engine.getWarnings(),
       solver: {
         lastIters: this._engine.lastIters,
         lastConverged: this._engine.lastConverged,

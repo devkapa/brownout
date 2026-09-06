@@ -96,6 +96,8 @@ import type {
   SimCircuit,
   SimFailure,
   SimFailureKind,
+  SimWarning,
+  SimWarningCode,
   StepperEngineState,
   ThermalRuntimeState,
 } from "./sim-engine.js";
@@ -542,6 +544,24 @@ export interface DeviceContext {
     h: number,
     threshold: number,
     makeFailure: () => SimFailure,
+  ): void;
+  /** True when the given latched engine warning exists for the component (pin). */
+  hasWarning(compId: string, code: SimWarningCode, pinId?: string): boolean;
+  /**
+   * recordAccumulatedStress's twin for advisories: the same dwell integrator,
+   * latching makeWarning() once when threshold is crossed. A latched warning
+   * never alters a stamp — it exists to be surfaced by the host (via
+   * SimEngine.takeNewWarnings()) once per condition, not once per step.
+   */
+  recordAccumulatedWarning(
+    code: SimWarningCode,
+    componentId: string,
+    pinId: string,
+    stressRate: number,
+    recoveryRate: number,
+    h: number,
+    threshold: number,
+    makeWarning: () => SimWarning,
   ): void;
   /** Last committed element current (A, pin0 -> pin1) for a component. */
   elementCurrent(compId: string): number | undefined;
