@@ -1,0 +1,5 @@
+---
+"brownout": minor
+---
+
+Add step breakpoints: `SimEngine.captureStepBreakpoints`, `SimEngine.takeStepBreakpoints()` and the `StepBreakpoint` type. An NE555 switch happens inside a `step()` (the engine splits the step at the threshold crossing), but a consumer that only sees accepted states interpolates straight across the whole step, so a scope drew the 555 output edge as a ramp centred on the step, up to half a step from where it switched. With capture on, the engine records the state at the switch and, after a 10 ns backward-Euler guard sub-step, the post-switch state; a split clamped short of a crossing in the last 2% of the step carries on to one guard short of the step end so the switch still lands inside it. Breakpoints roll back with `restoreState()` (snapshots carry `stepBreakpointCount`) and clear on `load()`. Capture is off by default, and with it off every trajectory is unchanged; with it on, the guard sub-step is the only change to the numerics, independent of whether anything reads the breakpoints.

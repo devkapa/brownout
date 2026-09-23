@@ -73,6 +73,16 @@ const H_MIN = 1e-8;
 const H_MAX = 1e-2;
 const H_INITIAL = 1e-8;
 const MCU_H_MAX = 1e-4;
+// While the circuit is changing, error-controlled steps stop at ACTIVE_H_MAX.
+// Backward Euler lags an RC curve by about half a step, and the local
+// tolerance alone let slow RC timing run at H_MAX: a 555 astable ran 1.5%
+// slow (2.2% at 4x) and its period wandered ±0.6 ms cycle to cycle; at 2 ms,
+// 0.6% and ±0.04 ms. "Changing" means a full H_MAX step would spend more than
+// QUIET_FRACTION of the error tolerance, extrapolated from the last estimate
+// (local error scales as h^(order+1)). A circuit sitting still keeps H_MAX:
+// a flat 2 ms ceiling cost static logic boards 3-4x the solves for nothing.
+const ACTIVE_H_MAX = 2e-3;
+const QUIET_FRACTION = 0.1;
 
 /**
  * Runaway guard. Same rationale as runSpice's maxTranSteps ceiling: an
@@ -271,6 +281,8 @@ export class HeadlessRunner {
   private _integrationMethod: "be" | "trap";
   private _adaptiveH = H_INITIAL;
   private _errorReplay = false;
+  /** Whether the last error estimate said the circuit is changing (see ACTIVE_H_MAX). */
+  private _changing = true;
 
   constructor(options?: HeadlessRunnerOptions) {
     this._integrationMethod = options?.integrationMethod ?? "be";
@@ -308,6 +320,7 @@ export class HeadlessRunner {
     this._engine.load(circuit);
     this._circuit = circuit;
     this._adaptiveH = H_INITIAL;
+    this._changing = true;
     this._errorReplay = circuitSupportsStepReplay(circuit);
   }
 
@@ -429,6 +442,7 @@ export class HeadlessRunner {
     // Re-seed under the new method. Lossless: nothing has been stepped yet.
     this._engine.load(circuit);
     this._adaptiveH = H_INITIAL;
+    this._changing = true;
   }
 
   /** Advance the simulation by `durationS` seconds. Throws only on misuse; solver trouble is reported on the result. */
@@ -462,7 +476,9 @@ export class HeadlessRunner {
     const errorControlEnabled = this._errorReplay && fixedH === null;
     // The source floor binds even in fixed-step mode: a caller-chosen step
     // that aliases the source is a wrong answer, not a caller preference.
-    const circuitMaxH = Math.min(this._errorReplay ? H_MAX : MCU_H_MAX, sourceStepLimit(circuit));
+    // The changing-circuit ceiling does not: it tunes the controller's choice.
+    const sourceMaxH = sourceStepLimit(circuit);
+    const order = this._integrationMethod === "trap" ? 2 : 1;
 
     let simmed = 0;
     let stepCount = 0;
@@ -486,6 +502,10 @@ export class HeadlessRunner {
 
       const remaining = durationS - simmed;
       const controllerH = fixedH ?? this._adaptiveH;
+      const circuitMaxH = Math.min(
+        !this._errorReplay ? MCU_H_MAX : errorControlEnabled && this._changing ? ACTIVE_H_MAX : H_MAX,
+        sourceMaxH,
+      );
       let h = Math.min(controllerH, circuitMaxH, remaining);
       let eventClamped = false;
 
@@ -514,6 +534,7 @@ export class HeadlessRunner {
 
       if (!attempt.accepted) {
         this._adaptiveH = Math.max(H_MIN, h * attempt.nextFactor);
+        this._changing = true;
         if (attempt.reason === "nonconverged") failedSteps += 1;
         else rejectedSteps += 1;
 
@@ -533,6 +554,11 @@ export class HeadlessRunner {
         // afterwards; the pre-clamp controller value is the honest carry-over.
         const unclampedController = eventClamped ? Math.min(controllerH, circuitMaxH) : 0;
         this._adaptiveH = Math.max(H_MIN, Math.min(circuitMaxH, Math.max(proposed, unclampedController)));
+        // Steps at the floor skip the estimate (errorRatio 0), which says
+        // nothing about whether the circuit is changing.
+        if (errorControlEnabled && h > H_MIN * 2.01) {
+          this._changing = attempt.errorRatio * (H_MAX / h) ** (order + 1) > QUIET_FRACTION;
+        }
       }
 
       acceptedSteps += 1;
