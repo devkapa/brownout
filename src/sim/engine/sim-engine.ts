@@ -772,8 +772,26 @@ export interface StateSnapshot {
   displayState?: Record<string, DisplayInfo>;
   /** Public solver diagnostics from the trusted state, not a rejected trial. */
   solverDiagnostics?: SolverDiagnosticsSnapshot;
+  /** Optional for compatibility with snapshots created before step breakpoints. */
+  stepBreakpointCount?: number;
   simTime: number;
 }
+
+/**
+ * A committed state inside a step() interval, recorded when
+ * `captureStepBreakpoints` is on. Today the only source is an NE555 switch:
+ * one breakpoint at the switch instant, then one a guard sub-step later
+ * holding the post-switch solution. A consumer that interpolates between
+ * accepted states (a scope) needs both to draw the edge where the switch
+ * happened instead of as a ramp across the whole step.
+ */
+export interface StepBreakpoint {
+  time: number;
+  netV: Record<string, number>;
+}
+
+/** Backward-Euler sub-step taken right after an NE555 switch while breakpoints are captured. */
+const NE555_GUARD_STEP_S = 1e-8;
 
 /**
  * Minimal immutable view used by the worker's coarse/refined error estimate.
@@ -1545,6 +1563,15 @@ export class SimEngine {
   }>();
   private _nextDigitalDueTimeCache: number | null = null;
   private _digitalDueCacheDirty = true;
+  /**
+   * Record StepBreakpoints for takeStepBreakpoints(). Off by default. While
+   * on, an NE555 switch also takes an NE555_GUARD_STEP_S backward-Euler
+   * sub-step so the state recorded just after the switch is the post-switch
+   * solution; that sub-step is the only effect on the numerics, and it does
+   * not depend on whether anything reads the breakpoints.
+   */
+  captureStepBreakpoints = false;
+  private _stepBreakpoints: StepBreakpoint[] = [];
   digitalEvaluationCount = 0;
   digitalEvaluationReuseCount = 0;
 
@@ -2094,6 +2121,7 @@ export class SimEngine {
         lastMatrixIllConditioned: this.lastMatrixIllConditioned,
         lastRelativeResidual: this.lastRelativeResidual,
       },
+      stepBreakpointCount: this._stepBreakpoints.length,
       simTime: this.simTime,
     };
     // Trap-mode-only: the histories are read only by trap stamps, so copying
@@ -2233,6 +2261,17 @@ export class SimEngine {
     }
     this.simTime = snap.simTime;
     this._digitalDueCacheDirty = true;
+    // A rolled-back trial's breakpoints never happened.
+    if (snap.stepBreakpointCount !== undefined && this._stepBreakpoints.length > snap.stepBreakpointCount) {
+      this._stepBreakpoints.length = snap.stepBreakpointCount;
+    }
+  }
+
+  /** The breakpoints committed since the last call, oldest first. See StepBreakpoint. */
+  takeStepBreakpoints(): StepBreakpoint[] {
+    const taken = this._stepBreakpoints;
+    this._stepBreakpoints = [];
+    return taken;
   }
 
   getFailures(): Record<string, SimFailure> {
@@ -3954,7 +3993,35 @@ export class SimEngine {
     // flag via the snapshot inside _restoreFailedSplitTrial.
     this._beNextStep = true;
 
-    this._solve(h * (1 - frac));
+    let rest = h * (1 - frac);
+    if (this.captureStepBreakpoints) {
+      const guard = Math.min(NE555_GUARD_STEP_S, rest / 2);
+      if (!this._ne555Switched(preNe555s)) {
+        // The split is clamped to 98% of the step, so a crossing in the last
+        // 2% leaves the first sub-step short of it. Carry on to one guard
+        // short of the step end and let the switch land there instead.
+        this._solve(rest - guard);
+        if (!this.lastConverged) {
+          this._restoreFailedSplitTrial(snap);
+          return;
+        }
+        this.simTime += rest - guard;
+        rest = guard;
+      }
+      if (this._ne555Switched(preNe555s)) {
+        this._stepBreakpoints.push({ time: this.simTime, netV: { ...this.netV } });
+        this._solve(guard);
+        if (!this.lastConverged) {
+          this._restoreFailedSplitTrial(snap);
+          return;
+        }
+        this.simTime += guard;
+        rest -= guard;
+        this._stepBreakpoints.push({ time: this.simTime, netV: { ...this.netV } });
+      }
+    }
+
+    if (rest > 0) this._solve(rest);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4466,6 +4533,16 @@ export class SimEngine {
    *   frac = (V_target − V_pre) / (V_post − V_pre)
    * The frac is clamped to [0.02, 0.98] to keep both sub-steps non-trivial.
    */
+  /** Whether any NE555's output state differs from `preNe555s`. */
+  private _ne555Switched(preNe555s: Map<string, NE555EngineState>): boolean {
+    for (const comp of this._ne555Components) {
+      const prev = preNe555s.get(comp.id) ?? { outHigh: true };
+      const next = this.state.ne555s.get(comp.id) ?? { outHigh: true };
+      if (prev.outHigh !== next.outHigh) return true;
+    }
+    return false;
+  }
+
   private _find555CrossingFrac(
     preNetV: Record<string, number>,
     preNe555s: Map<string, NE555EngineState>,
@@ -4582,6 +4659,7 @@ export class SimEngine {
     this._combinationalEvalCache.clear();
     this._nextDigitalDueTimeCache = null;
     this._digitalDueCacheDirty = true;
+    this._stepBreakpoints = [];
     this._ne555Components = circuit.components.filter((component) => component.kind === "ne555");
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
