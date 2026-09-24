@@ -884,8 +884,37 @@ function netPairKey(
   return { key: `${f1}||${f0}`, flipped: true };
 }
 
+/**
+ * Map clone with shallow-copied object values, written as a loop: the
+ * new Map([...m].map(...)) form allocated two throwaway arrays per map, and
+ * saveState/captureErrorState/restoreState clone ~20 maps per checked step.
+ */
+function cloneValueMap<K, V extends object>(source: Map<K, V> | undefined): Map<K, V> {
+  const out = new Map<K, V>();
+  if (source) for (const [key, value] of source) out.set(key, { ...value });
+  return out;
+}
+
+// failureKey runs for every stressed device on every step; memoised per
+// (kind, component, pin) so the key string is built once.
+const failureKeyCache = new Map<string, Map<string, Map<string, string>>>();
 function failureKey(kind: SimFailureKind, componentId: string, pinId = ""): string {
-  return `${kind}\x00${componentId}\x00${pinId}`;
+  let byComponent = failureKeyCache.get(kind);
+  if (!byComponent) {
+    byComponent = new Map();
+    failureKeyCache.set(kind, byComponent);
+  }
+  let byPin = byComponent.get(componentId);
+  if (!byPin) {
+    byPin = new Map();
+    byComponent.set(componentId, byPin);
+  }
+  let key = byPin.get(pinId);
+  if (key === undefined) {
+    key = `${kind}\x00${componentId}\x00${pinId}`;
+    byPin.set(pinId, key);
+  }
+  return key;
 }
 
 function failureKeyComponentId(key: string): string | null {
@@ -1108,15 +1137,33 @@ const FULL_STATIC_STAMP_KINDS = new Set<string>([
 const explicitCatalogPartCache = new Map<string, PartDefinition | undefined>();
 let explicitCatalogPartCacheVersion = getPartLibraryVersion();
 
+// Per-component memo of an explicit (catalogUid) resolution, checked against
+// the component's kind and uid so an in-place edit still re-resolves. Saves
+// the composite key string partFor otherwise builds on every stamp.
+const explicitPartByComponent = new WeakMap<SimComponent, {
+  version: number;
+  kind: string;
+  uid: string;
+  part: PartDefinition | undefined;
+}>();
+
 function partFor(comp: SimComponent): PartDefinition | undefined {
   const libraryVersion = getPartLibraryVersion();
+  if (comp.catalogUid) {
+    const hit = explicitPartByComponent.get(comp);
+    if (hit && hit.version === libraryVersion && hit.kind === comp.kind && hit.uid === comp.catalogUid) {
+      return hit.part;
+    }
+  }
   if (libraryVersion !== explicitCatalogPartCacheVersion) {
     explicitCatalogPartCache.clear();
     explicitCatalogPartCacheVersion = libraryVersion;
   }
   const cacheKey = comp.catalogUid ? `${comp.kind}\0${comp.catalogUid}` : null;
   if (cacheKey && explicitCatalogPartCache.has(cacheKey)) {
-    return explicitCatalogPartCache.get(cacheKey);
+    const cached = explicitCatalogPartCache.get(cacheKey);
+    explicitPartByComponent.set(comp, { version: libraryVersion, kind: comp.kind, uid: comp.catalogUid!, part: cached });
+    return cached;
   }
   const part = resolveCatalogPart({
     kind: comp.kind as ComponentKind,
@@ -2096,29 +2143,27 @@ export class SimEngine {
       capCurrents: new Map(this.state.capCurrents),
       integrationBeNextStep: this._beNextStep,
       inds: new Map(this.state.inds),
-      mosfetGates: new Map(
-        [...this.state.mosfetGates].map(([k, v]) => [k, { ...v }]),
-      ),
-      batteries: new Map([...this.state.batteries].map(([k, v]) => [k, { ...v }])),
+      mosfetGates: cloneValueMap(this.state.mosfetGates),
+      batteries: cloneValueMap(this.state.batteries),
       ne555s: new Map(this.state.ne555s),
-      relays: new Map([...this.state.relays].map(([k, v]) => [k, { ...v }])),
-      motors: new Map([...this.state.motors].map(([k, v]) => [k, { ...v }])),   // W7.1
-      servos: new Map([...this.state.servos].map(([k, v]) => [k, { ...v }])),   // W7.2
-      steppers: new Map([...this.state.steppers].map(([k, v]) => [k, { ...v }])), // W7.2
+      relays: cloneValueMap(this.state.relays),
+      motors: cloneValueMap(this.state.motors),   // W7.1
+      servos: cloneValueMap(this.state.servos),   // W7.2
+      steppers: cloneValueMap(this.state.steppers), // W7.2
       // W8.2 — deep-copy: ddram and lastData are arrays that must not share references.
       lcds: new Map([...this.state.lcds].map(([k, v]) => [k, { ...v, ddram: [...v.ddram], lastData: [...v.lastData] }])),
-      hcsr04: new Map([...this.state.hcsr04].map(([k, v]) => [k, { ...v }])), // S18b
+      hcsr04: cloneValueMap(this.state.hcsr04), // S18b
       failureStress: new Map(this.state.failureStress),
-      failures: new Map([...this.state.failures].map(([k, v]) => [k, { ...v }])),
-      warnings: new Map([...this.state.warnings].map(([k, v]) => [k, { ...v }])),
-      icState: new Map([...this.state.icState].map(([k, v]) => [k, { ...v }])),
+      failures: cloneValueMap(this.state.failures),
+      warnings: cloneValueMap(this.state.warnings),
+      icState: cloneValueMap(this.state.icState),
       eeproms: new Map(
         [...this.state.eeproms].map(([k, v]) => [k, {
           ...v,
           bytes: new Uint8Array(v.bytes),
         }]),
       ),
-      ptcs: new Map([...this.state.ptcs].map(([k, v]) => [k, { ...v }])),
+      ptcs: cloneValueMap(this.state.ptcs),
       thermalTemps: new Map(this.state.thermalTemps),
       thermalDevices: new Map(
         [...this.state.thermalDevices].map(([k, v]) => [k, { ...v, warnings: [...v.warnings] }]),
@@ -2159,43 +2204,19 @@ export class SimEngine {
       netV: { ...this.netV },
       caps: new Map(this.state.caps),
       inds: new Map(this.state.inds),
-      mosfetGates: new Map(
-        [...this.state.mosfetGates].map(([key, value]) => [key, { ...value }]),
-      ),
-      batteries: new Map(
-        [...this.state.batteries].map(([key, value]) => [key, { ...value }]),
-      ),
-      ne555s: new Map(
-        [...this.state.ne555s].map(([key, value]) => [key, { ...value }]),
-      ),
-      relays: new Map(
-        [...this.state.relays].map(([key, value]) => [key, { ...value }]),
-      ),
-      motors: new Map(
-        [...this.state.motors].map(([key, value]) => [key, { ...value }]),
-      ),
-      servos: new Map(
-        [...this.state.servos].map(([key, value]) => [key, { ...value }]),
-      ),
-      steppers: new Map(
-        [...this.state.steppers].map(([key, value]) => [key, { ...value }]),
-      ),
-      hcsr04: new Map(
-        [...this.state.hcsr04].map(([key, value]) => [key, { ...value }]),
-      ),
+      mosfetGates: cloneValueMap(this.state.mosfetGates),
+      batteries: cloneValueMap(this.state.batteries),
+      ne555s: cloneValueMap(this.state.ne555s),
+      relays: cloneValueMap(this.state.relays),
+      motors: cloneValueMap(this.state.motors),
+      servos: cloneValueMap(this.state.servos),
+      steppers: cloneValueMap(this.state.steppers),
+      hcsr04: cloneValueMap(this.state.hcsr04),
       failureStress: new Map(this.state.failureStress),
-      failures: new Map(
-        [...this.state.failures].map(([key, value]) => [key, { ...value }]),
-      ),
-      warnings: new Map(
-        [...this.state.warnings].map(([key, value]) => [key, { ...value }]),
-      ),
-      icState: new Map(
-        [...this.state.icState].map(([key, value]) => [key, { ...value }]),
-      ),
-      ptcs: new Map(
-        [...this.state.ptcs].map(([key, value]) => [key, { ...value }]),
-      ),
+      failures: cloneValueMap(this.state.failures),
+      warnings: cloneValueMap(this.state.warnings),
+      icState: cloneValueMap(this.state.icState),
+      ptcs: cloneValueMap(this.state.ptcs),
       thermalTemps: new Map(this.state.thermalTemps),
       thermalDevices: new Map(
         [...this.state.thermalDevices].map(([key, value]) => [
@@ -2229,34 +2250,30 @@ export class SimEngine {
     // same integration method in every leg.
     this._beNextStep = snap.integrationBeNextStep ?? this._beNextStep;
     this.state.inds = new Map(snap.inds);
-    this.state.mosfetGates = new Map(
-      [...(snap.mosfetGates ?? new Map())].map(([k, v]) => [k, { ...v }]),
-    );
-    this.state.batteries = new Map(
-      [...(snap.batteries ?? new Map())].map(([k, v]) => [k, { ...v }]),
-    );
+    this.state.mosfetGates = cloneValueMap(snap.mosfetGates);
+    this.state.batteries = cloneValueMap(snap.batteries);
     this.state.ne555s = new Map(snap.ne555s);
-    this.state.relays = new Map([...(snap.relays ?? new Map())].map(([k, v]) => [k, { ...v }]));
-    this.state.motors = new Map([...(snap.motors ?? new Map())].map(([k, v]) => [k, { ...v }]));   // W7.1
-    this.state.servos = new Map([...(snap.servos ?? new Map())].map(([k, v]) => [k, { ...v }]));   // W7.2
-    this.state.steppers = new Map([...(snap.steppers ?? new Map())].map(([k, v]) => [k, { ...v }])); // W7.2
+    this.state.relays = cloneValueMap(snap.relays);
+    this.state.motors = cloneValueMap(snap.motors);   // W7.1
+    this.state.servos = cloneValueMap(snap.servos);   // W7.2
+    this.state.steppers = cloneValueMap(snap.steppers); // W7.2
     // W8.2 — deep-copy: ddram and lastData are arrays that must not share references.
     this.state.lcds = new Map([...(snap.lcds ?? new Map())].map(([k, v]) => [k, { ...v, ddram: [...v.ddram], lastData: [...v.lastData] }]));
-    this.state.hcsr04 = new Map([...(snap.hcsr04 ?? new Map())].map(([k, v]) => [k, { ...v }])); // S18b
+    this.state.hcsr04 = cloneValueMap(snap.hcsr04); // S18b
     this.state.failureStress = new Map(snap.failureStress ?? new Map());
-    this.state.failures = new Map([...(snap.failures ?? new Map())].map(([k, v]) => [k, { ...v }]));
-    this.state.warnings = new Map([...(snap.warnings ?? new Map())].map(([k, v]) => [k, { ...v }]));
+    this.state.failures = cloneValueMap(snap.failures);
+    this.state.warnings = cloneValueMap(snap.warnings);
     // A warning latched by the trial being rolled back was never a committed
     // observation; it leaves the announce queue with the state.
     this._pruneUnannouncedWarnings();
-    this.state.icState = new Map([...(snap.icState ?? new Map())].map(([k, v]) => [k, { ...v }]));
+    this.state.icState = cloneValueMap(snap.icState);
     this.state.eeproms = new Map(
       [...(snap.eeproms ?? new Map())].map(([k, v]) => [k, {
         ...v,
         bytes: new Uint8Array(v.bytes),
       }]),
     );
-    this.state.ptcs = new Map([...(snap.ptcs ?? new Map())].map(([k, v]) => [k, { ...v }]));
+    this.state.ptcs = cloneValueMap(snap.ptcs);
     this.state.thermalTemps = new Map(snap.thermalTemps ?? new Map());
     this.state.thermalDevices = new Map(
       [...(snap.thermalDevices ?? new Map())].map(([k, v]) => [k, { ...v, warnings: [...v.warnings] }]),
@@ -5363,6 +5380,7 @@ export class SimEngine {
   }
 
   private _hasFailure(compId: string, kind: SimFailureKind, pinId = ""): boolean {
+    if (this.state.failures.size === 0) return false;
     return this.state.failures.has(failureKey(kind, compId, pinId));
   }
 
