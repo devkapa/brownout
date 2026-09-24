@@ -454,6 +454,17 @@ export function defaultHd44780State(): Hd44780State {
 export const DIGITAL_DELAY_PREFIX = "delay:";
 const DIGITAL_PENDING_PREFIX = "pending:";
 const DIGITAL_DUE_PREFIX = "due:";
+// [delay:, pending:, due:] keys per pin id, built once: the delayed-output
+// update runs for every output pin of every digital IC on every solve.
+const digitalDelayKeyCache = new Map<string, readonly [string, string, string]>();
+function digitalDelayKeys(pinId: string): readonly [string, string, string] {
+  let keys = digitalDelayKeyCache.get(pinId);
+  if (!keys) {
+    keys = [`${DIGITAL_DELAY_PREFIX}${pinId}`, `${DIGITAL_PENDING_PREFIX}${pinId}`, `${DIGITAL_DUE_PREFIX}${pinId}`];
+    digitalDelayKeyCache.set(pinId, keys);
+  }
+  return keys;
+}
 
 // Exported as the DeviceStateMaps.eeproms value type; the map, its load()
 // initialisation (contents/SDP seeding), and snapshot/rollback stay here.
@@ -1522,6 +1533,11 @@ export class SimEngine {
   private _pinToNetIndex = new Map<string, string>();
   private _pinNodeIndex = new Map<string, number>();
   private _openPinKeys = new Set<string>();
+  // _pinNode/_isOpenPin run for every pin of every stamp on every solve;
+  // component -> pin maps avoid building a composite string key each time.
+  private _pinNodeByComp = new Map<string, Map<string, number>>();
+  private _openPinsByComp = new Map<string, Set<string>>();
+  private _floatingNoiseCache = new Map<string, Map<string, { bucket: number; n: number }>>();
   private _thermalProfileCache = new Map<string, ThermalDeviceProfile | undefined>();
   private _batteryModelCache = new Map<string, {
     profile: BatteryPhysicsProfile;
@@ -4654,6 +4670,9 @@ export class SimEngine {
     this._pinToNetIndex = new Map();
     this._pinNodeIndex = new Map();
     this._openPinKeys = new Set();
+    this._pinNodeByComp = new Map();
+    this._openPinsByComp = new Map();
+    this._floatingNoiseCache = new Map();
     this._thermalProfileCache.clear();
     this._batteryModelCache.clear();
     this._combinationalEvalCache.clear();
@@ -4725,6 +4744,12 @@ export class SimEngine {
         const key = `${componentId}\0${pinId}`;
         this._pinToNetIndex.set(key, net.id);
         this._pinNodeIndex.set(key, row);
+        let byPin = this._pinNodeByComp.get(componentId);
+        if (!byPin) {
+          byPin = new Map();
+          this._pinNodeByComp.set(componentId, byPin);
+        }
+        byPin.set(pinId, row);
         let pinIds = pinsByComponent.get(componentId);
         if (!pinIds) {
           pinIds = new Set();
@@ -4744,7 +4769,15 @@ export class SimEngine {
         || (wire.to_component === componentId && pinIds.has(wire.to_pin)),
       );
       if (!hasExplicitPackageWire) {
-        for (const pinId of pinIds) this._openPinKeys.add(`${componentId}\0${pinId}`);
+        let open = this._openPinsByComp.get(componentId);
+        if (!open) {
+          open = new Set();
+          this._openPinsByComp.set(componentId, open);
+        }
+        for (const pinId of pinIds) {
+          this._openPinKeys.add(`${componentId}\0${pinId}`);
+          open.add(pinId);
+        }
       }
     }
   }
@@ -4878,12 +4911,13 @@ export class SimEngine {
   }
 
   private _pinNode(compId: string, pinId: string): number {
-    return this._pinNodeIndex.get(`${compId}\0${pinId}`) ?? -1;
+    return this._pinNodeByComp.get(compId)?.get(pinId) ?? -1;
   }
 
   private _isOpenPin(compId: string, pinId: string): boolean {
-    const key = `${compId}\0${pinId}`;
-    return !this._pinNodeIndex.has(key) || this._openPinKeys.has(key);
+    const byPin = this._pinNodeByComp.get(compId);
+    if (!byPin || !byPin.has(pinId)) return true;
+    return this._openPinsByComp.get(compId)?.has(pinId) ?? false;
   }
 
   /**
@@ -4977,10 +5011,33 @@ export class SimEngine {
 
   private _floatingLogicHigh(comp: SimComponent, pinId: string, power: IcPowerInfo): boolean {
     const bucket = Math.floor((this.simTime + 1e-12) / 0.01);
-    const n = hash32(`${comp.id}:${pinId}:${bucket}`) / 0xffffffff;
+    const n = this._floatingNoise(comp.id, pinId, bucket);
     const family = power.specs?.logic_family ?? "";
     const pHigh = family.includes("TTL") ? 0.7 : 0.5;
     return n < pHigh;
+  }
+
+  /**
+   * hash32(`${compId}:${pinId}:${bucket}`) normalised, memoised per pin: it
+   * only changes with the 10 ms bucket, and rebuilding the string and hash on
+   * every read of every open input was a top cost on logic boards.
+   */
+  private _floatingNoise(compId: string, pinId: string, bucket: number): number {
+    let byPin = this._floatingNoiseCache.get(compId);
+    if (!byPin) {
+      byPin = new Map();
+      this._floatingNoiseCache.set(compId, byPin);
+    }
+    const hit = byPin.get(pinId);
+    if (hit && hit.bucket === bucket) return hit.n;
+    const n = hash32(`${compId}:${pinId}:${bucket}`) / 0xffffffff;
+    if (hit) {
+      hit.bucket = bucket;
+      hit.n = n;
+    } else {
+      byPin.set(pinId, { bucket, n });
+    }
+    return n;
   }
 
   private _logicHigh(comp: SimComponent, pinId: string, x: Float64Array, power: IcPowerInfo): boolean {
@@ -5221,7 +5278,7 @@ export class SimEngine {
 
   private _delayedOutputLevel(comp: SimComponent, pinId: string, immediate: boolean): boolean {
     const st = this.state.icState.get(comp.id);
-    const stored = st?.[`${DIGITAL_DELAY_PREFIX}${pinId}`];
+    const stored = st?.[digitalDelayKeys(pinId)[0]];
     return stored === undefined ? immediate : stored >= 0.5;
   }
 
@@ -5237,9 +5294,7 @@ export class SimEngine {
     let dueChanged = false;
 
     for (const [pinId, immediateLevel] of Object.entries(immediate)) {
-      const valueKey = `${DIGITAL_DELAY_PREFIX}${pinId}`;
-      const pendingKey = `${DIGITAL_PENDING_PREFIX}${pinId}`;
-      const dueKey = `${DIGITAL_DUE_PREFIX}${pinId}`;
+      const [valueKey, pendingKey, dueKey] = digitalDelayKeys(pinId);
       const dueBefore = st[dueKey];
 
       if (st[valueKey] === undefined) {
