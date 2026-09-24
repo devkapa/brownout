@@ -37,6 +37,27 @@ function parsePk(s: string): PinKey {
   return [s.slice(0, i), s.slice(i + 1)];
 }
 
+const SOURCE_KINDS = new Set([
+  "battery_pack",
+  "bench_psu",
+  "voltage_source",
+  "signal_gen",
+  "pulse_source",
+  "pulse_gen",
+  "clock",
+  "clock_gen",
+]);
+
+/**
+ * The return terminal of an independent source, which is where a section's
+ * voltage reference goes: buildNets puts the circuit's ground there, and
+ * SimEngine anchors an electrically isolated section there.
+ */
+export function sourceReturnPinId(c: { kind: string; pins: Array<{ id: string }> }): string | undefined {
+  if (!SOURCE_KINDS.has(c.kind)) return undefined;
+  return (c.pins.find((p) => p.id === "neg") ?? c.pins.find((p) => p.id === "gnd"))?.id;
+}
+
 function unionize(groups: Set<string>[]): Set<string>[] {
   const remaining = [...groups];
   const out: Set<string>[] = [];
@@ -80,16 +101,6 @@ export function buildNets(circuit: MinCircuit): Net[] {
   // still reads 0 V at its negative terminal. A board ground is a fallback for
   // source-less/USB-powered circuits. Other source returns and board grounds
   // remain separate unless the user physically wires them together.
-  const SOURCE_KINDS = new Set([
-    "battery_pack",
-    "bench_psu",
-    "voltage_source",
-    "signal_gen",
-    "pulse_source",
-    "pulse_gen",
-    "clock",
-    "clock_gen",
-  ]);
   const sourceReferences: string[] = [];
   const boardReferences: string[] = [];
 
@@ -100,11 +111,8 @@ export function buildNets(circuit: MinCircuit): Net[] {
   };
 
   for (const c of circuit.components) {
-    if (SOURCE_KINDS.has(c.kind)) {
-      const returnPin = c.pins.find((p) => p.id === "neg")
-        ?? c.pins.find((p) => p.id === "gnd");
-      if (returnPin) sourceReferences.push(pk(c.id, returnPin.id));
-    }
+    const returnPinId = sourceReturnPinId(c);
+    if (returnPinId) sourceReferences.push(pk(c.id, returnPinId));
     if (c.kind === "arduino_uno" || c.kind === "arduino_nano") {
       const arduinoGrounds = c.pins
         .map((p) => p.id)

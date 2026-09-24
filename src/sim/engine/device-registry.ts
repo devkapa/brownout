@@ -702,6 +702,8 @@ export interface AcDeviceContext {
  * - internalNodes: _buildMatrix, once per load, in component order, BEFORE
  *   branch-row allocation. Must be pure over comp (same names for the same
  *   component every load). See the hook's own comment for the row contract.
+ * - galvanicGroups: load, once, after the pin-to-row maps are compiled, to
+ *   find isolated sections. Must be pure over comp.
  * - branchRows: _buildMatrix, once per load, in component order. Return the
  *   vsrcIdx keys to allocate, in order; must be pure over comp/catalog (the
  *   matrix does not exist yet), which the DeviceCatalogContext parameter
@@ -756,6 +758,26 @@ export interface DeviceModel {
    *   load, or the row keying goes stale.
    */
   internalNodes?(comp: DeviceComponent): readonly string[];
+  /**
+   * Partition of the component's pins into galvanically isolated groups
+   * (an optocoupler's LED and transistor, a transformer's windings). The
+   * engine reads it once per load to find electrically isolated sections,
+   * each of which gets its own voltage reference (see
+   * ISOLATED_SECTION_ANCHOR_G). Contract:
+   *
+   * - Shifting every pin voltage of one group by a constant must change no
+   *   current anywhere, in any stamp (transient, DC or AC) and in any state
+   *   this model can reach. Coupling through a group's differential voltage
+   *   (a winding's v1, an LED's forward current) is allowed; a conductance,
+   *   capacitance or source between groups is not.
+   * - Internal nodes must couple only within one group.
+   * - Every pin appears in exactly one group; must be pure over comp.
+   *
+   * Absent means all pins share one group, which is always safe: it can
+   * only leave a section unanchored, never anchor one that has a path to
+   * ground.
+   */
+  galvanicGroups?(comp: DeviceComponent): readonly (readonly string[])[];
   /** Branch-row keys to allocate in _buildMatrix, in allocation order. */
   branchRows?(comp: DeviceComponent, ctx: DeviceCatalogContext): readonly string[];
   /**

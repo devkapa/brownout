@@ -42,6 +42,7 @@ import { isMcuBoardKind } from "../../circuit/arduino.js";
 import { signalGenEnabled } from "./waveform.js";
 import {
   DIGITAL_DELAY_PREFIX,
+  ISOLATED_SECTION_ANCHOR_G,
   NODE_RSHUNT_G,
   type DcOperatingPointResult,
   type SimEngine,
@@ -283,6 +284,7 @@ export function runSmallSignalAc(
   });
 
   const ctx = engine.acDeviceContext({ inputId: options.inputId });
+  const anchorRows = engine.isolatedSectionAnchorRows();
 
   // A designated bench_psu whose committed OP regime is constant-current
   // pins its branch current, so the unit voltage drive cannot inject — the
@@ -318,6 +320,9 @@ export function runSmallSignalAc(
     // they do in the large-signal system.
     for (let row = 0; row < nodeCount; row++) {
       ac.addAc(row, row, NODE_RSHUNT_G, 0);
+    }
+    for (const row of anchorRows) {
+      ac.addAc(row, row, ISOLATED_SECTION_ANCHOR_G, 0);
     }
     for (const comp of components) {
       const model = getDeviceModel(comp.kind);
