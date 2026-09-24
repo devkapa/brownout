@@ -100,10 +100,17 @@ export type LinearBackendMode = "auto" | "dense" | "sparse";
  * printed recommendation reflects the warm path only. The threshold sits
  * one step above the cold crossover: below it the dense backend keeps
  * existing small-circuit behavior bit-identical, which the deterministic
- * trajectory baselines rely on, and the full default-mode corpus is green
- * at this value, so no baseline fixture crossed backends.
+ * trajectory baselines rely on.
+ *
+ * Lowered from 64 to 16 on 2026-09-24. Cold factorization is the wrong
+ * cost to compare: a stepping circuit pays it once per topology edit and
+ * the replay thousands of times a second. Stepping real boards end to end,
+ * sparse was never slower from n = 6 up and was 1.1-1.9x faster at n = 16-56
+ * (a 50-unknown clock module 1.9x, a 27-unknown analog lab 1.5x). Below 16
+ * the two are within noise, so the smallest circuits keep dense, and with it
+ * their bit-identical trajectories.
  */
-export const SPARSE_BACKEND_THRESHOLD = 64;
+export const SPARSE_BACKEND_THRESHOLD = 16;
 
 let forcedBackend: LinearBackendMode | null = null;
 

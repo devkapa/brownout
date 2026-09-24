@@ -69,8 +69,9 @@ function discriminatingKeys(candidates: readonly PartDefinition[]): string[] {
 function uniquelyInferredPart(
   candidates: readonly PartDefinition[],
   params: ComponentParams,
+  discriminating: readonly string[],
 ): PartDefinition | null {
-  const keys = discriminatingKeys(candidates).filter((key) => key in params);
+  const keys = discriminating.filter((key) => key in params);
   if (keys.length === 0) return null;
 
   // Identity inference is safety-critical: one contradictory discriminator
@@ -118,6 +119,10 @@ function legacyBreadboardFallbackUid(params: ComponentParams): string | null {
 export function createCatalogResolver(catalog: PartCatalog): CatalogResolver {
   const byUid = new Map<string, PartDefinition>();
   const byKind = new Map<ComponentKind, PartDefinition[]>();
+  // A pure function of one kind's candidates, which are fixed for this
+  // resolver. Recomputing it per call made catalog inference the top cost of
+  // stepping circuits whose parts carry no catalogUid (it runs per stamp).
+  const discriminatingByKind = new Map<ComponentKind, string[]>();
   for (const part of catalog.parts) {
     byUid.set(part.uid, part);
     const existing = byKind.get(part.kind);
@@ -155,7 +160,12 @@ export function createCatalogResolver(catalog: PartCatalog): CatalogResolver {
         }
       }
 
-      const inferred = uniquelyInferredPart(candidates, input.params ?? {});
+      let discriminating = discriminatingByKind.get(input.kind);
+      if (!discriminating) {
+        discriminating = discriminatingKeys(candidates);
+        discriminatingByKind.set(input.kind, discriminating);
+      }
+      const inferred = uniquelyInferredPart(candidates, input.params ?? {}, discriminating);
       if (inferred) {
         return { part: inferred, catalogUid: inferred.uid, source: "legacy-params" };
       }
