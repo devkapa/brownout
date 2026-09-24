@@ -1,0 +1,10 @@
+{
+  "id": "core-w0-no-source-synthetic-datum",
+  "components": [
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 1000 } },
+    { "id": "r2", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 2200 } }
+  ],
+  "wires": [
+    { "from_component": "r1", "from_pin": "b", "to_component": "r2", "to_pin": "a" }
+  ]
+}

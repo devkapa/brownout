@@ -23,6 +23,19 @@ There is no `NPM_TOKEN` secret in this repository, and there should never be
 one. The release job authenticates with a short-lived OIDC token minted by
 GitHub for that specific workflow run.
 
+`pnpm run build` now also builds the Rust core to wasm (`scripts/build-core.mjs`,
+called with `--dist`), so a local `build` or `prepack` needs the toolchain
+pinned in `core/rust-toolchain.toml` plus its `wasm32-unknown-unknown` target
+installed: `rustup toolchain install <channel> --profile minimal --target
+wasm32-unknown-unknown` (rustup 1.28 dropped the proxies' auto-install, so
+this is no longer automatic on first use). `scripts/build-core.mjs` runs
+cargo from inside `core/` — rustup resolves a toolchain pin from the current
+directory, not from `--manifest-path` — and asserts the active `rustc
+--version` actually matches the pin before it builds anything, so a stale
+default toolchain fails loudly instead of silently shipping the wrong wasm.
+Both workflows install the same pinned toolchain and run `cargo test --locked`
+from `core/` before the rest of their gate.
+
 ### What actually stops a bad release
 
 Be precise about this, because the honest answer is shorter than it looks:

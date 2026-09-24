@@ -91,7 +91,33 @@ jobs:
       # wrong ref checked out) fails OPEN, i.e. publishes. Inline fails closed.
       # Node 22 only: this proves the tree the publish packs; ci.yml owns the
       # 20.18.3 floor leg.
+      #
+      # The Rust core (core/) builds with the toolchain core/rust-toolchain.toml
+      # pins. Install it by name, read from that file, so the file stays the
+      # only place the version lives and the step does not depend on which
+      # rustup the runner image ships: an argument-less `rustup toolchain
+      # install` reads the file only from rustup 1.28, and 1.28.0 briefly
+      # dropped the proxies' auto-install.
+      # Inside the gate: a program.rs regression must block a release
+      # exactly like a failing vitest suite.
+      - name: Install the pinned Rust toolchain
+        working-directory: core
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --target wasm32-unknown-unknown
+          cargo --version
+      # rustup picks the toolchain from the cwd (and its parents), never from
+      # --manifest-path, so this has to run inside core/ to actually use the
+      # pin installed above instead of the runner's default toolchain.
+      - run: cargo test --locked
+        working-directory: core
       - run: pnpm run typecheck
+      # The package typechecks without DOM types, so nothing above would notice
+      # a type that collides with lib.dom in a browser consumer (a shipped
+      # `declare global { namespace WebAssembly }` did exactly that). This
+      # compiles a DOM-lib consumer with skipLibCheck off against the entries.
+      - run: pnpm run typecheck:dom-consumer
       - run: pnpm run build
       - run: pnpm run test
       - run: pnpm run test:sparse
