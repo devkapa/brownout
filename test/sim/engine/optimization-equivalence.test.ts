@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import type { Circuit } from "../../../src/circuit/types.js";
 import { chaser555CounterCircuit } from "../../helpers/embedded-fixtures.js";
 import { SimEngine } from "../../../src/sim/engine/sim-engine.js";
+import { setLinearSystemBackendForTests } from "../../../src/sim/engine/linear-system.js";
 
 // B2 migration: the corpus fixtures were pre-converted with devolt's own
 // breadboardToSimCircuit (one-shot, offline), so loading the *.sim.json is
@@ -88,6 +89,16 @@ function expectCaptures<T extends Record<string, unknown>>(
 }
 
 describe("optimization equivalence baselines", () => {
+  // The literals are DENSE captures. Automatic selection now sends circuits
+  // of 16+ unknowns to the sparse backend, so pin dense here; the forced
+  // sparse lane keeps asserting the same trajectories within roundoff.
+  beforeAll(() => {
+    if (!FORCED_SPARSE) setLinearSystemBackendForTests("dense");
+  });
+  afterAll(() => {
+    setLinearSystemBackendForTests(null);
+  });
+
   it("compiles the same deterministic pin-to-net mapping as the topology", () => {
     for (const circuit of [
       loadFixture("01-passive-sensor-transistor-lab.json"),
