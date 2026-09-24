@@ -7,11 +7,13 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W0 (scaffolding).** The kernel implements only a static slice —
-`ground`, `resistor` and grounded ideal `voltage_source` — so the whole
-pipeline (compile, upload, partition, solve, read back, facade, equivalence
-harness, packaging) can be proven end to end. The event kernel, rails,
-closed-form and stepped partitions arrive in W1.
+**Status: W1a (contract v2, the event kernel).** W0 proved the pipeline with a
+static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
+the event kernel and the Ben Eater path; its locked owner decisions and
+dispatch plan are in the devolt repo,
+`memory/decisions/2026-09-25-brownout-core-w1-plan.md`. The classic behaviour
+the kernel mirrors is `core/spec/w1-classic-semantics.md`, and the datasheet
+delays are `core/spec/w1-datasheet-delays.md`.
 
 ## Layout
 
@@ -41,99 +43,171 @@ npm tarball carries it under `dist/core/`.
   instruction loops. From W6 it also owns the DC operating point and
   small-signal AC, and the classic engine is deleted.
 
-## Program format, version 1
+## Program format, version 2
 
 One `Float64Array`. Every value is an f64; integers are carried as exact
-doubles (all counts and indices are far below 2^53). The TS and Rust sides
-ship in one package, so there is no cross-version compatibility: the version
-number is a sanity check, and any layout change bumps it on both sides at
-once.
+doubles (all counts, indices and 32-bit hash states are far below 2^53). The
+TS and Rust sides ship in one package, so there is no cross-version
+compatibility: v2 replaces v1 outright, and any layout change bumps the
+version on both sides at once.
 
 ```
-header   MAGIC, VERSION, nodeCount N, deviceCount D
-devices  D records, in component order (see below)
+header   MAGIC, VERSION, nodeCount N, deviceCount D,
+         optionCount O, (key, value) x O,
+         digitalSlotCount S, channelSlotCount C
+devices  D records, in component order
 trailer  MAGIC
 ```
 
-- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `1`.
-- **Nodes.** `N >= 1`. Node 0 is the datum: the net `buildNets` names `gnd`
-  when there is one, otherwise a synthetic node with no pins. Every other net
-  from `buildNets` becomes nodes `1..N-1`, in `buildNets` order. Node
-  classes (fixed, rail, free) are derived in Rust, not sent.
+- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `2`.
+- **Nodes.** As in v1: node 0 is the datum, the net `buildNets` names `gnd`
+  when there is one, otherwise a synthetic node with no pins; every other net
+  becomes nodes `1..N-1` in `buildNets` order. Node classes (fixed, rail,
+  free) are derived in Rust, never sent.
+- **Options.** `(key, value)` pairs, each key at most once:
+
+  | Key | Name | Values | Default |
+  |---|---|---|---|
+  | 1 | `INTEGRATION` | `0` backward Euler, `1` trapezoidal | `0` |
+  | 2 | `NO_SOLUTION_CACHE` | `0` / `1` (exactness switch) | `0` |
+  | 3 | `NO_RAIL_SHORTCUT` | `0` / `1` (exactness switch) | `0` |
+  | 4 | `FORCE_STEPPED` | `0` / `1` (tests only) | `0` |
+  | 5 | `AMBIENT_C` | finite °C | `25` |
+  | 6 | `FLOATING_MODEL` | `0` classic hash (the only value in W1) | `0` |
+
+- **Readout slot counts.** `S` digital slots and `C` channel slots (see
+  Readouts). The compiler assigns every slot; Rust only writes numbers.
 - **Device record.**
   ```
-  kindCode, componentIndex, pinCount, pin node x pinCount,
+  kindCode, componentIndex, pinCount, pin record x pinCount,
   paramCount, param x paramCount, blobCount, blob x blobCount
   ```
-  `componentIndex` is the index in `circuit.components`. The blob is empty in
-  W0; from W1 it carries ROM/RAM contents and IC pin maps. Components that
-  stamp nothing (`ground`) produce no record.
-- **Kind codes (v1).**
+  A **pin record** is four values: `node, flags, openHash, deadHash`.
+  - `node`: the pin's node index, `< N`.
+  - `flags`: bit 0 `OPEN` (the pin is open by classic's rule, spec §1.6: its
+    net holds only this component and no wire touches this component's pins
+    on it; the compiler computes it, G8); bit 1 `OPEN_HIGH` (the pin is in
+    classic's `IC_OPEN_HIGH_PINS`, spec §1.5). Every other bit must be 0.
+  - `openHash`: the FNV-1a-32 state (basis `0x811c9dc5`, per UTF-16 code
+    unit `h ^= unit; h = h * 0x01000193 mod 2^32`) after hashing the string
+    `${componentId}:${pinId}:`. `deadHash`: the same after
+    `${componentId}:${pinId}:undefined:`. Rust finishes classic's key by
+    hashing the bucket's decimal digits (ASCII, one unit each) onto the
+    state. The component and pin id strings never reach Rust. Both are
+    integers in `[0, 2^32)`; the compiler emits them for every pin.
+  - Pin **order** is fixed per kind in the kind table (G7): some kinds are
+    positional (`pins[0]`, `pins[1]`, as classic reads them), others list
+    pins by id in the table's order. Rust knows every pin's role from its
+    position alone.
+  - `params` and `blob` are per kind (kind table). Every param and blob value
+    is finite; a sentinel is an explicit code, never NaN. Where a kind
+    publishes digital or channel readouts, its blob starts with the index of
+    its first slot of each kind it uses.
+- **Validation.** The reader checks everything: magic, version, counts, each
+  option key known, not repeated and its value in range, every node index
+  `< N`, flags with no unknown bit, hash states integral and in range, known
+  kind codes, the exact pin, param and blob shape per kind, every param and
+  blob value finite, every slot index `< S` or `< C`, the trailer, and no
+  trailing data. Malformed is `-1`, never a panic; a well-formed but unknown
+  kind code is `-2`. Per-kind rules (for example resistor `R > 0`) live in
+  `core/src/kinds.rs`.
 
-  | Code | Kind | Pins (in order) | Params |
-  |---|---|---|---|
-  | 1 | `resistor` | `pins[0]`, `pins[1]` | `R = max(1e-3, Number(params.resistance ?? 1000))` |
-  | 2 | `voltage_source` | `pins[0]` (+), `pins[1]` (−) | `V = Number(params.voltage ?? 5)` |
+## Kind codes and records
 
-  Both mirror the classic models exactly (`devices/passives.ts`
-  `resistorModel`, `devices/sources.ts` `voltageSourceModel`, which stamps
-  `pins[0]` as + and `pins[1]` as −). A component with fewer than two pins is
-  a compile failure, not a silent skip.
+Codes are grouped in blocks by family. A kind's pin order, params and blob are
+written into this table by the orchestrator before the sub-wave that ports it
+is dispatched; a code without a record layout is reserved and rejected as
+`-2`.
 
-The reader validates everything: magic, version, counts, every node index
-`< N`, known kind codes, the exact pin and param counts per kind, every param
-finite, every resistor's `R > 0`, the trailer, and no trailing data. A
-malformed program is error `-1`, never a panic; a kind code that is a valid
-integer but names no kind is `-2`. (The compiler already clamps `R >= 1e-3`,
-so a non-positive `R` can only come from a hand-built program, not a compiled
-circuit — the reader's `R > 0` check is defense in depth, the same as its
-finiteness check. The compiler also refuses non-finite parameters before they
-reach a program, so the circuit falls back to the classic engine and the core
-never has to define NaN physics.)
+| Block | Codes |
+|---|---|
+| Passives and switches | 1 `resistor`, 3 `capacitor`, 4 `switch`, 5 `push_button`, 6 `spdt_switch`, 7 `dip_switch`, 8 `potentiometer`, 9 `trimmer`, 10 `fuse`, 11 `ldr`, 12 `thermistor` |
+| Sources | 2 `voltage_source` (kept from v1), 20 `battery_pack`, 21 `bench_psu`, 22 `clock`, 23 `clock_gen`, 24 `pulse_source`, 25 `pulse_gen` |
+| LEDs and displays | 30 `led`, 31 `rgb_led`, 32 `bicolor_led`, 33 `seg7_cc`, 34 `seg7_ca` |
+| Timers | 40 `ne555` |
+| Combinational ICs | 50 `74ls00`, 51 `74ls04`, 52 `74ls08`, 53 `74ls32`, 54 `74ls86`, 55 `74ls157`, 56 `74ls283`, 57 `74hc138`, 58 `74hc14`, 59 `74ls47`, 60 `cd4511`, 61 `74ls245` |
+| Sequential ICs | 70 `74ls161`, 71 `74ls173`, 72 `74hc74`, 73 `74hc595`, 74 `74hc165`, 75 `cd4017`, 76 `cd4060` |
+| Memories | 80 `74ls189`, 81 `28c16`, 82 `28c256` |
 
-## C ABI, version 1
+**Record layouts** (added per sub-wave):
+
+| Code | Kind | Pins, in order | Params | Blob | Added |
+|---|---|---|---|---|---|
+| 1 | `resistor` | `pins[0]`, `pins[1]` (positional) | `R = max(1e-3, Number(params.resistance ?? 1000))`, `R > 0` | empty | W0 |
+| 2 | `voltage_source` | `pins[0]` (+), `pins[1]` (−) (positional) | `V = Number(params.voltage ?? 5)` | empty | W0 |
+
+## C ABI, version 2
 
 All exports are `extern "C"` with `#[no_mangle]`. The module has **zero
 imports** and exports its `memory`, the functions below, and nothing else
 except the two inert linker globals `__heap_base` and `__data_end`, which
 rustc exports from every wasm32-unknown-unknown cdylib.
-`scripts/build-core.mjs` fails the build on any other import or export.
+`scripts/build-core.mjs` fails the build on any other import or export, so an
+export lands in its list in the same change that adds it.
 
-| Export | Signature | Meaning |
-|---|---|---|
-| `bo_abi_version` | `() -> u32` | `1`. The TS loader refuses a mismatch. |
-| `bo_alloc` | `(len_f64: u32) -> *mut f64` | Scratch f64 buffer, zeroed. |
-| `bo_free` | `(ptr: *mut f64, len_f64: u32)` | Frees a `bo_alloc` buffer. |
-| `bo_engine_create` | `() -> u32` | New engine handle; `0` is never a valid handle. Handles are never reused. |
-| `bo_engine_destroy` | `(h: u32)` | Frees the engine. Unknown handles are ignored. |
-| `bo_engine_load` | `(h: u32, ptr: *const f64, len_f64: u32) -> i32` | Load a program, derive fixed nodes, partition, solve at t = 0. `0` or an error code. |
-| `bo_engine_advance` | `(h: u32, t_end: f64) -> i32` | Advance to `t_end` (seconds, absolute). |
-| `bo_engine_time` | `(h: u32) -> f64` | Current simulation time. |
-| `bo_engine_node_count` | `(h: u32) -> u32` | `N` of the loaded program. |
-| `bo_engine_node_voltages` | `(h: u32) -> *const f64` | `N` volts, node 0 = 0. |
-| `bo_engine_device_count` | `(h: u32) -> u32` | `D` of the loaded program. |
-| `bo_engine_device_currents` | `(h: u32) -> *const f64` | `D` amps, one per device record, in record order. |
-| `bo_engine_stat` | `(h: u32, i: u32) -> f64` | Counters: `0` partitions, `1` static solves, `2` largest partition size, `3` fixed nodes. Unknown `i` gives `NaN`. |
-| `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. |
+| Export | Signature | Meaning | Since |
+|---|---|---|---|
+| `bo_abi_version` | `() -> u32` | `2`. The TS loader refuses a mismatch. | v1 |
+| `bo_alloc` / `bo_free` | `(len_f64: u32) -> *mut f64` / `(ptr, len_f64)` | Scratch f64 buffer, zeroed; freed with the same length. | v1 |
+| `bo_engine_create` / `bo_engine_destroy` | `() -> u32` / `(h)` | Handles; `0` is never valid; never reused. | v1 |
+| `bo_engine_load` | `(h, ptr: *const f64, len_f64: u32) -> i32` | Load a program, settle it (kernel semantics) at t = 0. | v1 |
+| `bo_engine_advance` | `(h, t_end: f64) -> i32` | Process every event with `t <= t_end`, then set time to `t_end`. | v1 |
+| `bo_engine_time` | `(h) -> f64` | Current simulation time. | v1 |
+| `bo_engine_node_count` / `bo_engine_node_voltages` | `(h) -> u32` / `(h) -> *const f64` | `N` volts, node 0 = 0. | v1 |
+| `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
+| `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. | v1 |
+| `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
+| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2-4 take effect at the next event; keys 1, 5 and 6 are load-time only (`-8` after load). | v2 (W1a) |
+| `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
+| `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
+| `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). | v2 (W1a) |
+| `bo_engine_trace_enable` | `(h, on: u32) -> i32` | Record every digital slot change as `(t, slot, value)`. Harness instrumentation only; W2's host traces are separate. | v2 (W1a) |
+| `bo_engine_trace_ptr` / `bo_engine_trace_len` / `bo_engine_trace_clear` | `(h) -> *const f64` / `(h) -> u32` (f64 count, a multiple of 3) / `(h)` | Read and reset the trace. | v2 (W1a) |
+| `bo_engine_set_params` | `(h, ptr: *const f64, len_f64: u32) -> i32` | `(deviceIndex, paramIndex, value)` triples for each kind's live params (owner decision 1), applied as one event at the current time with all other state kept. | v2 (W1b) |
+| `bo_engine_seed_memory` | `(h, device: u32, ptr: *const f64, len_f64: u32) -> i32` | Replace a memory device's contents (owner decision 2). | v2 (W1d) |
 
-**Error codes:** `-1` malformed program, `-2` unknown kind code, `-3`
-unsupported topology (the TS side falls back to the classic engine), `-4`
-solve failed (a zero or non-finite pivot, or a published node voltage or
-device current that came out non-finite), `-5` unknown handle or no program
-loaded, `-6` `t_end` is not finite, or is earlier than the current time.
+**Stat indices:** `0` partitions, `1` static solves, `2` largest partition,
+`3` fixed nodes, `4` events processed, `5` delta passes, `6` maximum delta
+depth, `7` solution-cache hits, `8` closed-form segments, `9` crossings,
+`10` stepped steps, `11` Newton iterations, `12` IC evaluations, `13` driver
+commits, `14` rail moves.
 
-**Memory.** Any call may grow the wasm memory, which detaches every JS view
-of `memory.buffer`. The TS glue re-derives each view from `memory.buffer`
-after every call and never caches one across calls. Pointers returned by the
-`*_voltages` / `*_currents` exports are valid until the next call on that
-engine.
+**Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
+unsupported topology (the TS side falls back to classic); `-4` solve failed
+(singular, non-finite pivot, or a non-finite published value); `-5` unknown
+handle or no program loaded; `-6` `t_end` not finite or earlier than the
+current time; `-7` delta-cycle livelock (the per-instant pass cap was
+exceeded; the host treats it as non-convergence); `-8` invalid argument (an
+unknown option key, a value out of range, a load-time option after load, a
+device or param index out of range, or a param that is not live).
+
+**Memory.** Any call may grow the wasm memory, which detaches every JS view of
+`memory.buffer`. The TS glue re-derives each view after every call and never
+caches one; every pointer is read as unsigned (`>>> 0`). Pointers returned by
+the readout exports are valid until the next call on that engine.
 
 **Traps.** The crate builds with `panic = "abort"`, so a Rust panic is a wasm
-trap (`WebAssembly.RuntimeError`). The instance may be mid-mutation after a
-trap, so the TS side treats it as poisoned: every later call throws until the
-core is re-initialised.
+trap. The TS side poisons the instance on a trap, and on any non-core error
+thrown during an ABI call (a wasm stack overflow surfaces as a JS
+`RangeError`): every later call throws until the core is re-initialised.
 
-## W0 kernel semantics
+## Readouts
+
+**Keys are built in TS; Rust publishes numbers.** The compiler emits a slot
+table alongside the program: digital slot `i` maps to a `digitalState` key
+(for example `u1/qa`, or a bare `u1` for a counter value), and channel slot
+`j` maps to `(componentId, channel)`. The facade assembles the classic-shaped
+records from it:
+- `getNetV()`: every net, plus classic's unconditional `gnd: 0`.
+- `getElementI()`: the key set classic's `_updateElementI` publishes (spec
+  §10.5), with the device current where the kind has a current model and
+  classic's `0` where it has none (`default: out[id] = 0`).
+- `digitalState`: rebuilt from the slots after every advance; a `NaN` slot is
+  an absent key, because classic rebuilds `digitalState` from scratch every
+  pass (spec §10.9 lists every kind's keys and when they appear).
+- `getElementChannelI()`: from the channel slots.
+
+## Kernel semantics: the static solve (W0)
 
 1. **Fixed nodes.** Node 0 is fixed at 0 V. A `voltage_source` with one
    terminal fixed fixes the other: `V(+) = V(−) + V`. Propagate until nothing
@@ -178,6 +252,42 @@ core is re-initialised.
    "t_end must be finite" — checked first, since a comparison against NaN is
    always false and would otherwise let it through and become the clock.
    Everything in W0 is static, so advancing only moves time.
+
+## Kernel semantics: events (W1a)
+
+1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
+   `seq` is a global insertion counter, so events at equal `t` run first in,
+   first out.
+2. **Drivers.** Every IC output is a driver: a conductance to its IC's own
+   supply pin nodes (so load current debits the rails, spec §1.7) with mode
+   `HIZ`, `HIGH` or `LOW`. A requested change goes through the inertial rules
+   of spec §2.4, as one pure function: the first observation has zero delay;
+   a glitch shorter than the delay is swallowed; a re-glitch gets a fresh due
+   time; at most one transition is in flight per pin. Each pending commit
+   carries a token; a newer request for the same driver supersedes it.
+3. **Delta cycles** (owner decision 4). At an instant `t`:
+   1. apply every due commit at `t`, in `(t, seq)` order, marking the
+      partitions they touch dirty;
+   2. re-solve the dirty partitions, then evaluate each affected reader once;
+   3. zero-delay outputs scheduled at `t` form the next delta. Repeat.
+
+   More than 1000 deltas at one instant is `-7`, never a silent exit.
+4. **Crossings.** A threshold crossing is accepted only at `t > now + 1e-15`.
+5. **Advance.** Process every event with `t <= t_end`, then set time to
+   `t_end`. Stepped partitions land exactly on `t_end` (a horizon clamp), so a
+   readout at `t_end` is a solved value, not an interpolation. Interpolated
+   acquisition is W2.
+6. **Load settling** (owner decision 8, and the W1-0 spike). Settle the
+   network to a fixed point with every register's edge history FROZEN: parts
+   drive their current state but never act on an edge or update `lastClk` or
+   `lastWE`. Then run exactly one edge pass. Classic's phantom rising edge
+   (`lastClk` seeded 0 while the clock is already HIGH) is kept; classic's
+   1 ps seed and rescue ladder are not. Re-running the edge pass on every
+   settle pass corrupted RAM at load in the spike.
+7. **Floating buckets** (owner decision 9). A floating or dead-band read uses
+   classic's key with `bucket = floor((t + 1e-12) / 0.01)` of the event time,
+   and every device that reads such a pin gets an event at each bucket
+   boundary.
 
 ## Hard-won rules for the kernel (from the prototype)
 

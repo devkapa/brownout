@@ -51,3 +51,76 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
  * in full — there is no per-device split between the two engines.
  */
 export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set();
+
+/**
+ * Kind codes for program format v2, mirroring core/src/kinds.rs and the
+ * README's "Kind codes and records" table. The orchestrator owns this table:
+ * it gains a kind's record shape below, and the README row, before the
+ * sub-wave that ports that kind is dispatched. A code without a shape is
+ * reserved; the Rust reader rejects it as -2.
+ */
+export const CORE_KIND_CODES = {
+  resistor: 1,
+  voltage_source: 2,
+  capacitor: 3,
+  switch: 4,
+  push_button: 5,
+  spdt_switch: 6,
+  dip_switch: 7,
+  potentiometer: 8,
+  trimmer: 9,
+  fuse: 10,
+  ldr: 11,
+  thermistor: 12,
+  battery_pack: 20,
+  bench_psu: 21,
+  clock: 22,
+  clock_gen: 23,
+  pulse_source: 24,
+  pulse_gen: 25,
+  led: 30,
+  rgb_led: 31,
+  bicolor_led: 32,
+  seg7_cc: 33,
+  seg7_ca: 34,
+  ne555: 40,
+  "74ls00": 50,
+  "74ls04": 51,
+  "74ls08": 52,
+  "74ls32": 53,
+  "74ls86": 54,
+  "74ls157": 55,
+  "74ls283": 56,
+  "74hc138": 57,
+  "74hc14": 58,
+  "74ls47": 59,
+  cd4511: 60,
+  "74ls245": 61,
+  "74ls161": 70,
+  "74ls173": 71,
+  "74hc74": 72,
+  "74hc595": 73,
+  "74hc165": 74,
+  cd4017: 75,
+  cd4060: 76,
+  "74ls189": 80,
+  "28c16": 81,
+  "28c256": 82,
+} as const;
+
+export type CoreKindCodeName = keyof typeof CORE_KIND_CODES;
+
+/** A kind's record shape, mirroring core/src/kinds.rs `KindShape`. */
+export interface CoreRecordShape {
+  /** Pin count, in the order the README's record-layout table gives. */
+  pins: number;
+  params: number;
+  /** Exact blob length, or a floor for variable-length contents. */
+  blob: { exact: number } | { atLeast: number };
+}
+
+/** Shapes of the kinds ported so far. Grows per sub-wave, in step with core/src/kinds.rs. */
+export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map([
+  [CORE_KIND_CODES.resistor, { pins: 2, params: 1, blob: { exact: 0 } }],
+  [CORE_KIND_CODES.voltage_source, { pins: 2, params: 1, blob: { exact: 0 } }],
+]);
