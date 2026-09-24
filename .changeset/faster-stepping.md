@@ -1,0 +1,5 @@
+---
+"brownout": minor
+---
+
+Faster transient stepping, 1.2-2.9x in de:volt's live worker on real boards (a 50-unknown clock module 2.9x, a mixed-signal lab 2.8x, a logic lab 2.2x), with the same solve counts. Most of the time was bookkeeping around the physics rather than the physics. Pin-to-node lookups no longer build a composite string key per access. Catalog inference caches each kind's discriminating keys and each component's explicit resolution. The floating-input noise is memoised per pin and 10 ms bucket, and delayed-output and failure keys per pin. State snapshots clone their maps without intermediate arrays, and `_hasFailure` returns at once when nothing has failed. These are bit-identical. The sparse linear backend now engages from 16 unknowns instead of 64: stepping real boards, sparse was never slower from 6 unknowns up and 1.1-1.9x faster from 16. Circuits with 16-63 unknowns therefore round differently (1e-14 or better on the fixtures, identical logic-edge times); a circuit whose accept/reject decision tips on roundoff can take a different, equally accurate step sequence. Circuits under 16 unknowns keep dense and their bit-identical trajectories.
