@@ -10,10 +10,12 @@
  * method, ambient temperature, and the test-only exactness switches) and the
  * readout slot tables. "Keys are built in TS; Rust publishes numbers"
  * (core/README.md, "Readouts") — `SlotAllocator` below is the machinery a
- * later kind's compiler case uses to claim a digital or channel slot; W1a's
- * only kinds (resistor, voltage_source) claim none, so both tables are empty
- * today, but the machinery itself is exercised directly by
- * compile.test.ts's synthetic slot-table tests.
+ * kind's compiler case uses to claim a digital or channel slot. W1c's 11
+ * combinational ICs are the first to claim one (one digital slot per
+ * output-capable pin — see this file's IC dispatch case, and compile/ics.ts);
+ * the channel-slot table is still empty (no kind through W1c claims one), and
+ * the machinery itself is exercised directly by compile.test.ts's synthetic
+ * slot-table tests.
  */
 
 import type { Net } from "../../sim/engine/graph.js";
@@ -29,6 +31,7 @@ import {
   PASSIVE_LIVE_PARAM_SPECS,
   type LiveParamSpec,
 } from "./passives.js";
+import { compileCombinationalIc } from "./ics.js";
 
 export { buildCoreNodes, corePinKey } from "./topology.js";
 export type { CoreNodeBuild } from "./topology.js";
@@ -152,9 +155,9 @@ export interface CompiledCircuit {
   pinNode: ReadonlyMap<string, number>;
   /** One entry per device record, in record order (== component order, skipping `ground`). */
   devices: ReadonlyArray<{ componentId: string; kind: string }>;
-  /** Digital slot `i` -> `digitalState` key. Empty until a compiled kind claims one (none in W1a). */
+  /** Digital slot `i` -> `digitalState` key. Empty unless the circuit contains a kind that claims one — W1c's combinational ICs are the first (compile/ics.ts). */
   digitalSlots: readonly DigitalSlotKey[];
-  /** Channel slot `j` -> `(componentId, channel)`. Empty until a compiled kind claims one (none in W1a). */
+  /** Channel slot `j` -> `(componentId, channel)`. Empty until a compiled kind claims one (none through W1c). */
   channelSlots: readonly ChannelSlotKey[];
   /**
    * The `getElementI()` key set, in component order, by classic's
@@ -369,6 +372,47 @@ export function compileCircuit(
           componentIndex,
           pins: result.pins,
           params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // The 11 W1c combinational ICs (README's "Kind codes and records",
+      // codes 50-59/61) share one compiler (compile/ics.ts): only the pin
+      // table and the truth table differ per kind, and both are read from
+      // classic's own tables (icPinMap, the catalog), not re-derived per
+      // case here. This dispatch's own job is just slot allocation (README's
+      // "Slot indices"): claim one digital slot per output-capable pin, IN
+      // COMPONENT ORDER (nothing else claims a digital slot in W1c, so
+      // `digitalSlots.count` right before the first allocate() call below
+      // IS this record's slotBase, and the allocations that follow are
+      // consecutive by construction).
+      case "74ls00":
+      case "74ls04":
+      case "74ls08":
+      case "74ls32":
+      case "74ls86":
+      case "74ls157":
+      case "74ls283":
+      case "74hc138":
+      case "74hc14":
+      case "74ls47":
+      case "74ls245": {
+        const result = compileCombinationalIc(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const slotBase = digitalSlots.count;
+        for (const pinId of result.outputCapablePinIds) {
+          digitalSlots.allocate(`${component.id}/${pinId}`);
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [slotBase, ...result.pinFlags],
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;

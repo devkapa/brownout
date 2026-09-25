@@ -506,3 +506,99 @@ describe("decodeProgram validation — each check the contract requires", () => 
     expect(() => decodeProgram(base.slice(0, base.length - 1))).toThrow(/truncated/);
   });
 });
+
+// ---- W1c: a digital-slot-owning kind's blob[0] + digitalSlots <= S --------
+// (core/README.md, "Slot indices" — mirrors core/src/program.rs's reader
+// check; core/compile/ics.test.ts covers the same rule end to end through a
+// real compiled IC program, so these are format.ts's own unit-level checks
+// of ProgramWriter/decodeProgram directly.)
+
+describe("blob[0] + digitalSlots <= S — a digital-slot-owning kind (74ls00: 12 logic pins, 4 output slots)", () => {
+  /** A minimal, structurally-valid 74ls00 record: 14 pins (all node 0, closed), 13 zeroed params, a blob of [slotBase, 12 zeroed pin flags]. Only `slotBase` varies between tests — the exact param/flag VALUES are format.ts's business only insofar as they're finite, which is checked elsewhere (kind-specific value rules like famFlags' range live in core/src/kinds.rs, not here). */
+  function ls00Device(slotBase: number) {
+    return {
+      kindCode: CORE_KIND_CODE["74ls00"],
+      componentIndex: 0,
+      pins: Array.from({ length: 14 }, () => pin(0)),
+      params: Array.from({ length: 13 }, () => 0),
+      blob: [slotBase, ...Array.from({ length: 12 }, () => 0)],
+    };
+  }
+
+  describe("ProgramWriter", () => {
+    it("accepts a device whose digital slot range fits exactly within the final digitalSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(ls00Device(0));
+      expect(() => writer.finish(4, 0)).not.toThrow();
+    });
+
+    it("rejects (at addDevice) a negative or non-integer blob[0] slot base", () => {
+      for (const bad of [-1, 0.5]) {
+        const writer = new ProgramWriter(1);
+        expect(() => writer.addDevice(ls00Device(bad))).toThrow(
+          /blob\[0\] \(digital slot base\) must be a non-negative integer/,
+        );
+      }
+    });
+
+    it("rejects (at finish, once S is final) a device whose digital slots run past digitalSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(ls00Device(1)); // slots [1, 5) — one past a digitalSlotCount of 4
+      expect(() => writer.finish(4, 0)).toThrow(/digital slots \[1, 5\) exceed digitalSlotCount 4/);
+    });
+
+    it("rejects two devices whose slot ranges, added in order, together exceed digitalSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(ls00Device(0)); // slots [0, 4)
+      writer.addDevice(ls00Device(4)); // slots [4, 8) — fits only if S >= 8
+      expect(() => writer.finish(4, 0)).toThrow(/digital slots \[4, 8\) exceed digitalSlotCount 4/);
+      // The same two devices DO fit a large enough S.
+      const writer2 = new ProgramWriter(1);
+      writer2.addDevice(ls00Device(0));
+      writer2.addDevice(ls00Device(4));
+      expect(() => writer2.finish(8, 0)).not.toThrow();
+    });
+  });
+
+  describe("decodeProgram", () => {
+    function programWithSlotBase(slotBase: number, digitalSlotCount: number): Float64Array {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(ls00Device(slotBase));
+      return writer.finish(digitalSlotCount, 0);
+    }
+
+    it("decodes cleanly when the slot range fits", () => {
+      const decoded = decodeProgram(programWithSlotBase(0, 4));
+      expect(decoded.devices[0]!.blob[0]).toBe(0);
+    });
+
+    it("rejects a hand-corrupted digitalSlotCount that no longer fits a device's own slot range", () => {
+      // ProgramWriter itself already refuses to produce this program (the
+      // ProgramWriter describe block above) — this proves decodeProgram, the
+      // actual authority per this file's own header comment, independently
+      // rejects a hand-built (or hand-corrupted) Float64Array making the same
+      // mistake, not just a legitimately-constructed one.
+      const program = programWithSlotBase(0, 4);
+      // With zero options, the header is exactly [MAGIC, VERSION, nodeCount=1,
+      // deviceCount=1, optionCount=0, digitalSlotCount, channelSlotCount, ...] —
+      // digitalSlotCount is index 5.
+      const corrupted = mutated(program, 5, 3);
+      expect(() => decodeProgram(corrupted)).toThrow(/digital slots \[0, 4\) exceed digitalSlotCount 3/);
+    });
+
+    it("rejects a hand-corrupted negative or fractional blob[0]", () => {
+      const program = programWithSlotBase(0, 4);
+      // 7-value header (MAGIC..channelSlotCount, indices 0-6) + kindCode +
+      // componentIndex + pinCount (3) + 14 pins x 4 values (56) + paramCount
+      // (1) + 13 params + blobCount (1) = 81: blob[0] (slotBase) itself.
+      const blobStart = 7 + 3 + 14 * 4 + 1 + 13 + 1;
+      expect(program[blobStart]).toBe(0); // sanity: this really is slotBase
+      expect(() => decodeProgram(mutated(program, blobStart, -1))).toThrow(
+        /blob\[0\] \(digital slot base\) -1, expected a non-negative integer/,
+      );
+      expect(() => decodeProgram(mutated(program, blobStart, 0.5))).toThrow(
+        /blob\[0\] \(digital slot base\) 0\.5, expected a non-negative integer/,
+      );
+    });
+  });
+});

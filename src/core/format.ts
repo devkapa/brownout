@@ -189,6 +189,15 @@ export class ProgramWriter {
   private readonly slotCountsIndex: number;
   private deviceCount = 0;
   private finished = false;
+  // Every device whose shape declares `digitalSlots` (W1c's combinational
+  // ICs, so far): its blob[0] (slot base) and slot count, checked against
+  // the final digitalSlotCount in finish() — the same `blob[0] + count <= S`
+  // rule core/src/program.rs's reader enforces (core/README.md, "Slot
+  // indices"). Deferred to finish() rather than checked in addDevice()
+  // because S itself is a finish()-time placeholder until every device (and
+  // therefore every slot allocation) has been added — see this class's own
+  // doc comment on the two-pass deviceCount/slotCounts patch.
+  private readonly pendingDigitalSlotChecks: { slotBase: number; count: number }[] = [];
 
   constructor(nodeCount: number, options: readonly ProgramOption[] = []) {
     if (!Number.isInteger(nodeCount) || nodeCount < 1) {
@@ -250,6 +259,19 @@ export class ProgramWriter {
         `ProgramWriter.addDevice: kind code ${device.kindCode} takes a blob of ${expected} value(s), got ${blob.length}`,
       );
     }
+    if (shape.digitalSlots) {
+      // blob[0] itself must be finite (checked below with every other blob
+      // value); the integer/non-negative shape is specific to it being a
+      // slot index, so it's checked here rather than folded into that
+      // generic finite loop.
+      const slotBase = blob[0]!;
+      if (!Number.isInteger(slotBase) || slotBase < 0) {
+        throw new Error(
+          `ProgramWriter.addDevice: kind code ${device.kindCode}'s blob[0] (digital slot base) must be a non-negative integer, got ${slotBase}`,
+        );
+      }
+      this.pendingDigitalSlotChecks.push({ slotBase, count: shape.digitalSlots });
+    }
     if (!Number.isInteger(device.componentIndex) || device.componentIndex < 0) {
       throw new Error(
         `ProgramWriter.addDevice: componentIndex must be a non-negative integer, got ${device.componentIndex}`,
@@ -306,6 +328,18 @@ export class ProgramWriter {
         throw new Error(`ProgramWriter.finish: ${label} must be a non-negative integer, got ${count}`);
       }
     }
+    // Now that S is final, check every digital-slot-owning device added so
+    // far against it (core/README.md's "Slot indices": `blob[0] + count <=
+    // S`) — the belt-and-braces mirror of core/src/program.rs's reader
+    // check, on the producer side.
+    for (const { slotBase, count } of this.pendingDigitalSlotChecks) {
+      if (slotBase + count > digitalSlotCount) {
+        throw new Error(
+          `ProgramWriter.finish: a device's digital slots [${slotBase}, ${slotBase + count}) exceed digitalSlotCount ${digitalSlotCount}`,
+        );
+      }
+    }
+
     this.finished = true;
     this.values[this.deviceCountIndex] = this.deviceCount;
     this.values[this.slotCountsIndex] = digitalSlotCount;
@@ -509,6 +543,25 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
         throw new Error(`decodeProgram: device[${d}].blob[${b}] must be finite, got ${value}`);
       }
       blob.push(value);
+    }
+
+    // A kind that publishes digital readouts (W1c's combinational ICs, so
+    // far) carries its first slot in blob[0]; every slot it owns must exist
+    // (core/README.md, "Slot indices" — mirrors core/src/program.rs's
+    // reader check). `digitalSlotCount` (S) was already read above, before
+    // this devices loop.
+    if (shape.digitalSlots) {
+      const slotBase = blob[0]!;
+      if (!Number.isInteger(slotBase) || slotBase < 0) {
+        throw new Error(
+          `decodeProgram: device[${d}] (${kindName}) has blob[0] (digital slot base) ${slotBase}, expected a non-negative integer`,
+        );
+      }
+      if (slotBase + shape.digitalSlots > digitalSlotCount) {
+        throw new Error(
+          `decodeProgram: device[${d}] (${kindName})'s digital slots [${slotBase}, ${slotBase + shape.digitalSlots}) exceed digitalSlotCount ${digitalSlotCount}`,
+        );
+      }
     }
 
     devices.push({ kindCode, componentIndex, pins, params, blob });

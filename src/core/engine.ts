@@ -565,10 +565,13 @@ export class CoreEngine implements EngineReadout {
 
   /**
    * Rebuilt from the digital slots after every load()/advance()
-   * (readout.ts's `buildDigitalState`). W1a implements only ground/resistor/
-   * voltage_source (core/README.md) — none publishes a digital slot yet, so
-   * this is always `{}` today, but it is the SAME slot-backed record a later
-   * kind's digital output will appear in, not a hardcoded empty return.
+   * (readout.ts's `buildDigitalState`). W1c's 11 combinational ICs
+   * (core/README.md) are the first kind whose compiled program claims a
+   * digital slot (compile/ics.ts) — a circuit with none of them still
+   * publishes `{}` here, via the same slot-backed machinery, not a
+   * hardcoded empty return. The Rust kernel itself does not publish IC
+   * slot VALUES until W1c step 2 lands, so every slot currently reads
+   * `NaN` (an absent key, per readout.ts's `buildDigitalState`) until then.
    */
   get digitalState(): Record<string, number> {
     this._requireLoaded();

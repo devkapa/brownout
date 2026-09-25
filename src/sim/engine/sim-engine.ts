@@ -1193,7 +1193,9 @@ function modelParam(
   return exactPart.default_params?.[key] ?? fallback;
 }
 
-const FLOATING_INPUT_FUNCTIONS = new Set<string>([
+// Exported for compile/ics.ts (core/README.md's W1c "IC blob" FLOATING_INPUT
+// rule — reused, never re-derived).
+export const FLOATING_INPUT_FUNCTIONS = new Set<string>([
   "input", "clock", "reset", "enable", "load", "io", "tri_state",
 ]);
 
@@ -1338,7 +1340,9 @@ export function defaultIcState(kind: string): Record<string, number> {
   }
 }
 
-function specsForComponent(comp: SimComponent): ElectricalSpecs | undefined {
+// Exported for compile/ics.ts (core/README.md's W1c IC params — reused,
+// never re-derived).
+export function specsForComponent(comp: SimComponent): ElectricalSpecs | undefined {
   return partFor(comp)?.electrical_specs ?? undefined;
 }
 
@@ -1350,7 +1354,9 @@ export function analogIcQuiescentCurrent(comp: SimComponent): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function supplyPinsForComponent(comp: SimComponent): { vccPin: string | null; gndPin: string | null } {
+// Exported for compile/ics.ts (core/README.md's W1c IC pin table — reused,
+// never re-derived).
+export function supplyPinsForComponent(comp: SimComponent): { vccPin: string | null; gndPin: string | null } {
   const part = partFor(comp);
   const vccPin = part?.pin_layout.find((p) => p.function === "vcc" || p.id === "vcc")?.id
     ?? (comp.kind === "ne555" ? "8" : null);
@@ -1376,7 +1382,9 @@ export function thresholdsFor(specs: ElectricalSpecs | undefined, vSupply: numbe
   return { vil: Math.max(0.8, 0.3 * vSupply), vih: Math.max(2.0, 0.6 * vSupply) };
 }
 
-function propagationDelayForComponent(comp: SimComponent): number {
+// Exported for compile/ics.ts (core/README.md's W1c IC param 12, `delay` —
+// reused, never re-derived).
+export function propagationDelayForComponent(comp: SimComponent): number {
   // Prefer the catalog-declared value so individual parts can override the
   // family default without touching engine code.  Fall back to prefix map
   // for parts that carry no prop_delay_ns (all legacy parts as of this wave).
