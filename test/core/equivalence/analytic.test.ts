@@ -11,6 +11,7 @@ import { HeadlessRunner } from "../../../src/host/headless.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import {
   checkAnalyticCrossing,
+  fixedPairCapacitorCurrentAt,
   ne555AstablePeriod,
   ne555MonostablePulseWidth,
   rcCrossingTime,
@@ -824,9 +825,31 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — core s
     expect(result2.status, result2.reason).toBe("pass");
   });
 
-  it("15-capacitor-both-ends-fixed: the core declines the topology (both terminals are already-fixed nodes — not a partition W1b step 2 solves)", () => {
+  it("15-capacitor-both-ends-fixed: the core loads the topology (rule 2a — both terminals fixed is no longer a decline) and publishes the exact dV/esr/leakage answer at load, matching the analytic reference exactly (classic's own load-instant artifact recorded for the report, not asserted)", () => {
     const circuit = loadFixtureCircuit("15-capacitor-both-ends-fixed");
-    const engine = new CoreEngine();
-    expect(() => engine.load(circuit, WITH_CAPACITOR)).toThrow(/topology/);
+    // dV = 5V - 3V = 2V; this fixture's capacitor declares no catalogUid, so
+    // esr/leakage both resolve to their "none" sentinel (0) — the series
+    // current is identically 0 the way `esrOhms === 0` always gives
+    // (fixedPairCapacitorCurrentAt's own doc comment), and so is the
+    // leakage term (`leakageOhms === 0`). This is the simplest possible
+    // instance of rule 2a: the whole point of this test is that the core
+    // now ACCEPTS the topology at all and reports the mathematically exact
+    // (here: exactly zero) answer where classic's own load-seed formula
+    // (`C*dV/1e-12`, core/README.md's documented known divergence) does not.
+    const analyticI = fixedPairCapacitorCurrentAt(2, 1e-6, 0, 0, 0);
+    expect(analyticI).toBe(0);
+
+    const core = loadCore(circuit);
+    const coreI = core.getElementI().c1!;
+
+    const classicSamples = collectClassicSamples(circuit, [0]);
+    const classicI = classicSamples[0]!.elementI.c1!;
+
+    const result = checkAnalyticCrossing({ coreValue: coreI, analyticValue: analyticI, classicValue: classicI, absTol: 1e-9, relTol: 1e-9 });
+    expect(result.status, result.reason).toBe("pass");
+    // Sanity: classic's own known-divergence artifact is genuinely present
+    // in this run (C*dV/1e-12 = 1e-6*2/1e-12 = 2e6A) — otherwise this test
+    // would not actually be proving anything about the artifact it names.
+    expect(classicI).toBeCloseTo(2_000_000, 0);
   });
 });

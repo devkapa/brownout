@@ -47,7 +47,7 @@ import { CoreUnsupportedError } from "../../../src/core/errors.js";
 import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles } from "./align.js";
-import { checkAnalyticCrossing, rcLadderVoltagesAt, rcTerminalThevenin, rcVoltageAt } from "./analytic.js";
+import { checkAnalyticCrossing, fixedPairCapacitorCurrentAt, rcLadderVoltagesAt, rcTerminalThevenin, rcVoltageAt } from "./analytic.js";
 import { compareSamples, compareStimuliSamples } from "./compare.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
@@ -590,7 +590,7 @@ function buildAnalyticTargets(circuit: SimCircuit, model: AnalyticFixtureModel):
     for (const componentId of model.currentComponents ?? []) {
       elementI.set(componentId, (t) => (model.sourceVolts - voltageAt(t)) / model.seriesOhms);
     }
-  } else {
+  } else if (model.kind === "rc-ladder") {
     const ladderParams = { sourceVolts: model.sourceVolts, r1Ohms: model.r1Ohms, c1F: model.c1F, r2Ohms: model.r2Ohms, c2F: model.c2F };
     const v1At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v1;
     const v2At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v2;
@@ -600,6 +600,15 @@ function buildAnalyticTargets(circuit: SimCircuit, model: AnalyticFixtureModel):
     if (netId2) netV.set(netId2, v2At);
     if (model.r1Component) elementI.set(model.r1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms);
     if (model.r2Component) elementI.set(model.r2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
+  } else {
+    // "fixed-pair-capacitor" (rule 2a): no free node at all, so only
+    // elementI targets exist — see AnalyticFixedPairCapacitorModel's own doc
+    // comment (types.ts) for the `sign`/`constantAmps` derivation.
+    const iCapAt = (t: number) => fixedPairCapacitorCurrentAt(model.dV, model.capacitanceF, model.esrOhms, model.leakageOhms, t);
+    elementI.set(model.capacitorComponent, iCapAt);
+    for (const src of model.fixingSources) {
+      elementI.set(src.component, (t) => src.sign * iCapAt(t) + src.constantAmps);
+    }
   }
 
   return { netV, elementI };

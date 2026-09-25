@@ -121,6 +121,46 @@ export interface AnalyticRcLadderModel {
 }
 
 /**
+ * Rule 2a (core/README.md, "Kernel semantics: partitions and dynamic
+ * solves"): a capacitor straight across two FIXED nodes (an ordinary
+ * decoupling capacitor on an ideal supply). Unlike `AnalyticRcModel`/
+ * `AnalyticRcLadderModel`, there is no free node at all here — the ENTIRE
+ * closed form is `analytic.ts`'s `fixedPairCapacitorCurrentAt`, a pure
+ * function of `dV` (constant forever: no fixed-node voltage is ever live in
+ * W1b) and time, so this model only ever judges `elementI` mismatches, never
+ * `netV`.
+ *
+ * `fixingSources` lets the SAME mismatch on each ideal source that fixes one
+ * of the capacitor's own two nodes also be judged analytically
+ * (core/README.md rule 2a's own last bullet: "that current enters the KCL of
+ * the sources fixing its nodes"). Each entry's `sign`/`constantAmps` are this
+ * circuit's own KCL derivation baked in by the fixture author (mirroring
+ * `PartitionedSolver::recompute_source_currents`'s children-before-parents
+ * walk — core/README.md's W0 point 5 — for this SPECIFIC topology), exactly
+ * as fixture-specific as `AnalyticRcModel.currentComponents`'s own `(V -
+ * node) / seriesOhms` formula is, not a general network solver: `component`'s
+ * current is `sign * fixedPairCapacitorCurrentAt(...) + constantAmps`, where
+ * `constantAmps` is that node's own universal-node-shunt contribution
+ * (`NODE_RSHUNT_G * fixedNodeVolts`, core/README.md's W0 point 2 — included
+ * in every KCL sum, fixed nodes included) with whatever sign this source's
+ * own `i_s = ∓(shunt*V + capacitor contribution)` derivation gives it.
+ */
+export interface AnalyticFixedPairCapacitorModel {
+  readonly kind: "fixed-pair-capacitor";
+  readonly dV: number;
+  readonly capacitanceF: number;
+  readonly esrOhms: number;
+  /** `0` means none — the record-layout table's own sentinel, NOT `AnalyticRcModel.leakageOhms`'s different Infinity-when-absent/node-shunt-combined convention (see `fixedPairCapacitorCurrentAt`'s doc comment for why the two fields differ). */
+  readonly leakageOhms: number;
+  readonly capacitorComponent: string;
+  readonly fixingSources: readonly {
+    readonly component: string;
+    readonly sign: 1 | -1;
+    readonly constantAmps: number;
+  }[];
+}
+
+/**
  * Gate 2e / decision 3 (the W1 plan): a fixture's closed-form analytic
  * reference for ONE dynamic node (or ladder pair) and, optionally, the
  * resistor currents Ohm's law derives from it. `run-entry.ts`'s plain
@@ -133,7 +173,7 @@ export interface AnalyticRcLadderModel {
  * produced the raw mismatch. Every mismatch on any OTHER net/element is
  * completely unaffected by this field and still fails the entry as before.
  */
-export type AnalyticFixtureModel = AnalyticRcModel | AnalyticRcLadderModel;
+export type AnalyticFixtureModel = AnalyticRcModel | AnalyticRcLadderModel | AnalyticFixedPairCapacitorModel;
 
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */

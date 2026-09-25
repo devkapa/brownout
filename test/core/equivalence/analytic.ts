@@ -134,6 +134,39 @@ export function rcTerminalThevenin(
   return { tau, vAsymptote: vTh, v0AtUncharged };
 }
 
+/**
+ * Rule 2a (core/README.md, "Kernel semantics: partitions and dynamic
+ * solves"): a capacitor across two FIXED nodes, `dV = V(pins[0]) -
+ * V(pins[1])` volts apart FOREVER — no fixed-node voltage is ever live in
+ * W1b (a `voltage_source` has no live params), so unlike every other
+ * closed-form reference in this file there is no re-aiming, no crossing, and
+ * no dependence on anything but `t` itself. Mirrors `core/src/solve/mod.rs`'s
+ * `FixedPairCapacitor::current_at` exactly (that Rust function's own doc
+ * comment explains why the series term is computed directly in this form,
+ * rather than through an intermediate `vc`, to avoid catastrophic
+ * cancellation once `vc` has relaxed close to `dV`):
+ * - `esrOhms > 0`: series current `(dV/esrOhms) * exp(-t / (esrOhms *
+ *   capacitanceF))`, from `vc = 0` at `t = 0` (the load instant — `t` here
+ *   is already relative to `START_TIME`, matching `rcVoltageAt`'s own `t`
+ *   convention).
+ * - `esrOhms === 0`: `vc = dV` from the load instant on, so the series
+ *   current is exactly `0`.
+ * Either way, `leakageOhms`'s current (`dV/leakageOhms`, `0` when
+ * `leakageOhms` is `0` — the record-layout table's OWN sentinel for "none",
+ * NOT `rcTerminalThevenin`'s different Infinity-when-absent convention,
+ * since this quantity is never combined with the universal node shunt: `dV`
+ * is exact regardless of it, both terminals being fixed nodes the shunt
+ * cannot move) is constant for as long as `dV` is — forever.
+ */
+export function fixedPairCapacitorCurrentAt(dV: number, capacitanceF: number, esrOhms: number, leakageOhms: number, t: number): number {
+  if (!(capacitanceF > 0)) throw new Error(`fixedPairCapacitorCurrentAt: capacitanceF must be > 0, got ${String(capacitanceF)}.`);
+  if (esrOhms < 0) throw new Error(`fixedPairCapacitorCurrentAt: esrOhms must be >= 0, got ${String(esrOhms)}.`);
+  if (leakageOhms < 0) throw new Error(`fixedPairCapacitorCurrentAt: leakageOhms must be >= 0, got ${String(leakageOhms)}.`);
+  const series = esrOhms > 0 ? (dV / esrOhms) * Math.exp(-t / (esrOhms * capacitanceF)) : 0;
+  const leak = leakageOhms > 0 ? dV / leakageOhms : 0;
+  return series + leak;
+}
+
 export interface Ne555AstableParams {
   readonly r1Ohms: number;
   readonly r2Ohms: number;

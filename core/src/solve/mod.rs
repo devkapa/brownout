@@ -699,7 +699,12 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 //   duplicated per sub-solver — that `closed_form`/`stepped` are simply
 //   handed by reference at stamp time, and `StaticPartitionSolver`'s OWN
 //   separate copy (for a `Static`-owned switch) is kept in sync by
-//   [`PartitionSolver::apply_params`]'s dispatcher.
+//   [`PartitionSolver::apply_params`]'s dispatcher;
+// - a capacitor across two FIXED, distinct nodes (core/README.md's rule 2a)
+//   — `partition::build` excludes it from every partition (it belongs to
+//   none), so it is never handed to `closed_form`/`stepped` either;
+//   [`FixedPairCapacitor`]/[`Self::publish_fixed_pair_capacitors`] are its
+//   only home.
 
 /// Which sub-solver owns a device (by its free pin's partition, or
 /// `Static` for a device with no free pin at all — the same "belongs to no
@@ -709,6 +714,54 @@ enum Owner {
     Static,
     ClosedForm(usize),
     Stepped(usize),
+}
+
+/// A capacitor across two FIXED, distinct nodes (core/README.md's rule 2a —
+/// the ordinary decoupling capacitor straight across an ideal supply).
+/// Belongs to no partition at all (`partition::build` excludes it from every
+/// `capacitor_count`), so `compile_dyn_shape` never touches it either: no
+/// free pin means it never "touches" any partition by that function's own
+/// `touches_partition` test. Unlike a `ClosedForm` partition's `Segment`,
+/// this device needs no re-aiming, no LU solve, and no watched-crossing
+/// machinery at all — its terminal voltage `dV = V(pins[0]) - V(pins[1])` is
+/// fixed FOREVER (a `voltage_source` has no live params, `kinds.rs`'s
+/// `live_params` table), so its whole trajectory is one pure, closed-form
+/// function of absolute time; `current_at` recomputes it fresh on every
+/// call rather than carrying any committed `vc`/anchor state of its own.
+/// That also means nothing here needs its own entry in
+/// [`PartitionSolver::dynamic_snapshot`]/`dynamic_restore`: its only mutable
+/// trace is the published `currents[device_index]` entry, already covered by
+/// the plain `voltages`/`currents` snapshot every `PartitionSolver` provides
+/// (contract point 7 — "rolls back with the instant").
+#[derive(Debug, Clone, Copy)]
+struct FixedPairCapacitor {
+    device_index: usize,
+    /// `V(pins[0]) - V(pins[1])`, constant forever (both nodes are fixed).
+    d_v: f64,
+    c: f64,
+    esr: f64,
+    /// `1/leakage`, or `0.0` for "none" — same convention as `DynCapacitor::leak_g`.
+    leak_g: f64,
+}
+
+impl FixedPairCapacitor {
+    /// Rule 2a's exact trajectory: from `vc = 0` at `START_TIME`, `vc(t) =
+    /// dV + (0 - dV) * exp(-(t - START_TIME) / (esr*C))` for `esr > 0`, so
+    /// the series current `(dV - vc)/esr` reduces to `(dV/esr) *
+    /// exp(-(t-START_TIME)/(esr*C))` — computed directly in that form
+    /// (rather than via an intermediate `vc`) to avoid the catastrophic
+    /// cancellation `dV - vc` would suffer once `vc` has relaxed close to
+    /// `dV`. `esr == 0`: `vc = dV` from the load instant on, so the series
+    /// current is exactly `0` (the contract's own words — not `dV*exp(..)/0`,
+    /// which would be `NaN`/`inf`). Either way, the leakage term `dV/leakage`
+    /// (`0` when there is none) is constant for as long as `dV` is,
+    /// i.e. forever. Current flows `pins[0] -> pins[1]`, the same convention
+    /// `DynCapacitor`'s published current and `PartitionedSolver::cap_devices`'s
+    /// KCL folding already use.
+    fn current_at(&self, now: f64, start_time: f64) -> f64 {
+        let series = if self.esr > 0.0 { (self.d_v / self.esr) * (-(now - start_time) / (self.esr * self.c)).exp() } else { 0.0 };
+        series + self.leak_g * self.d_v
+    }
 }
 
 /// A resistor or switch-family device, program-wide, kept for the
@@ -761,8 +814,22 @@ pub struct PartitionedSolver {
     live_params: HashMap<usize, Vec<f64>>,
     /// Every capacitor device, program-wide: `(device_index, pins[0] node,
     /// pins[1] node)`, for folding its ALREADY-PUBLISHED current into
-    /// [`Self::recompute_source_currents`]'s `leaving` array.
+    /// [`Self::recompute_source_currents`]'s `leaving` array. Includes a
+    /// [`FixedPairCapacitor`] too (its `device_index` appears in both lists)
+    /// — this one only cares about the node ids for the KCL fold, not which
+    /// list computed the current sitting in `currents[device_index]`.
     cap_devices: Vec<(usize, usize, usize)>,
+    /// Every capacitor across two fixed, distinct nodes (rule 2a) —
+    /// `partition::build` excludes these from every partition, so this is
+    /// the only place anything ever publishes their current.
+    fixed_pair_capacitors: Vec<FixedPairCapacitor>,
+    /// `program.options.start_time` (owner decision 8/option key 7): every
+    /// [`FixedPairCapacitor`] anchors its `vc = 0` here, exactly like a
+    /// closed-form/stepped partition's capacitor does (core/README.md point
+    /// 5), so it is kept alongside them rather than threaded through as a
+    /// parameter from every one of [`Self::publish_fixed_pair_capacitors`]'s
+    /// three call sites.
+    start_time: f64,
     /// Crossing/step events a dynamic partition asked to be scheduled since
     /// the last [`PartitionSolver::take_scheduled`] drain.
     pending_schedule: Vec<(f64, EventKind)>,
@@ -803,6 +870,7 @@ impl PartitionedSolver {
         let mut live_params = HashMap::new();
         let mut kcl_devices = Vec::new();
         let mut cap_devices = Vec::new();
+        let mut fixed_pair_capacitors = Vec::new();
 
         for (d, device) in program.devices.iter().enumerate() {
             match device.kind {
@@ -828,8 +896,28 @@ impl PartitionedSolver {
                     // partition's capacitor, and `static_part.rs` never
                     // stamps a capacitor at all), so it has no business in
                     // this KCL device list either.
-                    if device.pins[0].node != device.pins[1].node {
-                        cap_devices.push((d, device.pins[0].node, device.pins[1].node));
+                    let (u, w) = (device.pins[0].node, device.pins[1].node);
+                    if u == w {
+                        continue;
+                    }
+                    cap_devices.push((d, u, w));
+                    if local_index[u].is_none() && local_index[w].is_none() {
+                        // Rule 2a: both terminals are fixed, distinct nodes
+                        // (`partition::build` already excluded this device
+                        // from every partition's capacitor count on exactly
+                        // this test) — a decoupling capacitor straight
+                        // across an ideal supply. `fixed[..]` is guaranteed
+                        // `Some` for a node `local_index` reports as fixed
+                        // (`PartitionBuild`'s own doc comment on the two
+                        // fields).
+                        let leak = device.params[2];
+                        fixed_pair_capacitors.push(FixedPairCapacitor {
+                            device_index: d,
+                            d_v: fixed[u].expect("a fixed node always carries a voltage") - fixed[w].expect("a fixed node always carries a voltage"),
+                            c: device.params[0],
+                            esr: device.params[1],
+                            leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
+                        });
                     }
                 }
                 _ => {}
@@ -858,6 +946,8 @@ impl PartitionedSolver {
             switches,
             live_params,
             cap_devices,
+            fixed_pair_capacitors,
+            start_time: program.options.start_time,
             pending_schedule: Vec::new(),
             largest_partition,
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
@@ -935,6 +1025,26 @@ impl PartitionedSolver {
             if kd.owner == Owner::Static {
                 self.currents[kd.device_index] = self.static_solver.currents()[kd.device_index];
             }
+        }
+    }
+
+    /// Publishes every [`FixedPairCapacitor`]'s current at `now`
+    /// (core/README.md's rule 2a: "publishes... at every advance, horizon
+    /// clamp and set_params instant"). Called unconditionally from all three
+    /// of those points ([`PartitionSolver::resolve_dirty`],
+    /// `handle_dynamic_event`, `sync_dynamic_to`) — mirroring
+    /// [`Self::recompute_source_currents`]'s own "recomputed unconditionally"
+    /// contract just below, and for the same reason: this device belongs to
+    /// no partition, so nothing ever marks it "dirty" the way a driver commit
+    /// marks a real partition; recomputing it fresh from `now` on every call
+    /// is what stands in for that. MUST run before
+    /// `recompute_source_currents`, which folds this method's freshly
+    /// published `currents[device_index]` into the KCL of whichever source(s)
+    /// fixed this capacitor's two nodes (`self.cap_devices` already lists it,
+    /// core/README.md rule 2a's own last bullet).
+    fn publish_fixed_pair_capacitors(&mut self, now: f64) {
+        for cap in &self.fixed_pair_capacitors {
+            self.currents[cap.device_index] = cap.current_at(now, self.start_time);
         }
     }
 
@@ -1027,6 +1137,7 @@ impl PartitionSolver for PartitionedSolver {
         self.copy_in_static();
         readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
         readers.extend(self.stepped.resolve_dirty(&st_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents();
         self.drain_scheduled();
         self.check_finite()?;
@@ -1174,6 +1285,7 @@ impl PartitionSolver for PartitionedSolver {
         } else {
             self.stepped.handle_step(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
         };
+        self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents();
         self.drain_scheduled();
         self.check_finite()?;
@@ -1183,6 +1295,7 @@ impl PartitionSolver for PartitionedSolver {
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
         let readers = self.stepped.sync_to(t_end, &self.live_params, &mut self.voltages, &mut self.currents)?;
+        self.publish_fixed_pair_capacitors(t_end);
         self.recompute_source_currents();
         self.drain_scheduled();
         self.check_finite()?;
@@ -1642,6 +1755,155 @@ mod partitioned_solver_tests {
         kernel.apply_params_as_event(&[(1, 0, 0.0)]).unwrap();
         let next = kernel.next_event_time();
         assert_eq!(next, control_next, "a crossing scheduled during the failed attempt must not survive to distort a later, otherwise-identical re-aim's own schedule");
+    }
+
+    // ---- rule 2a: a capacitor across two fixed nodes -----------------------
+    //
+    // core/README.md's rule 2a: a decoupling capacitor straight across an
+    // ideal supply belongs to no partition (both its terminals are fixed,
+    // distinct nodes) but is not `-3` — it evolves on its own from the fixed
+    // `dV` between its terminals. `fixed_pair_program` below is exactly that
+    // shape: `node1` fixed at `v0` by `source`, `node0` = gnd, `capacitor`
+    // straight across them.
+
+    fn fixed_pair_program(v0: f64, c: f64, esr: f64, leak: f64) -> Program {
+        program(2, vec![source(0, 1, 0, v0), capacitor(1, 1, 0, c, esr, leak)])
+    }
+
+    #[test]
+    fn fixed_pair_capacitor_esr_matches_the_exact_exponential_within_1e9_relative() {
+        let (v0, esr, c) = (5.0, 0.5, 1e-6);
+        let p = fixed_pair_program(v0, c, esr, 0.0);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+
+        let expected_at_load = v0 / esr; // dV/esr, exactly (the contract's own "5/0.5=10").
+        let at_load = solver.currents()[1];
+        assert!((at_load - expected_at_load).abs() / expected_at_load.abs() < 1e-9, "at load: got {at_load} expected {expected_at_load}");
+
+        let tau = esr * c; // 0.5 us.
+        for &t in &[1e-6, 5e-6, 20e-6] {
+            solver.sync_dynamic_to(t).unwrap();
+            let got = solver.currents()[1];
+            let expected = (v0 / esr) * (-t / tau).exp();
+            let rel = (got - expected).abs() / expected.abs();
+            assert!(rel < 1e-9, "t={t}: got {got} expected {expected} rel {rel}");
+        }
+    }
+
+    #[test]
+    fn fixed_pair_capacitor_esr_zero_gives_zero_series_current_from_load_on() {
+        // esr=0: vc=dV from the load instant on (core/README.md rule 2a), so
+        // the series current (dV-vc)/esr is exactly 0 — not the classic
+        // known-divergence artifacts (`C*dV/1e-12` at load, `C*dV/h` on the
+        // first step) the contract explicitly calls out as classic's OWN
+        // step-size quirk, never the core's.
+        let p = fixed_pair_program(5.0, 1e-6, 0.0, 0.0);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+        assert_eq!(solver.currents()[1], 0.0, "esr=0: series current must be exactly 0 at load");
+
+        solver.sync_dynamic_to(1e-3).unwrap();
+        assert_eq!(solver.currents()[1], 0.0, "esr=0: series current must stay exactly 0 (vc=dV) at any later time");
+    }
+
+    #[test]
+    fn fixed_pair_capacitor_publishes_series_plus_leakage_current() {
+        // Matches the contract's own worked example: 5V/1uF/esr=0.5,
+        // leakage=1e6 -> steady c1 = 5e-6 A once the series term decays away.
+        let (v0, esr, c, leak) = (5.0, 0.5, 1e-6, 1e6);
+        let p = fixed_pair_program(v0, c, esr, leak);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+
+        let expected_leak = v0 / leak;
+        let expected_series_at_load = v0 / esr;
+        let got = solver.currents()[1];
+        assert!((got - (expected_series_at_load + expected_leak)).abs() < 1e-9, "at load: got {got} expected series {expected_series_at_load} + leak {expected_leak}");
+
+        solver.sync_dynamic_to(1e-2).unwrap(); // ~2e4 time constants: series fully decayed.
+        let steady = solver.currents()[1];
+        assert!((steady - expected_leak).abs() < 1e-9, "steady state should be exactly the leakage term, got {steady} expected {expected_leak}");
+    }
+
+    #[test]
+    fn fixed_pair_capacitors_current_enters_the_fixing_sources_kcl() {
+        let (v0, esr, c) = (5.0, 0.5, 1e-6);
+        let p = fixed_pair_program(v0, c, esr, 0.0);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+
+        // node1 (the source's + terminal) also carries the universal node
+        // shunt (W0 point 2), included in every KCL sum — `recompute_source_
+        // currents`'s own `leaving` walk folds both this and the capacitor's
+        // published current together before deriving the source's current.
+        let cap_i = solver.currents()[1];
+        let shunt = static_part::NODE_RSHUNT_G;
+        let expected_source_i = -(shunt * v0 + cap_i);
+        assert!(
+            (solver.currents()[0] - expected_source_i).abs() < 1e-9,
+            "source current {} does not fold in the capacitor's {cap_i} (expected {expected_source_i})",
+            solver.currents()[0]
+        );
+    }
+
+    #[test]
+    fn fixed_pair_capacitor_start_time_5_matches_start_time_0() {
+        let (v0, esr, c) = (5.0, 0.5, 1e-6);
+        let build_at = |start_time: f64| {
+            let mut options = Options::default();
+            options.start_time = start_time;
+            let p = Program { node_count: 2, options, digital_slot_count: 0, channel_slot_count: 0, devices: vec![source(0, 1, 0, v0), capacitor(1, 1, 0, c, esr, 0.0)] };
+            let mut solver = PartitionedSolver::build(&p).unwrap();
+            solver.resolve_dirty(&[], start_time, &[]).unwrap();
+            solver
+        };
+        let mut s0 = build_at(0.0);
+        let mut s5 = build_at(5.0);
+        assert_eq!(
+            s0.currents()[1].to_bits(),
+            s5.currents()[1].to_bits(),
+            "the load-instant current must match bit-for-bit regardless of START_TIME — both anchor vc=0 at their own START_TIME"
+        );
+
+        // And the trajectory itself tracks the same shifted exponential
+        // later, not merely at the load instant — a RELATIVE, not bit-exact,
+        // comparison: `now - start_time` for START_TIME=5 is not bit-
+        // identical to the same delta computed from START_TIME=0, an
+        // ordinary floating-point subtraction artifact, not a bug.
+        s0.sync_dynamic_to(5e-6).unwrap();
+        s5.sync_dynamic_to(5.0 + 5e-6).unwrap();
+        let rel = (s5.currents()[1] - s0.currents()[1]).abs() / s0.currents()[1].abs();
+        assert!(rel < 1e-9, "5us after their own START_TIME: START_TIME=0 got {} START_TIME=5 got {} rel {rel}", s0.currents()[1], s5.currents()[1]);
+    }
+
+    #[test]
+    fn a_fixed_pair_capacitors_current_rolls_back_with_the_instant() {
+        // Rule 2a's last bullet ("it rolls back with the rest of the
+        // instant") — this device carries no `dynamic_snapshot` state of its
+        // own (`FixedPairCapacitor`'s doc comment: it is a pure function of
+        // `now`), so its only mutable trace is `currents[device_index]`,
+        // already covered by the plain snapshot/restore `Kernel::advance`
+        // wraps every instant in. Proven directly against that same pair of
+        // calls, exactly as `kernel.rs`'s `advance` uses them.
+        let (v0, esr, c) = (5.0, 0.5, 1e-6);
+        let p = fixed_pair_program(v0, c, esr, 0.0);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+        let at_load = solver.currents()[1];
+        assert!((at_load - v0 / esr).abs() < 1e-9);
+
+        let snapshot = solver.snapshot();
+        solver.sync_dynamic_to(1e-5).unwrap(); // ~20 time constants later: fully decayed.
+        let decayed = solver.currents()[1];
+        assert!(decayed.abs() < 1e-6, "expected the series current to have decayed to ~0 by 1e-5s, got {decayed}");
+
+        solver.restore(snapshot);
+        assert_eq!(
+            solver.currents()[1].to_bits(),
+            at_load.to_bits(),
+            "a rollback must restore the fixed-pair capacitor's published current to its pre-attempt value, not leave the decayed one in place"
+        );
     }
 }
 

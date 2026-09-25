@@ -331,6 +331,23 @@ records from it:
 2. **Inert capacitor.** A capacitor whose two pins are on the same node
    stamps nothing, does not count toward its partition's classification, and
    publishes `0`, as classic does (its companion stamps cancel).
+2a. **Capacitor across two fixed nodes** (a decoupling capacitor on an
+   ideal supply; distinct nodes, so not rule 2). It belongs to no partition
+   and is not `-3`: its terminal voltage `dV = V(pins[0]) - V(pins[1])` is
+   fixed, so it evolves on its own, exactly.
+   - `esr > 0`: `vc(t) = dV + (vc(t0) - dV) * exp(-(t - t0) / (esr * C))`
+     from `vc = 0` at `START_TIME`, and the series current is
+     `(dV - vc) / esr`.
+   - `esr = 0`: `vc = dV` from the load instant on, and the series current
+     is 0.
+   - It publishes the series current plus the leakage `dV / leakage` (0 when
+     `leakage` is 0, meaning none), `pins[0]` to `pins[1]`, and that current
+     enters the KCL of the sources that fix its nodes (W0 point 5).
+   - Known divergence: classic reports its load seed's `C * dV / 1e-12` at
+     load and `C * dV / h` on its first step when `esr = 0`. Both are
+     artifacts of its step size; the core reports the exact value.
+   - It rolls back with the rest of the instant (rule 7). No fixed-node
+     voltage is live in W1b, so nothing re-aims it after load yet.
 3. **Classification** (decision 14). A partition with no counted capacitor
    is static. One with exactly one is closed-form. One with two or more is
    stepped. `FORCE_STEPPED` (load-time only) makes every closed-form

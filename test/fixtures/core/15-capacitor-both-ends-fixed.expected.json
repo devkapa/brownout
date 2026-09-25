@@ -1,1 +1,15 @@
-{ "status": "core-declined", "reasonPrefix": "topology:" }
+{
+  "status": "pass",
+  "analytic": {
+    "kind": "fixed-pair-capacitor",
+    "dV": 2,
+    "capacitanceF": 0.000001,
+    "esrOhms": 0,
+    "leakageOhms": 0,
+    "capacitorComponent": "c1",
+    "fixingSources": [
+      { "component": "vsrc1", "sign": -1, "constantAmps": -0.000000000005 },
+      { "component": "vsrc2", "sign": 1, "constantAmps": -0.000000000003 }
+    ]
+  }
+}

@@ -153,15 +153,17 @@ fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
 /// (this module's doc comment explains why the whole device, not contact by
 /// contact — a switch-family contact can run through a fixed pin), then
 /// classifies each resulting partition (Decision 14, `FORCE_STEPPED` applied
-/// here) and rejects a program no partition can ever own — a capacitor with
-/// BOTH terminals fixed (so it belongs to no partition at all: not a
-/// resistive network `solve/static_part.rs` can solve, and not a free-node
-/// dynamical system `solve/closed_form.rs`/`solve/stepped.rs` integrate
-/// either) — as `ERR_UNSUPPORTED_TOPOLOGY` (-3), exactly the code the
-/// contract already uses for "the TS side falls back to classic". A
-/// self-shorted capacitor (both pins the SAME node, free or fixed — contract
-/// point 2) is neither of those: it is simply excluded below, before this
-/// rejection could ever see it.
+/// here). A capacitor with BOTH terminals fixed belongs to no partition
+/// either — not a resistive network `solve/static_part.rs` can solve, and
+/// not a free-node dynamical system `solve/closed_form.rs`/`solve/stepped.rs`
+/// integrate — but, unlike a loop of ideal sources, this is NOT
+/// `ERR_UNSUPPORTED_TOPOLOGY` (-3): core/README.md's rule 2a (a decoupling
+/// capacitor straight across an ideal supply) gives it an exact closed form
+/// of its own, `solve::mod`'s `PartitionedSolver` owns it directly (see that
+/// module's `FixedPairCapacitor`), and this function simply excludes it from
+/// every partition's `capacitor_count` below, the same way a self-shorted
+/// capacitor (both pins the SAME node, free or fixed — contract point 2) is
+/// excluded.
 pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
     let (fixed, resolved) = derive_fixed_nodes(program, n)?;
@@ -234,19 +236,22 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             // this node's partition classification (an otherwise-Static
             // node must not be pulled into ClosedForm/Stepped by a capacitor
             // that never actually contributes to the matrix), nor can it
-            // ever hit the "both terminals fixed" rejection below — that
-            // rejection is for a capacitor with no free terminal AT ALL,
-            // not one whose single shared terminal happens to be fixed.
+            // ever be the DISTINCT-fixed-nodes case just below — that one is
+            // for a capacitor with no free terminal AT ALL, not one whose
+            // single shared terminal happens to be fixed.
             continue;
         }
         match (local_index[u], local_index[w]) {
             (Some((p, _)), _) | (_, Some((p, _))) => capacitor_count[p] += 1,
-            (None, None) => {
-                return Err(BoError::unsupported_topology(format!(
-                    "capacitor (component {}): both terminals are fixed nodes — a capacitor needs at least one free terminal to belong to a partition",
-                    device.component_index
-                )));
-            }
+            // Rule 2a: both terminals are FIXED, DISTINCT nodes (a
+            // decoupling capacitor straight across an ideal supply — not
+            // rule 2's self-shorted case, already handled above). It
+            // belongs to no partition and is not `ERR_UNSUPPORTED_TOPOLOGY`:
+            // its terminal voltage `dV` never moves (no fixed-node voltage
+            // is live in W1b), so it evolves on its own, exactly.
+            // `solve::mod::PartitionedSolver` is the only place that ever
+            // looks at this device again.
+            (None, None) => {}
         }
     }
 
