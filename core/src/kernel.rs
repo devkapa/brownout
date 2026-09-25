@@ -26,7 +26,7 @@
 use std::collections::BTreeSet;
 
 use crate::drivers::Driver;
-use crate::events::{DeviceId, DriverId, EventHeap, EventKind, Mode, PartitionId, Version};
+use crate::events::{DeviceId, DriverId, EventHeap, EventKind, Mode, PartitionId, Token, Version};
 use crate::solve::PartitionSolver;
 
 /// The per-instant delta-pass cap (contract point 3: "More than 1000 deltas
@@ -126,16 +126,50 @@ pub enum DriverRequest {
 /// `evaluate` with `false` for every settle pass before the first `true`
 /// pass, and with `true` for every call after that, including every
 /// ordinary delta during `advance`.
+///
+/// `voltages` is the solver's currently-published node-voltage array
+/// (`solve::PartitionSolver::voltages`, W1c contract point 4: "an IC reads
+/// its supply nodes and every logic pin's node"), handed straight through so
+/// an implementation needs no back-channel of its own to the solver just to
+/// read a pin.
 pub trait DeviceEvaluator {
-    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool) -> Vec<DriverRequest>;
+    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest>;
+
+    /// An owned copy of every piece of state this evaluator would need to
+    /// undo a failed instant (core/README.md, "A failed advance") — Schmitt
+    /// per-pin hysteresis state, register contents, anything else an
+    /// evaluation mutates in place. `Box<dyn Any>`, exactly like
+    /// [`solve::PartitionSolver::dynamic_snapshot`], for the same reason:
+    /// each evaluator's own state has its own shape, and only the concrete
+    /// implementation that produced the box ever downcasts it back. Default
+    /// `Box::new(())`: an evaluator with no mutable state of its own (every
+    /// one through W1b, `engine.rs`'s `NoDevices` included) has nothing to
+    /// roll back.
+    fn snapshot(&self) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+
+    /// Restores exactly what a prior [`Self::snapshot`] call captured.
+    /// Default a no-op, paired with the default snapshot above.
+    fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        let _ = snapshot;
+    }
 }
 
 /// So `Kernel<_, Box<dyn DeviceEvaluator>>` satisfies the trait bound
 /// directly — see `solve::PartitionSolver`'s matching impl for why
 /// `engine.rs` needs this.
 impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
-    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool) -> Vec<DriverRequest> {
-        (**self).evaluate(reader, now, acting_on_edges)
+    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
+        (**self).evaluate(reader, now, acting_on_edges, voltages)
+    }
+
+    fn snapshot(&self) -> Box<dyn std::any::Any> {
+        (**self).snapshot()
+    }
+
+    fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        (**self).restore(snapshot)
     }
 }
 
@@ -160,11 +194,29 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// pending token, no partition) because partition membership is a
     /// property of current topology, owned by whatever assigns partitions
     /// (W1b's `partition.rs`), not an intrinsic fact about a driver.
-    driver_partition: Vec<PartitionId>,
+    /// `None` for a driver whose own node is fixed (W1c contract point 4's
+    /// "a driver whose node is fixed belongs to no partition"): it has
+    /// nothing for a partition re-solve to do, so a commit against it never
+    /// dirties anything here — its electrical contribution reaches the
+    /// published state purely through the solver's own KCL fold
+    /// (`solve::PartitionedSolver::recompute_source_currents`), not through
+    /// [`solve::PartitionSolver::resolve_dirty`].
+    driver_partition: Vec<Option<PartitionId>>,
     time: f64,
     solver: S,
     evaluator: E,
     stats: KernelStats,
+    /// A `Commit` popped for a driver whose IC is currently unpowered (W1c
+    /// contract point 9, owner decision 8/Q-O4): held here instead of
+    /// applied, so the driver's committed level and any in-flight transition
+    /// stay exactly as they were while the outage lasts. Retried onto the
+    /// heap, at the current time, after every re-solve
+    /// ([`Self::retry_held_commits`]) once [`solve::PartitionSolver::ic_powered`]
+    /// reports the owning IC powered again — the ordinary stale-token check
+    /// on the next pop is what makes a commit superseded WHILE held (a fresh
+    /// request bumped the driver's token in the meantime) drop silently
+    /// instead of resurrecting a stale level.
+    held_commits: Vec<(DriverId, Mode, Token)>,
 }
 
 impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
@@ -177,6 +229,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             solver,
             evaluator,
             stats: KernelStats::default(),
+            held_commits: Vec::new(),
         }
     }
 
@@ -251,10 +304,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // already having fired once under an older version).
                 EventKind::Crossing { partition, version } => self.solver.is_current(partition, true, version),
                 EventKind::Step { partition, version } => self.solver.is_current(partition, false, version),
-                // Nothing in W1a-W1b schedules a `Timer` yet (W1c's floating
-                // buckets); treat it as live rather than guess at a
-                // validation rule with no producer to test it against.
+                // Nothing in W1a-W1b schedules a `Timer` yet; treat it as
+                // live rather than guess at a validation rule with no
+                // producer to test it against.
                 EventKind::Timer { .. } => true,
+                // A `Bucket` is never stale by construction (events.rs's own
+                // doc comment on the variant: the solver deduplicates so at
+                // most one is ever pending) -- always live.
+                EventKind::Bucket => true,
             };
             if live {
                 let t = ev.time;
@@ -274,8 +331,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// Registers a new driver as belonging to `partition`, returning its id.
     /// Topology assignment (which nodes, which partition) is the caller's
     /// job; the kernel only needs the partition id to mark dirty when this
-    /// driver later commits a change.
-    pub fn add_driver(&mut self, driver: Driver, partition: PartitionId) -> DriverId {
+    /// driver later commits a change. `partition` is `None` for a driver
+    /// whose own node is fixed (`solve::PartitionSolver::partition_of_node`
+    /// reports it so — W1c contract point 4): such a driver still commits
+    /// and stamps into the solver's KCL, it simply never dirties a partition
+    /// re-solve of its own.
+    pub fn add_driver(&mut self, driver: Driver, partition: Option<PartitionId>) -> DriverId {
         let id = DriverId(self.drivers.len() as u32);
         self.drivers.push(driver);
         self.driver_partition.push(partition);
@@ -336,7 +397,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // change, so it must not force a re-solve of anything).
                 let was_committed = self.drivers[idx].committed().is_some();
                 self.drivers[idx].reset();
-                was_committed.then_some(self.driver_partition[idx])
+                if was_committed { self.driver_partition[idx] } else { None }
             }
         }
     }
@@ -374,8 +435,28 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             match ev.kind {
                 EventKind::Commit { driver, mode, token } => {
                     let idx = driver.0 as usize;
-                    if self.drivers[idx].apply_commit(mode, token) {
-                        dirty.insert(self.driver_partition[idx]);
+                    // A stale token (superseded/cancelled since this event
+                    // was scheduled) is checked FIRST, before ever consulting
+                    // power state: a commit that no longer means anything
+                    // must drop silently exactly as it always has, never sit
+                    // in `held_commits` forever waiting for a power state
+                    // that was never going to make it live again.
+                    if self.drivers[idx].token() != token {
+                        // Stale: dropped, same as `Driver::apply_commit`
+                        // would report (mirrored here, not delegated to it,
+                        // because that call also clears `pending` on an
+                        // Unchanged match -- a distinction that does not
+                        // apply to a token mismatch either way).
+                    } else if self.drivers[idx].device != usize::MAX && !self.solver.ic_powered(self.drivers[idx].device) {
+                        // W1c contract point 9: held, not applied. The
+                        // driver's committed level and in-flight transition
+                        // stay exactly as they are; `Self::retry_held_commits`
+                        // re-queues this once the IC is powered again.
+                        self.held_commits.push((driver, mode, token));
+                    } else if self.drivers[idx].apply_commit(mode, token) {
+                        if let Some(p) = self.driver_partition[idx] {
+                            dirty.insert(p);
+                        }
                         changed += 1;
                     }
                 }
@@ -392,9 +473,39 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                     }
                 }
                 EventKind::Timer { .. } => {}
+                EventKind::Bucket => {
+                    let (dirty_partitions, readers) = self.solver.bucket_boundary(self.time);
+                    dirty.extend(dirty_partitions);
+                    directly_affected.extend(readers);
+                }
             }
         }
         Ok((dirty, directly_affected, popped, changed))
+    }
+
+    /// Re-queues every held commit (W1c contract point 9) whose owning IC
+    /// `solve::PartitionSolver::ic_powered` now reports powered again, at
+    /// `self.time`, so it becomes due and is applied by the very next delta
+    /// pass's [`Self::apply_due_events`] -- including its ordinary
+    /// stale-token check, which is what lets a commit superseded WHILE held
+    /// drop silently instead of resurrecting a stale level. Called after
+    /// every re-solve, both from [`Self::run_deltas`] and
+    /// [`Self::run_settle_pass`], since a hold can only end as a RESULT of a
+    /// re-solve publishing a new supply voltage.
+    fn retry_held_commits(&mut self) {
+        if self.held_commits.is_empty() {
+            return;
+        }
+        let mut still_held = Vec::new();
+        for (driver, mode, token) in self.held_commits.drain(..) {
+            let device = self.drivers[driver.0 as usize].device;
+            if device != usize::MAX && self.solver.ic_powered(device) {
+                self.heap.push(self.time, EventKind::Commit { driver, mode, token });
+            } else {
+                still_held.push((driver, mode, token));
+            }
+        }
+        self.held_commits = still_held;
     }
 
     /// Pushes every `Crossing`/`Step` a dynamic partition asked to be
@@ -471,12 +582,19 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 affected.extend(self.solver.resolve_dirty(&dirty, self.time, &self.drivers).map_err(KernelError::SolveFailed)?);
             }
             self.drain_scheduled();
+            // W1c contract point 9: a hold can only end as a result of the
+            // re-solve just above publishing a fresh supply voltage, so this
+            // runs right after it, every pass, regardless of whether `dirty`
+            // was empty this particular pass.
+            self.retry_held_commits();
 
             // Phase 3: this instant is quiet once nothing was affected and
             // nothing else is due at it (a re-solve could in principle
             // schedule something at exactly `self.time` once a real solver
             // exists; this is checked, not assumed, the same way pec3.mjs's
-            // `advance` does).
+            // `advance` does). A held commit just retried by the call above
+            // lands back on the heap at exactly `self.time`, so this check
+            // sees it too: "held commits ... apply in the next delta."
             if affected.is_empty() && self.heap.peek_time() > self.time {
                 settled = true;
                 break;
@@ -484,7 +602,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
             // Phase 4: evaluate each affected reader exactly once.
             for reader in affected {
-                let requests = self.evaluator.evaluate(reader, self.time, true);
+                let requests = self.evaluator.evaluate(reader, self.time, true, self.solver.voltages());
                 for req in requests {
                     if let Some(p) = self.apply_request(req, self.time, None) {
                         carried_dirty.insert(p);
@@ -531,6 +649,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             let drivers_snapshot = self.drivers.clone();
             let solver_snapshot = self.solver.snapshot();
             let dynamic_snapshot = self.solver.dynamic_snapshot();
+            let held_commits_snapshot = self.held_commits.clone();
+            let evaluator_snapshot = self.evaluator.snapshot();
 
             self.time = t;
             if let Err(e) = self.run_deltas(BTreeSet::new(), true) {
@@ -539,6 +659,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.drivers = drivers_snapshot;
                 self.solver.restore(solver_snapshot);
                 self.solver.dynamic_restore(dynamic_snapshot);
+                self.held_commits = held_commits_snapshot;
+                self.evaluator.restore(evaluator_snapshot);
                 return Err(e);
             }
         }
@@ -558,6 +680,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let drivers_snapshot = self.drivers.clone();
         let solver_snapshot = self.solver.snapshot();
         let dynamic_snapshot = self.solver.dynamic_snapshot();
+        let held_commits_snapshot = self.held_commits.clone();
+        let evaluator_snapshot = self.evaluator.snapshot();
 
         self.time = t_end;
         match self.solver.sync_dynamic_to(t_end) {
@@ -579,6 +703,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.drivers = drivers_snapshot;
                 self.solver.restore(solver_snapshot);
                 self.solver.dynamic_restore(dynamic_snapshot);
+                self.held_commits = held_commits_snapshot;
+                self.evaluator.restore(evaluator_snapshot);
                 Err(KernelError::SolveFailed(e))
             }
         }
@@ -615,6 +741,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let drivers_snapshot = self.drivers.clone();
         let solver_snapshot = self.solver.snapshot();
         let dynamic_snapshot = self.solver.dynamic_snapshot();
+        let held_commits_snapshot = self.held_commits.clone();
+        let evaluator_snapshot = self.evaluator.snapshot();
         let old_values: Vec<(usize, usize, f64)> = triples
             .iter()
             .map(|&(d, p, _)| (d, p, self.solver.param_value(d, p).expect("validate_params must run and succeed before apply_params_as_event")))
@@ -643,6 +771,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             self.drivers = drivers_snapshot;
             self.solver.restore(solver_snapshot);
             self.solver.dynamic_restore(dynamic_snapshot);
+            self.held_commits = held_commits_snapshot;
+            self.evaluator.restore(evaluator_snapshot);
             self.solver.apply_params(&old_values);
             return Err(e);
         }
@@ -682,7 +812,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // mistaken for a fixed point).
         let mut reset_dirty = BTreeSet::new();
         for &reader in all_readers {
-            let requests = self.evaluator.evaluate(reader, self.time, acting_on_edges);
+            let requests = self.evaluator.evaluate(reader, self.time, acting_on_edges, self.solver.voltages());
             for req in requests {
                 if let Some(p) = self.apply_request(req, self.time, Some(0.0)) {
                     reset_dirty.insert(p);
@@ -718,6 +848,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 .map_err(KernelError::SolveFailed)?;
         }
         self.drain_scheduled();
+        // W1c contract point 9, mirroring `run_deltas`'s own call: a hold
+        // can only end as a result of the resolve just above.
+        self.retry_held_commits();
         Ok(changed)
     }
 
@@ -783,7 +916,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
         let mut edge_pass_dirty = BTreeSet::new();
         for &reader in all_readers {
-            let requests = self.evaluator.evaluate(reader, now, true);
+            let requests = self.evaluator.evaluate(reader, now, true, self.solver.voltages());
             for req in requests {
                 if let Some(p) = self.apply_request(req, now, None) {
                     edge_pass_dirty.insert(p);
@@ -832,7 +965,7 @@ mod tests {
 
     struct NoOpEvaluator;
     impl DeviceEvaluator for NoOpEvaluator {
-        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
             Vec::new()
         }
     }
@@ -865,7 +998,7 @@ mod tests {
         }
 
         let mut k = Kernel::new(RecordingSolver { seen: Vec::new() }, NoOpEvaluator);
-        let d0 = k.add_driver(driver(1), PartitionId(7));
+        let d0 = k.add_driver(driver(1), Some(PartitionId(7)));
         k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 5.0 }, 0.0, None);
 
         k.advance(5.0).unwrap();
@@ -911,15 +1044,15 @@ mod tests {
             calls: Vec<(DeviceId, bool)>,
         }
         impl DeviceEvaluator for CountingEvaluator {
-            fn evaluate(&mut self, reader: DeviceId, _now: f64, acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, reader: DeviceId, _now: f64, acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 self.calls.push((reader, acting_on_edges));
                 Vec::new()
             }
         }
 
         let mut k = Kernel::new(DuplicatingSolver, CountingEvaluator { calls: Vec::new() });
-        let d0 = k.add_driver(driver(1), PartitionId(0));
-        let d1 = k.add_driver(driver(2), PartitionId(1));
+        let d0 = k.add_driver(driver(1), Some(PartitionId(0)));
+        let d1 = k.add_driver(driver(2), Some(PartitionId(1)));
         // Both commits become due at the same instant, so phase 1 of one
         // delta pass marks both partitions dirty in a single batch.
         k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 5.0 }, 0.0, None);
@@ -958,7 +1091,7 @@ mod tests {
             calls: Vec<(DeviceId, f64, bool)>,
         }
         impl DeviceEvaluator for ChainEvaluator {
-            fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 self.calls.push((reader, now, acting_on_edges));
                 let next = reader.0 as usize + 1;
                 if next < self.drivers.len() {
@@ -970,9 +1103,9 @@ mod tests {
         }
 
         let mut k = Kernel::new(ChainSolver, ChainEvaluator { drivers: [DriverId(0), DriverId(0), DriverId(0)], calls: Vec::new() });
-        let d0 = k.add_driver(driver(1), PartitionId(0));
-        let d1 = k.add_driver(driver(2), PartitionId(1));
-        let d2 = k.add_driver(driver(3), PartitionId(2));
+        let d0 = k.add_driver(driver(1), Some(PartitionId(0)));
+        let d1 = k.add_driver(driver(2), Some(PartitionId(1)));
+        let d2 = k.add_driver(driver(3), Some(PartitionId(2)));
         k.evaluator.drivers = [d0, d1, d2];
         // Kick off the chain: driver 0 commits at t = 0.
         k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 0.0 }, 0.0, None);
@@ -1011,7 +1144,7 @@ mod tests {
             next: Mode,
         }
         impl DeviceEvaluator for OscillatingEvaluator {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
                 vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
@@ -1024,7 +1157,7 @@ mod tests {
         // it will oscillate) before the kernel that will assign that id.
         let d0 = DriverId(0);
         let mut k = Kernel::new(AlwaysAffects(DeviceId(0)), OscillatingEvaluator { driver: d0, next: High });
-        assert_eq!(k.add_driver(driver(1), PartitionId(0)), d0);
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
         k.apply_request(DriverRequest::Level { driver: d0, level: Low, delay: 0.0 }, 0.0, None);
 
         let err = k.advance(0.0).unwrap_err();
@@ -1081,7 +1214,7 @@ mod tests {
             reader1_calls: u32,
         }
         impl DeviceEvaluator for Evaluator {
-            fn evaluate(&mut self, reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 match reader.0 {
                     0 => {
                         if self.reset_sent {
@@ -1101,8 +1234,8 @@ mod tests {
         }
 
         let mut k = Kernel::new(RecordingSolver { seen: Vec::new() }, Evaluator { bus: DriverId(0), reset_sent: false, reader1_calls: 0 });
-        let bus = k.add_driver(driver(1), PartitionId(1));
-        let enable = k.add_driver(driver(2), PartitionId(0));
+        let bus = k.add_driver(driver(1), Some(PartitionId(1)));
+        let enable = k.add_driver(driver(2), Some(PartitionId(0)));
         k.evaluator.bus = bus;
 
         // The bus is committed HIGH well before the reset -- and its own
@@ -1167,7 +1300,7 @@ mod tests {
             calls: u32,
         }
         impl DeviceEvaluator for CommitThenReset {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 self.calls += 1;
                 match self.calls {
                     1 => vec![DriverRequest::Level { driver: self.driver, level: High, delay: 0.0 }],
@@ -1179,7 +1312,7 @@ mod tests {
 
         let d0 = DriverId(0);
         let mut k = Kernel::new(RecordingSolver { seen: Vec::new() }, CommitThenReset { driver: d0, calls: 0 });
-        assert_eq!(k.add_driver(driver(1), PartitionId(3)), d0);
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(3))), d0);
 
         k.settle(0.0, &[PartitionId(3)], &[DeviceId(0)]).unwrap();
 
@@ -1207,7 +1340,7 @@ mod tests {
             edges: u32,
         }
         impl DeviceEvaluator for EdgeCountingRegister {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let clk_high = true;
                 if acting_on_edges {
                     if !self.last_clk && clk_high {
@@ -1265,7 +1398,7 @@ mod tests {
             next: Mode,
         }
         impl DeviceEvaluator for OscillatingEvaluator {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
                 // The requested delay does not matter: settle forces zero
@@ -1276,7 +1409,7 @@ mod tests {
 
         let d0 = DriverId(0);
         let mut k = Kernel::new(NoOpSolver, OscillatingEvaluator { driver: d0, next: High });
-        assert_eq!(k.add_driver(driver(1), PartitionId(0)), d0);
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
 
         let err = k.settle(0.0, &[], &[DeviceId(0)]).unwrap_err();
         assert_eq!(err, KernelError::Livelock { at: 0.0 });
@@ -1373,7 +1506,7 @@ mod tests {
             writes: u32,
         }
         impl DeviceEvaluator for HazardEvaluator {
-            fn evaluate(&mut self, reader: DeviceId, _now: f64, acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, reader: DeviceId, _now: f64, acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 match reader.0 {
                     REG => {
                         // CLK tied HIGH, `last_clk` defaults to 0 (classic's
@@ -1427,9 +1560,9 @@ mod tests {
             HazardSolver { shadow: Rc::clone(&shadow), q: DriverId(0), n: DriverId(1), we: DriverId(2) },
             HazardEvaluator { shadow: Rc::clone(&shadow), q: DriverId(0), n: DriverId(1), we: DriverId(2), reg_fired: false, last_we: true, writes: 0 },
         );
-        let q = k.add_driver(driver(1), PartitionId(0));
-        let n = k.add_driver(driver(2), PartitionId(1));
-        let we = k.add_driver(driver(3), PartitionId(2));
+        let q = k.add_driver(driver(1), Some(PartitionId(0)));
+        let n = k.add_driver(driver(2), Some(PartitionId(1)));
+        let we = k.add_driver(driver(3), Some(PartitionId(2)));
         assert_eq!((q, n, we), (DriverId(0), DriverId(1), DriverId(2)));
 
         k.settle(0.0, &[PartitionId(0), PartitionId(1), PartitionId(2)], &[DeviceId(REG), DeviceId(INV), DeviceId(NAND), DeviceId(RAM)]).unwrap();
@@ -1479,7 +1612,7 @@ mod tests {
         // dead slot as the next pending event (core/README.md: "Time of the
         // earliest pending event, +Infinity when none").
         let mut k = Kernel::new(NoOpSolver, NoOpEvaluator);
-        let d0 = k.add_driver(driver(1), PartitionId(0));
+        let d0 = k.add_driver(driver(1), Some(PartitionId(0)));
 
         // First observation: committed LOW at t = 0.
         k.request_driver(d0, Low, 0.0, 0.0);
@@ -1513,8 +1646,8 @@ mod tests {
         // event still sitting behind it, and must not disturb its own FIFO
         // position among any other event at that same time.
         let mut k = Kernel::new(NoOpSolver, NoOpEvaluator);
-        let stale = k.add_driver(driver(1), PartitionId(0));
-        let live = k.add_driver(driver(2), PartitionId(1));
+        let stale = k.add_driver(driver(1), Some(PartitionId(0)));
+        let live = k.add_driver(driver(2), Some(PartitionId(1)));
 
         k.request_driver(stale, Low, 0.0, 0.0);
         k.request_driver(live, Low, 0.0, 0.0);
@@ -1578,7 +1711,7 @@ mod tests {
             next: Mode,
         }
         impl DeviceEvaluator for OscillatingEvaluator {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
                 vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
@@ -1587,7 +1720,7 @@ mod tests {
 
         let d0 = DriverId(0);
         let mut k = Kernel::new(RecordingSolver { voltages: vec![-1.0] }, OscillatingEvaluator { driver: d0, next: High });
-        assert_eq!(k.add_driver(driver(1), PartitionId(0)), d0);
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
 
         // First instant settles normally: one commit to HIGH at t = 5.0.
         k.request_driver(d0, High, 5.0, 0.0);

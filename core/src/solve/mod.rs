@@ -23,12 +23,16 @@ pub mod newton;
 pub mod static_part;
 pub mod stepped;
 
+#[cfg(test)]
+mod ic_tests;
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::devices;
+use crate::digital;
 use crate::drivers::Driver;
 use crate::error::BoError;
-use crate::events::{DeviceId, EventKind, PartitionId, Version};
+use crate::events::{DeviceId, EventKind, Mode, PartitionId, Version};
 use crate::kinds;
 use crate::partition::{self, PartitionKind};
 use crate::program::Program;
@@ -290,6 +294,59 @@ pub trait PartitionSolver {
         let _ = t_end;
         Ok(Vec::new())
     }
+
+    // ---- W1c step 2: the digital core's solver-side hooks -----------------
+    //
+    // Every method below is default-provided, matching the pattern above: a
+    // solver with no notion of an IC (every implementor before this step)
+    // needs no changes to keep satisfying this trait.
+
+    /// Which partition `node` belongs to, or `None` when it names no free
+    /// node this solver tracks a partition for at all — a fixed node
+    /// (contract point 4: "a driver whose node is fixed belongs to no
+    /// partition"), or an out-of-range one. Used to assign a newly-created
+    /// [`crate::drivers::Driver`] its `Kernel::add_driver` partition (`None`
+    /// there is exactly this method's `None`, threaded straight through).
+    /// Default `None`: a solver with no partition concept of its own (every
+    /// `#[cfg(test)]` mock in `kernel.rs`) answers every node this way.
+    fn partition_of_node(&self, node: usize) -> Option<PartitionId> {
+        let _ = node;
+        None
+    }
+
+    /// Whether the IC at device index `device` is currently powered
+    /// (`digital::power::ic_power(..).powered`), read from the latest
+    /// PUBLISHED voltages — the kernel's power-loss hold (contract point 9)
+    /// calls this to decide whether a due `Commit` for one of that IC's
+    /// drivers applies now or is held. Default `true`: "true for a
+    /// non-IC" — every driver through W1b has `Driver::device ==
+    /// usize::MAX`, for which the kernel never even calls this, but a
+    /// solver with no IC concept at all (every mock) answering `true`
+    /// unconditionally is the correct, permissive default regardless.
+    fn ic_powered(&self, device: usize) -> bool {
+        let _ = device;
+        true
+    }
+
+    /// The floating-bucket boundary handler (W1c contract point 5/6):
+    /// called by `Kernel::apply_due_events` when a popped `EventKind::Bucket`
+    /// fires. Returns `(partitions to mark dirty, readers to evaluate this
+    /// delta)` — every partition holding an `OPEN` `FLOATING_INPUT` pin of a
+    /// powered IC (its pull target may have flipped, so it needs an ordinary
+    /// re-solve through `PartitionSolver::resolve_dirty`, folded into THIS
+    /// delta's dirty set) and every IC that either holds such a pin or reads
+    /// a pin in its dead band (added directly to the readers this delta
+    /// evaluates, exactly like a `Crossing`/`Step`'s own directly-affected
+    /// readers — its verdict can change from the bucket alone, with no
+    /// voltage having moved for `resolve_dirty` to notice on its own).
+    /// Default `(Vec::new(), Vec::new())`: a solver with no IC never
+    /// schedules a `Bucket` in the first place (see
+    /// [`Self::take_scheduled`]'s own doc comment), so this is unreachable
+    /// for one in practice.
+    fn bucket_boundary(&mut self, now: f64) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        let _ = now;
+        (Vec::new(), Vec::new())
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -372,6 +429,18 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
         (**self).sync_dynamic_to(t_end)
+    }
+
+    fn partition_of_node(&self, node: usize) -> Option<PartitionId> {
+        (**self).partition_of_node(node)
+    }
+
+    fn ic_powered(&self, device: usize) -> bool {
+        (**self).ic_powered(device)
+    }
+
+    fn bucket_boundary(&mut self, now: f64) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        (**self).bucket_boundary(now)
     }
 }
 
@@ -674,6 +743,96 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 }
 
 // ============================================================================
+// W1c step 2: shared IC-stamping helpers.
+// ============================================================================
+//
+// Every combinational IC lives in a `Static` partition this step (a `-3` at
+// load otherwise — `partition.rs`'s own doc comment), so both
+// `static_part::StaticPartitionSolver` (the actual per-partition LU stamp)
+// and `PartitionedSolver::recompute_source_currents` (the global KCL fold,
+// needed even for a driver/pull pin whose OWN node happens to be fixed —
+// contract point 4) need to answer the same two questions: "where does this
+// committed driver currently stamp, and at what conductance" and "where does
+// this open floating-input pin's pull currently stamp, and at what
+// conductance". Defined once, here, so neither module re-derives
+// `digital::power`/`digital::floating`'s rules a second time.
+
+/// Every combinational IC in `program`, by device index
+/// (`digital::IcRecord::from_device` is safe unconditionally — see
+/// `partition.rs`'s identical call for why).
+pub(crate) fn collect_ics(program: &Program) -> Vec<(usize, digital::IcRecord)> {
+    program
+        .devices
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| digital::is_combinational_ic(d.kind))
+        .map(|(i, d)| (i, digital::IcRecord::from_device(d)))
+        .collect()
+}
+
+/// Where a committed IC output driver currently stamps, and at what
+/// conductance (contract point 8): the pin's own node to `ic.vcc.node` at
+/// `1/R_out` while committed HIGH (unless `OPEN_COLLECTOR`, which is
+/// released instead — stamps nothing), or to `ic.gnd.node` while committed
+/// LOW. `None` while unpowered, HIZ, uncommitted, or a released
+/// `OPEN_COLLECTOR` HIGH.
+pub(crate) fn ic_driver_target(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> Option<(usize, f64)> {
+    if !power.powered {
+        return None;
+    }
+    match driver.committed() {
+        Some(Mode::High) if !driver.open_collector => Some((ic.vcc.node, 1.0 / power.r_out)),
+        Some(Mode::Low) => Some((ic.gnd.node, 1.0 / power.r_out)),
+        _ => None,
+    }
+}
+
+/// Where an open `FLOATING_INPUT` pin's floating pull currently stamps, and
+/// at what conductance (contract point 6): `digital::floating::pull`'s
+/// Norton target, `power.gnd + (high ? power.vs : 0)`, is always exactly
+/// `ic.gnd.node`'s or `ic.vcc.node`'s own voltage (`vs = vSraw = V(vcc) -
+/// V(gnd)` while powered), so the pull is exactly a plain two-terminal
+/// conductance between the pin's node and whichever supply node `high`
+/// (`digital::floating::floating_high` on the pin's own open key) selects —
+/// never an arbitrary absolute voltage a stamp site would need a THIRD,
+/// synthetic node for. `None` when `digital::floating::pull` itself declines
+/// (unpowered, not open, not `FLOATING_INPUT`, or `OPEN_HIGH`).
+pub(crate) fn ic_pull_target(ic: &digital::IcRecord, power: &digital::power::IcPower, pin: &digital::IcPin, t: f64) -> Option<(usize, f64)> {
+    let (g, _target_v) = digital::floating::pull(ic, power, pin, t)?;
+    let high = digital::floating::floating_high(pin.open_hash, t, ic.ttl);
+    Some((if high { ic.vcc.node } else { ic.gnd.node }, g))
+}
+
+/// Whether ANY powered IC in `ics` currently holds an open `FLOATING_INPUT`
+/// pin, or reads a non-Schmitt pin in its dead band (contract point 5/6):
+/// the condition that makes the solver schedule (or keep scheduled) a
+/// floating-bucket boundary. Both categories are exactly the pins whose read
+/// consults `digital::floating::floating_high` at all — a Schmitt pin's own
+/// "in between" case holds `*schmitt_state` instead (`digital::levels::read`'s
+/// own doc comment), never touching the floating model, so it never needs a
+/// bucket watch.
+pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord)], voltages: &[f64]) -> bool {
+    for (_, ic) in ics {
+        let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
+        if !power.powered {
+            continue;
+        }
+        for pin in &ic.logic {
+            if pin.open && pin.floating_input && !pin.open_high {
+                return true;
+            }
+            if !pin.open && power.schmitt.is_none() {
+                let v = voltages[pin.node] - power.v_gnd;
+                if v > power.vil && v < power.vih {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// ============================================================================
 // PartitionedSolver: the composite W1b step 2 solver.
 // ============================================================================
 //
@@ -830,6 +989,21 @@ pub struct PartitionedSolver {
     /// parameter from every one of [`Self::publish_fixed_pair_capacitors`]'s
     /// three call sites.
     start_time: f64,
+    /// Every combinational IC, program-wide (this module's "shared
+    /// IC-stamping helpers" section) — used by
+    /// [`Self::recompute_source_currents`]'s driver/pull KCL fold (contract
+    /// point 4's "fold driver and pull currents into the source KCL at
+    /// fixed nodes") and by [`Self::ic_needs_bucket_watch`]. Guaranteed
+    /// `Static`-owned by `partition::build`'s own `-3` decline (W1c step
+    /// 2b removes that restriction), so no `Owner` bookkeeping is needed for
+    /// them the way [`KclDevice`]/[`SwitchInfo`] carry one.
+    ics: Vec<(usize, digital::IcRecord)>,
+    /// The currently-scheduled floating-bucket boundary time, or `None` —
+    /// the dedup flag contract point 6 calls for ("the solver schedules...
+    /// ONE boundary event... deduplicated"). Part of "the bucket schedule"
+    /// contract point 7 names as state a failed instant must roll back
+    /// ([`PartitionSolver::dynamic_snapshot`]/`dynamic_restore`).
+    next_bucket: Option<f64>,
     /// Crossing/step events a dynamic partition asked to be scheduled since
     /// the last [`PartitionSolver::take_scheduled`] drain.
     pending_schedule: Vec<(f64, EventKind)>,
@@ -925,6 +1099,7 @@ impl PartitionedSolver {
         }
 
         let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
+        let ics = collect_ics(program);
 
         let static_solver = static_part::StaticPartitionSolver::build(program)?;
         let closed_form = closed_form::ClosedFormSolver::build(program, &partitions, &local_index, &fixed, &partition_kinds);
@@ -948,6 +1123,8 @@ impl PartitionedSolver {
             cap_devices,
             fixed_pair_capacitors,
             start_time: program.options.start_time,
+            ics,
+            next_bucket: None,
             pending_schedule: Vec::new(),
             largest_partition,
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
@@ -1057,8 +1234,26 @@ impl PartitionedSolver {
     /// purely static program. Always run, even with nothing dirty this call
     /// (a live-parameter change elsewhere can still move a source's
     /// current), mirroring that method's own "recomputed unconditionally"
-    /// contract.
-    fn recompute_source_currents(&mut self) {
+    /// contract. `now` and `drivers` are only for the W1c fold below — a
+    /// call with nothing IC-relevant to say (`handle_dynamic_event`/
+    /// `sync_dynamic_to`, since an IC can never touch a dynamic partition
+    /// this step) simply passes `&[]` and whatever `now`/`t_end` it already
+    /// has; every OTHER driver/pull site (this partition's own static solve)
+    /// is unaffected, since `self.ics` alone decides what there is to fold.
+    ///
+    /// W1c contract point 4's last bullet ("fold driver and pull currents
+    /// into the source KCL at fixed nodes... IC devices publish elementI
+    /// 0"): an IC output driver or floating pull is not in `self.kcl_devices`
+    /// at all (only a resistor/switch is), so without this it would
+    /// contribute NOTHING to a source's published current even when its own
+    /// pin sits on a fixed rail (a driver `partition_of_node` reports `None`
+    /// for) and draws real current from it. `self.voltages` is already the
+    /// fully-published, POST-solve array by the time this runs (every call
+    /// site calls it last), so both `ic_driver_target`/`ic_pull_target`'s
+    /// power computation and the actual `g*(Va-Vb)` current read off
+    /// already-final values, exactly like every other term in `leaving`
+    /// above them.
+    fn recompute_source_currents(&mut self, now: f64, drivers: &[Driver]) {
         let mut leaving = vec![0.0; self.voltages.len()];
         for kd in &self.kcl_devices {
             let params: &[f64] = self.live_params.get(&kd.device_index).map(|v| v.as_slice()).unwrap_or(&kd.params);
@@ -1076,6 +1271,29 @@ impl PartitionedSolver {
             let i = self.currents[d];
             leaving[u] += i;
             leaving[w] -= i;
+        }
+        for (device_index, ic) in &self.ics {
+            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            if !power.powered {
+                continue;
+            }
+            for driver in drivers {
+                if driver.device != *device_index {
+                    continue;
+                }
+                if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
+                    let i = g * (self.voltages[driver.node] - self.voltages[target]);
+                    leaving[driver.node] += i;
+                    leaving[target] -= i;
+                }
+            }
+            for pin in &ic.logic {
+                if let Some((target, g)) = ic_pull_target(ic, &power, pin, now) {
+                    let i = g * (self.voltages[pin.node] - self.voltages[target]);
+                    leaving[pin.node] += i;
+                    leaving[target] -= i;
+                }
+            }
         }
         let mut extra = vec![0.0; self.voltages.len()];
         for r in self.resolved.iter().rev() {
@@ -1095,6 +1313,27 @@ impl PartitionedSolver {
         for (t, p, v) in self.stepped.take_scheduled() {
             self.pending_schedule.push((t, EventKind::Step { partition: PartitionId(p as u32), version: v }));
         }
+    }
+
+    /// W1c contract point 5/6: schedules a floating-bucket boundary at
+    /// `digital::floating::next_bucket_boundary(now)` if any powered IC
+    /// currently needs one and none is already pending (`self.next_bucket`,
+    /// the dedup flag) — called after every point that just published fresh
+    /// voltages ([`PartitionSolver::resolve_dirty`], `handle_dynamic_event`,
+    /// `sync_dynamic_to`), and again from [`Self::bucket_boundary`] itself so
+    /// the chain keeps going even on a delta whose `bucket_boundary` call
+    /// returns no partitions to re-solve (nothing would otherwise call
+    /// `resolve_dirty`, and with it this method, that same delta).
+    fn maybe_schedule_bucket(&mut self, now: f64) {
+        if self.next_bucket.is_some() {
+            return;
+        }
+        if !any_powered_ic_needs_bucket_watch(&self.ics, &self.voltages) {
+            return;
+        }
+        let boundary = digital::floating::next_bucket_boundary(now);
+        self.next_bucket = Some(boundary);
+        self.pending_schedule.push((boundary, EventKind::Bucket));
     }
 
     fn check_finite(&self) -> Result<(), String> {
@@ -1138,8 +1377,9 @@ impl PartitionSolver for PartitionedSolver {
         readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
         readers.extend(self.stepped.resolve_dirty(&st_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
         self.publish_fixed_pair_capacitors(now);
-        self.recompute_source_currents();
+        self.recompute_source_currents(now, drivers);
         self.drain_scheduled();
+        self.maybe_schedule_bucket(now);
         self.check_finite()?;
         Ok(readers)
     }
@@ -1253,16 +1493,23 @@ impl PartitionSolver for PartitionedSolver {
     /// failed attempt surviving to be pushed onto the kernel's heap by some
     /// later, unrelated, successful call.
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
-        Box::new((self.static_solver.snapshot(), self.closed_form.snapshot(), self.stepped.snapshot(), self.pending_schedule.clone()))
+        Box::new((
+            self.static_solver.snapshot(),
+            self.closed_form.snapshot(),
+            self.stepped.snapshot(),
+            self.pending_schedule.clone(),
+            self.next_bucket,
+        ))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
-        if let Ok(boxed) = snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>)>() {
-            let (static_snap, cf, st, pending) = *boxed;
+        if let Ok(boxed) = snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>)>() {
+            let (static_snap, cf, st, pending, next_bucket) = *boxed;
             self.static_solver.restore(static_snap);
             self.closed_form.restore(cf);
             self.stepped.restore(st);
             self.pending_schedule = pending;
+            self.next_bucket = next_bucket;
         }
     }
 
@@ -1287,8 +1534,14 @@ impl PartitionSolver for PartitionedSolver {
             self.stepped.handle_step(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
         };
         self.publish_fixed_pair_capacitors(now);
-        self.recompute_source_currents();
+        // No IC can ever touch a dynamic partition this step (`partition.rs`'s
+        // own `-3` decline), so `self.ics`' driver/pull fold has nothing new
+        // to say here beyond what the last `resolve_dirty` already
+        // published — an empty `drivers` slice is exactly correct, not a
+        // shortcut.
+        self.recompute_source_currents(now, &[]);
         self.drain_scheduled();
+        self.maybe_schedule_bucket(now);
         self.check_finite()?;
         Ok(readers)
     }
@@ -1297,10 +1550,69 @@ impl PartitionSolver for PartitionedSolver {
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
         let readers = self.stepped.sync_to(t_end, &self.live_params, &mut self.voltages, &mut self.currents)?;
         self.publish_fixed_pair_capacitors(t_end);
-        self.recompute_source_currents();
+        self.recompute_source_currents(t_end, &[]);
         self.drain_scheduled();
+        self.maybe_schedule_bucket(t_end);
         self.check_finite()?;
         Ok(readers)
+    }
+
+    fn partition_of_node(&self, node: usize) -> Option<PartitionId> {
+        self.local_index.get(node).copied().flatten().map(|(p, _)| PartitionId(p as u32))
+    }
+
+    fn ic_powered(&self, device: usize) -> bool {
+        match self.ics.iter().find(|(d, _)| *d == device) {
+            Some((_, ic)) => digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]).powered,
+            // Not a tracked IC at all (a non-IC driver, `Driver::device ==
+            // usize::MAX`, or an out-of-range index): "true for a non-IC"
+            // (the trait default's own doc comment) — the kernel only ever
+            // calls this for `device != usize::MAX` in the first place, but
+            // answering permissively here rather than panicking keeps this
+            // method total.
+            None => true,
+        }
+    }
+
+    /// W1c contract point 6's third bullet: partitions to mark dirty are
+    /// every one holding an open `FLOATING_INPUT` pin of a CURRENTLY powered
+    /// IC (its pull target may have flipped — `partition.rs`'s union rule
+    /// guarantees that pin's node has a partition whenever it is free, which
+    /// it always is for a pull-eligible pin: an open pin is never a fixed
+    /// node in practice, but `partition_of_node`'s `None` is simply skipped
+    /// here rather than assumed impossible); readers are every powered IC
+    /// that either holds such a pin or currently reads a pin in its dead
+    /// band, exactly [`any_powered_ic_needs_bucket_watch`]'s own per-IC test
+    /// applied here so the caller learns WHICH ICs, not just whether any do.
+    fn bucket_boundary(&mut self, now: f64) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        self.next_bucket = None;
+        let mut dirty = BTreeSet::new();
+        let mut readers = BTreeSet::new();
+        for (device_index, ic) in &self.ics {
+            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            if !power.powered {
+                continue;
+            }
+            let mut needs_reader = false;
+            for pin in &ic.logic {
+                if pin.open && pin.floating_input && !pin.open_high {
+                    needs_reader = true;
+                    if let Some((p, _)) = self.local_index.get(pin.node).copied().flatten() {
+                        dirty.insert(PartitionId(p as u32));
+                    }
+                } else if !pin.open && power.schmitt.is_none() {
+                    let v = self.voltages[pin.node] - power.v_gnd;
+                    if v > power.vil && v < power.vih {
+                        needs_reader = true;
+                    }
+                }
+            }
+            if needs_reader {
+                readers.insert(DeviceId(*device_index as u32));
+            }
+        }
+        self.maybe_schedule_bucket(now);
+        (dirty.into_iter().collect(), readers.into_iter().collect())
     }
 }
 
@@ -1342,7 +1654,7 @@ mod partitioned_solver_tests {
     }
     struct NoDevices;
     impl crate::kernel::DeviceEvaluator for NoDevices {
-        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<crate::kernel::DriverRequest> {
             Vec::new()
         }
     }
@@ -1524,7 +1836,7 @@ mod partitioned_solver_tests {
         let solver = PartitionedSolver::build(&p).unwrap();
         struct NoDevices;
         impl crate::kernel::DeviceEvaluator for NoDevices {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<crate::kernel::DriverRequest> {
                 Vec::new()
             }
         }
@@ -1582,7 +1894,7 @@ mod partitioned_solver_tests {
             next: crate::events::Mode,
         }
         impl crate::kernel::DeviceEvaluator for OscillatingEvaluator {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<crate::kernel::DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
                 vec![crate::kernel::DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
@@ -1614,7 +1926,7 @@ mod partitioned_solver_tests {
         let current_version = 1u64;
         assert!(kernel.solver().is_current(PartitionId(0), true, current_version));
 
-        assert_eq!(kernel.add_driver(Driver::new(1, 100, 101, 1.0, 1.0, 0.0), PartitionId(0)), d0);
+        assert_eq!(kernel.add_driver(Driver::new(1, 100, 101, 1.0, 1.0, 0.0), Some(PartitionId(0))), d0);
         kernel.request_driver(d0, Low, kernel.time(), 0.0);
 
         let err = kernel.advance(kernel.time()).unwrap_err();

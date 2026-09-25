@@ -198,6 +198,25 @@ pub struct Driver {
     /// Fraction of `conductance` directed toward `lo_node` while driving
     /// LOW. `0.0` for an ordinary logic output.
     pub lo_level: f64,
+    /// The owning device's index (`program::Device` order), or `usize::MAX`
+    /// when this driver belongs to no device the kernel needs to look up by
+    /// index (every W0/W1a/W1b driver — there were none — and every non-IC
+    /// driver going forward). An IC output driver's `conductance` field above
+    /// is NOT what gets stamped: its real output conductance is `1/R_out`,
+    /// computed fresh at stamp time from `digital::power::ic_power` on the
+    /// IC's OWN, currently-published supply voltages (core/README.md's W1c
+    /// contract, point 3 — classic recomputes it from every Newton iterate
+    /// with no Jacobian term). `device` is what a stamp site
+    /// (`solve::static_part`) and the kernel's power-loss hold (contract
+    /// point 9, `Kernel::apply_due_events`) use to find which IC — and hence
+    /// which power state — a driver belongs to; `solve::PartitionSolver::
+    /// ic_powered(device)` answers "is it powered right now".
+    pub device: usize,
+    /// Whether this driver is an `OPEN_COLLECTOR` pin (a 74LS47 segment,
+    /// core/README.md's "IC blob"): a committed HIGH releases it — stamps
+    /// nothing — instead of driving `1/R_out` toward `hi_node` (contract
+    /// point 8). Meaningless (and unread) for a non-IC driver.
+    pub open_collector: bool,
     committed: Option<Mode>,
     pending: Option<Pending>,
     token: Token,
@@ -212,6 +231,33 @@ impl Driver {
             conductance,
             hi_level,
             lo_level,
+            device: usize::MAX,
+            open_collector: false,
+            committed: None,
+            pending: None,
+            token: 0,
+        }
+    }
+
+    /// An IC output pin (core/README.md's W1c contract, point 8): `node` is
+    /// the pin's own node, `vcc_node`/`gnd_node` its IC's supply nodes (the
+    /// rail stamps toward while driving HIGH/LOW), `device` the owning IC's
+    /// device index and `open_collector` its blob flag (`kinds::
+    /// PIN_OPEN_COLLECTOR`). `hi_level`/`lo_level` are the ordinary logic
+    /// output's `1.0`/`0.0` (README's W1a driver doc: "most digital outputs
+    /// use `hi_level = 1, lo_level = 0`"); `conductance` is left `0.0` and
+    /// never read for an IC driver — see the field's own doc comment — the
+    /// real value is computed at stamp time from the IC's live power state.
+    pub fn new_ic_output(node: usize, vcc_node: usize, gnd_node: usize, device: usize, open_collector: bool) -> Self {
+        Driver {
+            node,
+            hi_node: vcc_node,
+            lo_node: gnd_node,
+            conductance: 0.0,
+            hi_level: 1.0,
+            lo_level: 0.0,
+            device,
+            open_collector,
             committed: None,
             pending: None,
             token: 0,

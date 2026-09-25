@@ -55,6 +55,7 @@
 //! partition's free node as unreachable, rather than a case it has to
 //! silently paper over.
 
+use crate::digital::{self, combinational};
 use crate::error::BoError;
 use crate::kinds;
 use crate::program::Program;
@@ -168,6 +169,19 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
     let (fixed, resolved) = derive_fixed_nodes(program, n)?;
 
+    // Every free pin an IC driver or floating pull can ever stamp (W1c
+    // contract point 2's "output-capable" and "open FLOATING_INPUT" pins),
+    // free node id order — collected here, in the SAME pass that unions
+    // them, so the two later passes below (the ClosedForm/Stepped promotion
+    // and the W1c-step-2 `-3` decline) never have to re-decode an IC's pin
+    // flags a second time. `fixed` is all this pass needs (not
+    // `local_index`, built after every union below), matching the
+    // switch-family union loop's own "topology only needs `fixed`" shape.
+    let mut ic_free_driver_pull_nodes: Vec<usize> = Vec::new();
+    // Every free IC supply (`vcc`/`gnd`) node — used below to promote a
+    // ClosedForm partition that holds one to Stepped (contract point 3).
+    let mut ic_free_supply_nodes: Vec<usize> = Vec::new();
+
     let mut uf = UnionFind::new(n);
     for device in &program.devices {
         if let Some((pa, pb)) = resistor_or_capacitor_pair(device.kind) {
@@ -177,18 +191,52 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             }
             continue;
         }
-        if !matches!(device.kind, kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH) {
+        if matches!(device.kind, kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH) {
+            // Every free pin of this switch-family device joins the SAME
+            // partition, however many contacts separate them and regardless
+            // of which of the device's other pins are fixed (this module's
+            // doc comment) — union the first free pin found with every other
+            // one, which is enough to merge them all under union-by-size.
+            let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
+            if let Some(first) = free_pins.next() {
+                for node in free_pins {
+                    uf.union(first, node);
+                }
+            }
             continue;
         }
-        // Every free pin of this switch-family device joins the SAME
-        // partition, however many contacts separate them and regardless of
-        // which of the device's other pins are fixed (this module's doc
-        // comment) — union the first free pin found with every other one,
-        // which is enough to merge them all under union-by-size.
-        let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
-        if let Some(first) = free_pins.next() {
-            for node in free_pins {
-                uf.union(first, node);
+        if !digital::is_combinational_ic(device.kind) {
+            continue;
+        }
+        // W1c contract point 2: "the union-find also joins each free
+        // output-capable pin, and each free OPEN FLOATING_INPUT pin, with
+        // every free supply pin of the same IC." `IcRecord::from_device` is
+        // safe to call unconditionally here: `program.rs`'s reader has
+        // already validated this device against `kinds::shape`'s IC shape
+        // (pin/param/blob counts, flag codes) before `partition::build` ever
+        // runs (`digital::mod`'s own doc comment on `from_device`).
+        let ic = digital::IcRecord::from_device(device);
+        let free_supply: Vec<usize> =
+            [ic.vcc.node, ic.gnd.node].into_iter().filter(|&node| fixed[node].is_none()).collect();
+        ic_free_supply_nodes.extend(&free_supply);
+
+        let output_capable = combinational::output_capable(ic.kind);
+        let free_driver_pull_nodes = output_capable
+            .iter()
+            .map(|&i| ic.logic[i].node)
+            // Point 6's pull never applies to an OPEN_HIGH pin ("IC_OPEN_HIGH_PINS
+            // gets no pull at all"), so such a pin never stamps anything and
+            // has no business joining this union either — matching
+            // `digital::floating::pull`'s own eligibility test exactly (minus
+            // its `powered` check, which is a runtime fact, not a topology
+            // one: partition membership is fixed at load regardless of
+            // whether the IC happens to be powered at that instant).
+            .chain(ic.logic.iter().filter(|p| p.open && p.floating_input && !p.open_high).map(|p| p.node))
+            .filter(|&node| fixed[node].is_none());
+        for node in free_driver_pull_nodes {
+            ic_free_driver_pull_nodes.push(node);
+            for &supply in &free_supply {
+                uf.union(supply, node);
             }
         }
     }
@@ -266,12 +314,46 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // nonlinear kind) is left alone: forcing an already-stepped partition to
     // itself is a no-op.
     let multi_capacitor_partitions = capacitor_count.iter().filter(|&&c| c >= 2).count();
+
+    // W1c contract point 3: "A dynamic partition holding a free IC supply
+    // node is stepped" — R_out then moves with that partition's own solved
+    // state, which only the general BE/trap path (never the exact
+    // closed-form one) can re-stamp from. Computed from `ic_free_supply_nodes`
+    // (collected in the union pass above) against the now-final `local_index`,
+    // same shape as `capacitor_count`'s own per-partition accumulation.
+    let mut holds_free_ic_supply = vec![false; partitions.len()];
+    for &node in &ic_free_supply_nodes {
+        if let Some((p, _)) = local_index[node] {
+            holds_free_ic_supply[p] = true;
+        }
+    }
+
     let force_stepped = program.options.force_stepped;
     let kinds_by_partition: Vec<PartitionKind> = capacitor_count
         .into_iter()
         .map(classify)
-        .map(|kind| if force_stepped && kind == PartitionKind::ClosedForm { PartitionKind::Stepped } else { kind })
+        .enumerate()
+        .map(|(p, kind)| {
+            if kind == PartitionKind::ClosedForm && (force_stepped || holds_free_ic_supply[p]) {
+                PartitionKind::Stepped
+            } else {
+                kind
+            }
+        })
         .collect();
+
+    // W1c step 2 (this worker's own scope, README's "Kernel semantics: the
+    // digital core (W1c)" contract point 2's stamping half): an IC driver or
+    // floating pull that lands in a partition which is not `Static` needs
+    // dynamic-partition stamping (`solve::closed_form`/`solve::stepped`),
+    // which is step 2b's job, not this one's. Until then, decline the whole
+    // load rather than silently under-stamping such a partition.
+    for &node in &ic_free_driver_pull_nodes {
+        let (p, _) = local_index[node].expect("a node collected as an IC driver/pull site was confirmed free above");
+        if kinds_by_partition[p] != PartitionKind::Static {
+            return Err(BoError::unsupported_topology("ic stamp in a dynamic partition (W1c step 2b)"));
+        }
+    }
 
     Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions })
 }
@@ -399,6 +481,118 @@ impl UnionFind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ERR_UNSUPPORTED_TOPOLOGY;
+    use crate::kinds::ic_param;
+    use crate::program::{Device, Options, PinRecord};
+
+    fn pin(node: usize) -> PinRecord {
+        PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
+    }
+
+    fn source(ci: usize, pos: usize, neg: usize, v: f64) -> Device {
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: ci, pins: vec![pin(pos), pin(neg)], params: vec![v], blob: vec![] }
+    }
+
+    fn resistor(ci: usize, a: usize, b: usize, r: f64) -> Device {
+        Device { kind: kinds::RESISTOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![r], blob: vec![] }
+    }
+
+    fn capacitor(ci: usize, a: usize, b: usize) -> Device {
+        Device { kind: kinds::CAPACITOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![1e-6, 0.0, 0.0], blob: vec![] }
+    }
+
+    /// A minimal `74ls04` device: `pins[i]` is logic pin `i`'s node
+    /// (`icPinMap` order `1a 1y 2a 2y ... 6a 6y`), every pin driven (never
+    /// `PIN_FLAG_OPEN`). Standard LS-TTL params, matching
+    /// `solve::ic_tests`'s own builder of the same shape.
+    fn ls04(ci: usize, vcc: usize, gnd: usize, pins: [usize; 12]) -> Device {
+        let mut device_pins = vec![pin(vcc), pin(gnd)];
+        device_pins.extend(pins.iter().map(|&n| pin(n)));
+        let mut params = vec![0.0; ic_param::COUNT];
+        params[ic_param::VCC_MIN] = 4.75;
+        params[ic_param::VCC_MAX] = 5.25;
+        params[ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+        params[ic_param::VIL_FIXED] = 1.0;
+        params[ic_param::VIL] = 0.8;
+        params[ic_param::VIH_FIXED] = 1.0;
+        params[ic_param::VIH] = 2.0;
+        params[ic_param::NOMINAL] = 5.0;
+        params[ic_param::IO_MAX] = 0.008;
+        params[ic_param::DELAY] = 20e-9;
+        let mut blob = vec![0.0];
+        blob.extend((0..12).map(|i| if i % 2 == 0 { kinds::PIN_FLOATING_INPUT as f64 } else { 0.0 }));
+        Device { kind: kinds::IC_74LS04, component_index: ci, pins: device_pins, params, blob }
+    }
+
+    fn program(node_count: usize, devices: Vec<Device>) -> Program {
+        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    }
+
+    // ---- (h) the dynamic-partition decline (-3) ---------------------------
+
+    #[test]
+    fn an_ic_output_landing_in_a_closed_form_partition_is_declined_with_unsupported_topology() {
+        // vcc/gnd fixed (5V/0V, an ideal supply — contract point 2's "no IC
+        // pin joins anything" case), so 1y's own partition is decided purely
+        // by what else connects to it: a capacitor to gnd, making it
+        // ClosedForm on its own, with no help from the IC's union rule at
+        // all. That partition is exactly where 1y's driver would need to
+        // stamp — not `Static` — so this is W1c step 2's own `-3`, not step
+        // 2b's territory.
+        let p = program(4, vec![
+            source(0, 1, 0, 5.0),
+            capacitor(1, 2, 0),
+            ls04(2, 1, 0, [0, 2, 0, 3, 0, 3, 0, 3, 0, 3, 0, 3]),
+        ]);
+        let err = match build(&p) { Err(e) => e, Ok(_) => panic!("expected -3 unsupported_topology") };
+        assert_eq!(err.code, ERR_UNSUPPORTED_TOPOLOGY);
+        assert_eq!(err.message, "ic stamp in a dynamic partition (W1c step 2b)");
+    }
+
+    #[test]
+    fn an_open_floating_input_pin_landing_in_a_stepped_partition_is_also_declined() {
+        // Two capacitors on the SAME node as an open, FLOATING_INPUT pin (2a
+        // here): Stepped (>= 2 capacitors), not ClosedForm, but the decline
+        // applies identically -- "not Static" is the whole test, regardless
+        // of which dynamic kind.
+        let p = program(5, vec![
+            source(0, 1, 0, 5.0),
+            capacitor(1, 2, 0),
+            capacitor(2, 2, 0),
+            {
+                let mut d = ls04(3, 1, 0, [0, 3, 2, 4, 0, 3, 0, 3, 0, 3, 0, 3]);
+                d.pins[4].flags = crate::program::PIN_FLAG_OPEN; // 2a (pins[0..2]=vcc,gnd, then 1a,1y,2a,...): index 4 = 2a.
+                d
+            },
+        ]);
+        let err = match build(&p) { Err(e) => e, Ok(_) => panic!("expected -3 unsupported_topology") };
+        assert_eq!(err.code, ERR_UNSUPPORTED_TOPOLOGY);
+        assert_eq!(err.message, "ic stamp in a dynamic partition (W1c step 2b)");
+    }
+
+    // ---- point 3: a dynamic partition holding a free IC supply node is
+    // classified Stepped ------------------------------------------------
+
+    #[test]
+    fn a_closed_form_partition_holding_a_free_ic_supply_node_is_classified_stepped() {
+        // vcc FREE (through a resistor from the 5V source), gnd fixed. Every
+        // logic pin is tied straight to a FIXED node (never free), so no IC
+        // driver/pull ever lands in vcc's partition at all -- only a plain
+        // decoupling capacitor from vcc to gnd does (one free end, so NOT
+        // rule 2a's fixed-pair case), isolating the promotion rule from the
+        // `-3` decline: this partition holds a free IC supply node and one
+        // capacitor, so it must be classified Stepped, not ClosedForm, and
+        // `build` must still succeed (nothing here ever needs step 2b).
+        let p = program(3, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 2, 1, 10.0),
+            capacitor(2, 2, 0),
+            ls04(3, 2, 0, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ]);
+        let pb = build(&p).unwrap();
+        let (p_vcc, _) = pb.local_index[2].expect("vcc is free");
+        assert_eq!(pb.kinds[p_vcc], PartitionKind::Stepped, "a free IC supply node forces Stepped, never ClosedForm");
+    }
 
     #[test]
     fn union_find_handles_a_million_node_chain_without_recursing() {

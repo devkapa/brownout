@@ -82,11 +82,20 @@ pub enum EventKind {
     /// plans a fresh one under a new version, exactly like a closed-form
     /// re-aim cancels a stale `Crossing`.
     Step { partition: PartitionId, version: Version },
-    /// A device-owned timer, opaque to the kernel: a floating-bucket boundary
-    /// (contract point 7), or any future per-device deadline. `tag` lets one
-    /// device distinguish which of several timers it scheduled fired; the
-    /// kernel never inspects it.
+    /// A device-owned timer, opaque to the kernel: any future per-device
+    /// deadline. `tag` lets one device distinguish which of several timers it
+    /// scheduled fired; the kernel never inspects it.
     Timer { device: DeviceId, tag: u64 },
+    /// A floating-bucket boundary (W1c contract point 5/6, owner decision 9):
+    /// scheduled by `solve::PartitionSolver::take_scheduled` at
+    /// `digital::floating::next_bucket_boundary(now)` whenever a powered IC
+    /// holds an open `FLOATING_INPUT` pin or reads a pin in its dead band.
+    /// Carries no partition or version: the solver schedules at most one of
+    /// these at a time (deduplicated — `PartitionSolver::take_scheduled`'s own
+    /// doc comment), so, unlike a `Crossing`/`Step`, a popped `Bucket` is
+    /// never stale by construction and is always handled by calling
+    /// `PartitionSolver::bucket_boundary` outright.
+    Bucket,
 }
 
 /// One scheduled occurrence: a time and a payload. `seq` is set by

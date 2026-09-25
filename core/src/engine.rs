@@ -66,7 +66,7 @@ const STAT_COUNT: usize = 16;
 struct NoDevices;
 
 impl DeviceEvaluator for NoDevices {
-    fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+    fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
         Vec::new()
     }
 }
@@ -759,8 +759,8 @@ mod tests {
         // voltage on its own partition (contract, "W0 kernel semantics",
         // point 4: "-4" either from a non-finite pivot or, as here, a
         // finite-but-infinite-conductance stamp).
-        let d1 = e.kernel.add_driver(Driver::new(1, 3, 0, 1.0, 1.0, 0.0), PartitionId(0));
-        let d2 = e.kernel.add_driver(Driver::new(2, 3, 0, f64::INFINITY, 1.0, 0.0), PartitionId(1));
+        let d1 = e.kernel.add_driver(Driver::new(1, 3, 0, 1.0, 1.0, 0.0), Some(PartitionId(0)));
+        let d2 = e.kernel.add_driver(Driver::new(2, 3, 0, f64::INFINITY, 1.0, 0.0), Some(PartitionId(1)));
         // Both first requests, so both land at exactly `now` -- due at the
         // same instant, one delta pass resolves both partitions: partition 0
         // (d1) first, successfully; partition 1 (d2) second, and fails.
@@ -929,7 +929,7 @@ mod tests {
 
         // node1 is W0's only free node, so it is partition 0 by construction
         // (`StaticPartitionSolver::build`'s first-seen order).
-        let d0 = e.kernel.add_driver(Driver::new(1, 2, 0, 1.0, 1.0, 0.0), PartitionId(0));
+        let d0 = e.kernel.add_driver(Driver::new(1, 2, 0, 1.0, 1.0, 0.0), Some(PartitionId(0)));
 
         // A first-ever request for this driver always schedules at exactly
         // the `now` it is given, regardless of `delay` (drivers::fsm's
@@ -994,7 +994,7 @@ mod tests {
             next: Mode,
         }
         impl DeviceEvaluator for OscillatingEvaluator {
-            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == Mode::High { Mode::Low } else { Mode::High };
                 vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
@@ -1003,7 +1003,7 @@ mod tests {
 
         let p = program(2, vec![resistor(0, 1, 0, 1000.0)]);
         let mut e = Engine::load(&p).unwrap();
-        let d0 = e.kernel.add_driver(Driver::new(1, 0, 0, 1.0, 1.0, 0.0), PartitionId(0));
+        let d0 = e.kernel.add_driver(Driver::new(1, 0, 0, 1.0, 1.0, 0.0), Some(PartitionId(0)));
         e.kernel.set_solver(Box::new(AlwaysAffects));
         e.kernel.set_evaluator(Box::new(OscillatingEvaluator { driver: d0, next: Mode::High }));
         e.kernel.request_driver(d0, Mode::Low, 0.0, 0.0);
