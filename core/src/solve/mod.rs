@@ -746,15 +746,20 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 // W1c step 2: shared IC-stamping helpers.
 // ============================================================================
 //
-// Every combinational IC lives in a `Static` partition this step (a `-3` at
-// load otherwise — `partition.rs`'s own doc comment), so both
-// `static_part::StaticPartitionSolver` (the actual per-partition LU stamp)
-// and `PartitionedSolver::recompute_source_currents` (the global KCL fold,
-// needed even for a driver/pull pin whose OWN node happens to be fixed —
-// contract point 4) need to answer the same two questions: "where does this
+// Step 2a left every combinational IC confined to a `Static` partition (a
+// `-3` at load otherwise — `partition.rs`'s own doc comment on the decline
+// step 2b later lifts). Step 2b's own job is exactly that lift:
+// `closed_form::ClosedFormSolver` and `stepped::SteppedSolver` now stamp an
+// IC's driver/pull footprint too ([`stamp_ics_into_dyn`], below), whenever it
+// lands in one of THEIR partitions instead of a `Static` one. Every
+// per-partition stamp site — `static_part::StaticPartitionSolver`'s own LU
+// stamp, `closed_form`/`stepped`'s dynamic ones, and
+// `PartitionedSolver::recompute_source_currents` (the global KCL fold, needed
+// even for a driver/pull pin whose OWN node happens to be fixed — contract
+// point 4) — needs to answer the same two questions: "where does this
 // committed driver currently stamp, and at what conductance" and "where does
 // this open floating-input pin's pull currently stamp, and at what
-// conductance". Defined once, here, so neither module re-derives
+// conductance". Defined once, here, so no module re-derives
 // `digital::power`/`digital::floating`'s rules a second time.
 
 /// Every combinational IC in `program`, by device index
@@ -830,6 +835,107 @@ pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord
         }
     }
     false
+}
+
+/// The node -> IC-reader index (`static_part.rs`'s own `node_to_ic_readers`,
+/// mirrored here for `closed_form`/`stepped`, W1c step 2b's own contract
+/// point 4 addition: "resolves of dynamic partitions must also report IC
+/// readers of nodes that changed, as static does"): every combinational IC's
+/// `vcc`, `gnd` and every logic pin, mapped to its own device index.
+/// Program-wide, not filtered to any one partition — a node a given dynamic
+/// solver's own partitions never touch simply never gets consulted, the same
+/// harmless unused entry static's own copy already accepts.
+pub(crate) fn build_ic_reader_index(ics: &[(usize, digital::IcRecord)]) -> HashMap<usize, Vec<usize>> {
+    let mut index: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (device_index, ic) in ics {
+        for &node in &[ic.vcc.node, ic.gnd.node] {
+            index.entry(node).or_default().push(*device_index);
+        }
+        for pin in &ic.logic {
+            index.entry(pin.node).or_default().push(*device_index);
+        }
+    }
+    index
+}
+
+/// Stamps every combinational IC's driver/pull contribution that touches
+/// dynamic partition `p_idx` into its local `size x size` linear system —
+/// the `ClosedForm`/`Stepped` counterpart of `static_part.rs`'s own
+/// `stamp_ics_into` (W1c step 2b, lifting `partition.rs`'s former decline):
+/// generalized over `resolve`, a [`DynPin`]-producing closure, rather than
+/// that module's own `fold_local`, since a dynamic partition's stamp target
+/// goes through [`stamp_two_terminal`], not a direct matrix index. `touches`
+/// mirrors `static_part.rs::stamp_ics_into`'s own per-item test exactly,
+/// deliberately NOT assuming an IC's whole driver/pull footprint shares one
+/// partition: that is only guaranteed when at least one of its supply nodes
+/// is free (`partition.rs`'s union rule then joins every free driver/pull pin
+/// with it); when both are fixed, each driver/pull pin is placed purely by
+/// its own, independent wiring and can land in a different partition from
+/// its siblings (README's W1c contract point 2: "no IC pin joins anything").
+///
+/// `x` is the CURRENT local solution vector — only ever non-empty (and only
+/// ever actually indexed by [`pin_voltage`]) for a `Stepped` partition mid
+/// Newton iteration on a free IC supply node (contract point 3). Every IC
+/// that ever touches a `ClosedForm` partition is guaranteed, by
+/// `partition::build`'s own promotion rule (a `ClosedForm` partition holding
+/// a free IC supply is reclassified `Stepped` outright), to have BOTH supply
+/// nodes fixed, so `resolve` never returns `local: Some(_)` for either one
+/// there and `closed_form.rs` always passes `&[]`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stamp_ics_into_dyn(
+    size: usize,
+    a: &mut [f64],
+    b: &mut [f64],
+    now: f64,
+    drivers: &[Driver],
+    ics: &[(usize, digital::IcRecord)],
+    node_owner: &HashMap<usize, (usize, usize)>,
+    fixed: &[Option<f64>],
+    p_idx: usize,
+    x: &[f64],
+) {
+    let resolve = |node: usize| -> DynPin {
+        match node_owner.get(&node) {
+            Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
+            _ => DynPin {
+                local: None,
+                fixed: fixed[node].expect(
+                    "an IC pin reachable from a dynamic partition must be fixed or free within it (partition.rs's union rule)",
+                ),
+            },
+        }
+    };
+    let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
+
+    for (device_index, ic) in ics {
+        let touches = drivers.iter().any(|d| d.device == *device_index && in_partition(d.node))
+            || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node));
+        if !touches {
+            continue;
+        }
+        let vcc_pin = resolve(ic.vcc.node);
+        let gnd_pin = resolve(ic.gnd.node);
+        let power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x), pin_voltage(&gnd_pin, x));
+        if !power.powered {
+            continue;
+        }
+        for driver in drivers {
+            if driver.device != *device_index || !in_partition(driver.node) {
+                continue;
+            }
+            if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
+                stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0);
+            }
+        }
+        for pin in &ic.logic {
+            if !in_partition(pin.node) {
+                continue;
+            }
+            if let Some((target, g)) = ic_pull_target(ic, &power, pin, now) {
+                stamp_two_terminal(size, a, b, &resolve(pin.node), &resolve(target), g, 0.0);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -993,10 +1099,15 @@ pub struct PartitionedSolver {
     /// IC-stamping helpers" section) — used by
     /// [`Self::recompute_source_currents`]'s driver/pull KCL fold (contract
     /// point 4's "fold driver and pull currents into the source KCL at
-    /// fixed nodes") and by [`Self::ic_needs_bucket_watch`]. Guaranteed
-    /// `Static`-owned by `partition::build`'s own `-3` decline (W1c step
-    /// 2b removes that restriction), so no `Owner` bookkeeping is needed for
-    /// them the way [`KclDevice`]/[`SwitchInfo`] carry one.
+    /// fixed nodes") and by [`Self::maybe_schedule_bucket`]/`bucket_boundary`.
+    /// Both of those walk every IC's global voltages/driver state directly
+    /// (never through a per-partition solver), so — unlike
+    /// [`KclDevice`]/[`SwitchInfo`] — this list needs no `Owner` bookkeeping
+    /// of its own even now that an IC's driver/pull footprint can land in
+    /// any partition kind (W1c step 2b lifted `partition::build`'s former
+    /// `-3` decline): `static_part.rs`, `closed_form.rs` and `stepped.rs`
+    /// each keep their OWN copy of this same list (`solve::collect_ics`),
+    /// used only for the driver/pull stamps that touch THEIR OWN partitions.
     ics: Vec<(usize, digital::IcRecord)>,
     /// The currently-scheduled floating-bucket boundary time, or `None` —
     /// the dedup flag contract point 6 calls for ("the solver schedules...
@@ -1012,6 +1123,29 @@ pub struct PartitionedSolver {
     /// `partition::PartitionBuild::multi_capacitor_partitions`'s doc
     /// comment).
     multi_capacitor_linear_partitions: f64,
+    /// A clone of the kernel's full driver table, as of the most recent
+    /// [`PartitionSolver::resolve_dirty`] call (W1c step 2b) — that trait
+    /// method is the only one the kernel ever calls WITH a fresh `drivers`
+    /// slice; [`PartitionSolver::handle_dynamic_event`]/`sync_dynamic_to`
+    /// take none, because before this step no IC driver/pull ever touched a
+    /// dynamic partition at all, so `closed_form`/`stepped` never needed to
+    /// know a driver's committed state to restamp one. Now that they do
+    /// (`partition.rs`'s decline is lifted), this is what stands in: a
+    /// driver's committed level only ever changes via a `Commit` event, and
+    /// every `Commit` marks its own partition dirty, which always drives a
+    /// `resolve_dirty` call with the CURRENT `drivers` in the SAME delta —
+    /// so by the time a LATER, unrelated `Crossing`/`Step`/horizon-clamp call
+    /// can run, this snapshot is never stale. Included in
+    /// [`PartitionSolver::dynamic_snapshot`]/`dynamic_restore` (rule 7): a
+    /// failed instant's own livelock passes can call `resolve_dirty` many
+    /// times with an oscillating driver table before the whole attempt is
+    /// rolled back, and without restoring this too, a `Crossing`/`Step` that
+    /// fires on some LATER, otherwise-unrelated instant (with no
+    /// intervening `resolve_dirty` of its own — a due `Crossing`/`Step` with
+    /// nothing else dirty that same delta) would restamp against the failed
+    /// attempt's last, never-committed driver states instead of the
+    /// correctly-restored ones.
+    driver_snapshot: Vec<Driver>,
 }
 
 impl PartitionedSolver {
@@ -1107,7 +1241,7 @@ impl PartitionedSolver {
 
         let _ = device_count; // documents intent; `currents` is already sized from it above.
 
-        Ok(PartitionedSolver {
+        let mut solver = PartitionedSolver {
             voltages,
             currents,
             resolved,
@@ -1128,7 +1262,115 @@ impl PartitionedSolver {
             pending_schedule: Vec::new(),
             largest_partition,
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
-        })
+            driver_snapshot: Vec::new(),
+        };
+        solver.register_ic_read_pin_watches();
+        Ok(solver)
+    }
+
+    /// W1c contract point 4's own reader rule, closing the production gap
+    /// R6b's own W1c step 2b report left open: "A reader whose pin sits on a
+    /// closed-form or stepped partition registers that pin's live thresholds
+    /// (vil/vih, or the scaled vtMinus/vtPlus...) with the partition's
+    /// crossing watch, so it is re-evaluated at the crossing instant... not
+    /// at the next unrelated event." Nothing in production ever called
+    /// [`Self::watch_node`] before this — `devices::ics::IcEvaluator`
+    /// (I1's own production `DeviceEvaluator`) reads pins and drives outputs,
+    /// but has no channel back into the solver to register a watch of its
+    /// own, and nothing else in the kernel/evaluator pair ever will either
+    /// (this crate's `DeviceEvaluator` trait has no such hook). So this
+    /// solver registers every eligible watch itself, once, at load — the
+    /// only place that already has both a `PartitionSolver` to register
+    /// against and the IC list to register for.
+    ///
+    /// Only a NON-OPEN, NON-OUTPUT-CAPABLE logic pin. An open pin's read
+    /// never depends on its node voltage at all (`digital::levels::watch_thresholds`'s
+    /// own `Vec::new()` for that case), so it would be a pure no-op, harmless
+    /// but pointless to register. An output-capable pin is actively WRONG to
+    /// register (this method's own body has the full account: a driven
+    /// output sits pinned near its own rail by `1/R_out`, so solving
+    /// BACKWARD for `vc` from its own near-flat equation, the way
+    /// `ClosedFormSolver::handle_crossing` does for whichever node the
+    /// crossing landed on, is numerically unstable and can publish every
+    /// other node in the segment at a physically meaningless value). Only
+    /// when BOTH this IC's supply nodes are
+    /// FIXED: then, and only then, is `digital::power::ic_power` a build-time
+    /// constant this call can compute once and close over forever — a
+    /// `ClosedForm` partition itself is guaranteed never to hold a free IC
+    /// supply node (`partition::build`'s own promotion rule reclassifies any
+    /// partition that does to `Stepped`), but a PLAIN read pin (unlike an
+    /// output-capable or open-floating-input one) is never unioned with its
+    /// own IC's supply at all, so it can land in a `ClosedForm` partition
+    /// while its OWN ic's supply sits, free, in some entirely different one
+    /// — left unwatched here deliberately: W1c contract point 5/6's ordinary
+    /// bucket/re-solve machinery and this crate's `node_to_ic_readers`
+    /// (`report_changed_ic_readers` in `closed_form.rs`/`stepped.rs`) still
+    /// re-evaluate such a reader whenever ITS OWN node's published voltage
+    /// actually changes, just not via an exact analytic crossing.
+    ///
+    /// Both directions are registered for every threshold value
+    /// `watch_thresholds` returns, rather than only the direction each one
+    /// is individually meaningful for (a plain pin's `vil` only truly matters
+    /// falling, into LOW; `vih` only truly matters rising, into HIGH — the
+    /// other direction of each merely re-enters the dead band, still worth
+    /// noticing since a Schmitt-free pin's dead-band read is itself
+    /// time-varying, `digital::floating::floating_high` on the dead key): an
+    /// extra evaluation an unreached direction would cost is harmless (the
+    /// closed-form/stepped crossing search itself discards any threshold a
+    /// segment's own asymptote never reaches, `closed_form::schedule_crossing`/
+    /// `stepped::find_crossing`), and registering unconditionally avoids
+    /// re-deriving which of a Schmitt part's two directions versus a plain
+    /// part's four actually matter.
+    fn register_ic_read_pin_watches(&mut self) {
+        for i in 0..self.ics.len() {
+            let (device_index, ic) = self.ics[i].clone();
+            let vcc_fixed = self.local_index[ic.vcc.node].is_none();
+            let gnd_fixed = self.local_index[ic.gnd.node].is_none();
+            if !(vcc_fixed && gnd_fixed) {
+                continue;
+            }
+            // An output-capable pin is NEVER a valid watch target, on top of
+            // simply being meaningless as an INPUT (`digital::levels::read`
+            // is called on it too, since `IcRecord::logic` carries every pin
+            // uniformly — this crate's own `devices::ics::IcEvaluator`'s doc
+            // comment — but nothing ever CONSUMES that particular boolean:
+            // `digital::combinational::evaluate` only reads the pins each
+            // kind's own truth table names). It is actively WRONG to watch:
+            // a driven output sits pinned near its own rail by `1/R_out` (a
+            // strong, low-impedance path), so its voltage barely depends on
+            // this partition's `vc` at all — `ClosedFormSolver::handle_crossing`
+            // solves BACKWARD for `vc` from the crossed node's own affine
+            // equation (`(cross_v - x0[cross_local]) / dx[cross_local]`),
+            // and a near-zero `dx` there makes that solve numerically
+            // unstable, publishing a `vc` (hence every OTHER node in the
+            // segment) far from anything physically meaningful. Confirmed by
+            // running the 74HC14 oscillator through the real `Engine`: with
+            // an output pin watched too, the driver's own commit (`1/R_out`
+            // to the OPPOSITE rail) makes that SAME output pin race back
+            // across its threshold within nanoseconds, hijacking every
+            // later re-aim before the real input ever gets anywhere near ITS
+            // own threshold — the oscillator livelocks in a burst of
+            // sub-microsecond crossings and its output never actually
+            // flips again.
+            let outputs = digital::combinational::output_capable(ic.kind);
+            let power = digital::power::ic_power(&ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            for (logic_index, pin) in ic.logic.iter().enumerate() {
+                if pin.open || outputs.contains(&logic_index) {
+                    continue;
+                }
+                let thresholds = digital::levels::watch_thresholds(&ic, &power, pin);
+                if thresholds.is_empty() {
+                    continue;
+                }
+                let reader = DeviceId(device_index as u32);
+                let node = pin.node;
+                self.watch_node(
+                    node,
+                    reader,
+                    Box::new(move || thresholds.iter().flat_map(|&value| [Threshold { value, rising: true }, Threshold { value, rising: false }]).collect()),
+                );
+            }
+        }
     }
 
     /// Contract stat 0: every partition, of any kind.
@@ -1371,11 +1613,21 @@ impl PartitionSolver for PartitionedSolver {
         // comment on `resolve_dirty`). `closed_form`/`stepped` have no such
         // side effect for an empty id list, so calling them unconditionally
         // too is simply a cheap no-op, kept for symmetry.
+        // W1c step 2b: keep a clone of the full driver table for
+        // `handle_dynamic_event`/`sync_dynamic_to` (below, and this struct's
+        // own `driver_snapshot` doc comment on why they need one at all now
+        // that an IC can touch a dynamic partition). Unconditional, exactly
+        // like `copy_in_static`/`recompute_source_currents` below it: a
+        // caller only ever hands this the FULL table anyway (never filtered
+        // to `dirty`'s own partitions), so there is no "nothing changed"
+        // shortcut to take.
+        self.driver_snapshot = drivers.to_vec();
+
         let mut readers = Vec::new();
         readers.extend(self.static_solver.resolve_dirty(&static_ids, now, drivers)?);
         self.copy_in_static();
-        readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
-        readers.extend(self.stepped.resolve_dirty(&st_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        readers.extend(self.stepped.resolve_dirty(&st_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
         self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents(now, drivers);
         self.drain_scheduled();
@@ -1491,7 +1743,11 @@ impl PartitionSolver for PartitionedSolver {
     /// `Kernel::drain_scheduled` empties it again after every successful
     /// resolve within the SAME instant — is what stops a stale entry from a
     /// failed attempt surviving to be pushed onto the kernel's heap by some
-    /// later, unrelated, successful call.
+    /// later, unrelated, successful call — and, W1c step 2b, `driver_snapshot`
+    /// itself (that field's own doc comment: without it, a `Crossing`/`Step`
+    /// that fires on a LATER instant with no `resolve_dirty` of its own could
+    /// restamp an IC against the failed attempt's last, never-committed
+    /// driver states).
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
         Box::new((
             self.static_solver.snapshot(),
@@ -1499,17 +1755,21 @@ impl PartitionSolver for PartitionedSolver {
             self.stepped.snapshot(),
             self.pending_schedule.clone(),
             self.next_bucket,
+            self.driver_snapshot.clone(),
         ))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
-        if let Ok(boxed) = snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>)>() {
-            let (static_snap, cf, st, pending, next_bucket) = *boxed;
+        if let Ok(boxed) =
+            snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Vec<Driver>)>()
+        {
+            let (static_snap, cf, st, pending, next_bucket, driver_snapshot) = *boxed;
             self.static_solver.restore(static_snap);
             self.closed_form.restore(cf);
             self.stepped.restore(st);
             self.pending_schedule = pending;
             self.next_bucket = next_bucket;
+            self.driver_snapshot = driver_snapshot;
         }
     }
 
@@ -1529,17 +1789,26 @@ impl PartitionSolver for PartitionedSolver {
     fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
         let p = partition.0 as usize;
         let readers = if is_crossing {
-            self.closed_form.handle_crossing(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
+            self.closed_form.handle_crossing(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)?
         } else {
-            self.stepped.handle_step(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
+            self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)?
         };
         self.publish_fixed_pair_capacitors(now);
-        // No IC can ever touch a dynamic partition this step (`partition.rs`'s
-        // own `-3` decline), so `self.ics`' driver/pull fold has nothing new
-        // to say here beyond what the last `resolve_dirty` already
-        // published — an empty `drivers` slice is exactly correct, not a
-        // shortcut.
-        self.recompute_source_currents(now, &[]);
+        // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
+        // now touch a dynamic partition: `handle_crossing`/`handle_step`
+        // above already restamped its driver/pull contribution correctly
+        // (using `self.driver_snapshot` — that field's own doc comment on
+        // why it, not a fresh `drivers` slice, is what's available here).
+        // What this call still needs to do is exactly the KCL fold for a
+        // driver/pull pin whose OWN node is FIXED (contract point 4's last
+        // bullet: the rail's published current keeps moving continuously as
+        // a dynamic partition's own free-node voltage evolves, even between
+        // driver commits) — `self.driver_snapshot` is the right table for
+        // that too, not `&[]`: an empty slice would silently stop
+        // republishing every IC driver's contribution to a fixed rail's own
+        // current on every crossing/step in between actual commits.
+        let driver_snapshot = self.driver_snapshot.clone();
+        self.recompute_source_currents(now, &driver_snapshot);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
         self.check_finite()?;
@@ -1548,9 +1817,14 @@ impl PartitionSolver for PartitionedSolver {
 
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
-        let readers = self.stepped.sync_to(t_end, &self.live_params, &mut self.voltages, &mut self.currents)?;
+        let readers = self.stepped.sync_to(t_end, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)?;
         self.publish_fixed_pair_capacitors(t_end);
-        self.recompute_source_currents(t_end, &[]);
+        // Same reasoning as `handle_dynamic_event` above: the horizon clamp
+        // re-publishes a dynamic partition's exact state at `t_end`, and a
+        // fixed rail's own current must track that continuously, not only at
+        // the instants a driver actually commits.
+        let driver_snapshot = self.driver_snapshot.clone();
+        self.recompute_source_currents(t_end, &driver_snapshot);
         self.drain_scheduled();
         self.maybe_schedule_bucket(t_end);
         self.check_finite()?;

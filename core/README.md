@@ -448,7 +448,10 @@ References are to `core/spec/w1-classic-semantics.md`.
    partition holding a free IC supply node re-stamps from the latest iterate
    until classic's Newton test passes (`|dx| <= 1e-6 + 1e-3 |x|` per node, at
    most 50 iterations; failure is `-4`). A dynamic partition holding a free IC
-   supply node is stepped, because R_out then moves with its state. When every
+   supply node is stepped, because R_out then moves with its state. So is a
+   dynamic partition holding a 74ls245 `a`/`b` pin: those pins are read and
+   driven, a closed-form crossing watch cannot follow a pin its own IC drives,
+   and a stepped partition re-reads its ICs after every step. When every
    supply node is fixed, the power is constant and the solve is direct.
 4. **Reads** (§1.4), at each reader evaluation, from the solved voltages,
    relative to `V(gnd)`:
@@ -466,7 +469,11 @@ References are to `core/spec/w1-classic-semantics.md`.
    partition registers that pin's live thresholds (`vil`/`vih`, or the scaled
    `vtMinus`/`vtPlus`, and the power window on the supply) with the
    partition's crossing watch, so it is re-evaluated at the crossing instant
-   (accepted only at `t > now + 1e-15`), not at the next unrelated event.
+   (accepted only at `t > now + 1e-15`), not at the next unrelated event. An
+   output-capable pin is not watched: its level never changes the kind's
+   result (the 74ls245 aside, rule 3), and it sits on its own driver. A
+   stepped partition instead re-reads every IC reading a node that moved,
+   after every step.
 5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
    0.01)` of the evaluation time; `n = finish(hashState, bucket) /
    0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every

@@ -29,6 +29,7 @@
 //!   directly, in `solve/static_part.rs`), not a plain per-resolve stamp a
 //!   device hands back on request.
 
+pub mod ics;
 pub mod passives;
 pub mod switches;
 

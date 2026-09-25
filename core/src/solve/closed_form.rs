@@ -40,12 +40,17 @@
 
 use std::collections::HashMap;
 
+use crate::digital;
+use crate::drivers::Driver;
 use crate::events::DeviceId;
 use crate::kernel::accepts_crossing;
 use crate::lu;
 use crate::partition::PartitionKind;
 use crate::program::Program;
-use crate::solve::{compile_dyn_shape, pin_voltage_global, stamp_branch_terminal, stamp_linear_base, DynCapacitor, DynShape, ThresholdFn};
+use crate::solve::{
+    build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage_global, stamp_branch_terminal, stamp_ics_into_dyn, stamp_linear_base,
+    DynCapacitor, DynShape, ThresholdFn,
+};
 
 /// The 1e-9 V nudge past a crossed threshold (W1 plan row B2; pec3.mjs
 /// `CROSS_NUDGE_V`, `:34`) — see this module's doc comment.
@@ -143,6 +148,22 @@ pub struct ClosedFormSolver {
     /// fails first (see [`Snapshot`]'s doc comment), so it is part of
     /// [`Snapshot`] after all.
     scheduled: Vec<(f64, usize, u64)>,
+    /// Every combinational IC in the program (W1c step 2b, lifting
+    /// `partition.rs`'s former decline): [`build_segment`] restamps
+    /// whichever of these touch a given `ClosedForm` partition fresh on
+    /// every segment build, mirroring `static_part.rs`'s own `ics` list.
+    /// Every IC that ever touches a `ClosedForm` partition is guaranteed to
+    /// have BOTH supply nodes fixed (`stamp_ics_into_dyn`'s own doc
+    /// comment on why), so its power here is a build-time constant in
+    /// everything but WHICH driver/pull target it currently selects.
+    ics: Vec<(usize, digital::IcRecord)>,
+    /// Fixed voltages, node -> `Some(v)` — `stamp_ics_into_dyn`'s own
+    /// resolver needs this to place an IC pin whose node is fixed.
+    fixed: Vec<Option<f64>>,
+    /// node -> every IC device index that reads it (contract point 4's
+    /// last bullet: "resolves of dynamic partitions must also report IC
+    /// readers of nodes that changed, as static does").
+    node_to_ic_readers: HashMap<usize, Vec<usize>>,
 }
 
 impl ClosedFormSolver {
@@ -182,7 +203,9 @@ impl ClosedFormSolver {
                 },
             );
         }
-        ClosedFormSolver { partitions: parts, node_owner, scheduled: Vec::new() }
+        let ics = collect_ics(program);
+        let node_to_ic_readers = build_ic_reader_index(&ics);
+        ClosedFormSolver { partitions: parts, node_owner, scheduled: Vec::new(), ics, fixed: fixed.to_vec(), node_to_ic_readers }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -232,7 +255,15 @@ impl ClosedFormSolver {
     /// time a partition is named here, exactly as `Kernel::settle`'s
     /// first-pass "resolve every partition" hands every partition to this
     /// call once at load.
-    pub fn resolve_dirty(&mut self, dirty: &[usize], now: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
+    pub fn resolve_dirty(
+        &mut self,
+        dirty: &[usize],
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+    ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
         for &p_idx in dirty {
             let Some(part) = self.partitions.get_mut(&p_idx) else { continue };
@@ -240,9 +271,11 @@ impl ClosedFormSolver {
                 Some(_) => vc_at(part.seg_f, part.seg_inf, part.seg_vc0, part.seg_t0, now),
                 None => 0.0,
             };
-            Self::segment_and_aim(part, now, vc_now, live_params)?;
+            let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+            Self::segment_and_aim(part, now, vc_now, p_idx, drivers, &self.ics, &self.node_owner, &self.fixed, live_params)?;
             Self::publish(part, live_params, voltages, currents);
             readers.extend(part.watches.values().flatten().map(|(id, _)| *id));
+            Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
             if let Some(t) = Self::schedule_crossing(part, now) {
                 self.scheduled.push((t, p_idx, part.version));
             }
@@ -254,7 +287,15 @@ impl ClosedFormSolver {
     /// `_analyticCross`): lands the crossed node exactly on its
     /// threshold-plus-nudge, then re-aims from there, exactly like any other
     /// re-aim.
-    pub fn handle_crossing(&mut self, partition: usize, now: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
+    pub fn handle_crossing(
+        &mut self,
+        partition: usize,
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+    ) -> Result<Vec<DeviceId>, String> {
         let part = self.partitions.get_mut(&partition).ok_or_else(|| format!("closed-form: unknown partition {partition}"))?;
         part.crossings_hit += 1;
         let seg = part.seg.as_ref().expect("a Crossing was only ever scheduled after a segment existed");
@@ -267,9 +308,11 @@ impl ClosedFormSolver {
         if dx != 0.0 {
             vc = (part.cross_v - seg.x0[part.cross_local]) / dx;
         }
-        Self::segment_and_aim(part, now, vc, live_params)?;
+        let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+        Self::segment_and_aim(part, now, vc, partition, drivers, &self.ics, &self.node_owner, &self.fixed, live_params)?;
         Self::publish(part, live_params, voltages, currents);
-        let readers: Vec<DeviceId> = part.watches.values().flatten().map(|(id, _)| *id).collect();
+        let mut readers: Vec<DeviceId> = part.watches.values().flatten().map(|(id, _)| *id).collect();
+        Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         if let Some(t) = Self::schedule_crossing(part, now) {
             self.scheduled.push((t, partition, part.version));
         }
@@ -342,8 +385,19 @@ impl ClosedFormSolver {
 
     // ---- internals ---------------------------------------------------
 
-    fn segment_and_aim(part: &mut Partition, now: f64, vc_now: f64, live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
-        let seg = build_segment(&part.shape, &part.cap, live_params)?;
+    #[allow(clippy::too_many_arguments)]
+    fn segment_and_aim(
+        part: &mut Partition,
+        now: f64,
+        vc_now: f64,
+        p_idx: usize,
+        drivers: &[Driver],
+        ics: &[(usize, digital::IcRecord)],
+        node_owner: &HashMap<usize, (usize, usize)>,
+        fixed: &[Option<f64>],
+        live_params: &HashMap<usize, Vec<f64>>,
+    ) -> Result<(), String> {
+        let seg = build_segment(&part.shape, &part.cap, p_idx, now, drivers, ics, node_owner, fixed, live_params)?;
         part.seg = Some(seg);
         part.segments_built += 1;
         let seg = part.seg.as_ref().unwrap();
@@ -353,6 +407,25 @@ impl ClosedFormSolver {
         part.seg_vc0 = vc_now;
         part.version += 1;
         Ok(())
+    }
+
+    /// W1c contract point 4's last bullet, mirrored from `static_part.rs`'s
+    /// own `node_to_ic_readers` walk: for every one of this partition's own
+    /// local nodes whose PUBLISHED bits actually changed this re-aim,
+    /// extends `readers` with every IC that reads it (its `vcc`, `gnd`, or
+    /// any logic pin) — not only the ones with an explicit crossing watch
+    /// registered. `old_bits` is `part.shape.nodes`-order, captured by the
+    /// caller BEFORE `Self::publish`; `readers` may already hold entries
+    /// (from `part.watches`), and a duplicate here is harmless — `Kernel`
+    /// dedups across a whole delta's readers regardless.
+    fn report_changed_ic_readers(part: &Partition, old_bits: &[u64], voltages: &[f64], node_to_ic_readers: &HashMap<usize, Vec<usize>>, readers: &mut Vec<DeviceId>) {
+        for (l, &node) in part.shape.nodes.iter().enumerate() {
+            if voltages[node].to_bits() != old_bits[l] {
+                if let Some(ics) = node_to_ic_readers.get(&node) {
+                    readers.extend(ics.iter().map(|&d| DeviceId(d as u32)));
+                }
+            }
+        }
     }
 
     fn publish(part: &Partition, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) {
@@ -451,13 +524,39 @@ fn vc_at(f: f64, inf: f64, vc0: f64, t0: f64, t: f64) -> f64 {
 /// factorization (only `b[n]` differs between them), so this is one factor
 /// plus two applies, exactly as the module doc promises ("two small solves
 /// per switching event").
-fn build_segment(shape: &DynShape, cap: &DynCapacitor, live_params: &HashMap<usize, Vec<f64>>) -> Result<Segment, String> {
+///
+/// `stamp_ics_into_dyn` (W1c step 2b) is called once, into the SHARED `a`/
+/// `b0` baseline, before it is cloned into `x0`/`x1`: an IC driver/pull
+/// conductance never depends on `vc` at all (only on this partition's fixed
+/// supply voltages, `stamp_ics_into_dyn`'s own doc comment on why every IC
+/// touching a `ClosedForm` partition has both fixed), so it is exactly as
+/// constant across the two sub-solves as `stamp_linear_base`'s own resistor/
+/// switch/leakage terms already are — never something that needs its own
+/// `vc=0`/`vc=1` sweep the way the capacitor's own branch equation does.
+#[allow(clippy::too_many_arguments)]
+fn build_segment(
+    shape: &DynShape,
+    cap: &DynCapacitor,
+    p_idx: usize,
+    now: f64,
+    drivers: &[Driver],
+    ics: &[(usize, digital::IcRecord)],
+    node_owner: &HashMap<usize, (usize, usize)>,
+    fixed: &[Option<f64>],
+    live_params: &HashMap<usize, Vec<f64>>,
+) -> Result<Segment, String> {
     let n = shape.n;
     let size = n + 1;
     let r = n;
     let mut a = vec![0.0; size * size];
     let mut b0 = vec![0.0; size];
     stamp_linear_base(shape, size, &mut a, &mut b0, live_params);
+    // A `ClosedForm` partition never holds a free IC supply node (the
+    // promotion rule this module's own doc comment describes), so `x` (the
+    // Newton-iterate slice `stamp_ics_into_dyn` would index for a FREE
+    // supply) is never actually read here — `&[]` is exactly correct, not a
+    // shortcut, matching `static_part.rs::direct_solve`'s identical `&[]`.
+    stamp_ics_into_dyn(size, &mut a, &mut b0, now, drivers, ics, node_owner, fixed, p_idx, &[]);
 
     stamp_branch_terminal(&mut a, &mut b0, size, r, &cap.pins[0], 1.0);
     stamp_branch_terminal(&mut a, &mut b0, size, r, &cap.pins[1], -1.0);
@@ -573,7 +672,7 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let tau = r * c;
         // Not testing far past 5*tau: both the node voltage and the series
@@ -619,7 +718,7 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let d = 1.0 / r + 1.0 / leak_r + 1.0 / esr;
         let a = (v0 / r) / d;
@@ -653,7 +752,7 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         // No watcher yet: the first segment schedules nothing.
         assert!(cf.take_scheduled().is_empty());
@@ -663,7 +762,7 @@ mod tests {
         // Re-aiming (a fresh `resolve_dirty`, standing in for "a stamp in
         // the partition changed") is what actually schedules the crossing
         // against the now-registered watcher.
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let scheduled = cf.take_scheduled();
         assert_eq!(scheduled.len(), 1);
@@ -677,7 +776,7 @@ mod tests {
 
         // Landing the crossing nudges the node just past the threshold and
         // re-aims from there.
-        cf.handle_crossing(0, t, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.handle_crossing(0, t, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert!(voltages[2] > threshold && voltages[2] < threshold + 1e-6, "got {}", voltages[2]);
     }
 
@@ -688,9 +787,9 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         cf.watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }]));
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         let (_, _, stale_version) = cf.take_scheduled()[0];
         assert!(cf.is_current(0, stale_version));
 
@@ -699,7 +798,7 @@ mod tests {
         // exactly as `events.rs`'s lazy-deletion contract requires so
         // `Kernel` silently drops the stale heap entry instead of acting on
         // it.
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert!(!cf.is_current(0, stale_version), "the old crossing must be cancelled by the re-aim");
     }
 
@@ -710,14 +809,14 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(cf.segments_built(), 1.0);
         cf.watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }]));
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(cf.segments_built(), 2.0);
         assert_eq!(cf.crossings(), 0.0);
         let (t, _, _) = cf.take_scheduled()[0];
-        cf.handle_crossing(0, t, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.handle_crossing(0, t, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(cf.crossings(), 1.0);
     }
 
@@ -743,7 +842,7 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let r_shunt = 1.0 / crate::solve::static_part::NODE_RSHUNT_G;
         let vinf = v0 * r_shunt / (r + r_shunt);
@@ -791,7 +890,7 @@ mod tests {
         let mut cf = build(&p);
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
-        cf.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let shunt = crate::solve::static_part::NODE_RSHUNT_G;
         for &t in &[1e-5, 1e-4, 5e-4, 1e-3, 2e-3] {

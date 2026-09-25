@@ -154,6 +154,43 @@ pub trait DeviceEvaluator {
     fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         let _ = snapshot;
     }
+
+    /// Called once after every instant this kernel COMPLETES with a quiet
+    /// fixed point — never for one that livelocks or fails to solve and
+    /// rolls back (W1c contract point 3, "Digital slots": "Slots and trace
+    /// roll back with a failed instant" falls straight out of this never
+    /// being called for one). [`Kernel::advance`] calls it once per instant
+    /// in its own event loop and once more after the horizon clamp,
+    /// [`Kernel::settle`] once at the end of load settling, and
+    /// [`Kernel::apply_params_as_event`] once after its delta cycle — every
+    /// point core/README.md's point 3 names ("at EVERY completed instant,
+    /// not just at the end of advance").
+    ///
+    /// `drivers` is the kernel's full driver table and `solver` is the live
+    /// partition solver, given as a trait object so this generic module
+    /// commits to nothing about which concrete solver is behind `S` — W1c's
+    /// digital-slot readout needs exactly two things from them (a driver's
+    /// committed level, and its owning IC's current power state via
+    /// [`crate::solve::PartitionSolver::ic_powered`]), neither of which
+    /// `Kernel` itself has any notion of "a digital slot" to interpret.
+    /// Returns `(slot, value)` pairs for the caller (`engine.rs`) to publish
+    /// at this instant's time — an implementation with no slot-shaped
+    /// readout (every evaluator before W1c) returns nothing. Default empty.
+    fn on_settled(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
+        let _ = (now, drivers, solver);
+        Vec::new()
+    }
+
+    /// IC evaluations so far (contract stat 12) — "stats keep failed-attempt
+    /// counts" (core/README.md, "A failed advance"), so an implementation
+    /// must count every [`Self::evaluate`] call here regardless of whether
+    /// the instant it happened in is later rolled back, exactly like
+    /// [`KernelStats`] itself is never included in `Kernel::advance`'s own
+    /// snapshot/restore envelope. Default `0.0`: only W1c's IC evaluator
+    /// counts anything.
+    fn ic_evaluations(&self) -> f64 {
+        0.0
+    }
 }
 
 /// So `Kernel<_, Box<dyn DeviceEvaluator>>` satisfies the trait bound
@@ -170,6 +207,14 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         (**self).restore(snapshot)
+    }
+
+    fn on_settled(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
+        (**self).on_settled(now, drivers, solver)
+    }
+
+    fn ic_evaluations(&self) -> f64 {
+        (**self).ic_evaluations()
     }
 }
 
@@ -217,6 +262,21 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// request bumped the driver's token in the meantime) drop silently
     /// instead of resurrecting a stale level.
     held_commits: Vec<(DriverId, Mode, Token)>,
+    /// `(t, slot, value)` triples [`DeviceEvaluator::on_settled`] has
+    /// reported since the last [`Self::take_digital_writes`] drain — the
+    /// kernel-side half of W1c contract point 10's "Digital slots ... at
+    /// EVERY completed instant": `Engine` (which owns the actual slot array
+    /// and the harness trace, neither of which this `Program`/device-free
+    /// module knows the shape of) drains this after every top-level call and
+    /// republishes each entry at ITS OWN recorded `t`, not at whatever time
+    /// `Engine` happens to regain control — `advance`'s own event loop can
+    /// complete several instants inside one call, and each one's slot writes
+    /// belong to ITS instant for the trace to align on (the harness's own
+    /// requirement, W1c contract point 3). Never part of any snapshot/restore
+    /// envelope: nothing is ever pushed here for an instant that fails and
+    /// rolls back, since [`Self::publish_settled`] only ever runs after one
+    /// that already committed — so there is nothing to undo.
+    pending_digital_writes: Vec<(f64, usize, f64)>,
 }
 
 impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
@@ -230,6 +290,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             evaluator,
             stats: KernelStats::default(),
             held_commits: Vec::new(),
+            pending_digital_writes: Vec::new(),
         }
     }
 
@@ -273,6 +334,26 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// [`Self::set_solver`].
     pub fn set_evaluator(&mut self, evaluator: E) {
         self.evaluator = evaluator;
+    }
+
+    /// Read access to the device evaluator — `engine.rs`'s `Engine::stat`
+    /// uses this to reach [`DeviceEvaluator::ic_evaluations`] (contract stat
+    /// 12) without this generic module needing to know what an "IC" is,
+    /// mirroring [`Self::solver`]'s identical reason for existing.
+    pub fn evaluator(&self) -> &E {
+        &self.evaluator
+    }
+
+    /// Drains every `(t, slot, value)` write [`DeviceEvaluator::on_settled`]
+    /// has reported since the last call — `engine.rs` calls this after every
+    /// `advance`/`settle`/`apply_params_as_event` (successful or not: a
+    /// failed `advance` can still have completed earlier instants within the
+    /// same call, and those instants' writes are real, not rolled back — see
+    /// [`Self::pending_digital_writes`]'s own doc comment) and republishes
+    /// each entry at its OWN recorded time into whatever slot storage it
+    /// owns.
+    pub fn take_digital_writes(&mut self) -> Vec<(f64, usize, f64)> {
+        std::mem::take(&mut self.pending_digital_writes)
     }
 
     /// The time of the earliest *pending* event, `+Infinity` when none —
@@ -508,6 +589,20 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         self.held_commits = still_held;
     }
 
+    /// Calls [`DeviceEvaluator::on_settled`] for the instant just completed
+    /// at `self.time` and queues whatever it returns into
+    /// [`Self::pending_digital_writes`] — the one call site every one of
+    /// [`Self::run_deltas`]'s per-instant success, the horizon clamp's own
+    /// success, and [`Self::apply_params_as_event`]'s success routes through
+    /// (see each call site's own comment for why THERE, specifically, is "an
+    /// instant completed").
+    fn publish_settled(&mut self) {
+        let now = self.time;
+        for (slot, value) in self.evaluator.on_settled(now, &self.drivers, &self.solver) {
+            self.pending_digital_writes.push((now, slot, value));
+        }
+    }
+
     /// Pushes every `Crossing`/`Step` a dynamic partition asked to be
     /// scheduled since the last drain (`PartitionSolver::take_scheduled`)
     /// onto this kernel's own heap — the acceptance rule has already been
@@ -663,6 +758,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.evaluator.restore(evaluator_snapshot);
                 return Err(e);
             }
+            // This instant reached a quiet fixed point and was NOT rolled
+            // back: exactly "a completed instant" (W1c contract point 3), so
+            // its digital-slot readout is published now, at ITS OWN `t`, not
+            // deferred to wherever `advance`'s loop or the horizon clamp
+            // below eventually stops.
+            self.publish_settled();
         }
 
         // The horizon clamp (contract point 5): bring every dynamic
@@ -695,6 +796,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // caller that DOES need to react to a horizon-clamp-only
                 // change has somewhere to plug in.
                 self.drain_scheduled();
+                // The horizon clamp is its own completed "instant" at
+                // `t_end` (it has its own snapshot/rollback envelope above,
+                // exactly like any other) — a dynamic partition's published
+                // voltages moved here even though nothing was due, so a
+                // digital reader watching one of its nodes could too.
+                self.publish_settled();
                 Ok(())
             }
             Err(e) => {
@@ -776,6 +883,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             self.solver.apply_params(&old_values);
             return Err(e);
         }
+        // The one event this call applies reached a quiet fixed point and
+        // was not rolled back: a completed instant, same as any `advance`
+        // delta.
+        self.publish_settled();
         Ok(())
     }
 
@@ -924,7 +1035,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
         }
 
-        self.run_deltas(edge_pass_dirty, false)
+        self.run_deltas(edge_pass_dirty, false)?;
+        // Load settling is itself one completed "instant" at `now` (the
+        // three-step process above is how it gets there, not three separate
+        // ones — core/README.md's own "Load settling" point 6 describes it
+        // as a single settling procedure): publish once, at the end, exactly
+        // like `advance`'s own per-instant call does.
+        self.publish_settled();
+        Ok(())
     }
 }
 

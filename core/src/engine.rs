@@ -10,11 +10,16 @@
 //! existed to justify the module. `Engine`'s own `load`/`advance` stay thin:
 //! build the static topology, hand it to a `Kernel`, and let the kernel's
 //! settle/advance own every event-kernel concern (contract point 6, decision
-//! 8; contract point 3, decision 4). No W0/W1b kind ported so far
-//! (`resistor`, `voltage_source`, the switch family) ever creates a
-//! `Driver`, so for a program with no digital kind nothing is ever dirty
-//! beyond the one full solve `settle` performs at load — every W0 behaviour
-//! and test stays exactly as it was.
+//! 8; contract point 3, decision 4). No W0/W1b kind (`resistor`,
+//! `voltage_source`, the switch family) ever creates a `Driver`, so for a
+//! program with no digital kind nothing is ever dirty beyond the one full
+//! solve `settle` performs at load — every W0 behaviour and test stays
+//! exactly as it was. W1c's combinational ICs (`devices::ics`) are the first
+//! kind that does: `Engine::load` registers one `Driver` per output-capable
+//! pin and installs `devices::ics::IcEvaluator` as the kernel's real
+//! evaluator before settling, and every `advance`/`set_params` call drains
+//! `Kernel::take_digital_writes` into this struct's own `Readout` afterward
+//! (`Self::apply_digital_writes`), at each write's own recorded instant.
 //!
 //! `#[cfg(test)]` at the bottom adds a synthetic driver/device pair (gated
 //! out of every real build) that proves `Engine::advance` actually routes
@@ -24,6 +29,7 @@
 
 #[cfg(test)]
 use crate::drivers::Driver;
+use crate::devices::ics;
 use crate::error::BoError;
 use crate::events::{DeviceId, PartitionId};
 use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError};
@@ -44,12 +50,13 @@ pub const STAT_FIXED_NODES: u32 = 3;
 // Indices 4, 5, 6 and 13 (events processed, delta passes, maximum delta
 // depth, driver commits) come live from `Kernel::stats`; 7 (solution-cache
 // hits), 8 (closed-form segments), 9 (crossings), 10 (stepped steps) and 11
-// (Newton iterations) come live from the partition solver (W1b step 2) — see
-// `Engine::stat`. 12 (IC evaluations) and 14 (rail moves) stay reserved at 0
-// until W1c/W1f build that machinery; `Engine::stat` still answers them (as
-// 0), not `NaN`, so a caller can't mistake "not implemented yet" for
-// "unknown index" — that stays reserved for indices past the contract's
-// table (>= `STAT_COUNT`).
+// (Newton iterations) come live from the partition solver (W1b step 2); 12
+// (IC evaluations) comes live from the kernel's own evaluator
+// (`kernel::DeviceEvaluator::ic_evaluations`, W1c) — see `Engine::stat`. 14
+// (rail moves) stays reserved at 0 until W1f builds that machinery;
+// `Engine::stat` still answers it (as 0), not `NaN`, so a caller can't
+// mistake "not implemented yet" for "unknown index" — that stays reserved
+// for indices past the contract's table (>= `STAT_COUNT`).
 pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// W1b's report to the orchestrator: index 15 is NOT in core/README.md's
 /// "Stat indices" table yet (that file is off limits to this worker) — it is
@@ -59,9 +66,15 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// unaffected either way (it already accepts any `u32` index).
 const STAT_COUNT: usize = 16;
 
-/// No W0 or W1a kind creates a driver or a reader (`kernel::DeviceEvaluator`
-/// concepts do not exist for any kind ported so far), so this is `Engine`'s
-/// production evaluator until W1c's digital kinds exist.
+/// The placeholder evaluator every `Engine::load` installs a `Kernel` with
+/// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
+/// `Kernel` to assign driver ids through (`Kernel::add_driver`), so building
+/// the real `devices::ics::IcEvaluator` is necessarily a two-step "construct
+/// the kernel, then register, then `Kernel::set_evaluator`" sequence, exactly
+/// like `solve::ic_tests`'s own `IcHarness` build order. A program with no
+/// IC (or no digital kind at all, W0/W1b) never swaps this out, so it is
+/// also, still, `Engine`'s real evaluator for every such program — not just
+/// a load-time scaffold.
 #[derive(Debug)]
 struct NoDevices;
 
@@ -150,11 +163,11 @@ impl Engine {
     /// Counters (core/README.md, "Stat indices"). Indices 0-3 and 15 are the
     /// load-time snapshot (partition classification never changes after
     /// load); 4, 5, 6 and 13 (events processed, delta passes, maximum delta
-    /// depth, driver commits) come live from the kernel; 7-11 (solution-cache
+    /// depth, driver commits) come live from the kernel; 7-12 (solution-cache
     /// hits, closed-form segments, crossings, stepped steps, Newton
-    /// iterations) come live from the partition solver; 12 and 14 are
-    /// reserved at `0.0` until their machinery lands (W1c/W1f). Unknown `i`
-    /// (>= `STAT_COUNT`) is `NaN`.
+    /// iterations, IC evaluations) come live from the partition solver and
+    /// the kernel's own evaluator; 14 is reserved at `0.0` until its
+    /// machinery lands (W1f). Unknown `i` (>= `STAT_COUNT`) is `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
         match i {
             4 => self.kernel.stats().events_processed as f64,
@@ -165,6 +178,7 @@ impl Engine {
             9 => self.kernel.solver().crossings(),
             10 => self.kernel.solver().stepped_steps(),
             11 => self.kernel.solver().newton_iterations(),
+            12 => self.kernel.evaluator().ic_evaluations(),
             13 => self.kernel.stats().driver_commits as f64,
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
@@ -206,25 +220,58 @@ impl Engine {
         self.readout.trace_clear();
     }
 
-    /// Writes `value` into digital slot `slot`, recording a trace entry only
-    /// when the value actually changed (`bo_engine_trace_enable`'s contract:
-    /// "Record every digital slot change", not every write attempt — a slot
-    /// re-written to the value it already held is not a change, and classic
-    /// itself rebuilds `digitalState` from scratch every pass, so a
-    /// re-affirmed value is the ordinary case, not the exception). NaN
-    /// stands for "absent" (contract, "Readouts"), so absent-to-absent is
-    /// never a change either, even though `NaN != NaN` under `==`.
-    ///
-    /// No W0 or W1a kind calls this yet — it is the hook W1c's digital
-    /// devices will use once a kind actually publishes through
-    /// `digitalState`.
-    pub fn set_digital_slot(&mut self, slot: usize, value: f64) {
+    /// Writes `value` into digital slot `slot` at time `t`, recording a
+    /// trace entry only when the value actually changed
+    /// (`bo_engine_trace_enable`'s contract: "Record every digital slot
+    /// change", not every write attempt — a slot re-written to the value it
+    /// already held is not a change, and classic itself rebuilds
+    /// `digitalState` from scratch every pass, so a re-affirmed value is the
+    /// ordinary case, not the exception). NaN stands for "absent" (contract,
+    /// "Readouts"), so absent-to-absent is never a change either, even
+    /// though `NaN != NaN` under `==`. `t` is a parameter, not always
+    /// `self.kernel.time()`, because [`Self::apply_digital_writes`] replays
+    /// entries at THEIR OWN recorded instant — possibly earlier than the
+    /// kernel's current time, when `advance` completed several instants in
+    /// one call (W1c contract point 3/10: the harness aligns digital traces
+    /// on each change's exact instant, not on whenever `Engine` regains
+    /// control).
+    fn publish_digital(&mut self, t: f64, slot: usize, value: f64) {
         let current = self.readout.digital_slots()[slot];
         let changed = current.is_nan() != value.is_nan() || (!current.is_nan() && current != value);
         if changed {
-            self.readout.record(self.kernel.time(), slot, value);
+            self.readout.record(t, slot, value);
         }
         self.readout.digital_slots_mut()[slot] = value;
+    }
+
+    /// Writes `value` into digital slot `slot` at the CURRENT kernel time —
+    /// the harness/test entry point ([`Self::publish_digital`]'s own doc
+    /// comment covers the general rule; every real digital-slot write goes
+    /// through [`Self::apply_digital_writes`] instead, which knows each
+    /// write's own instant).
+    pub fn set_digital_slot(&mut self, slot: usize, value: f64) {
+        let t = self.kernel.time();
+        self.publish_digital(t, slot, value);
+    }
+
+    /// Drains every `(t, slot, value)` write the kernel's evaluator queued
+    /// via [`crate::kernel::DeviceEvaluator::on_settled`] since the last
+    /// call (`Kernel::take_digital_writes`) and republishes each one at its
+    /// own recorded instant. Called after `Engine::load`'s settle and after
+    /// every `Engine::advance`/`Engine::set_params` call — REGARDLESS of
+    /// whether that call itself succeeded: `advance` can complete several
+    /// instants before a LATER one livelocks or fails to solve, and those
+    /// earlier instants' writes are real, already-committed state (core/
+    /// README.md, "A failed advance": "the engine keeps the state of the
+    /// last instant it completed"), not part of the doomed attempt that
+    /// follows them — nothing is ever queued for the doomed instant itself
+    /// (`Kernel::pending_digital_writes`'s own doc comment), so draining
+    /// unconditionally is exactly correct, never a source of spurious writes
+    /// from a failed call.
+    fn apply_digital_writes(&mut self) {
+        for (t, slot, value) in self.kernel.take_digital_writes() {
+            self.publish_digital(t, slot, value);
+        }
     }
 
     /// Changes an option after load (core/README.md, `bo_engine_set_option`).
@@ -294,7 +341,12 @@ impl Engine {
                 self.kernel.time()
             )));
         }
-        self.kernel.advance(t_end).map_err(map_kernel_error)
+        let result = self.kernel.advance(t_end);
+        // Drained unconditionally, before mapping/returning the error: see
+        // `Self::apply_digital_writes`'s own doc comment on why a failed
+        // `advance` can still carry real, already-completed instants' writes.
+        self.apply_digital_writes();
+        result.map_err(map_kernel_error)
     }
 
     /// `bo_engine_set_params` (owner decision 1): `(deviceIndex, paramIndex,
@@ -327,17 +379,23 @@ impl Engine {
         }
         let triples: Vec<(usize, usize, f64)> = triples.iter().map(|&(d, p, v)| (d as usize, p as usize, v)).collect();
         self.kernel.solver().validate_params(&triples).map_err(BoError::invalid_argument)?;
-        self.kernel.apply_params_as_event(&triples).map_err(map_kernel_error)
+        let result = self.kernel.apply_params_as_event(&triples);
+        // See `Engine::advance`'s identical call: drained unconditionally.
+        self.apply_digital_writes();
+        result.map_err(map_kernel_error)
     }
 
-    /// Loads a program from scratch: build the static topology, then settle
-    /// it at `START_TIME` (decision 8, and decision 4's option key 7 — the
-    /// engine clock and the kernel both start there, never at a hard-coded
-    /// 0) — for a W0/W1a-only program (no drivers exist yet), this is
-    /// exactly the one dense LU solve per partition, plus the KCL current
-    /// pass, that `Engine::load` used to run inline. Never panics on a
-    /// well-formed `Program` — `Program::parse` is what turns malformed
-    /// bytes into `BoError` before this ever runs.
+    /// Loads a program from scratch: build the static topology, register
+    /// every combinational IC's output drivers and install the real digital
+    /// evaluator (`devices::ics::register`, W1c contract point 2), then
+    /// settle at `START_TIME` (decision 8, and decision 4's option key 7 —
+    /// the engine clock and the kernel both start there, never at a
+    /// hard-coded 0) with every IC as a reader (contract point 2's own
+    /// wording) — for a program with no IC (or no digital kind at all,
+    /// W0/W1b), `all_readers` is empty and this is exactly the one dense LU
+    /// solve per partition, plus the KCL current pass, `Engine::load` always
+    /// ran. Never panics on a well-formed `Program` — `Program::parse` is
+    /// what turns malformed bytes into `BoError` before this ever runs.
     pub fn load(program: &Program) -> Result<Engine, BoError> {
         let solver = PartitionedSolver::build(program)?;
         let partition_count = solver.partition_count();
@@ -348,7 +406,15 @@ impl Engine {
         let all_partitions: Vec<PartitionId> = (0..partition_count as u32).map(PartitionId).collect();
 
         let mut kernel = Kernel::new(Box::new(solver) as Box<dyn PartitionSolver>, Box::new(NoDevices) as Box<dyn DeviceEvaluator>);
-        kernel.settle(program.options.start_time, &all_partitions, &[]).map_err(map_kernel_error)?;
+        // `ics::register` needs a live kernel to assign driver ids through
+        // (`Kernel::add_driver`), so the real evaluator can only be built —
+        // and installed via `set_evaluator` — AFTER `Kernel::new`, exactly
+        // like `solve::ic_tests`'s own `IcHarness` build order (that
+        // module's own doc comment).
+        let ic_evaluator = ics::register(&mut kernel, program);
+        let all_readers = ic_evaluator.reader_ids();
+        kernel.set_evaluator(Box::new(ic_evaluator) as Box<dyn DeviceEvaluator>);
+        kernel.settle(program.options.start_time, &all_partitions, &all_readers).map_err(map_kernel_error)?;
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;
@@ -357,14 +423,21 @@ impl Engine {
         stats[STAT_FIXED_NODES as usize] = fixed_count as f64;
         stats[STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS as usize] = multi_capacitor_linear_partitions;
 
-        Ok(Engine {
+        let mut engine = Engine {
             node_count: program.node_count,
             device_count: program.devices.len(),
             kernel,
             stats,
             options: program.options,
             readout: Readout::new(program.digital_slot_count, program.channel_slot_count),
-        })
+        };
+        // The settle above already queued every IC's initial digital-slot
+        // state on the kernel side (`Kernel::settle`'s own `publish_settled`
+        // call) — drain it into this freshly-built `readout` now, so a
+        // caller reading `digital_slots()` right after `load()` sees it
+        // without a separate `advance()` first.
+        engine.apply_digital_writes();
+        Ok(engine)
     }
 }
 

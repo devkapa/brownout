@@ -44,11 +44,16 @@
 use std::collections::HashMap;
 
 use crate::devices::{self, passives};
+use crate::digital;
+use crate::drivers::Driver;
 use crate::events::DeviceId;
 use crate::partition::PartitionKind;
 use crate::program::Program;
 use crate::solve::newton;
-use crate::solve::{compile_dyn_shape, pin_voltage, stamp_linear_base, stamp_two_terminal, DynCapacitor, DynShape, Threshold, ThresholdFn};
+use crate::solve::{
+    build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, stamp_ics_into_dyn, stamp_linear_base, stamp_two_terminal, DynCapacitor,
+    DynShape, Threshold, ThresholdFn,
+};
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
 pub const H_MIN: f64 = 1e-8;
@@ -114,18 +119,77 @@ struct StepResult {
     i: Vec<f64>,
 }
 
+/// Everything [`take_step`]'s per-Newton-iterate stamp closure needs to
+/// restamp this partition's own IC driver/pull contributions afresh, every
+/// time (W1c contract point 3: "a partition holding a free IC supply node
+/// re-stamps from the latest iterate") — bundled into one struct rather than
+/// threaded as a long, repeated parameter list through `take_step`,
+/// `solve_initial_x`, `plan_step`, `refine_crossing_h`, all of which need
+/// every field here. `now` is the partition's own current time (`part.t`,
+/// unchanged for the whole step-doubling trio a single `plan_step` call
+/// tries): the floating-pull bucket key does not need finer resolution than
+/// that, and it keeps every sub-stamp (coarse, mid, fine, and any bisection
+/// trial `refine_crossing_h` takes) using the identical key, exactly as a
+/// single `static_part.rs::resolve_dirty` call uses one `now` throughout its
+/// own fixed-point iteration.
+struct IcStampCtx<'a> {
+    now: f64,
+    drivers: &'a [Driver],
+    ics: &'a [(usize, digital::IcRecord)],
+    node_owner: &'a HashMap<usize, (usize, usize)>,
+    fixed: &'a [Option<f64>],
+    p_idx: usize,
+    /// Whether THIS partition holds a free IC supply node (contract point
+    /// 3): when it does, R_out (and hence the whole stamp) moves with the
+    /// very voltages the step is solving for, so [`take_step`] runs a real
+    /// Newton iteration (`linear = false`) instead of the one-shot linear
+    /// solve every W1b kind alone would need.
+    holds_free_ic_supply: bool,
+}
+
 /// Solves one BE or trap step of size `h` from `(vc_from, x_from)`, with
-/// `i_prev` the last ACCEPTED series current (used only by trap).
-fn take_step(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], x_from: &[f64], i_prev: &[f64], method: Method, newton_iters: &mut u64) -> Result<StepResult, String> {
+/// `i_prev` the last ACCEPTED series current (used only by trap). `ic_ctx`
+/// carries whatever this partition's own IC driver/pull stamps need
+/// (W1c step 2b) — see [`IcStampCtx`]'s own doc comment.
+#[allow(clippy::too_many_arguments)]
+fn take_step(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+) -> Result<StepResult, String> {
     let n = shape.n;
-    let result = newton::solve(n, n, x_from, true, |_x, a, b| {
+    // `linear = true` short-circuits `newton::solve` to exactly one
+    // iteration (every W1b kind is linear, so a second pass could never move
+    // the answer) — but an IC's driver/pull conductance on a FREE supply
+    // node genuinely depends on the iterate itself (R_out is a function of
+    // the very voltage being solved for), so that partition needs the real
+    // convergence loop instead.
+    let linear = !ic_ctx.holds_free_ic_supply;
+    let result = newton::solve(n, n, x_from, linear, |x, a, b| {
         stamp_linear_base(shape, n, a, b, live_params);
         for (i, cap) in shape.capacitors.iter().enumerate() {
             let contrib = companion(cap, h, vc_from[i], i_prev[i], method);
             stamp_two_terminal(n, a, b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection);
         }
+        stamp_ics_into_dyn(n, a, b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, ic_ctx.fixed, ic_ctx.p_idx, x);
     })
     .map_err(|e| format!("stepped: {e}"))?;
+    if !linear && !result.converged {
+        // Classic's own Newton test (contract point 3), applied here exactly
+        // as `static_part.rs::iterate_solve` applies it to a `Static`
+        // partition holding a free IC supply: `newton::solve` itself never
+        // turns "hit the iteration cap unconverged" into an `Err` (a
+        // genuinely nonlinear W1c+ kind may legitimately want the last
+        // iterate anyway), so the caller that KNOWS 50 iterations is the
+        // hard limit is the one that must reject it.
+        return Err(format!("stepped: a free IC supply's fixed-point iteration did not converge within {} iterations", newton::NEWTON_MAX));
+    }
     *newton_iters += result.iterations as u64;
 
     let x = result.x;
@@ -193,11 +257,11 @@ const SEED_H: f64 = 1e-12;
 /// `capsI` itself. `i_prev` feeding a LATER trap companion is harmless here:
 /// `be_next_step` is set alongside this seed at every call site, so the very
 /// next REAL step is forced to BE regardless, never reading it.
-fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String> {
+fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], ic_ctx: &IcStampCtx) -> Result<(Vec<f64>, Vec<f64>), String> {
     let n = shape.n;
     let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
-    let result = take_step(shape, live_params, SEED_H, vc, &vec![0.0; n], &i_prev, Method::Be, &mut newton_iters)?;
+    let result = take_step(shape, live_params, SEED_H, vc, &vec![0.0; n], &i_prev, Method::Be, &mut newton_iters, ic_ctx)?;
     Ok((result.x, result.i))
 }
 
@@ -229,6 +293,13 @@ struct Partition {
     /// (core/README.md, "A failed advance").
     steps_taken: u64,
     newton_iterations: u64,
+    /// Whether this partition holds a free IC supply node (W1c contract
+    /// point 3) — a build-time topology fact (`SteppedSolver::build`
+    /// computes it once, from `collect_ics`/`local_index`), not part of any
+    /// snapshot/restore: it can never change after load, since
+    /// `partition::build`'s own union rule decides it before this solver
+    /// even exists.
+    holds_free_ic_supply: bool,
 }
 
 impl Partition {
@@ -264,6 +335,7 @@ impl Partition {
             watches: HashMap::new(),
             steps_taken: 0,
             newton_iterations: 0,
+            holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
         }
     }
 }
@@ -306,10 +378,38 @@ pub struct SteppedSolver {
     /// `closed_form::Snapshot`'s doc comment for why it is part of
     /// [`Snapshot`] rather than always empty by the time one is taken.
     scheduled: Vec<(f64, usize, u64)>,
+    /// Every combinational IC in the program (W1c step 2b, lifting
+    /// `partition.rs`'s former decline): [`take_step`]/`solve_initial_x`
+    /// restamp whichever of these touch a given `Stepped` partition fresh on
+    /// every trial, mirroring `static_part.rs`'s own `ics` list.
+    ics: Vec<(usize, digital::IcRecord)>,
+    /// Fixed voltages, node -> `Some(v)` — `stamp_ics_into_dyn`'s own
+    /// resolver needs this to place an IC pin whose node is fixed.
+    fixed: Vec<Option<f64>>,
+    /// node -> every IC device index that reads it (contract point 4's
+    /// last bullet: "resolves of dynamic partitions must also report IC
+    /// readers of nodes that changed, as static does").
+    node_to_ic_readers: HashMap<usize, Vec<usize>>,
 }
 
 impl SteppedSolver {
     pub fn build(program: &Program, partitions: &[Vec<usize>], local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>], kinds: &[PartitionKind]) -> Self {
+        let ics = collect_ics(program);
+        // Contract point 3: a partition holding a FREE `vcc`/`gnd` node of
+        // any IC is where R_out moves with the partition's own solved state,
+        // computed once here (program-wide, mirroring `capacitor_count`'s own
+        // per-partition accumulation in `partition.rs`) rather than re-walked
+        // on every step.
+        let mut holds_free_ic_supply = vec![false; partitions.len()];
+        for (_, ic) in &ics {
+            for &node in &[ic.vcc.node, ic.gnd.node] {
+                if let Some((p, _)) = local_index[node] {
+                    holds_free_ic_supply[p] = true;
+                }
+            }
+        }
+        let node_to_ic_readers = build_ic_reader_index(&ics);
+
         let mut parts = HashMap::new();
         let mut node_owner = HashMap::new();
         for (p_idx, kind) in kinds.iter().enumerate() {
@@ -320,9 +420,19 @@ impl SteppedSolver {
             for (l, &node) in shape.nodes.iter().enumerate() {
                 node_owner.insert(node, (p_idx, l));
             }
-            parts.insert(p_idx, Partition::new(shape, program.options.start_time));
+            let mut part = Partition::new(shape, program.options.start_time);
+            part.holds_free_ic_supply = holds_free_ic_supply[p_idx];
+            parts.insert(p_idx, part);
         }
-        SteppedSolver { partitions: parts, node_owner, method: Method::from_option(program.options.integration), scheduled: Vec::new() }
+        SteppedSolver {
+            partitions: parts,
+            node_owner,
+            method: Method::from_option(program.options.integration),
+            scheduled: Vec::new(),
+            ics,
+            fixed: fixed.to_vec(),
+            node_to_ic_readers,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -364,13 +474,25 @@ impl SteppedSolver {
     /// forward to `now` (discarding any pending trial beyond it), mark the
     /// BE anchor (a discontinuity), publish the synced state, then
     /// immediately plan (and schedule) a fresh step from `now`.
-    pub fn resolve_dirty(&mut self, dirty: &[usize], now: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
+    pub fn resolve_dirty(
+        &mut self,
+        dirty: &[usize],
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+    ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
         for &p_idx in dirty {
             if !self.partitions.contains_key(&p_idx) {
                 continue;
             }
-            self.sync_partition(p_idx, now, live_params)?;
+            self.sync_partition(p_idx, now, drivers, live_params)?;
+
+            let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+            let holds_free_ic_supply = self.partitions[&p_idx].holds_free_ic_supply;
+            let ic_ctx = IcStampCtx { now, drivers, ics: &self.ics, node_owner: &self.node_owner, fixed: &self.fixed, p_idx, holds_free_ic_supply };
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
@@ -385,46 +507,77 @@ impl SteppedSolver {
                 // later re-aim it keeps them from publishing the OLD
                 // topology's stale values next to `live_params`-driven
                 // switch/resistor currents that already read the NEW one.
-                let (x, i_prev) = solve_initial_x(&part.shape, live_params, &part.vc)?;
+                let (x, i_prev) = solve_initial_x(&part.shape, live_params, &part.vc, &ic_ctx)?;
                 part.x = x;
                 part.i_prev = i_prev;
             }
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
-            self.plan_and_schedule(p_idx, now, live_params)?;
+            Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
+            self.plan_and_schedule(p_idx, now, drivers, live_params)?;
         }
         Ok(readers)
     }
 
     /// A due, still-current `Step` event: commits the pending trial, then
     /// immediately plans (and schedules) the next one.
-    pub fn handle_step(&mut self, partition: usize, now: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
+    pub fn handle_step(
+        &mut self,
+        partition: usize,
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+    ) -> Result<Vec<DeviceId>, String> {
         let _ = now; // the due time IS `part.pend_t`; `now` is only a sanity anchor.
+        let old_bits: Vec<u64> = self.partitions[&partition].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
         {
             let part = self.partitions.get_mut(&partition).ok_or_else(|| format!("stepped: unknown partition {partition}"))?;
             Self::commit(part);
         }
         Self::publish(self.partitions.get(&partition).unwrap(), live_params, voltages, currents);
-        let readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
+        let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
+        Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
-        self.plan_and_schedule(partition, commit_time, live_params)?;
+        self.plan_and_schedule(partition, commit_time, drivers, live_params)?;
         Ok(readers)
     }
 
     /// The horizon clamp's stepped half (`PartitionedSolver::sync_dynamic_to`):
     /// fast-forwards every partition still behind `t_end`, publishes it, and
     /// re-plans from there so the next `advance` has a live pending step.
-    pub fn sync_to(&mut self, t_end: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
+    pub fn sync_to(&mut self, t_end: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
         let ids: Vec<usize> = self.partitions.keys().copied().collect();
         let mut readers = Vec::new();
         for p_idx in ids {
             if self.partitions[&p_idx].t >= t_end - 1e-15 {
                 continue;
             }
-            self.sync_partition(p_idx, t_end, live_params)?;
+            let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+            self.sync_partition(p_idx, t_end, drivers, live_params)?;
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
-            self.plan_and_schedule(p_idx, t_end, live_params)?;
+            // Contract point 4's last bullet ("resolves of dynamic
+            // partitions must also report IC readers of nodes that changed,
+            // as static does"), extended here to the horizon clamp too — the
+            // coordinator's own follow-up point 2: a Schmitt/plain input on a
+            // `Stepped` partition must be re-read after EVERY committed step,
+            // including whichever ones the clamp itself takes to land exactly
+            // on `t_end` (`sync_partition`'s own doc comment: "however many
+            // committed steps it takes"), not only the ones `handle_step`
+            // commits one at a time from the ordinary event loop. `Kernel`'s
+            // own `advance` currently discards this call's returned readers
+            // (`kernel.rs`'s own doc comment on why: "a solved value... this
+            // still has to evaluate... but not a no-op" for CLOSED-FORM,
+            // "no reader concept is exercised... today" for the clamp in
+            // general) — reporting them correctly here regardless keeps this
+            // solver's own contract complete independent of what the kernel
+            // currently does with the answer, and is what
+            // `stepped::tests::sync_to_reports_ic_readers_of_changed_nodes`
+            // (below) checks directly, at the solver level.
+            Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
+            self.plan_and_schedule(p_idx, t_end, drivers, live_params)?;
         }
         Ok(readers)
     }
@@ -505,6 +658,25 @@ impl SteppedSolver {
         crate::solve::publish_stamped_currents(&part.shape, voltages, live_params, currents);
     }
 
+    /// W1c contract point 4's last bullet, mirrored from `static_part.rs`'s
+    /// own `node_to_ic_readers` walk (`closed_form.rs` carries the identical
+    /// helper): for every one of this partition's own local nodes whose
+    /// PUBLISHED bits actually changed this commit/re-aim, extends `readers`
+    /// with every IC that reads it — not only the ones with an explicit
+    /// crossing watch registered. `old_bits` is `part.shape.nodes`-order,
+    /// captured by the caller BEFORE `Self::publish`; a duplicate `readers`
+    /// entry (already present from `part.watches`) is harmless — `Kernel`
+    /// dedups across a whole delta's readers regardless.
+    fn report_changed_ic_readers(part: &Partition, old_bits: &[u64], voltages: &[f64], node_to_ic_readers: &HashMap<usize, Vec<usize>>, readers: &mut Vec<DeviceId>) {
+        for (l, &node) in part.shape.nodes.iter().enumerate() {
+            if voltages[node].to_bits() != old_bits[l] {
+                if let Some(ics) = node_to_ic_readers.get(&node) {
+                    readers.extend(ics.iter().map(|&d| DeviceId(d as u32)));
+                }
+            }
+        }
+    }
+
     /// Commits `part`'s pending trial: `i_prev` becomes the trial's OWN
     /// series current (spec: "the last ACCEPTED series current"), `vc`/`x`
     /// become its result, `t` becomes `pend_t`, and the BE anchor clears
@@ -524,7 +696,7 @@ impl SteppedSolver {
     /// however many committed steps (each bounded to `horizon`) it takes to
     /// bring `part.t` up to `horizon`, using a pending trial outright when it
     /// already lands within `horizon`.
-    fn sync_partition(&mut self, p_idx: usize, horizon: f64, live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
+    fn sync_partition(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
         loop {
             let (t, has_pend, pend_t) = {
                 let part = &self.partitions[&p_idx];
@@ -538,15 +710,15 @@ impl SteppedSolver {
                 Self::commit(part);
                 continue;
             }
-            self.plan_step(p_idx, horizon, live_params)?;
+            self.plan_step(p_idx, horizon, drivers, live_params)?;
             let part = self.partitions.get_mut(&p_idx).unwrap();
             Self::commit(part);
         }
         Ok(())
     }
 
-    fn plan_and_schedule(&mut self, p_idx: usize, now: f64, live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
-        self.plan_step(p_idx, f64::INFINITY, live_params)?;
+    fn plan_and_schedule(&mut self, p_idx: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
+        self.plan_step(p_idx, f64::INFINITY, drivers, live_params)?;
         let part = &self.partitions[&p_idx];
         let _ = now;
         self.scheduled.push((part.pend_t, p_idx, part.version));
@@ -557,27 +729,31 @@ impl SteppedSolver {
     /// plus iterative crossing refinement (this module's doc comment,
     /// replacing pec3's single-fraction clamp). Leaves a fresh pending trial
     /// on `part`; does not commit it.
-    fn plan_step(&mut self, p_idx: usize, horizon: f64, live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
+    fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
         let option_method = self.method;
+        let ics = &self.ics;
+        let node_owner = &self.node_owner;
+        let fixed = &self.fixed;
         let part = self.partitions.get_mut(&p_idx).unwrap();
         let shape_n = part.shape.n;
         let method = if part.be_next_step { Method::Be } else { option_method };
         let vc0 = part.vc.clone();
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, fixed, p_idx, holds_free_ic_supply: part.holds_free_ic_supply };
 
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t);
         let mut ratio;
         let mut accepted: StepResult;
         loop {
             if h <= H_MIN * 2.01 {
-                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations)?;
+                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
                 ratio = 0.0;
                 break;
             }
-            let coarse = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations)?;
-            let mid = take_step(&part.shape, live_params, h / 2.0, &vc0, &x0, &i_prev, method, &mut part.newton_iterations)?;
-            let fine = take_step(&part.shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, &mut part.newton_iterations)?;
+            let coarse = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
+            let mid = take_step(&part.shape, live_params, h / 2.0, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
+            let fine = take_step(&part.shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, &mut part.newton_iterations, &ic_ctx)?;
 
             ratio = 0.0f64;
             for k in 0..shape_n {
@@ -608,9 +784,9 @@ impl SteppedSolver {
 
         // Iterative crossing refinement (this module's doc comment).
         if let Some((local, threshold)) = find_crossing(part, &x0, &accepted.x) {
-            let refined_h = refine_crossing_h(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, local, threshold, &mut part.newton_iterations)?;
+            let refined_h = refine_crossing_h(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, local, threshold, &mut part.newton_iterations, &ic_ctx)?;
             h = refined_h;
-            accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations)?;
+            accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
         }
 
         part.pend_x = accepted.x;
@@ -670,13 +846,14 @@ fn refine_crossing_h(
     local: usize,
     threshold: Threshold,
     newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
 ) -> Result<f64, String> {
     let target = threshold.value + if threshold.rising { CROSS_TOLERANCE_V } else { -CROSS_TOLERANCE_V };
     let (mut lo, mut hi) = (0.0f64, h);
     let mut best_h = hi;
     for _ in 0..CROSS_REFINE_MAX_ITERS {
         let mid = 0.5 * (lo + hi);
-        let trial = take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters)?;
+        let trial = take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx)?;
         let v = trial.x[local];
         let past = if threshold.rising { v >= target } else { v <= target };
         if past {
@@ -763,7 +940,7 @@ mod tests {
         assert_eq!(st.partitions.len(), 1, "two capacitors in one linear partition must classify Stepped");
         let mut voltages = vec![0.0, v, 0.0, 0.0];
         let mut currents = vec![0.0; 5];
-        st.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         // Not testing t=1e-4: node2 is still barely charged there (its own
         // RC lag behind node1), so even a tiny absolute error reads as a
@@ -772,7 +949,7 @@ mod tests {
         // a real accuracy regression.
         for &t in &[5e-4, 1e-3, 3e-3] {
             let (mut vv, mut cc) = (voltages.clone(), currents.clone());
-            st.sync_to(t, &HashMap::new(), &mut vv, &mut cc).unwrap();
+            st.sync_to(t, &[], &HashMap::new(), &mut vv, &mut cc).unwrap();
             let (expected_v1, expected_v2) = ladder_reference(v, r1, c1, r2, c2, t);
             // Decision 14: "within classic's tolerance but not exact" — a
             // numerically-converged stepped result, not the single-capacitor
@@ -805,7 +982,7 @@ mod tests {
         let mut st0 = build(&p0);
         let mut voltages0 = vec![0.0, v, 0.0, 0.0];
         let mut currents0 = vec![0.0; 5];
-        st0.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages0, &mut currents0).unwrap();
+        st0.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages0, &mut currents0).unwrap();
 
         let mut options5 = Options::default();
         options5.start_time = 5.0;
@@ -813,7 +990,7 @@ mod tests {
         let mut st5 = build(&p5);
         let mut voltages5 = vec![0.0, v, 0.0, 0.0];
         let mut currents5 = vec![0.0; 5];
-        st5.resolve_dirty(&[0], 5.0, &HashMap::new(), &mut voltages5, &mut currents5).unwrap();
+        st5.resolve_dirty(&[0], 5.0, &[], &HashMap::new(), &mut voltages5, &mut currents5).unwrap();
 
         assert_eq!(st5.steps_taken(), 0.0, "loading at a nonzero START_TIME must not integrate anything");
         for l in [2usize, 3] {
@@ -837,7 +1014,7 @@ mod tests {
             let mut st = build(&p);
             let mut voltages = vec![0.0, v, 0.0];
             let mut currents = vec![0.0; 3];
-            st.resolve_dirty(&[0], start_time, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+            st.resolve_dirty(&[0], start_time, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
             (st, voltages)
         };
         let (_st0, voltages0) = build_at(0.0);
@@ -862,11 +1039,11 @@ mod tests {
         let mut st = build(&p);
         let mut voltages = vec![0.0, v, 0.0];
         let mut currents = vec![0.0; 3];
-        st.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let vc_before = st.partitions[&0].vc[0];
         let h = st.partitions.get(&0).unwrap().h;
-        st.plan_step(0, f64::INFINITY, &HashMap::new()).unwrap();
+        st.plan_step(0, f64::INFINITY, &[], &HashMap::new()).unwrap();
         let part = &st.partitions[&0];
         let accepted_h = part.pend_t - 0.0;
         let vc_after = part.pend_vc[0];
@@ -902,13 +1079,13 @@ mod tests {
         // first plan is BE regardless (classic's `load()`); accept it, then
         // trigger a SECOND discontinuity explicitly to prove the flag gets
         // RE-SET, not merely left over from load.
-        st.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(true), "the first step after load must be BE");
         let now = st.partitions[&0].pend_t;
-        st.handle_step(0, now, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.handle_step(0, now, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(false), "an accepted step clears the BE anchor");
 
-        st.resolve_dirty(&[0], now, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], now, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(true), "a re-aim (a discontinuity) must set the BE anchor again");
     }
 
@@ -923,12 +1100,12 @@ mod tests {
         let mut st = build(&p);
         let mut voltages = vec![0.0, v, 0.0, 0.0];
         let mut currents = vec![0.0; 5];
-        st.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let shunt = crate::solve::static_part::NODE_RSHUNT_G;
         for &t in &[1e-4, 5e-4, 1e-3, 3e-3] {
             let (mut vv, mut cc) = (voltages.clone(), currents.clone());
-            st.sync_to(t, &HashMap::new(), &mut vv, &mut cc).unwrap();
+            st.sync_to(t, &[], &HashMap::new(), &mut vv, &mut cc).unwrap();
 
             let expected_r1 = (vv[1] - vv[2]) / r1;
             let expected_r2 = (vv[2] - vv[3]) / r2;
@@ -965,7 +1142,7 @@ mod tests {
         let mut currents = vec![0.0; 5];
 
         // This IS load time: no `sync_to`/`handle_step` has run yet.
-        st.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         // At vc=0 for both (uncharged) capacitors, both node voltages sit at
         // the resistive divider's value with no capacitor current flowing
@@ -989,5 +1166,76 @@ mod tests {
         assert!(kcl_node1.abs() < 1e-9, "KCL residual at node1 (load time) = {kcl_node1}");
         let kcl_node2 = currents[3] - currents[4] - shunt * voltages[3];
         assert!(kcl_node2.abs() < 1e-9, "KCL residual at node2 (load time) = {kcl_node2}");
+    }
+
+    // ---- W1c step 2b's own follow-up: IC readers of changed nodes, after
+    // EVERY committed step (`resolve_dirty`, `handle_step` AND `sync_to`) --
+
+    fn ls04_reading(ci: usize, vcc: usize, gnd: usize, a1: usize, dump: usize) -> Device {
+        use crate::kinds::ic_param;
+        let mut params = vec![0.0; ic_param::COUNT];
+        params[ic_param::VCC_MIN] = 4.75;
+        params[ic_param::VCC_MAX] = 5.25;
+        params[ic_param::FAM_FLAGS] = crate::kinds::FAM_TTL as f64;
+        params[ic_param::VIL_FIXED] = 1.0;
+        params[ic_param::VIL] = 0.8;
+        params[ic_param::VIH_FIXED] = 1.0;
+        params[ic_param::VIH] = 2.0;
+        params[ic_param::NOMINAL] = 5.0;
+        params[ic_param::IO_MAX] = 0.008;
+        params[ic_param::DELAY] = 20e-9;
+        // `1a 1y 2a 2y 3a 3y 4a 4y 5a 5y 6a 6y`: 1a reads `a1` (the watched
+        // node); every other pin ties to `dump` (an isolated, otherwise
+        // unconnected node — irrelevant to this test).
+        let pins = vec![pin(vcc), pin(gnd), pin(a1), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump), pin(dump)];
+        let blob_flags: Vec<f64> = (0..12).map(|i| if i % 2 == 0 { crate::kinds::PIN_FLOATING_INPUT as f64 } else { 0.0 }).collect();
+        let mut blob = vec![0.0];
+        blob.extend(blob_flags);
+        Device { kind: crate::kinds::IC_74LS04, component_index: ci, pins, params, blob }
+    }
+
+    /// Contract point 4's last bullet ("resolves of dynamic partitions must
+    /// also report IC readers of nodes that changed, as static does"), and
+    /// the coordinator's own W1c step 2b follow-up point 2: for a `Stepped`
+    /// partition this must hold after `resolve_dirty` (the load-time/re-aim
+    /// path), `handle_step` (an ordinary committed step) AND `sync_to` (the
+    /// horizon clamp's own committed steps) alike — a Schmitt or plain input
+    /// on a stepped RC must be re-read every time, not only at an explicit
+    /// crossing watch. No `watch_node` call anywhere in this test: the IC
+    /// (device 5) reads node2 purely through `node_to_ic_readers`
+    /// (`SteppedSolver::build`'s own `collect_ics`/`build_ic_reader_index`),
+    /// proving this is the GENERIC fallback the contract calls for, not
+    /// something that only works alongside a registered watch.
+    #[test]
+    fn resolve_dirty_handle_step_and_sync_to_all_report_the_ic_reader_of_a_changed_node() {
+        let (v, r1, c1, r2, c2) = (5.0, 1000.0, 1e-6, 1000.0, 1e-6);
+        let mut devices = vec![
+            source(0, 1, 0, v),
+            resistor(1, 1, 2, r1),
+            capacitor(2, 2, 0, c1, 0.0, 0.0),
+            resistor(3, 2, 3, r2),
+            capacitor(4, 3, 0, c2, 0.0, 0.0),
+        ];
+        devices.push(ls04_reading(5, 1, 0, 2, 4)); // reads node2 (the first RC node), dump = node4.
+        let p = program(5, devices, Options::default());
+        let mut st = build(&p);
+        assert_eq!(st.partitions.len(), 1, "two capacitors: genuinely Stepped");
+        let mut voltages = vec![0.0, v, 0.0, 0.0, 0.0];
+        let mut currents = vec![0.0; 6];
+
+        // Load-time resolve_dirty: node2 moves from its 0.0 placeholder to
+        // the real operating point (`solve_initial_x`'s own seed), so the ic
+        // reader (device 5) must be reported even with no watch registered.
+        let readers = st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        assert!(readers.contains(&DeviceId(5)), "resolve_dirty must report the ic reader when node2 changes, got {readers:?}");
+
+        // handle_step: commit one real, ordinary step -- node2 keeps moving.
+        let now = st.partitions[&0].pend_t;
+        let readers = st.handle_step(0, now, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        assert!(readers.contains(&DeviceId(5)), "handle_step must report the ic reader when node2 changes, got {readers:?}");
+
+        // sync_to: the horizon clamp, well past several more committed steps.
+        let readers = st.sync_to(5e-4, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        assert!(readers.contains(&DeviceId(5)), "sync_to must report the ic reader when node2 changes, got {readers:?}");
     }
 }
