@@ -15,7 +15,7 @@
  * outputs-valid-after-step / inputs-consumed-next-step phasing as ArduinoMcu.
  */
 
-import { RP2040, Simulator, USBCDC, GPIOPinState } from "rp2040js";
+import { RP2040, Simulator, USBCDC, GPIOPinState, ConsoleLogger, LogLevel } from "rp2040js";
 import type { MicrocontrollerCore, PinDriveState, PinEvent } from "./mcu.js";
 import { bootromB1 } from "./rp2040-bootrom.js";
 
@@ -127,6 +127,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
     // ourselves (never call Simulator.execute — that starts a setTimeout pacer).
     this.sim = new Simulator();
     this.rp2040 = this.sim.rp2040;
+    // rp2040js defaults to a Debug-level ConsoleLogger, which prints every USB
+    // transfer, SEV and unimplemented peripheral access: thousands of lines a
+    // second while MicroPython boots, enough to stall the host. Keep errors only
+    // (still thrown, as before).
+    this.rp2040.logger = new ConsoleLogger(LogLevel.Error, true);
     // The boot ROM must be present: on reset the core reads the reset vector
     // from ROM at address 0. Then we jump straight into flash boot2.
     this.rp2040.loadBootrom(bootromB1);
