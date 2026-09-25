@@ -40,6 +40,8 @@ export type { ExternalCorpus } from "./external-corpus.js";
 export type {
   CorpusEntry,
   CorpusOrigin,
+  DigitalFixtureSpec,
+  AnalogFixtureSpec,
   SampleReadout,
   Mismatch,
   CompareResult,
@@ -47,10 +49,12 @@ export type {
   EntryResult,
   NotPortedResult,
   CoreDeclinedResult,
+  CoreStimuliPendingResult,
   PassResult,
   FailResult,
   ErrorResult,
   KindRow,
+  KnownDivergenceHit,
 } from "./types.js";
 
 export {
@@ -62,3 +66,63 @@ export {
   withinVoltTolerance,
   withinAmpTolerance,
 } from "./tolerance.js";
+
+export {
+  diffDigitalStates,
+  collectClassicDigitalTrace,
+  collectCoreDigitalTrace,
+  hasCoreTraceSupport,
+  stateAt,
+  CoreTraceUnsupportedError,
+} from "./trace.js";
+export type { DigitalTraceEvent, CoreTraceCapable } from "./trace.js";
+
+export {
+  findRisingEdges,
+  sampleCycles,
+  alignCycles,
+  compareAlignedCycles,
+  requireMinComparedCycles,
+  TooFewComparedCyclesError,
+} from "./align.js";
+export type { ProjectedState, CycleSample, AlignmentResult, AlignmentSuccess, AlignmentFailure, CycleMismatch, AlignedComparison } from "./align.js";
+
+export {
+  guardWindowS,
+  eventInstantsFromTrace,
+  selectQuietInstants,
+  requireMinQuietInstants,
+  assertInstantsAreQuiet,
+  TooFewQuietInstantsError,
+} from "./quiet.js";
+export type { GuardWindowOptions } from "./quiet.js";
+
+export { denseAnalogSchedule, mergeScheduleTimes } from "./schedule.js";
+export type { DenseScheduleOptions } from "./schedule.js";
+
+export { rcCrossingTime, ne555AstablePeriod, ne555MonostablePulseWidth, checkAnalyticCrossing } from "./analytic.js";
+export type { Ne555AstableParams, Ne555AstableAnalytic, Ne555MonostableParams, AnalyticCheckResult } from "./analytic.js";
+
+export {
+  classicIdentityHash,
+  classicSourceFiles,
+  contentHashOfFiles,
+  DEFAULT_COLLECTOR_SOURCE_FILES,
+  resetClassicIdentityCacheForTest,
+  fixtureHash,
+  createMemoryReferenceCache,
+  createFileReferenceCache,
+  getOrCompute,
+} from "./reference-cache.js";
+export type { ClassicReferenceCacheKey, ClassicReferenceCache, ClassicIdentityInputs } from "./reference-cache.js";
+
+export {
+  STIMULUS_FIXED_STEP_S,
+  replayStimuliOnClassic,
+  replayStimuliOnCore,
+  StimuliNotYetSupportedOnCoreError,
+} from "./stimuli.js";
+export type { StimulusPhase, StimulusPhaseSet, StimulusStepSample } from "./stimuli.js";
+
+export { KNOWN_DIVERGENCES, classifyMismatches, computeDivergenceCone, digitalOutputPins } from "./known-divergences.js";
+export type { KnownDivergence, DivergenceSeed, DivergenceCone, DivergenceMatch, ClassifiedMismatches } from "./known-divergences.js";

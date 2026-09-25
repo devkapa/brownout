@@ -1,4 +1,4 @@
-//! The error codes are the contract (core/README.md, "C ABI, version 1").
+//! The error codes are the contract (core/README.md, "C ABI, version 2").
 //! Every fallible operation in this crate returns a `BoError` so the numeric
 //! code and the human message are produced together, in one place, and can
 //! never drift apart.
@@ -20,6 +20,14 @@ pub const ERR_SOLVE_FAILED: i32 = -4;
 pub const ERR_BAD_HANDLE: i32 = -5;
 /// `-6`: `bo_engine_advance` was asked to move time backwards.
 pub const ERR_TIME_BACKWARDS: i32 = -6;
+/// `-7`: the event kernel's per-instant delta-cycle pass cap was exceeded.
+/// The host treats it as non-convergence, never a silent exit (core/README.md,
+/// "Kernel semantics: events", point 3).
+pub const ERR_DELTA_LIVELOCK: i32 = -7;
+/// `-8`: invalid argument to a live ABI call — an unknown option key, a
+/// value out of range, a load-time option changed after load, a device or
+/// param index out of range, or a param that is not live.
+pub const ERR_INVALID_ARGUMENT: i32 = -8;
 
 #[derive(Debug, Clone)]
 pub struct BoError {
@@ -54,5 +62,13 @@ impl BoError {
 
     pub fn time_backwards(message: impl Into<String>) -> Self {
         Self::new(ERR_TIME_BACKWARDS, message)
+    }
+
+    pub fn delta_livelock(message: impl Into<String>) -> Self {
+        Self::new(ERR_DELTA_LIVELOCK, message)
+    }
+
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::new(ERR_INVALID_ARGUMENT, message)
     }
 }

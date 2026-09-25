@@ -4,19 +4,41 @@ import {
   CORE_FORMAT_VERSION,
   CORE_KIND_CODE,
   CORE_KIND_NAME_BY_CODE,
+  CORE_OPTION_KEYS,
   decodeProgram,
   ProgramWriter,
+  type ProgramPinInput,
 } from "../../src/core/format.js";
+import { CORE_KIND_CODES } from "../../src/core/kinds.js";
 
-// A minimal, valid one-resistor program (nodeCount 2, one resistor from node
-// 0 to node 1, R = 500). Used as a baseline that "each decode validation
-// error" tests mutate one field of at a time. Its layout is fixed by
-// ProgramWriter's push order — the offsets below (0..12) are documented as
-// each test uses them, so a change to that order is visible here.
+/** A closed pin record with arbitrary (but in-range) hash placeholders — format.ts doesn't care where a hash comes from, only that it's a valid uint32; the real FNV-1a values are compile/topology.ts's job and are golden-vector-tested in compile.test.ts. */
+function pin(node: number, overrides: Partial<ProgramPinInput> = {}): ProgramPinInput {
+  return { node, open: false, openHigh: false, openHash: 0x1111, deadHash: 0x2222, ...overrides };
+}
+
+// A minimal, valid one-resistor program: nodeCount 2, one AMBIENT_C option,
+// one resistor from node 0 (closed) to node 1 (open), R = 500, no readout
+// slots. Used as a baseline that "each decode validation error" tests mutate
+// one field of at a time. Its layout is fixed by ProgramWriter's push order —
+// the offsets below (0..23) are documented as each test uses them, so a
+// change to that order is visible here.
+//
+//  0 MAGIC        5 option0.key=AMBIENT_C   12 pin0.node=0   17 pin1.flags=OPEN
+//  1 VERSION      6 option0.value=25        13 pin0.flags=0  18 pin1.openHash
+//  2 nodeCount=2  7 digitalSlotCount=0      14 pin0.openHash 19 pin1.deadHash
+//  3 deviceCount=1 8 channelSlotCount=0     15 pin0.deadHash 20 paramCount=1
+//  4 optionCount=1 9 kindCode=resistor(1)   16 pin1.node=1   21 param0=500
+//                 10 componentIndex=0                        22 blobCount=0
+//                 11 pinCount=2                               23 trailer MAGIC
 function buildBaselineProgram(): Float64Array {
-  const writer = new ProgramWriter(2);
-  writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [0, 1], params: [500] });
-  return writer.finish();
+  const writer = new ProgramWriter(2, [[CORE_OPTION_KEYS.AMBIENT_C, 25]]);
+  writer.addDevice({
+    kindCode: CORE_KIND_CODE.resistor,
+    componentIndex: 0,
+    pins: [pin(0, { openHash: 0x1111, deadHash: 0x2222 }), pin(1, { open: true, openHash: 0x3333, deadHash: 0x4444 })],
+    params: [500],
+  });
+  return writer.finish(0, 0);
 }
 
 function mutated(base: Float64Array, index: number, value: number): Float64Array {
@@ -27,14 +49,29 @@ function mutated(base: Float64Array, index: number, value: number): Float64Array
 
 describe("CORE_FORMAT_MAGIC / CORE_FORMAT_VERSION", () => {
   it("match the contract in core/README.md", () => {
-    // core/README.md: `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `1`.
+    // core/README.md: `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `2`.
     expect(CORE_FORMAT_MAGIC).toBe(0x424f4331);
-    expect(CORE_FORMAT_VERSION).toBe(1);
+    expect(CORE_FORMAT_VERSION).toBe(2);
   });
 });
 
-describe("CORE_KIND_CODE / CORE_KIND_NAME_BY_CODE", () => {
-  it("assigns the contract's codes", () => {
+describe("CORE_OPTION_KEYS", () => {
+  it("matches the contract's Options table", () => {
+    expect(CORE_OPTION_KEYS).toEqual({
+      INTEGRATION: 1,
+      NO_SOLUTION_CACHE: 2,
+      NO_RAIL_SHORTCUT: 3,
+      FORCE_STEPPED: 4,
+      AMBIENT_C: 5,
+      FLOATING_MODEL: 6,
+      START_TIME: 7,
+    });
+  });
+});
+
+describe("CORE_KIND_CODE / CORE_KIND_NAME_BY_CODE — v1 aliases for kinds.ts's table", () => {
+  it("CORE_KIND_CODE is exactly kinds.ts's CORE_KIND_CODES (not a stale copy)", () => {
+    expect(CORE_KIND_CODE).toBe(CORE_KIND_CODES);
     expect(CORE_KIND_CODE.resistor).toBe(1);
     expect(CORE_KIND_CODE.voltage_source).toBe(2);
   });
@@ -43,40 +80,92 @@ describe("CORE_KIND_CODE / CORE_KIND_NAME_BY_CODE", () => {
     expect(CORE_KIND_NAME_BY_CODE.get(1)).toBe("resistor");
     expect(CORE_KIND_NAME_BY_CODE.get(2)).toBe("voltage_source");
     expect(CORE_KIND_NAME_BY_CODE.get(0)).toBeUndefined();
-    expect(CORE_KIND_NAME_BY_CODE.get(99)).toBeUndefined();
+    expect(CORE_KIND_NAME_BY_CODE.get(12345)).toBeUndefined();
   });
 });
 
 describe("ProgramWriter -> decodeProgram round trip", () => {
-  it("round-trips a multi-device program, including a non-empty blob", () => {
-    const writer = new ProgramWriter(4);
-    writer.addDevice({ kindCode: CORE_KIND_CODE.voltage_source, componentIndex: 0, pins: [1, 0], params: [9] });
-    writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 1, pins: [1, 2], params: [220] });
+  it("round-trips a multi-device program, including options, flags, hashes and a non-empty blob", () => {
+    const writer = new ProgramWriter(4, [
+      [CORE_OPTION_KEYS.INTEGRATION, 1],
+      [CORE_OPTION_KEYS.AMBIENT_C, 30],
+    ]);
+    writer.addDevice({
+      kindCode: CORE_KIND_CODE.voltage_source,
+      componentIndex: 0,
+      pins: [pin(1, { openHash: 10, deadHash: 20 }), pin(0, { open: true, openHigh: true, openHash: 30, deadHash: 40 })],
+      params: [9],
+    });
+    writer.addDevice({
+      kindCode: CORE_KIND_CODE.resistor,
+      componentIndex: 1,
+      pins: [pin(1, { openHash: 50, deadHash: 60 }), pin(2, { openHash: 70, deadHash: 80 })],
+      params: [220],
+    });
     writer.addDevice({
       kindCode: CORE_KIND_CODE.resistor,
       componentIndex: 2,
-      pins: [2, 3],
+      pins: [pin(2, { openHash: 90, deadHash: 100 }), pin(3, { openHash: 110, deadHash: 120 })],
       params: [330],
-      blob: [42, 43],
     });
 
-    const decoded = decodeProgram(writer.finish());
+    const decoded = decodeProgram(writer.finish(0, 0));
 
     expect(decoded).toEqual({
-      version: 1,
+      version: 2,
       nodeCount: 4,
+      options: [
+        [CORE_OPTION_KEYS.INTEGRATION, 1],
+        [CORE_OPTION_KEYS.AMBIENT_C, 30],
+      ],
+      digitalSlotCount: 0,
+      channelSlotCount: 0,
       devices: [
-        { kindCode: 2, componentIndex: 0, pins: [1, 0], params: [9], blob: [] },
-        { kindCode: 1, componentIndex: 1, pins: [1, 2], params: [220], blob: [] },
-        { kindCode: 1, componentIndex: 2, pins: [2, 3], params: [330], blob: [42, 43] },
+        {
+          kindCode: 2,
+          componentIndex: 0,
+          pins: [
+            { node: 1, open: false, openHigh: false, openHash: 10, deadHash: 20 },
+            { node: 0, open: true, openHigh: true, openHash: 30, deadHash: 40 },
+          ],
+          params: [9],
+          blob: [],
+        },
+        {
+          kindCode: 1,
+          componentIndex: 1,
+          pins: [
+            { node: 1, open: false, openHigh: false, openHash: 50, deadHash: 60 },
+            { node: 2, open: false, openHigh: false, openHash: 70, deadHash: 80 },
+          ],
+          params: [220],
+          blob: [],
+        },
+        {
+          kindCode: 1,
+          componentIndex: 2,
+          pins: [
+            { node: 2, open: false, openHigh: false, openHash: 90, deadHash: 100 },
+            { node: 3, open: false, openHigh: false, openHash: 110, deadHash: 120 },
+          ],
+          params: [330],
+          blob: [],
+        },
       ],
     });
   });
 
-  it("round-trips a program with zero devices", () => {
+  it("round-trips a program with zero devices, zero options and non-zero readout slot counts", () => {
     const writer = new ProgramWriter(1);
-    const decoded = decodeProgram(writer.finish());
-    expect(decoded).toEqual({ version: 1, nodeCount: 1, devices: [] });
+    const decoded = decodeProgram(writer.finish(3, 2));
+    expect(decoded).toEqual({
+      version: 2,
+      nodeCount: 1,
+      options: [],
+      digitalSlotCount: 3,
+      channelSlotCount: 2,
+      devices: [],
+    });
   });
 });
 
@@ -84,25 +173,44 @@ describe("ProgramWriter's exact byte layout — golden array", () => {
   // A 2-resistor divider fed by a 10 V source: node 0 = the negative rail
   // (gnd/datum), node 1 = the source's positive terminal / R1's top, node 2
   // = the midpoint between R1 and R2. Components in order [source, R1, R2].
+  // One option (AMBIENT_C=22) and non-zero readout slot counts, to pin the
+  // full v2 header shape, not just the v1-era device records.
   //
   // This array is hand-written, NOT computed from CORE_FORMAT_MAGIC or
   // CORE_KIND_CODE, so a change to those constants that silently breaks the
   // contract's actual layout would still be caught here.
   it("matches a hand-computed Float64Array", () => {
-    const writer = new ProgramWriter(3);
-    writer.addDevice({ kindCode: CORE_KIND_CODE.voltage_source, componentIndex: 0, pins: [1, 0], params: [10] });
-    writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 1, pins: [1, 2], params: [1000] });
-    writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 2, pins: [2, 0], params: [1000] });
+    const writer = new ProgramWriter(3, [[CORE_OPTION_KEYS.AMBIENT_C, 22]]);
+    writer.addDevice({
+      kindCode: CORE_KIND_CODE.voltage_source,
+      componentIndex: 0,
+      pins: [pin(1, { openHash: 1, deadHash: 2 }), pin(0, { openHash: 3, deadHash: 4 })],
+      params: [10],
+    });
+    writer.addDevice({
+      kindCode: CORE_KIND_CODE.resistor,
+      componentIndex: 1,
+      pins: [pin(1, { openHash: 5, deadHash: 6 }), pin(2, { open: true, openHash: 7, deadHash: 8 })],
+      params: [1000],
+    });
+    writer.addDevice({
+      kindCode: CORE_KIND_CODE.resistor,
+      componentIndex: 2,
+      pins: [pin(2, { openHash: 9, deadHash: 10 }), pin(0, { openHigh: true, openHash: 11, deadHash: 12 })],
+      params: [1000],
+    });
 
-    const program = writer.finish();
+    const program = writer.finish(0, 5);
 
     // prettier-ignore
     const expected = Float64Array.from([
-      0x424f4331, 1, 3, 3,                 // header: MAGIC, VERSION, nodeCount=3, deviceCount=3
-      2, 0, 2, 1, 0, 1, 10, 0,             // device 0: voltage_source, comp 0, 2 pins (1,0), 1 param (10 V), 0 blob
-      1, 1, 2, 1, 2, 1, 1000, 0,           // device 1: resistor, comp 1, 2 pins (1,2), 1 param (1000 ohm), 0 blob
-      1, 2, 2, 2, 0, 1, 1000, 0,           // device 2: resistor, comp 2, 2 pins (2,0), 1 param (1000 ohm), 0 blob
-      0x424f4331,                          // trailer: MAGIC
+      0x424f4331, 2, 3, 3,                        // header: MAGIC, VERSION, nodeCount=3, deviceCount=3
+      1, 5, 22,                                   // optionCount=1, (AMBIENT_C, 22)
+      0, 5,                                       // digitalSlotCount=0, channelSlotCount=5
+      2, 0, 2,  1, 0, 1, 2,  0, 0, 3, 4,  1, 10, 0,       // device 0: voltage_source, comp 0, pins (1 closed / 0 closed), 1 param (10 V), 0 blob
+      1, 1, 2,  1, 0, 5, 6,  2, 1, 7, 8,  1, 1000, 0,     // device 1: resistor, comp 1, pins (1 closed / 2 OPEN), 1 param (1000 ohm), 0 blob
+      1, 2, 2,  2, 0, 9, 10,  0, 2, 11, 12,  1, 1000, 0,  // device 2: resistor, comp 2, pins (2 closed / 0 OPEN_HIGH), 1 param (1000 ohm), 0 blob
+      0x424f4331,                                 // trailer: MAGIC
     ]);
 
     expect(program).toEqual(expected);
@@ -119,53 +227,140 @@ describe("ProgramWriter validation", () => {
     expect(() => new ProgramWriter(1.5)).toThrow(/integer/);
   });
 
+  it("rejects an unknown option key", () => {
+    expect(() => new ProgramWriter(1, [[99, 0]])).toThrow(/unknown option key/);
+  });
+
+  it("rejects a repeated option key", () => {
+    expect(
+      () =>
+        new ProgramWriter(1, [
+          [CORE_OPTION_KEYS.AMBIENT_C, 20],
+          [CORE_OPTION_KEYS.AMBIENT_C, 25],
+        ]),
+    ).toThrow(/repeated/);
+  });
+
+  it("rejects an out-of-range option value for every 0/1 key", () => {
+    for (const key of [
+      CORE_OPTION_KEYS.INTEGRATION,
+      CORE_OPTION_KEYS.NO_SOLUTION_CACHE,
+      CORE_OPTION_KEYS.NO_RAIL_SHORTCUT,
+      CORE_OPTION_KEYS.FORCE_STEPPED,
+    ]) {
+      expect(() => new ProgramWriter(1, [[key, 2]])).toThrow(/must be 0 or 1/);
+    }
+  });
+
+  it("rejects a non-finite AMBIENT_C", () => {
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.AMBIENT_C, NaN]])).toThrow(/must be a finite number/);
+  });
+
+  it("rejects a non-zero FLOATING_MODEL (the only value in W1)", () => {
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.FLOATING_MODEL, 1]])).toThrow(/must be 0/);
+  });
+
+  it("rejects a negative START_TIME", () => {
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.START_TIME, -1]])).toThrow(/must be a finite number >= 0/);
+  });
+
+  it("rejects a non-finite START_TIME", () => {
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.START_TIME, NaN]])).toThrow(/must be a finite number >= 0/);
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.START_TIME, Infinity]])).toThrow(
+      /must be a finite number >= 0/,
+    );
+  });
+
+  it("accepts START_TIME 0 and a positive value", () => {
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.START_TIME, 0]])).not.toThrow();
+    expect(() => new ProgramWriter(1, [[CORE_OPTION_KEYS.START_TIME, 12.5]])).not.toThrow();
+  });
+
   it("rejects an unknown kind code", () => {
     const writer = new ProgramWriter(2);
-    expect(() => writer.addDevice({ kindCode: 99, componentIndex: 0, pins: [0, 1], params: [1] })).toThrow(
-      /unknown kind code/,
-    );
+    expect(() =>
+      writer.addDevice({ kindCode: 99, componentIndex: 0, pins: [pin(0), pin(1)], params: [1] }),
+    ).toThrow(/unknown or unshaped kind code/);
   });
 
   it("rejects the wrong pin count for a kind", () => {
     const writer = new ProgramWriter(2);
     expect(() =>
-      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [0, 1, 1], params: [1] }),
+      writer.addDevice({
+        kindCode: CORE_KIND_CODE.resistor,
+        componentIndex: 0,
+        pins: [pin(0), pin(1), pin(1)],
+        params: [1],
+      }),
     ).toThrow(/pin\(s\)/);
   });
 
   it("rejects the wrong param count for a kind", () => {
     const writer = new ProgramWriter(2);
     expect(() =>
-      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [0, 1], params: [1, 2] }),
+      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [pin(0), pin(1)], params: [1, 2] }),
     ).toThrow(/param\(s\)/);
+  });
+
+  it("rejects a non-empty blob for a kind whose shape is blob-exact-0", () => {
+    const writer = new ProgramWriter(2);
+    expect(() =>
+      writer.addDevice({
+        kindCode: CORE_KIND_CODE.resistor,
+        componentIndex: 0,
+        pins: [pin(0), pin(1)],
+        params: [1],
+        blob: [1],
+      }),
+    ).toThrow(/blob of exactly 0/);
   });
 
   it("rejects a pin node outside [0, nodeCount)", () => {
     const writer = new ProgramWriter(2);
     expect(() =>
-      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [0, 2], params: [1] }),
+      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [pin(0), pin(2)], params: [1] }),
     ).toThrow(/out of range/);
+  });
+
+  it("rejects an out-of-range pin hash (negative, non-integer, or >= 2^32)", () => {
+    const writer = new ProgramWriter(2);
+    for (const bad of [-1, 1.5, 2 ** 32]) {
+      expect(() =>
+        writer.addDevice({
+          kindCode: CORE_KIND_CODE.resistor,
+          componentIndex: 0,
+          pins: [pin(0, { openHash: bad }), pin(1)],
+          params: [1],
+        }),
+      ).toThrow(/openHash .* must be an integer in \[0, 2\^32\)/);
+    }
   });
 
   it("rejects a negative componentIndex", () => {
     const writer = new ProgramWriter(2);
     expect(() =>
-      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: -1, pins: [0, 1], params: [1] }),
+      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: -1, pins: [pin(0), pin(1)], params: [1] }),
     ).toThrow(/componentIndex/);
   });
 
   it("rejects addDevice after finish()", () => {
     const writer = new ProgramWriter(2);
-    writer.finish();
+    writer.finish(0, 0);
     expect(() =>
-      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [0, 1], params: [1] }),
+      writer.addDevice({ kindCode: CORE_KIND_CODE.resistor, componentIndex: 0, pins: [pin(0), pin(1)], params: [1] }),
     ).toThrow(/after finish/);
   });
 
   it("rejects a second finish()", () => {
     const writer = new ProgramWriter(2);
-    writer.finish();
-    expect(() => writer.finish()).toThrow(/already finished/);
+    writer.finish(0, 0);
+    expect(() => writer.finish(0, 0)).toThrow(/already finished/);
+  });
+
+  it("rejects a negative or non-integer readout slot count", () => {
+    const writer = new ProgramWriter(1);
+    expect(() => writer.finish(-1, 0)).toThrow(/digitalSlotCount/);
+    expect(() => writer.finish(0, 1.5)).toThrow(/channelSlotCount/);
   });
 });
 
@@ -179,7 +374,7 @@ describe("decodeProgram validation — each check the contract requires", () => 
   });
 
   it("rejects an unsupported version", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 1, 2))).toThrow(/version/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 1, 1))).toThrow(/version/);
   });
 
   it("rejects nodeCount below 1", () => {
@@ -198,40 +393,106 @@ describe("decodeProgram validation — each check the contract requires", () => 
     expect(() => decodeProgram(mutated(buildBaselineProgram(), 3, -1))).toThrow(/non-negative integer/);
   });
 
+  it("rejects an unknown option key", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 5, 99))).toThrow(/unknown key/);
+  });
+
+  it("rejects an out-of-range option value", () => {
+    // Offset 6 is the baseline's single AMBIENT_C value.
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 6, NaN))).toThrow(/must be a finite number/);
+  });
+
+  it("rejects a repeated option key (hand-built: ProgramWriter itself already refuses to write one)", () => {
+    // MAGIC, VERSION, nodeCount=1, deviceCount=0, optionCount=2,
+    // (AMBIENT_C,20), (AMBIENT_C,25), digitalSlotCount=0, channelSlotCount=0, trailer
+    const program = Float64Array.from([
+      CORE_FORMAT_MAGIC, 2, 1, 0, 2, CORE_OPTION_KEYS.AMBIENT_C, 20, CORE_OPTION_KEYS.AMBIENT_C, 25, 0, 0,
+      CORE_FORMAT_MAGIC,
+    ]);
+    expect(() => decodeProgram(program)).toThrow(/repeated/);
+  });
+
+  it("rejects a negative optionCount", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 4, -1))).toThrow(/non-negative integer/);
+  });
+
+  it("rejects a negative digitalSlotCount / channelSlotCount", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 7, -1))).toThrow(/non-negative integer/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 8, -1))).toThrow(/non-negative integer/);
+  });
+
   it("rejects an unknown kind code", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 4, 99))).toThrow(/unknown kind code/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 9, 99))).toThrow(/unknown kind code/);
   });
 
   it("rejects a negative componentIndex", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 5, -1))).toThrow(/non-negative integer/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 10, -1))).toThrow(/non-negative integer/);
   });
 
   it("rejects the wrong pinCount for a kind", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 6, 3))).toThrow(/pinCount 3, expected 2/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 11, 3))).toThrow(/pinCount 3, expected 2/);
   });
 
   it("rejects a negative pin node index", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 7, -1))).toThrow(/non-negative integer/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 12, -1))).toThrow(/non-negative integer/);
   });
 
   it("rejects a pin node index >= nodeCount", () => {
-    // Baseline nodeCount is 2; index 7 is the resistor's first pin.
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 7, 5))).toThrow(/out of range for nodeCount 2/);
+    // Baseline nodeCount is 2; offset 12 is the resistor's first pin's node.
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 12, 5))).toThrow(/out of range for nodeCount 2/);
   });
 
-  it("rejects the wrong paramCount for a kind", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 9, 2))).toThrow(/paramCount 2, expected 1/);
+  it("rejects a pin flags word with an unknown bit set", () => {
+    // Offset 13 is pin0's flags (baseline: 0, closed).
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 13, 4))).toThrow(/unknown bit set/);
   });
 
-  it("rejects a non-finite param", () => {
-    // Offset 10 is the baseline resistor's R.
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      expect(() => decodeProgram(mutated(buildBaselineProgram(), 10, bad))).toThrow(/params\[0\] must be finite/);
+  // Finding 5 (w1a-fixes/ts.json #5): the old check was a bitwise
+  // `(flags & ~KNOWN_BITS) !== 0`, which coerces through ToInt32 (mod 2^32)
+  // — so a flags word AT OR ABOVE 2^32 wrapped around and silently passed
+  // (2^32 -> 0 "no flags"; 2^32+1 -> 1, a spurious OPEN) instead of being
+  // rejected the way the Rust reader rejects it (program.rs's bounded_index
+  // compares the raw f64 with no modulo). `flags > PIN_FLAG_KNOWN_BITS`
+  // (a plain numeric comparison, safe because readCount already guarantees a
+  // non-negative integer) has no such wraparound at any magnitude.
+  it("rejects a pin flags word at/above 2^32 (bitwise truncation would otherwise wrap it to a value that passes)", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 13, 2 ** 32))).toThrow(/unknown bit set/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 13, 2 ** 32 + 1))).toThrow(/unknown bit set/);
+  });
+
+  it("decodes OPEN and OPEN_HIGH bits correctly, including both set at once", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 13, 3))).not.toThrow();
+    const decoded = decodeProgram(mutated(buildBaselineProgram(), 13, 3));
+    expect(decoded.devices[0]!.pins[0]).toMatchObject({ open: true, openHigh: true });
+  });
+
+  it("rejects an out-of-range pin hash (negative, non-integer, or >= 2^32)", () => {
+    // Offset 14 is pin0's openHash.
+    for (const bad of [-1, 1.5, 2 ** 32]) {
+      expect(() => decodeProgram(mutated(buildBaselineProgram(), 14, bad))).toThrow(
+        /openHash = .* must be an integer in \[0, 2\^32\)/,
+      );
     }
   });
 
+  it("rejects the wrong paramCount for a kind", () => {
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 20, 2))).toThrow(/paramCount 2, expected 1/);
+  });
+
+  it("rejects a non-finite param", () => {
+    // Offset 21 is the baseline resistor's R.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => decodeProgram(mutated(buildBaselineProgram(), 21, bad))).toThrow(/params\[0\] must be finite/);
+    }
+  });
+
+  it("rejects the wrong blobCount for a kind", () => {
+    // Offset 22 is the baseline resistor's blobCount (shape: exact 0).
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 22, 1))).toThrow(/blobCount 1, expected exactly 0/);
+  });
+
   it("rejects a bad trailer magic", () => {
-    expect(() => decodeProgram(mutated(buildBaselineProgram(), 12, 0))).toThrow(/trailer magic/);
+    expect(() => decodeProgram(mutated(buildBaselineProgram(), 23, 0))).toThrow(/trailer magic/);
   });
 
   it("rejects trailing data after the trailer", () => {

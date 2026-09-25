@@ -1,15 +1,22 @@
-//! C ABI v1 (core/README.md, "C ABI, version 1"). Every export is
+//! C ABI v2 (core/README.md, "C ABI, version 2"). Every export is
 //! `extern "C"` with `#[no_mangle]`; this file only marshals — parsing lives
 //! in `program`, physics in `engine`. No panics ever cross this boundary on
 //! bad input: an error is a negative return code plus a message in
 //! `LAST_ERROR`, per the contract's error table.
+//!
+//! W1a adds the exports marked "v2 (W1a)" in the contract's ABI table:
+//! `bo_engine_set_option`, `bo_engine_next_event_time`, the digital/channel
+//! slot getters, and the harness trace. `bo_engine_set_params` and
+//! `bo_engine_seed_memory` (marked W1b/W1d) are not exported yet —
+//! `scripts/build-core.mjs`'s export audit would fail the build if they were
+//! declared here without matching contract rows.
 
 use crate::engine::Engine;
 use crate::error::BoError;
 use crate::program::Program;
 use std::cell::UnsafeCell;
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 
 /// One slot per handle ever issued by [`bo_engine_create`]. Indices are
 /// 1-based (handle `h` lives at `handles[h - 1]`) so `0` is never a valid
@@ -215,11 +222,93 @@ pub extern "C" fn bo_engine_device_currents(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.currents().as_ptr())
 }
 
-/// `0` partitions, `1` static solves, `2` largest partition size, `3` fixed
-/// nodes. Unknown `i`, or an unusable handle, gives `NaN`.
+/// Counters (core/README.md, "Stat indices"). Indices 0-3 are the W0 static
+/// solve; 4-14 are the event kernel's, reserved at `0.0` until a later
+/// dispatch wires it in. Unknown `i` (>= 15), or an unusable handle, gives
+/// `NaN`.
 #[no_mangle]
 pub extern "C" fn bo_engine_stat(h: u32, i: u32) -> f64 {
     with_engine(h, f64::NAN, |e| e.stat(i))
+}
+
+/// Changes an option after load. Keys 2-4 take effect at the next event;
+/// keys 1, 5, 6 and 7 are load-time only, and any other key is unknown — all
+/// of those are `-8` (core/README.md, `bo_engine_set_option`).
+#[no_mangle]
+pub extern "C" fn bo_engine_set_option(h: u32, key: u32, value: f64) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => match engine.set_option(key, value) {
+            Ok(()) => 0,
+            Err(err) => fail(&err),
+        },
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// Time of the earliest pending event, `+Infinity` when none. `NaN` for an
+/// unusable handle, matching `bo_engine_time`'s sentinel.
+#[no_mangle]
+pub extern "C" fn bo_engine_next_event_time(h: u32) -> f64 {
+    with_engine(h, f64::NAN, |e| e.next_event_time())
+}
+
+#[no_mangle]
+pub extern "C" fn bo_engine_digital_slot_count(h: u32) -> u32 {
+    with_engine(h, 0, |e| e.digital_slot_count())
+}
+
+/// `S` values; `NaN` means the key is absent this pass. Valid until the next
+/// call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_digital_slots(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.digital_slots().as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn bo_engine_channel_slot_count(h: u32) -> u32 {
+    with_engine(h, 0, |e| e.channel_slot_count())
+}
+
+/// `C` per-channel currents, amps. Valid until the next call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_channel_slots(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.channel_slots().as_ptr())
+}
+
+/// Turns the harness instrumentation trace on or off (`on != 0`). Harness
+/// instrumentation only, not W2's host traces.
+#[no_mangle]
+pub extern "C" fn bo_engine_trace_enable(h: u32, on: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => {
+            engine.trace_enable(on != 0);
+            0
+        }
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// Flat `(t, slot, value)` triples recorded while tracing was on. Valid
+/// until the next call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_trace_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.trace().as_ptr())
+}
+
+/// `f64` count of the trace buffer; always a multiple of 3.
+#[no_mangle]
+pub extern "C" fn bo_engine_trace_len(h: u32) -> u32 {
+    with_engine(h, 0, |e| e.trace().len() as u32)
+}
+
+/// Resets the trace buffer to empty. A no-op on an unusable handle — there
+/// is nothing to report back on this call (the contract gives it no return
+/// value), the same as `bo_engine_destroy` ignoring an unknown handle.
+#[no_mangle]
+pub extern "C" fn bo_engine_trace_clear(h: u32) {
+    with_engine(h, (), |e| e.trace_clear());
 }
 
 /// UTF-8 message for the most recent non-zero return from `bo_engine_load`
@@ -253,18 +342,60 @@ mod tests {
         TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Builds a well-formed one-resistor-and-a-source divider program, the
-    /// same shape `program::tests` uses, as a plain `Vec<f64>` ready for
-    /// `bo_engine_load`.
+    /// Builds a well-formed v2 program from the pieces (core/README.md,
+    /// "Program format, version 2"): header, options, readout slot counts,
+    /// device records, trailer. Mirrors `program::tests`' builder, kept
+    /// separate since it exercises the ABI's byte-level `bo_engine_load`
+    /// rather than `Program::parse` directly.
+    fn build_program(node_count: f64, options: &[(f64, f64)], digital_slots: f64, channel_slots: f64, devices: &[Vec<f64>]) -> Vec<f64> {
+        use crate::program::{MAGIC, VERSION};
+        let mut out = vec![MAGIC, VERSION, node_count, devices.len() as f64, options.len() as f64];
+        for &(k, v) in options {
+            out.push(k);
+            out.push(v);
+        }
+        out.push(digital_slots);
+        out.push(channel_slots);
+        for d in devices {
+            out.extend_from_slice(d);
+        }
+        out.push(MAGIC);
+        out
+    }
+
+    /// A pin record with no flags and zero hash states.
+    fn pin(node: f64) -> [f64; 4] {
+        [node, 0.0, 0.0, 0.0]
+    }
+
+    fn resistor_record(component_index: f64, a: f64, b: f64, r: f64) -> Vec<f64> {
+        let mut out = vec![crate::kinds::RESISTOR as f64, component_index, 2.0];
+        out.extend_from_slice(&pin(a));
+        out.extend_from_slice(&pin(b));
+        out.push(1.0);
+        out.push(r);
+        out.push(0.0); // blobCount
+        out
+    }
+
+    fn source_record(component_index: f64, pos: f64, neg: f64, v: f64) -> Vec<f64> {
+        let mut out = vec![crate::kinds::VOLTAGE_SOURCE as f64, component_index, 2.0];
+        out.extend_from_slice(&pin(pos));
+        out.extend_from_slice(&pin(neg));
+        out.push(1.0);
+        out.push(v);
+        out.push(0.0); // blobCount
+        out
+    }
+
+    /// The same one-resistor-and-a-source divider `program::tests` and
+    /// `engine::tests` use, as a plain `Vec<f64>` ready for `bo_engine_load`.
     fn divider_program() -> Vec<f64> {
-        use crate::program::{KIND_RESISTOR, KIND_VOLTAGE_SOURCE, MAGIC, VERSION};
-        vec![
-            MAGIC, VERSION, 3.0, 3.0, //
-            KIND_VOLTAGE_SOURCE as f64, 0.0, 2.0, 1.0, 0.0, 1.0, 10.0, 0.0, //
-            KIND_RESISTOR as f64, 1.0, 2.0, 1.0, 2.0, 1.0, 1000.0, 0.0, //
-            KIND_RESISTOR as f64, 2.0, 2.0, 2.0, 0.0, 1.0, 1000.0, 0.0, //
-            MAGIC,
-        ]
+        build_program(3.0, &[], 0.0, 0.0, &[
+            source_record(0.0, 1.0, 0.0, 10.0),
+            resistor_record(1.0, 1.0, 2.0, 1000.0),
+            resistor_record(2.0, 2.0, 0.0, 1000.0),
+        ])
     }
 
     fn load(h: u32, data: &[f64]) -> i32 {
@@ -272,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_1() {
-        assert_eq!(bo_abi_version(), 1);
+    fn abi_version_is_2() {
+        assert_eq!(bo_abi_version(), 2);
     }
 
     #[test]
@@ -383,5 +514,147 @@ mod tests {
         // The original, successfully loaded program must still answer.
         assert_eq!(bo_engine_node_count(h), 3);
         assert!(!bo_engine_node_voltages(h).is_null());
+    }
+
+    // --- v2 round trips of the W0 fixtures through the byte-level ABI -----
+
+    #[test]
+    fn v2_round_trip_of_chained_sources_matches_w0_currents() {
+        // Same fixture as
+        // `engine::tests::chained_sources_with_a_load_on_each_node_have_kcl_correct_currents`,
+        // built as v2 bytes and driven through the ABI rather than a
+        // hand-built `Program`, to prove the byte format round-trips to the
+        // same physics.
+        let _guard = lock();
+        let data = build_program(3.0, &[], 0.0, 0.0, &[
+            source_record(0.0, 1.0, 0.0, 5.0),
+            source_record(1.0, 2.0, 1.0, 3.0),
+            resistor_record(2.0, 1.0, 0.0, 1000.0),
+            resistor_record(3.0, 2.0, 0.0, 1000.0),
+        ]);
+        let h = bo_engine_create();
+        assert_eq!(load(h, &data), 0);
+        let v = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
+        assert!((v[1] - 5.0).abs() < 1e-9);
+        assert!((v[2] - 8.0).abs() < 1e-9);
+        let i = unsafe { std::slice::from_raw_parts(bo_engine_device_currents(h), 4) };
+        assert!((i[2] - 0.005).abs() < 1e-9, "load at A");
+        assert!((i[3] - 0.008).abs() < 1e-9, "load at B");
+    }
+
+    #[test]
+    fn v2_round_trip_of_an_isolated_net_reads_zero_volts() {
+        // Same fixture as
+        // `engine::tests::an_isolated_net_with_no_elements_reads_zero_volts_and_does_not_fail`.
+        let _guard = lock();
+        let data = build_program(2.0, &[], 0.0, 0.0, &[]);
+        let h = bo_engine_create();
+        assert_eq!(load(h, &data), 0);
+        let v = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 2) };
+        assert_eq!(v[1], 0.0);
+        assert_eq!(bo_engine_stat(h, 0), 1.0); // STAT_PARTITIONS
+    }
+
+    // --- v2 ABI exports, through the safe API ------------------------------
+
+    #[test]
+    fn next_event_time_is_infinity_for_a_loaded_static_program() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_next_event_time(h), f64::INFINITY);
+    }
+
+    #[test]
+    fn next_event_time_is_nan_for_an_unusable_handle() {
+        let _guard = lock();
+        assert!(bo_engine_next_event_time(999_999).is_nan());
+    }
+
+    #[test]
+    fn digital_and_channel_slots_are_sized_from_the_program_and_read_back_through_pointers() {
+        let _guard = lock();
+        let data = build_program(1.0, &[], 3.0, 2.0, &[]);
+        let h = bo_engine_create();
+        assert_eq!(load(h, &data), 0);
+        assert_eq!(bo_engine_digital_slot_count(h), 3);
+        assert_eq!(bo_engine_channel_slot_count(h), 2);
+        let digital = unsafe { std::slice::from_raw_parts(bo_engine_digital_slots(h), 3) };
+        assert!(digital.iter().all(|v| v.is_nan()), "{digital:?}");
+        let channel = unsafe { std::slice::from_raw_parts(bo_engine_channel_slots(h), 2) };
+        assert_eq!(channel, &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn slot_getters_are_sentinels_for_an_unusable_handle() {
+        let _guard = lock();
+        let bogus = 999_999u32;
+        assert_eq!(bo_engine_digital_slot_count(bogus), 0);
+        assert!(bo_engine_digital_slots(bogus).is_null());
+        assert_eq!(bo_engine_channel_slot_count(bogus), 0);
+        assert!(bo_engine_channel_slots(bogus).is_null());
+    }
+
+    #[test]
+    fn trace_enable_ptr_len_and_clear_round_trip() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_trace_len(h), 0);
+        assert_eq!(bo_engine_trace_enable(h, 1), 0);
+        // W1a's static kernel never itself writes a trace entry (nothing
+        // calls `Readout::record` yet), so this proves the plumbing —
+        // enable, read back an empty buffer, clear — without a physics event
+        // to record.
+        assert_eq!(bo_engine_trace_len(h), 0);
+        // `Vec::as_ptr` is never null, even for an empty `Vec`.
+        assert!(!bo_engine_trace_ptr(h).is_null());
+        bo_engine_trace_clear(h);
+        assert_eq!(bo_engine_trace_len(h), 0);
+        assert_eq!(bo_engine_trace_enable(h, 0), 0);
+    }
+
+    #[test]
+    fn trace_enable_on_an_unusable_handle_is_bad_handle() {
+        let _guard = lock();
+        let bogus = 999_999u32;
+        assert_eq!(bo_engine_trace_enable(bogus, 1), -5);
+        assert_eq!(bo_engine_trace_len(bogus), 0);
+        assert!(bo_engine_trace_ptr(bogus).is_null());
+        bo_engine_trace_clear(bogus); // must not panic
+    }
+
+    #[test]
+    fn set_option_accepts_keys_2_through_4_after_load() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_set_option(h, 2, 1.0), 0);
+        assert_eq!(bo_engine_set_option(h, 3, 0.0), 0);
+        assert_eq!(bo_engine_set_option(h, 4, 1.0), 0);
+    }
+
+    #[test]
+    fn set_option_rejects_load_time_only_and_unknown_keys_with_invalid_argument() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        for key in [1, 5, 6, 0, 7, 999] {
+            assert_eq!(bo_engine_set_option(h, key, 0.0), -8, "key {key}");
+        }
+    }
+
+    #[test]
+    fn set_option_rejects_an_out_of_range_value_with_invalid_argument() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_set_option(h, 2, 2.0), -8);
+    }
+
+    #[test]
+    fn set_option_on_an_unusable_handle_is_bad_handle_not_invalid_argument() {
+        let _guard = lock();
+        assert_eq!(bo_engine_set_option(999_999, 2, 1.0), -5);
     }
 }

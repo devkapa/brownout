@@ -1,12 +1,16 @@
 /**
- * Drives one circuit through one engine across the harness's fixed sample
- * schedule (core/README.md-adjacent contract, spelled out in the worker
- * brief's "Harness semantics"): t=0 right after load, then D/4, D/2, D.
- * Classic reaches each later time via successive `run({ durationS })`
- * deltas; the core jumps straight there via `advance(t)` (its `advance` is
- * absolute, per core/README.md's C ABI). Both collectors return the exact
- * same shape (SampleReadout[]) so compare.ts never has to know which engine
- * produced which side.
+ * Drives one circuit through one engine across a given sample schedule
+ * (core/README.md-adjacent contract, spelled out in the worker brief's
+ * "Harness semantics"). `sampleTimesFor` below is W0's fixed 4-point grid
+ * (t=0, D/4, D/2, D); gate 2b's dense analog schedule (schedule.ts's
+ * `denseAnalogSchedule`, filtered through quiet.ts's guard window) is a drop-
+ * in replacement for it — both are just `number[]`, and `collectClassicSamples`/
+ * `collectCoreSamples` neither know nor care which produced the array they
+ * were given. Classic reaches each later time via successive
+ * `run({ durationS })` deltas; the core jumps straight there via
+ * `advance(t)` (its `advance` is absolute, per core/README.md's C ABI). Both
+ * collectors return the exact same shape (SampleReadout[]) so compare.ts
+ * never has to know which engine produced which side.
  */
 
 import { HeadlessRunner } from "../../../src/host/headless.js";
@@ -19,6 +23,29 @@ export const DEFAULT_DURATION_S = 10e-3;
 
 export function sampleTimesFor(durationS: number): number[] {
   return [0, durationS / 4, durationS / 2, durationS];
+}
+
+/**
+ * Guards both collectors below against a caller-assembled schedule (gate
+ * 2b's dense-and-quiet grid is no longer the hardcoded 4-point array W0
+ * always produced) that is empty or not strictly ascending — either would
+ * make `collectClassicSamples`'s successive `run({ durationS: t - prev })`
+ * deltas silently misbehave (a zero or negative delta, or comparing samples
+ * that were never actually taken in time order) instead of failing loudly at
+ * the one place that can see the whole schedule at once.
+ */
+function assertAscendingTimes(times: readonly number[]): void {
+  if (times.length === 0) {
+    throw new Error("collectSamples: the sample schedule is empty — there is nothing to sample.");
+  }
+  for (let i = 1; i < times.length; i++) {
+    if (!(times[i]! > times[i - 1]!)) {
+      throw new Error(
+        `collectSamples: the sample schedule must be strictly ascending, got ...${times[i - 1]}, ${times[i]}... ` +
+          `at index ${i}.`,
+      );
+    }
+  }
 }
 
 /**
@@ -40,6 +67,7 @@ export function sampleTimesFor(durationS: number): number[] {
  * to catch still shows up there.
  */
 export function collectClassicSamples(circuit: SimCircuit, times: readonly number[]): SampleReadout[] {
+  assertAscendingTimes(times);
   const runner = new HeadlessRunner();
   runner.load(circuit);
 
@@ -88,6 +116,7 @@ export function collectClassicSamples(circuit: SimCircuit, times: readonly numbe
  * `engine: "core"` option does, so nothing else will dispose it.
  */
 export function collectCoreSamples(circuit: SimCircuit, times: readonly number[]): SampleReadout[] {
+  assertAscendingTimes(times);
   const engine = new CoreEngine();
   try {
     engine.load(circuit);

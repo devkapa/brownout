@@ -32,6 +32,26 @@ function shortedSource(): SimCircuit {
   );
 }
 
+describe("collectClassicSamples — schedule validation", () => {
+  const divider = circuit(
+    [
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 10 }),
+      part("gnd", "ground", ["gnd"]),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+    ],
+    [wire("vsrc", "neg", "gnd", "gnd"), wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "gnd", "gnd")],
+  );
+
+  it("rejects an empty schedule — gate 2b's dense-and-quiet grid can be filtered down to nothing", () => {
+    expect(() => collectClassicSamples(divider, [])).toThrow(/empty/);
+  });
+
+  it("rejects a non-ascending schedule", () => {
+    expect(() => collectClassicSamples(divider, [0, 2, 1])).toThrow(/ascending/);
+    expect(() => collectClassicSamples(divider, [0, 1, 1])).toThrow(/ascending/); // a duplicate is not STRICTLY ascending
+  });
+});
+
 describe("collectClassicSamples", () => {
   it("throws a harness error instead of returning a sample from a run that hit the H_MIN floor or never converged", () => {
     const times = sampleTimesFor(DEFAULT_DURATION_S);

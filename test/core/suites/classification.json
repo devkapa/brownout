@@ -1,0 +1,175 @@
+{
+  "$comment": [
+    "Gate 1 (devolt memory/decisions/2026-09-25-brownout-core-w1-plan.md, section",
+    "3.4.1; core/README.md's contract). Every test case in every suite file",
+    "wired into vitest.core-suites.config.ts's `test.include` is listed here,",
+    "classified as one of:",
+    "  - \"portable\":     runs on the core for the kinds it uses; wired into",
+    "                      vitest.core-suites.config.ts's testNamePattern.",
+    "  - \"classic-only\":  pins a classic-internal detail (step counts, Newton",
+    "                      iteration counts, engine.state, captureErrorState,",
+    "                      a split) that has no core counterpart and is not",
+    "                      part of the accuracy contract; never runs on the core.",
+    "  - \"not-yet\":       every kind the test's circuit uses is real device",
+    "                      behaviour, but at least one of those kinds has not",
+    "                      been ported to the core yet (or, for a handful of",
+    "                      kinds below, is not in the W1 plan's kind table at",
+    "                      all -- diode/bjt_npn/nmos/lm358/microbit).",
+    "",
+    "`kinds` lists every SimComponent.kind the test's circuit instantiates",
+    "(excluding the implicit ground net). gate-reporter.ts sums, per kind, how",
+    "many \"portable\" cases actually ran and passed under this file's",
+    "testNamePattern, and fails the whole run if any kind named in a portable",
+    "case's `kinds` array has a count of zero for that file -- see its own",
+    "header comment for why this must be computed from portable entries only,",
+    "not from CORE_IMPLEMENTED_KINDS (which also contains \"ground\", a compiler-",
+    "internal detail no test ever names as a component kind)."
+  ],
+  "suites": [
+    {
+      "file": "test/sim/engine/physics-reference-benchmarks.test.ts",
+      "cases": [
+        {
+          "describe": "reference physics — resistor dividers and loading",
+          "name": "unloaded 10k/20k divider matches 6 V within 0.2 uV",
+          "status": "portable",
+          "kinds": ["resistor", "voltage_source"],
+          "reason": "Static DC divider, ideal source and two resistors only; both kinds are in CORE_IMPLEMENTED_KINDS since W0."
+        },
+        {
+          "describe": "reference physics — resistor dividers and loading",
+          "name": "20k load changes the divider to 4.5 V within 0.2 uV",
+          "status": "portable",
+          "kinds": ["resistor", "voltage_source"],
+          "reason": "Static DC divider with a resistive load; same W0 kinds as the unloaded case."
+        },
+        {
+          "describe": "reference physics — RC step response at multiple timesteps",
+          "name": "h=tau/100 stays within 0.3% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "capacitor"],
+          "reason": "capacitor is W1b (closed-form/stepped dynamic partitions); not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — RC step response at multiple timesteps",
+          "name": "h=tau/20 stays within 1.2% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "capacitor"],
+          "reason": "capacitor is W1b; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — RC step response at multiple timesteps",
+          "name": "h=tau/10 stays within 2.5% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "capacitor"],
+          "reason": "capacitor is W1b; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — RL step response at multiple timesteps",
+          "name": "h=tau/100 stays within 0.3% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "inductor"],
+          "reason": "inductor is W1h (breadth beyond the board); not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — RL step response at multiple timesteps",
+          "name": "h=tau/20 stays within 1.2% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — RL step response at multiple timesteps",
+          "name": "h=tau/10 stays within 2.5% full-scale at t=tau",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — diode and LED temperature direction",
+          "name": "silicon diode forward drop falls by 0.33 V +/- 30 mV from -40 C to 125 C",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "diode"],
+          "reason": "diode is not in the W1 plan's kind table (core/README.md) at all; no W1 sub-wave ports it."
+        },
+        {
+          "describe": "reference physics — diode and LED temperature direction",
+          "name": "LED forward drop falls by 0.33 V +/- 30 mV from -40 C to 125 C",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "led"],
+          "reason": "led is W1e (NE555/LEDs/displays); not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — guarded junction overdrive",
+          "name": "keeps tangent-extended diode telemetry consistent with the solved branch",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "diode"],
+          "reason": "diode is not in the W1 plan's kind table at all; no W1 sub-wave ports it."
+        },
+        {
+          "describe": "reference physics — BJT and MOSFET DC sanity",
+          "name": "NPN forced-bias collector current matches forward-active Ebers-Moll within 1%",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "bjt_npn"],
+          "reason": "bjt_npn is W3 (decision 13's list; transistor_overcurrent is explicitly called out as W3 in section 2.4, Q-O46); out of W1 scope entirely."
+        },
+        {
+          "describe": "reference physics — BJT and MOSFET DC sanity",
+          "name": "NMOS triode and cutoff currents match the level-1 static equations",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "nmos"],
+          "reason": "nmos is a W3-family kind (transistor physics); out of W1 scope entirely."
+        },
+        {
+          "describe": "reference physics — KCL and source power balance",
+          "name": "loaded divider conserves current and signed power within declared residuals",
+          "status": "portable",
+          "kinds": ["resistor", "voltage_source"],
+          "reason": "Static DC divider with a resistive load; both kinds are in CORE_IMPLEMENTED_KINDS since W0. This is the table's \"KCL and power\" case."
+        },
+        {
+          "describe": "reference physics — transient KCL/KVL and energy residuals",
+          "name": "RC companion satisfies KCL and its discrete energy identity",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "capacitor"],
+          "reason": "capacitor is W1b; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — transient KCL/KVL and energy residuals",
+          "name": "RL companion satisfies KVL and its discrete energy identity",
+          "status": "not-yet",
+          "kinds": ["resistor", "voltage_source", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — active-device rail current and power",
+          "name": "digital output load current is debited from the package VCC rail",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "74hc14 is a W1c combinational-IC kind; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — active-device rail current and power",
+          "name": "NE555 output and compact idle current are withdrawn from its package rails",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "ne555"],
+          "reason": "ne555 is W1e; not implemented by the core yet."
+        },
+        {
+          "describe": "reference physics — active-device rail current and power",
+          "name": "MCU USB current includes board idle draw and GPIO load",
+          "status": "not-yet",
+          "kinds": ["microbit", "resistor"],
+          "reason": "MCU emulators (microbit) stay TS-only until W4/W7 per core/README.md's division of labour; out of W1 scope entirely."
+        },
+        {
+          "describe": "reference physics — active-device rail current and power",
+          "name": "op-amp output and quiescent current are withdrawn from its supply rail",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "lm358"],
+          "reason": "lm358 (op-amp) is not in the W1 plan's kind table at all; no W1 sub-wave ports it."
+        }
+      ]
+    }
+  ]
+}

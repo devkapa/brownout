@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Builds the Rust core to wasm32-unknown-unknown, validates the artifact
-// against the C ABI v1 contract (core/README.md), and copies it into place.
+// against the C ABI contract (core/README.md), and copies it into place.
 // Node ESM, no dependencies — this has to run before `pnpm install` has any
 // reason to have finished (the vitest globalSetup calls it too), so it can't
 // lean on anything from node_modules.
@@ -32,10 +32,14 @@ const toDist = process.argv.includes("--dist");
 // so the contract allows them and everything else unexpected still fails.
 const LLD_SYNTHESIZED_GLOBALS = ["__data_end", "__heap_base"];
 
-// The C ABI v1 export list (core/README.md, "C ABI, version 1"). Kept here
+// The C ABI v2 export list (core/README.md, "C ABI, version 2"). Kept here
 // as a literal list rather than parsed from the markdown: it changes only
-// when the ABI version bumps, at which point this list and `bo_abi_version`'s
-// return value change together — update both.
+// when the ABI version bumps or a sub-wave adds exports, at which point this
+// list, `bo_abi_version`'s return value and the contract's own table change
+// together — update all three. `bo_engine_set_params` and
+// `bo_engine_seed_memory` are v2 exports the contract already names, but
+// they are marked "v2 (W1b)" / "v2 (W1d)" — not part of W1a — so they stay
+// out of this list until the dispatch that implements them adds them here.
 const EXPECTED_FUNCTION_EXPORTS = [
   "bo_abi_version",
   "bo_alloc",
@@ -52,6 +56,16 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_stat",
   "bo_error_ptr",
   "bo_error_len",
+  "bo_engine_set_option",
+  "bo_engine_next_event_time",
+  "bo_engine_digital_slot_count",
+  "bo_engine_digital_slots",
+  "bo_engine_channel_slot_count",
+  "bo_engine_channel_slots",
+  "bo_engine_trace_enable",
+  "bo_engine_trace_ptr",
+  "bo_engine_trace_len",
+  "bo_engine_trace_clear",
 ];
 
 function fail(message) {
@@ -224,7 +238,7 @@ function validateWasm(bytes) {
     const parts = [];
     if (missing.length > 0) parts.push(`missing: ${missing.join(", ")}`);
     if (extra.length > 0) parts.push(`unexpected: ${extra.join(", ")}`);
-    fail(`the module's exports do not match the C ABI v1 contract (${parts.join("; ")}).`);
+    fail(`the module's exports do not match the C ABI contract in core/README.md (${parts.join("; ")}).`);
   }
 
   // Defense in depth for the RUSTFLAGS remap above: an embedded local path

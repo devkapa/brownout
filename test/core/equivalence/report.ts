@@ -8,7 +8,7 @@
 
 import type { HarnessEntryOutcome } from "./table.js";
 import type { HarnessRun } from "./harness.js";
-import type { EntryResult, KindRow, Mismatch } from "./types.js";
+import type { EntryResult, KindRow, KnownDivergenceHit, Mismatch } from "./types.js";
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
@@ -37,11 +37,14 @@ function describeMismatch(m: Mismatch): string {
   return `[t=${m.sampleTime}] ${m.category}.${m.id}: ${m.detail}`;
 }
 
-/** Notes appended to an entry's report line for conditions that are not failures but change how the outcome should be read (CorpusEntry's own docs on `stimulus` / `manifestKindsMismatch`). */
+/** Notes appended to an entry's report line for conditions that are not failures but change how the outcome should be read (CorpusEntry's own docs on `stimulus` / `manifestKindsMismatch` / `phasesUnsupported`). */
 function describeEntryNotes(entry: HarnessEntryOutcome["entry"]): string {
   const notes: string[] = [];
-  if (entry.stimulus === "verify-script") {
+  if (entry.stimulus === "verify-script" && !entry.phases) {
     notes.push("unstimulated: devolt additionally checks this under scripted stimuli this corpus does not carry — a pass here is not parity with that check");
+  }
+  if (entry.phasesUnsupported) {
+    notes.push(`phases unsupported: ${entry.phasesUnsupported}`);
   }
   if (entry.manifestKindsMismatch) {
     notes.push(
@@ -50,6 +53,14 @@ function describeEntryNotes(entry: HarnessEntryOutcome["entry"]): string {
     );
   }
   return notes.length > 0 ? ` (${notes.join("; ")})` : "";
+}
+
+/** Gate 2c: "Matching mismatches are reported as 'known' and do not fail" — this is that reporting. */
+function describeKnownDivergences(knownDivergences: readonly KnownDivergenceHit[]): string {
+  if (knownDivergences.length === 0) return "";
+  return knownDivergences
+    .map((hit) => `\n  - [known: ${hit.divergenceId}, ${hit.decisionRef}] ${describeMismatch(hit.mismatch)} — ${hit.reason}`)
+    .join("");
 }
 
 function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult): string {
@@ -61,15 +72,21 @@ function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult)
       // classicWallMs/coreWallMs are always null here: core runs first
       // (run-entry.ts), and a declined circuit never reaches classic.
       return `${head} (${result.reasons.join("; ")})`;
+    case "core-stimuli-pending":
+      return (
+        `${head} (classic replayed ${result.phaseCount} phase(s) in ${fmtMs(result.classicWallMs)}; ` +
+        "core stimuli pending — owner decision 1's parameter-update event is W1b, not yet landed)"
+      );
     case "pass":
       return (
         `${head} (max abs V ${fmtNum(result.maxAbsErrorVolts)}, max rel V ${fmtNum(result.maxRelErrorVolts)}, ` +
         `max abs I ${fmtNum(result.maxAbsErrorAmps)}, max rel I ${fmtNum(result.maxRelErrorAmps)}; ` +
-        `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})`
+        `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})` +
+        describeKnownDivergences(result.knownDivergences)
       );
     case "fail": {
       const shown = result.mismatches.map((m) => `\n  - ${describeMismatch(m)}`).join("");
-      return `${head} (${result.totalMismatches} mismatch(es)):${shown}`;
+      return `${head} (${result.totalMismatches} mismatch(es)):${shown}${describeKnownDivergences(result.knownDivergences)}`;
     }
     case "error":
       return `${head} ([${result.engine}] ${result.message})`;

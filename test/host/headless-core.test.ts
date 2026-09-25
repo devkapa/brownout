@@ -5,9 +5,16 @@
  * checks themselves — this file is about the HOST's routing/fallback
  * behaviour, not the engine's numerics.
  */
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { HeadlessRunner } from "../../src/host/headless.js";
-import { coreCall, getWasmApi, initCore } from "../../src/core/wasm.js";
+import {
+  coreCall,
+  getWasmApi,
+  initCore,
+  __installCoreForTest,
+  __resetCoreForTest,
+  type CoreExports,
+} from "../../src/core/wasm.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
@@ -229,6 +236,69 @@ describe('engine: "core" — run()\'s integrationMethod legality (decision: core
     expect(() => runner.run({ durationS: 1e-4, integrationMethod: "be" })).toThrow(
       /cannot switch integrationMethod to "be"/,
     );
+  });
+});
+
+// w1a-fixes/ts.json finding 4 (HeadlessRunner half): before the fix,
+// `_runCore` called `engine.advance(...)` with no try/catch, so a -4/-7
+// result (which CoreEngine.advance now reports rather than throws) would
+// have propagated a CoreLoadError straight out of run() — contradicting
+// run()'s own documented contract ("Throws only on misuse; solver trouble is
+// reported on the result").
+describe('engine: "core" — a non-converged advance() is reported on the result, not thrown (decision: -4/-7 is non-convergence, not a load error)', () => {
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  function installNonConvergentCore(lastCompletedInstant: number): void {
+    const buffer = new ArrayBuffer(1 << 16);
+    const exports: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      bo_alloc: () => 0,
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: () => 0,
+      bo_engine_advance: () => -7, // delta-cycle livelock, every call
+      bo_engine_time: () => lastCompletedInstant,
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => 0,
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 0,
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+    };
+    __installCoreForTest(exports);
+  }
+
+  it("run() does not throw; the result reports hitMinStep and how far time actually got, and lastConverged is false", () => {
+    installNonConvergentCore(4e-4);
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    runner.load(DIVIDER);
+    expect(runner.activeEngine).toBe("core");
+
+    let result: ReturnType<typeof runner.run> | undefined;
+    expect(() => {
+      result = runner.run({ durationS: 1e-3 });
+    }).not.toThrow();
+
+    expect(result!.hitMinStep).toBe(true);
+    expect(result!.simulatedS).toBeCloseTo(4e-4, 15); // short of the requested 1e-3
+    expect(result!.simTime).toBeCloseTo(4e-4, 15);
+    expect(runner.readout.lastConverged).toBe(false);
   });
 });
 

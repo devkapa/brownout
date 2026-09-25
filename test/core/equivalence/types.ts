@@ -13,9 +13,42 @@
  */
 
 import type { SimFailure, SimWarning } from "../../../src/sim/engine/sim-engine.js";
+import type { StimulusPhase } from "./stimuli.js";
 
 /** Where a CorpusEntry's circuit came from. External corpora supply their own string (falling back to the manifest's `producer`); this harness's own two sources use fixed literals. */
 export type CorpusOrigin = "brownout-fixture" | "synthetic" | (string & {});
+
+/**
+ * A fixture's own declaration of how to compare its digital behaviour
+ * (gate 2a; align.ts implements the mechanism this describes). Optional on
+ * `CorpusEntry`: no current corpus entry sets it — no digital kind is in
+ * `CORE_IMPLEMENTED_KINDS` yet (kinds.ts), so `runCorpusEntry` never reaches
+ * the "not-ported" check for one. It exists now so a later sub-wave's
+ * fixture (the SAP-1 boards, decision 5) only has to set this field, not
+ * plumb new harness machinery.
+ */
+export interface DigitalFixtureSpec {
+  /** The digitalState key whose rising edge (0/absent -> 1) marks a clock-cycle boundary — see align.ts's findRisingEdges. */
+  readonly clockKey: string;
+  /** digitalState keys sampled once per cycle. `undefined` means "the whole digitalState". */
+  readonly projection?: readonly string[];
+  /** The state (a subset of keys) that uniquely identifies "cycle zero" for alignment — align.ts's alignCycles. */
+  readonly anchor: Readonly<Record<string, number>>;
+  /** Cycles of alignment offset allowed before the fixture fails (gate 2a). The W1-0 spike measured exactly 6 on every SAP-1 board; that is this field's suggested default for a board built the same way, not a universal constant. */
+  readonly offsetBoundCycles: number;
+  /** Minimum aligned cycles the comparison must reach, counted from the trace (gate 2a) — a shorter span fails. */
+  readonly minComparedCycles: number;
+  /** Seconds of simulated time to trace for this comparison. Defaults to the entry's own `durationS` (or the harness default) when omitted. */
+  readonly traceDurationS?: number;
+}
+
+/** A fixture's own declaration of the guard window analog quiet-instant selection uses for it (gate 2b; quiet.ts implements the mechanism). Optional for the same reason as `DigitalFixtureSpec`. */
+export interface AnalogFixtureSpec {
+  /** Minimum quiet instants required after the guard-window filter — fewer is an error, not a pass (gate 2b). */
+  readonly minQuietInstants: number;
+  /** The largest datasheet/inertial delay among this fixture's kinds, seconds — quiet.ts's guardWindowS input. */
+  readonly maxDelayS: number;
+}
 
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */
@@ -48,6 +81,24 @@ export interface CorpusEntry {
   readonly stimulus: "verify-script" | null;
   /** Absolute path the circuit JSON was loaded from. Diagnostics only — never printed for an external-corpus entry in anything this repo commits. */
   readonly file: string;
+  /** How to compare this entry's digital behaviour (gate 2a). `undefined` (every current entry) means "compare digitalState per-sample, unaligned" — correct as long as no digital kind is in CORE_IMPLEMENTED_KINDS (today's case). */
+  readonly digital?: DigitalFixtureSpec;
+  /** This entry's analog quiet-instant guard window (gate 2b). `undefined` means "use the harness's default fixed sample grid" (sample.ts's sampleTimesFor). */
+  readonly analog?: AnalogFixtureSpec;
+  /**
+   * gate 2d's verify-script phases (stimuli.ts's `StimulusPhase[]`,
+   * `phases: [{set:[{id,params}],durationS}]`) — only present when
+   * `stimulus === "verify-script"` AND the producer actually exported them
+   * (a manifest entry may instead carry `phasesUnsupported`). When set,
+   * `runCorpusEntry` replays them through stimuli.ts instead of the plain
+   * fixed/dense sample grid, and the per-kind table's `unstimulated` column
+   * no longer counts this entry (its phases WERE replayed, even though only
+   * on the classic side until owner decision 1's core mechanism lands —
+   * W1b).
+   */
+  readonly phases?: readonly StimulusPhase[];
+  /** Why `phases` is absent despite `stimulus === "verify-script"`, when the producer knows and says so (rather than just omitting the field). Diagnostics only. */
+  readonly phasesUnsupported?: string;
 }
 
 /** One accepted-step-equivalent readout from either engine, at one sample time — see sample.ts. */
@@ -81,7 +132,7 @@ export interface CompareResult {
   readonly maxRelErrorAmps: number;
 }
 
-export type EntryStatus = "not-ported" | "core-declined" | "pass" | "fail" | "error";
+export type EntryStatus = "not-ported" | "core-declined" | "core-stimuli-pending" | "pass" | "fail" | "error";
 
 interface EntryResultBase {
   readonly kinds: readonly string[];
@@ -100,12 +151,45 @@ export interface CoreDeclinedResult extends EntryResultBase {
   readonly reasons: readonly string[];
 }
 
+/**
+ * `entry.phases` was replayed on classic (stimuli.ts's `replayStimuliOnClassic`)
+ * but the core side threw `StimuliNotYetSupportedOnCoreError` — owner
+ * decision 1's parameter-update event is W1b, not yet landed. Distinct from
+ * `CoreDeclinedResult`: that status means the CIRCUIT (a kind or topology)
+ * is not routable to the core; this one means the STIMULI MECHANISM itself
+ * does not exist yet, independent of whether the circuit's kinds are
+ * otherwise core-implemented. `coreWallMs` is always `null` — the core-side
+ * attempt only ever throws, it never actually runs anything to time.
+ */
+export interface CoreStimuliPendingResult extends EntryResultBase {
+  readonly status: "core-stimuli-pending";
+  /** `entry.phases.length` — how many phases classic actually replayed. */
+  readonly phaseCount: number;
+}
+
+/**
+ * One mismatch a known-divergences.ts registration accounts for (gate 2c's
+ * registry). Declared here, not imported from known-divergences.ts, so
+ * types.ts and known-divergences.ts (which imports `Mismatch` FROM this
+ * file) do not form an import cycle — `run-entry.ts`, which imports both,
+ * is where a real `DivergenceMatch` (known-divergences.ts) is assigned into
+ * this structurally-identical shape.
+ */
+export interface KnownDivergenceHit {
+  readonly mismatch: Mismatch;
+  readonly divergenceId: string;
+  readonly decisionRef: string;
+  readonly reason: string;
+}
+
 /** Shared by "pass" and "fail": both ran a real comparison and have real error stats. */
 interface ComparedResultBase extends EntryResultBase {
   readonly maxAbsErrorVolts: number;
   readonly maxRelErrorVolts: number;
   readonly maxAbsErrorAmps: number;
   readonly maxRelErrorAmps: number;
+  /** Mismatches known-divergences.ts's registry accounts for — reported here, never counted toward pass/fail. Empty for every entry until a fixture pattern in the registry actually matches. */
+  readonly knownDivergences: readonly KnownDivergenceHit[];
 }
 
 export interface PassResult extends ComparedResultBase {
@@ -125,7 +209,7 @@ export interface ErrorResult extends EntryResultBase {
   readonly message: string;
 }
 
-export type EntryResult = NotPortedResult | CoreDeclinedResult | PassResult | FailResult | ErrorResult;
+export type EntryResult = NotPortedResult | CoreDeclinedResult | CoreStimuliPendingResult | PassResult | FailResult | ErrorResult;
 
 /** One kind's row in the per-kind pass table (kinds.ts's CORE_IMPLEMENTED_KINDS/CORE_SUPPORTED_KINDS gate on this). */
 export interface KindRow {
@@ -142,7 +226,7 @@ export interface KindRow {
   readonly notPorted: number;
   /** Entries containing this kind that ended in "error" — not one of the table's required columns, kept here so nothing is silently dropped (table.ts's rendered markdown omits it when zero everywhere). */
   readonly errored: number;
-  /** Entries containing this kind whose `stimulus` is "verify-script" (CorpusEntry's own doc) — counted here so a pass count that is mostly unstimulated entries doesn't read as parity with devolt's own scripted check. */
+  /** Entries containing this kind whose `stimulus` is "verify-script" AND that carry no exported `phases` (CorpusEntry's own doc) — counted here so a pass count that is mostly unstimulated entries doesn't read as parity with devolt's own scripted check. An entry WITH phases was actually replayed (gate 2d; status "core-stimuli-pending" or, once W1b lands, a real pass/fail) and is not counted here even though the core side is still pending. */
   readonly unstimulated: number;
   readonly status: "pass" | "fail" | "untested" | "not-ported";
 }

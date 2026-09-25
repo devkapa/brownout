@@ -19,6 +19,7 @@ function passResult(): EntryResult {
     maxRelErrorVolts: 0,
     maxAbsErrorAmps: 0,
     maxRelErrorAmps: 0,
+    knownDivergences: [],
   };
 }
 

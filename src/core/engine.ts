@@ -33,8 +33,9 @@
  * a far worse surprise than an explicit throw.
  */
 
-import { compileCircuit, type CompiledCircuit } from "./compile.js";
+import { compileCircuit, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
 import { CORE_IMPLEMENTED_KINDS } from "./kinds.js";
+import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
 import {
   coreCall,
   coreGeneration,
@@ -55,6 +56,11 @@ import type { EngineReadout } from "./surface.js";
 import type { SimCircuit, SimFailure, SimWarning } from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import type { DisplayInfo } from "../sim/messages.js";
+
+/** `CoreEngine.load`'s third argument: `CompileOptions` (compile/index.js's options passthrough) plus the facade-clock seed. */
+export interface CoreEngineLoadOptions extends CompileOptions {
+  simTime?: number;
+}
 
 /** `bo_engine_stat`'s four counters (core/README.md's index table), named. */
 export interface CoreEngineStats {
@@ -95,32 +101,37 @@ export class CoreEngine implements EngineReadout {
   private _compiled: CompiledCircuit | null = null;
   private _netV: Record<string, number> = {};
   private _elementI: Record<string, number> = {};
+  private _digitalState: Record<string, number> = {};
+  private _elementChannelI: Record<string, number[]> = {};
   private _lastConverged = false;
 
-  // Facade-side clock. The Rust engine restarts every loaded program at t=0
-  // (core/README.md, "W0 kernel semantics" #6), but classic SimEngine.load()
-  // never resets `this.simTime` — only coldLoad() does (confirmed by reading
-  // sim-engine.ts: `load()` has no `this.simTime = 0` anywhere in it). A
-  // live-edit reload must keep the facade's simTime moving forward exactly
-  // like classic does.
+  // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
+  // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
+  // no `this.simTime = 0` anywhere in it) — so a live-edit reload must keep
+  // the facade's simTime moving forward exactly like classic does.
   //
-  // `_simTime` is the SOURCE OF TRUTH for the public `simTime` getter — it
-  // is set to exactly `tEnd` on a successful advance() and carried forward
-  // (unchanged) across load(), never derived by adding `bo_engine_time()`'s
-  // readback back on top of a base: `_timeBase + bo_engine_time(...)` is not
-  // guaranteed to reproduce the exact `tEnd` that was requested in floating
-  // point, and a caller comparing `engine.simTime` against the `tEnd` it
-  // just passed to advance() deserves EXACT equality, not "close enough".
+  // Unlike W0, this is no longer just a facade-side fiction layered on top of
+  // a Rust clock that restarts at 0: load() always passes the carried-over
+  // simTime as `START_TIME` (option key 7, core/README.md's Options table),
+  // so RUST'S OWN internal clock is seeded at the same absolute instant. That
+  // is what lets `advance(tEnd)` hand `tEnd` to `bo_engine_advance` directly
+  // — no TS-side offset arithmetic translates it first — and it's the fix for
+  // the reload bug this replaced: before START_TIME existed, Rust always
+  // restarted at 0 regardless of the facade's clock, so a time-dependent read
+  // (a floating-input bucket, a waveform phase) taken right after a non-zero-
+  // time reload would key on the wrong instant.
   //
-  // `_loadedAt` is a separate, narrower thing: only the facade-time offset
-  // used to translate advance()'s absolute `tEnd` into the Rust-relative
-  // call (`rustTEnd = tEnd - _loadedAt`). It is set once per successful
-  // load(), from whatever `_simTime` already was — INCLUDING right after a
-  // FAILED load(): `_simTime` itself is never reset by a failed load (see
-  // load()'s own comment), so a fail-then-succeed sequence still resumes at
-  // the pre-failure clock instead of restarting at 0.
+  // `_simTime` is the SOURCE OF TRUTH for the public `simTime` getter. On a
+  // successful advance() it is set to exactly `tEnd` — not re-derived from
+  // `bo_engine_time()`'s readback — because the contract guarantees
+  // `bo_engine_advance` either reaches `t_end` exactly (Rust stores the f64
+  // it is given, with no arithmetic done on it in TS first now) or fails
+  // outright, so the value the caller asked for IS the value now current. On
+  // a NON-CONVERGENT advance() (-4/-7, core/README.md's "A failed advance"),
+  // `_simTime` IS read back from `bo_engine_time()` instead: Rust kept the
+  // state of the last instant it actually completed, and that instant — not
+  // the `tEnd` that was requested — is what the caller must see.
   private _simTime = 0;
-  private _loadedAt = 0;
 
   constructor() {
     if (!coreReady()) {
@@ -198,7 +209,7 @@ export class CoreEngine implements EngineReadout {
    * `options.simTime`, when given, is the facade time the JUST-LOADED
    * program starts at — overriding whatever this engine's own clock already
    * read, rather than carrying it forward as a bare `load(circuit)` does
-   * (see the class doc comment on `_simTime`/`_loadedAt`). This is for a host
+   * (see the class doc comment on `_simTime`). This is for a host
    * adapter switching a live-edit reload from ANOTHER engine onto this one
    * (HeadlessRunner.load(): "classic to core" passes the classic engine's
    * current simTime here) — a caller loading onto an engine that was already
@@ -207,17 +218,27 @@ export class CoreEngine implements EngineReadout {
    * check) — a caller bug, not a circuit problem, so unlike a rejected
    * circuit it does NOT clear this engine's currently loaded program.
    *
+   * `options`' other fields (`integrationMethod`, and the exactness switches)
+   * pass straight through to `compileCircuit` (compile/index.js's
+   * `CompileOptions`) — the ambient temperature option is NOT here, since
+   * `compileCircuit` always derives it from `circuit.environment` itself.
+   * `startTimeS` is the one exception: this method ALWAYS overrides it with
+   * `previousSimTime` (below) before calling compileCircuit, regardless of
+   * whether the caller's `options` happened to set it — "the facade passes
+   * START_TIME on every load" means this engine's own carried-over clock is
+   * the only source for it, never a caller-supplied compile option.
+   *
    * Throws `CoreUnsupportedError` (with `reasons`) for anything compileCircuit
    * rejects, or for a Rust-side topology rejection (`bo_engine_load` code
-   * -3). Throws `CoreLoadError` for -1/-2/-4/-5 (see `mapLoadFailure`'s doc
-   * comment for why -2 is grouped there, not with -3). In every OTHER
+   * -3). Throws `CoreLoadError` for -1/-2/-4/-5/-8 (see `mapLoadFailure`'s
+   * doc comment for why -2 is grouped there, not with -3). In every OTHER
    * throwing case this engine ends up in the "no program loaded" state (see
    * the class doc comment) regardless of what was loaded before.
    */
   load(
     circuit: SimCircuit,
     implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
-    options?: { simTime?: number },
+    options?: CoreEngineLoadOptions,
   ): void {
     this._checkGeneration();
 
@@ -245,9 +266,20 @@ export class CoreEngine implements EngineReadout {
     this._compiled = null;
     this._netV = {};
     this._elementI = {};
+    this._digitalState = {};
+    this._elementChannelI = {};
     this._lastConverged = false;
 
-    const result = compileCircuit(circuit, implementedKinds);
+    // `options`' other fields pass straight through: compileCircuit's
+    // `CompileOptions` only reads integrationMethod/noSolutionCache/
+    // noRailShortcut/forceStepped/startTimeS, so the extra `simTime` field
+    // along for the ride (this method's own, above) is simply never read
+    // there. `startTimeS` is forced to `previousSimTime` here — not passed
+    // through from the caller — because THIS is "the facade passes
+    // START_TIME on every load" (core/README.md, Options key 7): every load,
+    // including one with no caller options at all, must seed Rust's clock
+    // with wherever this engine's own clock already was.
+    const result = compileCircuit(circuit, implementedKinds, { ...(options ?? {}), startTimeS: previousSimTime });
     if (!result.ok) {
       throw new CoreUnsupportedError(result.reasons);
     }
@@ -273,94 +305,126 @@ export class CoreEngine implements EngineReadout {
     });
 
     // Success: adopt the new program. `_simTime` itself does not change here
-    // (it already equals `previousSimTime`; nothing touched it above), but
-    // `_loadedAt` records where the JUST-LOADED program's Rust-internal t=0
-    // sits in facade time, for advance() to translate through.
+    // (it already equals `previousSimTime`; nothing touched it above) — the
+    // program was just loaded with START_TIME = previousSimTime (above), so
+    // Rust's own internal clock is already at exactly this same instant, and
+    // there is no separate facade-side offset left to record (see the class
+    // doc comment).
     this._compiled = compiled;
-    this._loadedAt = previousSimTime;
     this._simTime = previousSimTime;
     this._lastConverged = true;
     this._publishReadouts();
   }
 
   /**
-   * Advance to `tEnd` (absolute seconds, in the FACADE's clock — see the
-   * class doc comment). `tEnd` earlier than the current simTime by more than
-   * float slack throws a `RangeError` (core/README.md error -6): a caller
-   * bug, not a circuit problem, so it is never wrapped in `CoreUnsupportedError`/
+   * Advance to `tEnd` (absolute seconds — Rust's own clock IS the facade's
+   * clock now that load() always seeds START_TIME with it; see the class doc
+   * comment). `tEnd` earlier than the current simTime by more than float
+   * slack throws a `RangeError` (core/README.md error -6): a caller bug, not
+   * a circuit problem, so it is never wrapped in `CoreUnsupportedError`/
    * `CoreLoadError`. A non-finite `tEnd` (`NaN`/`Infinity`/`-Infinity`) is
    * rejected the same way, and BEFORE any ABI call: the Rust side's own
    * backwards-time guard (`t_end < self.time - TIME_EPS`) is false for NaN,
    * so a NaN or Infinite `tEnd` would otherwise reach `bo_engine_advance`,
    * succeed, and permanently disable that guard (every later comparison
    * against a NaN/Infinite clock is also false) — see engine.rs's `advance`.
+   *
+   * A NON-CONVERGENT advance (-4 solve failed, -7 delta-cycle livelock) does
+   * NOT throw (core/README.md, "A failed advance": "the host treats this as
+   * non-convergence, as classic's `lastConverged = false`... It is not a load
+   * error"). Rust keeps the state of the last instant it actually completed,
+   * so this sets `lastConverged = false`, reads `simTime` back from
+   * `bo_engine_time()` (the instant Rust actually reached, not the `tEnd`
+   * that was requested), and leaves the published readouts exactly as the
+   * last successful call left them — that IS "the last good instant" the
+   * contract promises, so there is nothing to re-publish. Every other
+   * non-zero code is still a genuine error and throws `CoreLoadError`, as
+   * before.
    */
   advance(tEnd: number): void {
     this._requireLoaded();
     if (!Number.isFinite(tEnd)) {
       throw new RangeError(`CoreEngine.advance: tEnd must be a finite number, got ${String(tEnd)}.`);
     }
-    const rustTEnd = tEnd - this._loadedAt;
-    const code = coreCall((exports) => exports.bo_engine_advance(this._handle, rustTEnd));
-    if (code !== 0) {
-      if (code === -6) {
-        throw new RangeError(
-          `CoreEngine.advance(${tEnd}): time cannot move backwards (current simTime is ${this._simTime}).`,
-        );
-      }
-      const message = coreCall((exports) => readCoreErrorMessage(exports));
-      throw new CoreLoadError(`bo_engine_advance failed (code ${code}): ${message}`);
+    const code = coreCall((exports) => exports.bo_engine_advance(this._handle, tEnd));
+    if (code === 0) {
+      // Set to exactly `tEnd`, not re-derived from `bo_engine_time()`'s
+      // readback: the contract guarantees bo_engine_advance either reaches
+      // `t_end` exactly or fails outright, and `tEnd` now reaches Rust with
+      // no TS-side arithmetic done on it first, so the value the caller asked
+      // for IS the value now current.
+      this._simTime = tEnd;
+      this._lastConverged = true;
+      this._publishReadouts();
+      return;
     }
-    // Set to exactly `tEnd`, not re-derived from `bo_engine_time()`'s
-    // readback (`_loadedAt + bo_engine_time(...)` is not guaranteed to equal
-    // `tEnd` bit-for-bit after the subtract/re-add round trip) — the
-    // contract guarantees bo_engine_advance either reaches `t_end` exactly
-    // or fails outright (core/README.md: "Advance to t_end"), so the value
-    // the caller asked for IS the value now current.
-    this._simTime = tEnd;
-    this._lastConverged = true;
-    this._publishReadouts();
+    if (code === -6) {
+      throw new RangeError(
+        `CoreEngine.advance(${tEnd}): time cannot move backwards (current simTime is ${this._simTime}).`,
+      );
+    }
+    if (code === -4 || code === -7) {
+      this._simTime = coreCall((exports) => exports.bo_engine_time(this._handle));
+      this._lastConverged = false;
+      return;
+    }
+    const message = coreCall((exports) => readCoreErrorMessage(exports));
+    throw new CoreLoadError(`bo_engine_advance failed (code ${code}): ${message}`);
   }
 
   /**
-   * Re-reads node voltages / device currents into `_netV`/`_elementI` after
-   * a successful load()/advance(). Called only while `_compiled` is set.
+   * Re-reads node voltages / device currents / digital slots / channel slots
+   * into `_netV`/`_elementI`/`_digitalState`/`_elementChannelI` after a
+   * successful load()/advance(), via readout.ts's pure builders. Called only
+   * while `_compiled` is set.
+   *
+   * Slot counts come from `compiled.digitalSlots.length`/
+   * `compiled.channelSlots.length` — the exact counts this circuit's program
+   * was written with (compile/index.js's `ProgramWriter.finish` call) —
+   * rather than an extra `bo_engine_digital_slot_count`/
+   * `bo_engine_channel_slot_count` round trip, the same way `nodeCount`/
+   * `deviceCount` above already trust the TS-side compiled table instead of
+   * calling `bo_engine_node_count`/`bo_engine_device_count`.
    */
   private _publishReadouts(): void {
     const compiled = this._compiled;
     if (!compiled) return;
     const nodeCount = compiled.netIdOfNode.length;
     const deviceCount = compiled.devices.length;
-
-    // Seeded with "gnd": 0 UNCONDITIONALLY, matching classic exactly —
-    // sim-engine.ts's _solve() always seeds `const netV = { gnd: 0 }` before
-    // overlaying real nets, so a circuit with no net actually named "gnd"
-    // (a synthetic datum) still publishes a phantom `netV.gnd === 0` key.
-    // See engine.test.ts for the parity check against a real classic load.
-    const netV: Record<string, number> = { gnd: 0 };
-    const elementI: Record<string, number> = {};
+    const digitalSlotCount = compiled.digitalSlots.length;
+    const channelSlotCount = compiled.channelSlots.length;
 
     coreCall((exports) => {
-      // `>>> 0` on both pointers: see load()'s bo_alloc comment — same i32
+      // `>>> 0` on every pointer: see load()'s bo_alloc comment — same i32
       // sign issue for every pointer this ABI returns.
       const voltagesPtr = exports.bo_engine_node_voltages(this._handle) >>> 0;
       const voltages = copyF64(exports, voltagesPtr, nodeCount);
-      for (let node = 0; node < nodeCount; node++) {
-        const netId = compiled.netIdOfNode[node];
-        if (netId !== null && netId !== undefined) netV[netId] = voltages[node] ?? 0;
-      }
+      this._netV = buildNetV(compiled, voltages);
 
       if (deviceCount > 0) {
         const currentsPtr = exports.bo_engine_device_currents(this._handle) >>> 0;
         const currents = copyF64(exports, currentsPtr, deviceCount);
-        compiled.devices.forEach((device, i) => {
-          elementI[device.componentId] = currents[i] ?? 0;
-        });
+        this._elementI = buildElementI(compiled, currents);
+      } else {
+        this._elementI = {};
+      }
+
+      if (digitalSlotCount > 0) {
+        const digitalPtr = exports.bo_engine_digital_slots(this._handle) >>> 0;
+        const digital = copyF64(exports, digitalPtr, digitalSlotCount);
+        this._digitalState = buildDigitalState(compiled, digital);
+      } else {
+        this._digitalState = {};
+      }
+
+      if (channelSlotCount > 0) {
+        const channelPtr = exports.bo_engine_channel_slots(this._handle) >>> 0;
+        const channel = copyF64(exports, channelPtr, channelSlotCount);
+        this._elementChannelI = buildElementChannelI(compiled, channel);
+      } else {
+        this._elementChannelI = {};
       }
     });
-
-    this._netV = netV;
-    this._elementI = elementI;
   }
 
   get simTime(): number {
@@ -390,15 +454,37 @@ export class CoreEngine implements EngineReadout {
   }
 
   /**
-   * W0 implements only ground/resistor/voltage_source (core/README.md) — no
-   * kind produces digital output yet. Always empty — a FRESH object per
-   * call, like classic's own per-engine field: a shared constant here would
-   * let one caller's mutation of the "empty" record leak into every other
-   * engine (and every other call).
+   * Rebuilt from the digital slots after every load()/advance()
+   * (readout.ts's `buildDigitalState`). W1a implements only ground/resistor/
+   * voltage_source (core/README.md) — none publishes a digital slot yet, so
+   * this is always `{}` today, but it is the SAME slot-backed record a later
+   * kind's digital output will appear in, not a hardcoded empty return.
    */
   get digitalState(): Record<string, number> {
     this._requireLoaded();
-    return {};
+    return this._digitalState;
+  }
+
+  /** Component id -> per-channel amps, from the channel slots. LIVE record, same caveat as getNetV(). Matches classic's `getElementChannelI()` shape (spec §10.10). */
+  getElementChannelI(): Record<string, number[]> {
+    this._requireLoaded();
+    return this._elementChannelI;
+  }
+
+  /**
+   * The facade-time (absolute, like `simTime`/`advance()`) of the earliest
+   * pending event, or `+Infinity` when none is scheduled
+   * (`bo_engine_next_event_time`, core/README.md's C ABI v2 table). Returned
+   * exactly as Rust reports it, with no offset added: Rust's own clock IS the
+   * facade's clock now that load() always seeds START_TIME with it (see the
+   * class doc comment), so there is nothing left to translate. W1a's kinds
+   * are static, so this is always `+Infinity` today — the event kernel's own
+   * W1a machinery (drivers, deltas) has nothing to schedule until a later
+   * sub-wave's kinds exist.
+   */
+  nextEventTime(): number {
+    this._requireLoaded();
+    return coreCall((exports) => exports.bo_engine_next_event_time(this._handle));
   }
 
   /** No W0 kind has a failure model. Always empty (a fresh object per call — see digitalState's doc comment). */

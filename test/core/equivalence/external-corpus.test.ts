@@ -90,4 +90,54 @@ describe("loadExternalCorpus", () => {
     expect(byName.get("c")!.stimulus).toBe("verify-script");
     expect(byName.get("d")!.stimulus).toBeNull();
   });
+
+  it("loads a verify-script entry's exported phases (W1a-A6's corpus format) into CorpusEntry.phases, exactly as given", () => {
+    const dir = newTmpDir();
+    writeCircuit(dir, "e.sim.json", [
+      { id: "gnd", kind: "ground", pins: ["gnd"] },
+      { id: "sw", kind: "switch", pins: ["a", "b"] },
+    ]);
+    const phases = [
+      { set: [{ id: "sw", params: { closed: 1 } }], durationS: 3.5 },
+      { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2.5 },
+    ];
+    writeManifest(dir, [
+      { file: "e.sim.json", name: "e", durationS: null, kinds: ["ground", "switch"], stimulus: "verify-script", phases },
+    ]);
+
+    const corpus = loadExternalCorpus(dir);
+    expect(corpus.entries[0]!.entry.phases).toEqual(phases);
+    expect(corpus.entries[0]!.entry.phasesUnsupported).toBeUndefined();
+  });
+
+  it("loads phasesUnsupported when the producer could not export phases for an entry, leaving phases undefined", () => {
+    const dir = newTmpDir();
+    writeCircuit(dir, "f.sim.json", [{ id: "gnd", kind: "ground", pins: ["gnd"] }]);
+    writeManifest(dir, [
+      {
+        file: "f.sim.json",
+        name: "f",
+        durationS: null,
+        kinds: ["ground"],
+        stimulus: "verify-script",
+        phasesUnsupported: "objective predicate has no phase-representable trigger",
+      },
+    ]);
+
+    const corpus = loadExternalCorpus(dir);
+    const entry = corpus.entries[0]!.entry;
+    expect(entry.phases).toBeUndefined();
+    expect(entry.phasesUnsupported).toBe("objective predicate has no phase-representable trigger");
+  });
+
+  it("leaves both phases and phasesUnsupported undefined for an entry that is not a verify-script at all", () => {
+    const dir = newTmpDir();
+    writeCircuit(dir, "g.sim.json", [{ id: "gnd", kind: "ground", pins: ["gnd"] }]);
+    writeManifest(dir, [{ file: "g.sim.json", name: "g", durationS: null, kinds: ["ground"] }]);
+
+    const corpus = loadExternalCorpus(dir);
+    const entry = corpus.entries[0]!.entry;
+    expect(entry.phases).toBeUndefined();
+    expect(entry.phasesUnsupported).toBeUndefined();
+  });
 });

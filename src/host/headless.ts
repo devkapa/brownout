@@ -870,29 +870,50 @@ export class HeadlessRunner {
   }
 
   /**
-   * run()'s core-mode path. The core has no step loop in W0 — bo_engine_advance
-   * jumps straight to tEnd (core/README.md, "W0 kernel semantics" #6: "Everything
-   * in W0 is static, so advancing only moves time") — so there is nothing here
-   * for adaptive/fixedStepS/maxSteps to control, and integrationMethod has
-   * already been validated/recorded (not applied — the core has no dynamics
-   * to seed) by run() before this is called; run() validates all of them
-   * (misuse is still caught) but this method ignores every one of them.
+   * run()'s core-mode path. The core has no step loop in W0/W1a —
+   * bo_engine_advance jumps straight to tEnd (core/README.md, "W0 kernel
+   * semantics" #6: "Everything in W0 is static, so advancing only moves
+   * time") — so there is nothing here for adaptive/fixedStepS/maxSteps to
+   * control, and integrationMethod has already been validated/recorded (not
+   * applied — the core has no dynamics to seed) by run() before this is
+   * called; run() validates all of them (misuse is still caught) but this
+   * method ignores every one of them.
+   *
+   * NON-CONVERGENCE. `CoreEngine.advance` does not throw for a -4/-7 result
+   * (core/README.md, "A failed advance") — it sets `lastConverged = false`
+   * and reads `simTime` back as however far Rust actually got. This method's
+   * own doc-inherited contract ("Throws only on misuse; solver trouble is
+   * reported on the result", run()'s doc comment) therefore holds here too:
+   * a non-converged advance is reported via `hitMinStep`/`simulatedS`, the
+   * SAME honest-failure signal the classic step loop above uses when it hits
+   * the H_MIN floor, rather than propagating a `CoreLoadError` out of run().
    */
   private _runCore(
     engine: CoreEngine,
     durationS: number,
     onSample: ((sample: HeadlessSample) => void) | undefined,
   ): HeadlessRunResult {
-    engine.advance(engine.simTime + durationS);
+    const startTime = engine.simTime;
+    engine.advance(startTime + durationS);
+    const converged = engine.lastConverged;
+    // On non-convergence `engine.simTime` is however far Rust actually got
+    // (the last instant it completed), not `startTime + durationS`, so the
+    // gap between them IS how much of the requested duration was actually
+    // simulated.
+    const simulatedS = converged ? durationS : engine.simTime - startTime;
 
     if (onSample) {
-      // No per-step sample grid exists in the core in W0 (one jump, not a
+      // No per-step sample grid exists in the core in W0/W1a (one jump, not a
       // step loop): onSample fires exactly ONCE, at the run's end, with
-      // h = durationS. W2's acquisition subsystem replaces this with the
-      // core's real sample points.
+      // h = simulatedS (== durationS on convergence). W2's acquisition
+      // subsystem replaces this with the core's real sample points. The
+      // readouts are always the last CONVERGED instant's — CoreEngine.advance
+      // never republishes them on a non-convergent call — so this is exactly
+      // the "last trusted state is preserved" guarantee hitMinStep's own doc
+      // comment describes for the classic path.
       onSample({
         simTime: engine.simTime,
-        h: durationS,
+        h: simulatedS,
         netV: { ...engine.getNetV() },
         elementI: { ...engine.getElementI() },
       });
@@ -900,14 +921,14 @@ export class HeadlessRunner {
 
     return {
       simTime: engine.simTime,
-      simulatedS: durationS,
+      simulatedS,
       acceptedSteps: 0,
       rejectedSteps: 0,
       failedSteps: 0,
       maxLocalErrorRatio: 0,
       finalH: 0,
       errorControlled: false,
-      hitMinStep: false,
+      hitMinStep: !converged,
       hitStepCap: false,
     };
   }

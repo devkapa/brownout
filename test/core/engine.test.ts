@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { SimEngine } from "../../src/sim/engine/sim-engine.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import {
@@ -16,6 +18,9 @@ import {
   CoreUnsupportedError,
 } from "../../src/core/errors.js";
 import type { EngineReadout } from "../../src/core/surface.js";
+import { buildCoreNodes, classicElementIKeys, compileCircuit, type CompiledCircuit } from "../../src/core/compile/index.js";
+import { CORE_OPTION_KEYS, decodeProgram } from "../../src/core/format.js";
+import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "../../src/core/readout.js";
 
 // ---- compile-time check: SimEngine must satisfy EngineReadout -------------
 // A pure type-level assertion — zero runtime footprint (a type alias emits no
@@ -607,7 +612,7 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
 
     const exports: CoreExports = {
       memory: { buffer },
-      bo_abi_version: () => 1,
+      bo_abi_version: () => 2,
       bo_alloc: () => toSignedI32(PROGRAM_ADDR),
       bo_free: () => {},
       bo_engine_create: () => 7,
@@ -630,6 +635,16 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
       bo_engine_stat: () => 0,
       bo_error_ptr: () => 0,
       bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
     };
     __installCoreForTest(exports);
 
@@ -648,5 +663,449 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
     const elementI = core.getElementI();
     expect(Object.keys(elementI).length).toBeGreaterThan(0);
     for (const v of Object.values(elementI)) expect(v).toBe(CURRENT_SENTINEL);
+  });
+});
+
+// ---- v2: readout.ts's pure builders, exercised directly -------------------
+// (independent of any ABI call — the digital/channel-slot READING inside
+// engine.ts's _publishReadouts is a thin `copyF64` + one of these calls, and
+// W1a's own kinds never populate a non-empty slot table, so the meaningful
+// coverage of "does the builder logic itself work" lives here rather than
+// forcing a real compiled circuit to have slots it cannot have yet.)
+
+function withSlots(
+  compiled: CompiledCircuit,
+  overrides: Partial<Pick<CompiledCircuit, "digitalSlots" | "channelSlots">>,
+): CompiledCircuit {
+  return { ...compiled, ...overrides };
+}
+
+function compileOkForReadoutTests(): CompiledCircuit {
+  const c = circuit(
+    [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+    [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+  );
+  const result = compileCircuit(c);
+  if (!result.ok) throw new Error("expected ok:true");
+  return result.compiled;
+}
+
+describe("readout.ts", () => {
+  it("buildNetV seeds gnd:0 unconditionally, then overlays every real net", () => {
+    const compiled = compileOkForReadoutTests();
+    const netV = buildNetV(compiled, [0, 5]); // node 0 = gnd = 0V, node 1 = 5V
+    expect(netV.gnd).toBe(0);
+    expect(Object.keys(netV)).toHaveLength(2);
+  });
+
+  it("buildNetV keeps the phantom gnd:0 key even when node 0 is a synthetic (no-net) datum", () => {
+    const c = circuit(
+      [part("r1", "resistor", ["a", "b"], { resistance: 10 }), part("r2", "resistor", ["a", "b"], { resistance: 20 })],
+      [wire("r1", "b", "r2", "a")],
+    );
+    const result = compileCircuit(c);
+    if (!result.ok) throw new Error("expected ok:true");
+    const netV = buildNetV(result.compiled, [0, 1, 2, 3]);
+    expect(netV.gnd).toBe(0);
+    expect(result.compiled.netIdOfNode[0]).toBeNull(); // no net actually named "gnd" here
+  });
+
+  it("buildElementI zips compiled.devices with the currents array, in order", () => {
+    const compiled = compileOkForReadoutTests();
+    const currents = compiled.devices.map((_, i) => (i + 1) * 1.5);
+    const elementI = buildElementI(compiled, currents);
+    compiled.devices.forEach((device, i) => {
+      expect(elementI[device.componentId]).toBe(currents[i]);
+    });
+  });
+
+  it("buildDigitalState treats NaN as an absent key (classic rebuilds digitalState from scratch every pass, spec §10.9)", () => {
+    const compiled = withSlots(compileOkForReadoutTests(), { digitalSlots: ["u1/qa", "u1/qb", "u2"] });
+    const digitalState = buildDigitalState(compiled, [1, Number.NaN, 0]);
+    expect(digitalState).toEqual({ "u1/qa": 1, u2: 0 });
+  });
+
+  it("buildElementChannelI groups channel slots by componentId, indexed by channel", () => {
+    const compiled = withSlots(compileOkForReadoutTests(), {
+      channelSlots: [
+        ["u1", 0],
+        ["u1", 1],
+        ["u2", 0],
+      ],
+    });
+    const elementChannelI = buildElementChannelI(compiled, [0.1, 0.2, 0.3]);
+    expect(elementChannelI).toEqual({ u1: [0.1, 0.2], u2: [0.3] });
+  });
+});
+
+// ---- elementI key set matches classic's _updateElementI (spec §10.5) ------
+
+describe("readout.ts's buildElementI key set — matches classic's _updateElementI on real fixtures", () => {
+  const FIXTURES_DIR = path.resolve(__dirname, "../fixtures/circuits");
+  const fixtureNames = fs.readdirSync(FIXTURES_DIR).filter((name) => name.endsWith(".sim.json"));
+
+  it("found at least one fixture to check", () => {
+    expect(fixtureNames.length).toBeGreaterThan(0);
+  });
+
+  for (const name of fixtureNames) {
+    it(`key set for ${name}: every component with >=2 pins, nothing else`, () => {
+      const raw = JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, name), "utf8")) as SimCircuit;
+      const classic = new SimEngine();
+      classic.load(raw);
+      const classicKeys = new Set(Object.keys(classic.getElementI()));
+
+      const ourKeys = new Set(classicElementIKeys(raw, buildCoreNodes(raw).nodeCount));
+      expect(ourKeys).toEqual(classicKeys);
+    });
+  }
+
+  it("a <2-pin component (ground) gets no elementI entry at all, on either side", () => {
+    const c = circuit([
+      part("gref", "ground", ["gnd"]),
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+    ]);
+    const classic = new SimEngine();
+    classic.load(c);
+    expect(Object.keys(classic.getElementI())).not.toContain("gref");
+
+    const result = compileCircuit(c);
+    if (!result.ok) throw new Error("expected ok:true");
+    const ourKeys = Object.keys(buildElementI(result.compiled, result.compiled.devices.map(() => 0)));
+    expect(ourKeys).not.toContain("gref");
+    expect(new Set(ourKeys)).toEqual(new Set(["vsrc", "r1"]));
+  });
+
+  it("a circuit whose only node is the datum publishes no elementI at all, like classic", () => {
+    // Classic names the net holding a source's return pin "gnd"; with no
+    // source, a board ground is the fallback reference. A resistor with both
+    // ends on that one net leaves the MNA with zero rows.
+    const c = circuit(
+      [part("gref", "ground", ["gnd"]), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("r1", "a", "gref", "gnd"), wire("r1", "b", "gref", "gnd")],
+    );
+    const classic = new SimEngine();
+    classic.load(c);
+    const nodeCount = buildCoreNodes(c).nodeCount;
+    expect(classicElementIKeys(c, nodeCount)).toEqual(Object.keys(classic.getElementI()));
+  });
+});
+
+// ---- v2: CoreEngine.load's options passthrough -----------------------------
+// Exercised via a synthetic bo_engine_load that captures the uploaded program
+// bytes instead of a real Rust decode (the real ABI is still v1 — see the
+// worker brief's "Integration timing"), then decodes them in TS to check the
+// option block compileCircuit actually wrote.
+
+describe("CoreEngine.load — options passthrough to compileCircuit (integrationMethod, ambient)", () => {
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  function installCapturingCore(): { capturedProgram: () => Float64Array | undefined } {
+    let captured: Float64Array | undefined;
+    const buffer = new ArrayBuffer(1 << 20);
+    const exports: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      bo_alloc: (lenF64: number) => 0,
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: (_h: number, ptr: number, lenF64: number) => {
+        captured = Float64Array.from(new Float64Array(buffer, ptr, lenF64));
+        return 0;
+      },
+      bo_engine_advance: () => 0,
+      bo_engine_time: () => 0,
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => 0,
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 0,
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+    };
+    __installCoreForTest(exports);
+    return { capturedProgram: () => captured };
+  }
+
+  function divider(): SimCircuit {
+    return circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+    );
+  }
+
+  it("defaults to backward Euler and ambient 25 when no options are given", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider());
+    const decoded = decodeProgram(capturedProgram()!);
+    expect(decoded.options).toContainEqual([CORE_OPTION_KEYS.INTEGRATION, 0]);
+    expect(decoded.options).toContainEqual([CORE_OPTION_KEYS.AMBIENT_C, 25]);
+  });
+
+  it("passes integrationMethod: 'trap' through to the compiled program's INTEGRATION option", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { integrationMethod: "trap" });
+    const decoded = decodeProgram(capturedProgram()!);
+    expect(decoded.options).toContainEqual([CORE_OPTION_KEYS.INTEGRATION, 1]);
+  });
+
+  it("derives AMBIENT_C from circuit.environment.temperatureC, not from a load option", () => {
+    const { capturedProgram } = installCapturingCore();
+    const c = divider();
+    c.environment = { temperatureC: 45 };
+    const core = new CoreEngine();
+    core.load(c);
+    const decoded = decodeProgram(capturedProgram()!);
+    expect(decoded.options).toContainEqual([CORE_OPTION_KEYS.AMBIENT_C, 45]);
+  });
+
+  it("simTime does not disturb the OTHER compile options: options.simTime itself never reaches compileCircuit as one", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { simTime: 12, integrationMethod: "trap" });
+    expect(core.simTime).toBe(12);
+    const decoded = decodeProgram(capturedProgram()!);
+    expect(decoded.options).toContainEqual([CORE_OPTION_KEYS.INTEGRATION, 1]);
+  });
+
+  // Finding 3 (w1a-fixes/ts.json #3): before the fix, CORE_OPTION_KEYS had no
+  // START_TIME entry at all and load() never wrote one — a live-edit reload
+  // restarted Rust's own clock at 0 while the facade's simTime carried
+  // forward, with no ABI field to tell Rust the difference. The fix: every
+  // load() writes START_TIME = the carried-over simTime (0 on the first
+  // load), so Rust's own clock is seeded absolute too.
+  it("writes START_TIME = the carried-over simTime on every load, including the very first (0)", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider());
+    expect(decodeProgram(capturedProgram()!).options).toContainEqual([CORE_OPTION_KEYS.START_TIME, 0]);
+  });
+
+  it("writes START_TIME = options.simTime when a reload seeds the clock explicitly", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { simTime: 7.5 });
+    expect(decodeProgram(capturedProgram()!).options).toContainEqual([CORE_OPTION_KEYS.START_TIME, 7.5]);
+  });
+
+  it("writes START_TIME = the facade's own clock on a bare reload (no options.simTime given)", () => {
+    const { capturedProgram } = installCapturingCore();
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { simTime: 3 });
+    core.advance(4);
+    core.load(divider()); // reload with no simTime override: carries 4 forward
+    expect(decodeProgram(capturedProgram()!).options).toContainEqual([CORE_OPTION_KEYS.START_TIME, 4]);
+  });
+});
+
+// ---- v2: advance() and the removal of the _loadedAt translation ------------
+// (w1a-fixes/ts.json findings 3 and 4)
+
+describe("advance() sends tEnd straight through to Rust — no more _loadedAt translation", () => {
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  function divider(): SimCircuit {
+    return circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+    );
+  }
+
+  function installFakeCore(
+    advanceImpl: (tEnd: number) => number,
+    timeImpl: () => number = () => 0,
+  ): { calls: number[]; voltagesView: Float64Array } {
+    const buffer = new ArrayBuffer(1 << 16);
+    const voltagesView = new Float64Array(buffer, 0, 8);
+    voltagesView.fill(1.0);
+    const calls: number[] = [];
+    const exports: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      bo_alloc: () => 0,
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: () => 0,
+      bo_engine_advance: (_h: number, tEnd: number) => {
+        calls.push(tEnd);
+        return advanceImpl(tEnd);
+      },
+      bo_engine_time: () => timeImpl(),
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => 0,
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 0,
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+    };
+    __installCoreForTest(exports);
+    return { calls, voltagesView };
+  }
+
+  it("advance(tEnd) reaches bo_engine_advance untranslated, even after a nonzero-time reload", () => {
+    // Before the fix, this would have called bo_engine_advance with
+    // `tEnd - _loadedAt` = 103 - 100 = 3. Rust's own clock is now seeded
+    // absolute via START_TIME at load time, so tEnd reaches it directly.
+    const { calls } = installFakeCore(() => 0);
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { simTime: 100 });
+    core.advance(103);
+    expect(calls).toEqual([103]);
+  });
+
+  // Finding 4 (w1a-fixes/ts.json #4): -4/-7 from advance() used to throw a
+  // generic CoreLoadError and leave `lastConverged` at its previous (true)
+  // value. core/README.md's "A failed advance" says this is non-convergence,
+  // not a load error, exactly like classic's `lastConverged = false`.
+  for (const code of [-4, -7]) {
+    it(`code ${code} does not throw: lastConverged becomes false and simTime reads back the last completed instant`, () => {
+      installFakeCore(() => code, () => 12.25);
+      const core = new CoreEngine();
+      core.load(divider());
+      expect(() => core.advance(20)).not.toThrow();
+      expect(core.lastConverged).toBe(false);
+      expect(core.simTime).toBe(12.25); // read back via bo_engine_time(), not the requested tEnd
+    });
+  }
+
+  it("a non-convergent advance() leaves the published readouts exactly as the last successful call left them", () => {
+    let calls = 0;
+    const { voltagesView } = installFakeCore(() => (calls++ === 0 ? 0 : -7));
+    const core = new CoreEngine();
+    core.load(divider());
+    core.advance(10); // succeeds: publishes voltagesView's current contents
+    const netVBefore = { ...core.getNetV() };
+    // Mutate the underlying "Rust" memory, as if the instance's own state had
+    // moved on: if the non-convergent call below wrongly re-published
+    // readouts, getNetV() would pick this up. It must not.
+    voltagesView.fill(999);
+    core.advance(20); // -7: must not throw, must not republish
+    expect(core.lastConverged).toBe(false);
+    expect(core.getNetV()).toEqual(netVBefore);
+  });
+});
+
+// ---- v2: nextEventTime() / getElementChannelI() / digitalState via synthetic exports
+
+describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digitalState), via synthetic exports", () => {
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  function divider(): SimCircuit {
+    return circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+    );
+  }
+
+  function installFakeCore(overrides: Partial<CoreExports> = {}): void {
+    const buffer = new ArrayBuffer(1 << 16);
+    const base: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      bo_alloc: () => 0,
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: () => 0,
+      bo_engine_advance: () => 0,
+      bo_engine_time: () => 0,
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => 0,
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 0,
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+    };
+    __installCoreForTest({ ...base, ...overrides });
+  }
+
+  it("nextEventTime() is +Infinity for W1a's static kinds (nothing scheduled)", () => {
+    installFakeCore();
+    const core = new CoreEngine();
+    core.load(divider());
+    expect(core.nextEventTime()).toBe(Infinity);
+  });
+
+  it("nextEventTime() returns Rust's own reported time UNTRANSLATED — Rust's clock is absolute now (START_TIME), so there is no facade offset left to add", () => {
+    // Finding 3 (w1a-fixes/ts.json #3): before the fix, Rust always restarted
+    // its internal clock at 0 on load, so this method had to translate its
+    // answer through `_loadedAt`. Now load() seeds START_TIME with the
+    // carried-over simTime, so Rust's own clock IS the facade's clock and
+    // `bo_engine_next_event_time`'s return value needs no adjustment. A fake
+    // core can't simulate START_TIME actually taking effect inside Rust, but
+    // it CAN prove the facade itself no longer adds anything on top — if it
+    // did, this would read 10.002, not 0.002.
+    installFakeCore({ bo_engine_next_event_time: () => 0.002 });
+    const core = new CoreEngine();
+    core.load(divider(), undefined, { simTime: 10 });
+    expect(core.nextEventTime()).toBeCloseTo(0.002, 12);
+  });
+
+  it("getElementChannelI() is {} for W1a's kinds (no channel slot ever claimed)", () => {
+    installFakeCore();
+    const core = new CoreEngine();
+    core.load(divider());
+    expect(core.getElementChannelI()).toEqual({});
+  });
+
+  it("digitalState is {} for W1a's kinds (no digital slot ever claimed), not a hardcoded stub — it is read through the same slot machinery", () => {
+    installFakeCore();
+    const core = new CoreEngine();
+    core.load(divider());
+    expect(core.digitalState).toEqual({});
+  });
+
+  it("getElementChannelI()/digitalState/nextEventTime() all require a loaded program, like every other readout", () => {
+    installFakeCore();
+    const core = new CoreEngine();
+    expect(() => core.getElementChannelI()).toThrow(CoreNotLoadedError);
+    expect(() => core.digitalState).toThrow(CoreNotLoadedError);
+    expect(() => core.nextEventTime()).toThrow(CoreNotLoadedError);
   });
 });

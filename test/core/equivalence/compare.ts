@@ -75,15 +75,26 @@ function compareDigitalState(
   core: Record<string, number>,
   mismatches: Mismatch[],
 ): void {
-  // W1 SLOT: a real digital kind needs trace ALIGNMENT before this per-
-  // sample comparison means anything — classic's load() seed can produce a
-  // spurious double clock edge at t=0 that the core's static seed never
-  // will, so a naive sample-for-sample diff would flag agreement as a
-  // mismatch. alignTraces(classicTrace, coreTrace) belongs here, run once
-  // per entry before the loop that calls this function, once W1 adds a
-  // digital kind. W0 has no digital kinds at all (both sides are always
-  // `{}`), so the raw per-sample compare below is exact and correct as
-  // written — there is nothing yet to misalign.
+  // This is a RAW per-sample comparator: it assumes `classic`/`core` were
+  // already sampled at the same instant (compareSamples's own simTime check
+  // is the belt-and-suspenders half of that assumption) and says nothing
+  // about clock-cycle skew. For a real digital kind, classic's load() seed
+  // can produce a spurious extra clock edge at t=0 (decision 8) that the
+  // core's exact-crossing settle does not, so a naive instant-for-instant
+  // diff would flag that skew as a mismatch. run-entry.ts's runCorpusEntry
+  // handles that SEPARATELY and BEFORE this function ever sees a digital
+  // key: for an entry that declares CorpusEntry.digital (types.ts), it
+  // builds full-resolution traces (trace.ts), aligns them per clock cycle
+  // (align.ts), and folds any resulting mismatch into the SAME list this
+  // function's caller already assembles — known-divergences.ts's registry is
+  // then applied to the combined list, so an owner-approved divergence
+  // (e.g. the SAP-1 display's startup phantom edge) is reported, not failed,
+  // regardless of which of the two paths produced it. This function itself
+  // stays a plain per-sample compare, correct as written for: (a) W0/W1a,
+  // where no kind publishes digitalState at all (both sides are always
+  // `{}`); and (b) any future entry that does NOT declare `digital` — e.g. a
+  // digital signal sampled well after it has settled, where cycle skew does
+  // not matter.
   const keys = new Set([...Object.keys(classic), ...Object.keys(core)]);
   for (const key of keys) {
     const a = classic[key];

@@ -1,7 +1,7 @@
 /**
  * Loads the brownout-core wasm module and holds the one live instance this
- * process talks to. Everything here is plumbing for the C ABI v1 contract
- * (core/README.md, "C ABI, version 1") — no physics, no program-format
+ * process talks to. Everything here is plumbing for the C ABI v2 contract
+ * (core/README.md, "C ABI, version 2") — no physics, no program-format
  * knowledge (that's format.ts/compile.ts) and no circuit knowledge (that's
  * engine.ts). engine.ts is the only intended caller of the `@internal`
  * exports below; a host only ever calls initCore()/coreReady().
@@ -76,8 +76,8 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** The only ABI version this build's TS and Rust halves understand (core/README.md, "C ABI, version 1"). */
-export const CORE_ABI_VERSION = 1;
+/** The only ABI version this build's TS and Rust halves understand (core/README.md, "C ABI, version 2"). */
+export const CORE_ABI_VERSION = 2;
 
 /**
  * A pre-compiled wasm module — what `new WebAssembly.Module(bytes)` or
@@ -131,10 +131,14 @@ export interface WasmMemoryLike {
 }
 
 /**
- * @internal Typed mirror of the C ABI v1 export table (core/README.md, "C
- * ABI, version 1"). Pointers are plain `number`s: a wasm32 `*const f64` (or
+ * @internal Typed mirror of the C ABI v2 export table (core/README.md, "C
+ * ABI, version 2"). Pointers are plain `number`s: a wasm32 `*const f64` (or
  * `*mut f64`) crosses the ABI as an i32 byte offset into `memory.buffer`,
  * never a real pointer object.
+ *
+ * v2 (W1a) adds the rows below `bo_error_len` — `bo_engine_set_params` (W1b)
+ * and `bo_engine_seed_memory` (W1d) are later rows in the same table and are
+ * deliberately NOT here yet.
  */
 export interface CoreExports {
   readonly memory: WasmMemoryLike;
@@ -153,9 +157,19 @@ export interface CoreExports {
   bo_engine_stat(h: number, i: number): number;
   bo_error_ptr(): number;
   bo_error_len(): number;
+  bo_engine_set_option(h: number, key: number, value: number): number;
+  bo_engine_next_event_time(h: number): number;
+  bo_engine_digital_slot_count(h: number): number;
+  bo_engine_digital_slots(h: number): number;
+  bo_engine_channel_slot_count(h: number): number;
+  bo_engine_channel_slots(h: number): number;
+  bo_engine_trace_enable(h: number, on: number): number;
+  bo_engine_trace_ptr(h: number): number;
+  bo_engine_trace_len(h: number): number;
+  bo_engine_trace_clear(h: number): void;
 }
 
-/** The C ABI v1 export names (core/README.md's table) every instance must have, beyond `memory`. */
+/** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */
 const REQUIRED_FUNCTION_EXPORTS = [
   "bo_abi_version",
   "bo_alloc",
@@ -172,6 +186,16 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_engine_stat",
   "bo_error_ptr",
   "bo_error_len",
+  "bo_engine_set_option",
+  "bo_engine_next_event_time",
+  "bo_engine_digital_slot_count",
+  "bo_engine_digital_slots",
+  "bo_engine_channel_slot_count",
+  "bo_engine_channel_slots",
+  "bo_engine_trace_enable",
+  "bo_engine_trace_ptr",
+  "bo_engine_trace_len",
+  "bo_engine_trace_clear",
 ] as const;
 
 // ─── The runtime WebAssembly API, resolved off globalThis — no ambient type ─
@@ -240,7 +264,7 @@ export function getWasmApi(): WasmApi {
 }
 
 /**
- * @internal Validates a raw `instance.exports` object against the C ABI v1
+ * @internal Validates a raw `instance.exports` object against the C ABI v2
  * contract and returns it typed as `CoreExports`, or throws a `CoreInitError`
  * naming exactly what's wrong. Exported (not just used internally by
  * `initCore`) so wasm.test.ts can drive the "missing export" and "ABI
@@ -253,7 +277,7 @@ export function verifyCoreExports(raw: Record<string, unknown>): CoreExports {
   if (missing.length > 0) {
     throw new CoreInitError(
       `brownout/core: the wasm module is missing (or has the wrong type for) the following ` +
-        `C ABI v1 export(s): ${missing.join(", ")}. This build does not match the contract in ` +
+        `C ABI v2 export(s): ${missing.join(", ")}. This build does not match the contract in ` +
         "core/README.md — rebuild both sides together (scripts/build-core.mjs).",
     );
   }
@@ -265,7 +289,7 @@ export function verifyCoreExports(raw: Record<string, unknown>): CoreExports {
       `brownout/core: the wasm module reports ABI version ${reportedVersion}, but this ` +
         `package's TS front end was built for ABI version ${CORE_ABI_VERSION}. The TS and ` +
         "Rust halves ship in one npm package and must be rebuilt together — there is no " +
-        "cross-version compatibility (core/README.md, \"Program format, version 1\").",
+        "cross-version compatibility (core/README.md, \"Program format, version 2\").",
     );
   }
   return exports;

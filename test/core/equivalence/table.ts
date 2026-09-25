@@ -5,6 +5,13 @@
  * kind it also contains. That is intentional: a "resistor" row must reflect
  * every entry resistor appears in, not just the ones where resistor alone
  * decided the outcome, or the `fixtures` column would undercount.
+ *
+ * A "pass" here already accounts for known-divergences.ts's registry:
+ * run-entry.ts classifies every mismatch (including a digital-alignment one,
+ * gate 2a) before deciding `EntryResult.status`, so an owner-approved
+ * divergence (e.g. the SAP-1 display's startup phantom edge) never turns a
+ * "pass" into a "fail" here — it shows up only in that pass result's own
+ * `knownDivergences` list (types.ts), not in this table.
  */
 
 import { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "../../../src/core/kinds.js";
@@ -34,12 +41,26 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
     for (const { entry, result } of outcomes) {
       if (!entry.kinds.includes(kind)) continue;
       fixtures += 1;
-      if (entry.stimulus === "verify-script") unstimulated += 1;
+      // Gate 2d: only an entry whose phases were NEVER replayed (no
+      // `entry.phases` at all — the field export failed, or this snapshot
+      // predates it) counts as "unstimulated" now. One WITH phases got a
+      // real classic-side replay (result.status "core-stimuli-pending"),
+      // so counting it here too would understate how much this entry
+      // actually exercised, even though the core side is still pending.
+      if (entry.stimulus === "verify-script" && !entry.phases) unstimulated += 1;
       switch (result.status) {
         case "not-ported":
           notPorted += 1;
           break;
         case "core-declined":
+          declined += 1;
+          break;
+        case "core-stimuli-pending":
+          // The core side declined for a stimuli-specific reason (owner
+          // decision 1's mechanism is W1b, not a kind/topology rejection) —
+          // folded into the same column as core-declined rather than adding
+          // a new one, since from this table's perspective both mean "the
+          // core did not attempt a real comparison here".
           declined += 1;
           break;
         case "pass":

@@ -1,15 +1,38 @@
-//! The W0 kernel (core/README.md, "W0 kernel semantics"): fixed-node
-//! derivation with parent tracking, union-find partitioning, a dense LU
-//! solve per partition, and the KCL pass that publishes device currents.
+//! The engine: `Engine::load`/`Engine::advance` wire the event kernel
+//! (`kernel.rs`) to concrete state — the W0 static kernel's partitions and
+//! solve (fixed-node derivation with parent tracking, union-find
+//! partitioning, a dense LU solve per partition, the KCL current pass) —
+//! through [`solve::PartitionSolver`]. `Engine` is a plain, safe Rust type
+//! with no `extern "C"` on it anywhere; `abi.rs` is the only place that
+//! touches raw pointers or a handle table.
 //!
-//! `Engine` is a plain, safe Rust type with no `extern "C"` on it anywhere —
-//! `abi.rs` is the only place that touches raw pointers or a handle table.
-//! Tests in this module call `Engine::load` / `Engine::advance` directly, on
-//! hand-built `Program`s, the same way `abi.rs` will after parsing bytes.
+//! `StaticPartitionSolver` below is the first real `PartitionSolver`. It
+//! lives here rather than in `solve/static_part.rs` on purpose (the phase-2
+//! integration brief): W1b moves it once real partitioning/caching exists,
+//! so keeping it a single, self-contained struct in this file keeps that
+//! move a one-file cut, not a refactor. `Engine`'s own `load`/`advance` are
+//! now thin: build the static topology, hand it to a `Kernel`, and let the
+//! kernel's settle/advance own every event-kernel concern (contract point 6,
+//! decision 8; contract point 3, decision 4). No W0 kind (`resistor`,
+//! `voltage_source`) ever creates a `Driver`, so for a W0-only or W1a-only
+//! program nothing is ever dirty beyond the one full solve `settle` performs
+//! at load — every W0 behaviour and test stays exactly as it was.
+//!
+//! `#[cfg(test)]` at the bottom adds a synthetic driver/device pair (gated
+//! out of every real build) that proves `Engine::advance` actually routes
+//! through the kernel end to end: a driver commit scheduled for a future
+//! time changes a node voltage through `StaticPartitionSolver`, and the
+//! kernel's own counters record it.
 
+use crate::drivers::Driver;
 use crate::error::BoError;
+use crate::events::{DeviceId, Mode, PartitionId};
+use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError};
+use crate::kinds;
 use crate::lu;
-use crate::program::{DeviceKind, Program};
+use crate::program::{switch_value, Program};
+use crate::readout::Readout;
+use crate::solve::PartitionSolver;
 
 /// Every node except node 0 carries this conductance to the datum (contract,
 /// "W0 kernel semantics", point 2): it keeps an isolated net solvable (reads
@@ -26,6 +49,15 @@ pub const STAT_PARTITIONS: u32 = 0;
 pub const STAT_STATIC_SOLVES: u32 = 1;
 pub const STAT_LARGEST_PARTITION: u32 = 2;
 pub const STAT_FIXED_NODES: u32 = 3;
+// Indices 4, 5, 6 and 13 (events processed, delta passes, maximum delta
+// depth, driver commits) now come live from `Kernel::stats` — see
+// `Engine::stat`. Indices 7-12 and 14 (solution-cache hits, closed-form
+// segments, crossings, stepped steps, Newton iterations, IC evaluations,
+// rail moves) stay reserved at 0 until W1b/W1c/W1f build that machinery;
+// `Engine::stat` still answers them (as 0), not `NaN`, so a caller can't
+// mistake "not implemented yet" for "unknown index" — that stays reserved
+// for indices past the contract's table (>= `STAT_COUNT`).
+const STAT_COUNT: usize = 15;
 
 /// One entry per source that fixed a node during propagation, in the order
 /// it was resolved. `parent_node` was already fixed at the moment `source`
@@ -33,6 +65,7 @@ pub const STAT_FIXED_NODES: u32 = 3;
 /// `parent_node` is that source's `pins[0]` (+) or `pins[1]` (-). Recorded
 /// so the current pass can walk the propagation forest children-before-
 /// parents (contract, point 5) by simply reversing this list.
+#[derive(Debug)]
 struct ResolvedSource {
     device_index: usize,
     parent_node: usize,
@@ -40,14 +73,330 @@ struct ResolvedSource {
     parent_is_pos: bool,
 }
 
+/// A resistor's contribution to KCL, kept minimal (its device index, its two
+/// nodes, its conductance) so `StaticPartitionSolver` can recompute every
+/// device's published current after any partition re-solve without holding
+/// on to a whole `Program`.
 #[derive(Debug)]
-pub struct Engine {
-    node_count: usize,
+struct ResistorStamp {
+    device_index: usize,
+    u: usize,
+    w: usize,
+    g: f64,
+}
+
+/// No W0 or W1a kind creates a driver or a reader (`kernel::DeviceEvaluator`
+/// concepts do not exist for any kind ported so far), so this is `Engine`'s
+/// production evaluator until W1c's digital kinds exist.
+#[derive(Debug)]
+struct NoDevices;
+
+impl DeviceEvaluator for NoDevices {
+    fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+        Vec::new()
+    }
+}
+
+/// The W0 static kernel adapted to [`PartitionSolver`]: a driver commit
+/// marks its partition dirty (`Kernel::advance`/`settle`), and re-solving
+/// means re-running the same dense LU solve over a pristine per-partition
+/// base (shunt + resistor stamps) plus whatever drivers currently sit in
+/// that partition, then recomputing every device's published current.
+///
+/// Driver stamping here only handles a driver whose `hi_node`/`lo_node` are
+/// both already-*fixed* nodes — the only case that can arise before any hub
+/// rail exists (W1f). No production kind creates a driver at all yet; only
+/// this module's own `#[cfg(test)]` harness below does, and it targets fixed
+/// rails, so that limitation is never exercised outside of being explicitly
+/// tested.
+#[derive(Debug)]
+struct StaticPartitionSolver {
+    /// Node ids per partition, in first-seen order (deterministic; contract
+    /// point 3 of "W0 kernel semantics").
+    partitions: Vec<Vec<usize>>,
+    /// node -> (partition index, local index), `None` for a fixed node.
+    local_index: Vec<Option<(usize, usize)>>,
+    /// node -> fixed voltage, `None` for a free node. Node 0 is always
+    /// `Some(0.0)`.
+    fixed: Vec<Option<f64>>,
+    /// Every source that fixed a node, in resolution order.
+    resolved: Vec<ResolvedSource>,
+    /// Pristine per-partition conductance matrix: shunt + resistor stamps
+    /// only, never a driver's. Cloned fresh before every solve so a driver
+    /// that has since left a mode never leaves a stale stamp behind.
+    matrix_base: Vec<Vec<f64>>,
+    /// Pristine per-partition right-hand side: resistor-to-fixed-neighbour
+    /// stamps only.
+    rhs_base: Vec<Vec<f64>>,
+    resistors: Vec<ResistorStamp>,
     device_count: usize,
     voltages: Vec<f64>,
     currents: Vec<f64>,
-    time: f64,
-    stats: [f64; 4],
+}
+
+impl StaticPartitionSolver {
+    /// Builds the static topology (fixed-node derivation, partitioning, the
+    /// pristine per-partition matrix/RHS) but does not solve anything yet —
+    /// that is `Kernel::settle`'s job, through `resolve_dirty`, the same way
+    /// any later re-solve works. Mirrors `Engine::load`'s former inline
+    /// topology build exactly; only the solve loop moved out.
+    fn build(program: &Program) -> Result<Self, BoError> {
+        let n = program.node_count;
+
+        let (fixed, resolved) = derive_fixed_nodes(program, n)?;
+
+        let mut uf = UnionFind::new(n);
+        for device in &program.devices {
+            if device.kind != kinds::RESISTOR {
+                continue;
+            }
+            let (u, w) = (device.pins[0].node, device.pins[1].node);
+            if fixed[u].is_none() && fixed[w].is_none() {
+                uf.union(u, w);
+            }
+        }
+
+        // Group free nodes into partitions by union-find representative,
+        // preserving first-seen order for determinism (node id order, not
+        // representative id order — the latter depends on union direction).
+        let mut partition_of: Vec<Option<usize>> = vec![None; n];
+        let mut partitions: Vec<Vec<usize>> = Vec::new();
+        for node in 1..n {
+            if fixed[node].is_some() {
+                continue;
+            }
+            let root = uf.find(node);
+            let idx = match partition_of[root] {
+                Some(idx) => idx,
+                None => {
+                    let idx = partitions.len();
+                    partitions.push(Vec::new());
+                    partition_of[root] = Some(idx);
+                    idx
+                }
+            };
+            partitions[idx].push(node);
+        }
+
+        let mut local_index: Vec<Option<(usize, usize)>> = vec![None; n];
+        for (p_idx, nodes) in partitions.iter().enumerate() {
+            for (l_idx, &node) in nodes.iter().enumerate() {
+                local_index[node] = Some((p_idx, l_idx));
+            }
+        }
+
+        let mut matrix_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len() * p.len()]).collect();
+        let mut rhs_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len()]).collect();
+
+        for (p_idx, nodes) in partitions.iter().enumerate() {
+            let size = nodes.len();
+            for l_idx in 0..size {
+                matrix_base[p_idx][l_idx * size + l_idx] += NODE_RSHUNT_G;
+            }
+        }
+
+        let mut resistors = Vec::with_capacity(program.devices.len());
+        for (d, device) in program.devices.iter().enumerate() {
+            if device.kind != kinds::RESISTOR {
+                continue;
+            }
+            let (u, w) = (device.pins[0].node, device.pins[1].node);
+            let g = 1.0 / device.params[0];
+            resistors.push(ResistorStamp { device_index: d, u, w, g });
+
+            let free_u = local_index[u];
+            let free_w = local_index[w];
+            match (free_u, free_w) {
+                (Some((pu, lu_)), Some((pw, lw))) => {
+                    // Both free, so both must land in the same partition —
+                    // the union-find pass above joined every free-free
+                    // resistor's two ends before partitions were formed.
+                    debug_assert_eq!(pu, pw);
+                    let size = partitions[pu].len();
+                    let a = &mut matrix_base[pu];
+                    a[lu_ * size + lu_] += g;
+                    a[lw * size + lw] += g;
+                    a[lu_ * size + lw] -= g;
+                    a[lw * size + lu_] -= g;
+                }
+                (Some((pu, lu_)), None) => {
+                    let size = partitions[pu].len();
+                    matrix_base[pu][lu_ * size + lu_] += g;
+                    rhs_base[pu][lu_] += g * fixed[w].unwrap();
+                }
+                (None, Some((pw, lw))) => {
+                    let size = partitions[pw].len();
+                    matrix_base[pw][lw * size + lw] += g;
+                    rhs_base[pw][lw] += g * fixed[u].unwrap();
+                }
+                (None, None) => {
+                    // Both ends fixed: no stamp. Its current is Ohm's law
+                    // from two already-known voltages, not a solve.
+                }
+            }
+        }
+
+        let mut voltages = vec![0.0; n];
+        for (node, v) in fixed.iter().enumerate() {
+            if let Some(v) = v {
+                voltages[node] = *v;
+            }
+        }
+
+        Ok(StaticPartitionSolver {
+            partitions,
+            local_index,
+            fixed,
+            resolved,
+            matrix_base,
+            rhs_base,
+            resistors,
+            device_count: program.devices.len(),
+            voltages,
+            currents: vec![0.0; program.devices.len()],
+        })
+    }
+
+    /// Resistor currents by Ohm's law, then source currents by the children-
+    /// before-parents KCL walk (contract, point 5), from `self.voltages` as
+    /// it currently stands.
+    fn recompute_currents(&self) -> Vec<f64> {
+        let mut currents = vec![0.0; self.device_count];
+        let mut leaving = vec![0.0; self.voltages.len()];
+
+        for r in &self.resistors {
+            let i = (self.voltages[r.u] - self.voltages[r.w]) * r.g;
+            currents[r.device_index] = i;
+            leaving[r.u] += i;
+            leaving[r.w] -= i;
+        }
+
+        // Shunt current, every node but the datum (contract, point 2).
+        for (node, v) in self.voltages.iter().enumerate().skip(1) {
+            leaving[node] += NODE_RSHUNT_G * v;
+        }
+
+        let mut extra = vec![0.0; self.voltages.len()];
+        for r in self.resolved.iter().rev() {
+            let total = leaving[r.child_node] + extra[r.child_node];
+            let child_is_pos = !r.parent_is_pos;
+            let i_s = if child_is_pos { -total } else { total };
+            currents[r.device_index] = i_s;
+
+            let contribution = if r.parent_is_pos { i_s } else { -i_s };
+            extra[r.parent_node] += contribution;
+        }
+
+        currents
+    }
+}
+
+impl PartitionSolver for StaticPartitionSolver {
+    fn resolve_dirty(&mut self, dirty: &[PartitionId], _now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+        for &partition in dirty {
+            let p_idx = partition.0 as usize;
+            let nodes = &self.partitions[p_idx];
+            let size = nodes.len();
+            if size == 0 {
+                continue;
+            }
+
+            let mut a = self.matrix_base[p_idx].clone();
+            let mut b = self.rhs_base[p_idx].clone();
+
+            // Stamp every driver currently committed to HIGH or LOW whose
+            // output node lives in this partition (contract point 2, spec
+            // section 1.7's rail-referenced output stage). See this struct's
+            // doc comment for the fixed-hi/lo-node limitation.
+            for driver in drivers {
+                let mode = match driver.committed() {
+                    Some(m) if m != Mode::Hiz => m,
+                    _ => continue,
+                };
+                let (driver_partition, l) = match self.local_index.get(driver.node).copied().flatten() {
+                    Some(loc) => loc,
+                    None => continue, // the driver's own node is fixed: nothing to stamp into any partition.
+                };
+                if driver_partition != p_idx {
+                    continue;
+                }
+                let f = match mode {
+                    Mode::High => driver.hi_level,
+                    Mode::Low => driver.lo_level,
+                    Mode::Hiz => unreachable!("filtered above"),
+                };
+                let hi_v = self.fixed.get(driver.hi_node).copied().flatten();
+                let lo_v = self.fixed.get(driver.lo_node).copied().flatten();
+                let (hi_v, lo_v) = match (hi_v, lo_v) {
+                    (Some(hv), Some(lv)) => (hv, lv),
+                    _ => {
+                        return Err(format!(
+                            "driver at node {}: a free hi/lo rail node is not supported by the W1a static solver (hub rails are W1f)",
+                            driver.node
+                        ));
+                    }
+                };
+                // Split between the two rails by `f`, exactly as a companion
+                // source with one free end and one fixed end is stamped
+                // above (`(Some((pu, lu_)), None)`), just weighted twice.
+                if f > 1e-12 {
+                    let gg = driver.conductance * f;
+                    a[l * size + l] += gg;
+                    b[l] += gg * hi_v;
+                }
+                if f < 1.0 - 1e-12 {
+                    let gg = driver.conductance * (1.0 - f);
+                    a[l * size + l] += gg;
+                    b[l] += gg * lo_v;
+                }
+            }
+
+            let x = lu::solve(a, size, b)
+                .map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))?;
+            for (l_idx, &node) in nodes.iter().enumerate() {
+                self.voltages[node] = x[l_idx];
+            }
+        }
+
+        // Recomputed unconditionally (even with an empty `dirty`): a
+        // device's current can depend purely on already-fixed voltages (two
+        // fixed-node resistor terminals), which no partition solve ever
+        // touches, so this is the only place that ever (re)publishes it.
+        self.currents = self.recompute_currents();
+
+        // Mirrors `Engine::load`'s former finiteness check: a finite pivot
+        // at every step only rules out a singular partition, not overflow in
+        // the fixed-voltage propagation, the right-hand side, or the
+        // currents themselves (contract, "W0 kernel semantics", point 4).
+        if let Some((node, v)) = self.voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(format!("node {node}: published voltage {v} is not finite"));
+        }
+        if let Some((device, i)) = self.currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
+            return Err(format!("device {device}: published current {i} is not finite"));
+        }
+
+        // No reader concept exists for any kind ported so far (W1c+).
+        Ok(Vec::new())
+    }
+
+    fn voltages(&self) -> &[f64] {
+        &self.voltages
+    }
+
+    fn currents(&self) -> &[f64] {
+        &self.currents
+    }
+
+    /// `resolve_dirty` above writes `voltages` partition by partition and
+    /// only recomputes `currents` after every dirty partition in the call
+    /// solves, so a mid-loop error on partition k leaves `voltages` a mix of
+    /// this attempt's new values (partitions before k) and the previous
+    /// instant's (partitions at or after k) — restoring both wholesale is
+    /// what `Kernel::advance`'s "a failed advance" rollback needs.
+    fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
+        self.voltages = snapshot.0;
+        self.currents = snapshot.1;
+    }
 }
 
 struct UnionFind {
@@ -95,6 +444,61 @@ impl UnionFind {
     }
 }
 
+/// Boxed rather than the concrete `Kernel<StaticPartitionSolver, NoDevices>`
+/// so `Engine`'s `#[cfg(test)]` harness can swap in a mock solver/evaluator
+/// pair through `Kernel::set_solver`/`set_evaluator` and prove
+/// `Engine::advance` propagates a livelock end to end — `StaticPartitionSolver`
+/// itself never produces one (it reports no readers at all, so `advance`'s
+/// delta cycle always settles after the one pass that applies a commit), so
+/// that proof needs a solver capable of a different shape at runtime. The
+/// extra vtable indirection this costs every call is a deliberate, currently
+/// cheap trade for that testability; W1b's real solvers may revisit it.
+type EngineKernel = Kernel<Box<dyn PartitionSolver>, Box<dyn DeviceEvaluator>>;
+
+/// Maps a [`KernelError`] onto the `BoError` `Engine::load`/`Engine::advance`
+/// return: `Livelock` to `-7` (contract, "Kernel semantics: events", point 3;
+/// `ERR_DELTA_LIVELOCK`), `SolveFailed` to `-4` (`ERR_SOLVE_FAILED`) with the
+/// solver's own message carried through unchanged.
+fn map_kernel_error(e: KernelError) -> BoError {
+    match e {
+        KernelError::Livelock { at } => BoError::delta_livelock(format!("delta-cycle livelock at t = {at}")),
+        KernelError::SolveFailed(message) => BoError::solve_failed(message),
+    }
+}
+
+// No `derive(Debug)`: `EngineKernel`'s solver/evaluator are trait objects
+// (`Box<dyn PartitionSolver>`/`Box<dyn DeviceEvaluator>`, needed so the
+// `#[cfg(test)]` harness below can swap them — see `EngineKernel`'s doc
+// comment), and neither trait requires `Debug` of its implementors. A manual,
+// minimal impl follows instead: `Result::unwrap_err` on a `Result<Engine,
+// BoError>` needs `Engine: Debug` for the success case's panic message, which
+// several tests below exercise (`Engine::load(&p).unwrap_err()`).
+pub struct Engine {
+    node_count: usize,
+    device_count: usize,
+    kernel: EngineKernel,
+    stats: [f64; STAT_COUNT],
+    /// The program's options, kept so `set_option` has something to update.
+    /// W1a's static kernel does not yet read any of these back into the
+    /// solve (that arrives with the partition and digital sub-waves); this
+    /// only stores what a live `bo_engine_set_option` call is allowed to
+    /// change and validates against.
+    options: crate::program::Options,
+    readout: Readout,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("node_count", &self.node_count)
+            .field("device_count", &self.device_count)
+            .field("time", &self.kernel.time())
+            .field("voltages", &self.voltages())
+            .field("currents", &self.currents())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Engine {
     pub fn node_count(&self) -> u32 {
         self.node_count as u32
@@ -105,207 +509,180 @@ impl Engine {
     }
 
     pub fn time(&self) -> f64 {
-        self.time
+        self.kernel.time()
     }
 
     pub fn voltages(&self) -> &[f64] {
-        &self.voltages
+        self.kernel.solver().voltages()
     }
 
     pub fn currents(&self) -> &[f64] {
-        &self.currents
+        self.kernel.solver().currents()
     }
 
+    /// Counters (core/README.md, "Stat indices"). Indices 0-3 are the load-
+    /// time static-solve snapshot; 4, 5, 6 and 13 (events processed, delta
+    /// passes, maximum delta depth, driver commits) come live from the
+    /// kernel; 7-12 and 14 are reserved at `0.0` until their machinery lands
+    /// (solve/mod.rs doc comment). Unknown `i` (>= `STAT_COUNT`) is `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
-        self.stats.get(i as usize).copied().unwrap_or(f64::NAN)
+        match i {
+            4 => self.kernel.stats().events_processed as f64,
+            5 => self.kernel.stats().delta_passes as f64,
+            6 => self.kernel.stats().max_delta_depth as f64,
+            13 => self.kernel.stats().driver_commits as f64,
+            _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
+        }
     }
 
-    /// Advances to `t_end` (absolute seconds). W0 is entirely static, so
-    /// this only moves the clock (contract, point 6) — there is nothing yet
-    /// that a change in time could invalidate.
+    /// Time of the earliest pending event, `+Infinity` when none
+    /// (core/README.md, `bo_engine_next_event_time`). `&mut self` because
+    /// finding the true next event means permanently discarding any stale,
+    /// cancelled `Commit` sitting ahead of it on the heap (`Kernel::next_event_time`).
+    pub fn next_event_time(&mut self) -> f64 {
+        self.kernel.next_event_time()
+    }
+
+    pub fn digital_slots(&self) -> &[f64] {
+        self.readout.digital_slots()
+    }
+
+    pub fn digital_slot_count(&self) -> u32 {
+        self.readout.digital_slots().len() as u32
+    }
+
+    pub fn channel_slots(&self) -> &[f64] {
+        self.readout.channel_slots()
+    }
+
+    pub fn channel_slot_count(&self) -> u32 {
+        self.readout.channel_slots().len() as u32
+    }
+
+    pub fn trace_enable(&mut self, on: bool) {
+        self.readout.trace_enable(on);
+    }
+
+    pub fn trace(&self) -> &[f64] {
+        self.readout.trace()
+    }
+
+    pub fn trace_clear(&mut self) {
+        self.readout.trace_clear();
+    }
+
+    /// Writes `value` into digital slot `slot`, recording a trace entry only
+    /// when the value actually changed (`bo_engine_trace_enable`'s contract:
+    /// "Record every digital slot change", not every write attempt — a slot
+    /// re-written to the value it already held is not a change, and classic
+    /// itself rebuilds `digitalState` from scratch every pass, so a
+    /// re-affirmed value is the ordinary case, not the exception). NaN
+    /// stands for "absent" (contract, "Readouts"), so absent-to-absent is
+    /// never a change either, even though `NaN != NaN` under `==`.
+    ///
+    /// No W0 or W1a kind calls this yet — it is the hook W1c's digital
+    /// devices will use once a kind actually publishes through
+    /// `digitalState`.
+    pub fn set_digital_slot(&mut self, slot: usize, value: f64) {
+        let current = self.readout.digital_slots()[slot];
+        let changed = current.is_nan() != value.is_nan() || (!current.is_nan() && current != value);
+        if changed {
+            self.readout.record(self.kernel.time(), slot, value);
+        }
+        self.readout.digital_slots_mut()[slot] = value;
+    }
+
+    /// Changes an option after load (core/README.md, `bo_engine_set_option`).
+    /// Keys 2-4 (the exactness switches and `FORCE_STEPPED`) take effect at
+    /// the next event; keys 1, 5, 6 and 7 are load-time only and are always
+    /// `ERR_INVALID_ARGUMENT` here, same as any key this build does not
+    /// recognize — `START_TIME` (7) names the instant the kernel's clock
+    /// already started at, which cannot be moved after the fact any more
+    /// than `INTEGRATION` or `AMBIENT_C` can. This is a distinct error code
+    /// from a bad option *in the program itself* (`ERR_MALFORMED` at load,
+    /// `program::parse_option`) — the bytes were fine at load time; this is a
+    /// live call misusing the ABI.
+    pub fn set_option(&mut self, key: u32, value: f64) -> Result<(), BoError> {
+        match key {
+            2 => {
+                self.options.no_solution_cache = Self::require_switch("NO_SOLUTION_CACHE", value)?;
+                Ok(())
+            }
+            3 => {
+                self.options.no_rail_shortcut = Self::require_switch("NO_RAIL_SHORTCUT", value)?;
+                Ok(())
+            }
+            4 => {
+                self.options.force_stepped = Self::require_switch("FORCE_STEPPED", value)?;
+                Ok(())
+            }
+            1 | 5 | 6 | 7 => Err(BoError::invalid_argument(format!(
+                "option key {key} is load-time only and cannot be changed after load"
+            ))),
+            _ => Err(BoError::invalid_argument(format!("unknown option key {key}"))),
+        }
+    }
+
+    fn require_switch(name: &str, value: f64) -> Result<bool, BoError> {
+        switch_value(value)
+            .ok_or_else(|| BoError::invalid_argument(format!("option {name}: value must be 0 or 1, got {value}")))
+    }
+
+    /// Advances to `t_end` (absolute seconds), through the event kernel's
+    /// two-phase delta cycle (contract point 3, decision 4). The non-finite
+    /// and backwards-time checks run first and stay entirely `Engine`'s
+    /// concern (`KernelError` has no ABI code of its own, by design —
+    /// `kernel.rs` does not depend on `error.rs`): a plain `t_end < time`
+    /// check alone would accept `NaN` (every comparison against it is
+    /// false), which would poison the clock and permanently disable this
+    /// same guard on every later call, and would accept `+Infinity` too,
+    /// then reject every later finite advance as "backwards". Neither is a
+    /// real point in time, so both are `-6` here, before the kernel ever
+    /// sees `t_end`.
     pub fn advance(&mut self, t_end: f64) -> Result<(), BoError> {
-        // Checked before the backwards-time comparison because every
-        // comparison against NaN is false: without this, advance(NaN) would
-        // fall through, get accepted, and turn the clock itself into NaN —
-        // after which every future comparison against it is also false, so
-        // the backwards-time guard would never fire again. +Infinity would
-        // similarly get "accepted" and then reject every finite advance
-        // after it. Neither is a real point in time, so both are -6 here
-        // rather than becoming the new clock value.
         if !t_end.is_finite() {
             return Err(BoError::time_backwards("t_end must be finite".to_string()));
         }
-        if t_end < self.time - TIME_EPS {
+        if t_end < self.kernel.time() - TIME_EPS {
             return Err(BoError::time_backwards(format!(
                 "advance({t_end}) is before the current time {}",
-                self.time
+                self.kernel.time()
             )));
         }
-        self.time = t_end;
-        Ok(())
+        self.kernel.advance(t_end).map_err(map_kernel_error)
     }
 
-    /// Loads a program from scratch: fixed-node derivation, partitioning,
-    /// one dense LU solve per partition, then the KCL current pass. Never
-    /// panics on a well-formed `Program` — `Program::parse` is what turns
-    /// malformed bytes into `BoError` before this ever runs.
+    /// Loads a program from scratch: build the static topology, then settle
+    /// it at `START_TIME` (decision 8, and decision 4's option key 7 — the
+    /// engine clock and the kernel both start there, never at a hard-coded
+    /// 0) — for a W0/W1a-only program (no drivers exist yet), this is
+    /// exactly the one dense LU solve per partition, plus the KCL current
+    /// pass, that `Engine::load` used to run inline. Never panics on a
+    /// well-formed `Program` — `Program::parse` is what turns malformed
+    /// bytes into `BoError` before this ever runs.
     pub fn load(program: &Program) -> Result<Engine, BoError> {
-        let n = program.node_count;
+        let solver = StaticPartitionSolver::build(program)?;
+        let partition_count = solver.partitions.len();
+        let largest_partition = solver.partitions.iter().map(|p| p.len()).max().unwrap_or(0);
+        let fixed_count = solver.fixed.iter().filter(|v| v.is_some()).count();
+        let all_partitions: Vec<PartitionId> = (0..partition_count as u32).map(PartitionId).collect();
 
-        let (fixed, resolved) = derive_fixed_nodes(program, n)?;
+        let mut kernel = Kernel::new(Box::new(solver) as Box<dyn PartitionSolver>, Box::new(NoDevices) as Box<dyn DeviceEvaluator>);
+        kernel.settle(program.options.start_time, &all_partitions, &[]).map_err(map_kernel_error)?;
 
-        let mut uf = UnionFind::new(n);
-        for device in &program.devices {
-            if device.kind != DeviceKind::Resistor {
-                continue;
-            }
-            let (u, w) = (device.pins[0], device.pins[1]);
-            if fixed[u].is_none() && fixed[w].is_none() {
-                uf.union(u, w);
-            }
-        }
-
-        // Group free nodes into partitions by union-find representative,
-        // preserving first-seen order for determinism (node id order, not
-        // representative id order — the latter depends on union direction).
-        // Node ids are already a dense `0..n` range, so a representative ->
-        // partition-index lookup is a plain indexed `Vec`, not a hash map.
-        let mut partition_of: Vec<Option<usize>> = vec![None; n];
-        let mut partitions: Vec<Vec<usize>> = Vec::new();
-        for node in 1..n {
-            if fixed[node].is_some() {
-                continue;
-            }
-            let root = uf.find(node);
-            let idx = match partition_of[root] {
-                Some(idx) => idx,
-                None => {
-                    let idx = partitions.len();
-                    partitions.push(Vec::new());
-                    partition_of[root] = Some(idx);
-                    idx
-                }
-            };
-            partitions[idx].push(node);
-        }
-
-        // node -> (partition index, local index within that partition), for
-        // free nodes only; `None` for a fixed node.
-        let mut local_index: Vec<Option<(usize, usize)>> = vec![None; n];
-        for (p_idx, nodes) in partitions.iter().enumerate() {
-            for (l_idx, &node) in nodes.iter().enumerate() {
-                local_index[node] = Some((p_idx, l_idx));
-            }
-        }
-
-        let mut matrices: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len() * p.len()]).collect();
-        let mut rhs: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len()]).collect();
-
-        for (p_idx, nodes) in partitions.iter().enumerate() {
-            let size = nodes.len();
-            for (l_idx, _) in nodes.iter().enumerate() {
-                matrices[p_idx][l_idx * size + l_idx] += NODE_RSHUNT_G;
-            }
-        }
-
-        for device in &program.devices {
-            if device.kind != DeviceKind::Resistor {
-                continue;
-            }
-            let (u, w) = (device.pins[0], device.pins[1]);
-            let g = 1.0 / device.params[0];
-            let free_u = local_index[u];
-            let free_w = local_index[w];
-            match (free_u, free_w) {
-                (Some((pu, lu_)), Some((pw, lw))) => {
-                    // Both free, so both must land in the same partition —
-                    // the union-find pass above joined every free-free
-                    // resistor's two ends before partitions were formed.
-                    debug_assert_eq!(pu, pw);
-                    let size = partitions[pu].len();
-                    let a = &mut matrices[pu];
-                    a[lu_ * size + lu_] += g;
-                    a[lw * size + lw] += g;
-                    a[lu_ * size + lw] -= g;
-                    a[lw * size + lu_] -= g;
-                }
-                (Some((pu, lu_)), None) => {
-                    let size = partitions[pu].len();
-                    matrices[pu][lu_ * size + lu_] += g;
-                    rhs[pu][lu_] += g * fixed[w].unwrap();
-                }
-                (None, Some((pw, lw))) => {
-                    let size = partitions[pw].len();
-                    matrices[pw][lw * size + lw] += g;
-                    rhs[pw][lw] += g * fixed[u].unwrap();
-                }
-                (None, None) => {
-                    // Both ends fixed: no stamp. Its current is Ohm's law
-                    // from two already-known voltages (below), not a solve.
-                }
-            }
-        }
-
-        let mut voltages = vec![0.0; n];
-        for (node, v) in fixed.iter().enumerate() {
-            if let Some(v) = v {
-                voltages[node] = *v;
-            }
-        }
-
-        let mut largest_partition = 0usize;
-        for (p_idx, nodes) in partitions.iter().enumerate() {
-            let size = nodes.len();
-            largest_partition = largest_partition.max(size);
-            let a = std::mem::take(&mut matrices[p_idx]);
-            let b = std::mem::take(&mut rhs[p_idx]);
-            let x = lu::solve(a, size, b).map_err(|_| {
-                BoError::solve_failed(format!(
-                    "partition {p_idx} ({size} node(s)): singular or non-finite pivot"
-                ))
-            })?;
-            for (l_idx, &node) in nodes.iter().enumerate() {
-                voltages[node] = x[l_idx];
-            }
-        }
-
-        let currents = compute_currents(program, n, &voltages, &resolved);
-
-        // Every finite pivot only rules out a singular partition — it says
-        // nothing about the fixed-voltage propagation (plain f64 addition,
-        // engine.rs `derive_fixed_nodes`) or the right-hand side and currents
-        // above, any of which can overflow to +-Infinity or NaN while every
-        // pivot along the way stayed finite. The contract's -4 covers that
-        // too ("solve failed: singular or non-finite"), so a load whose
-        // published values are not all finite is a failure, not a silent
-        // Infinity/NaN readout, and the first offending node or device is
-        // named so the caller does not have to scan for it.
-        if let Some((node, v)) = voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(BoError::solve_failed(format!(
-                "node {node}: published voltage {v} is not finite"
-            )));
-        }
-        if let Some((device, i)) = currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
-            return Err(BoError::solve_failed(format!(
-                "device {device}: published current {i} is not finite"
-            )));
-        }
-
-        let fixed_count = fixed.iter().filter(|v| v.is_some()).count();
-        let stats = [
-            partitions.len() as f64,
-            partitions.len() as f64, // W0 solves every partition exactly once, at load.
-            largest_partition as f64,
-            fixed_count as f64,
-        ];
+        let mut stats = [0.0; STAT_COUNT];
+        stats[STAT_PARTITIONS as usize] = partition_count as f64;
+        stats[STAT_STATIC_SOLVES as usize] = partition_count as f64; // W0 solves every partition exactly once, at load.
+        stats[STAT_LARGEST_PARTITION as usize] = largest_partition as f64;
+        stats[STAT_FIXED_NODES as usize] = fixed_count as f64;
 
         Ok(Engine {
-            node_count: n,
+            node_count: program.node_count,
             device_count: program.devices.len(),
-            voltages,
-            currents,
-            time: 0.0,
+            kernel,
             stats,
+            options: program.options,
+            readout: Readout::new(program.digital_slot_count, program.channel_slot_count),
         })
     }
 }
@@ -322,7 +699,7 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
         .devices
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.kind == DeviceKind::VoltageSource)
+        .filter(|(_, d)| d.kind == kinds::VOLTAGE_SOURCE)
         .map(|(i, _)| i)
         .collect();
     let mut is_resolved = vec![false; source_indices.len()];
@@ -337,7 +714,7 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
                 continue;
             }
             let device = &program.devices[device_index];
-            let (pos, neg) = (device.pins[0], device.pins[1]);
+            let (pos, neg) = (device.pins[0].node, device.pins[1].node);
             let v = device.params[0];
             match (fixed[pos], fixed[neg]) {
                 (Some(vp), None) => {
@@ -370,7 +747,7 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
             continue;
         }
         let device = &program.devices[device_index];
-        let (pos, neg) = (device.pins[0], device.pins[1]);
+        let (pos, neg) = (device.pins[0].node, device.pins[1].node);
         return Err(BoError::unsupported_topology(if fixed[pos].is_some() && fixed[neg].is_some() {
             format!(
                 "voltage_source (component {}): both terminals already fixed — a loop of ideal sources",
@@ -387,59 +764,27 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
     Ok((fixed, resolved))
 }
 
-/// Resistor currents by Ohm's law, then source currents by the children-
-/// before-parents KCL walk (contract, point 5).
-fn compute_currents(program: &Program, n: usize, voltages: &[f64], resolved: &[ResolvedSource]) -> Vec<f64> {
-    let mut currents = vec![0.0; program.devices.len()];
-    let mut leaving = vec![0.0; n];
-
-    for (d, device) in program.devices.iter().enumerate() {
-        if device.kind != DeviceKind::Resistor {
-            continue;
-        }
-        let (u, w) = (device.pins[0], device.pins[1]);
-        let r = device.params[0];
-        let i = (voltages[u] - voltages[w]) / r;
-        currents[d] = i;
-        leaving[u] += i;
-        leaving[w] -= i;
-    }
-
-    // Shunt current, every node but the datum (contract, point 2).
-    for (node, v) in voltages.iter().enumerate().skip(1) {
-        leaving[node] += NODE_RSHUNT_G * v;
-    }
-
-    let mut extra = vec![0.0; n];
-    for r in resolved.iter().rev() {
-        let total = leaving[r.child_node] + extra[r.child_node];
-        let child_is_pos = !r.parent_is_pos;
-        let i_s = if child_is_pos { -total } else { total };
-        currents[r.device_index] = i_s;
-
-        let contribution = if r.parent_is_pos { i_s } else { -i_s };
-        extra[r.parent_node] += contribution;
-    }
-
-    currents
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{ERR_SOLVE_FAILED, ERR_TIME_BACKWARDS, ERR_UNSUPPORTED_TOPOLOGY};
-    use crate::program::Device;
+    use crate::error::{ERR_INVALID_ARGUMENT, ERR_SOLVE_FAILED, ERR_TIME_BACKWARDS, ERR_UNSUPPORTED_TOPOLOGY};
+    use crate::events::{DriverId, Mode};
+    use crate::program::{Device, Options, PinRecord};
+
+    fn pin(node: usize) -> PinRecord {
+        PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
+    }
 
     fn resistor(component_index: usize, a: usize, b: usize, r: f64) -> Device {
-        Device { kind: DeviceKind::Resistor, component_index, pins: vec![a, b], params: vec![r], blob: vec![] }
+        Device { kind: kinds::RESISTOR, component_index, pins: vec![pin(a), pin(b)], params: vec![r], blob: vec![] }
     }
 
     fn source(component_index: usize, pos: usize, neg: usize, v: f64) -> Device {
-        Device { kind: DeviceKind::VoltageSource, component_index, pins: vec![pos, neg], params: vec![v], blob: vec![] }
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index, pins: vec![pin(pos), pin(neg)], params: vec![v], blob: vec![] }
     }
 
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, devices }
+        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
     }
 
     #[test]
@@ -707,5 +1052,304 @@ mod tests {
         for (node, v) in e.voltages().iter().enumerate() {
             assert!(v.is_finite(), "node {node} voltage was not finite: {v}");
         }
+    }
+
+    // --- v2 additions: next_event_time, slots, set_option, trace, stats ---
+
+    #[test]
+    fn next_event_time_is_infinity_in_the_static_kernel() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        assert_eq!(e.next_event_time(), f64::INFINITY);
+    }
+
+    // ---- decision 4: option key 7, START_TIME ----------------------------
+
+    #[test]
+    fn load_starts_the_engine_clock_and_the_kernel_at_start_time() {
+        // core/README.md, "Options": START_TIME is "the absolute time the
+        // loaded program starts at" -- the facade passes its carried-over
+        // simTime through here on a reload, so the kernel's clock must start
+        // there, not at a hard-coded 0.
+        let mut p = program(1, vec![]);
+        p.options.start_time = 12.5;
+        let e = Engine::load(&p).unwrap();
+        assert_eq!(e.time(), 12.5);
+    }
+
+    #[test]
+    fn set_option_rejects_start_time_after_load_with_a_message_naming_it() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        let err = e.set_option(7, 3.0).unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARGUMENT);
+        assert!(err.message.contains('7'), "message was: {}", err.message);
+    }
+
+    // ---- "a failed advance": rollback to the last completed instant ------
+
+    #[test]
+    fn a_failed_advance_with_a_solve_failure_keeps_the_readouts_and_time_of_the_last_completed_instant() {
+        // core/README.md, "A failed advance": on `-4` the engine keeps the
+        // state of the last instant it *completed*. Proven here through the
+        // real `StaticPartitionSolver`, which reaches exactly the
+        // half-written-`voltages` case no mock-only coverage can: it writes
+        // `voltages` partition by partition, so node1's freshly (and
+        // validly) solved voltage from *this same, ultimately failed* delta
+        // pass must not survive either.
+        //
+        // node1 and node2 are each their own singleton partition (joined to
+        // the datum only by their own resistor, never to each other); node3
+        // is a fixed 10V rail.
+        let p = program(4, vec![
+            source(0, 3, 0, 10.0),
+            resistor(1, 1, 0, 1000.0),
+            resistor(2, 2, 0, 1000.0),
+        ]);
+        let mut e = Engine::load(&p).unwrap();
+        assert_eq!(e.time(), 0.0);
+        let voltages_before = e.voltages().to_vec();
+
+        // d1 is an ordinary driver; d2's conductance is infinite, which
+        // stamps a non-finite matrix entry and yields a non-finite published
+        // voltage on its own partition (contract, "W0 kernel semantics",
+        // point 4: "-4" either from a non-finite pivot or, as here, a
+        // finite-but-infinite-conductance stamp).
+        let d1 = e.kernel.add_driver(Driver::new(1, 3, 0, 1.0, 1.0, 0.0), PartitionId(0));
+        let d2 = e.kernel.add_driver(Driver::new(2, 3, 0, f64::INFINITY, 1.0, 0.0), PartitionId(1));
+        // Both first requests, so both land at exactly `now` -- due at the
+        // same instant, one delta pass resolves both partitions: partition 0
+        // (d1) first, successfully; partition 1 (d2) second, and fails.
+        e.kernel.request_driver(d1, Mode::High, 5.0, 0.0);
+        e.kernel.request_driver(d2, Mode::High, 5.0, 0.0);
+
+        let err = e.advance(5.0).unwrap_err();
+        assert_eq!(err.code, ERR_SOLVE_FAILED);
+
+        assert_eq!(e.time(), 0.0, "time must roll back to the last completed instant -- load, since this advance never completed");
+        assert_eq!(
+            e.voltages(),
+            voltages_before.as_slice(),
+            "node1's freshly (and validly) solved voltage must not survive partition 1's failure in the same, ultimately-failed delta"
+        );
+    }
+
+    #[test]
+    fn digital_slots_start_absent_and_channel_slots_start_zero_sized_from_the_program() {
+        let mut p = program(1, vec![]);
+        p.digital_slot_count = 3;
+        p.channel_slot_count = 2;
+        let e = Engine::load(&p).unwrap();
+        assert_eq!(e.digital_slot_count(), 3);
+        assert!(e.digital_slots().iter().all(|v| v.is_nan()), "{:?}", e.digital_slots());
+        assert_eq!(e.channel_slot_count(), 2);
+        assert_eq!(e.channel_slots(), &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn set_option_accepts_keys_2_through_4_after_load() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        assert!(e.set_option(2, 1.0).is_ok());
+        assert!(e.set_option(3, 0.0).is_ok());
+        assert!(e.set_option(4, 1.0).is_ok());
+    }
+
+    #[test]
+    fn set_option_rejects_load_time_only_keys_after_load() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        for key in [1, 5, 6, 7] {
+            let err = e.set_option(key, 0.0).unwrap_err();
+            assert_eq!(err.code, ERR_INVALID_ARGUMENT, "key {key}");
+        }
+    }
+
+    #[test]
+    fn set_option_rejects_unknown_keys() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        for key in [0, 8, 999] {
+            let err = e.set_option(key, 0.0).unwrap_err();
+            assert_eq!(err.code, ERR_INVALID_ARGUMENT, "key {key}");
+        }
+    }
+
+    #[test]
+    fn set_option_rejects_an_out_of_range_value_for_an_accepted_key() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        let err = e.set_option(2, 2.0).unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn trace_is_off_by_default_and_round_trips_enable_and_clear() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        assert!(e.trace().is_empty());
+        e.trace_enable(true);
+        e.trace_clear();
+        assert!(e.trace().is_empty(), "clearing an empty trace stays empty");
+    }
+
+    #[test]
+    fn stat_indices_4_through_14_are_zero_for_a_device_less_circuit() {
+        // Nothing in a W0/W1a-only program ever creates a driver or a
+        // reader, so `settle` at load has nothing to commit and `advance`'s
+        // delta cycle never runs at all (no event is ever pending) — every
+        // one of these stays at its `0.0` initializer, live counters
+        // included, not because they are unimplemented but because there is
+        // truly nothing for them to count.
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(10.0).unwrap();
+        for i in 4..=14 {
+            assert_eq!(e.stat(i), 0.0, "stat({i})");
+        }
+        assert!(e.stat(15).is_nan(), "index 15 is past the contract's table");
+        assert!(e.stat(99).is_nan());
+    }
+
+    #[test]
+    fn set_digital_slot_records_a_trace_entry_only_on_an_actual_change() {
+        let mut p = program(1, vec![]);
+        p.digital_slot_count = 1;
+        let mut e = Engine::load(&p).unwrap();
+        e.trace_enable(true);
+
+        // Absent (NaN) to a real value: a change.
+        e.set_digital_slot(0, 1.0);
+        assert_eq!(e.trace(), &[0.0, 0.0, 1.0]);
+
+        // Same value again: not a change.
+        e.set_digital_slot(0, 1.0);
+        assert_eq!(e.trace(), &[0.0, 0.0, 1.0], "re-writing the same value must not grow the trace");
+
+        // A real value back to absent: a change.
+        e.set_digital_slot(0, f64::NAN);
+        assert_eq!(e.trace().len(), 6);
+        assert_eq!(&e.trace()[3..5], &[0.0, 0.0]);
+        assert!(e.trace()[5].is_nan());
+
+        // Absent to absent: not a change, even though NaN != NaN.
+        e.set_digital_slot(0, f64::NAN);
+        assert_eq!(e.trace().len(), 6, "absent-to-absent must not count as a change");
+    }
+
+    // --- phase 2: proving `Engine::advance` really routes through the kernel
+
+    /// A synthetic driver/device pair, gated out of every real build, whose
+    /// only purpose is to prove `Engine::advance` routes a scheduled driver
+    /// commit through `Kernel::advance` into `StaticPartitionSolver` and back
+    /// out through `Engine::voltages`/`Engine::stat` — the same wiring a real
+    /// W1c/W1d kind will use once one exists. No production kind creates a
+    /// `Driver` yet, so this is the only place one is ever added to an
+    /// `Engine`'s kernel.
+    #[test]
+    fn advance_routes_a_scheduled_driver_commit_through_the_static_solver_and_the_stats_count_it() {
+        // node0 = datum (fixed 0V), node1 = free (pulled to 0V by a 1k
+        // resistor to the datum until the driver acts), node2 = a fixed 10V
+        // rail via a voltage_source. The driver's hi_node is node2, lo_node
+        // is node0 -- both fixed, so `StaticPartitionSolver` can stamp it.
+        let p = program(3, vec![
+            source(0, 2, 0, 10.0),
+            resistor(1, 1, 0, 1000.0),
+        ]);
+        let mut e = Engine::load(&p).unwrap();
+
+        // Before the driver exists at all: node1 sits at 0V, and every live
+        // counter is untouched by load/settle (a device-less load).
+        assert!((e.voltages()[1] - 0.0).abs() < 1e-9);
+        assert_eq!(e.stat(4), 0.0, "events processed");
+        assert_eq!(e.stat(5), 0.0, "delta passes");
+        assert_eq!(e.stat(13), 0.0, "driver commits");
+
+        // node1 is W0's only free node, so it is partition 0 by construction
+        // (`StaticPartitionSolver::build`'s first-seen order).
+        let d0 = e.kernel.add_driver(Driver::new(1, 2, 0, 1.0, 1.0, 0.0), PartitionId(0));
+
+        // A first-ever request for this driver always schedules at exactly
+        // the `now` it is given, regardless of `delay` (drivers::fsm's
+        // "first observation has zero delay" row) -- so requesting it
+        // directly at t = 5.0 is how a *first* commit lands at a specific
+        // future time without any preceding commit to redirect away from.
+        e.kernel.request_driver(d0, Mode::High, 5.0, 0.0);
+        assert_eq!(e.next_event_time(), 5.0);
+
+        // Nothing has happened yet: advancing to just before the scheduled
+        // time must not move the voltage or the counters.
+        e.advance(4.0).unwrap();
+        assert!((e.voltages()[1] - 0.0).abs() < 1e-9);
+        assert_eq!(e.stat(4), 0.0);
+
+        e.advance(5.0).unwrap();
+
+        // Driving HIGH toward a 10V rail through a 1 ohm driver conductance,
+        // competing with the 1k pulldown to the datum, pulls node1 close to
+        // 10V (a simple two-resistor divider: 10 * 1000 / 1001).
+        let expected = 10.0 * 1000.0 / 1001.0;
+        assert!((e.voltages()[1] - expected).abs() < 1e-6, "got {}", e.voltages()[1]);
+
+        // One Commit event, popped once, that actually changed the driver's
+        // committed level -- the real kernel counters, not a stub.
+        assert_eq!(e.stat(4), 1.0, "events processed");
+        assert!(e.stat(5) >= 1.0, "at least one delta pass");
+        assert!(e.stat(6) >= 1.0, "max delta depth");
+        assert_eq!(e.stat(13), 1.0, "driver commits");
+    }
+
+    #[test]
+    fn livelock_through_engine_advance_returns_delta_livelock() {
+        // `StaticPartitionSolver` itself can never livelock (it never
+        // reports a reader, so `advance`'s delta cycle always settles after
+        // the pass that applies a commit — there is nothing for W1a's static
+        // kernel to loop on). Proving `Engine::advance` still propagates a
+        // livelock end to end, the way a real zero-delay loop eventually will
+        // once W1c's digital kinds exist, needs a solver/evaluator pair that
+        // actually cycles; `Kernel::set_solver`/`set_evaluator` swap
+        // `Engine`'s kernel to exactly the mock pair phase 1's own
+        // `kernel::tests::an_oscillating_zero_delay_pair_hits_the_cap_...`
+        // test used, reached here through the real `Engine::advance` path
+        // and `BoError` mapping instead of `Kernel::advance` directly.
+        struct AlwaysAffects;
+        impl PartitionSolver for AlwaysAffects {
+            fn resolve_dirty(&mut self, dirty: &[PartitionId], _now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+                Ok(if dirty.is_empty() { Vec::new() } else { vec![DeviceId(0)] })
+            }
+            fn voltages(&self) -> &[f64] {
+                &[]
+            }
+            fn currents(&self) -> &[f64] {
+                &[]
+            }
+            fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {
+                // No state to restore.
+            }
+        }
+        struct OscillatingEvaluator {
+            driver: DriverId,
+            next: Mode,
+        }
+        impl DeviceEvaluator for OscillatingEvaluator {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<DriverRequest> {
+                let level = self.next;
+                self.next = if level == Mode::High { Mode::Low } else { Mode::High };
+                vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+            }
+        }
+
+        let p = program(2, vec![resistor(0, 1, 0, 1000.0)]);
+        let mut e = Engine::load(&p).unwrap();
+        let d0 = e.kernel.add_driver(Driver::new(1, 0, 0, 1.0, 1.0, 0.0), PartitionId(0));
+        e.kernel.set_solver(Box::new(AlwaysAffects));
+        e.kernel.set_evaluator(Box::new(OscillatingEvaluator { driver: d0, next: Mode::High }));
+        e.kernel.request_driver(d0, Mode::Low, 0.0, 0.0);
+
+        let err = e.advance(0.0).unwrap_err();
+        assert_eq!(err.code, -7);
+        assert!(err.message.contains("livelock"), "message was: {}", err.message);
+        // Never returned silently: the clock stays put at the stuck instant.
+        assert_eq!(e.time(), 0.0);
     }
 }

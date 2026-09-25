@@ -74,6 +74,13 @@ trailer  MAGIC
   | 4 | `FORCE_STEPPED` | `0` / `1` (tests only) | `0` |
   | 5 | `AMBIENT_C` | finite °C | `25` |
   | 6 | `FLOATING_MODEL` | `0` classic hash (the only value in W1) | `0` |
+  | 7 | `START_TIME` | finite seconds `>= 0`: the absolute time the loaded program starts at | `0` |
+
+  `START_TIME` exists because classic keeps absolute `simTime` across a
+  reload, and time-dependent behaviour keys on it: floating-input buckets
+  (§1.5) and waveform source phase. The facade passes the time it carries
+  over, so Rust's clock is always absolute and no time base is layered on
+  top.
 
 - **Readout slot counts.** `S` digital slots and `C` channel slots (see
   Readouts). The compiler assigns every slot; Rust only writes numbers.
@@ -110,7 +117,12 @@ trailer  MAGIC
   blob value finite, every slot index `< S` or `< C`, the trailer, and no
   trailing data. Malformed is `-1`, never a panic; a well-formed but unknown
   kind code is `-2`. Per-kind rules (for example resistor `R > 0`) live in
-  `core/src/kinds.rs`.
+  `core/src/kinds.rs`. A bad option inside the program is `-1` (the program
+  is malformed); the same bad value passed to `bo_engine_set_option` after
+  load is `-8` (an invalid argument).
+- **Slot indices.** A kind that publishes readouts declares in `kinds.rs`
+  which blob positions hold its slot bases, so the reader can check them
+  against `S` and `C`. No kind before W1c publishes any.
 
 ## Kind codes and records
 
@@ -150,14 +162,14 @@ export lands in its list in the same change that adds it.
 | `bo_abi_version` | `() -> u32` | `2`. The TS loader refuses a mismatch. | v1 |
 | `bo_alloc` / `bo_free` | `(len_f64: u32) -> *mut f64` / `(ptr, len_f64)` | Scratch f64 buffer, zeroed; freed with the same length. | v1 |
 | `bo_engine_create` / `bo_engine_destroy` | `() -> u32` / `(h)` | Handles; `0` is never valid; never reused. | v1 |
-| `bo_engine_load` | `(h, ptr: *const f64, len_f64: u32) -> i32` | Load a program, settle it (kernel semantics) at t = 0. | v1 |
+| `bo_engine_load` | `(h, ptr: *const f64, len_f64: u32) -> i32` | Load a program and settle it at `START_TIME` (kernel semantics, point 6). | v1 |
 | `bo_engine_advance` | `(h, t_end: f64) -> i32` | Process every event with `t <= t_end`, then set time to `t_end`. | v1 |
 | `bo_engine_time` | `(h) -> f64` | Current simulation time. | v1 |
 | `bo_engine_node_count` / `bo_engine_node_voltages` | `(h) -> u32` / `(h) -> *const f64` | `N` volts, node 0 = 0. | v1 |
 | `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
 | `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. | v1 |
 | `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
-| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2-4 take effect at the next event; keys 1, 5 and 6 are load-time only (`-8` after load). | v2 (W1a) |
+| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2-4 take effect at the next event; keys 1, 5, 6 and 7 are load-time only (`-8` after load). | v2 (W1a) |
 | `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
 | `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
 | `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). | v2 (W1a) |
@@ -180,6 +192,14 @@ current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
 unknown option key, a value out of range, a load-time option after load, a
 device or param index out of range, or a param that is not live).
+
+**A failed advance.** When `bo_engine_advance` returns `-4` or `-7`, the
+engine keeps the state of the last instant it completed, and
+`bo_engine_time` reports that instant. The host treats this as
+non-convergence, as classic's `lastConverged = false`: it keeps the last
+good readouts and reports how far time actually got. It is not a load
+error. The stat counters are the exception: they keep the failed attempt's
+counts, as classic keeps its failed diagnostics after restoring state.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never
@@ -258,7 +278,10 @@ records from it:
 1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
    `seq` is a global insertion counter, so events at equal `t` run first in,
    first out.
-2. **Drivers.** Every IC output is a driver: a conductance to its IC's own
+2. **Drivers.** A driver's commit, a reset (the driver stops driving, e.g.
+   a tri-stated or direction-flipped pin) and any other change to what it
+   stamps all mark its partition dirty for the next re-solve; readers of that
+   partition are then re-evaluated. Every IC output is a driver: a conductance to its IC's own
    supply pin nodes (so load current debits the rails, spec §1.7) with mode
    `HIZ`, `HIGH` or `LOW`. A requested change goes through the inertial rules
    of spec §2.4, as one pure function: the first observation has zero delay;
@@ -277,13 +300,24 @@ records from it:
    `t_end`. Stepped partitions land exactly on `t_end` (a horizon clamp), so a
    readout at `t_end` is a solved value, not an interpolation. Interpolated
    acquisition is W2.
-6. **Load settling** (owner decision 8, and the W1-0 spike). Settle the
-   network to a fixed point with every register's edge history FROZEN: parts
-   drive their current state but never act on an edge or update `lastClk` or
-   `lastWE`. Then run exactly one edge pass. Classic's phantom rising edge
-   (`lastClk` seeded 0 while the clock is already HIGH) is kept; classic's
-   1 ps seed and rescue ladder are not. Re-running the edge pass on every
-   settle pass corrupted RAM at load in the spike.
+6. **Load settling** (owner decision 8, and the W1-0 spike). Three steps, at
+   `START_TIME`:
+   1. Settle the network to a fixed point with every register's edge history
+      FROZEN: parts drive their current state but never act on an edge or
+      update `lastClk` or `lastWE`. Delays do not apply while settling; this
+      is finding the consistent initial state, not simulating time.
+   2. Run exactly ONE edge pass: every reader is evaluated once with edges
+      live. Classic's phantom rising edge (`lastClk` seeded 0 while the clock
+      is already HIGH) is kept.
+   3. Whatever that edge pass requests is ordinary simulation from then on:
+      it goes through the inertial rules with its real delays and is drained
+      at `START_TIME` by the normal delta cycle, exactly as an advance to
+      `START_TIME` would. It is never re-run as further zero-delay settle
+      passes.
+
+   Classic's 1 ps seed and rescue ladder are not reproduced. The spike showed
+   that re-running edge-acting passes during settling lets a transient
+   glitch clock a register or write RAM; step 3 is what rules that out.
 7. **Floating buckets** (owner decision 9). A floating or dead-band read uses
    classic's key with `bucket = floor((t + 1e-12) / 0.01)` of the event time,
    and every device that reads such a pin gets an event at each bucket

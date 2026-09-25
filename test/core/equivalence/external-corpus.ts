@@ -15,6 +15,7 @@ import path from "node:path";
 import type { PartDefinition } from "../../../src/circuit/types.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
+import type { StimulusPhase } from "./stimuli.js";
 import type { CorpusEntry } from "./types.js";
 import type { LoadedEntry } from "./brownout-fixtures.js";
 
@@ -35,6 +36,18 @@ interface ExternalManifestEntry {
   kinds: string[];
   /** Optional; a missing field means null (CorpusEntry.stimulus's own doc). */
   stimulus?: "verify-script" | null;
+  /**
+   * Gate 2d's phases (W1a-A6): present on a `stimulus: "verify-script"`
+   * entry the producer was able to export scripted phases for — exactly
+   * stimuli.ts's `StimulusPhase[]` shape,
+   * `[{set:[{id,params}],durationS}, ...]`. Mutually exclusive with
+   * `phasesUnsupported` in practice, but both are read independently below
+   * rather than assumed exclusive, since a stale/hand-edited manifest could
+   * carry neither or (in principle) both.
+   */
+  phases?: StimulusPhase[];
+  /** Present instead of `phases` when the producer knows it could not export them for this entry, and says why (no current manifest entry uses this — CorpusEntry.phasesUnsupported's own doc). */
+  phasesUnsupported?: string;
 }
 
 interface ExternalManifest {
@@ -107,6 +120,8 @@ export function loadExternalCorpus(dir: string): ExternalCorpus {
       manifestKindsMismatch: kindsAgree ? undefined : manifestKinds,
       stimulus: raw.stimulus ?? null,
       file: full,
+      phases: raw.phases,
+      phasesUnsupported: raw.phasesUnsupported,
     };
     return { entry, circuit };
   });
