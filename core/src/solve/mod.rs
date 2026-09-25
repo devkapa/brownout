@@ -472,7 +472,17 @@ pub struct Threshold {
 /// comparator reference or a Schmitt band) to get whatever it currently
 /// wants watched on its node. `Fn`, not `FnMut`: a reader reports its OWN
 /// current reference, it does not need to mutate anything to do so.
-pub type ThresholdFn = Box<dyn Fn() -> Vec<Threshold>>;
+///
+/// Takes the full, currently-published voltage array (finding 2/6): a
+/// no-arg version cannot see anything beyond what it closed over at
+/// registration time, which is wrong the instant a watched IC's supply is
+/// allowed to be anything other than a truly fixed node (contract point 4,
+/// amended) -- a supply sitting in a `Static` partition can move whenever
+/// that partition is dirtied, and the threshold must move with it. Reading
+/// straight out of the published array (rather than being handed just the
+/// two supply voltages) keeps this a single, uniform shape regardless of
+/// which node(s) a given reader's own thresholds happen to depend on.
+pub type ThresholdFn = Box<dyn Fn(&[f64]) -> Vec<Threshold>>;
 
 /// One of a device's own pins, already resolved against a SPECIFIC dynamic
 /// partition: `local` is `Some(index)` into that partition's own node list
@@ -779,10 +789,22 @@ pub(crate) fn collect_ics(program: &Program) -> Vec<(usize, digital::IcRecord)> 
 /// conductance (contract point 8): the pin's own node to `ic.vcc.node` at
 /// `1/R_out` while committed HIGH (unless `OPEN_COLLECTOR`, which is
 /// released instead — stamps nothing), or to `ic.gnd.node` while committed
-/// LOW. `None` while unpowered, HIZ, uncommitted, or a released
-/// `OPEN_COLLECTOR` HIGH.
+/// LOW. `None` while unpowered, HIZ, uncommitted, a released
+/// `OPEN_COLLECTOR` HIGH, or the driver's own pin sits on the datum node
+/// (finding 9): classic's `_stampDigitalOutput` returns immediately for a
+/// pin on the reference net (`node < 0`, sim-engine.ts's own ground index),
+/// stamping nothing and drawing no source current, and node 0 is this
+/// core's own datum (core/README.md: "node 0 is the datum") — the same
+/// pin-on-ground case, just numbered differently. Guarded once here, in the
+/// shared helper every caller (`recompute_source_currents`,
+/// `static_part::stamp_ics_into`, `stamp_ics_into_dyn`) goes through,
+/// rather than at each call site, per this function's own "defined once"
+/// doc comment above (the other two callers never reach node 0 today, since
+/// they gate on `in_partition(driver.node)` and node 0 is never a partition
+/// member — but a THIRD caller should not have to remember that
+/// independently).
 pub(crate) fn ic_driver_target(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> Option<(usize, f64)> {
-    if !power.powered {
+    if !power.powered || driver.node == 0 {
         return None;
     }
     match driver.committed() {
@@ -908,8 +930,16 @@ pub(crate) fn stamp_ics_into_dyn(
     let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
 
     for (device_index, ic) in ics {
+        // `touches` also fires when this IC's own free supply node lives in
+        // `p_idx`, even if every one of its driver/pull pins is fixed
+        // elsewhere (findings 3/8's dynamic-partition twin): an output pin
+        // wired straight onto a fixed/ideal node still loads its IC's free
+        // `vcc`/`gnd` through `1/R_out`, and that belongs in whichever
+        // partition holds the free end.
         let touches = drivers.iter().any(|d| d.device == *device_index && in_partition(d.node))
-            || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node));
+            || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node))
+            || in_partition(ic.vcc.node)
+            || in_partition(ic.gnd.node);
         if !touches {
             continue;
         }
@@ -920,11 +950,29 @@ pub(crate) fn stamp_ics_into_dyn(
             continue;
         }
         for driver in drivers {
-            if driver.device != *device_index || !in_partition(driver.node) {
+            if driver.device != *device_index {
                 continue;
             }
             if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
-                stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0);
+                // Findings 3/8: stamp whenever EITHER end is free-in-`p_idx`
+                // (the driver's own pin, or its commit target), not only the
+                // driver's own pin as before — that was the whole bug, a
+                // fixed-pin output never loaded its IC's own free supply.
+                // Unlike `static_part.rs`'s `fold_local` (which silently
+                // no-ops when neither end is free-in-`p_idx`), `resolve`
+                // above PANICS on a node that is free but NOT fixed and NOT
+                // in `p_idx` (the "one supply free, the other pin placed
+                // entirely independently" case this function's own doc
+                // comment describes), so this guard must run BEFORE
+                // `resolve` is ever called on either node, not merely guard
+                // the stamp itself. This is still no narrower than
+                // necessary: when `target` is free, the union rule
+                // guarantees `driver.node` is fixed or ALSO free-in-`p_idx`
+                // (never free in some OTHER partition), so `resolve` never
+                // panics for a case this guard lets through.
+                if in_partition(driver.node) || in_partition(target) {
+                    stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0);
+                }
             }
         }
         for pin in &ic.logic {
@@ -1293,20 +1341,29 @@ impl PartitionedSolver {
     /// `ClosedFormSolver::handle_crossing` does for whichever node the
     /// crossing landed on, is numerically unstable and can publish every
     /// other node in the segment at a physically meaningless value). Only
-    /// when BOTH this IC's supply nodes are
-    /// FIXED: then, and only then, is `digital::power::ic_power` a build-time
-    /// constant this call can compute once and close over forever — a
-    /// `ClosedForm` partition itself is guaranteed never to hold a free IC
-    /// supply node (`partition::build`'s own promotion rule reclassifies any
-    /// partition that does to `Stepped`), but a PLAIN read pin (unlike an
+    /// when BOTH this IC's supply nodes are load-time STABLE
+    /// ([`Self::supply_is_load_stable`]: fixed, or free in a `Static`
+    /// partition — contract point 4, amended by finding 2/6): a `ClosedForm`
+    /// partition itself is guaranteed never to hold a free IC supply node
+    /// (`partition::build`'s own promotion rule reclassifies any partition
+    /// that does to `Stepped`), but a PLAIN read pin (unlike an
     /// output-capable or open-floating-input one) is never unioned with its
-    /// own IC's supply at all, so it can land in a `ClosedForm` partition
-    /// while its OWN ic's supply sits, free, in some entirely different one
-    /// — left unwatched here deliberately: W1c contract point 5/6's ordinary
-    /// bucket/re-solve machinery and this crate's `node_to_ic_readers`
-    /// (`report_changed_ic_readers` in `closed_form.rs`/`stepped.rs`) still
-    /// re-evaluate such a reader whenever ITS OWN node's published voltage
-    /// actually changes, just not via an exact analytic crossing.
+    /// own IC's supply at all, so it can land in a `ClosedForm`/`Stepped`
+    /// partition while its OWN ic's supply sits, free, in some entirely
+    /// different `Static` partition — previously left unwatched here
+    /// (finding 2/6's whole bug). A `Static` partition's voltage is exactly
+    /// as load-time-stable as a truly fixed node BETWEEN dirtying events (a
+    /// switch toggle, a driver commit), and
+    /// [`Self::add_watch_dependent_partitions`] re-aims every watch that
+    /// depends on one whenever such an event actually moves it. An IC whose
+    /// supply sits in a `ClosedForm`/`Stepped` partition instead still
+    /// relies on W1c contract point 5/6's ordinary bucket/re-solve machinery
+    /// and this crate's `node_to_ic_readers` (`report_changed_ic_readers` in
+    /// `closed_form.rs`/`stepped.rs`), which re-evaluate such a reader
+    /// whenever ITS OWN node's published voltage actually changes, just not
+    /// via an exact analytic crossing — the numerical-instability concern
+    /// above (a driven output's own near-flat segment) applies just as much
+    /// to a continuously-moving supply.
     ///
     /// Both directions are registered for every threshold value
     /// `watch_thresholds` returns, rather than only the direction each one
@@ -1324,9 +1381,7 @@ impl PartitionedSolver {
     fn register_ic_read_pin_watches(&mut self) {
         for i in 0..self.ics.len() {
             let (device_index, ic) = self.ics[i].clone();
-            let vcc_fixed = self.local_index[ic.vcc.node].is_none();
-            let gnd_fixed = self.local_index[ic.gnd.node].is_none();
-            if !(vcc_fixed && gnd_fixed) {
+            if !(self.supply_is_load_stable(ic.vcc.node) && self.supply_is_load_stable(ic.gnd.node)) {
                 continue;
             }
             // An output-capable pin is NEVER a valid watch target, on top of
@@ -1364,11 +1419,87 @@ impl PartitionedSolver {
                 }
                 let reader = DeviceId(device_index as u32);
                 let node = pin.node;
+                // Recomputed fresh on every call from the LIVE voltages
+                // array (finding 2/6), not the `thresholds` snapshot just
+                // above -- that one only decides whether this pin is worth
+                // registering AT ALL (a non-open pin's `watch_thresholds` is
+                // never actually empty today, but the check is cheap
+                // insurance against a future kind where it could be). A
+                // `Static`-supply IC's thresholds can move after load, when
+                // `Self::add_watch_dependent_partitions` re-aims this watch
+                // following a re-solve of the partition holding `vcc`/`gnd`;
+                // a fixed-supply IC's never move, so recomputing costs one
+                // redundant `ic_power` call and produces the identical
+                // answer every time.
+                let ic_for_watch = ic.clone();
+                let pin_for_watch = *pin;
+                let vcc_node = ic.vcc.node;
+                let gnd_node = ic.gnd.node;
                 self.watch_node(
                     node,
                     reader,
-                    Box::new(move || thresholds.iter().flat_map(|&value| [Threshold { value, rising: true }, Threshold { value, rising: false }]).collect()),
+                    Box::new(move |voltages: &[f64]| {
+                        let power = digital::power::ic_power(&ic_for_watch, voltages[vcc_node], voltages[gnd_node]);
+                        digital::levels::watch_thresholds(&ic_for_watch, &power, &pin_for_watch)
+                            .iter()
+                            .flat_map(|&value| [Threshold { value, rising: true }, Threshold { value, rising: false }])
+                            .collect()
+                    }),
                 );
+            }
+        }
+    }
+
+    /// Whether `node` is stable enough between dirtying events to serve as
+    /// the basis for a crossing watch's thresholds (contract point 4,
+    /// amended by finding 2/6): a genuinely fixed node, or one that is free
+    /// but lives in a `Static` partition. Neither moves except when
+    /// something dirties it (a switch toggle, a driver commit) — unlike a
+    /// `ClosedForm`/`Stepped` partition's own node, which moves continuously
+    /// between re-solves, the numerical-instability hazard
+    /// `Self::register_ic_read_pin_watches`'s own doc comment describes for
+    /// an output-capable pin applies here too.
+    fn supply_is_load_stable(&self, node: usize) -> bool {
+        match self.local_index[node] {
+            None => true,
+            Some((p, _)) => matches!(self.partition_kinds.get(p), Some(PartitionKind::Static)),
+        }
+    }
+
+    /// Finding 2/6's re-aim path: for every IC watched only because one (or
+    /// both) of its supply nodes sits in a `Static` partition, forces its
+    /// dependent `ClosedForm`/`Stepped` partitions (the ones holding one of
+    /// its currently-registered read-pin watches) into `cf_ids`/`st_ids`
+    /// whenever `static_ids` (the partitions `Self::resolve_dirty` is about
+    /// to re-solve this pass) contains that supply's own partition — even
+    /// though nothing in THEIR OWN topology changed. Their own trajectory
+    /// segment/plan comes out identical (nothing electrical there moved),
+    /// but the re-aim's `schedule_crossing`/`plan_step` runs the reader's
+    /// [`ThresholdFn`] again, which now sees the freshly-resolved supply
+    /// voltage (published into `self.voltages` by the static resolve that
+    /// just ran) instead of a stale one, so a crossing this IC's OWN watch
+    /// depends on gets correctly re-scheduled instead of staying aimed at
+    /// whatever the supply used to be.
+    fn add_watch_dependent_partitions(&self, static_ids: &[PartitionId], cf_ids: &mut Vec<usize>, st_ids: &mut Vec<usize>) {
+        let supply_touched = |node: usize| -> bool {
+            matches!(self.local_index[node], Some((p, _)) if self.partition_kinds.get(p) == Some(&PartitionKind::Static) && static_ids.iter().any(|pid| pid.0 as usize == p))
+        };
+        for (_, ic) in &self.ics {
+            if !(supply_touched(ic.vcc.node) || supply_touched(ic.gnd.node)) {
+                continue;
+            }
+            let outputs = digital::combinational::output_capable(ic.kind);
+            for (logic_index, pin) in ic.logic.iter().enumerate() {
+                if pin.open || outputs.contains(&logic_index) {
+                    continue;
+                }
+                if let Some((p, _)) = self.local_index[pin.node] {
+                    match self.partition_kinds.get(p) {
+                        Some(PartitionKind::ClosedForm) if !cf_ids.contains(&p) => cf_ids.push(p),
+                        Some(PartitionKind::Stepped) if !st_ids.contains(&p) => st_ids.push(p),
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -1621,13 +1752,31 @@ impl PartitionSolver for PartitionedSolver {
         // caller only ever hands this the FULL table anyway (never filtered
         // to `dirty`'s own partitions), so there is no "nothing changed"
         // shortcut to take.
-        self.driver_snapshot = drivers.to_vec();
+        //
+        // Finding 5 (W1b rule 6, amended): captured BEFORE the overwrite, so
+        // `stepped.resolve_dirty` below can hand its pre-`now` catch-up
+        // (`SteppedSolver::sync_partition`) the driver table that was
+        // actually in force for that whole span, not the one THIS commit
+        // just produced. `std::mem::replace`, not a second `.clone()`: the
+        // old table is only needed for this one call, and it already holds
+        // exactly what `drivers.to_vec()` would otherwise recompute.
+        let pre_commit_drivers = std::mem::replace(&mut self.driver_snapshot, drivers.to_vec());
 
         let mut readers = Vec::new();
         readers.extend(self.static_solver.resolve_dirty(&static_ids, now, drivers)?);
         self.copy_in_static();
+        // Finding 2/6: a watched IC's supply can sit in a `Static`
+        // partition, which only just moved (if it is among `static_ids`) —
+        // force a re-aim of every closed-form/stepped partition that
+        // depends on one, even though nothing in THEIR OWN topology
+        // changed, so the watch's thresholds (recomputed from the fresh
+        // supply voltage `copy_in_static` just published) actually get
+        // reconsidered instead of staying aimed at a stale target.
+        if !static_ids.is_empty() {
+            self.add_watch_dependent_partitions(&static_ids, &mut cf_ids, &mut st_ids);
+        }
         readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
-        readers.extend(self.stepped.resolve_dirty(&st_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        readers.extend(self.stepped.resolve_dirty(&st_ids, now, &pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
         self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents(now, drivers);
         self.drain_scheduled();
@@ -2120,7 +2269,7 @@ mod partitioned_solver_tests {
         // Register a watcher on the RC node (device index 2, the switch, is
         // reused here only as an arbitrary `DeviceId` stand-in — no real
         // reader kind exists in W1b) so a crossing actually gets scheduled.
-        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }])));
         // Re-aim through the KERNEL (not the solver directly) so the
         // resulting schedule is actually DRAINED onto its heap
         // (`Kernel::drain_scheduled`, called from `apply_params_as_event`'s
@@ -2184,7 +2333,7 @@ mod partitioned_solver_tests {
         // readers come only from `part.watches`, and with none registered
         // the delta cycle would settle after the very first commit with
         // nothing left to oscillate.
-        kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| Vec::<Threshold>::new()));
+        kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| Vec::<Threshold>::new()));
 
         // Advance for real first, so `vc`/the published node voltage is a
         // genuine nonzero mid-charge value, not merely its untouched initial
@@ -2313,7 +2462,7 @@ mod partitioned_solver_tests {
         let all = all_partitions(&control_solver);
         let mut control = Kernel::new(control_solver, NoDevices);
         control.settle(0.0, &all, &[]).unwrap();
-        assert!(control.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+        assert!(control.solver_mut().watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }])));
         control.apply_params_as_event(&[(1, 0, 0.0)]).unwrap(); // the same "no-op" re-aim as below.
         let control_next = control.next_event_time();
         assert!(control_next.is_finite(), "the control kernel must schedule a real crossing");
@@ -2321,7 +2470,7 @@ mod partitioned_solver_tests {
         let solver = PartitionedSolver::build(&p).unwrap();
         let mut kernel = Kernel::new(solver, NoDevices);
         kernel.settle(0.0, &all, &[]).unwrap();
-        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }])));
 
         // Close A's switch (re-aims A, scheduling a real crossing) AND B's
         // switch (overflows B's segment) as ONE event: A's crossing is

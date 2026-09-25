@@ -1615,7 +1615,7 @@
           "name": "releases all outputs when /RBO is driven LOW externally (blanking input)",
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74ls47"],
-          "reason": "/RBO driven LOW as a blanking input releases every segment (rule 7's rbo_n precedence over lt_n and rbi_n); plain load()/step()/getNetV."
+          "reason": "/RBO driven LOW releases every segment, but BCD=15 (a=b=c=d=HIGH) is already blank (LS47_SEGMENTS[15]) — a core that ignored rbo_n entirely and always fell through to the BCD decode would pass this case unnoticed. It only proves rbo_n does not break the already-blank case, not that it takes precedence over a real decode. The genuine precedence check (a non-blank BCD forced blank by rbo_n LOW, plus a same-BCD control with rbo_n HIGH) is combinational-ics.test.ts's \"gate 1 supplemental — 74LS47 /RBO blanking precedence\" describe block (review finding 15)."
         },
         {
           "describe": "74LS47 — blanking",
@@ -1678,7 +1678,7 @@
           "name": "74ls08 uses prefix fallback of 20ns (no prop_delay_ns in catalog)",
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74ls08"],
-          "reason": "Weak assertion (engine.digitalState['u1/1y'] is defined) after one large step on a powered 74ls08 AND gate; exercises load()/step()/digitalState for the one kind (74ls08) no other case in this file's sweeps names. Does not itself pin the 20 ns delay value (that is classic's own catalog-fallback resolution, consumed identically by the core's own delay param per core/README.md's IC blob per-pin delay field, worker C3's compile/ics.ts)."
+          "reason": "Weak assertion (engine.digitalState['u1/1y'] is defined) after one large step on a powered 74ls08 AND gate; exercises load()/step()/digitalState for the one kind (74ls08) no other case in this file's sweeps names. Does not itself pin the 20 ns delay value (that is classic's own catalog-fallback resolution, consumed identically by the core's own delay param per core/README.md's IC blob per-pin delay field) — and, being merely \"defined\", it cannot distinguish AND from NAND, OR, or any other committed 2-input function either (review finding 14). The real truth-table proof (both LOW, one HIGH, and — the row that actually distinguishes AND from NAND — both HIGH) is combinational-ics.test.ts's \"gate 1 supplemental — 74LS08 quad AND\" describe block; this case is left as-is because its own subject (the prop-delay prefix fallback) is unaffected by that gap."
         },
         {
           "describe": "infrastructure — catalog prop_delay_ns override",
@@ -1692,14 +1692,14 @@
           "name": "74hc14 uses catalog-declared prop_delay_ns=15 (same value as prefix default)",
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74hc14"],
-          "reason": "Confirms the catalog's declared prop_delay_ns is honoured (observable via the settled output after two 100 us steps, i.e. well past 15 ns); plain load()/step()/getNetV."
+          "reason": "Loads with the input already at its final level, so the load-time settle (zero delay, core/README.md's events section: \"the first observation has zero delay\") resolves 1y before any delay could ever be observed — a catalog delay of 0 ns, 15 ns or 50 us would all pass this case identically (sampled after two 100 us steps, far past any of them). This only proves the gate inverts (the input/output pin mapping and polarity are correct), never that any particular propagation delay is honoured. The genuine observable-delay check (a continuous RC threshold crossing during ordinary step()s, never a reload) is combinational-ics.test.ts's \"gate 1 supplemental — 74HC14 Schmitt inverter: a genuinely observed propagation delay\" case (review finding 15)."
         },
         {
           "describe": "infrastructure — catalog prop_delay_ns override",
           "name": "74ls47 uses catalog-declared prop_delay_ns=35 — output delay observable",
           "status": "not-yet",
           "kinds": ["voltage_source", "resistor", "74ls47"],
-          "reason": "Empirically fails on the built core: expected digitalState to still show the OLD committed value 25 ns after a reload changed the BCD input (less than the 35 ns catalog prop delay), got the NEW value already committed. Same root cause as the 74HC14 Schmitt dead-band cases above: bo_engine_load carries no per-id digital state forward (core/README.md rule 5's \"carrying charge across a reload is W2\", generalised) so the delay FSM treats every pin as a fresh first observation on reload, and \"first observation has zero delay\" (core/README.md's events section, mirroring classic's own §2.4 rule) commits the new value immediately instead of respecting the in-flight 35 ns timer a live (non-reloaded) transition would get. Not a core bug -- a known, documented W1 limitation (load carry-forward is W2, decision 1). The core's OWN delay-FSM timing (as opposed to its behaviour across a reload) is still proven by the 74hc14 prop_delay_ns=15 case above, which never reloads."
+          "reason": "Empirically fails on the built core: expected digitalState to still show the OLD committed value 25 ns after a reload changed the BCD input (less than the 35 ns catalog prop delay), got the NEW value already committed. Same root cause as the 74HC14 Schmitt dead-band cases above: bo_engine_load carries no per-id digital state forward (core/README.md rule 5's \"carrying charge across a reload is W2\", generalised) so the delay FSM treats every pin as a fresh first observation on reload, and \"first observation has zero delay\" (core/README.md's events section, mirroring classic's own §2.4 rule) commits the new value immediately instead of respecting the in-flight 35 ns timer a live (non-reloaded) transition would get. Not a core bug -- a known, documented W1 limitation (load carry-forward is W2, decision 1). The 74hc14 prop_delay_ns=15 case above does NOT prove the core's own delay-FSM timing either (review finding 15: it loads with the input already at its final level, so its load-time settle resolves before any delay could be observed). combinational-ics.test.ts's \"a genuinely observed propagation delay\" case (a continuous RC threshold crossing, never a reload — sidestepping this exact W2 gap entirely) is the first case anywhere in this corpus that actually proves the core's delay-FSM timing on a live (non-reloaded) transition, for the 74hc14 kind — 74ls47's own 35 ns value across a RELOAD-based transition specifically is still unverified pending W2's reload carry-forward (this case's own subject)."
         }
       ]
     },
@@ -1906,6 +1906,13 @@
           "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls245 circuit — see this file's own header comment). Only the well-established DIR=A->B, /OE-LOW path is exercised here; /OE-disabled release and bus contention between two 245s are covered by this worker's equivalence-harness fixtures (a real dual-engine comparison), not asserted here by hand."
         },
         {
+          "describe": "gate 1 supplemental — 74LS245 octal transceiver",
+          "name": "DIR=A->B, /OE enabled: a LOW A1 actively pulls B1 LOW against its own pull-up (only a genuinely driving 245 can do this)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls245"],
+          "reason": "Review finding 14: the pre-existing HIGH-A1 case cannot falsify a reversed DIR (B->A) or a disabled /OE, since b1 sits on a pull-up to vcc through r_out and reads ~5V either way. A LOW result can only come from the 245 actively pulling b1 down against that same pull-up — the one polarity that genuinely exercises DIR/OE."
+        },
+        {
           "describe": "gate 1 supplemental — 74LS283 4-bit adder",
           "name": "5 + 3 + c0=0 = 8 (binary 1000): no carry out",
           "status": "portable",
@@ -1918,6 +1925,48 @@
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74ls283"],
           "reason": "New case (this worker); exercises the full ripple-carry chain (every internal carry set) and the c4 carry-out pin."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS08 quad AND",
+          "name": "gate 1 with both inputs LOW drives the output LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls08"],
+          "reason": "New case (review finding 14; no pre-existing classic suite builds a real 74ls08 truth-table check — wave2-combinational.test.ts's own 74ls08 case only asserts digitalState is defined). AND truth table's LOW,LOW row."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS08 quad AND",
+          "name": "gate 1 with one input HIGH (the other LOW) drives the output LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls08"],
+          "reason": "New case (review finding 14); AND truth table's mixed-input row — rules out an OR-flavoured implementation together with the both-HIGH case below."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS08 quad AND",
+          "name": "gate 1 with both inputs HIGH drives the output HIGH (distinguishes AND from NAND/OR)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls08"],
+          "reason": "New case (review finding 14); the one row that actually distinguishes AND from NAND (which would give LOW here) — exactly the gap the pre-existing wave2-combinational.test.ts 74ls08 case (a bare toBeDefined() check) could not close."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS47 /RBO blanking precedence",
+          "name": "BCD=5 (non-blank) with rbo_n driven LOW still releases every segment — /RBO overrides the normal decode, not just a digit that was already blank",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Review finding 15: the pre-existing \"releases all outputs when /RBO is driven LOW\" case (wave2-combinational.test.ts) uses BCD=15, which LS47_SEGMENTS already decodes as fully blank — a core that ignored rbo_n entirely would pass it unnoticed. This case uses BCD=5 (a genuinely non-blank digit, the lamp-test case's own BCD), so releasing every segment here can only come from rbo_n's real precedence over the normal decode."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS47 /RBO blanking precedence",
+          "name": "control: the SAME BCD=5 with rbo_n HIGH (inactive) decodes normally — not every segment released",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Control for the rbo_n-LOW case above: proves BCD=5 with rbo_n inactive is a genuinely non-blank pattern (at least one segment LOW), so the LOW-rbo_n case's \"every segment released\" is a real transition, not a circuit that reads all-released regardless of rbo_n."
+        },
+        {
+          "describe": "gate 1 supplemental — 74HC14 Schmitt inverter: a genuinely observed propagation delay",
+          "name": "the digital commit lands measurably AFTER 1a crosses the Schmitt threshold — neither immediate (0ns) nor absurdly late (us-scale)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor", "74hc14"],
+          "reason": "Review finding 15: the pre-existing 74hc14 prop_delay_ns=15 case (wave2-combinational.test.ts) loads with the input already at its final level, so its load-time settle (zero delay) resolves before any delay could be observed. A live RELOAD-based transition (the mechanism wave2-sequential.test.ts's 74HC74 edge tests use) is not usable either: a core reload re-runs decision 8's zero-delay t=0 settle with no per-id carry-forward yet (W2 scope — the same reason this file's own \"Schmitt commit semantics\"/prop_delay=35ns \"not-yet\" cases above are not portable), so the new input would commit with NO delay on the core only. This case instead feeds 1a from a plain RC network already present at load time — a genuine continuous analog crossing during ordinary step()s, with no second load() anywhere (the same mechanism fixture 19's relaxation oscillator uses) — and dynamically locates both the analog crossing and the digital commit, asserting the gap between them is bounded to the tens-of-ns ballpark the 15ns catalog value lives in, ruling out both \"skipped entirely\" and \"some unrelated us-scale mechanism\"."
         }
       ]
     }

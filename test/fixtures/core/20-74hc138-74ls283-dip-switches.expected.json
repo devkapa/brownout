@@ -1,4 +1,11 @@
 {
   "status": "pass",
-  "durationS": 0.001
+  "durationS": 0.001,
+  "phases": [
+    { "durationS": 0.003 },
+    { "set": [{ "id": "dip", "params": { "sw1": 0 } }], "durationS": 0.001 },
+    { "set": [{ "id": "dip", "params": { "sw1": 1 } }], "durationS": 0.001 },
+    { "set": [{ "id": "dip", "params": { "sw4": 0 } }], "durationS": 0.001 },
+    { "set": [{ "id": "dip", "params": { "sw4": 1 } }], "durationS": 0.001 }
+  ]
 }

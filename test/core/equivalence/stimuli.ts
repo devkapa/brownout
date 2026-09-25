@@ -18,14 +18,21 @@
  * a uniform grid, and this harness inherits the same reason to avoid
  * adaptive's non-uniform spacing here).
  *
- * THE CORE applies a toggle through a parameter-update event instead of a
- * reload (owner decision 1, `bo_engine_set_params` — core/README.md's ABI v2,
- * W1b): `replayStimuliOnCore` loads the circuit once, then for each phase
+ * THE CORE applies a LATER phase's toggle through a parameter-update event
+ * instead of a reload (owner decision 1, `bo_engine_set_params` —
+ * core/README.md's ABI v2, W1b): for phase 1 onward, `replayStimuliOnCore`
  * calls `CoreEngine.setParams` on that phase's `set` overrides BEFORE
  * advancing — never a reload — so capacitor charge, register contents and
  * pending delays all carry across a phase boundary the same way classic's own
  * carry-forward reload preserves them (core/README.md's
- * `bo_engine_set_params` doc: "All other state is kept").
+ * `bo_engine_set_params` doc: "All other state is kept"). PHASE 0 is the one
+ * exception (the investigation behind finding 12): its `set` (if any) is
+ * folded into the circuit BEFORE the initial `load()`, exactly mirroring
+ * classic's own phase-0 reload, instead of being applied through
+ * `setParams` at t=0 — see `replayStimuliOnCore`'s own doc comment for why
+ * (a set_params-at-t=0 event schedules a live transition that a genuine t=0
+ * LOAD's zero-delay settle would instead have absorbed into the seed,
+ * manufacturing a sample classic can never produce).
  *
  * A circuit `replayStimuliOnCore` cannot even LOAD (an unimplemented kind, a
  * malformed parameter, or a topology the kernel rejects —
@@ -65,6 +72,21 @@ export interface StimulusPhase {
 
 /** devolt's `simulateScript` default step (`apps/learn/lib/seed/simulate.ts`'s `opts.dt ?? 1e-3`). */
 export const STIMULUS_FIXED_STEP_S = 1e-3;
+
+/**
+ * Finding 13: classic's own fixed-step loop (`src/host/headless.ts`'s `run()`,
+ * `if (untilEvent <= h) { h = Math.max(H_MIN, untilEvent); ... }`) floors
+ * EVERY event-aligned step at `H_MIN = 1e-8`, even when landing exactly on a
+ * due event — so two due times under `H_MIN` apart make classic OVERSHOOT the
+ * second one rather than landing on it exactly. `replayStimuliOnCore`'s own
+ * clamp (below) must reproduce that overshoot bit-for-bit, or the two engines
+ * land on different instants whenever two ICs with different propagation
+ * delays are driven by the same edge. Duplicated here (not imported) because
+ * `src/host/headless.ts` is outside this worker's ownership (core/src +
+ * test/core only) — this constant must be kept equal to headless.ts's own
+ * `H_MIN`, which is a private, unexported module constant there.
+ */
+const STIMULI_CLAMP_H_MIN = 1e-8;
 
 export interface StimulusStepSample {
   readonly phaseIndex: number;
@@ -211,7 +233,20 @@ export function replayStimuliOnCore(
   const engine = new CoreEngine();
   try {
     try {
-      engine.load(circuit, implementedKinds);
+      // INVESTIGATION point 2 (finding 12's write-up): fold phase 0's `set`
+      // into the circuit BEFORE the initial load, exactly as
+      // `replayStimuliOnClassic` folds every phase's `set` into a reload
+      // (`applyPhaseOverrides` then `runner.load(working)`, above) — never
+      // through `setParams` at t=0. Applying phase 0 via `setParams` instead
+      // schedules a live event AT t=0 (e.g. an IC's pending delay-FSM
+      // transition), which a genuine t=0 LOAD's own zero-delay settle pass
+      // (decision 8) would have absorbed into the seed instead. Classic's own
+      // phase-0 "reload" never has this problem — the override is already
+      // baked into the netlist its load() settles — so replaying it through
+      // setParams manufactures an extra sample classic can never produce
+      // (the investigation's own reproduction: 11 samples on classic, 12 on
+      // the core, for a fixture whose phase 0 carries a `set`).
+      engine.load(applyPhaseOverrides(circuit, phases[0] ?? { durationS: 0 }), implementedKinds);
     } catch (err) {
       if (err instanceof CoreUnsupportedError) {
         throw new StimuliNotYetSupportedOnCoreError(err.reasons, { cause: err });
@@ -222,7 +257,14 @@ export function replayStimuliOnCore(
     const samples: StimulusStepSample[] = [];
 
     phases.forEach((phase, phaseIndex) => {
-      if (phase.set && phase.set.length > 0) {
+      // Phase 0's `set` (if any) is already folded into the circuit this
+      // engine was loaded with, above — applying it again here through
+      // setParams would double-apply it as a live event on top of an
+      // already-settled initial state. Every LATER phase still uses
+      // setParams, exactly as before: only phase 0 gets the "fold into the
+      // load" treatment, matching classic's own reload only ever needing one
+      // "cold start" instant.
+      if (phaseIndex > 0 && phase.set && phase.set.length > 0) {
         const changes: CoreParamChange[] = phase.set.map((override) => ({
           componentId: override.id,
           params: override.params,
@@ -253,23 +295,51 @@ export function replayStimuliOnCore(
         // it is given, whether or not t_end lands exactly on one), but a
         // DIFFERENT sample count/schedule, which compareStimuliSamples
         // rejects outright as a harness bug (it requires two equal-length,
-        // time-aligned sequences). Clamping here to `engine.nextEventTime()`
-        // (bo_engine_next_event_time, core/README.md's C ABI v2) exactly
-        // reproduces classic's own "step lands exactly on a due event" rule
-        // (`<=`, not `<`: a candidate step that would land exactly on the
-        // event still counts as clamped, matching headless.ts's own
-        // comment), so both sides land on the identical instant sequence.
+        // time-aligned sequences).
+        //
+        // FINDING 10: clamping to `engine.nextEventTime()` (bo_engine_next_
+        // event_time) is TOO WIDE — that ABI call reports the earliest of ANY
+        // pending kernel event (a stepped partition's own internal Step
+        // bookkeeping, a closed-form Crossing watch, a floating-input Bucket
+        // boundary), none of which classic's `nextScheduledEventTime()` (the
+        // function this clamp is modeled on) ever considers — it only ever
+        // looks at a genuinely due digital commit. Clamping to the wider call
+        // made a W1b stepped-partition stimuli entry (no combinational IC at
+        // all) explode into millions of 1e-8-spaced samples the instant a
+        // `set` dirtied its stepped partition. `engine.nextDigitalDueTime()`
+        // (bo_engine_next_digital_due_time, core/README.md's C ABI v2, added
+        // for exactly this) reports ONLY a live driver-commit token, the same
+        // narrower thing classic's own function reports — `advance()` already
+        // processes every intervening Step/Crossing/Bucket event on its own
+        // to reach whatever `t_end` this loop picks, so there was never a
+        // reason for this clamp to single-step through the solver's own
+        // internal bookkeeping in the first place.
         const candidateStep = Math.min(STIMULUS_FIXED_STEP_S, phaseEndTime - t);
-        const untilEvent = engine.nextEventTime() - t;
+        const untilEvent = engine.nextDigitalDueTime() - t;
+        // FINDING 13: classic's own clamp floors EVERY event-aligned step at
+        // H_MIN (headless.ts: `h = Math.max(H_MIN, untilEvent)`), even when
+        // landing exactly on a due event — so two due times under H_MIN apart
+        // make classic OVERSHOOT the second one (it lands `H_MIN` past the
+        // first, not exactly on the second) rather than snapping to it. This
+        // clamp must reproduce that overshoot, or a fixture with two
+        // different-family ICs (74hc: 15ns, 74ls: 20ns delay) commit-chained
+        // off the same edge lands the two engines on different instants ~5ns
+        // apart, in a way that's `<= 0` (no reproduction of classic's actual
+        // OVERSHOOT of the true due instant), and both simTime and the
+        // resulting stale netV/elementI mismatch.
+        const clampedUntilEvent = Math.max(STIMULI_CLAMP_H_MIN, untilEvent);
         // The `+ 1e-12` nudge: classic applies each phase by RELOADING, and
         // load() runs its 1 ps seed solve (spec §2.2), so a delay-FSM
         // transition scheduled by that seed falls due at `phaseStart + 1e-12
-        // + delay`. The core applies the phase through set_params at
-        // `phaseStart` exactly, so the same transition falls due 1 ps
-        // earlier. Stepping the core to `due + 1e-12` lands its sample on
-        // classic's instant, just after the commit on both sides, instead of
-        // loosening compare.ts's 1e-12 simTime check.
-        t += untilEvent > 0 && untilEvent <= candidateStep ? untilEvent + 1e-12 : candidateStep;
+        // + delay`. The core applies a LATER phase's overrides through
+        // set_params at `phaseStart` exactly (phase 0's own override is now
+        // folded into the initial load instead — see this function's load()
+        // call, above — so it never reaches this nudge at all), so the same
+        // transition falls due 1 ps earlier. Stepping the core to
+        // `clampedUntilEvent + 1e-12` lands its sample on classic's instant,
+        // just after the commit on both sides, instead of loosening
+        // compare.ts's 1e-12 simTime check.
+        t += untilEvent > 0 && untilEvent <= candidateStep ? clampedUntilEvent + 1e-12 : candidateStep;
         engine.advance(t);
         if (!engine.lastConverged) {
           throw new Error(

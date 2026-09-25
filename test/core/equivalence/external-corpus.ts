@@ -15,6 +15,7 @@ import path from "node:path";
 import type { PartDefinition } from "../../../src/circuit/types.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
+import { detectOpenInput } from "./open-input.js";
 import type { StimulusPhase } from "./stimuli.js";
 import type { CorpusEntry } from "./types.js";
 import type { LoadedEntry } from "./brownout-fixtures.js";
@@ -122,6 +123,11 @@ export function loadExternalCorpus(dir: string): ExternalCorpus {
       file: full,
       phases: raw.phases,
       phasesUnsupported: raw.phasesUnsupported,
+      // Finding 8 (review): derived from the circuit itself, the same as
+      // every local fixture loader now does (open-input.ts) — an external
+      // manifest has no equivalent field to cross-check against, so unlike
+      // `kinds` there is nothing to detect staleness against here.
+      openInput: detectOpenInput(circuit),
     };
     return { entry, circuit };
   });

@@ -191,6 +191,19 @@ impl EventHeap {
     pub fn push_event(&mut self, ev: Event) {
         self.heap.push(std::cmp::Reverse(ev));
     }
+
+    /// Every still-pending event, in no particular order (the underlying
+    /// `BinaryHeap`'s own storage order, not `(time, seq)`) — for a caller
+    /// that needs to SCAN the whole heap rather than pop it in order
+    /// (`Kernel::next_digital_due_time`, finding 10/8: the earliest pending
+    /// driver `Commit` among possibly several, mixed in with `Crossing`/
+    /// `Step`/`Bucket` entries this scan must also see so it can filter them
+    /// out). Never removes anything, unlike [`Self::pop`], so a caller that
+    /// only wants to look does not need to pop-then-`push_event` every entry
+    /// back just to answer one question.
+    pub fn iter(&self) -> impl Iterator<Item = &Event> {
+        self.heap.iter().map(|std::cmp::Reverse(ev)| ev)
+    }
 }
 
 #[cfg(test)]

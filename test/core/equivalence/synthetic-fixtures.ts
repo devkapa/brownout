@@ -14,8 +14,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
+import { detectOpenInput } from "./open-input.js";
 import type { StimulusPhase } from "./stimuli.js";
-import type { AnalyticFixtureModel, CorpusEntry } from "./types.js";
+import type { AnalyticFixtureModel, CorpusEntry, DigitalFixtureSpec } from "./types.js";
 
 const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "core");
 
@@ -37,7 +38,15 @@ export interface SyntheticExpectation {
    * declared param values.
    */
   readonly phases?: readonly StimulusPhase[];
-  /** Decision 9's open-input tag, threaded straight onto the CorpusEntry — see `CorpusEntry.openInput`'s own doc (types.ts). `undefined`/false for every fixture without an OPEN floating-input pin. */
+  /**
+   * Finding 8 (review): decision 9's open-input tag is now AUTO-DETECTED
+   * from the circuit itself (`open-input.ts`'s `detectOpenInput`), the same
+   * "always derived, never trusted" rule `kinds` already gets — this field
+   * is kept only as a diagnostic the loader can cross-check against the
+   * detector (a fixture that declares one value while the detector computes
+   * the other is a stale fixture or a detector bug, either way worth
+   * surfacing), never as the value actually placed on the CorpusEntry.
+   */
   readonly openInput?: boolean;
   /**
    * Overrides `sampleTimesFor`'s default 10 ms window (sample.ts's
@@ -54,6 +63,14 @@ export interface SyntheticExpectation {
    * WHICH duration it is called with.
    */
   readonly durationS?: number;
+  /**
+   * Gate 2a's per-cycle digital alignment (decision 6), threaded straight
+   * onto the CorpusEntry the same way `analytic`/`phases` are — see
+   * `CorpusEntry.digital`'s own doc (types.ts) and `runDigitalAlignment`
+   * (run-entry.ts). `undefined` (every synthetic fixture before fixture 19)
+   * means "compare digitalState per-sample, unaligned" (the plain flow).
+   */
+  readonly digital?: DigitalFixtureSpec;
 }
 
 export interface LoadedSyntheticEntry {
@@ -82,6 +99,20 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
     }
     const expected = JSON.parse(fs.readFileSync(expectedPath, "utf8")) as SyntheticExpectation;
 
+    // Finding 8: always derived from the circuit (detectOpenInput), never
+    // trusted from the fixture's own manual flag — see SyntheticExpectation.
+    // openInput's own doc. A fixture whose manual flag disagrees with the
+    // detector is loudly wrong rather than silently ignored, exactly like
+    // external-corpus.ts's own manifestKindsMismatch treats a stale kinds list.
+    const openInput = detectOpenInput(circuit);
+    if (expected.openInput !== undefined && expected.openInput !== openInput) {
+      throw new Error(
+        `loadSyntheticCorpus: ${name}.expected.json declares openInput: ${String(expected.openInput)}, but ` +
+          `detectOpenInput(circuit) computes ${String(openInput)} — the manual flag is stale (or the detector is ` +
+          "wrong); fix the fixture's declaration or investigate the detector, never silently trust either.",
+      );
+    }
+
     const entry: CorpusEntry = {
       id: `synthetic/${name}`,
       origin: "synthetic",
@@ -104,7 +135,8 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       file: full,
       analytic: expected.analytic,
       phases: expected.phases,
-      openInput: expected.openInput,
+      digital: expected.digital,
+      openInput,
     };
     return { entry, circuit, expected };
   });

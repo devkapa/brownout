@@ -19,20 +19,20 @@
  * a clock is already HIGH) becomes visible to align.ts's cycle detector
  * instead of being silently swallowed into an assumed-empty starting point.
  *
- * CORE. No CoreEngine in this worktree implements the trace ABI yet
- * (core/README.md's `bo_engine_trace_enable`/`_ptr`/`_len`/`_clear`, contract
- * v2 "W1a") — this dispatch (A4, harness v2) runs concurrently with A1-A3,
- * who are landing it. `CoreTraceCapable` below is the SHAPE a `CoreEngine`
- * gains once that lands; `collectCoreDigitalTrace` feature-detects it at
- * runtime with `hasCoreTraceSupport` rather than assuming any particular
- * CoreEngine method exists at compile time — src/core/engine.ts is off-limits
- * to this worker, and coding directly against its current (v1) shape would
- * make this file wrong the moment A1-A3 land, instead of automatically
- * correct. Until then, every call throws `CoreTraceUnsupportedError` with a
- * clear message; trace.test.ts proves the collection LOGIC itself (diffing,
- * baseline-from-empty, NaN-means-absent) against synthetic engines that
- * satisfy the interface by hand, per this worker's brief ("code against an
- * interface and test with synthetic traces").
+ * CORE. `CoreEngine` (src/core/engine.ts) now implements the trace ABI
+ * (`enableTrace`/`readTrace`/`clearTrace`, over `bo_engine_trace_enable`/
+ * `_ptr`/`_len`/`_clear`, contract v2 "W1a") — `readTrace()` is already
+ * decoded to `{t, key, value}` via the compiler's own slot table
+ * (core/README.md's "Readouts": "Keys are built in TS; Rust publishes
+ * numbers"), so `collectCoreDigitalTrace` below does no decoding of its own.
+ * `CoreTraceCapable` is the STRUCTURAL shape it needs;
+ * `collectCoreDigitalTrace` still feature-detects it at runtime with
+ * `hasCoreTraceSupport` rather than importing `CoreEngine`'s concrete type
+ * for the check, so this file keeps working unchanged against a synthetic
+ * stand-in (trace.test.ts's own coverage: "code against an interface and
+ * test with synthetic traces") and degrades cleanly
+ * (`CoreTraceUnsupportedError`) if this worktree's wasm build is ever older
+ * than the TS side expects it to be.
  */
 
 import { CoreEngine } from "../../../src/core/engine.js";
@@ -153,12 +153,12 @@ export function hasCoreTraceSupport(engine: unknown): engine is CoreTraceCapable
 }
 
 /**
- * Thrown by every real (non-synthetic) core trace call until a `CoreEngine`
- * actually satisfies `CoreTraceCapable`. Callers that must tolerate a
- * mid-landing ABI (this worker's own Verify step: "The core side may fail to
- * load while A2/A3 are mid-change... run the classic-only paths, and re-run
- * the core paths at the end") catch this specifically and downgrade rather
- * than treating it as a circuit failure.
+ * Thrown by a real (non-synthetic) core trace call if the live `CoreEngine`
+ * ever does NOT satisfy `CoreTraceCapable` — normally unreachable now that
+ * `CoreEngine.enableTrace`/`readTrace`/`clearTrace` exist, but kept as a
+ * defensive downgrade (not a thrown circuit failure) for a worktree whose
+ * built wasm is stale relative to its own TS, or any other build skew.
+ * Callers that must tolerate that catch this specifically.
  */
 export class CoreTraceUnsupportedError extends Error {
   constructor() {
@@ -190,11 +190,30 @@ export function collectCoreDigitalTrace(
     if (!hasCoreTraceSupport(engine)) {
       throw new CoreTraceUnsupportedError();
     }
+    // The load-time baseline, as a diff from `{}` at the load's own instant —
+    // mirroring `collectClassicDigitalTrace`'s identical `diffDigitalStates(t,
+    // {}, prev)` baseline above. `bo_engine_trace_enable` only records CHANGES
+    // from whenever it is turned on, so without this the core's trace would
+    // start from whatever `load()` already settled to (silently), while
+    // classic's trace explicitly carries that same settle as its own cycle-0
+    // sample (align.ts's `sampleCycles`, decision 8's own "the load-time
+    // state IS the first thing align.ts's cycle 0 reads"). Omitting this made
+    // the two traces structurally asymmetric: cycle 0 came out empty on the
+    // core (nothing was ever recorded before the first REAL transition) but
+    // non-empty on classic, so no anchor state already true at load could
+    // ever be found on the core side.
+    const baseline = engine.digitalState;
+    const baselineEvents: DigitalTraceEvent[] = Object.entries(baseline).map(([key, value]) => ({
+      t: engine.simTime,
+      key,
+      value,
+    }));
+
     engine.enableTrace(true);
     engine.advance(durationS);
     const events = [...engine.readTrace()];
     engine.clearTrace();
-    return events;
+    return [...baselineEvents, ...events];
   } finally {
     engine.dispose();
   }

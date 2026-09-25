@@ -15,6 +15,7 @@ import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import { alignCycles, compareAlignedCycles, sampleCycles, type AlignmentSuccess } from "./align.js";
 import { compareStimuliSamples } from "./compare.js";
 import {
   collectClassicSamplesCached,
@@ -28,6 +29,7 @@ import {
 } from "./run-entry.js";
 import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase } from "./stimuli.js";
 import { loadSyntheticCorpus } from "./synthetic-fixtures.js";
+import { collectClassicDigitalTrace, collectCoreDigitalTrace } from "./trace.js";
 import type { CorpusEntry } from "./types.js";
 
 type SimComponent = SimCircuit["components"][number];
@@ -215,10 +217,17 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
     // is empty) — CoreEngine.setParams must reject this loudly, and
     // runStimuliEntry must surface that rejection as a real "error" entry,
     // not fold it into "not yet supported" (that status is reserved for
-    // StimuliNotYetSupportedOnCoreError, an unrelated failure mode).
+    // StimuliNotYetSupportedOnCoreError, an unrelated failure mode). The
+    // override is on phase 1, not phase 0: phase 0's own `set` is folded into
+    // the circuit before the initial load (investigation point 2, finding
+    // 12), where "live" is not a constraint at all — only a LATER phase's
+    // `set` ever reaches CoreEngine.setParams's liveness check.
     const entry = baseEntry({
       kinds: ["ground", "resistor", "switch", "voltage_source"],
-      phases: [{ set: [{ id: "r1", params: { resistance: 5000 } }], durationS: 1e-3 }],
+      phases: [
+        { durationS: 1e-3 },
+        { set: [{ id: "r1", params: { resistance: 5000 } }], durationS: 1e-3 },
+      ],
     });
 
     const result = runCorpusEntry(entry, switchedDivider(1));
@@ -419,5 +428,76 @@ describe("classic reference cache location — finding 12 (an external corpus's 
     expect(created.length).toBeGreaterThan(0);
     expect(created.every((f) => f.startsWith(os.tmpdir()))).toBe(true);
     newFilesWritten.push(...created);
+  });
+});
+
+/**
+ * Fix 7 (review): fixture 19 (the 74HC14 relaxation oscillator) now declares
+ * `digital` (decision 6's per-cycle alignment), which is only meaningful now
+ * that `CoreEngine` implements the trace ABI (trace.ts's `enableTrace`/
+ * `readTrace`/`clearTrace`) — before that it would have downgraded to
+ * "unsupported" and compared nothing. These tests use the fixture's REAL
+ * circuit and its own declared clockKey/anchor/offsetBoundCycles (never
+ * synthetic dummy keys — align.test.ts already covers the alignment
+ * machinery generically with synthetic traces) to prove: (a) the real
+ * classic-vs-core alignment genuinely passes with real per-cycle data, and
+ * (b) a seeded fault — the core's trace missing one whole toggle, exactly
+ * what an oscillator with a wrong period/threshold would produce — is
+ * actually caught, not silently absorbed by the alignment tolerance.
+ */
+describe("gate 2a real fixture — 19-74hc14-relaxation-oscillator (fix 7)", () => {
+  const fixture19 = loadSyntheticCorpus().find((e) => e.entry.name === "19-74hc14-relaxation-oscillator")!;
+  const spec = fixture19.entry.digital!;
+
+  it("fixture 19 declares a digital spec, so it exercises the real per-cycle alignment, not the downgraded path", () => {
+    expect(spec, "fixture 19 must declare `digital` for this describe block to mean anything").toBeDefined();
+    expect(spec.clockKey).toBe("u1/1y");
+  });
+
+  it("aligns cleanly at offset 0 with zero mismatches, across at least the fixture's declared minimum cycles", () => {
+    const durationS = spec.traceDurationS!;
+    const classicTrace = collectClassicDigitalTrace(fixture19.circuit, durationS);
+    const coreTrace = collectCoreDigitalTrace(fixture19.circuit, durationS);
+
+    const classicCycles = sampleCycles(classicTrace, spec.clockKey, spec.projection);
+    const coreCycles = sampleCycles(coreTrace, spec.clockKey, spec.projection);
+    const alignment = alignCycles(classicCycles, coreCycles, spec.anchor, spec.offsetBoundCycles);
+    expect(alignment.ok, alignment.ok ? "" : alignment.reason).toBe(true);
+
+    const comparison = compareAlignedCycles(classicCycles, coreCycles, alignment as AlignmentSuccess);
+    expect(comparison.mismatches).toEqual([]);
+    expect(comparison.comparedCycles).toBeGreaterThanOrEqual(spec.minComparedCycles);
+  });
+
+  it("a seeded period error — one cycle's real, sampled state flipped — fails the per-cycle comparison", () => {
+    const durationS = spec.traceDurationS!;
+    const classicTrace = collectClassicDigitalTrace(fixture19.circuit, durationS);
+    const coreTrace = collectCoreDigitalTrace(fixture19.circuit, durationS);
+
+    const classicCycles = sampleCycles(classicTrace, spec.clockKey, spec.projection);
+    const realCoreCycles = sampleCycles(coreTrace, spec.clockKey, spec.projection);
+    expect(realCoreCycles.length).toBeGreaterThan(spec.minComparedCycles);
+
+    // Seed the fault on the REAL, already-sampled core cycles (not the raw
+    // event list): a single-key oscillator alternates 0/1 every cycle by
+    // construction, so dropping a raw trace EVENT merges two half-cycles
+    // instead of producing a per-cycle state mismatch — mirroring align.
+    // test.ts's own "seeded fault: a bit flip" pattern (synthetic there;
+    // this fixture's real, collected cycles here) is what actually exercises
+    // what compareAlignedCycles inspects: cycle N (not compared to the
+    // t=0/anchor cycle) has ITS state flipped, as if the core reported the
+    // wrong logic level for one whole cycle — exactly what a wrong period or
+    // wrong Schmitt threshold would produce.
+    const flipIndex = Math.min(3, realCoreCycles.length - 1);
+    const flippedCycle = realCoreCycles[flipIndex]!;
+    const seededCoreCycles = realCoreCycles.map((c, i) =>
+      i === flipIndex ? { ...c, state: { [spec.clockKey]: flippedCycle.state[spec.clockKey] === 1 ? 0 : 1 } } : c,
+    );
+
+    const alignment = alignCycles(classicCycles, seededCoreCycles, spec.anchor, spec.offsetBoundCycles);
+    expect(alignment.ok, "the anchor (cycle 0) is untouched by flipping a LATER cycle").toBe(true);
+
+    const comparison = compareAlignedCycles(classicCycles, seededCoreCycles, alignment as AlignmentSuccess);
+    expect(comparison.mismatches.length, "a flipped cycle must surface as a real per-cycle mismatch, never be silently absorbed").toBeGreaterThan(0);
   });
 });

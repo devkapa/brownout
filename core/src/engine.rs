@@ -192,6 +192,15 @@ impl Engine {
         self.kernel.next_event_time()
     }
 
+    /// Time of the earliest pending driver commit, `+Infinity` when none
+    /// (core/README.md, `bo_engine_next_digital_due_time`; finding 10/8).
+    /// `&self`, not `&mut`: see `Kernel::next_digital_due_time`'s own doc
+    /// comment on why this one never needs to permanently discard anything
+    /// to answer correctly.
+    pub fn next_digital_due_time(&self) -> f64 {
+        self.kernel.next_digital_due_time()
+    }
+
     pub fn digital_slots(&self) -> &[f64] {
         self.readout.digital_slots()
     }

@@ -11,5 +11,12 @@
     "node": { "component": "c1", "pin": "a" },
     "currentComponents": ["r1", "c1"],
     "negatedCurrentComponents": ["vcc"]
+  },
+  "digital": {
+    "clockKey": "u1/1y",
+    "anchor": { "u1/1y": 1 },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 8,
+    "traceDurationS": 0.01
   }
 }

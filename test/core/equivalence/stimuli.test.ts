@@ -18,6 +18,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { initCore } from "../../../src/core/wasm.js";
+import { compareStimuliSamples } from "./compare.js";
 import {
   replayStimuliOnClassic,
   replayStimuliOnCore,
@@ -216,7 +217,15 @@ describe("replayStimuliOnCore", () => {
 
   it("a phase that sets a param which exists but is NOT live fails clearly — never silently skipped, and never StimuliNotYetSupportedOnCoreError", () => {
     // r1 (resistor) has no live params at all (CORE_RECORD_SHAPES.resistor.liveParams is empty).
-    const phases: StimulusPhase[] = [{ set: [{ id: "r1", params: { resistance: 5000 } }], durationS: STIMULUS_FIXED_STEP_S }];
+    // The override is on phase 1, not phase 0: phase 0's own `set` is folded
+    // into the circuit before the initial load() (investigation point 2),
+    // where "live" is not a constraint at all (a fresh compile accepts any
+    // param) — this test is specifically about `CoreEngine.setParams`'s own
+    // liveness check, which only a LATER phase's `set` ever reaches.
+    const phases: StimulusPhase[] = [
+      { durationS: STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "r1", params: { resistance: 5000 } }], durationS: STIMULUS_FIXED_STEP_S },
+    ];
     expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/live/i);
     try {
       replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
@@ -227,7 +236,15 @@ describe("replayStimuliOnCore", () => {
   });
 
   it("a phase naming a component absent from the loaded program fails clearly, not silently", () => {
-    const phases: StimulusPhase[] = [{ set: [{ id: "no-such-component", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S }];
+    // Same reasoning as above: phase 0's `set` is folded into the initial
+    // load (`applyPhaseOverrides`, which silently no-ops an unknown
+    // component id, mirroring classic's own reload path) — this check is
+    // specifically about `CoreEngine.setParams`'s own unknown-component
+    // check, reached only by a phase AFTER the first.
+    const phases: StimulusPhase[] = [
+      { durationS: STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "no-such-component", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S },
+    ];
     expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/no device for component/);
   });
 
@@ -280,21 +297,23 @@ describe("replayStimuliOnCore", () => {
    * mode — landing a short first step (here, exactly the 74HC138's 20 ns
    * prop_delay_ns) right after the reload, before resuming the plain
    * STIMULUS_FIXED_STEP_S grid. Before this file's event-aligned clamp
-   * (mirroring that with `engine.nextEventTime()`, `bo_engine_next_event_time`),
-   * replayStimuliOnCore had no such clamp at all, so it produced FEWER
-   * samples than classic for the SAME phases the moment a circuit contained
-   * a combinational IC — compareStimuliSamples (compare.ts) rejects that
-   * outright as a harness bug (unequal sequence lengths), not a comparable
-   * circuit result. This is the regression proof: any implemented
+   * (mirroring that with `engine.nextDigitalDueTime()`,
+   * `bo_engine_next_digital_due_time` — finding 10 narrowed this from the
+   * wider `bo_engine_next_event_time`, see that finding's own regression test
+   * below), replayStimuliOnCore had no such clamp at all, so it produced
+   * FEWER samples than classic for the SAME phases the moment a circuit
+   * contained a combinational IC — compareStimuliSamples (compare.ts) rejects
+   * that outright as a harness bug (unequal sequence lengths), not a
+   * comparable circuit result. This is the regression proof: any implemented
    * combinational-IC kind whose input a phase changes reproduces it.
    */
-  it("matches replayStimuliOnClassic's own sample COUNT when a phase toggles a DIP switch driving a 74HC138 address input (a pending IC delay-FSM due time right at the phase boundary)", () => {
+  function hc138DipSwitchCircuit(): SimCircuit {
     const hc138 = part(
       "hc138",
       "74hc138",
       ["a0", "a1", "a2", "e1n", "e2n", "e3", "y7n", "gnd", "y6n", "y5n", "y4n", "y3n", "y2n", "y1n", "y0n", "vcc"],
     );
-    const circuit: SimCircuit = {
+    return {
       components: [
         part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
         part("dip", "dip_switch", ["a1", "b1"], { positions: 2, sw1: 0, sw2: 0 }),
@@ -315,6 +334,10 @@ describe("replayStimuliOnCore", () => {
         wire("vcc", "neg", "hc138", "a2"),
       ],
     };
+  }
+
+  it("matches replayStimuliOnClassic's own sample COUNT when a phase toggles a DIP switch driving a 74HC138 address input (a pending IC delay-FSM due time right at the phase boundary), and is a REAL compareStimuliSamples equivalence, not just a count/time match", () => {
+    const circuit = hc138DipSwitchCircuit();
     const phases: StimulusPhase[] = [
       { durationS: 5 * STIMULUS_FIXED_STEP_S },
       { set: [{ id: "dip", params: { sw1: 1 } }], durationS: 5 * STIMULUS_FIXED_STEP_S },
@@ -326,6 +349,166 @@ describe("replayStimuliOnCore", () => {
     expect(coreSamples, "the old (unclamped) core loop landed on the plain grid and undercounted here").toHaveLength(classicSamples.length);
     for (let i = 0; i < classicSamples.length; i++) {
       expect(coreSamples[i]!.phaseIndex, `sample ${String(i)}`).toBe(classicSamples[i]!.phaseIndex);
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+
+    // Finding 12: the DIP toggle flips the 74HC138's address, swapping which
+    // of y6n/y7n is active — a real classic/core comparison (not just the
+    // count/simTime check above) must actually pass, with the one-sample lag
+    // at the commit instant explained by compare.ts's stamp-after-commit-lag
+    // exemption, never silently ignored.
+    const cmp = compareStimuliSamples(classicSamples, coreSamples, circuit);
+    expect(cmp.mismatches, JSON.stringify(cmp.mismatches, null, 2)).toEqual([]);
+  });
+
+  it("a seeded core fault in the SAME 74HC138 DIP-switch scenario still fails — the stamp-after-commit-lag exemption does not swallow a real regression", () => {
+    const circuit = hc138DipSwitchCircuit();
+    const phases: StimulusPhase[] = [
+      { durationS: 5 * STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "dip", params: { sw1: 1 } }], durationS: 5 * STIMULUS_FIXED_STEP_S },
+    ];
+
+    const classicSamples = replayStimuliOnClassic(circuit, phases);
+    const coreSamples = replayStimuliOnCore(circuit, phases);
+
+    // Seed a fault: corrupt the core's LAST sample's net voltages (a stand-in
+    // for a genuine core regression) so it never recovers — unlike the real
+    // stamp-after-commit lag, which only ever touches the ONE sample right at
+    // the commit and agrees again by the very next one.
+    const lastNetV = { ...coreSamples.at(-1)!.netV };
+    const netKeys = Object.keys(lastNetV);
+    expect(netKeys.length).toBeGreaterThan(0);
+    for (const key of netKeys) lastNetV[key] = lastNetV[key]! + 1; // any real component this large fails tolerance
+    const seeded = [...coreSamples.slice(0, -1), { ...coreSamples.at(-1)!, netV: lastNetV }];
+
+    const cmp = compareStimuliSamples(classicSamples, seeded, circuit);
+    expect(cmp.mismatches.length, "a seeded, non-recovering fault must never be excused").toBeGreaterThan(0);
+    // The mismatch is on the corrupted nets, at (approximately — sampleTime
+    // is labelled from CLASSIC's own clock, per compare.ts's convention)
+    // the last sample's instant: this is a genuinely unexplained failure,
+    // never routed into knownDivergences the way the real, transient
+    // stamp-after-commit lag is.
+    const lastSimTime = seeded.at(-1)!.simTime;
+    expect(cmp.mismatches.every((m) => m.category === "netV" && Math.abs(m.sampleTime - lastSimTime) < 1e-6)).toBe(true);
+    // None of the SEEDED corruption (specifically, at the last sample) was
+    // excused as a known divergence — an unrelated, EARLIER real commit-lag
+    // exemption (the genuine DIP-toggle swap) may legitimately reference one
+    // of this circuit's net ids too, so the check is keyed on sampleTime, not
+    // merely "does some known divergence name a net this circuit has".
+    expect(cmp.knownDivergences.some((d) => Math.abs(d.mismatch.sampleTime - lastSimTime) < 1e-6)).toBe(false);
+  });
+
+  /**
+   * Finding 10: a W1b-only fixture (a two-capacitor ladder toggled by a
+   * switch — no combinational IC anywhere, exactly the fixture-14 shape) has
+   * no digital due time at all, but its RC ladder's dynamic partition gets
+   * classified STEPPED (decision 14: a dynamic partition holding two or more
+   * capacitors). Clamping to the wider `bo_engine_next_event_time` (which
+   * also reports that partition's own internal step-doubling Step
+   * bookkeeping, `POST_EVENT_H = 1e-8`) made this loop single-step through
+   * every one of the stepped solver's own ~1e-8s internal steps for the rest
+   * of each 20ms phase — millions of samples instead of 40, and a runtime in
+   * the seconds instead of milliseconds. `nextDigitalDueTime()` reports
+   * `+Infinity` for this circuit (nothing digital is ever due), so the loop
+   * falls straight through to the plain `STIMULUS_FIXED_STEP_S` grid, exactly
+   * as it did before W1c ever added a combinational-IC clamp at all.
+   */
+  it("does not explode into millions of samples on a W1b stepped-partition ladder toggled by a switch, and matches classic's 40 samples exactly (finding 10)", () => {
+    const ladder: SimCircuit = {
+      components: [
+        part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("sw", "switch", ["a", "b"], { closed: 0 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+        part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+        part("r2", "resistor", ["a", "b"], { resistance: 1000 }),
+        part("c2", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+      ],
+      wires: [
+        wire("vsrc", "pos", "sw", "a"),
+        wire("sw", "b", "r1", "a"),
+        wire("r1", "b", "c1", "a"),
+        wire("c1", "b", "vsrc", "neg"),
+        wire("r1", "b", "r2", "a"),
+        wire("r2", "b", "c2", "a"),
+        wire("c2", "b", "vsrc", "neg"),
+      ],
+    };
+    const phases: StimulusPhase[] = [
+      { set: [{ id: "sw", params: { closed: 1 } }], durationS: 20 * STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "sw", params: { closed: 0 } }], durationS: 20 * STIMULUS_FIXED_STEP_S },
+    ];
+
+    const classicSamples = replayStimuliOnClassic(ladder, phases);
+    const coreSamples = replayStimuliOnCore(ladder, phases, WITH_SWITCH);
+
+    expect(classicSamples).toHaveLength(40);
+    expect(coreSamples, "a wide event clamp explodes into ~4 million samples here — see finding 10").toHaveLength(40);
+    for (let i = 0; i < classicSamples.length; i++) {
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+  });
+
+  /**
+   * Finding 13: one SPDT drives both a 74HC14 (15ns delay) and a 74LS04
+   * (20ns delay) input. After the toggle, classic's fixed-step loop lands
+   * exactly on the 74HC14's +15ns commit, then computes `untilEvent = 5ns` to
+   * the 74LS04's +20ns commit — 5ns is under classic's own `H_MIN` (10ns)
+   * floor, so classic's NEXT step is forced to 10ns, overshooting to +25ns
+   * instead of landing exactly on +20ns. Without reproducing that floor here,
+   * the core lands its own next step exactly on +20ns (no floor), a 5ns
+   * offset from classic that both `simTime` and the resulting stale
+   * netV/elementI would otherwise flag as a mismatch.
+   */
+  it("reproduces classic's H_MIN overshoot when two different-family ICs commit under 10ns apart (finding 13)", () => {
+    const mixedFamily: SimCircuit = {
+      components: [
+        part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        // spdt_switch pins are com/b/c (devices/passives.ts's spdtSwitchModel);
+        // position:0 selects "b" (wired to gnd), position:1 selects "c"
+        // (wired to vcc) — resolveSpdtSel's own doc comment.
+        part("sw", "spdt_switch", ["com", "b", "c"], { position: 0 }),
+        part(
+          "hc14",
+          "74hc14",
+          ["1a", "1y", "2a", "2y", "3a", "3y", "gnd", "4y", "4a", "5y", "5a", "6y", "6a", "vcc"],
+        ),
+        part(
+          "ls04",
+          "74ls04",
+          ["vcc", "gnd", "1a", "1y", "2a", "2y", "3a", "3y", "4a", "4y", "5a", "5y", "6a", "6y"],
+        ),
+      ],
+      wires: [
+        wire("vcc", "pos", "sw", "c"),
+        wire("vcc", "neg", "sw", "b"),
+        wire("sw", "com", "hc14", "1a"),
+        wire("sw", "com", "ls04", "1a"),
+        wire("vcc", "pos", "hc14", "vcc"),
+        wire("vcc", "neg", "hc14", "gnd"),
+        wire("vcc", "neg", "hc14", "2a"),
+        wire("vcc", "neg", "hc14", "3a"),
+        wire("vcc", "neg", "hc14", "4a"),
+        wire("vcc", "neg", "hc14", "5a"),
+        wire("vcc", "neg", "hc14", "6a"),
+        wire("vcc", "pos", "ls04", "vcc"),
+        wire("vcc", "neg", "ls04", "gnd"),
+        wire("vcc", "neg", "ls04", "2a"),
+        wire("vcc", "neg", "ls04", "3a"),
+        wire("vcc", "neg", "ls04", "4a"),
+        wire("vcc", "neg", "ls04", "5a"),
+        wire("vcc", "neg", "ls04", "6a"),
+      ],
+    };
+    const phases: StimulusPhase[] = [
+      { durationS: STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "sw", params: { position: 1 } }], durationS: 2 * STIMULUS_FIXED_STEP_S },
+    ];
+
+    const classicSamples = replayStimuliOnClassic(mixedFamily, phases);
+    const coreSamples = replayStimuliOnCore(mixedFamily, phases);
+
+    expect(coreSamples).toHaveLength(classicSamples.length);
+    for (let i = 0; i < classicSamples.length; i++) {
       expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
     }
   });

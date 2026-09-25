@@ -555,8 +555,17 @@ impl StaticPartitionSolver {
     /// is never actually indexed in that case, and an empty slice is safe.
     fn stamp_ics_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) {
         for (device_index, ic) in &self.ics {
+            // `touches` also fires when this IC's own free supply node lives
+            // in `p_idx`, even if every one of its driver/pull pins is fixed
+            // elsewhere (findings 3/8): an output pin wired straight onto a
+            // fixed/ideal node still loads its IC's free `vcc`/`gnd` through
+            // `1/R_out`, and that conductance belongs in whichever partition
+            // holds the free end, regardless of which end named this IC in
+            // the first place.
             let touches = drivers.iter().any(|d| d.device == *device_index && self.in_partition(d.node, p_idx))
-                || ic.logic.iter().any(|p| p.open && p.floating_input && !p.open_high && self.in_partition(p.node, p_idx));
+                || ic.logic.iter().any(|p| p.open && p.floating_input && !p.open_high && self.in_partition(p.node, p_idx))
+                || self.in_partition(ic.vcc.node, p_idx)
+                || self.in_partition(ic.gnd.node, p_idx);
             if !touches {
                 continue;
             }
@@ -567,7 +576,13 @@ impl StaticPartitionSolver {
                 continue;
             }
             for driver in drivers {
-                if driver.device != *device_index || !self.in_partition(driver.node, p_idx) {
+                // No `in_partition(driver.node, p_idx)` guard here (findings
+                // 3/8): `Self::fold_local` already stamps correctly whether
+                // the driver's own node or its commit target is the free end
+                // in `p_idx` (or no-ops when NEITHER is), so pre-filtering on
+                // the driver's own node only, as before, silently dropped
+                // the "driver fixed, target free-in-`p_idx`" case entirely.
+                if driver.device != *device_index {
                     continue;
                 }
                 if let Some((target, g)) = ic_driver_target(&power, driver, ic) {

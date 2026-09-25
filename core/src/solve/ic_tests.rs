@@ -789,7 +789,7 @@ fn watch_hc14_schmitt(kernel: &mut Kernel<PartitionedSolver, IcHarness>, x_node:
     assert!(kernel.solver_mut().watch_node(
         x_node,
         DeviceId(ic_device_index as u32),
-        Box::new(|| vec![Threshold { value: 2.7, rising: true }, Threshold { value: 1.6, rising: false }]),
+        Box::new(|_v: &[f64]| vec![Threshold { value: 2.7, rising: true }, Threshold { value: 1.6, rising: false }]),
     ));
 }
 
@@ -999,7 +999,7 @@ fn k_free_rail_ic_in_a_stepped_partition_converges_and_a_supply_dip_unpowers_it_
     // the power window... If gnd is fixed, that is a threshold on the vcc
     // node"): both directions registered up front, so the SAME watch catches
     // both the initial power-up (rising) and the later dip (falling).
-    assert!(kernel.solver_mut().watch_node(2, DeviceId(ic_index as u32), Box::new(move || vec![
+    assert!(kernel.solver_mut().watch_node(2, DeviceId(ic_index as u32), Box::new(move |_v: &[f64]| vec![
         Threshold { value: lo, rising: true },
         Threshold { value: lo, rising: false },
     ])));
@@ -1358,3 +1358,572 @@ fn o_hc14_oscillator_through_engine_load_force_stepped_needs_no_hand_registratio
     let commits = drive_oscillator_via_engine(&mut engine, SLOT_1Y, 8);
     assert_periods_match_f64(&commits, hc14_oscillator_exact_period(), 2e-2);
 }
+
+// ============================================================================
+// W1c review-fix regression tests (worker R7). Each proves the finding it
+// names FAILS against the pre-fix code (verified by hand: reverting the
+// named fix and re-running the single test reproduces the failure) and
+// PASSES against the fix.
+// ============================================================================
+
+// ---- finding 1: the horizon clamp discards sync_dynamic_to's readers -----
+
+#[test]
+fn finding1_case1_fine_grained_1us_advances_still_catch_an_unwatched_reader_on_a_free_supply() {
+    // The finding's own case 1, structurally: an IC reader with NO
+    // registered crossing watch at all (contract point 4, amended: an IC
+    // whose supply sits in a DYNAMIC partition relies purely on the stepped
+    // re-read, never a watch), so there is no pre-existing "crossing
+    // refinement" safety net to fall back on -- unlike a fixed-rail reader
+    // (which `register_ic_read_pin_watches` DOES watch, and whose own
+    // `plan_and_schedule` keeps re-arming a correctly refined `Step` after
+    // every horizon clamp regardless of this finding's bug, so a
+    // single-node fixed-rail variant of this test does not actually
+    // discriminate old code from fixed code -- verified by hand). 0=gnd,
+    // 1=5V rail (fixed), 2=vcc (free: 10 ohm feed + 1uF decoupling cap,
+    // test (k)'s own pattern -- forces the partition Stepped, contract
+    // point 3), 3=1a (a bare 100k tap off vcc, in the SAME Stepped
+    // partition, no capacitor of its own and no current path elsewhere, so
+    // it tracks vcc's own charge exactly). 1y drives a 10k load.
+    let p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 10.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 2, 3, 100_000.0),
+        ls04(4, 2, 0, [3, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_vcc, _) = pb.local_index[2].expect("vcc is free");
+    let (p_a, _) = pb.local_index[3].expect("1a is free");
+    assert_eq!(pb.kinds[p_vcc], crate::partition::PartitionKind::Stepped, "a free IC supply forces Stepped (contract point 3)");
+    assert_eq!(p_a, p_vcc, "1a must share vcc's own (dynamic) partition, so its supply is NOT load-stable and gets no watch (findings 2/6's own eligibility rule)");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 4, 1); // 1y
+    // vc=0 at load (contract point 5): unpowered until vcc (and 1a, which
+    // tracks it exactly) charges into the power window.
+    assert_eq!(kernel.driver(y).committed(), None, "unpowered at load: vcc starts at 0V");
+
+    let dt = 1e-6; // 1us: with the bug, the horizon clamp's own changed-node
+                   // reader report (`report_changed_ic_readers`, the ONLY
+                   // mechanism available here, with no watch to fall back
+                   // on) is discarded on every one of these calls.
+    let mut t = 0.0;
+    let mut flipped_at = None;
+    while flipped_at.is_none() && t < 5e-3 {
+        t += dt;
+        kernel.advance(t).unwrap();
+        if kernel.driver(y).committed() == Some(Mode::Low) {
+            flipped_at = Some(kernel.time());
+        }
+    }
+    let flipped_at = flipped_at.expect(
+        "1y must flip within 5ms of fine-grained 1us advances -- finding 1's discarded horizon-clamp readers leave an unwatched, dynamic-supply IC reader stale forever",
+    );
+
+    // 1a tracks vcc exactly (no drop across the 100k: nothing else draws
+    // current through it), so the IC powers on exactly when vcc clears the
+    // power window (vcc_min*0.9 = 4.275V for LS-TTL) -- already well past
+    // vih=2.0V by then, so 1y commits LOW at essentially that same instant
+    // (plus the 20ns inertial delay), quantized to this test's own 1us grid.
+    let tau = 10.0 * 1e-6;
+    let t_power_on = -tau * (1.0 - 4.75 * 0.9 / 5.0f64).ln();
+    let expected = t_power_on + 20e-9;
+    assert!((flipped_at - expected).abs() < 2.0 * dt, "1y flipped at {flipped_at}, expected ~{expected} (within one grid step)");
+}
+
+#[test]
+fn finding1_case2_gated_oscillator_advances_correctly_under_1us_host_steps() {
+    // The finding's own case 2 (fixture 19): a 74HC14 whose vcc is free
+    // (reached only through a closed switch from a fixed 5V rail, no added
+    // R/C of its own -- a Static supply would be the OTHER finding, 2/6;
+    // here vcc's OWN free-ness, plus the union rule joining every free
+    // output-capable pin of the SAME ic with it, pulls {vcc, 1y, X} into ONE
+    // partition, promoted to Stepped by contract point 3's rule). Driven by
+    // 1us host steps only (never `next_event_time`), exactly the finding's
+    // own reproduction shape.
+    let (r, c) = (10_000.0, 100e-9);
+    let p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        switch_dev(1, 1, 2, 1.0), // power switch, CLOSED at load: vcc free but ~5V.
+        resistor(2, 3, 4, r),
+        capacitor(3, 4, 0, c, 0.0, 0.0),
+        hc14(4, 2, 0, [4, 3, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9], [false; 12], [0; 12], 0.02, 15e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_vcc, _) = pb.local_index[2].expect("vcc is free");
+    assert_eq!(pb.kinds[p_vcc], crate::partition::PartitionKind::Stepped, "a free IC supply forces Stepped (contract point 3)");
+    let (p_x, _) = pb.local_index[4].expect("X is free");
+    assert_eq!(p_x, p_vcc, "the union rule must place X (a free output-capable-fed node) in the SAME partition as vcc");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    let ic_index = 4;
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, ic_index, 1); // 1y
+
+    let dt = 1e-6;
+    let mut t = 0.0;
+    let mut first_commit = None;
+    let last_mode = kernel.driver(y).committed();
+    while first_commit.is_none() && t < 5e-3 {
+        t += dt;
+        kernel.advance(t).unwrap();
+        let mode = kernel.driver(y).committed();
+        if mode != last_mode {
+            first_commit = Some((kernel.time(), mode.expect("a driver that just changed must be committed to something")));
+        }
+    }
+    let (first_t, first_mode) = first_commit.expect(
+        "the gated oscillator must flip within 5ms of fine-grained 1us advances -- finding 1's discarded horizon-clamp readers leave it frozen forever",
+    );
+    assert_eq!(first_mode, Mode::Low, "X charging past 2.7V must commit 1y LOW");
+
+    // The first charge leg, from vc=0 at load (contract point 5): X heads
+    // from 0V toward 5V and crosses vt+ = 2.7V at tau*ln(5/(5-2.7)), plus
+    // one 15ns propagation delay -- `hc14_oscillator_exact_period`'s own
+    // first-leg derivation, before any prior commit exists to correct for.
+    let tau = (r + 62.5) * c;
+    let expected_first = tau * (5.0f64 / (5.0 - 2.7)).ln() + 15e-9;
+    let rel = (first_t - expected_first).abs() / expected_first;
+    assert!(rel < 2e-2, "first commit at {first_t}, expected ~{expected_first} (rel {rel})");
+}
+
+// ---- findings 2/6: a closed-form read pin's watch needs a Static-supply
+// eligibility rule and a re-aim when that supply moves -------------------
+
+#[test]
+fn finding2_6_closed_form_ic_input_is_watched_when_its_supply_sits_in_a_static_partition() {
+    // The findings' own scenario (fixture 17-style): 0=gnd, 1=5V rail
+    // (fixed), 2=vcc (free, through a closed switch -- a `Static` partition
+    // holding a free IC supply, `StaticPartitionSolver::iterate_solve`'s own
+    // territory, never promoted since it has no capacitor), 3=1a (RC: 10k
+    // from the rail, 1uF to gnd -- its OWN ClosedForm partition, since a
+    // plain read pin is never unioned with its IC's supply), 4=1y
+    // (unloaded), 5..9=the other five gates' isolated dumps. A Schmitt part
+    // (74hc14), not a plain 74ls04: a plain pin's dead band is a genuine
+    // hash-based coin flip (`digital::floating::floating_high`), which would
+    // make this test's own expected-time formula meaningless.
+    let p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        switch_dev(1, 1, 2, 1.0), // vcc power switch, CLOSED at load.
+        resistor(2, 1, 3, 10_000.0),
+        capacitor(3, 3, 0, 1e-6, 0.0, 0.0),
+        hc14(4, 2, 0, [3, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9], [false; 12], [0; 12], 0.02, 15e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_vcc, _) = pb.local_index[2].expect("vcc is free");
+    assert_eq!(pb.kinds[p_vcc], crate::partition::PartitionKind::Static, "no capacitor of its own: stays Static (contract point 3's `iterate_solve` path)");
+    let (p_a, _) = pb.local_index[3].expect("1a is free");
+    assert_eq!(pb.kinds[p_a], crate::partition::PartitionKind::ClosedForm, "a plain read pin is never unioned with its IC's supply");
+    assert_ne!(p_vcc, p_a, "vcc and 1a must be genuinely different partitions for this to test findings 2/6 at all");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 4, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a at 0V (LOW) -> 1y HIGH at settle");
+
+    // Driven purely by `next_event_time`/`advance`: if 1a's read pin were
+    // never watched (findings 2/6's own bug -- `register_ic_read_pin_watches`
+    // requires BOTH supply nodes literally fixed), `next_event_time` would
+    // stay `+Infinity` forever and 1y would never move, since nothing else
+    // in this circuit perturbs anything on its own.
+    let mut guard = 0;
+    loop {
+        let t = kernel.next_event_time();
+        assert!(t.is_finite(), "1a's crossing watch must be registered even though vcc sits in a Static, not fixed, partition (findings 2/6)");
+        kernel.advance(t).unwrap();
+        guard += 1;
+        assert!(guard < 100, "must reach a commit well within a handful of events");
+        if kernel.driver(y).committed() == Some(Mode::Low) {
+            break;
+        }
+    }
+    let tau = 10_000.0 * 1e-6;
+    let expected = -tau * (1.0 - 2.7 / 5.0f64).ln() + 15e-9;
+    let rel = (kernel.time() - expected).abs() / expected;
+    assert!(rel < 1e-3, "1y committed LOW at {}, expected ~{expected} (rel {rel})", kernel.time());
+}
+
+#[test]
+fn finding2_6_reaiming_a_static_supply_move_updates_a_scaled_thresholds_watch() {
+    // Isolates the SECOND half of findings 2/6's fix (re-aiming, not merely
+    // registering): a 74hc14 (CMOS_RATIO family -- its vt-/vt+ SCALE with
+    // the live supply, contract's scaling formula) whose vcc is selected, by
+    // an spdt, between two different FIXED sources (2.5V and 5V) -- still a
+    // free, Static-partition supply, never fixed. 1a sits on its OWN RC (10k
+    // from a THIRD, independent fixed 5V rail, tau=1ms), unrelated to vcc,
+    // so ONLY the watched THRESHOLD moves when vcc is re-selected, never the
+    // RC's own trajectory -- isolating the re-aim's effect on the threshold
+    // value from any electrical coupling.
+    //
+    // 0=gnd, 1=5V rail (feeds 1a's RC, fixed), 2=2.5V source (fixed),
+    // 3=vcc (free: spdt selects 2=2.5V initially, then 1=5V), 4=X(=1a, RC:
+    // R from rail(1), C to gnd), 5=1y, 6..10=the other five gates' dumps.
+    let (r, c) = (10_000.0, 100e-9);
+    let p = program(11, vec![
+        source(0, 1, 0, 5.0),
+        source(1, 2, 0, 2.5),
+        spdt(2, 3, 2, 1, 0.0), // com=vcc(3), b=2.5V(node2), c=5V(node1); sel=0 selects b.
+        resistor(3, 1, 4, r),
+        capacitor(4, 4, 0, c, 0.0, 0.0),
+        hc14(5, 3, 0, [4, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10], [false; 12], [0; 12], 0.02, 15e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_vcc, _) = pb.local_index[3].expect("vcc is free");
+    assert_eq!(pb.kinds[p_vcc], crate::partition::PartitionKind::Static, "no capacitor of its own");
+    let (p_x, _) = pb.local_index[4].expect("X is free");
+    assert_eq!(pb.kinds[p_x], crate::partition::PartitionKind::ClosedForm);
+    assert_ne!(p_vcc, p_x);
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+    assert!((kernel.solver().voltages()[3] - 2.5).abs() < 1e-6, "vcc must start at 2.5V (sel=0)");
+    assert!(kernel.solver().ic_powered(5), "2.5V is within the hc14's power window (vcc_min=2.0)");
+
+    let y = driver_for(&kernel, &p, 5, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "X at 0V -> 1y HIGH at settle");
+
+    // Toggle vcc to 5V well before EITHER candidate threshold (1.35V at
+    // vS=2.5, 2.7V at vS=5) so the re-aim's effect, not electrical timing
+    // luck, decides which one the schedule ends up honoring. (This also
+    // exercises the SAME mechanism a stale, still-pending crossing's own
+    // natural re-aim would eventually self-correct through on its own --
+    // `ClosedFormSolver::handle_crossing` always recomputes fresh thresholds
+    // at its own end -- so this test's real bar is that the schedule ends
+    // up honoring vS=5's 2.7V, not 2.5's 1.35V, regardless of exactly which
+    // path got it there; `PartitionedSolver::add_watch_dependent_partitions`
+    // is what makes that happen the instant the supply moves, rather than
+    // only whenever some unrelated crossing next happens to fire.)
+    let tau = r * c;
+    let t_1_35 = tau * (5.0f64 / (5.0 - 1.35)).ln();
+    let t_2_7 = tau * (5.0f64 / (5.0 - 2.7)).ln();
+    assert!(t_1_35 < t_2_7);
+    kernel.advance(0.1 * t_1_35).unwrap();
+    kernel.solver().validate_params(&[(2, 0, 1.0)]).unwrap();
+    kernel.apply_params_as_event(&[(2, 0, 1.0)]).unwrap(); // sel=1 selects c=5V.
+    assert!((kernel.solver().voltages()[3] - 5.0).abs() < 1e-6, "vcc must now read 5V");
+
+    let mut guard = 0;
+    loop {
+        let t = kernel.next_event_time();
+        assert!(t.is_finite());
+        kernel.advance(t).unwrap();
+        guard += 1;
+        assert!(guard < 100);
+        if kernel.driver(y).committed() == Some(Mode::Low) {
+            break;
+        }
+    }
+    let commit_t = kernel.time();
+    let rel_to_2_7 = (commit_t - t_2_7).abs() / t_2_7;
+    let rel_to_1_35 = (commit_t - t_1_35).abs() / t_1_35;
+    assert!(
+        rel_to_2_7 < 2e-2,
+        "1y committed LOW at {commit_t}, expected ~{t_2_7} (the FRESH vt+=2.7V threshold after the re-aim); rel to stale 1.35V threshold ({t_1_35}) was {rel_to_1_35} -- a stale, registration-time-captured threshold would fire far too early"
+    );
+    assert!(rel_to_1_35 > 0.1, "the commit must NOT land near the stale 1.35V-threshold time ({t_1_35}), got {commit_t}");
+}
+
+// ---- findings 3/8: an output pin on a fixed non-datum node must load its
+// free supply's partition -------------------------------------------------
+
+#[test]
+fn finding3_8_static_output_pin_on_a_fixed_node_loads_its_free_supply_and_balances_kcl() {
+    // v1=5V through 20 ohm to vcc(free, Static); 1a..6a tied to gnd so 1y is
+    // HIGH; 1y wired straight to v2=3V (a SECOND fixed node). Before the
+    // fix, `stamp_ics_into` never considered this ic for vcc's own
+    // partition at all (no driver/pull pin of its own was free-in-partition
+    // there), so vcc solved as if unloaded (5V exactly) while
+    // `recompute_source_currents` still billed v2 for the R_out current
+    // anyway -- a KCL-violating combination.
+    let p = program(9, vec![
+        source(0, 1, 0, 5.0), // v1
+        source(1, 3, 0, 3.0), // v2
+        resistor(2, 1, 2, 20.0),
+        ls04(3, 2, 0, [0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 3, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH");
+
+    let vcc = kernel.solver().voltages()[2];
+    // Independently verified against the real classic engine (the review's
+    // own VERIFIER section): V(vcc) = 4.7630997508717305. A tolerance wide
+    // enough for this core's own universal per-node shunt (absent from
+    // classic) and Newton convergence, but two orders of magnitude tighter
+    // than the bug's own 0.237V error (broken: exactly 5.0V, unloaded).
+    let expected_vcc = 4.7630997508717305;
+    let rel = (vcc - expected_vcc).abs() / expected_vcc;
+    assert!(rel < 1e-3, "V(vcc) = {vcc}, expected ~{expected_vcc} (rel {rel})");
+
+    // KCL: with only these two sources (plus negligible universal-shunt
+    // noise), everything leaving v1 must return through v2.
+    let currents = kernel.solver().currents();
+    let (i_v1, i_v2) = (currents[0], currents[1]);
+    assert!(i_v1.abs() > 1e-4, "I(v1) must be a real, nonzero loading current now that the coupling is stamped, got {i_v1}");
+    assert!((i_v1 + i_v2).abs() < 1e-5, "I(v1) + I(v2) must balance (KCL), got i_v1={i_v1} i_v2={i_v2}");
+}
+
+#[test]
+fn finding3_8_dynamic_output_pin_on_a_fixed_node_loads_a_stepped_free_supply() {
+    // `stamp_ics_into_dyn`'s twin of the static test above (findings 3/8
+    // cite both call sites): vcc free through 10 ohm plus a 1uF decoupling
+    // cap (promoted to Stepped, contract point 3), 1y wired straight to a
+    // SECOND fixed node (3V).
+    let p = program(9, vec![
+        source(0, 1, 0, 5.0),
+        source(1, 3, 0, 3.0),
+        resistor(2, 1, 2, 10.0),
+        capacitor(3, 2, 0, 1e-6, 0.0, 0.0),
+        ls04(4, 2, 0, [0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_vcc, _) = pb.local_index[2].expect("vcc is free");
+    assert_eq!(pb.kinds[p_vcc], crate::partition::PartitionKind::Stepped, "a free IC supply with its own capacitor is promoted to Stepped");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 4, 1); // 1y
+    // vc=0 at load (contract point 5): vcc starts at 0V, unpowered, and 1y
+    // has nothing committed until vcc charges into the power window (test
+    // (k)'s own pattern) -- unlike the static test above, where vcc has no
+    // capacitor and is already at its steady value from the first solve.
+    assert_eq!(kernel.driver(y).committed(), None, "unpowered at load: vcc starts at 0V");
+    kernel.advance(500e-6).unwrap(); // 50 time constants (10 ohm * 1uF): fully settled.
+    assert!(kernel.solver().ic_powered(4), "vcc must have charged into the power window by 500us");
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH once powered");
+
+    let currents = kernel.solver().currents();
+    let (i_v1, i_v2) = (currents[0], currents[1]);
+    assert!(i_v1.abs() > 1e-4, "I(v1) must be a real, nonzero loading current, got {i_v1}");
+    assert!((i_v1 + i_v2).abs() < 1e-5, "I(v1) + I(v2) must balance (KCL) once settled, got i_v1={i_v1} i_v2={i_v2}");
+
+    let vcc = kernel.solver().voltages()[2];
+    assert!(vcc < 4.99, "vcc must sag below the unloaded 5V once the pin's own loading is stamped, got {vcc}");
+}
+
+// ---- finding 9: an output on the datum node stamps nothing, draws no
+// source current ------------------------------------------------------------
+
+#[test]
+fn finding9_output_on_the_datum_node_stamps_nothing_and_draws_no_source_current() {
+    // 0=gnd (the datum), 1=vcc (5V fixed). 1a=gnd (LOW) -> 1y=HIGH, wired
+    // straight to the datum node itself -- classic's `_stampDigitalOutput`
+    // early-return case ("If the output node is below 0, it does nothing").
+    let p = program(7, vec![
+        source(0, 1, 0, 5.0),
+        ls04(1, 1, 0, [0, 0, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 1, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH");
+
+    // Without the guard, `recompute_source_currents` folds `1/R_out *
+    // (V(0) - V(vcc))` into the source's KCL unconditionally for every
+    // committed driver -- here that would be -5V/156.25ohm = -0.032A. With
+    // it, a driver on the datum node contributes nothing, matching classic's
+    // I(vsrc) (RSHUNT noise only, ~1e-11A).
+    let i_vsrc = kernel.solver().currents()[0];
+    assert!(i_vsrc.abs() < 1e-8, "I(vsrc) should be near zero (shunt noise only), got {i_vsrc}");
+}
+
+// ---- finding 7: a commit on a fixed-node driver must re-publish source
+// currents at that instant --------------------------------------------------
+
+#[test]
+fn finding7_a_commit_on_a_fixed_node_driver_republishes_the_source_current_immediately() {
+    // 0=gnd, 1=vcc (5V fixed, ALSO 1y's own node -- wired straight to the
+    // rail), 2=1a (via an spdt: b=gnd, c=vcc). `add_driver`'s own doc
+    // comment: a driver whose own node is fixed belongs to no partition, so
+    // its commit alone never dirties anything for the ordinary delta cycle
+    // to re-solve -- exactly the gap finding 7 describes.
+    let p = program(8, vec![
+        source(0, 1, 0, 5.0),
+        spdt(1, 2, 0, 1, 0.0), // sel=0 selects b=gnd: 1a starts LOW.
+        ls04(2, 1, 0, [2, 1, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 2, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH (targets its own vcc rail: no extra current)");
+    assert!(kernel.solver().currents()[0].abs() < 1e-8, "HIGH onto its own rail draws no extra current at settle");
+
+    // 1a -> HIGH: 1y commits LOW after 20ns, now targeting gnd instead of
+    // vcc -- a REAL current (5V/R_out) must appear in the vsrc's published
+    // current exactly at that commit, not one event later.
+    let t0 = kernel.time();
+    kernel.solver().validate_params(&[(1, 0, 1.0)]).unwrap();
+    kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+    kernel.advance(t0 + 20e-9).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1y must have committed LOW by now");
+    let i_after_low = kernel.solver().currents()[0];
+    assert!((i_after_low - (-0.032)).abs() < 1e-3, "I(vsrc) must reflect the new LOW commit's R_out-to-gnd current immediately, got {i_after_low}");
+
+    // Switch back: 1y commits HIGH again (back to its own rail), and the
+    // published current must revert to ~0 at THAT SAME instant, not stay
+    // stale at -0.032 until some unrelated event happens to dirty a
+    // partition (finding 7's own "stays exactly one commit stale").
+    let t1 = kernel.time();
+    kernel.solver().validate_params(&[(1, 0, 0.0)]).unwrap();
+    kernel.apply_params_as_event(&[(1, 0, 0.0)]).unwrap();
+    kernel.advance(t1 + 20e-9).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1y must have committed HIGH again by now");
+    let i_after_high = kernel.solver().currents()[0];
+    assert!(i_after_high.abs() < 1e-3, "I(vsrc) must revert to ~0 immediately once 1y is back on its own rail, got {i_after_high}");
+}
+
+// ---- finding 5: a stepped catch-up must integrate with the pre-event
+// driver stamps, not the ones the triggering commit just installed --------
+
+#[test]
+fn finding5_stepped_catchup_integrates_with_the_driver_level_in_force_before_the_commit() {
+    // 1a on a closed-form RC (5V, 10k, 1uF, tau=10ms) drives 1y, which feeds
+    // a 2-cap ladder (1y --1k-- n1 --1uF-- gnd, n1 --1k-- n2 --1uF-- gnd:
+    // decision 14's "two or more capacitors", naturally Stepped). A 74hc14
+    // (Schmitt, deterministic crossing at vt_plus=2.7V -- a plain pin's dead
+    // band is a genuine hash coin flip, useless for an analytic expected
+    // time). A SINGLE `advance` call spans from load past 1a's own
+    // closed-form crossing (~7.77ms) and 1y's resulting commit: the ladder's
+    // own two-stage settling is slow enough that it has NOT yet reached
+    // steady state by then (verified by hand: V(n1) reads ~4.7706V right at
+    // the crossing, still charging), but its own step-doubling controller
+    // still relaxes to larger steps once the charge stops changing much
+    // from one step to the next -- leaving it idle for a while before the
+    // commit lands, exactly the gap the finding describes ("bounded by
+    // H_MAX=10ms"). Whatever V(n1) actually is at the crossing, the
+    // PHYSICAL decay 1us later is bounded by tau=(R_out+1k)*1uF~1.06ms, at
+    // most a few mV -- not the multi-volt collapse toward 0V the pre-fix bug
+    // produces by integrating the WHOLE idle gap with 1y's NEW (LOW) level
+    // instead of the one actually in force throughout it.
+    let p = program(11, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 10_000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 3, 4, 1_000.0),
+        capacitor(4, 4, 0, 1e-6, 0.0, 0.0),
+        resistor(5, 4, 5, 1_000.0),
+        capacitor(6, 5, 0, 1e-6, 0.0, 0.0),
+        hc14(7, 1, 0, [2, 3, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10], [false; 12], [0; 12], 0.02, 15e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_ladder, _) = pb.local_index[3].expect("1y is free");
+    assert_eq!(pb.kinds[p_ladder], crate::partition::PartitionKind::Stepped, "two capacitors: Stepped by decision 14");
+    assert_eq!(pb.local_index[4].unwrap().0, p_ladder, "n1 must share the ladder's own partition");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 7, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a at 0V -> 1y HIGH at settle");
+
+    let tau_rc = 10_000.0 * 1e-6;
+    let t_cross = -tau_rc * (1.0 - 2.7 / 5.0f64).ln();
+    let sample_at = t_cross + 15e-9 + 1e-6; // 1us past 1y's own commit.
+
+    // ONE call: the ladder's own natural step schedule, 1a's closed-form
+    // crossing, and 1y's resulting commit ALL happen inside it, with no
+    // intervening horizon clamp to artificially re-sync the ladder right up
+    // to the commit first (which would hide the bug).
+    kernel.advance(sample_at).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1a crossing vih must have committed 1y LOW well before {sample_at}");
+
+    let v_n1 = kernel.solver().voltages()[4];
+    // Hand-verified (by tracing the same circuit event by event): V(n1) is
+    // ~4.7706V right at the crossing and decays by only a few mV over the
+    // following 1us with the fix (~4.766V). The pre-fix bug instead
+    // integrates the whole pre-commit idle gap with the NEW (LOW) driver,
+    // landing at ~3.87V here -- comfortably below this bound.
+    assert!(
+        v_n1 > 4.6,
+        "V(n1) = {v_n1} just 1us after 1y's commit -- physically it can only have moved a few mV from its ~4.77V value at the crossing (tau~1.06ms); a value this far below means the catch-up integrated the pre-commit gap with the NEW (LOW) driver level instead of the old one"
+    );
+}
+
+// ---- finding 10/8: bo_engine_next_digital_due_time ignores every event
+// kind except a live driver Commit -------------------------------------------
+
+#[test]
+fn finding8_next_digital_due_time_ignores_a_scheduled_crossing() {
+    // `build()` already auto-registers X's watch through the PRODUCTION
+    // `register_ic_read_pin_watches` (both supply nodes are fixed here), on
+    // top of `watch_hc14_schmitt`'s own hand registration -- so, exactly
+    // like test (m)'s own comment on this ("every non-open logic pin's
+    // thresholds are watched in BOTH directions... re-evaluates the reader,
+    // finds no actual level change yet, and immediately re-schedules"), the
+    // very FIRST scheduled Crossing here is the harmless "X rising through
+    // 1.6 on its way to 2.7" wake-up, not a real digital transition. The
+    // SECOND is the real one (2.7 rising).
+    let (p, x_node, ic_index, y_logic) = hc14_oscillator_program(false);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    watch_hc14_schmitt(&mut kernel, x_node, ic_index);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+    let y = driver_for(&kernel, &p, ic_index, y_logic);
+
+    assert!(kernel.next_event_time().is_finite(), "a Crossing must be scheduled after settle");
+    assert_eq!(kernel.next_digital_due_time(), f64::INFINITY, "no driver commit is pending yet -- only a Crossing is, which must not count");
+
+    let t_bookkeeping = kernel.next_event_time();
+    kernel.advance(t_bookkeeping).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "the 1.6-rising wake-up requests nothing: X is still below vt_plus");
+    assert_eq!(kernel.next_digital_due_time(), f64::INFINITY, "a bare Crossing wake-up that requested nothing must not report a pending digital due time");
+
+    let t_cross = kernel.next_event_time();
+    kernel.advance(t_cross).unwrap();
+    let due = kernel.next_digital_due_time();
+    assert!(due.is_finite() && due > t_cross, "a driver commit must now be pending, after the (real) 2.7 crossing's own propagation delay");
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "not committed yet: the delay has not elapsed");
+    kernel.advance(due).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "the driver commit next_digital_due_time reported must be the real one");
+}
+
+#[test]
+fn finding8_next_digital_due_time_ignores_a_scheduled_step() {
+    let (p, x_node, ic_index, _y_logic) = hc14_oscillator_program(true); // FORCE_STEPPED
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    watch_hc14_schmitt(&mut kernel, x_node, ic_index);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    assert!(kernel.next_event_time().is_finite(), "a Step must be scheduled (the stepped partition's own bookkeeping)");
+    assert_eq!(kernel.next_digital_due_time(), f64::INFINITY, "a scheduled Step must not count as a pending digital due time");
+}
+
+#[test]
+fn finding8_next_digital_due_time_ignores_a_scheduled_bucket() {
+    // (c)'s own fixture, with 1a driven by an spdt instead of tied straight
+    // to gnd, so it can be toggled to raise a genuine driver Commit.
+    let prefix = fnv1a("u1:1b:");
+    let p = program(9, vec![
+        source(0, 1, 0, 5.0),
+        spdt(1, 2, 0, 1, 0.0), // 1a selector: sel=0 selects gnd (LOW) at load.
+        ls00(2, 1, 0, [2, 8, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6], [false, true, false, false, false, false, false, false, false, false, false, false], [0, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.008, 20e-9),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    assert!(kernel.next_event_time().is_finite(), "a Bucket boundary must be scheduled for the open floating input");
+    assert_eq!(kernel.next_digital_due_time(), f64::INFINITY, "a scheduled Bucket must not count as a pending digital due time");
+
+    let t0 = kernel.time();
+    kernel.solver().validate_params(&[(1, 0, 1.0)]).unwrap();
+    kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap(); // sel=1 selects vcc: 1a -> HIGH.
+    let due = kernel.next_digital_due_time();
+    assert!(due.is_finite(), "a real driver commit must now be pending");
+    let y = driver_for(&kernel, &p, 2, 2); // 1y (NAND output).
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "not committed yet");
+    kernel.advance(due).unwrap();
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1a HIGH, 1b golden-HIGH -> NAND -> LOW");
+    let _ = t0;
+}
+
+
+

@@ -89,23 +89,32 @@ export interface CoreEngineStats {
  * also corrupt that reason vocabulary: the message here is prose like
  * "device[3]: unknown kind code 7", not a kind name.
  *
- * WHY -7 FALLS BACK HERE TOO (W1c, decision 8). `bo_engine_load` runs its own
- * zero-delay settle pass at load time (decision 8, option C: "settle
- * zero-delay first observations to a fixed point at t=0 ... no rescue ladder
- * (a failed t=0 solve returns an error and the circuit falls back to
- * classic)"). A combinational ring whose delta cycle never reaches a fixed
- * point exceeds the per-instant pass cap and gets -7 from THAT settle pass,
- * before any `advance()` call ever runs — core/README.md's own error-code
- * table names -7 "delta-cycle livelock", generically, not only an
- * advance()-time condition. Before this fix, -7 at load fell through to the
- * generic `CoreLoadError` branch below, which `HeadlessRunner._tryLoadCore`
+ * WHY -7 (AND -4, FINDING 11) FALL BACK HERE TOO (W1c, decision 8).
+ * `bo_engine_load` runs its own zero-delay settle pass at load time (decision
+ * 8, option C: "settle zero-delay first observations to a fixed point at t=0
+ * ... no rescue ladder (a failed t=0 solve returns an error and the circuit
+ * falls back to classic)"). A combinational ring whose delta cycle never
+ * reaches a fixed point exceeds the per-instant pass cap and gets -7 from
+ * THAT settle pass, before any `advance()` call ever runs — core/README.md's
+ * own error-code table names -7 "delta-cycle livelock", generically, not only
+ * an advance()-time condition. Before this fix, -7 at load fell through to
+ * the generic `CoreLoadError` branch below, which `HeadlessRunner._tryLoadCore`
  * does not catch (only `CoreUnsupportedError` triggers its classic
  * fallback — see headless.ts) — so a livelocked load would propagate out of
  * `HeadlessRunner.load()` as an uncaught throw instead of the documented
- * "raises -7, then the circuit falls back to classic" outcome. This is
- * distinct from a -7 returned by `advance()` (a MID-RUN livelock after a
- * program already loaded successfully): that case is unaffected by this
- * function — see `advance()`'s own -4/-7 handling below, which keeps
+ * "raises -7, then the circuit falls back to classic" outcome.
+ *
+ * -4 (solve failed) at LOAD time is exactly the same class of failure: W1c's
+ * IC-supply fixed point (README's digital-core point 3) is ALSO part of
+ * decision 8's t=0 settle, and re-stamps from the latest iterate "until
+ * classic's Newton test passes ... at most 50 iterations; failure is -4" —
+ * an ordinary, IC-supply-loading-reachable failure (review finding 11), not a
+ * rare pathology. Every call into `mapLoadFailure` is from the LOAD path
+ * only, so a -4 it sees is BY CONSTRUCTION a failed t=0 solve, covered by the
+ * exact same decision-8 sentence that already routes -7 here. This is
+ * distinct from a -4/-7 returned by `advance()` (a MID-RUN non-convergence
+ * after a program already loaded successfully): that case is unaffected by
+ * this function — see `advance()`'s own -4/-7 handling below, which keeps
  * classic's non-convergence semantics (`lastConverged = false`), not a
  * fallback, because there is no "elsewhere" to route an already-running
  * program to.
@@ -117,9 +126,12 @@ function mapLoadFailure(code: number, message: string): CoreUnsupportedError | C
   if (code === -7) {
     return new CoreUnsupportedError([`livelock:${message}`]);
   }
+  if (code === -4) {
+    return new CoreUnsupportedError([`solve-failed:${message}`]);
+  }
   // -1 (malformed), -2 (unknown kind code — a TS/Rust drift bug, see above),
-  // -4 (solve failed), -5 (bad handle), and anything this build doesn't
-  // otherwise define: none of these mean "route this circuit elsewhere".
+  // -5 (bad handle), and anything this build doesn't otherwise define: none
+  // of these mean "route this circuit elsewhere".
   return new CoreLoadError(`bo_engine_load failed (code ${code}): ${message}`);
 }
 
@@ -260,14 +272,15 @@ export class CoreEngine implements EngineReadout {
    *
    * Throws `CoreUnsupportedError` (with `reasons`) for anything compileCircuit
    * rejects, for a Rust-side topology rejection (`bo_engine_load` code -3,
-   * reason prefixed `topology:`), or for a load-time delta-cycle livelock
-   * (code -7, reason prefixed `livelock:` — decision 8's load-settle pass
-   * exceeding the per-instant delta-cycle cap; see `mapLoadFailure`'s doc
-   * comment). Throws `CoreLoadError` for -1/-2/-4/-5/-8 (see
-   * `mapLoadFailure`'s doc comment for why -2 is grouped there, not with -3
-   * or -7). In every OTHER throwing case this engine ends up in the "no
-   * program loaded" state (see the class doc comment) regardless of what was
-   * loaded before.
+   * reason prefixed `topology:`), for a load-time delta-cycle livelock
+   * (code -7, reason prefixed `livelock:`), or for a load-time solve failure
+   * (code -4, reason prefixed `solve-failed:` — finding 11: W1c's IC-supply
+   * fixed point not converging is an ordinary way to reach this) — decision
+   * 8's load-settle pass covers all three; see `mapLoadFailure`'s doc
+   * comment. Throws `CoreLoadError` for -1/-2/-5/-8 (see `mapLoadFailure`'s
+   * doc comment for why -2 is grouped there, not with -3/-4/-7). In every
+   * OTHER throwing case this engine ends up in the "no program loaded" state
+   * (see the class doc comment) regardless of what was loaded before.
    */
   load(
     circuit: SimCircuit,
@@ -628,6 +641,27 @@ export class CoreEngine implements EngineReadout {
     return coreCall((exports) => exports.bo_engine_next_event_time(this._handle));
   }
 
+  /**
+   * The facade-time of the earliest pending DIGITAL DUE TIME only —
+   * `bo_engine_next_digital_due_time`, finding 10's narrower counterpart to
+   * `nextEventTime()` above. Unlike `nextEventTime()` (which also reports a
+   * stepped partition's own internal Step bookkeeping, a closed-form
+   * partition's Crossing watch, and a floating-input Bucket boundary), this
+   * ignores all three and only ever reports a live driver-commit token —
+   * mirroring classic's `nextScheduledEventTime()` (sim-engine.ts), which
+   * only ever considers `icState`'s DIGITAL_DUE_PREFIX due times. `+Infinity`
+   * when nothing is due. `bo_engine_advance` already processes every
+   * intervening Step/Crossing/Bucket event on its own to reach an arbitrary
+   * `tEnd`, so a caller (test/core/equivalence/stimuli.ts's
+   * `replayStimuliOnCore`) that only wants to clamp a step onto a genuinely
+   * due digital transition — never onto the solver's own internal analog
+   * bookkeeping — uses this instead of `nextEventTime()`.
+   */
+  nextDigitalDueTime(): number {
+    this._requireLoaded();
+    return coreCall((exports) => exports.bo_engine_next_digital_due_time(this._handle));
+  }
+
   /** No W0 kind has a failure model. Always empty (a fresh object per call — see digitalState's doc comment). */
   getFailures(): Record<string, SimFailure> {
     this._requireLoaded();
@@ -666,6 +700,58 @@ export class CoreEngine implements EngineReadout {
       largestPartition: exports.bo_engine_stat(this._handle, 2),
       fixedNodes: exports.bo_engine_stat(this._handle, 3),
     }));
+  }
+
+  /**
+   * Turns the digital trace (`bo_engine_trace_enable`, core/README.md's ABI
+   * v2 "W1a") on or off. Harness instrumentation only (the doc comment on the
+   * ABI row itself: "W2's host traces are separate") — a normal host adapter
+   * never calls this. `code !== 0` should not happen given `_requireLoaded()`
+   * already guarantees a live handle, but the ABI remains the authority, same
+   * as every other method here.
+   */
+  enableTrace(enabled: boolean): void {
+    this._requireLoaded();
+    const code = coreCall((exports) => exports.bo_engine_trace_enable(this._handle, enabled ? 1 : 0));
+    if (code !== 0) {
+      const message = coreCall((exports) => readCoreErrorMessage(exports));
+      throw new CoreLoadError(`bo_engine_trace_enable failed (code ${code}): ${message}`);
+    }
+  }
+
+  /**
+   * Decodes the raw `(t, slot, value)` f64 triples `bo_engine_trace_ptr`/
+   * `_len` publish into `{t, key, value}` events, using THIS program's own
+   * `digitalSlots` table (slot index -> `digitalState` key, readout.ts's own
+   * convention) — "Keys are built in TS; Rust publishes numbers"
+   * (core/README.md, "Readouts"). Copies eagerly (like every other readout
+   * here): the trace buffer is only valid until the next ABI call on this
+   * handle. A slot index outside this program's own table is skipped rather
+   * than throwing — defensive only; a well-formed trace from THIS program's
+   * own handle should never produce one.
+   */
+  readTrace(): { readonly t: number; readonly key: string; readonly value: number }[] {
+    const compiled = this._requireLoaded();
+    return coreCall((exports) => {
+      const len = exports.bo_engine_trace_len(this._handle);
+      if (len === 0) return [];
+      const ptr = exports.bo_engine_trace_ptr(this._handle) >>> 0;
+      const raw = copyF64(exports, ptr, len);
+      const events: { t: number; key: string; value: number }[] = [];
+      for (let i = 0; i + 2 < raw.length; i += 3) {
+        const slot = raw[i + 1]!;
+        const key = compiled.digitalSlots[slot];
+        if (key === undefined) continue;
+        events.push({ t: raw[i]!, key, value: raw[i + 2]! });
+      }
+      return events;
+    });
+  }
+
+  /** Resets the trace buffer (`bo_engine_trace_clear`) — does not touch whether tracing is enabled. */
+  clearTrace(): void {
+    this._requireLoaded();
+    coreCall((exports) => exports.bo_engine_trace_clear(this._handle));
   }
 
   /** Idempotent. Frees the wasm-side handle — but only if it still belongs to the live instance (see the class doc comment on generations). */

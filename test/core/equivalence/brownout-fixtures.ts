@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
+import { detectOpenInput } from "./open-input.js";
 import type { CorpusEntry } from "./types.js";
 
 const FIXTURES_DIR = path.resolve(
@@ -46,6 +47,11 @@ export function loadBrownoutFixtureCorpus(): LoadedEntry[] {
       kinds: kindsOf(circuit),
       stimulus: null,
       file: full,
+      // Finding 8 (review): always derived from the circuit, never a manual
+      // flag — see open-input.ts's own doc and CorpusEntry.openInput's doc
+      // (types.ts). Every one of these boards predates the core (W0 header
+      // comment above), so this only matters the day a kind here is ported.
+      openInput: detectOpenInput(circuit),
     };
     return { entry, circuit };
   });

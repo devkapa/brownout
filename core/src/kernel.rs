@@ -405,6 +405,35 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         }
     }
 
+    /// The time of the earliest pending driver `Commit` with a still-live
+    /// token, `+Infinity` when none -- `bo_engine_next_digital_due_time`'s
+    /// contract (finding 10/8): classic's `nextScheduledEventTime()`
+    /// counterpart, for a host that wants to clamp its own steps onto
+    /// digital due times without single-stepping through a `Crossing`/
+    /// `Step`/`Bucket` event a dynamic partition schedules purely for its own
+    /// internal bookkeeping ([`Self::next_event_time`] reports ALL of those
+    /// too, which is correct for that method's own contract but wrong for a
+    /// host that only means to ask "when does a digital output next
+    /// change"). A `Commit` currently sitting in [`Self::held_commits`] (the
+    /// W1c contract point 9 power-loss hold) does not count: it already left
+    /// the heap the instant it became due while unpowered, so it has no
+    /// pending time of its own to report until [`Self::retry_held_commits`]
+    /// re-queues it, at which point it is due immediately (at `self.time`)
+    /// and this method reports that, same as any other due commit. `&self`,
+    /// not `&mut`: unlike [`Self::next_event_time`], this never needs to
+    /// permanently discard a stale entry to answer correctly -- it can
+    /// simply skip one on every call, since [`EventHeap::iter`] never
+    /// mutates the heap.
+    pub fn next_digital_due_time(&self) -> f64 {
+        self.heap
+            .iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::Commit { driver, token, .. } if self.drivers[driver.0 as usize].token() == token => Some(ev.time),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
     pub fn driver(&self, id: DriverId) -> &Driver {
         &self.drivers[id.0 as usize]
     }
@@ -635,12 +664,24 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// call even started). Every ordinary [`Self::advance`] call seeds with
     /// nothing.
     ///
+    /// `seed_affected` exists for [`Self::advance`]'s horizon clamp (finding
+    /// 1): the readers [`solve::PartitionSolver::sync_dynamic_to`] returns
+    /// have no due commit and touch no dirty partition of their own (the
+    /// clamp's forced steps already moved their node's published voltage
+    /// directly), so they cannot reach [`Self::evaluate`] through `dirty`
+    /// the way an ordinary `Crossing`/`Step`'s readers do — they are folded
+    /// straight into the first pass's `affected` set instead, exactly as if
+    /// a step had landed on them at `t_end`. Like `seed_dirty`, only the
+    /// first pass ever sees it: [`BTreeSet::append`] drains the caller's set
+    /// into `affected` once, and every later pass's own (empty) leftover
+    /// appends as a no-op.
+    ///
     /// `count_stats` gates every `self.stats` update in here: `true` from
     /// [`Self::advance`], `false` from [`Self::settle`]'s hand-off, which is
     /// still load-time bookkeeping, not a live delta cycle (`KernelStats`'s
     /// doc comment: only `advance`'s real delta cycle counts towards these,
     /// the same line `run_settle_pass` already draws for its own passes).
-    fn run_deltas(&mut self, mut seed_dirty: BTreeSet<PartitionId>, count_stats: bool) -> Result<(), KernelError> {
+    fn run_deltas(&mut self, mut seed_dirty: BTreeSet<PartitionId>, mut seed_affected: BTreeSet<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
         let mut settled = false;
         let mut depth = 0u64;
         let mut carried_dirty = BTreeSet::new();
@@ -660,6 +701,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             let (mut dirty, mut affected, popped, changed) = self.apply_due_events()?;
             dirty.append(&mut seed_dirty);
             dirty.append(&mut carried_dirty);
+            affected.append(&mut seed_affected);
             if count_stats {
                 self.stats.events_processed += popped;
                 self.stats.driver_commits += changed;
@@ -672,7 +714,20 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // once (it watches nodes in more than one dirty partition, or
             // both a commit AND a crossing landed on it this same delta)
             // still runs only once.
-            if !dirty.is_empty() {
+            //
+            // `|| changed > 0` (finding 7): a commit can also land on a
+            // driver whose own node is fixed (`driver_partition[idx] ==
+            // None`, contract point 4) — no partition needs re-solving, but
+            // `resolve_dirty` still needs to run, with `dirty` possibly
+            // empty, so it can recompute source currents and refresh
+            // `driver_snapshot` from the just-changed `self.drivers`, the
+            // same fallback `Self::apply_params_as_event`'s own
+            // `dirty.is_empty()` branch already takes for a live-param
+            // change on an already-fixed device. Without this, a fixed-node
+            // driver's commit left the published source current (and
+            // `driver_snapshot`) exactly one commit stale until some
+            // unrelated event happened to dirty a partition.
+            if !dirty.is_empty() || changed > 0 {
                 let dirty: Vec<PartitionId> = dirty.into_iter().collect();
                 affected.extend(self.solver.resolve_dirty(&dirty, self.time, &self.drivers).map_err(KernelError::SolveFailed)?);
             }
@@ -748,7 +803,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             let evaluator_snapshot = self.evaluator.snapshot();
 
             self.time = t;
-            if let Err(e) = self.run_deltas(BTreeSet::new(), true) {
+            if let Err(e) = self.run_deltas(BTreeSet::new(), BTreeSet::new(), true) {
                 self.time = previous_time;
                 self.heap = heap_snapshot;
                 self.drivers = drivers_snapshot;
@@ -785,22 +840,45 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let evaluator_snapshot = self.evaluator.snapshot();
 
         self.time = t_end;
-        match self.solver.sync_dynamic_to(t_end) {
-            Ok(_readers) => {
-                // No reader concept is exercised by the horizon clamp today
-                // (W1c+): a dynamic partition's own crossing/step handling
-                // already ran through the ordinary delta machinery above for
-                // everything up to `t_end`; the clamp only re-publishes a
-                // state that was already correct, so nothing new needs
-                // evaluating. Kept as a `Result` (not `()`) so a future
-                // caller that DOES need to react to a horizon-clamp-only
-                // change has somewhere to plug in.
+        // W1a contract point 5 (amended by finding 1): a stepped partition's
+        // forced catch-up steps inside `sync_dynamic_to` can move a node an
+        // IC reads, with no `Step`/`Crossing` event of its own ever landing
+        // on the heap for the ordinary delta machinery above to pick up —
+        // `stepped::sync_to`'s own readers were previously bound and
+        // immediately discarded here (`Ok(_readers) =>`), leaving such a
+        // reader stale until some unrelated later event happened to
+        // re-evaluate it. Those readers are now fed through the same
+        // evaluate/apply-request/re-solve machinery `run_deltas` already
+        // gives an ordinary due `Step`/`Crossing`'s readers, seeded as this
+        // one-pass-or-more delta cycle's initial `affected` set, quiet or
+        // `KernelError::Livelock` (`-7`) guarded exactly like any other
+        // instant.
+        let clamp_result: Result<(), KernelError> = match self.solver.sync_dynamic_to(t_end) {
+            // No reader means the clamp genuinely had nothing new to
+            // evaluate (the common case: no dynamic partition, or every one
+            // of them was already exactly current) — skip `run_deltas`
+            // entirely rather than spend a delta pass (and its stats) on a
+            // guaranteed no-op, exactly matching what this branch always did
+            // before finding 1's fix.
+            Ok(readers) if readers.is_empty() => {
                 self.drain_scheduled();
+                Ok(())
+            }
+            Ok(readers) => self.run_deltas(BTreeSet::new(), readers.into_iter().collect(), true),
+            Err(e) => Err(KernelError::SolveFailed(e)),
+        };
+        match clamp_result {
+            Ok(()) => {
                 // The horizon clamp is its own completed "instant" at
                 // `t_end` (it has its own snapshot/rollback envelope above,
                 // exactly like any other) — a dynamic partition's published
                 // voltages moved here even though nothing was due, so a
-                // digital reader watching one of its nodes could too.
+                // digital reader watching one of its nodes could too. When
+                // there WERE readers, `run_deltas` above already drained
+                // every scheduled Crossing/Step this pass produced
+                // (`drain_scheduled` runs inside it every pass); the empty-
+                // reader branch above drains it directly instead, so either
+                // way nothing more is needed here before publishing.
                 self.publish_settled();
                 Ok(())
             }
@@ -812,7 +890,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.solver.dynamic_restore(dynamic_snapshot);
                 self.held_commits = held_commits_snapshot;
                 self.evaluator.restore(evaluator_snapshot);
-                Err(KernelError::SolveFailed(e))
+                Err(e)
             }
         }
     }
@@ -870,7 +948,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let result = if dirty.is_empty() {
             self.solver.resolve_dirty(&[], self.time, &self.drivers).map(|_| ()).map_err(KernelError::SolveFailed)
         } else {
-            self.run_deltas(dirty, true)
+            self.run_deltas(dirty, BTreeSet::new(), true)
         };
 
         if let Err(e) = result {
@@ -1035,7 +1113,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
         }
 
-        self.run_deltas(edge_pass_dirty, false)?;
+        self.run_deltas(edge_pass_dirty, BTreeSet::new(), false)?;
         // Load settling is itself one completed "instant" at `now` (the
         // three-step process above is how it gets there, not three separate
         // ones — core/README.md's own "Load settling" point 6 describes it

@@ -44,6 +44,21 @@ pub fn bucket(t: f64) -> u64 {
 /// estimate by single ulps (`f64::next_up`/`next_down`) until both hold.
 pub fn next_bucket_boundary(t: f64) -> f64 {
     let base = bucket(t);
+    // Finding 4: at a large enough `t` (roughly `START_TIME >= 1.8447e17`
+    // seconds, `u64::MAX * 0.01`), `bucket`'s own `as u64` cast saturates to
+    // `u64::MAX` -- and stays saturated for every float near `t`, since a
+    // single f64 ulp there already spans far more than one 10ms bucket.
+    // `base + 1` would then overflow (wrapping to 0 in a release build,
+    // panicking in debug/`cargo test`), and the climbing loop below (`while
+    // bucket(candidate) <= base`) could never terminate: every candidate it
+    // tries also saturates to the same `u64::MAX`, so the comparison holds
+    // forever and `bo_engine_load` hangs instead of returning. No real
+    // program reaches this (about 5.8 billion years of simulated time); "no
+    // bucket boundary ever" is the only sane answer once the bucket index
+    // itself can no longer be represented.
+    if base == u64::MAX {
+        return f64::INFINITY;
+    }
     let target = base + 1;
 
     let mut candidate = (target as f64) * 0.01 - 1e-12;
@@ -54,8 +69,16 @@ pub fn next_bucket_boundary(t: f64) -> f64 {
         candidate = t.next_up();
     }
 
-    // Climb until the candidate is actually past the boundary...
+    // Climb until the candidate is actually past the boundary -- defensively
+    // guarded against ever spinning on a non-finite candidate: nothing in
+    // this function's own arithmetic should reach one once the saturated-
+    // `base` case above is excluded, but a hang here would be exactly
+    // finding 4's failure mode, so the walk itself never assumes that rather
+    // than checks it.
     while bucket(candidate) <= base {
+        if !candidate.is_finite() {
+            return f64::INFINITY;
+        }
         candidate = candidate.next_up();
     }
     // ...then walk back down to the smallest float that still is.
@@ -191,6 +214,39 @@ mod tests {
             // NOT already be in the next bucket.
             assert!(just_below <= t || bucket(just_below) == bucket(t), "the float just below the boundary is not yet in the next bucket, t={t}");
         }
+    }
+
+    #[test]
+    fn next_bucket_boundary_returns_infinity_once_bucket_saturates() {
+        // Finding 4 [low]: at START_TIME = 1e18 (valid per the contract:
+        // "finite seconds >= 0"), the OLD implementation hung forever inside
+        // `bo_engine_load`'s settle -- `bucket(1e18)` saturates to
+        // `u64::MAX`, `base + 1` overflows, and the climbing loop's
+        // `bucket(candidate) <= base` never goes false because every
+        // candidate near 1e18 saturates to that same `u64::MAX` too. This is
+        // the exact scenario the finding names: "a program with START_TIME
+        // = 1e18 ... and a powered IC with an open FLOATING_INPUT pin ...
+        // bo_engine_load never returns."
+        assert_eq!(bucket(1e18), u64::MAX, "1e18 must actually be past bucket()'s own saturation point for this test to mean anything");
+        assert_eq!(next_bucket_boundary(1e18), f64::INFINITY, "no bucket boundary can be represented once the bucket index itself saturates");
+
+        // A `t` comfortably below the saturation point (the finding's own
+        // "threshold is START_TIME >= about 1.8447e17 s") must still behave
+        // exactly as before: a real, finite next boundary, strictly ahead of
+        // `t` and in a later bucket. Not `bucket(t) + 1` exactly: at this
+        // magnitude a single f64 ulp already spans many buckets (unlike
+        // `next_bucket_boundary_at_large_t`'s own 1e9, small enough that the
+        // exact-successor guarantee still holds), so the walk can only land
+        // on the smallest REPRESENTABLE float past the boundary, which is
+        // free to be several buckets beyond `bucket(t) + 1` -- a pre-existing,
+        // correct property of the walk at this magnitude, not something this
+        // fix changes.
+        let below_threshold = 1.0e17;
+        assert!(bucket(below_threshold) < u64::MAX);
+        let boundary = next_bucket_boundary(below_threshold);
+        assert!(boundary.is_finite());
+        assert!(boundary > below_threshold);
+        assert!(bucket(boundary) > bucket(below_threshold));
     }
 
     #[test]

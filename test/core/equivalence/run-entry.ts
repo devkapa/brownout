@@ -360,7 +360,12 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
 
   let cmp: ReturnType<typeof compareStimuliSamples>;
   try {
-    cmp = compareStimuliSamples(classicSamples, coreSamples);
+    // `circuit` enables finding 12's stamp-after-commit-lag exemption
+    // (compare.ts's own header) — the ORIGINAL (pre-override) circuit is
+    // correct here for the same reason known-divergences.ts's registry below
+    // uses it: a commit's driven-net topology is fixed by the netlist, never
+    // changed by a phase's `set` (which only ever touches component params).
+    cmp = compareStimuliSamples(classicSamples, coreSamples, circuit);
   } catch (err) {
     // Finding 10: compareStimuliSamples only ever throws on a sample-count
     // mismatch — the two replays used different phase/step schedules, a
@@ -387,7 +392,7 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   // explainAnalyticMismatches-then-classifyMismatches order.
   const richardsonSplit = explainRichardsonMismatches(circuit, phases, cmp.mismatches);
   const { known, unexplained } = classifyMismatches(circuit, richardsonSplit.remaining);
-  const knownDivergences = [...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
+  const knownDivergences = [...cmp.knownDivergences, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };

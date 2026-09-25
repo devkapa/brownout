@@ -408,7 +408,7 @@ describe("load-time delta-cycle livelock (-7) -> CoreUnsupportedError with a liv
       bo_error_len: () => messageBytes.length,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,
@@ -579,6 +579,73 @@ describe("a real zero-delay combinational ring genuinely livelocks the Rust kern
     });
 
     expect(code, `expected -7 (delta-cycle livelock); bo_engine_load's own message: ${message}`).toBe(-7);
+  });
+});
+
+describe("a real IC-supply fixed point that never converges at load (-4) falls back like -7 (finding 11)", () => {
+  /**
+   * Review finding 11's own reproduction: a 74LS04 fed vcc through a 100 ohm
+   * resistor from a 5V source, 1a tied to gnd (so 1y is HIGH), and 1y driving
+   * 100 ohm to gnd. When powered, 1y's own output load (in series with the
+   * 100 ohm supply feed) sags vcc below 0.9*vccMin, which unpowers the IC;
+   * unpowered, vcc recovers to 5V and the IC re-powers — the IC-supply fixed
+   * point (README's digital-core point 3) never settles within its 50-
+   * iteration cap, so `bo_engine_load` returns a genuine -4. Unlike the -7
+   * ring above, this is reachable through the ordinary compiled path — no
+   * program patching needed.
+   */
+  function saggingSupplyCircuit(): SimCircuit {
+    return circuit(
+      [
+        part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r_vcc", "resistor", ["a", "b"], { resistance: 100 }),
+        part("u1", "74ls04", ["vcc", "gnd", "1a", "1y", "2a", "2y", "3a", "3y", "4a", "4y", "5a", "5y", "6a", "6y"]),
+        part("r_out", "resistor", ["a", "b"], { resistance: 100 }),
+      ],
+      [
+        wire("vsrc", "pos", "r_vcc", "a"),
+        wire("r_vcc", "b", "u1", "vcc"),
+        wire("vsrc", "neg", "u1", "gnd"),
+        wire("vsrc", "neg", "u1", "1a"),
+        wire("u1", "1y", "r_out", "a"),
+        wire("r_out", "b", "vsrc", "neg"),
+        wire("vsrc", "neg", "u1", "2a"),
+        wire("vsrc", "neg", "u1", "3a"),
+        wire("vsrc", "neg", "u1", "4a"),
+        wire("vsrc", "neg", "u1", "5a"),
+        wire("vsrc", "neg", "u1", "6a"),
+      ],
+    );
+  }
+
+  it("CoreEngine.load() throws CoreUnsupportedError with a solve-failed: reason (bo_engine_load's real -4, not the generic CoreLoadError)", () => {
+    const core = new CoreEngine();
+    let caught: CoreUnsupportedError | undefined;
+    try {
+      core.load(saggingSupplyCircuit(), CORE_IMPLEMENTED_KINDS);
+    } catch (err) {
+      caught = err as CoreUnsupportedError;
+    }
+    expect(caught).toBeInstanceOf(CoreUnsupportedError);
+    expect(caught!.reasons).toHaveLength(1);
+    expect(caught!.reasons[0]).toMatch(/^solve-failed:/);
+    expect(caught!.reasons[0]).toMatch(/converge/i);
+  });
+
+  it("HeadlessRunner falls back to classic instead of throwing an uncaught error (finding 11's exact reported bug)", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    // Before this fix, this call threw an uncaught CoreLoadError straight out
+    // of HeadlessRunner.load(): -4 fell through mapLoadFailure's generic
+    // branch, which _tryLoadCore does not catch (only CoreUnsupportedError
+    // triggers the classic fallback).
+    expect(() => runner.load(saggingSupplyCircuit())).not.toThrow();
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toHaveLength(1);
+    expect(runner.engineFallbackReasons[0]).toMatch(/^solve-failed:/);
+    // Classic itself loads this circuit without throwing (decision 8: no
+    // rescue ladder, lastConverged can end up false, but load() itself must
+    // not throw) — the fallback is not a dead end for the caller.
+    expect(() => runner.readout.getNetV()).not.toThrow();
   });
 });
 
@@ -861,7 +928,7 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,
@@ -1054,7 +1121,7 @@ describe("CoreEngine.load — options passthrough to compileCircuit (integration
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,
@@ -1187,7 +1254,7 @@ describe("advance() sends tEnd straight through to Rust — no more _loadedAt tr
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,
@@ -1280,7 +1347,7 @@ describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digita
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,
@@ -1398,7 +1465,7 @@ describe("CoreEngine.setParams", () => {
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,

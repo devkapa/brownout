@@ -333,6 +333,17 @@ pub extern "C" fn bo_engine_next_event_time(h: u32) -> f64 {
     with_engine(h, f64::NAN, |e| e.next_event_time())
 }
 
+/// Time of the earliest pending driver commit (a live token; a commit held
+/// by the power-loss hold is not pending), `+Infinity` when none. `NaN` for
+/// an unusable handle. Classic's `nextScheduledEventTime()` counterpart, for
+/// a host that clamps its own steps onto digital due times without
+/// single-stepping through a stepped partition's own Step/Crossing/Bucket
+/// bookkeeping (finding 10/8).
+#[no_mangle]
+pub extern "C" fn bo_engine_next_digital_due_time(h: u32) -> f64 {
+    with_engine(h, f64::NAN, |e| e.next_digital_due_time())
+}
+
 #[no_mangle]
 pub extern "C" fn bo_engine_digital_slot_count(h: u32) -> u32 {
     with_engine(h, 0, |e| e.digital_slot_count())

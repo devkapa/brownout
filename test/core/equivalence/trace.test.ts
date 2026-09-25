@@ -1,11 +1,12 @@
 /**
  * Unit coverage for trace.ts: the diff primitive, the classic collector
- * against a real (small, fast) clocked digital circuit, and the core side's
- * feature-detected "not yet supported" behaviour — both against a hand-built
- * synthetic object satisfying `CoreTraceCapable` (this worker's brief: "code
- * against an interface and test with synthetic traces") and against the
- * REAL `CoreEngine` in this worktree today, which does not implement the
- * trace ABI yet.
+ * against a real (small, fast) clocked digital circuit, the feature-detection
+ * helper (both against a hand-built synthetic object satisfying
+ * `CoreTraceCapable` — this worker's brief: "code against an interface and
+ * test with synthetic traces" — and against the REAL `CoreEngine`, which now
+ * implements the trace ABI), and the core collector's own load-time baseline
+ * injection (needed so align.ts's cycle-0 sample means the same thing on
+ * both engines).
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -14,7 +15,6 @@ import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import {
   collectClassicDigitalTrace,
   collectCoreDigitalTrace,
-  CoreTraceUnsupportedError,
   diffDigitalStates,
   hasCoreTraceSupport,
   stateAt,
@@ -174,11 +174,11 @@ describe("hasCoreTraceSupport", () => {
     expect(hasCoreTraceSupport({})).toBe(false);
   });
 
-  it("is false for the REAL CoreEngine in this worktree today (the trace ABI has not landed in the facade yet)", async () => {
+  it("is true for the REAL CoreEngine in this worktree — enableTrace/readTrace/clearTrace now exist on the facade", async () => {
     const { CoreEngine } = await import("../../../src/core/engine.js");
     const engine = new CoreEngine();
     try {
-      expect(hasCoreTraceSupport(engine)).toBe(false);
+      expect(hasCoreTraceSupport(engine)).toBe(true);
     } finally {
       engine.dispose();
     }
@@ -186,13 +186,13 @@ describe("hasCoreTraceSupport", () => {
 });
 
 describe("collectCoreDigitalTrace against a synthetic engine (this module's own construction, not CoreEngine)", () => {
-  it("enables tracing, advances, reads, and clears — in that order — by driving a hand-built CoreTraceCapable through the SAME collection logic real CoreEngine will use once it lands", () => {
+  it("enables tracing, advances, reads, and clears — in that order — by driving a hand-built CoreTraceCapable through the SAME sequence collectCoreDigitalTrace itself makes against the real CoreEngine", () => {
     // collectCoreDigitalTrace's real signature builds its own CoreEngine, so
     // this test exercises the same three calls (enableTrace/advance/
     // readTrace/clearTrace) directly, in the order collectCoreDigitalTrace
     // makes them, against a hand-written double — proving the SEQUENCING is
-    // right independent of whether any real CoreEngine satisfies the
-    // interface yet.
+    // right independent of the real CoreEngine underneath (this module's own
+    // "code against an interface and test with synthetic traces" brief).
     const calls: string[] = [];
     const fakeTrace: DigitalTraceEvent[] = [{ t: 0, key: "clk", value: 1 }];
     const engine: CoreTraceCapable = {
@@ -215,8 +215,50 @@ describe("collectCoreDigitalTrace against a synthetic engine (this module's own 
   });
 });
 
+/** A single powered 74ls04 gate with a fixed HIGH input — no time-varying behaviour at all, so any event past t=0 in its trace would be a bug, not a real transition. */
+function fixedLs04Inverter(): SimCircuit {
+  return circuit(
+    [
+      part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("u1", "74ls04", ["1a", "1y", "2a", "2y", "3a", "3y", "gnd", "4y", "4a", "5y", "5a", "6y", "6a", "vcc"]),
+    ],
+    [
+      wire("vcc", "pos", "u1", "vcc"),
+      wire("vcc", "neg", "u1", "gnd"),
+      wire("vcc", "pos", "u1", "1a"),
+      wire("vcc", "neg", "u1", "2a"),
+      wire("vcc", "neg", "u1", "3a"),
+      wire("vcc", "neg", "u1", "4a"),
+      wire("vcc", "neg", "u1", "5a"),
+      wire("vcc", "neg", "u1", "6a"),
+    ],
+  );
+}
+
 describe("collectCoreDigitalTrace against the real CoreEngine", () => {
-  it("throws CoreTraceUnsupportedError — the trace ABI has not landed in this build; downgrade, not a circuit failure", () => {
-    expect(() => collectCoreDigitalTrace(divider(), 1e-3)).toThrow(CoreTraceUnsupportedError);
+  it("no longer throws CoreTraceUnsupportedError now that CoreEngine implements enableTrace/readTrace/clearTrace", () => {
+    expect(() => collectCoreDigitalTrace(divider(), 1e-3)).not.toThrow();
+  });
+
+  it("records the load-time state as a diff from empty, at t=0 — the same convention collectClassicDigitalTrace uses, so align.ts's cycle-0 sample is meaningful on both sides", () => {
+    const trace = collectCoreDigitalTrace(fixedLs04Inverter(), 1e-3);
+    // 1a is tied HIGH (1y committed LOW), 2a-6a are tied LOW (2y-6y committed
+    // HIGH) — every one of the package's 6 gates publishes a digital slot, so
+    // all 6 must appear as t=0 baseline events, exactly as they would in
+    // collectClassicDigitalTrace's own trace, even though
+    // bo_engine_trace_enable itself only starts recording changes AFTER it is
+    // turned on (this function's own baseline injection, trace.ts).
+    expect(trace).toEqual([
+      { t: 0, key: "u1/1y", value: 0 },
+      { t: 0, key: "u1/2y", value: 1 },
+      { t: 0, key: "u1/3y", value: 1 },
+      { t: 0, key: "u1/4y", value: 1 },
+      { t: 0, key: "u1/5y", value: 1 },
+      { t: 0, key: "u1/6y", value: 1 },
+    ]);
+  });
+
+  it("a circuit with no digital state at all still produces an empty trace, not a spurious baseline", () => {
+    expect(collectCoreDigitalTrace(divider(), 1e-3)).toEqual([]);
   });
 });

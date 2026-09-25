@@ -159,6 +159,15 @@ export interface CoreExports {
   bo_error_len(): number;
   bo_engine_set_option(h: number, key: number, value: number): number;
   bo_engine_next_event_time(h: number): number;
+  /**
+   * Time of the earliest pending DRIVER COMMIT only (`+Infinity` when none) —
+   * finding 10's narrower counterpart to `bo_engine_next_event_time`, which
+   * also reports a stepped partition's own internal Step bookkeeping, a
+   * closed-form Crossing watch, and a floating-input Bucket boundary. Mirrors
+   * classic's `nextScheduledEventTime()` (sim-engine.ts), which only ever
+   * considers a digital due time. core/README.md's C ABI v2 table, "W1c".
+   */
+  bo_engine_next_digital_due_time(h: number): number;
   bo_engine_digital_slot_count(h: number): number;
   bo_engine_digital_slots(h: number): number;
   bo_engine_channel_slot_count(h: number): number;
@@ -189,6 +198,7 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_error_len",
   "bo_engine_set_option",
   "bo_engine_next_event_time",
+  "bo_engine_next_digital_due_time",
   "bo_engine_digital_slot_count",
   "bo_engine_digital_slots",
   "bo_engine_channel_slot_count",

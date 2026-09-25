@@ -474,10 +474,29 @@ impl SteppedSolver {
     /// forward to `now` (discarding any pending trial beyond it), mark the
     /// BE anchor (a discontinuity), publish the synced state, then
     /// immediately plan (and schedule) a fresh step from `now`.
+    ///
+    /// `catchup_drivers` and `drivers` are deliberately DIFFERENT tables
+    /// (finding 5, W1b rule 6 amended): an IC driver commit lands via the
+    /// ordinary heap mid-`advance()`, at an arbitrary time with `part.t`
+    /// generally still short of `now` by up to a whole step — the catch-up
+    /// inside [`Self::sync_partition`] below must integrate that whole
+    /// `[part.t, now)` span with the stamps that were ACTUALLY in force
+    /// during it, i.e. the driver table from BEFORE this commit
+    /// (`catchup_drivers` — `solve::mod::PartitionedSolver::resolve_dirty`'s
+    /// own pre-overwrite `driver_snapshot`), not the one this same commit
+    /// just produced. Only the catch-up call gets it; `solve_initial_x` and
+    /// [`Self::plan_and_schedule`] below correctly keep using the current,
+    /// post-commit `drivers` — the discontinuity is real and belongs
+    /// exactly at `now`, not smeared across the interval leading up to it.
+    /// (`W1b`'s own `apply_params_as_event` never hit this because it only
+    /// ever runs right after `advance`'s horizon clamp, where `part.t ==
+    /// now` already and the catch-up loop is a no-op either way — see
+    /// `Kernel::apply_params_as_event`'s doc comment.)
     pub fn resolve_dirty(
         &mut self,
         dirty: &[usize],
         now: f64,
+        catchup_drivers: &[Driver],
         drivers: &[Driver],
         live_params: &HashMap<usize, Vec<f64>>,
         voltages: &mut [f64],
@@ -488,7 +507,7 @@ impl SteppedSolver {
             if !self.partitions.contains_key(&p_idx) {
                 continue;
             }
-            self.sync_partition(p_idx, now, drivers, live_params)?;
+            self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages)?;
 
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
             let holds_free_ic_supply = self.partitions[&p_idx].holds_free_ic_supply;
@@ -514,7 +533,7 @@ impl SteppedSolver {
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
             Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-            self.plan_and_schedule(p_idx, now, drivers, live_params)?;
+            self.plan_and_schedule(p_idx, now, drivers, live_params, voltages)?;
         }
         Ok(readers)
     }
@@ -540,7 +559,7 @@ impl SteppedSolver {
         let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
-        self.plan_and_schedule(partition, commit_time, drivers, live_params)?;
+        self.plan_and_schedule(partition, commit_time, drivers, live_params, voltages)?;
         Ok(readers)
     }
 
@@ -555,7 +574,7 @@ impl SteppedSolver {
                 continue;
             }
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
-            self.sync_partition(p_idx, t_end, drivers, live_params)?;
+            self.sync_partition(p_idx, t_end, drivers, live_params, voltages)?;
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
             // Contract point 4's last bullet ("resolves of dynamic
@@ -566,18 +585,19 @@ impl SteppedSolver {
             // including whichever ones the clamp itself takes to land exactly
             // on `t_end` (`sync_partition`'s own doc comment: "however many
             // committed steps it takes"), not only the ones `handle_step`
-            // commits one at a time from the ordinary event loop. `Kernel`'s
-            // own `advance` currently discards this call's returned readers
-            // (`kernel.rs`'s own doc comment on why: "a solved value... this
-            // still has to evaluate... but not a no-op" for CLOSED-FORM,
-            // "no reader concept is exercised... today" for the clamp in
-            // general) — reporting them correctly here regardless keeps this
-            // solver's own contract complete independent of what the kernel
-            // currently does with the answer, and is what
+            // commits one at a time from the ordinary event loop. `Kernel::advance`'s
+            // horizon clamp now feeds this call's returned readers through
+            // the same evaluate/apply-request/re-solve machinery an ordinary
+            // due `Step`/`Crossing`'s readers get (finding 1's fix,
+            // `kernel.rs`'s own doc comment on the clamp), so reporting them
+            // correctly here is no longer merely keeping this solver's OWN
+            // contract complete independent of the caller — it is exactly
+            // what makes finding 1's fix work at all. Also checked directly,
+            // at the solver level, by
             // `stepped::tests::sync_to_reports_ic_readers_of_changed_nodes`
-            // (below) checks directly, at the solver level.
+            // (below).
             Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-            self.plan_and_schedule(p_idx, t_end, drivers, live_params)?;
+            self.plan_and_schedule(p_idx, t_end, drivers, live_params, voltages)?;
         }
         Ok(readers)
     }
@@ -696,7 +716,7 @@ impl SteppedSolver {
     /// however many committed steps (each bounded to `horizon`) it takes to
     /// bring `part.t` up to `horizon`, using a pending trial outright when it
     /// already lands within `horizon`.
-    fn sync_partition(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
+    fn sync_partition(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         loop {
             let (t, has_pend, pend_t) = {
                 let part = &self.partitions[&p_idx];
@@ -710,15 +730,15 @@ impl SteppedSolver {
                 Self::commit(part);
                 continue;
             }
-            self.plan_step(p_idx, horizon, drivers, live_params)?;
+            self.plan_step(p_idx, horizon, drivers, live_params, voltages)?;
             let part = self.partitions.get_mut(&p_idx).unwrap();
             Self::commit(part);
         }
         Ok(())
     }
 
-    fn plan_and_schedule(&mut self, p_idx: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
-        self.plan_step(p_idx, f64::INFINITY, drivers, live_params)?;
+    fn plan_and_schedule(&mut self, p_idx: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+        self.plan_step(p_idx, f64::INFINITY, drivers, live_params, voltages)?;
         let part = &self.partitions[&p_idx];
         let _ = now;
         self.scheduled.push((part.pend_t, p_idx, part.version));
@@ -728,8 +748,12 @@ impl SteppedSolver {
     /// pec3's `_planStep` (`:643-687`): the BE/trap step-doubling controller,
     /// plus iterative crossing refinement (this module's doc comment,
     /// replacing pec3's single-fraction clamp). Leaves a fresh pending trial
-    /// on `part`; does not commit it.
-    fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) -> Result<(), String> {
+    /// on `part`; does not commit it. `voltages` is the solver-wide published
+    /// array (finding 2/6), threaded down to [`find_crossing`]'s
+    /// [`ThresholdFn`] calls: a watched reader's thresholds can depend on a
+    /// node OUTSIDE this partition (its IC's supply, sitting in a `Static`
+    /// partition), which `part`'s own local `x0`/`x1` arrays never carry.
+    fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         let option_method = self.method;
         let ics = &self.ics;
         let node_owner = &self.node_owner;
@@ -783,7 +807,7 @@ impl SteppedSolver {
         part.h = (h * next_step_factor(ratio, method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
 
         // Iterative crossing refinement (this module's doc comment).
-        if let Some((local, threshold)) = find_crossing(part, &x0, &accepted.x) {
+        if let Some((local, threshold)) = find_crossing(part, &x0, &accepted.x, voltages) {
             let refined_h = refine_crossing_h(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, local, threshold, &mut part.newton_iterations, &ic_ctx)?;
             h = refined_h;
             accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
@@ -807,7 +831,7 @@ fn rel_error(a: f64, b: f64) -> f64 {
 /// interpolation between the step's start (`x0`) and its accepted end
 /// (`x1`): the EARLIEST (by interpolated fraction) watched threshold this
 /// step actually crosses, or `None`.
-fn find_crossing(part: &Partition, x0: &[f64], x1: &[f64]) -> Option<(usize, Threshold)> {
+fn find_crossing(part: &Partition, x0: &[f64], x1: &[f64], voltages: &[f64]) -> Option<(usize, Threshold)> {
     let mut best: Option<(f64, usize, Threshold)> = None;
     for (&local, watchers) in &part.watches {
         let (v0, v1) = (x0[local], x1[local]);
@@ -815,7 +839,7 @@ fn find_crossing(part: &Partition, x0: &[f64], x1: &[f64]) -> Option<(usize, Thr
             continue;
         }
         for (_, thresholds) in watchers {
-            for th in thresholds() {
+            for th in thresholds(voltages) {
                 let ok = if th.rising { v0 < th.value && v1 > th.value } else { v0 > th.value && v1 < th.value };
                 if !ok {
                     continue;
@@ -940,7 +964,7 @@ mod tests {
         assert_eq!(st.partitions.len(), 1, "two capacitors in one linear partition must classify Stepped");
         let mut voltages = vec![0.0, v, 0.0, 0.0];
         let mut currents = vec![0.0; 5];
-        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         // Not testing t=1e-4: node2 is still barely charged there (its own
         // RC lag behind node1), so even a tiny absolute error reads as a
@@ -982,7 +1006,7 @@ mod tests {
         let mut st0 = build(&p0);
         let mut voltages0 = vec![0.0, v, 0.0, 0.0];
         let mut currents0 = vec![0.0; 5];
-        st0.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages0, &mut currents0).unwrap();
+        st0.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages0, &mut currents0).unwrap();
 
         let mut options5 = Options::default();
         options5.start_time = 5.0;
@@ -990,7 +1014,7 @@ mod tests {
         let mut st5 = build(&p5);
         let mut voltages5 = vec![0.0, v, 0.0, 0.0];
         let mut currents5 = vec![0.0; 5];
-        st5.resolve_dirty(&[0], 5.0, &[], &HashMap::new(), &mut voltages5, &mut currents5).unwrap();
+        st5.resolve_dirty(&[0], 5.0, &[], &[], &HashMap::new(), &mut voltages5, &mut currents5).unwrap();
 
         assert_eq!(st5.steps_taken(), 0.0, "loading at a nonzero START_TIME must not integrate anything");
         for l in [2usize, 3] {
@@ -1014,7 +1038,7 @@ mod tests {
             let mut st = build(&p);
             let mut voltages = vec![0.0, v, 0.0];
             let mut currents = vec![0.0; 3];
-            st.resolve_dirty(&[0], start_time, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+            st.resolve_dirty(&[0], start_time, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
             (st, voltages)
         };
         let (_st0, voltages0) = build_at(0.0);
@@ -1039,11 +1063,11 @@ mod tests {
         let mut st = build(&p);
         let mut voltages = vec![0.0, v, 0.0];
         let mut currents = vec![0.0; 3];
-        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let vc_before = st.partitions[&0].vc[0];
         let h = st.partitions.get(&0).unwrap().h;
-        st.plan_step(0, f64::INFINITY, &[], &HashMap::new()).unwrap();
+        st.plan_step(0, f64::INFINITY, &[], &HashMap::new(), &voltages).unwrap();
         let part = &st.partitions[&0];
         let accepted_h = part.pend_t - 0.0;
         let vc_after = part.pend_vc[0];
@@ -1079,13 +1103,13 @@ mod tests {
         // first plan is BE regardless (classic's `load()`); accept it, then
         // trigger a SECOND discontinuity explicitly to prove the flag gets
         // RE-SET, not merely left over from load.
-        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(true), "the first step after load must be BE");
         let now = st.partitions[&0].pend_t;
         st.handle_step(0, now, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(false), "an accepted step clears the BE anchor");
 
-        st.resolve_dirty(&[0], now, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], now, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(st.debug_be_next_step(0), Some(true), "a re-aim (a discontinuity) must set the BE anchor again");
     }
 
@@ -1100,7 +1124,7 @@ mod tests {
         let mut st = build(&p);
         let mut voltages = vec![0.0, v, 0.0, 0.0];
         let mut currents = vec![0.0; 5];
-        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         let shunt = crate::solve::static_part::NODE_RSHUNT_G;
         for &t in &[1e-4, 5e-4, 1e-3, 3e-3] {
@@ -1142,7 +1166,7 @@ mod tests {
         let mut currents = vec![0.0; 5];
 
         // This IS load time: no `sync_to`/`handle_step` has run yet.
-        st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
 
         // At vc=0 for both (uncharged) capacitors, both node voltages sit at
         // the resistive divider's value with no capacitor current flowing
@@ -1226,7 +1250,7 @@ mod tests {
         // Load-time resolve_dirty: node2 moves from its 0.0 placeholder to
         // the real operating point (`solve_initial_x`'s own seed), so the ic
         // reader (device 5) must be reported even with no watch registered.
-        let readers = st.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        let readers = st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert!(readers.contains(&DeviceId(5)), "resolve_dirty must report the ic reader when node2 changes, got {readers:?}");
 
         // handle_step: commit one real, ordinary step -- node2 keeps moving.

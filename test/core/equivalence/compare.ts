@@ -11,8 +11,11 @@
  * the only way to test a detector without editing src to break it.
  */
 
+import { buildCoreNodes, corePinKey, type CoreNodeBuild } from "../../../src/core/compile/topology.js";
+import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { withinTolerance, VOLT_ABS_TOL, VOLT_REL_TOL, AMP_ABS_TOL, AMP_REL_TOL } from "./tolerance.js";
-import type { CompareResult, Mismatch, SampleReadout } from "./types.js";
+import { digitalOutputPins } from "./known-divergences.js";
+import type { CompareResult, KnownDivergenceHit, Mismatch, SampleReadout } from "./types.js";
 import type { StimulusStepSample } from "./stimuli.js";
 
 interface ErrorAccumulator {
@@ -269,6 +272,80 @@ export function compareSamples(classic: readonly SampleReadout[], core: readonly
 }
 
 /**
+ * Finding 12 + the follow-up INVESTIGATION: classic stamps a delayed IC
+ * output's electrical effect ONE SOLVE AFTER the digital commit that changes
+ * it (core/spec/w1-classic-semantics.md §2.4, "The electrical stamp flips on
+ * the solve after the commit" — `stampCombinationalIC` reads the OLD, stored
+ * `_delayedOutputLevel` for the step that lands exactly on the commit's due
+ * time, and `_updateDelayedOutputs` only flips it AFTER that solve). So at a
+ * sample where classic's step commits an IC output, classic's own
+ * `digitalState` (published post-commit) and its `netV`/`elementI` (solved
+ * pre-commit) are mutually INCONSISTENT for one sample — a genuine classic
+ * artifact, not a core bug (D8 mandates the core's delta-cycle deliver
+ * commit-then-resolve atomically, so the core's own two readouts never have
+ * this lag). This is registered as a documented divergence, narrowly: only a
+ * netV/elementI mismatch on a net a JUST-CHANGED IC output pin drives, at the
+ * exact sample the commit shows up in classic's digitalState, and ONLY when
+ * that same (category, id) pair agrees again at the VERY NEXT sample — a
+ * seeded fault that does not resolve by the next sample is never excused.
+ */
+export const STAMP_AFTER_COMMIT_DIVERGENCE_ID = "classic-stamp-after-commit-lag";
+const STAMP_AFTER_COMMIT_DECISION_REF =
+  "core/spec/w1-classic-semantics.md §2.4 (\"The electrical stamp flips on the solve after the commit\"); " +
+  "D8 (delta-cycle exact delivery); review finding 12 + its INVESTIGATION follow-up.";
+
+function stampAfterCommitReason(category: "netV" | "elementI", id: string): string {
+  return (
+    `classic's electrical stamp flips one solve AFTER its digital commit (spec §2.4), so at this sample ` +
+    `classic's ${category} on "${id}" reflects the driver's PRE-commit level while its digitalState already ` +
+    `shows the POST-commit one; the core commits and re-solves in the same delta (README W1a point 3 / W1c ` +
+    `point 7), so its ${category} is already consistent with its own digitalState. Confirmed transient, not a ` +
+    `standing divergence: both sides agree again on this exact quantity at the very next sample.`
+  );
+}
+
+/** `${componentId}/${pinId}` digitalState keys that changed between two consecutive classic digitalState snapshots AND are one of that component's own digital OUTPUT pins (known-divergences.ts's `digitalOutputPins`) — i.e., a driver commit, not an input changing (an input changing has no "electrical stamp lags the commit" story at all). */
+function changedIcOutputPins(
+  kindById: ReadonlyMap<string, string>,
+  prevDigital: Readonly<Record<string, number>>,
+  curDigital: Readonly<Record<string, number>>,
+): string[] {
+  const changed: string[] = [];
+  const keys = new Set([...Object.keys(prevDigital), ...Object.keys(curDigital)]);
+  for (const key of keys) {
+    if (Object.is(prevDigital[key], curDigital[key])) continue;
+    const slash = key.indexOf("/");
+    if (slash < 0) continue;
+    const componentId = key.slice(0, slash);
+    const pin = key.slice(slash + 1);
+    const kind = kindById.get(componentId);
+    if (kind && digitalOutputPins(kind).has(pin)) changed.push(key);
+  }
+  return changed;
+}
+
+/** The net ids driven by `pinKeys` (`${componentId}/${pinId}`), plus every OTHER component sharing one of those nets — the netV/elementI surface finding 12's lag can plausibly touch. */
+function commitExplainedSurface(
+  built: CoreNodeBuild,
+  pinKeys: readonly string[],
+): { readonly nets: ReadonlySet<string>; readonly components: ReadonlySet<string> } {
+  const nets = new Set<string>();
+  for (const key of pinKeys) {
+    const slash = key.indexOf("/");
+    const node = built.pinNode.get(corePinKey(key.slice(0, slash), key.slice(slash + 1)));
+    if (node === undefined) continue;
+    const netId = built.netIdOfNode[node];
+    if (netId !== null && netId !== undefined) nets.add(netId);
+  }
+  const components = new Set<string>();
+  for (const net of built.nets) {
+    if (!nets.has(net.id)) continue;
+    for (const [componentId] of net.pins) components.add(componentId);
+  }
+  return { nets, components };
+}
+
+/**
  * Gate 2d's classic-vs-core stimuli comparison (run-entry.ts's
  * `runStimuliEntry`, W1b): compares two equal-length `StimulusStepSample`
  * sequences produced by `replayStimuliOnClassic`/`replayStimuliOnCore` on the
@@ -291,11 +368,21 @@ export function compareSamples(classic: readonly SampleReadout[], core: readonly
  * lengths, exactly like `compareSamples` — both sides replay the identical
  * phase list at the identical fixed step, so a length mismatch can only mean
  * one side's schedule diverged from the other's.
+ *
+ * `circuit`, when given, enables finding 12's stamp-after-commit-lag
+ * exemption (this file's own header above `STAMP_AFTER_COMMIT_DIVERGENCE_ID`):
+ * a netV/elementI mismatch on a net a just-committed IC output pin drives,
+ * that resolves again by the very next sample, is moved into the returned
+ * `knownDivergences` instead of `mismatches`. Omitting `circuit` (or passing
+ * one where no IC ever commits mid-phase) simply finds nothing to exempt —
+ * every mismatch stays in `mismatches`, exactly as before this exemption
+ * existed.
  */
 export function compareStimuliSamples(
   classic: readonly StimulusStepSample[],
   core: readonly StimulusStepSample[],
-): CompareResult {
+  circuit?: SimCircuit,
+): CompareResult & { readonly knownDivergences: readonly KnownDivergenceHit[] } {
   if (classic.length !== core.length) {
     throw new Error(
       `compareStimuliSamples: sample count mismatch (classic ${classic.length}, core ${core.length}) — ` +
@@ -303,25 +390,78 @@ export function compareStimuliSamples(
     );
   }
 
-  const mismatches: Mismatch[] = [];
   const voltErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
   const ampErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
+
+  // Per-sample-index mismatch lists (not one flat array) — the exemption
+  // pass below needs to look at "does this SAME (category, id) mismatch
+  // still appear at i+1", which is only answerable if each sample's own
+  // mismatches are kept separately addressable by index first.
+  const perSample: Mismatch[][] = [];
 
   for (let i = 0; i < classic.length; i++) {
     const c = classic[i]!;
     const r = core[i]!;
+    const local: Mismatch[] = [];
     // classic's own simTime/phaseIndex label the sample — see compareSamples's
     // own comment on why classic's copy is the one used to label a mismatch.
     const sampleTime = c.simTime;
     const phaseIndex = c.phaseIndex;
-    compareSimTime(sampleTime, c.simTime, r.simTime, mismatches, phaseIndex);
-    compareNumericRecord("netV", sampleTime, c.netV, r.netV, VOLT_ABS_TOL, VOLT_REL_TOL, mismatches, voltErr, phaseIndex);
-    compareNumericRecord("elementI", sampleTime, c.elementI, r.elementI, AMP_ABS_TOL, AMP_REL_TOL, mismatches, ampErr, phaseIndex);
-    compareDigitalState(sampleTime, c.digitalState, r.digitalState, mismatches, phaseIndex);
+    compareSimTime(sampleTime, c.simTime, r.simTime, local, phaseIndex);
+    compareNumericRecord("netV", sampleTime, c.netV, r.netV, VOLT_ABS_TOL, VOLT_REL_TOL, local, voltErr, phaseIndex);
+    compareNumericRecord("elementI", sampleTime, c.elementI, r.elementI, AMP_ABS_TOL, AMP_REL_TOL, local, ampErr, phaseIndex);
+    compareDigitalState(sampleTime, c.digitalState, r.digitalState, local, phaseIndex);
+    perSample.push(local);
+  }
+
+  const built = circuit ? buildCoreNodes(circuit) : null;
+  const kindById = circuit ? new Map(circuit.components.map((comp) => [comp.id, comp.kind])) : null;
+
+  const mismatches: Mismatch[] = [];
+  const knownDivergences: KnownDivergenceHit[] = [];
+
+  for (let i = 0; i < classic.length; i++) {
+    const local = perSample[i]!;
+
+    // The commit-explained surface for THIS sample: which nets/components a
+    // just-changed IC output pin (per classic's OWN digitalState, i>0 only —
+    // there is no "previous sample" at i=0) plausibly touches. Built lazily,
+    // only when this sample actually has local mismatches worth checking.
+    let surface: { readonly nets: ReadonlySet<string>; readonly components: ReadonlySet<string> } | null = null;
+    if (built && kindById && i > 0 && local.length > 0) {
+      const changedPins = changedIcOutputPins(kindById, classic[i - 1]!.digitalState, classic[i]!.digitalState);
+      if (changedPins.length > 0) surface = commitExplainedSurface(built, changedPins);
+    }
+
+    const next = i + 1 < perSample.length ? perSample[i + 1]! : null;
+
+    for (const m of local) {
+      const onSurface =
+        surface !== null &&
+        ((m.category === "netV" && surface.nets.has(m.id)) ||
+          (m.category === "elementI" && surface.components.has(m.id)));
+      // "Agrees at the next sample" means the SAME (category, id) pair is
+      // simply absent from that sample's own mismatch list — never true when
+      // there IS no next sample (the last sample of the whole replay), so a
+      // mismatch there can never be excused this way.
+      const explainedAtNext = onSurface && next !== null && !next.some((n) => n.category === m.category && n.id === m.id);
+
+      if (explainedAtNext) {
+        knownDivergences.push({
+          mismatch: m,
+          divergenceId: STAMP_AFTER_COMMIT_DIVERGENCE_ID,
+          decisionRef: STAMP_AFTER_COMMIT_DECISION_REF,
+          reason: stampAfterCommitReason(m.category as "netV" | "elementI", m.id),
+        });
+      } else {
+        mismatches.push(m);
+      }
+    }
   }
 
   return {
     mismatches,
+    knownDivergences,
     maxAbsErrorVolts: voltErr.maxAbs,
     maxRelErrorVolts: voltErr.maxRel,
     maxAbsErrorAmps: ampErr.maxAbs,

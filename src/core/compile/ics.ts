@@ -103,8 +103,14 @@ function isOutputCapable(kind: string, pin: IcPinDef): boolean {
  * pin id (or no part resolved at all — unreachable here in practice, since a
  * resolved `vccPin`/`gndPin` already implies `partFor` found the same part
  * this module's own `resolveComponentPart` call resolves).
+ *
+ * Exported (beyond this module's own compile-time use) so the equivalence
+ * harness's decision-9 open-input auto-detection (test/core/equivalence/
+ * open-input.ts) can ask the identical question this module asks at compile
+ * time — "is this pin FLOATING_INPUT" — for a fixture's own circuit, without
+ * re-deriving classic's `_shouldTreatOpenPinAsDigitalInput` rule a second time.
  */
-function isFloatingInput(part: ReturnType<typeof resolveComponentPart>, pin: IcPinDef): boolean {
+export function isFloatingInput(part: ReturnType<typeof resolveComponentPart>, pin: IcPinDef): boolean {
   const fn = part?.pin_layout.find((p) => p.id === pin.id)?.function;
   if (fn != null && FLOATING_INPUT_FUNCTIONS.has(fn)) return true;
   return pin.role === "input" || pin.role === "clock" || pin.role === "control";

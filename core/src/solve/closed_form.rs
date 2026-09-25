@@ -276,7 +276,7 @@ impl ClosedFormSolver {
             Self::publish(part, live_params, voltages, currents);
             readers.extend(part.watches.values().flatten().map(|(id, _)| *id));
             Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-            if let Some(t) = Self::schedule_crossing(part, now) {
+            if let Some(t) = Self::schedule_crossing(part, now, voltages) {
                 self.scheduled.push((t, p_idx, part.version));
             }
         }
@@ -313,7 +313,7 @@ impl ClosedFormSolver {
         Self::publish(part, live_params, voltages, currents);
         let mut readers: Vec<DeviceId> = part.watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-        if let Some(t) = Self::schedule_crossing(part, now) {
+        if let Some(t) = Self::schedule_crossing(part, now, voltages) {
             self.scheduled.push((t, partition, part.version));
         }
         Ok(readers)
@@ -459,7 +459,7 @@ impl ClosedFormSolver {
     /// segment (`F < 0`) is ever scheduled this way — `F >= 0` (growing or
     /// degenerate) is left alone, exactly as pec3 does, since the log
     /// formula below assumes a decaying exponential.
-    fn schedule_crossing(part: &mut Partition, now: f64) -> Option<f64> {
+    fn schedule_crossing(part: &mut Partition, now: f64, voltages: &[f64]) -> Option<f64> {
         let f = part.seg_f;
         if !(f < 0.0) {
             return None;
@@ -476,7 +476,7 @@ impl ClosedFormSolver {
             let now_v = x0 + dx * v0;
             let end_v = x0 + dx * inf;
             for (_, thresholds) in watchers {
-                for th in thresholds() {
+                for th in thresholds(voltages) {
                     let ok = if th.rising { now_v < th.value && end_v > th.value } else { now_v > th.value && end_v < th.value };
                     if !ok {
                         continue;
@@ -758,7 +758,7 @@ mod tests {
         assert!(cf.take_scheduled().is_empty());
 
         let threshold = 3.0;
-        assert!(cf.watch_node(2, DeviceId(0), Box::new(move || vec![Threshold { value: threshold, rising: true }])));
+        assert!(cf.watch_node(2, DeviceId(0), Box::new(move |_v: &[f64]| vec![Threshold { value: threshold, rising: true }])));
         // Re-aiming (a fresh `resolve_dirty`, standing in for "a stamp in
         // the partition changed") is what actually schedules the crossing
         // against the now-registered watcher.
@@ -788,7 +788,7 @@ mod tests {
         let mut voltages = vec![0.0, v0, 0.0];
         let mut currents = vec![0.0; 3];
         cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
-        cf.watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }]));
+        cf.watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }]));
         cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         let (_, _, stale_version) = cf.take_scheduled()[0];
         assert!(cf.is_current(0, stale_version));
@@ -811,7 +811,7 @@ mod tests {
         let mut currents = vec![0.0; 3];
         cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(cf.segments_built(), 1.0);
-        cf.watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }]));
+        cf.watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }]));
         cf.resolve_dirty(&[0], 0.0, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert_eq!(cf.segments_built(), 2.0);
         assert_eq!(cf.crossings(), 0.0);

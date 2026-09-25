@@ -59,6 +59,7 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_set_option",
   "bo_engine_set_params",
   "bo_engine_next_event_time",
+  "bo_engine_next_digital_due_time",
   "bo_engine_digital_slot_count",
   "bo_engine_digital_slots",
   "bo_engine_channel_slot_count",

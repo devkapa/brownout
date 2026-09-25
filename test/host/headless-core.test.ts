@@ -281,7 +281,7 @@ describe('engine: "core" — a non-converged advance() is reported on the result
       bo_error_len: () => 0,
       bo_engine_set_option: () => 0,
       bo_engine_next_event_time: () => Infinity,
-      bo_engine_digital_slot_count: () => 0,
+      bo_engine_next_digital_due_time: () => Infinity,      bo_engine_digital_slot_count: () => 0,
       bo_engine_digital_slots: () => 0,
       bo_engine_channel_slot_count: () => 0,
       bo_engine_channel_slots: () => 0,

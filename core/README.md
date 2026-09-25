@@ -245,6 +245,7 @@ export lands in its list in the same change that adds it.
 | `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
 | `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2 and 3 take effect at the next event; keys 1 and 4-7 are load-time only (`-8` after load). `FORCE_STEPPED` is load-time only because it decides partition classification, which is fixed at load. | v2 (W1a) |
 | `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
+| `bo_engine_next_digital_due_time` | `(h) -> f64` | Time of the earliest pending driver commit (a live token; a commit held by the power-loss hold is not pending), `+Infinity` when none. Classic's `nextScheduledEventTime()` counterpart for a host that clamps its steps onto digital due times; it ignores stepped, crossing and bucket events. | v2 (W1c) |
 | `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
 | `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). | v2 (W1a) |
 | `bo_engine_trace_enable` | `(h, on: u32) -> i32` | Record every digital slot change as `(t, slot, value)`. Harness instrumentation only; W2's host traces are separate. | v2 (W1a) |
@@ -275,8 +276,11 @@ commits, `14` rail moves, `15` stepped partitions holding two or more
 capacitors (decision 14's count; `FORCE_STEPPED` does not change it).
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
-unsupported topology (the TS side falls back to classic); `-4` solve failed
-(singular, non-finite pivot, or a non-finite published value); `-5` unknown
+unsupported topology (the TS side falls back to classic; so do `-4` and `-7`
+returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
+settle to classic); `-4` solve failed
+(singular, non-finite pivot, a non-finite published value, or an IC fixed
+point that does not converge); `-5` unknown
 handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
@@ -416,7 +420,10 @@ records from it:
    lands threshold crossings analytically. **Stepped** partitions use
    classic's controller (BE step doubling; trapezoidal with a BE anchor when
    `INTEGRATION` is `1`), land on every `t_end`, and refine crossings by
-   bisection.
+   bisection. When an event (a driver commit, a reset, a `set_params`)
+   dirties a stepped partition, its catch-up to the event instant integrates
+   with the stamps in force BEFORE the event. The new stamps apply from the
+   instant on.
 7. **Rollback.** A failed instant (`-4`, `-7`, in `advance` or
    `set_params`) restores every piece of solver state the attempt touched:
    published arrays, each static partition's own solution and cache, the
@@ -473,7 +480,11 @@ References are to `core/spec/w1-classic-semantics.md`.
    output-capable pin is not watched: its level never changes the kind's
    result (the 74ls245 aside, rule 3), and it sits on its own driver. A
    stepped partition instead re-reads every IC reading a node that moved,
-   after every step.
+   after every step, including the steps a horizon clamp takes (W1a point 5).
+   A watch's thresholds come from the IC's live supply voltages. So an IC
+   whose supply sits in a static partition is watched too, and its watches
+   are re-aimed whenever that supply moves. Only an IC with a supply node in
+   a dynamic partition relies on the stepped re-read instead.
 5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
    0.01)` of the evaluation time; `n = finish(hashState, bucket) /
    0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every
@@ -498,7 +509,12 @@ References are to `core/spec/w1-classic-semantics.md`.
 8. **Output stage** (§1.7, §3.7): while powered, a committed HIGH stamps
    `1/R_out` from the pin to the `vcc` node and a committed LOW to the `gnd`
    node. An `OPEN_COLLECTOR` pin committed HIGH is released: it stamps nothing.
-   An unpowered IC stamps nothing at all: no drivers, no pulls.
+   An unpowered IC stamps nothing at all: no drivers, no pulls. An output
+   on the datum node stamps nothing and draws no source current, as
+   classic's `_stampDigitalOutput` returns for a pin on the reference net.
+   An output on any other fixed node stamps into its supply node's partition
+   when that supply is free, and its current enters the source KCL. A commit
+   on a fixed-node driver re-publishes the source currents at that instant.
 9. **Power loss** (owner decision 8, Q-O4): while an IC is unpowered its
    drivers keep their committed level and in-flight transition frozen; a
    commit that comes due meanwhile is held, not applied. On the first powered
@@ -535,8 +551,10 @@ References are to `core/spec/w1-classic-semantics.md`.
 4. **Crossings.** A threshold crossing is accepted only at `t > now + 1e-15`.
 5. **Advance.** Process every event with `t <= t_end`, then set time to
    `t_end`. Stepped partitions land exactly on `t_end` (a horizon clamp), so a
-   readout at `t_end` is a solved value, not an interpolation. Interpolated
-   acquisition is W2.
+   readout at `t_end` is a solved value, not an interpolation. The readers
+   whose nodes the clamp moved are evaluated in a delta cycle at `t_end`, so
+   a digital readout at `t_end` reflects them, as if a step had landed there.
+   Interpolated acquisition is W2.
 6. **Load settling** (owner decision 8, and the W1-0 spike). Three steps, at
    `START_TIME`:
    1. Settle the network to a fixed point with every register's edge history
