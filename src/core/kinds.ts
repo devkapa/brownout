@@ -126,6 +126,37 @@ export interface CoreRecordShape {
   blob: { exact: number } | { atLeast: number };
   /** Param indices `bo_engine_set_params` may change after load (owner decision 1). */
   liveParams: readonly number[];
+  /** Digital readout slots a record publishes, starting at `blob[0]` (core/README.md, "Slot indices"). 0 or absent: none. */
+  digitalSlots?: number;
+}
+
+/** The params every W1c combinational IC carries, in order (core/README.md, "IC params"; core/src/kinds.rs `ic_param`). */
+export const CORE_IC_PARAM = {
+  vccMin: 0,
+  vccMax: 1,
+  famFlags: 2,
+  vilFixed: 3,
+  vil: 4,
+  vihFixed: 5,
+  vih: 6,
+  schmitt: 7,
+  vtPlus: 8,
+  vtMinus: 9,
+  nominal: 10,
+  ioMax: 11,
+  delay: 12,
+} as const;
+export const CORE_IC_PARAM_COUNT = 13;
+
+/** `famFlags` bits and per-logic-pin blob flag bits (core/README.md, "IC params" and "IC blob"). */
+export const CORE_IC_FAM_TTL = 1;
+export const CORE_IC_FAM_CMOS_RATIO = 2;
+export const CORE_IC_PIN_FLOATING_INPUT = 1;
+export const CORE_IC_PIN_OPEN_COLLECTOR = 2;
+
+/** A combinational IC's shape: `vcc`, `gnd`, then `logic` pins; one digital slot per output-capable pin. */
+function icShape(logic: number, outputs: number): CoreRecordShape {
+  return { pins: 2 + logic, pinsMax: 2 + logic, params: CORE_IC_PARAM_COUNT, blob: { exact: 1 + logic }, liveParams: [], digitalSlots: outputs };
 }
 
 /** Shapes of the kinds ported so far. Grows per sub-wave, in step with core/src/kinds.rs. */
@@ -137,4 +168,15 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.spdt_switch, { pins: 3, pinsMax: 3, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.dip_switch, { pins: 4, pinsMax: 16, params: 9, blob: { exact: 0 }, liveParams: [1, 2, 3, 4, 5, 6, 7, 8] }],
+  [CORE_KIND_CODES["74ls00"], icShape(12, 4)],
+  [CORE_KIND_CODES["74ls04"], icShape(12, 6)],
+  [CORE_KIND_CODES["74ls08"], icShape(12, 4)],
+  [CORE_KIND_CODES["74ls32"], icShape(12, 4)],
+  [CORE_KIND_CODES["74ls86"], icShape(12, 4)],
+  [CORE_KIND_CODES["74ls157"], icShape(14, 4)],
+  [CORE_KIND_CODES["74ls283"], icShape(14, 5)],
+  [CORE_KIND_CODES["74hc138"], icShape(14, 8)],
+  [CORE_KIND_CODES["74hc14"], icShape(12, 6)],
+  [CORE_KIND_CODES["74ls47"], icShape(14, 7)],
+  [CORE_KIND_CODES["74ls245"], icShape(18, 16)],
 ]);

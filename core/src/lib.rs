@@ -17,6 +17,7 @@
 //! - [`abi`]: the thin `extern "C"` shim. No physics lives there.
 
 pub mod devices;
+pub mod digital;
 pub mod drivers;
 pub mod engine;
 pub mod error;

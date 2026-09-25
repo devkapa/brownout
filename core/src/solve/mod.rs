@@ -1197,7 +1197,8 @@ impl PartitionSolver for PartitionedSolver {
             }
             let mut new_params = params.clone();
             new_params[param_index] = value;
-            (shape.check)(info.pin_count, &new_params).map_err(|msg| format!("device {device_index} ({}): {msg}", shape.name))?;
+            // Only switch-family kinds have live params, and none carries a blob.
+            (shape.check)(info.pin_count, &new_params, &[]).map_err(|msg| format!("device {device_index} ({}): {msg}", shape.name))?;
         }
         Ok(())
     }

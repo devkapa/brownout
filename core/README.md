@@ -7,7 +7,8 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W1b (analog partitions, the capacitor, the switch family).** W0 proved the pipeline with a
+**Status: W1b done (analog partitions, the capacitor, the switch family); W1c
+(the digital core and combinational ICs) contracted.** W0 proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
 dispatch plan are in the devolt repo,
@@ -120,9 +121,10 @@ trailer  MAGIC
   `core/src/kinds.rs`. A bad option inside the program is `-1` (the program
   is malformed); the same bad value passed to `bo_engine_set_option` after
   load is `-8` (an invalid argument).
-- **Slot indices.** A kind that publishes readouts declares in `kinds.rs`
-  which blob positions hold its slot bases, so the reader can check them
-  against `S` and `C`. No kind before W1c publishes any.
+- **Slot indices.** A kind that publishes digital readouts declares in
+  `kinds.rs` how many slots a record owns (`digital_slots`); its first slot
+  is `blob[0]`, and the reader checks that `blob[0]` is an integer and
+  `blob[0] + count <= S`. The W1c ICs are the first kinds that publish any.
 
 ## Kind codes and records
 
@@ -152,6 +154,55 @@ is dispatched; a code without a record layout is reserved and rejected as
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
 | 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
+| 50-59, 61 | the 11 combinational ICs: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245` | `vcc`, `gnd` (the pins classic's `supplyPinsForComponent` resolves), then the kind's logic pins in `icPinMap(kind)` order, by id (table below) | the 13 IC params below | `[slotBase, pinFlags x L]`, `L` the logic-pin count | W1c |
+
+**IC logic pins**, after `vcc` and `gnd` (`icPinMap`, src/sim/engine/digital.ts;
+`i` input, `c` control, `o` output). `cd4511` (code 60) is W1h.
+
+| Kind | `L` | Logic pins | Digital slots |
+|---|---|---|---|
+| `74ls00`, `74ls08`, `74ls32`, `74ls86` | 12 | `1a 1b 1y 2a 2b 2y 3a 3b 3y 4a 4b 4y` (y `o`) | 4 |
+| `74ls04`, `74hc14` | 12 | `1a 1y 2a 2y 3a 3y 4a 4y 5a 5y 6a 6y` (y `o`) | 6 |
+| `74ls157` | 14 | `sel /oe` (`c`), `1a 1b 1y 2a 2b 2y 3a 3b 3y 4a 4b 4y` (y `o`) | 4 |
+| `74ls283` | 14 | `a1 b1 a2 b2 a3 b3 a4 b4 c0` (`i`), `s1 s2 s3 s4 c4` (`o`) | 5 |
+| `74hc138` | 14 | `a0 a1 a2` (`i`), `e1n e2n e3` (`c`), `y0n..y7n` (`o`) | 8 |
+| `74ls47` | 14 | `b c` (`i`), `lt_n rbo_n rbi_n` (`c`), `d a` (`i`), `e_out d_out c_out b_out a_out g_out f_out` (`o`) | 7 |
+| `74ls245` | 18 | `dir /oe` (`c`), `a1 b1 a2 b2 ... a8 b8` | 16 (every `a` and `b` pin; the evaluator picks the direction) |
+
+A digital slot belongs to each output-capable pin in pin order, keyed
+`<componentId>/<pinId>`. The compiler declines an IC (the circuit falls back to
+classic with reason `topology:ic-pins:<componentId>`) when its supply pins do
+not both resolve (classic's supply-less path: a stale uid, or a kind missing
+from the injected library), or when the component's pin ids are not exactly
+the two supply pins plus the kind's logic pins. Catalog parts always carry the
+full set; the decline keeps classic's missing-pin defaults (`?? 0` for gate
+inputs, `?? 1` for 74ls47 controls) out of the core, where an absent pin would
+read node 0.
+
+**IC params** (indices in `kinds.rs` `ic_param` and `kinds.ts`
+`CORE_IC_PARAM`). Every value is finite, and the compiler resolves each one with
+classic's own helpers, exported from `sim-engine.ts` for this, never re-derived:
+- `0 vccMin = specs?.vcc_range?.min ?? 2.0`, `1 vccMax = specs?.vcc_range?.max ?? 18.0`.
+- `2 famFlags`: bit 0 `TTL` (`logic_family` contains `"TTL"`: pHigh 0.7 and a
+  1 MΩ floating pull, else 0.5 and 10 MΩ); bit 1 `CMOS_RATIO`
+  (`logic_family` contains `"HC-CMOS"` or `"CMOS-4000"`: `thresholdsFor`'s
+  ratio rule).
+- `3 vilFixed`, `4 vil`, `5 vihFixed`, `6 vih`: when `CMOS_RATIO` is clear and
+  `specs.v_input` exists, `vilFixed = 1, vil = v_il_max` if `v_il_max` is
+  present, likewise `vih` from `v_ih_min`; otherwise the flag is 0 and the
+  value 0, and the formula applies.
+- `7 schmitt = 1` when `specs.v_input.v_t_plus != null` (74hc14 among these
+  kinds); then `8 vtPlus = v_t_plus` and `9 vtMinus = v_t_minus ?? 1.6`;
+  otherwise all three are 0.
+- `10 nominal = specs?.vcc_range?.nominal ?? 5` (the Schmitt scale).
+- `11 ioMax = specs.io_max` when it is `> 0`, else 0 (meaning R_out = 50 Ω).
+- `12 delay = propagationDelayForComponent(comp)`, seconds, `>= 0`.
+
+**IC blob.** `slotBase`, then `pinFlags[i]` for logic pin `i`: bit 0
+`FLOATING_INPUT` (classic's `_shouldTreatOpenPinAsDigitalInput`: the catalog
+pin function is in `FLOATING_INPUT_FUNCTIONS`, or the `icPinMap` role is
+input, clock or control), bit 1 `OPEN_COLLECTOR` (catalog function
+`open_collector`: the 74ls47 segments). No other bit is used.
 
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
 maps an absent pin to its reference node (spec §7.2.7). One exception: classic
@@ -169,6 +220,7 @@ than emit a contact classic never stamps.
   used to report `com` to `b` at every position.
 - `dip_switch`: the sum of the closed positions' contact currents, `a_i` to
   `b_i`.
+- The W1c ICs: `0`, as classic (no current model).
 
 ## C ABI, version 2
 
@@ -370,6 +422,86 @@ records from it:
    published arrays, each static partition's own solution and cache, the
    closed-form and stepped partition state, and any crossing or step event
    the attempt scheduled. Nothing from the failed attempt reappears later.
+
+## Kernel semantics: the digital core (W1c)
+
+References are to `core/spec/w1-classic-semantics.md`.
+
+1. **Power** (§1.3), per IC, from its supply-node voltages:
+   `vSraw = V(vcc) - V(gnd)`; `powered = !OPEN(vcc) && !OPEN(gnd) &&
+   vSraw >= vccMin*0.9 && vSraw <= vccMax*1.1`, the products computed in f64
+   at run time; `vS = max(0, vSraw)`; `R_out = ioMax > 0 && vS > 0 ?
+   clamp(vS / (4*ioMax), 50, 1000) : 50`. Thresholds follow `thresholdsFor`
+   at `vS`: with `CMOS_RATIO`, `vil = max(0.2, 0.3 vS)` and
+   `vih = max(0.4, 0.7 vS)`; otherwise the fixed value when its flag is set,
+   else `max(0.8, 0.3 vS)` and `max(2.0, 0.6 vS)`.
+2. **Partitions.** An IC's driver stamps couple each output-capable pin to its
+   own supply nodes, and a floating pull couples an open input to both. So the
+   union-find also joins each free output-capable pin, and each free `OPEN`
+   `FLOATING_INPUT` pin, with every free supply pin of the same IC. Reading a
+   pin joins nothing. When both supply pins are fixed (an ideal supply), no
+   IC pin joins anything, and every output node partitions with its own load.
+3. **Stamps that depend on power** are an IC's driver conductances (`1/R_out`
+   to its own `vcc` or `gnd` node), its floating pulls, and whether it stamps
+   at all. Classic recomputes them from every Newton iterate with no Jacobian
+   term, which is a fixed-point iteration, and the core does the same: a
+   partition holding a free IC supply node re-stamps from the latest iterate
+   until classic's Newton test passes (`|dx| <= 1e-6 + 1e-3 |x|` per node, at
+   most 50 iterations; failure is `-4`). A dynamic partition holding a free IC
+   supply node is stepped, because R_out then moves with its state. When every
+   supply node is fixed, the power is constant and the solve is direct.
+4. **Reads** (§1.4), at each reader evaluation, from the solved voltages,
+   relative to `V(gnd)`:
+   - an `OPEN_HIGH` pin that is `OPEN` reads 1;
+   - otherwise an `OPEN` pin reads the floating model with the open key;
+   - a Schmitt part reads `v >= vtPlus*s` HIGH and `v <= vtMinus*s` LOW,
+     with `s = nominal > 0 ? vS/nominal : 1`; in between it holds its
+     per-pin state (default LOW);
+   - any other pin reads `v >= vih` HIGH and `v <= vil` LOW; in between it
+     reads the floating model with the dead key.
+
+   A reader evaluation is classic's `commit = true`, so it may write Schmitt
+   state. An unpowered IC reads nothing. An IC reads its supply nodes and
+   every logic pin's node. A reader whose pin sits on a closed-form or stepped
+   partition registers that pin's live thresholds (`vil`/`vih`, or the scaled
+   `vtMinus`/`vtPlus`, and the power window on the supply) with the
+   partition's crossing watch, so it is re-evaluated at the crossing instant
+   (accepted only at `t > now + 1e-15`), not at the next unrelated event.
+5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
+   0.01)` of the evaluation time; `n = finish(hashState, bucket) /
+   0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every
+   partition holding an `OPEN` `FLOATING_INPUT` pin of a powered IC is marked
+   dirty (its pull target may change), and every IC holding such a pin or
+   reading a dead-band pin is re-evaluated.
+6. **Floating pulls** (§1.6): while powered, each `OPEN` pin with
+   `FLOATING_INPUT` and not `OPEN_HIGH` gets `g = 1/(TTL ? 1e6 : 1e7)` toward
+   `V(gnd) + (high ? vS : 0)`, `high` from the open-key hash, so the pin
+   voltage and its read agree.
+7. **Evaluation** (§3.6): the 74ls157 and 74ls245 produce no outputs when
+   `/oe` reads 1; otherwise the kind's truth table over the read levels, with
+   74ls47's precedence `rbo_n` over `lt_n` over `rbi_n` and its partial glyphs
+   for 10-15, and the 74hc138 driving every output HIGH when disabled. Each
+   output-capable pin in the result requests its level through its driver
+   (§2.4, the kernel's inertial FSM, with the `delay` param; `delay = 0`
+   commits in the next delta). A pin absent from the result is reset: its
+   driver goes `HIZ` and drops any in-flight transition, so re-enabling
+   re-seeds with zero delay (§2.4's cleanup). Every evaluation counts toward
+   stat 12 (IC evaluations), which need not equal classic's
+   `digitalEvaluationCount` (D27).
+8. **Output stage** (§1.7, §3.7): while powered, a committed HIGH stamps
+   `1/R_out` from the pin to the `vcc` node and a committed LOW to the `gnd`
+   node. An `OPEN_COLLECTOR` pin committed HIGH is released: it stamps nothing.
+   An unpowered IC stamps nothing at all: no drivers, no pulls.
+9. **Power loss** (owner decision 8, Q-O4): while an IC is unpowered its
+   drivers keep their committed level and in-flight transition frozen; a
+   commit that comes due meanwhile is held, not applied. On the first powered
+   evaluation the partition is solved with the pre-outage committed levels,
+   and any held transition whose due time has passed commits in the next
+   delta, as classic's first powered pass does.
+10. **Readouts.** A digital slot holds the pin's committed level (electrical:
+    HIGH, or released for open-collector, is 1) while the pin is driven, and
+    `NaN` (an absent key) while the IC is unpowered or the pin is not in the
+    evaluator's result (tri-stated, or the undriven side of a 74ls245).
 
 ## Kernel semantics: events (W1a)
 

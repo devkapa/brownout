@@ -293,7 +293,7 @@ impl Program {
 
         let mut devices = Vec::with_capacity(device_count);
         for d in 0..device_count {
-            devices.push(Self::parse_device(&mut r, d, node_count)?);
+            devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count)?);
         }
 
         r.expect("trailer magic", MAGIC)?;
@@ -415,7 +415,7 @@ impl Program {
         Ok(PinRecord { node, flags, open_hash, dead_hash })
     }
 
-    fn parse_device(r: &mut Reader, index: usize, node_count: usize) -> Result<Device, BoError> {
+    fn parse_device(r: &mut Reader, index: usize, node_count: usize, digital_slot_count: usize) -> Result<Device, BoError> {
         let kind_code = r.bounded_index(&format!("device[{index}] kind code"), u32::MAX as usize)? as u32;
         // componentIndex is opaque (an index into the TS side's
         // `circuit.components`, unrelated to how much program data remains),
@@ -501,9 +501,23 @@ impl Program {
             }
         }
 
-        (shape.check)(pin_count, &params).map_err(|msg| {
+        (shape.check)(pin_count, &params, &blob).map_err(|msg| {
             BoError::malformed(format!("device[{index}] ({}): {msg}", shape.name))
         })?;
+
+        // A kind that publishes digital readouts carries its first slot in
+        // blob[0] (core/README.md, "Slot indices"); every slot it owns must
+        // exist.
+        let slots = (shape.digital_slots)(pin_count);
+        if slots > 0 {
+            let base = blob[0];
+            if base.fract() != 0.0 || base < 0.0 || base + slots as f64 > digital_slot_count as f64 {
+                return Err(BoError::malformed(format!(
+                    "device[{index}] ({}): digital slots {base}..{base}+{slots} are outside S = {digital_slot_count}",
+                    shape.name
+                )));
+            }
+        }
 
         Ok(Device { kind: kind_code, component_index, pins, params, blob })
     }
@@ -1072,5 +1086,59 @@ mod tests {
             let err = Program::parse(&data).unwrap_err();
             assert_eq!(err.code, -1, "position {i} set to NaN did not fail as malformed");
         }
+    }
+
+    // --- W1c: combinational IC records --------------------------------------
+
+    /// A 74LS00 record: vcc, gnd, then 12 logic pins, 13 params, a blob of
+    /// the slot base plus one flag per logic pin. `slot_base` and `flags`
+    /// are what the tests below break.
+    fn ls00_record(slot_base: f64, fam_flags: f64, pin_flag: f64) -> Vec<f64> {
+        let mut rec = vec![kinds::IC_74LS00 as f64, 0.0, 14.0];
+        rec.extend(simple_pin(1.0)); // vcc
+        rec.extend(simple_pin(0.0)); // gnd
+        for _ in 0..12 {
+            rec.extend(simple_pin(2.0));
+        }
+        rec.push(kinds::ic_param::COUNT as f64);
+        rec.extend([4.75, 5.25, fam_flags, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 20e-9]);
+        rec.push(13.0);
+        rec.push(slot_base);
+        rec.extend([pin_flag; 12]);
+        rec
+    }
+
+    #[test]
+    fn accepts_an_ic_record_whose_slots_fit() {
+        let p = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ls00_record(0.0, 1.0, 1.0)])).unwrap();
+        assert_eq!(p.devices[0].kind, kinds::IC_74LS00);
+        assert_eq!(p.devices[0].blob.len(), 13);
+    }
+
+    #[test]
+    fn rejects_an_ic_whose_slots_run_past_s() {
+        let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ls00_record(1.0, 1.0, 1.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("digital slots"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_a_fractional_ic_slot_base() {
+        let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[ls00_record(0.5, 1.0, 1.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_an_undefined_ic_pin_flag_bit() {
+        let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ls00_record(0.0, 1.0, 4.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("pin flags"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_an_out_of_range_family_code() {
+        let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ls00_record(0.0, 4.0, 1.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("famFlags"), "{}", err.message);
     }
 }
