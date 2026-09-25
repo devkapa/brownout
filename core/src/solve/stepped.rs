@@ -232,7 +232,18 @@ struct Partition {
 }
 
 impl Partition {
-    fn new(shape: DynShape) -> Self {
+    /// `t0` is `program.options.start_time` (contract point 5: "A stepped
+    /// partition's clock starts at START_TIME, so a load integrates nothing
+    /// and costs the same at any start time"). Starting the clock at 0
+    /// regardless of `t0` was the bug this fixes: `resolve_dirty`'s first
+    /// `sync_partition(p_idx, now, ...)` call horizon-clamps to `now`, which
+    /// IS `START_TIME` at load — with `t` hardcoded to 0 that call had to
+    /// really integrate the whole `[0, START_TIME]` interval with genuine
+    /// BE/trap steps before the circuit was considered loaded at all,
+    /// contradicting `vc`'s own "Initial vc = 0 at load" a few lines below
+    /// (a capacitor starts uncharged AT `START_TIME`, not at some point on
+    /// the way to it) and costing load time linear in `START_TIME`.
+    fn new(shape: DynShape, t0: f64) -> Self {
         let n = shape.n;
         let nc = shape.capacitors.len();
         Partition {
@@ -240,7 +251,7 @@ impl Partition {
             x: vec![0.0; n],
             vc: vec![0.0; nc], // README: "Initial vc = 0 at load".
             i_prev: vec![0.0; nc],
-            t: 0.0,
+            t: t0,
             h: POST_EVENT_H,
             changing: true,
             be_next_step: true, // classic's load(): the first step is always BE.
@@ -257,9 +268,14 @@ impl Partition {
     }
 }
 
+/// Contract point 7: includes `scheduled` too, not just each partition's own
+/// committed state — see `closed_form::Snapshot`'s doc comment for why a
+/// later partition in the SAME dirty batch failing first can leave a stale
+/// entry sitting here rather than in `PartitionedSolver::pending_schedule`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     partitions: HashMap<usize, PartitionSnapshot>,
+    scheduled: Vec<(f64, usize, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,8 +302,9 @@ pub struct SteppedSolver {
     node_owner: HashMap<usize, (usize, usize)>,
     method: Method,
     /// `Step` events this solver wants scheduled, drained by
-    /// [`Self::take_scheduled`] every call (never part of [`Snapshot`] — see
-    /// `closed_form::Snapshot`'s doc comment for the identical reasoning).
+    /// [`Self::take_scheduled`] — normally every call, but see
+    /// `closed_form::Snapshot`'s doc comment for why it is part of
+    /// [`Snapshot`] rather than always empty by the time one is taken.
     scheduled: Vec<(f64, usize, u64)>,
 }
 
@@ -303,7 +320,7 @@ impl SteppedSolver {
             for (l, &node) in shape.nodes.iter().enumerate() {
                 node_owner.insert(node, (p_idx, l));
             }
-            parts.insert(p_idx, Partition::new(shape));
+            parts.insert(p_idx, Partition::new(shape, program.options.start_time));
         }
         SteppedSolver { partitions: parts, node_owner, method: Method::from_option(program.options.integration), scheduled: Vec::new() }
     }
@@ -442,10 +459,12 @@ impl SteppedSolver {
                     )
                 })
                 .collect(),
+            scheduled: self.scheduled.clone(),
         }
     }
 
     pub fn restore(&mut self, snapshot: Snapshot) {
+        self.scheduled = snapshot.scheduled;
         for (p, s) in snapshot.partitions {
             if let Some(part) = self.partitions.get_mut(&p) {
                 part.x = s.x;
@@ -765,6 +784,68 @@ mod tests {
         }
         assert!(st.steps_taken() > 0.0);
         assert!(st.newton_iterations() > 0.0, "every step must route through Newton (W1 plan row B3), even converging in one iteration");
+    }
+
+    /// Section 2 of the W1b review, contract point 5: a stepped partition's
+    /// clock starts at `START_TIME`, so a load integrates nothing and costs
+    /// the same at any start time — `Partition::new`'s `t` used to be
+    /// hardcoded to 0 regardless of `t0`, so `resolve_dirty`'s first
+    /// `sync_partition(p_idx, now=START_TIME, ...)` call genuinely
+    /// integrated the whole `[0, START_TIME]` interval with real BE/trap
+    /// steps before the circuit was even considered loaded. Checked by
+    /// comparing `START_TIME=5` against `START_TIME=0` directly: with the
+    /// fix, both take zero steps at load and land on bit-identical (both
+    /// near-zero, `vc=0`-seeded) node voltages, since `solve_initial_x` is a
+    /// pure function of the topology and `vc`, never of `now` itself.
+    #[test]
+    fn a_stepped_ladder_at_a_nonzero_start_time_comes_up_uncharged_with_zero_steps_at_load() {
+        let (v, r1, c1, r2, c2) = (5.0, 1000.0, 1e-6, 1000.0, 1e-6);
+
+        let p0 = ladder_program(v, r1, c1, r2, c2); // START_TIME defaults to 0.
+        let mut st0 = build(&p0);
+        let mut voltages0 = vec![0.0, v, 0.0, 0.0];
+        let mut currents0 = vec![0.0; 5];
+        st0.resolve_dirty(&[0], 0.0, &HashMap::new(), &mut voltages0, &mut currents0).unwrap();
+
+        let mut options5 = Options::default();
+        options5.start_time = 5.0;
+        let p5 = program(4, vec![source(0, 1, 0, v), resistor(1, 1, 2, r1), capacitor(2, 2, 0, c1, 0.0, 0.0), resistor(3, 2, 3, r2), capacitor(4, 3, 0, c2, 0.0, 0.0)], options5);
+        let mut st5 = build(&p5);
+        let mut voltages5 = vec![0.0, v, 0.0, 0.0];
+        let mut currents5 = vec![0.0; 5];
+        st5.resolve_dirty(&[0], 5.0, &HashMap::new(), &mut voltages5, &mut currents5).unwrap();
+
+        assert_eq!(st5.steps_taken(), 0.0, "loading at a nonzero START_TIME must not integrate anything");
+        for l in [2usize, 3] {
+            assert_eq!(voltages5[l].to_bits(), voltages0[l].to_bits(), "node {l}: START_TIME=5 ({}) must match START_TIME=0 ({}) bit-for-bit — both take zero steps at load", voltages5[l], voltages0[l]);
+            assert!(voltages5[l].abs() < 1e-3, "node {l} got {}, expected an uncharged-capacitor value, not something charged toward 5V as if it had run since t=0", voltages5[l]);
+        }
+    }
+
+    /// The `FORCE_STEPPED` single-capacitor counterpart of the ladder test
+    /// above: the same zero-steps-at-load, bit-identical-to-START_TIME=0
+    /// guarantee must hold for a partition that only becomes `Stepped`
+    /// because of the option, not because it genuinely has two capacitors.
+    #[test]
+    fn a_force_stepped_single_capacitor_at_a_nonzero_start_time_comes_up_uncharged_with_zero_steps() {
+        let (v, r, c) = (5.0, 1000.0, 1e-6);
+        let build_at = |start_time: f64| {
+            let mut options = Options::default();
+            options.force_stepped = true;
+            options.start_time = start_time;
+            let p = program(3, vec![source(0, 1, 0, v), resistor(1, 1, 2, r), capacitor(2, 2, 0, c, 0.0, 0.0)], options);
+            let mut st = build(&p);
+            let mut voltages = vec![0.0, v, 0.0];
+            let mut currents = vec![0.0; 3];
+            st.resolve_dirty(&[0], start_time, &HashMap::new(), &mut voltages, &mut currents).unwrap();
+            (st, voltages)
+        };
+        let (_st0, voltages0) = build_at(0.0);
+        let (st5, voltages5) = build_at(5.0);
+
+        assert_eq!(st5.steps_taken(), 0.0, "loading at a nonzero START_TIME under FORCE_STEPPED must not integrate anything");
+        assert_eq!(voltages5[2].to_bits(), voltages0[2].to_bits(), "START_TIME=5 ({}) must match START_TIME=0 ({}) bit-for-bit", voltages5[2], voltages0[2]);
+        assert!(voltages5[2].abs() < 1e-3, "got {}, expected an uncharged-capacitor value", voltages5[2]);
     }
 
     /// The single-capacitor `FORCE_STEPPED` case (Decision 14; W1 plan row

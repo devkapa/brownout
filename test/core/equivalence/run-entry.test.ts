@@ -19,12 +19,15 @@ import { compareStimuliSamples } from "./compare.js";
 import {
   collectClassicSamplesCached,
   EXTERNAL_CLASSIC_REFERENCE_CACHE_DIR,
+  explainRichardsonMismatches,
   isLocalCorpusOrigin,
   QuietInstantEvidenceError,
   resolveSampleTimes,
+  RICHARDSON_DIVERGENCE_ID,
   runCorpusEntry,
 } from "./run-entry.js";
 import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase } from "./stimuli.js";
+import { loadSyntheticCorpus } from "./synthetic-fixtures.js";
 import type { CorpusEntry } from "./types.js";
 
 type SimComponent = SimCircuit["components"][number];
@@ -240,6 +243,86 @@ function simpleDivider(): SimCircuit {
     wires: [wire("vsrc", "neg", "gnd", "gnd"), wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "gnd", "gnd")],
   };
 }
+
+describe("finding 11 — Richardson-extrapolated forgiveness for the stimuli path", () => {
+  // Fixture 13 (test/fixtures/core/13-rc-switch-toggle), loaded exactly as
+  // the harness itself loads it (loadSyntheticCorpus, finding 12) — starts
+  // OPEN and declares phases close-20ms-then-open-20ms, so this exercises
+  // BOTH toggle directions on the section-11 circuit itself, not a
+  // hand-rolled stand-in for it.
+  const fixture13 = loadSyntheticCorpus().find((e) => e.entry.name === "13-rc-switch-toggle")!;
+
+  it("the section-11 circuit (fixture 13's RC, close 20ms then open 20ms) passes gate 2d with every mismatch explained", () => {
+    expect(fixture13.entry.phases?.length, "fixture 13 must declare phases for this test to mean anything").toBe(2);
+
+    const result = runCorpusEntry(fixture13.entry, fixture13.circuit);
+
+    expect(result.status).toBe("pass");
+    if (result.status === "pass") {
+      // Not a vacuous pass: compareStimuliSamples must have actually found
+      // something for Richardson to explain, or this test would look
+      // identical whether or not the detector does anything at all.
+      expect(result.knownDivergences.length).toBeGreaterThan(0);
+      expect(result.knownDivergences.every((hit) => hit.divergenceId === RICHARDSON_DIVERGENCE_ID)).toBe(true);
+    }
+  });
+
+  it("a seeded core fault (one core sample offset by 10 mV) is NOT explained away — the detector must still fire", () => {
+    const phases = fixture13.entry.phases!;
+    const classicSamples = replayStimuliOnClassic(fixture13.circuit, phases);
+    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases);
+
+    // Perturb the LAST sample's netV on every net by 10mV — comfortably
+    // outside both the flat tolerance and any plausible Richardson estimate
+    // near it, so this cannot pass by coincidence.
+    const tamperedIndex = coreSamples.length - 1;
+    const tampered = coreSamples.map((sample, i) =>
+      i === tamperedIndex
+        ? { ...sample, netV: Object.fromEntries(Object.entries(sample.netV).map(([k, v]) => [k, v + 0.01])) }
+        : sample,
+    );
+
+    const cmp = compareStimuliSamples(classicSamples, tampered);
+    // classic and core simTime labels agree closely (finding 10) but are not
+    // necessarily bit-identical floats (independent accumulation on each
+    // engine), so this matches by phase + a real time tolerance, not `===`.
+    const taggedTime = tampered[tamperedIndex]!.simTime;
+    const taggedPhase = tampered[tamperedIndex]!.phaseIndex;
+    const seededMismatches = cmp.mismatches.filter(
+      (m) => m.category === "netV" && m.phaseIndex === taggedPhase && Math.abs(m.sampleTime - taggedTime) < 1e-9,
+    );
+    expect(seededMismatches.length, "the 10mV perturbation itself must surface as a netV mismatch, or this test proves nothing").toBeGreaterThan(0);
+
+    const { explained, remaining } = explainRichardsonMismatches(fixture13.circuit, phases, cmp.mismatches);
+    for (const seeded of seededMismatches) {
+      expect(remaining, `mismatch on ${seeded.id} at t=${seeded.sampleTime}`).toContainEqual(seeded);
+      expect(explained.some((hit) => hit.mismatch === seeded)).toBe(false);
+    }
+  });
+
+  it("leaves digitalState/simTime mismatches untouched, even when a matching netV/elementI mismatch at the same sample IS explained", () => {
+    const phases = fixture13.entry.phases!;
+    const classicSamples = replayStimuliOnClassic(fixture13.circuit, phases);
+    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases);
+    const cmp = compareStimuliSamples(classicSamples, coreSamples);
+
+    // Fabricate a digitalState mismatch alongside the real (Richardson-
+    // explainable) netV/elementI ones this circuit actually produces.
+    const fabricated = {
+      sampleTime: cmp.mismatches[0]?.sampleTime ?? classicSamples[0]!.simTime,
+      category: "digitalState" as const,
+      id: "not-a-real-key",
+      classicValue: 0,
+      coreValue: 1,
+      detail: "fabricated for this test",
+      phaseIndex: 0,
+    };
+
+    const { explained, remaining } = explainRichardsonMismatches(fixture13.circuit, phases, [...cmp.mismatches, fabricated]);
+    expect(remaining).toContainEqual(fabricated);
+    expect(explained.some((hit) => hit.mismatch === fabricated)).toBe(false);
+  });
+});
 
 describe("resolveSampleTimes — finding 10 (quiet-instant selection must not admit everything by default)", () => {
   it("throws when an analog entry has no digital-event evidence at all (guardEventTimes empty, no trace was ever attempted)", () => {

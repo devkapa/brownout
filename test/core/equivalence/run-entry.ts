@@ -55,8 +55,15 @@ import { guardWindowS, requireMinQuietInstants, selectQuietInstants } from "./qu
 import { classicIdentityHash, createFileReferenceCache, getOrCompute, fixtureHash, type ClassicReferenceCache } from "./reference-cache.js";
 import { collectClassicSamples, collectCoreSamples, DEFAULT_DURATION_S, sampleTimesFor } from "./sample.js";
 import { denseAnalogSchedule } from "./schedule.js";
-import { replayStimuliOnClassic, replayStimuliOnCore, StimuliNotYetSupportedOnCoreError, type StimulusStepSample } from "./stimuli.js";
-import { AMP_ABS_TOL, AMP_REL_TOL, VOLT_ABS_TOL, VOLT_REL_TOL } from "./tolerance.js";
+import {
+  replayStimuliOnClassic,
+  replayStimuliOnCore,
+  STIMULUS_FIXED_STEP_S,
+  StimuliNotYetSupportedOnCoreError,
+  type StimulusPhase,
+  type StimulusStepSample,
+} from "./stimuli.js";
+import { AMP_ABS_TOL, AMP_REL_TOL, VOLT_ABS_TOL, VOLT_REL_TOL, withinTolerance } from "./tolerance.js";
 import { collectClassicDigitalTrace, collectCoreDigitalTrace, CoreTraceUnsupportedError, type DigitalTraceEvent } from "./trace.js";
 import type {
   AnalyticFixtureModel,
@@ -134,12 +141,153 @@ export function collectClassicSamplesCached(entry: CorpusEntry, circuit: SimCirc
   );
 }
 
+// ─── Gate 2d / finding 11: Richardson-extrapolated forgiveness for the stimuli path ──
+//
+// `runStimuliEntry` has no fixture-level analytic model — `entry.analytic`
+// (types.ts) is a plain-flow-only field, and a verify-script phase list has
+// no closed-form reference of its own. But decision 3's underlying claim
+// still applies here: classic's fixed-step (`STIMULUS_FIXED_STEP_S`)
+// backward-Euler replay lags the true trajectory by a known, bounded amount,
+// and a core that is genuinely CLOSER to the truth than that lagging
+// classic sample must not fail an entry just because it disagrees with
+// classic's own discretisation error (section 11 of the W1b review; a probe
+// against fixture 13's own RC-switch circuit showed the core's exact
+// closed-form answer failing against classic's one-step BE value by nearly
+// double the tolerance).
+//
+// ORCHESTRATOR DECISION (locked): where no closed-form model exists, a
+// Richardson extrapolation of CLASSIC AGAINST ITSELF stands in for one.
+// Replay classic a SECOND time on the same phases at half the fixed step
+// (`STIMULUS_FIXED_STEP_S / 2`), read that fine replay's own sample at each
+// coarse sample's instant, and combine the two backward-Euler (order 1)
+// estimates into `R = 2*c(h/2) - c(h)` — the usual Richardson cancellation
+// of a first-order method's leading error term. (For trapezoidal, order 2,
+// the equivalent combination is `R = (4*c(h/2) - c(h)) / 3`; nothing in this
+// file drives `replayStimuliOnClassic` at anything but backward Euler today
+// — see stimuli.ts's `replayStimuliOnClassic`, which never passes an
+// `integrationMethod` to its `HeadlessRunner` — so `richardsonMethod` below
+// defaults to "be" and only matters once/if that changes.)
+//
+// A mismatch is explained — never widened — only when BOTH:
+//   1. the core is within the ORDINARY volt/current tolerance of R (the same
+//      `withinTolerance` compare.ts itself uses, never a looser one), AND
+//   2. the core is at least as close to R as classic's own coarse sample is
+//      (`|core - R| <= |classic - R|`) — unlike decision 3's plain-flow rule
+//      (`checkAnalyticCrossing`, which only requires the core to be within
+//      tolerance of the analytic reference and treats `classicValue` as
+//      informational), the ORCHESTRATOR DECISION for this numerical
+//      stand-in requires the core to actually be the closer of the two,
+//      since there is no independently-derived ground truth backing R the
+//      way a fixture's own equations back an analytic model.
+// Anything else — including a fine reference replay that itself throws, in
+// which case R cannot be trusted at all — stays a failure. Digital-slot
+// (and simTime) mismatches are never touched: this is an analog-only
+// mechanism, exactly like `explainAnalyticMismatches` below.
+
+/** Exported so a test can assert an explained mismatch's `divergenceId` without hardcoding the string twice. */
+export const RICHARDSON_DIVERGENCE_ID = "richardson-classic-self-reference";
+const RICHARDSON_DECISION_REF =
+  "Finding 11 (W1b review), orchestrator decision: gate 2d's stimuli path has no per-fixture analytic model, " +
+  "so a Richardson-extrapolated classic-vs-classic reference (R = 2*c(h/2) - c(h) for backward Euler) stands " +
+  "in for one, forgiving a mismatch only when the core is within tolerance of R AND at least as close to R as " +
+  "classic's own coarse sample is.";
+
+function richardsonEstimate(coarse: number, fine: number, method: "be" | "trap"): number {
+  return method === "trap" ? (4 * fine - coarse) / 3 : 2 * fine - coarse;
+}
+
+/** The fine (h/2) replay's own sample for `mismatch`'s exact `(phaseIndex, sampleTime)`, or `undefined` if none matches within a tight time tolerance — should always be found (see this section's own header: every coarse instant is also a fine-replay instant), but a caller must not manufacture an R from the wrong instant if a future change to either replay's schedule ever breaks that. */
+function findFineSampleAt(
+  fineSamples: readonly StimulusStepSample[],
+  phaseIndex: number,
+  simTime: number,
+): StimulusStepSample | undefined {
+  const tol = 1e-9 * Math.max(1, Math.abs(simTime));
+  return fineSamples.find((s) => s.phaseIndex === phaseIndex && Math.abs(s.simTime - simTime) <= tol);
+}
+
+/**
+ * Splits `mismatches` into ones this Richardson reference explains (see this
+ * section's header for the exact rule) and everything else, which callers
+ * must still judge exactly as before. `digitalState`/`simTime` mismatches,
+ * and any `netV`/`elementI` mismatch whose values are not both plain
+ * numbers or whose `phaseIndex` is missing (never true of a real
+ * `compareStimuliSamples` mismatch — guarded defensively anyway), pass
+ * straight through to `remaining` untouched.
+ *
+ * Replays classic a second time at half the fixed step, over the SAME
+ * `phases` and the SAME (pre-override) `circuit` `runStimuliEntry` already
+ * replayed at the coarse step — an independent `HeadlessRunner`, so this
+ * never disturbs the samples already collected. If that fine reference
+ * replay itself throws (non-convergence, most likely), R cannot be trusted
+ * for ANY mismatch, so everything is returned unexplained rather than
+ * guessed at.
+ */
+export function explainRichardsonMismatches(
+  circuit: SimCircuit,
+  phases: readonly StimulusPhase[],
+  mismatches: readonly Mismatch[],
+  richardsonMethod: "be" | "trap" = "be",
+): { readonly explained: readonly KnownDivergenceHit[]; readonly remaining: readonly Mismatch[] } {
+  const analogMismatches = mismatches.filter((m) => m.category === "netV" || m.category === "elementI");
+  if (analogMismatches.length === 0) return { explained: [], remaining: mismatches };
+
+  let fineSamples: readonly StimulusStepSample[];
+  try {
+    fineSamples = replayStimuliOnClassic(circuit, phases, STIMULUS_FIXED_STEP_S / 2);
+  } catch {
+    return { explained: [], remaining: mismatches };
+  }
+
+  const explained: KnownDivergenceHit[] = [];
+  const remaining: Mismatch[] = [];
+
+  for (const mismatch of mismatches) {
+    if (mismatch.category !== "netV" && mismatch.category !== "elementI") {
+      remaining.push(mismatch);
+      continue;
+    }
+    if (typeof mismatch.classicValue !== "number" || typeof mismatch.coreValue !== "number" || mismatch.phaseIndex === undefined) {
+      remaining.push(mismatch);
+      continue;
+    }
+
+    const fineSample = findFineSampleAt(fineSamples, mismatch.phaseIndex, mismatch.sampleTime);
+    const fineValue = fineSample ? (mismatch.category === "netV" ? fineSample.netV[mismatch.id] : fineSample.elementI[mismatch.id]) : undefined;
+    if (typeof fineValue !== "number") {
+      remaining.push(mismatch);
+      continue;
+    }
+
+    const r = richardsonEstimate(mismatch.classicValue, fineValue, richardsonMethod);
+    const [absTol, relTol] = mismatch.category === "netV" ? [VOLT_ABS_TOL, VOLT_REL_TOL] : [AMP_ABS_TOL, AMP_REL_TOL];
+    const coreAbsErr = Math.abs(mismatch.coreValue - r);
+    const classicAbsErr = Math.abs(mismatch.classicValue - r);
+
+    if (withinTolerance(mismatch.coreValue, r, absTol, relTol) && coreAbsErr <= classicAbsErr) {
+      explained.push({
+        mismatch,
+        divergenceId: RICHARDSON_DIVERGENCE_ID,
+        decisionRef: RICHARDSON_DECISION_REF,
+        reason:
+          `core is within tolerance of the Richardson-extrapolated classic reference R=${r} (|core-R|=` +
+          `${coreAbsErr.toExponential(3)} <= |classic-R|=${classicAbsErr.toExponential(3)})`,
+      });
+    } else {
+      remaining.push(mismatch);
+    }
+  }
+
+  return { explained, remaining };
+}
+
 /**
  * Gate 2d's stimuli path (W1b): replays `entry.phases` on classic, then on
  * the core, and — once both sides actually produced samples — compares them
  * the same way the plain flow compares its own two sample sequences
  * (compare.ts's shared tolerances/comparators, known-divergences.ts's
- * registry). Runs BEFORE the plain not-ported/pass/fail flow and takes
+ * registry, and — finding 11 — the Richardson-extrapolated forgiveness
+ * above). Runs BEFORE the plain not-ported/pass/fail flow and takes
  * priority over it whenever `entry.phases` is set — a verify-script entry's
  * real question is "can this be validated under scripted stimuli", which is
  * answered here directly now that owner decision 1's parameter-update event
@@ -165,11 +313,12 @@ export function collectClassicSamplesCached(entry: CorpusEntry, circuit: SimCirc
  *     elementI, digitalState, and the samples' own simTime — tagging each
  *     resulting mismatch with the phase it came from (`Mismatch.phaseIndex`,
  *     types.ts) so a report can point straight at which phase produced it.
- *     `known-divergences.ts`'s registry classifies the mismatch list exactly
- *     as the plain flow does, against the entry's ORIGINAL (pre-override)
- *     circuit — a registration's cone is a topological fact, and a phase's
- *     `set` only ever changes a component's params, never the netlist a cone
- *     is computed from.
+ *     Finding 11's Richardson forgiveness is tried first (analog mismatches
+ *     only); `known-divergences.ts`'s registry then classifies whatever it
+ *     leaves unexplained, exactly as the plain flow does, against the
+ *     entry's ORIGINAL (pre-override) circuit — a registration's cone is a
+ *     topological fact, and a phase's `set` only ever changes a component's
+ *     params, never the netlist a cone is computed from.
  */
 function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   const phases = entry.phases!;
@@ -209,7 +358,20 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     return { status: "error", kinds: entry.kinds, engine: "core", message: errorMessage(err), classicWallMs, coreWallMs: null };
   }
 
-  const cmp = compareStimuliSamples(classicSamples, coreSamples);
+  let cmp: ReturnType<typeof compareStimuliSamples>;
+  try {
+    cmp = compareStimuliSamples(classicSamples, coreSamples);
+  } catch (err) {
+    // Finding 10: compareStimuliSamples only ever throws on a sample-count
+    // mismatch — the two replays used different phase/step schedules, a
+    // harness bug rather than a circuit fact. That must become THIS entry's
+    // "error" status, the same as every other failure path above, rather
+    // than escape uncaught and abort runEquivalenceHarness (and with it,
+    // every other entry's result) for the whole run. Defense in depth: the
+    // step-schedule fix in stimuli.ts's replayStimuliOnCore is what actually
+    // prevents this from firing on a real corpus entry.
+    return { status: "error", kinds: entry.kinds, engine: "core", message: errorMessage(err), classicWallMs, coreWallMs };
+  }
   const errorStats = {
     maxAbsErrorVolts: cmp.maxAbsErrorVolts,
     maxRelErrorVolts: cmp.maxRelErrorVolts,
@@ -217,8 +379,15 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     maxRelErrorAmps: cmp.maxRelErrorAmps,
   };
 
-  const { known, unexplained } = classifyMismatches(circuit, cmp.mismatches);
-  const knownDivergences = known.map(toKnownDivergenceHit);
+  // Finding 11 first: forgive an analog mismatch that is explained by a
+  // Richardson-extrapolated classic-vs-classic reference (this section's own
+  // header, above) before ever asking known-divergences.ts's registry about
+  // it — the two are independent explanations for the SAME mismatch list, so
+  // both are tried and merged, mirroring the plain flow's
+  // explainAnalyticMismatches-then-classifyMismatches order.
+  const richardsonSplit = explainRichardsonMismatches(circuit, phases, cmp.mismatches);
+  const { known, unexplained } = classifyMismatches(circuit, richardsonSplit.remaining);
+  const knownDivergences = [...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };

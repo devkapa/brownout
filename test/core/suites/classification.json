@@ -23,7 +23,10 @@
     "case's `kinds` array has a count of zero for that file -- see its own",
     "header comment for why this must be computed from portable entries only,",
     "not from CORE_IMPLEMENTED_KINDS (which also contains \"ground\", a compiler-",
-    "internal detail no test ever names as a component kind)."
+    "internal detail no test ever names as a component kind). It ALSO fails",
+    "when any CORE_IMPLEMENTED_KINDS member except \"ground\" has no portable",
+    "case, in any file, that ran and passed (the coverage floor, W1b review",
+    "finding 9): a kind the core implements must be exercised here."
   ],
   "suites": [
     {
@@ -168,6 +171,522 @@
           "status": "not-yet",
           "kinds": ["voltage_source", "resistor", "lm358"],
           "reason": "lm358 (op-amp) is not in the W1 plan's kind table at all; no W1 sub-wave ports it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/push-button-4pin.test.ts",
+      "cases": [
+        {
+          "describe": "push_button 4-pin internal shorts",
+          "name": "a≡a2 and b≡b2 are the SAME net (one conductor, not a resistor bridge)",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls buildNets() directly and never constructs a SimEngine at all -- there is no load()/step() here for the core-suites alias to intercept, so this never touches the core in the first place. Pure breadboard-topology check, not a physics comparison."
+        },
+        {
+          "describe": "push_button 4-pin internal shorts",
+          "name": "current entering a2 leaves via b2 when pressed (a2→a→b→b2 through the contact)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "push_button"],
+          "reason": "Plain divider through a closed push_button's a2-a-b-b2 internal short; push_button is in CORE_IMPLEMENTED_KINDS (W1b) with no partition-crossing contacts (push_button's single a/b pair, unlike spdt/dip, always shares one partition by construction)."
+        },
+        {
+          "describe": "push_button 4-pin internal shorts",
+          "name": "open button breaks the a↔b path (a2/b2 still tied to their partners)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "push_button"],
+          "reason": "Same rig as the closed case, open instead -- confirms the core stamps zero current through an open contact, not just a closed one."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/dip-switch.test.ts",
+      "cases": [
+        {
+          "describe": "dip_switch — closed position conducts",
+          "name": "sw1=1 with VCC/resistor/GND → large current flows (≈ 5 A through 1 mΩ + 1 kΩ)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Single closed dip_switch position (sw1) driving a resistor divider; positions 2-4 are entirely unwired, so this never exercises a contact whose free pin lands in a different partition than sw1's own (finding 1's failure mode)."
+        },
+        {
+          "describe": "dip_switch — closed position conducts",
+          "name": "sw1=0 → no current through the switch",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Same rig, sw1 open -- confirms the core stamps zero current through an open dip_switch contact."
+        },
+        {
+          "describe": "dip_switch — open positions isolate",
+          "name": "positions 2..4 open do not affect circuit when sw1 is closed",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Compares two full engine runs (all-open vs sw1-closed) on the same unwired-positions-2-4 rig above; both runs individually only ever stamp sw1's own contact."
+        },
+        {
+          "describe": "dip_switch — positions param",
+          "name": "N=2 positions works correctly",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Same sw1-only rig at the minimum declared pin count (positions=2); CORE_RECORD_SHAPES.dip_switch's pinsMax=16 with a positions-driven pin count already covers this shape."
+        },
+        {
+          "describe": "dip_switch — positions param",
+          "name": "N=8 positions works correctly",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Same sw1-only rig at the maximum declared pin count this test file uses (positions=8, well within CORE_RECORD_SHAPES.dip_switch's pinsMax=16)."
+        },
+        {
+          "describe": "dip_switch — extra sw params are inert",
+          "name": "sw5..sw8 on a 4-position switch do not affect the circuit",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "dip_switch"],
+          "reason": "Compares two engine runs whose only difference is params the compiler must ignore beyond `positions` (sw5-sw8 on a 4-position switch); both runs individually only ever stamp sw1's own contact, same as the cases above."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/spdt-switch.test.ts",
+      "cases": [
+        {
+          "describe": "spdt_switch.updateCurrent — Q-O26 (com to the contact in use)",
+          "name": "position 0 (com->b active, b floating with no load) reports ~0 A: no complete circuit",
+          "status": "portable",
+          "kinds": ["voltage_source", "spdt_switch", "resistor"],
+          "reason": "com is fixed (wired directly to the source) and b is the device's only OTHER free pin (c has no wire to it either in this case's own rig, since r1 sits on c) -- wait, r1 is wired to c even here, so b and c are the device's two free contacts in potentially different partitions (com fixed, so nothing unions them, per finding 1). The ACTIVE contact at position 0 is com-b, and b's own partition IS the device's attributed owner (owner_of picks the first free pin among [com,b,c] in declared order, i.e. b) -- so this reads the owning partition's own contact, not a cross-partition one, and is unaffected by finding 1's cross-partition mis-stamp."
+        },
+        {
+          "describe": "spdt_switch.updateCurrent — Q-O26 (com to the contact in use)",
+          "name": "position 1 (com->c active, c loaded through r1) reports the real ~5 mA load current — THIS is the case that read 5000 A before the fix",
+          "status": "portable",
+          "kinds": ["voltage_source", "spdt_switch", "resistor"],
+          "reason": "com fixed; b and c are two DIFFERENT free-node partitions (b isolated, c loaded through r1) with the device's Owner attributed to b (the first free pin), exactly finding 1's cross-partition scenario -- but this circuit has no capacitor anywhere, so both partitions are Static, and the static solver evidently solves the whole static graph as one combined system rather than per-partition with local indexing (finding 1's fixed[node].unwrap_or(0.0) fabrication is specific to the dynamic ClosedForm/Stepped compile_dyn_shape path). Verified empirically against the built core: this reports the correct ~5 mA, not a fabricated-0V-driven phantom current."
+        },
+        {
+          "describe": "spdt_switch.updateCurrent — Q-O26 (com to the contact in use)",
+          "name": "keeps reporting com->b at position 0 even when a load is later added to c (no cross-talk between throws)",
+          "status": "portable",
+          "kinds": ["voltage_source", "spdt_switch", "resistor"],
+          "reason": "Same position-0 rig as the first case with an extra resistor added on c (still not selected) -- confirms the core does not stamp the inactive contact regardless of whether it is loaded."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/passive-parasitics.test.ts",
+      "cases": [
+        {
+          "describe": "capacitor ESR + leakage backward-Euler companion",
+          "name": "satisfies both the capacitor update and ESR voltage law",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls classic's own capacitorCompanion/capacitorSeriesCurrent/capacitorInternalVoltage/parallelLossCurrent helpers (src/sim/engine/elements.ts) directly -- no SimCircuit, no SimEngine, nothing the core-suites alias could intercept. The core's own backward-Euler companion is Rust internal to core/, with no TS counterpart these helpers could be compared against."
+        },
+        {
+          "describe": "capacitor ESR + leakage backward-Euler companion",
+          "name": "preserves the historical ideal companion when loss params are absent",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Same classic-internal helper-function unit test as the case above, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor ESR + leakage backward-Euler companion",
+          "name": "reports total terminal current and snapshots the internal-C state",
+          "status": "classic-only",
+          "kinds": ["voltage_source", "capacitor"],
+          "reason": "Calls engine.saveState()/engine.restoreState() to round-trip capacitor state mid-run -- classic-only surface the core-suites adapter deliberately does not implement (adapter.ts's own header: saveState/restoreState are not part of any allowlisted case's needs)."
+        },
+        {
+          "describe": "capacitor ESR + leakage backward-Euler companion",
+          "name": "stamps leakage as an actual terminal shunt",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Plain resistor+capacitor(esr, leakageResistance) DC-settled divider, read through engine.nets/getNetV/getElementI only -- no classic-internal calls. CORE_RECORD_SHAPES.capacitor's 3 params (capacitance, esr, leakage) cover both non-default fields this fixture sets."
+        },
+        {
+          "describe": "capacitor ESR + leakage backward-Euler companion",
+          "name": "applies exact catalog ESR/leakage defaults to an older identified save",
+          "status": "classic-only",
+          "kinds": ["voltage_source", "capacitor"],
+          "reason": "This fixture's capacitor sits directly across the ideal source (c.a to src.pos, c.b to src.neg) -- BOTH terminals are fixed nodes, the same topology test/fixtures/core/15-capacitor-both-ends-fixed exists to document as a deliberate core rejection (partition.rs: a capacitor needs at least one free terminal to belong to a partition; core/README.md's precedent for a source shorted to itself). Verified empirically: the core-suites adapter's load() throws CoreSuiteFellBackError with exactly that topology reason. Classic has no such restriction, so this circuit's own point (checking catalogUid-driven ESR/leakage defaults through coldLoad) is untestable against the core through this specific fixture, regardless of the capacitor kind itself being implemented."
+        },
+        {
+          "describe": "cold reset passive initial conditions",
+          "name": "leaves isolated capacitor voltage and inductor current at exact zero",
+          "status": "not-yet",
+          "kinds": ["capacitor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet. (Also calls engine.saveState(), a second, independent reason this could never be portable even once inductor lands.)"
+        },
+        {
+          "describe": "cold reset passive initial conditions",
+          "name": "does not expose hidden passive energy through high-impedance branches",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "capacitor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "cold reset passive initial conditions",
+          "name": "does not advance zero stored state during a powered t=0 seed solve",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "capacitor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "inductor DCR + core-loss backward-Euler companion",
+          "name": "satisfies the winding DCR + inductance voltage law",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls classic's own inductorCompanion/inductorWindingCurrent/parallelLossCurrent helpers directly, no SimEngine involved."
+        },
+        {
+          "describe": "inductor DCR + core-loss backward-Euler companion",
+          "name": "preserves the historical ideal companion when loss params are absent",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Same classic-internal helper-function unit test, no SimEngine involved."
+        },
+        {
+          "describe": "inductor DCR + core-loss backward-Euler companion",
+          "name": "stamps DCR and core loss and reports their combined terminal current",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "inductor DCR + core-loss backward-Euler companion",
+          "name": "applies exact catalog DCR/core-loss defaults to an older identified save",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "passive parasitic catalog controls",
+          "name": "exposes values, units, labels, help, and explicit model limits",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly -- no SimCircuit, no SimEngine, nothing that runs on either engine."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/wave3-passives.test.ts",
+      "cases": [
+        {
+          "describe": "ferrite_bead — DC series resistance model",
+          "name": "conducts I ≈ 22–23.5 mA through a 5 V / 220 Ω circuit",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "ferrite_bead", "resistor"],
+          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core."
+        },
+        {
+          "describe": "ferrite_bead — DC series resistance model",
+          "name": "bead voltage drop ≈ rDc × I (Ohm's law verified)",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "ferrite_bead", "resistor"],
+          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core."
+        },
+        {
+          "describe": "ferrite_bead — DC series resistance model",
+          "name": "catalog entry exists and is kind ferrite_bead",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "channel 1 conducts 0.5 mA with 5V / 10 kΩ",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor_array"],
+          "reason": "resistor_array (an 8-pin multi-channel kind, distinct from the plain 2-pin resistor) is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core. Also reads engine.getElementChannelI(), a surface the core-suites adapter does not implement."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "unconnected channels carry ≈ 0 mA (isolation)",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor_array"],
+          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "all four channels conduct independently with individual supplies",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor_array"],
+          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "no cross-conduction between channels at different potentials",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor_array"],
+          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "catalog entry exists with correct kind and 8-pin layout",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "resistor_array — four independent channels",
+          "name": "value_tol is 0.05 — Monte Carlo runner will perturb resistance by ±5%",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor variants — catalog parsing",
+          "name": "cap-ceramic entry parses with style ceramic and 100 nF default",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor variants — catalog parsing",
+          "name": "cap-electrolytic entry parses with style electrolytic and 100 µF default",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor variants — catalog parsing",
+          "name": "cap-film entry parses with style film and 1 µF default",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor variants — catalog parsing",
+          "name": "all three new cap entries and the generic entry are kind 'capacitor'",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved."
+        },
+        {
+          "describe": "capacitor variants — RC charging identical across styles",
+          "name": "ceramic capacitor charges to near-supply voltage after 5τ",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Plain RC charging curve; `style` is a catalog/diagnostics-only param resolveCapacitorParams never reads (src/core/compile/passives.ts only resolves capacitance/esr/leakageResistance), so it is silently ignored by the compiler exactly as classic's own physics ignores it for charge behaviour."
+        },
+        {
+          "describe": "capacitor variants — RC charging identical across styles",
+          "name": "electrolytic capacitor charges to near-supply voltage after 5τ",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same RC charging curve as the ceramic case, style=electrolytic; see that case's reason."
+        },
+        {
+          "describe": "capacitor variants — RC charging identical across styles",
+          "name": "film capacitor charges to near-supply voltage after 5τ",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same RC charging curve as the ceramic case, style=film; see that case's reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "does NOT fire for a style-less capacitor (abstract engine-level cap)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "analyzeLive() is a pure function over a LiveReadings snapshot (netV/elementI/digitalState/simTime/converged/failures) -- it never calls into an engine object itself, so it works identically fed from the core-backed adapter's readout as from classic's. The underlying circuit is a plain resistor+capacitor divider, fully core-implemented."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "fires when electrolytic sees sustained reverse voltage > 1 V",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism as the case above; see its reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "does NOT fire when electrolytic has correct polarity",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism; see the first diagnostics case's reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "does NOT fire for ceramic capacitor regardless of polarity",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism; see the first diagnostics case's reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "does NOT fire for film capacitor regardless of polarity",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism; see the first diagnostics case's reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "does NOT fire when simTime is below the 50 ms guard",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism; see the first diagnostics case's reason."
+        },
+        {
+          "describe": "diagnostics: electrolytic-reverse-polarity",
+          "name": "generic capacitor placed from the palette (explicit default style) fires when reversed",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Same analyzeLive()-over-a-readout mechanism; see the first diagnostics case's reason."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/high-impedance.test.ts",
+      "cases": [
+        {
+          "describe": "high-impedance regularisation",
+          "name": "does not materially load a 100 MΩ source",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor"],
+          "reason": "Open-ended 100 MΩ resistor off an ideal source, reading only through engine.nets/getNetV -- checks the SAME universal 1e-12 S node-shunt value core/README.md documents both engines stamping (the test's own comment cites the exact 1 TΩ shunt arithmetic), so it is a like-for-like check across engines, not a classic-specific tolerance."
+        },
+        {
+          "describe": "high-impedance regularisation",
+          "name": "does not report conflicting ideal voltage constraints as converged",
+          "status": "classic-only",
+          "kinds": ["voltage_source"],
+          "reason": "Two ideal voltage sources looped together (a source shorted to itself in effect) is exactly core/README.md's documented -3 (ERR_UNSUPPORTED_TOPOLOGY) rejection, which HeadlessRunner falls back to classic for -- the core-suites adapter's load() then throws CoreSuiteFellBackError by design (no silent fallback), so this circuit cannot run on the core at all through this adapter. It also asserts engine.lastMatrixSingular === true, a classic-internal solver diagnostic the adapter reports as a fixed neutral false in core mode (headless.ts's snapshot() doc comment) even on builds where the topology did load."
+        },
+        {
+          "describe": "high-impedance regularisation",
+          "name": "keeps the last trusted state and time when a direct step cannot converge",
+          "status": "classic-only",
+          "kinds": ["voltage_source", "capacitor"],
+          "reason": "Same conflicting-ideal-sources topology as the case above (load() throws CoreSuiteFellBackError on the core-suites adapter), and separately calls engine.saveState(), a classic-internal surface the adapter does not implement."
+        },
+        {
+          "describe": "high-impedance regularisation",
+          "name": "clears stale solver health when the rebuilt circuit has an empty matrix",
+          "status": "classic-only",
+          "kinds": ["voltage_source"],
+          "reason": "Same conflicting-ideal-sources topology (load() throws CoreSuiteFellBackError on the core-suites adapter) followed by asserting classic-internal solver diagnostics (lastIters, lastMatrixSize, lastRelativeResidual, ...) that are fixed neutral placeholders in core mode regardless."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/trap-integration.test.ts",
+      "cases": [
+        {
+          "describe": "trapezoidal integration — series RLC ringing accuracy",
+          "name": "trap mode holds ringing frequency within 0.5% and the exp(-Rt/2L) envelope within 5%",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor", "capacitor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "trapezoidal integration — series RLC ringing accuracy",
+          "name": "backward Euler over-damps the same ringing by more than 3x",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor", "capacitor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "trapezoidal integration — LC tank amplitude conservation",
+          "name": "trap keeps peak-to-peak loss under 1% over 10 cycles where BE loses over half",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "switch", "resistor", "capacitor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "trapezoidal integration — first-order reference envelopes",
+          "name": "RC step at h=tau/100 stays within the 0.3% full-scale benchmark budget",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "capacitor"],
+          "reason": "Single-capacitor RC circuit -- W1b's closed-form partition solves it exactly regardless of the requested BE/trap integration method (INTEGRATION only selects a stepped partition's companion, per finding 7/core/README.md), so it clears this case's 0.3%-full-scale budget with room to spare. Exercises the adapter's new setIntegrationMethod()/step() plumbing (added for this case) and a mid-run engine.load() reload (source voltage changed) that must carry the capacitor's charge forward, exactly like devolt invariant #4."
+        },
+        {
+          "describe": "trapezoidal integration — first-order reference envelopes",
+          "name": "RL step at h=tau/100 stays within the 0.3% full-scale benchmark budget",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "trapezoidal integration — square-wave discontinuity handling",
+          "name": "trap mode with the BE-at-events protocol relaxes monotonically after every edge",
+          "status": "not-yet",
+          "kinds": ["signal_gen", "resistor", "capacitor"],
+          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+        },
+        {
+          "describe": "trapezoidal integration — stiff square-wave discontinuity handling",
+          "name": "trap mode keeps post-edge artifacts bounded at h = 30x tau",
+          "status": "not-yet",
+          "kinds": ["signal_gen", "resistor", "capacitor"],
+          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+        },
+        {
+          "describe": "trapezoidal integration — default-mode isolation",
+          "name": "series RLC under default load is bitwise identical to explicit be",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor", "capacitor"],
+          "reason": "inductor is W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "trapezoidal integration — default-mode isolation",
+          "name": "square-driven RC under default load is bitwise identical to explicit be",
+          "status": "not-yet",
+          "kinds": ["signal_gen", "resistor", "capacitor"],
+          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+        },
+        {
+          "describe": "trapezoidal integration — snapshot rollback",
+          "name": "saveState/restoreState round-trips capsI/indsV and replays bitwise",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor", "capacitor"],
+          "reason": "inductor is W1h; not implemented by the core yet. (Also calls engine.saveState()/restoreState(), a second, independent reason this could never be portable even once inductor lands -- capsI/indsV are classic-internal history maps with no core counterpart.)"
+        },
+        {
+          "describe": "trapezoidal integration — solver convergence health",
+          "name": "every trap-mode step converges with clean solver diagnostics",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "inductor", "capacitor"],
+          "reason": "inductor is W1h; not implemented by the core yet. (Also asserts engine.lastIters >= 1 on every step, a classic-internal solver diagnostic fixed at neutral 0 in core mode regardless -- a second, independent reason this could never be portable even once inductor lands.)"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/spst-switch.test.ts",
+      "cases": [
+        {
+          "describe": "spst switch — closed and open contacts",
+          "name": "a closed contact is 1 mOhm: the load sees the supply less the contact drop, and the switch reports the series current",
+          "status": "portable",
+          "kinds": ["voltage_source", "switch", "resistor"],
+          "reason": "Plain SPST switch (switch, the kind no other gate-1 suite exercises) in series with a resistor off an ideal source, read only through nets/getNetV/getElementI after step(). The closed contact is the same literal 1 mOhm on both engines (core/README.md's switch row), so the divider and the contact current match."
+        },
+        {
+          "describe": "spst switch — closed and open contacts",
+          "name": "an open contact stamps nothing: the load node falls to 0 V and the switch reports 0 A",
+          "status": "portable",
+          "kinds": ["voltage_source", "switch", "resistor"],
+          "reason": "Plain SPST switch (switch, the kind no other gate-1 suite exercises) in series with a resistor off an ideal source, read only through nets/getNetV/getElementI after step(). An open contact stamps nothing on either engine; the load node sits on r1 and the node shunt, and the switch publishes 0."
+        },
+        {
+          "describe": "spst switch — closed and open contacts",
+          "name": "the string \"0\" counts as closed, because classic reads the param with Boolean()",
+          "status": "portable",
+          "kinds": ["voltage_source", "switch", "resistor"],
+          "reason": "Plain SPST switch (switch, the kind no other gate-1 suite exercises) in series with a resistor off an ideal source, read only through nets/getNetV/getElementI after step(). The compiler resolves closed with the same Boolean() rule (core/README.md: the string \"0\" counts as closed), so the core closes the contact too."
+        },
+        {
+          "describe": "spst switch — toggling and dynamics",
+          "name": "reloading with the contact opened after it was closed drops the load to 0 V",
+          "status": "portable",
+          "kinds": ["voltage_source", "switch", "resistor"],
+          "reason": "A carry-forward reload with the contact toggled open; the adapter's load() reloads the core program with time carried, as HeadlessRunner does for classic."
+        },
+        {
+          "describe": "spst switch — toggling and dynamics",
+          "name": "a closed contact charges a capacitor behind it toward the supply, and an open one never does",
+          "status": "portable",
+          "kinds": ["voltage_source", "switch", "resistor", "capacitor"],
+          "reason": "A switch-gated RC: closed, the capacitor charges through 1 mOhm (tau about 1 ns) in a closed-form partition; open, the node never moves. Exercises a switch stamp inside a dynamic partition."
         }
       ]
     }

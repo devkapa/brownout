@@ -3,7 +3,7 @@
   "components": [
     { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
     { "id": "vsrc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
-    { "id": "sw", "kind": "switch", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "closed": 1 } },
+    { "id": "sw", "kind": "switch", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "closed": 0 } },
     { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 100000 } },
     { "id": "c1", "kind": "capacitor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "capacitance": 0.000001 } }
   ],

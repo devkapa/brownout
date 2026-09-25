@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
+import type { StimulusPhase } from "./stimuli.js";
 import type { AnalyticFixtureModel, CorpusEntry } from "./types.js";
 
 const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "core");
@@ -25,6 +26,17 @@ export interface SyntheticExpectation {
   readonly reasonPrefix?: string;
   /** Gate 2e / decision 3's analytic reference, when this fixture declares one — threaded straight onto the CorpusEntry (types.ts's own doc); see AnalyticFixtureModel and run-entry.ts's use of it. `undefined` for every fixture without one. */
   readonly analytic?: AnalyticFixtureModel;
+  /**
+   * Finding 12: gate 2d's verify-script phases (stimuli.ts's `StimulusPhase[]`),
+   * threaded straight onto the CorpusEntry the same way `analytic` is —
+   * `undefined` (every synthetic fixture before this one) means "no
+   * stimuli, use the plain fixed/dense sample grid" (`runCorpusEntry`'s own
+   * `entry.phases && entry.phases.length > 0` check). A fixture that
+   * declares this actually exercises `bo_engine_set_params` mid-run through
+   * `runStimuliEntry`, instead of only ever comparing its circuit's static
+   * declared param values.
+   */
+  readonly phases?: readonly StimulusPhase[];
 }
 
 export interface LoadedSyntheticEntry {
@@ -59,9 +71,17 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       name,
       durationS: null,
       kinds: kindsOf(circuit),
+      // Finding 12: a fixture with declared phases genuinely gets replayed
+      // under scripted stimuli (runCorpusEntry routes to runStimuliEntry),
+      // so it is not "unstimulated" the way CorpusEntry.stimulus's doc means
+      // for an entry that only ever compares static declared param values —
+      // but `stimulus` itself is the EXTERNAL-corpus "verify-script" marker
+      // (types.ts: "null for every local fixture"), so this stays null here
+      // regardless of whether `phases` is set.
       stimulus: null,
       file: full,
       analytic: expected.analytic,
+      phases: expected.phases,
     };
     return { entry, circuit, expected };
   });

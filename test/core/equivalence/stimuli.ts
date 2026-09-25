@@ -29,14 +29,15 @@
  *
  * A circuit `replayStimuliOnCore` cannot even LOAD (an unimplemented kind, a
  * malformed parameter, or a topology the kernel rejects —
- * `CoreUnsupportedError`) still throws `StimuliNotYetSupportedOnCoreError`,
- * same as before this landed: none of `switch`/`push_button`/`spdt_switch`/
- * `dip_switch` are in `CORE_IMPLEMENTED_KINDS` yet (kinds.ts is the
- * orchestrator's table — this worker does not own it), so every real
- * verify-script corpus entry still reports "core-stimuli-pending" until that
- * table is updated. A caller that already routes a wider `implementedKinds`
- * set through the core (this file's own tests; eventually the harness once
- * the orchestrator's table catches up) gets the REAL replay instead.
+ * `CoreUnsupportedError`) still throws `StimuliNotYetSupportedOnCoreError`.
+ * The switch family (`switch`/`push_button`/`spdt_switch`/`dip_switch`) and
+ * `capacitor` joined `CORE_IMPLEMENTED_KINDS` in W1b (kinds.ts, the
+ * orchestrator's table), so a real verify-script entry built only from those
+ * kinds now gets a genuine classic-vs-core stimuli replay by default; this
+ * error is still reachable for any kind that has not been ported yet (e.g.
+ * `led`, `ne555`). A caller that widens `implementedKinds` further still
+ * (this file's own tests, ahead of the orchestrator's table) can exercise a
+ * kind before it lands there.
  *
  * A phase's `set` naming a param that exists but is not live
  * (`CoreEngine.setParams`'s own check, per `CORE_RECORD_SHAPES.liveParams`)
@@ -89,8 +90,18 @@ function applyPhaseOverrides(circuit: SimCircuit, phase: StimulusPhase): SimCirc
  * as `simulateScript` relies on). Returns one sample per accepted step across
  * every phase. Throws if any phase does not complete cleanly — a truncated
  * phase must not be silently compared as if it ran to `durationS`.
+ *
+ * `fixedStepS` defaults to `STIMULUS_FIXED_STEP_S` (the real corpus replay
+ * step) but is overridable so run-entry.ts's finding-11 Richardson-
+ * extrapolation reference can replay the SAME phases a second time at half
+ * that step, on a second independent `HeadlessRunner`, without duplicating
+ * this function.
  */
-export function replayStimuliOnClassic(circuit: SimCircuit, phases: readonly StimulusPhase[]): StimulusStepSample[] {
+export function replayStimuliOnClassic(
+  circuit: SimCircuit,
+  phases: readonly StimulusPhase[],
+  fixedStepS: number = STIMULUS_FIXED_STEP_S,
+): StimulusStepSample[] {
   let working = structuredClone(circuit);
   const runner = new HeadlessRunner();
   const samples: StimulusStepSample[] = [];
@@ -102,7 +113,7 @@ export function replayStimuliOnClassic(circuit: SimCircuit, phases: readonly Sti
     const runOptions: HeadlessRunOptions = {
       durationS: phase.durationS,
       adaptive: false,
-      fixedStepS: STIMULUS_FIXED_STEP_S,
+      fixedStepS,
       onSample: (sample) => {
         samples.push({
           phaseIndex,
@@ -159,16 +170,30 @@ export class StimuliNotYetSupportedOnCoreError extends Error {
  * pending delays — continue across phases exactly as `bo_engine_set_params`'s
  * "all other state is kept" promises). Loads `circuit` once, unmodified, then
  * for each phase applies `phase.set` through `CoreEngine.setParams` (never a
- * reload) before advancing `phase.durationS` at the SAME fixed step
- * `replayStimuliOnClassic` uses, one sample per step, so the two sample
- * sequences line up instant for instant.
+ * reload) before advancing `phase.durationS`.
+ *
+ * STEP SCHEDULE (finding 10). This must take EXACTLY the same steps
+ * `HeadlessRunner.run()` takes for `replayStimuliOnClassic` (headless.ts's
+ * `run()`, the fixed-step branch): full `STIMULUS_FIXED_STEP_S` steps, then
+ * one FINAL step clamped to whatever time is left in the phase, using the
+ * identical end-of-phase slack (`Math.max(1e-15, phase.durationS * 1e-12)`,
+ * headless.ts's own comment: "so a duration that is an exact multiple of the
+ * final step does not spin one extra ~1e-16 s step"). The previous
+ * `Math.round(phase.durationS / STIMULUS_FIXED_STEP_S)` whole-step count
+ * rounded a non-multiple phase duration (e.g. 2.5ms) up or down to a whole
+ * number of 1ms steps, silently drifting the core onto different simTime
+ * instants than classic — or, for a phase shorter than one step (e.g.
+ * 0.4ms), producing ZERO samples where classic produces one. Mirroring the
+ * clamp instead means the two engines always land on the identical instant
+ * sequence, whether or not `phase.durationS` is a whole multiple of
+ * `STIMULUS_FIXED_STEP_S`.
  *
  * `implementedKinds` defaults to `CORE_IMPLEMENTED_KINDS` (kinds.ts's
  * orchestrator-owned table) — the same "a caller (chiefly tests) can widen
  * this" escape hatch `compileCircuit`/`CoreEngine.load` already document, for
- * a widened set. This is what lets this file's own tests exercise the switch
- * family before that table is updated, without weakening the DEFAULT
- * behaviour a real corpus entry gets.
+ * a widened set. This is what lets this file's own tests exercise a kind
+ * ahead of that table, without weakening the DEFAULT behaviour a real corpus
+ * entry gets.
  *
  * Throws `StimuliNotYetSupportedOnCoreError` when the core cannot load the
  * circuit at all (see that class's doc comment). Throws a plain `Error`
@@ -206,10 +231,14 @@ export function replayStimuliOnCore(
       }
 
       const phaseStartTime = engine.simTime;
-      const stepCount = Math.round(phase.durationS / STIMULUS_FIXED_STEP_S);
-      for (let step = 1; step <= stepCount; step++) {
-        const tEnd = phaseStartTime + step * STIMULUS_FIXED_STEP_S;
-        engine.advance(tEnd);
+      const phaseEndTime = phaseStartTime + phase.durationS;
+      // Same slack headless.ts's run() uses, sized off THIS phase's own
+      // durationS — see this function's doc comment.
+      const tolerance = Math.max(1e-15, phase.durationS * 1e-12);
+      let t = phaseStartTime;
+      while (phaseEndTime - t > tolerance) {
+        t += Math.min(STIMULUS_FIXED_STEP_S, phaseEndTime - t);
+        engine.advance(t);
         if (!engine.lastConverged) {
           throw new Error(
             `replayStimuliOnCore: phase ${phaseIndex} (durationS=${phase.durationS}) did not converge, reaching ` +

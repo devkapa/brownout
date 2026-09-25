@@ -412,8 +412,15 @@ pub type ThresholdFn = Box<dyn Fn() -> Vec<Threshold>>;
 /// otherwise, left `0.0`). A pin can never resolve to a DIFFERENT
 /// partition's free node: every device `compile_dyn_shape` considers has
 /// every one of its free pins in the partition being compiled, since
-/// `partition::build`'s union-find already guarantees a device's free pins
-/// share one partition.
+/// `partition::build`'s union-find guarantees a device's free pins share one
+/// partition — for a switch-family device, by unioning every one of its free
+/// pins together directly (`partition.rs`'s module doc comment), not merely
+/// each contact's own two ends, precisely so a pin can never land here
+/// resolved against the wrong partition. `compile_dyn_shape`'s own `resolve`
+/// enforces this as a hard error rather than trusting it silently: a free
+/// node that resolves to a DIFFERENT partition than the one being compiled
+/// is a partitioning regression, not a value `fixed: 0.0` should ever paper
+/// over.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DynPin {
     pub local: Option<usize>,
@@ -476,7 +483,12 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
     let resolve = |node: usize| -> DynPin {
         match local_index[node] {
             Some((p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
-            _ => DynPin { local: None, fixed: fixed[node].unwrap_or(0.0) },
+            Some((p, _)) => unreachable!(
+                "compile_dyn_shape: node {node} is free but lives in partition {p}, not the partition {p_idx} being compiled — \
+                 partition::build's union-find guarantees a device's free pins share one partition (partition.rs's module doc \
+                 comment); this is a partitioning regression, not a value a fixed-0V fallback should ever paper over"
+            ),
+            None => DynPin { local: None, fixed: fixed[node].expect("a node absent from local_index must be fixed") },
         }
     };
     let touches_partition = |device: &crate::program::Device| -> bool {
@@ -495,6 +507,16 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
                 stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone() });
             }
             kinds::CAPACITOR => {
+                if device.pins[0].node == device.pins[1].node {
+                    // Self-shorted (contract point 2): stamps nothing and
+                    // does not count toward classification, so it must not
+                    // appear as this (or any) partition's capacitor either —
+                    // `partition::build`'s `capacitor_count` already agrees
+                    // by skipping it, which is what a `ClosedForm`
+                    // partition's `debug_assert_eq!(shape.capacitors.len(),
+                    // 1)` depends on staying true.
+                    continue;
+                }
                 let pins = [resolve(device.pins[0].node), resolve(device.pins[1].node)];
                 let leak = device.params[2];
                 capacitors.push(DynCapacitor {
@@ -797,7 +819,18 @@ impl PartitionedSolver {
                     live_params.insert(d, device.params.clone());
                 }
                 kinds::CAPACITOR => {
-                    cap_devices.push((d, device.pins[0].node, device.pins[1].node));
+                    // A self-shorted capacitor (contract point 2) folds to a
+                    // no-op in `recompute_source_currents`'s `leaving[u] +=
+                    // i; leaving[w] -= i;` anyway (u == w cancels whatever
+                    // `i` is), but it is excluded here too, on principle: it
+                    // never has a published current to fold in the first
+                    // place (`compile_dyn_shape` never counts it as any
+                    // partition's capacitor, and `static_part.rs` never
+                    // stamps a capacitor at all), so it has no business in
+                    // this KCL device list either.
+                    if device.pins[0].node != device.pins[1].node {
+                        cap_devices.push((d, device.pins[0].node, device.pins[1].node));
+                    }
                 }
                 _ => {}
             }
@@ -1084,15 +1117,40 @@ impl PartitionSolver for PartitionedSolver {
         self.live_params.get(&device_index)?.get(param_index).copied()
     }
 
+    /// Contract point 7 ("A failed advance"/"A failed set_params"): beyond
+    /// `closed_form`/`stepped`'s own committed state, this must ALSO carry
+    /// `static_solver`'s own private `(voltages, currents)` — distinct from
+    /// this struct's PUBLISHED `self.voltages`/`self.currents` that
+    /// `PartitionSolver::snapshot` already round-trips, but written to
+    /// unconditionally by `StaticPartitionSolver::resolve_dirty` BEFORE that
+    /// method's own finiteness check can fail the whole instant
+    /// (`static_part.rs`'s doc comment on `resolve_dirty`), so a doomed
+    /// attempt's half-solved values would otherwise sit in `static_solver`
+    /// forever and reappear the next time ANY partition resolves (`
+    /// copy_in_static` unconditionally copies every `Static` node out of it,
+    /// not just the ones a given call actually re-solved) — and
+    /// `pending_schedule`, since `resolve_dirty`/`handle_dynamic_event`/
+    /// `sync_dynamic_to` all drain `closed_form`/`stepped`'s own `scheduled`
+    /// queues into it BEFORE their `check_finite` call can fail, so a doomed
+    /// attempt's crossing/step entries are already sitting here, not in
+    /// those (never-snapshotted, always-empty-by-the-time-a-caller-sees-them)
+    /// queues themselves. Restoring `pending_schedule` back to what it held
+    /// before this instant started — always empty in practice, since
+    /// `Kernel::drain_scheduled` empties it again after every successful
+    /// resolve within the SAME instant — is what stops a stale entry from a
+    /// failed attempt surviving to be pushed onto the kernel's heap by some
+    /// later, unrelated, successful call.
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
-        Box::new((self.closed_form.snapshot(), self.stepped.snapshot()))
+        Box::new((self.static_solver.snapshot(), self.closed_form.snapshot(), self.stepped.snapshot(), self.pending_schedule.clone()))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
-        if let Ok(boxed) = snapshot.downcast::<(closed_form::Snapshot, stepped::Snapshot)>() {
-            let (cf, st) = *boxed;
+        if let Ok(boxed) = snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>)>() {
+            let (static_snap, cf, st, pending) = *boxed;
+            self.static_solver.restore(static_snap);
             self.closed_form.restore(cf);
             self.stepped.restore(st);
+            self.pending_schedule = pending;
         }
     }
 
@@ -1154,8 +1212,124 @@ mod partitioned_solver_tests {
     fn capacitor(ci: usize, a: usize, b: usize, c: f64, esr: f64, leak: f64) -> Device {
         Device { kind: kinds::CAPACITOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![c, esr, leak], blob: vec![] }
     }
+    fn spdt(ci: usize, com: usize, b: usize, c: usize, sel: f64) -> Device {
+        Device { kind: kinds::SPDT_SWITCH, component_index: ci, pins: vec![pin(com), pin(b), pin(c)], params: vec![sel], blob: vec![] }
+    }
+    fn dip(ci: usize, pins: Vec<usize>, k: usize, sw: [f64; 8]) -> Device {
+        let mut params = vec![k as f64];
+        params.extend(sw);
+        Device { kind: kinds::DIP_SWITCH, component_index: ci, pins: pins.into_iter().map(pin).collect(), params, blob: vec![] }
+    }
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
         Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    }
+    fn all_partitions(solver: &PartitionedSolver) -> Vec<PartitionId> {
+        (0..solver.partition_count() as u32).map(PartitionId).collect()
+    }
+    struct NoDevices;
+    impl crate::kernel::DeviceEvaluator for NoDevices {
+        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+            Vec::new()
+        }
+    }
+
+    // ---- review section 1: a switch-family contact through a fixed pin ---
+    //
+    // An spdt_switch's `com` (or a dip_switch's `a` side) can sit on a fixed
+    // pin, so the contact itself never has two free ends to union. `b` and
+    // `c` (or every `b_i`) must still land in ONE partition (contract point
+    // 1's third bullet, `partition.rs`'s module doc comment), or the old
+    // single-owner dispatch attributes the whole device to whichever free
+    // pin it finds first and `compile_dyn_shape::resolve` fabricates 0V for
+    // the other one — the review's "5000 A through a contact it never
+    // stamped" bug.
+
+    /// com on a 5V source (fixed), b through 10k + 1uF to gnd (the
+    /// partition's one counted capacitor), c through a bare 10k to gnd.
+    fn spdt_partition_program(sel: f64) -> Program {
+        program(4, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 1, 2, 3, sel),
+            resistor(2, 2, 0, 10_000.0),
+            capacitor(3, 2, 0, 1e-6, 0.0, 0.0),
+            resistor(4, 3, 0, 10_000.0),
+        ])
+    }
+
+    #[test]
+    fn spdt_com_on_a_fixed_source_puts_b_and_c_in_one_closed_form_partition_and_selecting_c_at_load_reads_half_a_milliamp() {
+        // sel=1 selects c: com fixed to b/c through no free-free contact
+        // ever unions the old way, so this also proves the classification.
+        let p = spdt_partition_program(1.0);
+        let pb = partition::build(&p).unwrap();
+        let (p_b, _) = pb.local_index[2].expect("b is a free node");
+        let (p_c, _) = pb.local_index[3].expect("c is a free node");
+        assert_eq!(p_b, p_c, "b and c must share one partition even though com is fixed");
+        assert_eq!(pb.kinds[p_b], PartitionKind::ClosedForm, "exactly one counted capacitor (on b) classifies the merged partition ClosedForm");
+
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        let dirty = all_partitions(&solver);
+        solver.resolve_dirty(&dirty, 0.0, &[]).unwrap();
+        assert!((solver.voltages()[3] - 5.0).abs() < 1e-3, "v(c) = {}", solver.voltages()[3]);
+        // 5V across ~10k (the 1 milliohm contact is negligible), not the
+        // 5000A a fabricated 0V fixed boundary on c would have produced.
+        assert!((solver.currents()[1] - 5e-4).abs() < 1e-5, "spdt current = {}", solver.currents()[1]);
+    }
+
+    #[test]
+    fn spdt_selecting_c_by_set_params_reads_near_5v_and_half_a_milliamp_not_5000_amps() {
+        let p = spdt_partition_program(0.0); // sel=0 selects b at load.
+        let solver = PartitionedSolver::build(&p).unwrap();
+        let all = all_partitions(&solver);
+        let mut kernel = Kernel::new(solver, NoDevices);
+        kernel.settle(0.0, &all, &[]).unwrap();
+
+        kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap(); // device 1 = spdt, param 0 = sel.
+
+        assert!((kernel.solver().voltages()[3] - 5.0).abs() < 1e-3, "v(c) = {}", kernel.solver().voltages()[3]);
+        assert!((kernel.solver().currents()[1] - 5e-4).abs() < 1e-5, "spdt current = {}", kernel.solver().currents()[1]);
+    }
+
+    /// a1 and a2 both on a 5V rail (the SAME fixed node), b1 through 10k +
+    /// 1uF to gnd, b2 through a bare 10k to gnd.
+    fn dip_partition_program(sw1: f64, sw2: f64) -> Program {
+        program(4, vec![
+            source(0, 1, 0, 5.0),
+            dip(1, vec![1, 2, 1, 3], 2, [sw1, sw2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            resistor(2, 2, 0, 10_000.0),
+            capacitor(3, 2, 0, 1e-6, 0.0, 0.0),
+            resistor(4, 3, 0, 10_000.0),
+        ])
+    }
+
+    #[test]
+    fn dip_a_pins_on_a_fixed_rail_puts_b1_and_b2_in_one_closed_form_partition_and_sw2_closed_at_load_reads_half_a_milliamp() {
+        let p = dip_partition_program(0.0, 1.0); // sw1 open, sw2 closed at load.
+        let pb = partition::build(&p).unwrap();
+        let (p_b1, _) = pb.local_index[2].expect("b1 is a free node");
+        let (p_b2, _) = pb.local_index[3].expect("b2 is a free node");
+        assert_eq!(p_b1, p_b2, "b1 and b2 must share one partition even though a1/a2 are both fixed to the rail");
+        assert_eq!(pb.kinds[p_b1], PartitionKind::ClosedForm);
+
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        let dirty = all_partitions(&solver);
+        solver.resolve_dirty(&dirty, 0.0, &[]).unwrap();
+        assert!((solver.voltages()[3] - 5.0).abs() < 1e-3, "v(b2) = {}", solver.voltages()[3]);
+        assert!((solver.currents()[1] - 5e-4).abs() < 1e-5, "dip current = {}", solver.currents()[1]);
+    }
+
+    #[test]
+    fn dip_sw2_closed_by_set_params_reads_near_5v_and_half_a_milliamp_not_5000_amps() {
+        let p = dip_partition_program(0.0, 0.0); // both open at load.
+        let solver = PartitionedSolver::build(&p).unwrap();
+        let all = all_partitions(&solver);
+        let mut kernel = Kernel::new(solver, NoDevices);
+        kernel.settle(0.0, &all, &[]).unwrap();
+
+        kernel.apply_params_as_event(&[(1, 2, 1.0)]).unwrap(); // device 1 = dip, param 2 = sw2.
+
+        assert!((kernel.solver().voltages()[3] - 5.0).abs() < 1e-3, "v(b2) = {}", kernel.solver().voltages()[3]);
+        assert!((kernel.solver().currents()[1] - 5e-4).abs() < 1e-5, "dip current = {}", kernel.solver().currents()[1]);
     }
 
     /// node0=gnd, node1=source(+, 5V), node2=RC midpoint. A switch in
@@ -1337,6 +1511,137 @@ mod partitioned_solver_tests {
         // plain `voltages`/`currents` snapshot, actually ran).
         assert_eq!(kernel.solver().voltages()[2].to_bits(), committed_voltage.to_bits());
         assert!(kernel.solver().is_current(PartitionId(0), true, current_version), "the segment's version must be rolled back too, not left at whatever the livelock's last re-aim bumped it to");
+    }
+
+    // ---- review section 4: rollback leaks ---------------------------------
+
+    /// Section 4 of the W1b review, contract point 7 ("A failed advance"
+    /// also covers a failed `set_params`): a failed instant must restore
+    /// EVERY piece of solver state the attempt touched, not just the
+    /// published voltages/currents `PartitionedSolver::restore` already
+    /// covers. `StaticPartitionSolver::resolve_dirty` writes its OWN
+    /// internal `voltages`/`currents` — and recomputes EVERY static
+    /// device's current unconditionally, even ones outside this call's own
+    /// dirty set — BEFORE its finiteness check can fail the whole instant,
+    /// so without also rolling that internal state back, a doomed attempt's
+    /// half-solved values sit there until ANY later, unrelated, successful
+    /// event's own unconditional recompute republishes them as if they were
+    /// real (`copy_in_static` copies every `Static` node out of it, not
+    /// just the ones that call actually re-solved).
+    #[test]
+    fn a_failed_set_params_does_not_leak_static_solver_state_into_a_later_unrelated_event() {
+        // device0=source0(1e306V), device1=R1(1ohm, node1->node2), device2=
+        // S1(node2-gnd, open), device3=S2(across the source, node1-gnd,
+        // open), device4=source1(5V), device5=R2(1k, node3->node4), device6
+        // =S3(node4-gnd, open). node2 and node4 are two SEPARATE static
+        // partitions (no free-free contact ever joins them).
+        let p = program(5, vec![
+            source(0, 1, 0, 1e306),
+            resistor(1, 1, 2, 1.0),
+            switch_dev(2, 2, 0, 0.0),
+            switch_dev(3, 1, 0, 0.0),
+            source(4, 3, 0, 5.0),
+            resistor(5, 3, 4, 1000.0),
+            switch_dev(6, 4, 0, 0.0),
+        ]);
+        let solver = PartitionedSolver::build(&p).unwrap();
+        let all = all_partitions(&solver);
+        let mut kernel = Kernel::new(solver, NoDevices);
+        kernel.settle(0.0, &all, &[]).unwrap();
+
+        let v2_before = kernel.solver().voltages()[2];
+        let i1_before = kernel.solver().currents()[1];
+
+        // Close S1 and S2 together as one event: S2 shorts the 1e306V
+        // source to the datum through its own 1 milliohm contact,
+        // overflowing THAT device's published current to +Infinity.
+        let err = kernel.apply_params_as_event(&[(2, 0, 1.0), (3, 0, 1.0)]).unwrap_err();
+        assert!(matches!(err, crate::kernel::KernelError::SolveFailed(_)));
+
+        assert_eq!(kernel.solver().voltages()[2], v2_before, "the published node2 voltage must roll back");
+        assert_eq!(kernel.solver().currents()[1], i1_before, "R1's published current must roll back too");
+
+        // An UNRELATED event, on a different partition entirely (S3,
+        // node4): must not republish node2's doomed, S1-closed voltage —
+        // nor the R1 current that stale voltage would imply.
+        kernel.apply_params_as_event(&[(6, 0, 1.0)]).unwrap();
+        assert_eq!(kernel.solver().voltages()[2], v2_before, "an unrelated successful set_params must not resurrect the failed attempt's node2 voltage");
+        assert_eq!(kernel.solver().currents()[1], i1_before, "...or R1's doomed current either");
+    }
+
+    /// Section 4 of the W1b review, contract point 7: "any crossing or step
+    /// event the attempt scheduled" must not survive a rollback either. Two
+    /// independent `ClosedForm` partitions, A and B, dirtied by the SAME
+    /// event: A has a watcher registered, so re-aiming it schedules a real
+    /// crossing (drained into `PartitionedSolver::pending_schedule` by that
+    /// same call's own `drain_scheduled`, run BEFORE `check_finite`). B's
+    /// own switch sits directly between a free node and a 1e306V fixed one
+    /// (`com`-style, like the review's section 1/4 fixtures); closing it
+    /// stamps `g * fixed = 1000 * 1e306 = 1e309` into `build_segment`'s own
+    /// RHS, overflowing to `+Infinity` — `lu::LuFactorization::solve` checks
+    /// only the PIVOTs (finite by construction; only the right-hand side
+    /// overflows), so `build_segment` itself returns `Ok` with a poisoned
+    /// segment, and it is `PartitionedSolver::check_finite`, at the very
+    /// end, that actually fails the whole event — AFTER `drain_scheduled`
+    /// already moved A's crossing into `pending_schedule`. Without the
+    /// `pending_schedule` rollback, that stale entry survives into the next
+    /// successful, unrelated re-aim's own `drain_scheduled` sweep.
+    #[test]
+    fn a_crossing_scheduled_when_a_different_partition_fails_in_the_same_event_is_not_pushed_later() {
+        let p = program(5, vec![
+            source(0, 1, 0, 5.0),
+            switch_dev(1, 1, 2, 0.0), // A's own re-aim trigger, parallel with R1.
+            resistor(2, 1, 2, 1000.0),
+            capacitor(3, 2, 0, 1e-6, 0.0, 0.0),
+            source(4, 3, 0, 1e306),
+            switch_dev(5, 3, 4, 0.0), // B's own switch: fixed node3 (1e306V) directly to free node4.
+            capacitor(6, 4, 0, 1e-6, 0.0, 0.0),
+        ]);
+        let pb = partition::build(&p).unwrap();
+        let (a_idx, _) = pb.local_index[2].expect("A's node is free");
+        let (b_idx, _) = pb.local_index[4].expect("B's node is free");
+        assert_eq!(pb.kinds[a_idx], PartitionKind::ClosedForm);
+        assert_eq!(pb.kinds[b_idx], PartitionKind::ClosedForm);
+
+        // CONTROL: the identical topology and sequence, but B's switch is
+        // never closed at all — exactly the crossing schedule a clean,
+        // leak-free re-aim must produce. Compared against below rather than
+        // a hand-picked magic number, since the exact analytic crossing
+        // time is not the point of this test (`closed_form`'s own tests
+        // already cover that); whether a stale entry distorts it is.
+        let control_solver = PartitionedSolver::build(&p).unwrap();
+        let all = all_partitions(&control_solver);
+        let mut control = Kernel::new(control_solver, NoDevices);
+        control.settle(0.0, &all, &[]).unwrap();
+        assert!(control.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+        control.apply_params_as_event(&[(1, 0, 0.0)]).unwrap(); // the same "no-op" re-aim as below.
+        let control_next = control.next_event_time();
+        assert!(control_next.is_finite(), "the control kernel must schedule a real crossing");
+
+        let solver = PartitionedSolver::build(&p).unwrap();
+        let mut kernel = Kernel::new(solver, NoDevices);
+        kernel.settle(0.0, &all, &[]).unwrap();
+        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+
+        // Close A's switch (re-aims A, scheduling a real crossing) AND B's
+        // switch (overflows B's segment) as ONE event: A's crossing is
+        // already drained into `pending_schedule` by the time B's poisoned
+        // voltage is caught.
+        let err = kernel.apply_params_as_event(&[(1, 0, 1.0), (5, 0, 1.0)]).unwrap_err();
+        assert!(matches!(err, crate::kernel::KernelError::SolveFailed(_)));
+
+        // The SAME "no-op" re-aim the control kernel used (setting A's
+        // switch to the value it already holds still dirties the partition
+        // and re-aims it, `PartitionedSolver::apply_params`'s own
+        // unconditional `touched.insert`). If the failed attempt's crossing
+        // leaked into `pending_schedule`, THIS re-aim's own
+        // `drain_scheduled` sweeps it up alongside the fresh, legitimate one
+        // — `next_event_time` would then report the stale (much earlier,
+        // fast-segment) time instead of matching the control kernel's clean
+        // one.
+        kernel.apply_params_as_event(&[(1, 0, 0.0)]).unwrap();
+        let next = kernel.next_event_time();
+        assert_eq!(next, control_next, "a crossing scheduled during the failed attempt must not survive to distort a later, otherwise-identical re-aim's own schedule");
     }
 }
 

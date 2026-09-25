@@ -228,15 +228,23 @@ impl Engine {
     }
 
     /// Changes an option after load (core/README.md, `bo_engine_set_option`).
-    /// Keys 2-4 (the exactness switches and `FORCE_STEPPED`) take effect at
-    /// the next event; keys 1, 5, 6 and 7 are load-time only and are always
+    /// Keys 2 and 3 (the exactness switches) take effect at the next event;
+    /// keys 1 and 4-7 are load-time only and are always
     /// `ERR_INVALID_ARGUMENT` here, same as any key this build does not
     /// recognize — `START_TIME` (7) names the instant the kernel's clock
     /// already started at, which cannot be moved after the fact any more
-    /// than `INTEGRATION` or `AMBIENT_C` can. This is a distinct error code
-    /// from a bad option *in the program itself* (`ERR_MALFORMED` at load,
-    /// `program::parse_option`) — the bytes were fine at load time; this is a
-    /// live call misusing the ABI.
+    /// than `INTEGRATION` or `AMBIENT_C` can, and `FORCE_STEPPED` (4) is
+    /// load-time only for the same reason: `partition::build` folds it into
+    /// each partition's `PartitionKind` (Decision 14) exactly once, at load,
+    /// and nothing ever re-partitions or migrates a partition between
+    /// `solve::closed_form::ClosedFormSolver` and `solve::stepped::SteppedSolver`
+    /// afterward — a post-load `set_option(4, ...)` that merely recorded the
+    /// new value here would return success while every already-built
+    /// partition kept solving exactly as before, silently comparing the
+    /// closed form against itself instead of switching to BE/trap. This is a
+    /// distinct error code from a bad option *in the program itself*
+    /// (`ERR_MALFORMED` at load, `program::parse_option`) — the bytes were
+    /// fine at load time; this is a live call misusing the ABI.
     pub fn set_option(&mut self, key: u32, value: f64) -> Result<(), BoError> {
         match key {
             2 => {
@@ -253,11 +261,7 @@ impl Engine {
                 self.options.no_rail_shortcut = Self::require_switch("NO_RAIL_SHORTCUT", value)?;
                 Ok(())
             }
-            4 => {
-                self.options.force_stepped = Self::require_switch("FORCE_STEPPED", value)?;
-                Ok(())
-            }
-            1 | 5 | 6 | 7 => Err(BoError::invalid_argument(format!(
+            1 | 4 | 5 | 6 | 7 => Err(BoError::invalid_argument(format!(
                 "option key {key} is load-time only and cannot be changed after load"
             ))),
             _ => Err(BoError::invalid_argument(format!("unknown option key {key}"))),
@@ -640,6 +644,60 @@ mod tests {
         }
     }
 
+    /// Section 3 of the W1b review, contract point 2: a capacitor whose two
+    /// pins land on the SAME free node must stamp nothing (its companion
+    /// stamps cancel exactly, classic's own `stampConductance` behavior for
+    /// `i==j`) and must not count toward that node's partition
+    /// classification. Before this fix, `partition::build` counted it
+    /// anyway, wrongly classifying the node `ClosedForm`; its branch-current
+    /// row in `closed_form::build_segment` was then all zero (the
+    /// capacitor's `+1`/`-1` stamps to the SAME local index cancel exactly,
+    /// and `esr -= 0` when `esr == 0` leaves nothing else in that row) — a
+    /// singular pivot, so `bo_engine_load` returned `-4` where classic loads
+    /// the circuit normally. `esr` is irrelevant either way, since a
+    /// self-shorted capacitor never reaches the matrix at all; checked at 0
+    /// (the review's own repro) and a nonzero value, and under both default
+    /// classification and `FORCE_STEPPED` (which must not be able to pull a
+    /// partition with no REAL capacitor into the stepped path).
+    #[test]
+    fn a_capacitor_shorted_to_itself_on_a_free_node_loads_like_classic_not_singular() {
+        for &esr in &[0.0, 0.5] {
+            for &force_stepped in &[false, true] {
+                // node0 = gnd, node1 = source+, node2 (n1) = free: 1k from
+                // the source, a capacitor with BOTH pins on n1, 1k to gnd.
+                let mut options = Options::default();
+                options.force_stepped = force_stepped;
+                let p = Program {
+                    node_count: 3,
+                    options,
+                    digital_slot_count: 0,
+                    channel_slot_count: 0,
+                    devices: vec![
+                        source(0, 1, 0, 5.0),
+                        resistor(1, 1, 2, 1000.0),
+                        capacitor(2, 2, 2, 1e-6, esr, 0.0),
+                        resistor(3, 2, 0, 1000.0),
+                    ],
+                };
+                let e = Engine::load(&p)
+                    .unwrap_or_else(|err| panic!("esr={esr} force_stepped={force_stepped}: load failed with {} ({})", err.code, err.message));
+                // classic's own shunt-inclusive divider (the universal
+                // 1e-12 S node shunt pulls it very slightly below a bare
+                // 2.5V — the same tolerance `closed_form`'s own tests use
+                // against that model).
+                assert!((e.voltages()[2] - 2.5).abs() < 1e-6, "esr={esr} force_stepped={force_stepped}: n1 = {}", e.voltages()[2]);
+                assert_eq!(e.currents()[2], 0.0, "esr={esr} force_stepped={force_stepped}: c1 must publish exactly 0");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capacitor_with_both_pins_on_gnd_loads_fine_and_publishes_zero_current() {
+        let p = program(1, vec![capacitor(0, 0, 0, 1e-6, 0.0, 0.0)]);
+        let e = Engine::load(&p).unwrap();
+        assert_eq!(e.currents()[0], 0.0);
+    }
+
     // --- v2 additions: next_event_time, slots, set_option, trace, stats ---
 
     #[test]
@@ -733,22 +791,36 @@ mod tests {
     }
 
     #[test]
-    fn set_option_accepts_keys_2_through_4_after_load() {
+    fn set_option_accepts_keys_2_and_3_after_load() {
         let p = program(1, vec![]);
         let mut e = Engine::load(&p).unwrap();
         assert!(e.set_option(2, 1.0).is_ok());
         assert!(e.set_option(3, 0.0).is_ok());
-        assert!(e.set_option(4, 1.0).is_ok());
     }
 
     #[test]
     fn set_option_rejects_load_time_only_keys_after_load() {
         let p = program(1, vec![]);
         let mut e = Engine::load(&p).unwrap();
-        for key in [1, 5, 6, 7] {
+        for key in [1, 4, 5, 6, 7] {
             let err = e.set_option(key, 0.0).unwrap_err();
             assert_eq!(err.code, ERR_INVALID_ARGUMENT, "key {key}");
         }
+    }
+
+    /// Section 5 of the W1b review: `FORCE_STEPPED` after load used to
+    /// return success but never actually move a partition between the
+    /// closed-form and stepped solvers (`partition::build` only folds it in
+    /// once, at load). Contract: key 4 is load-time only, exactly like keys
+    /// 1/5/6/7, and the message must name it so a caller can tell which
+    /// option it tried to change live.
+    #[test]
+    fn set_option_rejects_force_stepped_after_load() {
+        let p = program(1, vec![]);
+        let mut e = Engine::load(&p).unwrap();
+        let err = e.set_option(4, 1.0).unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARGUMENT);
+        assert!(err.message.contains('4'), "message was: {}", err.message);
     }
 
     #[test]

@@ -175,13 +175,29 @@ export function compileSwitchOrPushButton(
   };
 }
 
-/** `spdt_switch`: `com`/`b`/`c` by id (always exactly 3 pin records), one live param (`position` -> `sel`, index 0). */
+/**
+ * `spdt_switch`: `com`/`b`/`c` by id (always exactly 3 pin records), one live
+ * param (`position` -> `sel`, index 0).
+ *
+ * Unlike `dip_switch`, this by-id kind ALSO requires at least 3 declared
+ * pins in total — classic's `spdtSwitchModel.stamp`/`acStamp` both start
+ * with `if (pins.length < 3) return;` (devices/passives.ts), a pure
+ * declared-pin-COUNT check, not a "does com/b/c exist" check. Without this
+ * guard, a component declaring only `[com, b]` (or fewer) would still
+ * compile a full 3-pin by-id record with `c` defaulting to node 0, and the
+ * core would close com-b (or short com to ground) where classic stamps
+ * nothing at all — see core/README.md's "Pins by id" bullet.
+ */
 export function compileSpdtSwitch(
   built: CoreNodeBuild,
   openKeys: ReadonlySet<string>,
   componentId: string,
+  pins: readonly { id: string }[],
   params: Record<string, number | string>,
 ): PassiveCompileResult {
+  if (pins.length < 3) {
+    return { ok: false, reason: `malformed:${componentId}:too-few-pins` };
+  }
   return {
     ok: true,
     pins: [

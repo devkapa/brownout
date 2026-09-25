@@ -8,15 +8,33 @@
  * enforce that rule inside that one command.
  *
  * WHY "CLAIMED" MEANS "NAMED BY A PORTABLE CASE", NOT `CORE_IMPLEMENTED_KINDS`
+ * -- EXCEPT AS A FLOOR (finding 9)
  * `CORE_IMPLEMENTED_KINDS` (src/core/kinds.ts) includes `"ground"`, a
  * compiler-internal detail (buildNets names a net `gnd`; nothing ever
  * constructs a `SimComponent` of kind `"ground"`), so no test's circuit ever
  * names it as a kind and a literal reading of "claimed supported" against
- * that set would make the gate fail forever. What section 3.4.1 actually
- * ties failure to is the per-kind table classification.json builds ("Kind(s)
- * | Suites run against the core") -- i.e. the kinds a PORTABLE case actually
- * says it exercises. That is fully self-contained in classification.json
- * plus this run's own results, with no need to import kinds.ts at all.
+ * that set would make the gate fail forever on `"ground"` alone. What
+ * section 3.4.1's per-suite table ("Kind(s) | Suites run against the core")
+ * actually describes is the kinds a PORTABLE case says it exercises, and
+ * PER-CASE enforcement (a listed case must be found, must have run, must
+ * have passed) is fully self-contained in classification.json plus this
+ * run's own results, with no need to import kinds.ts at all.
+ *
+ * But finding 9 showed that per-case enforcement alone has a gap: a kind can
+ * join `CORE_IMPLEMENTED_KINDS` (the compiler/kernel genuinely supports it)
+ * without classification.json EVER gaining a suite entry for it at all --
+ * nothing above notices, because there is no case naming that kind to be
+ * missing, skipped or failing; the kind simply never appears in
+ * `portableCases.flatMap(...)`, so the per-suite table silently omits its
+ * row and the whole file goes green. That is exactly the vacuous pass
+ * section 3.4.1 and this file's own `anyFailure` throw (below) exist to
+ * catch for a case that IS listed -- so this file also enforces the
+ * complementary floor: every kind in `CORE_IMPLEMENTED_KINDS` except
+ * `"ground"` (the one deliberately kind-less exception above) must have AT
+ * LEAST ONE portable case, ANYWHERE across the whole classification file,
+ * that both ran and passed. This is the one place this file imports
+ * kinds.ts -- everything else about "did this specific case run and pass"
+ * still needs nothing from it.
  *
  * HOW MATCHING WORKS
  * A Vitest task tree's leaf (`type !== "suite"`, no `.tasks` array) carries
@@ -39,6 +57,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 
 interface ClassificationCase {
   describe?: string;
@@ -92,6 +111,9 @@ function collectLeaves(node: unknown, prefix: string, out: LeafResult[]): void {
   }
 }
 
+/** The one `CORE_IMPLEMENTED_KINDS` member no test can ever name as a `SimComponent.kind` — see this file's header comment. */
+const GROUND_KIND_EXEMPT = "ground";
+
 interface VitestFileLike {
   filepath?: unknown;
 }
@@ -106,11 +128,20 @@ interface VitestFileLike {
 export class CoreGateReporter {
   private readonly rootDir: string;
   private readonly classification: ClassificationFile;
+  private readonly implementedKinds: ReadonlySet<string>;
 
-  constructor(rootDir: string) {
+  /**
+   * `implementedKinds` defaults to the real `CORE_IMPLEMENTED_KINDS`
+   * (kinds.ts) -- overridable so gate-reporter.test.ts's own unit tests can
+   * prove the finding-9 floor against a small synthetic set instead of
+   * asserting a specific real kind is (or is not) covered, which would
+   * silently stop testing anything the day that real set changes.
+   */
+  constructor(rootDir: string, implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS) {
     this.rootDir = rootDir;
     const raw = readFileSync(path.join(rootDir, "test/core/suites/classification.json"), "utf8");
     this.classification = JSON.parse(raw) as ClassificationFile;
+    this.implementedKinds = implementedKinds;
   }
 
   onFinished(files: VitestFileLike[] = []): void {
@@ -129,6 +160,18 @@ export class CoreGateReporter {
 
     const lines: string[] = ["", "Gate 1 -- per-kind portable test counts (core/README.md, section 3.4.1):"];
     let anyFailure = false;
+
+    // Finding 9: the floor beneath the per-suite tables below -- every
+    // implemented kind (except the exempt "ground") must have at least one
+    // portable case, IN ANY SUITE FILE, that ran and passed. Accumulated
+    // across every suite in the SAME pass over portableCases below, so a
+    // kind split across two suite files (e.g. capacitor's several) is
+    // counted once, correctly, rather than needing its own second pass.
+    const globalPerKind = new Map<string, { ran: number; passed: number }>();
+    for (const kind of this.implementedKinds) {
+      if (kind === GROUND_KIND_EXEMPT) continue;
+      globalPerKind.set(kind, { ran: 0, passed: 0 });
+    }
 
     for (const suite of this.classification.suites) {
       const leaves = leavesByFile.get(suite.file);
@@ -192,9 +235,15 @@ export class CoreGateReporter {
         }
         for (const kind of testCase.kinds) {
           const counts = perKind.get(kind);
-          if (!counts) continue;
-          if (ran) counts.ran += 1;
-          if (ran && passed) counts.passed += 1;
+          if (counts) {
+            if (ran) counts.ran += 1;
+            if (ran && passed) counts.passed += 1;
+          }
+          const globalCounts = globalPerKind.get(kind);
+          if (globalCounts) {
+            if (ran) globalCounts.ran += 1;
+            if (ran && passed) globalCounts.passed += 1;
+          }
         }
       }
 
@@ -209,6 +258,26 @@ export class CoreGateReporter {
           if (zero) anyFailure = true;
         }
       }
+    }
+
+    // Finding 9: the global floor, checked once after every suite has
+    // contributed to globalPerKind above -- a kind can be entirely ABSENT
+    // from every suite's own per-kind table (no portable case anywhere names
+    // it) and still reach this point with anyFailure still false, since the
+    // per-suite loop above only ever iterates kinds THAT SUITE's own
+    // portable cases mention. This is the check that catches that gap.
+    lines.push("", "Gate 1 -- CORE_IMPLEMENTED_KINDS coverage floor (finding 9):");
+    const uncovered = [...globalPerKind.entries()].filter(([, counts]) => counts.passed === 0);
+    if (uncovered.length === 0) {
+      lines.push(`  every implemented kind except "${GROUND_KIND_EXEMPT}" has a portable case that ran and passed.`);
+    }
+    for (const [kind, counts] of [...globalPerKind.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      if (counts.passed > 0) continue;
+      lines.push(
+        `  NO COVERAGE: "${kind}" is in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts) but no portable case in ` +
+          "ANY suite file in classification.json ran and passed for it -- gate 1 cannot claim this kind.",
+      );
+      anyFailure = true;
     }
 
     lines.push("");

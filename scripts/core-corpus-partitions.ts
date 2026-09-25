@@ -76,6 +76,7 @@ import { loadExternalCorpus } from "../test/core/equivalence/external-corpus.js"
 
 /** Kinds whose own physics is linear (a resistor, a capacitor, or an ideal switch contact) — the only kinds that can appear in a partition decision 14 counts. Not `voltage_source`/`ground`: see this file's header, step 3. */
 const LINEAR_PARTITION_KINDS = new Set(["resistor", "capacitor", "switch", "push_button", "spdt_switch", "dip_switch"]);
+const SWITCH_FAMILY_KINDS = new Set(["switch", "push_button", "spdt_switch", "dip_switch"]);
 
 const SWITCH_CONTACT_KINDS = new Set(["switch", "push_button", "spdt_switch", "dip_switch"]);
 
@@ -156,7 +157,7 @@ function nodeForPin(built: CoreNodeBuild, componentId: string, pinId: string): n
   return built.pinNode.get(corePinKey(componentId, pinId)) ?? 0;
 }
 
-/** Every (nodeA, nodeB) pair this component can ever carry a linear edge between, for TOPOLOGY only — unconditional on the switch family's current open/closed state, exactly like partition.rs's own `union_pairs`/`contact_pairs`. */
+/** Every (nodeA, nodeB) pair this component can ever carry a linear edge between, for TOPOLOGY only — unconditional on the switch family's current open/closed state, exactly like partition.rs (which also unions every free pin of one switch-family device; see `partitionCircuit`). */
 function linearEdgePairs(built: CoreNodeBuild, component: SimCircuit["components"][number]): Array<[number, number]> {
   const id = component.id;
   switch (component.kind) {
@@ -236,6 +237,14 @@ export function partitionCircuit(circuit: SimCircuit): CircuitPartitionReport {
     for (const [a, b] of linearEdgePairs(built, component)) {
       if (!fixed.has(a) && !fixed.has(b)) uf.union(a, b);
     }
+    // core/README.md's W1b partition rule 1: every free pin of one
+    // switch-family device shares a partition, even when the contact
+    // between two of them runs through a fixed pin (an spdt whose com sits
+    // on a source).
+    if (SWITCH_FAMILY_KINDS.has(component.kind)) {
+      const free = nodesTouchedBy(built, component).filter((node) => !fixed.has(node));
+      for (const node of free.slice(1)) uf.union(free[0]!, node);
+    }
   }
 
   // Group free nodes into partitions by union-find root, first-seen order.
@@ -276,6 +285,10 @@ export function partitionCircuit(circuit: SimCircuit): CircuitPartitionReport {
       continue;
     }
     if (component.kind === "capacitor") {
+      const [a, b] = linearEdgePairs(built, component)[0] ?? [];
+      // Rule 2: a capacitor with both pins on one node is inert. It counts
+      // toward nothing, not even the both-ends-fixed tally.
+      if (a !== undefined && a === b) continue;
       if (touchedPartitions.size === 0) {
         bothEndsFixedCapacitorCount++;
       } else {

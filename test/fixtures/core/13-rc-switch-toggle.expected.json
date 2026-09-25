@@ -1,13 +1,7 @@
 {
   "status": "pass",
-  "analytic": {
-    "kind": "rc",
-    "sourceVolts": 5,
-    "seriesOhms": 100000.001,
-    "capacitanceF": 0.000001,
-    "esrOhms": 0,
-    "leakageOhms": 1000000000000,
-    "node": { "component": "c1", "pin": "a" },
-    "currentComponents": ["r1"]
-  }
+  "phases": [
+    { "set": [{ "id": "sw", "params": { "closed": 1 } }], "durationS": 0.02 },
+    { "set": [{ "id": "sw", "params": { "closed": 0 } }], "durationS": 0.02 }
+  ]
 }

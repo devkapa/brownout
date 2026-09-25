@@ -238,4 +238,34 @@ describe("replayStimuliOnCore", () => {
     };
     expect(() => replayStimuliOnCore(shorted, [{ durationS: 1e-3 }])).toThrow();
   });
+
+  // Finding 10: phase durations that are NOT whole multiples of
+  // STIMULUS_FIXED_STEP_S used to make the core round to a different whole
+  // step count than classic's own clamp-to-remaining behaviour — 2.5ms
+  // rounded UP to 3 whole 1ms steps (drifting the next phase's `set` 0.5ms
+  // late relative to classic), and 0.4ms rounded DOWN to zero steps (no
+  // sample at all, where classic still produces one clamped 0.4ms step).
+  it("matches replayStimuliOnClassic's own sample times exactly for a phase duration that is NOT a whole multiple of STIMULUS_FIXED_STEP_S (2.5ms)", () => {
+    const phases: StimulusPhase[] = [{ durationS: 2.5 * STIMULUS_FIXED_STEP_S }, { durationS: 2 * STIMULUS_FIXED_STEP_S }];
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+
+    expect(coreSamples).toHaveLength(classicSamples.length);
+    for (let i = 0; i < classicSamples.length; i++) {
+      expect(coreSamples[i]!.phaseIndex, `sample ${String(i)}`).toBe(classicSamples[i]!.phaseIndex);
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+  });
+
+  it("matches replayStimuliOnClassic's own sample COUNT for a phase shorter than one whole STIMULUS_FIXED_STEP_S (0.4ms) — the old rounding produced ZERO core samples here", () => {
+    const phases: StimulusPhase[] = [{ durationS: 0.4 * STIMULUS_FIXED_STEP_S }, { durationS: 2 * STIMULUS_FIXED_STEP_S }];
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+
+    expect(classicSamples.filter((s) => s.phaseIndex === 0)).toHaveLength(1);
+    expect(coreSamples).toHaveLength(classicSamples.length);
+    for (let i = 0; i < classicSamples.length; i++) {
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+  });
 });

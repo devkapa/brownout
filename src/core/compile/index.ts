@@ -343,7 +343,7 @@ export function compileCircuit(
       }
 
       case "spdt_switch": {
-        const result = compileSpdtSwitch(built, openKeys, component.id, component.params);
+        const result = compileSpdtSwitch(built, openKeys, component.id, component.pins, component.params);
         if (!result.ok) {
           reasons.add(result.reason);
           return;

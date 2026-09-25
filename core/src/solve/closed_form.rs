@@ -100,10 +100,18 @@ struct Partition {
 /// Everything [`ClosedFormSolver::snapshot`] captures, restored verbatim by
 /// [`ClosedFormSolver::restore`]. Deliberately excludes `watches` (load-time
 /// wiring, never mutated by a solve) and the two stat counters (README: kept
-/// even through a rollback).
+/// even through a rollback). Includes `scheduled` (contract point 7): a
+/// dirty batch with more than one `ClosedForm` partition can re-aim an
+/// EARLIER partition (queuing a crossing into `self.scheduled`) before a
+/// LATER one in the SAME `resolve_dirty` call fails — `PartitionedSolver`'s
+/// own `drain_scheduled` (which would otherwise empty this into
+/// `pending_schedule`) never runs in that case, since the `?` on the failing
+/// call short-circuits first, so a stale entry can be left sitting here, not
+/// only in `pending_schedule`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     partitions: HashMap<usize, PartitionSnapshot>,
+    scheduled: Vec<(f64, usize, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,9 +137,11 @@ pub struct ClosedFormSolver {
     /// needs `partition::build`'s own tables in hand.
     node_owner: HashMap<usize, (usize, usize)>,
     /// Crossings this solver wants scheduled, drained by
-    /// [`Self::take_scheduled`] — always emptied by the caller (`solve::mod`'s
-    /// `PartitionedSolver`) before control returns to `kernel.rs`, so it is
-    /// never part of [`Snapshot`] (see that struct's doc comment).
+    /// [`Self::take_scheduled`] — normally emptied by the caller
+    /// (`solve::mod`'s `PartitionedSolver`) before control returns to
+    /// `kernel.rs`, but NOT when a later partition in the SAME dirty batch
+    /// fails first (see [`Snapshot`]'s doc comment), so it is part of
+    /// [`Snapshot`] after all.
     scheduled: Vec<(f64, usize, u64)>,
 }
 
@@ -310,10 +320,12 @@ impl ClosedFormSolver {
                     )
                 })
                 .collect(),
+            scheduled: self.scheduled.clone(),
         }
     }
 
     pub fn restore(&mut self, snapshot: Snapshot) {
+        self.scheduled = snapshot.scheduled;
         for (p, s) in snapshot.partitions {
             if let Some(part) = self.partitions.get_mut(&p) {
                 part.seg = s.seg;

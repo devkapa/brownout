@@ -44,15 +44,21 @@
  * by delegating to `HeadlessRunner.snapshot().solver`, which is ALREADY the
  * single place that documents their W0/W1a "no core meaning yet" neutral
  * values (headless.ts's own `snapshot()` doc comment) -- this file does not
- * duplicate that convention, it reads it. Nothing else on classic `SimEngine`
- * (saveState/restoreState/captureErrorState/setMicrobitDrive/the dozens of
- * kind-specific setters, ...) is implemented: no case in classification.json
- * currently needs any of them, and inventing behaviour for a method no
- * allowlisted test calls would be exactly the kind of unverified guess the
- * W1 plan's risk 15 warns about. A suite file that needs one fails with a
- * plain "not a function" TypeError, which is the honest outcome -- add the
- * method here, with a reason, when a suite that needs it is added to
- * classification.json.
+ * duplicate that convention, it reads it. `setIntegrationMethod` (added for
+ * trap-integration.test.ts, once W1b's stepped partitions gave the core real
+ * BE/trap dynamics to choose between) is implemented too -- see its own doc
+ * comment for why it is a two-step (record, then apply on the next `step()`)
+ * rather than an immediate call into `HeadlessRunner`. `getElementChannelI`
+ * (added for wave3-passives.test.ts) is implemented as a constant `{}` -- see
+ * its own doc comment for why that is provably correct here, not a guess.
+ * Nothing else on classic `SimEngine` (saveState/restoreState/
+ * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
+ * ...) is implemented: no case in classification.json currently needs any of
+ * them, and inventing behaviour for a method no allowlisted test calls would
+ * be exactly the kind of unverified guess the W1 plan's risk 15 warns about.
+ * A suite file that needs one fails with a plain "not a function" TypeError,
+ * which is the honest outcome -- add the method here, with a reason, when a
+ * suite that needs it is added to classification.json.
  */
 
 import { HeadlessRunner } from "../../../src/host/headless.js";
@@ -114,6 +120,8 @@ export interface CoreSuiteEngineOptions {
 export class SimEngine implements EngineReadout {
   private readonly _coreSupportedKinds: ReadonlySet<string>;
   private _runner: HeadlessRunner;
+  /** Set by setIntegrationMethod(), applied on the NEXT step() -- see that method's own doc comment. */
+  private _pendingIntegrationMethod: "be" | "trap" | undefined;
 
   constructor(options?: CoreSuiteEngineOptions) {
     this._coreSupportedKinds = options?.coreSupportedKinds ?? CORE_IMPLEMENTED_KINDS;
@@ -153,9 +161,53 @@ export class SimEngine implements EngineReadout {
     this._loadOnCore(circuit);
   }
 
-  /** Classic `SimEngine.step(h)` -> `CoreEngine.advance(simTime + h)`, via HeadlessRunner's own core-mode run() (headless.ts's `_runCore`). */
+  /**
+   * Classic `SimEngine.step(h)` -> `CoreEngine.advance(simTime + h)`, via
+   * HeadlessRunner's own core-mode run() (headless.ts's `_runCore`). Threads
+   * any pending `setIntegrationMethod()` request through `run()`'s own
+   * `integrationMethod` option every call -- cheap once applied (headless.ts's
+   * `applyIntegrationMethod` no-ops when the method already matches) and the
+   * ONLY call site this adapter has into that mechanism, since `load()`/
+   * `coldLoad()` take no method argument of their own.
+   *
+   * A `step()` is not itself guarded by `_loadOnCore`'s anti-silent-fallback
+   * check anywhere else in this file -- ordinarily nothing WOULD reload
+   * mid-session after `load()`/`coldLoad()` already proved the core accepted
+   * the circuit. But `applyIntegrationMethod` CAN reload (headless.ts: a
+   * method switch at t=0 re-seeds through `load()` so the new method is baked
+   * into the compiled program), and that reload can itself fall back to
+   * classic. So this is the one `step()` needs its own fallback check too --
+   * without it, a trap-mode circuit the core declines would silently keep
+   * running on classic from here on, exactly the failure mode `load()`/
+   * `coldLoad()` already refuse.
+   */
   step(h: number): void {
-    this._runner.run({ durationS: h });
+    this._runner.run({ durationS: h, integrationMethod: this._pendingIntegrationMethod });
+    if (this._runner.activeEngine !== "core") {
+      throw new CoreSuiteFellBackError(this._runner.engineFallbackReasons);
+    }
+  }
+
+  /**
+   * Classic `SimEngine.setIntegrationMethod(method)`. Classic applies this
+   * IMMEDIATELY (it is a plain field write with a re-seed on the classic
+   * engine object); `HeadlessRunner.applyIntegrationMethod` instead requires
+   * an already-loaded circuit and is only reachable through `run()`'s own
+   * `integrationMethod` option (headless.ts) -- there is no standalone
+   * "set the method right now" entry point to call into directly, and a
+   * suite file calling this BEFORE `load()` (trap-integration.test.ts's own
+   * pattern: `engine.setIntegrationMethod(method); engine.load(circuit);`)
+   * would have nothing loaded yet regardless. So this only records the
+   * request; `step()` (above) is what actually applies it, on the runner's
+   * own `run()` call, the same "in force before the load seed solve and the
+   * first step's backward-Euler anchoring" instant headless.ts's own
+   * `applyIntegrationMethod` doc comment requires (it throws if `simTime !==
+   * 0`, so this is only ever legal before the first `step()` anyway --
+   * exactly mirroring classic's "call it before stepping" contract, just
+   * enforced one call later here).
+   */
+  setIntegrationMethod(method: "be" | "trap"): void {
+    this._pendingIntegrationMethod = method;
   }
 
   // ---- EngineReadout -------------------------------------------------------
@@ -178,6 +230,24 @@ export class SimEngine implements EngineReadout {
 
   getElementI(): Record<string, number> {
     return this._runner.readout.getElementI();
+  }
+
+  /**
+   * Classic `SimEngine.getElementChannelI()`: per-channel currents for a
+   * multi-channel device (resistor_array's 4 independent channels, ...).
+   * `EngineReadout`/`CoreEngine` have no such concept -- multi-channel
+   * kinds are not in `CORE_IMPLEMENTED_KINDS`. Always `{}`, not a guess: a
+   * circuit that reached this adapter's `load()` at all necessarily used
+   * only core-implemented kinds, so it structurally cannot contain a
+   * multi-channel component for there to be a channel record of in the
+   * first place -- `{}` is the exact, provably-correct answer for every
+   * circuit this adapter can ever be holding, not an invented placeholder.
+   * Added for a test-file helper (wave3-passives.test.ts's `liveFromEngine`)
+   * that calls this unconditionally even on a circuit with no multi-channel
+   * device at all, purely to build a generic `LiveReadings` snapshot.
+   */
+  getElementChannelI(): Record<string, number[]> {
+    return {};
   }
 
   get digitalState(): Record<string, number> {

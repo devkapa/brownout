@@ -494,6 +494,12 @@ export class HeadlessRunner {
    * load()), is passed through to `CoreEngine.load()`'s own `options.simTime`
    * so the newly-core circuit starts at the runner's carried-over time
    * instead of wherever this engine's own clock last stood.
+   *
+   * Always passes `this._integrationMethod` through too: W1b gave the core
+   * real dynamics (capacitors, stepped partitions choosing BE/trapezoidal via
+   * the program's INTEGRATION option — load-time only, like classic's own
+   * seed), so a caller's requested method must reach the compiled program
+   * here, not just the classic engine's `setIntegrationMethod`.
    */
   private _tryLoadCore(circuit: SimCircuit, seedSimTime?: number): string[] | null {
     if (!coreReady()) {
@@ -522,7 +528,10 @@ export class HeadlessRunner {
         this._coreEngine = null;
       }
       this._coreEngine ??= new CoreEngine();
-      this._coreEngine.load(circuit, undefined, seedSimTime !== undefined ? { simTime: seedSimTime } : undefined);
+      this._coreEngine.load(circuit, undefined, {
+        integrationMethod: this._integrationMethod,
+        ...(seedSimTime !== undefined ? { simTime: seedSimTime } : {}),
+      });
       return null;
     } catch (err) {
       if (err instanceof CoreUnsupportedError) return [...err.reasons];
@@ -661,13 +670,14 @@ export class HeadlessRunner {
    * Apply a run's integrationMethod request. See
    * HeadlessRunOptions.integrationMethod for why t=0 is the only legal point.
    * The legality rule is the SAME regardless of which engine is active —
-   * `this.simTime` reads whichever one is (see the `simTime` getter) — but
-   * only the classic engine actually needs re-seeding: the core has no
-   * dynamics to seed in W0 and simply ignores the method for its own
-   * stepping, so in core mode this only RECORDS the request. Recording it is
-   * still necessary: a later live-edit reload that falls back to classic
-   * (see load()) must re-seed under the method the caller actually asked
-   * for, not silently revert to whatever `_integrationMethod` last was.
+   * `this.simTime` reads whichever one is (see the `simTime` getter). W1b
+   * gave the core real dynamics (capacitors; stepped partitions pick BE or
+   * trapezoidal from the program's INTEGRATION option), so — unlike W0/W1a,
+   * when the core had nothing to seed and this only recorded the request —
+   * core mode now needs the SAME re-seed classic gets: load() again, whose
+   * `_tryLoadCore` bakes `_integrationMethod` into the program (see its own
+   * doc comment). Lossless at t=0: nothing has been stepped yet on either
+   * engine.
    */
   private applyIntegrationMethod(method: "be" | "trap", circuit: SimCircuit): void {
     if (method === this._integrationMethod) return;
@@ -681,7 +691,15 @@ export class HeadlessRunner {
       );
     }
     this._integrationMethod = method;
-    if (this._activeEngine === "core") return;
+    if (this._activeEngine === "core") {
+      // Re-run engine selection rather than reloading the core directly, so
+      // the program is rebuilt under the new method through the one path
+      // that also handles a core that cannot take it (load() then falls
+      // back to classic, seeded under the new method, with the reasons
+      // recorded). run() branches on activeEngine only after this call.
+      this.load(circuit);
+      return;
+    }
     this._engine.setIntegrationMethod(method);
     // Re-seed under the new method. Lossless: nothing has been stepped yet.
     this._engine.load(circuit);
@@ -700,6 +718,10 @@ export class HeadlessRunner {
       throw new Error(`HeadlessRunner: durationS must be a positive finite number of seconds, got ${String(durationS)}.`);
     }
 
+    // Applied before the engine branch: in core mode it can reload, and a
+    // reload that falls back to classic changes which branch runs.
+    if (options.integrationMethod) this.applyIntegrationMethod(options.integrationMethod, circuit);
+
     if (this._activeEngine === "core") {
       // adaptive/fixedStepS/maxSteps have no effect on the core (see
       // HeadlessRunnerOptions.engine's doc comment) but a caller's misuse
@@ -716,14 +738,8 @@ export class HeadlessRunner {
           );
         }
       }
-      // integrationMethod DOES matter even here: not to the core's own
-      // stepping (it has none to seed), but to the legality check and to a
-      // LATER classic fallback — see applyIntegrationMethod's doc comment.
-      if (options.integrationMethod) this.applyIntegrationMethod(options.integrationMethod, circuit);
       return this._runCore(this._coreEngine as CoreEngine, durationS, onSample);
     }
-
-    if (options.integrationMethod) this.applyIntegrationMethod(options.integrationMethod, circuit);
 
     const adaptive = options.adaptive ?? true;
     let fixedH: number | null = null;

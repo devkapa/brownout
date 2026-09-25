@@ -591,14 +591,21 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — classi
     });
   });
 
-  it("13-rc-switch-toggle: closed switch behaves as the same ideal RC curve (the 1 mOhm closed contact is negligible)", () => {
+  // Finding 12: the fixture's OWN declared param now starts the switch OPEN
+  // (sim.json), so its toggle sequence (below, "a live switch toggle") can
+  // exercise the open-to-closed direction first — a "closed switch..." plain
+  // static-load check would just be testing the same closed-contact-is-
+  // negligible fact the "a live switch toggle" case's phase-1 charging curve
+  // already covers, in more depth (a whole trajectory, not three points).
+  // This checks the OTHER static fact the declared param now stands for
+  // instead: with no override applied at all, the capacitor never charges.
+  it("13-rc-switch-toggle: open switch (the fixture's own declared param) leaves the capacitor at 0V — no path to the source", () => {
     const circuit = loadFixtureCircuit("13-rc-switch-toggle");
     const netId = classicNetIdFor(circuit, "c1", "a");
-    const tau = 100_000 * 1e-6;
     const times = [10e-3, 20e-3, 40e-3];
     const samples = collectClassicSamples(circuit, times);
     times.forEach((t, i) => {
-      expectCloseToAnalytic(samples[i]!.netV[netId]!, rcVoltageAt(0, 5, tau, t), 5, `t=${t}`);
+      expect(Math.abs(samples[i]!.netV[netId]!), `t=${t}`).toBeLessThan(1e-6);
     });
   });
 
@@ -659,7 +666,7 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — core s
     return engine;
   }
 
-  it("11-rc-charge: the core's closed form is within 1e-9 relative of the exact exponential (and at least as close as classic)", () => {
+  it("11-rc-charge: the core's closed form is within 1e-9 relative of the exact exponential (classic recorded for the report, not asserted)", () => {
     const circuit = loadFixtureCircuit("11-rc-charge");
     const { tau, vAsymptote } = rcTerminalThevenin({
       sourceVolts: 5,
@@ -774,7 +781,7 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — core s
     expect(Math.abs(coreSamples[lastIndex]!.netV[netId]! - coreAtToggle)).toBeLessThan(1e-3);
   });
 
-  it("14-two-capacitor-ladder: the core's stepped solver (decision 14: not exact, but within tolerance) agrees with the analytic ladder solution and with classic", () => {
+  it("14-two-capacitor-ladder: the core's stepped solver (decision 14: not exact, but within tolerance) agrees with the analytic ladder solution (classic recorded for the report, not asserted)", () => {
     const circuit = loadFixtureCircuit("14-two-capacitor-ladder");
     const params: RcLadderParams = { sourceVolts: 5, r1Ohms: 100_000, c1F: 1e-6, r2Ohms: 150_000, c2F: 2e-6 };
     const t = 50e-3;

@@ -172,19 +172,32 @@ describe("compileSpdtSwitch — value resolution", () => {
     expect(dev.pins[2]!.node).toBe(built.pinNode.get("sw\u0000c"));
   });
 
-  it("a pin id the component lacks maps to node 0 and is reported open — never a compile error", () => {
-    // Only "com" is declared; "b" and "c" do not exist on this component at all.
+  it("fewer than 3 declared pins is malformed, not silently compiled — classic's spdtSwitchModel.stamp/acStamp stamp NOTHING below 3 pins (a pure declared-pin-count check, unlike dip_switch's by-id-only rule)", () => {
+    // Only "com" is declared; "b" and "c" do not exist on this component at
+    // all. Before this guard, compileSpdtSwitch still emitted a full 3-pin
+    // by-id record with b/c defaulting to node 0, so the core would close
+    // com to ground through the (fabricated) "c" contact — a circuit classic
+    // leaves completely open.
     const c = circuit([part("sw", "spdt_switch", ["com"], { position: 0 })]);
+    const result = compileCircuit(c, WITH_PASSIVES);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons).toEqual([`malformed:sw:too-few-pins`]);
+  });
+
+  it("a by-id pin the component lacks (but still declares >=3 pins total) maps to node 0 and is reported open — never a compile error", () => {
+    // 3 pins declared (satisfies the >=3-pin guard), but the component's
+    // actual ids are com/b/spare -- "c" itself is genuinely missing.
+    const c = circuit([part("sw", "spdt_switch", ["com", "b", "spare"], { position: 0 })]);
     const result = compileCircuit(c, WITH_PASSIVES);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const decoded = decodeProgram(result.compiled.program);
     const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE.spdt_switch)!;
-    // pins[1] = b, pins[2] = c, both absent -> node 0, open.
-    expect(dev.pins[1]!.node).toBe(0);
-    expect(dev.pins[1]!.open).toBe(true);
+    // pins[2] = c, absent by id -> node 0, open. pins[1] = b resolves normally.
     expect(dev.pins[2]!.node).toBe(0);
     expect(dev.pins[2]!.open).toBe(true);
+    const built = buildCoreNodes(c);
+    expect(dev.pins[1]!.node).toBe(built.pinNode.get("sw\u0000b"));
   });
 
   it("NaN position makes a real classic circuit stamp com->c (not com->b) — cross-checked against a live SimEngine run", () => {
@@ -489,7 +502,7 @@ describe("compile/passives.ts pin helpers agree with computeOpenPinKeys for a de
     const c = circuit([part("sw", "spdt_switch", ["com", "b", "c"], { position: 0 })]);
     const built = buildCoreNodes(c);
     const openKeys = computeOpenPinKeys(c, built.nets);
-    const result = compileSpdtSwitch(built, openKeys, "sw", { position: 0 });
+    const result = compileSpdtSwitch(built, openKeys, "sw", c.components[0]!.pins, { position: 0 });
     expect(result.ok).toBe(true);
     if (result.ok) {
       // pins = [com, b, c]; "c" is declared but never wired to anything.

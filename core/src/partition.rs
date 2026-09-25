@@ -35,8 +35,26 @@
 //! whatever else the switch would connect if closed; correctness is
 //! unaffected, since a zero-conductance contact contributes nothing to that
 //! shared system either way.
+//!
+//! **A switch-family device's free pins are unioned as a WHOLE, not contact
+//! by contact.** A single contact's own two ends (README point 1's second
+//! bullet) is not enough: an `spdt_switch`'s `com` can sit on a fixed pin (a
+//! source) while `b` and `c` are both free, so neither the `com`-`b` nor the
+//! `com`-`c` contact ever has two free ends to union — yet `b` and `c` are
+//! still the same device's two alternatives for the SAME current path, and
+//! `solve::mod`'s single-owner dispatch (`owner_of`, `owned_by_static`,
+//! `PartitionSolver::apply_params`'s dirtying) and `compile_dyn_shape`'s
+//! per-partition `resolve` both depend on a device's free pins landing in
+//! exactly one partition, no matter which pin happens to be fixed. So `build`
+//! below unions every free pin of a switch-family device with every other
+//! free pin of that SAME device directly — not only pairwise by contact —
+//! whenever the device has two or more free pins at all. This subsumes the
+//! plain "both ends of one contact, when both are free" rule as a special
+//! case (a contact's two pins are just two of the device's own pins), and it
+//! is what makes it safe for `compile_dyn_shape::resolve` to treat any other
+//! partition's free node as unreachable, rather than a case it has to
+//! silently paper over.
 
-use crate::devices;
 use crate::error::BoError;
 use crate::kinds;
 use crate::program::Program;
@@ -114,45 +132,61 @@ pub struct PartitionBuild {
     pub multi_capacitor_partitions: usize,
 }
 
-/// Every pin-index pair (into a device's own `pins`) that can ever carry a
-/// conductance between them, for topology purposes only — never for the
-/// actual electrical stamp, which reads the device's CURRENT parameters
-/// (`solve/static_part.rs`, `devices::stamp`). A resistor or capacitor has
-/// exactly one; a switch-family kind defers to
-/// [`devices::switches::contact_pairs`] (see this module's doc comment on
-/// why those are unioned unconditionally).
-fn union_pairs(kind: u32, pin_count: usize) -> Vec<(usize, usize)> {
+/// The one pin-index pair (into a device's own `pins`) a resistor or
+/// capacitor can ever carry a conductance between, for topology purposes
+/// only — never for the actual electrical stamp, which reads the device's
+/// CURRENT parameters (`solve/static_part.rs`, `devices::stamp`). A
+/// switch-family kind is unioned by [`build`] itself instead (this module's
+/// doc comment on why its free pins are unioned as a whole device, not pair
+/// by pair the way a resistor's or capacitor's single pair is).
+fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
     match kind {
-        kinds::RESISTOR | kinds::CAPACITOR => vec![(0, 1)],
-        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
-            devices::switches::contact_pairs(kind, pin_count)
-        }
-        _ => Vec::new(),
+        kinds::RESISTOR | kinds::CAPACITOR => Some((0, 1)),
+        _ => None,
     }
 }
 
 /// Builds the static topology: fixed-node propagation from node 0
 /// ([`derive_fixed_nodes`]), then union-find over free nodes joined by every
-/// resistor, capacitor or switch-family contact whose two ends are both free
-/// (see this module's doc comment for why a switch-family contact is
-/// unioned regardless of its current open/closed state), then classifies
-/// each resulting partition (Decision 14, `FORCE_STEPPED` applied here) and
-/// rejects a program no partition can ever own — a capacitor with BOTH
-/// terminals fixed (so it belongs to no partition at all: not a resistive
-/// network `solve/static_part.rs` can solve, and not a free-node dynamical
-/// system `solve/closed_form.rs`/`solve/stepped.rs` integrate either) — as
-/// `ERR_UNSUPPORTED_TOPOLOGY` (-3), exactly the code the contract already
-/// uses for "the TS side falls back to classic".
+/// resistor or capacitor whose two ends are both free, and by every free pin
+/// of a switch-family device with every other free pin of that same device
+/// (this module's doc comment explains why the whole device, not contact by
+/// contact — a switch-family contact can run through a fixed pin), then
+/// classifies each resulting partition (Decision 14, `FORCE_STEPPED` applied
+/// here) and rejects a program no partition can ever own — a capacitor with
+/// BOTH terminals fixed (so it belongs to no partition at all: not a
+/// resistive network `solve/static_part.rs` can solve, and not a free-node
+/// dynamical system `solve/closed_form.rs`/`solve/stepped.rs` integrate
+/// either) — as `ERR_UNSUPPORTED_TOPOLOGY` (-3), exactly the code the
+/// contract already uses for "the TS side falls back to classic". A
+/// self-shorted capacitor (both pins the SAME node, free or fixed — contract
+/// point 2) is neither of those: it is simply excluded below, before this
+/// rejection could ever see it.
 pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
     let (fixed, resolved) = derive_fixed_nodes(program, n)?;
 
     let mut uf = UnionFind::new(n);
     for device in &program.devices {
-        for (pa, pb) in union_pairs(device.kind, device.pins.len()) {
+        if let Some((pa, pb)) = resistor_or_capacitor_pair(device.kind) {
             let (u, w) = (device.pins[pa].node, device.pins[pb].node);
             if fixed[u].is_none() && fixed[w].is_none() {
                 uf.union(u, w);
+            }
+            continue;
+        }
+        if !matches!(device.kind, kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH) {
+            continue;
+        }
+        // Every free pin of this switch-family device joins the SAME
+        // partition, however many contacts separate them and regardless of
+        // which of the device's other pins are fixed (this module's doc
+        // comment) — union the first free pin found with every other one,
+        // which is enough to merge them all under union-by-size.
+        let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
+        if let Some(first) = free_pins.next() {
+            for node in free_pins {
+                uf.union(first, node);
             }
         }
     }
@@ -192,6 +226,19 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             continue;
         }
         let (u, w) = (device.pins[0].node, device.pins[1].node);
+        if u == w {
+            // Self-shorted (contract point 2): both terminals land on the
+            // SAME node, free or fixed (gnd included) — its companion stamps
+            // cancel exactly like classic's `stampConductance` with `i==j`,
+            // so it stamps nothing, publishes 0 and must not count toward
+            // this node's partition classification (an otherwise-Static
+            // node must not be pulled into ClosedForm/Stepped by a capacitor
+            // that never actually contributes to the matrix), nor can it
+            // ever hit the "both terminals fixed" rejection below — that
+            // rejection is for a capacitor with no free terminal AT ALL,
+            // not one whose single shared terminal happens to be fixed.
+            continue;
+        }
         match (local_index[u], local_index[w]) {
             (Some((p, _)), _) | (_, Some((p, _))) => capacitor_count[p] += 1,
             (None, None) => {

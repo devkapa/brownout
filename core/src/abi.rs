@@ -231,8 +231,8 @@ pub extern "C" fn bo_engine_stat(h: u32, i: u32) -> f64 {
     with_engine(h, f64::NAN, |e| e.stat(i))
 }
 
-/// Changes an option after load. Keys 2-4 take effect at the next event;
-/// keys 1, 5, 6 and 7 are load-time only, and any other key is unknown — all
+/// Changes an option after load. Keys 2 and 3 take effect at the next event;
+/// keys 1 and 4-7 are load-time only, and any other key is unknown — all
 /// of those are `-8` (core/README.md, `bo_engine_set_option`).
 #[no_mangle]
 pub extern "C" fn bo_engine_set_option(h: u32, key: u32, value: f64) -> i32 {
@@ -725,13 +725,24 @@ mod tests {
     }
 
     #[test]
-    fn set_option_accepts_keys_2_through_4_after_load() {
+    fn set_option_accepts_keys_2_and_3_after_load() {
         let _guard = lock();
         let h = bo_engine_create();
         assert_eq!(load(h, &divider_program()), 0);
         assert_eq!(bo_engine_set_option(h, 2, 1.0), 0);
         assert_eq!(bo_engine_set_option(h, 3, 0.0), 0);
-        assert_eq!(bo_engine_set_option(h, 4, 1.0), 0);
+    }
+
+    /// Section 5 of the W1b review: `FORCE_STEPPED` (key 4) after load used
+    /// to return success at the ABI layer too, with no physical effect
+    /// (`partition::build` folds it into each partition's classification
+    /// exactly once, at load). Now load-time only, like keys 1/5/6/7.
+    #[test]
+    fn set_option_rejects_force_stepped_after_load() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_set_option(h, 4, 1.0), -8);
     }
 
     #[test]
@@ -739,7 +750,7 @@ mod tests {
         let _guard = lock();
         let h = bo_engine_create();
         assert_eq!(load(h, &divider_program()), 0);
-        for key in [1, 5, 6, 0, 7, 999] {
+        for key in [1, 4, 5, 6, 0, 7, 999] {
             assert_eq!(bo_engine_set_option(h, key, 0.0), -8, "key {key}");
         }
     }

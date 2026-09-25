@@ -23,6 +23,19 @@ import { CoreGateReporter } from "./gate-reporter.js";
 
 const SUITE_FILE = "test/sim/engine/physics-reference-benchmarks.test.ts";
 
+/**
+ * The `implementedKinds` every test below except the finding-9 describe
+ * block passes explicitly, matching exactly what CLASSIFICATION's two cases
+ * name. Without this override, CoreGateReporter's constructor would default
+ * to the REAL `CORE_IMPLEMENTED_KINDS` (kinds.ts) -- which, by design,
+ * contains kinds (capacitor, the switch family, ...) this fixture
+ * classification never mentions -- and the new finding-9 floor check would
+ * fail every test below for a reason unrelated to what it is actually
+ * testing. The finding-9 tests further down construct their own smaller
+ * override instead, to isolate that check's own behaviour.
+ */
+const CLASSIFICATION_KINDS: ReadonlySet<string> = new Set(["resistor", "voltage_source"]);
+
 /** Both portable cases below deliberately share `kinds`, so a missing/skipped case never drives either kind's aggregate to zero -- that is the exact condition finding 13 says must still fail the gate. */
 const CLASSIFICATION = {
   suites: [
@@ -87,7 +100,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
   it("stays green when every portable case ran and passed (control)", () => {
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [leaf("case one", "pass"), leaf("case two", "pass")])];
       const before = process.exitCode;
       expect(() => reporter.onFinished(files as never)).not.toThrow();
@@ -100,7 +113,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
     // real it() title: "case one" never shows up as a leaf at all.
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [leaf("case two", "pass")])];
       const before = process.exitCode;
       try {
@@ -116,7 +129,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
     // which Vitest never counts as a test failure on its own.
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [leaf("case one", "skip"), leaf("case two", "pass")])];
       const before = process.exitCode;
       try {
@@ -130,7 +143,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
   it("fails when a portable case FAILED outright, even though its sibling (same kinds) passed", () => {
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [leaf("case one", "fail"), leaf("case two", "pass")])];
       const before = process.exitCode;
       try {
@@ -147,7 +160,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
     // a bare-title lookup would read its "skip" for the portable RC case.
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [
         {
           filepath: path.join(rootDir, SUITE_FILE),
@@ -166,7 +179,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
   it("fails when two tests share one full name, since their results cannot be told apart", () => {
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [leaf("case one", "pass"), leaf("case one", "pass"), leaf("case two", "pass")])];
       const before = process.exitCode;
       try {
@@ -180,7 +193,7 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
   it("still fails via the per-kind-zero path when every portable case for a kind is missing (no regression)", () => {
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const reporter = new CoreGateReporter(rootDir);
+      const reporter = new CoreGateReporter(rootDir, CLASSIFICATION_KINDS);
       const files = [fileWith(rootDir, [])];
       const before = process.exitCode;
       try {
@@ -189,5 +202,75 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
         process.exitCode = before;
       }
     });
+  });
+});
+
+describe("CoreGateReporter -- finding 9: every CORE_IMPLEMENTED_KINDS member needs a portable case ANYWHERE, not just per-case enforcement", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("fails when an implemented kind has NO portable case at all in classification.json, even though every LISTED case ran and passed", () => {
+    // "switch" is implemented (per the override below) but classification.json
+    // (CLASSIFICATION, module-level) never names it in any case's `kinds` --
+    // the exact gap finding 9 describes: nothing here is missing, skipped or
+    // failing by the PER-CASE rules, so only the coverage floor can catch it.
+    withFixtureRoot((rootDir) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const reporter = new CoreGateReporter(rootDir, new Set(["resistor", "voltage_source", "switch"]));
+      const files = [fileWith(rootDir, [leaf("case one", "pass"), leaf("case two", "pass")])];
+      const before = process.exitCode;
+      try {
+        expect(() => reporter.onFinished(files as never)).toThrow(/Gate 1 .* failed/);
+      } finally {
+        process.exitCode = before;
+      }
+    });
+  });
+
+  it("'ground' is exempt from the coverage floor even though no case ever names it as a kind", () => {
+    withFixtureRoot((rootDir) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      // Mirrors the real CORE_IMPLEMENTED_KINDS shape: "ground" alongside
+      // ordinary kinds the fixture classification DOES cover.
+      const reporter = new CoreGateReporter(rootDir, new Set(["resistor", "voltage_source", "ground"]));
+      const files = [fileWith(rootDir, [leaf("case one", "pass"), leaf("case two", "pass")])];
+      const before = process.exitCode;
+      expect(() => reporter.onFinished(files as never)).not.toThrow();
+      expect(process.exitCode).toBe(before);
+    });
+  });
+
+  it("passes once the missing kind gains its own portable case that runs and passes", () => {
+    // Same fixture root mechanism as withFixtureRoot, but with a THIRD case
+    // (for "switch") added to the classification, proving the floor is
+    // satisfiable, not just always-failing for any kind outside CLASSIFICATION.
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), "gate-reporter-test-"));
+    const dir = path.join(rootDir, "test/core/suites");
+    mkdirSync(dir, { recursive: true });
+    const classificationWithSwitch = {
+      suites: [
+        {
+          file: SUITE_FILE,
+          cases: [
+            ...CLASSIFICATION.suites[0]!.cases,
+            { describe: "fixture", name: "case three", status: "portable", kinds: ["switch"], reason: "fixture" },
+          ],
+        },
+      ],
+    };
+    writeFileSync(path.join(dir, "classification.json"), JSON.stringify(classificationWithSwitch), "utf8");
+    try {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const reporter = new CoreGateReporter(rootDir, new Set(["resistor", "voltage_source", "switch"]));
+      const files = [
+        fileWith(rootDir, [leaf("case one", "pass"), leaf("case two", "pass"), leaf("case three", "pass")]),
+      ];
+      const before = process.exitCode;
+      expect(() => reporter.onFinished(files as never)).not.toThrow();
+      expect(process.exitCode).toBe(before);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 });
