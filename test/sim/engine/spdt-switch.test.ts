@@ -60,6 +60,23 @@ describe("spdt_switch.updateCurrent — Q-O26 (com to the contact in use)", () =
     expect(Math.abs(i)).toBeLessThan(1);
   });
 
+  it("fewer than 3 declared pins: stamp() never stamps, updateCurrent() reports 0 (not a phantom current through an unstamped contact)", () => {
+    const circuit: SimCircuit = {
+      components: [
+        { id: "vcc", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
+        // Only com/b declared -- c is entirely missing, so pins.length is 2.
+        { id: "sw", kind: "spdt_switch", pins: [{ id: "com" }, { id: "b" }], params: { position: 1 } },
+      ],
+      wires: [{ from_component: "vcc", from_pin: "pos", to_component: "sw", to_pin: "com" }],
+    };
+    const engine = new SimEngine();
+    engine.load(circuit);
+    for (let i = 0; i < 20; i++) engine.step(1e-4);
+    // Before the fix, updateCurrent read com (pinned near 5V) against a
+    // never-stamped, floating "c" node, reporting ~5000 A.
+    expect(engine.getElementI().sw).toBe(0);
+  });
+
   it("keeps reporting com->b at position 0 even when a load is later added to c (no cross-talk between throws)", () => {
     const circuit = spdtRig(0);
     circuit.components.push({ id: "r2", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 500 } });
