@@ -237,7 +237,39 @@ export function replayStimuliOnCore(
       const tolerance = Math.max(1e-15, phase.durationS * 1e-12);
       let t = phaseStartTime;
       while (phaseEndTime - t > tolerance) {
-        t += Math.min(STIMULUS_FIXED_STEP_S, phaseEndTime - t);
+        // W1c EVENT-ALIGNED CLAMP, mirroring headless.ts's own classic-side
+        // clamp (`nextScheduledEventTime()`, whose W1c addition also consults
+        // `icState`'s DIGITAL_DUE_PREFIX due times — a combinational IC's
+        // pending delay-FSM transition, sim-engine.ts). Discovered empirically
+        // wiring the 74HC138/74LS283-DIP-switch fixture (test/fixtures/core/
+        // 20-*): classic's run() ALWAYS snaps a step boundary onto a due
+        // digital transition when one falls inside it, even in fixed-step
+        // mode (that clamp is unconditional, not gated on adaptive/error
+        // control) — landing an extra, short first step right after a phase's
+        // reload whenever the reload leaves a pending delayed transition. This
+        // loop had no equivalent, so it always landed on the plain
+        // STIMULUS_FIXED_STEP_S grid regardless — same eventual PHYSICS
+        // (bo_engine_advance processes every due event up to whatever t_end
+        // it is given, whether or not t_end lands exactly on one), but a
+        // DIFFERENT sample count/schedule, which compareStimuliSamples
+        // rejects outright as a harness bug (it requires two equal-length,
+        // time-aligned sequences). Clamping here to `engine.nextEventTime()`
+        // (bo_engine_next_event_time, core/README.md's C ABI v2) exactly
+        // reproduces classic's own "step lands exactly on a due event" rule
+        // (`<=`, not `<`: a candidate step that would land exactly on the
+        // event still counts as clamped, matching headless.ts's own
+        // comment), so both sides land on the identical instant sequence.
+        const candidateStep = Math.min(STIMULUS_FIXED_STEP_S, phaseEndTime - t);
+        const untilEvent = engine.nextEventTime() - t;
+        // The `+ 1e-12` nudge: classic applies each phase by RELOADING, and
+        // load() runs its 1 ps seed solve (spec §2.2), so a delay-FSM
+        // transition scheduled by that seed falls due at `phaseStart + 1e-12
+        // + delay`. The core applies the phase through set_params at
+        // `phaseStart` exactly, so the same transition falls due 1 ps
+        // earlier. Stepping the core to `due + 1e-12` lands its sample on
+        // classic's instant, just after the commit on both sides, instead of
+        // loosening compare.ts's 1e-12 simTime check.
+        t += untilEvent > 0 && untilEvent <= candidateStep ? untilEvent + 1e-12 : candidateStep;
         engine.advance(t);
         if (!engine.lastConverged) {
           throw new Error(

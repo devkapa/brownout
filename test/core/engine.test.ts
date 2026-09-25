@@ -7,6 +7,7 @@ import {
   coreCall,
   getWasmApi,
   initCore,
+  readCoreErrorMessage,
   __installCoreForTest,
   __resetCoreForTest,
   type CoreExports,
@@ -20,7 +21,8 @@ import {
 import type { EngineReadout } from "../../src/core/surface.js";
 import { buildCoreNodes, classicElementIKeys, compileCircuit, type CompiledCircuit } from "../../src/core/compile/index.js";
 import { CORE_OPTION_KEYS, decodeProgram } from "../../src/core/format.js";
-import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { CORE_IC_PARAM, CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES } from "../../src/core/kinds.js";
+import { HeadlessRunner } from "../../src/host/headless.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "../../src/core/readout.js";
 
 // ---- compile-time check: SimEngine must satisfy EngineReadout -------------
@@ -356,6 +358,227 @@ describe("unsupported kind -> CoreUnsupportedError with an unsupported-kind: rea
     }
     expect(caught).toBeInstanceOf(CoreUnsupportedError);
     expect(caught!.reasons).toEqual(["unsupported-kind:led"]);
+  });
+});
+
+describe("load-time delta-cycle livelock (-7) -> CoreUnsupportedError with a livelock: reason, and HeadlessRunner falls back", () => {
+  afterEach(async () => {
+    // Same rationale as the "pointer sign coercion" block above: this
+    // describe installs a synthetic CoreExports and must not leak it into
+    // whatever test runs next in this file.
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  /**
+   * `mapLoadFailure` (engine.ts) must map a -7 `bo_engine_load` return code
+   * the SAME way it maps -3 (topology): CoreUnsupportedError with a reason
+   * HeadlessRunner._tryLoadCore's `catch` recognises, not the generic
+   * CoreLoadError -3's sibling codes get. This is a synthetic bo_engine_load
+   * (no real circuit can produce -7 at load — see the sibling describe block
+   * below, "a real zero-delay combinational ring...", for why: none of the 11
+   * W1c combinational-IC kinds can reach a catalog-resolved delay of 0
+   * through propagationDelayForComponent, so this file's dedicated proof of
+   * mapLoadFailure's MAPPING itself has to inject the code directly, exactly
+   * as the "pointer sign coercion" describe block above injects addresses it
+   * cannot otherwise reach).
+   */
+  function installSyntheticLoadFailure(code: number, message: string): void {
+    const buffer = new ArrayBuffer(0x10000);
+    const messageBytes = new TextEncoder().encode(message);
+    new Uint8Array(buffer, 0, messageBytes.length).set(messageBytes);
+    const exports: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      // 8-byte aligned (CoreEngine.load() views this address as a
+      // Float64Array), and well past the message bytes at offset 0.
+      bo_alloc: () => 0x1000,
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: () => code,
+      bo_engine_advance: () => 0,
+      bo_engine_time: () => 0,
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => 0,
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 0,
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => messageBytes.length,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
+    };
+    __installCoreForTest(exports);
+  }
+
+  it("CoreEngine.load() throws CoreUnsupportedError with a livelock: reason (not the generic CoreLoadError -4/-5/... get)", () => {
+    installSyntheticLoadFailure(-7, "delta-cycle livelock: pass cap exceeded at t=0");
+    const c = circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+    );
+    const core = new CoreEngine();
+    let caught: CoreUnsupportedError | undefined;
+    try {
+      core.load(c);
+    } catch (err) {
+      caught = err as CoreUnsupportedError;
+    }
+    expect(caught).toBeInstanceOf(CoreUnsupportedError);
+    expect(caught!.reasons).toEqual(["livelock:delta-cycle livelock: pass cap exceeded at t=0"]);
+  });
+
+  it("HeadlessRunner falls back to classic for a load-time livelock, exactly as it does for an unsupported topology", () => {
+    installSyntheticLoadFailure(-7, "delta-cycle livelock: pass cap exceeded at t=0");
+    const c = circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
+      [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
+    );
+    // coreSupportedKinds is widened to CORE_IMPLEMENTED_KINDS the same way
+    // test/core/suites/adapter.ts does: CORE_SUPPORTED_KINDS is empty for all
+    // of W1 (decision 15), so a default-constructed HeadlessRunner would
+    // reject resistor/voltage_source before ever attempting a core load —
+    // this test is about the LOAD-TIME livelock fallback, not the separate
+    // "kind not supported yet" rejection.
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    runner.load(c);
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["livelock:delta-cycle livelock: pass cap exceeded at t=0"]);
+    // The circuit still simulates correctly on the classic fallback — a
+    // livelocked load is not a dead end for the caller.
+    expect(runner.readout.getNetV()["n0"]).toBeCloseTo(5, 9);
+  });
+});
+
+describe("a real zero-delay combinational ring genuinely livelocks the Rust kernel at load (-7)", () => {
+  /**
+   * None of the 11 W1c combinational-IC kinds can reach a catalog-resolved
+   * delay of 0 through the normal compiler path: propagationDelayForComponent
+   * (sim-engine.ts) only honours a catalog prop_delay_ns when it is `> 0`
+   * (explicitly excluding 0), and every one of the 11 kinds' prefixes is
+   * "74ls" or "74hc", both of which have a non-zero prefix fallback (20 ns /
+   * 15 ns) — so the function's own final `return 0` is unreachable for any of
+   * them. Checked directly against the bundled catalog (src/parts/
+   * default-parts.json): none of the 11 declares prop_delay_ns: 0 either, and
+   * even if one did, the `> 0` guard would still skip it. A real 0-delay
+   * combinational ring is therefore impossible to compile through
+   * CoreEngine.load()'s public API today (compileCircuit -> propagationDelay-
+   * ForComponent), so this test builds one honestly: compile a REAL, valid
+   * ring circuit (three 74LS04 inverters, odd — so it has no stable digital
+   * fixed point — output-to-input in a cycle, sharing one power rail), then
+   * patch ONLY the compiled program's own delay params to 0 before handing it
+   * to the REAL wasm module's bo_engine_load directly (bypassing
+   * CoreEngine.load()/compileCircuit's own delay resolution, but changing
+   * nothing else about the program a real compile would have produced — same
+   * pins, same hashes, same topology). This proves the RUST KERNEL itself
+   * (not just this file's TS-level mapping test above) returns -7 for a
+   * genuine zero-delay livelock, exactly as core/README.md's delta-cycle
+   * section documents ("More than 1000 deltas at one instant is -7, never a
+   * silent exit").
+   */
+  function ringCircuit(): SimCircuit {
+    // Each 74ls04 package has 6 independent inverter gates; only gate 1 of
+    // each package sits in the ring. The other 5 gates' inputs are tied to
+    // the powered vcc rail (a FIXED node) rather than left open, so this
+    // fixture never has to reason about the floating-input model at all —
+    // every pin here is driven or fixed, never OPEN.
+    const inverter = (id: string): SimComponent =>
+      part(id, "74ls04", ["vcc", "gnd", "1a", "1y", "2a", "2y", "3a", "3y", "4a", "4y", "5a", "5y", "6a", "6y"]);
+    const tieUnusedGates = (id: string): SimCircuit["wires"] => [
+      wire("vsrc", "pos", id, "2a"),
+      wire("vsrc", "pos", id, "3a"),
+      wire("vsrc", "pos", id, "4a"),
+      wire("vsrc", "pos", id, "5a"),
+      wire("vsrc", "pos", id, "6a"),
+    ];
+    return circuit(
+      [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), inverter("u1"), inverter("u2"), inverter("u3")],
+      [
+        wire("vsrc", "pos", "u1", "vcc"), wire("vsrc", "neg", "u1", "gnd"),
+        wire("vsrc", "pos", "u2", "vcc"), wire("vsrc", "neg", "u2", "gnd"),
+        wire("vsrc", "pos", "u3", "vcc"), wire("vsrc", "neg", "u3", "gnd"),
+        // The ring: an odd number (3) of inversions has no stable fixed
+        // point — u1.1y -> u2.1a -> u2.1y -> u3.1a -> u3.1y -> u1.1a.
+        wire("u1", "1y", "u2", "1a"),
+        wire("u2", "1y", "u3", "1a"),
+        wire("u3", "1y", "u1", "1a"),
+        ...tieUnusedGates("u1"),
+        ...tieUnusedGates("u2"),
+        ...tieUnusedGates("u3"),
+      ],
+    );
+  }
+
+  /**
+   * Walks a v2 program's own documented layout (core/README.md, "Program
+   * format, version 2": header through the option block and slot counts,
+   * then D device records of `kindCode, componentIndex, pinCount, pin x4,
+   * paramCount, param x paramCount, blobCount, blob x blobCount`) far enough
+   * to find each `kindCode` device's own param-block start offset — this
+   * test only ever needs to overwrite one param (delay, CORE_IC_PARAM.delay)
+   * per matching device, not decode the whole thing (decodeProgram already
+   * does that, more thoroughly, for format.test.ts's own purposes).
+   */
+  function findParamBlockOffsets(program: Float64Array, kindCode: number): number[] {
+    const deviceCount = program[3]!;
+    const optionCount = program[4]!;
+    let i = 5 + optionCount * 2 + 2; // past MAGIC/VERSION/nodeCount/deviceCount/optionCount, the option pairs, and the two slot counts
+    const offsets: number[] = [];
+    for (let d = 0; d < deviceCount; d++) {
+      const devKind = program[i]!;
+      i += 2; // kindCode, componentIndex
+      const pinCount = program[i]!;
+      i += 1 + pinCount * 4; // pinCount field, then the pin records themselves
+      const paramCount = program[i]!;
+      i += 1; // paramCount field
+      if (devKind === kindCode) offsets.push(i);
+      i += paramCount;
+      const blobCount = program[i]!;
+      i += 1 + blobCount;
+    }
+    return offsets;
+  }
+
+  it("bo_engine_load returns -7 for a genuine zero-delay ring (three 74LS04 inverters, real compiled program, delay patched to 0)", () => {
+    const result = compileCircuit(ringCircuit(), CORE_IMPLEMENTED_KINDS);
+    if (!result.ok) throw new Error(`ringCircuit() failed to compile: ${result.reasons.join(", ")}`);
+    const program = result.compiled.program;
+
+    const delayOffsets = findParamBlockOffsets(program, CORE_KIND_CODES["74ls04"]);
+    expect(delayOffsets, "expected all three 74ls04 device records in the compiled program").toHaveLength(3);
+    for (const paramStart of delayOffsets) {
+      // Sanity: this really is the delay slot on a real compiled program,
+      // and it really is non-zero before patching (propagationDelayForComponent's
+      // 20 ns 74ls prefix fallback) — if either check ever failed, the offset
+      // arithmetic above would be wrong, not the kernel under test.
+      expect(program[paramStart + CORE_IC_PARAM.delay]).toBeGreaterThan(0);
+      program[paramStart + CORE_IC_PARAM.delay] = 0;
+    }
+
+    const { code, message } = coreCall((exports) => {
+      const ptr = exports.bo_alloc(program.length) >>> 0;
+      const handle = exports.bo_engine_create();
+      try {
+        new Float64Array(exports.memory.buffer, ptr, program.length).set(program);
+        const loadCode = exports.bo_engine_load(handle, ptr, program.length);
+        return { code: loadCode, message: loadCode !== 0 ? readCoreErrorMessage(exports) : "" };
+      } finally {
+        exports.bo_engine_destroy(handle);
+        exports.bo_free(ptr, program.length);
+      }
+    });
+
+    expect(code, `expected -7 (delta-cycle livelock); bo_engine_load's own message: ${message}`).toBe(-7);
   });
 });
 

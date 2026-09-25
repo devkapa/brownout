@@ -147,9 +147,9 @@
         {
           "describe": "reference physics — active-device rail current and power",
           "name": "digital output load current is debited from the package VCC rail",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": ["voltage_source", "resistor", "74hc14"],
-          "reason": "74hc14 is a W1c combinational-IC kind; not implemented by the core yet."
+          "reason": "74hc14 is now in CORE_IMPLEMENTED_KINDS (W1c). This checks core/README.md digital-core rule 8 (output stage: a committed HIGH stamps 1/R_out from the pin to vcc) precisely: the rail debit must equal the load current within 10 nA and the source/load/output-resistance power balance within 50 nW, using the SAME R_out = clamp(vS/(4*ioMax), 50, 1000) formula rule 1 documents. A real quantitative physics proof, not a presence check."
         },
         {
           "describe": "reference physics — active-device rail current and power",
@@ -687,6 +687,1237 @@
           "status": "portable",
           "kinds": ["voltage_source", "switch", "resistor", "capacitor"],
           "reason": "A switch-gated RC: closed, the capacitor charges through 1 mOhm (tau about 1 ns) in a closed-form partition; open, the node never moves. Exercises a switch stamp inside a dynamic partition."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/wave2-combinational.test.ts",
+      "cases": [
+        {
+          "describe": "74HC14 — basic inversion",
+          "name": "output is LOW when input is above V_T+ (5V supply)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Powered 74HC14 Schmitt inverter with a pull-up on the output, read only through engine.nets/getNetV after step() — exercises core/README.md digital-core rules 1 (thresholds from live rails) and 8 (output stage). No classic-internal call."
+        },
+        {
+          "describe": "74HC14 — basic inversion",
+          "name": "output is HIGH when input is below V_T- (5V supply)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Same rig as the LOW case, input below V_T-; see that case's reason."
+        },
+        {
+          "describe": "74HC14 — Schmitt hysteresis dead band",
+          "name": "holds LOW output when input is in dead band approached from above",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Empirically fails on the built core: expected the output to stay LOW across the reload (the Schmitt-held input level carried forward from before), got the opposite. core/README.md rule 5 (Kernel semantics: partitions and dynamic solves) states plainly that \"carrying charge across a reload is W2\" for capacitors; the same is true for a digital IC's per-pin Schmitt hold-state and in-flight delay-FSM timers (classic's icState, sim-engine.ts:1043's own comment: \"74HC14 icState carries per-input Schmitt hysteresis level\"; carried forward by component id at every classic load(), sim-engine.ts:2808) — bo_engine_load has no per-id state carry-forward at all in W1, so every reload starts the IC's Schmitt/delay state fresh. This is a known, explicitly-documented W1 limitation (load carry-forward is W2, decision 1), not a core bug; not-yet until W2 lands."
+        },
+        {
+          "describe": "74HC14 — Schmitt hysteresis dead band",
+          "name": "holds HIGH output when input is in dead band approached from below",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Passes on the built core TODAY, but only by coincidence, not because the mechanism is correct: with no reload carry-forward (see the \"approached from above\" sibling case's reason — core/README.md rule 5, \"carrying charge across a reload is W2\", generalised to digital IC state), a freshly-reloaded IC's Schmitt hold-state defaults to LOW (core/README.md rule 4, \"in between it holds its per-pin state (default LOW)\"), which happens to equal the state this direction of approach needs anyway. Classifying this \"portable\" would be exactly the vacuous/coincidental pass gate 1's own no-silent-fallback design (adapter.ts's header, section 3.6 risk 3) exists to catch: it is not proving digital identity for the right reason, and would silently stop proving anything the day the default or classic's own default diverge. not-yet, for the same W2 load-carry-forward reason as its sibling."
+        },
+        {
+          "describe": "74HC14 — Schmitt hysteresis dead band",
+          "name": "thresholds scale with a 3V supply (V_T+ ~1.62V, V_T- ~0.96V)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Confirms core/README.md rule 4's Schmitt scale factor s = vS/nominal at a non-5V supply; plain load()/step()/getNetV, no classic-internal call."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y0n (address 0) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Powered 74HC138 with all three enables asserted and one address combination; the probed (selected) output is driven LOW. Plain load()/step()/getNetV."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y1n (address 1) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 1; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y2n (address 2) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 2; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y3n (address 3) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 3; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y4n (address 4) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 4; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y5n (address 5) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 5; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y6n (address 6) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 6; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "selects y7n (address 7) and drives it LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Same rig, address 7; see the address-0 case's reason."
+        },
+        {
+          "describe": "74HC138 — decode all 8 outputs",
+          "name": "non-selected outputs remain HIGH (probing y1n when address=0)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "Confirms an unselected output stays HIGH (core/README.md rule 7: 74hc138 drives every output HIGH when its decode does not select that line)."
+        },
+        {
+          "describe": "74HC138 — enable gating",
+          "name": "disables all outputs when /E1 is HIGH",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc138"],
+          "reason": "With /E1 HIGH the decoder is disabled and every output (including the one address 000 would otherwise select) stays HIGH; plain load()/step()/getNetV."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 0 segment g: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 1 segment g: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 2 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 3 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 4 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 5 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 6 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 7 segment g: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 8 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 9 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 10 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment c: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 11 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment b: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 12 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment a: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 13 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment d: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment e: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment f: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 14 segment g: LOW (sinking)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment a: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment b: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment c: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment d: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment e: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment f: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — digits 0-15 full segment patterns via open-collector pull-up",
+          "name": "digit 15 segment g: HIGH (released)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "One BCD input driving one open-collector segment output through a pull-up resistor, read only through engine.nets/getNetV after step(); the full 16x7 datasheet truth table (core/README.md rule 7's 74ls47 precedence and partial glyphs). No classic-internal call."
+        },
+        {
+          "describe": "74LS47 — datasheet-specific glyph checks",
+          "name": "digit 6: top bar (segment a) is RELEASED — classic LS47, no top bar",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Datasheet-specific partial glyph for digit 6 (no segment a), distinguishing the real 74LS47 table from a generic hex decoder; same rig as the full sweep above."
+        },
+        {
+          "describe": "74LS47 — datasheet-specific glyph checks",
+          "name": "digit 6: segment b is RELEASED — classic LS47 partial six",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Same digit-6 partial glyph, segment b; see the segment-a case's reason."
+        },
+        {
+          "describe": "74LS47 — datasheet-specific glyph checks",
+          "name": "digit 9: bottom bar (segment d) is RELEASED — classic LS47, no bottom",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Datasheet-specific partial glyph for digit 9 (no segment d); same rig as the full sweep."
+        },
+        {
+          "describe": "74LS47 — lamp test",
+          "name": "forces all seven segment outputs LOW when /LT is asserted (LOW)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Lamp-test override forces every segment to sink regardless of the BCD input (core/README.md rule 7's lt_n precedence over the BCD decode); plain load()/step()/getNetV."
+        },
+        {
+          "describe": "74LS47 — blanking",
+          "name": "releases all outputs when /RBO is driven LOW externally (blanking input)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "/RBO driven LOW as a blanking input releases every segment (rule 7's rbo_n precedence over lt_n and rbi_n); plain load()/step()/getNetV."
+        },
+        {
+          "describe": "74LS47 — blanking",
+          "name": "zero-suppresses digit 0 when /RBI is LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Ripple-blanking input on BCD=0 releases every segment (zero suppression); plain load()/step()/getNetV."
+        },
+        {
+          "describe": "74LS47 — open control pins (FIX 4: internal pull-ups)",
+          "name": "decodes BCD digit 5 normally when /LT, /RBI, /RBO are all left unconnected",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "/LT, /RBI and /RBO left OPEN must resolve HIGH (core/README.md rule 4's OPEN_HIGH pins, IC_OPEN_HIGH_PINS) so the chip decodes normally instead of latching lamp-test or blanking; exercises the open-pin path distinct from the floating-input path (those three pins are OPEN_HIGH, not FLOATING_INPUT)."
+        },
+        {
+          "describe": "74LS47 — Schmitt commit semantics (74HC14)",
+          "name": "dead-band input from above: output stays LOW across 20 steps",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Empirically fails on the built core: expected the output to stay LOW across the reload (the Schmitt-held input level carried forward from before), got the opposite. core/README.md rule 5 (Kernel semantics: partitions and dynamic solves) states plainly that \"carrying charge across a reload is W2\" for capacitors; the same is true for a digital IC's per-pin Schmitt hold-state and in-flight delay-FSM timers (classic's icState, sim-engine.ts:1043's own comment: \"74HC14 icState carries per-input Schmitt hysteresis level\"; carried forward by component id at every classic load(), sim-engine.ts:2808) — bo_engine_load has no per-id state carry-forward at all in W1, so every reload starts the IC's Schmitt/delay state fresh. This is a known, explicitly-documented W1 limitation (load carry-forward is W2, decision 1), not a core bug; not-yet until W2 lands."
+        },
+        {
+          "describe": "74LS47 — Schmitt commit semantics (74HC14)",
+          "name": "dead-band input from below: output stays HIGH across 20 steps",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Passes on the built core TODAY, but only by coincidence, not because the mechanism is correct: with no reload carry-forward (see the \"approached from above\" sibling case's reason — core/README.md rule 5, \"carrying charge across a reload is W2\", generalised to digital IC state), a freshly-reloaded IC's Schmitt hold-state defaults to LOW (core/README.md rule 4, \"in between it holds its per-pin state (default LOW)\"), which happens to equal the state this direction of approach needs anyway. Classifying this \"portable\" would be exactly the vacuous/coincidental pass gate 1's own no-silent-fallback design (adapter.ts's header, section 3.6 risk 3) exists to catch: it is not proving digital identity for the right reason, and would silently stop proving anything the day the default or classic's own default diverge. not-yet, for the same W2 load-carry-forward reason as its sibling."
+        },
+        {
+          "describe": "infrastructure — CMOS-4000 thresholds (fabricated spec)",
+          "name": "CMOS-4000 at 5V supply: vil=1.5V, vih=3.5V",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pure local-function formula check (expectedThresholds()) duplicating classic's module-private thresholdsFor (sim-engine.ts) -- never constructs a SimCircuit or SimEngine, so nothing here is routed through the adapter or exercises the core at all; alias-agnostic, not a core proof."
+        },
+        {
+          "describe": "infrastructure — CMOS-4000 thresholds (fabricated spec)",
+          "name": "CMOS-4000 at 12V supply: vil=3.6V, vih=8.4V",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Same pure-formula check as the 5V case; see its reason."
+        },
+        {
+          "describe": "infrastructure — CMOS-4000 thresholds (fabricated spec)",
+          "name": "CMOS-4000 at 3V supply: vil=0.9V, vih=2.1V",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Same pure-formula check as the 5V case; see its reason."
+        },
+        {
+          "describe": "infrastructure — CMOS-4000 thresholds (fabricated spec)",
+          "name": "CMOS-4000 and HC-CMOS use the same 0.3/0.7 ratios at 5V",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Same pure-formula check as the 5V case; see its reason."
+        },
+        {
+          "describe": "infrastructure — catalog prop_delay_ns override",
+          "name": "74ls08 uses prefix fallback of 20ns (no prop_delay_ns in catalog)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls08"],
+          "reason": "Weak assertion (engine.digitalState['u1/1y'] is defined) after one large step on a powered 74ls08 AND gate; exercises load()/step()/digitalState for the one kind (74ls08) no other case in this file's sweeps names. Does not itself pin the 20 ns delay value (that is classic's own catalog-fallback resolution, consumed identically by the core's own delay param per core/README.md's IC blob per-pin delay field, worker C3's compile/ics.ts)."
+        },
+        {
+          "describe": "infrastructure — catalog prop_delay_ns override",
+          "name": "74hc595 uses prefix fallback of 15ns (no prop_delay_ns in catalog)",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74hc595"],
+          "reason": "74hc595 is W1d/W1h (shift register); not implemented by the core yet."
+        },
+        {
+          "describe": "infrastructure — catalog prop_delay_ns override",
+          "name": "74hc14 uses catalog-declared prop_delay_ns=15 (same value as prefix default)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74hc14"],
+          "reason": "Confirms the catalog's declared prop_delay_ns is honoured (observable via the settled output after two 100 us steps, i.e. well past 15 ns); plain load()/step()/getNetV."
+        },
+        {
+          "describe": "infrastructure — catalog prop_delay_ns override",
+          "name": "74ls47 uses catalog-declared prop_delay_ns=35 — output delay observable",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "74ls47"],
+          "reason": "Empirically fails on the built core: expected digitalState to still show the OLD committed value 25 ns after a reload changed the BCD input (less than the 35 ns catalog prop delay), got the NEW value already committed. Same root cause as the 74HC14 Schmitt dead-band cases above: bo_engine_load carries no per-id digital state forward (core/README.md rule 5's \"carrying charge across a reload is W2\", generalised) so the delay FSM treats every pin as a fresh first observation on reload, and \"first observation has zero delay\" (core/README.md's events section, mirroring classic's own §2.4 rule) commits the new value immediately instead of respecting the in-flight 35 ns timer a live (non-reloaded) transition would get. Not a core bug -- a known, documented W1 limitation (load carry-forward is W2, decision 1). The core's OWN delay-FSM timing (as opposed to its behaviour across a reload) is still proven by the 74hc14 prop_delay_ns=15 case above, which never reloads."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/digital-realism.test.ts",
+      "cases": [
+        {
+          "describe": "digital realism — IC supply validity",
+          "name": "leaves an unpowered 74LS00 output to the external bias network instead of publishing a driven digital state",
+          "status": "portable",
+          "kinds": ["74ls00", "resistor", "voltage_source"],
+          "reason": "The 74LS00's vcc/gnd pins are left entirely unwired (OPEN), so core/README.md rule 1 (powered = false when a supply pin is OPEN) must leave the IC unpowered: no digitalState entry, and the output node floats to whatever the external resistor divider sets it to. Exercises rules 1, 8 and 9 (power gate, output stage, power loss) with no classic-internal call."
+        },
+        {
+          "describe": "digital realism — IC supply validity",
+          "name": "leaves an unpowered 74HC595 output to the external bias network instead of publishing a driven digital state",
+          "status": "not-yet",
+          "kinds": ["74hc595", "resistor", "voltage_source"],
+          "reason": "74hc595 is W1d/W1h (shift register); not implemented by the core yet."
+        },
+        {
+          "describe": "digital realism — family thresholds",
+          "name": "treats 74LS inputs as TTL-level high by 3 V and low below the 0.8 V band",
+          "status": "portable",
+          "kinds": ["74ls00", "voltage_source", "resistor"],
+          "reason": "Two powered 74LS00 runs at different input voltages, read only through getNetV after step(); exercises core/README.md rule 4's TTL fixed vil/vih thresholds (not the CMOS ratio path 74hc14/74hc138 exercise elsewhere in this suite)."
+        },
+        {
+          "describe": "digital realism — family thresholds",
+          "name": "keeps a 74HC595 input at 3 V below the 5 V supply-aware high threshold",
+          "status": "not-yet",
+          "kinds": ["74hc595", "voltage_source", "resistor"],
+          "reason": "74hc595 is W1d/W1h; not implemented by the core yet."
+        },
+        {
+          "describe": "digital realism — deterministic floating inputs",
+          "name": "returns the same seeded result across loads, and the floating input sits above an ideal grounded low",
+          "status": "portable",
+          "kinds": ["74ls00", "voltage_source"],
+          "reason": "The u1:1b open-input golden vector decision 9 names explicitly (core/README.md rule 5-6, the W1 plan's decision 9: 'the corpus has open-input cases, such as the u1:1b golden vector, digital-realism.test.ts:605-621'). Two independent classic-style runs of the SAME floating circuit must agree with each other (the FNV-1a hash is a pure function of id:pin:bucket, not of engine identity or call order), and must differ from a hard-grounded reference. Verified empirically against the built core (see this worker's report) rather than assumed from the spec text alone."
+        },
+        {
+          "describe": "digital realism — propagation delay",
+          "name": "holds a 74LS gate output until the package delay has elapsed",
+          "status": "classic-only",
+          "kinds": ["74ls00", "voltage_source", "resistor"],
+          "reason": "After engine.load(circuit), this mutates circuit.components.find(...).params.voltage on the SAME retained JS object WITHOUT calling engine.load() again, relying on classic's load() keeping a live reference (this.circuit = circuit, sim-engine.ts:2445) and re-reading component.params on every subsequent Newton iterate. The core adapter's load() compiles the circuit into a WASM program once; a later in-place mutation of the JS object has no effect on an already-loaded core program (there is no live binding, and Decision 1's toggle mechanism covers only switch/dip 'closed' params, not a voltage_source's voltage). Routing this case through the core would silently keep the OLD input forever and fail its own later assertion (digitalState flipping after the delay) rather than reproduce classic's propagation-delay behaviour — a classic implementation-detail dependency, not a like-for-like core comparison. (The core's own delay-FSM timing is instead proven by the 74ls47 prop_delay_ns case above, which DOES reload.)"
+        },
+        {
+          "describe": "digital realism — output contention diagnostics",
+          "name": "reports output-conflict when two push-pull outputs share a net",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls runDiagnostics() over a plain Circuit/nets pair (buildNets, the diagnostics module) — no SimCircuit, no SimEngine, nothing the core-suites adapter could intercept. Pure topology diagnostics, not a physics comparison."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/failure-states.test.ts",
+      "cases": [
+        {
+          "describe": "session-only failure states",
+          "name": "opens an overloaded resistor and reset restores runtime conduction",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor"],
+          "reason": "resistor_overload failure detection is W1g (slow/failures.rs); not implemented by the core yet. Also calls engine.resetFailures(), a surface the core-suites adapter does not implement (not needed by any currently-portable case)."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "removes a failed-open branch instead of coupling high-impedance nodes through 1 GΩ",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor"],
+          "reason": "Same resistor_overload dependency as the case above; also reloads mid-failure and re-checks failureKinds(), which needs the same not-yet-implemented failure machinery."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "checks potentiometer wiper-segment power instead of end-to-end current",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "potentiometer", "resistor"],
+          "reason": "potentiometer is W1h and resistor_overload failure detection is W1g; neither is implemented by the core yet."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "fails an overloaded resistor-array channel independently",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor_array"],
+          "reason": "resistor_array is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table at all; not implemented by the core. Also calls engine.getElementChannelI() expecting a real per-channel record, which the core-suites adapter deliberately stubs to {} (see adapter.ts's own doc comment)."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "trips a fuse open and clears it with resetFailures",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "fuse"],
+          "reason": "fuse is W1h and fuse_tripped failure detection is W1g; neither is implemented by the core yet. Also calls engine.resetFailures(), unimplemented on the adapter."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "uses a magnitude-dependent fuse I-squared-t curve",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "fuse"],
+          "reason": "Same fuse/W1g dependency as the case above."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "fails an overcurrent LED without persisting burnt params",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "resistor", "led"],
+          "reason": "led is W1e and led_failed detection is W1g; neither is implemented by the core yet. Also calls engine.resetFailures(), unimplemented on the adapter."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "treats IC brownout as a recoverable operating condition, not permanent damage",
+          "status": "portable",
+          "kinds": ["voltage_source", "74ls00"],
+          "reason": "A 3 V supply leaves the 74LS00 below core/README.md rule 1's 0.9*vccMin power window (unpowered, no failures published — trivially true on the core too, since W1g's failure machinery has not landed and getFailures() returns {} regardless); reloading at 5 V (a genuine engine.load() call, not the live-mutation-without-reload pattern the propagation-delay case above relies on) must recover the SAME chip with no manual reset and drive the NAND output HIGH. Exercises rule 9 (power loss / recovery) end to end. Verified empirically against the built core."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "reports loaded digital-output sag as a reversible warning without degrading the driver",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "74ls00", "resistor"],
+          "reason": "output_sag failure detection is W1g (slow/failures.rs, the output-sag target lists in digital/*); not implemented by the core yet, even though 74ls00 itself is. This is the suite section.4.1's own gate-1 table cites ('failure-states (74ls00 output_sag)') — it becomes portable once W1g lands, not in W1c."
+        },
+        {
+          "describe": "session-only failure states",
+          "name": "debounces output sag so a single-step switching transient never surfaces",
+          "status": "not-yet",
+          "kinds": ["voltage_source", "74ls00", "resistor"],
+          "reason": "Same output_sag/W1g dependency as the case above."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/combinational-ics.test.ts",
+      "cases": [
+        {
+          "describe": "gate 1 supplemental — 74LS04 hex inverter",
+          "name": "gate 1 inverts a HIGH input to a LOW output",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls04"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls04 circuit — see this file's own header comment). Textbook single-gate inversion, read only through getNetV after step()."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS04 hex inverter",
+          "name": "gate 1 inverts a LOW input to a HIGH output",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls04"],
+          "reason": "New case (this worker); mirror of the HIGH-input case."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS32 quad OR",
+          "name": "gate 1 with both inputs LOW drives the output LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls32"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls32 circuit — see this file's own header comment)."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS32 quad OR",
+          "name": "gate 1 with either input HIGH drives the output HIGH",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls32"],
+          "reason": "New case (this worker); the OR truth table's HIGH row."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS86 quad XOR",
+          "name": "gate 1 with matching inputs (0,0) drives the output LOW",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls86"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls86 circuit — see this file's own header comment)."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS86 quad XOR",
+          "name": "gate 1 with differing inputs (5,0) drives the output HIGH",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls86"],
+          "reason": "New case (this worker); the XOR truth table's differing-inputs row."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS86 quad XOR",
+          "name": "gate 1 with matching inputs (5,5) drives the output LOW (distinguishes XOR from OR)",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls86"],
+          "reason": "New case (this worker); proves the truth table is genuinely XOR (both HIGH -> LOW), not accidentally OR."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS157 quad 2:1 mux",
+          "name": "SELECT LOW routes the A input (A=HIGH, B=LOW) to the output",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls157"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls157 circuit — see this file's own header comment). /OE tied permanently LOW; decision 3's /OE strobe-to-LOW fix is deliberately not exercised here (see the file header) — that behaviour is covered by this worker's equivalence-harness fixtures instead, which compare classic and the core directly."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS157 quad 2:1 mux",
+          "name": "SELECT HIGH routes the B input (A=HIGH, B=LOW) to the output",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls157"],
+          "reason": "New case (this worker); the mux's other select state. See the SELECT-LOW case's reason on /OE scope."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS245 octal transceiver",
+          "name": "DIR=A->B, /OE enabled: a HIGH A1 drives B1 HIGH",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls245"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls245 circuit — see this file's own header comment). Only the well-established DIR=A->B, /OE-LOW path is exercised here; /OE-disabled release and bus contention between two 245s are covered by this worker's equivalence-harness fixtures (a real dual-engine comparison), not asserted here by hand."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS283 4-bit adder",
+          "name": "5 + 3 + c0=0 = 8 (binary 1000): no carry out",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls283"],
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls283 circuit — see this file's own header comment). A plain 4-bit addition with no carry propagation past bit 3."
+        },
+        {
+          "describe": "gate 1 supplemental — 74LS283 4-bit adder",
+          "name": "15 + 1 + c0=0 = 16 (binary 10000): sum wraps to 0000 with carry out",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls283"],
+          "reason": "New case (this worker); exercises the full ripple-carry chain (every internal carry set) and the c4 carry-out pin."
         }
       ]
     }

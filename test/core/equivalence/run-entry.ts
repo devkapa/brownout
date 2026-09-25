@@ -590,6 +590,9 @@ function buildAnalyticTargets(circuit: SimCircuit, model: AnalyticFixtureModel):
     for (const componentId of model.currentComponents ?? []) {
       elementI.set(componentId, (t) => (model.sourceVolts - voltageAt(t)) / model.seriesOhms);
     }
+    for (const componentId of model.negatedCurrentComponents ?? []) {
+      elementI.set(componentId, (t) => -(model.sourceVolts - voltageAt(t)) / model.seriesOhms);
+    }
   } else if (model.kind === "rc-ladder") {
     const ladderParams = { sourceVolts: model.sourceVolts, r1Ohms: model.r1Ohms, c1F: model.c1F, r2Ohms: model.r2Ohms, c2F: model.c2F };
     const v1At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v1;

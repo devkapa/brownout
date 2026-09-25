@@ -268,4 +268,65 @@ describe("replayStimuliOnCore", () => {
       expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
     }
   });
+
+  /**
+   * W1c: a toggled DIP switch that flips a 74HC138's address input leaves a
+   * pending delay-FSM transition (the datasheet-delay commit) right at the
+   * phase boundary. Discovered empirically wiring test/fixtures/core/20-
+   * 74hc138-74ls283-dip-switches: classic's run() ALWAYS clamps a step onto
+   * a pending digital due-time when one falls inside it (headless.ts's
+   * `nextScheduledEventTime()`, which since W1c also consults `icState`'s
+   * DIGITAL_DUE_PREFIX due times) — unconditionally, even in fixed-step
+   * mode — landing a short first step (here, exactly the 74HC138's 20 ns
+   * prop_delay_ns) right after the reload, before resuming the plain
+   * STIMULUS_FIXED_STEP_S grid. Before this file's event-aligned clamp
+   * (mirroring that with `engine.nextEventTime()`, `bo_engine_next_event_time`),
+   * replayStimuliOnCore had no such clamp at all, so it produced FEWER
+   * samples than classic for the SAME phases the moment a circuit contained
+   * a combinational IC — compareStimuliSamples (compare.ts) rejects that
+   * outright as a harness bug (unequal sequence lengths), not a comparable
+   * circuit result. This is the regression proof: any implemented
+   * combinational-IC kind whose input a phase changes reproduces it.
+   */
+  it("matches replayStimuliOnClassic's own sample COUNT when a phase toggles a DIP switch driving a 74HC138 address input (a pending IC delay-FSM due time right at the phase boundary)", () => {
+    const hc138 = part(
+      "hc138",
+      "74hc138",
+      ["a0", "a1", "a2", "e1n", "e2n", "e3", "y7n", "gnd", "y6n", "y5n", "y4n", "y3n", "y2n", "y1n", "y0n", "vcc"],
+    );
+    const circuit: SimCircuit = {
+      components: [
+        part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("dip", "dip_switch", ["a1", "b1"], { positions: 2, sw1: 0, sw2: 0 }),
+        part("r_a0", "resistor", ["a", "b"], { resistance: 10_000 }),
+        hc138,
+      ],
+      wires: [
+        wire("vcc", "pos", "dip", "a1"),
+        wire("dip", "b1", "hc138", "a0"),
+        wire("r_a0", "a", "hc138", "a0"),
+        wire("r_a0", "b", "vcc", "neg"),
+        wire("vcc", "pos", "hc138", "vcc"),
+        wire("vcc", "neg", "hc138", "gnd"),
+        wire("vcc", "neg", "hc138", "e1n"),
+        wire("vcc", "neg", "hc138", "e2n"),
+        wire("vcc", "pos", "hc138", "e3"),
+        wire("vcc", "neg", "hc138", "a1"),
+        wire("vcc", "neg", "hc138", "a2"),
+      ],
+    };
+    const phases: StimulusPhase[] = [
+      { durationS: 5 * STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "dip", params: { sw1: 1 } }], durationS: 5 * STIMULUS_FIXED_STEP_S },
+    ];
+
+    const classicSamples = replayStimuliOnClassic(circuit, phases);
+    const coreSamples = replayStimuliOnCore(circuit, phases);
+
+    expect(coreSamples, "the old (unclamped) core loop landed on the plain grid and undercounted here").toHaveLength(classicSamples.length);
+    for (let i = 0; i < classicSamples.length; i++) {
+      expect(coreSamples[i]!.phaseIndex, `sample ${String(i)}`).toBe(classicSamples[i]!.phaseIndex);
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+  });
 });

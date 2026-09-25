@@ -78,20 +78,44 @@ export interface CoreEngineStats {
 
 /**
  * Maps a non-zero `bo_engine_load` return code to the TS error the contract
- * assigns it (core/README.md's error-code table). Only -3 (unsupported
- * topology) is "route this circuit elsewhere" — -2 (unknown kind code) is
- * NOT a fallback case despite superficially reading like one: compileCircuit
- * only ever emits kind codes from format.ts's CORE_KIND_CODE, which is
- * exactly the set CORE_IMPLEMENTED_KINDS lets through, so the Rust reader
- * rejecting one it doesn't recognise means the TS and Rust halves are out of
- * step with each other, not a fact about the user's circuit. Folding it into
- * `unsupported-kind:<message>` would also corrupt that reason vocabulary:
- * the message here is prose like "device[3]: unknown kind code 7", not a
- * kind name.
+ * assigns it (core/README.md's error-code table). -3 (unsupported topology)
+ * and -7 (delta-cycle livelock) are both "route this circuit elsewhere" —
+ * -2 (unknown kind code) is NOT a fallback case despite superficially
+ * reading like one: compileCircuit only ever emits kind codes from
+ * format.ts's CORE_KIND_CODE, which is exactly the set CORE_IMPLEMENTED_KINDS
+ * lets through, so the Rust reader rejecting one it doesn't recognise means
+ * the TS and Rust halves are out of step with each other, not a fact about
+ * the user's circuit. Folding it into `unsupported-kind:<message>` would
+ * also corrupt that reason vocabulary: the message here is prose like
+ * "device[3]: unknown kind code 7", not a kind name.
+ *
+ * WHY -7 FALLS BACK HERE TOO (W1c, decision 8). `bo_engine_load` runs its own
+ * zero-delay settle pass at load time (decision 8, option C: "settle
+ * zero-delay first observations to a fixed point at t=0 ... no rescue ladder
+ * (a failed t=0 solve returns an error and the circuit falls back to
+ * classic)"). A combinational ring whose delta cycle never reaches a fixed
+ * point exceeds the per-instant pass cap and gets -7 from THAT settle pass,
+ * before any `advance()` call ever runs — core/README.md's own error-code
+ * table names -7 "delta-cycle livelock", generically, not only an
+ * advance()-time condition. Before this fix, -7 at load fell through to the
+ * generic `CoreLoadError` branch below, which `HeadlessRunner._tryLoadCore`
+ * does not catch (only `CoreUnsupportedError` triggers its classic
+ * fallback — see headless.ts) — so a livelocked load would propagate out of
+ * `HeadlessRunner.load()` as an uncaught throw instead of the documented
+ * "raises -7, then the circuit falls back to classic" outcome. This is
+ * distinct from a -7 returned by `advance()` (a MID-RUN livelock after a
+ * program already loaded successfully): that case is unaffected by this
+ * function — see `advance()`'s own -4/-7 handling below, which keeps
+ * classic's non-convergence semantics (`lastConverged = false`), not a
+ * fallback, because there is no "elsewhere" to route an already-running
+ * program to.
  */
 function mapLoadFailure(code: number, message: string): CoreUnsupportedError | CoreLoadError {
   if (code === -3) {
     return new CoreUnsupportedError([`topology:${message}`]);
+  }
+  if (code === -7) {
+    return new CoreUnsupportedError([`livelock:${message}`]);
   }
   // -1 (malformed), -2 (unknown kind code — a TS/Rust drift bug, see above),
   // -4 (solve failed), -5 (bad handle), and anything this build doesn't
@@ -235,11 +259,15 @@ export class CoreEngine implements EngineReadout {
    * the only source for it, never a caller-supplied compile option.
    *
    * Throws `CoreUnsupportedError` (with `reasons`) for anything compileCircuit
-   * rejects, or for a Rust-side topology rejection (`bo_engine_load` code
-   * -3). Throws `CoreLoadError` for -1/-2/-4/-5/-8 (see `mapLoadFailure`'s
-   * doc comment for why -2 is grouped there, not with -3). In every OTHER
-   * throwing case this engine ends up in the "no program loaded" state (see
-   * the class doc comment) regardless of what was loaded before.
+   * rejects, for a Rust-side topology rejection (`bo_engine_load` code -3,
+   * reason prefixed `topology:`), or for a load-time delta-cycle livelock
+   * (code -7, reason prefixed `livelock:` — decision 8's load-settle pass
+   * exceeding the per-instant delta-cycle cap; see `mapLoadFailure`'s doc
+   * comment). Throws `CoreLoadError` for -1/-2/-4/-5/-8 (see
+   * `mapLoadFailure`'s doc comment for why -2 is grouped there, not with -3
+   * or -7). In every OTHER throwing case this engine ends up in the "no
+   * program loaded" state (see the class doc comment) regardless of what was
+   * loaded before.
    */
   load(
     circuit: SimCircuit,

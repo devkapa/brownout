@@ -35,6 +35,18 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "spdt_switch",
   "dip_switch",
   "capacitor",
+  // W1c: the 11 combinational ICs.
+  "74ls00",
+  "74ls04",
+  "74ls08",
+  "74ls32",
+  "74ls86",
+  "74ls157",
+  "74ls283",
+  "74hc138",
+  "74hc14",
+  "74ls47",
+  "74ls245",
 ]);
 
 /**

@@ -262,6 +262,64 @@ describe("detector self-test — a clean sweep proves nothing unless the detecto
     const simTimeMismatch = result.mismatches.find((m) => m.category === "simTime");
     expect(simTimeMismatch, "expected a simTime mismatch").toBeDefined();
   });
+
+  // W1c: compare.ts's compareFailureKeys() exemption ("the core reports NO
+  // failures at all yet, W1g hasn't landed" — see that function's own header)
+  // is new and narrow by construction. These two prove BOTH halves of that
+  // claim on the SAME fabricated pair: the exemption suppresses a failure
+  // classic alone reports (the expected, common case while W1g is unbuilt),
+  // but the instant the core reports EVEN ONE failure of its own, a
+  // DIFFERENT failure set is caught exactly as before — the exemption can
+  // never launder "the core detected the wrong thing", only "the core
+  // detected nothing at all".
+  it("does NOT fire on a failures-presence difference when the core's failures side is completely empty (W1g not landed)", () => {
+    const times = sampleTimesFor(DEFAULT_DURATION_S);
+    const base = dividerWithR1(1000);
+    const classicSamples = collectClassicSamples(base, times);
+    const coreSamples = collectCoreSamples(base, times); // failures is always {} in W0/W1a-c
+
+    const tampered: SampleReadout[] = classicSamples.map((sample, i) =>
+      i === 0
+        ? { ...sample, failures: { r1: { kind: "resistor_overload", componentId: "r1", since: 0, message: "fabricated for this test", value: 1, limit: 1 } } }
+        : sample,
+    );
+
+    const result = compareSamples(tampered, coreSamples);
+    const failureMismatch = result.mismatches.find((m) => m.category === "failures");
+    expect(
+      failureMismatch,
+      "a failure classic alone reports, with the core's side completely empty, must be exempted (W1g is not built yet) — see compare.ts's compareFailureKeys header",
+    ).toBeUndefined();
+  });
+
+  it("still fires on a failures-presence difference when the core ALSO reports something (of its own) that disagrees with classic — the exemption never masks a real mismatch", () => {
+    const times = sampleTimesFor(DEFAULT_DURATION_S);
+    const base = dividerWithR1(1000);
+    const classicSamples = collectClassicSamples(base, times);
+    const coreSamples = collectCoreSamples(base, times);
+
+    const classicTampered: SampleReadout[] = classicSamples.map((sample, i) =>
+      i === 0
+        ? { ...sample, failures: { r1: { kind: "resistor_overload", componentId: "r1", since: 0, message: "fabricated for this test", value: 1, limit: 1 } } }
+        : sample,
+    );
+    // The core's side is NOT empty here — it reports a DIFFERENT failure key
+    // of its own (fabricated, standing in for a future W1g false positive),
+    // so the "completely empty" precondition compareFailureKeys checks does
+    // not hold and the mismatch must still be reported.
+    const coreTampered: SampleReadout[] = coreSamples.map((sample, i) =>
+      i === 0
+        ? { ...sample, failures: { r2: { kind: "output_sag", componentId: "r2", since: 0, message: "fabricated for this test", value: 1, limit: 1 } } }
+        : sample,
+    );
+
+    const result = compareSamples(classicTampered, coreTampered);
+    const failureMismatches = result.mismatches.filter((m) => m.category === "failures");
+    expect(
+      failureMismatches.map((m) => m.id).sort(),
+      "both r1 (classic-only) and r2 (core-only) must still be reported — the exemption does not apply once the core's side is non-empty",
+    ).toEqual(["r1", "r2"]);
+  });
 });
 
 describe("gate 2e / decision 3 — analytic-closer detector (assertion c continued)", () => {

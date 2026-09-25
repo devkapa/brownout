@@ -89,6 +89,21 @@ export interface AnalyticRcModel {
   readonly leakageOhms: number;
   readonly node: AnalyticNodeRef;
   readonly currentComponents?: readonly string[];
+  /**
+   * Same closed-form current as `currentComponents`, negated — for a
+   * component on the SAME series loop whose own sign convention is opposite
+   * the (source -> node) direction `currentComponents`' formula assumes.
+   * The canonical case is the loop's own `voltage_source` (or, for a W1c IC
+   * driving through its Thevenin R_out, the fixture's effective source): the
+   * kernel's own convention publishes the current INTO its + terminal,
+   * negative while it delivers power (core/README.md's W0 point 5) — the
+   * exact opposite sign of the same-magnitude current `currentComponents`
+   * reports for a resistor/capacitor further along the SAME series path.
+   * Both fields exist because there is genuinely no single sign convention
+   * that fits both roles — mirroring how `AnalyticFixedPairCapacitorModel.
+   * fixingSources` already carries a per-source `sign` for the same reason.
+   */
+  readonly negatedCurrentComponents?: readonly string[];
 }
 
 /**
@@ -226,6 +241,20 @@ export interface CorpusEntry {
   readonly phasesUnsupported?: string;
   /** Gate 2e / decision 3's analytic reference for this entry's plain (non-stimuli) comparison — see `AnalyticFixtureModel`'s own doc. `undefined` for every entry without a closed-form reference (the common case). */
   readonly analytic?: AnalyticFixtureModel;
+  /**
+   * Decision 9 (floating-input buckets): true when this circuit reads at
+   * least one OPEN, FLOATING_INPUT pin (classic's hashed floating model,
+   * core/README.md's digital-core rules 5-6). The FNV-1a hash is bit-exact
+   * with classic except within one classic accepted-step of a 10 ms bucket
+   * boundary (decision 9's own text), so a divergence on one of these
+   * entries is a DIFFERENT, narrower question than an ordinary mismatch —
+   * "did the bucket boundary land inside that one classic step" — not a sign
+   * the floating model itself disagrees. report.ts surfaces this on the
+   * entry's own report line so that distinction is visible to a reader
+   * rather than looking like an undifferentiated failure. `undefined`/false
+   * for every entry with no open input (the common case).
+   */
+  readonly openInput?: boolean;
 }
 
 /** One accepted-step-equivalent readout from either engine, at one sample time — see sample.ts. */

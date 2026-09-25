@@ -37,6 +37,23 @@ export interface SyntheticExpectation {
    * declared param values.
    */
   readonly phases?: readonly StimulusPhase[];
+  /** Decision 9's open-input tag, threaded straight onto the CorpusEntry — see `CorpusEntry.openInput`'s own doc (types.ts). `undefined`/false for every fixture without an OPEN floating-input pin. */
+  readonly openInput?: boolean;
+  /**
+   * Overrides `sampleTimesFor`'s default 10 ms window (sample.ts's
+   * DEFAULT_DURATION_S) for this one fixture. `undefined` (every synthetic
+   * fixture before W1c) keeps the old hardcoded-null behaviour. A W1c digital
+   * fixture needs this for real: the default grid's last point sits AT
+   * t=10ms exactly, which is also decision 9's floating-input bucket
+   * boundary (`floor((t+1e-12)/0.01)` ticks from 0 to 1 exactly there) — an
+   * open-input fixture that cares which bucket every sample lands in must be
+   * able to choose a window that keeps all four default sample points
+   * strictly inside one bucket, and a fixture with a real analog transition
+   * (the 74HC14 relaxation oscillator) must be able to stay inside one
+   * monotonic segment. `sampleTimesFor` itself is untouched; this only picks
+   * WHICH duration it is called with.
+   */
+  readonly durationS?: number;
 }
 
 export interface LoadedSyntheticEntry {
@@ -69,7 +86,12 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       id: `synthetic/${name}`,
       origin: "synthetic",
       name,
-      durationS: null,
+      // `expected.durationS ?? null`: every W0/W1b fixture predating this
+      // field has no time-varying behavior to exercise, so `null` (the
+      // harness default, sample.ts's DEFAULT_DURATION_S) is still correct
+      // for them; a W1c digital fixture that cares about its own sample
+      // window sets this explicitly (see SyntheticExpectation.durationS's doc).
+      durationS: expected.durationS ?? null,
       kinds: kindsOf(circuit),
       // Finding 12: a fixture with declared phases genuinely gets replayed
       // under scripted stimuli (runCorpusEntry routes to runStimuliEntry),
@@ -82,6 +104,7 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       file: full,
       analytic: expected.analytic,
       phases: expected.phases,
+      openInput: expected.openInput,
     };
     return { entry, circuit, expected };
   });

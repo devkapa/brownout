@@ -54,6 +54,13 @@ function describeEntryNotes(entry: HarnessEntryOutcome["entry"]): string {
         `circuit actually has [${entry.kinds.join(", ") || "none"}]`,
     );
   }
+  if (entry.openInput) {
+    notes.push(
+      "open-input (decision 9): reads at least one OPEN floating-input pin — the hashed floating model is bit-exact " +
+        "with classic except within one classic step of a 10 ms bucket boundary, so a mismatch here is a bucket-" +
+        "boundary-alignment question, not necessarily a floating-model disagreement",
+    );
+  }
   return notes.length > 0 ? ` (${notes.join("; ")})` : "";
 }
 
