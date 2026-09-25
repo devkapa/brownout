@@ -14,14 +14,17 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../src/core/wasm.js";
 import { CORE_SUPPORTED_KINDS } from "../../src/core/kinds.js";
+import { buildCoreNodes, corePinKey } from "../../src/core/compile/topology.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles, type AlignmentSuccess, type CycleSample } from "./equivalence/align.js";
 import { compareSamples } from "./equivalence/compare.js";
 import { parseCorpusDirsEnv } from "./equivalence/external-corpus.js";
 import { runEquivalenceHarness, type HarnessRun } from "./equivalence/harness.js";
 import { renderMarkdownReport, toJsonReport } from "./equivalence/report.js";
+import { explainAnalyticMismatches } from "./equivalence/run-entry.js";
 import { collectClassicSamples, collectCoreSamples, DEFAULT_DURATION_S, sampleTimesFor } from "./equivalence/sample.js";
 import { checkSupportedKindsGate } from "./equivalence/supported-kinds-gate.js";
+import { loadSyntheticCorpus } from "./equivalence/synthetic-fixtures.js";
 import { collectClassicDigitalTrace, type DigitalTraceEvent } from "./equivalence/trace.js";
 import type { KindRow, SampleReadout } from "./equivalence/types.js";
 
@@ -258,6 +261,90 @@ describe("detector self-test — a clean sweep proves nothing unless the detecto
     const result = compareSamples(classicSamples, tampered);
     const simTimeMismatch = result.mismatches.find((m) => m.category === "simTime");
     expect(simTimeMismatch, "expected a simTime mismatch").toBeDefined();
+  });
+});
+
+describe("gate 2e / decision 3 — analytic-closer detector (assertion c continued)", () => {
+  // Fixture 11 (test/fixtures/core/11-rc-charge) declares an "rc" analytic
+  // model in its .expected.json — loaded here exactly as the harness itself
+  // loads it (loadSyntheticCorpus), never hand-constructed, so this test
+  // proves the REAL declared model, not a stand-in for it.
+  const fixture11 = loadSyntheticCorpus().find((e) => e.entry.name === "11-rc-charge")!;
+
+  /** The net id `fixture11`'s own declared analytic node resolves to — the same resolution buildAnalyticTargets (run-entry.ts) itself uses. */
+  function fixture11AnalyticNetId(): string {
+    const model = fixture11.entry.analytic!;
+    if (model.kind !== "rc") throw new Error("fixture 11 is expected to declare an \"rc\" analytic model");
+    const built = buildCoreNodes(fixture11.circuit);
+    const node = built.pinNode.get(corePinKey(model.node.component, model.node.pin));
+    if (node === undefined) throw new Error("fixture 11's declared analytic node did not resolve to a net");
+    const netId = built.netIdOfNode[node];
+    if (!netId) throw new Error("fixture 11's declared analytic node resolved to the synthetic (netless) datum");
+    return netId;
+  }
+
+  it("explains a genuine classic-BE-lag mismatch as analytic-closer (decision 3), on a REAL classic-vs-core run", () => {
+    const times = sampleTimesFor(DEFAULT_DURATION_S); // [0, 2.5ms, 5ms, 10ms] -- short next to fixture 11's 100ms tau, so classic's lag is still visible
+    const classicSamples = collectClassicSamples(fixture11.circuit, times);
+    const coreSamples = collectCoreSamples(fixture11.circuit, times);
+
+    const cmp = compareSamples(classicSamples, coreSamples);
+    // Sanity: this is what makes the rest of the test meaningful -- if
+    // compareSamples stops disagreeing here (a tighter classic stepper, a
+    // different sample grid, ...), there is nothing left for the analytic
+    // path to explain, and a "0 explained, 0 remaining" result would look
+    // identical to "the detector is broken".
+    expect(cmp.mismatches.some((m) => m.category === "netV"), "expected a real classic-vs-core netV mismatch on this fixture's short default sample grid").toBe(true);
+
+    const { explained, remaining } = explainAnalyticMismatches(fixture11.entry, fixture11.circuit, cmp.mismatches);
+    expect(explained.length).toBeGreaterThan(0);
+    expect(remaining).toEqual([]);
+    for (const hit of explained) {
+      expect(hit.divergenceId).toBe("analytic:rc");
+      expect(hit.reason).toMatch(/analytic answer/);
+    }
+  });
+
+  it("does NOT explain away a core value perturbed away from the analytic answer, even on the declared node (the detector must still fire)", () => {
+    const times = sampleTimesFor(DEFAULT_DURATION_S);
+    const classicSamples = collectClassicSamples(fixture11.circuit, times);
+    const coreSamples = collectCoreSamples(fixture11.circuit, times);
+    const netId = fixture11AnalyticNetId();
+
+    // +0.5 V at the t=5ms sample: far outside tolerance of BOTH classic and
+    // the analytic answer (the untampered core value there is ~0.24 V) --
+    // exactly the "core itself is wrong" case gate 2e must never launder.
+    const tamperedIndex = 2;
+    const tampered: SampleReadout[] = coreSamples.map((sample, i) =>
+      i === tamperedIndex ? { ...sample, netV: { ...sample.netV, [netId]: sample.netV[netId]! + 0.5 } } : sample,
+    );
+
+    const cmp = compareSamples(classicSamples, tampered);
+    const perturbedMismatch = cmp.mismatches.find((m) => m.category === "netV" && m.id === netId && m.sampleTime === tampered[tamperedIndex]!.simTime);
+    expect(perturbedMismatch, "the perturbation itself must surface as a netV mismatch, or this test proves nothing").toBeDefined();
+
+    const { explained, remaining } = explainAnalyticMismatches(fixture11.entry, fixture11.circuit, cmp.mismatches);
+    expect(remaining).toContainEqual(perturbedMismatch);
+    expect(explained.some((hit) => hit.mismatch === perturbedMismatch)).toBe(false);
+  });
+
+  it("leaves a mismatch on an UNDECLARED net or element untouched, even for an entry that declares an analytic model", () => {
+    const times = sampleTimesFor(DEFAULT_DURATION_S);
+    const classicSamples = collectClassicSamples(fixture11.circuit, times);
+    const coreSamples = collectCoreSamples(fixture11.circuit, times);
+
+    // A fabricated mismatch on a component this fixture doesn't even have --
+    // guaranteed to name neither the declared node nor a declared current.
+    const fabricated: SampleReadout["elementI"] = { ...coreSamples[0]!.elementI, "not-a-real-component": 1 };
+    const tampered: SampleReadout[] = coreSamples.map((sample, i) => (i === 0 ? { ...sample, elementI: fabricated } : sample));
+
+    const cmp = compareSamples(classicSamples, tampered);
+    const fabricatedMismatch = cmp.mismatches.find((m) => m.category === "elementI" && m.id === "not-a-real-component");
+    expect(fabricatedMismatch).toBeDefined();
+
+    const { explained, remaining } = explainAnalyticMismatches(fixture11.entry, fixture11.circuit, cmp.mismatches);
+    expect(remaining).toContainEqual(fabricatedMismatch);
+    expect(explained.some((hit) => hit.mismatch === fabricatedMismatch)).toBe(false);
   });
 });
 

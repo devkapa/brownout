@@ -3,6 +3,19 @@
 //! W1b step 1 with the switch family's fresh-every-resolve stamping and the
 //! solution cache (row B1's second half).
 //!
+//! W1b step 2 (rows B2/B3) adds `ClosedForm`/`Stepped` partitions
+//! (`solve/closed_form.rs`, `solve/stepped.rs`), owned by `solve::mod`'s
+//! `PartitionedSolver`, not by this module. [`StaticPartitionSolver::build`]
+//! now skips any resistor or switch-family device whose free pin(s) land in
+//! a non-`Static` partition (`partition::PartitionKind`) — such a device is
+//! entirely a dynamic partition's own resistive-network stamp instead (a
+//! resistor in series with a capacitor, say), never split between the two —
+//! and never allocates a matrix stamp for a non-`Static` partition's own
+//! shunt row. `PartitionedSolver` only ever calls
+//! [`PartitionSolver::resolve_dirty`] here with `Static`-classified
+//! partition ids, so this module needs no defensive check of its own against
+//! being handed one it does not own.
+//!
 //! Re-solving a dirty partition means cloning its pristine per-partition
 //! base (shunt + every immutable static-stamp device — today, only the
 //! resistor), stamping every currently-committed driver on top of it
@@ -34,7 +47,7 @@ use crate::error::BoError;
 use crate::events::{DeviceId, Mode, PartitionId};
 use crate::kinds;
 use crate::lu;
-use crate::partition::{self, ResolvedSource};
+use crate::partition::{self, PartitionKind, ResolvedSource};
 use crate::program::Program;
 use crate::solve::PartitionSolver;
 
@@ -198,17 +211,40 @@ impl StaticPartitionSolver {
     /// later re-solve works.
     pub fn build(program: &Program) -> Result<Self, BoError> {
         let pb = partition::build(program)?;
-        let partition::PartitionBuild { partitions, local_index, fixed, resolved, .. } = pb;
+        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, .. } = pb;
 
         let mut matrix_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len() * p.len()]).collect();
         let mut rhs_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len()]).collect();
 
+        // Only a `Static` partition's own shunt row is ever meant to be
+        // solved here — a non-`Static` partition's matrix stays all-zero
+        // (never factored, since `PartitionedSolver` never names it in
+        // `resolve_dirty`'s `dirty`), but is still allocated above so every
+        // partition id in this vector lines up with `partition::build`'s
+        // global numbering (`solve::mod`'s `PartitionedSolver` depends on
+        // that alignment to route a dirty id to the right sub-solver).
         for (p_idx, nodes) in partitions.iter().enumerate() {
+            if partition_kinds[p_idx] != PartitionKind::Static {
+                continue;
+            }
             let size = nodes.len();
             for l_idx in 0..size {
                 matrix_base[p_idx][l_idx * size + l_idx] += NODE_RSHUNT_G;
             }
         }
+
+        // Whether `device`'s own free pin(s) land in a `Static` partition —
+        // `None` (no free pin at all, both terminals fixed) is also this
+        // solver's to own, exactly as before W1b step 2. A device's free
+        // pins are always in the SAME partition (`partition::build`'s
+        // union-find), so the first free pin found settles it.
+        let owned_by_static = |device: &crate::program::Device| -> bool {
+            device
+                .pins
+                .iter()
+                .find_map(|p| local_index[p.node].map(|(p_idx, _)| partition_kinds[p_idx]))
+                .is_none_or(|k| k == PartitionKind::Static)
+        };
 
         let mut resistors = Vec::new();
         let mut switches = Vec::new();
@@ -216,14 +252,14 @@ impl StaticPartitionSolver {
 
         for (d, device) in program.devices.iter().enumerate() {
             match device.kind {
-                kinds::RESISTOR => {
+                kinds::RESISTOR if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     for c in devices::stamp(device.kind, pins.len(), &device.params) {
                         fold_static_stamp(&partitions, &local_index, &fixed, &mut matrix_base, &mut rhs_base, pins[c.pin_a], pins[c.pin_b], c.conductance);
                     }
                     resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone() });
                 }
-                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     switch_index_by_device.insert(d, switches.len());
                     switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone() });

@@ -7,7 +7,7 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W1a (contract v2, the event kernel).** W0 proved the pipeline with a
+**Status: W1b (analog partitions, the capacitor, the switch family).** W0 proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
 dispatch plan are in the devolt repo,
@@ -154,7 +154,11 @@ is dispatched; a code without a record layout is reserved and rejected as
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
 
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
-maps an absent pin to its reference node (spec §7.2.7).
+maps an absent pin to its reference node (spec §7.2.7). One exception: classic
+stamps nothing at all for an `spdt_switch` with fewer than 3 declared pins
+(`if (pins.length < 3) return`), so the compiler declines one
+(`malformed:<componentId>:too-few-pins`, the circuit runs on classic) rather
+than emit a contact classic never stamps.
 
 **Currents** (`elementI`, one per record):
 - `capacitor`: series plus leakage current, `pins[0]` to `pins[1]`.
@@ -187,7 +191,7 @@ export lands in its list in the same change that adds it.
 | `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
 | `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. | v1 |
 | `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
-| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2-4 take effect at the next event; keys 1, 5, 6 and 7 are load-time only (`-8` after load). | v2 (W1a) |
+| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2 and 3 take effect at the next event; keys 1 and 4-7 are load-time only (`-8` after load). `FORCE_STEPPED` is load-time only because it decides partition classification, which is fixed at load. | v2 (W1a) |
 | `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
 | `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
 | `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). | v2 (W1a) |
@@ -215,7 +219,8 @@ export lands in its list in the same change that adds it.
 `3` fixed nodes, `4` events processed, `5` delta passes, `6` maximum delta
 depth, `7` solution-cache hits, `8` closed-form segments, `9` crossings,
 `10` stepped steps, `11` Newton iterations, `12` IC evaluations, `13` driver
-commits, `14` rail moves.
+commits, `14` rail moves, `15` stepped partitions holding two or more
+capacitors (decision 14's count; `FORCE_STEPPED` does not change it).
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
 unsupported topology (the TS side falls back to classic); `-4` solve failed
@@ -274,9 +279,10 @@ records from it:
    It keeps an isolated net solvable (it reads 0 V) and it is included in
    every KCL sum below.
 3. **Partitions.** Union-find over free nodes, joined by every resistor whose
-   two terminals are both free. A resistor with one fixed end stamps the fixed
-   voltage into the right-hand side; one with both ends fixed stamps nothing.
-   The union-find itself is iterative (path halving, union by size): no input
+   two terminals are both free (W1b widens the union; see "Kernel semantics:
+   partitions and dynamic solves (W1b)"). A resistor with one fixed end stamps
+   the fixed voltage into the right-hand side; one with both ends fixed stamps
+   nothing. The union-find itself is iterative (path halving, union by size): no input
    — however long a chain of unions it produces — makes it recurse to a depth
    that depends on the input.
 4. **Solve.** Dense LU with partial pivoting per partition, **LINPACK
@@ -294,8 +300,9 @@ records from it:
    the current flowing **into its + terminal** from the circuit, i.e. negative
    while it delivers power. Compute it by KCL at the node the source fixed,
    children before parents in the propagation forest:
-   - `R_u` = sum over resistors of the current leaving node `u`, plus the
-     shunt current `1e-12 * V[u]`;
+   - `R_u` = sum over resistors and switch-family contacts of the current
+     leaving node `u` through their live stamps, plus each capacitor's
+     published current leaving `u`, plus the shunt current `1e-12 * V[u]`;
    - a child source `c` at `u` contributes `+i_c` if `c`'s + terminal is `u`
      and `−i_c` if its − terminal is `u`;
    - if source `s` fixed its + terminal `u`: `i_s = −(R_u + children)`;
@@ -305,6 +312,47 @@ records from it:
    "t_end must be finite" — checked first, since a comparison against NaN is
    always false and would otherwise let it through and become the clock.
    Everything in W0 is static, so advancing only moves time.
+
+## Kernel semantics: partitions and dynamic solves (W1b)
+
+1. **Union.** The W0 union-find also joins, whatever their state:
+   - both pins of a capacitor, when both are free;
+   - both pins of every switch-family contact, when both are free, open or
+     closed;
+   - every free pin of one switch-family device with every other free pin of
+     it, even when the contact between them runs through a fixed pin (an
+     `spdt_switch` whose `com` sits on a source, a `dip_switch` whose `a`
+     side is a rail).
+
+   So every device's free pins share exactly one partition. Partition
+   membership is fixed at load: a toggle only changes what is stamped, never
+   which partition a node is in, and `bo_engine_set_params` marks that one
+   partition dirty.
+2. **Inert capacitor.** A capacitor whose two pins are on the same node
+   stamps nothing, does not count toward its partition's classification, and
+   publishes `0`, as classic does (its companion stamps cancel).
+3. **Classification** (decision 14). A partition with no counted capacitor
+   is static. One with exactly one is closed-form. One with two or more is
+   stepped. `FORCE_STEPPED` (load-time only) makes every closed-form
+   partition stepped.
+4. **Static partitions** keep a solution cache keyed on driver modes, the
+   rail band, the floating bits and an epoch that bumps only on a real value
+   change. `NO_SOLUTION_CACHE` bypasses it.
+5. **Initial state at load.** Every capacitor starts at `vc = 0` at
+   `START_TIME`, in closed-form and stepped partitions alike; carrying charge
+   across a reload is W2. A stepped partition's clock starts at
+   `START_TIME`, so a load integrates nothing and costs the same at any
+   start time.
+6. **Closed form** evaluates the exact exponential between events, and
+   lands threshold crossings analytically. **Stepped** partitions use
+   classic's controller (BE step doubling; trapezoidal with a BE anchor when
+   `INTEGRATION` is `1`), land on every `t_end`, and refine crossings by
+   bisection.
+7. **Rollback.** A failed instant (`-4`, `-7`, in `advance` or
+   `set_params`) restores every piece of solver state the attempt touched:
+   published arrays, each static partition's own solution and cache, the
+   closed-form and stepped partition state, and any crossing or step event
+   the attempt scheduled. Nothing from the failed attempt reappears later.
 
 ## Kernel semantics: events (W1a)
 

@@ -1,17 +1,37 @@
 //! Partition solvers. W1a defined only the partition-solver trait (worker
 //! A1) plus the first real implementation, `StaticPartitionSolver`, adapting
-//! the W0 static kernel. W1b (row B1) moves that implementation to
-//! `static_part`, adds the switch family's fresh-every-resolve stamping and
-//! the solution cache, and gives this trait the `bo_engine_set_params`
-//! (owner decision 1) and cache-control hooks every default-implemented
-//! method below exists for — a solver with no mutable device state or no
-//! cache (a future closed-form/stepped solver, or a test mock) can ignore
-//! them entirely.
+//! the W0 static kernel. W1b step 1 (row B1) moved that implementation to
+//! `static_part`, added the switch family's fresh-every-resolve stamping and
+//! the solution cache, and gave this trait the `bo_engine_set_params` (owner
+//! decision 1) and cache-control hooks every default-implemented method
+//! below exists for.
+//!
+//! W1b step 2 (rows B2/B3) adds the two dynamic partition kinds
+//! (`closed_form`, `stepped`, sharing the linear per-partition stamping
+//! helpers and [`DynShape`] defined here) and [`PartitionedSolver`], which
+//! dispatches every [`PartitionSolver`] call across the three partition
+//! kinds `partition::build` can now produce (Static/ClosedForm/Stepped,
+//! Decision 14) by [`crate::partition::PartitionKind`]. Every addition to
+//! the trait below is a DEFAULT-provided method: `StaticPartitionSolver` and
+//! every `#[cfg(test)]` mock solver in `kernel.rs`/`engine.rs` (which predate
+//! W1b step 2 and know nothing about dynamic partitions) keep compiling
+//! unchanged, because a solver with no dynamic partitions has nothing to say
+//! through any of them.
 
+pub mod closed_form;
+pub mod newton;
 pub mod static_part;
+pub mod stepped;
 
+use std::collections::{BTreeSet, HashMap};
+
+use crate::devices;
 use crate::drivers::Driver;
-use crate::events::{DeviceId, PartitionId};
+use crate::error::BoError;
+use crate::events::{DeviceId, EventKind, PartitionId, Version};
+use crate::kinds;
+use crate::partition::{self, PartitionKind};
+use crate::program::Program;
 
 /// What re-solving a set of partitions changed, from the kernel's point of
 /// view: the readers whose watched inputs moved. `kernel.rs`'s delta cycle
@@ -100,6 +120,29 @@ pub trait PartitionSolver {
         0.0
     }
 
+    /// Closed-form segments built so far (contract stat `8`). Default `0.0`:
+    /// only [`PartitionedSolver`] (which owns any `ClosedForm` partition)
+    /// reports anything else.
+    fn closed_form_segments(&self) -> f64 {
+        0.0
+    }
+
+    /// Threshold crossings landed so far (contract stat `9`).
+    fn crossings(&self) -> f64 {
+        0.0
+    }
+
+    /// Committed stepped-partition steps so far (contract stat `10`).
+    fn stepped_steps(&self) -> f64 {
+        0.0
+    }
+
+    /// Newton iterations run so far, summed across every stepped step
+    /// (contract stat `11`).
+    fn newton_iterations(&self) -> f64 {
+        0.0
+    }
+
     /// Validates one `bo_engine_set_params` batch of `(deviceIndex,
     /// paramIndex, value)` triples WITHOUT applying anything (owner
     /// decision 1's "all or nothing": every triple is checked before any is
@@ -138,6 +181,115 @@ pub trait PartitionSolver {
         let _ = (device_index, param_index);
         None
     }
+
+    // ---- W1b step 2: dynamic partitions (closed-form/stepped) -------------
+    //
+    // Every method below is default-provided and a no-op/empty for a solver
+    // with no dynamic partitions at all, so `StaticPartitionSolver` and every
+    // pre-existing `#[cfg(test)]` mock solver (`kernel.rs`, `engine.rs`) need
+    // no changes to keep satisfying this trait. Only `PartitionedSolver`
+    // (this module) overrides them.
+
+    /// Extra dynamic-partition state a snapshot/restore pair must carry
+    /// beyond `voltages()`/`currents()`: a closed-form partition's committed
+    /// segment anchor (`vc0`, `t0`) and its solved segment coefficients, or a
+    /// stepped partition's committed capacitor charge(s), last-accepted
+    /// series current(s), pending-step state and step-size controller state —
+    /// core/README.md's "A failed advance" and the W1b brief's "A failed
+    /// advance rolls back dynamic state too (committed vc)". Opaque to
+    /// `Kernel`, which only ever round-trips the box through
+    /// [`Self::dynamic_restore`] and never downcasts it — only the concrete
+    /// implementor that produced it does, on the way back in. `Box<dyn Any>`
+    /// rather than a fixed shape (a second `Vec<f64>`, say) because a
+    /// closed-form/stepped partition's state is not a flat float array by
+    /// nature (per-partition vectors of varying length, a `segReady`
+    /// boolean, per-partition version counters); forcing it through one
+    /// would cost this trait's only two implementors with anything to say
+    /// here (`PartitionedSolver` is the only one) an artificial encode/decode
+    /// step for no reader that ever needs the bytes themselves. Default
+    /// `Box::new(())`: a solver with no dynamic partitions has nothing to
+    /// carry, and `()` downcasts trivially back to itself if anything ever
+    /// mistakenly tried.
+    fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+
+    /// Restores exactly what a prior [`Self::dynamic_snapshot`] call
+    /// captured. Default a no-op, paired with the default snapshot above.
+    fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        let _ = snapshot;
+    }
+
+    /// Drains every `(time, EventKind::Crossing | EventKind::Step)` a dynamic
+    /// partition has asked to be scheduled since the last drain — a fresh
+    /// re-aim from [`Self::resolve_dirty`], [`Self::handle_dynamic_event`] or
+    /// [`Self::sync_dynamic_to`] each produce at most one, replacing whatever
+    /// that same partition had pending before (its version already bumped, so
+    /// the stale entry still on `Kernel`'s heap is recognisably dead —
+    /// [`Self::is_current`]). Every entry here has already passed the
+    /// crossing-acceptance rule (`kernel::accepts_crossing`) where relevant
+    /// (a closed-form re-aim applies it itself before ever producing one,
+    /// core/README.md's "Hard-won rules"); `Kernel` pushes each verbatim onto
+    /// its own heap and never re-checks it. Default empty.
+    fn take_scheduled(&mut self) -> Vec<(f64, EventKind)> {
+        Vec::new()
+    }
+
+    /// Whether a `Crossing`/`Step` event's carried `version` still matches
+    /// `partition`'s current solve epoch (events.rs's lazy-deletion
+    /// contract): `is_crossing` selects which of the two epochs (a partition
+    /// can be re-aimed and re-planned independently is moot in W1b, since a
+    /// partition is only ever one dynamic kind at a time, but the flag keeps
+    /// `Kernel` from needing to know that). Default `false`: a solver with no
+    /// dynamic partitions never has a live entry to confirm, matching the
+    /// fact that nothing ever pushes a `Crossing`/`Step` against it in the
+    /// first place.
+    fn is_current(&self, partition: PartitionId, is_crossing: bool, version: Version) -> bool {
+        let _ = (partition, is_crossing, version);
+        false
+    }
+
+    /// Applies a due `Crossing` (`is_crossing = true`) or `Step`
+    /// (`is_crossing = false`) event that [`Self::is_current`] already
+    /// confirmed is live, at `now`: pec3.mjs's `_analyticCross`/`_commitStep`
+    /// plus its immediate re-aim/replan. Returns the readers to queue this
+    /// delta, exactly like [`Self::resolve_dirty`] — `Kernel` calls this
+    /// INSTEAD of `resolve_dirty` for a partition whose own scheduled event is
+    /// what became due (nothing marked it dirty). Default empty: unreachable
+    /// for a solver [`Self::is_current`] never confirms anything against.
+    fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
+        let _ = (partition, now, is_crossing);
+        Ok(Vec::new())
+    }
+
+    /// The horizon clamp (core/README.md, "Kernel semantics: events", point
+    /// 5): brings every dynamic partition's PUBLISHED `voltages()`/`currents()`
+    /// entries exactly to `t_end`, so a readout right after `bo_engine_advance`
+    /// is a solved value, never an interpolation. The two dynamic kinds need
+    /// different amounts of work to get there:
+    /// - **Stepped**: takes however many bounded BE/trap steps land it
+    ///   exactly on `t_end` (pec3.mjs's `_syncDynamic`, called with `now =
+    ///   t_end`) — the same real integration work an ordinary step does, just
+    ///   horizon-bounded.
+    /// - **Closed-form**: its node voltages are already the exact trajectory
+    ///   at any `t`, so there is no INTEGRATION to do — but the value SITTING
+    ///   in the shared `voltages()`/`currents()` arrays was only ever written
+    ///   at the last re-aim/crossing time, which is generally still `< t_end`.
+    ///   This still has to evaluate `_vcAt(t_end)` and re-publish every node
+    ///   and the capacitor's current from it — cheap (no LU solve, no
+    ///   iteration, just the closed-form expression), but not a no-op.
+    ///
+    /// Called by `Kernel::advance` once, after its event loop has drained
+    /// everything up to and including `t_end`, inside the same
+    /// snapshot/rollback envelope as any other instant — a solve failure here
+    /// (a stepped partition's forced step fails to converge) is reported and
+    /// rolled back exactly like a mid-`advance` one. Default a no-op
+    /// returning no readers: nothing for a solver with no dynamic partitions
+    /// to do.
+    fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
+        let _ = t_end;
+        Ok(Vec::new())
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -170,6 +322,22 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).cache_hits()
     }
 
+    fn closed_form_segments(&self) -> f64 {
+        (**self).closed_form_segments()
+    }
+
+    fn crossings(&self) -> f64 {
+        (**self).crossings()
+    }
+
+    fn stepped_steps(&self) -> f64 {
+        (**self).stepped_steps()
+    }
+
+    fn newton_iterations(&self) -> f64 {
+        (**self).newton_iterations()
+    }
+
     fn validate_params(&self, triples: &[(usize, usize, f64)]) -> Result<(), String> {
         (**self).validate_params(triples)
     }
@@ -181,4 +349,994 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
     fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
         (**self).param_value(device_index, param_index)
     }
+
+    fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
+        (**self).dynamic_snapshot()
+    }
+
+    fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        (**self).dynamic_restore(snapshot)
+    }
+
+    fn take_scheduled(&mut self) -> Vec<(f64, EventKind)> {
+        (**self).take_scheduled()
+    }
+
+    fn is_current(&self, partition: PartitionId, is_crossing: bool, version: Version) -> bool {
+        (**self).is_current(partition, is_crossing, version)
+    }
+
+    fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
+        (**self).handle_dynamic_event(partition, now, is_crossing)
+    }
+
+    fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
+        (**self).sync_dynamic_to(t_end)
+    }
 }
+
+// ============================================================================
+// Shared dynamic-partition (closed-form/stepped) support.
+// ============================================================================
+//
+// A `ClosedFormPartition`/`SteppedPartition` (their own modules) both stamp
+// the SAME capacitor-independent linear network — resistors, a capacitor's
+// own leakage, and switch-family contacts — and differ only in how they
+// additionally treat the capacitor(s) themselves (the exact `M_SOURCE`
+// branch-current unknown for closed form, vs. a BE/trap companion for
+// stepped). [`DynShape`] and the `stamp_*`/`compile_dyn_shape` functions
+// below are that shared half, so neither module repeats it.
+
+/// One reader's current threshold on a watched node (the crossing-watch API,
+/// W1 plan row B2, used by both `closed_form` and `stepped`): `value` in
+/// volts, `rising` selects which direction counts as a crossing (`true`: now
+/// below, heading above; `false`: the reverse).
+#[derive(Debug, Clone, Copy)]
+pub struct Threshold {
+    pub value: f64,
+    pub rising: bool,
+}
+
+/// A registered reader's threshold function: called fresh every time a
+/// dynamic partition re-aims/re-plans (the whole point of a re-aim is that
+/// the trajectory changed, so a stale threshold snapshot would miss a moved
+/// comparator reference or a Schmitt band) to get whatever it currently
+/// wants watched on its node. `Fn`, not `FnMut`: a reader reports its OWN
+/// current reference, it does not need to mutate anything to do so.
+pub type ThresholdFn = Box<dyn Fn() -> Vec<Threshold>>;
+
+/// One of a device's own pins, already resolved against a SPECIFIC dynamic
+/// partition: `local` is `Some(index)` into that partition's own node list
+/// when the pin is free and belongs to it, `None` when the pin is a fixed
+/// node (in which case `fixed` is that node's voltage — meaningless
+/// otherwise, left `0.0`). A pin can never resolve to a DIFFERENT
+/// partition's free node: every device `compile_dyn_shape` considers has
+/// every one of its free pins in the partition being compiled, since
+/// `partition::build`'s union-find already guarantees a device's free pins
+/// share one partition.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DynPin {
+    pub local: Option<usize>,
+    pub fixed: f64,
+}
+
+/// A resistor or switch-family device touching this partition, kept by
+/// device index (for `PartitionedSolver`'s live-parameter dispatch) and kind
+/// (for `devices::stamp`) rather than a precomputed conductance, so a
+/// switch's current parameters are read fresh on every stamp — the same
+/// "never cached the way a resistor's stamp is baked in" rule
+/// `devices/switches.rs` already states for the static solver.
+#[derive(Debug, Clone)]
+pub(crate) struct DynStamped {
+    pub device_index: usize,
+    pub kind: u32,
+    pub pins: Vec<DynPin>,
+    /// The device's params AT COMPILE TIME — correct forever for a resistor
+    /// (no live params), and only a fallback for a switch-family device
+    /// whose CURRENT value is looked up in `PartitionedSolver`'s canonical
+    /// `live_params` map instead wherever the caller has one (every call
+    /// site in `closed_form`/`stepped` does).
+    pub params: Vec<f64>,
+}
+
+/// The one capacitor in a `ClosedForm` partition, or one of several in a
+/// `Stepped` one. Immutable after load (`capacitor`'s `live_params` is
+/// empty, core/README.md's record-layout table), so — unlike
+/// [`DynStamped`] — `c`/`esr`/`leak_g` are simply read directly, never
+/// looked up live.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DynCapacitor {
+    pub device_index: usize,
+    pub pins: [DynPin; 2],
+    pub c: f64,
+    pub esr: f64,
+    /// `1/leakage`, or `0.0` for "no leakage" (classic's infinite parallel
+    /// resistance) — already resolved so callers never re-derive it.
+    pub leak_g: f64,
+}
+
+/// A dynamic partition's whole capacitor-independent-plus-capacitor
+/// compiled shape: every device `compile_dyn_shape` found touching it.
+#[derive(Debug, Clone)]
+pub(crate) struct DynShape {
+    /// Node ids, in the SAME order `partition::build` assigned local indices
+    /// — `nodes[l]` is the global node id at local index `l`.
+    pub nodes: Vec<usize>,
+    pub n: usize,
+    pub stamped: Vec<DynStamped>,
+    pub capacitors: Vec<DynCapacitor>,
+}
+
+/// Compiles partition `p_idx`'s devices into a [`DynShape`]: every resistor,
+/// switch-family device or capacitor with at least one pin whose free node
+/// lands in `p_idx` (per `local_index`) — never one whose pins are ALL
+/// fixed or land in a DIFFERENT partition. Called once per dynamic partition
+/// at build time by `closed_form::build`/`stepped::build`.
+pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>], program: &Program) -> DynShape {
+    let resolve = |node: usize| -> DynPin {
+        match local_index[node] {
+            Some((p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
+            _ => DynPin { local: None, fixed: fixed[node].unwrap_or(0.0) },
+        }
+    };
+    let touches_partition = |device: &crate::program::Device| -> bool {
+        device.pins.iter().any(|pin| matches!(local_index[pin.node], Some((pp, _)) if pp == p_idx))
+    };
+
+    let mut stamped = Vec::new();
+    let mut capacitors = Vec::new();
+    for (d, device) in program.devices.iter().enumerate() {
+        if !touches_partition(device) {
+            continue;
+        }
+        match device.kind {
+            kinds::RESISTOR | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+                let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
+                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone() });
+            }
+            kinds::CAPACITOR => {
+                let pins = [resolve(device.pins[0].node), resolve(device.pins[1].node)];
+                let leak = device.params[2];
+                capacitors.push(DynCapacitor {
+                    device_index: d,
+                    pins,
+                    c: device.params[0],
+                    esr: device.params[1],
+                    leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
+                });
+            }
+            _ => {}
+        }
+    }
+    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors }
+}
+
+/// pec3.mjs's `stampH`/`stamp2` two-terminal companion stamp: the branch
+/// current flowing `pin_a -> pin_b` is `g*(v_a - v_b) + ieq` — every linear
+/// two-terminal contribution a dynamic partition ever stamps uses this same
+/// convention, whether it is a plain conductance (`ieq = 0.0`: a resistor, a
+/// capacitor's leakage, a switch contact) or a capacitor's BE/trap companion
+/// (`ieq` = its `-Ihist`, `devices::passives::capacitor_be_companion`/
+/// `capacitor_trap_companion`). `size` may exceed `a`/`b`'s node count (the
+/// closed-form segment solve adds one extra branch-current row/column).
+pub(crate) fn stamp_two_terminal(size: usize, a: &mut [f64], b: &mut [f64], pin_a: &DynPin, pin_b: &DynPin, g: f64, ieq: f64) {
+    if g == 0.0 && ieq == 0.0 {
+        return;
+    }
+    match (pin_a.local, pin_b.local) {
+        (Some(la), Some(lb)) => {
+            a[la * size + la] += g;
+            a[lb * size + lb] += g;
+            a[la * size + lb] -= g;
+            a[lb * size + la] -= g;
+            b[la] -= ieq;
+            b[lb] += ieq;
+        }
+        (Some(la), None) => {
+            a[la * size + la] += g;
+            b[la] += g * pin_b.fixed - ieq;
+        }
+        (None, Some(lb)) => {
+            a[lb * size + lb] += g;
+            b[lb] += g * pin_a.fixed + ieq;
+        }
+        (None, None) => {}
+    }
+}
+
+/// The current flowing `pin_a -> pin_b` through a branch stamped by
+/// [`stamp_two_terminal`] with the same `(g, ieq)`, given both terminals'
+/// resolved voltages.
+pub(crate) fn branch_current(g: f64, ieq: f64, va: f64, vb: f64) -> f64 {
+    g * (va - vb) + ieq
+}
+
+/// One capacitor terminal's contribution to an `M_SOURCE`-style branch-
+/// current row/column `r` (`sign = 1.0` for `pins[0]`, `-1.0` for `pins[1]`):
+/// `A[r,local] += sign; A[local,r] += sign` when free, `b[r] -= sign*fixed`
+/// when fixed (pec3.mjs `:386-388`). Shared by `closed_form::build_segment`
+/// (one capacitor, swept over `vc=0/1`) and `stepped::solve_initial_x`
+/// (every capacitor in the partition, evaluated once at its own current
+/// committed `vc`) — both replace a capacitor with an ideal source in series
+/// with its `esr` to solve the REST of the network exactly, just for
+/// different reasons.
+pub(crate) fn stamp_branch_terminal(a: &mut [f64], b: &mut [f64], size: usize, r: usize, pin: &DynPin, sign: f64) {
+    match pin.local {
+        Some(l) => {
+            a[l * size + r] += sign;
+            a[r * size + l] += sign;
+        }
+        None => {
+            b[r] -= sign * pin.fixed;
+        }
+    }
+}
+
+/// A resolved [`DynPin`]'s current voltage, given the partition's own local
+/// solution vector `x` (only valid for entries `0..n`).
+pub(crate) fn pin_voltage(pin: &DynPin, x: &[f64]) -> f64 {
+    match pin.local {
+        Some(l) => x[l],
+        None => pin.fixed,
+    }
+}
+
+/// A resolved [`DynPin`]'s current voltage read from the GLOBAL, PUBLISHED
+/// `voltages` array (`shape.nodes[l]` for a free pin) rather than a local
+/// solution vector — used once a partition's own free nodes have already
+/// been written into the shared array (`closed_form`/`stepped` publishing
+/// their own capacitor's terminal voltages for its leakage/series current,
+/// after already having written every node this same call).
+pub(crate) fn pin_voltage_global(pin: &DynPin, shape: &DynShape, voltages: &[f64]) -> f64 {
+    match pin.local {
+        Some(l) => voltages[shape.nodes[l]],
+        None => pin.fixed,
+    }
+}
+
+/// Looks up a [`DynStamped`] device's CURRENT params: `live_params` (keyed by
+/// device index — `PartitionedSolver`'s single canonical, mutable copy of
+/// every switch-family device's live state) when present, `stamped.params`
+/// (the load-time snapshot, correct forever for a resistor) otherwise.
+pub(crate) fn live_params_for<'a>(stamped: &'a DynStamped, live_params: &'a HashMap<usize, Vec<f64>>) -> &'a [f64] {
+    live_params.get(&stamped.device_index).map(|v| v.as_slice()).unwrap_or(&stamped.params)
+}
+
+/// Stamps every resistor, capacitor-leakage and switch-contact conductance
+/// in `shape` — the partition's capacitor-companion-INDEPENDENT linear part
+/// — into `a`/`b` (`size x size` / `size`, `size >= shape.n`), plus the node
+/// shunt (core/README.md, "W0 kernel semantics", point 2) on every local
+/// row. Shared by `closed_form`'s segment solve and `stepped`'s BE/trap
+/// companion solve, which differ only in how they additionally stamp the
+/// capacitor(s) themselves on top of this.
+pub(crate) fn stamp_linear_base(shape: &DynShape, size: usize, a: &mut [f64], b: &mut [f64], live_params: &HashMap<usize, Vec<f64>>) {
+    for l in 0..shape.n {
+        a[l * size + l] += static_part::NODE_RSHUNT_G;
+    }
+    for s in &shape.stamped {
+        let params = live_params_for(s, live_params);
+        for c in devices::stamp(s.kind, s.pins.len(), params) {
+            stamp_two_terminal(size, a, b, &s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, 0.0);
+        }
+    }
+    for cap in &shape.capacitors {
+        if cap.leak_g != 0.0 {
+            stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], cap.leak_g, 0.0);
+        }
+    }
+}
+
+/// Publishes every resistor's and switch-family device's OWN current
+/// (core/README.md's "Currents" rules — a resistor is `(Va-Vb)/R`, a switch
+/// kind is the sum of its own closed contacts' currents) for every
+/// [`DynStamped`] device in `shape`, given the ALREADY-PUBLISHED global
+/// `voltages` (every free node in `shape` must already be written into it —
+/// both `closed_form` and `stepped` call this only after their own node-
+/// voltage publish). Shared by both dynamic solvers: neither published this
+/// at all before W1b's own review caught it — `PartitionedSolver`'s
+/// `recompute_source_currents` only ever reads a device's current back OUT
+/// (to fold into a `voltage_source`'s KCL), it never computes one for a
+/// device that isn't itself a source, so a resistor/switch inside a dynamic
+/// partition had no path to `bo_engine_device_currents` at all until this
+/// existed.
+pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_params: &HashMap<usize, Vec<f64>>, currents: &mut [f64]) {
+    for s in &shape.stamped {
+        let params = live_params_for(s, live_params);
+        let mut total = 0.0;
+        for c in devices::stamp(s.kind, s.pins.len(), params) {
+            let (va, vb) = (pin_voltage_global(&s.pins[c.pin_a], shape, voltages), pin_voltage_global(&s.pins[c.pin_b], shape, voltages));
+            total += c.conductance * (va - vb);
+        }
+        currents[s.device_index] = total;
+    }
+}
+
+// ============================================================================
+// PartitionedSolver: the composite W1b step 2 solver.
+// ============================================================================
+//
+// One `PartitionSolver` covering every partition kind `partition::build` can
+// produce: a `Static` partition's electrical solve stays entirely
+// `static_part::StaticPartitionSolver`'s (untouched by this module beyond
+// which devices it is even handed, `static_part.rs`'s own module doc), a
+// `ClosedForm` one is `closed_form::ClosedFormSolver`'s, a `Stepped` one is
+// `stepped::SteppedSolver`'s. This struct's own job is purely dispatch and
+// the pieces that genuinely cross partition boundaries:
+// - the SHARED `voltages`/`currents` arrays every `bo_engine_*` readout
+//   reads (`closed_form`/`stepped` write directly into them; a `Static`
+//   resolve's results are copied in from `StaticPartitionSolver`'s own,
+//   separately-owned arrays afterward, [`Self::copy_in_static`]);
+// - a `voltage_source`'s published current, which needs the FULL, global
+//   picture of every OTHER device's current at its fixed neighbour nodes
+//   ([`Self::recompute_source_currents`]) — `StaticPartitionSolver`'s own
+//   version of this same KCL walk only ever saw its own (now filtered-down)
+//   resistor/switch list, so it is authoritative only for a purely static
+//   program; this solver's version is authoritative for every program;
+// - a switch-family device's live parameters ([`Self::live_params`]), a
+//   SINGLE canonical, mutable copy this solver owns outright — not
+//   duplicated per sub-solver — that `closed_form`/`stepped` are simply
+//   handed by reference at stamp time, and `StaticPartitionSolver`'s OWN
+//   separate copy (for a `Static`-owned switch) is kept in sync by
+//   [`PartitionSolver::apply_params`]'s dispatcher.
+
+/// Which sub-solver owns a device (by its free pin's partition, or
+/// `Static` for a device with no free pin at all — the same "belongs to no
+/// dynamic partition" rule `static_part.rs`'s `owned_by_static` applies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    Static,
+    ClosedForm(usize),
+    Stepped(usize),
+}
+
+/// A resistor or switch-family device, program-wide, kept for the
+/// source-current KCL walk ([`PartitionedSolver::recompute_source_currents`])
+/// and for copying a `Static`-owned one's current out of
+/// `StaticPartitionSolver` after it resolves.
+struct KclDevice {
+    device_index: usize,
+    kind: u32,
+    nodes: Vec<usize>,
+    /// The load-time snapshot — correct forever for a resistor (no live
+    /// params); for a switch-family device, only a FALLBACK, overridden by
+    /// `PartitionedSolver::live_params` at every actual use.
+    params: Vec<f64>,
+    owner: Owner,
+}
+
+/// A switch-family device's dispatch metadata for
+/// `PartitionSolver::validate_params`/`apply_params`/`param_value`.
+struct SwitchInfo {
+    kind: u32,
+    pin_count: usize,
+    owner: Owner,
+}
+
+/// The composite solver `engine.rs`'s `Engine::load` builds and boxes as
+/// `Box<dyn PartitionSolver>` (`solve::PartitionedSolver::build`).
+pub struct PartitionedSolver {
+    voltages: Vec<f64>,
+    currents: Vec<f64>,
+    resolved: Vec<partition::ResolvedSource>,
+    local_index: Vec<Option<(usize, usize)>>,
+    partition_kinds: Vec<PartitionKind>,
+    /// Every node whose owning partition is `Static` — [`Self::copy_in_static`]
+    /// copies exactly these out of `StaticPartitionSolver`'s own array after
+    /// it resolves (never a dynamic node, which `StaticPartitionSolver` never
+    /// writes at all after `static_part.rs`'s W1b step 2 device filter).
+    static_nodes: Vec<usize>,
+    static_solver: static_part::StaticPartitionSolver,
+    closed_form: closed_form::ClosedFormSolver,
+    stepped: stepped::SteppedSolver,
+    /// Every resistor and switch-family device, program-wide (this module's
+    /// doc comment).
+    kcl_devices: Vec<KclDevice>,
+    /// device index -> dispatch metadata, for every switch-family device
+    /// only (a resistor/capacitor/voltage_source never takes a live param).
+    switches: HashMap<usize, SwitchInfo>,
+    /// The single canonical, mutable copy of every switch-family device's
+    /// CURRENT params (this module's doc comment).
+    live_params: HashMap<usize, Vec<f64>>,
+    /// Every capacitor device, program-wide: `(device_index, pins[0] node,
+    /// pins[1] node)`, for folding its ALREADY-PUBLISHED current into
+    /// [`Self::recompute_source_currents`]'s `leaving` array.
+    cap_devices: Vec<(usize, usize, usize)>,
+    /// Crossing/step events a dynamic partition asked to be scheduled since
+    /// the last [`PartitionSolver::take_scheduled`] drain.
+    pending_schedule: Vec<(f64, EventKind)>,
+    largest_partition: usize,
+    /// Contract stat 15 (not yet in the ABI table — see
+    /// `partition::PartitionBuild::multi_capacitor_partitions`'s doc
+    /// comment).
+    multi_capacitor_linear_partitions: f64,
+}
+
+impl PartitionedSolver {
+    pub fn build(program: &Program) -> Result<Self, BoError> {
+        let pb = partition::build(program)?;
+        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions } = pb;
+
+        let node_count = program.node_count;
+        let device_count = program.devices.len();
+        let mut voltages = vec![0.0; node_count];
+        for (node, v) in fixed.iter().enumerate() {
+            if let Some(v) = v {
+                voltages[node] = *v;
+            }
+        }
+        let currents = vec![0.0; device_count];
+
+        let static_nodes: Vec<usize> =
+            (0..node_count).filter(|&n| matches!(local_index[n], Some((p, _)) if partition_kinds[p] == PartitionKind::Static)).collect();
+
+        let owner_of = |device: &crate::program::Device| -> Owner {
+            match device.pins.iter().find_map(|p| local_index[p.node].map(|(pi, _)| (pi, partition_kinds[pi]))) {
+                Some((p, PartitionKind::ClosedForm)) => Owner::ClosedForm(p),
+                Some((p, PartitionKind::Stepped)) => Owner::Stepped(p),
+                _ => Owner::Static, // no free pin, or its free pin(s) are Static-owned.
+            }
+        };
+
+        let mut switches = HashMap::new();
+        let mut live_params = HashMap::new();
+        let mut kcl_devices = Vec::new();
+        let mut cap_devices = Vec::new();
+
+        for (d, device) in program.devices.iter().enumerate() {
+            match device.kind {
+                kinds::RESISTOR => {
+                    let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
+                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, params: device.params.clone(), owner: owner_of(device) });
+                }
+                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+                    let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
+                    let pin_count = nodes.len();
+                    let owner = owner_of(device);
+                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, params: device.params.clone(), owner });
+                    switches.insert(d, SwitchInfo { kind: device.kind, pin_count, owner });
+                    live_params.insert(d, device.params.clone());
+                }
+                kinds::CAPACITOR => {
+                    cap_devices.push((d, device.pins[0].node, device.pins[1].node));
+                }
+                _ => {}
+            }
+        }
+
+        let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
+
+        let static_solver = static_part::StaticPartitionSolver::build(program)?;
+        let closed_form = closed_form::ClosedFormSolver::build(program, &partitions, &local_index, &fixed, &partition_kinds);
+        let stepped = stepped::SteppedSolver::build(program, &partitions, &local_index, &fixed, &partition_kinds);
+
+        let _ = device_count; // documents intent; `currents` is already sized from it above.
+
+        Ok(PartitionedSolver {
+            voltages,
+            currents,
+            resolved,
+            local_index,
+            partition_kinds,
+            static_nodes,
+            static_solver,
+            closed_form,
+            stepped,
+            kcl_devices,
+            switches,
+            live_params,
+            cap_devices,
+            pending_schedule: Vec::new(),
+            largest_partition,
+            multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
+        })
+    }
+
+    /// Contract stat 0: every partition, of any kind.
+    pub fn partition_count(&self) -> usize {
+        self.partition_kinds.len()
+    }
+
+    /// Contract stat 1: `Static`-classified partitions only — each one
+    /// actually gets one dense LU solve at load, exactly as W0's "static
+    /// solves" meant before dynamic partitions existed at all. A `ClosedForm`
+    /// partition's segment build and a `Stepped` partition's first plan are
+    /// their own kind of "solve" but not this one, since it names the SAME
+    /// static-partition mechanism the pre-W1b contract already described.
+    pub fn static_solve_count(&self) -> usize {
+        self.partition_kinds.iter().filter(|k| **k == PartitionKind::Static).count()
+    }
+
+    /// Contract stat 2: the largest partition (any kind) by node count.
+    pub fn largest_partition(&self) -> usize {
+        self.largest_partition
+    }
+
+    /// Contract stat 3: every fixed node, node 0 included.
+    pub fn fixed_count(&self) -> usize {
+        self.local_index.iter().filter(|x| x.is_none()).count()
+    }
+
+    pub fn multi_capacitor_linear_partitions(&self) -> f64 {
+        self.multi_capacitor_linear_partitions
+    }
+
+    pub fn closed_form_segments(&self) -> f64 {
+        self.closed_form.segments_built()
+    }
+
+    pub fn crossings(&self) -> f64 {
+        self.closed_form.crossings()
+    }
+
+    pub fn stepped_steps(&self) -> f64 {
+        self.stepped.steps_taken()
+    }
+
+    pub fn newton_iterations(&self) -> f64 {
+        self.stepped.newton_iterations()
+    }
+
+    /// The crossing-watch API's entry point (W1 plan row B2): registers
+    /// `reader` against `thresholds` on `node`, dispatching to whichever
+    /// dynamic sub-solver owns it. `false` for a node this solver has no
+    /// dynamic-partition record of at all (a fixed node, or a `Static`
+    /// partition's — see `closed_form`/`stepped`'s own `watch_node` doc
+    /// comment for why only a dynamic partition's node is ever a valid
+    /// target).
+    pub fn watch_node(&mut self, node: usize, reader: DeviceId, thresholds: ThresholdFn) -> bool {
+        match self.local_index.get(node).copied().flatten() {
+            Some((p, _)) => match self.partition_kinds.get(p) {
+                Some(PartitionKind::ClosedForm) => self.closed_form.watch_node(node, reader, thresholds),
+                Some(PartitionKind::Stepped) => self.stepped.watch_node(node, reader, thresholds),
+                _ => false,
+            },
+            None => false,
+        }
+    }
+
+    fn copy_in_static(&mut self) {
+        for &node in &self.static_nodes {
+            self.voltages[node] = self.static_solver.voltages()[node];
+        }
+        for kd in &self.kcl_devices {
+            if kd.owner == Owner::Static {
+                self.currents[kd.device_index] = self.static_solver.currents()[kd.device_index];
+            }
+        }
+    }
+
+    /// The authoritative `voltage_source` current computation for the WHOLE
+    /// program (this module's doc comment): rebuilds the KCL `leaving`
+    /// array from every resistor/switch contact (`devices::stamp`, live
+    /// params) plus every capacitor's ALREADY-PUBLISHED total current, then
+    /// walks `resolved` children-before-parents exactly as
+    /// `static_part::StaticPartitionSolver::recompute_currents` does for a
+    /// purely static program. Always run, even with nothing dirty this call
+    /// (a live-parameter change elsewhere can still move a source's
+    /// current), mirroring that method's own "recomputed unconditionally"
+    /// contract.
+    fn recompute_source_currents(&mut self) {
+        let mut leaving = vec![0.0; self.voltages.len()];
+        for kd in &self.kcl_devices {
+            let params: &[f64] = self.live_params.get(&kd.device_index).map(|v| v.as_slice()).unwrap_or(&kd.params);
+            for c in devices::stamp(kd.kind, kd.nodes.len(), params) {
+                let (u, w) = (kd.nodes[c.pin_a], kd.nodes[c.pin_b]);
+                let i = c.conductance * (self.voltages[u] - self.voltages[w]);
+                leaving[u] += i;
+                leaving[w] -= i;
+            }
+        }
+        for (node, v) in self.voltages.iter().enumerate().skip(1) {
+            leaving[node] += static_part::NODE_RSHUNT_G * v;
+        }
+        for &(d, u, w) in &self.cap_devices {
+            let i = self.currents[d];
+            leaving[u] += i;
+            leaving[w] -= i;
+        }
+        let mut extra = vec![0.0; self.voltages.len()];
+        for r in self.resolved.iter().rev() {
+            let total = leaving[r.child_node] + extra[r.child_node];
+            let child_is_pos = !r.parent_is_pos;
+            let i_s = if child_is_pos { -total } else { total };
+            self.currents[r.device_index] = i_s;
+            let contribution = if r.parent_is_pos { i_s } else { -i_s };
+            extra[r.parent_node] += contribution;
+        }
+    }
+
+    fn drain_scheduled(&mut self) {
+        for (t, p, v) in self.closed_form.take_scheduled() {
+            self.pending_schedule.push((t, EventKind::Crossing { partition: PartitionId(p as u32), version: v }));
+        }
+        for (t, p, v) in self.stepped.take_scheduled() {
+            self.pending_schedule.push((t, EventKind::Step { partition: PartitionId(p as u32), version: v }));
+        }
+    }
+
+    fn check_finite(&self) -> Result<(), String> {
+        if let Some((node, v)) = self.voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(format!("node {node}: published voltage {v} is not finite"));
+        }
+        if let Some((device, i)) = self.currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
+            return Err(format!("device {device}: published current {i} is not finite"));
+        }
+        Ok(())
+    }
+}
+
+impl PartitionSolver for PartitionedSolver {
+    fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+        let mut static_ids = Vec::new();
+        let mut cf_ids = Vec::new();
+        let mut st_ids = Vec::new();
+        for &pid in dirty {
+            let p = pid.0 as usize;
+            match self.partition_kinds.get(p) {
+                Some(PartitionKind::Static) => static_ids.push(pid),
+                Some(PartitionKind::ClosedForm) => cf_ids.push(p),
+                Some(PartitionKind::Stepped) => st_ids.push(p),
+                None => {}
+            }
+        }
+
+        // `StaticPartitionSolver::resolve_dirty` recomputes every resistor/
+        // switch current UNCONDITIONALLY, even for a device with no
+        // partition at all (both terminals fixed) — so it (and the copy-in
+        // that reads its result) must run every call, not only when
+        // `static_ids` is non-empty, exactly mirroring that method's own
+        // "recomputed unconditionally" contract (`static_part.rs`'s doc
+        // comment on `resolve_dirty`). `closed_form`/`stepped` have no such
+        // side effect for an empty id list, so calling them unconditionally
+        // too is simply a cheap no-op, kept for symmetry.
+        let mut readers = Vec::new();
+        readers.extend(self.static_solver.resolve_dirty(&static_ids, now, drivers)?);
+        self.copy_in_static();
+        readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        readers.extend(self.stepped.resolve_dirty(&st_ids, now, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        self.recompute_source_currents();
+        self.drain_scheduled();
+        self.check_finite()?;
+        Ok(readers)
+    }
+
+    fn voltages(&self) -> &[f64] {
+        &self.voltages
+    }
+
+    fn currents(&self) -> &[f64] {
+        &self.currents
+    }
+
+    fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
+        self.voltages = snapshot.0;
+        self.currents = snapshot.1;
+    }
+
+    fn set_no_solution_cache(&mut self, off: bool) {
+        self.static_solver.set_no_solution_cache(off);
+    }
+
+    fn cache_hits(&self) -> f64 {
+        self.static_solver.cache_hits()
+    }
+
+    fn closed_form_segments(&self) -> f64 {
+        PartitionedSolver::closed_form_segments(self)
+    }
+
+    fn crossings(&self) -> f64 {
+        PartitionedSolver::crossings(self)
+    }
+
+    fn stepped_steps(&self) -> f64 {
+        PartitionedSolver::stepped_steps(self)
+    }
+
+    fn newton_iterations(&self) -> f64 {
+        PartitionedSolver::newton_iterations(self)
+    }
+
+    fn validate_params(&self, triples: &[(usize, usize, f64)]) -> Result<(), String> {
+        for &(device_index, param_index, value) in triples {
+            if !value.is_finite() {
+                return Err(format!("device {device_index} param {param_index}: value {value} is not finite"));
+            }
+            let info = self.switches.get(&device_index).ok_or_else(|| format!("device {device_index}: has no live parameters"))?;
+            let shape = kinds::shape(info.kind).expect("a tracked switch device always has a known kind code");
+            if !shape.live_params.contains(&param_index) {
+                return Err(format!("device {device_index} ({}): param {param_index} is not live", shape.name));
+            }
+            let params = self.live_params.get(&device_index).expect("every switch in `switches` has a `live_params` entry");
+            if param_index >= params.len() {
+                return Err(format!("device {device_index} ({}): param index {param_index} out of range", shape.name));
+            }
+            let mut new_params = params.clone();
+            new_params[param_index] = value;
+            (shape.check)(info.pin_count, &new_params).map_err(|msg| format!("device {device_index} ({}): {msg}", shape.name))?;
+        }
+        Ok(())
+    }
+
+    fn apply_params(&mut self, triples: &[(usize, usize, f64)]) -> Vec<PartitionId> {
+        let mut touched = BTreeSet::new();
+        let mut static_triples = Vec::new();
+        for &(device_index, param_index, value) in triples {
+            if let Some(params) = self.live_params.get_mut(&device_index) {
+                params[param_index] = value;
+            }
+            if let Some(info) = self.switches.get(&device_index) {
+                match info.owner {
+                    Owner::Static => static_triples.push((device_index, param_index, value)),
+                    Owner::ClosedForm(p) | Owner::Stepped(p) => {
+                        touched.insert(PartitionId(p as u32));
+                    }
+                }
+            }
+        }
+        if !static_triples.is_empty() {
+            touched.extend(self.static_solver.apply_params(&static_triples));
+        }
+        touched.into_iter().collect()
+    }
+
+    fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
+        self.live_params.get(&device_index)?.get(param_index).copied()
+    }
+
+    fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
+        Box::new((self.closed_form.snapshot(), self.stepped.snapshot()))
+    }
+
+    fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        if let Ok(boxed) = snapshot.downcast::<(closed_form::Snapshot, stepped::Snapshot)>() {
+            let (cf, st) = *boxed;
+            self.closed_form.restore(cf);
+            self.stepped.restore(st);
+        }
+    }
+
+    fn take_scheduled(&mut self) -> Vec<(f64, EventKind)> {
+        std::mem::take(&mut self.pending_schedule)
+    }
+
+    fn is_current(&self, partition: PartitionId, is_crossing: bool, version: Version) -> bool {
+        let p = partition.0 as usize;
+        if is_crossing {
+            self.closed_form.is_current(p, version)
+        } else {
+            self.stepped.is_current(p, version)
+        }
+    }
+
+    fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
+        let p = partition.0 as usize;
+        let readers = if is_crossing {
+            self.closed_form.handle_crossing(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
+        } else {
+            self.stepped.handle_step(p, now, &self.live_params, &mut self.voltages, &mut self.currents)?
+        };
+        self.recompute_source_currents();
+        self.drain_scheduled();
+        self.check_finite()?;
+        Ok(readers)
+    }
+
+    fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
+        self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
+        let readers = self.stepped.sync_to(t_end, &self.live_params, &mut self.voltages, &mut self.currents)?;
+        self.recompute_source_currents();
+        self.drain_scheduled();
+        self.check_finite()?;
+        Ok(readers)
+    }
+}
+
+#[cfg(test)]
+mod partitioned_solver_tests {
+    use super::*;
+    use crate::drivers::Driver;
+    use crate::kernel::Kernel;
+    use crate::program::{Device, Options, PinRecord};
+
+    fn pin(node: usize) -> PinRecord {
+        PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
+    }
+    fn source(ci: usize, pos: usize, neg: usize, v: f64) -> Device {
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: ci, pins: vec![pin(pos), pin(neg)], params: vec![v], blob: vec![] }
+    }
+    fn resistor(ci: usize, a: usize, b: usize, r: f64) -> Device {
+        Device { kind: kinds::RESISTOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![r], blob: vec![] }
+    }
+    fn switch_dev(ci: usize, a: usize, b: usize, closed: f64) -> Device {
+        Device { kind: kinds::SWITCH, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![closed], blob: vec![] }
+    }
+    fn capacitor(ci: usize, a: usize, b: usize, c: f64, esr: f64, leak: f64) -> Device {
+        Device { kind: kinds::CAPACITOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![c, esr, leak], blob: vec![] }
+    }
+    fn program(node_count: usize, devices: Vec<Device>) -> Program {
+        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    }
+
+    /// node0=gnd, node1=source(+, 5V), node2=RC midpoint. A switch in
+    /// parallel with the resistor (node1-node2) changes the surrounding
+    /// resistive network when toggled, but must not move the capacitor's own
+    /// terminal voltage (esr=0, so that terminal EQUALS `vc` exactly,
+    /// mathematically continuous by construction) even a single bit.
+    fn rc_with_parallel_switch_program() -> Program {
+        program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), switch_dev(2, 1, 2, 0.0), capacitor(3, 2, 0, 1e-6, 0.0, 0.0)])
+    }
+
+    /// `test/fixtures/core/13-rc-switch-toggle.sim.json`'s exact topology: the
+    /// switch sits IN SERIES before the resistor (not in parallel with it, as
+    /// `a_switch_toggle_does_not_step_the_capacitors_terminal_voltage` above
+    /// uses), so the partition has TWO free nodes (the switch/resistor
+    /// junction, and the capacitor's own pin) — proving the continuity fix
+    /// (`closed_form::fix_branch_terminals_exactly`) holds for that shape
+    /// too, not only the simplest one-free-node case. Driven through 40
+    /// repeated 1ms horizon-clamp calls before and after the toggle, exactly
+    /// like `test/core/equivalence/stimuli.ts`'s `replayStimuliOnCore` fixed-
+    /// step replay (never a single jump), since that is the ACTUAL path the
+    /// TS-side equivalence suite drives a stimulus phase through.
+    #[test]
+    fn a_series_switch_toggle_leaves_a_two_free_node_partitions_capacitor_pin_bit_exact() {
+        let p = program(4, vec![source(0, 1, 0, 5.0), switch_dev(1, 1, 2, 1.0), resistor(2, 2, 3, 100000.0), capacitor(3, 3, 0, 1e-6, 0.0, 0.0)]);
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[PartitionId(0)], 0.0, &[]).unwrap();
+        for step in 1..=40 {
+            solver.sync_dynamic_to(step as f64 * 1e-3).unwrap();
+        }
+        let before = solver.voltages()[3];
+        assert!(before > 1.0 && before < 2.0, "expected a partially-charged node, got {before}");
+
+        let touched = solver.apply_params(&[(1, 0, 0.0)]); // open the switch, mirroring `{closed: 0}`.
+        assert_eq!(touched, vec![PartitionId(0)]);
+        solver.resolve_dirty(&touched, 40e-3, &[]).unwrap();
+        let after = solver.voltages()[3];
+        assert_eq!(before.to_bits(), after.to_bits(), "the capacitor's own pin (esr=0, its other terminal grounded) must not step across the toggle: before={before} after={after}");
+
+        // And it stays frozen afterward (no path to the source remains, only
+        // the universal node shunt's ~1e6 s decay — utterly negligible over
+        // 40 more ms).
+        for step in 1..=40 {
+            solver.sync_dynamic_to(40e-3 + step as f64 * 1e-3).unwrap();
+        }
+        assert!((solver.voltages()[3] - after).abs() < 1e-6, "expected the held charge to stay essentially frozen for 40ms, moved by {}", solver.voltages()[3] - after);
+    }
+
+    #[test]
+    fn a_switch_toggle_does_not_step_the_capacitors_terminal_voltage() {
+        let p = rc_with_parallel_switch_program();
+        let mut solver = PartitionedSolver::build(&p).unwrap();
+        solver.resolve_dirty(&[PartitionId(0)], 0.0, &[]).unwrap();
+
+        // Advance (via the same horizon-clamp path `Kernel::advance` uses)
+        // to a time partway through the charge, so `vc` is a nontrivial,
+        // nonzero value when the toggle lands — not merely unchanged because
+        // it never moved off its initial 0.
+        solver.sync_dynamic_to(5e-4).unwrap();
+        let before = solver.voltages()[2];
+        assert!(before > 0.1 && before < 5.0, "expected a partially-charged node, got {before}");
+
+        // Toggle the switch (device index 2) closed, exactly as
+        // `Kernel::apply_params_as_event` would dispatch a live
+        // `bo_engine_set_params` call: mutate, then resolve the touched
+        // partition(s) at the current time.
+        let touched = solver.apply_params(&[(2, 0, 1.0)]);
+        assert_eq!(touched, vec![PartitionId(0)]);
+        solver.resolve_dirty(&touched, 5e-4, &[]).unwrap();
+
+        let after = solver.voltages()[2];
+        assert_eq!(before.to_bits(), after.to_bits(), "a capacitor's terminal voltage (esr=0) must not step across a re-aim: before={before} after={after}");
+    }
+
+    #[test]
+    fn a_switch_toggle_via_set_params_style_dispatch_reaims_and_cancels_the_old_crossing() {
+        let p = rc_with_parallel_switch_program();
+        let solver = PartitionedSolver::build(&p).unwrap();
+        struct NoDevices;
+        impl crate::kernel::DeviceEvaluator for NoDevices {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+                Vec::new()
+            }
+        }
+        let mut kernel = Kernel::new(solver, NoDevices);
+        kernel.settle(0.0, &[PartitionId(0)], &[]).unwrap();
+
+        // Register a watcher on the RC node (device index 2, the switch, is
+        // reused here only as an arbitrary `DeviceId` stand-in — no real
+        // reader kind exists in W1b) so a crossing actually gets scheduled.
+        assert!(kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| vec![Threshold { value: 3.0, rising: true }])));
+        // Re-aim through the KERNEL (not the solver directly) so the
+        // resulting schedule is actually DRAINED onto its heap
+        // (`Kernel::drain_scheduled`, called from `apply_params_as_event`'s
+        // `run_deltas`) — setting the switch to the value it already holds
+        // still dirties the partition (`PartitionedSolver::apply_params`
+        // always reports the touched partition) without changing anything
+        // electrically, so this purely "picks up" the newly-registered
+        // watcher.
+        kernel.apply_params_as_event(&[(2, 0, 0.0)]).unwrap();
+
+        let before_next = kernel.next_event_time();
+        assert!(before_next.is_finite(), "expected a crossing to be scheduled");
+
+        // The toggle (`bo_engine_set_params`'s dispatch, `Engine::set_params`
+        // -> `Kernel::apply_params_as_event`) re-aims the partition, which
+        // must cancel the old crossing.
+        let validate_ok = kernel.solver().validate_params(&[(2, 0, 1.0)]);
+        assert!(validate_ok.is_ok());
+        kernel.apply_params_as_event(&[(2, 0, 1.0)]).unwrap();
+
+        // The stale crossing must no longer be current — `next_event_time`
+        // silently drops it and reports whatever the NEW re-aim scheduled
+        // (or infinity, if the new segment's asymptote no longer reaches the
+        // threshold).
+        let after_next = kernel.next_event_time();
+        assert_ne!(before_next, after_next, "the re-aim must have cancelled the stale crossing, not left it in place");
+    }
+
+    #[test]
+    fn a_failed_advance_rolls_back_dynamic_state_including_committed_vc() {
+        let p = rc_with_parallel_switch_program();
+        let solver = PartitionedSolver::build(&p).unwrap();
+
+        // A driver assigned to the RC partition's own id, oscillating
+        // forever: every commit marks partition 0 dirty, forcing a real
+        // re-aim (bumping the segment's version) each delta pass, without
+        // ever letting the instant settle — a livelock, exactly like
+        // `kernel.rs`'s own `an_oscillating_zero_delay_pair_hits_the_cap_...`
+        // test, but against the REAL dynamic solver instead of a mock, so
+        // this also proves `dynamic_snapshot`/`dynamic_restore` are actually
+        // wired into `Kernel::advance`'s rollback.
+        use crate::events::Mode::{High, Low};
+        struct OscillatingEvaluator {
+            driver: crate::events::DriverId,
+            next: crate::events::Mode,
+        }
+        impl crate::kernel::DeviceEvaluator for OscillatingEvaluator {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool) -> Vec<crate::kernel::DriverRequest> {
+                let level = self.next;
+                self.next = if level == High { Low } else { High };
+                vec![crate::kernel::DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+            }
+        }
+        let d0 = crate::events::DriverId(0);
+        let mut kernel = Kernel::new(solver, OscillatingEvaluator { driver: d0, next: High });
+        kernel.settle(0.0, &[PartitionId(0)], &[]).unwrap();
+
+        // A watcher (returning no thresholds — it exists purely to make this
+        // partition report a reader on every resolve) so the oscillating
+        // evaluator actually gets invoked at all: `resolve_dirty`'s returned
+        // readers come only from `part.watches`, and with none registered
+        // the delta cycle would settle after the very first commit with
+        // nothing left to oscillate.
+        kernel.solver_mut().watch_node(2, DeviceId(0), Box::new(|| Vec::<Threshold>::new()));
+
+        // Advance for real first, so `vc`/the published node voltage is a
+        // genuine nonzero mid-charge value, not merely its untouched initial
+        // 0 — a rollback that "changes nothing" either way would not prove
+        // anything. The segment built once at `settle` (version 1) is never
+        // re-aimed by this plain advance (no crossing was scheduled: the
+        // watcher above reports no thresholds, and the horizon clamp's own
+        // `ClosedFormSolver::publish_at` is a pure read that never bumps the
+        // version).
+        kernel.advance(5e-4).unwrap();
+        let committed_voltage = kernel.solver().voltages()[2];
+        assert!(committed_voltage > 0.1 && committed_voltage < 5.0);
+        let current_version = 1u64;
+        assert!(kernel.solver().is_current(PartitionId(0), true, current_version));
+
+        assert_eq!(kernel.add_driver(Driver::new(1, 100, 101, 1.0, 1.0, 0.0), PartitionId(0)), d0);
+        kernel.request_driver(d0, Low, kernel.time(), 0.0);
+
+        let err = kernel.advance(kernel.time()).unwrap_err();
+        assert!(matches!(err, crate::kernel::KernelError::Livelock { .. }));
+
+        // Rolled all the way back: time, the published voltage AND the
+        // segment's own version (proof that `dynamic_restore`, not just the
+        // plain `voltages`/`currents` snapshot, actually ran).
+        assert_eq!(kernel.solver().voltages()[2].to_bits(), committed_voltage.to_bits());
+        assert!(kernel.solver().is_current(PartitionId(0), true, current_version), "the segment's version must be rolled back too, not left at whatever the livelock's last re-aim bumped it to");
+    }
+}
+

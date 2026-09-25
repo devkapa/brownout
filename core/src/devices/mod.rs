@@ -11,10 +11,17 @@
 //! vtable and costs nothing extra.
 //!
 //! Designed to grow, not to change shape:
-//! - W1b step 2's capacitor keeps exactly this `stamp`/`current` pair, and
-//!   only starts returning a nonzero [`Contribution::injection`] for its
-//!   BE/trap companion's history current (`Ihist`) — nothing here needs
-//!   touching for that.
+//! - W1b step 2's capacitor is the first exception to "kind code in, stamp
+//!   out": its BE/trap companion (spec §7.4) depends on DYNAMIC history (the
+//!   step size `h`, the last committed terminal voltage, and — for trap —
+//!   the last accepted series current) that `stamp`/`current`'s signatures
+//!   below have no way to carry, so it is deliberately NOT dispatched
+//!   through them. Only its LEAKAGE — a plain, params-only shunt, exactly
+//!   like a resistor — goes through the ordinary `stamp` dispatch below;
+//!   `solve::closed_form`/`solve::stepped` call
+//!   `devices::passives::capacitor_be_companion`/`capacitor_trap_companion`
+//!   directly, with the history only they own. See `passives.rs`'s module
+//!   doc comment.
 //! - W1c's IC output stages are NOT behind this API at all: an IC output is
 //!   a [`crate::drivers::Driver`], an inertial, event-scheduled entity the
 //!   kernel itself must own the commit/reset lifecycle of
@@ -57,9 +64,14 @@ impl Contribution {
 /// any kind not listed here (a `voltage_source`'s contribution is fixed-node
 /// propagation, not a matrix stamp — `partition::derive_fixed_nodes` — and a
 /// digital driver is not this API at all; see the module doc).
+///
+/// `CAPACITOR` here is its LEAKAGE ONLY (a plain shunt, exactly like a
+/// resistor) — its ESR/BE/trap companion is not a function of `params`
+/// alone and is never reached through this dispatch; see the module doc.
 pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
     match kind {
         kinds::RESISTOR => passives::stamp(params),
+        kinds::CAPACITOR => passives::leakage_stamp(params),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::stamp(kind, pin_count, params),
         _ => Vec::new(),
     }
@@ -67,6 +79,14 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
 
 /// This device's published current (`elementI`), given each of its own
 /// pins' current voltage (parallel to the device's `pins`).
+///
+/// `CAPACITOR` is deliberately absent (falls to the `0.0` default): its real
+/// current (series plus leakage, spec §7.4) needs the dynamic history this
+/// signature cannot carry, so `solve::closed_form`/`solve::stepped` publish
+/// it directly into the shared currents array instead of through this
+/// function — mirroring how `StaticPartitionSolver::recompute_currents`
+/// already computes a `voltage_source`'s current with its own dedicated KCL
+/// walk rather than through this generic dispatch.
 pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]) -> f64 {
     match kind {
         kinds::RESISTOR => passives::current(params, pin_voltages),

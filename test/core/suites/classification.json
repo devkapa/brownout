@@ -46,23 +46,23 @@
         {
           "describe": "reference physics — RC step response at multiple timesteps",
           "name": "h=tau/100 stays within 0.3% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": ["resistor", "voltage_source", "capacitor"],
-          "reason": "capacitor is W1b (closed-form/stepped dynamic partitions); not implemented by the core yet."
+          "reason": "Single capacitor, one partition (closed form, W1b step 2). The assertion compares classic's own step result against the ANALYTIC exponential with a tolerance sized for classic's own discretization error at this h; the core's closed-form evaluation is exact (no discretization), so it clears the same (looser) bound. The pre-step voltage this case reloads from is 0 V on both engines regardless of whether a full bo_engine_load carries capacitor state forward the way classic's own load() does, so the case does not depend on that being true. NOTE ON MATCHING: the RC and RL step-response describe blocks share IDENTICAL it() titles (h=tau/100 / h=tau/20 / h=tau/10), so gate 1 matches every case on its FULL name, `describe` + \" \" + `name` (vitest's own testNamePattern join), anchored at both ends -- a bare it()-title match would also select the not-yet inductor RL cases below."
         },
         {
           "describe": "reference physics — RC step response at multiple timesteps",
           "name": "h=tau/20 stays within 1.2% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": ["resistor", "voltage_source", "capacitor"],
-          "reason": "capacitor is W1b; not implemented by the core yet."
+          "reason": "Same case as h=tau/100 at a coarser step; same reasoning applies. See that entry's matching note on why `describe` is load-bearing."
         },
         {
           "describe": "reference physics — RC step response at multiple timesteps",
           "name": "h=tau/10 stays within 2.5% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": ["resistor", "voltage_source", "capacitor"],
-          "reason": "capacitor is W1b; not implemented by the core yet."
+          "reason": "Same case as h=tau/100 at a coarser step; same reasoning applies. See that entry's matching note on why `describe` is load-bearing."
         },
         {
           "describe": "reference physics — RL step response at multiple timesteps",
@@ -130,9 +130,9 @@
         {
           "describe": "reference physics — transient KCL/KVL and energy residuals",
           "name": "RC companion satisfies KCL and its discrete energy identity",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": ["resistor", "voltage_source", "capacitor"],
-          "reason": "capacitor is W1b; not implemented by the core yet."
+          "reason": "Reconstructs `capacitorCurrent = capacitance * (voltage - previousVoltage) / h` and checks a KCL residual against it -- a property of classic's own fixed-h backward-Euler finite difference, not of the device's continuous physics. The core's single-capacitor partition (W1b step 2) advances the closed form continuously (no per-step h to reconstruct a matching discrete derivative from), so this identity is not a like-for-like comparison there. Forcing the core's generic stepped path (FORCE_STEPPED, core/README.md's Options table) would make the two arithmetically comparable again -- but the gate-1 adapter (test/core/suites/adapter.ts) is built on HeadlessRunner, and HeadlessRunnerOptions/HeadlessRunOptions carry no compile-options passthrough (no forceStepped, no CompileOptions of any kind) -- so there is currently no way to route this specific case's assertion onto the core's stepped path through this harness. A future worker could add that passthrough (HeadlessRunnerOptions.compileOptions, threaded into CoreEngine.load's options) to lift this to \"portable\" under FORCE_STEPPED."
         },
         {
           "describe": "reference physics — transient KCL/KVL and energy residuals",

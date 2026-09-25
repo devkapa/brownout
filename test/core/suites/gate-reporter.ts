@@ -20,9 +20,16 @@
  *
  * HOW MATCHING WORKS
  * A Vitest task tree's leaf (`type !== "suite"`, no `.tasks` array) carries
- * its OWN `it()` title as `.name` -- not the describe-prefixed full name --
- * so a case is looked up by exact `(file, name)` match. classification.json's
- * `describe` field is for humans; matching does not use it. This is
+ * only its OWN `it()` title as `.name`, so this reporter rebuilds each leaf's
+ * full name from its ancestor suites (joined by single spaces, the file node
+ * excluded -- the same string vitest's testNamePattern matches) and looks a
+ * case up by exact `(file, caseFullName(case))`. classification.json's
+ * `describe` field is therefore load-bearing: it must be the case's exact
+ * describe chain. Matching on the bare title would be ambiguous, since
+ * sibling describe blocks can share an `it()` title (the RC and RL
+ * step-response blocks do) and one leaf's state would overwrite the other's
+ * here. A leaf full name that occurs twice in one file is reported and fails
+ * the gate for the same reason. This is
  * deliberately loose about the exact task-tree shape (Vitest 1.x/2.x both
  * expose `{ name, tasks?, result?.state }` recursively from a `File`) so a
  * minor Vitest version difference degrades to "case not found" (which counts
@@ -58,20 +65,30 @@ interface TaskLike {
 }
 
 interface LeafResult {
-  name: string;
+  fullName: string;
   state: string | undefined;
 }
 
-function collectLeaves(node: unknown, out: LeafResult[]): void {
+/** The full name gate 1 matches a case on: vitest's own describe-chain join. */
+export function caseFullName(testCase: { describe?: string; name: string }): string {
+  return testCase.describe ? `${testCase.describe} ${testCase.name}` : testCase.name;
+}
+
+function collectLeaves(node: unknown, prefix: string, out: LeafResult[]): void {
   if (node === null || typeof node !== "object") return;
   const task = node as TaskLike;
+  const name = typeof task.name === "string" ? task.name : undefined;
   if (Array.isArray(task.tasks)) {
-    for (const child of task.tasks) collectLeaves(child, out);
+    const childPrefix = name === undefined ? prefix : prefix ? `${prefix} ${name}` : name;
+    for (const child of task.tasks) collectLeaves(child, childPrefix, out);
     return;
   }
-  if (typeof task.name === "string") {
+  if (name !== undefined) {
     const state = task.result && typeof task.result === "object" ? task.result.state : undefined;
-    out.push({ name: task.name, state: typeof state === "string" ? state : undefined });
+    out.push({
+      fullName: prefix ? `${prefix} ${name}` : name,
+      state: typeof state === "string" ? state : undefined,
+    });
   }
 }
 
@@ -102,8 +119,11 @@ export class CoreGateReporter {
       const filepath = typeof file.filepath === "string" ? file.filepath : undefined;
       if (!filepath) continue;
       const rel = path.relative(this.rootDir, filepath).split(path.sep).join("/");
+      // The file node's own name is its path, which is not part of a test's
+      // full name, so collection starts at its children.
       const leaves: LeafResult[] = [];
-      collectLeaves(file, leaves);
+      const children = (file as TaskLike).tasks;
+      if (Array.isArray(children)) for (const child of children) collectLeaves(child, "", leaves);
       leavesByFile.set(rel, leaves);
     }
 
@@ -112,7 +132,17 @@ export class CoreGateReporter {
 
     for (const suite of this.classification.suites) {
       const leaves = leavesByFile.get(suite.file);
-      const byName = new Map((leaves ?? []).map((leaf) => [leaf.name, leaf.state] as const));
+      const byName = new Map<string, string | undefined>();
+      for (const leaf of leaves ?? []) {
+        if (byName.has(leaf.fullName)) {
+          lines.push(
+            `  AMBIGUOUS: "${leaf.fullName}" (${suite.file}) names more than one test, so gate 1 cannot ` +
+              "tell which result belongs to a case with that name.",
+          );
+          anyFailure = true;
+        }
+        byName.set(leaf.fullName, leaf.state);
+      }
       const portableCases = suite.cases.filter((testCase) => testCase.status === "portable");
       const perKind = new Map<string, { ran: number; passed: number }>();
       for (const kind of new Set(portableCases.flatMap((testCase) => testCase.kinds))) {
@@ -127,7 +157,7 @@ export class CoreGateReporter {
       }
 
       for (const testCase of portableCases) {
-        const state = byName.get(testCase.name);
+        const state = byName.get(caseFullName(testCase));
         // "Ran" means Vitest actually executed the case (pass or fail), not
         // merely that a leaf with this name showed up in the tree: a leaf
         // reports state "skip" or "todo" too, and gate 1's contract (every
@@ -146,18 +176,18 @@ export class CoreGateReporter {
         // human-readable rollup, not the sole enforcement.
         if (!found) {
           lines.push(
-            `  MISSING: "${testCase.name}" (${suite.file}) is classified "portable" but did not run -- ` +
-              "check vitest.core-suites.config.ts's testNamePattern against classification.json.",
+            `  MISSING: "${caseFullName(testCase)}" (${suite.file}) is classified "portable" but did not run -- ` +
+              "check its `describe` and `name` in classification.json against the suite file.",
           );
           anyFailure = true;
         } else if (!ran) {
           lines.push(
-            `  SKIPPED: "${testCase.name}" (${suite.file}) is classified "portable" but reported state=` +
+            `  SKIPPED: "${caseFullName(testCase)}" (${suite.file}) is classified "portable" but reported state=` +
               `${String(state)} instead of running -- a skipped or todo case does not satisfy gate 1.`,
           );
           anyFailure = true;
         } else if (!passed) {
-          lines.push(`  FAILED:  "${testCase.name}" (${suite.file}) ran on the core but did not pass (state=${state}).`);
+          lines.push(`  FAILED:  "${caseFullName(testCase)}" (${suite.file}) ran on the core but did not pass (state=${state}).`);
           anyFailure = true;
         }
         for (const kind of testCase.kinds) {

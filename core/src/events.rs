@@ -74,6 +74,14 @@ pub enum EventKind {
     /// reaching a comparator boundary). Valid only if `version` still matches
     /// the partition's current solve epoch when popped.
     Crossing { partition: PartitionId, version: Version },
+    /// A stepped partition's planned step becoming due (W1b, `solve::stepped`
+    /// — pec3.mjs's `EV_STEP`). Valid only if `version` still matches the
+    /// partition's current solve epoch when popped: a re-aim (a switch toggle,
+    /// a driver commit, or the horizon-clamp's forced resync,
+    /// `kernel::Kernel::advance`) discards whatever step was in flight and
+    /// plans a fresh one under a new version, exactly like a closed-form
+    /// re-aim cancels a stale `Crossing`.
+    Step { partition: PartitionId, version: Version },
     /// A device-owned timer, opaque to the kernel: a floating-bucket boundary
     /// (contract point 7), or any future per-device deadline. `tag` lets one
     /// device distinguish which of several timers it scheduled fired; the

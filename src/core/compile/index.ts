@@ -22,6 +22,7 @@ import { CORE_OPTION_KEYS, ProgramWriter, type ProgramOption } from "../format.j
 import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES } from "../kinds.js";
 import { buildCoreNodes, buildPinRecord, computeOpenPinKeys, corePinKey, type CoreNodeBuild } from "./topology.js";
 import {
+  compileCapacitor,
   compileDipSwitch,
   compileSpdtSwitch,
   compileSwitchOrPushButton,
@@ -296,6 +297,22 @@ export function compileCircuit(
             pin(component.kind, component.id, component.pins[1]!.id),
           ],
           params: [voltage],
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      case "capacitor": {
+        const result = compileCapacitor(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.capacitor,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;

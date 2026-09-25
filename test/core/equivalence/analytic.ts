@@ -37,6 +37,103 @@ export function rcCrossingTime(v0: number, vTarget: number, vAsymptote: number, 
   return -tau * Math.log(num / den);
 }
 
+/**
+ * `rcCrossingTime`'s counterpart: evaluates the same exponential directly
+ * instead of inverting it for a crossing. `v(t) = vAsymptote + (v0 -
+ * vAsymptote) * exp(-t/tau)`, `t` measured from the instant `v(t) = v0`.
+ * W1b's "the exact exponential" reference (this worker's brief, item 2):
+ * a fixture's expected voltage at a chosen sample time, for a single ideal
+ * (or lossy — see `rcTerminalThevenin` below) capacitor's closed-form
+ * partition.
+ */
+export function rcVoltageAt(v0: number, vAsymptote: number, tau: number, t: number): number {
+  if (!(tau > 0)) {
+    throw new Error(`rcVoltageAt: tau must be > 0, got ${String(tau)}.`);
+  }
+  return vAsymptote + (v0 - vAsymptote) * Math.exp(-t / tau);
+}
+
+export interface RcLossyTerminalParams {
+  /** Source voltage driving the network (ground-referenced), volts. */
+  readonly sourceVolts: number;
+  /** External series resistance between the source and the capacitor's own terminal, ohms. */
+  readonly seriesOhms: number;
+  /** Capacitance, farads. */
+  readonly capacitanceF: number;
+  /** The capacitor device's own ESR (spec §7.4's series loss), ohms. 0 is ideal (no series loss). */
+  readonly esrOhms: number;
+  /** The capacitor device's own leakage resistance (spec §7.4's parallel loss, across ITS OWN terminals), ohms. `Infinity` (or omitted) is ideal (no leakage). */
+  readonly leakageOhms?: number;
+}
+
+/**
+ * The capacitor's OWN TERMINAL voltage (`pins[0]` to `pins[1]` — what a
+ * `netV`/`elementI` readout sees) for a single capacitor with ESR and
+ * leakage, external series resistance to an ideal source, everything else
+ * ideal, starting from an UNCHARGED capacitor (the internal `vc` state — the
+ * voltage across C alone — is 0 at t=0; true of a fresh load, never a
+ * carried-forward one). `tau`/`vAsymptote`/`v0AtUncharged` feed
+ * `rcVoltageAt`/`rcCrossingTime` above.
+ *
+ * Model (spec §7.4): the device is `esr` in series with `C`, and `leakage`
+ * as a resistor directly across the device's own two external terminals (in
+ * parallel with the esr+C branch) — so from the rest of the circuit's point
+ * of view, the leakage resistor is NOT inside the "capacitor branch" that
+ * `esr`/`C` sit in; it is a second, parallel path between the same two
+ * nodes. Removing the esr+C branch, the remaining network (source, series
+ * resistor, leakage resistor) is a plain two-resistor divider — a pure
+ * Thevenin source as seen by the esr+C branch:
+ *   Rth = seriesOhms*leakageOhms / (seriesOhms+leakageOhms)   (Rth = seriesOhms when leakageOhms is Infinity/absent)
+ *   Vth = sourceVolts * leakageOhms / (seriesOhms+leakageOhms) (Vth = sourceVolts when leakageOhms is Infinity/absent)
+ * The esr+C branch then sees a plain series RC toward Vth through (Rth+esr),
+ * so the INTERNAL state `vc` follows a plain single exponential toward Vth
+ * with that time constant.
+ *
+ * IMPORTANT: the device's TERMINAL voltage `v` is NOT the same trajectory
+ * shifted to start at 0, unless `esrOhms` is 0. `v` and `vc` relate by `v =
+ * i*esr + vc` with `i = (V*g1 - v*(g1+g2))/... ` — solving the instantaneous
+ * KCL at the terminal node for `v` given the current `vc` gives `v = (V*g1 +
+ * vc/esr) / (1/esr + g1 + g2)` (`g1=1/seriesOhms`, `g2=1/leakageOhms`, and
+ * `1/esr` reads as `Infinity` when `esrOhms` is 0, which correctly forces
+ * `v = vc` in that limit — the ideal case). `v` turns out to be an AFFINE
+ * image of `vc` (same derivation as above, algebra omitted), so it is STILL
+ * a plain single exponential with the identical `tau`/`vAsymptote` — but its
+ * OWN starting value `v(0)` is generally nonzero even though `vc(0) = 0`,
+ * because `esr` is a plain resistor: it passes an instantaneous current the
+ * moment the source is applied, before the capacitor has had any time to
+ * charge at all. `v0AtUncharged` is exactly this `v(0)` (with `vc(0) = 0`
+ * substituted above) — use it, not 0, as `rcVoltageAt`'s `v0` argument
+ * whenever `esrOhms > 0`. (Caught by this worker's own brute-force ODE
+ * cross-check in analytic.test.ts: assuming `v0 = 0` for a nonzero-ESR case
+ * is off by roughly 18% at t ~ 0.2*tau for this module's own fixture 12
+ * numbers — a real bug this cross-check exists to catch, not a hypothetical
+ * one.)
+ */
+export function rcTerminalThevenin(
+  params: RcLossyTerminalParams,
+): { readonly tau: number; readonly vAsymptote: number; readonly v0AtUncharged: number } {
+  const { sourceVolts, seriesOhms, capacitanceF, esrOhms, leakageOhms } = params;
+  if (!(seriesOhms > 0)) throw new Error(`rcTerminalThevenin: seriesOhms must be > 0, got ${String(seriesOhms)}.`);
+  if (!(capacitanceF > 0)) throw new Error(`rcTerminalThevenin: capacitanceF must be > 0, got ${String(capacitanceF)}.`);
+  if (esrOhms < 0) throw new Error(`rcTerminalThevenin: esrOhms must be >= 0, got ${String(esrOhms)}.`);
+  const leakage = leakageOhms ?? Number.POSITIVE_INFINITY;
+  if (!(leakage > 0)) throw new Error(`rcTerminalThevenin: leakageOhms must be > 0, got ${String(leakage)}.`);
+
+  // g2 is 0 when leakage is Infinity, and ge is Infinity when esrOhms is 0 —
+  // both fall out of plain IEEE-754 division (1/Infinity = 0, x/Infinity =
+  // 0 for finite x), so neither needs its own branch below.
+  const g1 = 1 / seriesOhms;
+  const g2 = 1 / leakage;
+  const ge = 1 / esrOhms;
+
+  const rTh = 1 / (g1 + g2);
+  const vTh = (sourceVolts * g1) / (g1 + g2);
+  const tau = capacitanceF * (rTh + esrOhms);
+  // v(0) with vc(0)=0 substituted into v = (V*g1 + vc*ge) / (ge+g1+g2).
+  const v0AtUncharged = (sourceVolts * g1) / (ge + g1 + g2);
+  return { tau, vAsymptote: vTh, v0AtUncharged };
+}
+
 export interface Ne555AstableParams {
   readonly r1Ohms: number;
   readonly r2Ohms: number;
@@ -124,6 +221,110 @@ export function ne555MonostablePulseWidth(params: Ne555MonostableParams): number
   const vs = params.supplyVoltsAtGnd;
   const tau = params.rOhms * params.capacitanceF;
   return rcCrossingTime(0, upper * vs, vs, tau);
+}
+
+export interface RcLadderParams {
+  /** Ideal source voltage (ground-referenced), volts. */
+  readonly sourceVolts: number;
+  /** Series resistance from the source to node 1, ohms. */
+  readonly r1Ohms: number;
+  /** Capacitance from node 1 to ground, farads. */
+  readonly c1F: number;
+  /** Series resistance from node 1 to node 2, ohms. */
+  readonly r2Ohms: number;
+  /** Capacitance from node 2 to ground, farads. */
+  readonly c2F: number;
+}
+
+export interface RcLadderState {
+  readonly v1: number;
+  readonly v2: number;
+}
+
+/**
+ * Exact two-capacitor RC-ladder trajectory: `sourceVolts --r1Ohms-- node1
+ * --r2Ohms-- node2`, `c1F` from node1 to ground, `c2F` from node2 to ground
+ * (both capacitors ideal — no ESR, no leakage), both starting uncharged
+ * (`v1(0) = v2(0) = 0`).
+ *
+ * This is decision 14's "more than one capacitor in one linear partition"
+ * case (the W1 plan's `solve/stepped.rs`, not the single-capacitor closed
+ * form) — node1 and node2 are joined into ONE partition by r2Ohms, and it
+ * contains two capacitors. The stepped solver is explicitly NOT claimed
+ * exact (decision 14: "within classic's tolerance but not exact"), so this
+ * reference exists to bound how far a numerically-converged answer may
+ * legitimately sit from the true trajectory — not to hold the core to the
+ * single-capacitor closed form's 1e-9 relative bar.
+ *
+ * DERIVATION. KCL at node1 and node2 gives the linear system `dx/dt = A x +
+ * b`, `x = (v1, v2)`:
+ * ```
+ * A = [ -(1/r1+1/r2)/c1,      1/(r2*c1) ]
+ *     [       1/(r2*c2), -1/(r2*c2)     ]
+ * b = (sourceVolts/(r1*c1), 0)
+ * ```
+ * whose steady state is `v1 = v2 = sourceVolts`: once both capacitors are
+ * fully charged no current flows anywhere in the ladder, so there is no IR
+ * drop across either resistor. Solved here by direct eigendecomposition of
+ * the real 2x2 matrix `A` — always real, non-positive eigenvalues for a
+ * passive RC network — rather than pulled from a linear-algebra dependency
+ * brownout does not have; cross-checked in this module's own tests against
+ * an independent RK4 numerical integration, so a transcription slip in the
+ * eigendecomposition algebra below would be caught separately from this
+ * formula itself.
+ */
+export function rcLadderVoltagesAt(params: RcLadderParams, t: number): RcLadderState {
+  const { sourceVolts: v, r1Ohms: r1, c1F: c1, r2Ohms: r2, c2F: c2 } = params;
+  if (!(r1 > 0) || !(r2 > 0)) throw new Error("rcLadderVoltagesAt: r1Ohms and r2Ohms must be > 0.");
+  if (!(c1 > 0) || !(c2 > 0)) throw new Error("rcLadderVoltagesAt: c1F and c2F must be > 0.");
+
+  const a11 = -(1 / r1 + 1 / r2) / c1;
+  const a12 = 1 / (r2 * c1);
+  const a21 = 1 / (r2 * c2);
+  const a22 = -1 / (r2 * c2);
+
+  const trace = a11 + a22;
+  const det = a11 * a22 - a12 * a21;
+  const discriminant = trace * trace - 4 * det;
+  if (discriminant < 0) {
+    // Not expected for any passive RC ladder (A is similar to a symmetric
+    // negative-semidefinite matrix), but guarded rather than silently
+    // producing a complex (NaN-in-JS) result.
+    throw new Error("rcLadderVoltagesAt: complex eigenvalues — not expected for a passive RC ladder.");
+  }
+  const sqrtDiscriminant = Math.sqrt(discriminant);
+  const lambda1 = (trace + sqrtDiscriminant) / 2;
+  const lambda2 = (trace - sqrtDiscriminant) / 2;
+  if (Math.abs(lambda1 - lambda2) < 1e-9 * Math.max(1, Math.abs(trace))) {
+    // Repeated eigenvalues need a generalized-eigenvector (Jordan-block) form
+    // this function does not implement — avoid the degenerate divide below
+    // producing a near-singular, numerically garbage answer instead.
+    throw new Error(
+      "rcLadderVoltagesAt: near-repeated eigenvalues — choose r1Ohms/c1F/r2Ohms/c2F that are not the degenerate " +
+        "symmetric case this function does not handle.",
+    );
+  }
+
+  // Eigenvector for eigenvalue lambda: (A - lambda*I) e = 0. Row 1 gives
+  // (a11-lambda)*ex + a12*ey = 0; a12 > 0 always here, so ex=a12, ey=lambda-a11
+  // is always a valid (nonzero) solution.
+  const eigenvector = (lambda: number): readonly [number, number] => [a12, lambda - a11];
+  const e1 = eigenvector(lambda1);
+  const e2 = eigenvector(lambda2);
+
+  // x(t) = (v,v) + k1*e1*exp(lambda1*t) + k2*e2*exp(lambda2*t); solve
+  // (k1,k2) from x(0)=(0,0): k1*e1 + k2*e2 = -(v,v), by Cramer's rule on
+  // M = [[e1[0],e2[0]],[e1[1],e2[1]]], rhs = (-v,-v).
+  const detM = e1[0] * e2[1] - e2[0] * e1[1];
+  const k1 = (-v * e2[1] - e2[0] * -v) / detM; // = v*(e2[0]-e2[1]) / detM
+  const k2 = (e1[0] * -v - -v * e1[1]) / detM; // = v*(e1[1]-e1[0]) / detM
+
+  const mode1 = k1 * Math.exp(lambda1 * t);
+  const mode2 = k2 * Math.exp(lambda2 * t);
+  return {
+    v1: v + mode1 * e1[0] + mode2 * e2[0],
+    v2: v + mode1 * e1[1] + mode2 * e2[1],
+  };
 }
 
 export interface AnalyticCheckResult {

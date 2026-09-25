@@ -8,8 +8,9 @@
  * A separate vitest project that:
  *   1. only collects the suite files classification.json lists (`test.include`);
  *   2. only RUNS the cases classification.json marks "portable" for THIS
- *      wave (`test.testNamePattern`, built from those cases' exact `it()`
- *      titles) -- a "classic-only"/"not-yet" case in an included file is
+ *      wave (`test.testNamePattern`, built from those cases' exact full
+ *      names, `describe` + " " + `it()` title, anchored) -- a
+ *      "classic-only"/"not-yet" case in an included file is
  *      left uncollected rather than silently exercised against the core;
  *   3. aliases those files' own `import { SimEngine } from ".../sim-engine.js"`
  *      to test/core/suites/adapter.ts's core-backed stand-in, via a Vite
@@ -37,11 +38,12 @@ import { defineConfig } from "vitest/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
-import { CoreGateReporter } from "./test/core/suites/gate-reporter.js";
+import { CoreGateReporter, caseFullName } from "./test/core/suites/gate-reporter.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 interface ClassificationCase {
+  describe?: string;
   name: string;
   status: "portable" | "classic-only" | "not-yet";
 }
@@ -60,7 +62,7 @@ const classification = JSON.parse(
 const SUITE_FILES = classification.suites.map((suite) => suite.file);
 
 const PORTABLE_NAMES = classification.suites.flatMap((suite) =>
-  suite.cases.filter((testCase) => testCase.status === "portable").map((testCase) => testCase.name),
+  suite.cases.filter((testCase) => testCase.status === "portable").map(caseFullName),
 );
 
 if (SUITE_FILES.length === 0 || PORTABLE_NAMES.length === 0) {
@@ -76,12 +78,15 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Vitest's testNamePattern matches against each leaf `it()` title; every
-// portable case's exact title, alternated, so only those cases collect and
-// run (a "classic-only"/"not-yet" case sharing a file with a portable one is
-// filtered out here rather than gated by hand inside a suite file we do not
-// own).
-const TEST_NAME_PATTERN = new RegExp(PORTABLE_NAMES.map(escapeRegExp).join("|"));
+// Vitest's testNamePattern matches against each test's full name (its
+// describe chain and `it()` title joined by single spaces, no file prefix);
+// every portable case's exact full name, alternated and anchored at both
+// ends, so only those cases collect and run (a "classic-only"/"not-yet" case
+// sharing a file with a portable one is filtered out here rather than gated
+// by hand inside a suite file we do not own). Anchoring matters: sibling
+// describe blocks can share an `it()` title (the RC and RL step-response
+// blocks do), and an unanchored title would select both.
+const TEST_NAME_PATTERN = new RegExp(`^(?:${PORTABLE_NAMES.map(escapeRegExp).join("|")})$`);
 
 const ADAPTER_PATH = path.resolve(ROOT, "test/core/suites/adapter.ts");
 const SIM_ENGINE_PATH = path.resolve(ROOT, "src/sim/engine/sim-engine.ts");

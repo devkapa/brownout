@@ -29,8 +29,8 @@ use crate::events::{DeviceId, PartitionId};
 use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError};
 use crate::program::{switch_value, Program};
 use crate::readout::Readout;
-use crate::solve::static_part::StaticPartitionSolver;
 use crate::solve::PartitionSolver;
+use crate::solve::PartitionedSolver;
 
 /// `bo_engine_advance` rejects a `t_end` this far or more behind the current
 /// time (contract, point 6). A plain `t_end < time` would re-reject a caller
@@ -42,15 +42,22 @@ pub const STAT_STATIC_SOLVES: u32 = 1;
 pub const STAT_LARGEST_PARTITION: u32 = 2;
 pub const STAT_FIXED_NODES: u32 = 3;
 // Indices 4, 5, 6 and 13 (events processed, delta passes, maximum delta
-// depth, driver commits) come live from `Kernel::stats`, and index 7
-// (solution-cache hits) comes live from the partition solver — see
-// `Engine::stat`. Indices 8-12 and 14 (closed-form segments, crossings,
-// stepped steps, Newton iterations, IC evaluations, rail moves) stay
-// reserved at 0 until W1b step 2/W1c/W1f build that machinery;
-// `Engine::stat` still answers them (as 0), not `NaN`, so a caller can't
-// mistake "not implemented yet" for "unknown index" — that stays reserved
-// for indices past the contract's table (>= `STAT_COUNT`).
-const STAT_COUNT: usize = 15;
+// depth, driver commits) come live from `Kernel::stats`; 7 (solution-cache
+// hits), 8 (closed-form segments), 9 (crossings), 10 (stepped steps) and 11
+// (Newton iterations) come live from the partition solver (W1b step 2) — see
+// `Engine::stat`. 12 (IC evaluations) and 14 (rail moves) stay reserved at 0
+// until W1c/W1f build that machinery; `Engine::stat` still answers them (as
+// 0), not `NaN`, so a caller can't mistake "not implemented yet" for
+// "unknown index" — that stays reserved for indices past the contract's
+// table (>= `STAT_COUNT`).
+pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
+/// W1b's report to the orchestrator: index 15 is NOT in core/README.md's
+/// "Stat indices" table yet (that file is off limits to this worker) — it is
+/// exposed here ahead of the contract being updated to name it, per the W1
+/// plan row B2's "W1b reports the count of multi-capacitor linear
+/// partitions in the corpus". The `bo_engine_stat` export list itself is
+/// unaffected either way (it already accepts any `u32` index).
+const STAT_COUNT: usize = 16;
 
 /// No W0 or W1a kind creates a driver or a reader (`kernel::DeviceEvaluator`
 /// concepts do not exist for any kind ported so far), so this is `Engine`'s
@@ -140,18 +147,24 @@ impl Engine {
         self.kernel.solver().currents()
     }
 
-    /// Counters (core/README.md, "Stat indices"). Indices 0-3 are the load-
-    /// time static-solve snapshot; 4, 5, 6 and 13 (events processed, delta
-    /// passes, maximum delta depth, driver commits) come live from the
-    /// kernel; 7 (solution-cache hits) comes live from the partition solver;
-    /// 8-12 and 14 are reserved at `0.0` until their machinery lands
-    /// (solve/mod.rs doc comment). Unknown `i` (>= `STAT_COUNT`) is `NaN`.
+    /// Counters (core/README.md, "Stat indices"). Indices 0-3 and 15 are the
+    /// load-time snapshot (partition classification never changes after
+    /// load); 4, 5, 6 and 13 (events processed, delta passes, maximum delta
+    /// depth, driver commits) come live from the kernel; 7-11 (solution-cache
+    /// hits, closed-form segments, crossings, stepped steps, Newton
+    /// iterations) come live from the partition solver; 12 and 14 are
+    /// reserved at `0.0` until their machinery lands (W1c/W1f). Unknown `i`
+    /// (>= `STAT_COUNT`) is `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
         match i {
             4 => self.kernel.stats().events_processed as f64,
             5 => self.kernel.stats().delta_passes as f64,
             6 => self.kernel.stats().max_delta_depth as f64,
             7 => self.kernel.solver().cache_hits(),
+            8 => self.kernel.solver().closed_form_segments(),
+            9 => self.kernel.solver().crossings(),
+            10 => self.kernel.solver().stepped_steps(),
+            11 => self.kernel.solver().newton_iterations(),
             13 => self.kernel.stats().driver_commits as f64,
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
@@ -322,10 +335,12 @@ impl Engine {
     /// well-formed `Program` — `Program::parse` is what turns malformed
     /// bytes into `BoError` before this ever runs.
     pub fn load(program: &Program) -> Result<Engine, BoError> {
-        let solver = StaticPartitionSolver::build(program)?;
+        let solver = PartitionedSolver::build(program)?;
         let partition_count = solver.partition_count();
+        let static_solve_count = solver.static_solve_count();
         let largest_partition = solver.largest_partition();
         let fixed_count = solver.fixed_count();
+        let multi_capacitor_linear_partitions = solver.multi_capacitor_linear_partitions();
         let all_partitions: Vec<PartitionId> = (0..partition_count as u32).map(PartitionId).collect();
 
         let mut kernel = Kernel::new(Box::new(solver) as Box<dyn PartitionSolver>, Box::new(NoDevices) as Box<dyn DeviceEvaluator>);
@@ -333,9 +348,10 @@ impl Engine {
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;
-        stats[STAT_STATIC_SOLVES as usize] = partition_count as f64; // W0 solves every partition exactly once, at load.
+        stats[STAT_STATIC_SOLVES as usize] = static_solve_count as f64;
         stats[STAT_LARGEST_PARTITION as usize] = largest_partition as f64;
         stats[STAT_FIXED_NODES as usize] = fixed_count as f64;
+        stats[STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS as usize] = multi_capacitor_linear_partitions;
 
         Ok(Engine {
             node_count: program.node_count,
@@ -370,6 +386,10 @@ mod tests {
 
     fn switch_dev(component_index: usize, a: usize, b: usize, closed: f64) -> Device {
         Device { kind: kinds::SWITCH, component_index, pins: vec![pin(a), pin(b)], params: vec![closed], blob: vec![] }
+    }
+
+    fn capacitor(component_index: usize, a: usize, b: usize, c: f64, esr: f64, leak: f64) -> Device {
+        Device { kind: kinds::CAPACITOR, component_index, pins: vec![pin(a), pin(b)], params: vec![c, esr, leak], blob: vec![] }
     }
 
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
@@ -773,7 +793,11 @@ mod tests {
         for i in 4..=14 {
             assert_eq!(e.stat(i), 0.0, "stat({i})");
         }
-        assert!(e.stat(15).is_nan(), "index 15 is past the contract's table");
+        // Index 15 (W1b step 2's multi-capacitor-partition count, not yet in
+        // the ABI contract table — see `STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS`)
+        // is a real, defined stat now, `0.0` for a capacitor-less program,
+        // not `NaN`; only an index past `STAT_COUNT` still means "unknown".
+        assert_eq!(e.stat(STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS), 0.0);
         assert!(e.stat(99).is_nan());
     }
 
@@ -1005,5 +1029,50 @@ mod tests {
         // state (open), so the second's resolve must reuse the first's
         // cached solution rather than re-running the LU solve.
         assert!(e.stat(7) >= 1.0, "expected at least one cache hit, got {}", e.stat(7));
+    }
+
+    #[test]
+    fn horizon_clamp_advance_readouts_are_solved_values_at_t_not_interpolations() {
+        // FORCE_STEPPED (a single capacitor, Decision 14's override) so the
+        // horizon clamp actually has integration work to do — a closed-form
+        // partition is exact at any `t` with no clamp needed at all (see
+        // `PartitionSolver::sync_dynamic_to`'s doc comment), so it alone
+        // would not distinguish "landed exactly on t_end" from "already
+        // correct regardless".
+        let mut options = Options::default();
+        options.force_stepped = true;
+        let (v0, r, c) = (5.0, 1000.0, 1e-6);
+        let p = Program {
+            node_count: 3,
+            options,
+            digital_slot_count: 0,
+            channel_slot_count: 0,
+            devices: vec![source(0, 1, 0, v0), resistor(1, 1, 2, r), capacitor(2, 2, 0, c, 0.0, 0.0)],
+        };
+        let mut e = Engine::load(&p).unwrap();
+
+        // An "ugly" time that will not, in general, land on a step-doubling
+        // controller's own natural step boundary.
+        let t = 4.37e-4;
+        e.advance(t).unwrap();
+        assert_eq!(e.time(), t);
+
+        let tau = r * c;
+        let expected = v0 * (1.0 - (-t / tau).exp());
+        let got = e.voltages()[2];
+        // The step-doubling controller's own local tolerance is REL_TOL =
+        // 1e-3; a horizon-clamped landing exactly at `t` should track the
+        // analytic answer to within a small multiple of that, not the much
+        // larger gap an un-clamped "wherever the last committed step
+        // happened to land" readout would show (up to ACTIVE_H_MAX = 2ms
+        // away for this circuit's time constant).
+        let rel = (got - expected).abs() / expected.abs();
+        assert!(rel < 1e-2, "t={t}: got {got} expected {expected} rel {rel}");
+
+        // Advancing again to the SAME instant must be idempotent: nothing
+        // new is due, so the horizon clamp re-publishes the identical
+        // solved value, not a fresh integration step from it.
+        e.advance(t).unwrap();
+        assert_eq!(e.voltages()[2], got);
     }
 }

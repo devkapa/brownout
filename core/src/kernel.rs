@@ -243,12 +243,18 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             };
             let live = match ev.kind {
                 EventKind::Commit { driver, token, .. } => self.drivers[driver.0 as usize].token() == token,
-                // Nothing in W1a schedules a `Crossing` or a `Timer` yet
-                // (module doc; `apply_due_commits` routes both to a no-op
-                // match arm), so there is no validation rule to apply here
-                // yet either -- treat both as live rather than guess at one
-                // with no producer to test it against.
-                EventKind::Crossing { .. } | EventKind::Timer { .. } => true,
+                // A dynamic partition's own solve epoch (events.rs's
+                // lazy-deletion contract): stale the instant a re-aim/replan
+                // bumps the version this event was scheduled under (a switch
+                // toggle, a driver commit, the horizon clamp's forced
+                // resync, or the crossing/step this event itself represents
+                // already having fired once under an older version).
+                EventKind::Crossing { partition, version } => self.solver.is_current(partition, true, version),
+                EventKind::Step { partition, version } => self.solver.is_current(partition, false, version),
+                // Nothing in W1a-W1b schedules a `Timer` yet (W1c's floating
+                // buckets); treat it as live rather than guess at a
+                // validation rule with no producer to test it against.
+                EventKind::Timer { .. } => true,
             };
             if live {
                 let t = ev.time;
@@ -335,21 +341,31 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         }
     }
 
-    /// Pops and applies every `Commit` due at `self.time` (FIFO within that
-    /// instant — the heap's own ordering already guarantees this), returning
-    /// the set of partitions a driver's committed level actually changed in,
-    /// how many events were popped, and how many commits actually changed a
-    /// driver's level. The last two are raw counts for the *caller* to fold
-    /// into `self.stats` (or not: `run_settle_pass` calls this too, and
+    /// Pops and applies every event due at `self.time` (FIFO within that
+    /// instant — the heap's own ordering already guarantees this):
+    /// - a `Commit` folds its driver's partition into the returned `dirty`
+    ///   set, for the caller to hand to `PartitionSolver::resolve_dirty`
+    ///   (unchanged from W1a);
+    /// - a `Crossing`/`Step` still current (`PartitionSolver::is_current`,
+    ///   events.rs's lazy-deletion contract) is applied DIRECTLY through
+    ///   `PartitionSolver::handle_dynamic_event` — not folded into `dirty`,
+    ///   since the partition's own scheduled event becoming due already IS
+    ///   the electrical update (pec3.mjs's `_analyticCross`/`_commitStep`),
+    ///   with nothing left for a later `resolve_dirty` call to redo — and its
+    ///   readers are returned directly in `directly_affected`;
+    /// - a stale `Crossing`/`Step` (version no longer current) and a `Timer`
+    ///   (no producer before W1c's floating buckets) are silently dropped,
+    ///   exactly as a stale `Commit` already is via `apply_commit`'s own
+    ///   token check.
+    ///
+    /// Also returns how many events were popped and how many commits
+    /// actually changed a driver's level — raw counts for the *caller* to
+    /// fold into `self.stats` (or not: `run_settle_pass` calls this too, and
     /// deliberately does not count settling toward the same stats — see
-    /// `KernelStats`'s doc comment). `Crossing` and `Timer` events are left
-    /// unhandled: W1a's abstract model has no producer of either yet
-    /// (closed-form crossings arrive with W1b's solver, device timers with
-    /// W1c's floating buckets), so there is nothing to interpret today; the
-    /// match is written to route them the moment one exists rather than to
-    /// silently drop them forever.
-    fn apply_due_commits(&mut self) -> (BTreeSet<PartitionId>, u64, u64) {
+    /// `KernelStats`'s doc comment).
+    fn apply_due_events(&mut self) -> Result<(BTreeSet<PartitionId>, BTreeSet<DeviceId>, u64, u64), KernelError> {
         let mut dirty = BTreeSet::new();
+        let mut directly_affected = BTreeSet::new();
         let mut popped = 0u64;
         let mut changed = 0u64;
         while self.heap.peek_time() <= self.time {
@@ -363,10 +379,33 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         changed += 1;
                     }
                 }
-                EventKind::Crossing { .. } | EventKind::Timer { .. } => {}
+                EventKind::Crossing { partition, version } => {
+                    if self.solver.is_current(partition, true, version) {
+                        let readers = self.solver.handle_dynamic_event(partition, self.time, true).map_err(KernelError::SolveFailed)?;
+                        directly_affected.extend(readers);
+                    }
+                }
+                EventKind::Step { partition, version } => {
+                    if self.solver.is_current(partition, false, version) {
+                        let readers = self.solver.handle_dynamic_event(partition, self.time, false).map_err(KernelError::SolveFailed)?;
+                        directly_affected.extend(readers);
+                    }
+                }
+                EventKind::Timer { .. } => {}
             }
         }
-        (dirty, popped, changed)
+        Ok((dirty, directly_affected, popped, changed))
+    }
+
+    /// Pushes every `Crossing`/`Step` a dynamic partition asked to be
+    /// scheduled since the last drain (`PartitionSolver::take_scheduled`)
+    /// onto this kernel's own heap — the acceptance rule has already been
+    /// applied by the solver itself before it ever produced one (that
+    /// method's own doc comment), so every entry here is pushed verbatim.
+    fn drain_scheduled(&mut self) {
+        for (at, kind) in self.solver.take_scheduled() {
+            self.heap.push(at, kind);
+        }
     }
 
     /// Runs the two-phase delta cycle at the instant already set in
@@ -407,8 +446,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
             // Phase 1: apply every due commit at this instant, plus whatever
             // a `Reset` in the previous pass (or, on the very first pass,
-            // `settle`'s hand-off) marked dirty.
-            let (mut dirty, popped, changed) = self.apply_due_commits();
+            // `settle`'s hand-off) marked dirty. A due `Crossing`/`Step` is
+            // applied directly here too (`apply_due_events`'s doc comment),
+            // contributing straight to `affected` below rather than to
+            // `dirty` — its own partition's electrical update already
+            // happened.
+            let (mut dirty, mut affected, popped, changed) = self.apply_due_events()?;
             dirty.append(&mut seed_dirty);
             dirty.append(&mut carried_dirty);
             if count_stats {
@@ -416,21 +459,18 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.stats.driver_commits += changed;
             }
 
-            // Phase 2: re-solve, collecting affected readers. Collected into
-            // a set (not a plain concatenation of the solver's per-call
-            // result) so a reader the solver names more than once — because
-            // it watches nodes in more than one dirty partition — still runs
-            // only once.
-            let affected: BTreeSet<DeviceId> = if dirty.is_empty() {
-                BTreeSet::new()
-            } else {
+            // Phase 2: re-solve every DRIVER-dirtied partition, folding its
+            // affected readers into the same set `apply_due_events` already
+            // seeded from any `Crossing`/`Step` this pass handled directly —
+            // a set, not a plain concatenation, so a reader named more than
+            // once (it watches nodes in more than one dirty partition, or
+            // both a commit AND a crossing landed on it this same delta)
+            // still runs only once.
+            if !dirty.is_empty() {
                 let dirty: Vec<PartitionId> = dirty.into_iter().collect();
-                self.solver
-                    .resolve_dirty(&dirty, self.time, &self.drivers)
-                    .map_err(KernelError::SolveFailed)?
-                    .into_iter()
-                    .collect()
-            };
+                affected.extend(self.solver.resolve_dirty(&dirty, self.time, &self.drivers).map_err(KernelError::SolveFailed)?);
+            }
+            self.drain_scheduled();
 
             // Phase 3: this instant is quiet once nothing was affected and
             // nothing else is due at it (a re-solve could in principle
@@ -490,6 +530,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             let heap_snapshot = self.heap.clone();
             let drivers_snapshot = self.drivers.clone();
             let solver_snapshot = self.solver.snapshot();
+            let dynamic_snapshot = self.solver.dynamic_snapshot();
 
             self.time = t;
             if let Err(e) = self.run_deltas(BTreeSet::new(), true) {
@@ -497,11 +538,50 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.heap = heap_snapshot;
                 self.drivers = drivers_snapshot;
                 self.solver.restore(solver_snapshot);
+                self.solver.dynamic_restore(dynamic_snapshot);
                 return Err(e);
             }
         }
+
+        // The horizon clamp (contract point 5): bring every dynamic
+        // partition's published state exactly to `t_end`, even though
+        // nothing on the heap is due there — a closed-form partition's
+        // trajectory is exact at any `t` but was only last PUBLISHED at its
+        // latest re-aim/crossing time, and a stepped partition's committed
+        // step generally lands short of `t_end` too
+        // (`PartitionSolver::sync_dynamic_to`'s own doc comment). Wrapped in
+        // the identical snapshot/rollback envelope as any other instant: a
+        // stepped partition's forced step can fail to converge exactly as an
+        // ordinary one can.
+        let previous_time = self.time;
+        let heap_snapshot = self.heap.clone();
+        let drivers_snapshot = self.drivers.clone();
+        let solver_snapshot = self.solver.snapshot();
+        let dynamic_snapshot = self.solver.dynamic_snapshot();
+
         self.time = t_end;
-        Ok(())
+        match self.solver.sync_dynamic_to(t_end) {
+            Ok(_readers) => {
+                // No reader concept is exercised by the horizon clamp today
+                // (W1c+): a dynamic partition's own crossing/step handling
+                // already ran through the ordinary delta machinery above for
+                // everything up to `t_end`; the clamp only re-publishes a
+                // state that was already correct, so nothing new needs
+                // evaluating. Kept as a `Result` (not `()`) so a future
+                // caller that DOES need to react to a horizon-clamp-only
+                // change has somewhere to plug in.
+                self.drain_scheduled();
+                Ok(())
+            }
+            Err(e) => {
+                self.time = previous_time;
+                self.heap = heap_snapshot;
+                self.drivers = drivers_snapshot;
+                self.solver.restore(solver_snapshot);
+                self.solver.dynamic_restore(dynamic_snapshot);
+                Err(KernelError::SolveFailed(e))
+            }
+        }
     }
 
     /// Applies a `bo_engine_set_params` batch as ONE event at the current
@@ -534,6 +614,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let heap_snapshot = self.heap.clone();
         let drivers_snapshot = self.drivers.clone();
         let solver_snapshot = self.solver.snapshot();
+        let dynamic_snapshot = self.solver.dynamic_snapshot();
         let old_values: Vec<(usize, usize, f64)> = triples
             .iter()
             .map(|&(d, p, _)| (d, p, self.solver.param_value(d, p).expect("validate_params must run and succeed before apply_params_as_event")))
@@ -561,6 +642,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             self.heap = heap_snapshot;
             self.drivers = drivers_snapshot;
             self.solver.restore(solver_snapshot);
+            self.solver.dynamic_restore(dynamic_snapshot);
             self.solver.apply_params(&old_values);
             return Err(e);
         }
@@ -607,8 +689,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 }
             }
         }
-        let (mut dirty, _popped, commits_changed) = self.apply_due_commits();
-        let changed = commits_changed > 0 || !reset_dirty.is_empty();
+        let (mut dirty, directly_affected, _popped, commits_changed) = self.apply_due_events()?;
+        let changed = commits_changed > 0 || !reset_dirty.is_empty() || !directly_affected.is_empty();
         dirty.append(&mut reset_dirty);
         let is_first_pass = *resolve_all_once;
         let to_resolve: Vec<PartitionId> = if is_first_pass {
@@ -623,11 +705,19 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // same way pec3's `init()` calls `ic.eval()` over every IC each
             // settle pass. The affected-reader optimisation only pays off
             // once `advance`'s delta cycle has a converged baseline to
-            // compare against.
+            // compare against. This first pass is also where every dynamic
+            // partition (a `ClosedForm`/`Stepped` id, folded into
+            // `all_partitions` exactly like a `Static` one) builds its FIRST
+            // segment/plan (the `segReady` guard; `Partition::new`'s pending
+            // state) and schedules its first `Crossing`/`Step` —
+            // `Self::drain_scheduled` below is what gets that onto the heap
+            // at all; without it a dynamic partition would sit forever with
+            // a pending trial nothing ever pops.
             self.solver
                 .resolve_dirty(&to_resolve, self.time, &self.drivers)
                 .map_err(KernelError::SolveFailed)?;
         }
+        self.drain_scheduled();
         Ok(changed)
     }
 
@@ -726,6 +816,17 @@ mod tests {
         }
         fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {
             // No state to restore.
+        }
+        // W1b step 2: `PartitionSolver`'s default `is_current` is `false`
+        // (nothing to confirm a `Crossing`/`Step` against for a solver with
+        // no dynamic partitions at all), but the tests below push a
+        // `Crossing` directly via `Kernel::schedule_crossing` to exercise
+        // ITS OWN acceptance rule, independent of any real dynamic solver —
+        // so this mock reports every version current, exactly matching this
+        // module's pre-W1b-step-2 assumption that nothing here invalidates
+        // one.
+        fn is_current(&self, _partition: PartitionId, _is_crossing: bool, _version: Version) -> bool {
+            true
         }
     }
 

@@ -1,9 +1,9 @@
 /**
  * Compiles the W1b switch family (`switch`, `push_button`, `spdt_switch`,
- * `dip_switch`) into v2 program records, exactly per core/README.md's "Kind
- * codes and records" table and spec §7.6. Also prepares (but does not yet
- * emit — that is step 2 of this wave) the capacitor's `[C, esr, leakage]`
- * param resolution, per spec §7.2.6's exact-uid `modelParam` rule.
+ * `dip_switch`) and the capacitor into v2 program records, exactly per
+ * core/README.md's "Kind codes and records" table and spec §7.6/§7.2.6. The
+ * capacitor's `[C, esr, leakage]` param resolution follows classic's
+ * exact-uid `modelParam` rule (spec §7.2.6).
  *
  * PIN CONVENTIONS (README, G7):
  * - `switch`/`push_button` are POSITIONAL: `pins[0]`, `pins[1]`. A component
@@ -30,6 +30,12 @@
  * (`LIVE_PARAM_SPECS`, consumed by `CoreEngine.setParams` in engine.ts) —
  * one source of truth for "the same resolution as the compiler" (this
  * worker's brief, step 3).
+ *
+ * `compileCapacitor` (step 2 of this wave) is the one exception to "positional
+ * pins, mirrors devices/passives.ts": it also resolves `esr`/`leakage`
+ * through `resolveCapacitorParams` below, which needs the WHOLE component
+ * (for `catalogUid`), not just its `params` — see that function's own doc
+ * comment for the exact-uid `modelParam` rule it mirrors.
  */
 
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
@@ -215,7 +221,7 @@ export function compileDipSwitch(
   return { ok: true, pins, params: [k, ...swParams] };
 }
 
-// ─── Capacitor param resolution (prepared here; not emitted until step 2) ──
+// ─── Capacitor: pins + param resolution ─────────────────────────────────────
 
 export interface ResolvedCapacitorParams {
   readonly capacitance: number;
@@ -242,16 +248,54 @@ export interface ResolvedCapacitorParams {
  *   catalog instances/values for the exact numbers this produces (e.g.
  *   `catalogUid:"capacitor"` with no loss params -> esr 1, leakage 1e7).
  *
- * Not yet called from `compileCircuit`'s switch statement — `capacitor` is
- * not compiled to a program record until this wave's next step. Exported so
- * this resolver can be proven correct against classic's own `modelParam` on
- * the passive-parasitics corpus before that step lands.
+ * Called from both `compileCapacitor` below (the initial compile) and
+ * `compile-passives.test.ts`'s own direct unit coverage against classic's
+ * `modelParam` (proven independently of `compileCapacitor`, so a drift in
+ * either the resolver or the emission wiring is caught separately).
  */
 export function resolveCapacitorParams(component: CatalogComponentLike): ResolvedCapacitorParams {
   const capacitance = Math.max(1e-15, Number(component.params.capacitance ?? 1e-6));
   const esr = seriesLossResistance(catalogParam(component, "esr", 0));
   const leakage = seriesLossResistance(catalogParam(component, "leakageResistance", 0));
   return { capacitance, esr, leakage };
+}
+
+/**
+ * `capacitor`: positional pins (`pins[0]`, `pins[1]`), params `[C, esr,
+ * leakage]` via `resolveCapacitorParams` above. Requires the whole component
+ * (not just `params`), unlike the switch-family compilers above, because
+ * `resolveCapacitorParams` needs `catalogUid` for the exact-uid `modelParam`
+ * rule. Only `capacitance` needs a finiteness guard here: `esr`/`leakage`
+ * are ALWAYS finite by construction (`seriesLossResistance`'s own "finite
+ * and > 0, else 0" predicate — see that function and `resolveCapacitorParams`'s
+ * doc comment), but `Number(params.capacitance ?? 1e-6)` can still be NaN for
+ * a garbage authored string, exactly like resistor/voltage_source's own
+ * non-finite guards in compile/index.ts.
+ */
+export function compileCapacitor(
+  built: CoreNodeBuild,
+  openKeys: ReadonlySet<string>,
+  component: CatalogComponentLike & { id: string; pins: readonly { id: string }[] },
+): PassiveCompileResult {
+  if (component.pins.length < 2) {
+    return { ok: false, reason: `malformed:${component.id}:too-few-pins` };
+  }
+  const resolved = resolveCapacitorParams(component);
+  if (!Number.isFinite(resolved.capacitance)) {
+    // A garbage `capacitance` string makes Math.max(1e-15, NaN) NaN. Classic's
+    // own capacitorModel has no finite guard either — it just poisons the BE
+    // companion (`G = 1/(esr + h/C)` becomes NaN) — so refusing here routes
+    // the circuit to the classic engine instead of defining NaN physics.
+    return { ok: false, reason: `malformed:${component.id}:non-finite-capacitance` };
+  }
+  return {
+    ok: true,
+    pins: [
+      buildPinRecord(built, openKeys, "capacitor", component.id, component.pins[0]!.id),
+      buildPinRecord(built, openKeys, "capacitor", component.id, component.pins[1]!.id),
+    ],
+    params: [resolved.capacitance, resolved.esr, resolved.leakage],
+  };
 }
 
 // ─── Live param specs (bo_engine_set_params, owner decision 1) ─────────────

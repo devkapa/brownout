@@ -34,6 +34,7 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "push_button",
   "spdt_switch",
   "dip_switch",
+  "capacitor",
 ]);
 
 /**

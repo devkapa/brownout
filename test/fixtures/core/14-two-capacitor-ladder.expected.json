@@ -1,0 +1,15 @@
+{
+  "status": "pass",
+  "analytic": {
+    "kind": "rc-ladder",
+    "sourceVolts": 5,
+    "r1Ohms": 100000,
+    "c1F": 0.000001,
+    "r2Ohms": 150000,
+    "c2F": 0.000002,
+    "node1": { "component": "c1", "pin": "a" },
+    "node2": { "component": "c2", "pin": "a" },
+    "r1Component": "r1",
+    "r2Component": "r2"
+  }
+}

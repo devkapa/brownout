@@ -50,6 +50,91 @@ export interface AnalogFixtureSpec {
   readonly maxDelayS: number;
 }
 
+/** A `(componentId, pinId)` pair identifying one terminal — resolved to a net id via `buildCoreNodes`/`corePinKey` (compile/topology.ts), the same way the compiler itself resolves a pin. */
+export interface AnalyticNodeRef {
+  readonly component: string;
+  readonly pin: string;
+}
+
+/**
+ * A single ideal-source-fed RC node (analytic.ts's `rcTerminalThevenin`/
+ * `rcVoltageAt`): `sourceVolts` through `seriesOhms` into a capacitor
+ * (`capacitanceF`, `esrOhms`, `leakageOhms`) at `node`, starting uncharged at
+ * t=0 (a fresh load — never true of a carried-forward reload).
+ *
+ * `leakageOhms` MUST already be the fixture's own declared leakage combined
+ * IN PARALLEL with the universal node shunt every free node carries
+ * (core/README.md's `NODE_RSHUNT_G = 1e-12` S, i.e. 1e12 ohms to the datum —
+ * both engines stamp it, so the true analytic answer includes it) — e.g.
+ * `parallelOhms(declaredLeakageOhms, 1e12)`, or exactly `1e12` when the
+ * fixture declares no leakage of its own. Getting this wrong shifts the
+ * asymptote by a relative amount comparable to the core's own precision
+ * (about 1e-7 at a 100 kohm series resistance) — analytic.test.ts's own
+ * `NODE_SHUNT_OHMS`/`parallelOhms` do the identical combination for the
+ * dedicated gate-2e checks; this mirrors that, not a fresh derivation.
+ *
+ * `currentComponents` names resistor component ids whose `elementI` is
+ * ALSO judged analytically, derived from this SAME node's analytic voltage
+ * via Ohm's law across `seriesOhms` (current = (sourceVolts - analytic node
+ * voltage) / seriesOhms) — valid exactly when the named resistor carries the
+ * full loop current from the fixed source to `node` (true whenever nothing
+ * else taps the path between them, as in every fixture 11-13 topology).
+ */
+export interface AnalyticRcModel {
+  readonly kind: "rc";
+  readonly sourceVolts: number;
+  readonly seriesOhms: number;
+  readonly capacitanceF: number;
+  readonly esrOhms: number;
+  readonly leakageOhms: number;
+  readonly node: AnalyticNodeRef;
+  readonly currentComponents?: readonly string[];
+}
+
+/**
+ * The two-capacitor RC ladder (analytic.ts's `rcLadderVoltagesAt`):
+ * `sourceVolts --r1Ohms-- node1 --r2Ohms-- node2`, `c1F`/`c2F` from node1/
+ * node2 to ground, both starting uncharged. No leakage/node-shunt term (the
+ * ladder's own analytic model is pure-ideal, per `rcLadderVoltagesAt`'s own
+ * signature) — decision 14 already holds the core's stepped path to a much
+ * looser bound than the single-capacitor closed form's 1e-9 relative, so the
+ * shunt's ~1e-7-relative effect is not worth modelling here.
+ *
+ * `r1Component`/`r2Component` are each resistor's own component id, judged
+ * the same way `AnalyticRcModel.currentComponents` is: r1's current is
+ * `(sourceVolts - analytic node1 voltage) / r1Ohms`, r2's is `(analytic
+ * node1 voltage - analytic node2 voltage) / r2Ohms` — both exact by Ohm's
+ * law across a resistor whose own two terminal voltages are both known
+ * analytically, regardless of what else taps either node.
+ */
+export interface AnalyticRcLadderModel {
+  readonly kind: "rc-ladder";
+  readonly sourceVolts: number;
+  readonly r1Ohms: number;
+  readonly c1F: number;
+  readonly r2Ohms: number;
+  readonly c2F: number;
+  readonly node1: AnalyticNodeRef;
+  readonly node2: AnalyticNodeRef;
+  readonly r1Component?: string;
+  readonly r2Component?: string;
+}
+
+/**
+ * Gate 2e / decision 3 (the W1 plan): a fixture's closed-form analytic
+ * reference for ONE dynamic node (or ladder pair) and, optionally, the
+ * resistor currents Ohm's law derives from it. `run-entry.ts`'s plain
+ * comparison judges a `netV`/`elementI` mismatch that names this model's own
+ * `node`/`currentComponents` through `checkAnalyticCrossing` (analytic.ts)
+ * INSTEAD OF the flat classic-vs-core tolerance: a mismatch there still
+ * fails if the CORE itself is off, but passes (as "analytic-closer", with
+ * the reason recorded — decision 3) when the core is within tolerance of the
+ * analytic answer and classic's own backward-Euler lag is what actually
+ * produced the raw mismatch. Every mismatch on any OTHER net/element is
+ * completely unaffected by this field and still fails the entry as before.
+ */
+export type AnalyticFixtureModel = AnalyticRcModel | AnalyticRcLadderModel;
+
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */
   readonly id: string;
@@ -99,6 +184,8 @@ export interface CorpusEntry {
   readonly phases?: readonly StimulusPhase[];
   /** Why `phases` is absent despite `stimulus === "verify-script"`, when the producer knows and says so (rather than just omitting the field). Diagnostics only. */
   readonly phasesUnsupported?: string;
+  /** Gate 2e / decision 3's analytic reference for this entry's plain (non-stimuli) comparison — see `AnalyticFixtureModel`'s own doc. `undefined` for every entry without a closed-form reference (the common case). */
+  readonly analytic?: AnalyticFixtureModel;
 }
 
 /** One accepted-step-equivalent readout from either engine, at one sample time — see sample.ts. */

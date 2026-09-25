@@ -1,11 +1,14 @@
 //! Partitioning and classification (core/README.md, "W0 kernel semantics"
-//! points 1-3; W1 plan section 3.2, row B1). Fixed-node derivation, the
-//! iterative union-find over free nodes, and — new in W1b — classifying each
-//! resulting partition as static, closed-form or stepped (Decision 14), so
-//! `solve/static_part.rs` knows exactly which partitions it may actually
-//! solve this step and which are a `ClosedForm`/`Stepped` "not yet" (no
-//! device stamps a capacitor's companion model until W1b step 2's
-//! `solve/closed_form.rs`/`solve/stepped.rs` exist).
+//! points 1-3; W1 plan section 3.2, rows B1/B2/B3). Fixed-node derivation,
+//! the iterative union-find over free nodes, and classifying each resulting
+//! partition as static, closed-form or stepped (Decision 14): `solve::mod`'s
+//! `PartitionedSolver` (W1b step 2) uses [`PartitionBuild::kinds`] to decide,
+//! per partition, whether `solve/static_part.rs`, `solve/closed_form.rs` or
+//! `solve/stepped.rs` owns it. `FORCE_STEPPED` (core/README.md's Options
+//! table, key 4 — tests only) is applied here, once, by [`build`]: every
+//! `ClosedForm` partition becomes `Stepped` instead, so every downstream
+//! consumer of `PartitionBuild::kinds` sees the final classification
+//! directly and never has to re-check the option itself.
 //!
 //! Moved here from `engine.rs`'s former `StaticPartitionSolver::build`
 //! (W0/W1a): fixed-node propagation from node 0 and the iterative,
@@ -52,24 +55,24 @@ pub struct ResolvedSource {
     pub parent_is_pos: bool,
 }
 
-/// How a partition's own devices classify it (Decision 14, W1 plan row B1).
-/// Only [`PartitionKind::Static`] is reachable through W1b step 1: [`build`]
-/// below rejects a program with any `ClosedForm`/`Stepped` partition as
-/// `ERR_UNSUPPORTED_TOPOLOGY` (-3) the same way a floating or looped ideal
-/// source already is, so `solve/static_part.rs` never has to handle one.
-/// Kept as a real three-way enum — not a bool — so W1b step 2 can match on
-/// it directly instead of re-deriving the classification from a capacitor
-/// count a second time.
+/// How a partition's own devices classify it (Decision 14, W1 plan row B1;
+/// the `FORCE_STEPPED` override, row B2/B3, is applied by [`build`] before
+/// this ever reaches a caller). Kept as a real three-way enum — not a bool —
+/// so `solve::mod`'s `PartitionedSolver` can match on it directly instead of
+/// re-deriving the classification from a capacitor count a second time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionKind {
     /// No capacitor at all: a pure conductance network, solved by
     /// `solve/static_part.rs` every time it is dirtied.
     Static,
-    /// Exactly one capacitor: eligible for W1b step 2's analytic
-    /// segment/crossing solver (Decision 14, `solve/closed_form.rs`).
+    /// Exactly one capacitor: eligible for the analytic segment/crossing
+    /// solver (Decision 14, `solve/closed_form.rs`) — unless `FORCE_STEPPED`
+    /// is set, in which case [`build`] reclassifies it as `Stepped` instead
+    /// (tests only, core/README.md's Options table key 4).
     ClosedForm,
-    /// More than one capacitor (or, once ported, an inductor): the general
-    /// stepped BE/trap path (`solve/stepped.rs`).
+    /// More than one capacitor (or, once ported, an inductor or a nonlinear
+    /// element), or any `ClosedForm` partition under `FORCE_STEPPED`: the
+    /// general stepped BE/trap path (`solve/stepped.rs`).
     Stepped,
 }
 
@@ -83,11 +86,11 @@ fn classify(capacitor_count: usize) -> PartitionKind {
 
 /// The result of partitioning: everything a solver needs to build its own
 /// per-partition state, without redoing fixed-node derivation or
-/// union-find. `kinds` is parallel to `partitions`; `build` below already
-/// guarantees every entry is [`PartitionKind::Static`] (it errors out
-/// otherwise), so a step-1 caller can ignore the field entirely if it
-/// prefers — it exists so W1b step 2 does not need a second pass over the
-/// same data to get the same classification.
+/// union-find. `kinds` is parallel to `partitions`, with `FORCE_STEPPED`
+/// already folded in — a caller that only ever handles
+/// [`PartitionKind::Static`] (there is none such left in this crate after
+/// W1b step 2, but a future standalone tool might) can still ignore the
+/// field entirely if it prefers.
 pub struct PartitionBuild {
     /// Node ids per partition, in first-seen order (deterministic; contract
     /// point 3 of "W0 kernel semantics").
@@ -100,6 +103,15 @@ pub struct PartitionBuild {
     /// Every source that fixed a node, in resolution order.
     pub resolved: Vec<ResolvedSource>,
     pub kinds: Vec<PartitionKind>,
+    /// How many partitions have >= 2 capacitors — real multi-capacitor
+    /// linear partitions, counted from the ORIGINAL capacitor count before
+    /// `FORCE_STEPPED` could reclassify a single-capacitor `ClosedForm`
+    /// partition into `Stepped` too (so this count does not move under that
+    /// option). W1b's report to the orchestrator: this is a candidate for a
+    /// new `bo_engine_stat` index 15, not yet in the ABI contract table
+    /// (core/README.md's "Stat indices") — `engine.rs` already exposes it at
+    /// that index, pending the orchestrator adding the row.
+    pub multi_capacitor_partitions: usize,
 }
 
 /// Every pin-index pair (into a device's own `pins`) that can ever carry a
@@ -124,10 +136,11 @@ fn union_pairs(kind: u32, pin_count: usize) -> Vec<(usize, usize)> {
 /// resistor, capacitor or switch-family contact whose two ends are both free
 /// (see this module's doc comment for why a switch-family contact is
 /// unioned regardless of its current open/closed state), then classifies
-/// each resulting partition (Decision 14) and rejects a program this step
-/// cannot solve — a `ClosedForm`/`Stepped` partition, or a capacitor with
-/// BOTH terminals fixed (so it belongs to no partition at all, but still
-/// needs dynamic state no kind here can give it before W1b step 2) — as
+/// each resulting partition (Decision 14, `FORCE_STEPPED` applied here) and
+/// rejects a program no partition can ever own — a capacitor with BOTH
+/// terminals fixed (so it belongs to no partition at all: not a resistive
+/// network `solve/static_part.rs` can solve, and not a free-node dynamical
+/// system `solve/closed_form.rs`/`solve/stepped.rs` integrate either) — as
 /// `ERR_UNSUPPORTED_TOPOLOGY` (-3), exactly the code the contract already
 /// uses for "the TS side falls back to classic".
 pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
@@ -183,21 +196,32 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             (Some((p, _)), _) | (_, Some((p, _))) => capacitor_count[p] += 1,
             (None, None) => {
                 return Err(BoError::unsupported_topology(format!(
-                    "capacitor (component {}): both terminals are fixed nodes — dynamic partitions are not implemented until W1b step 2",
+                    "capacitor (component {}): both terminals are fixed nodes — a capacitor needs at least one free terminal to belong to a partition",
                     device.component_index
                 )));
             }
         }
     }
 
-    let kinds_by_partition: Vec<PartitionKind> = capacitor_count.into_iter().map(classify).collect();
-    if let Some(p_idx) = kinds_by_partition.iter().position(|k| *k != PartitionKind::Static) {
-        return Err(BoError::unsupported_topology(format!(
-            "partition {p_idx}: contains a capacitor — dynamic partitions are not implemented until W1b step 2"
-        )));
-    }
+    // Decision 14 (W1 plan row B2/B3): classify by capacitor count, then fold
+    // in `FORCE_STEPPED` — a test-only override, core/README.md's Options
+    // table key 4 — which sends every single-capacitor `ClosedForm`
+    // partition down the general stepped path instead, so the same fixture
+    // can be run both ways to compare the exact closed form against the
+    // BE/trap step-doubling controller (W1 plan row B3's verify step: "the
+    // RC/RL discrete-conservation benchmarks under `FORCE_STEPPED`").
+    // `Stepped` (already >= 2 capacitors, or nonlinear once W1c+ adds a
+    // nonlinear kind) is left alone: forcing an already-stepped partition to
+    // itself is a no-op.
+    let multi_capacitor_partitions = capacitor_count.iter().filter(|&&c| c >= 2).count();
+    let force_stepped = program.options.force_stepped;
+    let kinds_by_partition: Vec<PartitionKind> = capacitor_count
+        .into_iter()
+        .map(classify)
+        .map(|kind| if force_stepped && kind == PartitionKind::ClosedForm { PartitionKind::Stepped } else { kind })
+        .collect();
 
-    Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition })
+    Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions })
 }
 
 /// Fixed-point propagation from node 0 (contract, point 1). Returns each

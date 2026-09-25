@@ -150,19 +150,37 @@ describe("replayStimuliOnClassic", () => {
   });
 });
 
+/**
+ * vsrc -> led1 -> r1 -> gnd. `switch` joined CORE_IMPLEMENTED_KINDS in W1b
+ * (kinds.ts), and `capacitor` joined it once this same wave's later step
+ * landed the device/solver — neither still proves "the default set can't
+ * load this circuit". `led` (W1e, not yet ported) takes over that role.
+ */
+function ledOnlyCircuit(): SimCircuit {
+  return {
+    components: [
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("gnd", "ground", ["gnd"]),
+      part("led1", "led", ["a", "b"], {}),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+    ],
+    wires: [
+      wire("vsrc", "neg", "gnd", "gnd"),
+      wire("vsrc", "pos", "led1", "a"),
+      wire("led1", "b", "r1", "a"),
+      wire("r1", "b", "gnd", "gnd"),
+    ],
+  };
+}
+
 describe("replayStimuliOnCore", () => {
   it("throws StimuliNotYetSupportedOnCoreError, naming the missing kind, when the DEFAULT CORE_IMPLEMENTED_KINDS can't load this circuit at all", () => {
-    // `switch` joined CORE_IMPLEMENTED_KINDS in W1b (kinds.ts), so a
-    // switch-only circuit no longer proves this path — `capacitor` has not
-    // (CORE_KIND_CODES reserves it a code, but kinds.ts's implemented set
-    // does not include it yet), so rcNetwork (already used above) is a kind
-    // this DEFAULT set still can't load.
     try {
-      replayStimuliOnCore(rcNetwork(1000), [{ durationS: 1e-3 }]);
+      replayStimuliOnCore(ledOnlyCircuit(), [{ durationS: 1e-3 }]);
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
-      expect((err as StimuliNotYetSupportedOnCoreError).reasons).toContain("unsupported-kind:capacitor");
+      expect((err as StimuliNotYetSupportedOnCoreError).reasons).toContain("unsupported-kind:led");
       expect((err as Error).message).toMatch(/bo_engine_set_params/);
     }
   });

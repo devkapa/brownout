@@ -33,13 +33,15 @@ const DIVIDER: SimCircuit = {
   wires: [wire("src", "pos", "top", "a"), wire("top", "b", "bottom", "a"), wire("bottom", "b", "src", "neg")],
 };
 
-// Same divider, plus one capacitor -- a kind CORE_IMPLEMENTED_KINDS does not
-// contain in W1a. compileCircuit can never turn this into a program, so this
-// is exactly the "force a fallback" case the worker brief's verify step asks
-// for.
+// Same divider, plus one LED -- a kind CORE_IMPLEMENTED_KINDS does not
+// contain (W1e, not yet ported; `capacitor` played this role until this same
+// wave's later step landed the device/solver and the orchestrator added it
+// to CORE_IMPLEMENTED_KINDS). compileCircuit can never turn this into a
+// program, so this is exactly the "force a fallback" case the worker brief's
+// verify step asks for.
 const WITH_UNSUPPORTED_KIND: SimCircuit = {
-  components: [...DIVIDER.components, part("c", "capacitor", ["a", "b"], { capacitance: 1e-6 })],
-  wires: [...DIVIDER.wires, wire("bottom", "b", "c", "a"), wire("bottom", "b", "c", "b")],
+  components: [...DIVIDER.components, part("led1", "led", ["a", "b"], {})],
+  wires: [...DIVIDER.wires, wire("bottom", "b", "led1", "a"), wire("bottom", "b", "led1", "b")],
 };
 
 beforeAll(async () => {
@@ -111,7 +113,7 @@ describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(CoreSuiteFellBackError);
-    expect((thrown as CoreSuiteFellBackError).reasons).toContain("unsupported-kind:capacitor");
+    expect((thrown as CoreSuiteFellBackError).reasons).toContain("unsupported-kind:led");
   });
 
   it("also fires when coreSupportedKinds is narrowed below what a portable case needs", () => {
@@ -128,7 +130,7 @@ describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
     expect(() => engine.load(WITH_UNSUPPORTED_KIND)).toThrow(CoreSuiteFellBackError);
     // CoreEngine's own "no program loaded" facade state (engine.ts) surfaces
     // through HeadlessRunner's classic fallback load, which DOES succeed (the
-    // capacitor circuit is valid on classic) -- readouts must reflect that
+    // LED circuit is valid on classic) -- readouts must reflect that
     // fallback run, not the earlier core one, since accessing them at all
     // outside gate 1's own load()-throws contract is a caller bug the adapter
     // does not otherwise police.

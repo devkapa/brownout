@@ -57,7 +57,7 @@ function circuit(components: SimComponent[], wires: SimCircuit["wires"] = []): S
   return { components, wires };
 }
 
-const WITH_PASSIVES = new Set([...CORE_IMPLEMENTED_KINDS, "switch", "push_button", "spdt_switch", "dip_switch"]);
+const WITH_PASSIVES = new Set([...CORE_IMPLEMENTED_KINDS, "switch", "push_button", "spdt_switch", "dip_switch", "capacitor"]);
 
 function compileOk(c: SimCircuit) {
   const result = compileCircuit(c, WITH_PASSIVES);
@@ -390,6 +390,95 @@ describe("resolveCapacitorParams — classic's modelParam exact-uid rule (spec �
     const resolved = resolveCapacitorParams(c.components[1]!);
     expect(resolved.esr).toBe(1);
     expect(resolved.leakage).toBe(10_000_000);
+  });
+});
+
+// ---- capacitor: wire emission (compileCircuit / compileCapacitor) ----------
+//
+// The block above proves resolveCapacitorParams itself against classic's
+// modelParam; this one proves the ACTUAL program record compileCircuit emits
+// for "capacitor" — pins, and [C, esr, leakage] in the wire's param order —
+// on the same passive-parasitics.test.ts catalogUid cases the README's own
+// kind-codes table cites (catalogUid "capacitor", "cap-ceramic",
+// "cap-electrolytic", "cap-film", and no catalogUid at all).
+
+describe("compileCapacitor / compileCircuit — capacitor wire emission", () => {
+  it("capacitor IS implemented in the default CORE_IMPLEMENTED_KINDS (kinds.ts; the orchestrator added it once this worker's compiler emission and R2's Rust device/solver both landed)", () => {
+    const c = circuit([
+      part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+    ]);
+    const result = compileCircuit(c); // default implementedKinds, no override
+    expect(result.ok).toBe(true);
+  });
+
+  it("emits positional pins and [C, esr, leakage] for an ideal (no catalogUid) capacitor", () => {
+    const c = circuit([
+      part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+      part("c1", "capacitor", ["a", "b"], { capacitance: 4.7e-6 }),
+    ], [
+      wire("vs", "pos", "r1", "a"),
+      wire("r1", "b", "c1", "a"),
+      wire("c1", "b", "vs", "neg"),
+    ]);
+    const compiled = compileOk(c);
+    const decoded = decodeProgram(compiled.program);
+    const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE.capacitor)!;
+    expect(dev.params).toEqual([4.7e-6, 0, 0]); // ideal: esr 0, leakage 0 (meaning none)
+    expect(dev.pins).toHaveLength(2);
+    const built = buildCoreNodes(c);
+    expect(dev.pins[0]!.node).toBe(built.pinNode.get("c1\u0000a"));
+    expect(dev.pins[1]!.node).toBe(built.pinNode.get("c1\u0000b"));
+  });
+
+  it.each([
+    ["capacitor", 1, 1e7],
+    ["cap-ceramic", 0.05, 1e9],
+    ["cap-electrolytic", 0.2, 1e6],
+    ["cap-film", 0.1, 1e9],
+  ] as const)("catalogUid %s emits [C, esr, leakage] = [C, %f, %f], per the README's own table", (catalogUid, esr, leakage) => {
+    const c = circuit([
+      { id: "c1", kind: "capacitor", catalogUid, pins: [{ id: "a" }, { id: "b" }], params: { capacitance: 2.2e-6 } },
+    ]);
+    const compiled = compileOk(c);
+    const decoded = decodeProgram(compiled.program);
+    const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE.capacitor)!;
+    expect(dev.params[0]).toBeCloseTo(2.2e-6, 15);
+    expect(dev.params[1]).toBeCloseTo(esr, 12);
+    expect(dev.params[2]).toBeCloseTo(leakage, 3);
+  });
+
+  it("an authored esr/leakageResistance param always wins over the catalog default, in the emitted wire record too", () => {
+    const c = circuit([
+      { id: "c1", kind: "capacitor", catalogUid: "capacitor", pins: [{ id: "a" }, { id: "b" }], params: { capacitance: 1e-6, esr: 3, leakageResistance: 42 } },
+    ]);
+    const compiled = compileOk(c);
+    const decoded = decodeProgram(compiled.program);
+    const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE.capacitor)!;
+    expect(dev.params).toEqual([1e-6, 3, 42]);
+  });
+
+  it("too few pins is malformed, not silently accepted (matches resistor/voltage_source's own rule)", () => {
+    const c = circuit([part("c1", "capacitor", ["a"], { capacitance: 1e-6 })]);
+    const result = compileCircuit(c, WITH_PASSIVES);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons).toEqual(["malformed:c1:too-few-pins"]);
+  });
+
+  it("a non-finite capacitance (garbage string) is refused at compile time, routing to classic", () => {
+    const c = circuit([part("c1", "capacitor", ["a", "b"], { capacitance: "not-a-number" })]);
+    const result = compileCircuit(c, WITH_PASSIVES);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons).toEqual(["malformed:c1:non-finite-capacitance"]);
+  });
+
+  it("capacitance floors at 1e-15 and defaults to 1e-6, matching devices/passives.ts's capacitorModel, in the emitted wire record", () => {
+    const zero = compileOk(circuit([part("c1", "capacitor", ["a", "b"], { capacitance: 0 })]));
+    expect(decodeProgram(zero.program).devices[0]!.params[0]).toBe(1e-15);
+
+    const absent = compileOk(circuit([part("c1", "capacitor", ["a", "b"], {})]));
+    expect(decodeProgram(absent.program).devices[0]!.params[0]).toBe(1e-6);
   });
 });
 

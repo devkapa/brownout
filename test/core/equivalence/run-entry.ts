@@ -44,8 +44,10 @@ import path from "node:path";
 import { getPartLibrary } from "../../../src/parts/part-library.js";
 import { HeadlessRunner } from "../../../src/host/headless.js";
 import { CoreUnsupportedError } from "../../../src/core/errors.js";
+import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles } from "./align.js";
+import { checkAnalyticCrossing, rcLadderVoltagesAt, rcTerminalThevenin, rcVoltageAt } from "./analytic.js";
 import { compareSamples, compareStimuliSamples } from "./compare.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
@@ -54,8 +56,18 @@ import { classicIdentityHash, createFileReferenceCache, getOrCompute, fixtureHas
 import { collectClassicSamples, collectCoreSamples, DEFAULT_DURATION_S, sampleTimesFor } from "./sample.js";
 import { denseAnalogSchedule } from "./schedule.js";
 import { replayStimuliOnClassic, replayStimuliOnCore, StimuliNotYetSupportedOnCoreError, type StimulusStepSample } from "./stimuli.js";
+import { AMP_ABS_TOL, AMP_REL_TOL, VOLT_ABS_TOL, VOLT_REL_TOL } from "./tolerance.js";
 import { collectClassicDigitalTrace, collectCoreDigitalTrace, CoreTraceUnsupportedError, type DigitalTraceEvent } from "./trace.js";
-import type { CorpusEntry, CorpusOrigin, EntryResult, KnownDivergenceHit, Mismatch, SampleReadout } from "./types.js";
+import type {
+  AnalyticFixtureModel,
+  AnalyticNodeRef,
+  CorpusEntry,
+  CorpusOrigin,
+  EntryResult,
+  KnownDivergenceHit,
+  Mismatch,
+  SampleReadout,
+} from "./types.js";
 
 /** The first ~10 mismatches are reported per the brief; the rest are still counted (FailResult.totalMismatches). */
 const MAX_REPORTED_MISMATCHES = 10;
@@ -359,6 +371,142 @@ function toKnownDivergenceHit(match: { mismatch: Mismatch; divergence: { id: str
   return { mismatch: match.mismatch, divergenceId: match.divergence.id, decisionRef: match.divergence.decisionRef, reason: match.divergence.reason };
 }
 
+// ─── Gate 2e / decision 3: analytic-closer judging for the plain comparison ──
+//
+// A fixture that declares `CorpusEntry.analytic` (types.ts) names one node
+// (or ladder pair) it has a closed-form answer for. Decision 3: classic's own
+// backward-Euler discretisation can lag the true curve by more than the flat
+// classic-vs-core tolerance even when the core is EXACT — that is classic
+// being "wrong" by a known, bounded amount, not the core failing. Rather than
+// widen the tolerance everywhere (which would just as easily hide a real core
+// bug), `explainAnalyticMismatches` re-judges ONLY the mismatches that name
+// the declared node/current, against the analytic answer instead of against
+// classic, and only when the core itself is within the SAME tolerance
+// compareSamples already uses (tolerance.ts) — never a looser one invented
+// for this path. A mismatch outside the declared node/elements, or one where
+// the core itself is off, is untouched and still fails the entry exactly as
+// before classic became "unfair" to compare against.
+
+/** `AnalyticNodeRef` resolved to this circuit's net id (`buildCoreNodes`, the same resolution `compileCircuit` itself uses) — `null` when the pin does not resolve (a malformed model, never expected of a fixture this harness owns). */
+function analyticNetId(built: ReturnType<typeof buildCoreNodes>, ref: AnalyticNodeRef): string | null {
+  const node = built.pinNode.get(corePinKey(ref.component, ref.pin));
+  if (node === undefined) return null;
+  return built.netIdOfNode[node] ?? null;
+}
+
+interface AnalyticTargets {
+  /** net id -> analytic voltage at time t. */
+  readonly netV: ReadonlyMap<string, (t: number) => number>;
+  /** component id (elementI key) -> analytic current at time t. */
+  readonly elementI: ReadonlyMap<string, (t: number) => number>;
+}
+
+/** Resolves one entry's declared `AnalyticFixtureModel` into ready-to-evaluate functions, keyed exactly the way `Mismatch.id` names a `netV`/`elementI` target — computed once per entry, reused across every sample time a mismatch might name. */
+function buildAnalyticTargets(circuit: SimCircuit, model: AnalyticFixtureModel): AnalyticTargets {
+  const built = buildCoreNodes(circuit);
+  const netV = new Map<string, (t: number) => number>();
+  const elementI = new Map<string, (t: number) => number>();
+
+  if (model.kind === "rc") {
+    const { tau, vAsymptote, v0AtUncharged } = rcTerminalThevenin({
+      sourceVolts: model.sourceVolts,
+      seriesOhms: model.seriesOhms,
+      capacitanceF: model.capacitanceF,
+      esrOhms: model.esrOhms,
+      leakageOhms: model.leakageOhms,
+    });
+    const voltageAt = (t: number) => rcVoltageAt(v0AtUncharged, vAsymptote, tau, t);
+    const netId = analyticNetId(built, model.node);
+    if (netId) netV.set(netId, voltageAt);
+    for (const componentId of model.currentComponents ?? []) {
+      elementI.set(componentId, (t) => (model.sourceVolts - voltageAt(t)) / model.seriesOhms);
+    }
+  } else {
+    const ladderParams = { sourceVolts: model.sourceVolts, r1Ohms: model.r1Ohms, c1F: model.c1F, r2Ohms: model.r2Ohms, c2F: model.c2F };
+    const v1At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v1;
+    const v2At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v2;
+    const netId1 = analyticNetId(built, model.node1);
+    const netId2 = analyticNetId(built, model.node2);
+    if (netId1) netV.set(netId1, v1At);
+    if (netId2) netV.set(netId2, v2At);
+    if (model.r1Component) elementI.set(model.r1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms);
+    if (model.r2Component) elementI.set(model.r2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
+  }
+
+  return { netV, elementI };
+}
+
+/** `Decision 3 (W1 plan)`, recorded on every mismatch this path explains — kept as one exported constant so a report and a test can both name it exactly, rather than re-typing the string. */
+export const ANALYTIC_CLOSER_DIVERGENCE_ID_PREFIX = "analytic";
+const ANALYTIC_DECISION_REF =
+  "Decision 3 (W1 plan): the core's closed-form/stepped solve may be closer to a fixture's declared analytic " +
+  "answer than classic's own backward-Euler discretisation is — judged here against the SAME tolerance " +
+  "(tolerance.ts) compareSamples itself uses, never a looser one.";
+
+/**
+ * Splits `mismatches` into ones `entry.analytic` explains (the core is within
+ * tolerance of the analytic answer at that mismatch's own `sampleTime` — gate
+ * 2e's rule, `checkAnalyticCrossing`) and everything else, which callers must
+ * still judge exactly as before. Returns `mismatches` itself unchanged (in
+ * `remaining`) when the entry declares no analytic model, or when a mismatch
+ * is not numeric (`classicValue`/`coreValue` are not both `number` — this
+ * never checks a `digitalState`/`failures`/`warnings`/`simTime` mismatch)
+ * or does not name the declared node/current.
+ *
+ * Exported for equivalence.test.ts's detector self-test (compareSamples's
+ * own header: "the only way to test a detector without editing src to break
+ * it") — proving a core value perturbed away from the analytic answer still
+ * ends up in `remaining`, never silently explained away.
+ */
+export function explainAnalyticMismatches(
+  entry: CorpusEntry,
+  circuit: SimCircuit,
+  mismatches: readonly Mismatch[],
+): { readonly explained: readonly KnownDivergenceHit[]; readonly remaining: readonly Mismatch[] } {
+  if (!entry.analytic) return { explained: [], remaining: mismatches };
+
+  const targets = buildAnalyticTargets(circuit, entry.analytic);
+  const explained: KnownDivergenceHit[] = [];
+  const remaining: Mismatch[] = [];
+
+  for (const mismatch of mismatches) {
+    const analyticFn =
+      mismatch.category === "netV"
+        ? targets.netV.get(mismatch.id)
+        : mismatch.category === "elementI"
+          ? targets.elementI.get(mismatch.id)
+          : undefined;
+
+    if (!analyticFn || typeof mismatch.classicValue !== "number" || typeof mismatch.coreValue !== "number") {
+      remaining.push(mismatch);
+      continue;
+    }
+
+    const analyticValue = analyticFn(mismatch.sampleTime);
+    const [absTol, relTol] = mismatch.category === "netV" ? [VOLT_ABS_TOL, VOLT_REL_TOL] : [AMP_ABS_TOL, AMP_REL_TOL];
+    const result = checkAnalyticCrossing({
+      coreValue: mismatch.coreValue,
+      analyticValue,
+      classicValue: mismatch.classicValue,
+      absTol,
+      relTol,
+    });
+
+    if (result.status === "pass") {
+      explained.push({
+        mismatch,
+        divergenceId: `${ANALYTIC_CLOSER_DIVERGENCE_ID_PREFIX}:${entry.analytic.kind}`,
+        decisionRef: ANALYTIC_DECISION_REF,
+        reason: result.reason,
+      });
+    } else {
+      remaining.push(mismatch);
+    }
+  }
+
+  return { explained, remaining };
+}
+
 export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   // Gate 2d's stimuli path takes priority over everything below: a
   // verify-script entry with exported phases is answering a different
@@ -462,8 +610,13 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   };
 
   const allMismatches = [...cmp.mismatches, ...digitalMismatches];
-  const { known, unexplained } = classifyMismatches(circuit, allMismatches);
-  const knownDivergences = known.map(toKnownDivergenceHit);
+  // Gate 2e / decision 3 first: re-judge a mismatch on the entry's declared
+  // analytic node/current against the analytic answer before ever asking
+  // known-divergences.ts's registry about it — the two are independent
+  // explanations for the SAME mismatch list, so both are tried and merged.
+  const analyticSplit = explainAnalyticMismatches(entry, circuit, allMismatches);
+  const { known, unexplained } = classifyMismatches(circuit, analyticSplit.remaining);
+  const knownDivergences = [...analyticSplit.explained, ...known.map(toKnownDivergenceHit)];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };

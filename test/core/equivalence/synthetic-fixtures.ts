@@ -14,7 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
-import type { CorpusEntry } from "./types.js";
+import type { AnalyticFixtureModel, CorpusEntry } from "./types.js";
 
 const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "core");
 
@@ -23,6 +23,8 @@ export interface SyntheticExpectation {
   readonly status: "pass" | "core-declined";
   /** Only meaningful when status is "core-declined" — e.g. "topology:" for the two topology-rejection fixtures. */
   readonly reasonPrefix?: string;
+  /** Gate 2e / decision 3's analytic reference, when this fixture declares one — threaded straight onto the CorpusEntry (types.ts's own doc); see AnalyticFixtureModel and run-entry.ts's use of it. `undefined` for every fixture without one. */
+  readonly analytic?: AnalyticFixtureModel;
 }
 
 export interface LoadedSyntheticEntry {
@@ -59,6 +61,7 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       kinds: kindsOf(circuit),
       stimulus: null,
       file: full,
+      analytic: expected.analytic,
     };
     return { entry, circuit, expected };
   });

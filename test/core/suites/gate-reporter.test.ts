@@ -141,6 +141,42 @@ describe("CoreGateReporter -- gate 1 fails on any un-run or un-passed portable c
     });
   });
 
+  it("matches on the full describe chain, so a same-titled test under a sibling describe cannot shadow a case", () => {
+    // The real suite's RC and RL step-response blocks share it() titles; the
+    // RL copy is filtered out (state "skip") and comes later in the tree, so
+    // a bare-title lookup would read its "skip" for the portable RC case.
+    withFixtureRoot((rootDir) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const reporter = new CoreGateReporter(rootDir);
+      const files = [
+        {
+          filepath: path.join(rootDir, SUITE_FILE),
+          tasks: [
+            { name: "fixture", tasks: [leaf("case one", "pass"), leaf("case two", "pass")] },
+            { name: "sibling", tasks: [leaf("case one", "skip")] },
+          ],
+        },
+      ];
+      const before = process.exitCode;
+      expect(() => reporter.onFinished(files as never)).not.toThrow();
+      expect(process.exitCode).toBe(before);
+    });
+  });
+
+  it("fails when two tests share one full name, since their results cannot be told apart", () => {
+    withFixtureRoot((rootDir) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const reporter = new CoreGateReporter(rootDir);
+      const files = [fileWith(rootDir, [leaf("case one", "pass"), leaf("case one", "pass"), leaf("case two", "pass")])];
+      const before = process.exitCode;
+      try {
+        expect(() => reporter.onFinished(files as never)).toThrow(/Gate 1 .* failed/);
+      } finally {
+        process.exitCode = before;
+      }
+    });
+  });
+
   it("still fails via the per-kind-zero path when every portable case for a kind is missing (no regression)", () => {
     withFixtureRoot((rootDir) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
