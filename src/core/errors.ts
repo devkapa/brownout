@@ -108,12 +108,13 @@ export class CoreUnsupportedError extends Error {
 }
 
 /**
- * `bo_engine_load` (or `bo_engine_advance`) failed for a reason that is not
- * "route this circuit elsewhere" — a malformed program, an unknown kind code
- * (-2: a TS/Rust kind-table drift bug, not a fact about the user's circuit —
- * see engine.ts's `mapLoadFailure`), a solve failure, or a bad handle
- * (core/README.md error codes -1/-2/-4/-5). Carries the Rust side's own
- * message verbatim, prefixed with what was being attempted.
+ * `bo_engine_load`, `bo_engine_advance` or `bo_engine_set_params` failed for
+ * a reason that is not "route this circuit elsewhere" — a malformed program,
+ * an unknown kind code (-2: a TS/Rust kind-table drift bug, not a fact about
+ * the user's circuit — see engine.ts's `mapLoadFailure`), a solve failure, a
+ * bad handle, or (for `bo_engine_set_params`) an invalid argument the ABI
+ * itself rejected (core/README.md error codes -1/-2/-4/-5/-8). Carries the
+ * Rust side's own message verbatim, prefixed with what was being attempted.
  */
 export class CoreLoadError extends Error {
   constructor(message: string) {

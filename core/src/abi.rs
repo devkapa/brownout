@@ -246,6 +246,86 @@ pub extern "C" fn bo_engine_set_option(h: u32, key: u32, value: f64) -> i32 {
     }
 }
 
+/// Reads one index field (`deviceIndex`/`paramIndex`) out of a
+/// `bo_engine_set_params` triple: must be finite, non-negative, whole and in
+/// `u32` range, exactly `program.rs`'s own `Reader::bounded_index` rule for
+/// an index field, but returning `Option` rather than a `program::BoError`
+/// since this is a live ABI call (`ERR_INVALID_ARGUMENT`, not
+/// `ERR_MALFORMED` — the contract's own distinction between a bad value at
+/// load time and the same shape of bad value in a live call).
+fn whole_index(v: f64) -> Option<u32> {
+    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= u32::MAX as f64 {
+        Some(v as u32)
+    } else {
+        None
+    }
+}
+
+/// `(deviceIndex, paramIndex, value)` triples for a switch-family kind's
+/// live params (owner decision 1). All or nothing: every triple is
+/// validated by `Engine::set_params` before any is applied. `-8` (with
+/// nothing changed) for a malformed buffer (a length not a multiple of 3, a
+/// null pointer with a nonzero length, or an index field that is not a
+/// valid non-negative whole number) as well as for any triple
+/// `Engine::set_params` itself rejects — both are "invalid argument to a
+/// live ABI call" per the contract's error table, not `ERR_MALFORMED` (that
+/// code is reserved for `bo_engine_load`'s own program bytes).
+#[no_mangle]
+pub extern "C" fn bo_engine_set_params(h: u32, ptr: *const f64, len_f64: u32) -> i32 {
+    let handles = HANDLES.get();
+    let engine = match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => engine,
+        _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    };
+
+    if len_f64 % 3 != 0 {
+        return fail(&BoError::invalid_argument(format!(
+            "bo_engine_set_params: buffer length {len_f64} is not a multiple of 3"
+        )));
+    }
+    let triple_count = (len_f64 / 3) as usize;
+    if triple_count == 0 {
+        // An empty batch is trivially valid (`Engine::set_params` itself
+        // treats it as a no-op) -- no need to touch `ptr` at all, matching
+        // `bo_alloc(0)`'s own "a zero-length buffer is not an error" stance.
+        return 0;
+    }
+    if ptr.is_null() {
+        return fail(&BoError::invalid_argument("bo_engine_set_params: buffer pointer is null".to_string()));
+    }
+    // SAFETY: same contract as `bo_engine_load`'s pointer -- `len_f64` live,
+    // initialized f64s in this instance's memory for the duration of this
+    // call.
+    let data = unsafe { std::slice::from_raw_parts(ptr, len_f64 as usize) };
+
+    let mut triples = Vec::with_capacity(triple_count);
+    for i in 0..triple_count {
+        let (raw_device, raw_param, value) = (data[i * 3], data[i * 3 + 1], data[i * 3 + 2]);
+        let device_index = match whole_index(raw_device) {
+            Some(v) => v,
+            None => {
+                return fail(&BoError::invalid_argument(format!(
+                    "bo_engine_set_params: triple {i} deviceIndex {raw_device} is not a valid index"
+                )))
+            }
+        };
+        let param_index = match whole_index(raw_param) {
+            Some(v) => v,
+            None => {
+                return fail(&BoError::invalid_argument(format!(
+                    "bo_engine_set_params: triple {i} paramIndex {raw_param} is not a valid index"
+                )))
+            }
+        };
+        triples.push((device_index, param_index, value));
+    }
+
+    match engine.set_params(&triples) {
+        Ok(()) => 0,
+        Err(err) => fail(&err),
+    }
+}
+
 /// Time of the earliest pending event, `+Infinity` when none. `NaN` for an
 /// unusable handle, matching `bo_engine_time`'s sentinel.
 #[no_mangle]
@@ -395,6 +475,26 @@ mod tests {
             source_record(0.0, 1.0, 0.0, 10.0),
             resistor_record(1.0, 1.0, 2.0, 1000.0),
             resistor_record(2.0, 2.0, 0.0, 1000.0),
+        ])
+    }
+
+    fn switch_record(component_index: f64, a: f64, b: f64, closed: f64) -> Vec<f64> {
+        let mut out = vec![crate::kinds::SWITCH as f64, component_index, 2.0];
+        out.extend_from_slice(&pin(a));
+        out.extend_from_slice(&pin(b));
+        out.push(1.0);
+        out.push(closed);
+        out.push(0.0); // blobCount
+        out
+    }
+
+    /// A source and one switch (open) across it, device 0 and device 1
+    /// respectively — a minimal program for exercising
+    /// `bo_engine_set_params`'s byte-level marshaling.
+    fn switch_program() -> Vec<f64> {
+        build_program(3.0, &[], 0.0, 0.0, &[
+            source_record(0.0, 1.0, 0.0, 10.0),
+            switch_record(1.0, 1.0, 2.0, 0.0),
         ])
     }
 
@@ -656,5 +756,82 @@ mod tests {
     fn set_option_on_an_unusable_handle_is_bad_handle_not_invalid_argument() {
         let _guard = lock();
         assert_eq!(bo_engine_set_option(999_999, 2, 1.0), -5);
+    }
+
+    // --- bo_engine_set_params (W1b, owner decision 1) -----------------------
+
+    fn set_params(h: u32, triples: &[f64]) -> i32 {
+        bo_engine_set_params(h, triples.as_ptr(), triples.len() as u32)
+    }
+
+    #[test]
+    fn set_params_toggles_a_switch_and_the_node_voltage_updates_immediately() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        let v = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
+        assert!(v[2].abs() < 1e-6, "open: got {}", v[2]);
+
+        // device 1 (the switch), param 0 (`closed`), value 1.0.
+        assert_eq!(set_params(h, &[1.0, 0.0, 1.0]), 0);
+        let v = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
+        assert!((v[2] - 10.0).abs() < 1e-3, "closed: got {}", v[2]);
+    }
+
+    #[test]
+    fn set_params_with_an_empty_buffer_is_a_no_op() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(set_params(h, &[]), 0);
+    }
+
+    #[test]
+    fn set_params_rejects_a_length_not_a_multiple_of_three() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(set_params(h, &[1.0, 0.0]), -8);
+    }
+
+    #[test]
+    fn set_params_rejects_a_non_whole_or_negative_index() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(set_params(h, &[1.5, 0.0, 1.0]), -8, "non-whole deviceIndex");
+        assert_eq!(set_params(h, &[1.0, -1.0, 1.0]), -8, "negative paramIndex");
+        assert_eq!(set_params(h, &[f64::NAN, 0.0, 1.0]), -8, "NaN deviceIndex");
+    }
+
+    #[test]
+    fn set_params_rejects_an_invalid_triple_and_changes_nothing() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        let before = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) }.to_vec();
+        // Device 0 (the source) has no live params.
+        assert_eq!(set_params(h, &[0.0, 0.0, 1.0]), -8);
+        let after = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
+        assert_eq!(after, before.as_slice());
+    }
+
+    #[test]
+    fn set_params_on_an_unusable_handle_is_bad_handle() {
+        let _guard = lock();
+        assert_eq!(set_params(999_999, &[0.0, 0.0, 1.0]), -5);
+    }
+
+    #[test]
+    fn set_params_stat_7_counts_cache_hits() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(bo_engine_stat(h, 7), 0.0);
+        assert_eq!(set_params(h, &[1.0, 0.0, 0.0]), 0); // toggle open -> open: no real change.
+        assert_eq!(set_params(h, &[1.0, 0.0, 1.0]), 0); // open -> closed: a real change.
+        assert_eq!(set_params(h, &[1.0, 0.0, 0.0]), 0); // closed -> open: a real change.
+        assert_eq!(set_params(h, &[1.0, 0.0, 0.0]), 0); // open -> open again: repeats a prior state.
+        assert!(bo_engine_stat(h, 7) >= 1.0, "expected at least one cache hit, got {}", bo_engine_stat(h, 7));
     }
 }

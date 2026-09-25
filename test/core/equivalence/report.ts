@@ -33,8 +33,10 @@ function fmtMs(value: number | null): string {
   return value === null ? "n/a" : `${value.toFixed(2)} ms`;
 }
 
+/** `phaseIndex` (set only by gate 2d's `compareStimuliSamples`, compare.ts) is prefixed on its own so a stimuli-path mismatch names which `StimulusPhase` it came from — a plain (non-stimuli) mismatch never has one. */
 function describeMismatch(m: Mismatch): string {
-  return `[t=${m.sampleTime}] ${m.category}.${m.id}: ${m.detail}`;
+  const phase = m.phaseIndex !== undefined ? `phase ${m.phaseIndex}, ` : "";
+  return `[${phase}t=${m.sampleTime}] ${m.category}.${m.id}: ${m.detail}`;
 }
 
 /** Notes appended to an entry's report line for conditions that are not failures but change how the outcome should be read (CorpusEntry's own docs on `stimulus` / `manifestKindsMismatch` / `phasesUnsupported`). */

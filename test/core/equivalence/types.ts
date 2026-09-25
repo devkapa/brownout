@@ -120,6 +120,14 @@ export interface Mismatch {
   readonly classicValue: unknown;
   readonly coreValue: unknown;
   readonly detail: string;
+  /**
+   * Which `StimulusPhase` (stimuli.ts) this sample belongs to — set only by
+   * compare.ts's `compareStimuliSamples` (gate 2d's classic-vs-core stimuli
+   * comparison, run-entry.ts's `runStimuliEntry`, W1b). `undefined` for every
+   * plain (non-stimuli) mismatch `compareSamples` produces — there is no
+   * phase to name outside a scripted-stimuli replay.
+   */
+  readonly phaseIndex?: number;
 }
 
 /** compareSamples()'s full result — see compare.ts. */

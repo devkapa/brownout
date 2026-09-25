@@ -113,7 +113,7 @@ describe("the built module itself", () => {
     expect(WA.Module.imports(module)).toEqual([]);
   });
 
-  it("exports memory and every C ABI v2 (W1a) function, and NOT set_params/seed_memory yet", () => {
+  it("exports memory and every C ABI v2 (W1a+W1b) function, and NOT seed_memory yet", () => {
     const WA = getWasmApi();
     const module = new WA.Module(readWasmBytes());
     const names = new Set(WA.Module.exports(module).map((e: { name: string }) => e.name));
@@ -144,11 +144,11 @@ describe("the built module itself", () => {
       "bo_engine_trace_ptr",
       "bo_engine_trace_len",
       "bo_engine_trace_clear",
+      "bo_engine_set_params",
     ]) {
       expect(names.has(name)).toBe(true);
     }
-    // W1b/W1d rows of the same ABI table — must not exist yet.
-    expect(names.has("bo_engine_set_params")).toBe(false);
+    // W1d's row of the same ABI table — must not exist yet.
     expect(names.has("bo_engine_seed_memory")).toBe(false);
   });
 });
@@ -182,6 +182,7 @@ function fakeExports(overrides: Partial<CoreExports> = {}): CoreExports {
     bo_engine_trace_ptr: () => 0,
     bo_engine_trace_len: () => 0,
     bo_engine_trace_clear: () => {},
+    bo_engine_set_params: () => 0,
   };
   return { ...base, ...overrides };
 }

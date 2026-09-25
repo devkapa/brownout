@@ -1,0 +1,76 @@
+//! The device stamp API (W1 plan section 3.2, row B1/item 3): what a purely
+//! electrical, non-inertial device contributes to its own partition's
+//! static solve, and how it reports its own current afterward.
+//! [`passives`] (the resistor) and [`switches`] (switch, push_button,
+//! spdt_switch, dip_switch) are the only kinds behind it through W1b step 1.
+//!
+//! Kept as a small kind-code dispatch (`stamp`/`current` below), matching
+//! the rest of the crate's style (`kinds::shape`), rather than a trait
+//! object per device: every call site already has the device's `u32` kind
+//! code in hand (`program::Device::kind`), so a `match` is simpler than a
+//! vtable and costs nothing extra.
+//!
+//! Designed to grow, not to change shape:
+//! - W1b step 2's capacitor keeps exactly this `stamp`/`current` pair, and
+//!   only starts returning a nonzero [`Contribution::injection`] for its
+//!   BE/trap companion's history current (`Ihist`) — nothing here needs
+//!   touching for that.
+//! - W1c's IC output stages are NOT behind this API at all: an IC output is
+//!   a [`crate::drivers::Driver`], an inertial, event-scheduled entity the
+//!   kernel itself must own the commit/reset lifecycle of
+//!   (`solve::PartitionSolver::resolve_dirty` already stamps a `Driver`
+//!   directly, in `solve/static_part.rs`), not a plain per-resolve stamp a
+//!   device hands back on request.
+
+pub mod passives;
+pub mod switches;
+
+use crate::kinds;
+
+/// One two-terminal linear contribution between two of a device's OWN pins
+/// (indices into that device's `pins`/`pin_voltages` arrays — never a raw
+/// node id; the caller resolves each side to a local partition index or a
+/// fixed voltage, exactly as `solve/static_part.rs` already does for a
+/// resistor: added to both diagonals and subtracted cross-wise when both
+/// ends are free, or folded into the fixed-neighbour right-hand side when
+/// one end is fixed). `injection` is an independent Norton current on top of
+/// `conductance`, landing on the same two terminals; every kind through W1b
+/// step 1 leaves it `0.0` — step 2's capacitor companion is the first to
+/// need it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Contribution {
+    pub pin_a: usize,
+    pub pin_b: usize,
+    pub conductance: f64,
+    pub injection: f64,
+}
+
+impl Contribution {
+    /// A plain conductance term, no independent source — every W1b
+    /// step 1 kind's only shape.
+    pub fn conductance(pin_a: usize, pin_b: usize, conductance: f64) -> Self {
+        Contribution { pin_a, pin_b, conductance, injection: 0.0 }
+    }
+}
+
+/// This device's current stamp, in terms of its own pin indices. Empty for
+/// any kind not listed here (a `voltage_source`'s contribution is fixed-node
+/// propagation, not a matrix stamp — `partition::derive_fixed_nodes` — and a
+/// digital driver is not this API at all; see the module doc).
+pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
+    match kind {
+        kinds::RESISTOR => passives::stamp(params),
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::stamp(kind, pin_count, params),
+        _ => Vec::new(),
+    }
+}
+
+/// This device's published current (`elementI`), given each of its own
+/// pins' current voltage (parallel to the device's `pins`).
+pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]) -> f64 {
+    match kind {
+        kinds::RESISTOR => passives::current(params, pin_voltages),
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::current(kind, pin_count, params, pin_voltages),
+        _ => 0.0,
+    }
+}

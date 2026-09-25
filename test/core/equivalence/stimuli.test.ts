@@ -3,13 +3,21 @@
  * (small, fast) RC circuit for the one behaviour that actually matters here
  * — carry-forward across a phase's reload, mirroring devolt's
  * `simulateScript` (read for this brief, not imported: devolt is a private,
- * off-limits repo for this worker). The core side is checked against the
- * plain, always-true contract this worker's brief specifies for it: "give
- * the core side an interface that throws 'not yet supported' clearly."
+ * off-limits repo for this worker). The core side is now checked against a
+ * real synthetic switch circuit: `bo_engine_set_params` (owner decision 1)
+ * landed in W1b, so `replayStimuliOnCore` genuinely replays a phase's `set`
+ * overrides through `CoreEngine.setParams` instead of always throwing.
+ * `switch`/`push_button`/`spdt_switch`/`dip_switch` are not yet in
+ * `CORE_IMPLEMENTED_KINDS` (kinds.ts, the orchestrator's table), so these
+ * tests pass a widened `implementedKinds` set — the same documented escape
+ * hatch `compileCircuit`/`CoreEngine.load` already offer callers (chiefly
+ * tests).
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
+import { initCore } from "../../../src/core/wasm.js";
 import {
   replayStimuliOnClassic,
   replayStimuliOnCore,
@@ -17,6 +25,12 @@ import {
   StimuliNotYetSupportedOnCoreError,
   type StimulusPhase,
 } from "./stimuli.js";
+
+// A real CoreEngine (used once `implementedKinds` is widened below) needs
+// initCore() awaited first.
+beforeAll(async () => {
+  await initCore();
+});
 
 type SimComponent = SimCircuit["components"][number];
 
@@ -45,6 +59,24 @@ function rcNetwork(resistance: number): SimCircuit {
     ],
   };
 }
+
+/** vsrc -> sw -> r1 -> vsrc.neg. `switch` is not in CORE_IMPLEMENTED_KINDS (kinds.ts) yet — the core-side tests below pass a widened implementedKinds set. */
+function switchedDivider(closed: number | string): SimCircuit {
+  return {
+    components: [
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("sw", "switch", ["a", "b"], { closed }),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+    ],
+    wires: [
+      wire("vsrc", "pos", "sw", "a"),
+      wire("sw", "b", "r1", "a"),
+      wire("r1", "b", "vsrc", "neg"),
+    ],
+  };
+}
+
+const WITH_SWITCH = new Set([...CORE_IMPLEMENTED_KINDS, "switch"]);
 
 describe("replayStimuliOnClassic", () => {
   it("carries capacitor charge forward across a phase's reload, even though the phase overrides an UNRELATED component's param", () => {
@@ -119,17 +151,73 @@ describe("replayStimuliOnClassic", () => {
 });
 
 describe("replayStimuliOnCore", () => {
-  it("always throws StimuliNotYetSupportedOnCoreError — owner decision 1's parameter-update event is W1b, not yet landed", () => {
-    expect(() => replayStimuliOnCore(rcNetwork(1000), [{ durationS: 1e-3 }])).toThrow(StimuliNotYetSupportedOnCoreError);
-  });
-
-  it("the error message names the actual mechanism the core will use, not a generic TODO", () => {
+  it("throws StimuliNotYetSupportedOnCoreError, naming the missing kind, when the DEFAULT CORE_IMPLEMENTED_KINDS can't load this circuit at all", () => {
+    // `switch` joined CORE_IMPLEMENTED_KINDS in W1b (kinds.ts), so a
+    // switch-only circuit no longer proves this path — `capacitor` has not
+    // (CORE_KIND_CODES reserves it a code, but kinds.ts's implemented set
+    // does not include it yet), so rcNetwork (already used above) is a kind
+    // this DEFAULT set still can't load.
     try {
       replayStimuliOnCore(rcNetwork(1000), [{ durationS: 1e-3 }]);
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
+      expect((err as StimuliNotYetSupportedOnCoreError).reasons).toContain("unsupported-kind:capacitor");
       expect((err as Error).message).toMatch(/bo_engine_set_params/);
     }
+  });
+
+  it("applies each phase's `set` through CoreEngine.setParams at the phase start, then advances — closed, then open, in ONE continuous run (no reload)", () => {
+    const phases: StimulusPhase[] = [
+      { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2 * STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2 * STIMULUS_FIXED_STEP_S },
+    ];
+
+    const samples = replayStimuliOnCore(switchedDivider(0), phases, WITH_SWITCH);
+    const phase0 = samples.filter((s) => s.phaseIndex === 0);
+    const phase1 = samples.filter((s) => s.phaseIndex === 1);
+    expect(phase0).toHaveLength(2);
+    expect(phase1).toHaveLength(2);
+
+    // Phase 0 turned the switch on (closed:1): ~5mA through the 1k resistor.
+    expect(Math.abs(phase0.at(-1)!.elementI.sw ?? 0)).toBeGreaterThan(4e-3);
+    // Phase 1 turned it back off (closed:0): the update actually took effect
+    // — this is not the circuit's ORIGINAL (also open) param, it is setParams
+    // having flipped a device that phase 0 had just closed.
+    expect(Math.abs(phase1.at(-1)!.elementI.sw ?? 0)).toBeLessThan(1e-4);
+  });
+
+  it("samples at the fixed step STIMULUS_FIXED_STEP_S, matching the classic path's uniform grid", () => {
+    const phases: StimulusPhase[] = [{ durationS: 5 * STIMULUS_FIXED_STEP_S }];
+    const samples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+    expect(samples).toHaveLength(5);
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i]!.simTime - samples[i - 1]!.simTime).toBeCloseTo(STIMULUS_FIXED_STEP_S, 9);
+    }
+  });
+
+  it("a phase that sets a param which exists but is NOT live fails clearly — never silently skipped, and never StimuliNotYetSupportedOnCoreError", () => {
+    // r1 (resistor) has no live params at all (CORE_RECORD_SHAPES.resistor.liveParams is empty).
+    const phases: StimulusPhase[] = [{ set: [{ id: "r1", params: { resistance: 5000 } }], durationS: STIMULUS_FIXED_STEP_S }];
+    expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/live/i);
+    try {
+      replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).not.toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
+    }
+  });
+
+  it("a phase naming a component absent from the loaded program fails clearly, not silently", () => {
+    const phases: StimulusPhase[] = [{ set: [{ id: "no-such-component", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S }];
+    expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/no device for component/);
+  });
+
+  it("throws (does not swallow) when the circuit cannot even be loaded — a source shorted to itself, mirroring replayStimuliOnClassic's own load-failure check", () => {
+    const shorted: SimCircuit = {
+      components: [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 })],
+      wires: [wire("vsrc", "pos", "vsrc", "neg")],
+    };
+    expect(() => replayStimuliOnCore(shorted, [{ durationS: 1e-3 }])).toThrow();
   });
 });

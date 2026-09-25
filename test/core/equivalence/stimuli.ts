@@ -20,14 +20,34 @@
  *
  * THE CORE applies a toggle through a parameter-update event instead of a
  * reload (owner decision 1, `bo_engine_set_params` — core/README.md's ABI v2,
- * landing in W1b). That does not exist yet, so `replayStimuliOnCore` always
- * throws `StimuliNotYetSupportedOnCoreError`: per this worker's brief, "For
- * now implement the classic side, and give the core side an interface that
- * throws 'not yet supported' clearly." Every verify-script corpus entry
- * therefore stays `CorpusEntry.stimulus === "verify-script"` / "unstimulated"
- * on the core side until W1b lands the real mechanism.
+ * W1b): `replayStimuliOnCore` loads the circuit once, then for each phase
+ * calls `CoreEngine.setParams` on that phase's `set` overrides BEFORE
+ * advancing — never a reload — so capacitor charge, register contents and
+ * pending delays all carry across a phase boundary the same way classic's own
+ * carry-forward reload preserves them (core/README.md's
+ * `bo_engine_set_params` doc: "All other state is kept").
+ *
+ * A circuit `replayStimuliOnCore` cannot even LOAD (an unimplemented kind, a
+ * malformed parameter, or a topology the kernel rejects —
+ * `CoreUnsupportedError`) still throws `StimuliNotYetSupportedOnCoreError`,
+ * same as before this landed: none of `switch`/`push_button`/`spdt_switch`/
+ * `dip_switch` are in `CORE_IMPLEMENTED_KINDS` yet (kinds.ts is the
+ * orchestrator's table — this worker does not own it), so every real
+ * verify-script corpus entry still reports "core-stimuli-pending" until that
+ * table is updated. A caller that already routes a wider `implementedKinds`
+ * set through the core (this file's own tests; eventually the harness once
+ * the orchestrator's table catches up) gets the REAL replay instead.
+ *
+ * A phase's `set` naming a param that exists but is not live
+ * (`CoreEngine.setParams`'s own check, per `CORE_RECORD_SHAPES.liveParams`)
+ * is NEVER folded into "not yet supported" — it propagates as-is (a plain
+ * `RangeError` naming exactly what was wrong), because silently skipping it
+ * would hide a stimulus the caller asked for and thought was applied.
  */
 
+import { CoreEngine, type CoreParamChange } from "../../../src/core/engine.js";
+import { CoreUnsupportedError } from "../../../src/core/errors.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { HeadlessRunner, type HeadlessRunOptions } from "../../../src/host/headless.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 
@@ -106,25 +126,108 @@ export function replayStimuliOnClassic(circuit: SimCircuit, phases: readonly Sti
   return samples;
 }
 
-/** Thrown by every `replayStimuliOnCore` call until owner decision 1's parameter-update event lands (W1b). */
+/**
+ * Thrown when `replayStimuliOnCore` cannot even LOAD the circuit onto the
+ * core (`CoreUnsupportedError` from `CoreEngine.load` — an unimplemented
+ * kind, a malformed parameter, or a topology the kernel rejects). Owner
+ * decision 1's parameter-update event itself (`bo_engine_set_params`) has
+ * landed (W1b) — this class now means "this PARTICULAR circuit's kinds
+ * aren't routed through the core yet", not "the mechanism doesn't exist at
+ * all". `reasons` is `CoreUnsupportedError.reasons` verbatim, and the
+ * original is kept as `cause`.
+ */
 export class StimuliNotYetSupportedOnCoreError extends Error {
-  constructor() {
+  readonly reasons: readonly string[];
+  constructor(reasons: readonly string[], options?: ErrorOptions) {
     super(
-      "replayStimuliOnCore: the core applies a stimulus phase through a parameter-update event " +
-        "(owner decision 1; core/README.md's bo_engine_set_params, ABI v2 \"W1b\"), which does not exist " +
-        "yet in this worktree. Every verify-script corpus entry stays \"unstimulated\" on the core side " +
-        "until then (CorpusEntry.stimulus's doc, types.ts) — this is expected, not a bug to work around.",
+      `replayStimuliOnCore: the core cannot load this circuit (${reasons.join(", ")}), so its phases were never ` +
+        "replayed. The parameter-update mechanism itself (owner decision 1; core/README.md's " +
+        "bo_engine_set_params, ABI v2 \"W1b\") exists — see CoreEngine.setParams — but this circuit's kind set " +
+        "is not yet in CORE_IMPLEMENTED_KINDS (kinds.ts), or the core otherwise declined it. Every verify-script " +
+        "corpus entry using such a kind stays \"unstimulated\" on the core side until that table catches up " +
+        "(CorpusEntry.stimulus's doc, types.ts) — this is expected, not a bug to work around.",
+      options,
     );
     this.name = "StimuliNotYetSupportedOnCoreError";
+    this.reasons = reasons;
   }
 }
 
 /**
- * Always throws `StimuliNotYetSupportedOnCoreError`. The signature mirrors
- * `replayStimuliOnClassic`'s so a caller can be written against the eventual
- * real implementation now; `_circuit`/`_phases` are accepted (not `never`)
- * for exactly that reason, even though this build never reads them.
+ * Core replay of every phase, in order, on ONE `CoreEngine` (so `simTime` and
+ * every device's committed state — capacitor charge, register contents,
+ * pending delays — continue across phases exactly as `bo_engine_set_params`'s
+ * "all other state is kept" promises). Loads `circuit` once, unmodified, then
+ * for each phase applies `phase.set` through `CoreEngine.setParams` (never a
+ * reload) before advancing `phase.durationS` at the SAME fixed step
+ * `replayStimuliOnClassic` uses, one sample per step, so the two sample
+ * sequences line up instant for instant.
+ *
+ * `implementedKinds` defaults to `CORE_IMPLEMENTED_KINDS` (kinds.ts's
+ * orchestrator-owned table) — the same "a caller (chiefly tests) can widen
+ * this" escape hatch `compileCircuit`/`CoreEngine.load` already document, for
+ * a widened set. This is what lets this file's own tests exercise the switch
+ * family before that table is updated, without weakening the DEFAULT
+ * behaviour a real corpus entry gets.
+ *
+ * Throws `StimuliNotYetSupportedOnCoreError` when the core cannot load the
+ * circuit at all (see that class's doc comment). Throws a plain `Error`
+ * (never that class) when a phase does not complete cleanly (non-convergence
+ * — mirrors `replayStimuliOnClassic`'s own "did not complete cleanly" check)
+ * or when `CoreEngine.setParams` itself rejects a change (an unknown
+ * component/param, or a param that exists but is not live) — a stimulus the
+ * caller asked for must fail loudly, never be silently skipped.
  */
-export function replayStimuliOnCore(_circuit: SimCircuit, _phases: readonly StimulusPhase[]): StimulusStepSample[] {
-  throw new StimuliNotYetSupportedOnCoreError();
+export function replayStimuliOnCore(
+  circuit: SimCircuit,
+  phases: readonly StimulusPhase[],
+  implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
+): StimulusStepSample[] {
+  const engine = new CoreEngine();
+  try {
+    try {
+      engine.load(circuit, implementedKinds);
+    } catch (err) {
+      if (err instanceof CoreUnsupportedError) {
+        throw new StimuliNotYetSupportedOnCoreError(err.reasons, { cause: err });
+      }
+      throw err;
+    }
+
+    const samples: StimulusStepSample[] = [];
+
+    phases.forEach((phase, phaseIndex) => {
+      if (phase.set && phase.set.length > 0) {
+        const changes: CoreParamChange[] = phase.set.map((override) => ({
+          componentId: override.id,
+          params: override.params,
+        }));
+        engine.setParams(changes);
+      }
+
+      const phaseStartTime = engine.simTime;
+      const stepCount = Math.round(phase.durationS / STIMULUS_FIXED_STEP_S);
+      for (let step = 1; step <= stepCount; step++) {
+        const tEnd = phaseStartTime + step * STIMULUS_FIXED_STEP_S;
+        engine.advance(tEnd);
+        if (!engine.lastConverged) {
+          throw new Error(
+            `replayStimuliOnCore: phase ${phaseIndex} (durationS=${phase.durationS}) did not converge, reaching ` +
+              `only t=${engine.simTime}s — this phase did not complete cleanly.`,
+          );
+        }
+        samples.push({
+          phaseIndex,
+          simTime: engine.simTime,
+          netV: { ...engine.getNetV() },
+          elementI: { ...engine.getElementI() },
+          digitalState: { ...engine.digitalState },
+        });
+      }
+    });
+
+    return samples;
+  } finally {
+    engine.dispose();
+  }
 }

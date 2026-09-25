@@ -20,6 +20,7 @@ import {
 import type { EngineReadout } from "../../src/core/surface.js";
 import { buildCoreNodes, classicElementIKeys, compileCircuit, type CompiledCircuit } from "../../src/core/compile/index.js";
 import { CORE_OPTION_KEYS, decodeProgram } from "../../src/core/format.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "../../src/core/readout.js";
 
 // ---- compile-time check: SimEngine must satisfy EngineReadout -------------
@@ -645,6 +646,7 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
 
@@ -837,6 +839,7 @@ describe("CoreEngine.load — options passthrough to compileCircuit (integration
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
     return { capturedProgram: () => captured };
@@ -969,6 +972,7 @@ describe("advance() sends tEnd straight through to Rust — no more _loadedAt tr
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
     return { calls, voltagesView };
@@ -1061,6 +1065,7 @@ describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digita
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
     };
     __installCoreForTest({ ...base, ...overrides });
   }
@@ -1107,5 +1112,196 @@ describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digita
     expect(() => core.getElementChannelI()).toThrow(CoreNotLoadedError);
     expect(() => core.digitalState).toThrow(CoreNotLoadedError);
     expect(() => core.nextEventTime()).toThrow(CoreNotLoadedError);
+  });
+});
+
+// ---- v2 (W1b): CoreEngine.setParams — mapping, live-param gating, and errors
+//
+// `switch`/`spdt_switch`/`dip_switch` are not yet in CORE_IMPLEMENTED_KINDS
+// (kinds.ts, the orchestrator's table), so every load() below passes a
+// widened set — the same documented escape hatch compileCircuit's own doc
+// comment describes. `bo_engine_set_params` is faked (it captures the raw
+// triples instead of a real Rust decode), matching this file's existing
+// "installCapturingCore" convention for exercising the TS-side contract
+// before/independent of a specific Rust build.
+
+describe("CoreEngine.setParams", () => {
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  const WITH_PASSIVES = new Set([...CORE_IMPLEMENTED_KINDS, "switch", "spdt_switch", "dip_switch"]);
+
+  /** vsrc, sw (switch), spdt (spdt_switch), dip (dip_switch, k=2), r1 — deliberately unwired: this suite never solves the circuit, only exercises setParams' own mapping/validation. Component order fixes device order: vsrc=0, sw=1, spdt=2, dip=3, r1=4. */
+  function passivesCircuit(): SimCircuit {
+    return circuit([
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("sw", "switch", ["a", "b"], { closed: 0 }),
+      part("spdt", "spdt_switch", ["com", "b", "c"], { position: 0 }),
+      part("dip", "dip_switch", ["a1", "b1", "a2", "b2"], { positions: 2, sw1: 0, sw2: 0 }),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+    ]);
+  }
+
+  function installFakeCore(overrides: Partial<CoreExports> = {}): {
+    capturedTriples: () => number[];
+    setParamsCalls: () => number;
+    voltagesReadCalls: () => number;
+  } {
+    const buffer = new ArrayBuffer(1 << 16);
+    let captured: number[] = [];
+    let setParamsCalls = 0;
+    let voltagesReadCalls = 0;
+    const base: CoreExports = {
+      memory: { buffer },
+      bo_abi_version: () => 2,
+      bo_alloc: () => 1024, // fixed scratch offset, well past the voltages/currents views below
+      bo_free: () => {},
+      bo_engine_create: () => 1,
+      bo_engine_destroy: () => {},
+      bo_engine_load: () => 0,
+      bo_engine_advance: () => 0,
+      bo_engine_time: () => 0,
+      bo_engine_node_count: () => 0,
+      bo_engine_node_voltages: () => {
+        voltagesReadCalls++;
+        return 0; // byte offset 0
+      },
+      bo_engine_device_count: () => 0,
+      bo_engine_device_currents: () => 512, // byte offset, past any plausible node count here
+      bo_engine_stat: () => 0,
+      bo_error_ptr: () => 0,
+      bo_error_len: () => 0,
+      bo_engine_set_option: () => 0,
+      bo_engine_next_event_time: () => Infinity,
+      bo_engine_digital_slot_count: () => 0,
+      bo_engine_digital_slots: () => 0,
+      bo_engine_channel_slot_count: () => 0,
+      bo_engine_channel_slots: () => 0,
+      bo_engine_trace_enable: () => 0,
+      bo_engine_trace_ptr: () => 0,
+      bo_engine_trace_len: () => 0,
+      bo_engine_trace_clear: () => {},
+      bo_engine_set_params: (_h: number, ptr: number, lenF64: number) => {
+        setParamsCalls++;
+        captured = Array.from(new Float64Array(buffer, ptr, lenF64));
+        return 0;
+      },
+    };
+    __installCoreForTest({ ...base, ...overrides });
+    return {
+      capturedTriples: () => captured,
+      setParamsCalls: () => setParamsCalls,
+      voltagesReadCalls: () => voltagesReadCalls,
+    };
+  }
+
+  it("maps (componentId, paramName) to (deviceIndex, paramIndex), resolves values the same way the compiler does, and sends every triple in ONE call", () => {
+    const { capturedTriples, setParamsCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+
+    core.setParams([
+      { componentId: "sw", params: { closed: 1 } }, // device 1, param 0 (closed) -> Boolean(1) = 1
+      { componentId: "spdt", params: { position: 1 } }, // device 2, param 0 (sel) -> position!==0 selects c = 1
+      { componentId: "dip", params: { sw2: 1 } }, // device 3, param 2 (sw2) -> Number(1)!==0 = 1
+    ]);
+
+    expect(setParamsCalls()).toBe(1);
+    expect(capturedTriples()).toEqual([
+      1, 0, 1,
+      2, 0, 1,
+      3, 2, 1,
+    ]);
+  });
+
+  it("the string \"0\" resolves to CLOSED (1), matching the compiler's own Boolean(closed) rule", () => {
+    const { capturedTriples } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    core.setParams([{ componentId: "sw", params: { closed: "0" } }]);
+    expect(capturedTriples()).toEqual([1, 0, 1]);
+  });
+
+  it("republishes readouts (re-reads node voltages) after a successful call", () => {
+    const { voltagesReadCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    const afterLoad = voltagesReadCalls();
+    core.setParams([{ componentId: "sw", params: { closed: 1 } }]);
+    expect(voltagesReadCalls()).toBe(afterLoad + 1);
+  });
+
+  it("an empty changes array makes no ABI call and does not republish", () => {
+    const { setParamsCalls, voltagesReadCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    const afterLoad = voltagesReadCalls();
+    expect(() => core.setParams([])).not.toThrow();
+    expect(setParamsCalls()).toBe(0);
+    expect(voltagesReadCalls()).toBe(afterLoad);
+  });
+
+  it("throws for an unknown componentId, without making any ABI call", () => {
+    const { setParamsCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    expect(() => core.setParams([{ componentId: "no-such-component", params: { closed: 1 } }])).toThrow(RangeError);
+    expect(setParamsCalls()).toBe(0);
+  });
+
+  it("throws for an unknown param name on a real device's kind, without making any ABI call", () => {
+    const { setParamsCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    expect(() => core.setParams([{ componentId: "sw", params: { not_a_real_param: 1 } }])).toThrow(RangeError);
+    expect(setParamsCalls()).toBe(0);
+  });
+
+  it("throws for a param that exists on the kind but is NOT live — a component with no live params at all (resistor), and a non-live param on a kind that DOES have live params (dip_switch's own \"positions\")", () => {
+    const { setParamsCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    expect(() => core.setParams([{ componentId: "r1", params: { resistance: 5000 } }])).toThrow(RangeError);
+    expect(() => core.setParams([{ componentId: "dip", params: { positions: 4 } }])).toThrow(RangeError);
+    expect(setParamsCalls()).toBe(0);
+  });
+
+  it("validates every change before applying ANY of them — one bad change in a batch makes no ABI call at all", () => {
+    const { setParamsCalls } = installFakeCore();
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    expect(() =>
+      core.setParams([
+        { componentId: "sw", params: { closed: 1 } }, // valid
+        { componentId: "r1", params: { resistance: 5000 } }, // invalid: not live
+      ]),
+    ).toThrow(RangeError);
+    expect(setParamsCalls()).toBe(0);
+  });
+
+  it("a non-zero bo_engine_set_params return throws CoreLoadError, carrying the ABI's own error message", () => {
+    const encoder = new TextEncoder();
+    const message = "invalid argument";
+    const messageBytes = encoder.encode(message);
+    installFakeCore({
+      bo_engine_set_params: () => -8,
+      bo_error_ptr: () => 2048,
+      bo_error_len: () => messageBytes.length,
+    });
+    // Write the error message into the same backing buffer bo_error_ptr points at.
+    const core = new CoreEngine();
+    core.load(passivesCircuit(), WITH_PASSIVES);
+    // Reach into the live instance's memory to seed the error bytes at 2048 —
+    // coreCall is the only sanctioned way in from outside engine.ts/wasm.ts.
+    coreCall((exports) => new Uint8Array(exports.memory.buffer, 2048, messageBytes.length).set(messageBytes));
+    expect(() => core.setParams([{ componentId: "sw", params: { closed: 1 } }])).toThrow(/invalid argument/);
+  });
+
+  it("setParams requires a loaded program, like every other mutating call", () => {
+    installFakeCore();
+    const core = new CoreEngine();
+    expect(() => core.setParams([{ componentId: "sw", params: { closed: 1 } }])).toThrow(CoreNotLoadedError);
   });
 });

@@ -136,9 +136,9 @@ export interface WasmMemoryLike {
  * `*mut f64`) crosses the ABI as an i32 byte offset into `memory.buffer`,
  * never a real pointer object.
  *
- * v2 (W1a) adds the rows below `bo_error_len` — `bo_engine_set_params` (W1b)
- * and `bo_engine_seed_memory` (W1d) are later rows in the same table and are
- * deliberately NOT here yet.
+ * v2 (W1a) adds the rows below `bo_error_len`; `bo_engine_set_params` (W1b,
+ * owner decision 1) is now below too. `bo_engine_seed_memory` (W1d) is a
+ * later row in the same table and is deliberately NOT here yet.
  */
 export interface CoreExports {
   readonly memory: WasmMemoryLike;
@@ -167,6 +167,7 @@ export interface CoreExports {
   bo_engine_trace_ptr(h: number): number;
   bo_engine_trace_len(h: number): number;
   bo_engine_trace_clear(h: number): void;
+  bo_engine_set_params(h: number, ptr: number, lenF64: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */
@@ -196,6 +197,7 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_engine_trace_ptr",
   "bo_engine_trace_len",
   "bo_engine_trace_clear",
+  "bo_engine_set_params",
 ] as const;
 
 // ─── The runtime WebAssembly API, resolved off globalThis — no ambient type ─

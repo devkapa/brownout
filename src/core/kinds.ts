@@ -30,6 +30,10 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "ground",
   "resistor",
   "voltage_source",
+  "switch",
+  "push_button",
+  "spdt_switch",
+  "dip_switch",
 ]);
 
 /**

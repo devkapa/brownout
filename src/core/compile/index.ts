@@ -21,9 +21,32 @@ import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { CORE_OPTION_KEYS, ProgramWriter, type ProgramOption } from "../format.js";
 import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES } from "../kinds.js";
 import { buildCoreNodes, buildPinRecord, computeOpenPinKeys, corePinKey, type CoreNodeBuild } from "./topology.js";
+import {
+  compileDipSwitch,
+  compileSpdtSwitch,
+  compileSwitchOrPushButton,
+  PASSIVE_LIVE_PARAM_SPECS,
+  type LiveParamSpec,
+} from "./passives.js";
 
 export { buildCoreNodes, corePinKey } from "./topology.js";
 export type { CoreNodeBuild } from "./topology.js";
+export type { LiveParamSpec } from "./passives.js";
+
+/**
+ * Every kind's live-param spec (owner decision 1, `bo_engine_set_params`),
+ * aggregated across the compiler's per-kind-family modules — the same
+ * "index.ts aggregates, a per-kind-family module owns the actual logic"
+ * split this file already uses for `compileCircuit`'s switch statement
+ * itself. `CoreEngine.setParams` (engine.ts) is the only consumer: it maps a
+ * caller's `(componentId, paramName)` to `(deviceIndex, paramIndex)` through
+ * `compiled.devices[i].kind` -> this map -> `paramNames.indexOf`, then
+ * gates the result against `CORE_RECORD_SHAPES.get(kindCode).liveParams`
+ * before calling `resolveLiveValue`. Grows per sub-wave, alongside
+ * `CORE_RECORD_SHAPES`/`CORE_IMPLEMENTED_KINDS` (kinds.ts) and whichever
+ * compile/*.ts module a later kind's live params live in.
+ */
+export const LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new Map([...PASSIVE_LIVE_PARAM_SPECS]);
 
 // ─── Readout slot tables ────────────────────────────────────────────────────
 
@@ -273,6 +296,62 @@ export function compileCircuit(
             pin(component.kind, component.id, component.pins[1]!.id),
           ],
           params: [voltage],
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      case "switch":
+      case "push_button": {
+        const result = compileSwitchOrPushButton(
+          built,
+          openKeys,
+          component.kind,
+          component.id,
+          component.pins,
+          component.params,
+        );
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      case "spdt_switch": {
+        const result = compileSpdtSwitch(built, openKeys, component.id, component.params);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.spdt_switch,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      case "dip_switch": {
+        const result = compileDipSwitch(built, openKeys, component.id, component.params);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.dip_switch,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;

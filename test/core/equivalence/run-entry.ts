@@ -46,14 +46,14 @@ import { HeadlessRunner } from "../../../src/host/headless.js";
 import { CoreUnsupportedError } from "../../../src/core/errors.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles } from "./align.js";
-import { compareSamples } from "./compare.js";
+import { compareSamples, compareStimuliSamples } from "./compare.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
 import { guardWindowS, requireMinQuietInstants, selectQuietInstants } from "./quiet.js";
 import { classicIdentityHash, createFileReferenceCache, getOrCompute, fixtureHash, type ClassicReferenceCache } from "./reference-cache.js";
 import { collectClassicSamples, collectCoreSamples, DEFAULT_DURATION_S, sampleTimesFor } from "./sample.js";
 import { denseAnalogSchedule } from "./schedule.js";
-import { replayStimuliOnClassic, replayStimuliOnCore, StimuliNotYetSupportedOnCoreError } from "./stimuli.js";
+import { replayStimuliOnClassic, replayStimuliOnCore, StimuliNotYetSupportedOnCoreError, type StimulusStepSample } from "./stimuli.js";
 import { collectClassicDigitalTrace, collectCoreDigitalTrace, CoreTraceUnsupportedError, type DigitalTraceEvent } from "./trace.js";
 import type { CorpusEntry, CorpusOrigin, EntryResult, KnownDivergenceHit, Mismatch, SampleReadout } from "./types.js";
 
@@ -123,26 +123,50 @@ export function collectClassicSamplesCached(entry: CorpusEntry, circuit: SimCirc
 }
 
 /**
- * Gate 2d's stimuli path: replays `entry.phases` on classic, then attempts
- * the core side purely to observe it throw `StimuliNotYetSupportedOnCoreError`
- * (owner decision 1's parameter-update event is W1b, not yet landed).
- * Runs BEFORE the plain not-ported/pass/fail flow and takes priority over it
- * whenever `entry.phases` is set — a verify-script entry's real question is
- * "can this be validated under scripted stimuli", which is unconditionally
- * "not yet, core-side" regardless of whether its kinds happen to already be
- * `CORE_IMPLEMENTED_KINDS`. Reporting "core-stimuli-pending" here instead of
- * silently falling through to "not-ported" (today) or a "pass" that never
- * actually exercised the phases (once every kind involved is implemented) is
- * the whole point: neither of those would tell a reader that classic-side
- * replay genuinely ran.
+ * Gate 2d's stimuli path (W1b): replays `entry.phases` on classic, then on
+ * the core, and — once both sides actually produced samples — compares them
+ * the same way the plain flow compares its own two sample sequences
+ * (compare.ts's shared tolerances/comparators, known-divergences.ts's
+ * registry). Runs BEFORE the plain not-ported/pass/fail flow and takes
+ * priority over it whenever `entry.phases` is set — a verify-script entry's
+ * real question is "can this be validated under scripted stimuli", which is
+ * answered here directly now that owner decision 1's parameter-update event
+ * (`bo_engine_set_params`) has landed: a circuit whose kinds are ALL
+ * `CORE_IMPLEMENTED_KINDS` (the switch family, W1b) gets a real classic-vs-
+ * core comparison, not just a bookkeeping gesture toward one.
+ *
+ * Results:
+ *   - "core-stimuli-pending" when the core cannot even LOAD the circuit
+ *     (`StimuliNotYetSupportedOnCoreError` — some kind isn't
+ *     `CORE_IMPLEMENTED_KINDS` yet, or the core otherwise declines the
+ *     topology). Distinct from "not-ported": that status never even
+ *     attempts classic, whereas this one always has a real classic-side
+ *     replay behind it (`classicWallMs` is never null here).
+ *   - "error" when either side's replay throws for any OTHER reason —
+ *     classic did not complete cleanly, the core did not converge, or
+ *     (critically) a phase named a param that exists on the core's record
+ *     but is not live (`CoreEngine.setParams`'s own check): that must
+ *     surface loudly, never silently fold into "not yet supported" or get
+ *     dropped.
+ *   - "pass"/"fail" once both replays succeed: `compareStimuliSamples`
+ *     (compare.ts) diffs the two `StimulusStepSample` sequences — netV,
+ *     elementI, digitalState, and the samples' own simTime — tagging each
+ *     resulting mismatch with the phase it came from (`Mismatch.phaseIndex`,
+ *     types.ts) so a report can point straight at which phase produced it.
+ *     `known-divergences.ts`'s registry classifies the mismatch list exactly
+ *     as the plain flow does, against the entry's ORIGINAL (pre-override)
+ *     circuit — a registration's cone is a topological fact, and a phase's
+ *     `set` only ever changes a component's params, never the netlist a cone
+ *     is computed from.
  */
 function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   const phases = entry.phases!;
 
+  let classicSamples: StimulusStepSample[];
   let classicWallMs: number;
   try {
     const started = performance.now();
-    replayStimuliOnClassic(circuit, phases);
+    classicSamples = replayStimuliOnClassic(circuit, phases);
     classicWallMs = performance.now() - started;
   } catch (err) {
     return {
@@ -155,23 +179,48 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     };
   }
 
+  let coreSamples: StimulusStepSample[];
+  let coreWallMs: number;
   try {
-    replayStimuliOnCore(circuit, phases);
+    const started = performance.now();
+    coreSamples = replayStimuliOnCore(circuit, phases);
+    coreWallMs = performance.now() - started;
   } catch (err) {
     if (err instanceof StimuliNotYetSupportedOnCoreError) {
       return { status: "core-stimuli-pending", kinds: entry.kinds, classicWallMs, coreWallMs: null, phaseCount: phases.length };
     }
-    // Any other throw is a genuine bug in this harness (or a sign
-    // replayStimuliOnCore's contract has changed underneath this function),
-    // not the expected "not yet supported" signal — surface it as a real error.
+    // Any other throw — non-convergence, or CoreEngine.setParams rejecting a
+    // phase's override (an unknown component, or a param that exists but is
+    // not live) — is a genuine failure to surface, never a silent skip and
+    // never folded into "not yet supported" (that status is reserved for
+    // StimuliNotYetSupportedOnCoreError alone, above).
     return { status: "error", kinds: entry.kinds, engine: "core", message: errorMessage(err), classicWallMs, coreWallMs: null };
   }
-  // replayStimuliOnCore is documented to always throw; reaching here means
-  // owner decision 1's mechanism has landed and this function is stale.
-  throw new Error(
-    "runStimuliEntry: replayStimuliOnCore returned instead of throwing — the classic-vs-core stimuli " +
-      "comparison (W1b) needs to be implemented here; this function's \"always throws\" assumption no longer holds.",
-  );
+
+  const cmp = compareStimuliSamples(classicSamples, coreSamples);
+  const errorStats = {
+    maxAbsErrorVolts: cmp.maxAbsErrorVolts,
+    maxRelErrorVolts: cmp.maxRelErrorVolts,
+    maxAbsErrorAmps: cmp.maxAbsErrorAmps,
+    maxRelErrorAmps: cmp.maxRelErrorAmps,
+  };
+
+  const { known, unexplained } = classifyMismatches(circuit, cmp.mismatches);
+  const knownDivergences = known.map(toKnownDivergenceHit);
+
+  if (unexplained.length === 0) {
+    return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };
+  }
+  return {
+    status: "fail",
+    kinds: entry.kinds,
+    classicWallMs,
+    coreWallMs,
+    knownDivergences,
+    mismatches: unexplained.slice(0, MAX_REPORTED_MISMATCHES),
+    totalMismatches: unexplained.length,
+    ...errorStats,
+  };
 }
 
 /**

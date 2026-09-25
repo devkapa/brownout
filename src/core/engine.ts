@@ -33,8 +33,8 @@
  * a far worse surprise than an explicit throw.
  */
 
-import { compileCircuit, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
-import { CORE_IMPLEMENTED_KINDS } from "./kinds.js";
+import { compileCircuit, LIVE_PARAM_SPECS, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
+import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
 import {
   coreCall,
@@ -60,6 +60,12 @@ import type { DisplayInfo } from "../sim/messages.js";
 /** `CoreEngine.load`'s third argument: `CompileOptions` (compile/index.js's options passthrough) plus the facade-clock seed. */
 export interface CoreEngineLoadOptions extends CompileOptions {
   simTime?: number;
+}
+
+/** One `CoreEngine.setParams` change: every named param in `params` is applied to the device compiled for `componentId`. */
+export interface CoreParamChange {
+  readonly componentId: string;
+  readonly params: Readonly<Record<string, number | string>>;
 }
 
 /** `bo_engine_stat`'s four counters (core/README.md's index table), named. */
@@ -370,6 +376,110 @@ export class CoreEngine implements EngineReadout {
     }
     const message = coreCall((exports) => readCoreErrorMessage(exports));
     throw new CoreLoadError(`bo_engine_advance failed (code ${code}): ${message}`);
+  }
+
+  /**
+   * Applies a live parameter update to already-loaded devices through
+   * `bo_engine_set_params` (core/README.md's ABI v2, owner decision 1) rather
+   * than a reload — the mechanism `test/core/equivalence/stimuli.ts`'s
+   * `replayStimuliOnCore` uses to replay a verify-script phase's toggles
+   * without discarding capacitor charge, register contents or pending delays
+   * the way a reload would.
+   *
+   * Each `change.params` entry is resolved through the SAME per-kind value
+   * resolver the compiler itself used at load time (`compile/index.js`'s
+   * `LIVE_PARAM_SPECS`, built from each kind-family module's own resolver
+   * functions — e.g. compile/passives.ts's `resolveSwitchClosed`), so a live
+   * toggle and the initial compiled value agree bit for bit ("converting
+   * values with the same resolution as the compiler", this worker's brief).
+   *
+   * Every `(deviceIndex, paramIndex, value)` triple is validated on THIS side
+   * before any ABI call — belt and braces, mirroring `ProgramWriter
+   * .addDevice`'s own "validate, but the reader is still the real source of
+   * truth" stance:
+   * - an unknown `componentId` (no device compiled for it), an unknown param
+   *   name for that device's kind, or a param that exists but is NOT live
+   *   (`CORE_RECORD_SHAPES.get(kindCode).liveParams`) each throw a plain
+   *   `RangeError` naming exactly what was wrong — a caller/corpus-data bug,
+   *   not a circuit fact, so (like `load()`'s `options.simTime` check) this
+   *   is refused before anything else runs and never wrapped in
+   *   `CoreUnsupportedError`/`CoreLoadError`. This is what makes a stimulus
+   *   phase that sets a non-live param fail clearly instead of being
+   *   silently skipped.
+   * - every change's every triple is collected FIRST; only once all of them
+   *   validate are they sent to `bo_engine_set_params` in ONE call ("applied
+   *   as ONE event at the current time", the contract's own wording), and
+   *   readouts are republished exactly as after `advance()`. An empty
+   *   `changes` (or every change's own `params` empty) makes no ABI call at
+   *   all and republishes nothing — there is nothing to apply.
+   * - a non-zero `bo_engine_set_params` return (code `-8`, invalid argument —
+   *   should not happen given the checks above, since the contract's own
+   *   validation is the same rules already enforced here, but the ABI
+   *   remains the authority) throws `CoreLoadError`, exactly like a
+   *   `bo_engine_load`/`bo_engine_advance` failure.
+   */
+  setParams(changes: readonly CoreParamChange[]): void {
+    const compiled = this._requireLoaded();
+
+    const deviceIndexByComponentId = new Map<string, number>();
+    compiled.devices.forEach((device, index) => deviceIndexByComponentId.set(device.componentId, index));
+
+    const triples: number[] = [];
+    for (const change of changes) {
+      const deviceIndex = deviceIndexByComponentId.get(change.componentId);
+      if (deviceIndex === undefined) {
+        throw new RangeError(
+          `CoreEngine.setParams: no device for component "${change.componentId}" in the loaded program.`,
+        );
+      }
+      const kind = compiled.devices[deviceIndex]!.kind;
+      const spec = LIVE_PARAM_SPECS.get(kind);
+      const kindCode = CORE_KIND_CODES[kind as CoreKindCodeName];
+      const shape = CORE_RECORD_SHAPES.get(kindCode);
+
+      for (const [paramName, rawValue] of Object.entries(change.params)) {
+        if (!spec) {
+          throw new RangeError(
+            `CoreEngine.setParams: component "${change.componentId}" (kind "${kind}") has no live params at all.`,
+          );
+        }
+        const paramIndex = spec.paramNames.indexOf(paramName);
+        if (paramIndex === -1) {
+          throw new RangeError(
+            `CoreEngine.setParams: kind "${kind}" has no param named "${paramName}" (component "${change.componentId}").`,
+          );
+        }
+        if (!shape || !shape.liveParams.includes(paramIndex)) {
+          throw new RangeError(
+            `CoreEngine.setParams: kind "${kind}"'s param "${paramName}" (index ${paramIndex}) is not live — ` +
+              `it can only be set by loading a new program (component "${change.componentId}").`,
+          );
+        }
+        const value = spec.resolveLiveValue(paramName, rawValue);
+        triples.push(deviceIndex, paramIndex, value);
+      }
+    }
+
+    // Nothing to apply — no ABI call, no republish. (`changes` empty, or
+    // every change's own `params` empty.)
+    if (triples.length === 0) return;
+
+    coreCall((exports) => {
+      // `>>> 0`: see load()'s bo_alloc comment — same i32 sign issue for
+      // every pointer this ABI returns.
+      const ptr = exports.bo_alloc(triples.length) >>> 0;
+      try {
+        new Float64Array(exports.memory.buffer, ptr, triples.length).set(triples);
+        const code = exports.bo_engine_set_params(this._handle, ptr, triples.length);
+        if (code !== 0) {
+          throw new CoreLoadError(`bo_engine_set_params failed (code ${code}): ${readCoreErrorMessage(exports)}`);
+        }
+      } finally {
+        exports.bo_free(ptr, triples.length);
+      }
+    });
+
+    this._publishReadouts();
   }
 
   /**

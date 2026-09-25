@@ -280,6 +280,7 @@ describe('engine: "core" — a non-converged advance() is reported on the result
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
   }

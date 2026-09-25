@@ -36,10 +36,10 @@ const LLD_SYNTHESIZED_GLOBALS = ["__data_end", "__heap_base"];
 // as a literal list rather than parsed from the markdown: it changes only
 // when the ABI version bumps or a sub-wave adds exports, at which point this
 // list, `bo_abi_version`'s return value and the contract's own table change
-// together — update all three. `bo_engine_set_params` and
-// `bo_engine_seed_memory` are v2 exports the contract already names, but
-// they are marked "v2 (W1b)" / "v2 (W1d)" — not part of W1a — so they stay
-// out of this list until the dispatch that implements them adds them here.
+// together — update all three. `bo_engine_seed_memory` is a v2 export the
+// contract already names, but it is marked "v2 (W1d)" — not part of W1a or
+// W1b — so it stays out of this list until that dispatch implements it.
+// `bo_engine_set_params` is "v2 (W1b)" and is implemented as of this list.
 const EXPECTED_FUNCTION_EXPORTS = [
   "bo_abi_version",
   "bo_alloc",
@@ -57,6 +57,7 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_error_ptr",
   "bo_error_len",
   "bo_engine_set_option",
+  "bo_engine_set_params",
   "bo_engine_next_event_time",
   "bo_engine_digital_slot_count",
   "bo_engine_digital_slots",

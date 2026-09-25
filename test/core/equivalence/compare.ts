@@ -13,6 +13,7 @@
 
 import { withinTolerance, VOLT_ABS_TOL, VOLT_REL_TOL, AMP_ABS_TOL, AMP_REL_TOL } from "./tolerance.js";
 import type { CompareResult, Mismatch, SampleReadout } from "./types.js";
+import type { StimulusStepSample } from "./stimuli.js";
 
 interface ErrorAccumulator {
   maxAbs: number;
@@ -28,6 +29,7 @@ function compareNumericRecord(
   relTol: number,
   mismatches: Mismatch[],
   errAcc: ErrorAccumulator,
+  phaseIndex?: number,
 ): void {
   const keys = new Set([...Object.keys(classic), ...Object.keys(core)]);
   for (const key of keys) {
@@ -41,6 +43,7 @@ function compareNumericRecord(
         classicValue: inClassic ? classic[key] : undefined,
         coreValue: inCore ? core[key] : undefined,
         detail: `present only on the ${inClassic ? "classic" : "core"} side`,
+        phaseIndex,
       });
       continue;
     }
@@ -64,6 +67,7 @@ function compareNumericRecord(
         classicValue: a,
         coreValue: b,
         detail: `|${a} - ${b}| = ${absErr.toExponential(3)} exceeds tolerance ${(absTol + relTol * denom).toExponential(3)}`,
+        phaseIndex,
       });
     }
   }
@@ -74,6 +78,7 @@ function compareDigitalState(
   classic: Record<string, number>,
   core: Record<string, number>,
   mismatches: Mismatch[],
+  phaseIndex?: number,
 ): void {
   // This is a RAW per-sample comparator: it assumes `classic`/`core` were
   // already sampled at the same instant (compareSamples's own simTime check
@@ -107,6 +112,7 @@ function compareDigitalState(
         classicValue: a,
         coreValue: b,
         detail: a === undefined ? "present only on the core side" : b === undefined ? "present only on the classic side" : "digital state differs",
+        phaseIndex,
       });
     }
   }
@@ -147,7 +153,13 @@ function compareFailureKeys(
  * own header): even a divergence that collector fails to catch up front
  * still surfaces here as a labelled mismatch instead of a silent pass.
  */
-function compareSimTime(sampleTime: number, classicSimTime: number, coreSimTime: number, mismatches: Mismatch[]): void {
+function compareSimTime(
+  sampleTime: number,
+  classicSimTime: number,
+  coreSimTime: number,
+  mismatches: Mismatch[],
+  phaseIndex?: number,
+): void {
   const tol = 1e-12 * Math.max(1, Math.abs(sampleTime));
   const absErr = Math.abs(classicSimTime - coreSimTime);
   if (absErr > tol) {
@@ -160,6 +172,7 @@ function compareSimTime(sampleTime: number, classicSimTime: number, coreSimTime:
       detail:
         `|${classicSimTime} - ${coreSimTime}| = ${absErr.toExponential(3)} exceeds tolerance ${tol.toExponential(3)} — ` +
         "the two sides were sampled at different instants.",
+      phaseIndex,
     });
   }
 }
@@ -220,6 +233,67 @@ export function compareSamples(classic: readonly SampleReadout[], core: readonly
     compareDigitalState(sampleTime, c.digitalState, r.digitalState, mismatches);
     compareFailureKeys(sampleTime, c.failures, r.failures, mismatches);
     compareWarningCodes(sampleTime, c.warnings, r.warnings, mismatches);
+  }
+
+  return {
+    mismatches,
+    maxAbsErrorVolts: voltErr.maxAbs,
+    maxRelErrorVolts: voltErr.maxRel,
+    maxAbsErrorAmps: ampErr.maxAbs,
+    maxRelErrorAmps: ampErr.maxRel,
+  };
+}
+
+/**
+ * Gate 2d's classic-vs-core stimuli comparison (run-entry.ts's
+ * `runStimuliEntry`, W1b): compares two equal-length `StimulusStepSample`
+ * sequences produced by `replayStimuliOnClassic`/`replayStimuliOnCore` on the
+ * SAME phase list and the SAME fixed step schedule (stimuli.ts's
+ * `STIMULUS_FIXED_STEP_S`), so `classic[i]`/`core[i]` are always the same
+ * step of the same phase.
+ *
+ * Reuses `compareSamples`'s own comparators (same tolerances, same
+ * netV/elementI/digitalState/simTime checks) rather than duplicating them —
+ * the only difference is that every `Mismatch` this produces also carries
+ * `phaseIndex` (the worker brief: "with the phase index in each mismatch"),
+ * and there is no failures/warnings dimension to compare: `StimulusStepSample`
+ * (unlike `SampleReadout`) never carries either, since `replayStimuliOnCore`/
+ * `replayStimuliOnClassic` throw instead of returning a sample for a phase
+ * that does not complete cleanly (both files' own "did not complete cleanly"
+ * checks) — there is nothing for a `failures`/`warnings` record to report by
+ * the time a sample reaches here.
+ *
+ * Throws (a harness bug, not a circuit fact) if the sequences have different
+ * lengths, exactly like `compareSamples` — both sides replay the identical
+ * phase list at the identical fixed step, so a length mismatch can only mean
+ * one side's schedule diverged from the other's.
+ */
+export function compareStimuliSamples(
+  classic: readonly StimulusStepSample[],
+  core: readonly StimulusStepSample[],
+): CompareResult {
+  if (classic.length !== core.length) {
+    throw new Error(
+      `compareStimuliSamples: sample count mismatch (classic ${classic.length}, core ${core.length}) — ` +
+        "the two replays used different phase/step schedules; this is a harness bug, not a circuit result.",
+    );
+  }
+
+  const mismatches: Mismatch[] = [];
+  const voltErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
+  const ampErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
+
+  for (let i = 0; i < classic.length; i++) {
+    const c = classic[i]!;
+    const r = core[i]!;
+    // classic's own simTime/phaseIndex label the sample — see compareSamples's
+    // own comment on why classic's copy is the one used to label a mismatch.
+    const sampleTime = c.simTime;
+    const phaseIndex = c.phaseIndex;
+    compareSimTime(sampleTime, c.simTime, r.simTime, mismatches, phaseIndex);
+    compareNumericRecord("netV", sampleTime, c.netV, r.netV, VOLT_ABS_TOL, VOLT_REL_TOL, mismatches, voltErr, phaseIndex);
+    compareNumericRecord("elementI", sampleTime, c.elementI, r.elementI, AMP_ABS_TOL, AMP_REL_TOL, mismatches, ampErr, phaseIndex);
+    compareDigitalState(sampleTime, c.digitalState, r.digitalState, mismatches, phaseIndex);
   }
 
   return {

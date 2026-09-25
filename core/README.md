@@ -150,7 +150,7 @@ is dispatched; a code without a record layout is reserved and rejected as
 | 3 | `capacitor` | `pins[0]`, `pins[1]` (positional) | `[C, esr, leakage]`: `C = max(1e-15, Number(params.capacitance ?? 1e-6))`; `esr` and `leakage` by classic's `modelParam` exact-uid rule (spec §7.2.6), `esr` 0 when absent or invalid, `leakage` 0 meaning none (classic's infinite parallel resistance) | empty | W1b |
 | 4 | `switch` | `pins[0]`, `pins[1]` (positional) | `[closed]`: `Boolean(params.closed) ? 1 : 0` (the string `"0"` counts as closed, as in classic); the closed contact is a literal 1 mΩ | empty | W1b; live param 0 |
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
-| 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position) === 0 ? 0 : 1` (0 selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
+| 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
 
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
@@ -207,6 +207,9 @@ export lands in its list in the same change that adds it.
   at that instant. All other state is kept: register contents, capacitor
   charge, pending delays. This reproduces the digital outcome of classic's
   carry-forward reload.
+- If that delta cycle fails (`-4` or `-7`), the param changes roll back too,
+  along with the rest of the instant, and the call returns the code. A
+  failed toggle leaves the engine exactly as it was.
 
 **Stat indices:** `0` partitions, `1` static solves, `2` largest partition,
 `3` fixed nodes, `4` events processed, `5` delta passes, `6` maximum delta

@@ -1,13 +1,12 @@
 /**
  * Unit coverage for run-entry.ts's gate 2d stimuli path: an entry with
- * `phases` takes priority over the plain not-ported/pass/fail flow,
- * replays on classic through stimuli.ts, and reports
- * "core-stimuli-pending" once the (always-throwing, until W1b)
- * `replayStimuliOnCore` call is observed to throw
- * `StimuliNotYetSupportedOnCoreError` — never a plain "not-ported" (today)
- * or a silent "pass" (once every kind involved is core-implemented) that
- * would hide the fact the phases were never actually checked against the
- * core.
+ * `phases` takes priority over the plain not-ported/pass/fail flow, replays
+ * on classic through stimuli.ts, and — since W1b landed
+ * `bo_engine_set_params` and put the switch family into
+ * `CORE_IMPLEMENTED_KINDS` — now gets a REAL classic-vs-core comparison
+ * (pass/fail) whenever every kind involved is core-implemented, or
+ * "core-stimuli-pending" (never a plain "not-ported", and never a silent
+ * "pass" that skipped the core side) whenever it is not.
  */
 
 import fs from "node:fs";
@@ -16,6 +15,7 @@ import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import { compareStimuliSamples } from "./compare.js";
 import {
   collectClassicSamplesCached,
   EXTERNAL_CLASSIC_REFERENCE_CACHE_DIR,
@@ -24,6 +24,7 @@ import {
   resolveSampleTimes,
   runCorpusEntry,
 } from "./run-entry.js";
+import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase } from "./stimuli.js";
 import type { CorpusEntry } from "./types.js";
 
 type SimComponent = SimCircuit["components"][number];
@@ -36,13 +37,42 @@ function wire(a: string, ap: string, b: string, bp: string): SimCircuit["wires"]
   return { from_component: a, from_pin: ap, to_component: b, to_pin: bp };
 }
 
-/** vsrc -> sw -> r1 -> gnd. `switch` is NOT in CORE_IMPLEMENTED_KINDS (kinds.ts) — this circuit would be "not-ported" under the plain flow. */
-function switchedDivider(): SimCircuit {
+/**
+ * vsrc -> c1 -> r1 -> gnd. `capacitor` is NOT in CORE_IMPLEMENTED_KINDS
+ * (kinds.ts) — this circuit is "not-ported" under the plain flow, and
+ * "core-stimuli-pending" under the gate 2d stimuli path. (Before W1b put the
+ * switch family into CORE_IMPLEMENTED_KINDS, a `switch` played this same
+ * "an unported kind" role here; `capacitor` takes over that job now that
+ * `switch` is real.)
+ */
+function unportedKindDivider(): SimCircuit {
   return {
     components: [
       part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
       part("gnd", "ground", ["gnd"]),
-      part("sw", "switch", ["a", "b"], { closed: 0 }),
+      part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+    ],
+    wires: [
+      wire("vsrc", "neg", "gnd", "gnd"),
+      wire("vsrc", "pos", "c1", "a"),
+      wire("c1", "b", "r1", "a"),
+      wire("r1", "b", "gnd", "gnd"),
+    ],
+  };
+}
+
+/**
+ * vsrc -> sw -> r1 -> gnd. `switch` IS in CORE_IMPLEMENTED_KINDS (kinds.ts,
+ * W1b) — an entry toggling `sw` across phases now gets a REAL classic-vs-core
+ * comparison through `runStimuliEntry`, not "core-stimuli-pending".
+ */
+function switchedDivider(closed: number | string = 0): SimCircuit {
+  return {
+    components: [
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("gnd", "ground", ["gnd"]),
+      part("sw", "switch", ["a", "b"], { closed }),
       part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
     ],
     wires: [
@@ -73,15 +103,16 @@ function baseEntry(overrides: Partial<CorpusEntry> = {}): CorpusEntry {
 }
 
 describe("runCorpusEntry — gate 2d stimuli priority", () => {
-  it("reports core-stimuli-pending for an entry with phases, instead of not-ported, even though `switch` is not core-implemented", () => {
+  it("reports core-stimuli-pending for an entry with phases, instead of not-ported, even though `capacitor` is not core-implemented", () => {
     const entry = baseEntry({
+      kinds: ["capacitor", "ground", "resistor", "voltage_source"],
       phases: [
-        { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2e-3 },
-        { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2e-3 },
+        { set: [{ id: "c1", params: { capacitance: 2e-6 } }], durationS: 2e-3 },
+        { set: [{ id: "c1", params: { capacitance: 1e-6 } }], durationS: 2e-3 },
       ],
     });
 
-    const result = runCorpusEntry(entry, switchedDivider());
+    const result = runCorpusEntry(entry, unportedKindDivider());
 
     expect(result.status).toBe("core-stimuli-pending");
     if (result.status === "core-stimuli-pending") {
@@ -92,11 +123,11 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
   });
 
   it("falls through to the plain not-ported flow for the SAME circuit when the entry carries no phases", () => {
-    const entry = baseEntry({ phases: undefined });
-    const result = runCorpusEntry(entry, switchedDivider());
+    const entry = baseEntry({ kinds: ["capacitor", "ground", "resistor", "voltage_source"], phases: undefined });
+    const result = runCorpusEntry(entry, unportedKindDivider());
     expect(result.status).toBe("not-ported");
     if (result.status === "not-ported") {
-      expect(result.missingKinds).toContain("switch");
+      expect(result.missingKinds).toContain("capacitor");
     }
   });
 
@@ -116,9 +147,83 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
   });
 
   it("an empty phases array does not trigger the stimuli path (falls through to the plain flow)", () => {
-    const entry = baseEntry({ phases: [] });
-    const result = runCorpusEntry(entry, switchedDivider());
+    const entry = baseEntry({ kinds: ["capacitor", "ground", "resistor", "voltage_source"], phases: [] });
+    const result = runCorpusEntry(entry, unportedKindDivider());
     expect(result.status).toBe("not-ported");
+  });
+
+  // ── W1b: `switch`/`push_button`/`spdt_switch`/`dip_switch` joined
+  // CORE_IMPLEMENTED_KINDS and CoreEngine.setParams landed, so an entry whose
+  // kinds are ALL core-implemented now gets a REAL classic-vs-core stimuli
+  // comparison here, not just a "core-stimuli-pending" bookkeeping gesture. ──
+
+  it("a switch-only stimulated circuit (a switch toggling a resistor divider across two phases) passes classic vs core", () => {
+    const entry = baseEntry({
+      kinds: ["ground", "resistor", "switch", "voltage_source"],
+      phases: [
+        { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2e-3 },
+        { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2e-3 },
+      ],
+    });
+
+    const result = runCorpusEntry(entry, switchedDivider(0));
+
+    expect(result.status).toBe("pass");
+    if (result.status === "pass") {
+      expect(result.classicWallMs).not.toBeNull();
+      expect(result.coreWallMs).not.toBeNull();
+      expect(result.maxAbsErrorAmps).toBeLessThan(1e-6);
+    }
+  });
+
+  it("a seeded fault (a phase applied only on the classic side) fails and names the phase index it diverged at", () => {
+    // Both sides start from the SAME circuit (switch open) and phase 0 is a
+    // no-op on both — real physics, identical on both engines. Phase 1
+    // diverges ONLY in what gets applied: classic closes the switch, core's
+    // corresponding phase stays a no-op. Neither replay is tampered — the
+    // fault is a real, deliberate difference in what stimulus each engine
+    // actually received, so the resulting mismatch is a genuine disagreement
+    // for compareStimuliSamples (compare.ts) to catch, not a fabricated one.
+    const circuit = switchedDivider(0);
+    const noOpPhase: StimulusPhase = { durationS: 2 * STIMULUS_FIXED_STEP_S };
+    const classicPhases: StimulusPhase[] = [
+      noOpPhase,
+      { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2 * STIMULUS_FIXED_STEP_S },
+    ];
+    const corePhases: StimulusPhase[] = [noOpPhase, noOpPhase];
+
+    const classicSamples = replayStimuliOnClassic(circuit, classicPhases);
+    const coreSamples = replayStimuliOnCore(circuit, corePhases);
+    const cmp = compareStimuliSamples(classicSamples, coreSamples);
+
+    expect(cmp.mismatches.length).toBeGreaterThan(0);
+    // Phase 0 ran identically (switch stayed open) on both sides.
+    expect(cmp.mismatches.some((m) => m.phaseIndex === 0)).toBe(false);
+    // Phase 1 is where the two sides' stimuli actually diverged.
+    const phase1Mismatches = cmp.mismatches.filter((m) => m.phaseIndex === 1);
+    expect(phase1Mismatches.length).toBeGreaterThan(0);
+    expect(phase1Mismatches.some((m) => m.category === "elementI" && m.id === "sw")).toBe(true);
+  });
+
+  it("a phase that sets a param which exists but is not live reports 'error', never a silent pass or 'core-stimuli-pending'", () => {
+    // r1 (resistor) has no live params (CORE_RECORD_SHAPES.resistor.liveParams
+    // is empty) — CoreEngine.setParams must reject this loudly, and
+    // runStimuliEntry must surface that rejection as a real "error" entry,
+    // not fold it into "not yet supported" (that status is reserved for
+    // StimuliNotYetSupportedOnCoreError, an unrelated failure mode).
+    const entry = baseEntry({
+      kinds: ["ground", "resistor", "switch", "voltage_source"],
+      phases: [{ set: [{ id: "r1", params: { resistance: 5000 } }], durationS: 1e-3 }],
+    });
+
+    const result = runCorpusEntry(entry, switchedDivider(1));
+
+    expect(result.status).toBe("error");
+    if (result.status === "error") {
+      expect(result.engine).toBe("core");
+      expect(result.message).toMatch(/live/i);
+      expect(result.classicWallMs).not.toBeNull();
+    }
   });
 });
 

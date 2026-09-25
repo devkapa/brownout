@@ -1,9 +1,14 @@
-//! Partition solvers. W1a defines only the partition-solver trait (worker A1);
-//! the static, closed-form and stepped solvers arrive in W1b. Phase 2 of W1a
-//! (the kernel-integration dispatch) adds the first real implementation,
-//! `engine::StaticPartitionSolver`, adapting the W0 static kernel — it stays
-//! in `engine.rs` for now (a deliberate seam; see that module's doc comment)
-//! rather than moving here early.
+//! Partition solvers. W1a defined only the partition-solver trait (worker
+//! A1) plus the first real implementation, `StaticPartitionSolver`, adapting
+//! the W0 static kernel. W1b (row B1) moves that implementation to
+//! `static_part`, adds the switch family's fresh-every-resolve stamping and
+//! the solution cache, and gives this trait the `bo_engine_set_params`
+//! (owner decision 1) and cache-control hooks every default-implemented
+//! method below exists for — a solver with no mutable device state or no
+//! cache (a future closed-form/stepped solver, or a test mock) can ignore
+//! them entirely.
+
+pub mod static_part;
 
 use crate::drivers::Driver;
 use crate::events::{DeviceId, PartitionId};
@@ -80,6 +85,59 @@ pub trait PartitionSolver {
 
     /// Restores exactly what a prior [`Self::snapshot`] call captured.
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>));
+
+    /// Toggles the solution-cache exactness switch (`NO_SOLUTION_CACHE`,
+    /// core/README.md's Options table, key 2) after load. Default a no-op:
+    /// only a solver that actually caches (`static_part::StaticPartitionSolver`)
+    /// needs to do anything; a solver kind that never caches at all — every
+    /// mock in `kernel.rs`'s own tests included — is unaffected by
+    /// definition.
+    fn set_no_solution_cache(&mut self, _off: bool) {}
+
+    /// Solution-cache hits so far (contract stat `7`). Default `0.0`: only a
+    /// solver that actually caches reports anything else.
+    fn cache_hits(&self) -> f64 {
+        0.0
+    }
+
+    /// Validates one `bo_engine_set_params` batch of `(deviceIndex,
+    /// paramIndex, value)` triples WITHOUT applying anything (owner
+    /// decision 1's "all or nothing": every triple is checked before any is
+    /// applied). `Err` names the first problem found. The default rejects
+    /// any non-empty batch — `engine.rs` never calls this with an empty one
+    /// (it short-circuits first) — since only a solver with mutable
+    /// per-device parameters (`static_part::StaticPartitionSolver`) can have
+    /// a live one at all.
+    fn validate_params(&self, triples: &[(usize, usize, f64)]) -> Result<(), String> {
+        let _ = triples;
+        Err("this partition solver has no live parameters".to_string())
+    }
+
+    /// Applies an already-`validate_params`-checked batch: mutates every
+    /// named device's param, bumps whatever epoch the solver's own solution
+    /// cache keys on, and returns every partition touched (deduplicated) —
+    /// no electrical re-solve here. The caller (`Kernel::apply_params_as_event`)
+    /// runs that as one kernel event (owner decision 1: "applied as ONE
+    /// event at the current time"). Default a no-op, paired with the default
+    /// `validate_params` above, which never lets a non-empty batch reach
+    /// here in the first place.
+    fn apply_params(&mut self, triples: &[(usize, usize, f64)]) -> Vec<PartitionId> {
+        let _ = triples;
+        Vec::new()
+    }
+
+    /// Reads a device's current live-parameter value, for
+    /// `Kernel::apply_params_as_event` to save a pre-image before applying a
+    /// batch — so a downstream solve failure or livelock can be undone by
+    /// re-applying the old values, the same "keeps the state of the last
+    /// completed instant" guarantee `Kernel::advance` already gives a
+    /// failed advance. `None` for a device index this solver does not track
+    /// live parameters for at all; every triple `validate_params` accepted
+    /// is guaranteed to have `Some` here.
+    fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
+        let _ = (device_index, param_index);
+        None
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -102,5 +160,25 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
         (**self).restore(snapshot)
+    }
+
+    fn set_no_solution_cache(&mut self, off: bool) {
+        (**self).set_no_solution_cache(off)
+    }
+
+    fn cache_hits(&self) -> f64 {
+        (**self).cache_hits()
+    }
+
+    fn validate_params(&self, triples: &[(usize, usize, f64)]) -> Result<(), String> {
+        (**self).validate_params(triples)
+    }
+
+    fn apply_params(&mut self, triples: &[(usize, usize, f64)]) -> Vec<PartitionId> {
+        (**self).apply_params(triples)
+    }
+
+    fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
+        (**self).param_value(device_index, param_index)
     }
 }

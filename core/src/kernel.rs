@@ -198,6 +198,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         &self.solver
     }
 
+    /// Mutable access to the partition solver — `engine.rs`'s
+    /// `Engine::set_option` uses this to propagate `NO_SOLUTION_CACHE`
+    /// (`PartitionSolver::set_no_solution_cache`) into whatever solver is
+    /// actually behind the kernel, without this generic module needing to
+    /// know that cache exists at all.
+    pub fn solver_mut(&mut self) -> &mut S {
+        &mut self.solver
+    }
+
     /// Replaces the partition solver outright, keeping every driver, the
     /// heap and the live counters as they were. `engine.rs`'s `#[cfg(test)]`
     /// harness uses this to swap in a mock solver and prove `Engine::advance`
@@ -492,6 +501,69 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
         }
         self.time = t_end;
+        Ok(())
+    }
+
+    /// Applies a `bo_engine_set_params` batch as ONE event at the current
+    /// time (owner decision 1, core/README.md's `bo_engine_set_params`):
+    /// mutates the solver's device state
+    /// ([`solve::PartitionSolver::apply_params`]), marks every partition it
+    /// touched dirty, and runs one delta cycle right now — without moving
+    /// the heap or the clock.
+    ///
+    /// The caller (`engine.rs`) must call
+    /// `self.solver().validate_params(triples)` FIRST and map that failure
+    /// to `-8`: this method only handles what happens once validation has
+    /// already passed, because turning a solver-level validation `String`
+    /// into the right `BoError` variant is `engine.rs`'s job, not this
+    /// `Program`/`BoError`-free module's (the same line `advance`/`settle`
+    /// already draw against `engine.rs`).
+    ///
+    /// Rolls back exactly like [`Self::advance`]'s "a failed advance" if the
+    /// resulting delta cycle does not reach a quiet fixed point: a batch
+    /// `validate_params` already accepted can still make the circuit
+    /// unsolvable (closing a switch that shorts two rails, say), and the
+    /// contract's "all or nothing" reads most naturally as covering that
+    /// outcome too, not only the pre-application checks — so the rollback
+    /// here undoes the param mutation itself (by re-applying the pre-image
+    /// `validate_params`'s own success already guarantees exists,
+    /// `PartitionSolver::param_value`), on top of the heap/drivers/solver
+    /// snapshot `advance` already takes. This is a judgment call beyond
+    /// what the contract states outright; the orchestrator can override it.
+    pub fn apply_params_as_event(&mut self, triples: &[(usize, usize, f64)]) -> Result<(), KernelError> {
+        let heap_snapshot = self.heap.clone();
+        let drivers_snapshot = self.drivers.clone();
+        let solver_snapshot = self.solver.snapshot();
+        let old_values: Vec<(usize, usize, f64)> = triples
+            .iter()
+            .map(|&(d, p, _)| (d, p, self.solver.param_value(d, p).expect("validate_params must run and succeed before apply_params_as_event")))
+            .collect();
+
+        let dirty: BTreeSet<PartitionId> = self.solver.apply_params(triples).into_iter().collect();
+
+        // A device every one of whose pins sits on an already-fixed node
+        // names no partition at all (mirrors a resistor with both ends
+        // fixed: no matrix solve is needed), but its published current can
+        // still have just changed. `resolve_dirty` recomputes every
+        // device's current unconditionally, even when handed an empty
+        // slice, so call it directly here rather than going through
+        // `run_deltas`, whose "nothing dirty, nothing to do" shortcut exists
+        // for `advance` skipping a resolve when nothing is actually pending
+        // — which does not apply here, since a live param really did just
+        // change.
+        let result = if dirty.is_empty() {
+            self.solver.resolve_dirty(&[], self.time, &self.drivers).map(|_| ()).map_err(KernelError::SolveFailed)
+        } else {
+            self.run_deltas(dirty, true)
+        };
+
+        if let Err(e) = result {
+            self.heap = heap_snapshot;
+            self.drivers = drivers_snapshot;
+            self.solver.restore(solver_snapshot);
+            self.solver.apply_params(&old_values);
+            return Err(e);
+        }
         Ok(())
     }
 

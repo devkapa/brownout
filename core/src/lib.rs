@@ -8,11 +8,15 @@
 //!   precise error, never a panic.
 //! - [`kernel`], [`events`], [`drivers`]: the event loop, the heap, and IC
 //!   output drivers with inertial delays.
-//! - [`engine`]: load orchestration and the static solve.
+//! - [`engine`]: load orchestration.
+//! - [`partition`]: fixed nodes, partitioning and partition classes.
 //! - [`solve`]: partition solvers. [`lu`] is dense LU in LINPACK layout.
+//! - [`devices`]: per-kind stamps and currents for the passive and switch
+//!   kinds.
 //! - [`readout`]: digital and channel slots and the harness trace.
 //! - [`abi`]: the thin `extern "C"` shim. No physics lives there.
 
+pub mod devices;
 pub mod drivers;
 pub mod engine;
 pub mod error;
@@ -20,6 +24,7 @@ pub mod events;
 pub mod kernel;
 pub mod kinds;
 pub mod lu;
+pub mod partition;
 pub mod program;
 pub mod readout;
 pub mod solve;
