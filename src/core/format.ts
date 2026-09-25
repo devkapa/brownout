@@ -232,9 +232,9 @@ export class ProgramWriter {
     if (!shape) {
       throw new Error(`ProgramWriter.addDevice: unknown or unshaped kind code ${device.kindCode}`);
     }
-    if (device.pins.length !== shape.pins) {
+    if (device.pins.length < shape.pins || device.pins.length > shape.pinsMax) {
       throw new Error(
-        `ProgramWriter.addDevice: kind code ${device.kindCode} takes ${shape.pins} pin(s), got ${device.pins.length}`,
+        `ProgramWriter.addDevice: kind code ${device.kindCode} takes ${shape.pins === shape.pinsMax ? shape.pins : `${shape.pins}..${shape.pinsMax}`} pin(s), got ${device.pins.length}`,
       );
     }
     if (device.params.length !== shape.params) {
@@ -431,9 +431,9 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
     const componentIndex = readCount(`device[${d}].componentIndex`);
 
     const pinCount = readCount(`device[${d}].pinCount`);
-    if (pinCount !== shape.pins) {
+    if (pinCount < shape.pins || pinCount > shape.pinsMax) {
       throw new Error(
-        `decodeProgram: device[${d}] (${kindName}) has pinCount ${pinCount}, expected ${shape.pins}`,
+        `decodeProgram: device[${d}] (${kindName}) has pinCount ${pinCount}, expected ${shape.pins === shape.pinsMax ? shape.pins : `${shape.pins}..${shape.pinsMax}`}`,
       );
     }
     const pins: DecodedPin[] = [];

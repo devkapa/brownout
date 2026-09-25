@@ -112,15 +112,24 @@ export type CoreKindCodeName = keyof typeof CORE_KIND_CODES;
 
 /** A kind's record shape, mirroring core/src/kinds.rs `KindShape`. */
 export interface CoreRecordShape {
-  /** Pin count, in the order the README's record-layout table gives. */
+  /** Minimum pin count, in the order the README's record-layout table gives. */
   pins: number;
+  /** Maximum pin count; equal to `pins` except where the count follows a param (dip_switch). */
+  pinsMax: number;
   params: number;
   /** Exact blob length, or a floor for variable-length contents. */
   blob: { exact: number } | { atLeast: number };
+  /** Param indices `bo_engine_set_params` may change after load (owner decision 1). */
+  liveParams: readonly number[];
 }
 
 /** Shapes of the kinds ported so far. Grows per sub-wave, in step with core/src/kinds.rs. */
-export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map([
-  [CORE_KIND_CODES.resistor, { pins: 2, params: 1, blob: { exact: 0 } }],
-  [CORE_KIND_CODES.voltage_source, { pins: 2, params: 1, blob: { exact: 0 } }],
+export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<number, CoreRecordShape>([
+  [CORE_KIND_CODES.resistor, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.voltage_source, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.capacitor, { pins: 2, pinsMax: 2, params: 3, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.switch, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
+  [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
+  [CORE_KIND_CODES.spdt_switch, { pins: 3, pinsMax: 3, params: 1, blob: { exact: 0 }, liveParams: [0] }],
+  [CORE_KIND_CODES.dip_switch, { pins: 4, pinsMax: 16, params: 9, blob: { exact: 0 }, liveParams: [1, 2, 3, 4, 5, 6, 7, 8] }],
 ]);

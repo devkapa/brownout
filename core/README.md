@@ -147,6 +147,24 @@ is dispatched; a code without a record layout is reserved and rejected as
 |---|---|---|---|---|---|
 | 1 | `resistor` | `pins[0]`, `pins[1]` (positional) | `R = max(1e-3, Number(params.resistance ?? 1000))`, `R > 0` | empty | W0 |
 | 2 | `voltage_source` | `pins[0]` (+), `pins[1]` (−) (positional) | `V = Number(params.voltage ?? 5)` | empty | W0 |
+| 3 | `capacitor` | `pins[0]`, `pins[1]` (positional) | `[C, esr, leakage]`: `C = max(1e-15, Number(params.capacitance ?? 1e-6))`; `esr` and `leakage` by classic's `modelParam` exact-uid rule (spec §7.2.6), `esr` 0 when absent or invalid, `leakage` 0 meaning none (classic's infinite parallel resistance) | empty | W1b |
+| 4 | `switch` | `pins[0]`, `pins[1]` (positional) | `[closed]`: `Boolean(params.closed) ? 1 : 0` (the string `"0"` counts as closed, as in classic); the closed contact is a literal 1 mΩ | empty | W1b; live param 0 |
+| 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
+| 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position) === 0 ? 0 : 1` (0 selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
+| 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
+
+**Pins by id.** A pin id the component lacks maps to node 0, because classic
+maps an absent pin to its reference node (spec §7.2.7).
+
+**Currents** (`elementI`, one per record):
+- `capacitor`: series plus leakage current, `pins[0]` to `pins[1]`.
+- `switch`, `push_button`: the contact current `pins[0]` to `pins[1]`, 0 when
+  open.
+- `spdt_switch`: the current through the contact in use, `com` to the
+  selected throw. This is the Q-O26 fix, landed in classic first; classic
+  used to report `com` to `b` at every position.
+- `dip_switch`: the sum of the closed positions' contact currents, `a_i` to
+  `b_i`.
 
 ## C ABI, version 2
 
@@ -177,6 +195,18 @@ export lands in its list in the same change that adds it.
 | `bo_engine_trace_ptr` / `bo_engine_trace_len` / `bo_engine_trace_clear` | `(h) -> *const f64` / `(h) -> u32` (f64 count, a multiple of 3) / `(h)` | Read and reset the trace. | v2 (W1a) |
 | `bo_engine_set_params` | `(h, ptr: *const f64, len_f64: u32) -> i32` | `(deviceIndex, paramIndex, value)` triples for each kind's live params (owner decision 1), applied as one event at the current time with all other state kept. | v2 (W1b) |
 | `bo_engine_seed_memory` | `(h, device: u32, ptr: *const f64, len_f64: u32) -> i32` | Replace a memory device's contents (owner decision 2). | v2 (W1d) |
+
+**`bo_engine_set_params`** (W1b, owner decision 1). The buffer holds
+`(deviceIndex, paramIndex, value)` triples.
+- The call is all or nothing: every triple is validated before any is
+  applied. A device index out of range, a param index outside that kind's
+  live params (`kinds.rs` `live_params`), or a value that fails the kind's
+  check is `-8`, and nothing changes.
+- The changes apply as ONE event at the current time. The affected devices'
+  stamps change, their partitions are marked dirty, and the delta cycle runs
+  at that instant. All other state is kept: register contents, capacitor
+  charge, pending delays. This reproduces the digital outcome of classic's
+  carry-forward reload.
 
 **Stat indices:** `0` partitions, `1` static solves, `2` largest partition,
 `3` fixed nodes, `4` events processed, `5` delta passes, `6` maximum delta

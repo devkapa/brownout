@@ -12,7 +12,7 @@
 //!
 //! Per-kind shape and parameter rules live in `kinds.rs` (orchestrator-owned):
 //! this module dispatches to `kinds::shape(code)` for pin/param/blob counts
-//! and `check_params`, and never hard-codes a kind's own rules.
+//! and `check`, and never hard-codes a kind's own rules.
 
 use crate::error::BoError;
 use crate::kinds::{self, BlobShape};
@@ -465,10 +465,15 @@ impl Program {
             BoError::unknown_kind(format!("device[{index}]: unknown kind code {kind_code}"))
         })?;
 
-        if pin_count != shape.pins {
+        if pin_count < shape.pins || pin_count > shape.pins_max {
+            let expected = if shape.pins == shape.pins_max {
+                shape.pins.to_string()
+            } else {
+                format!("{}..={}", shape.pins, shape.pins_max)
+            };
             return Err(BoError::malformed(format!(
-                "device[{index}] ({}): expected {} pin(s), got {pin_count}",
-                shape.name, shape.pins
+                "device[{index}] ({}): expected {expected} pin(s), got {pin_count}",
+                shape.name
             )));
         }
         if param_count != shape.params {
@@ -496,7 +501,7 @@ impl Program {
             }
         }
 
-        (shape.check_params)(&params).map_err(|msg| {
+        (shape.check)(pin_count, &params).map_err(|msg| {
             BoError::malformed(format!("device[{index}] ({}): {msg}", shape.name))
         })?;
 
