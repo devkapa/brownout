@@ -1,0 +1,5 @@
+---
+"brownout": minor
+---
+
+Circuits with an electrically isolated section now solve. A second battery's loop, an optocoupler's LED side, a transformer's secondary or a relay coil on its own supply has no path to ground, so its potential rested on the 1e-12 S node shunt alone and the matrix was singular to rounding. Once a closed switch stamped 1000 S into such a section, LU noise moved the whole section by tenths of a volt between Newton iterates; on a 4N35 board whose LED ran from a second battery, every step was rejected for as long as the button was held. Each isolated section now gets its own reference, a 1 S tie to ground from one node (a source's negative terminal where it has one), which carries only the shunts' ~1e-11 A. The section's voltages read against that terminal instead of averaging 0 V. Device models declare galvanically separate pins through the new optional `DeviceModel.galvanicGroups` hook; the optocoupler, coupled inductor and relay do. Circuits in which every net has a path to ground are bit-identical.

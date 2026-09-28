@@ -178,8 +178,13 @@ function acStampClampDiode(
   stampAcAdmittance(ac, anode, cathode, gd + AC_GMIN, 0);
 }
 
+// The contacts follow the committed energized flag, which depends on the
+// coil's differential voltage alone.
+const RELAY_GALVANIC_GROUPS = [["coil_a", "coil_b"], ["com", "no", "nc"]] as const;
+
 export const relayModel: DeviceModel = {
   kinds: ["relay"],
+  galvanicGroups: () => RELAY_GALVANIC_GROUPS,
   stamp: (ctx, comp, _xGuess, h) => {
     // W6.1 — SPDT relay.
     //

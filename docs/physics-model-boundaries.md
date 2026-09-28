@@ -45,6 +45,16 @@ Included:
 - A 1 Tohm numerical node shunt used only to regularize otherwise floating
   matrices. Diagnostics call out isolated catalog inputs and explicit
   resistances near that numerical limit.
+- An electrically isolated section (a second battery's loop, an
+  optocoupler's LED side, a transformer secondary, a relay coil on its own
+  supply) gets its own voltage reference: a 1 S tie to ground from one node,
+  a source's negative terminal where the section has one. The section has no
+  path to ground, so the tie carries only the node shunts' current, and the
+  section's voltages read against that terminal. Sections come from the
+  wiring; only the optocoupler, coupled inductor and relay models separate
+  their pins into isolated groups, so a section cut off only by another
+  multi-channel part (a DPDT pole, a resistor array) still rests on the node
+  shunt.
 - Rail-referenced, finite-resistance digital and MCU outputs, real internal GPIO
   pulls, board idle current, IC quiescent current, and conservative supply-current
   routing for modeled active parts.

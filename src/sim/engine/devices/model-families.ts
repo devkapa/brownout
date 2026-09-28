@@ -154,8 +154,12 @@ function coupledInductorParams(
   };
 }
 
+// Every stamp couples the windings through v1 = a1-b1 and v2 = a2-b2 only.
+const COUPLED_INDUCTOR_GALVANIC_GROUPS = [["a1", "b1"], ["a2", "b2"]] as const;
+
 export const coupledInductorModel: DeviceModel = {
   kinds: ["coupled_inductor"],
+  galvanicGroups: () => COUPLED_INDUCTOR_GALVANIC_GROUPS,
   stamp: (ctx, comp, _xGuess, h) => {
     // Pins a1/b1 = winding 1, a2/b2 = winding 2; a1 and a2 are the dotted
     // terminals (see coupledInductorCompanion's derivation).
@@ -684,6 +688,10 @@ export const triacModel: DeviceModel = {
 // ── Optocoupler (LED + phototransistor) ─────────────────────────────────────
 
 const OPTO_INTERNAL_NODES = ["b"] as const;
+// The photocurrent is driven by the committed LED current, a function of the
+// LED's forward voltage alone, so the two sides share no conductive path.
+// The package's base pin sits with the transistor it belongs to.
+const OPTO_GALVANIC_GROUPS = [["led_a", "led_k"], ["c", "e", "b"], ["nc"]] as const;
 
 interface OptoParams {
   ctr: number;
@@ -713,6 +721,7 @@ export const optoNpnModel: DeviceModel = {
   // The phototransistor base is a real circuit node inside the package with
   // no external pin — the canonical internal-node consumer.
   internalNodes: () => OPTO_INTERNAL_NODES,
+  galvanicGroups: () => OPTO_GALVANIC_GROUPS,
   stamp: (ctx, comp, xGuess, _h) => {
     // Pins led_a/led_k (input LED) and c/e (phototransistor). Input side:
     // the standard Shockley LED stamp. Output side: a full Ebers-Moll NPN
