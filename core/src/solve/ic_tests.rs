@@ -208,7 +208,12 @@ impl DeviceEvaluator for IcHarness {
             .map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st))
             .collect();
         let result = digital::combinational::evaluate(ic.kind, &levels);
-        digital::delay::driver_requests(ic, &entry.output_drivers, &result)
+        // This harness is a step-1/2a truth-table and power-gating tool, not
+        // a `lastReads` tracker: it always passes `None` here, which is a
+        // legitimate contract state (delay.rs's "no identified cause, so
+        // param 12" row for the 157), not a mock of the cause-detection rule
+        // -- no test in this file depends on strobe-vs-param-12 timing.
+        digital::delay::driver_requests(ic, &entry.output_drivers, &result, &levels, None)
     }
 }
 

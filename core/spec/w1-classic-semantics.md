@@ -65,6 +65,7 @@ re-pinned.
 | `2c6ba7d` (`fix/current-source-polarity`) | `current_source` drives its current out of `pos`, through the circuit and back into `neg`, like a battery's `+`. The transient stamp, the element current (pin0 -> pin1, so a sourcing source reads `-I` plus its shunt's current) and the small-signal injection flip together. The SPICE parser attaches an I card's n+ to `neg`, so decks keep their meaning. | 8.6a | Not a W1 kind. Port with the kind, with `current-source-polarity.test.ts` in gate 1. |
 | `b70be41`, `bc1cfd6`, `a05089b` (`fix/rp2040-long-script`, which carries `perf/rp2040-idle-skip` and `fix/rp2040-quiet-logger`) | `RP2040Mcu` logs errors only, on every boot and `reset()`. An armed USB CDC OUT read is held until the host has data, never completed with zero bytes, so a sleeping core no longer takes a USB interrupt every ~28 µs. Host-to-device REPL bytes go into an unbounded host-side queue that tops up the 512-entry CDC FIFO each time the firmware arms an OUT read, so a program over 512 bytes (and its Ctrl-D) is no longer dropped. | none (outside W1) | W7, with `rp2040-idle.test.ts` (busy fraction < 0.01) and `rp2040-long-script.test.ts` in gate 1. |
 | `3497700`, `fccd8bd` (`fix/rp2040-adc-temp`, which carries `fix/rp2040-adc-counts`) | `RP2040Mcu.setAnalogVolts` feeds `round(clamp(v, 0, vcc) / vcc · 4095)` counts to ADC0-2, not volts, with `vcc` the 3V3 rail. ADC4, the temperature sensor, is seeded at boot and on `reset()` with 876 counts (0.706 V, 27 °C per the RP2040 datasheet §4.9.5, against the 3V3 reference), fixed and not temperature-driven. | none (outside W1) | W7, with the ADC cases of `rp2040.test.ts` and `rp2040-micropython.test.ts` (27 ± 1 °C) in gate 1. |
+| Q-O64 (owner decision 3; this wave, worker R8, `feat/wasm-core-w1`) | The 74LS157's `/OE` is a strobe `/G`, not a tri-state enable: `/G` HIGH now forces every `Y` LOW (`sim-engine.ts`'s `_combinationalOutputs` `/oe` short-circuit narrows to the 74LS245 alone; `digital.ts`'s `oe ? false : ...` branch, previously dead, is now reachable and drives LOW), matching the real SN74LS157 (TI SDLS058 function table). The tri-state behaviour classic used to model on this pin belongs to a different part, the 74LS257. The 74LS245 is unchanged. | 1.4, 1.7, 2.4, 2.5, 3.4, 3.6, 3.12, 3.13, 11 D5, 13.2, 13.3 G4, 12 | Ported in the same change (core: W1d). `combinational.rs`'s `mux157` returns `Some(false)` for every `Y` at `/oe = 1`; `delay.rs`'s `driver_requests` times the strobe-caused transition with the kind's own `strobe` pair (13 ns release / 14 ns force), and a data/select-caused one with param 12, the larger per direction when both fire together. |
 
 **Where shared mechanics are specified.** Other chapters point here instead of
 repeating them.
@@ -299,6 +300,8 @@ return { ..., vcc, gnd, vSupply: max(0,vSupply), thresholds: thresholdsFor(specs
     (`sim-engine.ts:5206-5227`), which is a cache only (§2.10).
   - 74ls157 and 74ls245 drive nothing when `/oe` is 1 or above
     (`sim-engine.ts:5221-5223`).
+  - Delta: since Q-O64, only 74ls245 drives nothing at `/oe` high; 74ls157
+    drives every `Y` LOW instead. See "Deltas since the 2026-09-24 baseline".
 
 ### 1.5 The floating and indeterminate model (`sim-engine.ts:5029-5058`)
 
@@ -410,6 +413,9 @@ high   = n < pHigh
   - 74hc595 with `/oe` HIGH (`:523-524`);
   - 74ls157 and 74ls245 with `/oe` (`sim-engine.ts:5221-5223`), after which
     their delay slots are dropped (`:5343-5363`).
+  - Delta: since Q-O64, 74ls157 no longer HIZs at `/oe`; it drives every `Y`
+    LOW and keeps its delay slots. See "Deltas since the 2026-09-24
+    baseline".
 - An unpowered IC stamps nothing, and `updateDigital` publishes nothing.
   `digital-realism.test.ts:482-500` shows an unpowered 74LS00 or 74HC595 output
   between 10 kOhm pull-up and pull-down resistors reading 2-3 V, with
@@ -649,6 +655,10 @@ Then a cleanup pass (5352-5364) drops the triad for any pin missing from
 `immediate`: the tri-stated 74LS245/157 case, and a 245 direction flip
 (rationale 5346-5351). Re-enabling re-seeds with zero delay.
 
+Delta: since Q-O64, the tri-stated case here is 74LS245 only; a 74LS157
+`/oe` transition is an ordinary level change (`Y` LOW), never a dropped
+triad. See "Deltas since the 2026-09-24 baseline".
+
 Rules as coded:
 - A due-fire and a new schedule can happen in the same call.
 - There is at most one in-flight transition per pin. A glitch back cancels it;
@@ -672,6 +682,9 @@ Tests:
 
 - **74LS245/157 `/OE` high:** `_combinationalOutputs` returns `{}`
   (5220-5223).
+  - Delta: since Q-O64, this line is 74LS245 only; 74LS157 `/OE` high now
+    produces every `Y` LOW through the ordinary evaluator path, not `{}`.
+    See "Deltas since the 2026-09-24 baseline".
 - **74LS173 `M` or `N` high:** no stamp (`digital-ics.ts:405-414`).
 - **74HC595 `/OE` high:** no stamp (522-524).
 - **74LS189:** `/CS` high → return; `/WE` low → return. Otherwise the address
@@ -1036,6 +1049,10 @@ these kinds:
   `le` are not listed.
 - An open 157/245 `/oe` reads HIGH (outputs disabled) in about 70% of 10 ms
   buckets. Open 74hc138 enables and an open cd4511 `le` are 50/50 per bucket.
+  - Delta: since Q-O64, an open 157 `/oe` still reads HIGH ~70% of the time,
+    but that now drives every `Y` LOW (package/strobe delay) rather than
+    disabling the outputs; only the 245 goes hi-Z. See "Deltas since the
+    2026-09-24 baseline".
 - 74hc14 Schmitt state `schmitt_<pin>` is written only when
   `commit && next !== prev` (`5133-5136`). `commit=true` comes only from
   `combinationalIcModel.updateDigital` (`devices/digital-ics.ts:326`). Newton
@@ -1080,6 +1097,11 @@ The stamp is specified in §1.6. It is called from `stampCombinationalIC`
   `evalCombinationalIC(kind, pinValues, 0.5)` (`5220-5223`). This makes the
   evaluator's own OE branches (`digital.ts:499`, `520-522`) unreachable
   (Q-W6).
+  - Delta: since Q-O64, the `pinValues["/oe"]>=0.5` short-circuit narrows to
+    `kind==="74ls245"`; a 74ls157 now always reaches `evalCombinationalIC`,
+    whose own `/oe` branch (`digital.ts:499`) drives every `Y` LOW. Only the
+    245's OE branch (`:520-522`) stays unreachable (Q-W6). See "Deltas since
+    the 2026-09-24 baseline".
 
 Gate arrays (`74ls00/04/08/32/86`, `74hc14`): `IC_GATE_KIND` gives
 `nand, not, and, or, xor, not` (`digital.ts:409-418`). Inputs are grouped by
@@ -1092,9 +1114,16 @@ Gate arrays (`74ls00/04/08/32/86`, `74hc14`): `IC_GATE_KIND` gives
 
 | /OE | SEL | Yg |
 |---|---|---|
-| H | x | absent: hi-Z, no stamp, no digitalState (engine gate `sim-engine.ts:5220-5222`) |
+| H | x | L (driven, package delay; key present, 0) |
 | L | L | Ag |
 | L | H | Bg |
+
+Delta: since Q-O64 (owner decision 3), the `/OE` HIGH row is as shown above.
+Classic used to model this pin as a tri-state enable: `H | x` produced
+`absent: hi-Z, no stamp, no digitalState` (the engine gate at
+`sim-engine.ts:5220-5222`). The real SN74LS157's `/G` HIGH forces every `Y`
+LOW instead (TI SDLS058 function table); the tri-state behaviour classic
+modelled belongs to the 74LS257. See "Deltas since the 2026-09-24 baseline".
 
 74ls283 (`digital.ts:504-514`): ripple sum from `c0`: `Si = (Ai+Bi+carry)&1`,
 `C4` is the final carry. It is evaluated in one pass, and each output pin gets
@@ -1283,6 +1312,9 @@ delay (`pec2.mjs:698-702`), which matches classic's re-seed. Neither prototype
 has `74hc14`, `74ls47` or `cd4511`.
 
 Where they differ from classic:
+- Delta: since Q-O64, classic's own 157 `/OE` no longer matches either
+  prototype's `release()`; it now drives every `Y` LOW instead of tri-stating.
+  See "Deltas since the 2026-09-24 baseline".
 - `lv()` resolves the dead band to 1 (`pec2.mjs:697`, `pec3.mjs:899-903`). Its
   own comment says this is never reached on that board. The prototypes have no
   hash floating model.
@@ -1301,6 +1333,11 @@ identical, including LS47 RBO>LT>RBI and the partial 10-15 glyphs, CD4511 blank
 segment timing). Assembly note: this chapter's reader could not locate the plan
 document; it is `devolt/memory/decisions/2026-09-24-brownout-rust-wasm-core.md`,
 and decision 3 at `:38-43` reads as the chapter assumed.
+
+Delta: since Q-O64 (owner decision 3), D5's tri-state divergence is 74LS245
+only. A 74LS157 `/OE` edge is a datasheet-delayed level change (its own
+`strobe` pair), not a tri-state enable/disable; both engines resolved this
+the same change (core: W1d). See "Deltas since the 2026-09-24 baseline".
 
 Open questions for this chapter: Q-O4, Q-O9, Q-O10, Q-O12, Q-O13, Q-O49,
 Q-O57, Q-O64, Q-W1, Q-W6, Q-W7.
@@ -4659,6 +4696,12 @@ but not the rule). Plan lines are in
 | D32 | Facade surface | Snapshot/restore; step breakpoints: two per 555 switch, 1e-8 s apart, rolled back by restore, cleared on load (§5.4). | `CoreEngine` implements the SimEngine surface the worker and HeadlessRunner use: load, advance, readouts, failures, warnings, telemetry, snapshot/restore, breakpoints, acquisition (Plan:102-106). Shared read type at `src/core/surface.ts:24-55`. | Mandated (Q-O20) | 5,10 |
 | D33 | Prototype subset | The prototype lacks rgb/bicolor LEDs, self-heating, failures, 74hc14/74ls47/cd4511, 74hc595/165, cd4017/4060, 28c256 and EEPROM writes, trap and DC modes, the floating hash and the power gate. | The core implements the full classic surface; the prototype is a cross-check only. | Authority rule | 1,3,4,6,7 |
 
+Delta: since Q-O64 (owner decision 3), D5's tri-state figure is 74ls245 only.
+A 74ls157 `/OE` transition is a datasheet-delayed level change (its own
+`strobe` pair), not a tri-state enable/disable edge; both engines resolved
+this in the same change (core: W1d). See "Deltas since the 2026-09-24
+baseline".
+
 ---
 
 ## 12. Open questions
@@ -4912,6 +4955,14 @@ kind on Ben Eater's computer.
   (`digital.ts:499`) drives LOW. D5 asks for tri-state enable delays; which
   semantics and which delay apply to this pin? (The benchmark ties `/OE` LOW,
   so the board itself does not exercise it.)
+  **Resolved (owner decision 3): the real SN74LS157's `/G` HIGH forces every
+  `Y` LOW (TI SDLS058 function table), checked against the datasheet; the
+  tri-state behaviour classic modelled here belongs to the 74LS257.
+  Strobe-caused transitions use the part's own `strobe` pair (13 ns release,
+  14 ns force); data/select-caused ones keep param 12 (classic's 20 ns), the
+  larger per direction when both fire together. Fixed in both engines in the
+  same change (classic: `sim-engine.ts`'s `/oe` gate narrows to the 74ls245;
+  core: W1d). See "Deltas since the 2026-09-24 baseline".**
 - **Q-O65** [1,13] (W1 board) Logic ICs draw no quiescent supply current in
   classic (§13, gap G6), so rail sag on the board comes only from outputs,
   LEDs and the 555's idle cross-current. Accept as classic, or is this a
@@ -4941,6 +4992,9 @@ kind on Ben Eater's computer.
 - **Q-W6** [3] `evalCombinationalIC`'s `/oe` branches for 74ls157/74ls245
   (`digital.ts:499`, `520-522`) are unreachable. The core can omit them unless
   Q-O64 changes the 157's semantics.
+  **Resolved by Q-O64: the 157 branch (`digital.ts:499`) is reachable now — it
+  is how classic drives every `Y` LOW. Only the 245 branch (`:520-522`) stays
+  dead.**
 - **Q-W7** [3] The 74hc14 catalog has `v_il_max` 1.35 vs `v_t_minus` 1.6 despite
   its note; neither affects logic reads. Settle which value the catalog means.
 - **Q-W8** [2,4] `wave2-combinational.test.ts:729-762` ("74hc595 uses prefix
@@ -5096,6 +5150,11 @@ alone. Gap IDs refer to §13.3.
 | 74hc138 | Yes | Yes (20 ns) | Yes (combinational, unchanged) | Yes | Yes | none |
 | 28c16 | Yes (§4.2.5) | Yes (`contents` base64, assembly note in §4.1.5) | Classic yes; core access delays missing | Yes | Yes (output_sag; see Q-W11, Q-W23) | G4, E1 |
 
+Delta: since Q-O64 (owner decision 3), the 74ls157 row's timing verdict and
+gap are resolved: the strobe figures (13 ns release / 14 ns force) are TI
+SDLS058's SN74LS157 typicals, carried in the catalog's `switching_ns.strobe`.
+See "Deltas since the 2026-09-24 baseline".
+
 Cross-cutting kinds the board touches without listing them: `voltage_source`
 (§8.2, complete) and, in the devolt fixture, `potentiometer`/`push_dpdt`
 (§7.6-7.7, complete) and `breadboard` (not specified, G9).
@@ -5140,7 +5199,9 @@ Cross-cutting kinds the board touches without listing them: `voltage_source`
   for: 74ls161 (CLK→Q, CLK→RCO, ENT→RCO), 74ls173 (CLK→Q, M/N enable and
   disable), 74ls189 (address and /CS access, /WE→output), 74ls245 (/OE enable
   and disable; its 20 ns data delay is classic), 74ls157 (/OE, see Q-O64) and
-  28c16 (address, /CE and /OE access, output float). Also missing: whether the
+  28c16 (address, /CE and /OE access, output float). Delta: 74ls157's /OE
+  value is resolved (Q-O64): the strobe pair is 13 ns release / 14 ns force,
+  TI SDLS058. See "Deltas since the 2026-09-24 baseline". Also missing: whether the
   asynchronous and live paths get delays: 74hc74 /PRE and /CLR and 74ls161
   ENT→RCO, which classic applies live within the solve (§2.5), and 74ls161 /CLR
   and 74ls173 CLR, which classic applies in `updateDigital` and so one solve

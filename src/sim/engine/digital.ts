@@ -493,7 +493,7 @@ export function evalCombinationalIC(
 
   if (kind === "74ls157") {
     const sel = (pinV["sel"] ?? 0) >= vth;
-    const oe  = (pinV["/oe"] ?? 0) >= vth; // active-low
+    const oe  = (pinV["/oe"] ?? 0) >= vth; // strobe /G, active LOW: HIGH forces every Y LOW (SN74LS157 function table, TI SDLS058 p.1)
     for (let g = 0; g < 4; g++) {
       const pinA = `${g + 1}a`, pinB = `${g + 1}b`, pinY = `${g + 1}y`;
       result[pinY] = oe ? false : sel ? (pinV[pinB] ?? 0) >= vth : (pinV[pinA] ?? 0) >= vth;

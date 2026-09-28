@@ -1315,31 +1315,33 @@ mod tests {
     }
 
     #[test]
-    fn engine_load_registers_and_settles_one_of_each_w1d_kind_with_the_stubs_publishing_nan() {
-        // The DELIVER-list proof that the dispatcher (devices::ics::register
-        // and IcEvaluator) is wired all the way through the real
-        // `Engine::load` entry point, not just through a hand-built
-        // `Kernel`/`PartitionedSolver` pair (devices::ics::tests's own
-        // version of this same fixture) -- one each of 161, 173, 74hc74, 189
-        // and 28c16, all powered from a shared 5V fixed supply.
-        let p = Program {
-            node_count: 2,
-            options: Options::default(),
-            digital_slot_count: 100,
-            channel_slot_count: 0,
-            devices: vec![
-                source(0, 1, 0, 5.0),
-                w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
-                w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
-                w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
-                w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
-                w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
-            ],
-        };
-        let e = Engine::load(&p).expect("a program holding every W1d kind must load through the real Engine::load entry point");
-        assert!(!e.digital_slots().is_empty());
-        for (slot, &value) in e.digital_slots().iter().enumerate() {
-            assert!(value.is_nan(), "slot {slot} must read NaN while the W1d family evaluators are stubs, got {value}");
+    fn engine_load_registers_and_settles_one_of_each_w1d_kind_and_publishes_their_power_on_readouts() {
+        // The dispatcher (devices::ics::register and IcEvaluator) wired all
+        // the way through the real `Engine::load` entry point, not just a
+        // hand-built `Kernel`/`PartitionedSolver` pair (devices::ics::tests'
+        // version of this fixture, which explains each expected value): one
+        // each of 161, 173, 74hc74, 189 and 28c16, every logic pin on gnd,
+        // all powered from one 5 V source.
+        let mut devices = vec![
+            source(0, 1, 0, 5.0),
+            w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
+            w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
+            w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+        ];
+        for (device, base) in devices[1..].iter_mut().zip([0.0, 5.0, 9.0, 13.0, 17.0]) {
+            device.blob[0] = base;
         }
+        let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
+        let e = Engine::load(&p).expect("a program holding every W1d kind must load through the real Engine::load entry point");
+        let expected = [
+            0.0, 0.0, 0.0, 0.0, 0.0, // 161: count, qa..qd
+            0.0, 0.0, 0.0, 0.0, // 173: q1..q4
+            1.0, 1.0, 1.0, 1.0, // 74hc74: q1 q1_n q2 q2_n
+            0.0, 0.0, 0.0, 0.0, // 189: /o1../o4
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 28c16: io0..io7
+        ];
+        assert_eq!(e.digital_slots(), &expected);
     }
 }

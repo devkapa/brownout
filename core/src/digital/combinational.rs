@@ -5,10 +5,14 @@
 //! `evaluate` mirrors classic's `evalCombinationalIC`
 //! (`src/sim/engine/digital.ts`) plus the engine-level `/oe` gate
 //! `_combinationalOutputs` (`src/sim/engine/sim-engine.ts:5206-5227`) applies
-//! *before* calling it — the reason a 157/245 held at `/oe = 1` produces no
+//! *before* calling it — the reason a 245 held at `/oe = 1` produces no
 //! outputs at all here, never `evalCombinationalIC`'s own (dead, in classic)
-//! `oe ? false : ...` branch. `levels` and the return value share one
-//! indexing convention throughout this file:
+//! `oe ? {a:false,b:false} : ...` branch. The 157's `/oe` is a strobe, not a
+//! tri-state enable (owner decision 3, Q-O64), so it is never gated at that
+//! engine level: it always reaches [`mux157`], whose own `oe ? ... : ...`
+//! branch (mirroring classic's `digital.ts:499`, reachable now) drives every
+//! `Y` LOW instead of returning `None`. `levels` and the return value share
+//! one indexing convention throughout this file:
 //! - `levels[i]` is logic pin `i`'s read, in `icPinMap` order (README's "IC
 //!   logic pins" table) — every logic pin, inputs and outputs and controls
 //!   alike, because that is what classic's own pin map carries and what
@@ -68,8 +72,8 @@ pub use super::output_capable;
 /// Evaluates kind `kind`'s truth table over `levels` (one electrical read per
 /// logic pin, `icPinMap` order — see the module doc). Returns one entry per
 /// [`output_capable`]`(kind)` pin, `Some(level)` (electrical) when classic's
-/// result carries that pin's key, `None` when it does not (a 157/245 tri-
-/// stated by `/oe`, or the undriven side of a 245).
+/// result carries that pin's key, `None` when it does not (a 245 tri-stated
+/// by `/oe`, or its undriven side; the 157 is always driven, see [`mux157`]).
 pub fn evaluate(kind: u32, levels: &[bool]) -> Vec<Option<bool>> {
     match kind {
         kinds::IC_74LS00 => gate3(levels, Gate::Nand, 4),
@@ -118,15 +122,16 @@ fn gate2_not(levels: &[bool], gates: usize) -> Vec<Option<bool>> {
 }
 
 /// `74ls157`: pins `sel(0) /oe(1) 1a(2) 1b(3) 1y(4) ... 4a(11) 4b(12) 4y(13)`.
+/// `/oe` here is the part's strobe `/G`, not a tri-state enable (owner
+/// decision 3, Q-O64): the real SN74LS157's `/G` HIGH forces every `Y` LOW
+/// (TI SDLS058 function table), so unlike the 74ls245 this kind is always
+/// driven. The tri-state behaviour classic used to model on this pin belongs
+/// to the 74LS257.
 fn mux157(levels: &[bool]) -> Vec<Option<bool>> {
     let sel = levels[0];
     let oe = levels[1];
-    // The engine-level gate (module doc; sim-engine.ts's own check ahead of
-    // ever calling evalCombinationalIC): /oe HIGH means no outputs at all,
-    // not each gate individually going `false` (digital.ts:499's `oe ? false
-    // : ...` is unreachable in classic).
     if oe {
-        return vec![None; 4];
+        return vec![Some(false); 4];
     }
     (0..4)
         .map(|g| {
@@ -320,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn mux_157_selects_b_side_and_oe_high_mutes_every_output() {
+    fn mux_157_selects_b_side_and_strobe_high_forces_every_output_low() {
         // sel=1 (B side), /oe=0 (enabled): 1a=0 1b=1 -> 1y=1; the rest LOW.
         let mut levels = [false; 14];
         levels[0] = true; // sel
@@ -328,9 +333,11 @@ mod tests {
         let enabled = evaluate(kinds::IC_74LS157, &levels);
         assert_eq!(enabled, vec![Some(true), Some(false), Some(false), Some(false)]);
 
-        levels[1] = true; // /oe HIGH -> disabled regardless of sel/inputs
-        let disabled = evaluate(kinds::IC_74LS157, &levels);
-        assert_eq!(disabled, vec![None, None, None, None]);
+        // /oe (the strobe /G) HIGH: every Y driven LOW, whatever sel/inputs
+        // (owner decision 3, Q-O64) -- present and false, never absent.
+        levels[1] = true;
+        let strobed = evaluate(kinds::IC_74LS157, &levels);
+        assert_eq!(strobed, vec![Some(false), Some(false), Some(false), Some(false)]);
     }
 
     #[test]

@@ -302,12 +302,18 @@ describe("74ls157 — /oe gates every output", () => {
     );
   }
 
-  it("/oe HIGH: 1y's key is absent on both engines", () => {
+  it("/oe HIGH: 1y reads LOW on both engines (key present at 0, Q-O64)", () => {
+    // The real SN74LS157's /G HIGH forces every Y LOW (TI SDLS058); the
+    // tri-state behaviour classic used to model here belongs to the 74LS257
+    // (owner decision 3, Q-O64). Both engines now drive 1y LOW through the
+    // strobe's own package delay at load (a first observation, zero delay),
+    // so the key is present and the node voltage agrees, not absent.
     const c = build(1, 0);
     const classic = loadClassic(c);
     const core = loadCore(c);
     expectDigitalStateClose(core.digitalState, classic.digitalState, "/oe high");
-    expect("u1/1y" in core.digitalState, "/oe high mutes every output").toBe(false);
+    expect(core.digitalState["u1/1y"], "/oe high forces Y LOW").toBe(0);
+    expectPinVClose(core, classic, "u1", "1y", "/oe high");
   });
 
   it("/oe LOW, sel=0 (selects 1a=LOW): 1y reads LOW, node V matches classic", () => {
@@ -326,6 +332,45 @@ describe("74ls157 — /oe gates every output", () => {
     expectDigitalStateClose(core.digitalState, classic.digitalState, "/oe low sel=1");
     expect(core.digitalState["u1/1y"], "/oe low sel=1").toBe(1);
     expectPinVClose(core, classic, "u1", "1y", "/oe low sel=1");
+  });
+
+  // ---- core-only: the strobe's OWN datasheet delay (13/14 ns), which
+  // classic has no counterpart for (classic keeps its one 20 ns package
+  // delay for every 157 transition, contract "datasheet delays and enables
+  // (W1d)" point 6) — so this is not a classic/core parity case, unlike
+  // every other test in this describe block. ------------------------------
+
+  it("a live /oe toggle drives Y LOW 14 ns later (strobe hl) and back HIGH 13 ns after release (strobe lh)", () => {
+    // sel=1 fixed throughout (selects 1b=HIGH): the only thing that ever
+    // changes is /oe, so every transition's cause is the strobe alone, never
+    // "the larger of strobe and param 12" — this isolates the 13/14 ns
+    // figures from the 20 ns data-path default.
+    const c = build(0, 1); // /oe LOW at load: 1y commits HIGH at t=0 (first observation).
+    const core = loadCore(c);
+    expect(core.digitalState["u1/1y"], "t=0").toBe(1);
+
+    // The due time the core actually schedules is `t1 + (14 * 1e-9)`, the
+    // SAME multiplication resolveDelayTail's figureS does at compile time —
+    // not the literal `14e-9`, which rounds to a different double (a ~1e-24s
+    // gap). advance() only fires an event at `t <= t_end`, so landing on the
+    // literal would occasionally fall a few ULPs short of due; a 1ps margin
+    // clears that with room to spare while staying far inside "not yet due".
+    const EPS = 1e-12;
+    const t1 = 100e-9;
+    core.advance(t1);
+    core.setParams([{ componentId: "swoe", params: { position: 1 } }]); // /oe HIGH: strobe forces Y LOW.
+    expect(core.digitalState["u1/1y"], "t=100ns, right after the toggle: hl (14ns) is not yet due").toBe(1);
+
+    core.advance(t1 + 14e-9 + EPS);
+    expect(core.digitalState["u1/1y"], "t=114ns: the strobe's hl commits Y LOW").toBe(0);
+
+    const t2 = 300e-9;
+    core.advance(t2);
+    core.setParams([{ componentId: "swoe", params: { position: 0 } }]); // /oe LOW again: strobe releases, 1b=HIGH shows through.
+    expect(core.digitalState["u1/1y"], "t=300ns, right after release: lh (13ns) is not yet due").toBe(0);
+
+    core.advance(t2 + 13e-9 + EPS);
+    expect(core.digitalState["u1/1y"], "t=313ns: the strobe's lh commits Y HIGH again").toBe(1);
   });
 });
 
@@ -357,6 +402,11 @@ describe("74ls245 — /oe gates both sides; dir picks which side is driven", () 
   }
 
   it("/oe HIGH: both a1 and b1 keys are absent", () => {
+    // Unlike the 157 (Q-O64), the 245's /oe is a genuine tri-state enable
+    // (unchanged by the W1d retrofit): a load settled with /oe HIGH commits
+    // HIZ as a first observation (zero delay, contract "datasheet delays and
+    // enables (W1d)" point 2's "none -> any: 0" row), so the keys stay
+    // absent (W1c readouts point 10: a committed-HIZ pin is NaN).
     const c = build(1, 1);
     const classic = loadClassic(c);
     const core = loadCore(c);

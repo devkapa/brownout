@@ -1889,7 +1889,7 @@
           "name": "SELECT LOW routes the A input (A=HIGH, B=LOW) to the output",
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74ls157"],
-          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls157 circuit — see this file's own header comment). /OE tied permanently LOW; decision 3's /OE strobe-to-LOW fix is deliberately not exercised here (see the file header) — that behaviour is covered by this worker's equivalence-harness fixtures instead, which compare classic and the core directly."
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls157 circuit — see this file's own header comment). /OE tied permanently LOW, the only state the real corpus wires (decision 3); the strobe-to-LOW fix (Q-O64) is exercised directly by this file's own STROBE case below, not by a harness fixture — the /OE-toggle harness fixtures (21-23) are a later worker's (D4)."
         },
         {
           "describe": "gate 1 supplemental — 74LS157 quad 2:1 mux",
@@ -1899,11 +1899,18 @@
           "reason": "New case (this worker); the mux's other select state. See the SELECT-LOW case's reason on /OE scope."
         },
         {
+          "describe": "gate 1 supplemental — 74LS157 quad 2:1 mux",
+          "name": "STROBE (/OE) HIGH forces the output LOW against its pull-up, whatever SELECT and the data",
+          "status": "portable",
+          "kinds": ["voltage_source", "resistor", "74ls157"],
+          "reason": "New case (this worker; owner decision 3, Q-O64). The real SN74LS157's /G HIGH forces every Y LOW; A=B=5V and 1y on the file's own pull-up shows the strobe overriding both SELECT and the data, not merely releasing the bus. Both engines now agree here — classic's own /oe-HIGH evaluator branch (digital.ts:499) is reachable now, not dead code."
+        },
+        {
           "describe": "gate 1 supplemental — 74LS245 octal transceiver",
           "name": "DIR=A->B, /OE enabled: a HIGH A1 drives B1 HIGH",
           "status": "portable",
           "kinds": ["voltage_source", "resistor", "74ls245"],
-          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls245 circuit — see this file's own header comment). Only the well-established DIR=A->B, /OE-LOW path is exercised here; /OE-disabled release and bus contention between two 245s are covered by this worker's equivalence-harness fixtures (a real dual-engine comparison), not asserted here by hand."
+          "reason": "New case (this worker; no pre-existing classic suite builds a real 74ls245 circuit — see this file's own header comment). Only the well-established DIR=A->B, /OE-LOW path is exercised here; /OE-disabled release and bus contention between two 245s are NOT yet covered by a harness fixture — the /OE-toggle harness fixtures (21-23) are a later worker's (D4), not asserted here by hand."
         },
         {
           "describe": "gate 1 supplemental — 74LS245 octal transceiver",

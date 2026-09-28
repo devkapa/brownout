@@ -1,41 +1,138 @@
 //! The memory family: 74ls189, 28c16, 28c256 (core/README.md, "Kernel
-//! semantics: memories (W1d)"). This commit (W1d worker K1, kernel
-//! infrastructure) only stubs the interface `devices::ics`'s dispatcher
-//! wires end to end — `MemState`'s real fields (the 189's 16 nibbles and
-//! `lastWE`; the EEPROMs' byte image, latch/edge history, pending write,
-//! poll-read count and SDP progress) and [`evaluate`]'s real per-kind logic
-//! (contract points 2-6) are D2's scope, not this file's.
+//! semantics: memories (W1d)"). W1d worker D2's scope: `MemState`'s real
+//! fields and [`evaluate`]'s real per-kind logic (contract points 2-6),
+//! plus [`seed`] and [`take_update`] behind `bo_engine_seed_memory` and
+//! `bo_engine_take_eeprom_updates`.
 //!
-//! [`evaluate`] drives nothing and reports every digital slot `NaN`, the
-//! same placeholder shape as `sequential::evaluate` — see that function's
-//! doc comment. [`seed`] always declines (defensively re-checking the word
-//! count `devices::ics::IcEvaluator::seed_memory` already validated the
-//! shape of before ever routing a 74ls189 here) and [`take_update`] never
-//! has anything dirty to report, so `bo_engine_seed_memory` and
-//! `bo_engine_take_eeprom_updates` round-trip end to end (`-8` / `0`
-//! respectively) before D2's real store lands.
+//! The 189 and the two EEPROMs never share a device, so [`MemState`] is an
+//! enum picked once at [`MemState::power_on`] from `ic.kind`; [`evaluate`],
+//! [`seed`] and [`take_update`] then dispatch on that variant. The EEPROM
+//! branch still reads its address width from `ic.kind` (28c16 or 28c256).
+//!
+//! **EEPROM image, copy-on-write.** The evaluator snapshots every device's
+//! state at every instant (contract, "A failed advance"), so the 2 KiB/32 KiB
+//! byte image lives behind an `Rc<Vec<u8>>`: an ordinary snapshot is a
+//! refcount bump, and [`Rc::make_mut`] on the one write path (write
+//! completion) copies the backing `Vec` only the instant two owners
+//! (the live state and a held snapshot) actually diverge.
+
+use std::rc::Rc;
 
 use super::{FamilyOutput, IcRecord};
 use crate::drivers::DelaySet;
 use crate::events::Mode;
 use crate::kinds;
 
-/// State for one 74ls189/28c16/28c256 device (contract point 2 and the
-/// memories section's own point 2). Empty for now. `Clone` for the same
-/// snapshot reason as `sequential::SeqState`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MemState;
+/// State for one 74ls189/28c16/28c256 device (memories section point 2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemState {
+    Ram189(Ram189State),
+    Eeprom(EepromState),
+}
+
+/// The 74ls189's 16 nibbles, true sense (the `/o` pins show the complement),
+/// and the write path's edge history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ram189State {
+    mem: [u8; 16],
+    last_we: bool,
+}
+
+/// A 28c16/28c256's byte image and write-cycle state machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EepromState {
+    /// Copy-on-write: see the module doc comment.
+    image: Rc<Vec<u8>>,
+    last_we_high: bool,
+    last_ce_high: bool,
+    /// `(addr, byte, completesAt)`, already masked to the kind's address
+    /// width.
+    pending: Option<(usize, u8, f64)>,
+    poll_reads: u16,
+    sdp_step: u8,
+    sdp_unlocked: bool,
+    dirty: bool,
+    /// Whether the previous powered evaluation was itself a DATA-polling
+    /// read cycle (`/oe` and `/ce` both read LOW) — memories point 4.4's own
+    /// edge detector, separate from `last_reads` because it must survive
+    /// (and only needs to track) exactly this one two-pin condition.
+    prev_read_cycle: bool,
+}
+
+/// Opaque tag for this family's one `FamilyOutput::timers` producer, an
+/// EEPROM's write-completion deadline (memories point 4.2 / point 5). The
+/// interface says the kernel never inspects it.
+const WRITE_COMPLETE_TAG: u64 = 0;
+
+/// SDP unlock sequence, classic's `SDP_ENABLE` (`digital-ics.ts:94-98`):
+/// `(address, data)` expected at each of the three steps.
+const SDP_SEQUENCE: [(usize, u8); 3] = [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0xA0)];
 
 impl MemState {
     /// Power-on values (memories section point 2): 189 `mem[0..15] = 0xF`,
     /// `lastWE = 1`; EEPROM the blob's image, `lastWeHigh = lastCeHigh =
     /// true`, no pending write, `pollReads = 0`, SDP locked at step 0,
     /// `dirty = false`. `rom` is the device's own ROM image (`devices::ics`'s
-    /// blob decode, core/README.md's "ROM image"), empty for a 74ls189. The
-    /// stub ignores both arguments.
+    /// blob decode, core/README.md's "ROM image"), empty for a 74ls189.
     pub fn power_on(ic: &IcRecord, rom: &[u32]) -> Self {
-        let _ = (ic, rom);
-        MemState
+        if ic.kind == kinds::IC_74LS189 {
+            MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true })
+        } else {
+            MemState::Eeprom(EepromState {
+                image: Rc::new(words_to_bytes(rom)),
+                last_we_high: true,
+                last_ce_high: true,
+                pending: None,
+                poll_reads: 0,
+                sdp_step: 0,
+                sdp_unlocked: false,
+                dirty: false,
+                prev_read_cycle: false,
+            })
+        }
+    }
+}
+
+/// Little-endian word decode, the README's "ROM image": word `k` is
+/// `b[4k] + b[4k+1]*2^8 + b[4k+2]*2^16 + b[4k+3]*2^24`, inverted here.
+fn words_to_bytes(rom: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(rom.len() * 4);
+    for &w in rom {
+        bytes.push((w & 0xFF) as u8);
+        bytes.push(((w >> 8) & 0xFF) as u8);
+        bytes.push(((w >> 16) & 0xFF) as u8);
+        bytes.push(((w >> 24) & 0xFF) as u8);
+    }
+    bytes
+}
+
+/// The inverse packing, for `bo_engine_take_eeprom_updates` ("the whole
+/// image packed as the ROM blob is").
+fn bytes_to_words(bytes: &[u8]) -> Vec<u32> {
+    bytes.chunks_exact(4).map(|c| c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16 | (c[3] as u32) << 24).collect()
+}
+
+/// `n` read bits starting at `reads[base]`, bit 0 = `reads[base]` (every
+/// address/data bus in this file is bit 0 first, README's "Bit 0 of every
+/// bus is its first pin").
+fn bits(reads: &[bool], base: usize, n: usize) -> usize {
+    let mut v = 0usize;
+    for i in 0..n {
+        if reads[base + i] {
+            v |= 1 << i;
+        }
+    }
+    v
+}
+
+/// The largest of `vals`, or `fallback` when `vals` is empty (delays point
+/// 3: "with no identified cause, the kind's first pair applies" / WHAT TO
+/// BUILD point 3: "unselectable entries take the kind's first pair, never
+/// 0").
+fn max_or(vals: &[f64], fallback: f64) -> f64 {
+    match vals.iter().copied().fold(None::<f64>, |acc, v| Some(acc.map_or(v, |a| a.max(v)))) {
+        Some(m) => m,
+        None => fallback,
     }
 }
 
@@ -43,35 +140,734 @@ impl MemState {
 /// 3-4) — see `sequential::evaluate`'s doc comment for the parameter
 /// convention this mirrors exactly.
 pub fn evaluate(ic: &IcRecord, state: &mut MemState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64) -> FamilyOutput {
-    let _ = (state, reads, last_reads, edges_live, now);
-    let outputs = super::output_capable(ic.kind).len();
-    let slots = kinds::shape(ic.kind).map_or(0, |s| (s.digital_slots)(ic.logic.len() + 2));
-    FamilyOutput {
-        requests: vec![(Mode::Hiz, DelaySet::uniform(0.0)); outputs],
-        slots: vec![f64::NAN; slots],
-        timers: Vec::new(),
+    match state {
+        MemState::Ram189(st) => evaluate_189(ic, st, reads, last_reads, edges_live),
+        MemState::Eeprom(st) => evaluate_eeprom(ic, st, reads, last_reads, edges_live, now),
     }
 }
 
+// ---- 74ls189 ---------------------------------------------------------------
+//
+// Logic pins (README's sequential/memory table): `a0 a1 a2 a3 d1 d2 d3 d4
+// /cs /we` (0-9, read), `/o1 /o2 /o3 /o4` (10-13, driven — not read by this
+// function; `output_capable` already gives the dispatcher the right driver
+// order for `FamilyOutput.requests`).
+
+const ADDR189: usize = 0;
+const DATA189: usize = 4;
+const CS189: usize = 8;
+const WE189: usize = 9;
+
+fn evaluate_189(ic: &IcRecord, state: &mut Ram189State, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool) -> FamilyOutput {
+    let cs_low = !reads[CS189];
+    let we_high = reads[WE189];
+
+    // Step 2: write, edges live only, trailing edge of /we (memories point
+    // 3.2). lastWE updates whatever /cs reads, still gated by edges_live
+    // (the general IC contract's "no ... lastWE update" while frozen).
+    if edges_live {
+        let we_rising = we_high && !state.last_we;
+        if cs_low && we_rising {
+            let addr = bits(reads, ADDR189, 4);
+            state.mem[addr] = bits(reads, DATA189, 4) as u8;
+        }
+        state.last_we = we_high;
+    }
+
+    // Steps 3-4: drive and publish read the (possibly just-written) mem
+    // array live, unconditionally — the 189's own "read, write (edges live
+    // only), drive, publish" ordering (WHAT TO BUILD point 2).
+    let addr = bits(reads, ADDR189, 4);
+    let word = state.mem[addr];
+    let delays = delay_set_189(ic, reads, last_reads);
+
+    let mut requests = Vec::with_capacity(4);
+    if cs_low && we_high {
+        for bit in 0..4 {
+            let level = (word >> bit) & 1 == 0; // inverted outputs
+            requests.push((if level { Mode::High } else { Mode::Low }, delays));
+        }
+    } else {
+        requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 4));
+    }
+
+    let mut slots = vec![f64::NAN; 4];
+    if cs_low {
+        // Write mode included (memories point 3.4 / classic's own DI:489-495).
+        for (bit, slot) in slots.iter_mut().enumerate() {
+            *slot = if (word >> bit) & 1 == 0 { 1.0 } else { 0.0 };
+        }
+    }
+
+    FamilyOutput { requests, slots, timers: Vec::new() }
+}
+
+/// `ic.delays` in the README's pair order: `addrO(0) csEnable(1)
+/// csDisable(2) weEnable(3) weDisable(4)`.
+fn delay_set_189(ic: &IcRecord, reads: &[bool], last_reads: Option<&[bool]>) -> DelaySet {
+    let d = &ic.delays;
+    let (lh, hl) = d[0];
+
+    let mut zh_c = Vec::new();
+    let mut zl_c = Vec::new();
+    let mut hz_c = Vec::new();
+    let mut lz_c = Vec::new();
+
+    if let Some(last) = last_reads {
+        let cs_low_now = !reads[CS189];
+        let cs_low_last = !last[CS189];
+        let we_high_now = reads[WE189];
+        let we_high_last = last[WE189];
+        let addr_changed = (0..4).any(|i| reads[ADDR189 + i] != last[ADDR189 + i]);
+
+        if cs_low_now && !cs_low_last {
+            zh_c.push(d[1].0);
+            zl_c.push(d[1].1); // /cs fell: csEnable
+        }
+        if we_high_now && !we_high_last {
+            zh_c.push(d[3].0);
+            zl_c.push(d[3].1); // /we rose: weEnable
+        }
+        if addr_changed {
+            zh_c.push(d[0].0);
+            zl_c.push(d[0].1);
+        }
+
+        if !cs_low_now && cs_low_last {
+            hz_c.push(d[2].0);
+            lz_c.push(d[2].1); // /cs rose: csDisable
+        }
+        if !we_high_now && we_high_last {
+            hz_c.push(d[4].0);
+            lz_c.push(d[4].1); // /we fell: weDisable
+        }
+    }
+
+    DelaySet { lh, hl, zh: max_or(&zh_c, d[0].0), zl: max_or(&zl_c, d[0].1), hz: max_or(&hz_c, d[0].0), lz: max_or(&lz_c, d[0].1) }
+}
+
+// ---- 28c16 / 28c256 ---------------------------------------------------------
+//
+// Logic pins: `a0..a(addrBits-1) /oe /ce /we` (read), `io0..io7` (driven AND
+// read — sampled for the data bus on a write, per the 74ls245 rule the
+// contract's shared-machinery point 1 extends to these).
+
+fn consume_eeprom_write(state: &mut EepromState, sdp_enabled: bool, addr: usize, data: u8) -> bool {
+    if !sdp_enabled || state.sdp_unlocked {
+        return true;
+    }
+    let (expect_addr, expect_data) = SDP_SEQUENCE[state.sdp_step as usize];
+    if addr == expect_addr && data == expect_data {
+        state.sdp_step += 1;
+        if state.sdp_step == 3 {
+            state.sdp_unlocked = true;
+            state.sdp_step = 0;
+        }
+        return false;
+    }
+    // "A mismatch sets sdpStep = 0 without re-testing the write against step
+    // 0" (memories section, SDP paragraph): one comparison against the step
+    // that was active on entry, then reset — never a second comparison
+    // against the freshly reset step.
+    state.sdp_step = 0;
+    false
+}
+
+fn evaluate_eeprom(ic: &IcRecord, state: &mut EepromState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64) -> FamilyOutput {
+    let addr_bits = if ic.kind == kinds::IC_28C16 { 11 } else { 15 };
+    let mask = (1usize << addr_bits) - 1;
+    let oe_pin = addr_bits;
+    let ce_pin = addr_bits + 1;
+    let we_pin = addr_bits + 2;
+    let io_base = addr_bits + 3;
+
+    let oe_low = !reads[oe_pin];
+    let ce_low = !reads[ce_pin];
+    let we_high = reads[we_pin];
+    let addr = bits(reads, 0, addr_bits) & mask;
+
+    let t_wc = ic.extra.first().copied().unwrap_or(10e-3);
+    let sdp_enabled = ic.extra.get(1).copied().unwrap_or(0.0) != 0.0;
+
+    // Step 1: completion, not gated by edges_live — a time deadline, not an
+    // edge (memories point 4.1; point 5: "the completion itself is step
+    // 4.1, so an evaluation then for any other reason completes the
+    // write").
+    if let Some((pending_addr, pending_byte, completes_at)) = state.pending {
+        if now >= completes_at {
+            Rc::make_mut(&mut state.image)[pending_addr] = pending_byte;
+            state.dirty = true;
+            state.pending = None;
+            state.poll_reads = 0;
+        }
+    }
+
+    // Step 2-3: latch and SDP, edges live only (memories point 4.2-4.3).
+    let mut newly_accepted_at: Option<f64> = None;
+    if edges_live {
+        let ce_high = !ce_low;
+        let oe_high = !oe_low;
+        let we_rising = we_high && !state.last_we_high;
+        let ce_rising = ce_high && !state.last_ce_high;
+        let we_latch = we_rising && ce_low && oe_high;
+        let ce_latch = ce_rising && !we_high && oe_high;
+
+        if (we_latch || ce_latch) && state.pending.is_none() {
+            let data = bits(reads, io_base, 8) as u8;
+            if consume_eeprom_write(state, sdp_enabled, addr, data) {
+                let completes_at = now + t_wc;
+                state.pending = Some((addr, data, completes_at));
+                state.poll_reads = 0;
+                newly_accepted_at = Some(completes_at);
+            }
+        }
+        // Updates whatever the latch decision was — including when an edge
+        // was ignored because a write was already pending (memories point
+        // 4.2: "An edge while a write is pending is ignored and never
+        // reaches SDP. Then lastWeHigh = weHigh, lastCeHigh = ceHigh.").
+        state.last_we_high = we_high;
+        state.last_ce_high = ce_high;
+    }
+
+    // Step 4: the toggle bit. Ungated by edges_live, like drive/publish
+    // below — the contract's list ("completion first, latch (edges live
+    // only), SDP, the toggle bit, drive, publish") marks only "latch" with
+    // the qualifier, mirroring the 189's "write (edges live only)" vs.
+    // always-live drive/publish.
+    let read_cycle_now = oe_low && ce_low;
+    if state.pending.is_some() && read_cycle_now && !state.prev_read_cycle {
+        state.poll_reads = state.poll_reads.wrapping_add(1);
+    }
+    state.prev_read_cycle = read_cycle_now;
+
+    // Steps 5-6: drive and publish.
+    let delays = delay_set_eeprom(ic, addr_bits, reads, last_reads);
+    let byte = state.image[addr];
+    let mut requests = Vec::with_capacity(8);
+    let mut slots = vec![f64::NAN; 8];
+
+    if oe_low && ce_low {
+        let polling_byte = state.pending.and_then(|(pending_addr, pending_byte, _)| (pending_addr == addr).then_some(pending_byte));
+        for bit in 0..8 {
+            let level = match (polling_byte, bit) {
+                (Some(pending_byte), 7) => (pending_byte >> 7) & 1 == 0, // complement
+                (Some(_), 6) => state.poll_reads & 1 == 1,
+                _ => (byte >> bit) & 1 == 1,
+            };
+            requests.push((if level { Mode::High } else { Mode::Low }, delays));
+        }
+        if state.pending.is_none() {
+            for (bit, slot) in slots.iter_mut().enumerate() {
+                *slot = ((byte >> bit) & 1) as f64;
+            }
+        }
+    } else {
+        requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 8));
+    }
+
+    let timers = newly_accepted_at.map(|at| vec![(at, WRITE_COMPLETE_TAG)]).unwrap_or_default();
+    FamilyOutput { requests, slots, timers }
+}
+
+/// `ic.delays` in the README's pair order: `addrIo(0) ceEnable(1)
+/// ceDisable(2) oeEnable(3) oeDisable(4)`.
+fn delay_set_eeprom(ic: &IcRecord, addr_bits: usize, reads: &[bool], last_reads: Option<&[bool]>) -> DelaySet {
+    let d = &ic.delays;
+    let (lh, hl) = d[0];
+    let oe_pin = addr_bits;
+    let ce_pin = addr_bits + 1;
+
+    let mut zh_c = Vec::new();
+    let mut zl_c = Vec::new();
+    let mut hz_c = Vec::new();
+    let mut lz_c = Vec::new();
+
+    if let Some(last) = last_reads {
+        let ce_low_now = !reads[ce_pin];
+        let ce_low_last = !last[ce_pin];
+        let oe_low_now = !reads[oe_pin];
+        let oe_low_last = !last[oe_pin];
+        let addr_changed = (0..addr_bits).any(|i| reads[i] != last[i]);
+
+        if ce_low_now && !ce_low_last {
+            zh_c.push(d[1].0);
+            zl_c.push(d[1].1); // /ce fell: ceEnable
+        }
+        if oe_low_now && !oe_low_last {
+            zh_c.push(d[3].0);
+            zl_c.push(d[3].1); // /oe fell: oeEnable
+        }
+        if addr_changed {
+            zh_c.push(d[0].0);
+            zl_c.push(d[0].1);
+        }
+
+        if !ce_low_now && ce_low_last {
+            hz_c.push(d[2].0);
+            lz_c.push(d[2].1); // /ce rose: ceDisable
+        }
+        if !oe_low_now && oe_low_last {
+            hz_c.push(d[4].0);
+            lz_c.push(d[4].1); // /oe rose: oeDisable
+        }
+    }
+
+    DelaySet { lh, hl, zh: max_or(&zh_c, d[0].0), zl: max_or(&zl_c, d[0].1), hz: max_or(&hz_c, d[0].0), lz: max_or(&lz_c, d[0].1) }
+}
+
+// ---- exports behind the C ABI ----------------------------------------------
+
 /// Replaces a 74ls189's 16 stored nibbles (`bo_engine_seed_memory`, owner
-/// decision 2). `devices::ics::IcEvaluator::seed_memory` already routes a
-/// non-189 kind to `Err("not a memory")` itself and never reaches here for
-/// one; this function still checks the word count defensively
-/// (core/README.md: "`len_f64 != 16` ... is `-8`, validated in full before
-/// anything changes") and otherwise declines — D2 wires the real 16-nibble
-/// store this validates the values against and writes into.
+/// decision 2). Validates every word — an integer in `[0, 15]` — before
+/// touching `state`, so a rejected seed changes nothing (README:
+/// "`len_f64 != 16` ... is `-8`, validated in full before anything
+/// changes"; the same rule extends to a bad value). `devices::ics::
+/// IcEvaluator::seed_memory` already routes a non-189 kind to `Err("not a
+/// memory")` itself and never reaches here for one; the `Eeprom` arm below
+/// is unreachable in practice but handled rather than assumed.
 pub fn seed(ic: &IcRecord, state: &mut MemState, words: &[f64]) -> Result<(), String> {
-    let _ = (ic, state);
+    let _ = ic;
     if words.len() != 16 {
         return Err(format!("seed_memory: expected 16 words, got {}", words.len()));
     }
-    Err("74ls189 seeding is not implemented yet".to_string())
+    let mut nibbles = [0u8; 16];
+    for (i, &w) in words.iter().enumerate() {
+        if !(w.is_finite() && w.fract() == 0.0 && (0.0..=15.0).contains(&w)) {
+            return Err(format!("seed_memory: word {i} must be an integer in [0, 15], got {w}"));
+        }
+        nibbles[i] = w as u8;
+    }
+    match state {
+        MemState::Ram189(st) => {
+            st.mem = nibbles;
+            Ok(())
+        }
+        MemState::Eeprom(_) => Err("seed_memory: not a 74ls189".to_string()),
+    }
 }
 
 /// Collects and clears this device's dirty EEPROM image
-/// (`bo_engine_take_eeprom_updates`). The stub never has anything dirty — D2
-/// wires the real per-byte image and `dirty` flag this drains.
+/// (`bo_engine_take_eeprom_updates`). `None` for a 74ls189 (never dirty) or
+/// a clean EEPROM.
 pub fn take_update(state: &mut MemState) -> Option<Vec<u32>> {
-    let _ = state;
-    None
+    match state {
+        MemState::Eeprom(st) if st.dirty => {
+            st.dirty = false;
+            Some(bytes_to_words(&st.image))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::digital::IcPin;
+
+    // ---- record/state builders ---------------------------------------------
+
+    fn ic_pin() -> IcPin {
+        IcPin { node: 0, open: false, open_high: false, open_hash: 0, dead_hash: 0, floating_input: false, open_collector: false }
+    }
+
+    fn ic_record(kind: u32, logic_len: usize, delays: Vec<(f64, f64)>, extra: Vec<f64>) -> IcRecord {
+        IcRecord {
+            kind,
+            vcc: ic_pin(),
+            gnd: ic_pin(),
+            logic: vec![ic_pin(); logic_len],
+            vcc_min: 4.5,
+            vcc_max: 5.5,
+            ttl: true,
+            cmos_ratio: false,
+            vil: Some(0.8),
+            vih: Some(2.0),
+            schmitt: None,
+            nominal: 5.0,
+            io_max: None,
+            delay: 20e-9,
+            slot_base: 0,
+            delays,
+            extra,
+        }
+    }
+
+    // addrO, csEnable, csDisable, weEnable, weDisable / addrIo, ceEnable,
+    // ceDisable, oeEnable, oeDisable — all distinct so a test can tell which
+    // pair a request actually used.
+    const D: [(f64, f64); 5] = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0), (9.0, 10.0)];
+
+    fn ic_189() -> IcRecord {
+        ic_record(kinds::IC_74LS189, 14, D.to_vec(), Vec::new())
+    }
+
+    fn ic_28c16() -> IcRecord {
+        ic_record(kinds::IC_28C16, 22, D.to_vec(), vec![10e-3, 0.0])
+    }
+
+    fn ic_28c256(sdp: f64) -> IcRecord {
+        ic_record(kinds::IC_28C256, 26, D.to_vec(), vec![10e-3, sdp])
+    }
+
+    fn eeprom_state(bytes: Vec<u8>) -> EepromState {
+        EepromState {
+            image: Rc::new(bytes),
+            last_we_high: true,
+            last_ce_high: true,
+            pending: None,
+            poll_reads: 0,
+            sdp_step: 0,
+            sdp_unlocked: false,
+            dirty: false,
+            prev_read_cycle: false,
+        }
+    }
+
+    fn reads189(addr: u8, data: u8, cs_low: bool, we_high: bool) -> Vec<bool> {
+        let mut r = vec![false; 14];
+        for i in 0..4 {
+            r[ADDR189 + i] = (addr >> i) & 1 == 1;
+            r[DATA189 + i] = (data >> i) & 1 == 1;
+        }
+        r[CS189] = !cs_low;
+        r[WE189] = we_high;
+        r
+    }
+
+    fn reads_eeprom(addr_bits: usize, addr: usize, data: u8, oe_low: bool, ce_low: bool, we_high: bool) -> Vec<bool> {
+        let mut r = vec![false; addr_bits + 3 + 8];
+        for i in 0..addr_bits {
+            r[i] = (addr >> i) & 1 == 1;
+        }
+        r[addr_bits] = !oe_low;
+        r[addr_bits + 1] = !ce_low;
+        r[addr_bits + 2] = we_high;
+        for i in 0..8 {
+            r[addr_bits + 3 + i] = (data >> i) & 1 == 1;
+        }
+        r
+    }
+
+    /// A full we-controlled latch cycle (idle, then /we's trailing edge)
+    /// against a *fresh* `last_reads` history each call, with /oe held HIGH
+    /// and /ce held LOW throughout — the simplest way to drive
+    /// `consume_eeprom_write`/SDP repeatedly in a test.
+    fn latch_write(ic: &IcRecord, state: &mut EepromState, addr: usize, data: u8) {
+        let addr_bits = if ic.kind == kinds::IC_28C16 { 11 } else { 15 };
+        let before = reads_eeprom(addr_bits, addr, data, false, true, false); // /oe HIGH, /ce LOW, /we LOW
+        let _ = evaluate_eeprom(ic, state, &before, None, true, 0.0);
+        let after = reads_eeprom(addr_bits, addr, data, false, true, true); // /we rises
+        let _ = evaluate_eeprom(ic, state, &after, Some(&before), true, 0.0);
+    }
+
+    // ---- 74ls189 -------------------------------------------------------------
+
+    #[test]
+    fn write_occurs_on_the_trailing_edge_of_we_while_selected() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0xF; 16], last_we: false };
+        let before = reads189(0b0101, 0b1010, true, false); // selected, write mode
+        let _ = evaluate_189(&ic, &mut state, &before, None, true);
+        assert_eq!(state.mem[0b0101], 0xF, "no write yet: /we has not risen");
+
+        let after = reads189(0b0101, 0b1010, true, true); // trailing edge
+        let _ = evaluate_189(&ic, &mut state, &after, Some(&before), true);
+        assert_eq!(state.mem[0b0101], 0b1010, "trailing edge of /we writes D into mem[addr]");
+    }
+
+    #[test]
+    fn write_ignored_while_cs_high_but_last_we_still_updates() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0xF; 16], last_we: false };
+        let before = reads189(2, 5, false, false); // deselected, write mode
+        let after = reads189(2, 5, false, true); // /we rises, still deselected
+        let _ = evaluate_189(&ic, &mut state, &before, None, true);
+        let _ = evaluate_189(&ic, &mut state, &after, Some(&before), true);
+        assert_eq!(state.mem[2], 0xF, "deselected: no write");
+        assert!(state.last_we, "lastWE updates whatever /cs reads");
+    }
+
+    #[test]
+    fn inverted_outputs_drive_high_for_a_zero_bit_and_low_for_a_one_bit() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0b0101; 16], last_we: true };
+        let reads = reads189(0, 0, true, true);
+        let out = evaluate_189(&ic, &mut state, &reads, None, true);
+        assert_eq!(out.requests[0].0, Mode::Low); // bit0=1
+        assert_eq!(out.requests[1].0, Mode::High); // bit1=0
+        assert_eq!(out.requests[2].0, Mode::Low); // bit2=1
+        assert_eq!(out.requests[3].0, Mode::High); // bit3=0
+    }
+
+    #[test]
+    fn outputs_go_hiz_outside_selected_read_mode() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let deselected = reads189(0, 0, false, true);
+        let out = evaluate_189(&ic, &mut state, &deselected, None, true);
+        assert!(out.requests.iter().all(|&(m, _)| m == Mode::Hiz), "deselected");
+
+        let write_mode = reads189(0, 0, true, false);
+        let out2 = evaluate_189(&ic, &mut state, &write_mode, None, true);
+        assert!(out2.requests.iter().all(|&(m, _)| m == Mode::Hiz), "write mode");
+    }
+
+    #[test]
+    fn slots_publish_in_write_mode_too_but_not_when_deselected() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0b0011; 16], last_we: true };
+        let write_mode = reads189(0, 0, true, false);
+        let out = evaluate_189(&ic, &mut state, &write_mode, None, true);
+        assert!(out.slots.iter().all(|v| !v.is_nan()), "slots publish while selected, write mode included");
+
+        let deselected = reads189(0, 0, false, true);
+        let out2 = evaluate_189(&ic, &mut state, &deselected, None, true);
+        assert!(out2.slots.iter().all(|v| v.is_nan()), "deselected: NaN");
+    }
+
+    #[test]
+    fn address_change_alone_picks_addro_for_a_level_to_level_transition() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let before = reads189(0, 0, true, true);
+        let _ = evaluate_189(&ic, &mut state, &before, None, true);
+        let after = reads189(1, 0, true, true);
+        let out = evaluate_189(&ic, &mut state, &after, Some(&before), true);
+        assert_eq!((out.requests[0].1.lh, out.requests[0].1.hl), D[0]);
+    }
+
+    #[test]
+    fn cs_falling_alone_selects_csenable_for_the_enable_pair() {
+        let ic = ic_189();
+        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let before = reads189(0, 0, false, true); // deselected
+        let _ = evaluate_189(&ic, &mut state, &before, None, true);
+        let after = reads189(0, 0, true, true); // /cs falls, address unchanged
+        let out = evaluate_189(&ic, &mut state, &after, Some(&before), true);
+        assert_eq!((out.requests[0].1.zh, out.requests[0].1.zl), D[1], "csEnable, not addrO's fallback");
+    }
+
+    // ---- 28c16 / 28c256 -------------------------------------------------------
+
+    #[test]
+    fn we_controlled_latch_accepts_a_write_on_the_trailing_edge_of_we() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        let before = reads_eeprom(11, 5, 0xAB, false, true, false); // /oe HIGH, /ce LOW, /we LOW
+        let _ = evaluate_eeprom(&ic, &mut state, &before, None, true, 0.0);
+        let after = reads_eeprom(11, 5, 0xAB, false, true, true); // /we rises
+        let out = evaluate_eeprom(&ic, &mut state, &after, Some(&before), true, 0.0);
+        assert_eq!(state.pending, Some((5, 0xAB, 10e-3)));
+        assert_eq!(out.timers, vec![(10e-3, WRITE_COMPLETE_TAG)]);
+    }
+
+    #[test]
+    fn ce_controlled_latch_accepts_a_write_on_the_trailing_edge_of_ce_when_we_is_already_low() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        let before = reads_eeprom(11, 9, 0x12, false, true, false); // /ce LOW, /we LOW, /oe HIGH
+        let _ = evaluate_eeprom(&ic, &mut state, &before, None, true, 0.0);
+        let after = reads_eeprom(11, 9, 0x12, false, false, false); // /ce rises, /we stays LOW
+        let out = evaluate_eeprom(&ic, &mut state, &after, Some(&before), true, 0.0);
+        assert_eq!(state.pending, Some((9, 0x12, 10e-3)));
+        assert_eq!(out.timers, vec![(10e-3, WRITE_COMPLETE_TAG)]);
+    }
+
+    #[test]
+    fn an_edge_while_a_write_is_pending_is_ignored_and_never_reaches_sdp() {
+        let ic = ic_28c256(1.0);
+        let mut state = eeprom_state(vec![0xFF; 32768]);
+        latch_write(&ic, &mut state, 100, 0x11); // step 0 mismatch: consumed, sdpStep resets, nothing pending
+        assert_eq!(state.pending, None);
+        state.sdp_unlocked = true; // isolate "pending write" behaviour from SDP gating
+        latch_write(&ic, &mut state, 100, 0x11);
+        let original_pending = state.pending;
+        assert_eq!(original_pending, Some((100, 0x11, 10e-3)));
+
+        state.sdp_unlocked = false;
+        state.sdp_step = 0;
+        let addr_bits = 15;
+        let before2 = reads_eeprom(addr_bits, 0x5555, 0xAA, false, true, false);
+        let _ = evaluate_eeprom(&ic, &mut state, &before2, None, true, 0.0);
+        let after2 = reads_eeprom(addr_bits, 0x5555, 0xAA, false, true, true);
+        let out = evaluate_eeprom(&ic, &mut state, &after2, Some(&before2), true, 0.0);
+
+        assert_eq!(state.pending, original_pending, "the original pending write must be untouched");
+        assert_eq!(state.sdp_step, 0, "the edge never reached SDP, so the step must not have advanced");
+        assert!(out.timers.is_empty(), "no new write accepted, so no new Timer");
+    }
+
+    #[test]
+    fn a_pending_write_completes_at_or_after_its_deadline_from_any_evaluation() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        state.pending = Some((7, 0x42, 10e-3));
+        state.poll_reads = 3;
+
+        let unrelated = reads_eeprom(11, 0, 0, true, true, true); // deselected, unrelated address
+        let _ = evaluate_eeprom(&ic, &mut state, &unrelated, None, true, 5e-3);
+        assert_eq!(state.pending, Some((7, 0x42, 10e-3)), "too early: still pending");
+        assert_eq!(state.image[7], 0xFF);
+
+        let _ = evaluate_eeprom(&ic, &mut state, &unrelated, Some(&unrelated), true, 10e-3);
+        assert_eq!(state.pending, None, "an unrelated evaluation at/after the deadline still completes it");
+        assert_eq!(state.image[7], 0x42);
+        assert!(state.dirty);
+        assert_eq!(state.poll_reads, 0);
+    }
+
+    #[test]
+    fn dirty_is_set_on_completion_even_when_the_byte_is_unchanged() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0x42; 2048]);
+        state.pending = Some((3, 0x42, 1e-3));
+        let reads = reads_eeprom(11, 0, 0, true, true, true);
+        let _ = evaluate_eeprom(&ic, &mut state, &reads, None, true, 1e-3);
+        assert!(state.dirty, "completion sets dirty even when the stored byte does not change");
+    }
+
+    #[test]
+    fn data_polling_shows_io7_complement_and_io6_toggling_once_per_read_cycle_not_per_evaluation() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        state.pending = Some((4, 0b1000_0000, 10e-3)); // pendingByte bit7 = 1
+
+        let read1 = reads_eeprom(11, 4, 0, true, true, false); // /oe, /ce both LOW at the pending addr
+        let out1 = evaluate_eeprom(&ic, &mut state, &read1, None, true, 0.0);
+        assert_eq!(out1.requests[7].0, Mode::Low, "io7 = complement of pendingByte bit7 (1 -> LOW)");
+        assert_eq!(state.poll_reads, 1, "one read cycle counted");
+        // Step 4 (the toggle bit) runs before step 5 (drive) within the same
+        // evaluation, so the read cycle that FIRST sets pollReads to 1 also
+        // sees that same odd value on its own io6 request.
+        assert_eq!(out1.requests[6].0, Mode::High, "pollReads became 1 (odd) this evaluation -> io6 HIGH");
+
+        let out2 = evaluate_eeprom(&ic, &mut state, &read1, Some(&read1), true, 0.0);
+        assert_eq!(state.poll_reads, 1, "still inside the same read cycle: no second increment");
+        assert_eq!(out2.requests[6].0, Mode::High);
+
+        let deselect = reads_eeprom(11, 4, 0, false, false, false); // /oe, /ce HIGH: leave the read cycle
+        let _ = evaluate_eeprom(&ic, &mut state, &deselect, Some(&read1), true, 0.0);
+        let out3 = evaluate_eeprom(&ic, &mut state, &read1, Some(&deselect), true, 0.0);
+        assert_eq!(state.poll_reads, 2, "a fresh read cycle toggles the bit");
+        assert_eq!(out3.requests[6].0, Mode::Low, "pollReads is now 2 (even) -> io6 LOW");
+    }
+
+    #[test]
+    fn sdp_unlock_sequence_accepts_a_write_after_three_matching_writes() {
+        let ic = ic_28c256(1.0);
+        let mut state = eeprom_state(vec![0xFF; 32768]);
+        latch_write(&ic, &mut state, 0x5555, 0xAA);
+        assert_eq!(state.pending, None, "unlock-sequence writes are consumed, not stored");
+        assert_eq!(state.sdp_step, 1);
+        latch_write(&ic, &mut state, 0x2AAA, 0x55);
+        assert_eq!(state.sdp_step, 2);
+        latch_write(&ic, &mut state, 0x5555, 0xA0);
+        assert!(state.sdp_unlocked);
+        assert_eq!(state.sdp_step, 0);
+
+        latch_write(&ic, &mut state, 0x10, 0x99);
+        assert_eq!(state.pending, Some((0x10, 0x99, 10e-3)), "unlocked: an ordinary write is now accepted");
+    }
+
+    #[test]
+    fn a_mismatch_resets_the_step_without_retesting_against_the_reset_step() {
+        let ic = ic_28c256(1.0);
+        let mut state = eeprom_state(vec![0xFF; 32768]);
+        latch_write(&ic, &mut state, 0x5555, 0xAA); // step 0 -> 1 (now expects 0x2AAA/0x55)
+        assert_eq!(state.sdp_step, 1);
+        // This write matches step 0's pair exactly, but the active step is 1.
+        latch_write(&ic, &mut state, 0x5555, 0xAA);
+        assert_eq!(state.sdp_step, 0, "mismatched against step 1's expected pair, so it resets");
+        assert!(!state.sdp_unlocked, "one call does not retry the same write against the freshly reset step 0");
+    }
+
+    #[test]
+    fn sdp_is_off_on_a_28c16_so_every_write_is_accepted_directly() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        latch_write(&ic, &mut state, 5, 0xAA); // would be an SDP unlock byte on a 28c256
+        assert_eq!(state.pending, Some((5, 0xAA, 10e-3)), "no SDP gating on a 28c16");
+    }
+
+    #[test]
+    fn a_28c256_address_uses_a_15_bit_mask_and_reaches_the_top_of_the_image() {
+        let ic = ic_28c256(0.0);
+        let mut state = eeprom_state(vec![0xFF; 32768]);
+        latch_write(&ic, &mut state, 32767, 0x7A); // the highest 15-bit address
+        assert_eq!(state.pending, Some((32767, 0x7A, 10e-3)));
+        let reads = reads_eeprom(15, 0, 0, true, true, true);
+        let _ = evaluate_eeprom(&ic, &mut state, &reads, None, true, 10e-3);
+        assert_eq!(state.image[32767], 0x7A);
+        assert_eq!(state.image.len(), 32768);
+    }
+
+    #[test]
+    fn edges_live_false_changes_no_latch_state_even_on_a_would_be_latching_edge() {
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        let before = reads_eeprom(11, 5, 0xAB, false, true, false); // /oe HIGH, /ce LOW: a valid we-latch setup
+        let _ = evaluate_eeprom(&ic, &mut state, &before, None, true, 0.0);
+        let snapshot = state.clone();
+        let after = reads_eeprom(11, 5, 0xAB, false, true, true); // /we would rise -> latch, if live
+        let _ = evaluate_eeprom(&ic, &mut state, &after, Some(&before), false, 0.0);
+        assert_eq!(state, snapshot, "edges_live = false: no latch, no history update, no state change");
+    }
+
+    #[test]
+    fn cloning_a_28c256_state_does_not_copy_the_image() {
+        let ic = ic_28c256(1.0);
+        let words = vec![0u32; 32768 / 4];
+        let state = MemState::power_on(&ic, &words);
+        let clone = state.clone();
+        match (&state, &clone) {
+            (MemState::Eeprom(a), MemState::Eeprom(b)) => {
+                assert!(Rc::ptr_eq(&a.image, &b.image), "clone must share the image, not copy it");
+                assert_eq!(Rc::strong_count(&a.image), 2);
+            }
+            _ => panic!("expected Eeprom state"),
+        }
+    }
+
+    // ---- seed / take_update ----------------------------------------------------
+
+    #[test]
+    fn seed_validates_every_word_before_changing_anything() {
+        let ic = ic_189();
+        let mut state = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true });
+        let mut bad = vec![0.0; 16];
+        bad[15] = 16.0; // out of range
+        let err = seed(&ic, &mut state, &bad).unwrap_err();
+        assert!(err.contains("15"), "names the offending word's index: {err}");
+        if let MemState::Ram189(st) = &state {
+            assert_eq!(st.mem, [0xF; 16], "a rejected seed changes nothing");
+        }
+
+        let good: Vec<f64> = (0..16).map(|i| (i % 16) as f64).collect();
+        seed(&ic, &mut state, &good).unwrap();
+        if let MemState::Ram189(st) = &state {
+            for i in 0..16 {
+                assert_eq!(st.mem[i], (i % 16) as u8);
+            }
+        }
+
+        assert!(seed(&ic, &mut state, &vec![0.0; 10]).is_err(), "wrong length");
+    }
+
+    #[test]
+    fn take_update_returns_the_image_when_dirty_and_clears_the_flag() {
+        let bytes: Vec<u8> = [0x11, 0x22, 0x33, 0x44].into_iter().chain(std::iter::repeat(0xFFu8)).take(2048).collect();
+        let mut st = eeprom_state(bytes);
+        st.dirty = true;
+        let mut state = MemState::Eeprom(st);
+
+        let words = take_update(&mut state).expect("dirty: must return the image");
+        assert_eq!(words[0], 0x4433_2211, "little-endian word packing");
+        if let MemState::Eeprom(st) = &state {
+            assert!(!st.dirty, "take_update clears dirty");
+        }
+        assert!(take_update(&mut state).is_none(), "not dirty: nothing to report");
+
+        let mut ram = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true });
+        assert!(take_update(&mut ram).is_none(), "a 74ls189 never reports a dirty EEPROM image");
+    }
 }

@@ -63,9 +63,10 @@ struct IcEntry {
     /// This IC's logic-pin reads at its own previous POWERED evaluation
     /// (W1d contract, delays point 3 / sequential point 4 / memory point 7):
     /// `None` before the first one. Kept for every family, not only
-    /// sequential/memory: a future combinational delay tail (the 74ls157's
-    /// `strobe`, the 74ls245's `oeEnable`/`oeDisable`) needs the identical
-    /// cause-detection rule, and this is where it would read it from.
+    /// sequential/memory: the combinational delay tail (the 74ls157's
+    /// `strobe`, the 74ls245's `oeEnable`/`oeDisable`) uses the identical
+    /// cause-detection rule, read from here by `evaluate`'s combinational
+    /// arm and passed into `digital::delay::driver_requests`.
     last_reads: Option<Vec<bool>>,
     /// Sequential/memory only: this device's digital-slot readout from its
     /// LAST evaluation (`digital::FamilyOutput::slots`), published by
@@ -124,10 +125,10 @@ impl IcEvaluator {
 /// driver (in the same order `out.requests` carries — the interface's own
 /// contract) and one `Timer` per pending deadline the evaluation scheduled
 /// (a memory's pending-write completion). The W1d counterpart of
-/// `digital::delay::driver_requests` for the combinational family — unlike
-/// that function, there is no `None`/`Reset` arm here at all: W1d point 4,
-/// "no IC requests a reset any more", so every entry in `out.requests` is
-/// already a concrete `Mode` (`Hiz` included).
+/// `digital::delay::driver_requests` for the combinational family — like
+/// that function since W1d point 4 ("no IC requests a reset any more"),
+/// there is no `None`/`Reset` arm here at all: every entry in `out.requests`
+/// is already a concrete `Mode` (`Hiz` included).
 fn family_requests(device_index: usize, output_drivers: &[DriverId], out: &digital::FamilyOutput) -> Vec<DriverRequest> {
     debug_assert_eq!(output_drivers.len(), out.requests.len(), "one driver per output-capable pin, in the same order");
     let mut reqs: Vec<DriverRequest> = output_drivers
@@ -213,7 +214,7 @@ impl DeviceEvaluator for IcEvaluator {
         match &mut entry.family {
             Family::Combinational { .. } => {
                 let result = digital::combinational::evaluate(ic.kind, &levels);
-                digital::delay::driver_requests(ic, &entry.output_drivers, &result)
+                digital::delay::driver_requests(ic, &entry.output_drivers, &result, &levels, last_reads.as_deref())
             }
             Family::Sequential(state) => {
                 let out = digital::sequential::evaluate(ic, state, &levels, last_reads.as_deref(), acting_on_edges, now);
@@ -582,56 +583,64 @@ mod tests {
         assert!(kernel.take_digital_writes().is_empty(), "a livelocked instant must publish no digital-slot writes at all");
     }
 
-    // ---- W1d: the dispatcher end to end, one of each new kind, stubs ------
+    // ---- W1d: the dispatcher end to end, one of each new kind ---------------
+
+    /// `device` with its digital slots starting at `base` (blob[0]).
+    fn at_slot(mut device: Device, base: usize) -> Device {
+        device.blob[0] = base as f64;
+        device
+    }
 
     #[test]
-    fn a_program_holding_one_of_each_w1d_kind_loads_and_publishes_all_nan_slots() {
-        // core/README.md's own kernel-semantics tables give each kind's `L`
-        // (logic-pin count) and delay-pair count; every logic pin here ties
-        // to gnd (a plain, always-valid read), and every device shares the
-        // same 5V-fixed supply so every one of them is POWERED — proving the
-        // dispatcher actually reaches `digital::sequential::evaluate`/
-        // `digital::memory::evaluate` (the stubs), not merely that an
-        // unpowered branch trivially returns NaN.
-        let p = program(2, 100, vec![
+    fn a_program_holding_one_of_each_w1d_kind_publishes_each_familys_power_on_readout() {
+        // Every logic pin ties to gnd and every device is powered from one
+        // 5 V source, so every family evaluator is reached (not the
+        // unpowered NaN branch). With every pin LOW: the 161's /clr clears
+        // (count 0), the 173 holds its power-on 0, the 74hc74's /PRE and /CLR
+        // are both asserted (Q = Q-bar = 1 on both flip-flops), the 189 is
+        // selected in write mode showing mem[0] = 0xF inverted (all 0), and
+        // the 28c16 is in read mode showing byte 0 of an all-zero image.
+        let p = program(2, 25, vec![
             source(0, 1, 0, 5.0),
-            w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
-            w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
-            w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
-            w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
-            w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+            at_slot(w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0), 0),
+            at_slot(w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0), 5),
+            at_slot(w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0), 9),
+            at_slot(w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0), 13),
+            at_slot(w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4), 17),
         ]);
         let (mut kernel, all_partitions, all_readers) = build(&p);
         assert_eq!(all_readers.len(), 5, "every W1d kind must register as a reader, exactly like a W1c IC");
         kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
 
-        let writes = kernel.take_digital_writes();
-        assert!(!writes.is_empty(), "the stubs must still publish a slot value (NaN) for every device, not skip publishing entirely");
-        for &(_, _, value) in &writes {
-            assert!(value.is_nan(), "every W1d slot must read NaN while the family evaluators are stubs, got {value}");
+        let mut slots = vec![f64::NAN; 25];
+        for (_, slot, value) in kernel.take_digital_writes() {
+            slots[slot] = value;
         }
+        let expected = [
+            0.0, 0.0, 0.0, 0.0, 0.0, // 161: count, qa..qd
+            0.0, 0.0, 0.0, 0.0, // 173: q1..q4
+            1.0, 1.0, 1.0, 1.0, // 74hc74: q1 q1_n q2 q2_n
+            0.0, 0.0, 0.0, 0.0, // 189: /o1../o4
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 28c16: io0..io7
+        ];
+        assert_eq!(slots, expected);
         assert!(kernel.evaluator().ic_evaluations() >= 5.0, "settle must have evaluated every one of the 5 new readers at least once");
     }
 
     #[test]
-    fn seed_memory_declines_a_non_189_kind_and_routes_a_189_to_the_memory_stub() {
+    fn seed_memory_declines_a_non_189_kind_and_seeds_a_real_189() {
         let p = program(2, 20, vec![
             source(0, 1, 0, 5.0),
             w1d_ic(kinds::IC_74HC74, 1, 1, 0, 12, w1d_params(2, &[]), 0),
-            w1d_ic(kinds::IC_74LS189, 2, 1, 0, 14, w1d_params(5, &[]), 0),
+            at_slot(w1d_ic(kinds::IC_74LS189, 2, 1, 0, 14, w1d_params(5, &[]), 0), 4),
         ]);
         let (mut kernel, all_partitions, all_readers) = build(&p);
         kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
 
         let wrong_kind = kernel.evaluator_mut().seed_memory(1, &[0.0; 16]).unwrap_err();
         assert!(wrong_kind.contains("not a memory"), "a 74hc74 must never reach digital::memory::seed: {wrong_kind}");
-
-        // Routed to the real 74ls189 -- the stub still declines, but with a
-        // DIFFERENT message (`digital::memory::seed`'s own "not implemented
-        // yet"), proving the dispatcher actually reached it rather than
-        // stopping at the same "not a memory" guard.
-        let routed = kernel.evaluator_mut().seed_memory(2, &[0.0; 16]).unwrap_err();
-        assert_ne!(routed, wrong_kind, "a real 74ls189 must be routed past the kind guard, even though the stub still declines");
+        assert!(kernel.evaluator_mut().seed_memory(2, &[16.0; 16]).is_err(), "a nibble outside [0, 15] must be refused");
+        kernel.evaluator_mut().seed_memory(2, &[0.0; 16]).expect("a real 74ls189 must accept a valid seed");
     }
 
     #[test]
@@ -644,6 +653,6 @@ mod tests {
         kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
 
         let updates = kernel.evaluator_mut().take_eeprom_updates();
-        assert!(updates.is_empty(), "the stub never has a dirty EEPROM to report");
+        assert!(updates.is_empty(), "no write has completed, so no EEPROM is dirty");
     }
 }

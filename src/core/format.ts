@@ -1,7 +1,7 @@
 /**
- * "Program format, version 2" — the wire format the TS compiler (compile/)
+ * "Program format, version 3" — the wire format the TS compiler (compile/)
  * emits and the Rust W1a event kernel reads (core/README.md, "Program
- * format, version 2"). This file is the TS half of that contract: the
+ * format, version 3"). This file is the TS half of that contract: the
  * format constants, a small writer used by compile/index.ts, and a decoder
  * that performs every validation the contract requires of the Rust reader.
  *
@@ -15,7 +15,7 @@
  * are carried as exact doubles; every one of them this format ever produces
  * is far below 2^53, so there is no precision loss doing that.
  *
- * Layout (core/README.md, "Program format, version 2"):
+ * Layout (core/README.md, "Program format, version 3"):
  *   header   MAGIC, VERSION, nodeCount N, deviceCount D,
  *            optionCount O, (key, value) x O,
  *            digitalSlotCount S, channelSlotCount C
@@ -42,9 +42,11 @@ export const CORE_FORMAT_MAGIC = 0x424f4331;
  * ship in one npm package, so there is no cross-version compatibility to
  * preserve: a layout change bumps this constant on both sides in the same
  * commit, and decodeProgram rejects anything else outright rather than
- * trying to interpret an old or new layout.
+ * trying to interpret an old or new layout. W1d bumped it from 2 to 3
+ * because the 74ls157 and 74ls245 records gained a delay tail
+ * (core/README.md, "Program format, version 3").
  */
-export const CORE_FORMAT_VERSION = 2;
+export const CORE_FORMAT_VERSION = 3;
 
 /**
  * v1 export names, kept as aliases now that the kind-code table moved to
@@ -61,7 +63,7 @@ export const CORE_KIND_NAME_BY_CODE: ReadonlyMap<number, CoreKindCodeName> = new
 );
 
 /**
- * Option keys, core/README.md "Program format, version 2" > the Options
+ * Option keys, core/README.md "Program format, version 3" > the Options
  * table. Every key is optional in the wire format itself (each appears at
  * most once; an absent key means the reader applies the README's Default
  * column) — ProgramWriter/decodeProgram only validate the keys that ARE

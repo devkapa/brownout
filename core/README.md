@@ -671,7 +671,11 @@ References are to `core/spec/w1-classic-semantics.md`.
      completed EEPROM write, a seeded word, a polling toggle).
    - With several causes the larger figure for that direction wins: a
      datasheet's output-valid time is the latest of its constraints. With no
-     identified cause, the kind's first pair applies.
+     identified cause (a first powered evaluation, or a read that changed
+     nothing the table names), the default path applies: the first entry in
+     the kind's `lh`/`hl` cell below (the 157's param 12, the 161's `clkQ`,
+     the 189's `addrO`). A `DelaySet` entry the kind can never select (a pin
+     that never goes HIZ) carries that same default, never 0.
    - `zh`/`zl`/`hz`/`lz` come from the output class's enable and disable
      pairs; where a kind has several enables, from the one that changed.
    - `lastReads` is written at every powered evaluation, frozen-settle passes

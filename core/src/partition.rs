@@ -630,6 +630,12 @@ mod tests {
         params[ic_param::NOMINAL] = 5.0;
         params[ic_param::IO_MAX] = 0.024;
         params[ic_param::DELAY] = 20e-9;
+        // 245's delay tail (W1d retrofit): oeEnable, oeDisable -- this test
+        // never exercises timing, only partition classification, but
+        // `IcRecord::from_device` indexes `params[13..17]` unconditionally
+        // now that `kinds::delay_pairs(IC_74LS245)` is 2, so the vector must
+        // carry them to avoid an out-of-bounds panic.
+        params.extend([25e-9, 27e-9, 15e-9, 15e-9]);
         let ls245 = Device { kind: kinds::IC_74LS245, component_index: 3, pins, params, blob: vec![0.0; 19] };
         let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 10_000.0), capacitor(2, 2, 0), ls245]);
         let pb = build(&p).unwrap();

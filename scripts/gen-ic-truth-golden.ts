@@ -64,16 +64,21 @@ interface Row {
 
 /**
  * classic's own engine-level `/oe` gate (`sim-engine.ts`'s
- * `_combinationalOutputs`, ~5206-5227): a 157 or 245 held at `/oe >= 0.5`
- * publishes NO outputs at all, checked BEFORE `evalCombinationalIC` ever
- * runs — which is why `evalCombinationalIC`'s own `oe ? false : ...`
- * branches (`digital.ts:499`, `520-522`) are dead code in classic (README
- * point 7, Q-W6). Reproduced here explicitly, the same way
- * `combinational.rs`'s `mux157`/`transceiver245` do, rather than trusting
- * `evalCombinationalIC` alone to produce the empty result.
+ * `_combinationalOutputs`, ~5206-5227): a 245 held at `/oe >= 0.5` publishes
+ * NO outputs at all, checked BEFORE `evalCombinationalIC` ever runs — which
+ * is why `evalCombinationalIC`'s own `oe ? {a:false,b:false} : ...` branch
+ * (`digital.ts:520-522`) is dead code in classic (README point 7, Q-W6).
+ * Reproduced here explicitly, the same way `combinational.rs`'s
+ * `transceiver245` does, rather than trusting `evalCombinationalIC` alone to
+ * produce the empty result.
+ *
+ * The 157's `/oe` is a strobe `/G`, not a tri-state enable (owner decision 3,
+ * Q-O64): it is never gated here, so it always reaches `evalCombinationalIC`,
+ * whose own `oe ? false : ...` branch (`digital.ts:499`) is reachable now and
+ * drives every `Y` LOW.
  */
 function combinationalOutputs(kind: string, pinV: Record<string, number>): Record<string, boolean> {
-  if ((kind === "74ls157" || kind === "74ls245") && (pinV["/oe"] ?? 0) >= 0.5) {
+  if (kind === "74ls245" && (pinV["/oe"] ?? 0) >= 0.5) {
     return {};
   }
   return evalCombinationalIC(kind, pinV, 0.5);

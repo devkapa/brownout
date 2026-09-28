@@ -49,9 +49,9 @@ function mutated(base: Float64Array, index: number, value: number): Float64Array
 
 describe("CORE_FORMAT_MAGIC / CORE_FORMAT_VERSION", () => {
   it("match the contract in core/README.md", () => {
-    // core/README.md: `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `2`.
+    // core/README.md: `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `3`.
     expect(CORE_FORMAT_MAGIC).toBe(0x424f4331);
-    expect(CORE_FORMAT_VERSION).toBe(2);
+    expect(CORE_FORMAT_VERSION).toBe(3);
   });
 });
 
@@ -112,7 +112,7 @@ describe("ProgramWriter -> decodeProgram round trip", () => {
     const decoded = decodeProgram(writer.finish(0, 0));
 
     expect(decoded).toEqual({
-      version: 2,
+      version: 3,
       nodeCount: 4,
       options: [
         [CORE_OPTION_KEYS.INTEGRATION, 1],
@@ -159,7 +159,7 @@ describe("ProgramWriter -> decodeProgram round trip", () => {
     const writer = new ProgramWriter(1);
     const decoded = decodeProgram(writer.finish(3, 2));
     expect(decoded).toEqual({
-      version: 2,
+      version: 3,
       nodeCount: 1,
       options: [],
       digitalSlotCount: 3,
@@ -174,7 +174,7 @@ describe("ProgramWriter's exact byte layout — golden array", () => {
   // (gnd/datum), node 1 = the source's positive terminal / R1's top, node 2
   // = the midpoint between R1 and R2. Components in order [source, R1, R2].
   // One option (AMBIENT_C=22) and non-zero readout slot counts, to pin the
-  // full v2 header shape, not just the v1-era device records.
+  // full v3 header shape, not just the v1-era device records.
   //
   // This array is hand-written, NOT computed from CORE_FORMAT_MAGIC or
   // CORE_KIND_CODE, so a change to those constants that silently breaks the
@@ -204,7 +204,7 @@ describe("ProgramWriter's exact byte layout — golden array", () => {
 
     // prettier-ignore
     const expected = Float64Array.from([
-      0x424f4331, 2, 3, 3,                        // header: MAGIC, VERSION, nodeCount=3, deviceCount=3
+      0x424f4331, 3, 3, 3,                        // header: MAGIC, VERSION, nodeCount=3, deviceCount=3
       1, 5, 22,                                   // optionCount=1, (AMBIENT_C, 22)
       0, 5,                                       // digitalSlotCount=0, channelSlotCount=5
       2, 0, 2,  1, 0, 1, 2,  0, 0, 3, 4,  1, 10, 0,       // device 0: voltage_source, comp 0, pins (1 closed / 0 closed), 1 param (10 V), 0 blob
@@ -406,7 +406,7 @@ describe("decodeProgram validation — each check the contract requires", () => 
     // MAGIC, VERSION, nodeCount=1, deviceCount=0, optionCount=2,
     // (AMBIENT_C,20), (AMBIENT_C,25), digitalSlotCount=0, channelSlotCount=0, trailer
     const program = Float64Array.from([
-      CORE_FORMAT_MAGIC, 2, 1, 0, 2, CORE_OPTION_KEYS.AMBIENT_C, 20, CORE_OPTION_KEYS.AMBIENT_C, 25, 0, 0,
+      CORE_FORMAT_MAGIC, CORE_FORMAT_VERSION, 1, 0, 2, CORE_OPTION_KEYS.AMBIENT_C, 20, CORE_OPTION_KEYS.AMBIENT_C, 25, 0, 0,
       CORE_FORMAT_MAGIC,
     ]);
     expect(() => decodeProgram(program)).toThrow(/repeated/);

@@ -12,17 +12,21 @@
  * which is why every assertion reads through `nets`/`getNetV` and `step()`
  * only, the same convention spst-switch.test.ts uses.
  *
- * 74LS157's /OE is tied permanently LOW (enabled) in every case here: the
- * strobe-to-LOW fix (decision 3, Q-O64) is deliberately not exercised, since
- * classic's own /oe-HIGH branch is unreachable through evalCombinationalIC
- * (sim-engine.ts's `_combinationalOutputs` special-cases it before the call)
- * and needs checking against classic engine runs, not a hand-authored
- * expectation -- also the only /OE state the real corpus ever wires (decision
- * 3: "the board and the one corpus 74ls157 tie /OE LOW"). The 74LS245 case is
- * similarly limited to the single well-established a->b, /oe-LOW path; /OE-
- * disabled release and bus contention between two 245s are covered instead by
- * this worker's equivalence-harness fixtures (test/fixtures/core/1x-*), which
- * compare classic and the core directly.
+ * 74LS157's /OE is a strobe /G, not a tri-state enable (decision 3, Q-O64):
+ * the real SN74LS157 forces every Y LOW while /G is HIGH, and the tri-state
+ * behaviour classic used to model there belongs to the 74LS257. Classic now
+ * matches the real part in both the `_combinationalOutputs` gate
+ * (sim-engine.ts, whose /oe short-circuit narrows to the 74LS245 alone) and
+ * the evaluator branch that gate used to make unreachable (digital.ts). The
+ * mux truth-table cases below still tie /OE permanently LOW, the only state
+ * the real corpus wires (decision 3: "the board and the one corpus 74ls157
+ * tie /OE LOW"); the strobe case below ties it HIGH instead, against a data
+ * pattern that would otherwise read HIGH, to show the strobe overrides
+ * SELECT and the data. The 74LS245 case is still limited to the single
+ * well-established a->b, /oe-LOW path. Bus contention between two 245s is
+ * covered by harness fixture 18 (test/fixtures/core/18-*), which compares
+ * classic and the core directly; /OE-disabled release gets its own harness
+ * fixture in W1d step 3.
  */
 import { describe, expect, it } from "vitest";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
@@ -171,8 +175,8 @@ describe("gate 1 supplemental — 74LS86 quad XOR", () => {
   });
 });
 
-// ---- 74LS157 (quad 2:1 mux, /OE tied permanently LOW — see header) --------
-function ls157Circuit(sel: 0 | 1, aVolts: number, bVolts: number): SimCircuit {
+// ---- 74LS157 (quad 2:1 mux, /OE — a strobe /G, not tri-state — see header) -
+function ls157Circuit(sel: 0 | 1, aVolts: number, bVolts: number, oe: 0 | 1 = 0): SimCircuit {
   return {
     components: [
       {
@@ -190,7 +194,8 @@ function ls157Circuit(sel: 0 | 1, aVolts: number, bVolts: number): SimCircuit {
     wires: [
       wire("vcc", "pos", "u1", "vcc"),
       wire("vcc", "neg", "u1", "gnd"),
-      wire("vcc", "neg", "u1", "/oe"), // /OE tied LOW: always enabled (see header note)
+      // strobe /G: LOW enables the mux, HIGH forces every Y LOW (see header note)
+      wire("vcc", oe === 1 ? "pos" : "neg", "u1", "/oe"),
       wire("vsel", "pos", "u1", "sel"),
       wire("vsel", "neg", "vcc", "neg"),
       wire("va", "pos", "u1", "1a"),
@@ -211,6 +216,11 @@ describe("gate 1 supplemental — 74LS157 quad 2:1 mux", () => {
 
   it("SELECT HIGH routes the B input (A=HIGH, B=LOW) to the output", () => {
     const engine = runEngine(ls157Circuit(1, 5, 0));
+    expect(netVoltage(engine, "u1", "1y")).toBeLessThan(1.0);
+  });
+
+  it("STROBE (/OE) HIGH forces the output LOW against its pull-up, whatever SELECT and the data", () => {
+    const engine = runEngine(ls157Circuit(1, 5, 5, 1));
     expect(netVoltage(engine, "u1", "1y")).toBeLessThan(1.0);
   });
 });

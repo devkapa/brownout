@@ -5321,8 +5321,11 @@ export class SimEngine {
       this.digitalEvaluationReuseCount += 1;
       return cached.outputs;
     }
+    // Only the 74LS245 tri-states here. The 74LS157's /oe is a strobe /G:
+    // real-part HIGH forces every Y LOW (Q-O64), which the evaluator itself
+    // does (digital.ts), not a suppressed result.
     const outputs =
-      (comp.kind === "74ls157" || comp.kind === "74ls245") && pinValues["/oe"] >= 0.5
+      comp.kind === "74ls245" && pinValues["/oe"] >= 0.5
         ? {}
         : evalCombinationalIC(comp.kind, pinValues, 0.5);
     this.digitalEvaluationCount += 1;
@@ -5449,10 +5452,11 @@ export class SimEngine {
 
     // A `delay:` slot is the canonical record of a DRIVEN output stage (the
     // small-signal AC default and the pin readouts key off it), so a pin
-    // that left `immediate` — a 74LS245/157 whose /OE released the bus — must
+    // that left `immediate` — a 74LS245 whose /OE released the bus — must
     // drop its value/pending/due slots rather than advertise a stage that the
     // transient stamp no longer writes. Re-enabling later re-seeds from the
-    // immediate level, exactly like the first driven step.
+    // immediate level, exactly like the first driven step. The 74LS157 never
+    // leaves `immediate` now (Q-O64): its strobe forces Y LOW instead.
     for (const key of Object.keys(st)) {
       let pinId: string | null = null;
       if (key.startsWith(DIGITAL_DELAY_PREFIX)) {

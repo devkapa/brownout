@@ -1,6 +1,6 @@
 /**
  * Compiles the 11 W1c combinational ICs (core/README.md's "Kind codes and
- * records": codes 50-59 and 61) into v2 program records. Every physical
+ * records": codes 50-59 and 61) into v3 program records. Every physical
  * value — power window, thresholds, floating-pull family, propagation delay —
  * comes from classic's OWN helpers (`specsForComponent`,
  * `supplyPinsForComponent`, `propagationDelayForComponent`,
@@ -22,14 +22,20 @@
  * library missing the kind, and defaulting would read a real node as node 0
  * silently instead of falling back to classic.
  *
- * PARAMS are the 13-value table CORE_IC_PARAM indexes (kinds.ts). Every
- * value is derived straight from `specsForComponent(component)` — the same
- * `ElectricalSpecs` classic's own `_icPowerInfo`/`thresholdsFor` read — with
- * no vSupply-dependent computation done here: the fixed/formula split for
- * thresholds (params 3-6) and the schmitt/nominal/ioMax params are exactly
- * classic's OWN "what does the catalog fix, and what does the runtime supply
- * decide" split (spec/README's kernel semantics point 1), just carried onto
- * the wire instead of evaluated at compile time.
+ * PARAMS are the 13-value table CORE_IC_PARAM indexes (kinds.ts), then, for
+ * the two kinds `CORE_IC_DELAY_PAIRS` names (74ls157, 74ls245), the kind's
+ * datasheet delay tail (`resolveDelayTail`, compile/delays.ts) resolved
+ * against the SAME `specsForComponent(component)` call and falling back to
+ * `params[delay]` (param 12, classic's package delay) per pair per direction
+ * when the catalog carries no `switching_ns` figure for it (README's
+ * "Resolution"). Every value is derived straight from
+ * `specsForComponent(component)` — the same `ElectricalSpecs` classic's own
+ * `_icPowerInfo`/`thresholdsFor` read — with no vSupply-dependent computation
+ * done here: the fixed/formula split for thresholds (params 3-6) and the
+ * schmitt/nominal/ioMax params are exactly classic's OWN "what does the
+ * catalog fix, and what does the runtime supply decide" split (spec/README's
+ * kernel semantics point 1), just carried onto the wire instead of evaluated
+ * at compile time.
  *
  * BLOB is `[slotBase, pinFlags x L]`. `slotBase` is assigned by the caller
  * (compile/index.ts owns slot allocation, in component order — see its own
@@ -66,6 +72,7 @@ import {
   CORE_IC_PIN_OPEN_COLLECTOR,
 } from "../kinds.js";
 import { resolveComponentPart } from "./catalog.js";
+import { resolveDelayTail } from "./delays.js";
 import { buildPinRecord, type CoreNodeBuild } from "./topology.js";
 
 type SimComponent = SimCircuit["components"][number];
@@ -234,6 +241,12 @@ export function compileCombinationalIc(
   ];
 
   const params = icBaseParams(component);
+  // Append the delay tail (README's "IC delay tail"): resolveDelayTail
+  // returns `[]` for a kind CORE_IC_DELAY_PAIRS does not name, so this is a
+  // no-op for the nine plain W1c kinds and adds 2/4 values for 74ls157/245.
+  // icBaseParams itself is untouched -- it is shared with the W1d
+  // sequential/memory compilers, which append their own tails the same way.
+  params.push(...resolveDelayTail(kind, specsForComponent(component), params[CORE_IC_PARAM.delay]));
 
   // ---- blob: per-logic-pin flags, plus which pins are output-capable ------
 

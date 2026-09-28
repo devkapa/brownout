@@ -172,6 +172,8 @@ export const CORE_IC_PIN_OPEN_COLLECTOR = 2;
  * `14 + 2k` (dL). A kind absent here has no tail.
  */
 export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = {
+  "74ls157": ["strobe"],
+  "74ls245": ["oeEnable", "oeDisable"],
   "74ls161": ["clkQ", "clrQ", "clkRco", "entRco"],
   "74ls173": ["clkQ", "clrQ", "mnEnable", "mnDisable"],
   "74hc74": ["clkQ", "preClrQ"],
@@ -192,9 +194,14 @@ function w1dShape(logic: number, params: number, blob: number, slots: number): C
   return { pins: 2 + logic, pinsMax: 2 + logic, params, blob: { exact: blob }, liveParams: [], digitalSlots: slots };
 }
 
-/** A combinational IC's shape: `vcc`, `gnd`, then `logic` pins; one digital slot per output-capable pin. */
-function icShape(logic: number, outputs: number): CoreRecordShape {
-  return { pins: 2 + logic, pinsMax: 2 + logic, params: CORE_IC_PARAM_COUNT, blob: { exact: 1 + logic }, liveParams: [], digitalSlots: outputs };
+/**
+ * A combinational IC's shape: `vcc`, `gnd`, then `logic` pins; one digital
+ * slot per output-capable pin. `pairs` is the kind's own delay-tail pair
+ * count (0 for a plain W1c kind; 74ls157: 1, 74ls245: 2 — `CORE_IC_DELAY_PAIRS`),
+ * adding `2 * pairs` params on top of the 13 plain IC params.
+ */
+function icShape(logic: number, outputs: number, pairs = 0): CoreRecordShape {
+  return { pins: 2 + logic, pinsMax: 2 + logic, params: CORE_IC_PARAM_COUNT + 2 * pairs, blob: { exact: 1 + logic }, liveParams: [], digitalSlots: outputs };
 }
 
 /** Shapes of the kinds ported so far. Grows per sub-wave, in step with core/src/kinds.rs. */
@@ -211,12 +218,12 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74ls08"], icShape(12, 4)],
   [CORE_KIND_CODES["74ls32"], icShape(12, 4)],
   [CORE_KIND_CODES["74ls86"], icShape(12, 4)],
-  [CORE_KIND_CODES["74ls157"], icShape(14, 4)],
+  [CORE_KIND_CODES["74ls157"], icShape(14, 4, 1)],
   [CORE_KIND_CODES["74ls283"], icShape(14, 5)],
   [CORE_KIND_CODES["74hc138"], icShape(14, 8)],
   [CORE_KIND_CODES["74hc14"], icShape(12, 6)],
   [CORE_KIND_CODES["74ls47"], icShape(14, 7)],
-  [CORE_KIND_CODES["74ls245"], icShape(18, 16)],
+  [CORE_KIND_CODES["74ls245"], icShape(18, 16, 2)],
   [CORE_KIND_CODES["74ls161"], w1dShape(14, 21, 1 + 14, 5)],
   [CORE_KIND_CODES["74ls173"], w1dShape(14, 21, 1 + 14, 4)],
   [CORE_KIND_CODES["74hc74"], w1dShape(12, 17, 1 + 12, 4)],

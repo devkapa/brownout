@@ -1,4 +1,4 @@
-//! Program format v2 reader (core/README.md, "Program format, version 2").
+//! Program format v3 reader (core/README.md, "Program format, version 3").
 //!
 //! One `&[f64]`: header (magic, version, node count, device count, an
 //! options block, then the readout slot counts), D device records, trailer.
@@ -18,7 +18,7 @@ use crate::error::BoError;
 use crate::kinds::{self, BlobShape};
 
 pub const MAGIC: f64 = 0x424F4331 as f64; // "BOC1"
-pub const VERSION: f64 = 2.0;
+pub const VERSION: f64 = 3.0;
 
 /// Pin record flag bits (core/README.md, "Device record"). Every other bit
 /// must be 0 — since these are the only two defined bits, "no unknown bit
@@ -1140,6 +1140,49 @@ mod tests {
         let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ls00_record(0.0, 4.0, 1.0)])).unwrap_err();
         assert_eq!(err.code, -1, "{}", err.message);
         assert!(err.message.contains("famFlags"), "{}", err.message);
+    }
+
+    // --- W1d retrofit: the 157/245 delay tail (VERSION 3) -------------------
+
+    /// A 74LS245 record: vcc, gnd, then 18 logic pins, `param_count` params
+    /// (15 IC params plus whatever tail the caller supplies, or a wrong
+    /// count outright, to exercise the shape check), a blob of the slot base
+    /// plus one flag per logic pin.
+    fn ls245_record(param_count: usize) -> Vec<f64> {
+        let mut rec = vec![kinds::IC_74LS245 as f64, 0.0, 20.0];
+        rec.extend(simple_pin(1.0)); // vcc
+        rec.extend(simple_pin(0.0)); // gnd
+        for _ in 0..18 {
+            rec.extend(simple_pin(2.0));
+        }
+        rec.push(param_count as f64);
+        let mut params = vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 20e-9];
+        params.resize(param_count, 0.0); // pads with 0.0 (a valid tail value) or truncates
+        rec.extend(params);
+        rec.push(19.0);
+        rec.push(0.0);
+        rec.extend([1.0; 18]);
+        rec
+    }
+
+    #[test]
+    fn rejects_a_74ls245_record_with_the_pre_w1d_13_param_count() {
+        // Before this retrofit a 245 carried the 13 plain IC params and
+        // nothing else; VERSION 3's shape needs 13 + 2*2 = 17 (the oeEnable
+        // and oeDisable pairs), so the old record shape is now malformed.
+        let data = build(3.0, &[ls245_record(kinds::ic_param::COUNT)]);
+        let err = Program::parse(&data).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("param"), "{}", err.message);
+    }
+
+    #[test]
+    fn accepts_a_74ls245_record_with_its_delay_tail() {
+        // 16 digital slots: the 245's own shape (every a/b pin is
+        // output-capable, core/README.md's IC logic pins table).
+        let p = Program::parse(&build_full(3.0, &[], 16.0, 0.0, &[ls245_record(kinds::ic_param::COUNT + 4)])).unwrap();
+        assert_eq!(p.devices[0].kind, kinds::IC_74LS245);
+        assert_eq!(p.devices[0].params.len(), 17);
     }
 
     // --- W1d: sequential and memory IC records ------------------------------

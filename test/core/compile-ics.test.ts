@@ -1,6 +1,6 @@
 /**
  * Unit coverage for compile/ics.ts: the 11 W1c combinational ICs (core/
- * README.md's "Kind codes and records", codes 50-59/61) compiled to v2
+ * README.md's "Kind codes and records", codes 50-59/61) compiled to v3
  * program records.
  *
  * Every part checked here comes straight from src/parts/default-parts.json
@@ -34,6 +34,7 @@ import { IC_OPEN_HIGH_PINS, icPinMap } from "../../src/sim/engine/digital.js";
 import { compileCircuit } from "../../src/core/compile/index.js";
 import { CORE_KIND_CODE, decodeProgram } from "../../src/core/format.js";
 import {
+  CORE_IC_DELAY_PAIRS,
   CORE_IC_FAM_CMOS_RATIO,
   CORE_IC_FAM_TTL,
   CORE_IC_PARAM,
@@ -175,9 +176,12 @@ describe.each(IC_KINDS)("%s — every default-parts.json part", (kind) => {
         engine.load(c);
       });
 
-      it("compiled — one device of the right kind code, with a 13-value param block", () => {
+      it("compiled — one device of the right kind code, with the kind's own param count (13, plus its delay tail)", () => {
         expect(dev).toBeDefined();
-        expect(dev.params).toHaveLength(13);
+        // 9 of these 11 kinds carry no tail; 74ls157 (1 pair) and 74ls245
+        // (2 pairs) gained one in the W1d retrofit (CORE_IC_DELAY_PAIRS).
+        const tailPairs = CORE_IC_DELAY_PAIRS[kind]?.length ?? 0;
+        expect(dev.params).toHaveLength(13 + 2 * tailPairs);
       });
 
       it("vccMin/vccMax match specsForComponent's vcc_range", () => {
@@ -254,6 +258,76 @@ describe.each(IC_KINDS)("%s — every default-parts.json part", (kind) => {
       });
     });
   }
+});
+
+// ---- W1d retrofit: the 157/245 delay tail (owner decision 3, Q-O64) -------
+//
+// icBaseParams itself carries no tail (13 values always); compileCombinationalIc
+// appends resolveDelayTail's result on top for these two kinds only. Checked
+// against the RAW catalog numbers (README's "IC delay tail" typicals), not by
+// re-deriving resolveDelayTail's own formula, matching this file's own rule
+// that every expected value comes from an independent source.
+
+/** Nanoseconds -> seconds, matching compile/delays.ts's own `figureS` (`ns * 1e-9`)
+ * multiplication exactly, so a ULP-level rounding difference against a literal
+ * `Ne-9` (a different double — parsed once, not multiplied) never fails this
+ * on a technicality (test/core/compile-delays.test.ts's own `expectTail`
+ * convention, here as `toEqual` since the values are compared whole, not
+ * per-entry with a tolerance). */
+const NS = (n: number) => n * 1e-9;
+
+describe("74ls157/74ls245 delay tail", () => {
+  it("74ls157's strobe pair resolves to the catalog's own tplh/tphl (13/14 ns)", () => {
+    const p157 = partsFor("74ls157")[0]!;
+    const c = poweredIcCircuit(icComponent("u1", p157), 5);
+    const decoded = decodeProgram(compileOk(c).program);
+    const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls157"])!;
+    expect(dev.params).toHaveLength(15);
+    expect(dev.params.slice(13)).toEqual([NS(13), NS(14)]);
+  });
+
+  it("74ls245's oeEnable/oeDisable pairs resolve to the catalog's own tpzh/tpzl/tphz/tplz (25/27, 15/15 ns)", () => {
+    const p245 = partsFor("74ls245")[0]!;
+    const c = poweredIcCircuit(icComponent("u1", p245), 5);
+    const decoded = decodeProgram(compileOk(c).program);
+    const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls245"])!;
+    expect(dev.params).toHaveLength(17);
+    expect(dev.params.slice(13)).toEqual([NS(25), NS(27), NS(15), NS(15)]);
+  });
+
+  it("falls back to param 12 (the package delay), both directions, when the 157's switching_ns is removed", () => {
+    const p157 = partsFor("74ls157")[0]!;
+    const stripped: PartDefinition = structuredClone(p157);
+    delete stripped.electrical_specs?.switching_ns;
+    setPartLibrary([stripped]);
+    try {
+      const c = poweredIcCircuit(icComponent("u1", stripped), 5);
+      const decoded = decodeProgram(compileOk(c).program);
+      const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls157"])!;
+      const delay = dev.params[CORE_IC_PARAM.delay]!;
+      expect(delay).toBeGreaterThan(0);
+      expect(dev.params.slice(13)).toEqual([delay, delay]);
+    } finally {
+      resetPartLibrary();
+    }
+  });
+
+  it("falls back to param 12, every pair and direction, when the 245's switching_ns is removed", () => {
+    const p245 = partsFor("74ls245")[0]!;
+    const stripped: PartDefinition = structuredClone(p245);
+    delete stripped.electrical_specs?.switching_ns;
+    setPartLibrary([stripped]);
+    try {
+      const c = poweredIcCircuit(icComponent("u1", stripped), 5);
+      const decoded = decodeProgram(compileOk(c).program);
+      const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls245"])!;
+      const delay = dev.params[CORE_IC_PARAM.delay]!;
+      expect(delay).toBeGreaterThan(0);
+      expect(dev.params.slice(13)).toEqual([delay, delay, delay, delay]);
+    } finally {
+      resetPartLibrary();
+    }
+  });
 });
 
 // ---- FLOATING_INPUT_FUNCTIONS sanity: the set this module reuses is

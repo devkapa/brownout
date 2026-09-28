@@ -206,10 +206,25 @@ fn ic_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String
     Ok(())
 }
 
+/// A combinational IC with a datasheet delay tail (W1d retrofit: 74ls157,
+/// 74ls245) on top of [`ic_check`]: every tail value (`params[13..]`) must be
+/// `>= 0`, the same rule [`seq_check`] applies to the W1d kinds' tails. Every
+/// param is already checked finite for every kind (`program.rs`, "every
+/// param and blob value finite"), so only the range is this function's job.
+fn ic_tail_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    ic_check(pin_count, params, blob)?;
+    if let Some(bad) = params[ic_param::COUNT..].iter().find(|v| **v < 0.0) {
+        return Err(format!("delay-tail values must be >= 0, got {bad}"));
+    }
+    Ok(())
+}
+
 /// Delay pairs in each IC kind's tail (core/README.md, "IC delay tail"):
 /// params `13 + 2k` and `14 + 2k`. Kinds without a tail return 0.
 pub fn delay_pairs(kind: u32) -> usize {
     match kind {
+        IC_74LS157 => 1,
+        IC_74LS245 => 2,
         IC_74LS161 | IC_74LS173 => 4,
         IC_74HC74 => 2,
         IC_74LS189 | IC_28C16 | IC_28C256 => 5,
@@ -283,9 +298,15 @@ fn eeprom_28c16_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<
 }
 
 /// Declares one combinational IC: `logic` pins after `vcc` and `gnd`, and
-/// `outputs` of them publish a digital slot each.
+/// `outputs` of them publish a digital slot each. The 4-arg form is a plain
+/// W1c kind (13 params, no tail); the 6-arg form is a kind with a W1d
+/// datasheet delay tail of `pairs` pairs (13 + 2*pairs params) and its own
+/// tail-checking `check` function (74ls157, 74ls245: [`ic_tail_check`]).
 macro_rules! ic_shape {
-    ($code:expr, $name:expr, $logic:expr, $outputs:expr) => {{
+    ($code:expr, $name:expr, $logic:expr, $outputs:expr) => {
+        ic_shape!($code, $name, $logic, $outputs, 0, ic_check)
+    };
+    ($code:expr, $name:expr, $logic:expr, $outputs:expr, $pairs:expr, $check:expr) => {{
         fn slots(_: usize) -> usize {
             $outputs
         }
@@ -294,9 +315,9 @@ macro_rules! ic_shape {
             name: $name,
             pins: 2 + $logic,
             pins_max: 2 + $logic,
-            params: ic_param::COUNT,
+            params: ic_param::COUNT + 2 * $pairs,
             blob: BlobShape::Exact(1 + $logic),
-            check: ic_check,
+            check: $check,
             live_params: &[],
             digital_slots: slots,
         }
@@ -338,12 +359,12 @@ const SHAPES: &[KindShape] = &[
     ic_shape!(IC_74LS08, "74ls08", 12, 4),
     ic_shape!(IC_74LS32, "74ls32", 12, 4),
     ic_shape!(IC_74LS86, "74ls86", 12, 4),
-    ic_shape!(IC_74LS157, "74ls157", 14, 4),
+    ic_shape!(IC_74LS157, "74ls157", 14, 4, 1, ic_tail_check),
     ic_shape!(IC_74LS283, "74ls283", 14, 5),
     ic_shape!(IC_74HC138, "74hc138", 14, 8),
     ic_shape!(IC_74HC14, "74hc14", 12, 6),
     ic_shape!(IC_74LS47, "74ls47", 14, 7),
-    ic_shape!(IC_74LS245, "74ls245", 18, 16),
+    ic_shape!(IC_74LS245, "74ls245", 18, 16, 2, ic_tail_check),
     w1d_shape!(IC_74LS161, "74ls161", 14, 21, 1 + 14, 5, seq_check),
     w1d_shape!(IC_74LS173, "74ls173", 14, 21, 1 + 14, 4, seq_check),
     w1d_shape!(IC_74HC74, "74hc74", 12, 17, 1 + 12, 4, seq_check),
