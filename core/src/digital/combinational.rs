@@ -53,31 +53,17 @@ pub fn logic_pin_count(kind: u32) -> usize {
     }
 }
 
-const OUT_QUAD3: [usize; 4] = [2, 5, 8, 11];
-const OUT_HEX2: [usize; 6] = [1, 3, 5, 7, 9, 11];
-const OUT_157: [usize; 4] = [4, 7, 10, 13];
-const OUT_283: [usize; 5] = [9, 10, 11, 12, 13];
-const OUT_138: [usize; 8] = [6, 7, 8, 9, 10, 11, 12, 13];
-const OUT_47: [usize; 7] = [7, 8, 9, 10, 11, 12, 13];
-const OUT_245: [usize; 16] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
-
 /// Indices into the logic pins (in pin order) that own a digital slot: the
 /// `o` pins, or, for the 74ls245, all 16 `a`/`b` pins (README's locked API —
 /// the evaluator picks which side of each pair is driven, so both sides are
 /// "output-capable" even though only one is driven on any given evaluation).
 /// `&[]` for a kind this module does not own (see [`logic_pin_count`]'s doc).
-pub fn output_capable(kind: u32) -> &'static [usize] {
-    match kind {
-        kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => &OUT_QUAD3,
-        kinds::IC_74LS04 | kinds::IC_74HC14 => &OUT_HEX2,
-        kinds::IC_74LS157 => &OUT_157,
-        kinds::IC_74LS283 => &OUT_283,
-        kinds::IC_74HC138 => &OUT_138,
-        kinds::IC_74LS47 => &OUT_47,
-        kinds::IC_74LS245 => &OUT_245,
-        _ => &[],
-    }
-}
+///
+/// The table itself moved to `digital::output_capable` (W1d): every W1d kind
+/// needs the identical lookup, so it lives once at the shared parent and
+/// this forwards to it, keeping this module's own (many) call sites and
+/// tests compiling unchanged.
+pub use super::output_capable;
 
 /// Evaluates kind `kind`'s truth table over `levels` (one electrical read per
 /// logic pin, `icPinMap` order — see the module doc). Returns one entry per

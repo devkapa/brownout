@@ -6,10 +6,11 @@
 //!
 //! W1a adds the exports marked "v2 (W1a)" in the contract's ABI table:
 //! `bo_engine_set_option`, `bo_engine_next_event_time`, the digital/channel
-//! slot getters, and the harness trace. `bo_engine_set_params` and
-//! `bo_engine_seed_memory` (marked W1b/W1d) are not exported yet —
-//! `scripts/build-core.mjs`'s export audit would fail the build if they were
-//! declared here without matching contract rows.
+//! slot getters, and the harness trace. `bo_engine_set_params` (W1b) and
+//! `bo_engine_seed_memory`/`bo_engine_take_eeprom_updates`/
+//! `bo_engine_eeprom_updates_ptr` (W1d) are all implemented as of this file
+//! — every export name here has a matching row in `scripts/build-core.mjs`'s
+//! export audit list.
 
 use crate::engine::Engine;
 use crate::error::BoError;
@@ -324,6 +325,57 @@ pub extern "C" fn bo_engine_set_params(h: u32, ptr: *const f64, len_f64: u32) ->
         Ok(()) => 0,
         Err(err) => fail(&err),
     }
+}
+
+/// Replaces a 74ls189's 16 stored nibbles (W1d, owner decision 2). `-8` for
+/// a device index out of range, a buffer length other than 16, a null
+/// pointer with a nonzero length, or any reason the evaluator's own hook
+/// declines (the wrong kind, or a bad value) — validated in full before
+/// anything changes, per the contract; `-5` for an unknown/destroyed/
+/// unloaded handle.
+#[no_mangle]
+pub extern "C" fn bo_engine_seed_memory(h: u32, device: u32, ptr: *const f64, len_f64: u32) -> i32 {
+    let handles = HANDLES.get();
+    let engine = match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => engine,
+        _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    };
+    if len_f64 != 16 {
+        return fail(&BoError::invalid_argument(format!(
+            "bo_engine_seed_memory: buffer length {len_f64} must be exactly 16"
+        )));
+    }
+    if ptr.is_null() {
+        return fail(&BoError::invalid_argument("bo_engine_seed_memory: buffer pointer is null".to_string()));
+    }
+    // SAFETY: same contract as `bo_engine_load`/`bo_engine_set_params`'s
+    // pointer — `len_f64` (here always 16) live, initialized f64s in this
+    // instance's memory for the duration of this call.
+    let words = unsafe { std::slice::from_raw_parts(ptr, len_f64 as usize) };
+    match engine.seed_memory(device, words) {
+        Ok(()) => 0,
+        Err(err) => fail(&err),
+    }
+}
+
+/// Collects and clears every dirty EEPROM image, returning the update
+/// buffer's length in f64 (`>= 0`, always a multiple of `2 + W` — one
+/// `deviceIndex, W, word x W` run per dirty EEPROM); `-5` with no program
+/// loaded.
+#[no_mangle]
+pub extern "C" fn bo_engine_take_eeprom_updates(h: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => engine.take_eeprom_updates().len() as i32,
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_take_eeprom_updates`] call. Valid
+/// until the next call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_eeprom_updates_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.eeprom_updates().as_ptr())
 }
 
 /// Time of the earliest pending event, `+Infinity` when none. `NaN` for an

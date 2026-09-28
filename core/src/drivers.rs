@@ -33,6 +33,32 @@ pub struct Pending {
     pub due: f64,
 }
 
+/// A pin's six datasheet propagation-delay figures (core/README.md, "Kernel
+/// semantics: datasheet delays and enables (W1d)", delays point 1), seconds,
+/// keyed by the transition they time: `lh`/`hl` a level change (LOW->HIGH,
+/// HIGH->LOW), `zh`/`zl` an enable from HIZ, `hz`/`lz` a disable into HIZ. A
+/// kind with no delay tail sends [`Self::uniform`] (param 12), so its timing
+/// is unchanged from before W1d — every field the same one figure, so
+/// [`fsm::pick`] picks the identical value whichever row applies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DelaySet {
+    pub lh: f64,
+    pub hl: f64,
+    pub zh: f64,
+    pub zl: f64,
+    pub hz: f64,
+    pub lz: f64,
+}
+
+impl DelaySet {
+    /// The same figure `d` in every direction — a kind with no delay tail,
+    /// or the load-settle/zero override (contract, delays point 2: "the
+    /// settle override zeroes the whole set").
+    pub fn uniform(d: f64) -> Self {
+        DelaySet { lh: d, hl: d, zh: d, zl: d, hz: d, lz: d }
+    }
+}
+
 /// The pure inertial-cancellation FSM (spec section 2.4) and the token
 /// bookkeeping that lets a superseded `Commit` event be recognised and
 /// dropped, lazily, when it is eventually popped (events.rs's contract).
@@ -40,7 +66,40 @@ pub struct Pending {
 /// None of these functions touch a heap or a `Driver`; they take and return
 /// plain state so every FSM row is a value-in, value-out test.
 pub mod fsm {
-    use super::{Mode, Pending, Token};
+    use super::{DelaySet, Mode, Pending, Token};
+
+    /// Picks the one delay figure a level request actually times (contract,
+    /// "datasheet delays and enables", delays point 2's table), from the
+    /// COMMITTED level (the pin is still physically there) to `requested`:
+    ///
+    /// | committed -> requested | delay |
+    /// |---|---|
+    /// | none -> any | 0 (first observation) |
+    /// | LOW -> HIGH | `lh` |
+    /// | HIGH -> LOW | `hl` |
+    /// | HIZ -> HIGH | `zh` |
+    /// | HIZ -> LOW | `zl` |
+    /// | HIGH -> HIZ | `hz` |
+    /// | LOW -> HIZ | `lz` |
+    /// | requested == committed | irrelevant (0) |
+    ///
+    /// The last row is never actually consumed as a delay: [`request`] never
+    /// schedules a new `Commit` when `requested == committed` (either
+    /// nothing is pending, or a glitch-back cancellation — neither picks up
+    /// a due time), so `0.0` here is a safe, inert placeholder, not a real
+    /// datasheet figure standing in for anything.
+    pub fn pick(committed: Option<Mode>, requested: Mode, delays: &DelaySet) -> f64 {
+        match (committed, requested) {
+            (None, _) => 0.0,
+            (Some(Mode::Low), Mode::High) => delays.lh,
+            (Some(Mode::High), Mode::Low) => delays.hl,
+            (Some(Mode::Hiz), Mode::High) => delays.zh,
+            (Some(Mode::Hiz), Mode::Low) => delays.zl,
+            (Some(Mode::High), Mode::Hiz) => delays.hz,
+            (Some(Mode::Low), Mode::Hiz) => delays.lz,
+            (Some(_), _) => 0.0,
+        }
+    }
 
     /// The result of a level request: the driver's new in-flight transition
     /// (or none), and — when this call must cause a new `Commit` event —
@@ -276,11 +335,15 @@ impl Driver {
         self.token
     }
 
-    /// Requests `level` at `now`, given this pin's device delay. Updates the
-    /// driver's in-flight state and returns `(due, mode, token)` for the
-    /// caller to push onto the event heap as `EventKind::Commit`, when this
-    /// call causes a new one to be scheduled.
-    pub fn request(&mut self, level: Mode, now: f64, delay: f64) -> Option<(f64, Mode, Token)> {
+    /// Requests `level` at `now`, given this pin's full datasheet
+    /// [`DelaySet`]. Picks the one figure the transition from the currently
+    /// COMMITTED level to `level` actually times ([`fsm::pick`]), then runs
+    /// the unchanged FSM ([`fsm::request`]) with that scalar exactly as
+    /// before W1d. Updates the driver's in-flight state and returns `(due,
+    /// mode, token)` for the caller to push onto the event heap as
+    /// `EventKind::Commit`, when this call causes a new one to be scheduled.
+    pub fn request(&mut self, level: Mode, now: f64, delays: &DelaySet) -> Option<(f64, Mode, Token)> {
+        let delay = fsm::pick(self.committed, level, delays);
         let t = fsm::request(self.committed, self.pending, self.token, level, now, delay);
         self.pending = t.pending;
         self.token = t.token;
@@ -430,7 +493,7 @@ mod tests {
     fn driver_first_request_commits_with_zero_delay_after_one_apply() {
         let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
         assert_eq!(d.committed(), None);
-        let (due, mode, token) = d.request(High, 0.0, 20e-9).expect("first observation always schedules");
+        let (due, mode, token) = d.request(High, 0.0, &DelaySet::uniform(20e-9)).expect("first observation always schedules");
         assert_eq!(due, 0.0);
         assert_eq!(mode, High);
         assert!(d.apply_commit(mode, token));
@@ -441,15 +504,15 @@ mod tests {
     #[test]
     fn driver_glitch_then_apply_of_the_stale_commit_is_a_no_op() {
         let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
-        let first_token = d.request(Low, 0.0, 0.0).unwrap().2;
+        let first_token = d.request(Low, 0.0, &DelaySet::uniform(0.0)).unwrap().2;
         d.apply_commit(Low, first_token);
         assert_eq!(d.committed(), Some(Low));
 
         // Schedule a transition to HIGH, then glitch back to LOW before it
         // is due -- this cancels it (token bump) without touching the
         // event that is still sitting in some caller's heap.
-        let (due, mode, stale_token) = d.request(High, 10.0, 20e-9).unwrap();
-        assert!(d.request(Low, 10.0 + 5e-9, 20e-9).is_none(), "the glitch-back cancels, it does not schedule");
+        let (due, mode, stale_token) = d.request(High, 10.0, &DelaySet::uniform(20e-9)).unwrap();
+        assert!(d.request(Low, 10.0 + 5e-9, &DelaySet::uniform(20e-9)).is_none(), "the glitch-back cancels, it does not schedule");
         assert_eq!(d.committed(), Some(Low));
 
         // The caller pops that now-stale Commit{HIGH, stale_token} at `due`:
@@ -462,7 +525,7 @@ mod tests {
     #[test]
     fn driver_reset_forces_the_next_request_to_be_a_first_observation_again() {
         let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
-        let (_, mode, token) = d.request(High, 0.0, 20e-9).unwrap();
+        let (_, mode, token) = d.request(High, 0.0, &DelaySet::uniform(20e-9)).unwrap();
         d.apply_commit(mode, token);
         assert_eq!(d.committed(), Some(High));
 
@@ -470,18 +533,149 @@ mod tests {
         assert_eq!(d.committed(), None);
         assert_eq!(d.pending(), None);
 
-        let (due, ..) = d.request(Low, 5.0, 20e-9).unwrap();
+        let (due, ..) = d.request(Low, 5.0, &DelaySet::uniform(20e-9)).unwrap();
         assert_eq!(due, 5.0, "post-reset, the next request is a first observation: zero delay");
     }
 
     #[test]
     fn driver_reset_makes_a_previously_scheduled_commit_stale() {
         let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
-        let first_token = d.request(Low, 0.0, 0.0).unwrap().2;
+        let first_token = d.request(Low, 0.0, &DelaySet::uniform(0.0)).unwrap().2;
         d.apply_commit(Low, first_token);
-        let (_, mode, token) = d.request(High, 0.0, 20e-9).unwrap();
+        let (_, mode, token) = d.request(High, 0.0, &DelaySet::uniform(20e-9)).unwrap();
         d.reset();
         assert!(!d.apply_commit(mode, token), "the reset must invalidate the transition it interrupted");
         assert_eq!(d.committed(), None);
+    }
+
+    // ---- fsm::pick, every row of the datasheet-delays table ---------------
+
+    fn distinct_delays() -> DelaySet {
+        DelaySet { lh: 1.0, hl: 2.0, zh: 3.0, zl: 4.0, hz: 5.0, lz: 6.0 }
+    }
+
+    #[test]
+    fn pick_none_committed_is_always_zero_the_first_observation() {
+        let d = distinct_delays();
+        assert_eq!(fsm::pick(None, High, &d), 0.0);
+        assert_eq!(fsm::pick(None, Low, &d), 0.0);
+        assert_eq!(fsm::pick(None, Hiz, &d), 0.0);
+    }
+
+    #[test]
+    fn pick_low_to_high_is_lh() {
+        assert_eq!(fsm::pick(Some(Low), High, &distinct_delays()), 1.0);
+    }
+
+    #[test]
+    fn pick_high_to_low_is_hl() {
+        assert_eq!(fsm::pick(Some(High), Low, &distinct_delays()), 2.0);
+    }
+
+    #[test]
+    fn pick_hiz_to_high_is_zh() {
+        assert_eq!(fsm::pick(Some(Hiz), High, &distinct_delays()), 3.0);
+    }
+
+    #[test]
+    fn pick_hiz_to_low_is_zl() {
+        assert_eq!(fsm::pick(Some(Hiz), Low, &distinct_delays()), 4.0);
+    }
+
+    #[test]
+    fn pick_high_to_hiz_is_hz() {
+        assert_eq!(fsm::pick(Some(High), Hiz, &distinct_delays()), 5.0);
+    }
+
+    #[test]
+    fn pick_low_to_hiz_is_lz() {
+        assert_eq!(fsm::pick(Some(Low), Hiz, &distinct_delays()), 6.0);
+    }
+
+    #[test]
+    fn pick_requested_equal_to_committed_is_irrelevant_zero() {
+        let d = distinct_delays();
+        assert_eq!(fsm::pick(Some(High), High, &d), 0.0);
+        assert_eq!(fsm::pick(Some(Low), Low, &d), 0.0);
+        assert_eq!(fsm::pick(Some(Hiz), Hiz, &d), 0.0);
+    }
+
+    // ---- Driver::request against a non-uniform DelaySet: HIZ transitions --
+
+    #[test]
+    fn a_delayed_disable_commits_hiz_at_now_plus_hz_or_lz_from_the_committed_level() {
+        // Committed HIGH -> disable to HIZ uses `hz`, not `lh`/`hl`/param 12.
+        let delays = distinct_delays();
+        let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d.request(High, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d.apply_commit(mode, token);
+        assert_eq!(d.committed(), Some(High));
+
+        let (due, mode, _) = d.request(Hiz, 10.0, &delays).expect("a disable from a driven level always schedules");
+        assert_eq!(due, 10.0 + delays.hz);
+        assert_eq!(mode, Hiz);
+
+        // Committed LOW -> disable to HIZ uses `lz`.
+        let mut d2 = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d2.request(Low, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d2.apply_commit(mode, token);
+        let (due, ..) = d2.request(Hiz, 20.0, &delays).unwrap();
+        assert_eq!(due, 20.0 + delays.lz);
+    }
+
+    #[test]
+    fn a_delayed_enable_commits_high_or_low_at_now_plus_zh_or_zl_from_hiz() {
+        // Committed HIZ -> enable to HIGH uses `zh`.
+        let delays = distinct_delays();
+        let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d.request(Hiz, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d.apply_commit(mode, token);
+        assert_eq!(d.committed(), Some(Hiz));
+
+        let (due, mode, _) = d.request(High, 30.0, &delays).expect("an enable from HIZ always schedules");
+        assert_eq!(due, 30.0 + delays.zh);
+        assert_eq!(mode, High);
+
+        // Committed HIZ -> enable to LOW uses `zl`.
+        let mut d2 = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d2.request(Hiz, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d2.apply_commit(mode, token);
+        let (due, ..) = d2.request(Low, 40.0, &delays).unwrap();
+        assert_eq!(due, 40.0 + delays.zl);
+    }
+
+    #[test]
+    fn a_glitch_back_before_a_disable_commits_cancels_it() {
+        // Committed HIGH, a disable to HIZ pending (via hz); glitching back
+        // to HIGH before it is due must cancel it, never resurrect the
+        // driven level through a fresh schedule (spec 2.4: "a glitch
+        // shorter than the delay is swallowed").
+        let delays = distinct_delays();
+        let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d.request(High, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d.apply_commit(mode, token);
+        let (_, mode, stale_token) = d.request(Hiz, 10.0, &delays).unwrap();
+
+        assert!(d.request(High, 10.0 + 1.0, &delays).is_none(), "the glitch-back cancels, it does not schedule");
+        assert_eq!(d.committed(), Some(High));
+        assert!(!d.apply_commit(mode, stale_token), "the now-stale HIZ commit must never apply");
+        assert_eq!(d.committed(), Some(High));
+    }
+
+    #[test]
+    fn a_glitch_back_before_an_enable_commits_cancels_it() {
+        // Committed HIZ, an enable to HIGH pending (via zh); glitching back
+        // to HIZ before it is due must cancel it, so the pin never actually
+        // drives.
+        let delays = distinct_delays();
+        let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+        let (_, mode, token) = d.request(Hiz, 0.0, &DelaySet::uniform(0.0)).unwrap();
+        d.apply_commit(mode, token);
+        let (_, mode, stale_token) = d.request(High, 30.0, &delays).unwrap();
+
+        assert!(d.request(Hiz, 30.0 + 1.0, &delays).is_none(), "the glitch-back cancels, it does not schedule");
+        assert_eq!(d.committed(), Some(Hiz));
+        assert!(!d.apply_commit(mode, stale_token), "the now-stale HIGH commit must never apply");
+        assert_eq!(d.committed(), Some(Hiz));
     }
 }

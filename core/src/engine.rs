@@ -32,7 +32,7 @@ use crate::drivers::Driver;
 use crate::devices::ics;
 use crate::error::BoError;
 use crate::events::{DeviceId, PartitionId};
-use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError};
+use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError, SeedMemoryError};
 use crate::program::{switch_value, Program};
 use crate::readout::Readout;
 use crate::solve::PartitionSolver;
@@ -125,6 +125,12 @@ pub struct Engine {
     /// change and validates against.
     options: crate::program::Options,
     readout: Readout,
+    /// The last `bo_engine_take_eeprom_updates` call's own buffer
+    /// (`Self::take_eeprom_updates`'s doc comment) — kept here so
+    /// `Self::eeprom_updates`'s pointer stays valid "until the next call on
+    /// this engine" (the contract's own promise for every such pointer),
+    /// exactly like `Readout`'s digital/channel slot arrays.
+    eeprom_updates: Vec<f64>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -394,9 +400,56 @@ impl Engine {
         result.map_err(map_kernel_error)
     }
 
+    /// `bo_engine_seed_memory` (W1d, owner decision 2): validates `device` is
+    /// a real device-record index (`-8` otherwise — an unknown/out-of-range
+    /// kind or a bad word is the `DeviceEvaluator::seed_memory` hook's own
+    /// job, also mapped to `-8` below), then applies it as one event at the
+    /// current time exactly like `Self::set_params` (`Kernel::seed_memory`,
+    /// mirroring `Kernel::apply_params_as_event`): a hook rejection changes
+    /// nothing and maps to `-8`; a downstream solve failure/livelock while
+    /// re-evaluating the device rolls the contents back with the rest of the
+    /// instant and maps to `-4`/`-7` as usual. Every digital-slot write the
+    /// kernel queued is published afterward regardless of outcome, exactly
+    /// like `advance`/`set_params` (`Self::apply_digital_writes`'s own doc
+    /// comment).
+    pub fn seed_memory(&mut self, device: u32, words: &[f64]) -> Result<(), BoError> {
+        if device as usize >= self.device_count {
+            return Err(BoError::invalid_argument(format!("seed_memory: device index {device} out of range")));
+        }
+        let result = self.kernel.seed_memory(DeviceId(device), words);
+        // See `Engine::advance`'s identical call: drained unconditionally,
+        // regardless of outcome.
+        self.apply_digital_writes();
+        match result {
+            Ok(()) => Ok(()),
+            Err(SeedMemoryError::Rejected(msg)) => Err(BoError::invalid_argument(msg)),
+            Err(SeedMemoryError::Kernel(e)) => Err(map_kernel_error(e)),
+        }
+    }
+
+    /// `bo_engine_take_eeprom_updates` (W1d): collects and clears every
+    /// dirty EEPROM image (`DeviceEvaluator::take_eeprom_updates`), packed
+    /// `deviceIndex, W, word x W` per dirty EEPROM, in device order
+    /// (core/README.md's own wording). Kept on `Engine` (not just returned)
+    /// so `Self::eeprom_updates`'s pointer stays valid "until the next call
+    /// on this engine" — the ABI's `bo_engine_eeprom_updates_ptr` reads that
+    /// accessor, never this one, so reading the pointer never re-drains the
+    /// evaluator's dirty set a second time.
+    pub fn take_eeprom_updates(&mut self) -> &[f64] {
+        self.eeprom_updates = self.kernel.evaluator_mut().take_eeprom_updates();
+        &self.eeprom_updates
+    }
+
+    /// The buffer from the last [`Self::take_eeprom_updates`] call.
+    pub fn eeprom_updates(&self) -> &[f64] {
+        &self.eeprom_updates
+    }
+
     /// Loads a program from scratch: build the static topology, register
-    /// every combinational IC's output drivers and install the real digital
-    /// evaluator (`devices::ics::register`, W1c contract point 2), then
+    /// every IC's output drivers (combinational, sequential and memory
+    /// alike — W1d widened this from combinational-only) and install the
+    /// real digital evaluator (`devices::ics::register`, W1c contract point
+    /// 2), then
     /// settle at `START_TIME` (decision 8, and decision 4's option key 7 —
     /// the engine clock and the kernel both start there, never at a
     /// hard-coded 0) with every IC as a reader (contract point 2's own
@@ -439,6 +492,7 @@ impl Engine {
             stats,
             options: program.options,
             readout: Readout::new(program.digital_slot_count, program.channel_slot_count),
+            eeprom_updates: Vec::new(),
         };
         // The settle above already queued every IC's initial digital-slot
         // state on the kernel side (`Kernel::settle`'s own `publish_settled`
@@ -453,6 +507,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drivers::DelaySet;
     use crate::error::{ERR_INVALID_ARGUMENT, ERR_SOLVE_FAILED, ERR_TIME_BACKWARDS, ERR_UNSUPPORTED_TOPOLOGY};
     use crate::events::{DriverId, Mode};
     use crate::kinds;
@@ -1079,7 +1134,7 @@ mod tests {
             fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == Mode::High { Mode::Low } else { Mode::High };
-                vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+                vec![DriverRequest::Level { driver: self.driver, level, delays: DelaySet::uniform(0.0) }]
             }
         }
 
@@ -1228,5 +1283,63 @@ mod tests {
         // solved value, not a fresh integration step from it.
         e.advance(t).unwrap();
         assert_eq!(e.voltages()[2], got);
+    }
+
+    // ---- W1d: the dispatcher through the real Engine::load entry point -----
+
+    fn w1d_params(delay_pairs: usize, extra: &[f64]) -> Vec<f64> {
+        let mut p = vec![0.0; kinds::ic_param::COUNT];
+        p[kinds::ic_param::VCC_MIN] = 4.5;
+        p[kinds::ic_param::VCC_MAX] = 5.5;
+        p[kinds::ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+        p[kinds::ic_param::VIL_FIXED] = 1.0;
+        p[kinds::ic_param::VIL] = 0.8;
+        p[kinds::ic_param::VIH_FIXED] = 1.0;
+        p[kinds::ic_param::VIH] = 2.0;
+        p[kinds::ic_param::NOMINAL] = 5.0;
+        p.extend(std::iter::repeat(20e-9).take(2 * delay_pairs));
+        p.extend_from_slice(extra);
+        p
+    }
+
+    /// A W1d sequential/memory device with every logic pin tied to `gnd` and
+    /// no ROM contents — `devices::ics::tests`'s identical helper, rebuilt
+    /// here rather than shared (this crate's own convention: each test
+    /// module owns its tiny fixtures, `devices::ics`'s own doc comment).
+    fn w1d_ic(kind: u32, ci: usize, vcc: usize, gnd: usize, logic_len: usize, params: Vec<f64>, rom_words: usize) -> Device {
+        let device_pins = std::iter::once(pin(vcc)).chain(std::iter::once(pin(gnd))).chain((0..logic_len).map(|_| pin(gnd))).collect();
+        let mut blob = vec![0.0];
+        blob.extend(std::iter::repeat(0.0).take(logic_len));
+        blob.extend(std::iter::repeat(0.0).take(rom_words));
+        Device { kind, component_index: ci, pins: device_pins, params, blob }
+    }
+
+    #[test]
+    fn engine_load_registers_and_settles_one_of_each_w1d_kind_with_the_stubs_publishing_nan() {
+        // The DELIVER-list proof that the dispatcher (devices::ics::register
+        // and IcEvaluator) is wired all the way through the real
+        // `Engine::load` entry point, not just through a hand-built
+        // `Kernel`/`PartitionedSolver` pair (devices::ics::tests's own
+        // version of this same fixture) -- one each of 161, 173, 74hc74, 189
+        // and 28c16, all powered from a shared 5V fixed supply.
+        let p = Program {
+            node_count: 2,
+            options: Options::default(),
+            digital_slot_count: 100,
+            channel_slot_count: 0,
+            devices: vec![
+                source(0, 1, 0, 5.0),
+                w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
+                w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
+                w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
+                w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
+                w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+            ],
+        };
+        let e = Engine::load(&p).expect("a program holding every W1d kind must load through the real Engine::load entry point");
+        assert!(!e.digital_slots().is_empty());
+        for (slot, &value) in e.digital_slots().iter().enumerate() {
+            assert!(value.is_nan(), "slot {slot} must read NaN while the W1d family evaluators are stubs, got {value}");
+        }
     }
 }

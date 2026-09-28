@@ -55,7 +55,7 @@
 //! partition's free node as unreachable, rather than a case it has to
 //! silently paper over.
 
-use crate::digital::{self, combinational};
+use crate::digital;
 use crate::error::BoError;
 use crate::kinds;
 use crate::program::Program;
@@ -201,7 +201,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             }
             continue;
         }
-        if !digital::is_combinational_ic(device.kind) {
+        if !digital::is_ic(device.kind) {
             continue;
         }
         // W1c contract point 2: "the union-find also joins each free
@@ -210,13 +210,16 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         // safe to call unconditionally here: `program.rs`'s reader has
         // already validated this device against `kinds::shape`'s IC shape
         // (pin/param/blob counts, flag codes) before `partition::build` ever
-        // runs (`digital::mod`'s own doc comment on `from_device`).
+        // runs (`digital::mod`'s own doc comment on `from_device`). W1d
+        // widened this from combinational-only to every IC kind
+        // (`digital::is_ic`): a sequential/memory IC's own output-capable
+        // and floating-input pins join its supply exactly the same way.
         let ic = digital::IcRecord::from_device(device);
         let free_supply: Vec<usize> =
             [ic.vcc.node, ic.gnd.node].into_iter().filter(|&node| fixed[node].is_none()).collect();
         ic_free_supply_nodes.extend(&free_supply);
 
-        let output_capable = combinational::output_capable(ic.kind);
+        let output_capable = digital::output_capable(ic.kind);
         let free_driver_pull_nodes = output_capable
             .iter()
             .map(|&i| ic.logic[i].node)
@@ -325,18 +328,20 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             must_step[p] = true;
         }
     }
-    // A 74LS245's a/b pins are read AND driven, so the closed-form crossing
-    // watch cannot cover them: watching a pin its own IC drives makes the
-    // crossing solve divide by a near-zero coupling (solve/mod.rs,
-    // `register_ic_read_pin_watches`). A stepped partition re-reads its ICs
-    // after every step instead, so a partition holding one is stepped
-    // (core/README.md, W1c point 3).
+    // A 74LS245's a/b pins (and, W1d, an EEPROM's io0..io7) are read AND
+    // driven, so the closed-form crossing watch cannot cover them: watching
+    // a pin its own IC drives makes the crossing solve divide by a
+    // near-zero coupling (solve/mod.rs, `register_ic_read_pin_watches`). A
+    // stepped partition re-reads its ICs after every step instead, so a
+    // partition holding one is stepped (core/README.md, W1c point 3 /
+    // W1d memories point 1: "the EEPROM's io pins ... follow the 74ls245
+    // rule").
     for device in &program.devices {
-        if device.kind != kinds::IC_74LS245 {
+        if !digital::is_read_and_driven(device.kind) {
             continue;
         }
         let ic = digital::IcRecord::from_device(device);
-        for &i in combinational::output_capable(ic.kind) {
+        for &i in digital::output_capable(ic.kind) {
             if let Some((p, _)) = local_index[ic.logic[i].node] {
                 must_step[p] = true;
             }

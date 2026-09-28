@@ -1,18 +1,27 @@
 //! The digital core (core/README.md, "Kernel semantics: the digital core
 //! (W1c)"). Orchestrator-owned: this file holds the typed view of an IC record
-//! every submodule shares; the submodules belong to their W1c workers.
+//! every submodule shares; the submodules belong to their W1c/W1d workers.
 //!
 //! - `power`, `levels`, `floating`: IC power, pin reads and the floating model
 //!   (W1c worker C1). Pure functions of an [`IcRecord`] and voltages.
 //! - `combinational`, `delay`: the 11 truth tables and the mapping of an
 //!   evaluation onto driver requests (W1c worker C2).
+//! - `sequential`, `memory`: the W1d register/memory families' own state and
+//!   per-kind evaluators (D1/D2) — [`FamilyOutput`] is the interface
+//!   `devices::ics`'s dispatcher (W1d worker K1) turns into `DriverRequest`s
+//!   and digital-slot writes, mirroring `delay::driver_requests`'s job for
+//!   the combinational family.
 
 pub mod combinational;
 pub mod delay;
 pub mod floating;
 pub mod levels;
+pub mod memory;
 pub mod power;
+pub mod sequential;
 
+use crate::drivers::DelaySet;
+use crate::events::Mode;
 use crate::kinds::{self, ic_param};
 use crate::program::{Device, PIN_FLAG_OPEN, PIN_FLAG_OPEN_HIGH};
 
@@ -94,6 +103,96 @@ pub fn is_combinational_ic(kind: u32) -> bool {
             | kinds::IC_74LS47
             | kinds::IC_74LS245
     )
+}
+
+/// Whether `kind`'s output-capable pins are also READ, not driven-only (W1c
+/// contract point 3's 74ls245 rule, generalised by W1d memories point 1 to
+/// the EEPROMs' `io0..io7`): such a pin can never be crossing-watched (its
+/// own IC's commit would race the watch — `solve::mod`'s
+/// `register_ic_read_pin_watches` already excludes every output-capable pin
+/// uniformly) and forces any dynamic partition holding one to be stepped
+/// instead of closed-form (`partition::build`). The 74ls189's `/o` pins are
+/// driven only (its address/data lines are separate read pins), so it is
+/// NOT included here.
+pub fn is_read_and_driven(kind: u32) -> bool {
+    matches!(kind, kinds::IC_74LS245 | kinds::IC_28C16 | kinds::IC_28C256)
+}
+
+// ---- output_capable: every IC kind's driver footprint ---------------------
+//
+// Moved here from `combinational.rs` (W1d): this is the one table describing
+// which logic-pin indices own a digital slot and a `Driver`, across every IC
+// kind this crate knows, combinational and W1d sequential/memory alike.
+// `combinational::output_capable` now just forwards to this copy, so its many
+// existing call sites (and its own tests) keep compiling unchanged.
+
+const OUT_QUAD3: [usize; 4] = [2, 5, 8, 11];
+const OUT_HEX2: [usize; 6] = [1, 3, 5, 7, 9, 11];
+const OUT_157: [usize; 4] = [4, 7, 10, 13];
+const OUT_283: [usize; 5] = [9, 10, 11, 12, 13];
+const OUT_138: [usize; 8] = [6, 7, 8, 9, 10, 11, 12, 13];
+const OUT_47: [usize; 7] = [7, 8, 9, 10, 11, 12, 13];
+const OUT_245: [usize; 16] = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+/// 74ls161: `/clr clk /load enp ent a b c d` (0-8, `r`), `qa qb qc qd rco`
+/// (9-13, `o`) — core/README.md's sequential pin table.
+const OUT_161: [usize; 5] = [9, 10, 11, 12, 13];
+/// 74ls173: `/clr clk m n g1 g2 d1 d2 d3 d4` (0-9, `r`), `q1 q2 q3 q4` (10-13,
+/// `o`).
+const OUT_173: [usize; 4] = [10, 11, 12, 13];
+/// 74hc74: `clr1_n d1 clk1 pre1_n` (0-3, `r`), `q1 q1_n q2_n q2` (4-7, `o`),
+/// `pre2_n clk2 d2 clr2_n` (8-11, `r`).
+const OUT_74HC74: [usize; 4] = [4, 5, 6, 7];
+/// 74ls189: `a0 a1 a2 a3 d1 d2 d3 d4 /cs /we` (0-9, `r`), `/o1 /o2 /o3 /o4`
+/// (10-13, `o`).
+const OUT_189: [usize; 4] = [10, 11, 12, 13];
+/// 28c16: `a0..a10 /oe /ce /we` (0-13, `r`), `io0..io7` (14-21, `o`/`r`).
+const OUT_28C16: [usize; 8] = [14, 15, 16, 17, 18, 19, 20, 21];
+/// 28c256: `a0..a14 /oe /ce /we` (0-17, `r`), `io0..io7` (18-25, `o`/`r`).
+const OUT_28C256: [usize; 8] = [18, 19, 20, 21, 22, 23, 24, 25];
+
+/// Indices into an IC's logic pins (pin order) that own a digital slot and a
+/// `Driver`, across every IC kind — combinational (README's "IC logic pins"
+/// table) and W1d sequential/memory (README's "Sequential and memory IC
+/// logic pins" table) alike. `&[]` for a kind this crate does not know.
+pub fn output_capable(kind: u32) -> &'static [usize] {
+    match kind {
+        kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => &OUT_QUAD3,
+        kinds::IC_74LS04 | kinds::IC_74HC14 => &OUT_HEX2,
+        kinds::IC_74LS157 => &OUT_157,
+        kinds::IC_74LS283 => &OUT_283,
+        kinds::IC_74HC138 => &OUT_138,
+        kinds::IC_74LS47 => &OUT_47,
+        kinds::IC_74LS245 => &OUT_245,
+        kinds::IC_74LS161 => &OUT_161,
+        kinds::IC_74LS173 => &OUT_173,
+        kinds::IC_74HC74 => &OUT_74HC74,
+        kinds::IC_74LS189 => &OUT_189,
+        kinds::IC_28C16 => &OUT_28C16,
+        kinds::IC_28C256 => &OUT_28C256,
+        _ => &[],
+    }
+}
+
+/// One family evaluator's per-delta output (W1d contract, "Kernel semantics:
+/// sequential ICs"/"...memories") — what `devices::ics`'s dispatcher turns
+/// into `DriverRequest`s and digital-slot writes, the W1d counterpart of
+/// `delay::driver_requests` for the combinational family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FamilyOutput {
+    /// One `(level, delays)` per [`output_capable`]`(kind)` pin, in that same
+    /// order — always a concrete [`Mode`] (`Hiz` included: W1d delays point
+    /// 4, "no IC requests a reset any more" past the combinational family).
+    pub requests: Vec<(Mode, DelaySet)>,
+    /// One entry per this kind's digital slot (`kinds::shape(kind).digital_slots`),
+    /// `NaN` meaning absent — a DIFFERENT indexing from `requests`: the
+    /// README's per-kind readout tables map some slots to state that has no
+    /// driver of its own (a 161's bare `<id>` count) and leave some drivers
+    /// with no slot at all (its `rco` pin).
+    pub slots: Vec<f64>,
+    /// `(at, tag)` pairs for `DriverRequest::Timer` — the EEPROMs' pending
+    /// write-completion deadline (W1d, "Kernel semantics: memories", point
+    /// 4.2 and point 5) is the one producer.
+    pub timers: Vec<(f64, u64)>,
 }
 
 impl IcRecord {

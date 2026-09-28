@@ -772,15 +772,23 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 // conductance". Defined once, here, so no module re-derives
 // `digital::power`/`digital::floating`'s rules a second time.
 
-/// Every combinational IC in `program`, by device index
+/// Every IC in `program` — combinational, sequential or memory alike (W1d
+/// widened this from combinational-only, `digital::is_ic`) — by device index
 /// (`digital::IcRecord::from_device` is safe unconditionally — see
-/// `partition.rs`'s identical call for why).
+/// `partition.rs`'s identical call for why). Every driver/pull stamp site
+/// below (`ic_driver_target`, `ic_pull_target`, the watch registration and
+/// bucket-watch machinery) is already generic over `IcRecord`, so this one
+/// filter change is what makes a W1d IC's electrical footprint (power,
+/// floating pulls, driver stamps, crossing-watch exclusion, stepped
+/// classification) solver-visible; only the DEVICE EVALUATION (its truth
+/// table or register/memory logic) differs, and that lives in
+/// `devices::ics`, never here.
 pub(crate) fn collect_ics(program: &Program) -> Vec<(usize, digital::IcRecord)> {
     program
         .devices
         .iter()
         .enumerate()
-        .filter(|(_, d)| digital::is_combinational_ic(d.kind))
+        .filter(|(_, d)| digital::is_ic(d.kind))
         .map(|(i, d)| (i, digital::IcRecord::from_device(d)))
         .collect()
 }
@@ -1407,7 +1415,7 @@ impl PartitionedSolver {
             // own threshold — the oscillator livelocks in a burst of
             // sub-microsecond crossings and its output never actually
             // flips again.
-            let outputs = digital::combinational::output_capable(ic.kind);
+            let outputs = digital::output_capable(ic.kind);
             let power = digital::power::ic_power(&ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
             for (logic_index, pin) in ic.logic.iter().enumerate() {
                 if pin.open || outputs.contains(&logic_index) {
@@ -1488,7 +1496,7 @@ impl PartitionedSolver {
             if !(supply_touched(ic.vcc.node) || supply_touched(ic.gnd.node)) {
                 continue;
             }
-            let outputs = digital::combinational::output_capable(ic.kind);
+            let outputs = digital::output_capable(ic.kind);
             for (logic_index, pin) in ic.logic.iter().enumerate() {
                 if pin.open || outputs.contains(&logic_index) {
                     continue;
@@ -2320,7 +2328,7 @@ mod partitioned_solver_tests {
             fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<crate::kernel::DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
-                vec![crate::kernel::DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+                vec![crate::kernel::DriverRequest::Level { driver: self.driver, level, delays: crate::drivers::DelaySet::uniform(0.0) }]
             }
         }
         let d0 = crate::events::DriverId(0);

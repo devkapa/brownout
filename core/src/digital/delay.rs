@@ -3,6 +3,7 @@
 //! core (W1c)", point 7; `core/spec/w1-classic-semantics.md` §2.4, §3.7-3.8).
 //! Owned by W1c worker C2.
 
+use crate::drivers::DelaySet;
 use crate::events::{DriverId, Mode};
 use crate::kernel::DriverRequest;
 
@@ -32,8 +33,8 @@ pub fn driver_requests(ic: &IcRecord, drivers: &[DriverId], result: &[Option<boo
         .iter()
         .zip(result.iter())
         .map(|(&driver, level)| match level {
-            Some(true) => DriverRequest::Level { driver, level: Mode::High, delay: ic.delay },
-            Some(false) => DriverRequest::Level { driver, level: Mode::Low, delay: ic.delay },
+            Some(true) => DriverRequest::Level { driver, level: Mode::High, delays: DelaySet::uniform(ic.delay) },
+            Some(false) => DriverRequest::Level { driver, level: Mode::Low, delays: DelaySet::uniform(ic.delay) },
             None => DriverRequest::Reset { driver },
         })
         .collect()
@@ -83,7 +84,7 @@ mod tests {
         let ic = ic_with_delay(20e-9);
         let d0 = DriverId(0);
         let reqs = driver_requests(&ic, &[d0], &[Some(true)]);
-        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::High, delay: 20e-9 }]);
+        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::High, delays: DelaySet::uniform(20e-9) }]);
     }
 
     #[test]
@@ -91,7 +92,7 @@ mod tests {
         let ic = ic_with_delay(35e-9);
         let d0 = DriverId(0);
         let reqs = driver_requests(&ic, &[d0], &[Some(false)]);
-        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::Low, delay: 35e-9 }]);
+        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::Low, delays: DelaySet::uniform(35e-9) }]);
     }
 
     #[test]
@@ -113,7 +114,7 @@ mod tests {
         let ic = ic_with_delay(35e-9);
         let d0 = DriverId(0);
         let reqs = driver_requests(&ic, &[d0], &[Some(true)]);
-        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::High, delay: 35e-9 }]);
+        assert_eq!(reqs, vec![DriverRequest::Level { driver: d0, level: Mode::High, delays: DelaySet::uniform(35e-9) }]);
     }
 
     #[test]
@@ -125,10 +126,10 @@ mod tests {
         assert_eq!(
             reqs,
             vec![
-                DriverRequest::Level { driver: DriverId(0), level: Mode::High, delay: 0.0 },
+                DriverRequest::Level { driver: DriverId(0), level: Mode::High, delays: DelaySet::uniform(0.0) },
                 DriverRequest::Reset { driver: DriverId(1) },
-                DriverRequest::Level { driver: DriverId(2), level: Mode::Low, delay: 0.0 },
-                DriverRequest::Level { driver: DriverId(3), level: Mode::High, delay: 0.0 },
+                DriverRequest::Level { driver: DriverId(2), level: Mode::Low, delays: DelaySet::uniform(0.0) },
+                DriverRequest::Level { driver: DriverId(3), level: Mode::High, delays: DelaySet::uniform(0.0) },
             ]
         );
     }

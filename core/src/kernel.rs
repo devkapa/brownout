@@ -25,7 +25,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::drivers::Driver;
+use crate::drivers::{DelaySet, Driver};
 use crate::events::{DeviceId, DriverId, EventHeap, EventKind, Mode, PartitionId, Token, Version};
 use crate::solve::PartitionSolver;
 
@@ -62,6 +62,17 @@ pub enum KernelError {
     SolveFailed(String),
 }
 
+/// The outcome of a failed [`Kernel::seed_memory`] call: either the
+/// [`DeviceEvaluator::seed_memory`] hook itself declined (`engine.rs` maps
+/// this to ABI `-8`, invalid argument — the wrong kind, a wrong word count,
+/// or a bad value), or the delta cycle the seed then triggered failed the
+/// ordinary way (mapped exactly like any other [`KernelError`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SeedMemoryError {
+    Rejected(String),
+    Kernel(KernelError),
+}
+
 /// The kernel's own live counters (contract, "Stat indices" 4, 5, 6 and 13 —
 /// 7-12 and 14 belong to machinery this phase does not build). Only
 /// [`Kernel::advance`]'s real delta cycle updates these: [`Kernel::settle`]'s
@@ -92,24 +103,36 @@ pub struct KernelStats {
 /// `DeviceEvaluator` implementations return these instead of touching a
 /// `Driver` directly, so `Kernel` stays the sole owner of the driver table
 /// and the event heap.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DriverRequest {
     /// Request `driver` reach `level` through the inertial FSM
-    /// (`drivers::fsm::request`), with propagation delay `delay` — the
-    /// reader's own kind's datasheet or catalog figure. The kernel neither
-    /// knows nor needs to know what it is; it is carried on the request
-    /// rather than stored on `Driver` itself. During [`Kernel::settle`],
-    /// `delay` is ignored and treated as zero throughout (decision 8;
-    /// pec3-w1's `_seeding` forces every commit to zero delay while the
-    /// network settles at load, not only on a driver's first observation).
-    Level { driver: DriverId, level: Mode, delay: f64 },
+    /// (`drivers::fsm::request`), with the reader's own kind's full
+    /// datasheet [`DelaySet`] — the kernel neither knows nor needs to know
+    /// which pair it picks from; that is `Driver::request`'s job
+    /// (`drivers::fsm::pick`). During [`Kernel::settle`]'s frozen fixed
+    /// point, every set is ignored and treated as all-zero throughout
+    /// (decision 8; pec3-w1's `_seeding` forces every commit to zero delay
+    /// while the network settles at load, not only on a driver's first
+    /// observation).
+    Level { driver: DriverId, level: Mode, delays: DelaySet },
     /// The reader did not drive `driver` at all this evaluation (a
     /// tri-stated bus, a direction flip on a bidirectional part): drop its
     /// delay history outright (`drivers::fsm::reset`) instead of
     /// transitioning it through the ordinary delayed path, so the next
     /// request against it is again a first observation (spec 2.4's cleanup
-    /// pass, "drops the triad for any pin missing from `immediate`").
+    /// pass, "drops the triad for any pin missing from `immediate`"). Only a
+    /// W1c combinational IC still requests this (the HARD RULE: its
+    /// behaviour stays bit-identical); W1d point 4: "no IC requests a reset
+    /// any more" past that.
     Reset { driver: DriverId },
+    /// A device-owned deadline becoming due (W1d, "Kernel semantics: events
+    /// (W1a)" point 2 and the memories section's write-completion point):
+    /// pushes `EventKind::Timer { device, tag }` onto the heap at `at`. A
+    /// popped `Timer` folds `device` into that delta's directly-affected
+    /// readers (`Self::apply_due_events`), so the device that scheduled it
+    /// is evaluated in the very delta its `Timer` pops — the EEPROM's
+    /// pending-write completion is the one producer today.
+    Timer { device: DeviceId, at: f64, tag: u64 },
 }
 
 /// Evaluates one reader (a device with at least one input) once per delta.
@@ -191,6 +214,30 @@ pub trait DeviceEvaluator {
     fn ic_evaluations(&self) -> f64 {
         0.0
     }
+
+    /// `bo_engine_seed_memory` (W1d, owner decision 2): mutate this
+    /// evaluator's own state for `device` (a device-record index) to hold
+    /// `words`, or decline with a message naming why (the wrong kind, a
+    /// wrong word count, a bad value). `Err` means NOTHING changed —
+    /// [`Kernel::seed_memory`] never runs a delta cycle at all when this
+    /// returns one, so a well-behaved implementation must validate `words`
+    /// in full before mutating anything (core/README.md: "validated in full
+    /// before anything changes"). Default: every device declines — only an
+    /// evaluator that actually owns a memory (`devices::ics::IcEvaluator`)
+    /// overrides this.
+    fn seed_memory(&mut self, device: usize, words: &[f64]) -> Result<(), String> {
+        let _ = (device, words);
+        Err("not a memory".to_string())
+    }
+
+    /// `bo_engine_take_eeprom_updates` (W1d): collects and clears every
+    /// dirty EEPROM image this evaluator owns, packed `deviceIndex, W, word
+    /// x W` per dirty EEPROM (core/README.md's own wording), in device
+    /// order. Default empty: only an evaluator that actually owns an EEPROM
+    /// overrides this.
+    fn take_eeprom_updates(&mut self) -> Vec<f64> {
+        Vec::new()
+    }
 }
 
 /// So `Kernel<_, Box<dyn DeviceEvaluator>>` satisfies the trait bound
@@ -215,6 +262,14 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn ic_evaluations(&self) -> f64 {
         (**self).ic_evaluations()
+    }
+
+    fn seed_memory(&mut self, device: usize, words: &[f64]) -> Result<(), String> {
+        (**self).seed_memory(device, words)
+    }
+
+    fn take_eeprom_updates(&mut self) -> Vec<f64> {
+        (**self).take_eeprom_updates()
     }
 }
 
@@ -344,6 +399,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         &self.evaluator
     }
 
+    /// Mutable access to the device evaluator — `engine.rs`'s
+    /// `Engine::take_eeprom_updates` uses this to reach
+    /// [`DeviceEvaluator::take_eeprom_updates`] (a draining call, so it needs
+    /// `&mut`) without this generic module needing to know what an EEPROM
+    /// is, mirroring [`Self::solver_mut`]'s identical reason for existing.
+    pub fn evaluator_mut(&mut self) -> &mut E {
+        &mut self.evaluator
+    }
+
     /// Drains every `(t, slot, value)` write [`DeviceEvaluator::on_settled`]
     /// has reported since the last call — `engine.rs` calls this after every
     /// `advance`/`settle`/`apply_params_as_event` (successful or not: a
@@ -460,7 +524,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// through the same FSM and event-scheduling path `advance`'s delta
     /// cycle itself uses.
     pub fn request_driver(&mut self, driver: DriverId, level: Mode, now: f64, delay: f64) {
-        self.apply_request(DriverRequest::Level { driver, level, delay }, now, None);
+        self.apply_request(DriverRequest::Level { driver, level, delays: DelaySet::uniform(delay) }, now, false);
     }
 
     /// Schedules a partition threshold crossing at `candidate_t`, or rejects
@@ -474,27 +538,31 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         true
     }
 
-    /// Applies one `DriverRequest`, pushing a `Commit` event onto the heap
-    /// when the driver's FSM decides to schedule one. `delay_override`, when
-    /// set, replaces whatever delay a `Level` request carries — used by
-    /// [`Self::run_settle_pass`] to force zero delay throughout (decision 8).
+    /// Applies one `DriverRequest`, pushing a `Commit` (or `Timer`) event
+    /// onto the heap when appropriate. `zero_delays`, when set, replaces
+    /// whatever [`DelaySet`] a `Level` request carries with an all-zero one
+    /// — used by [`Self::run_settle_pass`] to force zero delay throughout
+    /// (decision 8, delays point 2: "the settle override zeroes the whole
+    /// set").
     ///
     /// Returns the driver's partition when a `Reset` actually changed
     /// something (contract, "Kernel semantics: events", point 2: "a reset
     /// ... marks its partition dirty for the next re-solve; readers of that
-    /// partition are then re-evaluated") — a `Level` request never returns
-    /// one, because its effect (if any) is a `Commit` event that will mark
-    /// the partition dirty itself, through the ordinary heap/`apply_due_commits`
-    /// path, once it becomes due. A `Reset` has no due time of its own: unlike
-    /// a commit, it takes effect the instant it is requested (`Driver::reset`),
-    /// so this is the only signal a caller gets that it needs to fold the
-    /// partition into whatever dirty set feeds the next re-solve.
-    fn apply_request(&mut self, req: DriverRequest, now: f64, delay_override: Option<f64>) -> Option<PartitionId> {
+    /// partition are then re-evaluated") — a `Level` or `Timer` request
+    /// never returns one, because its effect (if any) is an event that will
+    /// mark the relevant partition dirty (or fold its device into
+    /// `directly_affected`) itself, through the ordinary heap/
+    /// `apply_due_events` path, once it becomes due. A `Reset` has no due
+    /// time of its own: unlike a commit, it takes effect the instant it is
+    /// requested (`Driver::reset`), so this is the only signal a caller gets
+    /// that it needs to fold the partition into whatever dirty set feeds the
+    /// next re-solve.
+    fn apply_request(&mut self, req: DriverRequest, now: f64, zero_delays: bool) -> Option<PartitionId> {
         match req {
-            DriverRequest::Level { driver, level, delay } => {
-                let delay = delay_override.unwrap_or(delay);
+            DriverRequest::Level { driver, level, delays } => {
+                let delays = if zero_delays { DelaySet::uniform(0.0) } else { delays };
                 let idx = driver.0 as usize;
-                if let Some((due, mode, token)) = self.drivers[idx].request(level, now, delay) {
+                if let Some((due, mode, token)) = self.drivers[idx].request(level, now, &delays) {
                     self.heap.push(due, EventKind::Commit { driver, mode, token });
                 }
                 None
@@ -508,6 +576,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 let was_committed = self.drivers[idx].committed().is_some();
                 self.drivers[idx].reset();
                 if was_committed { self.driver_partition[idx] } else { None }
+            }
+            DriverRequest::Timer { device, at, tag } => {
+                self.heap.push(at, EventKind::Timer { device, tag });
+                None
             }
         }
     }
@@ -582,7 +654,19 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         directly_affected.extend(readers);
                     }
                 }
-                EventKind::Timer { .. } => {}
+                EventKind::Timer { device, .. } => {
+                    // W1d, "Kernel semantics: events (W1a)" point 2: "a
+                    // popped Timer adds its device to that delta's affected
+                    // readers, so the device is evaluated in the delta its
+                    // Timer pops." A `Timer` carries no version to go stale
+                    // by (events.rs's own doc comment: no producer needed
+                    // one before W1c's floating buckets, and W1d's one
+                    // producer — the EEPROM's pending-write completion —
+                    // never needs to cancel one either: a stray pop simply
+                    // finds nothing left to do, contract point 5 under
+                    // "Kernel semantics: memories").
+                    directly_affected.insert(device);
+                }
                 EventKind::Bucket => {
                     let (dirty_partitions, readers) = self.solver.bucket_boundary(self.time);
                     dirty.extend(dirty_partitions);
@@ -754,7 +838,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             for reader in affected {
                 let requests = self.evaluator.evaluate(reader, self.time, true, self.solver.voltages());
                 for req in requests {
-                    if let Some(p) = self.apply_request(req, self.time, None) {
+                    if let Some(p) = self.apply_request(req, self.time, false) {
                         carried_dirty.insert(p);
                     }
                 }
@@ -968,6 +1052,50 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         Ok(())
     }
 
+    /// Applies `bo_engine_seed_memory` as ONE event at the current time
+    /// (core/README.md's own section, W1d owner decision 2), mirroring
+    /// [`Self::apply_params_as_event`]'s shape: snapshot everything first,
+    /// mutate the evaluator through [`DeviceEvaluator::seed_memory`] (the
+    /// hook decides whether `device` even accepts a seed at all — the
+    /// evaluator's own state is restored either way, so a rejection is as
+    /// safe as a no-op even if a future implementation ever mutated before
+    /// detecting one), then run a delta cycle seeded with `device` as this
+    /// pass's sole `directly_affected` reader (contract: "the device is
+    /// re-evaluated in a delta cycle there, its readout shows the new word
+    /// at once, and an output the new word changes requests it with the
+    /// addrO pair"). Rolls back exactly like `apply_params_as_event` on
+    /// `-4`/`-7`.
+    pub fn seed_memory(&mut self, device: DeviceId, words: &[f64]) -> Result<(), SeedMemoryError> {
+        let heap_snapshot = self.heap.clone();
+        let drivers_snapshot = self.drivers.clone();
+        let solver_snapshot = self.solver.snapshot();
+        let dynamic_snapshot = self.solver.dynamic_snapshot();
+        let held_commits_snapshot = self.held_commits.clone();
+        let evaluator_snapshot = self.evaluator.snapshot();
+
+        if let Err(msg) = self.evaluator.seed_memory(device.0 as usize, words) {
+            self.evaluator.restore(evaluator_snapshot);
+            return Err(SeedMemoryError::Rejected(msg));
+        }
+
+        let mut seed_affected = BTreeSet::new();
+        seed_affected.insert(device);
+        if let Err(e) = self.run_deltas(BTreeSet::new(), seed_affected, true) {
+            self.heap = heap_snapshot;
+            self.drivers = drivers_snapshot;
+            self.solver.restore(solver_snapshot);
+            self.solver.dynamic_restore(dynamic_snapshot);
+            self.held_commits = held_commits_snapshot;
+            self.evaluator.restore(evaluator_snapshot);
+            return Err(SeedMemoryError::Kernel(e));
+        }
+        // This instant reached a quiet fixed point and was not rolled back:
+        // a completed instant, same as any `advance` delta or
+        // `apply_params_as_event`'s own event.
+        self.publish_settled();
+        Ok(())
+    }
+
     /// One settle pass: evaluate every reader in `all_readers`
     /// unconditionally (not just ones a solver flagged — nothing has run yet
     /// at the top of the very first pass, so there is nothing to flag by),
@@ -1003,7 +1131,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         for &reader in all_readers {
             let requests = self.evaluator.evaluate(reader, self.time, acting_on_edges, self.solver.voltages());
             for req in requests {
-                if let Some(p) = self.apply_request(req, self.time, Some(0.0)) {
+                if let Some(p) = self.apply_request(req, self.time, true) {
                     reset_dirty.insert(p);
                 }
             }
@@ -1107,7 +1235,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         for &reader in all_readers {
             let requests = self.evaluator.evaluate(reader, now, true, self.solver.voltages());
             for req in requests {
-                if let Some(p) = self.apply_request(req, now, None) {
+                if let Some(p) = self.apply_request(req, now, false) {
                     edge_pass_dirty.insert(p);
                 }
             }
@@ -1127,7 +1255,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::Driver;
+    use crate::drivers::{DelaySet, Driver};
     use crate::events::Mode::{High, Low};
 
     // ---- mocks --------------------------------------------------------
@@ -1195,7 +1323,7 @@ mod tests {
 
         let mut k = Kernel::new(RecordingSolver { seen: Vec::new() }, NoOpEvaluator);
         let d0 = k.add_driver(driver(1), Some(PartitionId(7)));
-        k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 5.0 }, 0.0, None);
+        k.apply_request(DriverRequest::Level { driver: d0, level: High, delays: DelaySet::uniform(5.0) }, 0.0, false);
 
         k.advance(5.0).unwrap();
 
@@ -1251,8 +1379,8 @@ mod tests {
         let d1 = k.add_driver(driver(2), Some(PartitionId(1)));
         // Both commits become due at the same instant, so phase 1 of one
         // delta pass marks both partitions dirty in a single batch.
-        k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 5.0 }, 0.0, None);
-        k.apply_request(DriverRequest::Level { driver: d1, level: High, delay: 5.0 }, 0.0, None);
+        k.apply_request(DriverRequest::Level { driver: d0, level: High, delays: DelaySet::uniform(5.0) }, 0.0, false);
+        k.apply_request(DriverRequest::Level { driver: d1, level: High, delays: DelaySet::uniform(5.0) }, 0.0, false);
 
         k.advance(5.0).unwrap();
 
@@ -1291,7 +1419,7 @@ mod tests {
                 self.calls.push((reader, now, acting_on_edges));
                 let next = reader.0 as usize + 1;
                 if next < self.drivers.len() {
-                    vec![DriverRequest::Level { driver: self.drivers[next], level: High, delay: 0.0 }]
+                    vec![DriverRequest::Level { driver: self.drivers[next], level: High, delays: DelaySet::uniform(0.0) }]
                 } else {
                     Vec::new()
                 }
@@ -1304,7 +1432,7 @@ mod tests {
         let d2 = k.add_driver(driver(3), Some(PartitionId(2)));
         k.evaluator.drivers = [d0, d1, d2];
         // Kick off the chain: driver 0 commits at t = 0.
-        k.apply_request(DriverRequest::Level { driver: d0, level: High, delay: 0.0 }, 0.0, None);
+        k.apply_request(DriverRequest::Level { driver: d0, level: High, delays: DelaySet::uniform(0.0) }, 0.0, false);
 
         k.advance(0.0).unwrap();
 
@@ -1343,7 +1471,7 @@ mod tests {
             fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
-                vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+                vec![DriverRequest::Level { driver: self.driver, level, delays: DelaySet::uniform(0.0) }]
             }
         }
 
@@ -1354,7 +1482,7 @@ mod tests {
         let d0 = DriverId(0);
         let mut k = Kernel::new(AlwaysAffects(DeviceId(0)), OscillatingEvaluator { driver: d0, next: High });
         assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
-        k.apply_request(DriverRequest::Level { driver: d0, level: Low, delay: 0.0 }, 0.0, None);
+        k.apply_request(DriverRequest::Level { driver: d0, level: Low, delays: DelaySet::uniform(0.0) }, 0.0, false);
 
         let err = k.advance(0.0).unwrap_err();
         assert_eq!(err, KernelError::Livelock { at: 0.0 });
@@ -1499,7 +1627,7 @@ mod tests {
             fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 self.calls += 1;
                 match self.calls {
-                    1 => vec![DriverRequest::Level { driver: self.driver, level: High, delay: 0.0 }],
+                    1 => vec![DriverRequest::Level { driver: self.driver, level: High, delays: DelaySet::uniform(0.0) }],
                     2 => vec![DriverRequest::Reset { driver: self.driver }],
                     _ => Vec::new(),
                 }
@@ -1599,7 +1727,7 @@ mod tests {
                 self.next = if level == High { Low } else { High };
                 // The requested delay does not matter: settle forces zero
                 // delay throughout regardless of what is asked for.
-                vec![DriverRequest::Level { driver: self.driver, level, delay: 123.0 }]
+                vec![DriverRequest::Level { driver: self.driver, level, delays: DelaySet::uniform(123.0) }]
             }
         }
 
@@ -1716,21 +1844,21 @@ mod tests {
                         // first observation.
                         if acting_on_edges && !self.reg_fired {
                             self.reg_fired = true;
-                            vec![DriverRequest::Level { driver: self.q, level: High, delay: 10.0 }]
+                            vec![DriverRequest::Level { driver: self.q, level: High, delays: DelaySet::uniform(10.0) }]
                         } else {
                             Vec::new()
                         }
                     }
                     INV => {
                         let q = self.shadow.borrow().q;
-                        vec![DriverRequest::Level { driver: self.n, level: if q { Low } else { High }, delay: 2.0 }]
+                        vec![DriverRequest::Level { driver: self.n, level: if q { Low } else { High }, delays: DelaySet::uniform(2.0) }]
                     }
                     NAND => {
                         let (q, n) = {
                             let s = self.shadow.borrow();
                             (s.q, s.n)
                         };
-                        vec![DriverRequest::Level { driver: self.we, level: if q && n { Low } else { High }, delay: 5.0 }]
+                        vec![DriverRequest::Level { driver: self.we, level: if q && n { Low } else { High }, delays: DelaySet::uniform(5.0) }]
                     }
                     RAM => {
                         let we = self.shadow.borrow().we;
@@ -1910,7 +2038,7 @@ mod tests {
             fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
                 let level = self.next;
                 self.next = if level == High { Low } else { High };
-                vec![DriverRequest::Level { driver: self.driver, level, delay: 0.0 }]
+                vec![DriverRequest::Level { driver: self.driver, level, delays: DelaySet::uniform(0.0) }]
             }
         }
 
@@ -1947,5 +2075,122 @@ mod tests {
         // instant's own work), so it must still be pending afterward -- the
         // rollback undoes the instant's own work, not history before it.
         assert_eq!(k.next_event_time(), 10.0, "the still-pending commit that was about to run must not be lost");
+    }
+
+    // ---- W1d: DriverRequest::Timer -----------------------------------------
+
+    #[test]
+    fn a_popped_timer_adds_its_device_to_this_deltas_affected_readers() {
+        // A `Timer` carries no driver and no partition of its own: it only
+        // exists to guarantee that the device which scheduled it gets one
+        // more `evaluate` call, in the delta the timer pops, at the
+        // timer's own time -- the EEPROM write-completion mechanism (W1d,
+        // "Kernel semantics: memories", point 5).
+        struct RecordingEvaluator {
+            calls: Vec<(DeviceId, f64)>,
+        }
+        impl DeviceEvaluator for RecordingEvaluator {
+            fn evaluate(&mut self, reader: DeviceId, now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+                self.calls.push((reader, now));
+                Vec::new()
+            }
+        }
+
+        let mut k = Kernel::new(NoOpSolver, RecordingEvaluator { calls: Vec::new() });
+        k.apply_request(DriverRequest::Timer { device: DeviceId(3), at: 5.0, tag: 42 }, 0.0, false);
+        // Nothing has happened yet -- the Timer only sits on the heap until
+        // its own due time, exactly like a Commit.
+        assert!(k.evaluator.calls.is_empty());
+
+        k.advance(5.0).unwrap();
+
+        assert_eq!(k.evaluator.calls, vec![(DeviceId(3), 5.0)], "the device must be evaluated in the delta its own Timer pops");
+    }
+
+    #[test]
+    fn next_event_time_reports_a_pending_timer_but_next_digital_due_time_does_not() {
+        // W1d, "Kernel semantics: events (W1a)" point 2: "Timer events are
+        // in the heap snapshot (rollback), counted by next_event_time and
+        // NOT by next_digital_due_time."
+        let mut k = Kernel::new(NoOpSolver, NoOpEvaluator);
+        k.apply_request(DriverRequest::Timer { device: DeviceId(0), at: 7.0, tag: 1 }, 0.0, false);
+        assert_eq!(k.next_event_time(), 7.0);
+        assert_eq!(k.next_digital_due_time(), f64::INFINITY, "a Timer is not a driver commit");
+    }
+
+    // ---- W1d: Kernel::seed_memory -------------------------------------------
+
+    #[test]
+    fn seed_memory_rejects_through_the_evaluator_hook_without_touching_the_kernel() {
+        struct DecliningEvaluator;
+        impl DeviceEvaluator for DecliningEvaluator {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+                Vec::new()
+            }
+            fn seed_memory(&mut self, _device: usize, _words: &[f64]) -> Result<(), String> {
+                Err("not a memory".to_string())
+            }
+        }
+        let mut k = Kernel::new(NoOpSolver, DecliningEvaluator);
+        let err = k.seed_memory(DeviceId(0), &[1.0; 16]).unwrap_err();
+        assert_eq!(err, SeedMemoryError::Rejected("not a memory".to_string()));
+        assert_eq!(k.time(), 0.0, "a rejected seed must not run any event at all");
+    }
+
+    #[test]
+    fn seed_memory_rolls_back_the_evaluator_hooks_own_mutation_on_a_forced_livelock() {
+        // Same oscillation shape as `an_oscillating_zero_delay_pair_hits_the_cap_and_returns_livelock_not_a_silent_exit`
+        // above, except the trigger is `Kernel::seed_memory` rather than
+        // `advance`: the hook itself succeeds (recording `seeded`) before
+        // the delta cycle it then runs never settles, so the whole instant
+        // -- the hook's own mutation included -- must roll back
+        // (core/README.md, `bo_engine_seed_memory`: "-4 or -7 rolls the
+        // contents back with the instant").
+        struct AlwaysAffects(DeviceId);
+        impl PartitionSolver for AlwaysAffects {
+            fn resolve_dirty(&mut self, dirty: &[PartitionId], _now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+                Ok(if dirty.is_empty() { Vec::new() } else { vec![self.0] })
+            }
+            fn voltages(&self) -> &[f64] {
+                &[]
+            }
+            fn currents(&self) -> &[f64] {
+                &[]
+            }
+            fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {
+                // No state to restore.
+            }
+        }
+        struct OscillatingEvaluator {
+            driver: DriverId,
+            next: Mode,
+            seeded: Option<f64>,
+        }
+        impl DeviceEvaluator for OscillatingEvaluator {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+                let level = self.next;
+                self.next = if level == High { Low } else { High };
+                vec![DriverRequest::Level { driver: self.driver, level, delays: DelaySet::uniform(0.0) }]
+            }
+            fn seed_memory(&mut self, _device: usize, words: &[f64]) -> Result<(), String> {
+                self.seeded = Some(words[0]);
+                Ok(())
+            }
+            fn snapshot(&self) -> Box<dyn std::any::Any> {
+                Box::new(self.seeded)
+            }
+            fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+                self.seeded = *snapshot.downcast::<Option<f64>>().expect("OscillatingEvaluator::restore: wrong snapshot type");
+            }
+        }
+
+        let d0 = DriverId(0);
+        let mut k = Kernel::new(AlwaysAffects(DeviceId(0)), OscillatingEvaluator { driver: d0, next: High, seeded: None });
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
+
+        let err = k.seed_memory(DeviceId(0), &[9.0]).unwrap_err();
+        assert_eq!(err, SeedMemoryError::Kernel(KernelError::Livelock { at: 0.0 }));
+        assert_eq!(k.evaluator().seeded, None, "a rolled-back seed must undo the hook's own mutation too");
+        assert_eq!(k.driver(d0).committed(), None, "the oscillator's own doomed commits must roll back too");
     }
 }

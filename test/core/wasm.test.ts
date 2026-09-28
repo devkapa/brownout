@@ -113,7 +113,7 @@ describe("the built module itself", () => {
     expect(WA.Module.imports(module)).toEqual([]);
   });
 
-  it("exports memory and every C ABI v2 (W1a+W1b) function, and NOT seed_memory yet", () => {
+  it("exports memory and every C ABI v2 (W1a+W1b+W1d) function", () => {
     const WA = getWasmApi();
     const module = new WA.Module(readWasmBytes());
     const names = new Set(WA.Module.exports(module).map((e: { name: string }) => e.name));
@@ -145,11 +145,17 @@ describe("the built module itself", () => {
       "bo_engine_trace_len",
       "bo_engine_trace_clear",
       "bo_engine_set_params",
+      // W1d's row of the same ABI table: the kernel/dispatcher wiring for
+      // these three now exists (this build's own commit), even though the
+      // TS-side CoreExports/CoreEngine bindings for them do not yet (a
+      // later, separate dispatch's job — `src/core/wasm.ts`'s own doc
+      // comment on `CoreExports` still marks that gap).
+      "bo_engine_seed_memory",
+      "bo_engine_take_eeprom_updates",
+      "bo_engine_eeprom_updates_ptr",
     ]) {
       expect(names.has(name)).toBe(true);
     }
-    // W1d's row of the same ABI table — must not exist yet.
-    expect(names.has("bo_engine_seed_memory")).toBe(false);
   });
 });
 

@@ -1,18 +1,25 @@
-//! The production combinational-IC [`DeviceEvaluator`] (core/README.md,
-//! "Kernel semantics: the digital core (W1c)") and its registration against
-//! a live [`Kernel`]. Owned by W1c worker I1.
+//! The production IC [`DeviceEvaluator`] (core/README.md, "Kernel semantics:
+//! the digital core (W1c)" / "...: sequential ICs (W1d)" / "...: memories
+//! (W1d)") and its registration against a live [`Kernel`]. W1c combinational
+//! dispatch owned by worker I1; the W1d family dispatch (this file's own
+//! `Family` enum, the sequential/memory branches of `evaluate`/`on_settled`/
+//! `snapshot`/`restore`/`seed_memory`/`take_eeprom_updates`, and widening
+//! `register` to every IC kind) is W1d worker K1's kernel-infrastructure
+//! wiring — the real per-kind register/memory logic behind
+//! `digital::sequential`/`digital::memory` is D1/D2's.
 //!
-//! This file adds no digital logic of its own: every IC is read and
-//! evaluated straight through the step-1 functions this crate already
-//! carries — `digital::power::ic_power`, `digital::levels::read`,
-//! `digital::combinational::evaluate`, `digital::delay::driver_requests` —
-//! exactly the way `solve::ic_tests`'s test-only `IcHarness` (step 2a)
-//! already proved out end to end against a real `Kernel`/`PartitionedSolver`
-//! pair. The two things a PRODUCTION evaluator needs beyond that harness are
-//! here: stat 12 (IC evaluations, counted even for an instant that later
-//! rolls back — core/README.md's "A failed advance": "stats keep
-//! failed-attempt counts") and [`DeviceEvaluator::snapshot`]/[`restore`]
-//! for the per-pin Schmitt state a failed instant must undo.
+//! This file adds no digital logic of its own for the combinational path:
+//! every combinational IC is read and evaluated straight through the step-1
+//! functions this crate already carries — `digital::power::ic_power`,
+//! `digital::levels::read`, `digital::combinational::evaluate`,
+//! `digital::delay::driver_requests` — exactly the way `solve::ic_tests`'s
+//! test-only `IcHarness` (step 2a) already proved out end to end against a
+//! real `Kernel`/`PartitionedSolver` pair. For a sequential or memory IC, the
+//! read/power steps are identical but the truth table is replaced by a call
+//! into that IC's own family evaluator (`digital::sequential::evaluate` /
+//! `digital::memory::evaluate`), which returns a [`digital::FamilyOutput`]
+//! this file maps onto `DriverRequest`s and digital-slot writes instead of
+//! `digital::delay::driver_requests`'s job for the combinational family.
 //!
 //! IC output stages are not behind `devices::stamp`/`devices::current` at
 //! all (`devices/mod.rs`'s own module doc) — a `Driver`'s stamp is the
@@ -24,34 +31,65 @@ use crate::digital::{self, IcRecord};
 use crate::drivers::Driver;
 use crate::events::{DeviceId, DriverId, Mode};
 use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel};
-use crate::program::Program;
+use crate::kinds;
+use crate::program::{Device, Program};
 use crate::solve::PartitionSolver;
 
+/// Which family of evaluator an IC's own state belongs to (core/README.md's
+/// W1d dispatcher): combinational keeps its per-LOGIC-pin Schmitt state
+/// (unchanged from W1c); sequential and memory each carry one state struct
+/// per device, built once at registration from the device's own record (a
+/// memory's also from its ROM words, when it has any).
+#[derive(Debug, Clone)]
+enum Family {
+    Combinational { schmitt_state: Vec<bool> },
+    Sequential(digital::sequential::SeqState),
+    Memory(digital::memory::MemState),
+}
+
 /// One registered IC: its typed record, the driver ids for its
-/// `combinational::output_capable` pins (in that same order — also this
-/// IC's digital-slot order, `IcRecord::slot_base + i` for output-capable pin
-/// `i`, core/README.md's "A digital slot belongs to each output-capable pin
-/// in pin order"), and one Schmitt-hysteresis flag per LOGIC pin
-/// (`digital::levels::read`'s `schmitt_state` — unused, never written, by a
-/// non-Schmitt kind, but every pin still gets a slot so `evaluate`'s
-/// `zip` stays positional and needs no per-pin "does this kind even have
-/// Schmitt" branch of its own).
+/// `digital::output_capable` pins (in that same order — also this IC's
+/// digital-slot order for the COMBINATIONAL family only, `IcRecord::slot_base
+/// + i` for output-capable pin `i`, core/README.md's "A digital slot belongs
+/// to each output-capable pin in pin order"; a sequential/memory IC's slots
+/// use a DIFFERENT indexing — see `family_slots`' own doc comment), and its
+/// family state.
 #[derive(Debug, Clone)]
 struct IcEntry {
     device_index: usize,
     record: IcRecord,
     output_drivers: Vec<DriverId>,
-    schmitt_state: Vec<bool>,
+    family: Family,
+    /// This IC's logic-pin reads at its own previous POWERED evaluation
+    /// (W1d contract, delays point 3 / sequential point 4 / memory point 7):
+    /// `None` before the first one. Kept for every family, not only
+    /// sequential/memory: a future combinational delay tail (the 74ls157's
+    /// `strobe`, the 74ls245's `oeEnable`/`oeDisable`) needs the identical
+    /// cause-detection rule, and this is where it would read it from.
+    last_reads: Option<Vec<bool>>,
+    /// Sequential/memory only: this device's digital-slot readout from its
+    /// LAST evaluation (`digital::FamilyOutput::slots`), published by
+    /// `on_settled` verbatim (sequential contract point 8 / memories point
+    /// 6: "a slot holds the evaluator's view at its latest evaluation, not
+    /// the committed pin level"). Sized to the kind's own digital-slot count
+    /// at registration (`kinds::shape(kind).digital_slots`) — a DIFFERENT
+    /// count, and a different meaning per index, from `output_drivers.len()`
+    /// (a 161 has 5 output-capable pins — `qa..qd rco` — but 5 slots keyed
+    /// `<id> qa qb qc qd`: the bare count has no driver of its own, and
+    /// `rco` has no slot at all). Left empty (and unused) for a
+    /// combinational entry, whose slots instead come from driver levels,
+    /// exactly as W1c already did.
+    family_slots: Vec<f64>,
 }
 
-/// The production combinational-IC evaluator. One instance covers every IC
-/// in a loaded program — `register` below builds it in one pass, alongside
-/// creating each IC's output drivers, which is why the two are wired
-/// together rather than split across two calls (`solve::ic_tests`'s own
-/// `register_ics`/`IcHarness::new` split exists only because that test-only
-/// harness is built AFTER the drivers it needs ids from already exist; this
-/// module's `register` does the same thing in one function since nothing
-/// else here needs the intermediate list).
+/// The production IC evaluator. One instance covers every IC in a loaded
+/// program — `register` below builds it in one pass, alongside creating
+/// each IC's output drivers, which is why the two are wired together rather
+/// than split across two calls (`solve::ic_tests`'s own `register_ics`/
+/// `IcHarness::new` split exists only because that test-only harness is
+/// built AFTER the drivers it needs ids from already exist; this module's
+/// `register` does the same thing in one function since nothing else here
+/// needs the intermediate list).
 #[derive(Debug)]
 pub struct IcEvaluator {
     ics: Vec<IcEntry>,
@@ -81,14 +119,45 @@ impl IcEvaluator {
     }
 }
 
+/// Maps one family evaluator's [`digital::FamilyOutput`] onto the
+/// `DriverRequest`s the kernel applies: one `Level` per output-capable pin
+/// driver (in the same order `out.requests` carries — the interface's own
+/// contract) and one `Timer` per pending deadline the evaluation scheduled
+/// (a memory's pending-write completion). The W1d counterpart of
+/// `digital::delay::driver_requests` for the combinational family — unlike
+/// that function, there is no `None`/`Reset` arm here at all: W1d point 4,
+/// "no IC requests a reset any more", so every entry in `out.requests` is
+/// already a concrete `Mode` (`Hiz` included).
+fn family_requests(device_index: usize, output_drivers: &[DriverId], out: &digital::FamilyOutput) -> Vec<DriverRequest> {
+    debug_assert_eq!(output_drivers.len(), out.requests.len(), "one driver per output-capable pin, in the same order");
+    let mut reqs: Vec<DriverRequest> = output_drivers
+        .iter()
+        .zip(out.requests.iter())
+        .map(|(&driver, &(level, delays))| DriverRequest::Level { driver, level, delays })
+        .collect();
+    reqs.extend(out.timers.iter().map(|&(at, tag)| DriverRequest::Timer { device: DeviceId(device_index as u32), at, tag }));
+    reqs
+}
+
+/// A memory device's ROM image, decoded from its blob tail (core/README.md,
+/// "ROM image": blob is `[slotBase, pinFlags x L, word x W]`) — empty for a
+/// 74ls189 (no ROM: `kinds::eeprom_words` is 0 for that kind).
+fn rom_words(device: &Device, kind: u32, logic_len: usize) -> Vec<u32> {
+    let words_from = 1 + logic_len;
+    let words_count = kinds::eeprom_words(kind);
+    device.blob[words_from..words_from + words_count].iter().map(|&w| w as u32).collect()
+}
+
 impl DeviceEvaluator for IcEvaluator {
     /// Contract point 4 ("An unpowered IC reads nothing") and point 7
-    /// (evaluate the truth table, map the result onto driver requests). This
-    /// function adds no rules of its own: every branch below is a direct
-    /// call into `digital::power`/`digital::levels`/`digital::combinational`/
-    /// `digital::delay`, exactly as `solve::ic_tests::IcHarness` (the
-    /// test-only sibling this mirrors) already does.
-    fn evaluate(&mut self, reader: DeviceId, now: f64, _acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
+    /// (evaluate the truth table, map the result onto driver requests) for
+    /// the combinational family; W1d sequential point 3 / memories points
+    /// 3-4 for the other two. Every branch below is a direct call into
+    /// `digital::power`/`digital::levels` plus, per family,
+    /// `digital::combinational`+`digital::delay` or
+    /// `digital::sequential`/`digital::memory` — no digital logic lives in
+    /// this function itself.
+    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
         self.evaluations += 1;
         let entry = self
             .ics
@@ -98,76 +167,137 @@ impl DeviceEvaluator for IcEvaluator {
         let ic = &entry.record;
         let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
         if !power.powered {
+            // W1c contract point 9 / W1d sequential point 3 ("an unpowered
+            // device reads, writes and requests nothing, so its state and
+            // lastClk freeze") / memories points 3-4: a sequential/memory
+            // slot goes NaN while unpowered. The combinational path already
+            // returned nothing here before W1d and still does — its slots
+            // come from driver levels at `on_settled` time, not from a
+            // stored readout, so there is nothing of its own to blank here.
+            if !matches!(entry.family, Family::Combinational { .. }) {
+                for s in entry.family_slots.iter_mut() {
+                    *s = f64::NAN;
+                }
+            }
             return Vec::new();
         }
-        let levels: Vec<bool> = ic
-            .logic
-            .iter()
-            .zip(entry.schmitt_state.iter_mut())
-            .map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st))
-            .collect();
-        let result = digital::combinational::evaluate(ic.kind, &levels);
-        digital::delay::driver_requests(ic, &entry.output_drivers, &result)
+
+        // Every logic pin's read, in pin order (W1c contract point 4).
+        // Schmitt hysteresis state only exists for the combinational
+        // family (`kinds::seq_check` rejects `schmitt = 1` on every W1d
+        // kind), so a sequential/memory read uses a throwaway per-pin
+        // scratch slot instead of a stored one.
+        let levels: Vec<bool> = if let Family::Combinational { schmitt_state } = &mut entry.family {
+            ic.logic
+                .iter()
+                .zip(schmitt_state.iter_mut())
+                .map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st))
+                .collect()
+        } else {
+            ic.logic
+                .iter()
+                .map(|p| {
+                    let mut scratch = false;
+                    digital::levels::read(ic, &power, p, voltages[p.node], now, &mut scratch)
+                })
+                .collect()
+        };
+
+        // "lastReads is written at every powered evaluation, frozen-settle
+        // passes included" (W1d delays point 3) — for every family, not
+        // only sequential/memory (this entry's own doc comment on the
+        // field).
+        let last_reads = entry.last_reads.clone();
+        entry.last_reads = Some(levels.clone());
+
+        match &mut entry.family {
+            Family::Combinational { .. } => {
+                let result = digital::combinational::evaluate(ic.kind, &levels);
+                digital::delay::driver_requests(ic, &entry.output_drivers, &result)
+            }
+            Family::Sequential(state) => {
+                let out = digital::sequential::evaluate(ic, state, &levels, last_reads.as_deref(), acting_on_edges, now);
+                for (i, v) in entry.family_slots.iter_mut().enumerate() {
+                    *v = out.slots.get(i).copied().unwrap_or(f64::NAN);
+                }
+                family_requests(entry.device_index, &entry.output_drivers, &out)
+            }
+            Family::Memory(state) => {
+                let out = digital::memory::evaluate(ic, state, &levels, last_reads.as_deref(), acting_on_edges, now);
+                for (i, v) in entry.family_slots.iter_mut().enumerate() {
+                    *v = out.slots.get(i).copied().unwrap_or(f64::NAN);
+                }
+                family_requests(entry.device_index, &entry.output_drivers, &out)
+            }
+        }
     }
 
-    /// One `Vec<bool>` per registered IC, in the same order as `self.ics` —
-    /// every pin's Schmitt-hysteresis flag `evaluate` may have written this
-    /// instant (core/README.md's "A failed advance": rolled back along with
+    /// Every piece of per-device mutable state `evaluate` (or `seed_memory`)
+    /// may have written this instant — the family state, `last_reads` and
+    /// `family_slots`, one tuple per registered IC in `self.ics` order
+    /// (core/README.md's "A failed advance": rolled back along with
     /// everything else the attempt touched). `evaluations` is deliberately
     /// NOT here — see its own doc comment.
     fn snapshot(&self) -> Box<dyn std::any::Any> {
-        Box::new(self.ics.iter().map(|e| e.schmitt_state.clone()).collect::<Vec<Vec<bool>>>())
+        Box::new(self.ics.iter().map(|e| (e.family.clone(), e.last_reads.clone(), e.family_slots.clone())).collect::<Vec<(Family, Option<Vec<bool>>, Vec<f64>)>>())
     }
 
     fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         let states = *snapshot
-            .downcast::<Vec<Vec<bool>>>()
+            .downcast::<Vec<(Family, Option<Vec<bool>>, Vec<f64>)>>()
             .expect("IcEvaluator::restore: snapshot was not produced by IcEvaluator::snapshot");
-        debug_assert_eq!(states.len(), self.ics.len(), "one Schmitt-state vector per registered IC");
-        for (entry, state) in self.ics.iter_mut().zip(states) {
-            entry.schmitt_state = state;
+        debug_assert_eq!(states.len(), self.ics.len(), "one state tuple per registered IC");
+        for (entry, (family, last_reads, family_slots)) in self.ics.iter_mut().zip(states) {
+            entry.family = family;
+            entry.last_reads = last_reads;
+            entry.family_slots = family_slots;
         }
     }
 
-    /// Contract point 10 ("Readouts"): a digital slot holds the pin's
-    /// committed level while driven (1.0 HIGH, 0.0 LOW — an `OPEN_COLLECTOR`
-    /// pin released HIGH reads exactly like a push-pull HIGH here, since its
-    /// `Driver::committed()` is `Some(High)` regardless of whether the
-    /// solver's own stamp then releases it or drives it — point 8's
-    /// electrical distinction, not a readout one) and `NaN` while the IC is
-    /// unpowered or the driver is uncommitted/reset (`None`) or mid-HIZ
-    /// (`Some(Hiz)`, unreachable in practice — `digital::delay::driver_requests`
-    /// never requests it — but handled rather than assumed impossible).
+    /// Contract point 10 ("Readouts") for the combinational family: a
+    /// digital slot holds the pin's committed level while driven (1.0 HIGH,
+    /// 0.0 LOW — an `OPEN_COLLECTOR` pin released HIGH reads exactly like a
+    /// push-pull HIGH here, since its `Driver::committed()` is `Some(High)`
+    /// regardless of whether the solver's own stamp then releases it or
+    /// drives it — point 8's electrical distinction, not a readout one) and
+    /// `NaN` while the IC is unpowered or the driver is uncommitted/reset
+    /// (`None`) or mid-HIZ (`Some(Hiz)`, unreachable in practice —
+    /// `digital::delay::driver_requests` never requests it — but handled
+    /// rather than assumed impossible).
     ///
-    /// Deliberately reads straight off `drivers`/`solver.ic_powered` with no
-    /// re-evaluation of pins or truth tables: the committed level this
-    /// reports is exactly what the ordinary delta cycle's `evaluate` calls
-    /// already settled on this instant, so recomputing it here would be
-    /// redundant (and would wrongly mutate `schmitt_state` a second time,
-    /// since `digital::levels::read`'s `commit = true` write happens on
-    /// every call). Every output-capable pin of every registered IC is
-    /// reported every call, whether or not it actually changed — cheap at
-    /// this crate's current IC counts — and left for the caller (`engine.rs`'s
-    /// `Readout`) to dedupe against its own last-published value before
-    /// deciding whether a trace entry is warranted, the same "raw write, the
-    /// reader decides if it's a change" split `Engine::set_digital_slot`
-    /// already uses for every other digital-slot writer.
+    /// W1d sequential point 8 / memories point 6 for the other two
+    /// families: a slot holds the evaluator's OWN view from its latest
+    /// evaluation (`family_slots`, already NaN while unpowered — see
+    /// `Self::evaluate`'s own doc comment), not a driver's committed level
+    /// at all — `powered` is still re-checked here too, defensively, for
+    /// parity with the combinational branch's identical belt-and-suspenders
+    /// read of live power state rather than trusting a value computed
+    /// earlier in the same instant.
     fn on_settled(&mut self, _now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
         for entry in &self.ics {
             let powered = solver.ic_powered(entry.device_index);
-            for (i, &driver_id) in entry.output_drivers.iter().enumerate() {
-                let slot = entry.record.slot_base + i;
-                let value = if !powered {
-                    f64::NAN
-                } else {
-                    match drivers[driver_id.0 as usize].committed() {
-                        Some(Mode::High) => 1.0,
-                        Some(Mode::Low) => 0.0,
-                        Some(Mode::Hiz) | None => f64::NAN,
+            match &entry.family {
+                Family::Combinational { .. } => {
+                    for (i, &driver_id) in entry.output_drivers.iter().enumerate() {
+                        let slot = entry.record.slot_base + i;
+                        let value = if !powered {
+                            f64::NAN
+                        } else {
+                            match drivers[driver_id.0 as usize].committed() {
+                                Some(Mode::High) => 1.0,
+                                Some(Mode::Low) => 0.0,
+                                Some(Mode::Hiz) | None => f64::NAN,
+                            }
+                        };
+                        out.push((slot, value));
                     }
-                };
-                out.push((slot, value));
+                }
+                Family::Sequential(_) | Family::Memory(_) => {
+                    for (i, &value) in entry.family_slots.iter().enumerate() {
+                        out.push((entry.record.slot_base + i, if powered { value } else { f64::NAN }));
+                    }
+                }
             }
         }
         out
@@ -176,10 +306,55 @@ impl DeviceEvaluator for IcEvaluator {
     fn ic_evaluations(&self) -> f64 {
         self.evaluations as f64
     }
+
+    /// `bo_engine_seed_memory`: routes to `digital::memory::seed` for a
+    /// registered 74ls189, declines every other kind (a wrong device index
+    /// is `Err` too — `Engine::seed_memory` already checks the index is in
+    /// range before this is ever called, so a miss here only means the
+    /// device at that index is not one `register` gave a `Family::Memory`
+    /// state at all, which cannot happen for a valid 74ls189 but is handled
+    /// rather than assumed).
+    fn seed_memory(&mut self, device: usize, words: &[f64]) -> Result<(), String> {
+        let entry = match self.ics.iter_mut().find(|e| e.device_index == device) {
+            Some(e) => e,
+            None => return Err(format!("seed_memory: no IC registered for device {device}")),
+        };
+        if entry.record.kind != kinds::IC_74LS189 {
+            return Err("seed_memory: not a memory".to_string());
+        }
+        let record = entry.record.clone();
+        match &mut entry.family {
+            Family::Memory(state) => digital::memory::seed(&record, state, words),
+            _ => Err("seed_memory: not a memory".to_string()),
+        }
+    }
+
+    /// `bo_engine_take_eeprom_updates`: collects and clears every dirty
+    /// 28c16/28c256 image (`digital::memory::take_update`), packed
+    /// `deviceIndex, W, word x W` per dirty EEPROM, in device (registration)
+    /// order. A 74ls189 is a `Family::Memory` too but is never a source
+    /// here — `digital::memory::take_update`'s own state never marks one
+    /// dirty (only a completed EEPROM write does, memories section point 5),
+    /// so calling it uniformly for every memory entry costs nothing and
+    /// needs no kind check of its own.
+    fn take_eeprom_updates(&mut self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for entry in &mut self.ics {
+            if let Family::Memory(state) = &mut entry.family {
+                if let Some(words) = digital::memory::take_update(state) {
+                    out.push(entry.device_index as f64);
+                    out.push(words.len() as f64);
+                    out.extend(words.iter().map(|&w| w as f64));
+                }
+            }
+        }
+        out
+    }
 }
 
-/// Registers every combinational IC device in `program` against `kernel`:
-/// one [`Driver`] per `combinational::output_capable` pin (contract point 2
+/// Registers every IC device in `program` against `kernel` — combinational,
+/// sequential and memory alike (W1d widened this from combinational-only):
+/// one [`Driver`] per `digital::output_capable` pin (contract point 2
 /// wiring), created in pin order and handed `kernel.solver().partition_of_node`
 /// so a driver whose own node happens to be fixed correctly gets `None`
 /// (contract point 4). Returns the [`IcEvaluator`] ready to install with
@@ -199,19 +374,31 @@ impl DeviceEvaluator for IcEvaluator {
 pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E>, program: &Program) -> IcEvaluator {
     let mut ics = Vec::new();
     for (device_index, device) in program.devices.iter().enumerate() {
-        if !digital::is_combinational_ic(device.kind) {
+        if !digital::is_ic(device.kind) {
             continue;
         }
         let record = IcRecord::from_device(device);
-        let mut output_drivers = Vec::with_capacity(digital::combinational::output_capable(record.kind).len());
-        for &i in digital::combinational::output_capable(record.kind) {
+        let outputs = digital::output_capable(record.kind);
+        let mut output_drivers = Vec::with_capacity(outputs.len());
+        for &i in outputs {
             let p = &record.logic[i];
             let partition = kernel.solver().partition_of_node(p.node);
             let driver = Driver::new_ic_output(p.node, record.vcc.node, record.gnd.node, device_index, p.open_collector);
             output_drivers.push(kernel.add_driver(driver, partition));
         }
-        let schmitt_state = vec![false; record.logic.len()];
-        ics.push(IcEntry { device_index, record, output_drivers, schmitt_state });
+
+        let slot_count = kinds::shape(record.kind).map_or(0, |s| (s.digital_slots)(record.logic.len() + 2));
+        let family = if digital::is_sequential_ic(record.kind) {
+            Family::Sequential(digital::sequential::SeqState::power_on(&record))
+        } else if digital::is_memory_ic(record.kind) {
+            let rom = rom_words(device, record.kind, record.logic.len());
+            Family::Memory(digital::memory::MemState::power_on(&record, &rom))
+        } else {
+            Family::Combinational { schmitt_state: vec![false; record.logic.len()] }
+        };
+        let family_slots = vec![f64::NAN; slot_count];
+
+        ics.push(IcEntry { device_index, record, output_drivers, family, last_reads: None, family_slots });
     }
     IcEvaluator { ics, evaluations: 0 }
 }
@@ -273,6 +460,37 @@ mod tests {
         let mut blob = vec![0.0];
         blob.extend(blob_flags);
         Device { kind: kinds::IC_74LS04, component_index: ci, pins: device_pins, params: ls_ttl_params(io_max, delay), blob }
+    }
+
+    /// A W1d sequential/memory device with every logic pin tied to `gnd`
+    /// (node 0) and no ROM contents (a 74ls161/173/74hc74/189) or an
+    /// all-0xFF image (an EEPROM, `atob("")`'s own fallback) — this
+    /// module's own dispatcher-wiring tests need nothing more specific than
+    /// "loads, is powered, and every family evaluator is reachable".
+    /// `logic_len` is the kind's own `L` (README's sequential/memory pin
+    /// table); `params` is the kind's full param vector (13 IC params, the
+    /// delay tail, and, for an EEPROM, `tWC`/`sdp`).
+    fn w1d_ic(kind: u32, ci: usize, vcc: usize, gnd: usize, logic_len: usize, params: Vec<f64>, rom_words: usize) -> Device {
+        let device_pins = std::iter::once(pin(vcc)).chain(std::iter::once(pin(gnd))).chain((0..logic_len).map(|_| pin(gnd))).collect();
+        let mut blob = vec![0.0]; // slotBase
+        blob.extend(std::iter::repeat(0.0).take(logic_len)); // pin flags, all clear
+        blob.extend(std::iter::repeat(0.0).take(rom_words)); // ROM words (0xFFFFFFFF-free stub image)
+        Device { kind, component_index: ci, pins: device_pins, params, blob }
+    }
+
+    fn w1d_params(delay_pairs: usize, extra: &[f64]) -> Vec<f64> {
+        let mut p = vec![0.0; ic_param::COUNT];
+        p[ic_param::VCC_MIN] = 4.5;
+        p[ic_param::VCC_MAX] = 5.5;
+        p[ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+        p[ic_param::VIL_FIXED] = 1.0;
+        p[ic_param::VIL] = 0.8;
+        p[ic_param::VIH_FIXED] = 1.0;
+        p[ic_param::VIH] = 2.0;
+        p[ic_param::NOMINAL] = 5.0;
+        p.extend(std::iter::repeat(20e-9).take(2 * delay_pairs));
+        p.extend_from_slice(extra);
+        p
     }
 
     fn program(node_count: usize, digital_slot_count: usize, devices: Vec<Device>) -> Program {
@@ -362,5 +580,70 @@ mod tests {
         // `pending_digital_writes`) — this one never did, so nothing was
         // ever queued for it.
         assert!(kernel.take_digital_writes().is_empty(), "a livelocked instant must publish no digital-slot writes at all");
+    }
+
+    // ---- W1d: the dispatcher end to end, one of each new kind, stubs ------
+
+    #[test]
+    fn a_program_holding_one_of_each_w1d_kind_loads_and_publishes_all_nan_slots() {
+        // core/README.md's own kernel-semantics tables give each kind's `L`
+        // (logic-pin count) and delay-pair count; every logic pin here ties
+        // to gnd (a plain, always-valid read), and every device shares the
+        // same 5V-fixed supply so every one of them is POWERED — proving the
+        // dispatcher actually reaches `digital::sequential::evaluate`/
+        // `digital::memory::evaluate` (the stubs), not merely that an
+        // unpowered branch trivially returns NaN.
+        let p = program(2, 100, vec![
+            source(0, 1, 0, 5.0),
+            w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
+            w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
+            w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        assert_eq!(all_readers.len(), 5, "every W1d kind must register as a reader, exactly like a W1c IC");
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+        let writes = kernel.take_digital_writes();
+        assert!(!writes.is_empty(), "the stubs must still publish a slot value (NaN) for every device, not skip publishing entirely");
+        for &(_, _, value) in &writes {
+            assert!(value.is_nan(), "every W1d slot must read NaN while the family evaluators are stubs, got {value}");
+        }
+        assert!(kernel.evaluator().ic_evaluations() >= 5.0, "settle must have evaluated every one of the 5 new readers at least once");
+    }
+
+    #[test]
+    fn seed_memory_declines_a_non_189_kind_and_routes_a_189_to_the_memory_stub() {
+        let p = program(2, 20, vec![
+            source(0, 1, 0, 5.0),
+            w1d_ic(kinds::IC_74HC74, 1, 1, 0, 12, w1d_params(2, &[]), 0),
+            w1d_ic(kinds::IC_74LS189, 2, 1, 0, 14, w1d_params(5, &[]), 0),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+        let wrong_kind = kernel.evaluator_mut().seed_memory(1, &[0.0; 16]).unwrap_err();
+        assert!(wrong_kind.contains("not a memory"), "a 74hc74 must never reach digital::memory::seed: {wrong_kind}");
+
+        // Routed to the real 74ls189 -- the stub still declines, but with a
+        // DIFFERENT message (`digital::memory::seed`'s own "not implemented
+        // yet"), proving the dispatcher actually reached it rather than
+        // stopping at the same "not a memory" guard.
+        let routed = kernel.evaluator_mut().seed_memory(2, &[0.0; 16]).unwrap_err();
+        assert_ne!(routed, wrong_kind, "a real 74ls189 must be routed past the kind guard, even though the stub still declines");
+    }
+
+    #[test]
+    fn take_eeprom_updates_returns_empty_with_no_dirty_eeprom() {
+        let p = program(2, 20, vec![
+            source(0, 1, 0, 5.0),
+            w1d_ic(kinds::IC_28C16, 1, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+        let updates = kernel.evaluator_mut().take_eeprom_updates();
+        assert!(updates.is_empty(), "the stub never has a dirty EEPROM to report");
     }
 }
