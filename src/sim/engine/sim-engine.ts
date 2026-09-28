@@ -479,6 +479,20 @@ function digitalDelayKeys(pinId: string): readonly [string, string, string] {
   return keys;
 }
 
+// Exported for the core compiler (core/README.md, "ROM image"), which must
+// decode `contents` with this exact code: atob's leniency (whitespace,
+// missing padding) and its throws decide which bytes classic loads.
+export function eepromImageBytes(size: number, contentsB64: string): Uint8Array {
+  const bytes = new Uint8Array(size).fill(0xff);
+  if (contentsB64) {
+    try {
+      const raw = Uint8Array.from(atob(contentsB64), (ch) => ch.charCodeAt(0));
+      bytes.set(raw.subarray(0, size));
+    } catch { /* invalid base64 -> keep 0xff fill */ }
+  }
+  return bytes;
+}
+
 // Exported as the DeviceStateMaps.eeproms value type; the map, its load()
 // initialisation (contents/SDP seeding), and snapshot/rollback stay here.
 export interface EepromState {
@@ -2903,13 +2917,7 @@ export class SimEngine {
           prev.sdpEnabled = sdpEnabled;
           this.state.eeproms.set(c.id, prev);
         } else {
-          const bytes = new Uint8Array(size).fill(0xff);
-          if (contentsB64) {
-            try {
-              const raw = Uint8Array.from(atob(contentsB64), (ch) => ch.charCodeAt(0));
-              bytes.set(raw.subarray(0, size));
-            } catch { /* invalid base64 -> keep 0xff fill */ }
-          }
+          const bytes = eepromImageBytes(size, contentsB64);
           this.state.eeproms.set(c.id, {
             bytes,
             contentsHash: hash,

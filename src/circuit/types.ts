@@ -375,6 +375,27 @@ export interface ElectricalSpecs {
    * (propagationDelayForKind in sim-engine.ts).
    */
   prop_delay_ns?: number;
+  /**
+   * Per-path datasheet switching figures in nanoseconds (owner decision 3;
+   * core/spec/w1-datasheet-delays.md): typical at 5 V and the datasheet's
+   * standard load (HC parts: the 4.5 V column), or the maximum where no
+   * typical is published. Read only by the core compiler
+   * (src/core/compile/delays.ts); the classic engine keeps prop_delay_ns and
+   * the family prefix.
+   */
+  switching_ns?: Record<string, SwitchingPathNs>;
+  /** Where switching_ns came from (datasheet, typical or maximum, supply, load). Documentation only; never read. */
+  switching_source?: string;
+}
+
+/** One datasheet switching path in nanoseconds: a level path carries tplh/tphl, an enable tpzh/tpzl, a disable tphz/tplz. */
+export interface SwitchingPathNs {
+  tplh?: number;
+  tphl?: number;
+  tpzh?: number;
+  tpzl?: number;
+  tphz?: number;
+  tplz?: number;
 }
 
 /**

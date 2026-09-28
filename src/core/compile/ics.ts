@@ -117,45 +117,14 @@ export function isFloatingInput(part: ReturnType<typeof resolveComponentPart>, p
 }
 
 /**
- * Compiles one combinational IC component (`component.kind` one of the 11
- * codes 50-59/61) into its pins/params/blob-flags. The caller
- * (compile/index.ts) still owns: dispatching only these 11 kinds here,
- * allocating digital slots (`outputCapablePinIds`, in order) and assembling
- * the final blob (`[slotBase, ...pinFlags]`).
+ * The 13 IC params (CORE_IC_PARAM, kinds.ts) of one IC component, straight
+ * from `specsForComponent`: power window, family flags, thresholds, Schmitt
+ * figures, nominal supply, ioMax and classic's package delay. Shared by the
+ * combinational compiler here and the W1d register and memory compilers,
+ * which then zero the Schmitt params and append their delay tail
+ * (core/README.md, "Kind codes and records").
  */
-export function compileCombinationalIc(
-  built: CoreNodeBuild,
-  openKeys: ReadonlySet<string>,
-  component: SimComponent,
-): IcCompileResult {
-  const kind = component.kind;
-  const logicPins = icPinMap(kind);
-
-  const { vccPin, gndPin } = supplyPinsForComponent(component);
-  if (!vccPin || !gndPin) {
-    // Classic's supply-less path (a stale catalogUid, or a kind missing from
-    // the injected library) — README's "IC logic pins" decline rule.
-    return { ok: false, reason: `topology:ic-pins:${component.id}` };
-  }
-
-  // The component's declared pin ids must be EXACTLY the two supply pins
-  // plus the kind's logic pins — no more, no fewer (README: "Catalog parts
-  // always carry the full set; the decline keeps classic's missing-pin
-  // defaults... out of the core, where an absent pin would read node 0.").
-  const declaredIds = new Set(component.pins.map((p) => p.id));
-  const expectedIds = new Set<string>([vccPin, gndPin, ...logicPins.map((p) => p.id)]);
-  if (declaredIds.size !== expectedIds.size || ![...expectedIds].every((id) => declaredIds.has(id))) {
-    return { ok: false, reason: `topology:ic-pins:${component.id}` };
-  }
-
-  const pins: ProgramPinInput[] = [
-    buildPinRecord(built, openKeys, kind, component.id, vccPin),
-    buildPinRecord(built, openKeys, kind, component.id, gndPin),
-    ...logicPins.map((p) => buildPinRecord(built, openKeys, kind, component.id, p.id)),
-  ];
-
-  // ---- params (CORE_IC_PARAM's 13 indices, kinds.ts) -----------------------
-
+export function icBaseParams(component: SimComponent): number[] {
   const specs = specsForComponent(component);
   const family = specs?.logic_family ?? "";
 
@@ -223,6 +192,48 @@ export function compileCombinationalIc(
   params[CORE_IC_PARAM.nominal] = nominal;
   params[CORE_IC_PARAM.ioMax] = ioMax;
   params[CORE_IC_PARAM.delay] = propagationDelayForComponent(component);
+  return params;
+}
+
+/**
+ * Compiles one combinational IC component (`component.kind` one of the 11
+ * codes 50-59/61) into its pins/params/blob-flags. The caller
+ * (compile/index.ts) still owns: dispatching only these 11 kinds here,
+ * allocating digital slots (`outputCapablePinIds`, in order) and assembling
+ * the final blob (`[slotBase, ...pinFlags]`).
+ */
+export function compileCombinationalIc(
+  built: CoreNodeBuild,
+  openKeys: ReadonlySet<string>,
+  component: SimComponent,
+): IcCompileResult {
+  const kind = component.kind;
+  const logicPins = icPinMap(kind);
+
+  const { vccPin, gndPin } = supplyPinsForComponent(component);
+  if (!vccPin || !gndPin) {
+    // Classic's supply-less path (a stale catalogUid, or a kind missing from
+    // the injected library) — README's "IC logic pins" decline rule.
+    return { ok: false, reason: `topology:ic-pins:${component.id}` };
+  }
+
+  // The component's declared pin ids must be EXACTLY the two supply pins
+  // plus the kind's logic pins — no more, no fewer (README: "Catalog parts
+  // always carry the full set; the decline keeps classic's missing-pin
+  // defaults... out of the core, where an absent pin would read node 0.").
+  const declaredIds = new Set(component.pins.map((p) => p.id));
+  const expectedIds = new Set<string>([vccPin, gndPin, ...logicPins.map((p) => p.id)]);
+  if (declaredIds.size !== expectedIds.size || ![...expectedIds].every((id) => declaredIds.has(id))) {
+    return { ok: false, reason: `topology:ic-pins:${component.id}` };
+  }
+
+  const pins: ProgramPinInput[] = [
+    buildPinRecord(built, openKeys, kind, component.id, vccPin),
+    buildPinRecord(built, openKeys, kind, component.id, gndPin),
+    ...logicPins.map((p) => buildPinRecord(built, openKeys, kind, component.id, p.id)),
+  ];
+
+  const params = icBaseParams(component);
 
   // ---- blob: per-logic-pin flags, plus which pins are output-capable ------
 
