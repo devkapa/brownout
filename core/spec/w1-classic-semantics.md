@@ -44,6 +44,27 @@ code and was not executed.
 - Each chapter's core-divergence material is consolidated in chapter 11 (rows
   D1-D33). Each chapter's open questions are consolidated in chapter 12, tagged
   with the chapter number.
+- Classic changes that landed after the baseline are listed under "Deltas
+  since the 2026-09-24 baseline" below. Where a delta and a chapter disagree,
+  the delta wins; the chapters carry a "Delta:" note at each affected point.
+
+**Deltas since the 2026-09-24 baseline.** Classic fixes merged into
+`feat/wasm-core-w1` after this document was assembled (plan decision 10: a
+spec delta before any kind they touch is ported). Each one is a real merge of
+its own branch; the branches stay unreleased until brownout 1.0.0. Line
+citations into the files these merges touched (`sim-engine.ts`, `graph.ts`,
+`device-registry.ts`, `ac-analysis.ts`, `passives.ts`, `sources.ts`,
+`rp2040.ts`, the SPICE files) still refer to the baseline tree and were not
+re-pinned.
+
+| Commit (branch) | What classic does now | Chapters | Core |
+|---|---|---|---|
+| `c221994`, `0a0b37c` (Q-O26; on this branch since W1b) | `spdt_switch` reports the current com -> the selected throw (`b` at position 0, `c` otherwise, the stamp's own selection), and 0 A with fewer than 3 pins. | 7.6, 7.11, Q-O26 | Ported in W1b (`core/README.md`, kind 6). |
+| `bd90847` (`fix/floating-section-solve`) | Every electrically isolated section gets a 1 S tie to ground (`ISOLATED_SECTION_ANCHOR_G`) at one net row: the return pin (`neg`, else `gnd`) of the first `SOURCE_KINDS` component in the section, else its lowest net row. Sections are a union-find over each component's pins, split only where a model declares `galvanicGroups` (optocoupler, coupled inductor, relay), recomputed every `load()`, and never depend on a switch position, relay contact or failure; internal nodes stay out. The static stamp base, the DC-stability replay and the AC seed all stamp the anchors. A circuit whose every net reaches ground is bit-identical. | 8.9, 10.1, 10.2 | Not ported: isolated nets still rest on `NODE_RSHUNT_G`, and a floating ideal source is `-3`, so every circuit this changes falls back to classic. Port in W1f, with `isolated-sections.test.ts` in gate 1. |
+| `990232e` (`fix/pot-rotation-end-stops`) | `position` is rotation from the CCW stop: position 1 puts the wiper at `cw`, the log taper grows `rCcw` with rotation, and each segment's overload limit is floored at `0.25·p_max` (`POT_SEGMENT_MIN_RATING_SHARE`), rated against `rCw + rCcw` rather than the unused `resistance` param. | 7.1, 7.2.5, 7.7 | Those sections already describe this: the baseline working tree carried the fix before it was committed, so until this merge the branch's classic code disagreed with them (position 1 put the wiper at `ccw`). Port in W1h, with `potentiometer.test.ts` in gate 1. |
+| `2c6ba7d` (`fix/current-source-polarity`) | `current_source` drives its current out of `pos`, through the circuit and back into `neg`, like a battery's `+`. The transient stamp, the element current (pin0 -> pin1, so a sourcing source reads `-I` plus its shunt's current) and the small-signal injection flip together. The SPICE parser attaches an I card's n+ to `neg`, so decks keep their meaning. | 8.6a | Not a W1 kind. Port with the kind, with `current-source-polarity.test.ts` in gate 1. |
+| `b70be41`, `bc1cfd6`, `a05089b` (`fix/rp2040-long-script`, which carries `perf/rp2040-idle-skip` and `fix/rp2040-quiet-logger`) | `RP2040Mcu` logs errors only, on every boot and `reset()`. An armed USB CDC OUT read is held until the host has data, never completed with zero bytes, so a sleeping core no longer takes a USB interrupt every ~28 µs. Host-to-device REPL bytes go into an unbounded host-side queue that tops up the 512-entry CDC FIFO each time the firmware arms an OUT read, so a program over 512 bytes (and its Ctrl-D) is no longer dropped. | none (outside W1) | W7, with `rp2040-idle.test.ts` (busy fraction < 0.01) and `rp2040-long-script.test.ts` in gate 1. |
+| `3497700`, `fccd8bd` (`fix/rp2040-adc-temp`, which carries `fix/rp2040-adc-counts`) | `RP2040Mcu.setAnalogVolts` feeds `round(clamp(v, 0, vcc) / vcc · 4095)` counts to ADC0-2, not volts, with `vcc` the 3V3 rail. ADC4, the temperature sensor, is seeded at boot and on `reset()` with 876 counts (0.706 V, 27 °C per the RP2040 datasheet §4.9.5, against the 3V3 reference), fixed and not temperature-driven. | none (outside W1) | W7, with the ADC cases of `rp2040.test.ts` and `rp2040-micropython.test.ts` (27 ± 1 °C) in gate 1. |
 
 **Where shared mechanics are specified.** Other chapters point here instead of
 repeating them.
@@ -2795,6 +2816,9 @@ when closed and nothing when open.
   - **`updateCurrent` always reports `(V(pins[0])-V(pins[1]))/0.001` = com->b,
     whatever the position** (`510-520`). At position 1 this is meaningless
     (probe: 5000 A).
+  - Delta: fixed by `c221994`/`0a0b37c` (Q-O26). It now reports com -> the
+    selected throw, and 0 A with fewer than 3 pins. See "Deltas since the
+    2026-09-24 baseline".
 - **push_dpdt** (`537-572`):
   - Pins `l1,c1,r1,l2,c2,r2`. `Number(position)!==0` selects the right throws,
     otherwise the left, and both poles move together.
@@ -2818,6 +2842,9 @@ when closed and nothing when open.
 
 ### 7.7 Potentiometer / trimmer (`passives.ts:626-682`)
 
+- Delta: this section already describes `990232e`, which the baseline working
+  tree carried uncommitted; the branch's classic code matches it only from that
+  merge on. See "Deltas since the 2026-09-24 baseline".
 - `position` runs CCW(0) -> CW(1).
 - `fromCcw` is `10^(2(p-1))` when `taper==="log"`, otherwise `p`.
 - `rCw = max(1, rTotal(1-fromCcw))`, `rCcw = max(1, rTotal·fromCcw)`
@@ -2867,8 +2894,9 @@ area:
 ### 7.11 Readouts
 
 - `netV` (`5599-5604`).
-- `elementI` (sign pin0->pin1, except: spdt always com->b; push_dpdt
-  c1->throw; pot CW->wiper; dip is a sum).
+- `elementI` (sign pin0->pin1, except: spdt com->selected throw since
+  `c221994`, com->b always before it; push_dpdt c1->throw; pot CW->wiper; dip
+  is a sum).
 - No `digitalState` and no `setDisplayInfo` from this area.
 - `getFailures()`: resistor, pot and trimmer (`resistor_overload`, message
   `passives.ts:155-156`) and fuse (`fuse_tripped`, `725`).
@@ -2979,7 +3007,8 @@ file also holds `signal_gen` and `current_source` (§8.6a).
   (`elements.ts:62-125`). Only `battery_pack` in this area uses it
   (`sources.ts:146-155`).
 - **Node shunt.** `NODE_RSHUNT_G = 1e-12` S goes on every node row before any
-  device stamps (`sim-engine.ts:85,4806-4808`).
+  device stamps (`sim-engine.ts:85,4806-4808`). Delta: since `bd90847` the
+  isolated-section anchors (1 S, one row per section) go in beside it (§8.9).
 
 #### 8.1.2 Static ideal-source fast path
 
@@ -3382,7 +3411,9 @@ Consequences for this area:
   - Host floors: `1/(40f)` for sine/triangle/ramp, `1/(10f)` for square/pulse,
     `1/20 kHz` for noise (`headless.ts:155-164`).
 - **current_source** has no branch row, and both its stamp and its elementI are
-  homotopy-scaled (`sources.ts:406-474`).
+  homotopy-scaled (`sources.ts:406-474`). Delta: since `2c6ba7d` it drives its
+  current out of `pos`, and its elementI and small-signal injection flip with
+  it. See "Deltas since the 2026-09-24 baseline".
 
 ### 8.7 Readout summary
 
@@ -3431,6 +3462,11 @@ that the reference is a coordinate choice that never creates connectivity:
 other source returns and board grounds stay separate unless wired. A
 subcircuit with no conductive path to the datum is then held only by the
 1e-12 S node shunts (§10.1).
+
+Delta: since `bd90847`, each such subcircuit also gets a 1 S tie to ground at
+one net row, preferring a source's return pin, so a second battery reads 0 V at
+its own negative terminal. Sections come from the wiring and `galvanicGroups`,
+not from switch or relay state. See "Deltas since the 2026-09-24 baseline".
 
 ### 8.10 Prototype cross-check (`brownout-core-prototype/js`)
 
@@ -4033,6 +4069,10 @@ as `integrationBeNextStep` (`:2144`) and restored (`:2253`).
 - in the DC-OP recorder replay (`:3427-3429`);
 - in AC (`ac-analysis.ts:320`).
 
+Delta: since `bd90847` all three places also stamp
+`ISOLATED_SECTION_ANCHOR_G = 1` on each isolated section's anchor row, and
+`isolatedSectionAnchorRows()` exposes those rows (§8.9).
+
 ### 10.2 `load(circuit)` (`:2418-2950`)
 
 The doc comment (`:2418-2424`) summarises the rule: carry by ID first, then by
@@ -4042,6 +4082,8 @@ Sequence:
 1. `_beNextStep = true` (`:2430`).
 2. Snapshot the old circuit and nets (`:2434-2435`).
 3. `buildNets`, `_buildMatrix`, `_compileRuntimeMetadata` (`:2437-2440`).
+   Delta: since `bd90847` this step also computes the isolated-section
+   anchors (§8.9).
 4. Prune `microbitDrives` and `_mcuBootSimTime` for removed ids
    (`:2445-2457`).
 5. Capture the `prev*` maps (`:2459-2480`) and build `oldKindById` (`:2481`).
@@ -4745,7 +4787,8 @@ kind on Ben Eater's computer.
   DCR and core loss, or always apply the resolved part's defaults? (`p_max`
   already resolves without a uid.)
 - **Q-O26** [7] (W1 board) `spdt_switch` `updateCurrent` always reports com→b,
-  even at position 1 (a probe read 5000 A). Fix or mirror?
+  even at position 1 (a probe read 5000 A). Fix or mirror? Resolved: fixed in
+  both engines (`c221994`, `0a0b37c`; core W1b).
 - **Q-O27** [7,9] (W1 board) A resistor with no `resistance` param stamps 1 kΩ
   but never overloads (`passives.ts:107` vs `:175`); a fuse with no `iRating`
   never trips. Mirror or fix?
