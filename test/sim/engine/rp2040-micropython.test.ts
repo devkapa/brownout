@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { RP2040Mcu } from "../../../src/sim/engine/rp2040.js";
@@ -30,6 +30,23 @@ describe("RP2040Mcu — runs real MicroPython (slow)", () => {
     mcu.runScript("from machine import Pin\r\np = Pin(25, Pin.OUT)\r\np.value(1)\r\n");
     expect(runUntil(mcu, "gp25", "out-high")).toBe(true);
     expect(mcu.scriptStarted).toBe(true);
+  }, 30_000);
+
+  it("boots and runs a program without writing to the console", () => {
+    // rp2040js's default Debug-level logger printed every USB transfer, SEV and
+    // unimplemented peripheral access; in the app that was 2,000+ messages in
+    // the first seconds and the engine fell behind real time.
+    const spies = (["log", "debug", "info", "warn"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    try {
+      const mcu = new RP2040Mcu(UF2);
+      mcu.runScript("from machine import Pin\r\np = Pin(25, Pin.OUT)\r\np.value(1)\r\n");
+      expect(runUntil(mcu, "gp25", "out-high")).toBe(true);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   }, 30_000);
 
   it("drives a header GPIO (GP15) as an output-low", () => {

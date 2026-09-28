@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RP2040Mcu, RP2040_IO_PINS, RP2040_ANALOG_PINS, loadUF2IntoFlash } from "../../../src/sim/engine/rp2040.js";
 
 // RP2040 register addresses used to drive GPIO from "outside" the way emulated
@@ -147,6 +147,28 @@ describe("RP2040Mcu — MicrocontrollerCore coupling", () => {
     mcu.step(100e-9);
     expect(clock.nanos).toBeGreaterThanOrEqual(2 ** 54 + 64);
     expect(alarmCount).toBe(1);
+  });
+
+  it("keeps rp2040js's debug/info/warn chatter out of the console, before and after reset()", () => {
+    // rp2040js defaults to a Debug-level ConsoleLogger, so every unimplemented
+    // peripheral access, USB transfer and SEV hit the console; a booting
+    // MicroPython image made thousands per second and stalled the app.
+    const PLL_SYS_BASE = 0x40028000; // an UnimplementedPeripheral in rp2040js
+    const spies = (["log", "debug", "info", "warn"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const read = (mcu: RP2040Mcu) =>
+      (mcu as unknown as { rp2040: { readUint32(a: number): number } }).rp2040.readUint32(PLL_SYS_BASE);
+    try {
+      const mcu = new RP2040Mcu();
+      read(mcu);
+      raw(mcu).writeUint32(PLL_SYS_BASE + 8, 0x7d);
+      mcu.reset(); // boot() builds a fresh Simulator, which must be quiet too
+      read(mcu);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 
   it("loadUF2IntoFlash ignores non-UF2 bytes and copies flash blocks", () => {

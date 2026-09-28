@@ -15,7 +15,7 @@
  * outputs-valid-after-step / inputs-consumed-next-step phasing as ArduinoMcu.
  */
 
-import { RP2040, Simulator, USBCDC, GPIOPinState } from "rp2040js";
+import { RP2040, Simulator, USBCDC, GPIOPinState, ConsoleLogger, LogLevel } from "rp2040js";
 import type { MicrocontrollerCore, PinDriveState, PinEvent } from "./mcu.js";
 import { bootromB1 } from "./rp2040-bootrom.js";
 
@@ -113,6 +113,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
   private _pendingSource: string | null = null;
   private _replPhase: 0 | 1 | 2 = 0;
   private _nudgeCount = 0;
+  // Reads the firmware armed on a USB OUT endpoint while the host had nothing
+  // to send (endpoint -> byte count). Answered by send(); see boot().
+  private _heldReads = new Map<number, number>();
+  // REPL bytes not yet in USBCDC's tx FIFO, which holds 512 and drops the rest.
+  private _txQueue: number[] = [];
 
   /** @param firmware optional UF2 image (e.g. MicroPython) to boot from flash. */
   constructor(firmware?: Uint8Array) {
@@ -131,6 +136,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
     // ourselves (never call Simulator.execute — that starts a setTimeout pacer).
     this.sim = new Simulator();
     this.rp2040 = this.sim.rp2040;
+    // rp2040js defaults to a Debug-level ConsoleLogger, which prints every USB
+    // transfer, SEV and unimplemented peripheral access: thousands of lines a
+    // second while MicroPython boots, enough to stall the host. Keep errors only
+    // (still thrown, as before).
+    this.rp2040.logger = new ConsoleLogger(LogLevel.Error, true);
     // The boot ROM must be present: on reset the core reads the reset vector
     // from ROM at address 0. Then we jump straight into flash boot2.
     this.rp2040.loadBootrom(bootromB1);
@@ -148,6 +158,20 @@ export class RP2040Mcu implements MicrocontrollerCore {
       this._serialOut += String.fromCharCode(...buf);
       if (this._serialOut.length > 8192) this._serialOut = this._serialOut.slice(-4096);
     };
+    // USBCDC answers every read the firmware arms on its OUT endpoint 10 us
+    // later, with an empty packet when there is nothing to send. TinyUSB re-arms
+    // on each one, so a MicroPython program asleep in WFE took a USB interrupt
+    // every ~28 us and its core was busy ~90% of the time: every Pico project ran
+    // below real time. A real host sends OUT data only when it has some, so hold
+    // the armed read until send() queues bytes. Each read also tops the FIFO up
+    // from _txQueue, so a program longer than the FIFO arrives whole.
+    const usb = this.rp2040.usbCtrl;
+    const answerRead = usb.onEndpointRead;
+    usb.onEndpointRead = (endpoint, byteCount) => {
+      this.fillTxFifo();
+      if (this.cdc.txFIFO.empty) this._heldReads.set(endpoint, byteCount);
+      else answerRead?.(endpoint, byteCount);
+    };
     if (this._firmware) {
       loadUF2IntoFlash(this._firmware, this.rp2040.flash);
       this.rp2040.core.PC = FLASH_XIP_BASE;
@@ -158,6 +182,8 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this._connected = false;
     this._replPhase = 0;
     this._nudgeCount = 0;
+    this._heldReads.clear();
+    this._txQueue = [];
     this.installListeners();
   }
 
@@ -186,7 +212,22 @@ export class RP2040Mcu implements MicrocontrollerCore {
   }
 
   private send(bytes: number[]): void {
-    for (const b of bytes) this.cdc.sendSerialByte(b);
+    // Queue rather than sendSerialByte(): pushing a whole program into the
+    // 512-byte FIFO dropped its tail and the Ctrl-D that runs it.
+    for (const b of bytes) this._txQueue.push(b);
+    // Answer the reads the firmware armed while there was nothing to send.
+    // USBCDC ignores any that are not its data OUT endpoint, as it always has.
+    const held = [...this._heldReads];
+    this._heldReads.clear();
+    for (const [endpoint, byteCount] of held) this.rp2040.usbCtrl.onEndpointRead?.(endpoint, byteCount);
+  }
+
+  /** Move queued REPL bytes into USBCDC's tx FIFO, as far as it has room. */
+  private fillTxFifo(): void {
+    const fifo = this.cdc.txFIFO;
+    const n = Math.min(fifo.size - fifo.itemCount, this._txQueue.length);
+    for (let i = 0; i < n; i++) fifo.push(this._txQueue[i]);
+    this._txQueue.splice(0, n);
   }
 
   private pumpRepl(): void {
