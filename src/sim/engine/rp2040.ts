@@ -112,6 +112,8 @@ export class RP2040Mcu implements MicrocontrollerCore {
   // Reads the firmware armed on a USB OUT endpoint while the host had nothing
   // to send (endpoint -> byte count). Answered by send(); see boot().
   private _heldReads = new Map<number, number>();
+  // REPL bytes not yet in USBCDC's tx FIFO, which holds 512 and drops the rest.
+  private _txQueue: number[] = [];
 
   /** @param firmware optional UF2 image (e.g. MicroPython) to boot from flash. */
   constructor(firmware?: Uint8Array) {
@@ -153,10 +155,12 @@ export class RP2040Mcu implements MicrocontrollerCore {
     // on each one, so a MicroPython program asleep in WFE took a USB interrupt
     // every ~28 us and its core was busy ~90% of the time: every Pico project ran
     // below real time. A real host sends OUT data only when it has some, so hold
-    // the armed read until send() queues bytes.
+    // the armed read until send() queues bytes. Each read also tops the FIFO up
+    // from _txQueue, so a program longer than the FIFO arrives whole.
     const usb = this.rp2040.usbCtrl;
     const answerRead = usb.onEndpointRead;
     usb.onEndpointRead = (endpoint, byteCount) => {
+      this.fillTxFifo();
       if (this.cdc.txFIFO.empty) this._heldReads.set(endpoint, byteCount);
       else answerRead?.(endpoint, byteCount);
     };
@@ -171,6 +175,7 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this._replPhase = 0;
     this._nudgeCount = 0;
     this._heldReads.clear();
+    this._txQueue = [];
     this.installListeners();
   }
 
@@ -199,12 +204,22 @@ export class RP2040Mcu implements MicrocontrollerCore {
   }
 
   private send(bytes: number[]): void {
-    for (const b of bytes) this.cdc.sendSerialByte(b);
+    // Queue rather than sendSerialByte(): pushing a whole program into the
+    // 512-byte FIFO dropped its tail and the Ctrl-D that runs it.
+    for (const b of bytes) this._txQueue.push(b);
     // Answer the reads the firmware armed while there was nothing to send.
     // USBCDC ignores any that are not its data OUT endpoint, as it always has.
     const held = [...this._heldReads];
     this._heldReads.clear();
     for (const [endpoint, byteCount] of held) this.rp2040.usbCtrl.onEndpointRead?.(endpoint, byteCount);
+  }
+
+  /** Move queued REPL bytes into USBCDC's tx FIFO, as far as it has room. */
+  private fillTxFifo(): void {
+    const fifo = this.cdc.txFIFO;
+    const n = Math.min(fifo.size - fifo.itemCount, this._txQueue.length);
+    for (let i = 0; i < n; i++) fifo.push(this._txQueue[i]);
+    this._txQueue.splice(0, n);
   }
 
   private pumpRepl(): void {
