@@ -107,7 +107,7 @@ describe("session-only failure states", () => {
           id: "pot",
           kind: "potentiometer",
           pins: [{ id: "cw" }, { id: "wiper" }, { id: "ccw" }],
-          params: { rTotal: 10_000, position: 0.01, taper: "linear" },
+          params: { rTotal: 10_000, position: 0.99, taper: "linear" },
         },
         {
           id: "load",
@@ -124,7 +124,9 @@ describe("session-only failure states", () => {
       ],
     };
 
-    const engine = run(circuit, 0.02);
+    // 45 mA through the 100 Ω CW segment is 0.2 W, four times the floor
+    // share of a 0.2 W track, and latches in about a third of a second.
+    const engine = run(circuit, 0.5);
     const failures = Object.values(engine.getFailures());
     expect(failures).toHaveLength(1);
     expect(failures[0]?.componentId).toBe("pot");

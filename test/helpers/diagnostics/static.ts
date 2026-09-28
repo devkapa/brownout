@@ -498,12 +498,14 @@ export function analyzeStatic(input: DiagnosticsInput): DiagnosticFinding[] {
       );
     } else if (resistor.kind === "potentiometer" || resistor.kind === "trimmer") {
       const total = Number(resistor.params.rTotal ?? resistor.params.resistance ?? 0);
+      // Position is rotation from the CCW stop, as in the engine: 1 puts the
+      // wiper at CW, and the log taper shapes the wiper-CCW segment.
       const authoredPosition = Math.max(0, Math.min(1, Number(resistor.params.position ?? 0.5)));
-      const position = String(resistor.params.taper ?? "linear") === "log"
+      const fromCcw = String(resistor.params.taper ?? "linear") === "log"
         ? Math.pow(10, 2 * (authoredPosition - 1))
         : authoredPosition;
-      addResistiveEdge(pinNet(resistor.id, "cw"), pinNet(resistor.id, "wiper"), Math.max(1, total * position), resistor.id);
-      addResistiveEdge(pinNet(resistor.id, "wiper"), pinNet(resistor.id, "ccw"), Math.max(1, total * (1 - position)), resistor.id);
+      addResistiveEdge(pinNet(resistor.id, "cw"), pinNet(resistor.id, "wiper"), Math.max(1, total * (1 - fromCcw)), resistor.id);
+      addResistiveEdge(pinNet(resistor.id, "wiper"), pinNet(resistor.id, "ccw"), Math.max(1, total * fromCcw), resistor.id);
     }
   }
 

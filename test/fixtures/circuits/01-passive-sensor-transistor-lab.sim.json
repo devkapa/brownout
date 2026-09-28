@@ -504,7 +504,7 @@
       "params": {
         "rTotal": 10000,
         "taper": "linear",
-        "position": 0.65
+        "position": 0.35
       },
       "label": "Panel potentiometer divider"
     },
@@ -544,7 +544,7 @@
       ],
       "params": {
         "rTotal": 50000,
-        "position": 0.35
+        "position": 0.65
       },
       "label": "Trim bias divider"
     },
