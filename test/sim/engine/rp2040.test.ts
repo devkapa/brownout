@@ -99,6 +99,15 @@ describe("RP2040Mcu — MicrocontrollerCore coupling", () => {
     expect(adc.channelValues[2]).toBe(0);
   });
 
+  it("holds the temperature sensor (ADC4) at 27 °C, including after reset()", () => {
+    const mcu = new RP2040Mcu();
+    const adc = () => (mcu as unknown as { rp2040: { adc: { channelValues: number[] } } }).rp2040.adc;
+    // 0.706 V (datasheet Vbe at 27 °C) against 3.3 V is 876 of 4095 counts.
+    expect(adc().channelValues[4]).toBe(876);
+    mcu.reset(); // rebuilds the emulator, so a fresh RPADC starts at 0 again
+    expect(adc().channelValues[4]).toBe(876);
+  });
+
   it("accepts a digital input level without throwing", () => {
     const mcu = new RP2040Mcu();
     expect(() => mcu.setInputBit("gp10", 1)).not.toThrow();

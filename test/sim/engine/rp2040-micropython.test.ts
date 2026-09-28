@@ -67,4 +67,19 @@ describe("RP2040Mcu — runs real MicroPython (slow)", () => {
     for (let i = 0; i < 250 && !/ADC=\d+/.test(serial()); i++) mcu.step(0.002);
     expect(Number(/ADC=(\d+)/.exec(serial())?.[1])).toBe(expected);
   }, 30_000);
+
+  // ADC4 is the on-die temperature sensor. Nothing fed it, so it read 0 counts,
+  // which the datasheet formula below turns into 437 °C.
+  it("reads the temperature sensor (ADC4) as about 27 °C", () => {
+    const mcu = new RP2040Mcu(UF2);
+    mcu.runScript(
+      "from machine import ADC\r\nr = ADC(4).read_u16()\r\n" +
+        "print('T=%.2f' % (27 - (r * 3.3 / 65535 - 0.706) / 0.001721))\r\n",
+    );
+    const serial = () => (mcu as unknown as { _serialOut: string })._serialOut;
+    const done = /T=(-?[\d.]+)\r?\n/;
+    for (let i = 0; i < 250 && !done.test(serial()); i++) mcu.step(0.002);
+    const celsius = Number(done.exec(serial())?.[1]);
+    expect(Math.abs(celsius - 27)).toBeLessThanOrEqual(1);
+  }, 30_000);
 });
