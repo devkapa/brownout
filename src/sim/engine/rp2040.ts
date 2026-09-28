@@ -109,6 +109,9 @@ export class RP2040Mcu implements MicrocontrollerCore {
   private _pendingSource: string | null = null;
   private _replPhase: 0 | 1 | 2 = 0;
   private _nudgeCount = 0;
+  // Reads the firmware armed on a USB OUT endpoint while the host had nothing
+  // to send (endpoint -> byte count). Answered by send(); see boot().
+  private _heldReads = new Map<number, number>();
 
   /** @param firmware optional UF2 image (e.g. MicroPython) to boot from flash. */
   constructor(firmware?: Uint8Array) {
@@ -145,6 +148,18 @@ export class RP2040Mcu implements MicrocontrollerCore {
       this._serialOut += String.fromCharCode(...buf);
       if (this._serialOut.length > 8192) this._serialOut = this._serialOut.slice(-4096);
     };
+    // USBCDC answers every read the firmware arms on its OUT endpoint 10 us
+    // later, with an empty packet when there is nothing to send. TinyUSB re-arms
+    // on each one, so a MicroPython program asleep in WFE took a USB interrupt
+    // every ~28 us and its core was busy ~90% of the time: every Pico project ran
+    // below real time. A real host sends OUT data only when it has some, so hold
+    // the armed read until send() queues bytes.
+    const usb = this.rp2040.usbCtrl;
+    const answerRead = usb.onEndpointRead;
+    usb.onEndpointRead = (endpoint, byteCount) => {
+      if (this.cdc.txFIFO.empty) this._heldReads.set(endpoint, byteCount);
+      else answerRead?.(endpoint, byteCount);
+    };
     if (this._firmware) {
       loadUF2IntoFlash(this._firmware, this.rp2040.flash);
       this.rp2040.core.PC = FLASH_XIP_BASE;
@@ -155,6 +170,7 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this._connected = false;
     this._replPhase = 0;
     this._nudgeCount = 0;
+    this._heldReads.clear();
     this.installListeners();
   }
 
@@ -184,6 +200,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
 
   private send(bytes: number[]): void {
     for (const b of bytes) this.cdc.sendSerialByte(b);
+    // Answer the reads the firmware armed while there was nothing to send.
+    // USBCDC ignores any that are not its data OUT endpoint, as it always has.
+    const held = [...this._heldReads];
+    this._heldReads.clear();
+    for (const [endpoint, byteCount] of held) this.rp2040.usbCtrl.onEndpointRead?.(endpoint, byteCount);
   }
 
   private pumpRepl(): void {
