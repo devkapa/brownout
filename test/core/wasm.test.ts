@@ -189,6 +189,9 @@ function fakeExports(overrides: Partial<CoreExports> = {}): CoreExports {
     bo_engine_trace_len: () => 0,
     bo_engine_trace_clear: () => {},
     bo_engine_set_params: () => 0,
+    bo_engine_seed_memory: () => 0,
+    bo_engine_take_eeprom_updates: () => 0,
+    bo_engine_eeprom_updates_ptr: () => 0,
   };
   return { ...base, ...overrides };
 }
@@ -220,6 +223,63 @@ describe("verifyCoreExports — the internal ABI-verification seam", () => {
 
   it("accepts a fully conforming exports object", () => {
     expect(() => verifyCoreExports(asRaw(fakeExports()))).not.toThrow();
+  });
+});
+
+// W1d's three new ABI rows (core/README.md's C ABI v2 table: owner decision
+// 2) — the module-level "has zero imports"/"exports every C ABI v2 function"
+// checks above already cover the Rust side having these; this describe block
+// covers the TS-side wiring (CoreExports/verifyCoreExports/REQUIRED_FUNCTION_
+// EXPORTS) that makes them callable at all. Success-path and validation
+// behaviour belong to engine.ts's CoreEngine facade (memory-facade.test.ts),
+// not here — this file only proves the raw ABI functions are wired through.
+describe("bo_engine_seed_memory / bo_engine_take_eeprom_updates / bo_engine_eeprom_updates_ptr — wired through CoreExports (W1d)", () => {
+  afterEach(() => {
+    __resetCoreForTest();
+  });
+
+  it("verifyCoreExports rejects a missing bo_engine_seed_memory export, naming it", () => {
+    const raw = asRaw(fakeExports());
+    delete raw.bo_engine_seed_memory;
+    expect(() => verifyCoreExports(raw)).toThrow(CoreInitError);
+    expect(() => verifyCoreExports(raw)).toThrow(/bo_engine_seed_memory/);
+  });
+
+  it("verifyCoreExports rejects a missing bo_engine_take_eeprom_updates export, naming it", () => {
+    const raw = asRaw(fakeExports());
+    delete raw.bo_engine_take_eeprom_updates;
+    expect(() => verifyCoreExports(raw)).toThrow(CoreInitError);
+    expect(() => verifyCoreExports(raw)).toThrow(/bo_engine_take_eeprom_updates/);
+  });
+
+  it("verifyCoreExports rejects a missing bo_engine_eeprom_updates_ptr export, naming it", () => {
+    const raw = asRaw(fakeExports());
+    delete raw.bo_engine_eeprom_updates_ptr;
+    expect(() => verifyCoreExports(raw)).toThrow(CoreInitError);
+    expect(() => verifyCoreExports(raw)).toThrow(/bo_engine_eeprom_updates_ptr/);
+  });
+
+  // Against the REAL built module (the Rust stub families at this commit —
+  // this worker's brief: "every slot NaN, seed declines with -8, no EEPROM
+  // is ever dirty"): calling both functions with no program loaded proves
+  // the raw ABI calls are wired end to end, independent of engine.ts.
+  it("against the real built module: with no program loaded, both bo_engine_seed_memory and bo_engine_take_eeprom_updates return -5", async () => {
+    await initCore();
+    const handle = coreCall((exports) => exports.bo_engine_create());
+    try {
+      const seedResult = coreCall((exports) => {
+        const ptr = exports.bo_alloc(16) >>> 0;
+        try {
+          return exports.bo_engine_seed_memory(handle, 0, ptr, 16);
+        } finally {
+          exports.bo_free(ptr, 16);
+        }
+      });
+      expect(seedResult).toBe(-5);
+      expect(coreCall((exports) => exports.bo_engine_take_eeprom_updates(handle))).toBe(-5);
+    } finally {
+      coreCall((exports) => exports.bo_engine_destroy(handle));
+    }
   });
 });
 

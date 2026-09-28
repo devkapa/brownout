@@ -87,8 +87,9 @@ const NE555_OUTPUT_R_OHM = 20;
 const NE555_OUTPUT_HEADROOM_V = 0.1;
 
 // EEPROM write-cycle time (datasheet t_WC, 10 ms class) — a started byte
-// write completes this long after the latching edge.
-const T_WC = 10e-3;
+// write completes this long after the latching edge. Exported for the core
+// compiler (compile/memories.ts), which carries it as the EEPROMs' tWC param.
+export const T_WC = 10e-3;
 
 // 28C256 software-data-protection unlock sequence (Atmel datasheet order).
 const SDP_ENABLE: Array<[number, number]> = [

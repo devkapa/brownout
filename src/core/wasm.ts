@@ -137,8 +137,9 @@ export interface WasmMemoryLike {
  * never a real pointer object.
  *
  * v2 (W1a) adds the rows below `bo_error_len`; `bo_engine_set_params` (W1b,
- * owner decision 1) is now below too. `bo_engine_seed_memory` (W1d) is a
- * later row in the same table and is deliberately NOT here yet.
+ * owner decision 1) is now below too. `bo_engine_seed_memory`,
+ * `bo_engine_take_eeprom_updates` and `bo_engine_eeprom_updates_ptr` (W1d,
+ * owner decision 2) are the table's last three rows.
  */
 export interface CoreExports {
   readonly memory: WasmMemoryLike;
@@ -177,6 +178,26 @@ export interface CoreExports {
   bo_engine_trace_len(h: number): number;
   bo_engine_trace_clear(h: number): void;
   bo_engine_set_params(h: number, ptr: number, lenF64: number): number;
+  /**
+   * Replace a 74ls189's 16 stored nibbles (core/README.md's C ABI v2 table,
+   * W1d, owner decision 2). `device` is a device record index; the buffer
+   * holds 16 values, each the nibble stored at that address in TRUE sense
+   * (classic's `mem{i}`), an integer in `[0, 15]`.
+   */
+  bo_engine_seed_memory(h: number, device: number, ptr: number, lenF64: number): number;
+  /**
+   * Collect and clear every dirty EEPROM image, returning the update
+   * buffer's length in f64 (`>= 0`), or `-5` with no program loaded
+   * (core/README.md's C ABI v2 table, W1d). Read the buffer itself with
+   * {@link CoreExports.bo_engine_eeprom_updates_ptr}.
+   */
+  bo_engine_take_eeprom_updates(h: number): number;
+  /**
+   * The buffer from the last {@link CoreExports.bo_engine_take_eeprom_updates}
+   * call, valid until the next call on this engine: per EEPROM,
+   * `deviceIndex, W, word x W` (the whole image packed as the ROM blob is).
+   */
+  bo_engine_eeprom_updates_ptr(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */
@@ -208,6 +229,9 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_engine_trace_len",
   "bo_engine_trace_clear",
   "bo_engine_set_params",
+  "bo_engine_seed_memory",
+  "bo_engine_take_eeprom_updates",
+  "bo_engine_eeprom_updates_ptr",
 ] as const;
 
 // ─── The runtime WebAssembly API, resolved off globalThis — no ambient type ─

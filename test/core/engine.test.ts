@@ -416,6 +416,9 @@ describe("load-time delta-cycle livelock (-7) -> CoreUnsupportedError with a liv
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -936,6 +939,9 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1129,6 +1135,9 @@ describe("CoreEngine.load — options passthrough to compileCircuit (integration
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1262,6 +1271,9 @@ describe("advance() sends tEnd straight through to Rust — no more _loadedAt tr
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1355,6 +1367,9 @@ describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digita
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest({ ...base, ...overrides });
@@ -1473,6 +1488,9 @@ describe("CoreEngine.setParams", () => {
       bo_engine_trace_ptr: () => 0,
       bo_engine_trace_len: () => 0,
       bo_engine_trace_clear: () => {},
+      bo_engine_seed_memory: () => 0,
+      bo_engine_take_eeprom_updates: () => 0,
+      bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_set_params: (_h: number, ptr: number, lenF64: number) => {
         setParamsCalls++;
         captured = Array.from(new Float64Array(buffer, ptr, lenF64));

@@ -32,6 +32,8 @@ import {
   type LiveParamSpec,
 } from "./passives.js";
 import { compileCombinationalIc } from "./ics.js";
+import { compileRegisterIc } from "./registers.js";
+import { compileMemoryIc } from "./memories.js";
 
 export { buildCoreNodes, corePinKey } from "./topology.js";
 export type { CoreNodeBuild } from "./topology.js";
@@ -413,6 +415,62 @@ export function compileCircuit(
           pins: result.pins,
           params: result.params,
           blob: [slotBase, ...result.pinFlags],
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // The 3 W1d sequential ICs (README's "Kind codes and records", codes
+      // 70-72), one shared compiler (compile/registers.ts). Unlike the W1c
+      // ICs above, the digital slot KEYS are not derived here from an
+      // output-capable-pin list — compile/registers.ts hands back the
+      // README's own fixed key list per kind (its own header explains why:
+      // the 161's bare `<id>` count key and 74hc74's non-pin-order key
+      // sequence can't be derived generically the way `${id}/${pinId}` was
+      // for the W1c ICs).
+      case "74ls161":
+      case "74ls173":
+      case "74hc74": {
+        const result = compileRegisterIc(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const slotBase = digitalSlots.count;
+        for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [slotBase, ...result.pinFlags],
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // The 3 W1d memory ICs (README's "Kind codes and records", codes
+      // 80-82), one shared compiler (compile/memories.ts). The EEPROMs'
+      // blob additionally carries the ROM image words after the pin flags
+      // (README's "ROM image"); the 189 compiles an empty `romWords`, since
+      // its 16 nibbles are seeded at runtime, never compiled into the
+      // program.
+      case "74ls189":
+      case "28c16":
+      case "28c256": {
+        const result = compileMemoryIc(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const slotBase = digitalSlots.count;
+        for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [slotBase, ...result.pinFlags, ...result.romWords],
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;

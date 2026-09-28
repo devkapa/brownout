@@ -524,6 +524,144 @@ export class CoreEngine implements EngineReadout {
   }
 
   /**
+   * Seeds a 74ls189's 16 stored nibbles through `bo_engine_seed_memory`
+   * (core/README.md's ABI v2, W1d, owner decision 2) — the runtime
+   * counterpart to `params.contents` for the EEPROM kinds: a 189 has no
+   * compiled contents at all (its RAM always powers on at 0xF, README's
+   * memories kernel semantics point 2), so this is the only way to give it a
+   * starting word.
+   *
+   * `nibbles[i]` is the nibble stored at address `i`, in TRUE sense
+   * (classic's `mem{i}`; the `/o` pins show its complement) — an integer in
+   * `[0, 15]`.
+   *
+   * Every check below runs BEFORE any ABI call, exactly `setParams`'s own
+   * "validate everything on this side first, but the ABI remains the
+   * authority" stance:
+   * - an unknown `componentId` (no device compiled for it), or one whose
+   *   compiled kind is not `74ls189`, throws a plain `RangeError` — a
+   *   caller/corpus-data bug, not a circuit fact, so (like `setParams`'s own
+   *   unknown-component/unknown-param checks) this is refused before
+   *   anything else runs and never wrapped in `CoreUnsupportedError`/
+   *   `CoreLoadError`;
+   * - `nibbles.length !== 16`, or any value that is not an integer in
+   *   `[0, 15]`, throws `RangeError` naming the offending index (README:
+   *   "Any other kind, an index out of range, `len_f64 != 16`, or a bad
+   *   value is `-8`, validated in full before anything changes" — the checks
+   *   here are the TS-side mirror of that same rule, which should make a
+   *   non-zero `bo_engine_seed_memory` return unreachable in practice; it
+   *   still throws `CoreLoadError` rather than being assumed impossible).
+   *
+   * Applies as ONE event at the current time (README): the device is
+   * re-evaluated in a delta cycle there, so readouts are republished exactly
+   * as after `advance()`/`setParams()`.
+   */
+  setMemoryContents(componentId: string, nibbles: readonly number[]): void {
+    const compiled = this._requireLoaded();
+
+    const deviceIndex = compiled.devices.findIndex((device) => device.componentId === componentId);
+    if (deviceIndex === -1) {
+      throw new RangeError(
+        `CoreEngine.setMemoryContents: no device for component "${componentId}" in the loaded program.`,
+      );
+    }
+    const kind = compiled.devices[deviceIndex]!.kind;
+    if (kind !== "74ls189") {
+      throw new RangeError(
+        `CoreEngine.setMemoryContents: component "${componentId}" (kind "${kind}") does not accept a memory ` +
+          "seed — only a 74ls189 does.",
+      );
+    }
+    if (nibbles.length !== 16) {
+      throw new RangeError(
+        `CoreEngine.setMemoryContents: component "${componentId}" needs exactly 16 nibble values, got ` +
+          `${nibbles.length}.`,
+      );
+    }
+    nibbles.forEach((value, i) => {
+      if (!Number.isInteger(value) || value < 0 || value > 15) {
+        throw new RangeError(
+          `CoreEngine.setMemoryContents: component "${componentId}"'s nibble[${i}] must be an integer in ` +
+            `[0, 15], got ${value}.`,
+        );
+      }
+    });
+
+    coreCall((exports) => {
+      // `>>> 0`: see load()'s bo_alloc comment — same i32 sign issue for
+      // every pointer this ABI returns.
+      const ptr = exports.bo_alloc(16) >>> 0;
+      try {
+        new Float64Array(exports.memory.buffer, ptr, 16).set(nibbles);
+        const code = exports.bo_engine_seed_memory(this._handle, deviceIndex, ptr, 16);
+        if (code !== 0) {
+          throw new CoreLoadError(`bo_engine_seed_memory failed (code ${code}): ${readCoreErrorMessage(exports)}`);
+        }
+      } finally {
+        exports.bo_free(ptr, 16);
+      }
+    });
+
+    this._publishReadouts();
+  }
+
+  /**
+   * Collects every EEPROM image that changed since the last call
+   * (`bo_engine_take_eeprom_updates`/`bo_engine_eeprom_updates_ptr`,
+   * core/README.md's ABI v2, W1d) and clears their dirty flags — the runtime
+   * counterpart to classic's `SimEngine.takeEepromUpdates()`
+   * (sim-engine.ts), whose `Record<string, Uint8Array>` shape (component id
+   * to a FRESH `Uint8Array(size)` copy) this method reproduces exactly. `{}`
+   * is the common no-op path: nothing has written to any EEPROM since the
+   * last call (also what the W1d Rust stubs always return today — see this
+   * worker's report).
+   *
+   * The wire buffer is `deviceIndex, W, word x W` per dirty EEPROM (README).
+   * Each word is unpacked back into 4 little-endian bytes with plain shifts
+   * — never a `Uint32Array`/host-endian view — the exact inverse of
+   * compile/memories.ts's own `romWords` packing.
+   */
+  takeEepromUpdates(): Record<string, Uint8Array> {
+    const compiled = this._requireLoaded();
+    return coreCall((exports) => {
+      const len = exports.bo_engine_take_eeprom_updates(this._handle);
+      if (len < 0) {
+        throw new CoreLoadError(
+          `bo_engine_take_eeprom_updates failed (code ${len}): ${readCoreErrorMessage(exports)}`,
+        );
+      }
+      if (len === 0) return {};
+
+      // `>>> 0`: see load()'s bo_alloc comment.
+      const ptr = exports.bo_engine_eeprom_updates_ptr(this._handle) >>> 0;
+      const raw = copyF64(exports, ptr, len);
+
+      const out: Record<string, Uint8Array> = {};
+      let offset = 0;
+      while (offset < raw.length) {
+        const deviceIndex = raw[offset++]!;
+        const wordCount = raw[offset++]!;
+        const device = compiled.devices[deviceIndex];
+        const bytes = new Uint8Array(wordCount * 4);
+        for (let k = 0; k < wordCount; k++) {
+          const word = raw[offset + k]! >>> 0;
+          bytes[4 * k] = word & 0xff;
+          bytes[4 * k + 1] = (word >>> 8) & 0xff;
+          bytes[4 * k + 2] = (word >>> 16) & 0xff;
+          bytes[4 * k + 3] = (word >>> 24) & 0xff;
+        }
+        offset += wordCount;
+        // A device index outside this program's own table would be a
+        // Rust/TS drift bug, not a fact about the circuit — skipped
+        // defensively rather than thrown, the same stance readTrace() takes
+        // for a stale slot index (see its own doc comment).
+        if (device) out[device.componentId] = bytes;
+      }
+      return out;
+    });
+  }
+
+  /**
    * Re-reads node voltages / device currents / digital slots / channel slots
    * into `_netV`/`_elementI`/`_digitalState`/`_elementChannelI` after a
    * successful load()/advance(), via readout.ts's pure builders. Called only
