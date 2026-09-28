@@ -1141,4 +1141,74 @@ mod tests {
         assert_eq!(err.code, -1, "{}", err.message);
         assert!(err.message.contains("famFlags"), "{}", err.message);
     }
+
+    // --- W1d: sequential and memory IC records ------------------------------
+
+    /// A W1d IC record: vcc, gnd, `logic` pins on node 2, the 13 IC params
+    /// (LS-TTL), a delay tail and `extra` params, then the blob.
+    fn w1d_record(kind: u32, logic: usize, tail: &[f64], extra: &[f64], pin_flag: f64, words: &[f64]) -> Vec<f64> {
+        let mut rec = vec![kind as f64, 0.0, (2 + logic) as f64];
+        rec.extend(simple_pin(1.0));
+        rec.extend(simple_pin(0.0));
+        for _ in 0..logic {
+            rec.extend(simple_pin(2.0));
+        }
+        let mut params = vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 20e-9];
+        params.extend_from_slice(tail);
+        params.extend_from_slice(extra);
+        rec.push(params.len() as f64);
+        rec.extend(params);
+        rec.push((1 + logic + words.len()) as f64);
+        rec.push(0.0);
+        rec.extend(std::iter::repeat(pin_flag).take(logic));
+        rec.extend_from_slice(words);
+        rec
+    }
+
+    const LS161_TAIL: [f64; 8] = [13e-9, 18e-9, 20e-9, 20e-9, 20e-9, 18e-9, 9e-9, 9e-9];
+
+    #[test]
+    fn accepts_a_74ls161_record_with_its_delay_tail() {
+        let rec = w1d_record(kinds::IC_74LS161, 14, &LS161_TAIL, &[], 1.0, &[]);
+        let p = Program::parse(&build_full(3.0, &[], 5.0, 0.0, &[rec])).unwrap();
+        assert_eq!(p.devices[0].params.len(), 21);
+    }
+
+    #[test]
+    fn rejects_a_negative_delay_tail_value() {
+        let mut tail = LS161_TAIL;
+        tail[3] = -1e-9;
+        let err = Program::parse(&build_full(3.0, &[], 5.0, 0.0, &[w1d_record(kinds::IC_74LS161, 14, &tail, &[], 1.0, &[])])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("delay-tail"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_open_collector_on_a_register() {
+        let err = Program::parse(&build_full(3.0, &[], 5.0, 0.0, &[w1d_record(kinds::IC_74LS161, 14, &LS161_TAIL, &[], 3.0, &[])])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("OPEN_COLLECTOR"), "{}", err.message);
+    }
+
+    fn eeprom_tail() -> [f64; 10] {
+        [150e-9, 150e-9, 150e-9, 150e-9, 50e-9, 50e-9, 70e-9, 70e-9, 50e-9, 50e-9]
+    }
+
+    #[test]
+    fn accepts_a_28c16_image_and_rejects_a_word_out_of_range() {
+        let mut words = vec![4_294_967_295.0; 512];
+        let ok = w1d_record(kinds::IC_28C16, 22, &eeprom_tail(), &[10e-3, 0.0], 1.0, &words);
+        assert!(Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[ok])).is_ok());
+        words[7] = 4_294_967_296.0;
+        let bad = w1d_record(kinds::IC_28C16, 22, &eeprom_tail(), &[10e-3, 0.0], 1.0, &words);
+        let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[bad])).unwrap_err();
+        assert!(err.message.contains("ROM words"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_sdp_on_a_28c16() {
+        let rec = w1d_record(kinds::IC_28C16, 22, &eeprom_tail(), &[10e-3, 1.0], 1.0, &vec![0.0; 512]);
+        let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[rec])).unwrap_err();
+        assert!(err.message.contains("28c16"), "{}", err.message);
+    }
 }

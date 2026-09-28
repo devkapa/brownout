@@ -166,6 +166,32 @@ export const CORE_IC_FAM_CMOS_RATIO = 2;
 export const CORE_IC_PIN_FLOATING_INPUT = 1;
 export const CORE_IC_PIN_OPEN_COLLECTOR = 2;
 
+/**
+ * The delay tail's pairs per kind, in order (core/README.md, "IC delay tail";
+ * core/src/kinds.rs `delay_pairs`). Pair `k` is params `13 + 2k` (dH) and
+ * `14 + 2k` (dL). A kind absent here has no tail.
+ */
+export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = {
+  "74ls161": ["clkQ", "clrQ", "clkRco", "entRco"],
+  "74ls173": ["clkQ", "clrQ", "mnEnable", "mnDisable"],
+  "74hc74": ["clkQ", "preClrQ"],
+  "74ls189": ["addrO", "csEnable", "csDisable", "weEnable", "weDisable"],
+  "28c16": ["addrIo", "ceEnable", "ceDisable", "oeEnable", "oeDisable"],
+  "28c256": ["addrIo", "ceEnable", "ceDisable", "oeEnable", "oeDisable"],
+};
+
+/** The EEPROMs' params after their delay tail (core/src/kinds.rs `eeprom_param`). */
+export const CORE_EEPROM_PARAM = { tWC: 23, sdp: 24 } as const;
+export const CORE_EEPROM_PARAM_COUNT = 25;
+
+/** EEPROM image sizes in bytes; the blob carries `size / 4` little-endian words (core/README.md, "ROM image"). */
+export const CORE_EEPROM_SIZE: Readonly<Record<string, number>> = { "28c16": 2048, "28c256": 32768 };
+
+/** A sequential or memory IC's shape (codes 70-82): `vcc`, `gnd`, `logic` pins, `params` in all, `blob` values in all. */
+function w1dShape(logic: number, params: number, blob: number, slots: number): CoreRecordShape {
+  return { pins: 2 + logic, pinsMax: 2 + logic, params, blob: { exact: blob }, liveParams: [], digitalSlots: slots };
+}
+
 /** A combinational IC's shape: `vcc`, `gnd`, then `logic` pins; one digital slot per output-capable pin. */
 function icShape(logic: number, outputs: number): CoreRecordShape {
   return { pins: 2 + logic, pinsMax: 2 + logic, params: CORE_IC_PARAM_COUNT, blob: { exact: 1 + logic }, liveParams: [], digitalSlots: outputs };
@@ -191,4 +217,10 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74hc14"], icShape(12, 6)],
   [CORE_KIND_CODES["74ls47"], icShape(14, 7)],
   [CORE_KIND_CODES["74ls245"], icShape(18, 16)],
+  [CORE_KIND_CODES["74ls161"], w1dShape(14, 21, 1 + 14, 5)],
+  [CORE_KIND_CODES["74ls173"], w1dShape(14, 21, 1 + 14, 4)],
+  [CORE_KIND_CODES["74hc74"], w1dShape(12, 17, 1 + 12, 4)],
+  [CORE_KIND_CODES["74ls189"], w1dShape(14, 23, 1 + 14, 4)],
+  [CORE_KIND_CODES["28c16"], w1dShape(22, CORE_EEPROM_PARAM_COUNT, 1 + 22 + 2048 / 4, 8)],
+  [CORE_KIND_CODES["28c256"], w1dShape(26, CORE_EEPROM_PARAM_COUNT, 1 + 26 + 32768 / 4, 8)],
 ]);

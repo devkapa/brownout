@@ -73,6 +73,8 @@ mod tests {
             io_max: None,
             delay,
             slot_base: 0,
+            delays: Vec::new(),
+            extra: Vec::new(),
         }
     }
 

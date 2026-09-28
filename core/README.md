@@ -7,8 +7,9 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W1b done (analog partitions, the capacitor, the switch family); W1c
-(the digital core and combinational ICs) contracted.** W0 proved the pipeline with a
+**Status: W1c done (the digital core and the 11 combinational ICs); W1d
+(sequential ICs, memories, datasheet delays and the W1c enable retrofit)
+contracted.** W0 proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
 dispatch plan are in the devolt repo,
@@ -44,7 +45,7 @@ npm tarball carries it under `dist/core/`.
   instruction loops. From W6 it also owns the DC operating point and
   small-signal AC, and the classic engine is deleted.
 
-## Program format, version 2
+## Program format, version 3
 
 One `Float64Array`. Every value is an f64; integers are carried as exact
 doubles (all counts, indices and 32-bit hash states are far below 2^53). The
@@ -60,7 +61,8 @@ devices  D records, in component order
 trailer  MAGIC
 ```
 
-- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `2`.
+- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `3`. W1d bumped it from 2,
+  because the 74ls157 and 74ls245 records gained a delay tail.
 - **Nodes.** As in v1: node 0 is the datum, the net `buildNets` names `gnd`
   when there is one, otherwise a synthetic node with no pins; every other net
   becomes nodes `1..N-1` in `buildNets` order. Node classes (fixed, rail,
@@ -154,7 +156,10 @@ is dispatched; a code without a record layout is reserved and rejected as
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
 | 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
-| 50-59, 61 | the 11 combinational ICs: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245` | `vcc`, `gnd` (the pins classic's `supplyPinsForComponent` resolves), then the kind's logic pins in `icPinMap(kind)` order, by id (table below) | the 13 IC params below | `[slotBase, pinFlags x L]`, `L` the logic-pin count | W1c |
+| 50-59, 61 | the 11 combinational ICs: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245` | `vcc`, `gnd` (the pins classic's `supplyPinsForComponent` resolves), then the kind's logic pins in `icPinMap(kind)` order, by id (table below) | the 13 IC params below, then the kind's delay tail (74ls157: 1 pair, 74ls245: 2 pairs, the other nine: none) | `[slotBase, pinFlags x L]`, `L` the logic-pin count | W1c; tail W1d |
+| 70-72 | `74ls161`, `74ls173`, `74hc74` | `vcc`, `gnd`, then the kind's logic pins by id (sequential table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
+| 80 | `74ls189` | `vcc`, `gnd`, then the memory logic pins by id (memory table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
+| 81, 82 | `28c16`, `28c256` | `vcc`, `gnd`, then the memory logic pins by id | the 13 IC params, the delay tail, then `tWC` and `sdp` | `[slotBase, pinFlags x L, word x W]` (ROM image below) | W1d |
 
 **IC logic pins**, after `vcc` and `gnd` (`icPinMap`, src/sim/engine/digital.ts;
 `i` input, `c` control, `o` output). `cd4511` (code 60) is W1h.
@@ -202,7 +207,83 @@ classic's own helpers, exported from `sim-engine.ts` for this, never re-derived:
 `FLOATING_INPUT` (classic's `_shouldTreatOpenPinAsDigitalInput`: the catalog
 pin function is in `FLOATING_INPUT_FUNCTIONS`, or the `icPinMap` role is
 input, clock or control), bit 1 `OPEN_COLLECTOR` (catalog function
-`open_collector`: the 74ls47 segments). No other bit is used.
+`open_collector`: the 74ls47 segments). No other bit is used. The pin-flag
+check covers `blob[1..=L]` only; an EEPROM's ROM words follow and are checked
+as words.
+
+**Sequential and memory IC logic pins**, after `vcc` and `gnd` (catalog pin
+ids; `r` read, `o` driven). `74hc74` follows `icPinMap`; `74ls161`,
+`74ls173`, `74ls189` and the EEPROMs have no `icPinMap` entry, so this table
+fixes their order: controls, then data, then outputs in bit order.
+
+| Kind | `L` | Logic pins | Drivers | Digital slots |
+|---|---|---|---|---|
+| `74ls161` | 14 | `/clr clk /load enp ent a b c d` (r), `qa qb qc qd rco` (o) | 5 | 5: `<id>` (the count, a bare key), `qa qb qc qd` |
+| `74ls173` | 14 | `/clr clk m n g1 g2 d1 d2 d3 d4` (r), `q1 q2 q3 q4` (o) | 4 | 4: `q1..q4` |
+| `74hc74` | 12 | `clr1_n d1 clk1 pre1_n` (r), `q1 q1_n q2_n q2` (o), `pre2_n clk2 d2 clr2_n` (r) | 4 | 4: `q1 q1_n q2 q2_n` (classic's key order) |
+| `74ls189` | 14 | `a0 a1 a2 a3 d1 d2 d3 d4 /cs /we` (r), `/o1 /o2 /o3 /o4` (o) | 4 | 4: `/o1../o4` (keys `<id>//o1`) |
+| `28c16` | 22 | `a0..a10 /oe /ce /we` (r), `io0..io7` (o and r) | 8 | 8: `io0..io7` |
+| `28c256` | 26 | `a0..a14 /oe /ce /we` (r), `io0..io7` (o and r) | 8 | 8: `io0..io7` |
+
+Bit 0 of every bus is its first pin. The compiler declines exactly as for a
+W1c IC (`topology:ic-pins:<componentId>`). For codes 70-82:
+- params `7 schmitt`, `8 vtPlus`, `9 vtMinus` are 0 whatever the catalog says,
+  because classic reads these kinds through `logicHigh`/`logicHighH`, never
+  its Schmitt branch. The reader rejects `schmitt = 1` here;
+- `OPEN_COLLECTOR` is never set (classic drives them push-pull through
+  `stampDigitalOutput`), and the reader rejects it;
+- `FLOATING_INPUT` for the kinds with no `icPinMap` roles is the catalog
+  pin-function test alone. It covers every read pin and, through `tri_state`
+  and `io`, the 173's `q` pins and the memories' outputs.
+
+**IC delay tail** (owner decision 3; figures in
+`core/spec/w1-datasheet-delays.md`). After the 13 IC params come `P` delay
+pairs. Pair `k` is params `13 + 2k` (`dH`) and `14 + 2k` (`dL`), in seconds,
+finite and `>= 0`; a kind's further params follow the tail. A pair is indexed
+by the driven level the transition involves: a level path gives `dH = tPLH`,
+`dL = tPHL`; an enable path `dH = tPZH`, `dL = tPZL`; a disable path
+`dH = tPHZ`, `dL = tPLZ`.
+
+| Kind | `P` | Pairs, in order | Typical ns (`dH`, `dL`) |
+|---|---|---|---|
+| `74ls157` | 1 | `strobe` | 13, 14 |
+| `74ls245` | 2 | `oeEnable`, `oeDisable` | 25, 27; 15, 15 |
+| `74ls161` | 4 | `clkQ`, `clrQ`, `clkRco`, `entRco` | 13, 18; 20, 20 (tPHL only published); 20, 18; 9, 9 |
+| `74ls173` | 4 | `clkQ`, `clrQ`, `mnEnable`, `mnDisable` | 17, 22; 26, 26 (tPHL only); 15, 18; 11, 11 |
+| `74hc74` | 2 | `clkQ`, `preClrQ` | 20, 20; 20, 20 (the 4.5 V column: TI's HC tables have no 5 V column) |
+| `74ls189` | 5 | `addrO`, `csEnable`, `csDisable`, `weEnable`, `weDisable` | 37, 37; 10, 10; the rest unpublished for the LS part, so param 12 (20 ns) |
+| `28c16`, `28c256` | 5 | `addrIo`, `ceEnable`, `ceDisable`, `oeEnable`, `oeDisable` | 150, 150; 150, 150; 50, 50; 70, 70; 50, 50 (datasheet MAXIMA: none publishes a typical) |
+
+The other nine W1c kinds carry no tail, and every one of their transitions
+uses param 12 in both directions. The EEPROMs' further params are
+`23 tWC = 10e-3` (classic's `T_WC`, both kinds) and `24 sdp =
+kind === "28c256" && Number(params.sdpBypass ?? 0) === 0 ? 1 : 0` (0 on a
+28c16).
+
+**Resolution** (the compiler). With `f(x) = specs.switching_ns[path][x] *
+1e-9` when that value is a finite number `>= 0` (`specs` from
+`specsForComponent`) and `d = param 12`:
+`dH = f(h) ?? f(l) ?? d` and `dL = f(l) ?? f(h) ?? d`. So a path published in
+one direction only carries its figure both ways, and an unpublished path, or a
+catalog without the field (devolt's injected catalog until it gains it), gets
+classic's family default. A missing figure never declines the circuit.
+
+**Catalog field** `electrical_specs.switching_ns` (`src/circuit/types.ts`):
+`Record<path, { tplh?, tphl?, tpzh?, tpzl?, tphz?, tplz? }>` in nanoseconds,
+plus a documentation-only `switching_source`. It is added per part to
+`src/parts/default-parts.json` and to the test catalog. Only the core
+compiler reads it; classic keeps `prop_delay_ns` and the family prefix.
+
+**ROM image** (EEPROMs). `size` is 2048 (`28c16`) or 32768 (`28c256`), and
+`W = size / 4` (512 or 8192 words).
+- TS decodes `params.contents` exactly as classic's `load()` does, through a
+  helper exported from `sim-engine.ts` that classic's `load()` also calls:
+  fill `size` bytes with 0xFF, overlay `atob(String(params.contents ?? ""))`
+  truncated to `size`, and keep all 0xFF when `atob` throws.
+- Word `k` is `b[4k] + b[4k+1]*2^8 + b[4k+2]*2^16 + b[4k+3]*2^24`:
+  little-endian, an exact integer in `[0, 2^32)`, built with shifts and
+  `>>> 0`, never a host-endian view. The reader checks every word.
+- Rust never sees base64, a short image, or the contents hash.
 
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
 maps an absent pin to its reference node (spec §7.2.7). One exception: classic
@@ -220,7 +301,7 @@ than emit a contact classic never stamps.
   used to report `com` to `b` at every position.
 - `dip_switch`: the sum of the closed positions' contact currents, `a_i` to
   `b_i`.
-- The W1c ICs: `0`, as classic (no current model).
+- The W1c and W1d ICs: `0`, as classic (no current model).
 
 ## C ABI, version 2
 
@@ -251,7 +332,9 @@ export lands in its list in the same change that adds it.
 | `bo_engine_trace_enable` | `(h, on: u32) -> i32` | Record every digital slot change as `(t, slot, value)`. Harness instrumentation only; W2's host traces are separate. | v2 (W1a) |
 | `bo_engine_trace_ptr` / `bo_engine_trace_len` / `bo_engine_trace_clear` | `(h) -> *const f64` / `(h) -> u32` (f64 count, a multiple of 3) / `(h)` | Read and reset the trace. | v2 (W1a) |
 | `bo_engine_set_params` | `(h, ptr: *const f64, len_f64: u32) -> i32` | `(deviceIndex, paramIndex, value)` triples for each kind's live params (owner decision 1), applied as one event at the current time with all other state kept. | v2 (W1b) |
-| `bo_engine_seed_memory` | `(h, device: u32, ptr: *const f64, len_f64: u32) -> i32` | Replace a memory device's contents (owner decision 2). | v2 (W1d) |
+| `bo_engine_seed_memory` | `(h, device: u32, ptr: *const f64, len_f64: u32) -> i32` | Replace a 74ls189's 16 stored nibbles (owner decision 2). | v2 (W1d) |
+| `bo_engine_take_eeprom_updates` | `(h) -> i32` | Collect and clear every dirty EEPROM image; returns the update buffer's length in f64 (`>= 0`), `-5` with no program. | v2 (W1d) |
+| `bo_engine_eeprom_updates_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. | v2 (W1d) |
 
 **`bo_engine_set_params`** (W1b, owner decision 1). The buffer holds
 `(deviceIndex, paramIndex, value)` triples.
@@ -286,6 +369,31 @@ current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
 unknown option key, a value out of range, a load-time option after load, a
 device or param index out of range, or a param that is not live).
+
+**`bo_engine_seed_memory`** (W1d, owner decision 2).
+- `device` is a device record index. The buffer holds 16 values; value `i`
+  is the nibble stored at address `i` in true sense (classic's `mem{i}`; the
+  `/o` pins show its complement), an integer in `[0, 15]`.
+- Only a `74ls189` accepts a seed. Any other kind, an index out of range,
+  `len_f64 != 16`, or a bad value is `-8`, validated in full before anything
+  changes; `-5` before a successful load.
+- It replaces the 16 nibbles and nothing else: `lastWE`, drivers and pending
+  events are kept.
+- It applies as ONE event at the current time, like `bo_engine_set_params`:
+  the device is re-evaluated in a delta cycle there, its readout shows the new
+  word at once, and an output the new word changes requests it with the
+  `addrO` pair. `-4` or `-7` rolls the contents back with the instant.
+- A later load rebuilds every 189 at 0xF. Classic has no counterpart; the
+  harness keeps writing classic's `icState` (test-only).
+
+**`bo_engine_take_eeprom_updates`** (W1d). It collects, in device order,
+every EEPROM whose `dirty` flag is set, clears those flags, and writes the
+buffer: per EEPROM `deviceIndex, W, word x W`, the whole image packed as the
+ROM blob is. `dirty` is set only when a write completes (even to the same
+byte); neither load nor a seed sets it, and it rolls back with a failed
+instant. The facade's `CoreEngine.takeEepromUpdates()` returns classic's
+`SimEngine.takeEepromUpdates()` shape: component id to a fresh
+`Uint8Array(size)`.
 
 **A failed advance.** When `bo_engine_advance` returns `-4` or `-7`, the
 engine keeps the state of the last instant it completed, and
@@ -495,15 +603,17 @@ References are to `core/spec/w1-classic-semantics.md`.
    `FLOATING_INPUT` and not `OPEN_HIGH` gets `g = 1/(TTL ? 1e6 : 1e7)` toward
    `V(gnd) + (high ? vS : 0)`, `high` from the open-key hash, so the pin
    voltage and its read agree.
-7. **Evaluation** (§3.6): the 74ls157 and 74ls245 produce no outputs when
-   `/oe` reads 1; otherwise the kind's truth table over the read levels, with
+7. **Evaluation** (§3.6): the 74ls245 drives neither side when `/oe` reads 1,
+   and otherwise drives one side and requests HIZ on the other; the 74ls157
+   drives every output LOW when `/oe` (the strobe `/G`) reads 1 (W1d,
+   Q-O64). Otherwise the kind's truth table over the read levels, with
    74ls47's precedence `rbo_n` over `lt_n` over `rbi_n` and its partial glyphs
    for 10-15, and the 74hc138 driving every output HIGH when disabled. Each
    output-capable pin in the result requests its level through its driver
    (§2.4, the kernel's inertial FSM, with the `delay` param; `delay = 0`
-   commits in the next delta). A pin absent from the result is reset: its
-   driver goes `HIZ` and drops any in-flight transition, so re-enabling
-   re-seeds with zero delay (§2.4's cleanup). Every evaluation counts toward
+   commits in the next delta). A pin the result does not drive requests HIZ
+   through the same FSM, with its disable delay (W1d, delays point 4); no IC
+   requests a reset. Every evaluation counts toward
    stat 12 (IC evaluations), which need not equal classic's
    `digitalEvaluationCount` (D27).
 8. **Output stage** (§1.7, §3.7): while powered, a committed HIGH stamps
@@ -521,18 +631,249 @@ References are to `core/spec/w1-classic-semantics.md`.
    evaluation the partition is solved with the pre-outage committed levels,
    and any held transition whose due time has passed commits in the next
    delta, as classic's first powered pass does.
-10. **Readouts.** A digital slot holds the pin's committed level (electrical:
-    HIGH, or released for open-collector, is 1) while the pin is driven, and
-    `NaN` (an absent key) while the IC is unpowered or the pin is not in the
-    evaluator's result (tri-stated, or the undriven side of a 74ls245).
+10. **Readouts** (codes 50-61). A digital slot holds the pin's committed level
+    (electrical: HIGH, or released for open-collector, is 1) while the pin is
+    driven, and `NaN` (an absent key) while the IC is unpowered, or the pin is
+    committed HIZ or has never committed. Codes 70-82 publish evaluator state
+    instead (W1d).
+
+## Kernel semantics: datasheet delays and enables (W1d)
+
+1. **Delay set.** A `DriverRequest::Level` carries `delays: DelaySet { lh,
+   hl, zh, zl, hz, lz }` (seconds) in place of W1c's single `delay`. The
+   evaluator builds one set per output-capable pin, from the pin's output
+   class and the cause of the request (point 3). A kind with no tail sends
+   `DelaySet::uniform(param 12)`, so its timing is unchanged. Figures are
+   fixed at load and do not scale with supply or load (classic, §1.3).
+2. **Pick.** `Driver::request` picks exactly one delay with a pure
+   `fsm::pick(committed, requested, delays)` beside the FSM, then runs the
+   unchanged §2.4 FSM. The pick keys on the COMMITTED level, because the pin
+   is still physically there.
+
+   | committed → requested | delay |
+   |---|---|
+   | none → any | 0 (first observation) |
+   | LOW → HIGH | `lh` |
+   | HIGH → LOW | `hl` |
+   | HIZ → HIGH | `zh` |
+   | HIZ → LOW | `zl` |
+   | HIGH → HIZ | `hz` |
+   | LOW → HIZ | `lz` |
+
+   A request for the pending target keeps its due time; a request for the
+   committed level cancels. Load settling's zero override zeroes the whole
+   set, and `Kernel::request_driver` takes `DelaySet::uniform(delay)`.
+3. **Cause.** Each IC keeps `lastReads`, its logic-pin reads at its previous
+   powered evaluation (none before the first).
+   - A level transition's `lh`/`hl` come from the pair of the cause that
+     produced the new target: an input whose read differs from `lastReads`,
+     or a state change the evaluation made (a clock edge, a clear, a write, a
+     completed EEPROM write, a seeded word, a polling toggle).
+   - With several causes the larger figure for that direction wins: a
+     datasheet's output-valid time is the latest of its constraints. With no
+     identified cause, the kind's first pair applies.
+   - `zh`/`zl`/`hz`/`lz` come from the output class's enable and disable
+     pairs; where a kind has several enables, from the one that changed.
+   - `lastReads` is written at every powered evaluation, frozen-settle passes
+     included (it only chooses delays, which are zero while settling). It is
+     in the evaluator's snapshot, so it rolls back with a failed instant; a
+     load drops it.
+
+   | Kind | Outputs | `lh`/`hl` by cause | `zh`/`zl` | `hz`/`lz` |
+   |---|---|---|---|---|
+   | `74ls157` | `1y..4y` | param 12; `strobe` when the `/oe` read changed | - | - |
+   | `74ls245` | `a1..a8`, `b1..b8` | param 12 (data) | `oeEnable`, from `/oe` or `dir` | `oeDisable`, from `/oe` or `dir` |
+   | `74ls161` | `qa..qd` | `clkQ` (a clock edge: count or load); `clrQ` (`/clr`) | - | - |
+   | `74ls161` | `rco` | `clkRco` (the count changed on an edge); `clrQ` (a clear); `entRco` (`ent` changed alone) | - | - |
+   | `74ls173` | `q1..q4` | `clkQ` (a clock edge); `clrQ` (`/clr`, active HIGH) | `mnEnable` | `mnDisable` |
+   | `74hc74` | `q1 q1_n q2 q2_n` | `clkQ` (a clock edge); `preClrQ` (`/pre` or `/clr`) | - | - |
+   | `74ls189` | `/o1../o4` | `addrO` (the address or the stored word changed) | `csEnable` (`/cs` fell); `weEnable` (`/we` rose) | `csDisable` (`/cs` rose); `weDisable` (`/we` fell) |
+   | `28c16`, `28c256` | `io0..io7` | `addrIo` (the address, the byte or a polling bit changed) | `ceEnable` (`/ce` fell); `oeEnable` (`/oe` fell) | `ceDisable` (`/ce` rose); `oeDisable` (`/oe` rose) |
+
+4. **Tri-state is a HIZ request, never a reset.** An output the evaluator
+   does not drive requests `Mode::Hiz` through the same FSM, as the
+   prototype's three-mode `drive()` did (§2.17):
+   - disable: from HIGH or LOW, HIZ commits at `now + hz` or `now + lz`, and
+     until then the pin keeps driving its committed level;
+   - enable: from HIZ, the level commits at `now + zh` or `now + zl`, and until
+     then the pin stamps nothing;
+   - a glitch back before the commit cancels it (the pin never releases, or
+     never drives); a new level mid-transition supersedes it with a fresh due
+     time picked from the committed level;
+   - a committed HIZ stamps nothing, exactly like an uncommitted driver;
+   - no IC requests `DriverRequest::Reset` any more (the variant stays for
+     its kernel tests), so after load no pin re-seeds with zero delay.
+5. **74ls245.** Evaluation as classic: `/oe` HIGH requests HIZ on every
+   `a`/`b` pin; `/oe` LOW with `dir` HIGH drives `b_i = a_i` and requests HIZ
+   on `a_i`, and `dir` LOW the reverse. Level changes use param 12. A `dir`
+   flip with `/oe` LOW disables the old side with `oeDisable` and enables the
+   other with `oeEnable`: the datasheet has no DIR row, and DIR gates the same
+   output enables. Every disable figure is shorter than every enable figure
+   (15 < 25 ns), so the new side cannot commit a value read back through the
+   old side's still-driven pin: the old side's HIZ commit re-evaluates the
+   245, and the enable target is re-picked before its due time.
+6. **74ls157 strobe** (Q-O64; classic fixed in the same change, spec delta
+   1): `/oe` HIGH forces every `y` LOW, and the outputs never go HIZ.
+   Strobe-caused transitions use `strobe` (13 ns release, 14 ns force); data
+   and select changes keep param 12 (classic's 20 ns). Classic takes its one
+   20 ns package delay for all of them.
+7. **State across calls.** A driver's FSM state (committed level, pending
+   transition, token) survives `bo_engine_set_params` and `bo_engine_seed_memory`,
+   rolls back with a failed instant, and is rebuilt uncommitted by a load, so
+   the load settle is all first observations at zero delay. Classic carries
+   the `delay:/pending:/due:` slots across `load()` by id and kind; in the
+   core that is W2 (load carry-forward). HIZ commits are ordinary commits:
+   held while unpowered (W1c point 9), counted in stat 13, and reported by
+   `bo_engine_next_digital_due_time`.
+8. **Readouts of the 157 and 245** stay the committed pin level (W1c point
+   10): a 245 pin shows its old level while a disable is in flight and `NaN`
+   while an enable is; the 157's four keys are always present while powered.
+
+## Kernel semantics: sequential ICs (W1d)
+
+References are to spec §4.1 and §4.2.1-4.2.3 and classic's
+`devices/digital-ics.ts`.
+
+1. **Shared machinery.** Codes 70-72 are ICs for W1c points 1-6, 8 and 9:
+   power, partitions, power-dependent stamps, reads (no Schmitt branch; the
+   74hc74's `pre1_n clr1_n pre2_n clr2_n` are `OPEN_HIGH`), the floating model
+   and pulls (an open 173 `q` pin is pulled whether or not it is driven,
+   because classic stamps pulls before outputs), the output stage and the
+   power-loss hold. A general IC predicate replaces the combinational-only
+   one wherever W1c tests it.
+2. **Register state** lives in the evaluator, one record per device: 161
+   `{count 0-15, lastClk}`, 173 `{q1..q4, lastClk}`, 74hc74 `{q1, q1n,
+   lastClk1, q2, q2n, lastClk2}` (Q̄ is stored so that Q = Q̄ = 1 can exist).
+   Power-on values are classic's `defaultIcState`: all 0 except `q1n = q2n =
+   1`. The records are in the evaluator's snapshot (a failed instant restores
+   them), `bo_engine_set_params` keeps them, and a load starts from power-on
+   values (classic carries them by id; W2). No export seeds a register.
+3. **One evaluation** of a powered device: (a) read every logic pin; (b) when
+   edges are live, apply the update (point 5) and set every `lastClk` to its
+   clock's read level; while settling with edge history frozen, skip (b)
+   entirely; (c) compute each driver's target (point 6); (d) request it with
+   the delays of the delays section. An unpowered device reads, writes and
+   requests nothing, so its state and `lastClk` freeze and the first powered
+   evaluation compares the clock with the pre-outage `lastClk` (Q-O4).
+4. **Edges** (owner decision 6, D22). A rising edge is `clkRead &&
+   !lastClk`, `clkRead` read through W1c point 4 (thresholds, floating model,
+   dead-band key) at every event that can change a read, not once per step.
+   So a clock entering the dead band is an edge whenever the dead key hashes
+   HIGH, an open clock can take an edge at a bucket boundary, and a pulse
+   narrower than a classic step counts. `lastClk` is written at every live
+   evaluation whatever branch applies, so an edge that arrives while a clear
+   holds is consumed. Every other input is sampled at the evaluation that
+   detects the edge, after that delta's commits.
+5. **Update**, in priority order (classic's `updateDigital`):
+   - `74ls161`: `/clr` reads 0 → count = 0 (asynchronous, level-sensitive,
+     at every evaluation); else a rising edge with `/load` reading 0 → count =
+     `a + 2b + 4c + 8d`; else a rising edge with `enp` and `ent` both 1 →
+     count = (count + 1) & 0xF; else hold.
+   - `74ls173`: the pin named `/clr` is active HIGH (classic): it reads 1 →
+     q1..q4 = 0; else a rising edge with `g1` and `g2` both reading 0 → qi =
+     di; else hold. M and N do not enter the update.
+   - `74hc74`, per flip-flop: `/pre` and `/clr` both 0 → Q = Q̄ = 1; `/clr`
+     0 → Q = 0, Q̄ = 1; `/pre` 0 → Q = 1, Q̄ = 0; a rising edge → Q = D, Q̄ =
+     !D; else hold.
+6. **Targets** (classic's stamp): 161 `qa..qd` = count bits 0-3, `rco` =
+   count == 15 && ENT reads 1 (ENP never gates RCO); 173 `qi` = bit i when M
+   and N both read 0, else HIZ; 74hc74 the stored Q and Q̄ with point 5's
+   asynchronous priorities applied from the current reads (a no-op once (b)
+   ran, but it drives the frozen settle).
+7. **Load** (decision 8). The frozen settle drives classic's stamp view of
+   the power-on state, with the live paths live (161 RCO from ENT, 173 M/N,
+   74hc74 `/pre` and `/clr`). The one edge pass then runs point 5 with every
+   `lastClk` at 0: a clock already reading HIGH gives classic's phantom rising
+   edge (optimization-equivalence's count 1 at 1 ms), and a held clear clears.
+   The requests of that pass carry their real delays, so the phantom edge's Q
+   changes land at `START_TIME + clkQ`, where classic's land on its next
+   solve; the slots at `START_TIME` already show the post-edge state.
+8. **Readouts** (Q-O8, decision 6: mirror classic). A slot holds the register
+   value after the latest evaluation, not a driver level: it changes at the
+   evaluation that changes the state, ahead of the pin by the delay (classic
+   leads by one solve). The 161 publishes its count under the bare key
+   `<id>` and bits 0-3 under `qa..qd` (no `rco` key); the 173 shows its
+   register while M or N tri-states the pins. Every slot is `NaN` while the
+   device is unpowered.
+9. **Events and stats.** A register needs no events of its own: W1c's watches
+   on every read pin and its bucket events wake it. Its output commits are
+   ordinary commits, and every evaluation counts toward stat 12.
+
+## Kernel semantics: memories (W1d)
+
+References are to spec §4.2.4-4.2.5.
+
+1. **Shared machinery.** As for the sequential ICs. The EEPROM's `io` pins are
+   driven and also read (sampled at a latch), so they follow the 74ls245
+   rule: never crossing-watched, and a dynamic partition holding one is
+   stepped (W1c point 3).
+2. **State at load.** 189: `mem[0..15] = 0xF`, `lastWE = 1`. EEPROM: the
+   blob's image, `lastWeHigh = lastCeHigh = true`, no pending write,
+   `pollReads = 0`, SDP locked at step 0, `dirty = false`. So the settle's edge
+   pass sees no write edge (no phantom write, as classic).
+3. **74ls189**, one powered evaluation, in order:
+   1. `csLow = !/cs`, `weHigh = /we`.
+   2. Write, with edges live only: when `csLow && weHigh && lastWE == 0`,
+      `mem[addr] = D` (`d1` is bit 0), address and D read now (the trailing
+      edge of `/we`). Then `lastWE = weHigh`, whatever `/cs` reads.
+   3. Drive: while `csLow && weHigh`, `/oN` requests HIGH when bit `N-1` of
+      `mem[addr]` is 0 (inverted outputs); otherwise every `/oN` requests HIZ.
+   4. Publish: while `csLow`, slot `N` is 1 when bit `N-1` of `mem[addr]` is
+      0, else 0, write mode included (classic); otherwise `NaN`.
+4. **28c16 and 28c256**, one powered evaluation, in order (`mask = size - 1`):
+   1. Completion: a pending write with `now >= completesAt` stores
+      `bytes[pendingAddr] = pendingByte`, sets `dirty`, clears the pending
+      write and `pollReads = 0`.
+   2. Latch, with edges live only: `weLatch = weHigh && !lastWeHigh && ceLow
+      && oeHigh`, `ceLatch = ceHigh && !lastCeHigh && !weHigh && oeHigh`. On
+      either, with no write pending, sample the address and `io0..io7` now
+      and run SDP. An accepted write sets `pendingAddr = addr & mask`,
+      `pendingByte`, `completesAt = now + tWC`, `pollReads = 0`, and schedules
+      a `Timer` for the device at `completesAt`. An edge while a write is
+      pending is ignored and never reaches SDP. Then `lastWeHigh = weHigh`,
+      `lastCeHigh = ceHigh`.
+   3. SDP (when `sdp = 1`) is classic's `consumeEepromWrite` verbatim:
+      unlocked accepts; otherwise a write matching `[(0x5555, 0xAA), (0x2AAA,
+      0x55), (0x5555, 0xA0)][sdpStep]` advances the step (the third match
+      unlocks and resets the step), a mismatch resets the step, and in both
+      cases the byte is dropped. The unlock lasts until the next load.
+   4. Toggle bit: while a write is pending, an evaluation at which `/oe` and
+      `/ce` both read LOW, having not both read LOW at the previous powered
+      evaluation, adds 1 to `pollReads` (one read cycle, the datasheet's
+      "successive reads toggle I/O6"). Classic adds 1 per accepted step (a
+      step-grid artifact the core cannot reproduce; a divergence).
+   5. Drive: while `oeLow && ceLow`, `ioK` requests bit K of `bytes[addr]`;
+      with a write pending and `addr == pendingAddr`, io7 requests the
+      complement of `pendingByte` bit 7 and io6 requests `pollReads & 1` (DATA
+      polling). Otherwise every `ioK` requests HIZ.
+   6. Publish: while `oeLow && ceLow` and no write is pending, slot K is bit K
+      of `bytes[addr]` (never a polling bit); otherwise `NaN`.
+5. **Write completion** (Q-O7). The latch's `Timer` only guarantees an
+   evaluation at `completesAt`; the completion itself is step 4.1, so an
+   evaluation then for any other reason completes the write and the `Timer`
+   finds nothing to do. A `Timer` that finds the IC unpowered leaves the
+   completion to its first powered evaluation. The kernel evaluates a device
+   in the delta in which its live `Timer` pops; `bo_engine_next_event_time`
+   reports it and `bo_engine_next_digital_due_time` does not (classic's
+   `nextScheduledEventTime` never sees `writeCompletesAt`).
+6. **Readouts** mirror classic (Q-O8): a slot holds the evaluator's view at
+   its latest evaluation, not the committed pin level, and runs ahead of the
+   pins by the delay. `NaN` while unpowered.
+7. **Rollback.** A failed instant restores the stored contents, edge
+   history, pending write, `pollReads`, SDP progress, `dirty`, `lastReads` and
+   the readouts. The EEPROM image is shared copy-on-write, so the per-instant
+   evaluator snapshot never copies 32 KiB; only a completion writes it.
+8. **Reload.** Nothing carries across `bo_engine_load` in W1: RAM returns to
+   0xF and the EEPROM to its contents image. Classic's carry rules (189 by
+   id; EEPROM by contents hash and size) are W2's load carry-forward.
 
 ## Kernel semantics: events (W1a)
 
 1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
    `seq` is a global insertion counter, so events at equal `t` run first in,
    first out.
-2. **Drivers.** A driver's commit, a reset (the driver stops driving, e.g.
-   a tri-stated or direction-flipped pin) and any other change to what it
+2. **Drivers.** A driver's commit (a commit to HIZ included: the driver stops
+   driving, as a tri-stated or direction-flipped pin does) and any other change to what it
    stamps all mark its partition dirty for the next re-solve; readers of that
    partition are then re-evaluated. Every IC output is a driver: a conductance to its IC's own
    supply pin nodes (so load current debits the rails, spec §1.7) with mode
@@ -540,7 +881,9 @@ References are to `core/spec/w1-classic-semantics.md`.
    of spec §2.4, as one pure function: the first observation has zero delay;
    a glitch shorter than the delay is swallowed; a re-glitch gets a fresh due
    time; at most one transition is in flight per pin. Each pending commit
-   carries a token; a newer request for the same driver supersedes it.
+   carries a token; a newer request for the same driver supersedes it. Each
+   request carries a delay set, and the driver picks one delay from its
+   committed level and the requested level (W1d, delays point 2).
 3. **Delta cycles** (owner decision 4). At an instant `t`:
    1. apply every due commit at `t`, in `(t, seq)` order, marking the
       partitions they touch dirty;
@@ -559,7 +902,10 @@ References are to `core/spec/w1-classic-semantics.md`.
    `START_TIME`:
    1. Settle the network to a fixed point with every register's edge history
       FROZEN: parts drive their current state but never act on an edge or
-      update `lastClk` or `lastWE`. Delays do not apply while settling; this
+      update `lastClk` or `lastWE`. Level-sensitive asynchronous inputs (a
+      74hc74's `/pre` and `/clr`, a 161's ENT to RCO, a 173's M/N) change the
+      outputs, as classic's seed stamp does, but never the register state;
+      the edge pass does the state writes. Delays do not apply while settling; this
       is finding the consistent initial state, not simulating time.
    2. Run exactly ONE edge pass: every reader is evaluated once with edges
       live. Classic's phantom rising edge (`lastClk` seeded 0 while the clock

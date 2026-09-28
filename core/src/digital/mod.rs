@@ -55,6 +55,27 @@ pub struct IcRecord {
     pub delay: f64,
     /// The first of this IC's digital slots.
     pub slot_base: usize,
+    /// The delay tail's `(dH, dL)` pairs, in the kind's pair order
+    /// (core/README.md, "IC delay tail"); empty for a kind without a tail.
+    pub delays: Vec<(f64, f64)>,
+    /// Params after the tail (the EEPROMs' `tWC`, `sdp`); empty otherwise.
+    pub extra: Vec<f64>,
+}
+
+/// Whether `kind` is a W1d sequential IC (codes 70-72).
+pub fn is_sequential_ic(kind: u32) -> bool {
+    matches!(kind, kinds::IC_74LS161 | kinds::IC_74LS173 | kinds::IC_74HC74)
+}
+
+/// Whether `kind` is a W1d memory (codes 80-82).
+pub fn is_memory_ic(kind: u32) -> bool {
+    matches!(kind, kinds::IC_74LS189 | kinds::IC_28C16 | kinds::IC_28C256)
+}
+
+/// Whether `kind` is any IC with an `IcRecord`: combinational, sequential or
+/// memory. W1c's call sites that meant "an IC" use this.
+pub fn is_ic(kind: u32) -> bool {
+    is_combinational_ic(kind) || is_sequential_ic(kind) || is_memory_ic(kind)
 }
 
 /// Whether `kind` is one of the W1c combinational IC codes.
@@ -110,6 +131,8 @@ impl IcRecord {
             io_max: (p[ic_param::IO_MAX] > 0.0).then_some(p[ic_param::IO_MAX]),
             delay: p[ic_param::DELAY],
             slot_base: device.blob[0] as usize,
+            delays: (0..kinds::delay_pairs(device.kind)).map(|k| (p[ic_param::COUNT + 2 * k], p[ic_param::COUNT + 2 * k + 1])).collect(),
+            extra: p[ic_param::COUNT + 2 * kinds::delay_pairs(device.kind)..].to_vec(),
         }
     }
 }
@@ -145,5 +168,23 @@ mod tests {
         assert_eq!(ic.io_max, Some(0.024));
         assert_eq!(ic.slot_base, 5);
         assert!(is_combinational_ic(ic.kind));
+    }
+
+    #[test]
+    fn types_a_28c256_record_with_its_delay_pairs_and_extras() {
+        let pin = |node: usize| PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 };
+        let mut pins = vec![pin(1), pin(0)];
+        pins.extend((0..26).map(|_| pin(2)));
+        let mut params = vec![4.5, 5.5, 0.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.004, 0.0];
+        params.extend([150e-9, 150e-9, 150e-9, 150e-9, 50e-9, 50e-9, 70e-9, 70e-9, 50e-9, 50e-9, 10e-3, 1.0]);
+        let mut blob = vec![3.0];
+        blob.extend(std::iter::repeat(1.0).take(26));
+        blob.extend(std::iter::repeat(0.0).take(8192));
+        let ic = IcRecord::from_device(&Device { kind: kinds::IC_28C256, component_index: 0, pins, params, blob });
+        assert_eq!(ic.logic.len(), 26);
+        assert_eq!(ic.delays.len(), 5);
+        assert_eq!(ic.delays[3], (70e-9, 70e-9), "oeEnable is the fourth pair");
+        assert_eq!(ic.extra, vec![10e-3, 1.0], "tWC then sdp");
+        assert!(is_memory_ic(ic.kind) && is_ic(ic.kind) && !is_combinational_ic(ic.kind));
     }
 }

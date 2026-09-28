@@ -181,8 +181,10 @@ fn is_code_in(v: f64, max: u32) -> bool {
 
 /// The shared IC checks: the flag params are codes, the physical ones are
 /// in range, and every per-pin blob flag uses only the two defined bits.
-/// The blob's slot base is checked by the reader against `S`.
-fn ic_check(_: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+/// The blob's slot base is checked by the reader against `S`. Pin flags sit
+/// at `blob[1..=L]`, `L = pin_count - 2`; an EEPROM's ROM words follow them
+/// and are checked as words by [`eeprom_check`].
+fn ic_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
     use ic_param::*;
     if !is_code_in(params[FAM_FLAGS], FAM_TTL | FAM_CMOS_RATIO) {
         return Err(format!("famFlags must be an integer in [0, 3], got {}", params[FAM_FLAGS]));
@@ -197,8 +199,85 @@ fn ic_check(_: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
             return Err(format!("{name} must be >= 0, got {}", params[i]));
         }
     }
-    if let Some(bad) = blob.get(1..).unwrap_or(&[]).iter().find(|v| !is_code_in(**v, PIN_FLOATING_INPUT | PIN_OPEN_COLLECTOR)) {
+    let logic = pin_count.saturating_sub(2);
+    if let Some(bad) = blob.get(1..=logic).unwrap_or(&[]).iter().find(|v| !is_code_in(**v, PIN_FLOATING_INPUT | PIN_OPEN_COLLECTOR)) {
         return Err(format!("pin flags must be an integer in [0, 3], got {bad}"));
+    }
+    Ok(())
+}
+
+/// Delay pairs in each IC kind's tail (core/README.md, "IC delay tail"):
+/// params `13 + 2k` and `14 + 2k`. Kinds without a tail return 0.
+pub fn delay_pairs(kind: u32) -> usize {
+    match kind {
+        IC_74LS161 | IC_74LS173 => 4,
+        IC_74HC74 => 2,
+        IC_74LS189 | IC_28C16 | IC_28C256 => 5,
+        _ => 0,
+    }
+}
+
+/// The EEPROMs' further params, after their delay tail.
+pub mod eeprom_param {
+    pub const TWC: usize = 23;
+    pub const SDP: usize = 24;
+    pub const COUNT: usize = 25;
+}
+
+/// ROM words per EEPROM image: 4 bytes per word (core/README.md, "ROM
+/// image").
+pub fn eeprom_words(kind: u32) -> usize {
+    match kind {
+        IC_28C16 => 2048 / 4,
+        IC_28C256 => 32768 / 4,
+        _ => 0,
+    }
+}
+
+/// The sequential and memory kinds (codes 70-82) on top of [`ic_check`]:
+/// classic reads them with no Schmitt branch and drives them push-pull, so
+/// `schmitt` and `OPEN_COLLECTOR` must be clear; every delay-tail value is
+/// `>= 0`.
+fn seq_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    ic_check(pin_count, params, blob)?;
+    if params[ic_param::SCHMITT] != 0.0 {
+        return Err("schmitt must be 0 for a sequential or memory IC".to_string());
+    }
+    let logic = pin_count.saturating_sub(2);
+    if blob.get(1..=logic).unwrap_or(&[]).iter().any(|v| (*v as u32) & PIN_OPEN_COLLECTOR != 0) {
+        return Err("OPEN_COLLECTOR is not allowed on a sequential or memory IC".to_string());
+    }
+    // The tail is every param after 12, except an EEPROM's tWC and sdp,
+    // which follow it and are checked by `eeprom_check`.
+    let tail_end = if params.len() == eeprom_param::COUNT { eeprom_param::TWC } else { params.len() };
+    if let Some(bad) = params[ic_param::COUNT..tail_end].iter().find(|v| **v < 0.0) {
+        return Err(format!("delay-tail values must be >= 0, got {bad}"));
+    }
+    Ok(())
+}
+
+/// An EEPROM (codes 81, 82) on top of [`seq_check`]: `tWC > 0`, `sdp` is 0
+/// or 1, and every ROM word after the pin flags is an integer in `[0, 2^32)`.
+/// `sdp = 1` on a 28c16 is rejected by [`eeprom_28c16_check`].
+fn eeprom_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    seq_check(pin_count, params, blob)?;
+    if !(params[eeprom_param::TWC] > 0.0) {
+        return Err(format!("tWC must be > 0, got {}", params[eeprom_param::TWC]));
+    }
+    if !is_switch_value(params[eeprom_param::SDP]) {
+        return Err(format!("sdp must be 0 or 1, got {}", params[eeprom_param::SDP]));
+    }
+    let words_from = 1 + pin_count.saturating_sub(2);
+    if let Some(bad) = blob.get(words_from..).unwrap_or(&[]).iter().find(|v| !(v.fract() == 0.0 && (0.0..4_294_967_296.0).contains(*v))) {
+        return Err(format!("ROM words must be integers in [0, 2^32), got {bad}"));
+    }
+    Ok(())
+}
+
+fn eeprom_28c16_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    eeprom_check(pin_count, params, blob)?;
+    if params[eeprom_param::SDP] != 0.0 {
+        return Err("sdp must be 0 on a 28c16 (classic applies SDP to the 28c256 only)".to_string());
     }
     Ok(())
 }
@@ -224,6 +303,28 @@ macro_rules! ic_shape {
     }};
 }
 
+/// Declares one sequential or memory IC (codes 70-82): `logic` pins after
+/// `vcc` and `gnd`, `params` in all (13 + the tail + any extras), `blob`
+/// values in all, and `slots` digital slots.
+macro_rules! w1d_shape {
+    ($code:expr, $name:expr, $logic:expr, $params:expr, $blob:expr, $slots:expr, $check:expr) => {{
+        fn slots(_: usize) -> usize {
+            $slots
+        }
+        KindShape {
+            code: $code,
+            name: $name,
+            pins: 2 + $logic,
+            pins_max: 2 + $logic,
+            params: $params,
+            blob: BlobShape::Exact($blob),
+            check: $check,
+            live_params: &[],
+            digital_slots: slots,
+        }
+    }};
+}
+
 const SHAPES: &[KindShape] = &[
     KindShape { code: RESISTOR, name: "resistor", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: resistor_check, live_params: &[], digital_slots: no_slots },
     KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[], digital_slots: no_slots },
@@ -243,6 +344,12 @@ const SHAPES: &[KindShape] = &[
     ic_shape!(IC_74HC14, "74hc14", 12, 6),
     ic_shape!(IC_74LS47, "74ls47", 14, 7),
     ic_shape!(IC_74LS245, "74ls245", 18, 16),
+    w1d_shape!(IC_74LS161, "74ls161", 14, 21, 1 + 14, 5, seq_check),
+    w1d_shape!(IC_74LS173, "74ls173", 14, 21, 1 + 14, 4, seq_check),
+    w1d_shape!(IC_74HC74, "74hc74", 12, 17, 1 + 12, 4, seq_check),
+    w1d_shape!(IC_74LS189, "74ls189", 14, 23, 1 + 14, 4, seq_check),
+    w1d_shape!(IC_28C16, "28c16", 22, eeprom_param::COUNT, 1 + 22 + 2048 / 4, 8, eeprom_28c16_check),
+    w1d_shape!(IC_28C256, "28c256", 26, eeprom_param::COUNT, 1 + 26 + 32768 / 4, 8, eeprom_check),
 ];
 
 /// The shape for `code`, or `None` when the code is unknown or reserved.
