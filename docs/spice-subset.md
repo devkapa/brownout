@@ -52,7 +52,7 @@ result.ac;          // frequencies + complex per-node responses
 | `L` | `lname n+ n- value [ic=i]` | Same positive-value and positional rules |
 | `K` | `kname lname1 lname2 coeff` | Couples two named `L` elements in the same scope; a top-level `K` naming a subcircuit-internal inductor is an error, as in ngspice |
 | `V` | `vname n+ n- [dc] value`, `sin(vo va freq [td])`, `pulse(v1 v2 td tr tf pw per)` | `SIN` freq must be positive; a negative `VA` maps onto `\|VA\|` with 180-degree phase (the engine's signal_gen clamps negative amplitudes to 0). All seven `PULSE` values are required — SPICE's defaults come from `.tran`, which the subset does not retro-apply |
-| `I` | `iname n+ n- dc value` | DC only |
+| `I` | `iname n+ n- dc value` | DC only. SPICE meaning kept: the current flows from n+ through the source to n-. The engine's `current_source` drives its current out of `pos`, so n+ attaches to `neg` and n- to `pos`, and `.op` reports the card's current n+ -> n-, equal to its value |
 | `D` | `dname n+ n- model` | Requires a `.model` reference |
 | `Q` | `qname nc nb ne model` | Requires a `.model` reference |
 | `M` | `mname nd ng ns nb model [w=..] [l=..]` | 4-node SPICE form; `W`/`L` default to 100 µm each |

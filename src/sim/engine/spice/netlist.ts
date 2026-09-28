@@ -937,8 +937,12 @@ function addElementCard(card: RawCard, builder: Builder): void {
         pins: [{ id: "pos" }, { id: "neg" }],
         params: { current: spec.dc ?? 0 },
       });
-      attachPin(builder, tokens[1], name, "pos");
-      attachPin(builder, tokens[2], name, "neg");
+      // Crossed on purpose. SPICE's n+ is where the current ENTERS from the
+      // circuit (it flows n+ -> source -> n-), while the engine's pos is the
+      // terminal it LEAVES by, like a battery's +. Attaching n- to pos keeps
+      // the deck's meaning: "i1 0 out 1m" lifts out to +1 V across 1k.
+      attachPin(builder, tokens[1], name, "neg");
+      attachPin(builder, tokens[2], name, "pos");
       if (spec.ac !== null) registerAcInput(builder, card, name, spec.ac);
       return;
     }

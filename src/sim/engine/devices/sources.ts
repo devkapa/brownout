@@ -412,11 +412,14 @@ export const currentSourceModel: DeviceModel = {
   // shunt keeps a source feeding an otherwise-open node solvable exactly as
   // it does for every high-Z default.
   //
-  // Sign convention is the SPICE I-element's: params.current is the current
-  // flowing from the pos pin THROUGH the source to the neg pin, i.e. it is
-  // drawn out of the pos node and injected into the neg node ("I1 0 out 1m"
-  // lifts node out positive). stampCurrentSource(i, j, I) injects INTO i and
-  // OUT of j, hence the (neg, pos) argument order below.
+  // Sign convention is a battery's, not the SPICE I-element's: params.current
+  // leaves the pos pin, flows through the external circuit and returns into
+  // the neg pin, so pos is the terminal the source drives positive — what a
+  // part labelled "+" promises. SPICE names the terminals the other way round
+  // (current flows from n+ THROUGH the source to n-), so the netlist parser
+  // attaches an I card's n+ to neg and its n- to pos; "I1 0 out 1m" still
+  // lifts node out positive. stampCurrentSource(i, j, I) injects INTO i and
+  // OUT of j, hence the (pos, neg) argument order below.
   stamp: (ctx, comp, _xGuess, _h) => {
     const pins = comp.pins;
     if (pins.length < 2) return;
@@ -425,7 +428,7 @@ export const currentSourceModel: DeviceModel = {
     // Scaled like every independent drive so the Wave A3 source-stepping
     // ladder relaxes I sources together with V sources.
     const I = ctx.independentSourceMagnitude(Number(comp.params.current ?? 0));
-    stampCurrentSource(ctx.mna, negNode, posNode, I);
+    stampCurrentSource(ctx.mna, posNode, negNode, I);
     const rParallel = Number(comp.params.rParallel ?? 0);
     if (Number.isFinite(rParallel) && rParallel > 0) {
       stampResistor(ctx.mna, posNode, negNode, rParallel);
@@ -433,11 +436,13 @@ export const currentSourceModel: DeviceModel = {
   },
   updateCurrent: (ctx, comp, x) => {
     // Element-current convention is pin0 -> pin1 (pos -> neg THROUGH the
-    // component): the ideal branch carries exactly the programmed current,
-    // plus the declared parallel shunt's terminal current. The homotopy
-    // scale is applied so a mid-ladder rung publishes the same drive it
-    // stamped (a voltage source's x[k] reflects the scaled stamp the same
-    // way); at any accepted point the scale is 1 and this is exact.
+    // component), the passive frame every two-terminal part publishes in.
+    // The ideal branch carries the programmed current the other way (it
+    // flows neg -> pos inside and leaves pos), hence -I, plus the declared
+    // parallel shunt's terminal current. The homotopy scale is applied so a
+    // mid-ladder rung publishes the same drive it stamped (a voltage source's
+    // x[k] reflects the scaled stamp the same way); at any accepted point the
+    // scale is 1 and this is exact.
     const pins = comp.pins;
     if (pins.length < 2) return;
     const I = ctx.independentSourceMagnitude(Number(comp.params.current ?? 0));
@@ -445,16 +450,16 @@ export const currentSourceModel: DeviceModel = {
     if (Number.isFinite(rParallel) && rParallel > 0) {
       const vd = ctx.vAt(x, ctx.pinNode(comp.id, pins[0].id))
         - ctx.vAt(x, ctx.pinNode(comp.id, pins[1].id));
-      ctx.setElementCurrent(comp.id, I + vd / rParallel);
+      ctx.setElementCurrent(comp.id, -I + vd / rParallel);
       return;
     }
-    ctx.setElementCurrent(comp.id, I);
+    ctx.setElementCurrent(comp.id, -I);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // The SPICE small-signal convention for an I element: AC-zeroed it is an
     // OPEN (a constant-current branch has zero admittance — nothing stamps),
     // and as the designated input it injects the unit 1 A drive with the
-    // transient stamp's polarity (out of pos, into neg). The declared
+    // transient stamp's polarity (into the pos node, out of neg). The declared
     // rParallel is a physical terminal resistor, so it stays as a real
     // conductance either way, mirroring the transient stamp exactly.
     const pins = comp.pins;
@@ -467,8 +472,8 @@ export const currentSourceModel: DeviceModel = {
     }
     const magnitude = ctx.acInputMagnitude(comp.id);
     if (magnitude !== 0) {
-      ac.addBAc(negNode, magnitude, 0);
-      ac.addBAc(posNode, -magnitude, 0);
+      ac.addBAc(posNode, magnitude, 0);
+      ac.addBAc(negNode, -magnitude, 0);
     }
   },
 };

@@ -84,7 +84,10 @@ export interface SpiceOpResult {
   /** SPICE node -> volts, normalized to V(node) - V("0"). */
   nodeVoltages: Record<string, number>;
   /** Element id -> amps (engine convention: pin0 -> pin1 through the
-   *  element; for sources that is the branch current INTO the pos pin). */
+   *  element; for sources that is the branch current INTO the pos pin).
+   *  An I card is the exception, reported n+ -> n- through the source like
+   *  the card reads, so it equals the card's value (its pins are crossed
+   *  onto the engine's, see netlist.ts). */
   elementCurrents: Record<string, number>;
   /** Which dcOperatingPoint ladder stage converged. */
   method: DcOperatingPointResult["method"];
@@ -216,9 +219,15 @@ function runOpAnalysis(parsed: ParsedNetlist, method: "be" | "trap"): SpiceOpRes
   for (const [node, volts] of normalizedNodeVoltages(op.netV, netIdByNode)) {
     nodeVoltages[node] = volts;
   }
+  const elementCurrents: Record<string, number> = { ...engine.elementI };
+  for (const component of parsed.circuit.components) {
+    if (component.kind === "current_source" && component.id in elementCurrents) {
+      elementCurrents[component.id] = -elementCurrents[component.id];
+    }
+  }
   return {
     nodeVoltages,
-    elementCurrents: { ...engine.elementI },
+    elementCurrents,
     method: op.method,
     newtonIterations: op.iterations,
   };
