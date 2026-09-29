@@ -1812,4 +1812,142 @@ mod tests {
         let miss = landed.expect("a step must land on the crossing of node 3 with half of node 2");
         assert!(miss.abs() < 3e-9, "node 3 lands {miss} V from half of node 2 at the landing instant, expected within the 1 nV nudge");
     }
+
+    // ---- G1's cross-partition supply tracking (manager ruling 2026-09-29) --
+
+    fn trace(nodes: Vec<usize>, before: Option<(f64, Vec<f64>)>, t0: f64, x0: Vec<f64>, t1: f64, x1: Vec<f64>) -> SupplyTrace {
+        SupplyTrace { nodes, before, t0, x0, t1, x1 }
+    }
+
+    #[test]
+    fn a_supply_trace_with_an_earlier_commit_reads_the_parabola_through_its_three_points() {
+        // Two nodes, each a quadratic in t, written as the quadratic itself so
+        // the expectation does not come from `write`. Points at tp = 1, t0 = 2,
+        // t1 = 4. Node 2: 0.5 t^2 - 3 t + 7 (4.5, 3, 3). Node 4: -0.25 t^2 + 2 t
+        // + 1 (2.75, 4, 5). The other slots must stay as they were.
+        let qa = |t: f64| 0.5 * t * t - 3.0 * t + 7.0;
+        let qb = |t: f64| -0.25 * t * t + 2.0 * t + 1.0;
+        let tr = trace(vec![2, 4], Some((1.0, vec![qa(1.0), qb(1.0)])), 2.0, vec![qa(2.0), qb(2.0)], 4.0, vec![qa(4.0), qb(4.0)]);
+        let mut scratch = vec![-99.0; 6];
+        for &t in &[2.0, 2.25, 2.5, 3.0, 3.5, 3.9, 4.0] {
+            tr.write(&mut scratch, t);
+            assert!((scratch[2] - qa(t)).abs() < 1e-12, "node 2 at t={t}: {} vs {}", scratch[2], qa(t));
+            assert!((scratch[4] - qb(t)).abs() < 1e-12, "node 4 at t={t}: {} vs {}", scratch[4], qb(t));
+        }
+        for slot in [0, 1, 3, 5] {
+            assert_eq!(scratch[slot], -99.0, "slot {slot} is not a supply node and must be left alone");
+        }
+        // And it is the parabola, not the straight line between the ends: at
+        // t = 3 the line gives 3 for node 2 (its ends are both 3), the
+        // quadratic 2.5; node 4's line gives 4.5, the quadratic 4.75.
+        tr.write(&mut scratch, 3.0);
+        assert!((scratch[2] - 2.5).abs() < 1e-12, "{}", scratch[2]);
+        assert!((scratch[4] - 4.75).abs() < 1e-12, "{}", scratch[4]);
+    }
+
+    #[test]
+    fn a_supply_trace_with_no_earlier_commit_is_the_straight_line() {
+        // Right after a discontinuity `before` is dropped: 1 V at t = 0 to 3 V at t = 2.
+        let tr = trace(vec![1], None, 0.0, vec![1.0], 2.0, vec![3.0]);
+        let mut scratch = vec![0.0; 3];
+        for &(t, want) in &[(0.0, 1.0), (0.5, 1.5), (1.0, 2.0), (1.5, 2.5), (2.0, 3.0)] {
+            tr.write(&mut scratch, t);
+            assert!((scratch[1] - want).abs() < 1e-15, "t={t}: {} vs {want}", scratch[1]);
+        }
+    }
+
+    #[test]
+    fn a_supply_trace_with_no_trial_is_flat_at_its_committed_value() {
+        // `supply_traces` gives a partition with no pending trial t1 = t0 and x1 = x0.
+        let tr = trace(vec![1], Some((1.0, vec![9.0])), 3.0, vec![4.2], 3.0, vec![4.2]);
+        let mut scratch = vec![0.0; 2];
+        for &t in &[0.0, 1.0, 3.0, 3.5, 9.0] {
+            tr.write(&mut scratch, t);
+            assert_eq!(scratch[1], 4.2, "t={t}: no trial means the supply is where it was committed, whatever `before` says");
+        }
+    }
+
+    #[test]
+    fn a_supply_trace_clamps_to_its_own_interval_instead_of_extrapolating() {
+        let q = |t: f64| 0.5 * t * t - 3.0 * t + 7.0;
+        let with_before = trace(vec![1], Some((1.0, vec![q(1.0)])), 2.0, vec![q(2.0)], 4.0, vec![q(4.0)]);
+        let line = trace(vec![1], None, 2.0, vec![q(2.0)], 4.0, vec![q(4.0)]);
+        let mut scratch = vec![0.0; 2];
+        for tr in [&with_before, &line] {
+            tr.write(&mut scratch, -5.0);
+            assert!((scratch[1] - q(2.0)).abs() < 1e-12, "before t0 the value is x0: {}", scratch[1]);
+            tr.write(&mut scratch, 1.0);
+            assert!((scratch[1] - q(2.0)).abs() < 1e-12, "before t0 the value is x0, not the parabola's own value at t = 1 ({}): {}", q(1.0), scratch[1]);
+            tr.write(&mut scratch, 9.0);
+            assert!((scratch[1] - q(4.0)).abs() < 1e-12, "after t1 the value is x1, not the parabola's own value at t = 9 ({}): {}", q(9.0), scratch[1]);
+        }
+    }
+
+    /// Two independent single-capacitor partitions under `FORCE_STEPPED`: node
+    /// 2, a 1 ms RC off the 5 V rail (the supplier), and node 3, a 1 s RC off
+    /// the same rail (the watcher). The watch on node 3 reads half of node 2,
+    /// so node 2 is the supply its threshold follows. Returns the solver and
+    /// the two partition indices, both loaded at t = 0.
+    fn supplier_and_watcher(depends: bool) -> (SteppedSolver, usize, usize) {
+        let mut options = Options::default();
+        options.force_stepped = true;
+        let p = program(
+            4,
+            vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1e3), capacitor(2, 2, 0, 1e-6, 0.0, 0.0), resistor(3, 1, 3, 1e6), capacitor(4, 3, 0, 1e-6, 0.0, 0.0)],
+            options,
+        );
+        let mut st = build(&p);
+        assert_eq!(st.partitions.len(), 2, "two capacitors on two separate free nodes: two partitions");
+        let (supplier, watcher) = (st.node_owner[&2].0, st.node_owner[&3].0);
+        assert_ne!(supplier, watcher);
+        let mut voltages = vec![0.0, 5.0, 0.0, 0.0];
+        let mut currents = vec![0.0; 5];
+        st.resolve_dirty(&[supplier, watcher], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        assert!(st.watch_node(3, DeviceId(0), Box::new(|v: &[f64]| vec![Threshold { value: 0.5 * v[2], rising: true }])));
+        if depends {
+            st.add_supply_dependency(3, 2);
+        }
+        (st, supplier, watcher)
+    }
+
+    #[test]
+    fn a_step_never_runs_past_the_end_of_a_supply_trial_however_long_its_own_control_would_take() {
+        let voltages = vec![0.0, 5.0, 0.0, 0.0];
+        let live = HashMap::new();
+        // The supplier's trial: a short step of 100 us from t = 0.
+        let plan_supplier = |st: &mut SteppedSolver, supplier: usize| {
+            st.partitions.get_mut(&supplier).unwrap().h = 1e-4;
+            st.plan_step(supplier, f64::INFINITY, &[], &live, &voltages).unwrap();
+            let part = &st.partitions[&supplier];
+            assert!(part.has_pend && part.pend_t > 0.0 && part.pend_t <= 1e-4 + 1e-15, "the supplier's trial ends within 100 us: {}", part.pend_t);
+            part.pend_t
+        };
+        // The watcher, asked for its longest active step. A 1 s RC takes that whole step in one go.
+        let plan_watcher = |st: &mut SteppedSolver, watcher: usize, h: f64| {
+            let part = st.partitions.get_mut(&watcher).unwrap();
+            part.h = h;
+            part.changing = true;
+            st.plan_step(watcher, f64::INFINITY, &[], &live, &voltages).unwrap();
+            st.partitions[&watcher].pend_t
+        };
+
+        // Without the dependency the watcher takes the whole 2 ms: this is the step the cap has to cut.
+        let (mut control, supplier, watcher) = supplier_and_watcher(false);
+        let control_supplier_end = plan_supplier(&mut control, supplier);
+        let control_end = plan_watcher(&mut control, watcher, ACTIVE_H_MAX);
+        assert_eq!(control_end, ACTIVE_H_MAX, "the watcher's own control takes the full active step");
+        assert!(control_end > 10.0 * control_supplier_end, "and that is far past the supplier's trial ({control_supplier_end})");
+
+        // With it, the step ends where the supplier's trial ends and not a moment later.
+        let (mut st, supplier, watcher) = supplier_and_watcher(true);
+        let supplier_end = plan_supplier(&mut st, supplier);
+        let watcher_end = plan_watcher(&mut st, watcher, ACTIVE_H_MAX);
+        assert!(watcher_end <= supplier_end + 1e-15, "watcher pend_t {watcher_end} must not exceed the supplier's {supplier_end}");
+        assert!((watcher_end - supplier_end).abs() < 1e-15, "and it is the cap that ends it, not something shorter: {watcher_end} vs {supplier_end}");
+
+        // A step already shorter than the trial is left alone: the cap only lowers.
+        let short = plan_watcher(&mut st, watcher, 1e-5);
+        assert_eq!(short, 1e-5);
+        assert!(short < supplier_end);
+    }
 }

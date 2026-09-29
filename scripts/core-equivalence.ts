@@ -10,7 +10,12 @@
  *
  * `--corpus` is repeatable (one external corpus per flag). `--json`/`--md`
  * write the full report (table + per-entry detail) to the given path; the
- * per-kind table always prints to stdout regardless. Nothing under
+ * per-kind table always prints to stdout regardless. The summary under it
+ * (and the JSON's `summary`) splits the passing entries into those that pass
+ * clean and those that pass with at least one known-divergence hit, and
+ * tallies the hits by divergence id: a known hit is an explained mismatch,
+ * and a bare pass count would hide how many of the passes rest on one.
+ * Nothing under
  * `--corpus` is ever written into this repo by this script — it only reads
  * from the directories it is given.
  *
@@ -35,6 +40,7 @@ import { createFileReferenceCache } from "../test/core/equivalence/reference-cac
 import { EXTERNAL_CLASSIC_REFERENCE_CACHE_DIR } from "../test/core/equivalence/run-entry.js";
 import { runEquivalenceHarness } from "../test/core/equivalence/harness.js";
 import { renderMarkdownReport, renderMarkdownTable, toJsonReport } from "../test/core/equivalence/report.js";
+import type { HarnessEntryOutcome } from "../test/core/equivalence/table.js";
 
 interface Args {
   corpusDirs: string[];
@@ -85,6 +91,67 @@ function writeFileEnsuringDir(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents);
 }
 
+interface KnownHitSummary {
+  readonly entries: number;
+  readonly byStatus: Readonly<Record<string, number>>;
+  readonly pass: {
+    readonly total: number;
+    /** Passes with no known-divergence hit at all: the two engines agreed within tolerance everywhere. */
+    readonly clean: number;
+    /** Passes with at least one known hit: some mismatch was explained rather than absent. */
+    readonly withKnownHits: number;
+  };
+  /** Known hits on PASSING entries by divergence id: `hits` counts mismatches, `entries` the passing entries holding at least one. */
+  readonly knownHitsById: Readonly<Record<string, { readonly hits: number; readonly entries: number }>>;
+}
+
+function summarizeKnownHits(outcomes: readonly HarnessEntryOutcome[]): KnownHitSummary {
+  const byStatus: Record<string, number> = {};
+  const byId = new Map<string, { hits: number; entries: number }>();
+  let clean = 0;
+  let withKnownHits = 0;
+
+  for (const { result } of outcomes) {
+    byStatus[result.status] = (byStatus[result.status] ?? 0) + 1;
+    if (result.status !== "pass") continue;
+    if (result.knownDivergences.length === 0) {
+      clean++;
+      continue;
+    }
+    withKnownHits++;
+    const seen = new Set<string>();
+    for (const hit of result.knownDivergences) {
+      const tally = byId.get(hit.divergenceId) ?? { hits: 0, entries: 0 };
+      tally.hits++;
+      if (!seen.has(hit.divergenceId)) {
+        seen.add(hit.divergenceId);
+        tally.entries++;
+      }
+      byId.set(hit.divergenceId, tally);
+    }
+  }
+
+  return {
+    entries: outcomes.length,
+    byStatus,
+    pass: { total: clean + withKnownHits, clean, withKnownHits },
+    knownHitsById: Object.fromEntries([...byId].sort(([a], [b]) => a.localeCompare(b))),
+  };
+}
+
+function printKnownHitSummary(summary: KnownHitSummary): void {
+  console.log(`pass: ${summary.pass.total} = ${summary.pass.clean} clean + ${summary.pass.withKnownHits} with known hits`);
+  const ids = Object.entries(summary.knownHitsById);
+  if (ids.length === 0) {
+    console.log("known hits on passing entries: none");
+    return;
+  }
+  console.log("known hits on passing entries, by divergence id:");
+  for (const [id, { hits, entries }] of ids) {
+    console.log(`  ${id}: ${hits} hit${hits === 1 ? "" : "s"} in ${entries} entr${entries === 1 ? "y" : "ies"}`);
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -111,9 +178,12 @@ async function main(): Promise<void> {
   console.log(renderMarkdownTable(run.kindTable));
   console.log("");
   console.log(`${run.outcomes.length} corpus entr${run.outcomes.length === 1 ? "y" : "ies"} evaluated.`);
+  const summary = summarizeKnownHits(run.outcomes);
+  printKnownHitSummary(summary);
 
   if (args.jsonPath) {
-    writeFileEnsuringDir(args.jsonPath, JSON.stringify(toJsonReport(run), null, 2));
+    // `summary` rides beside the report's own fields rather than inside toJsonReport (report.ts is shared with the gate test).
+    writeFileEnsuringDir(args.jsonPath, JSON.stringify({ summary, ...(toJsonReport(run) as object) }, null, 2));
     console.log(`JSON report written to ${args.jsonPath}`);
   }
   if (args.mdPath) {

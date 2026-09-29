@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { initCore } from "../../../src/core/wasm.js";
+import { coreCall, initCore } from "../../../src/core/wasm.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles, type AlignmentSuccess } from "./align.js";
 import { compareStimuliSamples } from "./compare.js";
@@ -36,17 +36,19 @@ import {
   ne555SupplyResidual,
   QuietInstantEvidenceError,
   resolveSampleTimes,
+  RICHARDSON_CLOSER_DIVERGENCE_ID,
   RICHARDSON_DIVERGENCE_ID,
   runCorpusEntry,
   runSidecarChecks,
 } from "./run-entry.js";
 import { collectClassicSamples, collectCoreSamples } from "./sample.js";
-import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase } from "./stimuli.js";
+import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase, type StimulusStepSample } from "./stimuli.js";
 import { loadSyntheticCorpus } from "./synthetic-fixtures.js";
 import { CoreEngine } from "../../../src/core/engine.js";
 import { ledRcVoltages } from "./analytic.js";
+import { VOLT_ABS_TOL, VOLT_REL_TOL } from "./tolerance.js";
 import { collectClassicDigitalTrace, collectCoreDigitalTrace } from "./trace.js";
-import type { CorpusEntry } from "./types.js";
+import type { CorpusEntry, Mismatch } from "./types.js";
 
 type SimComponent = SimCircuit["components"][number];
 
@@ -349,6 +351,188 @@ describe("finding 11 — Richardson-extrapolated forgiveness for the stimuli pat
     const { explained, remaining } = explainRichardsonMismatches(fixture13.circuit, phases, [...cmp.mismatches, fabricated]);
     expect(remaining).toContainEqual(fabricated);
     expect(explained.some((hit) => hit.mismatch === fabricated)).toBe(false);
+  });
+});
+
+/**
+ * The Richardson rules' detector, on hand-built numbers only: `replay` stands
+ * in for classic, so no engine's output decides a verdict here. Every value
+ * below is chosen so that R, R' and the tolerances are easy to check by eye:
+ * with c(h) = 1.000 and c(h/2) = 1.010 (volts), R = 2*1.010 - 1.000 = 1.020,
+ * and the ordinary tolerance at about 1.02 V is 100e-6 + 1e-3*1.02 = 1.12 mV.
+ */
+describe("Richardson rules on hand-built numbers (rule 2: richardson-closer-than-classic)", () => {
+  const circuit = simpleDivider();
+  const phases: StimulusPhase[] = [{ durationS: 5e-3 }];
+  const T = 5e-3;
+
+  const mismatch = (classicValue: number, coreValue: number, category: "netV" | "elementI" = "netV", id = "n1"): Mismatch => ({
+    sampleTime: T,
+    category,
+    id,
+    classicValue,
+    coreValue,
+    detail: "hand-built",
+    phaseIndex: 0,
+  });
+
+  const sampleOf = (category: "netV" | "elementI", id: string, value: number): StimulusStepSample => ({
+    phaseIndex: 0,
+    simTime: T,
+    netV: category === "netV" ? { [id]: value } : {},
+    elementI: category === "elementI" ? { [id]: value } : {},
+    digitalState: {},
+  });
+
+  /** A classic that answers by step size: c(h/2) = `half`, c(h/4) = `quarter` (a number; "throw"; or "missing", a replay with no sample at T). Counts the calls per step. */
+  function fakeReplay(half: number, quarter: number | "throw" | "missing", category: "netV" | "elementI" = "netV", id = "n1") {
+    const calls: number[] = [];
+    const replay = (_c: SimCircuit, _p: readonly StimulusPhase[], stepS: number): StimulusStepSample[] => {
+      calls.push(stepS);
+      if (stepS === STIMULUS_FIXED_STEP_S / 2) return [sampleOf(category, id, half)];
+      if (stepS === STIMULUS_FIXED_STEP_S / 4) {
+        if (quarter === "throw") throw new Error("classic did not converge at h/4");
+        if (quarter === "missing") return [];
+        return [sampleOf(category, id, quarter)];
+      }
+      throw new Error(`unexpected replay step ${stepS}`);
+    };
+    return { replay, calls, quarterCalls: () => calls.filter((c) => c === STIMULUS_FIXED_STEP_S / 4).length };
+  }
+
+  it("explains a core that is closer than classic but outside tolerance of R, when R has converged, and records the numbers", () => {
+    // R = 1.020. Core 1.0235 is 3.5 mV from R (over the 1.12 mV tolerance, so rule 1 refuses it) and classic 1.000 is 20 mV away.
+    // c(h/4) = 1.0152 gives R' = 2*1.0152 - 1.010 = 1.0204: |R'-R| = 0.4 mV, inside the tolerance.
+    const fake = fakeReplay(1.01, 1.0152);
+    const m = mismatch(1.0, 1.0235);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+
+    expect(remaining).toEqual([]);
+    expect(explained).toHaveLength(1);
+    const hit = explained[0]!;
+    expect(hit.mismatch).toBe(m);
+    expect(hit.divergenceId).toBe(RICHARDSON_CLOSER_DIVERGENCE_ID);
+    expect(hit.richardson).toBeDefined();
+    expect(hit.richardson!.reference).toBeCloseTo(1.02, 12);
+    expect(hit.richardson!.coreError).toBeCloseTo(3.5e-3, 12);
+    expect(hit.richardson!.classicError).toBeCloseTo(0.02, 12);
+    expect(hit.richardson!.convergenceEstimate).toBeCloseTo(4e-4, 12);
+    // Recorded in the reason too, so the plain-text report carries them.
+    expect(hit.reason).toContain("3.500e-3");
+    expect(hit.reason).toContain("2.000e-2");
+    expect(hit.reason).toContain("4.000e-4");
+  });
+
+  it("leaves a mismatch alone when classic is the closer of the two, and never runs the h/4 replay for it", () => {
+    // Core 1.060 is 40 mV from R = 1.020, classic 1.000 only 20 mV: no hit, whatever R' is.
+    const fake = fakeReplay(1.01, 1.0152);
+    const m = mismatch(1.0, 1.06);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+
+    expect(explained).toEqual([]);
+    expect(remaining).toEqual([m]);
+    expect(fake.quarterCalls()).toBe(0);
+  });
+
+  it("a core exactly as far from R as classic is not strictly closer, so rule 2 refuses it", () => {
+    // Core 1.040 and classic 1.000 are both 20 mV from R = 1.020 (one above, one below). Rule 1 fails on tolerance, rule 2 on strictness.
+    const fake = fakeReplay(1.01, 1.0152);
+    const m = mismatch(1.0, 1.04);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+    expect(explained).toEqual([]);
+    expect(remaining).toEqual([m]);
+  });
+
+  it("leaves a mismatch alone when R has not converged: the estimate |R'-R| is over the tolerance", () => {
+    // c(h/4) = 1.0175 gives R' = 2*1.0175 - 1.010 = 1.025: |R'-R| = 5 mV, over the 1.12 mV tolerance.
+    const fake = fakeReplay(1.01, 1.0175);
+    const m = mismatch(1.0, 1.0235);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+
+    expect(explained).toEqual([]);
+    expect(remaining).toEqual([m]);
+    expect(fake.quarterCalls()).toBe(1);
+  });
+
+  it("the convergence estimate is judged against the AMP bounds for an elementI mismatch, not the volt ones", () => {
+    // Amps: c(h) = 2.000 uA, c(h/2) = 2.100 uA, so R = 2.200 uA; core 2.270 uA is 70 nA from R (tolerance about 3.3 nA, so rule 1
+    // refuses it) and classic is 200 nA away. |R'-R| = 20 nA is far under the 100 uV volt bound but over the 3.2 nA amp bound.
+    const over = fakeReplay(2.1e-6, 2.16e-6, "elementI", "d1");
+    const bad = mismatch(2.0e-6, 2.27e-6, "elementI", "d1");
+    const refused = explainRichardsonMismatches(circuit, phases, [bad], "be", over.replay);
+    expect(refused.explained).toEqual([]);
+    expect(refused.remaining).toEqual([bad]);
+
+    // c(h/4) = 2.1505 uA: R' = 2*2.1505 - 2.100 = 2.201 uA, |R'-R| = 1 nA, inside the amp bound.
+    const under = fakeReplay(2.1e-6, 2.1505e-6, "elementI", "d1");
+    const good = mismatch(2.0e-6, 2.27e-6, "elementI", "d1");
+    const taken = explainRichardsonMismatches(circuit, phases, [good], "be", under.replay);
+    expect(taken.remaining).toEqual([]);
+    expect(taken.explained[0]!.divergenceId).toBe(RICHARDSON_CLOSER_DIVERGENCE_ID);
+    expect(taken.explained[0]!.richardson!.convergenceEstimate).toBeCloseTo(1e-9, 15);
+  });
+
+  it("a mismatch rule 1 takes keeps rule 1's own id, records no Richardson evidence, and never runs the h/4 replay", () => {
+    // Core 1.0205 is 0.5 mV from R = 1.020 (inside 1.12 mV) and classic is 20 mV away.
+    const fake = fakeReplay(1.01, 1.0152);
+    const m = mismatch(1.0, 1.0205);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+
+    expect(remaining).toEqual([]);
+    expect(explained).toHaveLength(1);
+    expect(explained[0]!.divergenceId).toBe(RICHARDSON_DIVERGENCE_ID);
+    expect(explained[0]!.richardson).toBeUndefined();
+    expect(fake.quarterCalls()).toBe(0);
+  });
+
+  it("runs the h/4 replay once for an entry however many mismatches reach rule 2, and mixes both rules in one call", () => {
+    const fake = fakeReplay(1.01, 1.0152);
+    const closer = mismatch(1.0, 1.0235);
+    const alsoCloser = { ...closer }; // a second mismatch reaching rule 2: must reuse the one h/4 replay
+    const first = mismatch(1.0, 1.0205);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [closer, first, alsoCloser], "be", fake.replay);
+
+    expect(remaining).toEqual([]);
+    expect(explained.map((h) => h.divergenceId)).toEqual([
+      RICHARDSON_CLOSER_DIVERGENCE_ID,
+      RICHARDSON_DIVERGENCE_ID,
+      RICHARDSON_CLOSER_DIVERGENCE_ID,
+    ]);
+    expect(fake.quarterCalls()).toBe(1);
+  });
+
+  it("a rule-1 or no-Richardson entry never triggers the h/4 replay: only the h/2 one runs", () => {
+    const fake = fakeReplay(1.01, 1.0152);
+    explainRichardsonMismatches(circuit, phases, [mismatch(1.0, 1.0205)], "be", fake.replay);
+    expect(fake.calls).toEqual([STIMULUS_FIXED_STEP_S / 2]);
+
+    const none = fakeReplay(1.01, 1.0152);
+    explainRichardsonMismatches(circuit, phases, [], "be", none.replay);
+    expect(none.calls).toEqual([]);
+  });
+
+  it("an h/4 replay that throws leaves the mismatch unexplained, and is not retried for the next one", () => {
+    const fake = fakeReplay(1.01, "throw");
+    const a = mismatch(1.0, 1.0235);
+    const b = { ...mismatch(1.0, 1.0235), id: "n2" };
+    // n2 needs samples too: answer for both ids at the h/2 step.
+    const replay = (c: SimCircuit, p: readonly StimulusPhase[], step: number): StimulusStepSample[] => {
+      const base = fake.replay(c, p, step);
+      return step === STIMULUS_FIXED_STEP_S / 2 ? [{ ...base[0]!, netV: { n1: 1.01, n2: 1.01 } }] : base;
+    };
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [a, b], "be", replay);
+
+    expect(explained).toEqual([]);
+    expect(remaining).toEqual([a, b]);
+    expect(fake.quarterCalls()).toBe(1);
+  });
+
+  it("an h/4 replay with no sample at the mismatch's instant leaves it unexplained", () => {
+    const fake = fakeReplay(1.01, "missing");
+    const m = mismatch(1.0, 1.0235);
+    const { explained, remaining } = explainRichardsonMismatches(circuit, phases, [m], "be", fake.replay);
+    expect(explained).toEqual([]);
+    expect(remaining).toEqual([m]);
   });
 });
 
@@ -766,5 +950,165 @@ describe("NE555, classic side", () => {
     const core = levelChanges(collectCoreDigitalTrace(circuit, 0.3), "u1");
     const classic = levelChanges(collectClassicDigitalTrace(circuit, 0.3), "u1");
     expect(classic[1]!.t).toBeGreaterThan(core[1]!.t);
+  });
+});
+
+/**
+ * Fixture 40, G1's cross-partition supply tracking (manager ruling 2026-09-29,
+ * 4b). A 555 whose free supply and whose watched pin are in DIFFERENT Stepped
+ * partitions, with the supply still moving when the pin crosses its threshold,
+ * judged against classic through the stimuli path. Nothing here assumes the
+ * layout: each test loads the fixture through the core and reads it back.
+ *
+ * WHY A 555, AND WHY IT IS SHAPED THIS WAY (the numbers cost several rounds).
+ * - The pin's crossing is continuous, so classic (a fixed 1 ms step) flips
+ *   at the first sample after it and the core at the crossing. Only the 555
+ *   has an exemption for that one-sample difference (`classic-555-one-solve-
+ *   lag`); a 74hc14's output or a register's Q would fail at that sample.
+ * - DIS is wired to the supply through a pull-up (ra), never to the timing
+ *   node: DIS is output-capable, so on the timing node it would union the pin
+ *   with the free supply into ONE partition. TRIG and THR share the pin
+ *   (P), on an RC (rp1, rp2, rq, cp) the sidecar does not model, so classic
+ *   is compared directly with Richardson arbitrating.
+ * - The supply is the rail through rs with cs across it: cs is uncharged, so
+ *   the supply starts at the rail (12 V, well above the 4.05 V power floor)
+ *   and falls with tau = cs * (rs || rb), about 0.36 s, as the divider takes
+ *   over. It falls while THR rises through 2/3 of it. Classic estimates a
+ *   555 crossing from the supply's value before the step; with the supply
+ *   falling that estimate overshoots, so classic's split lands the flip
+ *   inside the step and its OUT, its DIS and its readouts flip together at
+ *   one sample. A rising supply under-shoots it, and classic's nets then
+ *   flip a sample after its state, which nothing excuses.
+ * - rl runs OUT to a 3.5 V source (vb), so the output current is several mA
+ *   in both states: u1's own current is a difference of two 5 mA terms and
+ *   carries about 5 uA of solver noise, more than the 0.1% tolerance of a
+ *   current below a few mA.
+ * - Resistors are sized under classic's 0.25 W rating (rb sees 12 V at the
+ *   start: 0.2 W): classic latches a `resistor_overload` failure and the
+ *   core, which has no failure model yet (W1g), then disagrees with it.
+ * - The time constants are slow enough that the core's own backward-Euler
+ *   error, largest in the capacitor currents (cs, cp, rq), stays inside the
+ *   tolerance of the Richardson reference R, so every explained mismatch is
+ *   a `richardson-classic-self-reference` hit and none rests on the weaker
+ *   closer-than-classic rule. The same circuit with time constants 30% shorter
+ *   leaves 67 `richardson-closer-than-classic` hits. The price is a threshold
+ *   that moves only about twice the tolerance over the crossing step: the
+ *   movement and the core's capacitor-current error both scale with the ratio
+ *   of the core's step to the time constant, so a faster supply that moved
+ *   the threshold further would put the core's currents outside R.
+ */
+describe("fixture 40 - a 555 whose watched pin and free supply are in different Stepped partitions", () => {
+  const { entry, circuit } = syntheticEntry("40-ne555-cross-partition-moving-supply");
+
+  /** `bo_engine_stat`, which CoreEngine.stats() does not expose past its first four (8 closed-form segments, 10 stepped steps). */
+  const rawStat = (engine: CoreEngine, index: number): number => {
+    const handle = (engine as unknown as { _handle: number })._handle;
+    return coreCall((exports) => exports.bo_engine_stat(handle, index));
+  };
+
+  /** The core's natural event sequence up to `tEnd`: advance to `next_event_time` until nothing is due, so no step is clamped to a horizon of ours. */
+  function naturalEvents(engine: CoreEngine, tEnd: number): { t: number; pinV: number; level: number }[] {
+    const handle = (engine as unknown as { _handle: number })._handle;
+    const pinNet = engine.getNetIdForPin("u1", "6")!;
+    const events: { t: number; pinV: number; level: number }[] = [];
+    for (let guard = 0; guard < 100000; guard++) {
+      const t = coreCall((exports) => exports.bo_engine_next_event_time(handle));
+      if (!Number.isFinite(t) || t > tEnd) break;
+      engine.advance(t);
+      events.push({ t: engine.simTime, pinV: engine.getNetV()[pinNet]!, level: engine.digitalState.u1! });
+    }
+    return events;
+  }
+
+  it("loads as exactly two partitions, the pin's and the supply's, both stepped", () => {
+    const engine = new CoreEngine();
+    try {
+      engine.load(circuit);
+      const supply = engine.getNetIdForPin("u1", "8")!;
+      const pin = engine.getNetIdForPin("u1", "6")!;
+      expect(engine.getNetIdForPin("u1", "2")).toBe(pin);
+      expect(pin).not.toBe(supply);
+
+      // Free nodes: the supply, DIS and OUT (an output-capable pin on a free node is unioned with the free supply of its IC),
+      // and the pin with the node behind rq. Fixed: the datum, the rail and vb. Five free nodes in two partitions, the
+      // larger holding three, so the supply, DIS and OUT are one partition and the pin and its RC the other.
+      expect(engine.getNetIdForPin("u1", "7")).not.toBe(pin);
+      expect(engine.getNetIdForPin("u1", "3")).not.toBe(pin);
+      expect(engine.stats()).toMatchObject({ partitions: 2, largestPartition: 3, fixedNodes: 3 });
+
+      // Each partition holds one capacitor, which alone would make it closed-form. It is stepped only because the supply
+      // is free (partition::build) and because the pin is a watched read pin of an IC with such a supply. A closed-form
+      // partition plans a segment at load, so none is counted, and both partitions take steps.
+      engine.advance(0.02);
+      expect(Math.abs(rawStat(engine, 8)), "stat 8 reads -0 when nothing was counted").toBe(0);
+      expect(rawStat(engine, 10)).toBeGreaterThan(0);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("the 555 flips once, at a crossing the supply is still moving through, by more than the volt tolerance over the crossing step", () => {
+    const engine = new CoreEngine();
+    let flip: { t: number; start: number };
+    try {
+      engine.load(circuit);
+      const events = naturalEvents(engine, 0.33);
+      const flipAt = events.findIndex((e) => e.level === 0);
+      expect(flipAt, "the 555 must reset inside the run").toBeGreaterThan(0);
+      expect(events.filter((e, i) => i > 0 && e.level !== events[i - 1]!.level)).toHaveLength(1);
+      // The crossing step starts at the last commit before the flip's instant.
+      let start = flipAt - 1;
+      while (events[start]!.t >= events[flipAt]!.t) start--;
+      flip = { t: events[flipAt]!.t, start: events[start]!.t };
+    } finally {
+      engine.dispose();
+    }
+
+    // The supply at each end of that step, from an engine advanced exactly there.
+    const supplyAt = (t: number): number => {
+      const e = new CoreEngine();
+      try {
+        e.load(circuit);
+        e.advance(t);
+        return e.getNetV()[e.getNetIdForPin("u1", "8")!]!;
+      } finally {
+        e.dispose();
+      }
+    };
+    const thresholdAtStart = (2 / 3) * supplyAt(flip.start);
+    const thresholdAtFlip = (2 / 3) * supplyAt(flip.t);
+    const moved = Math.abs(thresholdAtStart - thresholdAtFlip);
+    const tolerance = VOLT_ABS_TOL + VOLT_REL_TOL * thresholdAtFlip;
+    expect(flip.t, "the crossing is well inside the run and after the supply has left the rail").toBeGreaterThan(0.1);
+    expect(flip.t - flip.start, "a step of the pin's partition, not a zero-length event").toBeGreaterThan(1e-3);
+    expect(moved, `THR's threshold moved ${moved} V over the ${flip.t - flip.start} s crossing step, tolerance ${tolerance}`).toBeGreaterThan(tolerance);
+  });
+
+  it("fixture 38's hc14 (plain flow) has the same layout: its pin and its supply are different Stepped partitions", () => {
+    const { circuit: hc14 } = syntheticEntry("38-74hc14-read-pin-moving-supply");
+    const engine = new CoreEngine();
+    try {
+      engine.load(hc14);
+      const supply = engine.getNetIdForPin("u1", "vcc")!;
+      const pin = engine.getNetIdForPin("u1", "1a")!;
+      expect(pin).not.toBe(supply);
+      // The pin is a partition of its own, and the supply shares one with the six unwired outputs (output-capable pins on free nodes join it).
+      expect(engine.stats()).toMatchObject({ partitions: 2, largestPartition: 7 });
+      engine.advance(0.01);
+      expect(Math.abs(rawStat(engine, 8))).toBe(0);
+      expect(rawStat(engine, 10)).toBeGreaterThan(0);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("passes the stimuli path against classic with every mismatch explained by within-tolerance evidence: no richardson-closer-than-classic hit", () => {
+    expect(entry.phases?.length, "the fixture must run through the stimuli path").toBeGreaterThan(0);
+    const result = runCorpusEntry(entry, circuit);
+    expect(result.status).toBe("pass");
+    if (result.status !== "pass") return;
+    expect(result.knownDivergences.filter((hit) => hit.divergenceId === RICHARDSON_CLOSER_DIVERGENCE_ID)).toEqual([]);
+    // The comparison did have mismatches to explain, or this would prove nothing about the rules.
+    expect(result.knownDivergences.length).toBeGreaterThan(0);
   });
 });

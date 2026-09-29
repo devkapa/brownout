@@ -211,9 +211,40 @@ export function collectClassicSamplesCached(entry: CorpusEntry, circuit: SimCirc
 // which case R cannot be trusted at all — stays a failure. Digital-slot
 // (and simTime) mismatches are never touched: this is an analog-only
 // mechanism, exactly like `explainAnalyticMismatches` below.
+//
+// SECOND RULE, `richardson-closer-than-classic` (manager ruling 2026-09-29,
+// plan accuracy gate 2: "agree within tolerance (or come closer to the
+// analytic answer, with the reason recorded)"). Rule 1 needs the core to sit
+// within the ordinary tolerance of R. The core steps at a few ms and is
+// itself only backward Euler, so a core far nearer the truth than classic
+// can still sit more than a tolerance from R (mostly in capacitor currents,
+// where a tolerance of 0.1% is tighter than a voltage's), and rule 1 fails
+// it. A mismatch that fails rule 1 is therefore also explained when BOTH
+// hold:
+//   a. `|core - R| < |classic - R|`, strictly, and
+//   b. R has itself converged: replay classic a third time at h/4, form
+//      `R' = richardsonEstimate(c(h/2), c(h/4))` at the same instant, and
+//      `|R' - R|` is within the ordinary tolerance at R's magnitude (the
+//      same `withinTolerance` bounds, volts for netV and amps for
+//      elementI).
+// (b) is what stops "closer than classic" from being a free pass: a core
+// that beats classic against a reference that is still moving under
+// refinement has shown nothing. The h/4 replay is the expensive one, so it
+// runs lazily (only for a mismatch that already satisfies (a)) and at most
+// once per entry; a replay that throws, or a missing sample at the instant,
+// leaves the mismatch unexplained. Each hit records `|core - R|`,
+// `|classic - R|` and the estimate, in its reason and in
+// `KnownDivergenceHit.richardson`.
 
 /** Exported so a test can assert an explained mismatch's `divergenceId` without hardcoding the string twice. */
 export const RICHARDSON_DIVERGENCE_ID = "richardson-classic-self-reference";
+/** The second rule's id (this section's header): kept apart from rule 1's so a report can count how much of a pass rests on the weaker "closer than classic" evidence. */
+export const RICHARDSON_CLOSER_DIVERGENCE_ID = "richardson-closer-than-classic";
+const RICHARDSON_CLOSER_DECISION_REF =
+  "Delta (W1e, manager ruling 2026-09-29), plan accuracy gate 2 (\"agree within tolerance, or come closer to the " +
+  "analytic answer, with the reason recorded\"): a mismatch rule 1 does not take is explained when the core is " +
+  "strictly closer than classic to the Richardson reference R AND R's own convergence estimate (classic at h/4 " +
+  "against h/2, |R' - R|) is within the ordinary tolerance at R's magnitude.";
 const RICHARDSON_DECISION_REF =
   "Finding 11 (W1b review), orchestrator decision: gate 2d's stimuli path has no per-fixture analytic model, " +
   "so a Richardson-extrapolated classic-vs-classic reference (R = 2*c(h/2) - c(h) for backward Euler) stands " +
@@ -234,9 +265,16 @@ function findFineSampleAt(
   return fineSamples.find((s) => s.phaseIndex === phaseIndex && Math.abs(s.simTime - simTime) <= tol);
 }
 
+/** The signature of `replayStimuliOnClassic`, so a test can stand in a hand-built classic (the detector's own numbers must not come from an engine). */
+export type ClassicStimuliReplay = (
+  circuit: SimCircuit,
+  phases: readonly StimulusPhase[],
+  fixedStepS: number,
+) => readonly StimulusStepSample[];
+
 /**
  * Splits `mismatches` into ones this Richardson reference explains (see this
- * section's header for the exact rule) and everything else, which callers
+ * section's header for the two rules) and everything else, which callers
  * must still judge exactly as before. `digitalState`/`simTime` mismatches,
  * and any `netV`/`elementI` mismatch whose values are not both plain
  * numbers or whose `phaseIndex` is missing (never true of a real
@@ -249,23 +287,38 @@ function findFineSampleAt(
  * never disturbs the samples already collected. If that fine reference
  * replay itself throws (non-convergence, most likely), R cannot be trusted
  * for ANY mismatch, so everything is returned unexplained rather than
- * guessed at.
+ * guessed at. The third replay (h/4, rule 2's convergence estimate) is taken
+ * only when a mismatch needs it, once.
  */
 export function explainRichardsonMismatches(
   circuit: SimCircuit,
   phases: readonly StimulusPhase[],
   mismatches: readonly Mismatch[],
   richardsonMethod: "be" | "trap" = "be",
+  replay: ClassicStimuliReplay = replayStimuliOnClassic,
 ): { readonly explained: readonly KnownDivergenceHit[]; readonly remaining: readonly Mismatch[] } {
   const analogMismatches = mismatches.filter((m) => m.category === "netV" || m.category === "elementI");
   if (analogMismatches.length === 0) return { explained: [], remaining: mismatches };
 
   let fineSamples: readonly StimulusStepSample[];
   try {
-    fineSamples = replayStimuliOnClassic(circuit, phases, STIMULUS_FIXED_STEP_S / 2);
+    fineSamples = replay(circuit, phases, STIMULUS_FIXED_STEP_S / 2);
   } catch {
     return { explained: [], remaining: mismatches };
   }
+
+  // `undefined`: not replayed yet; `null`: replayed and threw, which is not retried (once per entry).
+  let finestSamples: readonly StimulusStepSample[] | null | undefined;
+  const finest = (): readonly StimulusStepSample[] | null => {
+    if (finestSamples === undefined) {
+      try {
+        finestSamples = replay(circuit, phases, STIMULUS_FIXED_STEP_S / 4);
+      } catch {
+        finestSamples = null;
+      }
+    }
+    return finestSamples;
+  };
 
   const explained: KnownDivergenceHit[] = [];
   const remaining: Mismatch[] = [];
@@ -280,8 +333,11 @@ export function explainRichardsonMismatches(
       continue;
     }
 
-    const fineSample = findFineSampleAt(fineSamples, mismatch.phaseIndex, mismatch.sampleTime);
-    const fineValue = fineSample ? (mismatch.category === "netV" ? fineSample.netV[mismatch.id] : fineSample.elementI[mismatch.id]) : undefined;
+    const valueAt = (samples: readonly StimulusStepSample[]): number | undefined => {
+      const sample = findFineSampleAt(samples, mismatch.phaseIndex!, mismatch.sampleTime);
+      return sample ? (mismatch.category === "netV" ? sample.netV[mismatch.id] : sample.elementI[mismatch.id]) : undefined;
+    };
+    const fineValue = valueAt(fineSamples);
     if (typeof fineValue !== "number") {
       remaining.push(mismatch);
       continue;
@@ -301,9 +357,38 @@ export function explainRichardsonMismatches(
           `core is within tolerance of the Richardson-extrapolated classic reference R=${r} (|core-R|=` +
           `${coreAbsErr.toExponential(3)} <= |classic-R|=${classicAbsErr.toExponential(3)})`,
       });
-    } else {
-      remaining.push(mismatch);
+      continue;
     }
+
+    // Rule 2. The strict comparison comes first because it is free and the
+    // h/4 replay is not: a core no closer than classic is unexplained
+    // whatever R's estimate is.
+    if (!(coreAbsErr < classicAbsErr)) {
+      remaining.push(mismatch);
+      continue;
+    }
+    const finestAll = finest();
+    const finestValue = finestAll ? valueAt(finestAll) : undefined;
+    if (typeof finestValue !== "number") {
+      remaining.push(mismatch);
+      continue;
+    }
+    const rNext = richardsonEstimate(fineValue, finestValue, richardsonMethod);
+    const estimate = Math.abs(rNext - r);
+    if (!withinTolerance(rNext, r, absTol, relTol)) {
+      remaining.push(mismatch);
+      continue;
+    }
+    explained.push({
+      mismatch,
+      divergenceId: RICHARDSON_CLOSER_DIVERGENCE_ID,
+      decisionRef: RICHARDSON_CLOSER_DECISION_REF,
+      reason:
+        `core is closer to the Richardson reference R=${r} than classic is (|core-R|=${coreAbsErr.toExponential(3)} < ` +
+        `|classic-R|=${classicAbsErr.toExponential(3)}), though not within tolerance of it; R has converged: ` +
+        `|R'-R|=${estimate.toExponential(3)} (R'=${rNext}, classic at h/4 against h/2) is within the ordinary tolerance`,
+      richardson: { reference: r, coreError: coreAbsErr, classicError: classicAbsErr, convergenceEstimate: estimate },
+    });
   }
 
   return { explained, remaining };

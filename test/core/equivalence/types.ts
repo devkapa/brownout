@@ -464,6 +464,19 @@ export interface KnownDivergenceHit {
   readonly divergenceId: string;
   readonly decisionRef: string;
   readonly reason: string;
+  /** Only the stimuli path's `richardson-closer-than-classic` rule sets this (run-entry.ts): the numbers its verdict rests on, so a report reads them without parsing `reason`. */
+  readonly richardson?: RichardsonEvidence;
+}
+
+/** What `richardson-closer-than-classic` records per hit: R is the Richardson reference at the mismatch's instant. */
+export interface RichardsonEvidence {
+  readonly reference: number;
+  /** `|core - R|`. */
+  readonly coreError: number;
+  /** `|classic - R|`. */
+  readonly classicError: number;
+  /** `|R' - R|`, R's own convergence estimate: R' from classic at h/4 against h/2. */
+  readonly convergenceEstimate: number;
 }
 
 /** Shared by "pass" and "fail": both ran a real comparison and have real error stats. */

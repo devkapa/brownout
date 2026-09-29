@@ -1865,6 +1865,33 @@ lands in a free supply's partition, are W1c points 3 and 4; fixtures 38 and
    and every device that reads such a pin gets an event at each bucket
    boundary.
 
+## Equivalence harness rules
+
+Under scripted stimuli (gate 2d) a scripted circuit has no
+closed form, so a classic-versus-core mismatch in an analog readout (`netV`,
+`elementI`) can be explained by a Richardson reference R, and only by one of
+the two rules below. An explained mismatch is a known-divergence hit under its
+own id, never a silent pass. Digital and time mismatches are never touched.
+
+- **R, the reference.** Classic is replayed against itself: at the fixed step
+  h, and again at h/2, both backward Euler (order 1). At an instant,
+  `R = 2 c(h/2) - c(h)`, which cancels backward Euler's leading error. R is
+  a numerical stand-in for the true answer, not the answer.
+- **`richardson-classic-self-reference`.** The core is within the ordinary
+  tolerance of R (volts: 100 uV plus 0.1% of the larger value; amps: 1 nA
+  plus 0.1%) and at least as close to R as classic is.
+- **`richardson-closer-than-classic`.** A mismatch the first rule does not
+  take is explained when BOTH hold: the core is strictly closer to R than
+  classic is (`|core - R| < |classic - R|`), and R has converged. The
+  convergence guard: classic is replayed a third time at h/4,
+  `R' = 2 c(h/4) - c(h/2)`, and `|R' - R|` is within the ordinary tolerance
+  at R's magnitude (the same volt and amp bounds). The h/4 replay runs only
+  when a mismatch needs it, at most once per entry. If it fails, or has no
+  sample at the instant, the mismatch stays a failure. Each hit records
+  `|core - R|`, `|classic - R|` and `|R' - R|`.
+
+Delta (W1e, manager ruling 2026-09-29): the closer-than-classic rule, from plan accuracy gate 2.
+
 ## Hard-won rules for the kernel (from the prototype, and from W1e)
 
 - Accept a threshold crossing only at `t > now + 1e-15`; rounding can put a
@@ -1880,3 +1907,9 @@ lands in a free supply's partition, are W1c points 3 and 4; fixtures 38 and
 - Watch every threshold a reader compares against in both directions, so a
   node's published voltage never sits across a threshold from its exact
   value; a reader evaluated at an unrelated event then reads the right side.
+
+## Deferred past 1.0.0
+
+- Hysteresis at the IC supply floor, a classic change too: the W1c fixed point
+  returns -4 (fallback to classic) when a free supply sits near the power
+  floor. Accepted for 1.0.0 (manager, 2026-09-29).
