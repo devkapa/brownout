@@ -8,7 +8,8 @@
  * SAP-1-shaped circuit.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { initCore } from "../../../src/core/wasm.js";
 import { buildNets } from "../../../src/sim/engine/graph.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { classifyMismatches, computeDivergenceCone, digitalOutputPins, KNOWN_DIVERGENCES } from "./known-divergences.js";
@@ -273,3 +274,86 @@ function findNetIdForPin(c: SimCircuit, componentId: string, pinId: string): str
   if (!net) throw new Error(`findNetIdForPin: no net contains ${componentId}.${pinId}`);
   return net.id;
 }
+
+
+// ─── W1e: "any 555 whose comparators resolve 0 at load" (NE555 point 9) ─────
+//
+// The registration's seed is now NE555 point 3 evaluated on classic's own load
+// frame, not just "RST tied low". Each circuit below is a powered 555 (5 V on
+// pins 8 and 1) clocking one half of a 74HC74; only its wiring differs.
+
+describe("the phantom-edge divergence, widened from 'RST held low' to any 555 that resolves 0 at load", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  const ff = ["clr1_n", "d1", "clk1", "pre1_n", "q1", "q1_n", "gnd", "q2_n", "q2", "pre2_n", "clk2", "d2", "clr2_n", "vcc"];
+  const chip = ["1", "2", "3", "4", "5", "6", "7", "8"];
+
+  /** A 555 on 5 V clocking u_ff's clk1; `wiring` adds the pins under test. */
+  function powered555(wiring: (w: SimCircuit["wires"], comps: SimComponent[]) => void): SimCircuit {
+    const components: SimComponent[] = [
+      part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("gnd", "ground", ["gnd"]),
+      part("u_555", "ne555", chip),
+      part("u_ff", "74hc74", ff),
+    ];
+    const wires: SimCircuit["wires"] = [
+      wire("vcc", "neg", "gnd", "gnd"),
+      wire("u_555", "8", "vcc", "pos"),
+      wire("u_555", "1", "vcc", "neg"),
+      wire("u_555", "3", "u_ff", "clk1"),
+    ];
+    wiring(wires, components);
+    return circuit(components, wires);
+  }
+
+  const phantom: Mismatch = { sampleTime: 0, category: "digitalState", id: "u_ff/q1", classicValue: 1, coreValue: 0, detail: "differs" };
+  const seeded = (c: SimCircuit): boolean => classifyMismatches(c, [phantom]).known.length === 1;
+
+  it("RST on an uncharged RC (a power-on reset delay) resolves 0 at load: seeded", () => {
+    const c = powered555((w, comps) => {
+      comps.push(part("rr", "resistor", ["a", "b"], { resistance: 100000 }), part("cr", "capacitor", ["a", "b"], { capacitance: 1e-6 }));
+      w.push(wire("rr", "a", "vcc", "pos"), wire("rr", "b", "u_555", "4"), wire("cr", "a", "u_555", "4"), wire("cr", "b", "vcc", "neg"));
+      w.push(wire("u_555", "2", "u_555", "8"), wire("u_555", "6", "u_555", "1"));
+    });
+    expect(seeded(c)).toBe(true);
+  });
+
+  it("RST left open reads 0 V (the README's Q-O16): seeded", () => {
+    const c = powered555((w) => {
+      w.push(wire("u_555", "2", "u_555", "8"), wire("u_555", "6", "u_555", "1"));
+    });
+    expect(seeded(c)).toBe(true);
+  });
+
+  it("THR held above 2/3 vS with TRIG above 1/3 vS (both on the supply) resolves 0: seeded", () => {
+    const c = powered555((w) => {
+      w.push(wire("u_555", "4", "u_555", "8"), wire("u_555", "2", "u_555", "8"), wire("u_555", "6", "u_555", "8"));
+    });
+    expect(seeded(c)).toBe(true);
+  });
+
+  it("the seeded fault: an astable (TRIG = THR on an uncharged capacitor, RST on the supply) resolves 1 at load, so nothing is known", () => {
+    const c = powered555((w, comps) => {
+      comps.push(part("ct", "capacitor", ["a", "b"], { capacitance: 1e-6 }), part("ra", "resistor", ["a", "b"], { resistance: 1000 }));
+      w.push(wire("u_555", "4", "u_555", "8"), wire("u_555", "2", "u_555", "6"), wire("u_555", "6", "ct", "a"), wire("ct", "b", "vcc", "neg"));
+      w.push(wire("ra", "a", "vcc", "pos"), wire("ra", "b", "u_555", "7"), wire("u_555", "7", "u_555", "6"));
+    });
+    expect(seeded(c)).toBe(false);
+  });
+
+  it("the seeded fault: a monostable (TRIG high, THR low: the hold region, power-on HIGH) resolves 1 at load, so nothing is known", () => {
+    const c = powered555((w) => {
+      w.push(wire("u_555", "4", "u_555", "8"), wire("u_555", "2", "u_555", "8"), wire("u_555", "6", "u_555", "1"));
+    });
+    expect(seeded(c)).toBe(false);
+  });
+
+  it("an unpowered 555 resolves nothing: RST open, but pin 8 unwired, is not seeded", () => {
+    const c = powered555((w) => {
+      w.splice(w.findIndex((x) => x.from_pin === "8"), 1);
+    });
+    expect(seeded(c)).toBe(false);
+  });
+});

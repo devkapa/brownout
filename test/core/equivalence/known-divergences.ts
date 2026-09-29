@@ -33,6 +33,7 @@
 import { buildCoreNodes, corePinKey, type CoreNodeBuild } from "../../../src/core/compile/topology.js";
 import { icPinMap } from "../../../src/sim/engine/digital.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import { collectClassicSamples } from "./sample.js";
 import type { Mismatch } from "./types.js";
 
 // ─── Digital output pins ────────────────────────────────────────────────────
@@ -225,17 +226,75 @@ const HC74_HALVES: ReadonlyArray<{ readonly clkPin: string; readonly outputPins:
 ];
 
 /**
- * Every 74HC74 HALF whose OWN clock pin (clk1 or clk2) is driven by an
- * ne555's OUT pin (pin id "3") whose OWN RST pin (id "4") is held low — the
- * owner's post-spike ruling's precondition, computed structurally instead of
- * assumed from a fixture name. Finding 7: a package with, say, clk1 on the
- * RST-low 555 and clk2 on some unrelated clock yields ONE seed (for clk1's
- * half only) — clk2's half is never seeded, even though it lives in the same
- * package, because ITS OWN clock is not the RST-low 555's OUT.
+ * core/README.md NE555 point 9 (widened in W1e from "RST held low"): does
+ * this 555's latch resolve 0 at load? Point 3's rule on the load frame, first
+ * match wins: `vRst < 0.5` (absolute volts above pin 1): 0; else `vTrig <
+ * vS/3`: 1; else `vThr > 2 vS/3`: 0; else the power-on latch, 1. An unpowered
+ * 555 (outside 1.8-19.8 V, 4.05-17.6 V with a catalog part) resolves nothing.
+ *
+ * "RST on the datum, or on a net a 0 V source also sits on" is the structural
+ * special case (true whatever the supply is); every other case reads classic's
+ * OWN load frame (`collectClassicSamples` at t = 0), because that is the state
+ * whose comparators the ruling is about: an RST on an uncharged RC, an open
+ * RST (it reads 0 V), TRIG or THR held on the supply. When classic cannot even
+ * load the circuit there is nothing to seed from, and the answer is no.
  */
-function seedsForRstLow555ClockedHc74(circuit: SimCircuit): DivergenceSeed[] {
+function comparatorsResolveZeroAtLoad(circuit: SimCircuit, built: CoreNodeBuild, chipId: string): boolean {
+  if (pinIsHeldLow(circuit, built, chipId, "4")) return true;
+
+  let netV: Record<string, number>;
+  try {
+    netV = collectClassicSamples(circuit, [0])[0]!.netV;
+  } catch {
+    return false;
+  }
+  const volts = (pinId: string): number | undefined => {
+    const node = built.pinNode.get(corePinKey(chipId, pinId));
+    if (node === undefined) return undefined;
+    if (node === 0) return 0;
+    const netId = built.netIdOfNode[node];
+    return netId ? netV[netId] : undefined;
+  };
+  const v1 = volts("1");
+  const v8 = volts("8");
+  const v2 = volts("2");
+  const v4 = volts("4");
+  const v6 = volts("6");
+  if (v1 === undefined || v8 === undefined || v2 === undefined || v4 === undefined || v6 === undefined) return false;
+
+  const chip = circuit.components.find((c) => c.id === chipId);
+  const [vccMin, vccMax] = chip?.params.catalogUid !== undefined ? [4.05, 17.6] : [1.8, 19.8];
+  const vS = v8 - v1;
+  if (vS < vccMin || vS > vccMax) return false;
+
+  if (v4 - v1 < NE555_RST_LEVEL_VOLTS) return true;
+  if (v2 - v1 < (1 / 3) * vS) return false;
+  if (v6 - v1 > (2 / 3) * vS) return true;
+  return false;
+}
+
+/** NE555 point 3's RST comparator level, absolute volts above pin 1. */
+const NE555_RST_LEVEL_VOLTS = 0.5;
+
+/**
+ * Every 74HC74 HALF whose OWN clock pin (clk1 or clk2) is driven by an
+ * ne555's OUT pin (pin id "3") whose comparators resolve 0 at load
+ * (`comparatorsResolveZeroAtLoad`) — the owner's post-spike ruling's
+ * precondition, widened in W1e from "RST tied low" to any such 555 (NE555
+ * point 9), computed structurally instead of assumed from a fixture name.
+ * Finding 7: a package with, say, clk1 on such a 555 and clk2 on some
+ * unrelated clock yields ONE seed (for clk1's half only) — clk2's half is
+ * never seeded, even though it lives in the same package, because ITS OWN
+ * clock is not that 555's OUT.
+ */
+function seedsForZeroAtLoad555ClockedHc74(circuit: SimCircuit): DivergenceSeed[] {
   const built = buildCoreNodes(circuit);
   const seeds: DivergenceSeed[] = [];
+  const zeroAtLoad = new Map<string, boolean>();
+  const resolvesZero = (chipId: string): boolean => {
+    if (!zeroAtLoad.has(chipId)) zeroAtLoad.set(chipId, comparatorsResolveZeroAtLoad(circuit, built, chipId));
+    return zeroAtLoad.get(chipId)!;
+  };
 
   for (const comp of circuit.components) {
     if (comp.kind !== "74hc74") continue;
@@ -246,14 +305,14 @@ function seedsForRstLow555ClockedHc74(circuit: SimCircuit): DivergenceSeed[] {
       const net = netById(built, netId);
       if (!net) continue;
 
-      const drivenByRstLow555 = net.pins.some(([otherComponentId, otherPinId]) => {
+      const drivenByZeroAtLoad555 = net.pins.some(([otherComponentId, otherPinId]) => {
         if (otherPinId !== "3") return false;
         const otherComp = circuit.components.find((c) => c.id === otherComponentId);
         if (!otherComp || otherComp.kind !== "ne555") return false;
-        return pinIsHeldLow(circuit, built, otherComponentId, "4");
+        return resolvesZero(otherComponentId);
       });
 
-      if (drivenByRstLow555) seeds.push({ componentId: comp.id, outputPins: half.outputPins });
+      if (drivenByZeroAtLoad555) seeds.push({ componentId: comp.id, outputPins: half.outputPins });
     }
   }
 
@@ -297,8 +356,9 @@ function seedsForEepromWritePendingPolling(circuit: SimCircuit): DivergenceSeed[
 
 /**
  * The one registration this worker's brief requires: the W1-0 post-spike
- * owner ruling on the SAP-1's display divider. A 74HC74 clocked by an NE555
- * whose RST is tied low sees a phantom rising edge at load under classic
+ * owner ruling on the SAP-1's display divider, widened in W1e (NE555 point 9)
+ * from "RST tied low" to any 555 whose comparators resolve 0 at load. A
+ * 74HC74 clocked by such an NE555 sees a phantom rising edge at load under classic
  * (classic's first digital pass reads the 555's default-committed OUT latch
  * as HIGH before ever running a real solve) that the core's exact-crossing
  * 555 (decision 7) does not produce, because the core never has a
@@ -314,14 +374,16 @@ function seedsForEepromWritePendingPolling(circuit: SimCircuit): DivergenceSeed[
 export const KNOWN_DIVERGENCES: readonly KnownDivergence[] = [
   {
     id: "w1-0-startup-phantom-edge-74hc74-555-rst-low",
-    decisionRef: "Decision 8 (load settling); W1-0 post-spike owner stop, 2026-09-25",
+    decisionRef:
+      "Decision 8 (load settling); W1-0 post-spike owner stop, 2026-09-25; core/README.md NE555 point 9 (widened in W1e to any 555 whose comparators resolve 0 at load)",
     reason:
-      "A 74HC74 clocked by an NE555 whose RST is tied low sees a startup phantom rising edge under " +
+      "A 74HC74 clocked by an NE555 whose comparators resolve 0 at load (RST held low, open or on an " +
+      "uncharged RC, or THR above 2/3 vS with TRIG above 1/3 vS) sees a startup phantom rising edge under " +
       "classic (its load seed reads the 555's default-committed OUT latch as HIGH before the first real " +
       "solve) that the core's exact-crossing 555 does not reproduce, holding the divider one count off " +
       "forever. Ruled correct-and-documented by the owner, not a bug in either engine; the CPU-visible " +
       "state is unaffected.",
-    seeds: seedsForRstLow555ClockedHc74,
+    seeds: seedsForZeroAtLoad555ClockedHc74,
   },
   {
     id: "28c16-28c256-io6-write-poll-step-grid",

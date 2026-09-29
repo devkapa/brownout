@@ -17,8 +17,9 @@
 import { describe, expect, it } from "vitest";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
-import { compareStimuliSamples, STAMP_AFTER_COMMIT_DIVERGENCE_ID } from "./compare.js";
+import { comparePhaseAlignedSamples, compareStimuliSamples, STAMP_AFTER_COMMIT_DIVERGENCE_ID } from "./compare.js";
 import type { StimulusStepSample } from "./stimuli.js";
+import type { SampleReadout } from "./types.js";
 
 /** One 74LS04 inverter (u1) with its 1y output wired to a resistor (r1) — just enough topology for `digitalOutputPins("74ls04")` to recognise "1y" as an output pin and for both pins to land on one shared net. */
 function inverterCircuit(): SimCircuit {
@@ -164,5 +165,48 @@ describe("compareStimuliSamples — finding 12's stamp-after-commit-lag exemptio
     expect(result.knownDivergences).toHaveLength(1);
     expect(result.knownDivergences[0]!.mismatch.id).toBe(netId);
     expect(result.mismatches.map((m) => m.id)).toEqual(["unrelated"]);
+  });
+});
+
+
+// ─── W1e: NE555 point 13.4, the phase-aligned comparison ────────────────────
+
+describe("comparePhaseAlignedSamples (NE555 point 13.4)", () => {
+  const sample = (simTime: number, over: Partial<SampleReadout> = {}): SampleReadout => ({
+    simTime,
+    netV: { out: 4.9, cap: 2.64, gnd: 0 },
+    elementI: { vcc: -0.0148, ra: 0.0012 },
+    digitalState: { u1: 1 },
+    failures: {},
+    warnings: {},
+    ...over,
+  });
+  const options = { skipNetV: new Set(["cap"]), skipElementI: new Set(["ra"]) };
+
+  it("never compares simTime (the engines are sampled at their own instants by design) and judges everything else as compareSamples does", () => {
+    const result = comparePhaseAlignedSamples([sample(1.0e-3)], [sample(1.2e-3)], options);
+    expect(result.mismatches).toEqual([]);
+  });
+
+  it("the detector: a level, a current or a digital state that differs is a mismatch, and its detail names both instants", () => {
+    const core = sample(1.2e-3, { netV: { out: 4.5, cap: 2.64, gnd: 0 }, elementI: { vcc: -0.02, ra: 0.0012 }, digitalState: { u1: 0 } });
+    const result = comparePhaseAlignedSamples([sample(1.0e-3)], [core], options);
+    expect(result.mismatches.map((m) => `${m.category}:${m.id}`).sort()).toEqual(["digitalState:u1", "elementI:vcc", "netV:out"]);
+    expect(result.mismatches[0]!.detail).toMatch(/classic sampled at t=0.001, core at t=0.0012/);
+  });
+
+  it("leaves the sidecar's nodes and elements out (a cap node 1 V apart is not this comparison's business), and removes the timing branch from a source through adjustElementI", () => {
+    const core = sample(1.2e-3, { netV: { out: 4.9, cap: 3.64, gnd: 0 }, elementI: { vcc: -0.0148 - 0.0005, ra: 0.0012 + 0.0005 } });
+    const raw = comparePhaseAlignedSamples([sample(1.0e-3)], [core], options);
+    expect(raw.mismatches.map((m) => m.id)).toEqual(["vcc"]);
+    const adjusted = comparePhaseAlignedSamples([sample(1.0e-3)], [core], {
+      ...options,
+      adjustElementI: (i) => ({ ...i, vcc: i.vcc! + i.ra! }),
+    });
+    expect(adjusted.mismatches).toEqual([]);
+  });
+
+  it("refuses a pair of different lengths (a harness bug, not a circuit result)", () => {
+    expect(() => comparePhaseAlignedSamples([sample(1e-3)], [], options)).toThrow(/sample count mismatch/);
   });
 });

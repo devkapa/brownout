@@ -271,6 +271,81 @@ export function compareSamples(classic: readonly SampleReadout[], core: readonly
   };
 }
 
+/** What `comparePhaseAlignedSamples` leaves out of the classic-versus-core comparison, and how it prepares the rest. */
+export interface PhaseAlignedOptions {
+  /** Net ids judged against the sidecar instead (NE555 point 13.4: the timing network's nodes). */
+  readonly skipNetV: ReadonlySet<string>;
+  /** Component ids judged against the sidecar instead (the timing network's resistors and capacitors). */
+  readonly skipElementI: ReadonlySet<string>;
+  /**
+   * Applied to each side's `elementI` before it is compared: the supply
+   * current carries the timing network's own branch current (the charging
+   * current through RA), which follows the capacitor's phase and so differs
+   * between the engines at their k-th midpoints; run-entry.ts's
+   * `ne555SupplyResidual` removes it, leaving the phase-independent rest.
+   */
+  readonly adjustElementI?: (elementI: Record<string, number>) => Record<string, number>;
+}
+
+/**
+ * NE555 point 13.4: compares `classic[k]` with `core[k]` where each was
+ * sampled at ITS OWN instant (the midpoint of its own k-th HIGH or LOW), so
+ * the two `simTime`s differ by design and are never compared. Everything else
+ * is `compareSamples`'s own comparison, same tolerances: netV, elementI (bar
+ * the sidecar's), digitalState, failures, warnings. Each mismatch's detail
+ * names both instants.
+ */
+export function comparePhaseAlignedSamples(
+  classic: readonly SampleReadout[],
+  core: readonly SampleReadout[],
+  options: PhaseAlignedOptions,
+): CompareResult {
+  if (classic.length !== core.length) {
+    throw new Error(
+      `comparePhaseAlignedSamples: sample count mismatch (classic ${classic.length}, core ${core.length}) — ` +
+        "the caller must pair the engines' k-th intervals; this is a harness bug, not a circuit result.",
+    );
+  }
+  const without = <T>(record: Record<string, T>, skip: ReadonlySet<string>): Record<string, T> =>
+    Object.fromEntries(Object.entries(record).filter(([key]) => !skip.has(key)));
+
+  const mismatches: Mismatch[] = [];
+  const voltErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
+  const ampErr: ErrorAccumulator = { maxAbs: 0, maxRel: 0 };
+
+  for (let i = 0; i < classic.length; i++) {
+    const c = classic[i]!;
+    const r = core[i]!;
+    const local: Mismatch[] = [];
+    const adjust = options.adjustElementI ?? ((record: Record<string, number>) => record);
+    compareNumericRecord("netV", c.simTime, without(c.netV, options.skipNetV), without(r.netV, options.skipNetV), VOLT_ABS_TOL, VOLT_REL_TOL, local, voltErr);
+    compareNumericRecord(
+      "elementI",
+      c.simTime,
+      without(adjust(c.elementI), options.skipElementI),
+      without(adjust(r.elementI), options.skipElementI),
+      AMP_ABS_TOL,
+      AMP_REL_TOL,
+      local,
+      ampErr,
+    );
+    compareDigitalState(c.simTime, c.digitalState, r.digitalState, local);
+    compareFailureKeys(c.simTime, c.failures, r.failures, local);
+    compareWarningCodes(c.simTime, c.warnings, r.warnings, local);
+    for (const m of local) {
+      mismatches.push({ ...m, detail: `${m.detail} [interval ${i}: classic sampled at t=${c.simTime}, core at t=${r.simTime}]` });
+    }
+  }
+
+  return {
+    mismatches,
+    maxAbsErrorVolts: voltErr.maxAbs,
+    maxRelErrorVolts: voltErr.maxRel,
+    maxAbsErrorAmps: ampErr.maxAbs,
+    maxRelErrorAmps: ampErr.maxRel,
+  };
+}
+
 /**
  * Finding 12 + the follow-up INVESTIGATION: classic stamps a delayed IC
  * output's electrical effect ONE SOLVE AFTER the digital commit that changes

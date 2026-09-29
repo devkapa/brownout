@@ -37,18 +37,44 @@
  * the end") downgrades to "digital dimension not checked this run", not a
  * circuit failure: the entry's status still reflects whatever the analog
  * comparison found.
+ *
+ * W1e ADDS three flows, each documented at its own section below: an entry
+ * holding an `ne555` is judged as core/README.md NE555 point 13 says
+ * (`runNe555Entry` for the plain flow, `prepareNe555Stimuli` under gate 2d's
+ * scripted stimuli): the core's own switch times against a model-exact
+ * sidecar, the timing network against the sidecar's exponentials, everything
+ * else at phase-aligned quiet instants; an entry declaring an LED `sidecar`
+ * also checks the core against the junction law's own answer
+ * (`runSidecarChecks`); and every entry holding an LED-family kind is run a
+ * second time with the solution cache off (`compareCacheOnOff`, LEDs point 7).
+ * None of it touches an entry without those kinds or that field.
  */
 
 import os from "node:os";
 import path from "node:path";
 import { getPartLibrary } from "../../../src/parts/part-library.js";
 import { HeadlessRunner } from "../../../src/host/headless.js";
+import { CoreEngine } from "../../../src/core/engine.js";
 import { CoreUnsupportedError } from "../../../src/core/errors.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles } from "./align.js";
-import { checkAnalyticCrossing, fixedPairCapacitorCurrentAt, rcLadderVoltagesAt, rcTerminalThevenin, rcVoltageAt } from "./analytic.js";
-import { compareSamples, compareStimuliSamples } from "./compare.js";
+import {
+  checkAnalyticCrossing,
+  detectNe555Specs,
+  evaluateLedStatic,
+  extractNe555Sidecar,
+  fixedPairCapacitorCurrentAt,
+  ledRcVoltages,
+  rcLadderVoltagesAt,
+  rcTerminalThevenin,
+  rcVoltageAt,
+  type Ne555Phase,
+  type Ne555Sidecar,
+  type Ne555SidecarSpec,
+} from "./analytic.js";
+import { comparePhaseAlignedSamples, compareSamples, compareStimuliSamples } from "./compare.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
 import { guardWindowS, requireMinQuietInstants, selectQuietInstants } from "./quiet.js";
@@ -70,9 +96,11 @@ import type {
   AnalyticNodeRef,
   CorpusEntry,
   CorpusOrigin,
+  DigitalFixtureSpec,
   EntryResult,
   KnownDivergenceHit,
   Mismatch,
+  Ne555FixtureSpec,
   SampleReadout,
 } from "./types.js";
 
@@ -361,6 +389,16 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     return { status: "error", kinds: entry.kinds, engine: "core", message: errorMessage(err), classicWallMs, coreWallMs: null };
   }
 
+  // W1e: an entry holding a 555 takes its timing network out of the classic-versus-core comparison
+  // (the core is held to the sidecar instead), drops the timing branch from the supply current, and
+  // lets an instant where classic's 555 lags the core's pass for what its outputs reach.
+  let ne555: Ne555StimuliPrep | null;
+  try {
+    ne555 = prepareNe555Stimuli(entry, circuit, phases, classicSamples, coreSamples);
+  } catch (err) {
+    return { status: "error", kinds: entry.kinds, engine: "core", message: errorMessage(err), classicWallMs, coreWallMs };
+  }
+
   let cmp: ReturnType<typeof compareStimuliSamples>;
   try {
     // `circuit` enables finding 12's stamp-after-commit-lag exemption
@@ -368,7 +406,7 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     // correct here for the same reason known-divergences.ts's registry below
     // uses it: a commit's driven-net topology is fixed by the netlist, never
     // changed by a phase's `set` (which only ever touches component params).
-    cmp = compareStimuliSamples(classicSamples, coreSamples, circuit);
+    cmp = compareStimuliSamples(ne555 ? ne555.classic : classicSamples, ne555 ? ne555.core : coreSamples, circuit);
   } catch (err) {
     // Finding 10: compareStimuliSamples only ever throws on a sample-count
     // mismatch — the two replays used different phase/step schedules, a
@@ -393,9 +431,36 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   // it — the two are independent explanations for the SAME mismatch list, so
   // both are tried and merged, mirroring the plain flow's
   // explainAnalyticMismatches-then-classifyMismatches order.
-  const richardsonSplit = explainRichardsonMismatches(circuit, phases, cmp.mismatches);
-  const { known, unexplained } = classifyMismatches(circuit, richardsonSplit.remaining);
-  const knownDivergences = [...cmp.knownDivergences, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
+  const lagKnown: KnownDivergenceHit[] = [];
+  let afterLag: readonly Mismatch[] = cmp.mismatches;
+  if (ne555) {
+    const still: Mismatch[] = [];
+    for (const m of cmp.mismatches) {
+      const onSurface =
+        m.category === "digitalState"
+          ? ne555.lagSurface.components.has(m.id.split("/")[0]!)
+          : m.category === "netV"
+            ? ne555.lagSurface.nets.has(m.id)
+            : m.category === "elementI"
+              ? ne555.lagSurface.components.has(m.id)
+              : false;
+      if (onSurface && ne555.lagTimes.has(m.sampleTime)) {
+        lagKnown.push({
+          mismatch: m,
+          divergenceId: CLASSIC_555_LAG_DIVERGENCE_ID,
+          decisionRef: CLASSIC_555_LAG_REF,
+          reason: `classic's 555 lags the core's at t=${m.sampleTime} and agrees again at the next sample; "${m.id}" is one of what its outputs reach`,
+        });
+      } else {
+        still.push(m);
+      }
+    }
+    afterLag = still;
+  }
+  const richardsonSplit = explainRichardsonMismatches(circuit, phases, afterLag);
+  const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining);
+  const unexplained = [...unexplainedRaw, ...(ne555?.extra ?? [])];
+  const knownDivergences = [...cmp.knownDivergences, ...lagKnown, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };
@@ -476,7 +541,7 @@ export function resolveSampleTimes(
   return quiet;
 }
 
-interface DigitalAlignmentOutcome {
+export interface DigitalAlignmentOutcome {
   readonly mismatches: readonly Mismatch[];
   /** Every distinct instant either trace recorded a digital event — feeds the analog guard window (gate 2b) when the entry also declares `analog`. */
   readonly eventTimes: readonly number[];
@@ -496,6 +561,15 @@ function runDigitalAlignment(entry: CorpusEntry, circuit: SimCircuit): DigitalAl
     throw err;
   }
   const classicTrace = collectClassicDigitalTrace(circuit, durationS);
+  return alignDigitalTraces(spec, classicTrace, coreTrace);
+}
+
+/** Gate 2a on two already-collected traces (`runDigitalAlignment` above collects them; an NE555 entry collects them once for its period check and reuses them here). */
+export function alignDigitalTraces(
+  spec: DigitalFixtureSpec,
+  classicTrace: readonly DigitalTraceEvent[],
+  coreTrace: readonly DigitalTraceEvent[],
+): DigitalAlignmentOutcome {
   const eventTimes = [...new Set([...classicTrace, ...coreTrace].map((e) => e.t))].sort((a, b) => a - b);
 
   const classicCycles = sampleCycles(classicTrace, spec.clockKey, spec.projection);
@@ -696,6 +770,791 @@ export function explainAnalyticMismatches(
   return { explained, remaining };
 }
 
+// ─── W1e: NE555 entries (core/README.md "Kernel semantics: NE555 (W1e)" point 13) ──
+//
+// Classic's 555 output lags its latch by one solve and its crossing search
+// is step-limited (+1.58% per period on the SAP-1 clock astable), so a plain
+// instant-for-instant comparison of a 555 circuit fails for reasons that are
+// classic's, not the core's. An entry holding an `ne555` is therefore judged
+// as point 13 says, in place of the four-point comparison:
+//   2. the core's own switch times against the model-exact sidecar, 1e-6
+//      relative (`checkNe555Periods`); classic's are recorded, not gated;
+//   4. the timing network's nodes and currents against the sidecar's
+//      exponentials at the core's own instants, and everything else at
+//      phase-aligned quiet instants: the midpoint of each engine's own k-th
+//      HIGH and LOW (`ne555Midpoints`).
+// The digital comparison (point 13.1) is the entry's `digital` spec, per cycle
+// after alignment. An entry that declares no `ne555` spec gets one derived
+// from its own wiring (`detectNe555Specs`); a 555 the sidecar cannot model
+// (a foreign element on its timing network, an RST driven by something else)
+// is still compared at phase-aligned instants, with its timing nodes held to
+// classic there as they are for any other node.
+
+/** NE555 point 13.2: every phase duration and every period agrees with the sidecar to 1e-6 relative. */
+export const NE555_PERIOD_REL_TOL = 1e-6;
+const NE555_DEFAULT_INTERVALS = 8;
+const NE555_DEFAULT_MIN_INTERVAL_S = 1e-5;
+/** Classic's own switch times and the sidecar's, reported and never gated (D11). */
+export const CLASSIC_555_PERIOD_DRIFT_ID = "classic-555-period-drift";
+const CLASSIC_555_PERIOD_DRIFT_REF =
+  "core/README.md NE555 point 13.2 (D11): the core's switch times are exact event times; classic's come from " +
+  "its step-limited crossing search and are recorded against the same sidecar, not gated.";
+
+export interface LevelChange {
+  readonly t: number;
+  readonly high: boolean;
+}
+
+export interface LevelSegment {
+  readonly high: boolean;
+  readonly t0: number;
+  readonly t1: number;
+}
+
+/** `key`'s level changes in a digital trace, consecutive repeats dropped. A `NaN` (the key absent: an unpowered 555) is skipped, so the level before it carries on. */
+export function levelChanges(trace: readonly DigitalTraceEvent[], key: string): LevelChange[] {
+  const out: LevelChange[] = [];
+  for (const e of trace) {
+    if (e.key !== key || Number.isNaN(e.value)) continue;
+    const high = e.value === 1;
+    if (out.length === 0 || out[out.length - 1]!.high !== high) out.push({ t: e.t, high });
+  }
+  return out;
+}
+
+/** The stretches between consecutive changes: every complete HIGH or LOW. The last level, still open at the end of the trace, is not one. */
+export function closedSegments(changes: readonly LevelChange[]): LevelSegment[] {
+  const out: LevelSegment[] = [];
+  for (let i = 0; i + 1 < changes.length; i++) out.push({ high: changes[i]!.high, t0: changes[i]!.t, t1: changes[i + 1]!.t });
+  return out;
+}
+
+function phaseLabel(index: number, high: boolean, segments: readonly LevelSegment[]): string {
+  const ordinal = segments.slice(0, index + 1).filter((s) => s.high === high).length;
+  return index === 0 && high ? "first HIGH" : `${high ? "HIGH" : "LOW"} #${ordinal}`;
+}
+
+const fmtS = (t: number): string => `${(t * 1e3).toPrecision(9)} ms`;
+
+/**
+ * NE555 point 13.2. `changes` is the core's trace of the 555's key: each
+ * closed HIGH and LOW (the first HIGH from START_TIME) and each period
+ * `r_(k+1) - r_k` between two real rising edges (the power-on cycle, which
+ * starts at START_TIME rather than at an edge, is excluded) must agree with
+ * the sidecar's `phases` to `NE555_PERIOD_REL_TOL` relative. Fewer than
+ * `minPhases` closed phases is itself a mismatch: a run too short to measure
+ * proves nothing.
+ *
+ * Mismatch fields: `classicValue` is the SIDECAR's value and `coreValue` the
+ * measured one (types.ts, `Mismatch.category`).
+ */
+export function checkNe555Periods(params: {
+  readonly key: string;
+  readonly changes: readonly LevelChange[];
+  readonly phases: readonly Ne555Phase[];
+  readonly minPhases: number;
+}): Mismatch[] {
+  const { key, changes, phases, minPhases } = params;
+  const segments = closedSegments(changes);
+  const modelled = phases.filter((p) => Number.isFinite(p.t1));
+  const mismatches: Mismatch[] = [];
+  const push = (id: string, expected: number, measured: number, detail: string): void => {
+    mismatches.push({ sampleTime: 0, category: "period", id: `${key}: ${id}`, classicValue: expected, coreValue: measured, detail });
+  };
+
+  if (segments.length < minPhases) {
+    push("phases", minPhases, segments.length, `the core completed only ${segments.length} phase(s) of the sidecar's, short of the fixture's declared minimum of ${minPhases}`);
+  }
+  if (changes.length > 0 && phases.length > 0 && changes[0]!.high !== phases[0]!.high) {
+    push("initial level", phases[0]!.high ? 1 : 0, changes[0]!.high ? 1 : 0, "the core starts at a different level than the sidecar");
+    return mismatches;
+  }
+
+  const n = Math.min(segments.length, modelled.length);
+  for (let i = 0; i < n; i++) {
+    const expected = modelled[i]!.t1 - modelled[i]!.t0;
+    const measured = segments[i]!.t1 - segments[i]!.t0;
+    const rel = Math.abs(measured - expected) / expected;
+    if (!(rel <= NE555_PERIOD_REL_TOL)) {
+      push(phaseLabel(i, segments[i]!.high, segments), expected, measured, `${fmtS(measured)} against the sidecar's ${fmtS(expected)}: relative error ${rel.toExponential(3)} exceeds ${NE555_PERIOD_REL_TOL.toExponential(0)}`);
+    }
+  }
+  for (let i = 1; i + 1 < n; i++) {
+    if (!segments[i]!.high) continue;
+    const expected = modelled[i + 1]!.t1 - modelled[i]!.t0;
+    const measured = segments[i + 1]!.t1 - segments[i]!.t0;
+    const rel = Math.abs(measured - expected) / expected;
+    if (!(rel <= NE555_PERIOD_REL_TOL)) {
+      push(`period #${segments.slice(0, i + 1).filter((s) => s.high).length - 1}`, expected, measured, `${fmtS(measured)} against the sidecar's ${fmtS(expected)}: relative error ${rel.toExponential(3)} exceeds ${NE555_PERIOD_REL_TOL.toExponential(0)}`);
+    }
+  }
+  return mismatches;
+}
+
+/** Classic's own phase durations against the sidecar, as known-divergence records (never gated): the first few complete phases. */
+function recordClassicPeriods(key: string, changes: readonly LevelChange[], phases: readonly Ne555Phase[]): KnownDivergenceHit[] {
+  const segments = closedSegments(changes);
+  const modelled = phases.filter((p) => Number.isFinite(p.t1));
+  const hits: KnownDivergenceHit[] = [];
+  const n = Math.min(segments.length, modelled.length, 4);
+  for (let i = 0; i < n; i++) {
+    const expected = modelled[i]!.t1 - modelled[i]!.t0;
+    const measured = segments[i]!.t1 - segments[i]!.t0;
+    const rel = (measured - expected) / expected;
+    if (Math.abs(rel) <= NE555_PERIOD_REL_TOL) continue;
+    const label = phaseLabel(i, segments[i]!.high, segments);
+    hits.push({
+      mismatch: {
+        sampleTime: segments[i]!.t0,
+        category: "period",
+        id: `${key}: classic ${label}`,
+        classicValue: measured,
+        coreValue: expected,
+        detail: `classic ${fmtS(measured)} against the sidecar's ${fmtS(expected)} (${(rel * 100).toFixed(2)}%)`,
+      },
+      divergenceId: CLASSIC_555_PERIOD_DRIFT_ID,
+      decisionRef: CLASSIC_555_PERIOD_DRIFT_REF,
+      reason: `classic's ${label} is ${(rel * 100).toFixed(2)}% off the model-exact duration; recorded, not gated`,
+    });
+  }
+  return hits;
+}
+
+/**
+ * The instants at which one engine is compared phase-aligned: the midpoint
+ * of each of its complete HIGH and LOW stretches, in order. A stretch shorter
+ * than `minIntervalS` is no phase (classic's load-seed pulse when the
+ * comparators resolve 0 at load lasts one solve) and is skipped in both
+ * engines' lists, so the k-th of one is the k-th of the other. A monostable's
+ * last LOW, open at the end of the run, contributes its midpoint to the run's
+ * end.
+ */
+export function ne555Midpoints(changes: readonly LevelChange[], horizonS: number, minIntervalS: number, monostable: boolean): number[] {
+  const mids = closedSegments(changes)
+    .filter((s) => s.t1 - s.t0 >= minIntervalS)
+    .map((s) => 0.5 * (s.t0 + s.t1));
+  const last = changes[changes.length - 1];
+  if (monostable && last && !last.high && horizonS - last.t >= 2 * minIntervalS) mids.push(0.5 * (last.t + horizonS));
+  return mids;
+}
+
+/**
+ * The supply's phase-independent current. A source on the timing network's
+ * supply net carries the network's own branch current (the charging current
+ * through RA), which follows the capacitor's phase and so differs between the
+ * engines at their k-th midpoints; this adds the timing resistors' current
+ * leaving the source's + net back on, leaving what the 555 and its load draw.
+ */
+export function ne555SupplyResidual(
+  circuit: SimCircuit,
+  resistors: readonly { readonly id: string; readonly aNet: string; readonly bNet: string }[],
+): (elementI: Record<string, number>) => Record<string, number> {
+  const built = buildCoreNodes(circuit);
+  const adjustments = circuit.components
+    .filter((c) => c.kind === "voltage_source")
+    .map((source) => {
+      const node = built.pinNode.get(corePinKey(source.id, "pos"));
+      const posNet = node === undefined ? null : built.netIdOfNode[node];
+      const terms = resistors
+        .filter((r) => r.aNet === posNet || r.bNet === posNet)
+        .map((r) => ({ id: r.id, sign: r.aNet === posNet ? 1 : -1 }));
+      return { id: source.id, terms };
+    })
+    .filter((a) => a.terms.length > 0);
+  return (elementI) => {
+    if (adjustments.length === 0) return elementI;
+    const out = { ...elementI };
+    for (const { id, terms } of adjustments) {
+      if (out[id] === undefined) continue;
+      out[id] = out[id]! + terms.reduce((sum, t) => sum + t.sign * (elementI[t.id] ?? 0), 0);
+    }
+    return out;
+  };
+}
+
+/** The core's readout against the sidecar's prediction at the core's own instants (point 13.4): `classicValue` is the sidecar's value, `coreValue` the core's. */
+export function compareNe555Sidecar(sidecar: Ne555Sidecar, coreSamples: readonly Pick<SampleReadout, "simTime" | "netV" | "elementI">[]): Mismatch[] {
+  const mismatches: Mismatch[] = [];
+  for (const sample of coreSamples) {
+    const predicted = sidecar.at(sample.simTime);
+    const check = (category: "netV" | "elementI", id: string, want: number, got: number | undefined, absTol: number, relTol: number): void => {
+      if (got === undefined || !withinTolerance(want, got, absTol, relTol)) {
+        mismatches.push({
+          sampleTime: sample.simTime,
+          category: "sidecar",
+          id: `${category}.${id}`,
+          classicValue: want,
+          coreValue: got,
+          detail:
+            got === undefined
+              ? "the core does not publish it"
+              : `|${want} - ${got}| = ${Math.abs(want - got).toExponential(3)} exceeds tolerance ${(absTol + relTol * Math.max(Math.abs(want), Math.abs(got))).toExponential(3)} of the sidecar's exponential`,
+        });
+      }
+    };
+    for (const [id, want] of Object.entries(predicted.netV)) check("netV", id, want, sample.netV[id], VOLT_ABS_TOL, VOLT_REL_TOL);
+    for (const [id, want] of Object.entries(predicted.elementI)) check("elementI", id, want, sample.elementI[id], AMP_ABS_TOL, AMP_REL_TOL);
+  }
+  return mismatches;
+}
+
+/** True when the entry's circuit holds a 555 (from its derived `kinds`, never trusted from a manifest). */
+export function hasNe555(entry: CorpusEntry): boolean {
+  return entry.kinds.includes("ne555");
+}
+
+/** The sidecars an entry's 555s get: its declared spec, else one derived from the wiring of each 555 (`detectNe555Specs`). A 555 the sidecar cannot model is listed in `unmodelled` rather than thrown for; a DECLARED spec that cannot be built is a fixture bug and throws. */
+export function ne555Sidecars(
+  entry: CorpusEntry,
+  circuit: SimCircuit,
+  horizonS: number,
+  stimuli?: readonly StimulusPhase[],
+): { readonly sidecars: readonly Ne555Sidecar[]; readonly unmodelled: readonly string[] } {
+  const specs: readonly (Ne555SidecarSpec | Ne555FixtureSpec)[] = entry.ne555 ? [entry.ne555] : detectNe555Specs(circuit);
+  const sidecars: Ne555Sidecar[] = [];
+  const unmodelled: string[] = circuit.components
+    .filter((c) => c.kind === "ne555" && !specs.some((sp) => sp.component === c.id))
+    .map((c) => c.id);
+  for (const spec of specs) {
+    try {
+      sidecars.push(extractNe555Sidecar(circuit, spec, horizonS, { stimuli }));
+    } catch (err) {
+      if (entry.ne555) throw err;
+      unmodelled.push(spec.component);
+    }
+  }
+  return { sidecars, unmodelled };
+}
+
+// ─── W1e: NE555 entries under scripted stimuli (gate 2d) ──────────────────────
+//
+// A verify-script entry replays classic on a fixed 1 ms grid and the core on
+// classic's own instants (stimuli.ts). The 555 rules of point 13 carry over:
+// the timing network is held to the sidecar's exponentials at every instant
+// (a scripted button press on TRIG is a trigger the sidecar follows, from
+// `v0 = V∞d` after a full discharge), the supply current is compared without
+// the timing network's own branch current, and an instant where the engines
+// disagree on the 555's level (classic's output lags its latch by one solve,
+// decision 7) is not a quiet instant for anything the 555's OUT and DIS reach.
+
+/** `phase.set` folded into a copy of the circuit (phase 0 becomes part of the load, as stimuli.ts does it). */
+function withPhaseSet(circuit: SimCircuit, phase: StimulusPhase | undefined): SimCircuit {
+  if (!phase?.set || phase.set.length === 0) return circuit;
+  const next: SimCircuit = { ...circuit, components: circuit.components.map((c) => ({ ...c })) };
+  for (const override of phase.set) {
+    const component = next.components.find((c) => c.id === override.id);
+    if (component) component.params = { ...component.params, ...override.params };
+  }
+  return next;
+}
+
+/** The core's digital trace over a scripted stimulus: `collectCoreDigitalTrace`'s baseline, then every change while each phase's `set` is applied through `setParams` (phase 0 through the load) and the run advances to the phase's end. */
+export function collectCoreDigitalTraceWithPhases(circuit: SimCircuit, phases: readonly StimulusPhase[]): DigitalTraceEvent[] {
+  const engine = new CoreEngine();
+  try {
+    engine.load(withPhaseSet(circuit, phases[0]));
+    const baseline = Object.entries(engine.digitalState).map(([key, value]) => ({ t: engine.simTime, key, value }));
+    engine.enableTrace(true);
+    let end = engine.simTime;
+    phases.forEach((phase, index) => {
+      if (index > 0 && phase.set && phase.set.length > 0) {
+        engine.setParams(phase.set.map((o) => ({ componentId: o.id, params: o.params })));
+      }
+      end += phase.durationS;
+      engine.advance(end);
+    });
+    const events = [...engine.readTrace()];
+    engine.clearTrace();
+    return [...baseline, ...events];
+  } finally {
+    engine.dispose();
+  }
+}
+
+/** Kinds a 555's OUT and DIS reach without a source or a driver in between (a two-terminal passive, or an LED-family part through its own junction). */
+const PASSIVE_KINDS: ReadonlySet<string> = new Set(["resistor", "capacitor", "led", "push_button", "switch"]);
+
+/**
+ * The nets and components one instant of classic's one-solve output lag can
+ * touch: the nets of each named 555's OUT and DIS, everything reachable from
+ * them through passive two-terminals (stopping at fixed nodes, where a source
+ * or the datum sits), and every voltage source (it carries whatever the
+ * outputs draw). Narrow on purpose: an IC, a switch driver or anything past a
+ * fixed node is never inside it.
+ */
+export function ne555LagSurface(
+  circuit: SimCircuit,
+  chipIds: readonly string[],
+): { readonly nets: ReadonlySet<string>; readonly components: ReadonlySet<string> } {
+  const built = buildCoreNodes(circuit);
+  const fixedNets = new Set<string>();
+  for (const src of circuit.components.filter((c) => c.kind === "voltage_source")) {
+    for (const pin of ["pos", "neg"]) {
+      const node = built.pinNode.get(corePinKey(src.id, pin));
+      const id = node === undefined ? undefined : built.netIdOfNode[node];
+      if (id) fixedNets.add(id);
+    }
+  }
+  fixedNets.add("gnd");
+  const netOfPin = (componentId: string, pinId: string): string | null => {
+    const node = built.pinNode.get(corePinKey(componentId, pinId));
+    return node === undefined ? null : (built.netIdOfNode[node] ?? null);
+  };
+  const nets = new Set<string>();
+  const components = new Set<string>(chipIds);
+  const queue: string[] = [];
+  for (const chip of chipIds) {
+    for (const pin of ["3", "7"]) {
+      const net = netOfPin(chip, pin);
+      if (net && !nets.has(net)) {
+        nets.add(net);
+        queue.push(net);
+      }
+    }
+  }
+  while (queue.length > 0) {
+    const net = queue.shift()!;
+    for (const [componentId] of built.nets.find((n) => n.id === net)?.pins ?? []) {
+      const comp = circuit.components.find((c) => c.id === componentId);
+      if (!comp || !PASSIVE_KINDS.has(comp.kind)) continue;
+      components.add(componentId);
+      for (const pin of comp.pins) {
+        const other = netOfPin(componentId, pin.id);
+        if (other && !fixedNets.has(other) && !nets.has(other)) {
+          nets.add(other);
+          queue.push(other);
+        }
+      }
+    }
+  }
+  for (const src of circuit.components.filter((c) => c.kind === "voltage_source")) components.add(src.id);
+  return { nets, components };
+}
+
+export const CLASSIC_555_LAG_DIVERGENCE_ID = "classic-555-one-solve-lag";
+const CLASSIC_555_LAG_REF =
+  "core/README.md NE555 point 12 (decision 7): classic's OUT and DIS stamps run one solve behind its latch, so at an " +
+  "instant where the engines disagree on the 555's level nothing its outputs reach is a quiet instant; the core has " +
+  "no such lag. Both engines agree on the level again at the very next sample.";
+
+interface Ne555StimuliPrep {
+  readonly classic: readonly StimulusStepSample[];
+  readonly core: readonly StimulusStepSample[];
+  readonly sidecars: readonly Ne555Sidecar[];
+  /** Sidecar and period mismatches (core against the model): never explained by a divergence or by Richardson. */
+  readonly extra: readonly Mismatch[];
+  /** Sample times classic's 555 lags the core's, with the surface each can touch. */
+  readonly lagTimes: ReadonlySet<number>;
+  readonly lagSurface: { readonly nets: ReadonlySet<string>; readonly components: ReadonlySet<string> };
+}
+
+/** Prepares an NE555 entry's stimuli comparison: the timing network is taken out of the classic-versus-core comparison (the core is held to the sidecar instead) and the supply current loses the timing branch. Returns `null` for an entry with no 555. */
+function prepareNe555Stimuli(
+  entry: CorpusEntry,
+  circuit: SimCircuit,
+  phases: readonly StimulusPhase[],
+  classic: readonly StimulusStepSample[],
+  core: readonly StimulusStepSample[],
+): Ne555StimuliPrep | null {
+  if (!hasNe555(entry)) return null;
+  const horizonS = phases.reduce((sum, p) => sum + p.durationS, 0);
+  const { sidecars } = ne555Sidecars(entry, circuit, horizonS, phases);
+
+  const skipNetV = new Set<string>();
+  const skipElementI = new Set<string>();
+  const resistors: { id: string; aNet: string; bNet: string }[] = [];
+  const extra: Mismatch[] = [];
+  for (const sidecar of sidecars) {
+    sidecar.netIds.forEach((id) => skipNetV.add(id));
+    sidecar.elementIds.forEach((id) => skipElementI.add(id));
+    resistors.push(...sidecar.resistors);
+    extra.push(...compareNe555Sidecar(sidecar, core));
+    // Point 13.2: the core's own switch times, from its trace over the same script.
+    const key = sidecar.spec.component;
+    const minPhases = entry.ne555 && entry.ne555.component === key ? entry.ne555.minPhases : 0;
+    extra.push(...checkNe555Periods({ key, changes: levelChanges(collectCoreDigitalTraceWithPhases(circuit, phases), key), phases: sidecar.phases, minPhases }));
+  }
+  const adjust = ne555SupplyResidual(circuit, resistors);
+  const prepare = (sample: StimulusStepSample): StimulusStepSample => {
+    const netV = Object.fromEntries(Object.entries(sample.netV).filter(([id]) => !skipNetV.has(id)));
+    const elementI = Object.fromEntries(Object.entries(adjust({ ...sample.elementI })).filter(([id]) => !skipElementI.has(id)));
+    return { ...sample, netV, elementI };
+  };
+
+  const chips = circuit.components.filter((c) => c.kind === "ne555").map((c) => c.id);
+  return { classic: classic.map(prepare), core: core.map(prepare), sidecars, extra, lagTimes: ne555LagTimes(chips, classic, core), lagSurface: ne555LagSurface(circuit, chips) };
+}
+
+/**
+ * The sample times (classic's clock) where classic's 555 lags the core's: the
+ * engines disagree on a 555's level there and agree again at the very next
+ * sample. A disagreement that outlasts one sample is a standing difference, not
+ * a lag, and is never excused.
+ */
+export function ne555LagTimes(
+  chipIds: readonly string[],
+  classic: readonly Pick<StimulusStepSample, "simTime" | "digitalState">[],
+  core: readonly Pick<StimulusStepSample, "simTime" | "digitalState">[],
+): Set<number> {
+  const lagTimes = new Set<number>();
+  const disagrees = (i: number): boolean => chipIds.some((id) => !Object.is(classic[i]!.digitalState[id], core[i]!.digitalState[id]));
+  for (let i = 0; i + 1 < classic.length; i++) {
+    if (disagrees(i) && !disagrees(i + 1)) lagTimes.add(classic[i]!.simTime);
+  }
+  return lagTimes;
+}
+
+function runNe555Entry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
+  const durationS = entry.digital?.traceDurationS ?? entry.durationS ?? DEFAULT_DURATION_S;
+  const kinds = entry.kinds;
+  const fail = (engine: "classic" | "core", err: unknown, classicWallMs: number | null, coreWallMs: number | null): EntryResult => ({
+    status: "error",
+    kinds,
+    engine,
+    message: errorMessage(err),
+    classicWallMs,
+    coreWallMs,
+  });
+
+  let coreTrace: DigitalTraceEvent[];
+  let coreWallMs: number;
+  try {
+    const started = performance.now();
+    coreTrace = collectCoreDigitalTrace(circuit, durationS);
+    coreWallMs = performance.now() - started;
+  } catch (err) {
+    if (err instanceof CoreUnsupportedError) {
+      return { status: "core-declined", kinds, reasons: [...err.reasons], classicWallMs: null, coreWallMs: null };
+    }
+    return fail("core", err, null, null);
+  }
+  let classicTrace: DigitalTraceEvent[];
+  let classicWallMs: number;
+  try {
+    const started = performance.now();
+    classicTrace = collectClassicDigitalTrace(circuit, durationS);
+    classicWallMs = performance.now() - started;
+  } catch (err) {
+    return fail("classic", err, null, coreWallMs);
+  }
+
+  const mismatches: Mismatch[] = [];
+  const knownDivergences: KnownDivergenceHit[] = [];
+
+  let sidecars: readonly Ne555Sidecar[];
+  try {
+    sidecars = ne555Sidecars(entry, circuit, durationS).sidecars;
+  } catch (err) {
+    return fail("core", err, classicWallMs, coreWallMs);
+  }
+  const firstKey = sidecars[0]?.spec.component ?? circuit.components.find((c) => c.kind === "ne555")!.id;
+  const monostable = (sidecars[0]?.spec.mode ?? "astable") === "monostable";
+
+  // Point 13.1: `<id>` is in every declared 555 fixture's projection.
+  if (entry.ne555) {
+    if (!entry.digital) {
+      mismatches.push({
+        sampleTime: 0,
+        category: "digitalState",
+        id: "*",
+        classicValue: null,
+        coreValue: null,
+        detail: "an NE555 fixture must declare a `digital` spec whose projection names the 555's own key (NE555 point 13.1)",
+      });
+    } else if (entry.digital.projection && !entry.digital.projection.includes(entry.ne555.component)) {
+      mismatches.push({
+        sampleTime: 0,
+        category: "digitalState",
+        id: "*",
+        classicValue: null,
+        coreValue: null,
+        detail: `the digital projection must include the 555's key "${entry.ne555.component}" (NE555 point 13.1)`,
+      });
+    }
+  }
+  if (entry.digital) mismatches.push(...alignDigitalTraces(entry.digital, classicTrace, coreTrace).mismatches);
+
+  // Point 13.2: the core's switch times against the sidecar; classic's recorded.
+  for (const sidecar of sidecars) {
+    const key = sidecar.spec.component;
+    const minPhases = entry.ne555 && entry.ne555.component === key ? entry.ne555.minPhases : 0;
+    mismatches.push(...checkNe555Periods({ key, changes: levelChanges(coreTrace, key), phases: sidecar.phases, minPhases }));
+    knownDivergences.push(...recordClassicPeriods(key, levelChanges(classicTrace, key), sidecar.phases));
+  }
+
+  // Point 13.4: phase-aligned instants, each engine's own.
+  const minIntervalS = entry.ne555?.minIntervalS ?? NE555_DEFAULT_MIN_INTERVAL_S;
+  const wanted = entry.ne555?.intervals ?? NE555_DEFAULT_INTERVALS;
+  const classicMids = ne555Midpoints(levelChanges(classicTrace, firstKey), durationS, minIntervalS, monostable);
+  const coreMids = ne555Midpoints(levelChanges(coreTrace, firstKey), durationS, minIntervalS, monostable);
+  const count = Math.min(wanted, classicMids.length, coreMids.length);
+  let classicTimes = classicMids.slice(0, count);
+  let coreTimes = coreMids.slice(0, count);
+  if (count === 0) {
+    if (entry.ne555) {
+      mismatches.push({
+        sampleTime: 0,
+        category: "sidecar",
+        id: "phase-aligned instants",
+        classicValue: wanted,
+        coreValue: 0,
+        detail: "no complete HIGH or LOW interval on both engines: nothing to compare phase-aligned",
+      });
+    } else {
+      // No phase closed inside the entry's own duration on at least one engine, so no
+      // switching has separated them yet: the entry's ordinary sample grid (the same
+      // instants on both sides) is the phase-aligned comparison, and the timing network
+      // is still held to the sidecar's exponentials there.
+      try {
+        const eventTimes = [...new Set([...classicTrace, ...coreTrace].map((e) => e.t))].sort((a, b) => a - b);
+        const plain = resolveSampleTimes(entry, circuit, durationS, eventTimes, durationS);
+        classicTimes = plain;
+        coreTimes = plain;
+      } catch (err) {
+        return fail("core", err, classicWallMs, coreWallMs);
+      }
+    }
+  }
+
+  let errorStats = { maxAbsErrorVolts: 0, maxRelErrorVolts: 0, maxAbsErrorAmps: 0, maxRelErrorAmps: 0 };
+  if (classicTimes.length > 0) {
+    let coreSamples: SampleReadout[];
+    let classicSamples: SampleReadout[];
+    try {
+      const started = performance.now();
+      coreSamples = collectCoreSamples(circuit, coreTimes);
+      coreWallMs += performance.now() - started;
+    } catch (err) {
+      return fail("core", err, classicWallMs, coreWallMs);
+    }
+    try {
+      const started = performance.now();
+      classicSamples = collectClassicSamplesCached(entry, circuit, classicTimes);
+      classicWallMs += performance.now() - started;
+    } catch (err) {
+      return fail("classic", err, classicWallMs, coreWallMs);
+    }
+
+    if (hasLedFamily(entry)) mismatches.push(...compareCacheOnOff(circuit, coreTimes, coreSamples));
+
+    const skipNetV = new Set<string>();
+    const skipElementI = new Set<string>();
+    const resistors: { id: string; aNet: string; bNet: string }[] = [];
+    for (const sidecar of sidecars) {
+      sidecar.netIds.forEach((id) => skipNetV.add(id));
+      sidecar.elementIds.forEach((id) => skipElementI.add(id));
+      resistors.push(...sidecar.resistors);
+      mismatches.push(...compareNe555Sidecar(sidecar, coreSamples));
+    }
+    const cmp = comparePhaseAlignedSamples(classicSamples, coreSamples, {
+      skipNetV,
+      skipElementI,
+      adjustElementI: ne555SupplyResidual(circuit, resistors),
+    });
+    mismatches.push(...cmp.mismatches);
+    errorStats = {
+      maxAbsErrorVolts: cmp.maxAbsErrorVolts,
+      maxRelErrorVolts: cmp.maxRelErrorVolts,
+      maxAbsErrorAmps: cmp.maxAbsErrorAmps,
+      maxRelErrorAmps: cmp.maxRelErrorAmps,
+    };
+  }
+
+  // The LED sidecar checks, when the entry also declares them.
+  const extra = runSidecarChecks(entry, circuit);
+  mismatches.push(...extra.mismatches);
+  coreWallMs += extra.coreWallMs;
+
+  const { known, unexplained } = classifyMismatches(circuit, mismatches);
+  const hits = [...knownDivergences, ...known.map(toKnownDivergenceHit)];
+  if (unexplained.length === 0) {
+    return { status: "pass", kinds, classicWallMs, coreWallMs, knownDivergences: hits, ...errorStats };
+  }
+  return {
+    status: "fail",
+    kinds,
+    classicWallMs,
+    coreWallMs,
+    knownDivergences: hits,
+    mismatches: unexplained.slice(0, MAX_REPORTED_MISMATCHES),
+    totalMismatches: unexplained.length,
+    ...errorStats,
+  };
+}
+
+// ─── W1e: the solution cache (core/README.md LEDs point 7) ──────────────────────
+//
+// A nonlinear static partition keeps the solution cache, and with
+// NO_SOLUTION_CACHE it is solved by the Newton of point 6 from its last
+// published voltages instead, so the two runs agree within 1 uV (the polish
+// residual, at most 0.39 uV measured), not bit for bit; a linear partition
+// stays bit-identical. Every entry holding an LED-family kind is run both ways
+// at the same instants and held to that bound: a cache hit that published
+// stale bits, or a miss that missed its epoch, shows up here on a circuit
+// whose drivers repeat modes (an IC or a 555 driving an LED).
+
+/** The bound a cached and an uncached nonlinear partition must agree within (LEDs point 7), volts. */
+export const CACHE_AGREEMENT_VOLTS = 1e-6;
+const LED_FAMILY_KINDS: ReadonlySet<string> = new Set(["led", "rgb_led", "bicolor_led", "seg7_cc", "seg7_ca"]);
+
+/** True when the entry's circuit holds an LED-family kind (LEDs point 7's nonlinear static partitions). */
+export function hasLedFamily(entry: CorpusEntry): boolean {
+  return entry.kinds.some((kind) => LED_FAMILY_KINDS.has(kind));
+}
+
+/** The core with the solution cache on (`cached`, already collected by the caller) against the same run with it off, at the same instants: netV within 1 uV, elementI within the ordinary amp tolerance. `classicValue` is the cached run's, `coreValue` the uncached one's (types.ts, `Mismatch.category`). */
+export function compareCacheOnOff(circuit: SimCircuit, times: readonly number[], cached: readonly SampleReadout[]): Mismatch[] {
+  const engine = new CoreEngine();
+  const mismatches: Mismatch[] = [];
+  try {
+    engine.load(circuit, CORE_IMPLEMENTED_KINDS, { noSolutionCache: true });
+    times.forEach((t, i) => {
+      if (t > 0) engine.advance(t);
+      const uncached = { netV: engine.getNetV(), elementI: engine.getElementI() };
+      const on = cached[i]!;
+      for (const [id, v] of Object.entries(on.netV)) {
+        const w = uncached.netV[id];
+        if (w === undefined || !(Math.abs(v - w) <= CACHE_AGREEMENT_VOLTS)) {
+          mismatches.push({ sampleTime: t, category: "sidecar", id: `cache.netV.${id}`, classicValue: v, coreValue: w, detail: `cache on ${v} against cache off ${w}: |diff| exceeds ${CACHE_AGREEMENT_VOLTS.toExponential(0)} V (LEDs point 7)` });
+        }
+      }
+      for (const [id, v] of Object.entries(on.elementI)) {
+        const w = uncached.elementI[id];
+        if (w === undefined || !withinTolerance(v, w, AMP_ABS_TOL, AMP_REL_TOL)) {
+          mismatches.push({ sampleTime: t, category: "sidecar", id: `cache.elementI.${id}`, classicValue: v, coreValue: w, detail: `cache on ${v} against cache off ${w}: exceeds the amp tolerance (LEDs point 7)` });
+        }
+      }
+    });
+  } finally {
+    engine.dispose();
+  }
+  return mismatches;
+}
+
+// ─── W1e: LED sidecars (core/README.md "Kernel semantics: LEDs and displays (W1e)") ──
+//
+// A static LED fixture compares the plain classic-versus-core samples AND the
+// core against the model's own answer (analytic.ts's `evaluateLedStatic`),
+// plus the channel currents of the multi-channel kinds, which the plain
+// samples do not carry: core against the sidecar and against classic's
+// `getElementChannelI()`, key set included. An RC-fed LED (a stepped,
+// nonlinear partition) compares the core under TRAPEZOIDAL integration
+// against the ODE at mid-transient instants (orchestrator ruling: backward
+// Euler's own mid-transient error is inherent, so BE is judged only where the
+// plain sample instants are settled).
+
+const channelKey = (id: string, j: number): string => `${id}[${j}]`;
+
+function sidecarMismatch(sampleTime: number, id: string, want: number | string, got: number | string | undefined, detail: string): Mismatch {
+  return { sampleTime, category: "sidecar", id, classicValue: want, coreValue: got, detail };
+}
+
+export function runSidecarChecks(entry: CorpusEntry, circuit: SimCircuit): { readonly mismatches: Mismatch[]; readonly coreWallMs: number } {
+  const model = entry.sidecar;
+  if (!model) return { mismatches: [], coreWallMs: 0 };
+  const started = performance.now();
+  const mismatches: Mismatch[] = [];
+  const durationS = entry.durationS ?? DEFAULT_DURATION_S;
+
+  if (model.kind === "led-static") {
+    const want = evaluateLedStatic(circuit, model);
+    const engine = new CoreEngine();
+    let coreChannels: Record<string, number[]>;
+    try {
+      engine.load(circuit);
+      engine.advance(durationS);
+      const netV = engine.getNetV();
+      const elementI = engine.getElementI();
+      coreChannels = { ...engine.getElementChannelI() };
+      const t = engine.simTime;
+      for (const [id, v] of Object.entries(want.netV)) {
+        if (!withinTolerance(v, netV[id] ?? Number.NaN, VOLT_ABS_TOL, VOLT_REL_TOL)) {
+          mismatches.push(sidecarMismatch(t, `netV.${id}`, v, netV[id], `|${v} - ${netV[id]}| exceeds the volt tolerance of the model's own answer`));
+        }
+      }
+      for (const [id, i] of Object.entries(want.elementI)) {
+        if (!withinTolerance(i, elementI[id] ?? Number.NaN, AMP_ABS_TOL, AMP_REL_TOL)) {
+          mismatches.push(sidecarMismatch(t, `elementI.${id}`, i, elementI[id], `|${i} - ${elementI[id]}| exceeds the amp tolerance of the model's own answer`));
+        }
+      }
+      for (const [id, channels] of Object.entries(want.channels)) {
+        const got = coreChannels[id];
+        if (channels === null) {
+          if (got !== undefined) mismatches.push(sidecarMismatch(t, `channels.${id}`, "absent", `[${got.join(", ")}]`, "a burnt part's channel entry must be absent"));
+          continue;
+        }
+        if (channels.length === 0) continue; // a plain `led` publishes no channels
+        if (!got || got.length !== channels.length) {
+          mismatches.push(sidecarMismatch(t, `channels.${id}`, channels.length, got?.length, "the core's channel array has the wrong length"));
+          continue;
+        }
+        channels.forEach((amps, j) => {
+          if (!withinTolerance(amps, got[j]!, AMP_ABS_TOL, AMP_REL_TOL)) {
+            mismatches.push(sidecarMismatch(t, `channels.${channelKey(id, j)}`, amps, got[j], `|${amps} - ${got[j]}| exceeds the amp tolerance of the model's own answer`));
+          }
+        });
+      }
+    } catch (err) {
+      return {
+        mismatches: [sidecarMismatch(0, "core run", "ok", errorMessage(err), "the core could not run the fixture for the sidecar check")],
+        coreWallMs: performance.now() - started,
+      };
+    } finally {
+      engine.dispose();
+    }
+
+    // Classic's channel currents, key set included (`getElementChannelI`, spec §10.10).
+    try {
+      const runner = new HeadlessRunner();
+      runner.load(circuit);
+      if (durationS > 0) runner.run({ durationS });
+      const classicChannels = runner.engine.getElementChannelI() as Record<string, number[]>;
+      const keys = new Set([...Object.keys(classicChannels), ...Object.keys(coreChannels)]);
+      for (const id of keys) {
+        const a = classicChannels[id];
+        const b = coreChannels[id];
+        if (!a || !b || a.length !== b.length) {
+          mismatches.push({ sampleTime: durationS, category: "elementI", id: `channels.${id}`, classicValue: a?.length, coreValue: b?.length, detail: "the channel arrays differ in presence or length" });
+          continue;
+        }
+        a.forEach((x, j) => {
+          if (!withinTolerance(x, b[j]!, AMP_ABS_TOL, AMP_REL_TOL)) {
+            mismatches.push({ sampleTime: durationS, category: "elementI", id: `channels.${channelKey(id, j)}`, classicValue: x, coreValue: b[j], detail: `|${x} - ${b[j]}| exceeds the amp tolerance` });
+          }
+        });
+      }
+    } catch (err) {
+      mismatches.push(sidecarMismatch(0, "classic run", "ok", errorMessage(err), "classic could not run the fixture for the channel check"));
+    }
+  } else {
+    const built = buildCoreNodes(circuit);
+    const device = circuit.components.find((c) => c.id === model.device);
+    const anodePin = device?.pins[0]?.id;
+    const node = anodePin === undefined ? undefined : built.pinNode.get(corePinKey(model.device, anodePin));
+    const netId = node === undefined ? undefined : built.netIdOfNode[node];
+    if (!netId) {
+      return { mismatches: [sidecarMismatch(0, "led-rc node", "resolved", undefined, `${model.device}'s anode is not on a named net`)], coreWallMs: 0 };
+    }
+    const want = ledRcVoltages(circuit, model, model.instantsS);
+    const engine = new CoreEngine();
+    try {
+      engine.load(circuit, CORE_IMPLEMENTED_KINDS, { integrationMethod: "trap" });
+      model.instantsS.forEach((t, i) => {
+        engine.advance(t);
+        const got = engine.getNetV()[netId];
+        if (!withinTolerance(want[i]!, got ?? Number.NaN, VOLT_ABS_TOL, VOLT_REL_TOL)) {
+          mismatches.push(sidecarMismatch(t, `netV.${netId}`, want[i]!, got, `trapezoidal core |${want[i]} - ${got}| exceeds the volt tolerance of the ODE`));
+        }
+      });
+    } catch (err) {
+      mismatches.push(sidecarMismatch(0, "core run", "ok", errorMessage(err), "the core (trapezoidal) could not run the fixture for the ODE check"));
+    } finally {
+      engine.dispose();
+    }
+  }
+  return { mismatches, coreWallMs: performance.now() - started };
+}
+
 export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   // Gate 2d's stimuli path takes priority over everything below: a
   // verify-script entry with exported phases is answering a different
@@ -711,6 +1570,9 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   if (missingKinds.length > 0) {
     return { status: "not-ported", kinds: entry.kinds, missingKinds, classicWallMs: null, coreWallMs: null };
   }
+
+  // W1e: an entry holding an NE555 is judged as NE555 point 13 says (see the block above).
+  if (hasNe555(entry)) return runNe555Entry(entry, circuit);
 
   // Digital alignment (gate 2a) runs first: it needs its own full-resolution
   // traces, independent of the analog sample schedule below, and — when the
@@ -773,6 +1635,9 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
     };
   }
 
+  // W1e (LEDs point 7): an entry holding an LED-family kind also runs the core with the solution cache off.
+  const cacheMismatches = hasLedFamily(entry) ? compareCacheOnOff(circuit, times, coreSamples) : [];
+
   let classicSamples;
   let classicWallMs: number;
   try {
@@ -798,7 +1663,8 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
     maxRelErrorAmps: cmp.maxRelErrorAmps,
   };
 
-  const allMismatches = [...cmp.mismatches, ...digitalMismatches];
+  const sidecarChecks = runSidecarChecks(entry, circuit);
+  const allMismatches = [...cmp.mismatches, ...digitalMismatches, ...sidecarChecks.mismatches, ...cacheMismatches];
   // Gate 2e / decision 3 first: re-judge a mismatch on the entry's declared
   // analytic node/current against the analytic answer before ever asking
   // known-divergences.ts's registry about it — the two are independent

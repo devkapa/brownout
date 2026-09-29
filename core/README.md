@@ -1732,6 +1732,26 @@ records").
        else (OUT and its load, the 555's `elementI`, the supply current, and
        what OUT drives) compares at phase-aligned quiet instants: the
        midpoint of each engine's own k-th HIGH and LOW.
+       - The supply current carries the timing network's own branch current
+         (the charging current through RA), which follows the capacitor's
+         phase: classic's capacitor is up to 60 mV off at its own midpoint,
+         30 µA on the SAP-1 clock's 14.9 mA. So a source's current compares
+         with the timing resistors' current leaving its + net added back
+         (W0 point 5's sign), which leaves what the 555 and its load draw.
+         The timing resistors and capacitor are held to the sidecar instead.
+       - A 555 the generator cannot model (anything but resistors, the
+         capacitor and pins 2, 6 and 7 on its timing network, or RST neither
+         on the supply nor on its own RC) gets no sidecar. It compares with
+         classic at phase-aligned instants, timing nodes included, with no
+         Richardson forgiveness.
+       - Under a scripted stimulus (gate 2d), the timing network is held to
+         the sidecar at every sample, and a button on TRIG is a trigger the
+         sidecar follows. A sample where the engines disagree on a 555's
+         level, and agree again at the very next sample, is classic's
+         one-solve lag (point 12). It is registered as
+         `classic-555-one-solve-lag` for what OUT and DIS reach through
+         passives, and for the sources. A disagreement that lasts longer is
+         never excused.
 
 **Known gaps (W1e follow-up).** Two gaps inherited from W1c, which no board
 circuit exercises, are closed by a separate W1e change after the 555 and LED

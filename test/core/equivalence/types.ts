@@ -190,6 +190,113 @@ export interface AnalyticFixedPairCapacitorModel {
  */
 export type AnalyticFixtureModel = AnalyticRcModel | AnalyticRcLadderModel | AnalyticFixedPairCapacitorModel;
 
+/**
+ * W1e, core/README.md "Kernel semantics: NE555 (W1e)" point 13: a fixture's
+ * declaration that it contains a 555 whose timing is judged against the
+ * model-exact sidecar (analytic.ts's `extractNe555Sidecar`) instead of against
+ * classic. Everything the sidecar needs (resistors, supply, the DIS net) is
+ * read off the circuit itself; the spec only names the parts.
+ *
+ * What `runCorpusEntry` does for an entry that sets this (run-entry.ts's
+ * `runNe555Checks`), in place of the plain four-point comparison:
+ * 1. the period check (point 13.2): the core's own trace of `<component>`
+ *    against the sidecar's phase durations, 1e-6 relative;
+ * 2. the timing network's nodes and currents (point 13.4): the core at its own
+ *    sample instants against the sidecar's exponentials;
+ * 3. everything else (point 13.4): classic and core, each at the midpoint of
+ *    its own k-th HIGH and LOW.
+ * The digital projection (point 13.1) is the entry's `digital` spec, which must
+ * name the 555's own key (the bare component id).
+ */
+export interface Ne555FixtureSpec {
+  /** The 555's component id; also its digitalState key (classic's `digitalState[id]`). */
+  readonly component: string;
+  readonly mode: "astable" | "monostable";
+  /** The timing capacitor's component id. */
+  readonly capacitor: string;
+  /** A capacitor on the RST net (a power-on reset delay), when the fixture has one: the sidecar derives the release time from its RC. */
+  readonly rstCapacitor?: string;
+  /** The fewest sidecar phases (each a HIGH or a LOW) the core's trace must complete inside the entry's duration. */
+  readonly minPhases: number;
+  /** How many complete intervals (each engine's own, in order) are compared phase-aligned. Default 8. */
+  readonly intervals?: number;
+  /** An interval shorter than this is not a phase (classic's load-seed pulse when the comparators resolve 0 at load); it takes no part in the alignment. Default 1e-5 s. */
+  readonly minIntervalS?: number;
+}
+
+/**
+ * W1e, core/README.md "Kernel semantics: LEDs and displays (W1e)": the model's
+ * own answer for a static LED fixture, computed from the junction law (LEDs
+ * point 2) by bisection on each node's KCL with GMIN and the node shunt,
+ * never by core code. One `LedJunctionCell` is one junction fed through one
+ * resistor from an ideal source; the analytic values it implies (the node's
+ * voltage, the resistor's and the junction's current) are checked against the
+ * core, and the device-level aggregates (`elementI`, channel currents,
+ * LEDs point 13) are derived from the cells' currents.
+ */
+export interface LedJunctionCell {
+  /** The LED-family component holding the junction. */
+  readonly device: string;
+  /** The device pin that sits on the free node. */
+  readonly pin: string;
+  /** The resistor between the free node and the source's + net; a is upstream (higher potential), b downstream, in both orientations. */
+  readonly resistor: string;
+  /** The ideal `voltage_source` whose - terminal is on the datum. */
+  readonly source: string;
+  /** `anode-node`: source - R - node - junction - datum. `cathode-node`: source(anode side, fixed) - junction - node - R - datum. */
+  readonly orientation: "anode-node" | "cathode-node";
+  /** The junction's forward-voltage param (`vf`, `vf_r`, `vf1`...) and its default when the component omits it. */
+  readonly vfParam: string;
+  readonly vfDefault: number;
+  /** The channel slot this junction feeds on a multi-channel device (`bicolor_led`, `rgb_led`, `seg7`); absent on a plain `led`. */
+  readonly channel?: number;
+  /** Set when the junction's cathode is a common node shared through `commonResistor` (a `seg7_cc` whose `com` is not on the datum): the group's cells solve as one coupled system. */
+  readonly commonGroup?: string;
+}
+
+export interface LedCommonGroup {
+  readonly id: string;
+  /** The device pin that is the shared common node. */
+  readonly device: string;
+  readonly pin: string;
+  /** The resistor from the common node (a) to the datum (b). */
+  readonly resistor: string;
+}
+
+/** The devices whose aggregate readouts are checked, including ones with no junction at all (burnt, nothing wired). */
+export interface LedDeviceModel {
+  readonly device: string;
+}
+
+export interface AnalyticLedStaticModel {
+  readonly kind: "led-static";
+  readonly cells: readonly LedJunctionCell[];
+  readonly commonGroups?: readonly LedCommonGroup[];
+  readonly devices: readonly LedDeviceModel[];
+}
+
+/**
+ * W1e, LEDs point 8: source - R - node, with a capacitor and a junction from
+ * the node to the datum (a stepped, nonlinear partition). The sidecar
+ * integrates the partition's own ODE (the junction law, GMIN and the node
+ * shunt) from an uncharged capacitor. `run-entry.ts`'s `runSidecarChecks`
+ * compares the core under TRAPEZOIDAL integration against it at
+ * mid-transient instants (the orchestrator ruling: backward Euler's own
+ * mid-transient error is inherent, so BE is judged only where the plain
+ * classic-versus-core sample instants are settled).
+ */
+export interface AnalyticLedRcModel {
+  readonly kind: "led-rc";
+  readonly source: string;
+  readonly resistor: string;
+  readonly capacitor: string;
+  readonly device: string;
+  /** Instants (s) the trapezoidal core run is compared at. */
+  readonly instantsS: readonly number[];
+}
+
+export type SidecarModel = AnalyticLedStaticModel | AnalyticLedRcModel;
+
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */
   readonly id: string;
@@ -241,6 +348,10 @@ export interface CorpusEntry {
   readonly phasesUnsupported?: string;
   /** Gate 2e / decision 3's analytic reference for this entry's plain (non-stimuli) comparison — see `AnalyticFixtureModel`'s own doc. `undefined` for every entry without a closed-form reference (the common case). */
   readonly analytic?: AnalyticFixtureModel;
+  /** W1e: the entry contains a 555 judged against the model-exact timing sidecar (`Ne555FixtureSpec`'s own doc). `undefined` for every entry without one. */
+  readonly ne555?: Ne555FixtureSpec;
+  /** W1e: an LED sidecar checked against the core in addition to the plain comparison (`SidecarModel`'s own doc). `undefined` for every entry without one. */
+  readonly sidecar?: SidecarModel;
   /**
    * Decision 9 (floating-input buckets): true when this circuit reads at
    * least one OPEN, FLOATING_INPUT pin (classic's hashed floating model,
@@ -270,7 +381,16 @@ export interface SampleReadout {
 /** One comparison failure, sample-and-quantity addressable so a report can point straight at the disagreement. */
 export interface Mismatch {
   readonly sampleTime: number;
-  readonly category: "netV" | "elementI" | "digitalState" | "failures" | "warnings" | "simTime";
+  /**
+   * `period` and `sidecar` (W1e) are core-versus-model checks, not classic-versus-
+   * core ones: `period` is the 555 period gate (NE555 point 13.2), `sidecar` any
+   * other check of the core against a model-exact answer (the 555 timing
+   * network, an LED fixture's analytic values). Their `classicValue` is the
+   * sidecar's value and `coreValue` the core's (or `undefined` where a side is
+   * absent), so `explainAnalyticMismatches` and the divergence registry, which
+   * only look at netV/elementI/digitalState, never explain them away.
+   */
+  readonly category: "netV" | "elementI" | "digitalState" | "failures" | "warnings" | "simTime" | "period" | "sidecar";
   /** Net id, component id, failure/warning key, "*" for a whole-record comparison (warning code sets), or "simTime" for the simTime category. */
   readonly id: string;
   readonly classicValue: unknown;

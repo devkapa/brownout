@@ -16,7 +16,7 @@ import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
 import { detectOpenInput } from "./open-input.js";
 import type { StimulusPhase } from "./stimuli.js";
-import type { AnalyticFixtureModel, CorpusEntry, DigitalFixtureSpec } from "./types.js";
+import type { AnalogFixtureSpec, AnalyticFixtureModel, CorpusEntry, DigitalFixtureSpec, Ne555FixtureSpec, SidecarModel } from "./types.js";
 
 const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "core");
 
@@ -71,6 +71,21 @@ export interface SyntheticExpectation {
    * means "compare digitalState per-sample, unaligned" (the plain flow).
    */
   readonly digital?: DigitalFixtureSpec;
+  /**
+   * Gate 2b's quiet-instant guard window (types.ts's `AnalogFixtureSpec`), threaded straight onto the
+   * CorpusEntry. W1e's open-RST fixture needs it: its load frame is a documented classic-versus-core
+   * difference (NE555 point 12), so its samples are taken at quiet instants only.
+   */
+  readonly analog?: AnalogFixtureSpec;
+  /**
+   * W1e (core/README.md NE555 point 13): names the fixture's 555 and its timing
+   * parts, threaded straight onto the CorpusEntry (types.ts's `Ne555FixtureSpec`).
+   * `undefined` for every fixture without a 555, and for a fixture whose 555
+   * should get the spec derived from its wiring.
+   */
+  readonly ne555?: Ne555FixtureSpec;
+  /** W1e: an LED sidecar, threaded straight onto the CorpusEntry (types.ts's `SidecarModel`). */
+  readonly sidecar?: SidecarModel;
 }
 
 export interface LoadedSyntheticEntry {
@@ -136,6 +151,9 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       analytic: expected.analytic,
       phases: expected.phases,
       digital: expected.digital,
+      analog: expected.analog,
+      ne555: expected.ne555,
+      sidecar: expected.sidecar,
       openInput,
     };
     return { entry, circuit, expected };

@@ -11,14 +11,27 @@ import { HeadlessRunner } from "../../../src/host/headless.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import {
   checkAnalyticCrossing,
+  detectNe555Specs,
+  evaluateLedStatic,
+  extractNe555Sidecar,
   fixedPairCapacitorCurrentAt,
+  ledCurrent,
+  ledLaw,
+  ledRcVoltages,
+  ledSeriesNode,
+  ledSharedCommon,
   ne555AstablePeriod,
   ne555MonostablePulseWidth,
+  ne555Phases,
+  NE555_DIS_OHMS,
   rcCrossingTime,
   rcLadderVoltagesAt,
   rcTerminalThevenin,
   rcVoltageAt,
+  theveninAt,
+  type Ne555TimingModel,
   type RcLadderParams,
+  type ResistiveNetwork,
 } from "./analytic.js";
 import { collectClassicSamples } from "./sample.js";
 import { replayStimuliOnClassic, replayStimuliOnCore, type StimulusPhase } from "./stimuli.js";
@@ -851,5 +864,270 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — core s
     // in this run (C*dV/1e-12 = 1e-6*2/1e-12 = 2e6A) — otherwise this test
     // would not actually be proving anything about the artifact it names.
     expect(classicI).toBeCloseTo(2_000_000, 0);
+  });
+});
+
+
+// ─── W1e: the model-exact NE555 sidecar (core/README.md NE555 point 13.3) ────
+//
+// Every number below is from the drafting probe `periods2.py`, which solves the
+// timing network in exact rational arithmetic with the 1e-12 S shunt on every
+// free node; analytic.ts is plain double precision, so they agree to about 1e-12
+// relative and are asserted here to 1e-9.
+
+/** The astable of a resistor chain `VCC - RA - D - RB (- RPOT) - X` with C from X to GND, as a `ne555Phases` model built straight from `theveninAt`. */
+function astableModel(params: { ra: number; rb: number; rpot?: number; c: number; vs: number }): Ne555TimingModel {
+  const nodes = params.rpot === undefined ? ["D", "X"] : ["D", "P", "X"];
+  const chain = params.rpot === undefined ? [{ id: "rb", a: "D", b: "X", ohms: params.rb }] : [{ id: "rb", a: "D", b: "P", ohms: params.rb }, { id: "rp", a: "P", b: "X", ohms: params.rpot }];
+  const charge: ResistiveNetwork = {
+    fixed: { VCC: params.vs, GND: 0 },
+    free: nodes,
+    edges: [{ id: "ra", a: "VCC", b: "D", ohms: params.ra }, ...chain],
+  };
+  const discharge: ResistiveNetwork = { ...charge, edges: [...charge.edges, { id: "dis", a: "D", b: "GND", ohms: NE555_DIS_OHMS }] };
+  const c = theveninAt(charge, "X");
+  const d = theveninAt(discharge, "X");
+  return { mode: "astable", vGnd: 0, vS: params.vs, capacitanceF: params.c, charge: { vInf: c.vth, rOhms: c.rth }, discharge: { vInf: d.vth, rOhms: d.rth } };
+}
+
+function durations(model: Ne555TimingModel, horizonS = 0.5): number[] {
+  return ne555Phases(model, horizonS).map((p) => p.t1 - p.t0);
+}
+
+describe("W1e sidecar: the shunt-inclusive Thevenin and the NE555 phases (NE555 point 13.3)", () => {
+  it("F-A, the SAP-1 clock astable (RA 1k, RB 1k + RPOT 1 mOhm, C 1 uF): first HIGH, t_high, t_low and T from periods2.py", () => {
+    const [first, low, high] = durations(astableModel({ ra: 1000, rb: 1000, rpot: 0.001, c: 1e-6, vs: 5 }));
+    expect(first).toBeCloseTo(2.19722569e-3, 10);
+    expect(high).toBeCloseTo(1.38629506e-3, 10);
+    expect(low).toBeCloseTo(0.71535129e-3, 10);
+    expect(high + low).toBeCloseTo(2.10164636e-3, 10);
+  });
+
+  it("F-B, the SAP-1 display astable (RA 1k, RB 15k, C 100 nF)", () => {
+    const [first, low, high] = durations(astableModel({ ra: 1000, rb: 15000, c: 1e-7, vs: 5 }));
+    expect(first).toBeCloseTo(1.75777969e-3, 11);
+    expect(high).toBeCloseTo(1.10903551e-3, 11);
+    expect(low).toBeCloseTo(1.06320733e-3, 11);
+    expect(high + low).toBeCloseTo(2.17224284e-3, 11);
+  });
+
+  it("F-C, brownout fixture 03's astable (RA 10k, RB 100k, C 1 uF)", () => {
+    const [first, low, high] = durations(astableModel({ ra: 10000, rb: 100000, c: 1e-6, vs: 5 }));
+    expect(first).toBeCloseTo(120.847365e-3, 9);
+    expect(high).toBeCloseTo(76.2462012e-3, 9);
+    expect(low).toBeCloseTo(69.4718384e-3, 9);
+    expect(high + low).toBeCloseTo(145.71804e-3, 9);
+  });
+
+  it("F-D, the headless-step-ceiling astable (RA 4.7k, RB 10k, C 10 uF): T = 171.596843 ms", () => {
+    const [, low, high] = durations(astableModel({ ra: 4700, rb: 10000, c: 1e-5, vs: 5 }));
+    expect(high + low).toBeCloseTo(171.596843e-3, 8);
+  });
+
+  it("F-E, the SAP-1 manual monostable (R 1 MOhm, C 1 uF): the pulse is 1.09861319 s, and the shunt term is what moves it off ln(3) R C by 8.2e-7 relative", () => {
+    const net: ResistiveNetwork = { fixed: { VCC: 5, GND: 0 }, free: ["X"], edges: [{ id: "r", a: "VCC", b: "X", ohms: 1e6 }] };
+    const dis: ResistiveNetwork = { ...net, edges: [...net.edges, { id: "dis", a: "X", b: "GND", ohms: NE555_DIS_OHMS }] };
+    const c = theveninAt(net, "X");
+    const d = theveninAt(dis, "X");
+    const pulse = ne555Phases({ mode: "monostable", vGnd: 0, vS: 5, capacitanceF: 1e-6, charge: { vInf: c.vth, rOhms: c.rth }, discharge: { vInf: d.vth, rOhms: d.rth } }, 5)[0]!;
+    const measured = pulse.t1 - pulse.t0;
+    expect(measured).toBeCloseTo(1.09861319, 8);
+    const withoutShunts = ne555MonostablePulseWidth({ rOhms: 1e6, capacitanceF: 1e-6, supplyVoltsAtGnd: 5 });
+    expect(withoutShunts).toBeCloseTo(1.09861229, 8);
+    expect(Math.abs(measured - withoutShunts) / measured).toBeGreaterThan(5e-7);
+  });
+
+  it("F-F, R 100 kOhm C 1 uF re-triggered at 0.5 s: 0.109861238 s from power-on, 0.109851238 s from v0 = V_inf,d = 4.9995e-4 V", () => {
+    const net: ResistiveNetwork = { fixed: { VCC: 5, GND: 0 }, free: ["X"], edges: [{ id: "r", a: "VCC", b: "X", ohms: 1e5 }] };
+    const dis: ResistiveNetwork = { ...net, edges: [...net.edges, { id: "dis", a: "X", b: "GND", ohms: NE555_DIS_OHMS }] };
+    const c = theveninAt(net, "X");
+    const d = theveninAt(dis, "X");
+    expect(d.vth).toBeCloseTo(4.9995e-4, 8);
+    const phases = ne555Phases(
+      { mode: "monostable", vGnd: 0, vS: 5, capacitanceF: 1e-6, charge: { vInf: c.vth, rOhms: c.rth }, discharge: { vInf: d.vth, rOhms: d.rth } },
+      2,
+      [{ t: 0.5, low: true }, { t: 0.501, low: false }],
+    );
+    const highs = phases.filter((p) => p.high).map((p) => p.t1 - p.t0);
+    expect(highs).toHaveLength(2);
+    expect(highs[0]).toBeCloseTo(0.109861238, 9);
+    expect(highs[1]).toBeCloseTo(0.109851238, 9);
+    expect(phases.find((p) => p.high && p.t0 > 0)!.t0).toBe(0.5);
+  });
+
+  it("a TRIG held low past the threshold crossing holds OUT HIGH until it is released (SET beats RESET), then resets at once", () => {
+    const net: ResistiveNetwork = { fixed: { VCC: 5, GND: 0 }, free: ["X"], edges: [{ id: "r", a: "VCC", b: "X", ohms: 1e5 }] };
+    const dis: ResistiveNetwork = { ...net, edges: [...net.edges, { id: "dis", a: "X", b: "GND", ohms: NE555_DIS_OHMS }] };
+    const c = theveninAt(net, "X");
+    const d = theveninAt(dis, "X");
+    const model: Ne555TimingModel = { mode: "monostable", vGnd: 0, vS: 5, capacitanceF: 1e-6, charge: { vInf: c.vth, rOhms: c.rth }, discharge: { vInf: d.vth, rOhms: d.rth } };
+    const phases = ne555Phases(model, 2, [{ t: 0.05, low: true }, { t: 0.3, low: false }]);
+    const first = phases[0]!;
+    // TRIG went low at 0.05 s, during the power-on pulse, and stays low past its natural end (0.1099 s).
+    expect(first.high).toBe(true);
+    expect(first.t1).toBe(0.3);
+    expect(phases[1]!.high).toBe(false);
+  });
+
+  it("F-G, RST on 100 kOhm / 1 uF: OUT is LOW until RC ln(vS/(vS-0.5)) = 10.5360516 ms, and the first HIGH then starts from the capacitor's voltage at release", () => {
+    const circuit = loadFixtureCircuit("33-ne555-rst-delay-74hc74");
+    const sidecar = extractNe555Sidecar(circuit, { component: "u1", mode: "astable", capacitor: "ct", rstCapacitor: "cr" }, 0.03);
+    const [hold, firstHigh] = sidecar.phases;
+    expect(hold!.high).toBe(false);
+    expect(hold!.t1).toBeCloseTo(10.5360516e-3, 10);
+    // Independent recomputation of the first HIGH: v0 = V_inf,d (1 - exp(-t_rel / (Rd C))) then the charge side to 2/3 vS.
+    const model = astableModel({ ra: 1000, rb: 1000, rpot: 0.001, c: 1e-6, vs: 5 });
+    const v0 = model.discharge.vInf * (1 - Math.exp(-hold!.t1 / (model.discharge.rOhms * 1e-6)));
+    expect(firstHigh!.v0).toBeCloseTo(v0, 9);
+    expect(firstHigh!.t1 - firstHigh!.t0).toBeCloseTo(rcCrossingTime(v0, 10 / 3, model.charge.vInf, model.charge.rOhms * 1e-6), 9);
+  });
+
+  it("refuses a release that leaves the capacitor above vL (the latch would hold, which the model does not cover)", () => {
+    const m = astableModel({ ra: 1000, rb: 1000, c: 1e-6, vs: 5 });
+    expect(() => ne555Phases({ ...m, startVolts: 2, releaseS: 1e-9 }, 1)).toThrow(/would hold/);
+  });
+
+  it("extractNe555Sidecar reads fixture 31 (the SAP-1 clock with an LED on OUT) and reproduces F-A", () => {
+    const sidecar = extractNe555Sidecar(loadFixtureCircuit("31-ne555-astable-led"), { component: "u1", mode: "astable", capacitor: "ct" }, 0.02);
+    expect(sidecar.phases[0]!.t1).toBeCloseTo(2.19722569e-3, 10);
+    const at = sidecar.at(3.6057245e-3);
+    // Mid-HIGH of the second cycle: exactly 2.6430 V at the capacitor and 3.8215 V at the DIS node.
+    expect(Object.values(at.netV).sort((a, b) => a - b)[1]).toBeCloseTo(2.642978, 5);
+    expect(Object.values(at.netV).sort((a, b) => a - b)[2]).toBeCloseTo(3.821489, 5);
+    // The capacitor's and the resistors' currents, the same 1.1785 mA at mid-HIGH.
+    expect(at.elementI.ra).toBeCloseTo(1.178511e-3, 8);
+    expect(at.elementI.ct).toBeCloseTo(1.178511e-3, 8);
+  });
+
+  it("the detector: dropping RA from the discharge network gives the SAP-1 clock 2.086374 ms, off the true 2.101646 ms by 0.7%", () => {
+    const circuit = loadFixtureCircuit("31-ne555-astable-led");
+    const spec = { component: "u1", mode: "astable", capacitor: "ct" } as const;
+    const wrong = extractNe555Sidecar(circuit, spec, 0.02, { dischargeDropsResistor: "ra" });
+    const right = extractNe555Sidecar(circuit, spec, 0.02);
+    const period = (phases: readonly { t1: number; t0: number }[]) => phases[1]!.t1 - phases[1]!.t0 + (phases[2]!.t1 - phases[2]!.t0);
+    expect(period(wrong.phases)).toBeCloseTo(2.086374e-3, 9);
+    expect(Math.abs(period(wrong.phases) - period(right.phases)) / period(right.phases)).toBeGreaterThan(5e-3);
+  });
+
+  it("detectNe555Specs finds an astable, a monostable and an RST RC in the W1e fixtures, and nothing in a bistable", () => {
+    expect(detectNe555Specs(loadFixtureCircuit("31-ne555-astable-led"))).toEqual([{ component: "u1", mode: "astable", capacitor: "ct" }]);
+    expect(detectNe555Specs(loadFixtureCircuit("32-ne555-monostable"))).toEqual([{ component: "u1", mode: "monostable", capacitor: "ct" }]);
+    expect(detectNe555Specs(loadFixtureCircuit("33-ne555-rst-delay-74hc74"))).toEqual([{ component: "u1", mode: "astable", capacitor: "ct", rstCapacitor: "cr" }]);
+    const bistable = loadFixtureCircuit("32-ne555-monostable");
+    // THR (pin 6) on the datum, DIS open: neither TRIG = THR nor THR = DIS.
+    const rewired: SimCircuit = { ...bistable, wires: bistable.wires.filter((w) => !(w.from_component === "u1" && w.from_pin === "7" && w.to_pin === "6")).filter((w) => !(w.from_pin === "6" && w.to_component === "ct")).concat([{ from_component: "u1", from_pin: "6", to_component: "vcc", to_pin: "neg" }]) };
+    expect(detectNe555Specs(rewired)).toEqual([]);
+  });
+
+  it("extractNe555Sidecar refuses what the model does not cover: a foreign element on the timing node, an RST that is neither on the supply nor an RC", () => {
+    const base = loadFixtureCircuit("31-ne555-astable-led");
+    const spec = { component: "u1", mode: "astable", capacitor: "ct" } as const;
+    const withLed: SimCircuit = {
+      components: [...base.components, { id: "rx", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1e6 } }, { id: "dx", kind: "led", pins: [{ id: "a" }, { id: "k" }], params: {} }],
+      wires: [...base.wires, { from_component: "ct", from_pin: "a", to_component: "rx", to_pin: "a" }, { from_component: "rx", from_pin: "b", to_component: "dx", to_pin: "a" }, { from_component: "dx", from_pin: "k", to_component: "u1", to_pin: "1" }],
+    };
+    expect(() => extractNe555Sidecar(withLed, spec, 0.01)).toThrow(/does not cover/);
+    const rstOpen: SimCircuit = { ...base, wires: base.wires.filter((w) => !(w.from_pin === "4" || w.to_pin === "4")) };
+    expect(() => extractNe555Sidecar(rstOpen, spec, 0.01)).toThrow(/RST/);
+  });
+});
+
+// ─── W1e: the LED junction sidecars (LEDs point 2, 8 and 13) ──────────────────
+//
+// The numbers are from `drled-sidecars.mjs` (bisection on the node's KCL with
+// GMIN_D and the shunt), 25 C unless stated.
+
+describe("W1e sidecar: the LED junction law and its one-node solves", () => {
+  const law = (vf25: number, tempC = 25, iRated = 0.02, n = 2) => ledLaw({ vf25, iRated, n, tempC });
+
+  it("F1: a red LED (vf 1.8) through 220 ohm from 5 V sits at 1.783894181 V with 14.61866281 mA", () => {
+    const r = ledSeriesNode(law(1.8), 5, 220, "anode-node");
+    expect(r.nodeV).toBeCloseTo(1.783894181, 9);
+    expect(r.ledAmps).toBeCloseTo(14.61866281e-3, 11);
+    expect(r.resistorAmps).toBeCloseTo((5 - r.nodeV) / 220, 15);
+  });
+
+  it("F2: red, green, blue and white through 150 ohm (green sits at exactly Vf, where I = iRated - Is)", () => {
+    const want: Array<[number, number, number]> = [[1.8, 1.803263884, 21.3115741e-3], [2.0, 2.0, 20.0e-3], [3.0, 2.979684437, 13.4687704e-3], [3.2, 3.174474705, 12.1701686e-3]];
+    for (const [vf, v, i] of want) {
+      const r = ledSeriesNode(law(vf), 5, 150, "anode-node");
+      expect(r.nodeV).toBeCloseTo(v, 8);
+      expect(r.ledAmps).toBeCloseTo(i, 9);
+    }
+  });
+
+  it("F3: the junction voltage falls with ambient temperature (the fixed -2 mV/C tempco): 1.8556, 1.7073, 1.5711, 1.4808 V at -40, 25, 85, 125 C through 1 kohm", () => {
+    const want: Array<[number, number]> = [[-40, 1.855657028], [25, 1.707299923], [85, 1.571145893], [125, 1.480773665]];
+    for (const [t, v] of want) expect(ledSeriesNode(law(1.8, t), 5, 1000, "anode-node").nodeV).toBeCloseTo(v, 8);
+  });
+
+  it("F4: across 5 V through 0.1 ohm the load line meets the tangent past vSat = 2.056925791 V, at 2.447429482 V and 25.5257052 A", () => {
+    const l = law(1.8);
+    expect(l.vSat).toBeCloseTo(2.056925791, 8);
+    const r = ledSeriesNode(l, 5, 0.1, "anode-node");
+    expect(r.nodeV).toBeCloseTo(2.447429482, 8);
+    expect(r.ledAmps).toBeCloseTo(25.5257052, 5);
+    // The tangent line itself: I(v) is linear above vSat with the slope of the exponential at vSat.
+    const slope = (l.is * Math.exp(l.vSat / l.vtn)) / l.vtn;
+    expect(ledCurrent(l, l.vSat + 1) - ledCurrent(l, l.vSat)).toBeCloseTo(slope, 6);
+  });
+
+  it("F7: a seg7_cc showing 7 (a b c through 330 ohm, common to the datum through a shared 10 ohm): common 0.2536861645 V, anode 2.20945219 V, 8.456205481 mA per segment", () => {
+    const l = law(2.0);
+    const r = ledSharedCommon([l, l, l], 5, [330, 330, 330], 10);
+    expect(r.commonV).toBeCloseTo(0.2536861645, 9);
+    expect(r.nodeV[0]).toBeCloseTo(2.20945219, 8);
+    expect(r.ledAmps[0]).toBeCloseTo(8.456205481e-3, 11);
+    expect(r.commonAmps).toBeCloseTo(0.02536861645, 10);
+  });
+
+  it("a cathode-node cell (a seg7_ca segment: anode fixed at 5 V, resistor to the datum) is the mirror of the anode-node one", () => {
+    const l = law(2.0);
+    const a = ledSeriesNode(l, 5, 330, "anode-node");
+    const c = ledSeriesNode(l, 5, 330, "cathode-node");
+    expect(c.ledAmps).toBeCloseTo(a.ledAmps, 9);
+    expect(c.nodeV).toBeCloseTo(5 - a.nodeV, 9);
+  });
+
+  it("the RC-fed LED's ODE settles on the one-node answer (5 V, 1 kohm, 85 C), and starts at 0 V", () => {
+    const circuit = loadFixtureCircuit("35-led-rc-stepped");
+    const [early, late] = ledRcVoltages(circuit, { kind: "led-rc", source: "vcc", resistor: "r1", capacitor: "c1", device: "d1", instantsS: [] }, [1e-3, 0.2]);
+    expect(early!).toBeCloseTo(5 * (1 - Math.exp(-1e-3 / (1000 * 1e-5))) , 2);
+    expect(late!).toBeCloseTo(ledSeriesNode(law(1.8, 85), 5, 1000, "anode-node").nodeV, 6);
+  });
+});
+
+describe("W1e sidecar: evaluateLedStatic against the core", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  it("F4 through the core (no classic: classic latches this LED as failed within nanoseconds at 25 A): the tangent region answers exactly", () => {
+    const circuit: SimCircuit = {
+      components: [
+        { id: "vcc", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
+        { id: "gnd", kind: "ground", pins: [{ id: "gnd" }], params: {} },
+        { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 0.1 } },
+        { id: "d1", kind: "led", pins: [{ id: "a" }, { id: "k" }], params: { vf: 1.8, iRated: 0.02 } },
+      ],
+      wires: [
+        { from_component: "vcc", from_pin: "neg", to_component: "gnd", to_pin: "gnd" },
+        { from_component: "vcc", from_pin: "pos", to_component: "r1", to_pin: "a" },
+        { from_component: "r1", from_pin: "b", to_component: "d1", to_pin: "a" },
+        { from_component: "d1", from_pin: "k", to_component: "gnd", to_pin: "gnd" },
+      ],
+    };
+    const want = evaluateLedStatic(circuit, {
+      kind: "led-static",
+      cells: [{ device: "d1", pin: "a", resistor: "r1", source: "vcc", orientation: "anode-node", vfParam: "vf", vfDefault: 1.8 }],
+      devices: [{ device: "d1" }],
+    });
+    const engine = new CoreEngine();
+    engine.load(circuit);
+    const netId = engine.getNetIdForPin("d1", "a")!;
+    expect(engine.getNetV()[netId]).toBeCloseTo(want.netV[netId]!, 6);
+    expect(engine.getNetV()[netId]).toBeCloseTo(2.447429482, 6);
+    expect(engine.getElementI().d1).toBeCloseTo(25.5257052, 4);
+    expect(engine.getElementI().d1).toBeCloseTo(want.elementI.d1!, 4);
   });
 });

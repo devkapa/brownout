@@ -17,18 +17,34 @@ import { initCore } from "../../../src/core/wasm.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { alignCycles, compareAlignedCycles, sampleCycles, type AlignmentSuccess } from "./align.js";
 import { compareStimuliSamples } from "./compare.js";
+import { extractNe555Sidecar } from "./analytic.js";
 import {
+  CACHE_AGREEMENT_VOLTS,
+  checkNe555Periods,
+  closedSegments,
   collectClassicSamplesCached,
+  collectCoreDigitalTraceWithPhases,
+  compareCacheOnOff,
+  compareNe555Sidecar,
   EXTERNAL_CLASSIC_REFERENCE_CACHE_DIR,
   explainRichardsonMismatches,
   isLocalCorpusOrigin,
+  levelChanges,
+  ne555LagSurface,
+  ne555LagTimes,
+  ne555Midpoints,
+  ne555SupplyResidual,
   QuietInstantEvidenceError,
   resolveSampleTimes,
   RICHARDSON_DIVERGENCE_ID,
   runCorpusEntry,
+  runSidecarChecks,
 } from "./run-entry.js";
+import { collectClassicSamples, collectCoreSamples } from "./sample.js";
 import { replayStimuliOnClassic, replayStimuliOnCore, STIMULUS_FIXED_STEP_S, type StimulusPhase } from "./stimuli.js";
 import { loadSyntheticCorpus } from "./synthetic-fixtures.js";
+import { CoreEngine } from "../../../src/core/engine.js";
+import { ledRcVoltages } from "./analytic.js";
 import { collectClassicDigitalTrace, collectCoreDigitalTrace } from "./trace.js";
 import type { CorpusEntry } from "./types.js";
 
@@ -46,7 +62,7 @@ function wire(a: string, ap: string, b: string, bp: string): SimCircuit["wires"]
  * vsrc -> d1 -> r1 -> gnd. `diode` is NOT in CORE_IMPLEMENTED_KINDS
  * (kinds.ts) — this circuit is "not-ported" under the plain flow, and
  * "core-stimuli-pending" under the gate 2d stimuli path. (This "an unported
- * kind" role has moved twice now: `switch` played it until W1b put the
+ * kind" role has moved three times now: `switch` played it until W1b put the
  * switch family into CORE_IMPLEMENTED_KINDS, then `capacitor` played it
  * until this same wave's later step landed the capacitor device/solver and
  * the orchestrator added it too; then `led` played it until W1e ported it,
@@ -502,5 +518,253 @@ describe("gate 2a real fixture — 19-74hc14-relaxation-oscillator (fix 7)", () 
 
     const comparison = compareAlignedCycles(classicCycles, seededCoreCycles, alignment as AlignmentSuccess);
     expect(comparison.mismatches.length, "a flipped cycle must surface as a real per-cycle mismatch, never be silently absorbed").toBeGreaterThan(0);
+  });
+});
+
+
+// ─── W1e: NE555 entries (core/README.md NE555 point 13) and LED sidecars ──────
+//
+// Fixtures 31-36 (test/fixtures/core) run through the real harness in
+// equivalence.test.ts; what is proven here is that each detector can FAIL: a
+// clean sweep proves nothing unless a seeded fault turns it red.
+
+function syntheticEntry(name: string) {
+  const found = loadSyntheticCorpus().find((e) => e.entry.name === name);
+  if (!found) throw new Error(`no synthetic fixture named ${name}`);
+  return found;
+}
+
+describe("NE555 point 13.2 — the period gate, and the detector that must be able to fail", () => {
+  const { entry, circuit } = syntheticEntry("31-ne555-astable-led");
+  const spec = { component: "u1", mode: "astable", capacitor: "ct" } as const;
+  const durationS = entry.durationS!;
+
+  it("levelChanges drops repeats and absent (NaN) events; closedSegments leaves the open last level out; ne555Midpoints skips a runt and closes a monostable's tail", () => {
+    const trace = [
+      { t: 0, key: "u1", value: 1 },
+      { t: 0, key: "other", value: 1 },
+      { t: 1e-3, key: "u1", value: 1 },
+      { t: 2e-3, key: "u1", value: 0 },
+      { t: 3e-3, key: "u1", value: Number.NaN },
+      { t: 3.000001e-3, key: "u1", value: 1 },
+      { t: 3.000002e-3, key: "u1", value: 0 },
+      { t: 5e-3, key: "u1", value: 1 },
+    ];
+    const changes = levelChanges(trace, "u1");
+    expect(changes.map((c) => [c.t, c.high])).toEqual([[0, true], [2e-3, false], [3.000001e-3, true], [3.000002e-3, false], [5e-3, true]]);
+    const segments = closedSegments(changes);
+    expect(segments).toHaveLength(4);
+    // the 1 us pulse between 3.000001 and 3.000002 ms is not a phase; the trailing open HIGH is not complete
+    const mids = ne555Midpoints(changes, 6e-3, 1e-5, false);
+    expect(mids).toHaveLength(3);
+    [1e-3, 2.5000005e-3, 4.000001e-3].forEach((want, i) => expect(mids[i]).toBeCloseTo(want, 12));
+    // a monostable's last LOW is open at the end of the run: its midpoint to the horizon is an instant too
+    const mono = levelChanges([{ t: 0, key: "u1", value: 1 }, { t: 0.1, key: "u1", value: 0 }], "u1");
+    expect(ne555Midpoints(mono, 0.3, 1e-5, true)).toEqual([0.05, 0.2]);
+    expect(ne555Midpoints(mono, 0.3, 1e-5, false)).toEqual([0.05]);
+  });
+
+  it("the core's real trace of the SAP-1 clock passes against the model-exact sidecar, every phase and period to 1e-6", () => {
+    const sidecar = extractNe555Sidecar(circuit, spec, durationS);
+    const changes = levelChanges(collectCoreDigitalTrace(circuit, durationS), "u1");
+    expect(checkNe555Periods({ key: "u1", changes, phases: sidecar.phases, minPhases: 16 })).toEqual([]);
+  });
+
+  it("the detector: a sidecar that drops RA from the discharge Thevenin (2.086374 ms, off by 0.7%) fails against the very same core trace", () => {
+    const wrong = extractNe555Sidecar(circuit, spec, durationS, { dischargeDropsResistor: "ra" });
+    const changes = levelChanges(collectCoreDigitalTrace(circuit, durationS), "u1");
+    const mismatches = checkNe555Periods({ key: "u1", changes, phases: wrong.phases, minPhases: 16 });
+    expect(mismatches.length).toBeGreaterThan(0);
+    expect(mismatches.every((m) => m.category === "period")).toBe(true);
+    expect(mismatches.some((m) => /LOW #1/.test(m.id))).toBe(true);
+    expect(mismatches.some((m) => /period/.test(m.id))).toBe(true);
+  });
+
+  it("the detector: classic's own trace (its period is 2.1349 ms, +1.6%) fails the same gate, which is why classic's are recorded and not gated", () => {
+    const sidecar = extractNe555Sidecar(circuit, spec, durationS);
+    const changes = levelChanges(collectClassicDigitalTrace(circuit, durationS), "u1");
+    const mismatches = checkNe555Periods({ key: "u1", changes, phases: sidecar.phases, minPhases: 16 });
+    expect(mismatches.length).toBeGreaterThan(0);
+    expect(mismatches.map((m) => m.id).join(" ")).toMatch(/first HIGH/);
+  });
+
+  it("too few completed phases, and a starting level that disagrees with the sidecar, are mismatches of their own", () => {
+    const sidecar = extractNe555Sidecar(circuit, spec, durationS);
+    const short = checkNe555Periods({ key: "u1", changes: [{ t: 0, high: true }, { t: 2.19722569e-3, high: false }], phases: sidecar.phases, minPhases: 5 });
+    expect(short.map((m) => m.id)).toEqual(["u1: phases"]);
+    const flipped = checkNe555Periods({ key: "u1", changes: [{ t: 0, high: false }, { t: 1e-3, high: true }], phases: sidecar.phases, minPhases: 0 });
+    expect(flipped.map((m) => m.id)).toEqual(["u1: initial level"]);
+  });
+});
+
+describe("NE555 point 13.4 — the timing network against the sidecar, and the supply residual", () => {
+  const { circuit } = syntheticEntry("31-ne555-astable-led");
+  const sidecar = extractNe555Sidecar(circuit, { component: "u1", mode: "astable", capacitor: "ct" }, 0.02);
+  const t = 3.6057245e-3; // mid-HIGH of the second cycle, on the core's own clock
+
+  it("the core's own readout at that instant agrees with the sidecar's exponentials (no mismatch)", () => {
+    expect(compareNe555Sidecar(sidecar, collectCoreSamples(circuit, [t]))).toEqual([]);
+  });
+
+  it("the detector: a capacitor node 0.5 V off, or a timing resistor current 10% off, is a sidecar mismatch naming it", () => {
+    const [sample] = collectCoreSamples(circuit, [t]);
+    const capNet = [...sidecar.netIds].sort()[0]!;
+    const netTampered = { ...sample!, netV: { ...sample!.netV, [capNet]: sample!.netV[capNet]! + 0.5 } };
+    expect(compareNe555Sidecar(sidecar, [netTampered]).map((m) => m.id)).toEqual([`netV.${capNet}`]);
+    const currentTampered = { ...sample!, elementI: { ...sample!.elementI, ra: sample!.elementI.ra! * 1.1 } };
+    expect(compareNe555Sidecar(sidecar, [currentTampered]).map((m) => m.id)).toEqual(["elementI.ra"]);
+  });
+
+  it("ne555SupplyResidual adds the timing resistors' current leaving the source's + net back: the supply current with the charging branch removed", () => {
+    const adjust = ne555SupplyResidual(circuit, sidecar.resistors);
+    // vcc delivers 14.87 mA of which 1.1785 mA is RA's: the raw -0.0148738 A becomes -0.0136953 A.
+    const out = adjust({ vcc: -0.0148738, ra: 0.0011785, rb: 0.0011785 });
+    expect(out.vcc).toBeCloseTo(-0.0136953, 7);
+    expect(out.ra).toBe(0.0011785); // the resistor's own current is left for the sidecar
+    expect(adjust({ ra: 1 }).vcc).toBeUndefined();
+  });
+});
+
+describe("NE555 entries in runCorpusEntry", () => {
+  it("an entry with a 555 and no declared spec gets one from its wiring: fixture 31 without its `ne555` field still passes, on the derived sidecar", () => {
+    const { entry, circuit } = syntheticEntry("31-ne555-astable-led");
+    const auto: CorpusEntry = { ...entry, ne555: undefined };
+    const result = runCorpusEntry(auto, circuit);
+    expect(result.status).toBe("pass");
+  });
+
+  it("a declared fixture must name the 555 in its digital projection (point 13.1): one with no `digital` spec fails, naming that", () => {
+    const { entry, circuit } = syntheticEntry("31-ne555-astable-led");
+    const result = runCorpusEntry({ ...entry, digital: undefined }, circuit);
+    expect(result.status).toBe("fail");
+    if (result.status === "fail") expect(result.mismatches.some((m) => /NE555 point 13\.1/.test(m.detail))).toBe(true);
+  });
+
+  it("records classic's period drift against the sidecar as known divergences, never as failures", () => {
+    const { entry, circuit } = syntheticEntry("31-ne555-astable-led");
+    const result = runCorpusEntry(entry, circuit);
+    expect(result.status).toBe("pass");
+    if (result.status === "pass") {
+      const drift = result.knownDivergences.filter((h) => h.divergenceId === "classic-555-period-drift");
+      expect(drift.length).toBeGreaterThan(0);
+      expect(drift[0]!.mismatch.detail).toMatch(/against the sidecar/);
+    }
+  });
+
+  it("collectCoreDigitalTraceWithPhases follows a scripted trigger: fixture 36's second pulse starts at the button press, 0.5 s", () => {
+    const { entry, circuit } = syntheticEntry("36-ne555-monostable-retrigger");
+    const changes = levelChanges(collectCoreDigitalTraceWithPhases(circuit, entry.phases!), "u1");
+    expect(changes.map((c) => c.high)).toEqual([true, false, true, false]);
+    expect(changes[2]!.t).toBeCloseTo(0.5, 9);
+    // the retriggered pulse runs from v0 = V_inf,d: 0.109851238 s
+    expect(changes[3]!.t - changes[2]!.t).toBeCloseTo(0.109851238, 8);
+  });
+
+  it("ne555LagSurface reaches OUT and DIS through passives and stops at fixed nodes: fixture 32's timing parts are in, the supply is added, nothing past an IC is", () => {
+    const { circuit } = syntheticEntry("32-ne555-monostable");
+    const surface = ne555LagSurface(circuit, ["u1"]);
+    expect([...surface.components].sort()).toEqual(["ct", "rl", "rt", "u1", "vcc"]);
+    expect(surface.nets.size).toBe(2); // OUT, and DIS = THR
+  });
+});
+
+describe("LEDs point 7 and 13 — the sidecar and the cache detectors", () => {
+  const { entry, circuit } = syntheticEntry("34-led-family-static");
+
+  it("the sidecar check of the static LED fixture passes against the core and classic's channel currents", () => {
+    expect(runSidecarChecks(entry, circuit).mismatches).toEqual([]);
+  });
+
+  it("the detector: a sidecar with one cell's orientation flipped, or a burnt part that is not, is a mismatch", () => {
+    const model = entry.sidecar!;
+    if (model.kind !== "led-static") throw new Error("fixture 34 declares a led-static sidecar");
+    const flipped = { ...entry, sidecar: { ...model, cells: model.cells.map((c, i) => (i === 0 ? { ...c, orientation: "cathode-node" as const } : c)) } };
+    expect(runSidecarChecks(flipped, circuit).mismatches.length).toBeGreaterThan(0);
+    // the same circuit with the burnt rgb_led un-burnt: the core now publishes channels the sidecar says are absent
+    const unburnt: SimCircuit = { ...circuit, components: circuit.components.map((c) => (c.id === "bu_rgb" ? { ...c, params: { burnt: 0 } } : c)) };
+    expect(runSidecarChecks(entry, unburnt).mismatches.some((m) => /channels\.bu_rgb/.test(m.id))).toBe(true);
+  });
+
+  it("the RC-fed LED is checked under trapezoidal integration against the ODE at mid-transient instants: passes, and the ODE tells a 2 kohm core from a 1 kohm one", () => {
+    const rc = syntheticEntry("35-led-rc-stepped");
+    expect(runSidecarChecks(rc.entry, rc.circuit).mismatches).toEqual([]);
+    const model = rc.entry.sidecar!;
+    if (model.kind !== "led-rc") throw new Error("fixture 35 declares a led-rc sidecar");
+    // The core run on a circuit whose R is doubled, against the ODE of the original: mid-transient the two differ by far more than W0's tolerance.
+    const doubled: SimCircuit = { ...rc.circuit, components: rc.circuit.components.map((c) => (c.id === "r1" ? { ...c, params: { resistance: 2000 } } : c)) };
+    const engine = new CoreEngine();
+    engine.load(doubled, undefined, { integrationMethod: "trap" });
+    engine.advance(model.instantsS[3]!);
+    const core = engine.getNetV()[engine.getNetIdForPin("d1", "a")!]!;
+    engine.dispose();
+    const ode = ledRcVoltages(rc.circuit, model, [model.instantsS[3]!])[0]!;
+    expect(Math.abs(core - ode)).toBeGreaterThan(1e-2);
+  });
+
+  it("compareCacheOnOff agrees for a real LED circuit driven by a 555 (fixture 31: modes repeat, the cache hits), and the detector flags a cached sample 2 uV away", () => {
+    const f31 = syntheticEntry("31-ne555-astable-led");
+    const times = [3.6057245e-3, 4.6565e-3, 5.7074e-3];
+    const cached = collectCoreSamples(f31.circuit, times);
+    expect(compareCacheOnOff(f31.circuit, times, cached)).toEqual([]);
+    const netId = Object.keys(cached[1]!.netV).find((k) => k !== "gnd")!;
+    const tampered = cached.map((s, i) => (i === 1 ? { ...s, netV: { ...s.netV, [netId]: s.netV[netId]! + 2 * CACHE_AGREEMENT_VOLTS } } : s));
+    const flagged = compareCacheOnOff(f31.circuit, times, tampered);
+    expect(flagged.map((m) => m.id)).toEqual([`cache.netV.${netId}`]);
+  });
+});
+
+describe("NE555 point 3 and 12 — an unwired RST (Q-O16), fixture 37", () => {
+  const { circuit } = syntheticEntry("37-ne555-open-rst");
+
+  it("RST reads 0 V, so OUT is LOW from load on: 0.0980392157 V across 1 kohm, 9.80392157e-5 A out of pin 3, the slot 0 and no edge in 20 ms", () => {
+    const engine = new CoreEngine();
+    try {
+      engine.load(circuit);
+      engine.advance(5e-3);
+      expect(engine.getNetV()[engine.getNetIdForPin("u1", "3")!]).toBeCloseTo(0.0980392157, 9);
+      expect(engine.getElementI().u1).toBeCloseTo(9.80392157e-5, 12);
+      expect(engine.digitalState.u1).toBe(0);
+    } finally {
+      engine.dispose();
+    }
+    expect(levelChanges(collectCoreDigitalTrace(circuit, 0.02), "u1")).toEqual([{ t: 0, high: false }]);
+  });
+
+  it("classic publishes 4.803922 V on OUT at the load frame (its stamp lags the latch by one solve): the difference NE555 point 12 declares, which is why this fixture is sampled at quiet instants only", () => {
+    const [frame] = collectClassicSamples(circuit, [0]);
+    expect(frame!.netV[Object.keys(frame!.netV).find((k) => Math.abs(frame!.netV[k]! - 4.803922) < 1e-5)!]).toBeCloseTo(4.803922, 5);
+  });
+});
+
+describe("classic's one-solve 555 lag (NE555 point 12)", () => {
+  const at = (simTime: number, u1: number | undefined): { simTime: number; digitalState: Record<string, number> } => ({
+    simTime,
+    digitalState: u1 === undefined ? {} : { u1 },
+  });
+
+  it("excuses a disagreement on the 555's level that resolves at the very next sample, and only that", () => {
+    const classic = [at(0, 1), at(1, 1), at(2, 0), at(3, 0)];
+    const core = [at(0, 1), at(1, 0), at(2, 0), at(3, 0)];
+    expect([...ne555LagTimes(["u1"], classic, core)]).toEqual([1]);
+  });
+
+  it("the detector: a standing difference (classic stays HIGH while the core is LOW), or one on the very last sample, is never excused", () => {
+    const standing = ne555LagTimes(["u1"], [at(0, 1), at(1, 1), at(2, 1), at(3, 1)], [at(0, 1), at(1, 0), at(2, 0), at(3, 0)]);
+    expect(standing.has(1)).toBe(false);
+    expect(standing.size).toBe(0);
+    expect(ne555LagTimes(["u1"], [at(0, 1), at(1, 1)], [at(0, 1), at(1, 0)]).size).toBe(0);
+  });
+
+  it("a key absent on one side counts as a disagreement (an unpowered 555 drops its key)", () => {
+    expect([...ne555LagTimes(["u1"], [at(0, 1), at(1, undefined), at(2, 1)], [at(0, 1), at(1, 1), at(2, 1)])]).toEqual([1]);
+  });
+});
+
+describe("NE555, classic side", () => {
+  it("classic's monostable pulse ends later than the core's (fixture 32): the drift the period gate records instead of gating", () => {
+    const { circuit } = syntheticEntry("32-ne555-monostable");
+    const core = levelChanges(collectCoreDigitalTrace(circuit, 0.3), "u1");
+    const classic = levelChanges(collectClassicDigitalTrace(circuit, 0.3), "u1");
+    expect(classic[1]!.t).toBeGreaterThan(core[1]!.t);
   });
 });

@@ -1,0 +1,271 @@
+{
+  "id": "core-w1e-31-ne555-astable-led",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "u1",
+      "kind": "ne555",
+      "pins": [
+        {
+          "id": "1"
+        },
+        {
+          "id": "2"
+        },
+        {
+          "id": "3"
+        },
+        {
+          "id": "4"
+        },
+        {
+          "id": "5"
+        },
+        {
+          "id": "6"
+        },
+        {
+          "id": "7"
+        },
+        {
+          "id": "8"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "ra",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "rb",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "rpot",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 0.001
+      }
+    },
+    {
+      "id": "ct",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      }
+    },
+    {
+      "id": "cv",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-8
+      }
+    },
+    {
+      "id": "rl",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "d1",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 1.8,
+        "iRated": 0.02
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "u1",
+      "from_pin": "1",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "1",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "8",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "4",
+      "to_component": "u1",
+      "to_pin": "8"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "a",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "7"
+    },
+    {
+      "from_component": "rb",
+      "from_pin": "a",
+      "to_component": "u1",
+      "to_pin": "7"
+    },
+    {
+      "from_component": "rb",
+      "from_pin": "b",
+      "to_component": "rpot",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rpot",
+      "from_pin": "b",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "2",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "6",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "ct",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "1"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "5",
+      "to_component": "cv",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "cv",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "1"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "3",
+      "to_component": "rl",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl",
+      "from_pin": "b",
+      "to_component": "d1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d1",
+      "from_pin": "k",
+      "to_component": "u1",
+      "to_pin": "1"
+    }
+  ]
+}
