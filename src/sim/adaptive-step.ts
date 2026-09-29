@@ -126,6 +126,13 @@ function compareMap(
   return worst;
 }
 
+/**
+ * The passive buzzer's signal envelope. No stamp reads it, and it moves on
+ * every step by an amount that depends on h, so any tolerance here would let
+ * a readout shrink the step. The crossings it produces are still compared.
+ */
+const IC_STATE_READOUT_ONLY = new Set(["envHi", "envLo"]);
+
 function icStateTolerance(key: string): { absTol: number; absoluteOnly?: boolean } | null {
   if (key === "iin" || key === "i1" || key === "i2") return { absTol: ABS_CURRENT };
   if (
@@ -135,7 +142,7 @@ function icStateTolerance(key: string): { absTol: number; absoluteOnly?: boolean
   ) {
     return { absTol: ABS_VOLTAGE };
   }
-  if (key === "lastCrossT" || key === "windowStart" || key.startsWith("due:")) {
+  if (key === "lastCrossT" || key === "prevCrossT" || key === "windowStart" || key.startsWith("due:")) {
     return { absTol: ABS_TIME, absoluteOnly: true };
   }
   if (key === "detectedHz") return { absTol: ABS_FREQUENCY };
@@ -433,6 +440,7 @@ export function estimateStepError(
     }
     const keys = new Set([...Object.keys(a!), ...Object.keys(b!)]);
     for (const key of keys) {
+      if (IC_STATE_READOUT_ONLY.has(key)) continue;
       if (!(key in a!) || !(key in b!)) {
         worst = compareExact(key in a!, key in b!, `ic-state:${id}:${key}:present`, worst);
         continue;

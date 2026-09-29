@@ -301,6 +301,29 @@ function modelStateFor(
         provenance: engineProvenance("engine.getHcsr04State", "state-machine"),
       };
     }
+    case "buzzer": {
+      // `sounding` is written by the post-solve commit (load's seed solve
+      // included); without one the part has no readout, not a silent one.
+      const state = engine.getIcState(component.id);
+      if (!state || !Number.isFinite(state.sounding)) return undefined;
+      const buzzerType = String(component.params.type ?? "active") === "passive" ? "passive" : "active";
+      return {
+        kind: "buzzer",
+        buzzerType,
+        sounding: state.sounding === 1,
+        ...(buzzerType === "passive" && state.detectedHz > 0 ? { toneHz: state.detectedHz } : {}),
+        provenance: engineProvenance("engine.getIcState", "behavioral-estimate"),
+      };
+    }
+    case "speaker": {
+      const state = engine.getIcState(component.id);
+      if (!state || !Number.isFinite(state.sounding)) return undefined;
+      return {
+        kind: "speaker",
+        sounding: state.sounding === 1,
+        provenance: engineProvenance("engine.getIcState", "behavioral-estimate"),
+      };
+    }
     default:
       return undefined;
   }

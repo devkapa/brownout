@@ -28,7 +28,7 @@
  *   R = 32 Ω (default). I = V/R = 5/32 = 0.15625 A.
  *   V_drive = 0.5 V < 1.5 V → sounding = false.
  *
- * BUZZER PASSIVE — zero-crossing frequency detection:
+ * BUZZER PASSIVE — crossing detection around the drive's own midpoint:
  *   A 1 kHz square wave toggles between +2V and −2V.
  *   Half-period = 0.5 ms = 500 µs.  Steps per half-period at dt=50µs: 10.
  *   After 3+ half-periods the ZC detector should report ≥ 500 Hz.
@@ -512,6 +512,93 @@ describe("buzzer — passive type (zero-crossing frequency detection)", () => {
     // We only assert > 0 (not the exact frequency) to avoid coupling to the
     // discretization timing of the crossing moment.
     expect(st?.detectedHz).toBeGreaterThan(0);
+  });
+});
+
+describe("buzzer — passive type, crossings relative to the drive's own midpoint", () => {
+  // Every drive is 440 Hz. A crossing is registered at the end of the fixed
+  // 10 µs step that makes it, so each crossing lags its true instant by less
+  // than one step and a period between two of them is exact to ±10 µs:
+  //   |Δf| / f <= dt / T = 10 µs / 2.2727 ms = 0.44 %  → assert within 1 %.
+  // Duty is irrelevant: the period spans two crossings in the same direction.
+  function drive(params: Record<string, number | string>, kind = "signal_gen"): SimCircuit["components"][number] {
+    return { id: "drv", kind, pins: [{ id: "out" }, { id: "gnd" }], params };
+  }
+  function across(src: SimCircuit["components"][number]): SimCircuit {
+    return makeSimCircuit(
+      [src, buzzer("bz1", "passive")],
+      [wire("drv", "out", "bz1", "p1"), wire("drv", "gnd", "bz1", "p2")],
+    );
+  }
+  const sineBipolar = drive({ waveform: "sine", frequency: 440, amplitude: 2, offset: 0, rSource: 0 });
+
+  it.each([
+    ["a 0-5 V square (clock_gen, the drive the part's help recommends)", drive({ frequency: 440, duty: 0.5 }, "clock_gen")],
+    ["a 0-5 V square at 25% duty (an analogWrite-style PWM pin)", drive({ frequency: 440, duty: 0.25 }, "clock_gen")],
+    ["a 0-5 V sine (signal_gen's default offset)", drive({ waveform: "sine", frequency: 440, amplitude: 2.5, offset: 2.5, rSource: 0 })],
+    ["a ±2 V sine", sineBipolar],
+  ])("detects 440 Hz from %s", (_label, src) => {
+    const engine = runSteps(across(src), 2000, 10e-6); // 20 ms = 8.8 periods
+    const st = engine.getIcState("bz1");
+    expect(st?.detectedHz).toBeGreaterThan(440 * 0.99);
+    expect(st?.detectedHz).toBeLessThan(440 * 1.01);
+    expect(st?.sounding).toBe(1);
+  });
+
+  it("holds 440 Hz when edges are crossed by guard steps and by full steps in turn", () => {
+    // The worker's pattern: steps of at most P/10 land 5 ns before each clock
+    // edge, then either a 10 ns guard step crosses the edge or (when the
+    // source still reads the old level there) the next P/10 step does. Edge k
+    // sits at k × P/2 and the clock starts high, so odd k fall and even k
+    // rise; guarding edges 0-1, 4-5, 8-9, ... alternates the two patterns for
+    // consecutive crossings in the SAME direction. Timed at a step's end,
+    // those periods are off by one P/10 step (±10 %); timed at its start, both
+    // patterns put the crossing within 10 ns of the edge:
+    //   |Δf| / f <= 2 × 10 ns / 2.2727 ms < 0.001 %  → assert within 0.1 %.
+    const P = 1 / 440;
+    const H = P / 10;
+    const engine = new SimEngine();
+    engine.load(across(drive({ frequency: 440, duty: 0.5 }, "clock_gen")));
+    const readings: number[] = [];
+    for (let k = 1; k <= 40; k++) {
+      const landAt = (k * P) / 2 - 5e-9;
+      while (landAt - engine.simTime > 1e-12) {
+        engine.step(Math.min(H, landAt - engine.simTime));
+        readings.push(engine.getIcState("bz1")?.detectedHz ?? 0);
+      }
+      if (Math.floor(k / 2) % 2 === 0) engine.step(10e-9);
+    }
+    // From the fourth period on, every step's reading is a full period.
+    const settled = readings.slice(Math.round((4 * P) / H));
+    expect(settled.length).toBeGreaterThan(100);
+    for (const hz of settled) {
+      expect(hz).toBeGreaterThan(440 * 0.999);
+      expect(hz).toBeLessThan(440 * 1.001);
+    }
+  });
+
+  it("stops sounding within two periods of the drive stopping", () => {
+    // Two periods at 440 Hz = 4.55 ms; 6 ms of 0 V leaves no crossing inside it.
+    const engine = runSteps(across(sineBipolar), 2000, 10e-6);
+    expect(engine.getIcState("bz1")?.sounding).toBe(1);
+    // Same buzzer id, so load() carries its detector state across the swap.
+    engine.load(across(drive({ voltage: 0 }, "voltage_source")));
+    for (let i = 0; i < 600; i++) engine.step(10e-6);
+    expect(engine.getIcState("bz1")?.detectedHz).toBe(0);
+    expect(engine.getIcState("bz1")?.sounding).toBe(0);
+  });
+
+  it("does not report a tone for one press of a button (0 → 5 V → 0)", () => {
+    // Two edges 100 ms apart read as 1 / (2 × 0.1 s) = 5 Hz: below 20 Hz a
+    // piezo clicks per edge instead of sounding a tone.
+    const engine = runSteps(across(drive({ voltage: 0 }, "voltage_source")), 100, 1e-4);
+    for (const v of [5, 0]) {
+      engine.load(across(drive({ voltage: v }, "voltage_source")));
+      for (let i = 0; i < 1000; i++) {
+        engine.step(1e-4);
+        expect(engine.getIcState("bz1")?.sounding).toBe(0);
+      }
+    }
   });
 });
 
