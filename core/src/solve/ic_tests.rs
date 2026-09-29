@@ -108,6 +108,27 @@ fn ls04(ci: usize, vcc: usize, gnd: usize, pins: [usize; 12], open: [bool; 12], 
     Device { kind: kinds::IC_74LS04, component_index: ci, pins: device_pins, params: ls_ttl_params(io_max, delay), blob }
 }
 
+/// Like [`ls04`], but pin index 1 ("1y") ALSO carries `PIN_FLOATING_INPUT`
+/// in its blob, on top of whatever `open`/`open_hash` the caller gives it —
+/// a pin that is simultaneously output-capable (`combinational::
+/// output_capable(IC_74LS04)` names index 1 regardless of blob content) and
+/// a `FLOATING_INPUT`, the exact shape the W1d P1 floating-pull-stamp bug
+/// needs (real parts: the 74ls173 q pins, 74ls189 /o pins, 28c16/28c256 io
+/// pins, 74ls245 a/b pins — none of them a plain inverter, but this is the
+/// smallest device this test module already knows how to drive and read
+/// that can still reproduce the bug's shape).
+#[allow(clippy::too_many_arguments)]
+fn ls04_with_open_capable_output(ci: usize, vcc: usize, gnd: usize, pins: [usize; 12], open: [bool; 12], open_hash: [u32; 12], io_max: f64, delay: f64) -> Device {
+    let mut device_pins = vec![pin(vcc), pin(gnd)];
+    for i in 0..12 {
+        device_pins.push(if open[i] { open_pin(pins[i], open_hash[i]) } else { pin(pins[i]) });
+    }
+    let blob_flags: Vec<f64> = (0..12).map(|i| if i % 2 == 0 || i == 1 { kinds::PIN_FLOATING_INPUT as f64 } else { 0.0 }).collect();
+    let mut blob = vec![0.0];
+    blob.extend(blob_flags);
+    Device { kind: kinds::IC_74LS04, component_index: ci, pins: device_pins, params: ls_ttl_params(io_max, delay), blob }
+}
+
 /// A `74ls00` (quad 2-input NAND) device: `pins[i]` names logic pin `i`
 /// (`1a 1b 1y 2a 2b 2y 3a 3b 3y 4a 4b 4y`).
 #[allow(clippy::too_many_arguments)]
@@ -1739,6 +1760,139 @@ fn finding9_output_on_the_datum_node_stamps_nothing_and_draws_no_source_current(
     // I(vsrc) (RSHUNT noise only, ~1e-11A).
     let i_vsrc = kernel.solver().currents()[0];
     assert!(i_vsrc.abs() < 1e-8, "I(vsrc) should be near zero (shunt noise only), got {i_vsrc}");
+}
+
+// ---- W1d P1: an open FLOATING_INPUT pin's pull stamps to the datum, never
+// to `ic.vcc.node`/`ic.gnd.node` directly (the bug: routing its return
+// current through a real supply node let it leak into that supply's own
+// published source current) -----------------------------------------------
+
+#[test]
+fn w1d_p1_static_driven_open_floating_output_leaves_supply_current_clean() {
+    // 74ls173 q2-q4's own shape, reproduced on the smallest device this
+    // module can drive and read (`ls04_with_open_capable_output`): 1a tied
+    // straight to vcc (HIGH from load, vcc fixed), so 1y (NOT gate) commits
+    // LOW -- driven to gnd through R_out. 1y is ALSO open and
+    // FLOATING_INPUT, with `u1:1b`'s own golden hash (digital::floating's
+    // golden vector) selecting HIGH at bucket 0: the pull's target is vcc,
+    // the OPPOSITE of the driven level, exactly the repro's own shape ("the
+    // driver holds the pin LOW" while "the hash selects HIGH").
+    //
+    // Before the fix, `ic_pull_target` returned `ic.vcc.node` as the pull's
+    // target, so `recompute_source_currents` folded `g*(V(1y)-V(vcc))` into
+    // `leaving[vcc]` -- and vcc IS `source(0)`'s own fixed child node here,
+    // so that phantom term reached `currents[0]` directly: with g=1e-6
+    // (TTL) and V(1y)~0, roughly `-1e-6*(0-5) = 5e-6` A of current that
+    // never actually flows through the supply. After the fix, the pull
+    // returns through the datum instead, so `currents[0]` carries only the
+    // universal per-node shunt's noise.
+    let prefix = fnv1a("u1:1b:");
+    let p = program(8, vec![
+        source(0, 1, 0, 5.0), // vcc, fixed.
+        ls04_with_open_capable_output(
+            1,
+            1,
+            0,
+            [1, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7],
+            [false, true, false, false, false, false, false, false, false, false, false, false],
+            [0, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            0.008,
+            20e-9,
+        ),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    let y = driver_for(&kernel, &p, 1, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1a HIGH (tied to vcc) -> 1y LOW");
+
+    // The pin voltage is unchanged from before the fix: the conductance
+    // half of the pull's stamp (`a[l,l] += g`) is identical either way, and
+    // `target_v` is numerically exactly `V(vcc)`, so the injected RHS term
+    // (`g*target_v` now, `g*V(vcc)` via a real node before) is identical
+    // too. R_out (156.25 ohm) dominates the pull (1 Mohm), so 1y sits close
+    // to LOW despite the pull's own HIGH target.
+    let g_out = 1.0 / 156.25;
+    let g_pull = 1e-6;
+    let expected_v = g_pull * 5.0 / (g_out + g_pull);
+    let v_pin = kernel.solver().voltages()[2];
+    assert!((v_pin - expected_v).abs() / expected_v < 1e-2, "V(1y) = {v_pin}, expected ~{expected_v} (unaffected by the fix)");
+
+    let i_vcc = kernel.solver().currents()[0];
+    assert!(i_vcc.abs() < 1e-8, "I(vcc) must show only the universal per-node shunt's noise, no phantom pull leakage, got {i_vcc}");
+}
+
+#[test]
+fn w1d_p1_dynamic_driven_open_floating_output_pull_stamps_to_the_datum() {
+    // `stamp_ics_into_dyn`'s own counterpart of the static test above: a
+    // capacitor on 1y's own (otherwise plain) node forces it into a
+    // dynamic (ClosedForm, since both of this IC's supply nodes stay fixed
+    // -- `stamp_ics_into_dyn`'s own doc comment) partition, so the pull's
+    // Norton branch folds through `stamp_two_terminal`'s general
+    // `g*(va-vb)+ieq` convention instead of `fold_pull`'s direct matrix
+    // poke -- the OTHER stamp site this fix touches.
+    let prefix = fnv1a("u1:1b:");
+    let p = program(8, vec![
+        source(0, 1, 0, 5.0), // vcc, fixed.
+        capacitor(1, 2, 0, 1e-9, 0.0, 0.0), // forces 1y's own node dynamic.
+        ls04_with_open_capable_output(
+            2,
+            1,
+            0,
+            [1, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7],
+            [false, true, false, false, false, false, false, false, false, false, false, false],
+            [0, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            0.008,
+            20e-9,
+        ),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_pin, _) = pb.local_index[2].expect("1y's own node is free (the capacitor keeps it out of derive_fixed_nodes)");
+    assert_ne!(pb.kinds[p_pin], crate::partition::PartitionKind::Static, "the capacitor must force 1y's own node into a dynamic partition");
+
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+    let y = driver_for(&kernel, &p, 2, 1); // 1y
+    assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1a HIGH (tied to vcc) -> 1y LOW");
+
+    kernel.advance(2e-5).unwrap(); // >> R_out*C's own time constant (156.25ohm * 1nF ~ 156ns).
+
+    // Same analytic steady state as the static test above (the stamp site
+    // differs, the physics does not).
+    let g_out = 1.0 / 156.25;
+    let g_pull = 1e-6;
+    let expected_v = g_pull * 5.0 / (g_out + g_pull);
+    let v_pin = kernel.solver().voltages()[2];
+    assert!((v_pin - expected_v).abs() / expected_v < 1e-2, "V(1y) = {v_pin}, expected ~{expected_v}");
+
+    let i_vcc = kernel.solver().currents()[0];
+    assert!(i_vcc.abs() < 1e-6, "I(vcc) must show no phantom pull leakage once 1y's own node is dynamic either, got {i_vcc}");
+}
+
+#[test]
+fn w1d_p1_undriven_open_floating_input_settles_at_pull_target_with_zero_current() {
+    // A pure, non-output-capable open input (1a, plain `ls04`): this shape
+    // never showed the bug (nothing else drives current through the same
+    // node, so `i = g*(V(pin)-V(target))` was already exactly 0 either way
+    // -- `V(pin)` settles to `target_v` exactly since the pull is the ONLY
+    // thing stamped there). Checked anyway as a no-regression guard on the
+    // ordinary case `ic_pull_target`'s callers exercise far more often than
+    // the driven one above.
+    let prefix = fnv1a("u1:1b:");
+    let p = program(9, vec![
+        source(0, 1, 0, 5.0),
+        ls04(1, 1, 0, [2, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8], [true, false, false, false, false, false, false, false, false, false, false, false], [prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.008, 20e-9),
+    ]);
+    let (mut kernel, all_partitions, all_readers) = build(&p);
+    kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+
+    // `u1:1b`'s golden hash selects HIGH at bucket 0 (digital::floating's
+    // own golden vector), so 1a settles at vcc (5V), not gnd.
+    let v_1a = kernel.solver().voltages()[2];
+    assert!((v_1a - 5.0).abs() < 1e-4, "V(1a) = {v_1a}, expected ~5V (the pull's own HIGH target, nothing else stamped on this node)");
+
+    let i_vcc = kernel.solver().currents()[0];
+    assert!(i_vcc.abs() < 1e-8, "an undriven open input's pull current must return entirely through its own IC, never the supply source, got {i_vcc}");
 }
 
 // ---- finding 7: a commit on a fixed-node driver must re-publish source

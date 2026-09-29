@@ -823,19 +823,31 @@ pub(crate) fn ic_driver_target(power: &digital::power::IcPower, driver: &Driver,
 }
 
 /// Where an open `FLOATING_INPUT` pin's floating pull currently stamps, and
-/// at what conductance (contract point 6): `digital::floating::pull`'s
-/// Norton target, `power.gnd + (high ? power.vs : 0)`, is always exactly
-/// `ic.gnd.node`'s or `ic.vcc.node`'s own voltage (`vs = vSraw = V(vcc) -
-/// V(gnd)` while powered), so the pull is exactly a plain two-terminal
-/// conductance between the pin's node and whichever supply node `high`
-/// (`digital::floating::floating_high` on the pin's own open key) selects —
-/// never an arbitrary absolute voltage a stamp site would need a THIRD,
-/// synthetic node for. `None` when `digital::floating::pull` itself declines
-/// (unpowered, not open, not `FLOATING_INPUT`, or `OPEN_HIGH`).
-pub(crate) fn ic_pull_target(ic: &digital::IcRecord, power: &digital::power::IcPower, pin: &digital::IcPin, t: f64) -> Option<(usize, f64)> {
-    let (g, _target_v) = digital::floating::pull(ic, power, pin, t)?;
-    let high = digital::floating::floating_high(pin.open_hash, t, ic.ttl);
-    Some((if high { ic.vcc.node } else { ic.gnd.node }, g))
+/// at what conductance (contract point 6): exactly `digital::floating::pull`'s
+/// own `(conductance, absolute target volts)` Norton branch — `g` from the
+/// pin's node to the DATUM (node 0), plus the injection `g * target_v` into
+/// the pin's own row, never a conductance to `ic.gnd.node`/`ic.vcc.node`
+/// directly.
+///
+/// This module used to fold the pull as `g` from the pin to whichever supply
+/// node `target_v` numerically equals (`ic.vcc.node` while HIGH, `ic.gnd.node`
+/// while LOW) on the argument that node voltages cannot tell the two stamps
+/// apart — true, but SOURCE CURRENTS can: routing the branch through a real
+/// supply node makes its return current fold into that node's own KCL, so
+/// `recompute_source_currents`'s walk attributes a phantom few microamps of
+/// it to whatever voltage source ultimately fixed that rail — current a
+/// pull's own physical resistor-to-a-Norton-equivalent never draws from any
+/// real source, since it is not actually wired to the supply rail at all
+/// (classic's `_stampFloatingDigitalInputs` never touches the supply source
+/// either: `mna.add(node, node, g); mna.addB(node, target * g)` is a shunt
+/// to the reference net, not a branch to `power.vcc`/`power.gnd`'s own
+/// component). Stamping to the datum instead makes every call site match
+/// classic's current bookkeeping exactly, not merely its node voltages.
+///
+/// `None` when `digital::floating::pull` itself declines (unpowered, not
+/// open, not `FLOATING_INPUT`, or `OPEN_HIGH`).
+pub(crate) fn ic_pull_target(ic: &digital::IcRecord, power: &digital::power::IcPower, pin: &digital::IcPin, t: f64) -> Option<(f64, f64)> {
+    digital::floating::pull(ic, power, pin, t)
 }
 
 /// Whether ANY powered IC in `ics` currently holds an open `FLOATING_INPUT`
@@ -987,8 +999,19 @@ pub(crate) fn stamp_ics_into_dyn(
             if !in_partition(pin.node) {
                 continue;
             }
-            if let Some((target, g)) = ic_pull_target(ic, &power, pin, now) {
-                stamp_two_terminal(size, a, b, &resolve(pin.node), &resolve(target), g, 0.0);
+            if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, now) {
+                // The pull's Norton branch runs to the DATUM (node 0, always
+                // fixed at 0.0 — never a partition member, so this is never
+                // `resolve(0)`'s free arm), not to a supply node (the bug
+                // `ic_pull_target`'s own doc comment explains). Folded through
+                // `stamp_two_terminal`'s general `g*(va-vb)+ieq` convention:
+                // with `vb` pinned at 0, `ieq = -g*target_v` makes the branch
+                // current into the pin exactly `g*V(pin) - g*target_v`,
+                // classic's own `mna.add(node,node,g); mna.addB(node,
+                // target*g)` (`_stampFloatingDigitalInputs`) restated as a
+                // two-terminal stamp instead of a direct matrix/RHS poke.
+                let datum = DynPin { local: None, fixed: 0.0 };
+                stamp_two_terminal(size, a, b, &resolve(pin.node), &datum, g, -g * target_v);
             }
         }
     }
@@ -1669,10 +1692,16 @@ impl PartitionedSolver {
                 }
             }
             for pin in &ic.logic {
-                if let Some((target, g)) = ic_pull_target(ic, &power, pin, now) {
-                    let i = g * (self.voltages[pin.node] - self.voltages[target]);
+                if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, now) {
+                    // Into the datum (node 0), not `ic.vcc.node`/`ic.gnd.node`
+                    // (`ic_pull_target`'s own doc comment: this is the fix).
+                    // `leaving[0]` is never read by the `resolved` walk below
+                    // (node 0 is that walk's root, never a `child_node`), so
+                    // the symmetric term is simply omitted rather than added
+                    // to a slot nothing consumes — unlike the driver loop
+                    // above, whose `target` is a real, possibly-fixed node.
+                    let i = g * (self.voltages[pin.node] - target_v);
                     leaving[pin.node] += i;
-                    leaving[target] -= i;
                 }
             }
         }

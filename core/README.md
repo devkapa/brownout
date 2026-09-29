@@ -551,7 +551,8 @@ References are to `core/spec/w1-classic-semantics.md`.
    `vih = max(0.4, 0.7 vS)`; otherwise the fixed value when its flag is set,
    else `max(0.8, 0.3 vS)` and `max(2.0, 0.6 vS)`.
 2. **Partitions.** An IC's driver stamps couple each output-capable pin to its
-   own supply nodes, and a floating pull couples an open input to both. So the
+   own supply nodes, and a floating pull's target follows both supply
+   voltages (point 6). So the
    union-find also joins each free output-capable pin, and each free `OPEN`
    `FLOATING_INPUT` pin, with every free supply pin of the same IC. Reading a
    pin joins nothing. When both supply pins are fixed (an ideal supply), no
@@ -602,7 +603,13 @@ References are to `core/spec/w1-classic-semantics.md`.
 6. **Floating pulls** (§1.6): while powered, each `OPEN` pin with
    `FLOATING_INPUT` and not `OPEN_HIGH` gets `g = 1/(TTL ? 1e6 : 1e7)` toward
    `V(gnd) + (high ? vS : 0)`, `high` from the open-key hash, so the pin
-   voltage and its read agree.
+   voltage and its read agree. It is stamped as classic stamps it, as a
+   Norton branch to the datum: `g` from the pin to node 0 plus an injected
+   `g * target`, with the target taken from the latest iterate. So the pull's
+   current never passes through the IC's supply source. A conductance to the
+   `vcc` or `gnd` node gives the same pin voltage, but it would bill a pulled
+   pin that its own IC drives (a 173 `q`, a 189 `/o`, an EEPROM `io`, a 245
+   `a`/`b` left unconnected) to the supply source.
 7. **Evaluation** (§3.6): the 74ls245 drives neither side when `/oe` reads 1,
    and otherwise drives one side and requests HIZ on the other; the 74ls157
    drives every output LOW when `/oe` (the strobe `/G`) reads 1 (W1d,

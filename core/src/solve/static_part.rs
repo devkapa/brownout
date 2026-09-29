@@ -468,6 +468,33 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Folds an open `FLOATING_INPUT` pin's Norton pull into partition
+    /// `p_idx`'s local scratch matrix/rhs (`ic_pull_target`'s own doc
+    /// comment: `g` from `pin_node` to the DATUM, plus the injection `g *
+    /// target_v` into `pin_node`'s own row) — the pull's counterpart of
+    /// [`Self::fold_local`], but simpler: unlike a driver's target, the
+    /// datum is never itself a partition member with a KCL row of its own
+    /// (node 0 is always fixed, `Self::fixed`'s own doc comment), so there is
+    /// no "which end is free" dispatch to do, only the one free end
+    /// `Self::stamp_ics_into` already confirmed with its own
+    /// `Self::in_partition(pin.node, p_idx)` guard before ever calling in.
+    /// Exactly classic's `mna.add(node, node, g); mna.addB(node, target *
+    /// g)` (`_stampFloatingDigitalInputs`, sim-engine.ts:5202-5203).
+    fn fold_pull(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], pin_node: usize, g: f64, target_v: f64) {
+        if g == 0.0 {
+            return;
+        }
+        let (p, l) = self
+            .local_index
+            .get(pin_node)
+            .copied()
+            .flatten()
+            .expect("Self::stamp_ics_into already confirmed pin_node is free via Self::in_partition before calling fold_pull");
+        debug_assert_eq!(p, p_idx, "Self::in_partition(pin_node, p_idx) already confirmed this");
+        a[l * size + l] += g;
+        b[l] += g * target_v;
+    }
+
     /// Stamps every driver currently committed to HIGH or LOW whose OWN pin
     /// lives in partition `p_idx`, EXCEPT an IC driver (`Driver::device !=
     /// usize::MAX`) — `Self::stamp_ics_into` owns those, since an IC's
@@ -593,8 +620,8 @@ impl StaticPartitionSolver {
                 if !self.in_partition(pin.node, p_idx) {
                     continue;
                 }
-                if let Some((target, g)) = ic_pull_target(ic, &power, pin, now) {
-                    self.fold_local(p_idx, size, a, b, pin.node, target, g);
+                if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, now) {
+                    self.fold_pull(p_idx, size, a, b, pin.node, g, target_v);
                 }
             }
         }
