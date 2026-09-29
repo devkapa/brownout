@@ -2086,3 +2086,263 @@ fn finding8_next_digital_due_time_ignores_a_scheduled_bucket() {
 
 
 
+
+// ============================================================================
+// W1e follow-up, gap 1: a watched read pin whose IC supply is free in a
+// Stepped partition (core/README.md, W1c point 4 and NE555 point 5). Every
+// test loads through the real `Engine`, so nothing is hand-registered, and
+// every expected instant comes from an ODE integrated here at a fixed 2 us
+// RK4 step (independent of the core's own controller), never from the core.
+// ============================================================================
+
+/// `(t_cross, tolerance)` for the first instant a two-state linear circuit's
+/// `y[1] - k * y[0]` goes from negative to non-negative: the moment node 1 (a
+/// read pin) meets a threshold that is `k` times node 0 (the supply), and the
+/// time equivalent of W0's tolerance on that threshold (100 uV + 1e-3
+/// relative) at the crossing slope. `kinks` are instants the circuit changes,
+/// landed on exactly.
+fn model_crossing(deriv: impl Fn(f64, [f64; 2]) -> [f64; 2], k: f64, kinks: &[f64]) -> (f64, f64) {
+    let rk4 = |t: f64, y: [f64; 2], h: f64| -> [f64; 2] {
+        let add = |a: [f64; 2], b: [f64; 2], s: f64| [a[0] + s * b[0], a[1] + s * b[1]];
+        let k1 = deriv(t, y);
+        let k2 = deriv(t + h / 2.0, add(y, k1, h / 2.0));
+        let k3 = deriv(t + h / 2.0, add(y, k2, h / 2.0));
+        let k4 = deriv(t + h, add(y, k3, h));
+        [0, 1].map(|i| y[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]))
+    };
+    let (mut t, mut y) = (0.0f64, [0.0f64; 2]);
+    let mut prev = y[1] - k * y[0];
+    while t < 0.2 {
+        let mut h = 2e-6;
+        if let Some(&kink) = kinks.iter().find(|&&kk| kk > t + 1e-15 && kk < t + h) {
+            h = kink - t;
+        }
+        y = rk4(t, y, h);
+        t += h;
+        let cur = y[1] - k * y[0];
+        if prev < 0.0 && cur >= 0.0 {
+            let t_cross = t - h * cur / (cur - prev);
+            let dy = deriv(t, y);
+            let slope = (dy[1] - k * dy[0]).abs();
+            return (t_cross, (1e-4 + 1e-3 * k * y[0]) / slope);
+        }
+        prev = cur;
+    }
+    panic!("the model never crosses");
+}
+
+/// Advances `engine` event by event until digital slot `slot` reads `to`,
+/// returning that instant, or `None` when `limit` passes first. A partition
+/// that is never watched schedules only its own steps, so a missed crossing
+/// shows here as `None` or a late instant, never as a hang.
+fn instant_slot_reads(engine: &mut Engine, slot: usize, to: f64, limit: f64) -> Option<f64> {
+    loop {
+        let t = engine.next_event_time();
+        if !t.is_finite() || t > limit {
+            return None;
+        }
+        engine.advance(t).unwrap();
+        if engine.digital_slots()[slot] == to {
+            return Some(engine.time());
+        }
+    }
+}
+
+/// A `74hc14` (Schmitt, CMOS ratio: `vt+ = 2.7 * vS / 5`) on `vcc`/gnd with
+/// 1a on `pin_1a` and every other input on the datum; 1y (slot 0) and the
+/// other five outputs each on their own free node from `first_out` on.
+fn hc14_on(ci: usize, vcc: usize, pin_1a: usize, first_out: usize) -> Device {
+    hc14(ci, vcc, 0, [pin_1a, first_out, 0, first_out + 1, 0, first_out + 2, 0, first_out + 3, 0, first_out + 4, 0, first_out + 5], [false; 12], [0; 12], 0.02, 15e-9)
+}
+
+const HC14_DELAY: f64 = 15e-9;
+
+/// Loads `p` under each integration method (`INTEGRATION` 1, trapezoidal, then
+/// 0, backward Euler), lets `prepare` run any stimulus, and checks the first
+/// instant `slot` reads `to`: the pin (`pin_node`) must be on a threshold
+/// `k * V(supply_node)` taken from the supply as it is AT that instant, to
+/// W0's tolerance (100 uV + 1e-3 relative), and the instant must match the
+/// model's crossing `t_model` (the flip is `delay` after it). The first is
+/// the requirement and holds under either method, because it compares the
+/// core with itself; the second also carries the stepped controller's
+/// integration error (README, NE555 point 5: "exact timing needs closed
+/// form"), which trapezoidal keeps inside the tolerance and backward Euler,
+/// at about 1% here, does not, so under it the bound is 2%.
+#[allow(clippy::too_many_arguments)]
+fn assert_flips_at_the_model_crossing(
+    mut p: Program,
+    prepare: impl Fn(&mut Engine),
+    slot: usize,
+    to: f64,
+    delay: f64,
+    (pin_node, supply_node, k): (usize, usize, f64),
+    (t_model, tol): (f64, f64),
+    what: &str,
+) {
+    for integration in [1u8, 0] {
+        p.options.integration = integration;
+        let mut engine = Engine::load(&p).unwrap();
+        prepare(&mut engine);
+        let flipped = instant_slot_reads(&mut engine, slot, to, 0.2).unwrap_or_else(|| panic!("{what} (integration {integration}): the read pin's crossing was missed"));
+        let threshold = k * engine.voltages()[supply_node];
+        let miss = (engine.voltages()[pin_node] - threshold).abs();
+        let allowed = 1e-4 + 1e-3 * threshold;
+        assert!(miss <= allowed, "{what} (integration {integration}): at the flip the pin is {miss} V from the threshold its supply gives at that instant (allowed {allowed})");
+        let t_cross = flipped - delay;
+        let bound = if integration == 1 { tol } else { 0.02 * t_model };
+        assert!((t_cross - t_model).abs() <= bound, "{what} (integration {integration}): flipped for a crossing at {t_cross}, the model puts it at {t_model} (bound {bound})");
+    }
+}
+
+#[test]
+fn gap1_a_read_pin_in_the_supplys_own_stepped_partition_flips_at_the_moving_thresholds_crossing() {
+    // 0=gnd, 1=5 V rail, 2=vcc (5k from the rail, 1 uF to gnd), 3=1a (20k
+    // from vcc, 1 uF to gnd), 4..9 the six outputs. One partition with two
+    // capacitors: Stepped. vcc is still rising when 1a meets vt+ = 0.54 vcc
+    // (4.36 V at 20.7 ms), so a threshold read from the start of the step (or
+    // never watched at all) lands the flip late or not at all.
+    let mut p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 5_000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 2, 3, 20_000.0),
+        capacitor(4, 3, 0, 1e-6, 0.0, 0.0),
+        hc14_on(5, 2, 3, 4),
+    ]);
+    p.digital_slot_count = 6;
+    let pb = crate::partition::build(&p).unwrap();
+    assert_eq!(pb.local_index[2].unwrap().0, pb.local_index[3].unwrap().0, "vcc and 1a share a partition");
+    assert_eq!(pb.kinds[pb.local_index[3].unwrap().0], crate::partition::PartitionKind::Stepped);
+
+    let model = model_crossing(|_, y| [((5.0 - y[0]) / 5_000.0 - (y[0] - y[1]) / 20_000.0) / 1e-6, (y[0] - y[1]) / 20_000.0 / 1e-6], 0.54, &[]);
+    assert_flips_at_the_model_crossing(p, |_| {}, 0, 0.0, HC14_DELAY, (3, 2, 0.54), model, "same partition, supply moving");
+}
+
+#[test]
+fn gap1_a_closed_form_pin_beside_a_quiet_stepped_supply_is_promoted_and_flips_at_the_analytic_time() {
+    // 1a on its own RC from the rail (10k, 1 uF; closed-form by count) while
+    // vcc sits in another partition behind 10 ohm and 1 uF, settled long
+    // before 1a reaches vt+ = 2.7 V at -tau ln(1 - 2.7/5) = 7.77 ms.
+    let mut p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 10.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 1, 3, 10_000.0),
+        capacitor(4, 3, 0, 1e-6, 0.0, 0.0),
+        hc14_on(5, 2, 3, 4),
+    ]);
+    p.digital_slot_count = 6;
+    let pb = crate::partition::build(&p).unwrap();
+    let (p_a, _) = pb.local_index[3].unwrap();
+    assert_ne!(p_a, pb.local_index[2].unwrap().0, "1a and vcc are different partitions");
+    assert_eq!(pb.kinds[p_a], crate::partition::PartitionKind::Stepped, "promoted from closed-form");
+
+    let tau = 10_000.0 * 1e-6;
+    let t_model = -tau * (1.0 - 2.7 / 5.0f64).ln();
+    // 2.7 V is 0.54 * 5 V; the slope of 1a there is (5 - 2.7) / tau.
+    let tol = (1e-4 + 1e-3 * 2.7) / ((5.0 - 2.7) / tau);
+    assert_flips_at_the_model_crossing(p, |_| {}, 0, 0.0, HC14_DELAY, (3, 2, 0.54), (t_model, tol), "another partition, supply quiet");
+}
+
+#[test]
+fn gap1_a_read_pin_in_another_partition_meets_a_threshold_that_is_still_moving() {
+    // Same, with the supply on a 5 ms time constant and 1a on 20 ms: they
+    // meet at 14.2 ms with vcc at 4.71 V and still rising 0.058 V/ms, so vt+
+    // moves 0.031 V/ms against 1a's 0.12 V/ms. A threshold taken from the
+    // supply's last published value is up to a whole step stale.
+    let mut p = program(10, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 5_000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 1, 3, 20_000.0),
+        capacitor(4, 3, 0, 1e-6, 0.0, 0.0),
+        hc14_on(5, 2, 3, 4),
+    ]);
+    p.digital_slot_count = 6;
+    let pb = crate::partition::build(&p).unwrap();
+    assert_ne!(pb.local_index[2].unwrap().0, pb.local_index[3].unwrap().0);
+
+    let model = model_crossing(|_, y| [(5.0 - y[0]) / 5_000.0 / 1e-6, (5.0 - y[1]) / 20_000.0 / 1e-6], 0.54, &[]);
+    assert_flips_at_the_model_crossing(p, |_| {}, 0, 0.0, HC14_DELAY, (3, 2, 0.54), model, "another partition, supply moving");
+}
+
+#[test]
+fn gap1_a_supply_re_solve_re_aims_the_dependent_watch_to_an_earlier_crossing() {
+    // A quiet supply (10 ohm and 1 uF) and 1a on 100k and 1 uF, whose steps
+    // have grown long. A 10 ohm dump on vcc closes at 31.1 ms: vcc drops to
+    // 2.5 V within microseconds, vt+ falls from 2.7 V to 1.35 V, and 1a meets
+    // it at 31.47 ms, 0.37 ms later and inside the step its partition had
+    // planned before the dump. That crossing was aimed at the old supply, so
+    // 1a's partition must be re-planned when vcc is re-solved, or 1y goes LOW
+    // at the end of the planned step, 1.5 ms late. The run after the dump is
+    // one `advance`, because a host's `advance` ends by bringing every
+    // partition to its instant and would re-plan 1a anyway.
+    let mut p = program(11, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 10.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 1, 3, 100_000.0),
+        capacitor(4, 3, 0, 1e-6, 0.0, 0.0),
+        resistor(5, 2, 10, 10.0),
+        switch_dev(6, 10, 0, 0.0),
+        hc14_on(7, 2, 3, 4),
+    ]);
+    p.digital_slot_count = 6;
+    p.options.integration = 1;
+    let t_switch = 31.1e-3;
+    let (t_model, tol) = model_crossing(
+        |t, y| {
+            let dump = if t >= t_switch { y[0] / 10.001 } else { 0.0 };
+            [((5.0 - y[0]) / 10.0 - dump) / 1e-6, (5.0 - y[1]) / 100_000.0 / 1e-6]
+        },
+        0.54,
+        &[t_switch],
+    );
+    assert!(t_model > t_switch, "the model crosses after the dump");
+    let mut engine = Engine::load(&p).unwrap();
+    engine.trace_enable(true);
+    engine.advance(t_switch).unwrap();
+    assert_eq!(engine.digital_slots()[0], 1.0, "1y is HIGH until 1a crosses");
+    engine.set_params(&[(6, 0, 1.0)]).unwrap();
+    engine.advance(0.1).unwrap();
+    let flipped = engine.trace().chunks_exact(3).find(|c| c[0] > t_switch && c[1] as usize == 0 && c[2] == 0.0).map(|c| c[0]).expect("1y never went LOW");
+    assert!((flipped - HC14_DELAY - t_model).abs() <= tol, "1y went LOW at {flipped}, the model puts 1a's crossing at {t_model} (tolerance {tol})");
+}
+
+/// An `ne555` with no catalog window (2-18 V): pins in the record's order,
+/// `logic` in TRIG/OUT/RST/CV/THR/DIS order, digital slot base 0.
+fn ne555_dev(ci: usize, vcc: usize, gnd: usize, logic: [usize; 6]) -> Device {
+    let mut p = vec![0.0; ic_param::COUNT];
+    p[ic_param::VCC_MIN] = 2.0;
+    p[ic_param::VCC_MAX] = 18.0;
+    p[ic_param::NOMINAL] = 5.0;
+    let mut pins = vec![pin(vcc), pin(gnd)];
+    pins.extend(logic.map(pin));
+    Device { kind: kinds::NE555, component_index: ci, pins, params: p, blob: vec![0.0; 7] }
+}
+
+#[test]
+fn gap1_a_555_thr_pin_in_another_partition_resets_at_the_moving_thresholds_crossing() {
+    // THR on 20k/1 uF from the rail; the 555's supply behind 5k and 1 uF
+    // (5 ms). RESET fires when THR meets vUpper = (2/3) vcc, at 21.4 ms with
+    // vcc at 4.93 V and still rising. TRIG and RST sit on the rail, so the
+    // 555 powers on with its default HIGH latch and stays there until THR.
+    // OUT and DIS are on the datum, which stamps nothing (NE555 point 7): a
+    // 555's idle draw (4.9 mA) through 5k would leave no powered operating
+    // point, and vcc would be a plain RC the model can integrate.
+    let mut p = program(6, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 5_000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        resistor(3, 1, 3, 20_000.0),
+        capacitor(4, 3, 0, 1e-6, 0.0, 0.0),
+        ne555_dev(5, 2, 0, [1, 0, 1, 0, 3, 0]),
+    ]);
+    p.digital_slot_count = 1;
+    let pb = crate::partition::build(&p).unwrap();
+    assert_ne!(pb.local_index[2].unwrap().0, pb.local_index[3].unwrap().0);
+    assert_eq!(pb.kinds[pb.local_index[3].unwrap().0], crate::partition::PartitionKind::Stepped, "THR's RC is promoted");
+
+    let model = model_crossing(|_, y| [(5.0 - y[0]) / 5_000.0 / 1e-6, (5.0 - y[1]) / 20_000.0 / 1e-6], 2.0 / 3.0, &[]);
+    assert_flips_at_the_model_crossing(p, |_| {}, 0, 0.0, 0.0, (3, 2, 2.0 / 3.0), model, "555 THR, another partition, supply moving");
+}

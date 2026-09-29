@@ -1539,30 +1539,32 @@ impl PartitionedSolver {
     /// BACKWARD for `vc` from its own near-flat equation, the way
     /// `ClosedFormSolver::handle_crossing` does for whichever node the
     /// crossing landed on, is numerically unstable and can publish every
-    /// other node in the segment at a physically meaningless value). Only
-    /// when BOTH this IC's supply nodes are load-time STABLE
-    /// ([`Self::supply_is_load_stable`]: fixed, or free in a `Static`
-    /// partition — contract point 4, amended by finding 2/6): a `ClosedForm`
-    /// partition itself is guaranteed never to hold a free IC supply node
-    /// (`partition::build`'s own promotion rule reclassifies any partition
-    /// that does to `Stepped`), but a PLAIN read pin (unlike an
-    /// output-capable or open-floating-input one) is never unioned with its
-    /// own IC's supply at all, so it can land in a `ClosedForm`/`Stepped`
-    /// partition while its OWN ic's supply sits, free, in some entirely
-    /// different `Static` partition — previously left unwatched here
-    /// (finding 2/6's whole bug). A `Static` partition's voltage is exactly
-    /// as load-time-stable as a truly fixed node BETWEEN dirtying events (a
-    /// switch toggle, a driver commit), and
+    /// other node in the segment at a physically meaningless value).
+    ///
+    /// A pin on a `ClosedForm` partition only when BOTH this IC's supply
+    /// nodes are load-time STABLE ([`Self::supply_is_load_stable`]: fixed, or
+    /// free in a `Static` partition — contract point 4, amended by finding
+    /// 2/6): a `ClosedForm` partition itself is guaranteed never to hold a
+    /// free IC supply node (`partition::build`'s own promotion rule
+    /// reclassifies any partition that does to `Stepped`), but a PLAIN read
+    /// pin (unlike an output-capable or open-floating-input one) is never
+    /// unioned with its own IC's supply at all, so it can land in a
+    /// `ClosedForm`/`Stepped` partition while its OWN ic's supply sits, free,
+    /// in some entirely different partition. A `Static` partition's voltage
+    /// is exactly as load-time-stable as a truly fixed node BETWEEN dirtying
+    /// events (a switch toggle, a driver commit), and
     /// [`Self::add_watch_dependent_partitions`] re-aims every watch that
-    /// depends on one whenever such an event actually moves it. An IC whose
-    /// supply sits in a `ClosedForm`/`Stepped` partition instead still
-    /// relies on W1c contract point 5/6's ordinary bucket/re-solve machinery
-    /// and this crate's `node_to_ic_readers` (`report_changed_ic_readers` in
-    /// `closed_form.rs`/`stepped.rs`), which re-evaluate such a reader
-    /// whenever ITS OWN node's published voltage actually changes, just not
-    /// via an exact analytic crossing — the numerical-instability concern
-    /// above (a driven output's own near-flat segment) applies just as much
-    /// to a continuously-moving supply.
+    /// depends on one whenever such an event actually moves it. A supply free
+    /// in a `Stepped` partition moves continuously, which a closed-form
+    /// crossing (solved once, for one threshold) cannot follow, so
+    /// `partition::build` promotes the `ClosedForm` partition of such a pin
+    /// to `Stepped` (W1e follow-up, gap 1). A pin still `ClosedForm` here
+    /// therefore has a stable supply, and one on a `Stepped` partition is
+    /// watched WHATEVER its supply, as a 555's is (NE555 point 5). Its
+    /// thresholds then follow the supply inside `stepped`: taken from each
+    /// trial's own state when the supply is in the same partition, and from
+    /// the supply partition's pending trial when it is another one
+    /// ([`stepped::SteppedSolver::add_supply_dependency`]).
     ///
     /// Both directions are registered for every threshold value
     /// `watch_thresholds` returns, rather than only the direction each one
@@ -1591,9 +1593,7 @@ impl PartitionedSolver {
                 self.register_ne555_watches(device_index, &ic);
                 continue;
             }
-            if !(self.supply_is_load_stable(ic.vcc.node) && self.supply_is_load_stable(ic.gnd.node)) {
-                continue;
-            }
+            let supply_stable = self.supply_is_load_stable(ic.vcc.node) && self.supply_is_load_stable(ic.gnd.node);
             // An output-capable pin is NEVER a valid watch target, on top of
             // simply being meaningless as an INPUT (`digital::levels::read`
             // is called on it too, since `IcRecord::logic` carries every pin
@@ -1617,10 +1617,18 @@ impl PartitionedSolver {
             // own threshold — the oscillator livelocks in a burst of
             // sub-microsecond crossings and its output never actually
             // flips again.
-            let outputs = digital::output_capable(ic.kind);
             let power = digital::power::ic_power(&ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
             for (logic_index, pin) in ic.logic.iter().enumerate() {
-                if pin.open || outputs.contains(&logic_index) {
+                if !partition::is_watched_read_pin(&ic, logic_index) {
+                    continue;
+                }
+                let kind = self.local_index.get(pin.node).copied().flatten().and_then(|(p, _)| self.partition_kinds.get(p).copied());
+                let eligible = match kind {
+                    Some(PartitionKind::Stepped) => true,
+                    Some(PartitionKind::ClosedForm) => supply_stable,
+                    _ => false,
+                };
+                if !eligible {
                     continue;
                 }
                 let thresholds = digital::levels::watch_thresholds(&ic, &power, pin);
@@ -1656,6 +1664,10 @@ impl PartitionedSolver {
                             .collect()
                     }),
                 );
+                if kind == Some(PartitionKind::Stepped) {
+                    self.stepped.add_supply_dependency(node, ic.vcc.node);
+                    self.stepped.add_supply_dependency(node, ic.gnd.node);
+                }
             }
         }
     }
@@ -1706,6 +1718,10 @@ impl PartitionedSolver {
                 reader,
                 Box::new(move |voltages: &[f64]| digital::ne555::watch_thresholds(logic_index, voltages[vcc_node], voltages[gnd_node])),
             );
+            if kind == Some(PartitionKind::Stepped) {
+                self.stepped.add_supply_dependency(node, vcc_node);
+                self.stepped.add_supply_dependency(node, gnd_node);
+            }
         }
     }
 
@@ -1739,26 +1755,43 @@ impl PartitionedSolver {
     /// just ran) instead of a stale one, so a crossing this IC's OWN watch
     /// depends on gets correctly re-scheduled instead of staying aimed at
     /// whatever the supply used to be.
+    ///
+    /// The same holds for a supply in a `Stepped` partition that this pass
+    /// re-solves (W1e follow-up, gap 1): its trial is discarded and planned
+    /// afresh under the new stamps, and a dependent partition's crossing was
+    /// aimed at the discarded one (`stepped`'s supply traces). Such a
+    /// dependent is itself re-solved, which can make it a supply in turn, so
+    /// this repeats until nothing more joins.
     fn add_watch_dependent_partitions(&self, static_ids: &[PartitionId], cf_ids: &mut Vec<usize>, st_ids: &mut Vec<usize>) {
-        let supply_touched = |node: usize| -> bool {
-            matches!(self.local_index[node], Some((p, _)) if self.partition_kinds.get(p) == Some(&PartitionKind::Static) && static_ids.iter().any(|pid| pid.0 as usize == p))
-        };
-        for (_, ic) in &self.ics {
-            if !(supply_touched(ic.vcc.node) || supply_touched(ic.gnd.node)) {
-                continue;
-            }
-            let outputs = digital::output_capable(ic.kind);
-            for (logic_index, pin) in ic.logic.iter().enumerate() {
-                if pin.open || outputs.contains(&logic_index) {
+        loop {
+            let before = (cf_ids.len(), st_ids.len());
+            let supply_touched = |node: usize, st_ids: &[usize]| -> bool {
+                let Some((p, _)) = self.local_index[node] else { return false };
+                match self.partition_kinds.get(p) {
+                    Some(PartitionKind::Static) => static_ids.iter().any(|pid| pid.0 as usize == p),
+                    Some(PartitionKind::Stepped) => st_ids.contains(&p),
+                    _ => false,
+                }
+            };
+            for (_, ic) in &self.ics {
+                if !(supply_touched(ic.vcc.node, st_ids) || supply_touched(ic.gnd.node, st_ids)) {
                     continue;
                 }
-                if let Some((p, _)) = self.local_index[pin.node] {
-                    match self.partition_kinds.get(p) {
-                        Some(PartitionKind::ClosedForm) if !cf_ids.contains(&p) => cf_ids.push(p),
-                        Some(PartitionKind::Stepped) if !st_ids.contains(&p) => st_ids.push(p),
-                        _ => {}
+                for (logic_index, pin) in ic.logic.iter().enumerate() {
+                    if !partition::is_watched_read_pin(ic, logic_index) {
+                        continue;
+                    }
+                    if let Some((p, _)) = self.local_index[pin.node] {
+                        match self.partition_kinds.get(p) {
+                            Some(PartitionKind::ClosedForm) if !cf_ids.contains(&p) => cf_ids.push(p),
+                            Some(PartitionKind::Stepped) if !st_ids.contains(&p) => st_ids.push(p),
+                            _ => {}
+                        }
                     }
                 }
+            }
+            if (cf_ids.len(), st_ids.len()) == before {
+                break;
             }
         }
     }
@@ -2101,7 +2134,7 @@ impl PartitionSolver for PartitionedSolver {
         // changed, so the watch's thresholds (recomputed from the fresh
         // supply voltage `copy_in_static` just published) actually get
         // reconsidered instead of staying aimed at a stale target.
-        if !static_ids.is_empty() {
+        if !static_ids.is_empty() || !st_ids.is_empty() {
             self.add_watch_dependent_partitions(&static_ids, &mut cf_ids, &mut st_ids);
         }
         readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);

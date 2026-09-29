@@ -427,7 +427,20 @@ pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E
         let mut output_drivers = Vec::with_capacity(outputs.len());
         for &i in outputs {
             let p = &record.logic[i];
-            let partition = kernel.solver().partition_of_node(p.node);
+            // A driver on a fixed non-datum node has no partition of its own,
+            // yet its stamp lands in the partition of whichever supply node is
+            // free (W1c point 8), so its commit must dirty that one: without
+            // it the free supply keeps the old stamp until something else
+            // re-solves it. `partition::build` unions the two supplies when
+            // both are free and such a pin exists, so `vcc` first and `gnd`
+            // second name one partition either way. A pin on the datum stamps
+            // nothing and, with both supplies fixed, nothing is left to dirty.
+            let partition = kernel.solver().partition_of_node(p.node).or_else(|| {
+                if p.node == 0 {
+                    return None;
+                }
+                kernel.solver().partition_of_node(record.vcc.node).or_else(|| kernel.solver().partition_of_node(record.gnd.node))
+            });
             let mut driver = Driver::new_ic_output(p.node, record.vcc.node, record.gnd.node, device_index, p.open_collector);
             // W1a point 2 (amended): a 555's OUT/DIS pin carries its own
             // stage instead of the default `Logic` one, so
@@ -710,5 +723,158 @@ mod tests {
 
         let updates = kernel.evaluator_mut().take_eeprom_updates();
         assert!(updates.is_empty(), "no write has completed, so no EEPROM is dirty");
+    }
+
+    // ---- W1e follow-up, gap 2: a driver on a fixed node, its supply free ----
+    //
+    // The driver's own node is fixed, so `partition_of_node` gives it no
+    // partition, yet its `1/R_out` stamp lands in whichever supply partition
+    // is free. Every case loads through the real `Engine` and moves the
+    // driver with a switch, so the only thing that can re-solve the supply at
+    // the commit is the commit's own dirty mark. `io_max = 0` gives a constant
+    // 50 ohm R_out, so every expected voltage is a linear hand solution.
+
+    use crate::engine::Engine;
+
+    const R_OUT: f64 = 50.0;
+
+    /// Runs `engine`'s only pending change: `set_params` at the current
+    /// instant, then to just before and to the commit, `delay` later, and
+    /// returns the voltages of `nodes` at each.
+    fn across_the_commit(engine: &mut Engine, triples: &[(u32, u32, f64)], delay: f64, nodes: &[usize]) -> (Vec<f64>, Vec<f64>) {
+        let t0 = engine.time();
+        engine.set_params(triples).unwrap();
+        engine.advance(t0 + 0.5 * delay).unwrap();
+        let before: Vec<f64> = nodes.iter().map(|&n| engine.voltages()[n]).collect();
+        engine.advance(t0 + delay).unwrap();
+        let at: Vec<f64> = nodes.iter().map(|&n| engine.voltages()[n]).collect();
+        (before, at)
+    }
+
+    #[test]
+    fn gap2_an_ic_output_on_a_fixed_node_moves_a_free_vcc_at_the_commit() {
+        // 0=gnd, 1=5 V rail, 2=4.5 V source (1y wired to it), 3=vcc (1k from
+        // the rail), 4=1a (spdt: sel 0 to gnd, 1 to the rail).
+        let p = program(5, 6, vec![
+            source(0, 1, 0, 5.0),
+            source(1, 2, 0, 4.5),
+            resistor(2, 1, 3, 1000.0),
+            spdt(3, 4, 0, 1, 0.0),
+            ls04(4, 3, 0, [4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [false; 12], 0.0, 20e-9),
+        ]);
+        let (s, rv, f) = (5.0, 1000.0, 4.5);
+        // 1a LOW -> 1y HIGH: R_out from the 4.5 V source into vcc, in parallel
+        // with the feed. 1a HIGH -> 1y LOW: R_out goes to gnd, vcc sees only the feed.
+        let high = (s / rv + f / R_OUT) / (1.0 / rv + 1.0 / R_OUT);
+        let mut engine = Engine::load(&p).unwrap();
+        assert!((engine.voltages()[3] - high).abs() < 1e-6, "at load vcc = {}, hand solution {high}", engine.voltages()[3]);
+        assert!((engine.currents()[1] - (high - f) / R_OUT).abs() < 1e-6, "the 4.5 V source absorbs what vcc sends back");
+
+        let (before, at) = across_the_commit(&mut engine, &[(3, 0, 1.0)], 20e-9, &[3]);
+        assert!((before[0] - high).abs() < 1e-6, "vcc must not move before the commit, got {}", before[0]);
+        assert!((at[0] - s).abs() < 1e-6, "vcc = {} at the commit, hand solution {s}: the stamp left with 1y's HIGH", at[0]);
+        assert!((engine.currents()[1] - (-f / R_OUT)).abs() < 1e-6, "the 4.5 V source now feeds 1y LOW into gnd: {}", engine.currents()[1]);
+
+        let (_, back) = across_the_commit(&mut engine, &[(3, 0, 0.0)], 20e-9, &[3]);
+        assert!((back[0] - high).abs() < 1e-6, "back to HIGH, vcc = {}, hand solution {high}", back[0]);
+    }
+
+    #[test]
+    fn gap2_an_ic_output_on_a_fixed_node_moves_a_free_gnd_at_the_commit() {
+        // vcc on the rail, gnd free (10 ohm to the datum): only 1y LOW stamps
+        // into gnd's partition. 0=datum, 1=5 V rail, 2=1.5 V source, 3=IC
+        // gnd, 4=1a.
+        let p = program(5, 6, vec![
+            source(0, 1, 0, 5.0),
+            source(1, 2, 0, 1.5),
+            resistor(2, 3, 0, 10.0),
+            spdt(3, 4, 0, 1, 0.0),
+            ls04(4, 1, 3, [4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [false; 12], 0.0, 20e-9),
+        ]);
+        let low_gnd = (1.5 / R_OUT) / (1.0 / 10.0 + 1.0 / R_OUT);
+        let mut engine = Engine::load(&p).unwrap();
+        assert!(engine.voltages()[3].abs() < 1e-6, "1y HIGH stamps into the rail, gnd sits at the datum");
+        let (before, at) = across_the_commit(&mut engine, &[(3, 0, 1.0)], 20e-9, &[3]);
+        assert!(before[0].abs() < 1e-6);
+        assert!((at[0] - low_gnd).abs() < 1e-6, "gnd = {} at the commit, hand solution {low_gnd}", at[0]);
+    }
+
+    #[test]
+    fn gap2_with_both_supplies_free_one_commit_re_solves_both_sides() {
+        // vcc 10 ohm from the rail, gnd 10 ohm to the datum, 1y on the 1.5 V
+        // source. HIGH loads vcc (4.4167 V, gnd 0); LOW loads gnd (5 V, 0.25 V).
+        // The stamp leaves one supply and lands in the other in one commit.
+        let p = program(6, 6, vec![
+            source(0, 1, 0, 5.0),
+            source(1, 2, 0, 1.5),
+            resistor(2, 1, 3, 10.0),
+            resistor(3, 4, 0, 10.0),
+            spdt(4, 5, 0, 1, 0.0),
+            ls04(5, 3, 4, [5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [false; 12], 0.0, 20e-9),
+        ]);
+        let pb = crate::partition::build(&p).unwrap();
+        assert_eq!(pb.local_index[3].unwrap().0, pb.local_index[4].unwrap().0, "vcc and gnd share the partition the driver dirties");
+        let high_vcc = (5.0 / 10.0 + 1.5 / R_OUT) / (1.0 / 10.0 + 1.0 / R_OUT);
+        let low_gnd = (1.5 / R_OUT) / (1.0 / 10.0 + 1.0 / R_OUT);
+        let mut engine = Engine::load(&p).unwrap();
+        assert!((engine.voltages()[3] - high_vcc).abs() < 1e-6 && engine.voltages()[4].abs() < 1e-6);
+        let (_, at) = across_the_commit(&mut engine, &[(4, 0, 1.0)], 20e-9, &[3, 4]);
+        assert!((at[0] - 5.0).abs() < 1e-6, "vcc = {} at the commit, hand solution 5", at[0]);
+        assert!((at[1] - low_gnd).abs() < 1e-6, "gnd = {} at the commit, hand solution {low_gnd}", at[1]);
+    }
+
+    /// An `ne555` with no catalog window (2-18 V), pins in the record's
+    /// order, `logic` in TRIG/OUT/RST/CV/THR/DIS order, digital slot base 0.
+    fn ne555_dev(ci: usize, vcc: usize, gnd: usize, logic: [usize; 6]) -> Device {
+        let mut params = vec![0.0; ic_param::COUNT];
+        params[ic_param::VCC_MIN] = 2.0;
+        params[ic_param::VCC_MAX] = 18.0;
+        params[ic_param::NOMINAL] = 5.0;
+        let mut pins = vec![pin(vcc), pin(gnd)];
+        pins.extend(logic.map(pin));
+        Device { kind: kinds::NE555, component_index: ci, pins, params, blob: vec![0.0; 7] }
+    }
+
+    #[test]
+    fn gap2_a_555_out_on_a_fixed_node_moves_a_free_vcc_at_the_commit() {
+        // 0=gnd, 1=5 V rail, 2=4.5 V source (OUT wired to it), 3=vcc (1k from
+        // the rail), 4=TRIG and THR (spdt: sel 0 to gnd sets, 1 to the rail
+        // resets), RST on the rail, CV and DIS on gnd. DIS on a free node
+        // would join vcc's partition, and its own commit (LOW with the reset)
+        // would re-solve vcc and hide a missing dirty mark on OUT's.
+        // OUT stamps f/20 S to vcc and (1-f)/20 S to gnd with
+        // f = 1 - min(0.5, 0.1/vS) HIGH and min(0.5, 0.1/vS) LOW (NE555 point
+        // 7), and vS is vcc itself, so each vcc is the fixed point of
+        // vcc = (S/Rv + g F) / (1/Rv + g + 1e-12), g = f/20.
+        let p = program(5, 1, vec![
+            source(0, 1, 0, 5.0),
+            source(1, 2, 0, 4.5),
+            resistor(2, 1, 3, 1000.0),
+            spdt(3, 4, 0, 1, 0.0),
+            ne555_dev(4, 3, 0, [4, 2, 1, 0, 4, 0]),
+        ]);
+        let vcc_with_out = |high: bool| {
+            let mut n = 4.5f64;
+            for _ in 0..200 {
+                let f = if high { 1.0 - (0.1 / n).min(0.5) } else { (0.1 / n).min(0.5) };
+                let g = f / 20.0;
+                n = (5.0 / 1000.0 + g * 4.5) / (1.0 / 1000.0 + g + 1e-12);
+            }
+            n
+        };
+        let (high, low) = (vcc_with_out(true), vcc_with_out(false));
+        assert!((high - low).abs() > 0.1, "the two states must differ for this to test anything: {high} vs {low}");
+
+        let mut engine = Engine::load(&p).unwrap();
+        assert_eq!(engine.digital_slots()[0], 1.0, "TRIG on gnd sets OUT HIGH at load");
+        assert!((engine.voltages()[3] - high).abs() < 1e-4, "at load vcc = {}, hand solution {high}", engine.voltages()[3]);
+
+        // OUT, like every 555 commit, lands in the same instant as the
+        // comparator that requested it: THR above 2/3 vS resets the latch.
+        let t0 = engine.time();
+        engine.set_params(&[(3, 0, 1.0)]).unwrap();
+        engine.advance(t0).unwrap();
+        assert_eq!(engine.digital_slots()[0], 0.0, "THR on the rail resets OUT LOW");
+        assert!((engine.voltages()[3] - low).abs() < 1e-4, "vcc = {} at the commit, hand solution {low}", engine.voltages()[3]);
     }
 }

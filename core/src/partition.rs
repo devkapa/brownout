@@ -67,6 +67,16 @@
 //! ([`PartitionBuild::holds_junction`]): static when it holds no counted
 //! capacitor, stepped otherwise, never closed-form. A junction across two
 //! fixed nodes belongs to no partition, and a `burnt` device has none.
+//!
+//! **Two W1e follow-up rules keep an IC's supply and its pins in step.** A
+//! `ClosedForm` partition holding a watched read pin of an IC whose supply is
+//! free in a `Stepped` partition is promoted to `Stepped`
+//! ([`is_watched_read_pin`]): a closed-form crossing is solved once for one
+//! threshold, and that supply moves it continuously. And an IC with both
+//! supplies free whose output-capable pin sits on a fixed, non-datum node has
+//! its two supplies unioned ([`drives_a_fixed_node`]): that driver has no
+//! partition of its own, `devices::ics::register` dirties its free supply's,
+//! and a driver dirties exactly one.
 
 use crate::devices::led::{self, Junction};
 use crate::digital;
@@ -275,6 +285,19 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
                 uf.union(supply, node);
             }
         }
+        // W1e follow-up, gap 2: an output-capable pin on a fixed, non-datum
+        // node is not in any partition, so nothing above joined it to the
+        // supply, yet its driver stamps `1/R_out` from that fixed node into
+        // whichever supply is free (HIGH into `vcc`, LOW into `gnd`, and a
+        // 555's OUT into both). `devices::ics::register` hands such a driver
+        // the partition of its free supply, and a driver dirties exactly one
+        // partition, so with both supplies free they must share it or a
+        // commit that moves the stamp from `vcc` to `gnd` would re-solve
+        // only one side. A pin on the datum stamps nothing (finding 9), so
+        // it never needs this.
+        if free_supply.len() == 2 && output_capable.iter().any(|&i| drives_a_fixed_node(&ic, i, &fixed)) {
+            uf.union(free_supply[0], free_supply[1]);
+        }
     }
 
     // Group free nodes into partitions by union-find representative,
@@ -401,7 +424,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     }
 
     let force_stepped = program.options.force_stepped;
-    let kinds_by_partition: Vec<PartitionKind> = capacitor_count
+    let mut kinds_by_partition: Vec<PartitionKind> = capacitor_count
         .into_iter()
         .map(classify)
         .enumerate()
@@ -414,6 +437,39 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         })
         .collect();
 
+    // W1e follow-up, gap 1 (W1c point 4): a closed-form node cannot be
+    // watched against a supply that moves between events, because the
+    // closed-form crossing is solved once for a fixed threshold. A free
+    // supply in a Stepped partition is exactly that (a Static one only moves
+    // at events, and the watch is re-aimed then). So a ClosedForm partition
+    // holding a watched read pin of an IC with such a supply is promoted to
+    // Stepped, where the watch follows the supply (`solve::stepped`).
+    // One pass is enough: a promoted partition holds no free IC supply
+    // (that would already have made it Stepped above), so the promotion
+    // never creates a new Stepped supply for a later IC, and it never turns
+    // a Static partition dynamic.
+    for device in &program.devices {
+        if !digital::is_ic(device.kind) {
+            continue;
+        }
+        let ic = digital::IcRecord::from_device(device);
+        let supply_in_stepped =
+            [ic.vcc.node, ic.gnd.node].iter().any(|&node| matches!(local_index[node], Some((p, _)) if kinds_by_partition[p] == PartitionKind::Stepped));
+        if !supply_in_stepped {
+            continue;
+        }
+        for i in 0..ic.logic.len() {
+            if !is_watched_read_pin(&ic, i) {
+                continue;
+            }
+            if let Some((p, _)) = local_index[ic.logic[i].node] {
+                if kinds_by_partition[p] == PartitionKind::ClosedForm {
+                    kinds_by_partition[p] = PartitionKind::Stepped;
+                }
+            }
+        }
+    }
+
     // W1c step 2b (this worker's own scope, README's "Kernel semantics: the
     // digital core (W1c)" contract point 2's stamping half): an IC driver or
     // floating pull landing in a non-`Static` partition used to be declined
@@ -424,6 +480,27 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // this topology any more — every partition kind accepts every IC
     // footprint the union rule above can produce.
     Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions, holds_junction })
+}
+
+/// Whether logic pin `logic_index` of `ic` is one whose node voltage a
+/// crossing watch follows (W1c point 4, NE555 point 5): a non-open pin that
+/// is not output-capable, and for a 555 exactly TRIG, RST and THR (CV is never
+/// read, so a bypass capacitor on it must not be promoted or re-aimed).
+/// Shared by `build`'s promotion and `solve`'s watch registration so the two
+/// can never disagree about which pins a supply can strand.
+pub(crate) fn is_watched_read_pin(ic: &digital::IcRecord, logic_index: usize) -> bool {
+    if digital::is_ne555(ic.kind) {
+        return matches!(logic_index, digital::NE555_TRIG | digital::NE555_RST | digital::NE555_THR);
+    }
+    !ic.logic[logic_index].open && !digital::output_capable(ic.kind).contains(&logic_index)
+}
+
+/// Whether output-capable pin `logic_index` sits on a fixed node other than
+/// the datum, so its driver stamps into a free supply's partition and not
+/// its own (`build`'s gap 2 union, `devices::ics::register`).
+pub(crate) fn drives_a_fixed_node(ic: &digital::IcRecord, logic_index: usize, fixed: &[Option<f64>]) -> bool {
+    let node = ic.logic[logic_index].node;
+    node != 0 && fixed[node].is_some()
 }
 
 /// Fixed-point propagation from node 0 (contract, point 1). Returns each
@@ -853,5 +930,119 @@ mod tests {
         let mut p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0), led(3, 2, 0, 0.0)]);
         p.options.force_stepped = true;
         assert_eq!(kind_of(&build(&p).unwrap(), 2), PartitionKind::Stepped);
+    }
+
+    // ---- W1e follow-up, gap 1: a watched read pin whose supply is free in a
+    // Stepped partition promotes its closed-form partition ------------------
+
+    #[derive(Clone, Copy)]
+    enum Supply {
+        Fixed,
+        Static,
+        Stepped,
+    }
+
+    /// 0=gnd, 1=5 V rail, 2=the IC's vcc (the rail itself for `Fixed`; 10
+    /// ohm from it for `Static`; with a 1 uF decoupling capacitor as well for
+    /// `Stepped`), 3=1a (10k from the rail and 1 uF to gnd: one capacitor,
+    /// closed-form by count), 4=1y. Every other logic pin is on the datum.
+    fn read_pin_program(supply: Supply) -> Program {
+        let mut devices = vec![source(0, 1, 0, 5.0), resistor(1, 1, 3, 10_000.0), capacitor(2, 3, 0)];
+        let vcc = match supply {
+            Supply::Fixed => 1,
+            Supply::Static => {
+                devices.push(resistor(3, 1, 2, 10.0));
+                2
+            }
+            Supply::Stepped => {
+                devices.push(resistor(3, 1, 2, 10.0));
+                devices.push(capacitor(4, 2, 0));
+                2
+            }
+        };
+        devices.push(ls04(5, vcc, 0, [3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        program(5, devices)
+    }
+
+    #[test]
+    fn a_closed_form_read_pin_partition_is_promoted_when_the_ic_supply_is_free_in_a_stepped_partition() {
+        let pb = build(&read_pin_program(Supply::Stepped)).unwrap();
+        let (p_vcc, _) = pb.local_index[2].unwrap();
+        let (p_a, _) = pb.local_index[3].unwrap();
+        assert_eq!(pb.kinds[p_vcc], PartitionKind::Stepped, "the supply's own partition (a free IC supply beside a capacitor)");
+        assert_ne!(p_a, p_vcc, "a read pin is never unioned with its IC's supply");
+        assert_eq!(pb.kinds[p_a], PartitionKind::Stepped, "one capacitor makes it closed-form by count; the moving supply promotes it");
+    }
+
+    #[test]
+    fn a_closed_form_read_pin_partition_stays_closed_form_with_a_fixed_or_static_supply() {
+        for supply in [Supply::Fixed, Supply::Static] {
+            let pb = build(&read_pin_program(supply)).unwrap();
+            let (p_a, _) = pb.local_index[3].unwrap();
+            assert_eq!(pb.kinds[p_a], PartitionKind::ClosedForm, "a supply that moves only at events is re-aimed, not stepped");
+        }
+    }
+
+    #[test]
+    fn only_a_555s_trig_rst_and_thr_promote_a_partition_and_its_cv_does_not() {
+        // 0=gnd, 1=5 V rail, 2=vcc (10 ohm from the rail + 1 uF: Stepped),
+        // 3=TRIG and 5=CV, each on its own 10k/1 uF from the rail
+        // (closed-form by count), 4=OUT, 6=DIS. RST on the rail, THR on gnd.
+        let p = program(7, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 10.0),
+            capacitor(2, 2, 0),
+            resistor(3, 1, 3, 10_000.0),
+            capacitor(4, 3, 0),
+            resistor(5, 1, 5, 10_000.0),
+            capacitor(6, 5, 0),
+            ne555_dev(7, 2, 0, [3, 4, 1, 5, 0, 6]),
+        ]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.kinds[pb.local_index[2].unwrap().0], PartitionKind::Stepped);
+        assert_eq!(pb.kinds[pb.local_index[3].unwrap().0], PartitionKind::Stepped, "TRIG is watched");
+        assert_eq!(pb.kinds[pb.local_index[5].unwrap().0], PartitionKind::ClosedForm, "CV is never read, so its bypass capacitor stays closed-form");
+    }
+
+    /// An `ne555` with no catalog window, pins in the record's order, `logic`
+    /// in TRIG/OUT/RST/CV/THR/DIS order.
+    fn ne555_dev(ci: usize, vcc: usize, gnd: usize, logic: [usize; 6]) -> Device {
+        let mut params = vec![0.0; ic_param::COUNT];
+        params[ic_param::VCC_MIN] = 2.0;
+        params[ic_param::VCC_MAX] = 18.0;
+        params[ic_param::NOMINAL] = 5.0;
+        let mut pins = vec![pin(vcc), pin(gnd)];
+        pins.extend(logic.map(pin));
+        Device { kind: kinds::NE555, component_index: ci, pins, params, blob: vec![0.0; 7] }
+    }
+
+    // ---- gap 2: a driver on a fixed node joins both of its free supplies --
+
+    /// 0=datum, 1=5 V rail, 2=1.5 V source, 3=vcc (10 ohm from the rail),
+    /// 4=gnd (10 ohm to the datum), 1y on `y_node`. Every other output is on
+    /// the datum and every input too, so 1y is the only pin that could join
+    /// the supplies.
+    fn both_supplies_free(y_node: usize) -> Program {
+        program(5, vec![
+            source(0, 1, 0, 5.0),
+            source(1, 2, 0, 1.5),
+            resistor(2, 1, 3, 10.0),
+            resistor(3, 4, 0, 10.0),
+            ls04(4, 3, 4, [0, y_node, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ])
+    }
+
+    #[test]
+    fn an_output_on_a_fixed_node_joins_the_two_free_supplies_of_its_ic() {
+        let pb = build(&both_supplies_free(2)).unwrap();
+        assert_eq!(pb.local_index[3].unwrap().0, pb.local_index[4].unwrap().0, "one driver dirties one partition, and its stamp is HIGH into vcc, LOW into gnd");
+    }
+
+    #[test]
+    fn an_output_on_the_datum_leaves_the_two_free_supplies_apart() {
+        // A pin on the datum stamps nothing, so there is nothing to keep in
+        // one partition and the supplies stay as their own resistors make them.
+        let pb = build(&both_supplies_free(0)).unwrap();
+        assert_ne!(pb.local_index[3].unwrap().0, pb.local_index[4].unwrap().0);
     }
 }

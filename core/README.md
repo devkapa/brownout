@@ -784,8 +784,26 @@ their own, and the source KCL does with W1a point 2's branch fold.
    supply node is stepped, because R_out then moves with its state. So is a
    dynamic partition holding a 74ls245 `a`/`b` pin: those pins are read and
    driven, a closed-form crossing watch cannot follow a pin its own IC drives,
-   and a stepped partition re-reads its ICs after every step. When every
+   and a stepped partition re-reads its ICs after every step. So is a
+   dynamic partition holding a watched read pin (point 4) of an IC whose
+   `vcc` or `gnd` is free in a stepped partition: a closed-form crossing is
+   solved once, for one threshold, and that supply moves the threshold
+   between events. In code, `partition::build` promotes such a closed-form
+   partition after the first classification, in one pass (a promoted
+   partition holds no free IC supply, so it makes no new stepped supply, and
+   a static partition is never made dynamic); a 555's watched pins are TRIG,
+   RST and THR, so a bypass capacitor on CV promotes nothing. When every
    supply node is fixed, the power is constant and the solve is direct.
+
+   A driver on a fixed node other than the datum belongs to no partition, but
+   its stamp lands in the partition of whichever supply is free: HIGH into
+   `vcc`, LOW into `gnd`, a 555's OUT into both, its DIS into `gnd`.
+   `devices::ics::register` therefore registers it against the partition of
+   its free `vcc`, else its free `gnd`, so its commit dirties that partition
+   and re-solves the supply at the commit instant. A driver dirties exactly
+   one partition, so an IC with both supplies free and an output-capable pin
+   on such a node has its two supplies unioned by `partition::build`. A pin on
+   the datum stamps nothing (point 8) and needs neither.
 4. **Reads** (§1.4), at each reader evaluation, from the solved voltages,
    relative to `V(gnd)`:
    - an `OPEN_HIGH` pin that is `OPEN` reads 1;
@@ -811,13 +829,33 @@ their own, and the source KCL does with W1a point 2's branch fold.
    after every step, including the steps a horizon clamp takes (W1a point 5).
    A watch's thresholds come from the IC's live supply voltages. So an IC
    whose supply sits in a static partition is watched too, and its watches
-   are re-aimed whenever that supply moves. Only an IC with a supply node in
-   a dynamic partition relies on the stepped re-read instead (a 555 on a
-   stepped partition is watched as well). In code,
-   `register_ic_read_pin_watches` skips code 40 in its generic loop and
-   registers `digital::ne555::watch_thresholds`, and
-   `add_watch_dependent_partitions` re-aims the partitions holding pins 2, 4
-   and 6. `watch_node` and `ThresholdFn` already serve stepped partitions.
+   are re-aimed whenever that supply moves. A pin on a stepped partition is
+   watched whatever its supply, as a 555's is, and one on a closed-form
+   partition only when the supply is fixed or static (point 3 promotes any
+   other). In code, `register_ic_read_pin_watches` skips code 40 in its
+   generic loop and registers `digital::ne555::watch_thresholds`, and
+   `add_watch_dependent_partitions` re-aims the partitions holding a watched
+   pin (pins 2, 4 and 6 of a 555) of an IC whose supply is static, or is
+   stepped and being re-solved (its trial is discarded, and a dependent's
+   crossing was aimed at it). `watch_node` and `ThresholdFn` serve stepped
+   partitions.
+
+   A supply that moves moves the threshold, so a stepped crossing is found
+   against the supply's value at the crossing instant. The thresholds are read
+   at the start and end of each planned step and at each bisection trial, from
+   that instant's state: this partition's nodes from the trial, and a supply in
+   another stepped partition from that partition's pending trial (a parabola
+   through its last two commits and the trial's end, a line right after a
+   discontinuity). The watching partition's step never runs past that trial's
+   end, and before it plans, and before the IC is read at one of its steps,
+   each supply partition is brought to that instant by a real step from its
+   last commit and planned afresh. So the IC reads the supply the crossing was
+   aimed at, and the miss is the supply partition's own step-control
+   accuracy, within W0's tolerance on the threshold (100 uV + 1e-3
+   relative). A supply cycle between partitions plans the innermost against
+   the trial it already has. Partitions otherwise advance independently, each
+   on its own `Step` events, and an IC evaluated at an event of one of them
+   reads the others as last published.
 5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
    0.01)` of the evaluation time; `n = finish(hashState, bucket) /
    0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every
@@ -1554,15 +1592,12 @@ records").
        across a node that did not move.
      - A supply node on a dynamic partition: that partition is stepped
        (point 6), and the watches are registered all the same. Each step
-       plan reads the thresholds from the supply voltages published at the
-       step's start, and a step that shows a crossing is bisected onto it,
-       so the threshold lags the supply by at most one step. W1c's ICs
-       register no watch in this case (W1c point 4's last sentence;
-       `register_ic_read_pin_watches` cites the closed-form backward solve).
-       A stepped crossing is found by bisecting real steps, with no backward
-       solve, and without a watch a 555 would switch only at step ends,
-       coarser than classic's interpolated split. A supply on a hub rail is
-       W1f's.
+       plan reads the thresholds from the supply at the trial's own instant,
+       and a step that shows a crossing is bisected onto it, so the
+       threshold is the supply's value at the crossing (W1c point 4). W1c's
+       ICs register the same watch on a stepped partition. A stepped
+       crossing is found by bisecting real steps, with no backward solve. A
+       supply on a hub rail is W1f's.
 6. **Partitions** (W1c points 2-3). OUT (logic index 1) and DIS (5) are the
    output-capable pins: each free one joins every free supply pin. TRIG,
    RST, THR and CV join nothing through the 555.
@@ -1753,24 +1788,10 @@ records").
          passives, and for the sources. A disagreement that lasts longer is
          never excused.
 
-**Known gaps (W1e follow-up).** Two gaps inherited from W1c, which no board
-circuit exercises, are closed by a separate W1e change after the 555 and LED
-solver work, with tests:
-- **A watched pin on a closed-form partition with the supply in a dynamic
-  partition.** No watch is registered there, because the supply is not
-  load-stable, so a read at an unrelated event can see a stale closed-form
-  voltage. W1c ICs share the gap, and W1c ICs on a stepped partition with a
-  dynamic supply have no watch at all (point 5's last bullet gives the 555
-  one). A 555's timing network always reaches VCC through RA or R, so it
-  never hits the first case. The fix: promote such a closed-form partition
-  to stepped in `partition.rs`, and let W1c ICs register on stepped
-  partitions as the 555 does.
-- **A driver on a fixed node whose stamp lands in a free supply's
-  partition.** `ics::register` gives such a driver no partition, so its
-  commit dirties nothing, and the supply partition keeps the old stamp until
-  something else re-solves it. For the 555 this is OUT or DIS wired straight
-  to a fixed node while pin 8 or 1 is free. The fix: register the driver
-  against the partition of its free target.
+**Known gaps (W1e follow-up): closed.** The two W1c gaps, a watched pin whose
+supply is free in a stepped partition and a driver on a fixed node whose stamp
+lands in a free supply's partition, are W1c points 3 and 4; fixtures 38 and
+39 cover them.
 
 ## Kernel semantics: events (W1a)
 

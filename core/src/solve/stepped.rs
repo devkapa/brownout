@@ -40,6 +40,19 @@
 //! (`adaptive-step.ts`'s replay path: "if the snapshot had BE pending, call
 //! `markDiscontinuity()`" before the SECOND half too).
 //!
+//! **A watched IC's supply moves the threshold, and is read at the instant.**
+//! A watch's thresholds come from its IC's supply, so a crossing is the node
+//! meeting a threshold that is itself moving. `find_crossing` and the
+//! bisection read the thresholds from the state at each trial's own instant:
+//! this partition's nodes from the trial, and a supply in ANOTHER Stepped
+//! partition from that partition's pending trial ([`SupplyTrace`], a parabola
+//! through its last two commits and the trial's end). So this partition's step
+//! never runs past the nearest supply trial's end, and
+//! [`SteppedSolver::sync_supplies`] brings each supply partition to the
+//! planning instant first, so an IC evaluated at the crossing reads the same
+//! supply the crossing was aimed at. Partitions otherwise advance
+//! independently, each on its own `Step` events.
+//!
 //! **Crossings inside a step are REFINED ITERATIVELY** (spec D11): a linear
 //! first estimate of the crossing time (as pec3 does) is followed by
 //! bisection on `h` itself, re-taking the real BE/trap step at each trial
@@ -59,7 +72,7 @@ use crate::program::Program;
 use crate::solve::newton;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base, stamp_two_terminal,
-    DynCapacitor, DynShape, Threshold, ThresholdFn,
+    DynCapacitor, DynShape, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -325,6 +338,17 @@ struct Partition {
     /// (core/README.md, "A failed advance").
     steps_taken: u64,
     newton_iterations: u64,
+    /// Other Stepped partitions holding a supply node of an IC that watches
+    /// one of this partition's nodes (`SteppedSolver::add_supply_dependency`).
+    /// A build-time fact, like `holds_free_ic_supply`, so not part of any
+    /// snapshot: see [`SteppedSolver::sync_supplies`] for what it drives.
+    supply_deps: Vec<usize>,
+    /// The state before the last committed step (`prev_t`, `prev_x`), valid
+    /// while `has_prev`: a dependent partition interpolates this one's
+    /// pending trial with it ([`SupplyTrace`]). Dropped at a discontinuity.
+    prev_t: f64,
+    prev_x: Vec<f64>,
+    has_prev: bool,
     /// Whether this partition holds a free IC supply node (W1c contract
     /// point 3) — a build-time topology fact (`SteppedSolver::build`
     /// computes it once, from `collect_ics`/`local_index`), not part of any
@@ -372,6 +396,10 @@ impl Partition {
             watches: HashMap::new(),
             steps_taken: 0,
             newton_iterations: 0,
+            supply_deps: Vec::new(),
+            prev_t: t0,
+            prev_x: Vec::new(),
+            has_prev: false,
             holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
         }
     }
@@ -402,6 +430,9 @@ struct PartitionSnapshot {
     pend_x: Vec<f64>,
     pend_vc: Vec<f64>,
     pend_i: Vec<f64>,
+    prev_t: f64,
+    prev_x: Vec<f64>,
+    has_prev: bool,
 }
 
 /// Owns every `Stepped` partition (>= 2 capacitors, or a single one under
@@ -427,6 +458,10 @@ pub struct SteppedSolver {
     /// last bullet: "resolves of dynamic partitions must also report IC
     /// readers of nodes that changed, as static does").
     node_to_ic_readers: HashMap<usize, Vec<usize>>,
+    /// The voltage array a watch's thresholds are read from while a step is
+    /// planned ([`ThresholdEnv`]), kept between plans so a plan costs a copy
+    /// and not an allocation. No state: it is overwritten before every use.
+    threshold_scratch: Vec<f64>,
 }
 
 impl SteppedSolver {
@@ -469,6 +504,7 @@ impl SteppedSolver {
             ics,
             fixed: fixed.to_vec(),
             node_to_ic_readers,
+            threshold_scratch: Vec::new(),
         }
     }
 
@@ -483,6 +519,24 @@ impl SteppedSolver {
         let part = self.partitions.get_mut(&p_idx).expect("node_owner and partitions built together");
         part.watches.entry(local).or_default().push((reader, thresholds));
         true
+    }
+
+    /// Records that the watch on `node` reads `supply_node` for its
+    /// thresholds (`solve::register_ic_read_pin_watches`). Only a supply in
+    /// ANOTHER Stepped partition matters: one in the same partition comes out
+    /// of every trial step's own solution, and a fixed or Static one moves
+    /// only at events, which re-aim the watch (`add_watch_dependent_partitions`).
+    pub fn add_supply_dependency(&mut self, node: usize, supply_node: usize) {
+        let (Some(&(watcher, _)), Some(&(supplier, _))) = (self.node_owner.get(&node), self.node_owner.get(&supply_node)) else {
+            return;
+        };
+        if watcher == supplier {
+            return;
+        }
+        let part = self.partitions.get_mut(&watcher).expect("node_owner and partitions built together");
+        if !part.supply_deps.contains(&supplier) {
+            part.supply_deps.push(supplier);
+        }
     }
 
     pub fn steps_taken(&self) -> f64 {
@@ -540,7 +594,7 @@ impl SteppedSolver {
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
-        for &p_idx in dirty {
+        for p_idx in self.suppliers_first(dirty) {
             if !self.partitions.contains_key(&p_idx) {
                 continue;
             }
@@ -552,6 +606,7 @@ impl SteppedSolver {
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
+                part.has_prev = false;
                 part.h = POST_EVENT_H;
                 part.changing = true;
                 part.version += 1;
@@ -570,9 +625,21 @@ impl SteppedSolver {
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
             Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-            self.plan_and_schedule(p_idx, now, drivers, live_params, voltages)?;
+            self.plan_and_schedule(p_idx, now, catchup_drivers, drivers, live_params, voltages, currents, &mut readers)?;
         }
         Ok(readers)
+    }
+
+    /// `dirty` reordered so a partition that supplies another dirty
+    /// partition's watch is re-solved first: the dependent's plan then reads
+    /// the supply's fresh trial and not the one the discontinuity is about to
+    /// discard (`sync_supplies`). Stable otherwise, and a supply cycle simply
+    /// keeps the caller's order.
+    fn suppliers_first(&self, dirty: &[usize]) -> Vec<usize> {
+        let supplies_a_dirty_partition =
+            |p: usize| dirty.iter().any(|&q| q != p && self.partitions.get(&q).is_some_and(|part| part.supply_deps.contains(&p)));
+        let (first, rest): (Vec<usize>, Vec<usize>) = dirty.iter().copied().partition(|&p| supplies_a_dirty_partition(p));
+        first.into_iter().chain(rest).collect()
     }
 
     /// A due, still-current `Step` event: commits the pending trial, then
@@ -596,7 +663,7 @@ impl SteppedSolver {
         let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
-        self.plan_and_schedule(partition, commit_time, drivers, live_params, voltages)?;
+        self.plan_and_schedule(partition, commit_time, drivers, drivers, live_params, voltages, currents, &mut readers)?;
         Ok(readers)
     }
 
@@ -604,7 +671,11 @@ impl SteppedSolver {
     /// fast-forwards every partition still behind `t_end`, publishes it, and
     /// re-plans from there so the next `advance` has a live pending step.
     pub fn sync_to(&mut self, t_end: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
-        let ids: Vec<usize> = self.partitions.keys().copied().collect();
+        let mut ids: Vec<usize> = self.partitions.keys().copied().collect();
+        // A map's order is arbitrary, and a partition's plan now reads the
+        // ones that supply it (`sync_supplies`): fix the order so a run does
+        // not depend on it.
+        ids.sort_unstable();
         let mut readers = Vec::new();
         for p_idx in ids {
             if self.partitions[&p_idx].t >= t_end - 1e-15 {
@@ -634,7 +705,7 @@ impl SteppedSolver {
             // `stepped::tests::sync_to_reports_ic_readers_of_changed_nodes`
             // (below).
             Self::report_changed_ic_readers(&self.partitions[&p_idx], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
-            self.plan_and_schedule(p_idx, t_end, drivers, live_params, voltages)?;
+            self.plan_and_schedule(p_idx, t_end, drivers, drivers, live_params, voltages, currents, &mut readers)?;
         }
         Ok(readers)
     }
@@ -665,6 +736,9 @@ impl SteppedSolver {
                             pend_x: part.pend_x.clone(),
                             pend_vc: part.pend_vc.clone(),
                             pend_i: part.pend_i.clone(),
+                            prev_t: part.prev_t,
+                            prev_x: part.prev_x.clone(),
+                            has_prev: part.has_prev,
                         },
                     )
                 })
@@ -690,6 +764,9 @@ impl SteppedSolver {
                 part.pend_x = s.pend_x;
                 part.pend_vc = s.pend_vc;
                 part.pend_i = s.pend_i;
+                part.prev_t = s.prev_t;
+                part.prev_x = s.prev_x;
+                part.has_prev = s.has_prev;
             }
         }
     }
@@ -741,8 +818,10 @@ impl SteppedSolver {
     fn commit(part: &mut Partition) {
         debug_assert!(part.has_pend, "commit called with nothing pending");
         part.has_pend = false;
+        part.prev_t = part.t;
+        part.has_prev = true;
         part.t = part.pend_t;
-        part.x = std::mem::take(&mut part.pend_x);
+        part.prev_x = std::mem::replace(&mut part.x, std::mem::take(&mut part.pend_x));
         part.vc = std::mem::take(&mut part.pend_vc);
         part.i_prev = std::mem::take(&mut part.pend_i);
         part.be_next_step = false;
@@ -774,12 +853,111 @@ impl SteppedSolver {
         Ok(())
     }
 
-    fn plan_and_schedule(&mut self, p_idx: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn plan_and_schedule(
+        &mut self,
+        p_idx: usize,
+        now: f64,
+        catchup_drivers: &[Driver],
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+        readers: &mut Vec<DeviceId>,
+    ) -> Result<(), String> {
+        let mut visiting = vec![p_idx];
+        self.plan_and_schedule_in(p_idx, now, catchup_drivers, drivers, live_params, voltages, currents, readers, &mut visiting)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_and_schedule_in(
+        &mut self,
+        p_idx: usize,
+        now: f64,
+        catchup_drivers: &[Driver],
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+        readers: &mut Vec<DeviceId>,
+        visiting: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        self.sync_supplies(p_idx, now, catchup_drivers, drivers, live_params, voltages, currents, readers, visiting)?;
         self.plan_step(p_idx, f64::INFINITY, drivers, live_params, voltages)?;
         let part = &self.partitions[&p_idx];
-        let _ = now;
         self.scheduled.push((part.pend_t, p_idx, part.version));
         Ok(())
+    }
+
+    /// Brings every OTHER Stepped partition that supplies one of `p_idx`'s
+    /// watched ICs (`supply_deps`) up to `now`, publishes it, and plans it
+    /// afresh, before `p_idx` itself is planned or its readers are read.
+    ///
+    /// Stepped partitions advance independently, each on its own `Step`
+    /// events, so at `now` a supply's published voltage is its last commit,
+    /// which can be a whole step old. Two things need it current. The plan:
+    /// it finds a crossing against the supply's value at the crossing
+    /// instant, which it takes from the supply's pending trial
+    /// ([`SupplyTrace`]), so that trial must start at `now` and reach past
+    /// it. The read: the IC evaluated at this event compares the pin with
+    /// thresholds derived from the published supply, and a stale one can
+    /// leave a pin the plan landed 1e-9 V past its threshold on the wrong
+    /// side of the one the IC actually reads. The supply's own watchers and
+    /// the readers of the nodes it moved are added to `readers`, as any
+    /// committed step's are. `visiting` stops a cycle (an IC whose supply
+    /// sits in the partition of a pin that another IC's supply depends on)
+    /// from recursing; the innermost partition then plans against the
+    /// trial it already has.
+    #[allow(clippy::too_many_arguments)]
+    fn sync_supplies(
+        &mut self,
+        p_idx: usize,
+        now: f64,
+        catchup_drivers: &[Driver],
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+        readers: &mut Vec<DeviceId>,
+        visiting: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        let deps = self.partitions[&p_idx].supply_deps.clone();
+        for b in deps {
+            if visiting.contains(&b) {
+                continue;
+            }
+            let part = &self.partitions[&b];
+            if part.t >= now - 1e-15 && part.has_pend && part.pend_t > now + 1e-15 {
+                continue;
+            }
+            let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+            visiting.push(b);
+            let result = (|| {
+                self.sync_partition(b, now, catchup_drivers, live_params, voltages)?;
+                Self::publish(&self.partitions[&b], live_params, voltages, currents);
+                readers.extend(self.partitions[&b].watches.values().flatten().map(|(id, _)| *id));
+                Self::report_changed_ic_readers(&self.partitions[&b], &old_bits, voltages, &self.node_to_ic_readers, readers);
+                self.plan_and_schedule_in(b, now, catchup_drivers, drivers, live_params, voltages, currents, readers, visiting)
+            })();
+            visiting.pop();
+            result?;
+        }
+        Ok(())
+    }
+
+    /// The Stepped partitions in `p_idx`'s `supply_deps` as trajectories over
+    /// their pending trials, for [`plan_step`](Self::plan_step)'s thresholds.
+    fn supply_traces(&self, p_idx: usize) -> Vec<SupplyTrace> {
+        self.partitions[&p_idx]
+            .supply_deps
+            .iter()
+            .map(|b| {
+                let part = &self.partitions[b];
+                let (t1, x1) = if part.has_pend { (part.pend_t, part.pend_x.clone()) } else { (part.t, part.x.clone()) };
+                let before = (part.has_prev && part.prev_t < part.t).then(|| (part.prev_t, part.prev_x.clone()));
+                SupplyTrace { nodes: part.shape.nodes.clone(), before, t0: part.t, x0: part.x.clone(), t1, x1 }
+            })
+            .collect()
     }
 
     /// pec3's `_planStep` (`:643-687`): the BE/trap step-doubling controller,
@@ -792,9 +970,16 @@ impl SteppedSolver {
     /// partition), which `part`'s own local `x0`/`x1` arrays never carry.
     fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         let option_method = self.method;
+        // Each partition this one's watches take a supply from is a known
+        // trajectory only as far as its pending trial reaches, so a step
+        // never runs past the nearest trial's end (below): inside it the
+        // supply is the trial, interpolated, and a threshold at any instant
+        // of the step is one of its values, not the last published one.
+        let traces = self.supply_traces(p_idx);
         let ics = &self.ics;
         let node_owner = &self.node_owner;
         let fixed = &self.fixed;
+        let scratch = &mut self.threshold_scratch;
         let part = self.partitions.get_mut(&p_idx).unwrap();
         let shape_n = part.shape.n;
         let method = if part.be_next_step { Method::Be } else { option_method };
@@ -803,7 +988,8 @@ impl SteppedSolver {
         let i_prev = part.i_prev.clone();
         let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, fixed, p_idx, iterated: part.iterated() };
 
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t);
+        let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);
         let mut ratio;
         let mut accepted: StepResult;
         loop {
@@ -840,12 +1026,30 @@ impl SteppedSolver {
         part.h = (h * next_step_factor(ratio, method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
 
         // Iterative crossing refinement (this module's doc comment).
-        if let Some((local, threshold)) = find_crossing(part, &x0, &accepted.x, voltages) {
-            let refined_h = refine_crossing_h(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, local, threshold, &mut part.newton_iterations, &ic_ctx)?;
-            h = refined_h;
-            // Deterministic: `refined_h` is an `h` a trial (or the accepted
-            // step itself) already converged at.
-            accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx).map_err(StepError::into_message)?;
+        if !part.watches.is_empty() {
+            let t0 = part.t;
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch);
+            if let Some(crossing) = find_crossing(&part.watches, &x0, t0, &accepted.x, t0 + h, &mut env) {
+                let refined_h = refine_crossing_h(
+                    &part.shape,
+                    live_params,
+                    h,
+                    &vc0,
+                    &x0,
+                    &i_prev,
+                    method,
+                    &part.watches,
+                    crossing,
+                    t0,
+                    &mut env,
+                    &mut part.newton_iterations,
+                    &ic_ctx,
+                )?;
+                h = refined_h;
+                // Deterministic: `refined_h` is an `h` a trial (or the accepted
+                // step itself) already converged at.
+                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx).map_err(StepError::into_message)?;
+            }
         }
 
         part.pend_x = accepted.x;
@@ -902,37 +1106,137 @@ fn rel_error(a: f64, b: f64) -> f64 {
     (a - b).abs() / (ABS_VOLTAGE + REL_TOL * a.abs().max(b.abs()))
 }
 
-/// pec3's crossing search within a planned step (`:668-680`), linear
-/// interpolation between the step's start (`x0`) and its accepted end
-/// (`x1`): the EARLIEST (by interpolated fraction) watched threshold this
-/// step actually crosses, or `None`.
-fn find_crossing(part: &Partition, x0: &[f64], x1: &[f64], voltages: &[f64]) -> Option<(usize, Threshold)> {
-    let mut best: Option<(f64, usize, Threshold)> = None;
-    for (&local, watchers) in &part.watches {
-        let (v0, v1) = (x0[local], x1[local]);
-        if v0 == v1 {
-            continue;
+/// Another Stepped partition's trajectory over its pending trial: `x0` at
+/// `t0` (its last commit) to `x1` at `t1` (the trial's end), or flat when it
+/// has no trial, and `before` the state at the commit before that. What a
+/// threshold that reads a node of that partition sees at any instant `t` in
+/// between: the parabola through the three points (the trial's end alone
+/// would be a straight line). A step's error control bounds its END, and a
+/// trapezoidal step is second order there, so a straight line between the
+/// ends can be off by several millivolts mid-step where the step itself is
+/// good to a fraction of one; the parabola is a whole order better. With no
+/// `before` (a discontinuity just dropped it, or nothing has committed) it
+/// is the line, and the steps right after a discontinuity are short.
+struct SupplyTrace {
+    nodes: Vec<usize>,
+    before: Option<(f64, Vec<f64>)>,
+    t0: f64,
+    x0: Vec<f64>,
+    t1: f64,
+    x1: Vec<f64>,
+}
+
+impl SupplyTrace {
+    fn write(&self, scratch: &mut [f64], t: f64) {
+        if self.t1 <= self.t0 {
+            for (l, &node) in self.nodes.iter().enumerate() {
+                if let Some(slot) = scratch.get_mut(node) {
+                    *slot = self.x0[l];
+                }
+            }
+            return;
         }
-        for (_, thresholds) in watchers {
-            for th in thresholds(voltages) {
-                let ok = if th.rising { v0 < th.value && v1 > th.value } else { v0 > th.value && v1 < th.value };
+        let t = t.clamp(self.t0, self.t1);
+        let f = (t - self.t0) / (self.t1 - self.t0);
+        for (l, &node) in self.nodes.iter().enumerate() {
+            let line = self.x0[l] + f * (self.x1[l] - self.x0[l]);
+            let value = match &self.before {
+                Some((tp, xp)) => {
+                    // The parabola is the line plus a term that vanishes at
+                    // both ends, `k (t - t0)(t - t1)`, with `k` fixed by the
+                    // earlier point `(tp, xp)`.
+                    let at_tp = self.x0[l] + (tp - self.t0) / (self.t1 - self.t0) * (self.x1[l] - self.x0[l]);
+                    let k = (xp[l] - at_tp) / ((tp - self.t0) * (tp - self.t1));
+                    line + k * (t - self.t0) * (t - self.t1)
+                }
+                None => line,
+            };
+            if let Some(slot) = scratch.get_mut(node) {
+                *slot = value;
+            }
+        }
+    }
+}
+
+/// The voltage array a [`ThresholdFn`] is called with while a step is
+/// planned: the published array, with this partition's own nodes replaced by
+/// the step's state at instant `t` and every supply partition's by its
+/// trajectory at `t`. A watched IC's thresholds move with its supply, so
+/// reading them from the array as last published (the start of the step, and
+/// for another partition possibly older still) puts the crossing where the
+/// threshold WAS, not where it is when the node arrives.
+struct ThresholdEnv<'a> {
+    nodes: &'a [usize],
+    traces: &'a [SupplyTrace],
+    scratch: &'a mut Vec<f64>,
+}
+
+impl<'a> ThresholdEnv<'a> {
+    fn new(nodes: &'a [usize], traces: &'a [SupplyTrace], published: &[f64], scratch: &'a mut Vec<f64>) -> Self {
+        scratch.clear();
+        scratch.extend_from_slice(published);
+        ThresholdEnv { nodes, traces, scratch }
+    }
+
+    fn at(&mut self, x: &[f64], t: f64) -> &[f64] {
+        for (l, &node) in self.nodes.iter().enumerate() {
+            if let Some(slot) = self.scratch.get_mut(node) {
+                *slot = x[l];
+            }
+        }
+        for trace in self.traces {
+            trace.write(self.scratch, t);
+        }
+        self.scratch
+    }
+}
+
+/// A watched threshold a step crosses: the watched local node, which of its
+/// watchers, and which of that watcher's thresholds.
+#[derive(Clone, Copy)]
+struct Crossing {
+    local: usize,
+    watcher: usize,
+    index: usize,
+    rising: bool,
+}
+
+/// pec3's crossing search within a planned step (`:668-680`), linear
+/// interpolation between the step's start (`x0` at `t0`) and its accepted end
+/// (`x1` at `t1`): the EARLIEST (by interpolated fraction) watched threshold
+/// this step actually crosses, or `None`. A threshold is a function of the
+/// supply, so it is taken at each end of the step from the supply's value
+/// THEN ([`ThresholdEnv`]), and a crossing is the node's distance from it
+/// changing sign, whichever of the two moved (a supply sweeping a threshold
+/// past a node that stands still is one too).
+fn find_crossing(watches: &HashMap<usize, Vec<(DeviceId, ThresholdFn)>>, x0: &[f64], t0: f64, x1: &[f64], t1: f64, env: &mut ThresholdEnv) -> Option<Crossing> {
+    let mut best: Option<(f64, Crossing)> = None;
+    for (&local, watchers) in watches {
+        for (w, (_, thresholds)) in watchers.iter().enumerate() {
+            let at_start = thresholds(env.at(x0, t0));
+            let at_end = thresholds(env.at(x1, t1));
+            for (k, (th0, th1)) in at_start.iter().zip(&at_end).enumerate() {
+                let (d0, d1) = (x0[local] - th0.value, x1[local] - th1.value);
+                let ok = if th0.rising { d0 < 0.0 && d1 > 0.0 } else { d0 > 0.0 && d1 < 0.0 };
                 if !ok {
                     continue;
                 }
-                let frac = (th.value - v0) / (v1 - v0);
-                if best.is_none_or(|(bf, _, _)| frac < bf) {
-                    best = Some((frac, local, th));
+                let frac = d0 / (d0 - d1);
+                if best.is_none_or(|(bf, _)| frac < bf) {
+                    best = Some((frac, Crossing { local, watcher: w, index: k, rising: th0.rising }));
                 }
             }
         }
     }
-    best.map(|(_, l, th)| (l, th))
+    best.map(|(_, c)| c)
 }
 
 /// Bisects `h` (never pec3's single `[0.02, 0.98]` fraction clamp, spec D11)
 /// until the crossing node lands within [`CROSS_TOLERANCE_V`] of its
 /// threshold (nudged past it, `closed_form::CROSS_NUDGE_V`'s same reasoning
 /// applies here too — landing exactly ON a threshold risks re-triggering).
+/// The threshold is re-read at every trial from the state and the supplies
+/// at the trial's own instant `t0 + h`, so it is the one the node meets.
 #[allow(clippy::too_many_arguments)]
 fn refine_crossing_h(
     shape: &DynShape,
@@ -942,12 +1246,15 @@ fn refine_crossing_h(
     x0: &[f64],
     i_prev: &[f64],
     method: Method,
-    local: usize,
-    threshold: Threshold,
+    watches: &HashMap<usize, Vec<(DeviceId, ThresholdFn)>>,
+    crossing: Crossing,
+    t0: f64,
+    env: &mut ThresholdEnv,
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
 ) -> Result<f64, String> {
-    let target = threshold.value + if threshold.rising { CROSS_TOLERANCE_V } else { -CROSS_TOLERANCE_V };
+    let thresholds = &watches[&crossing.local][crossing.watcher].1;
+    let nudge = if crossing.rising { CROSS_TOLERANCE_V } else { -CROSS_TOLERANCE_V };
     let (mut lo, mut hi) = (0.0f64, h);
     let mut best_h = hi;
     for _ in 0..CROSS_REFINE_MAX_ITERS {
@@ -959,8 +1266,12 @@ fn refine_crossing_h(
             Err(StepError::NoConverge) => return Ok(best_h),
             Err(StepError::Failed(message)) => return Err(message),
         };
-        let v = trial.x[local];
-        let past = if threshold.rising { v >= target } else { v <= target };
+        let Some(threshold) = thresholds(env.at(&trial.x, t0 + mid)).get(crossing.index).copied() else {
+            return Ok(best_h);
+        };
+        let target = threshold.value + nudge;
+        let v = trial.x[crossing.local];
+        let past = if crossing.rising { v >= target } else { v <= target };
         if past {
             hi = mid;
             best_h = mid;
@@ -979,6 +1290,7 @@ mod tests {
     use super::*;
     use crate::partition;
     use crate::program::{Device, Options, PinRecord};
+    use crate::solve::Threshold;
 
     fn pin(node: usize) -> PinRecord {
         PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
@@ -1466,5 +1778,38 @@ mod tests {
         st.resolve_dirty(&[0], 0.05, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         let guesses = hooks::recorded_initial_guesses();
         assert_eq!(guesses[0], committed, "the seed solve is the first Newton after the catch-up");
+    }
+
+    #[test]
+    fn a_threshold_that_reads_another_node_of_the_partition_is_taken_at_the_trial_instant() {
+        // The two-capacitor ladder, with node 3 (the far capacitor) watched
+        // against half of node 2 (the near one), a threshold that RISES as the
+        // step goes on. The crossing must land where node 3 meets half of node
+        // 2 as it is at the landing instant, not half of node 2 as it was
+        // when the step began.
+        let mut st = build(&ladder_program(5.0, 1e3, 1e-6, 1e3, 1e-6));
+        let mut voltages = vec![0.0, 5.0, 0.0, 0.0];
+        let mut currents = vec![0.0; 5];
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        assert!(st.watch_node(3, DeviceId(0), Box::new(|v: &[f64]| vec![Threshold { value: 0.5 * v[2], rising: true }])));
+        let (l2, l3) = (st.node_owner[&2].1, st.node_owner[&3].1);
+
+        let mut landed = None;
+        for _ in 0..200 {
+            st.plan_step(0, f64::INFINITY, &[], &HashMap::new(), &voltages).unwrap();
+            let part = &st.partitions[&0];
+            let miss = part.pend_x[l3] - 0.5 * part.pend_x[l2];
+            if miss.abs() < 1e-6 {
+                landed = Some(miss);
+                break;
+            }
+            let part = st.partitions.get_mut(&0).unwrap();
+            SteppedSolver::commit(part);
+            for (l, &node) in st.partitions[&0].shape.nodes.iter().enumerate() {
+                voltages[node] = st.partitions[&0].x[l];
+            }
+        }
+        let miss = landed.expect("a step must land on the crossing of node 3 with half of node 2");
+        assert!(miss.abs() < 3e-9, "node 3 lands {miss} V from half of node 2 at the landing instant, expected within the 1 nV nudge");
     }
 }
