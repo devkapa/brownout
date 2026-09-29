@@ -10,10 +10,12 @@
 //! driven pin (pec3.mjs `_stamp`: a driver in HIGH mode contributes
 //! `conductance * hi_level` toward `hi_node` and `conductance * (1 -
 //! hi_level)` toward `lo_node`, symmetrically for LOW with `lo_level`; most
-//! digital outputs use `hi_level = 1, lo_level = 0`, and a 555 OUT pin's
-//! headroom-correct level is computed by its own device model and written
-//! here). Stamping itself is W1b/W1c's job; this module does not solve
-//! anything.
+//! digital outputs use `hi_level = 1, lo_level = 0`). A 555's OUT and DIS do
+//! not use those fields: `f` depends on the live `vS`, so W1e's `Driver::stage`
+//! (`Ne555Out`/`Ne555Dis`) has `solve::ic_driver_branches` compute the stamp
+//! at stamp time (`digital::ne555::branches`), superseding the earlier note
+//! that a 555 OUT writes its level into `hi_level`/`lo_level`. Stamping itself
+//! is W1b/W1c's job; this module does not solve anything.
 //!
 //! The FSM in [`fsm`] is the part under test here: a pure function from
 //! (committed state, in-flight transition, requested level, now, delay) to
@@ -289,6 +291,13 @@ pub struct Driver {
     /// nothing — instead of driving `1/R_out` toward `hi_node` (contract
     /// point 8). Meaningless (and unread) for a non-IC driver.
     pub open_collector: bool,
+    /// What a committed mode stamps (W1a point 2, amended by W1e): the
+    /// default `Logic` is `1/R_out` to `hi_node`/`lo_node` (W1c point 8), a
+    /// plain logic output; a 555's OUT/DIS pin carries `Ne555Out`/`Ne555Dis`
+    /// instead (`devices::ics::register`'s own wiring), so
+    /// `solve::ic_driver_branches` dispatches to `digital::ne555::branches`
+    /// for it rather than this field's `conductance`/`hi_level`/`lo_level`.
+    pub stage: DriverStage,
     committed: Option<Mode>,
     pending: Option<Pending>,
     token: Token,
@@ -305,6 +314,7 @@ impl Driver {
             lo_level,
             device: usize::MAX,
             open_collector: false,
+            stage: DriverStage::default(),
             committed: None,
             pending: None,
             token: 0,
@@ -330,6 +340,7 @@ impl Driver {
             lo_level: 0.0,
             device,
             open_collector,
+            stage: DriverStage::default(),
             committed: None,
             pending: None,
             token: 0,

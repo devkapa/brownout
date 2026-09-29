@@ -50,7 +50,7 @@ use crate::kinds;
 use crate::lu;
 use crate::partition::{self, PartitionKind, ResolvedSource};
 use crate::program::Program;
-use crate::solve::{collect_ics, ic_driver_target, ic_pull_target, PartitionSolver};
+use crate::solve::{collect_ics, ic_driver_branches, ic_pull_target, PartitionSolver};
 
 /// The fixed-point iteration's cap and Newton-style per-node tolerance (W1c
 /// contract point 3: "classic's Newton test", `|dx| <= 1e-6 + 1e-3 |x|`) —
@@ -612,8 +612,12 @@ impl StaticPartitionSolver {
                 if driver.device != *device_index {
                     continue;
                 }
-                if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
-                    self.fold_local(p_idx, size, a, b, driver.node, target, g);
+                // Every branch folds (W1a point 2): a 555's OUT stamps up to
+                // two, to its own vcc and gnd nodes.
+                for branch in ic_driver_branches(&power, driver, ic) {
+                    if let Some((target, g)) = branch {
+                        self.fold_local(p_idx, size, a, b, driver.node, target, g);
+                    }
                 }
             }
             for pin in &ic.logic {

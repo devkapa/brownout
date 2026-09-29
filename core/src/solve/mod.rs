@@ -30,7 +30,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::devices;
 use crate::digital;
-use crate::drivers::Driver;
+use crate::drivers::{Driver, DriverStage};
 use crate::error::BoError;
 use crate::events::{DeviceId, EventKind, Mode, PartitionId, Version};
 use crate::kinds;
@@ -776,7 +776,7 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 /// widened this from combinational-only, `digital::is_ic`) — by device index
 /// (`digital::IcRecord::from_device` is safe unconditionally — see
 /// `partition.rs`'s identical call for why). Every driver/pull stamp site
-/// below (`ic_driver_target`, `ic_pull_target`, the watch registration and
+/// below (`ic_driver_branches`, `ic_pull_target`, the watch registration and
 /// bucket-watch machinery) is already generic over `IcRecord`, so this one
 /// filter change is what makes a W1d IC's electrical footprint (power,
 /// floating pulls, driver stamps, crossing-watch exclusion, stepped
@@ -794,31 +794,40 @@ pub(crate) fn collect_ics(program: &Program) -> Vec<(usize, digital::IcRecord)> 
 }
 
 /// Where a committed IC output driver currently stamps, and at what
-/// conductance (contract point 8): the pin's own node to `ic.vcc.node` at
-/// `1/R_out` while committed HIGH (unless `OPEN_COLLECTOR`, which is
-/// released instead — stamps nothing), or to `ic.gnd.node` while committed
-/// LOW. `None` while unpowered, HIZ, uncommitted, a released
-/// `OPEN_COLLECTOR` HIGH, or the driver's own pin sits on the datum node
-/// (finding 9): classic's `_stampDigitalOutput` returns immediately for a
-/// pin on the reference net (`node < 0`, sim-engine.ts's own ground index),
-/// stamping nothing and drawing no source current, and node 0 is this
-/// core's own datum (core/README.md: "node 0 is the datum") — the same
-/// pin-on-ground case, just numbered differently. Guarded once here, in the
-/// shared helper every caller (`recompute_source_currents`,
-/// `static_part::stamp_ics_into`, `stamp_ics_into_dyn`) goes through,
-/// rather than at each call site, per this function's own "defined once"
-/// doc comment above (the other two callers never reach node 0 today, since
+/// conductance(s) (contract point 8, and NE555 point 7 for a 555's OUT/DIS
+/// stage): at most two `(target, g)` branches — a plain `Logic` stage only
+/// ever produces one (the pin's own node to `ic.vcc.node` at `1/R_out` while
+/// committed HIGH, unless `OPEN_COLLECTOR`, which is released instead — or
+/// to `ic.gnd.node` while committed LOW), while a 555's OUT stage can
+/// produce two simultaneously (its complementary-conductance Thevenin split,
+/// `digital::ne555::branches`). Both entries `None` while unpowered, HIZ,
+/// uncommitted, a released `OPEN_COLLECTOR` HIGH, or the driver's own pin
+/// sits on the datum node (finding 9; NE555 point 7 "a pin on node 0 stamps
+/// nothing"): classic's `_stampDigitalOutput`/`_stampRailReferencedOutput`
+/// both return immediately for a pin on the reference net (`node < 0`), and
+/// node 0 is this core's own datum (core/README.md: "node 0 is the datum")
+/// — the same pin-on-ground case, just numbered differently. Guarded once
+/// here, in the shared helper every caller (`recompute_source_currents`,
+/// `static_part::stamp_ics_into`, `stamp_ics_into_dyn`) goes through, rather
+/// than at each call site, per this function's own "defined once" doc
+/// comment above (the other two callers never reach node 0 today, since
 /// they gate on `in_partition(driver.node)` and node 0 is never a partition
 /// member — but a THIRD caller should not have to remember that
 /// independently).
-pub(crate) fn ic_driver_target(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> Option<(usize, f64)> {
+pub(crate) fn ic_driver_branches(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> [Option<(usize, f64)>; 2] {
     if !power.powered || driver.node == 0 {
-        return None;
+        return [None, None];
     }
-    match driver.committed() {
-        Some(Mode::High) if !driver.open_collector => Some((ic.vcc.node, 1.0 / power.r_out)),
-        Some(Mode::Low) => Some((ic.gnd.node, 1.0 / power.r_out)),
-        _ => None,
+    match driver.stage {
+        DriverStage::Logic => {
+            let branch = match driver.committed() {
+                Some(Mode::High) if !driver.open_collector => Some((ic.vcc.node, 1.0 / power.r_out)),
+                Some(Mode::Low) => Some((ic.gnd.node, 1.0 / power.r_out)),
+                _ => None,
+            };
+            [branch, None]
+        }
+        DriverStage::Ne555Out | DriverStage::Ne555Dis => digital::ne555::branches(driver.stage, driver.committed(), power, driver, ic),
     }
 }
 
@@ -860,6 +869,15 @@ pub(crate) fn ic_pull_target(ic: &digital::IcRecord, power: &digital::power::IcP
 /// bucket watch.
 pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord)], voltages: &[f64]) -> bool {
     for (_, ic) in ics {
+        // C8: a 555 takes no part in the floating model at all (it holds no
+        // `FLOATING_INPUT` pin and reads nothing through it), so it must
+        // never be considered here — its own TRIG/THR sit inside the
+        // generic dead band for most of an astable's period, and without
+        // this exclusion that would schedule a pointless bucket every 10 ms
+        // forever.
+        if digital::is_ne555(ic.kind) {
+            continue;
+        }
         let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
         if !power.powered {
             continue;
@@ -973,7 +991,8 @@ pub(crate) fn stamp_ics_into_dyn(
             if driver.device != *device_index {
                 continue;
             }
-            if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
+            for branch in ic_driver_branches(&power, driver, ic) {
+                let Some((target, g)) = branch else { continue };
                 // Findings 3/8: stamp whenever EITHER end is free-in-`p_idx`
                 // (the driver's own pin, or its commit target), not only the
                 // driver's own pin as before — that was the whole bug, a
@@ -989,7 +1008,9 @@ pub(crate) fn stamp_ics_into_dyn(
                 // necessary: when `target` is free, the union rule
                 // guarantees `driver.node` is fixed or ALSO free-in-`p_idx`
                 // (never free in some OTHER partition), so `resolve` never
-                // panics for a case this guard lets through.
+                // panics for a case this guard lets through. Each of a 555
+                // OUT's up-to-two branches is folded independently (W1a
+                // point 2's "each caller folds every branch").
                 if in_partition(driver.node) || in_partition(target) {
                     stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0);
                 }
@@ -1412,6 +1433,17 @@ impl PartitionedSolver {
     fn register_ic_read_pin_watches(&mut self) {
         for i in 0..self.ics.len() {
             let (device_index, ic) = self.ics[i].clone();
+            // NE555 point 5 replaces W1c point 4's generic per-pin watch
+            // entirely for code 40: it has no `vil`/`vih`/Schmitt read at
+            // all (`digital::levels::watch_thresholds` would find nothing to
+            // watch there anyway), and its own eligibility rule differs from
+            // every other IC's (`Self::register_ne555_watches`'s own doc
+            // comment: a 555 is watched on a Stepped partition even with a
+            // dynamic supply, unlike a generic IC).
+            if digital::is_ne555(ic.kind) {
+                self.register_ne555_watches(device_index, &ic);
+                continue;
+            }
             if !(self.supply_is_load_stable(ic.vcc.node) && self.supply_is_load_stable(ic.gnd.node)) {
                 continue;
             }
@@ -1478,6 +1510,55 @@ impl PartitionedSolver {
                     }),
                 );
             }
+        }
+    }
+
+    /// NE555 point 5: registers TRIG/RST/THR crossing watches, both
+    /// directions, for the 555 at `device_index` — the "Moving thresholds"
+    /// paragraph's own eligibility rule, which is NOT
+    /// [`Self::supply_is_load_stable`] applied uniformly the way a generic
+    /// IC's is (`Self::register_ic_read_pin_watches`'s own gate): a 555's
+    /// read pin is watched whenever ITS OWN partition is `Stepped`
+    /// (regardless of whether its supply sits in that same dynamic
+    /// partition or a `Static` one — "a supply node on a dynamic partition:
+    /// that partition is stepped, and the watches are registered all the
+    /// same"), and watched on a `ClosedForm` partition only when both
+    /// supply nodes are load-stable (fixed or `Static` — the same
+    /// numerical-instability concern as any other IC: a `ClosedForm`
+    /// partition never holds a free IC supply at all, `partition::build`'s
+    /// promotion rule, so this half of the rule can never actually diverge
+    /// from the generic one in practice, but is spelled out here to match
+    /// the contract's own wording rather than silently relying on that
+    /// invariant). A pin that is open, or whose node is fixed (no partition
+    /// at all: [`Self::watch_node`] simply returns `false` for it, so
+    /// registering unconditionally is harmless), is naturally excluded by
+    /// the `match` below rather than a separate check — unlike a generic
+    /// IC's watch, a 555's own `pin.open` is NOT excluded on principle
+    /// (NE555 point 2: "an unwired RST reads its node voltage... Rust
+    /// reads OPEN on pins 8 and 1 only", never on a read pin), though in
+    /// practice an `OPEN` read pin's node is always isolated (G8's rule)
+    /// and so never actually lands on a `Stepped`/`ClosedForm` partition
+    /// anyway.
+    fn register_ne555_watches(&mut self, device_index: usize, ic: &digital::IcRecord) {
+        let supply_stable = self.supply_is_load_stable(ic.vcc.node) && self.supply_is_load_stable(ic.gnd.node);
+        for &logic_index in &[digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
+            let node = ic.logic[logic_index].node;
+            let kind = self.local_index.get(node).copied().flatten().and_then(|(p, _)| self.partition_kinds.get(p).copied());
+            let eligible = match kind {
+                Some(PartitionKind::Stepped) => true,
+                Some(PartitionKind::ClosedForm) => supply_stable,
+                _ => false,
+            };
+            if !eligible {
+                continue;
+            }
+            let reader = DeviceId(device_index as u32);
+            let (vcc_node, gnd_node) = (ic.vcc.node, ic.gnd.node);
+            self.watch_node(
+                node,
+                reader,
+                Box::new(move |voltages: &[f64]| digital::ne555::watch_thresholds(logic_index, voltages[vcc_node], voltages[gnd_node])),
+            );
         }
     }
 
@@ -1653,7 +1734,7 @@ impl PartitionedSolver {
     /// pin sits on a fixed rail (a driver `partition_of_node` reports `None`
     /// for) and draws real current from it. `self.voltages` is already the
     /// fully-published, POST-solve array by the time this runs (every call
-    /// site calls it last), so both `ic_driver_target`/`ic_pull_target`'s
+    /// site calls it last), so both `ic_driver_branches`/`ic_pull_target`'s
     /// power computation and the actual `g*(Va-Vb)` current read off
     /// already-final values, exactly like every other term in `leaving`
     /// above them.
@@ -1685,7 +1766,8 @@ impl PartitionedSolver {
                 if driver.device != *device_index {
                     continue;
                 }
-                if let Some((target, g)) = ic_driver_target(&power, driver, ic) {
+                for branch in ic_driver_branches(&power, driver, ic) {
+                    let Some((target, g)) = branch else { continue };
                     let i = g * (self.voltages[driver.node] - self.voltages[target]);
                     leaving[driver.node] += i;
                     leaving[target] -= i;
@@ -1713,6 +1795,33 @@ impl PartitionedSolver {
             self.currents[r.device_index] = i_s;
             let contribution = if r.parent_is_pos { i_s } else { -i_s };
             extra[r.parent_node] += contribution;
+        }
+    }
+
+    /// NE555 point 8 / C11: publishes each 555's `elementI`, the current
+    /// delivered out of pin 3, in the global post-pass beside
+    /// [`Self::recompute_source_currents`] (every resolve, crossing, step and
+    /// horizon clamp), from the committed OUT level and the published
+    /// voltages, so it follows a moving supply or load. 0 while unpowered or
+    /// while OUT has never committed. A 555 is not in `kcl_devices` and no
+    /// other pass writes its `currents` slot, so this is its only writer.
+    fn publish_ne555_currents(&mut self, drivers: &[Driver]) {
+        for (device_index, ic) in &self.ics {
+            if !digital::is_ne555(ic.kind) {
+                continue;
+            }
+            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            let committed = drivers.iter().find(|d| d.device == *device_index && d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
+            self.currents[*device_index] = match (power.powered, committed) {
+                (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(
+                    level == Mode::High,
+                    power.vs,
+                    self.voltages[ic.logic[digital::NE555_OUT].node],
+                    self.voltages[ic.gnd.node],
+                    self.voltages[ic.vcc.node],
+                ),
+                _ => 0.0,
+            };
         }
     }
 
@@ -1816,6 +1925,7 @@ impl PartitionSolver for PartitionedSolver {
         readers.extend(self.stepped.resolve_dirty(&st_ids, now, &pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
         self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents(now, drivers);
+        self.publish_ne555_currents(drivers);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
         self.check_finite()?;
@@ -1995,6 +2105,7 @@ impl PartitionSolver for PartitionedSolver {
         // current on every crossing/step in between actual commits.
         let driver_snapshot = self.driver_snapshot.clone();
         self.recompute_source_currents(now, &driver_snapshot);
+        self.publish_ne555_currents(&driver_snapshot);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
         self.check_finite()?;
@@ -2011,6 +2122,7 @@ impl PartitionSolver for PartitionedSolver {
         // the instants a driver actually commits.
         let driver_snapshot = self.driver_snapshot.clone();
         self.recompute_source_currents(t_end, &driver_snapshot);
+        self.publish_ne555_currents(&driver_snapshot);
         self.drain_scheduled();
         self.maybe_schedule_bucket(t_end);
         self.check_finite()?;
@@ -2049,6 +2161,12 @@ impl PartitionSolver for PartitionedSolver {
         let mut dirty = BTreeSet::new();
         let mut readers = BTreeSet::new();
         for (device_index, ic) in &self.ics {
+            // C8, as in `any_powered_ic_needs_bucket_watch`: a 555 takes no
+            // part in the floating model, so a bucket boundary never dirties
+            // or wakes it.
+            if digital::is_ne555(ic.kind) {
+                continue;
+            }
             let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
             if !power.powered {
                 continue;

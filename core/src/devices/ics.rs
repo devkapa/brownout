@@ -28,7 +28,7 @@
 //! should request each delta.
 
 use crate::digital::{self, IcRecord};
-use crate::drivers::Driver;
+use crate::drivers::{DelaySet, Driver, DriverStage};
 use crate::events::{DeviceId, DriverId, Mode};
 use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel};
 use crate::kinds;
@@ -45,6 +45,12 @@ enum Family {
     Combinational { schmitt_state: Vec<bool> },
     Sequential(digital::sequential::SeqState),
     Memory(digital::memory::MemState),
+    /// NE555 point 1: its own family, one latch bit per device. Dispatched
+    /// specially in `evaluate`/`on_settled` (this file's own doc comment) --
+    /// it shares `IcEntry::family_slots`' single-slot publish path with
+    /// Sequential/Memory, but reads no logic level and writes no
+    /// `last_reads` at all.
+    Ne555(digital::ne555::Ne555State),
 }
 
 /// One registered IC: its typed record, the driver ids for its
@@ -166,6 +172,42 @@ impl DeviceEvaluator for IcEvaluator {
             .find(|e| e.device_index == reader.0 as usize)
             .unwrap_or_else(|| panic!("IcEvaluator: no IC registered for reader {reader:?}"));
         let ic = &entry.record;
+
+        // NE555 point 1: dispatched before any `levels::read`/power-gate/
+        // `last_reads` bookkeeping the other three families share below --
+        // it has no logic-pin read concept of its own ("no logic level...
+        // it publishes its latch instead"). `digital::ne555::evaluate`
+        // already re-derives power itself (`None` while unpowered), so this
+        // branch does its own power gate rather than sharing the one below.
+        if let Family::Ne555(state) = &mut entry.family {
+            return match digital::ne555::evaluate(ic, state, voltages, acting_on_edges) {
+                None => {
+                    // Point 10: unpowered -- the slot goes NaN and nothing is
+                    // requested (drivers keep their frozen committed level
+                    // through the kernel's own power-loss hold).
+                    for s in entry.family_slots.iter_mut() {
+                        *s = f64::NAN;
+                    }
+                    Vec::new()
+                }
+                Some(out_high) => {
+                    // Point 12: the slot holds `outHigh` at every completed
+                    // instant while powered.
+                    entry.family_slots[0] = if out_high { 1.0 } else { 0.0 };
+                    // Point 4: OUT HIGH/LOW as the result, DIS LOW when the
+                    // result is 0 or HIGH (released) when it is 1 -- the SAME
+                    // `Mode` for both drivers -- with DelaySet::uniform(0):
+                    // no output lag, no propagation delay.
+                    let level = if out_high { Mode::High } else { Mode::Low };
+                    let delays = DelaySet::uniform(0.0);
+                    vec![
+                        DriverRequest::Level { driver: entry.output_drivers[0], level, delays },
+                        DriverRequest::Level { driver: entry.output_drivers[1], level, delays },
+                    ]
+                }
+            };
+        }
+
         let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
         if !power.powered {
             // W1c contract point 9 / W1d sequential point 3 ("an unpowered
@@ -230,6 +272,8 @@ impl DeviceEvaluator for IcEvaluator {
                 }
                 family_requests(entry.device_index, &entry.output_drivers, &out)
             }
+            // Returned above, before any read or `last_reads` write.
+            Family::Ne555(_) => unreachable!("a 555 is dispatched at the top of `evaluate`"),
         }
     }
 
@@ -294,7 +338,7 @@ impl DeviceEvaluator for IcEvaluator {
                         out.push((slot, value));
                     }
                 }
-                Family::Sequential(_) | Family::Memory(_) => {
+                Family::Sequential(_) | Family::Memory(_) | Family::Ne555(_) => {
                     for (i, &value) in entry.family_slots.iter().enumerate() {
                         out.push((entry.record.slot_base + i, if powered { value } else { f64::NAN }));
                     }
@@ -384,7 +428,17 @@ pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E
         for &i in outputs {
             let p = &record.logic[i];
             let partition = kernel.solver().partition_of_node(p.node);
-            let driver = Driver::new_ic_output(p.node, record.vcc.node, record.gnd.node, device_index, p.open_collector);
+            let mut driver = Driver::new_ic_output(p.node, record.vcc.node, record.gnd.node, device_index, p.open_collector);
+            // W1a point 2 (amended): a 555's OUT/DIS pin carries its own
+            // stage instead of the default `Logic` one, so
+            // `solve::ic_driver_branches` dispatches to
+            // `digital::ne555::branches` for it (NE555 point 7). `outputs`
+            // is `digital::NE555_OUT, digital::NE555_DIS` in that order for
+            // this kind (`output_capable`'s own table), so `i` names exactly
+            // which stage applies.
+            if digital::is_ne555(record.kind) {
+                driver.stage = if i == digital::NE555_OUT { DriverStage::Ne555Out } else { DriverStage::Ne555Dis };
+            }
             output_drivers.push(kernel.add_driver(driver, partition));
         }
 
@@ -394,6 +448,8 @@ pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E
         } else if digital::is_memory_ic(record.kind) {
             let rom = rom_words(device, record.kind, record.logic.len());
             Family::Memory(digital::memory::MemState::power_on(&record, &rom))
+        } else if digital::is_ne555(record.kind) {
+            Family::Ne555(digital::ne555::Ne555State::power_on())
         } else {
             Family::Combinational { schmitt_state: vec![false; record.logic.len()] }
         };

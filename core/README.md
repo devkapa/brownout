@@ -1569,7 +1569,10 @@ records").
    - A dynamic partition holding a free 555 supply node is stepped: OUT's
      fraction and the power gate move with its state. With a free VCC the
      timing network joins it through RA (or the monostable's R), so its
-     timing is stepped until W1f treats such a rail as a hub.
+     timing is stepped until W1f treats such a rail as a hub. A partition
+     with a free 555 supply node and no capacitor stays static and runs W1c
+     point 3's fixed-point iteration, so a fixture that needs a stepped
+     555 supply puts a capacitor in that partition.
    - The monostable ties DIS to THR. Unlike W1c's read-and-driven pins, that
      does not force stepping: the DIS commit follows a THR crossing and
      moves the node away from it, so no crossing races its own commit. The
