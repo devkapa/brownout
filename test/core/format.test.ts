@@ -602,3 +602,95 @@ describe("blob[0] + digitalSlots <= S — a digital-slot-owning kind (74ls00: 12
     });
   });
 });
+
+// ---- W1e: a channel-slot-owning kind's blob[0] + channelSlots <= C --------
+// (core/README.md, "Slot indices" — the channel-slot twin of the digital
+// check above, mirroring the Rust reader's new rule; core/compile-leds.test.ts
+// covers the same rule end to end through a real compiled `rgb_led` program,
+// so these are format.ts's own unit-level checks of ProgramWriter/
+// decodeProgram directly.)
+
+describe("blob[0] + channelSlots <= C — a channel-slot-owning kind (rgb_led: 3 channel slots, no digital slots)", () => {
+  /** A minimal, structurally-valid rgb_led record: 4 pins (all node 0, closed), 6 zeroed params, a blob of exactly [channelBase] — rgb_led has no digital slots, so the channel base sits at blob[0]. */
+  function rgbLedDevice(channelBase: number) {
+    return {
+      kindCode: CORE_KIND_CODE.rgb_led,
+      componentIndex: 0,
+      pins: Array.from({ length: 4 }, () => pin(0)),
+      params: Array.from({ length: 6 }, () => 0),
+      blob: [channelBase],
+    };
+  }
+
+  describe("ProgramWriter", () => {
+    it("accepts a device whose channel slot range fits exactly within the final channelSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(rgbLedDevice(0));
+      expect(() => writer.finish(0, 3)).not.toThrow();
+    });
+
+    it("rejects (at addDevice) a negative or non-integer blob[0] channel slot base", () => {
+      for (const bad of [-1, 0.5]) {
+        const writer = new ProgramWriter(1);
+        expect(() => writer.addDevice(rgbLedDevice(bad))).toThrow(
+          /blob\[0\] \(channel slot base\) must be a non-negative integer/,
+        );
+      }
+    });
+
+    it("rejects (at finish, once C is final) a device whose channel slots run past channelSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(rgbLedDevice(1)); // slots [1, 4) — one past a channelSlotCount of 3
+      expect(() => writer.finish(0, 3)).toThrow(/channel slots \[1, 4\) exceed channelSlotCount 3/);
+    });
+
+    it("rejects two devices whose channel slot ranges, added in order, together exceed channelSlotCount", () => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(rgbLedDevice(0)); // slots [0, 3)
+      writer.addDevice(rgbLedDevice(3)); // slots [3, 6) — fits only if C >= 6
+      expect(() => writer.finish(0, 3)).toThrow(/channel slots \[3, 6\) exceed channelSlotCount 3/);
+      // The same two devices DO fit a large enough C.
+      const writer2 = new ProgramWriter(1);
+      writer2.addDevice(rgbLedDevice(0));
+      writer2.addDevice(rgbLedDevice(3));
+      expect(() => writer2.finish(0, 6)).not.toThrow();
+    });
+  });
+
+  describe("decodeProgram", () => {
+    function programWithChannelBase(channelBase: number, channelSlotCount: number): Float64Array {
+      const writer = new ProgramWriter(1);
+      writer.addDevice(rgbLedDevice(channelBase));
+      return writer.finish(0, channelSlotCount);
+    }
+
+    it("decodes cleanly when the slot range fits", () => {
+      const decoded = decodeProgram(programWithChannelBase(0, 3));
+      expect(decoded.devices[0]!.blob[0]).toBe(0);
+    });
+
+    it("rejects a hand-corrupted channelSlotCount that no longer fits a device's own slot range", () => {
+      const program = programWithChannelBase(0, 3);
+      // With zero options, the header is exactly [MAGIC, VERSION, nodeCount=1,
+      // deviceCount=1, optionCount=0, digitalSlotCount, channelSlotCount,
+      // ...] — channelSlotCount is index 6.
+      const corrupted = mutated(program, 6, 2);
+      expect(() => decodeProgram(corrupted)).toThrow(/channel slots \[0, 3\) exceed channelSlotCount 2/);
+    });
+
+    it("rejects a hand-corrupted negative or fractional blob[0]", () => {
+      const program = programWithChannelBase(0, 3);
+      // 7-value header (MAGIC..channelSlotCount, indices 0-6) + kindCode +
+      // componentIndex + pinCount (3) + 4 pins x 4 values (16) + paramCount
+      // (1) + 6 params + blobCount (1) = 34: blob[0] (channelBase) itself.
+      const blobStart = 7 + 3 + 4 * 4 + 1 + 6 + 1;
+      expect(program[blobStart]).toBe(0); // sanity: this really is channelBase
+      expect(() => decodeProgram(mutated(program, blobStart, -1))).toThrow(
+        /blob\[0\] \(channel slot base\) -1, expected a non-negative integer/,
+      );
+      expect(() => decodeProgram(mutated(program, blobStart, 0.5))).toThrow(
+        /blob\[0\] \(channel slot base\) 0\.5, expected a non-negative integer/,
+      );
+    });
+  });
+});

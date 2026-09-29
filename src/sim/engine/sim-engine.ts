@@ -1393,6 +1393,24 @@ export function supplyPinsForComponent(comp: SimComponent): { vccPin: string | n
   return { vccPin, gndPin };
 }
 
+// The body of `_thermalProfile` below, without its per-component cache.
+// Exported for compile/leds.ts (core/README.md's LEDs point 3: the compiler
+// declines a plain `led` whose `catalogUid` this function accepts, until
+// W1g ports self-heating) and for W1g, which needs the same uncached lookup
+// for its own held-temperature state. A pure function of `comp.catalogUid`
+// and `comp.kind` (through `partFor`'s identity check) — `_thermalProfile`
+// now only adds the cache around it, so this is a pure refactor with no
+// behavior change for classic (the eepromImageBytes precedent).
+export function thermalProfileForComponent(comp: SimComponent): ThermalDeviceProfile | undefined {
+  if (!comp.catalogUid) return undefined;
+  // Thermal identity must pass the same UID/kind validation as electrical
+  // identity. A stale or kind-mismatched UID must not lend another package's
+  // temperature/shutdown behavior to a custom component.
+  if (!partFor(comp)) return undefined;
+  const resolved = resolveThermalProfile({ catalogUid: comp.catalogUid });
+  return resolved.source === "exact-catalog-uid" ? resolved.profile : undefined;
+}
+
 export function thresholdsFor(specs: ElectricalSpecs | undefined, vSupply: number): LogicThresholds {
   const family = specs?.logic_family ?? "";
   // HC-CMOS and CMOS-4000 both use 30%/70% supply-ratioed thresholds.
@@ -1831,19 +1849,7 @@ export class SimEngine {
     if (this._thermalProfileCache.has(comp.id)) {
       return this._thermalProfileCache.get(comp.id);
     }
-    if (!comp.catalogUid) {
-      this._thermalProfileCache.set(comp.id, undefined);
-      return undefined;
-    }
-    // Thermal identity must pass the same UID/kind validation as electrical
-    // identity. A stale or kind-mismatched UID must not lend another package's
-    // temperature/shutdown behavior to a custom component.
-    if (!partFor(comp)) {
-      this._thermalProfileCache.set(comp.id, undefined);
-      return undefined;
-    }
-    const resolved = resolveThermalProfile({ catalogUid: comp.catalogUid });
-    const profile = resolved.source === "exact-catalog-uid" ? resolved.profile : undefined;
+    const profile = thermalProfileForComponent(comp);
     this._thermalProfileCache.set(comp.id, profile);
     return profile;
   }

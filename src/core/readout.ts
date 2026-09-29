@@ -66,16 +66,27 @@ export function buildDigitalState(compiled: CompiledCircuit, digitalSlots: Array
  * `getElementChannelI()`: from the channel slots, per `compiled.channelSlots`
  * (slot `j` -> `(componentId, channel)`) — matches classic's own
  * `getElementChannelI(): Record<string, number[]>` shape (sim-engine.ts
- * §10.10) exactly, one array per component, indexed by channel.
+ * §10.10) exactly, one array per component, indexed by channel. A component
+ * whose slots are `NaN` is omitted entirely (core/README.md's "Readouts":
+ * "a component whose slots are NaN is omitted, as classic omits a burnt or
+ * failed `rgb_led`/`bicolor_led`") — classic writes no key at all for such a
+ * component, so this skips the `NaN` through rather than publishing an
+ * array of `NaN`s.
  */
 export function buildElementChannelI(
   compiled: CompiledCircuit,
   channelSlots: ArrayLike<number>,
 ): Record<string, number[]> {
-  const out: Record<string, number[]> = {};
+  const raw: Record<string, number[]> = {};
   compiled.channelSlots.forEach(([componentId, channel], i) => {
     const value = channelSlots[i] ?? 0;
-    (out[componentId] ??= [])[channel] = value;
+    (raw[componentId] ??= [])[channel] = value;
   });
+  const out: Record<string, number[]> = {};
+  for (const componentId of Object.keys(raw)) {
+    const values = raw[componentId]!;
+    if (values.some((value) => Number.isNaN(value))) continue;
+    out[componentId] = values;
+  }
   return out;
 }

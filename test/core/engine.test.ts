@@ -1034,6 +1034,24 @@ describe("readout.ts", () => {
     const elementChannelI = buildElementChannelI(compiled, [0.1, 0.2, 0.3]);
     expect(elementChannelI).toEqual({ u1: [0.1, 0.2], u2: [0.3] });
   });
+
+  // core/README.md's "Readouts": "a component whose slots are NaN is
+  // omitted, as classic omits a burnt or failed rgb_led/bicolor_led" —
+  // W1e's LEDs point 13. buildElementChannelI must skip the whole component,
+  // not publish an array of NaNs, exactly as classic writes no key at all.
+  it("buildElementChannelI omits a component whose channel slots are NaN (a burnt rgb_led/bicolor_led, W1e)", () => {
+    const compiled = withSlots(compileOkForReadoutTests(), {
+      channelSlots: [
+        ["u1", 0],
+        ["u1", 1],
+        ["u1", 2],
+        ["u2", 0],
+      ],
+    });
+    const elementChannelI = buildElementChannelI(compiled, [Number.NaN, Number.NaN, Number.NaN, 0.3]);
+    expect(elementChannelI).toEqual({ u2: [0.3] });
+    expect(elementChannelI).not.toHaveProperty("u1");
+  });
 });
 
 // ---- elementI key set matches classic's _updateElementI (spec §10.5) ------

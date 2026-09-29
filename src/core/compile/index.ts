@@ -11,17 +11,18 @@
  * readout slot tables. "Keys are built in TS; Rust publishes numbers"
  * (core/README.md, "Readouts") — `SlotAllocator` below is the machinery a
  * kind's compiler case uses to claim a digital or channel slot. W1c's 11
- * combinational ICs are the first to claim one (one digital slot per
+ * combinational ICs are the first to claim a digital slot (one per
  * output-capable pin — see this file's IC dispatch case, and compile/ics.ts);
- * the channel-slot table is still empty (no kind through W1c claims one), and
- * the machinery itself is exercised directly by compile.test.ts's synthetic
- * slot-table tests.
+ * W1e's `rgb_led`/`bicolor_led`/`seg7_cc`/`seg7_ca` are the first to claim a
+ * channel slot (compile/leds.ts), consecutively per component, in the same
+ * allocation order. The machinery itself is exercised directly by
+ * compile.test.ts's synthetic slot-table tests.
  */
 
 import type { Net } from "../../sim/engine/graph.js";
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { CORE_OPTION_KEYS, ProgramWriter, type ProgramOption } from "../format.js";
-import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES } from "../kinds.js";
+import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES } from "../kinds.js";
 import { buildCoreNodes, buildPinRecord, computeOpenPinKeys, corePinKey, type CoreNodeBuild } from "./topology.js";
 import {
   compileCapacitor,
@@ -34,6 +35,8 @@ import {
 import { compileCombinationalIc } from "./ics.js";
 import { compileRegisterIc } from "./registers.js";
 import { compileMemoryIc } from "./memories.js";
+import { compileBicolorLed, compileLed, compileRgbLed, compileSeg7 } from "./leds.js";
+import { compileNe555 } from "./ne555.js";
 
 export { buildCoreNodes, corePinKey } from "./topology.js";
 export type { CoreNodeBuild } from "./topology.js";
@@ -374,6 +377,78 @@ export function compileCircuit(
           componentIndex,
           pins: result.pins,
           params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // `led` (code 30): positional pins, no channel slots (compile/leds.ts).
+      case "led": {
+        const result = compileLed(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.led,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // `rgb_led`, `bicolor_led`, `seg7_cc`, `seg7_ca` (codes 31-34): by-id
+      // pins, one shared channel-slot allocation (compile/leds.ts owns each
+      // kind's own compiler; this dispatch's own job, as for the W1c ICs
+      // above, is slot allocation — README's "Channel slots": consecutively
+      // per component, in component order, `channelBase` written as the
+      // record's only blob value).
+      case "rgb_led":
+      case "bicolor_led":
+      case "seg7_cc":
+      case "seg7_ca": {
+        const result =
+          component.kind === "rgb_led"
+            ? compileRgbLed(built, openKeys, component)
+            : component.kind === "bicolor_led"
+              ? compileBicolorLed(built, openKeys, component)
+              : compileSeg7(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const channelCount = CORE_RECORD_SHAPES.get(CORE_KIND_CODES[component.kind])!.channelSlots ?? 0;
+        const channelBase = channelSlots.count;
+        for (let j = 0; j < channelCount; j++) channelSlots.allocate([component.id, j]);
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [channelBase],
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // `ne555` (code 40): by-id pins in the IC layout, one digital slot
+      // keyed by the bare component id (compile/ne555.ts).
+      case "ne555": {
+        const result = compileNe555(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const slotBase = digitalSlots.count;
+        for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.ne555,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [slotBase, ...result.pinFlags],
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;

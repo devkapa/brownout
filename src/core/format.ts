@@ -200,6 +200,15 @@ export class ProgramWriter {
   // therefore every slot allocation) has been added — see this class's own
   // doc comment on the two-pass deviceCount/slotCounts patch.
   private readonly pendingDigitalSlotChecks: { slotBase: number; count: number }[] = [];
+  // The channel-slot twin of the above (W1e's `rgb_led`/`bicolor_led`/
+  // `seg7_cc`/`seg7_ca`, codes 31-34, the first kinds with `channelSlots`):
+  // `base + count <= C`, checked against the final channelSlotCount in
+  // finish() for the same two-pass reason. A kind's blob carries digital
+  // slots before channel slots (core/README.md, "Slot indices"), so the
+  // channel base sits at `blob[1]` for a kind with both and `blob[0]` for one
+  // with channel slots only — no W1e kind has both, but addDevice computes
+  // the index generically from the shape rather than assuming `blob[0]`.
+  private readonly pendingChannelSlotChecks: { slotBase: number; count: number }[] = [];
 
   constructor(nodeCount: number, options: readonly ProgramOption[] = []) {
     if (!Number.isInteger(nodeCount) || nodeCount < 1) {
@@ -274,6 +283,20 @@ export class ProgramWriter {
       }
       this.pendingDigitalSlotChecks.push({ slotBase, count: shape.digitalSlots });
     }
+    if (shape.channelSlots) {
+      // Channel slots follow digital slots in the blob (core/README.md,
+      // "Slot indices"): blob[1] when this kind also has digital slots,
+      // blob[0] otherwise. No W1e kind has both, but the index is derived
+      // from the shape rather than hardcoded.
+      const channelBlobIndex = shape.digitalSlots ? 1 : 0;
+      const channelBase = blob[channelBlobIndex]!;
+      if (!Number.isInteger(channelBase) || channelBase < 0) {
+        throw new Error(
+          `ProgramWriter.addDevice: kind code ${device.kindCode}'s blob[${channelBlobIndex}] (channel slot base) must be a non-negative integer, got ${channelBase}`,
+        );
+      }
+      this.pendingChannelSlotChecks.push({ slotBase: channelBase, count: shape.channelSlots });
+    }
     if (!Number.isInteger(device.componentIndex) || device.componentIndex < 0) {
       throw new Error(
         `ProgramWriter.addDevice: componentIndex must be a non-negative integer, got ${device.componentIndex}`,
@@ -338,6 +361,15 @@ export class ProgramWriter {
       if (slotBase + count > digitalSlotCount) {
         throw new Error(
           `ProgramWriter.finish: a device's digital slots [${slotBase}, ${slotBase + count}) exceed digitalSlotCount ${digitalSlotCount}`,
+        );
+      }
+    }
+    // The channel-slot twin of the loop above (core/README.md, "Slot
+    // indices": `base + count <= C`).
+    for (const { slotBase, count } of this.pendingChannelSlotChecks) {
+      if (slotBase + count > channelSlotCount) {
+        throw new Error(
+          `ProgramWriter.finish: a device's channel slots [${slotBase}, ${slotBase + count}) exceed channelSlotCount ${channelSlotCount}`,
         );
       }
     }
@@ -562,6 +594,25 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
       if (slotBase + shape.digitalSlots > digitalSlotCount) {
         throw new Error(
           `decodeProgram: device[${d}] (${kindName})'s digital slots [${slotBase}, ${slotBase + shape.digitalSlots}) exceed digitalSlotCount ${digitalSlotCount}`,
+        );
+      }
+    }
+
+    // The channel-slot twin of the digital check above (core/README.md,
+    // "Slot indices"): W1e's `rgb_led`/`bicolor_led`/`seg7_cc`/`seg7_ca`
+    // carry their channel base at blob[1] when the kind also has digital
+    // slots, blob[0] otherwise (no W1e kind has both).
+    if (shape.channelSlots) {
+      const channelBlobIndex = shape.digitalSlots ? 1 : 0;
+      const channelBase = blob[channelBlobIndex]!;
+      if (!Number.isInteger(channelBase) || channelBase < 0) {
+        throw new Error(
+          `decodeProgram: device[${d}] (${kindName}) has blob[${channelBlobIndex}] (channel slot base) ${channelBase}, expected a non-negative integer`,
+        );
+      }
+      if (channelBase + shape.channelSlots > channelSlotCount) {
+        throw new Error(
+          `decodeProgram: device[${d}] (${kindName})'s channel slots [${channelBase}, ${channelBase + shape.channelSlots}) exceed channelSlotCount ${channelSlotCount}`,
         );
       }
     }

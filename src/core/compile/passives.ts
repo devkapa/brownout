@@ -67,8 +67,13 @@ type SimComponent = SimCircuit["components"][number];
  * `isOpenPin` treats "no node entry at all" as open, mirroring classic's own
  * `_isOpenPin`), so every one of them is safe to call regardless of whether
  * the pin is actually declared.
+ *
+ * Exported for compile/leds.ts (`rgb_led`, `bicolor_led`, `seg7_cc`,
+ * `seg7_ca`) and compile/ne555.ts, both by-id kinds (core/README.md's "Pins
+ * by id" rule applies identically to them) — this worker's brief is explicit
+ * that this helper is reused, never copied.
  */
-function pinByIdOrGround(
+export function pinByIdOrGround(
   built: CoreNodeBuild,
   openKeys: ReadonlySet<string>,
   kind: string,
