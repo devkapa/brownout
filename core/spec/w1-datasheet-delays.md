@@ -377,6 +377,10 @@ pattern as the AT28C16 and as flagged in the dispatch instructions.
 
 ## Summary table: recommended figure per path
 
+The AT28C16 and AT28C256 rows are **datasheet maxima**: neither sheet
+publishes a typical access time, and the maxima are accepted (manager for
+the owner, 2026-09-29).
+
 "Recommended (ns)" is what the simulator should use. Where the reason column
 is blank, it is a plain datasheet typical at (or nearest to) 5 V, standard
 load. `null` means no manufacturer typical exists; the value shown is the
@@ -492,6 +496,9 @@ being modelled as a 28C16.
    these two ratios disagree, so this is not reliable); (c) leave /WE→output
    at classic's zero and only fix address/CS access. None of these is a
    datasheet number; recommend the owner pick.
+   **Resolved (manager for the owner, 2026-09-29):** the /WE enable and every
+   disable pair keep the 20 ns package delay (param 12), marked "no published
+   LS figure". No other vendor's figure is borrowed.
 
 3. **74HC-family figures are all at 4.5 V/6 V, never exactly 5 V.** TI's
    current HC datasheets (74HC74/595/165) only tabulate switching
@@ -500,6 +507,8 @@ being modelled as a 28C16.
    not invented. If the simulator wants a closer-to-5V number, linear
    interpolation between the 4.5V and 6V typ columns is mechanical and can
    be added, but it would not be a number that appears in any datasheet.
+   **Resolved (manager for the owner, 2026-09-29):** the 4.5 V column is
+   accepted, and each HC figure's `switching_source` names that column.
 
 4. **`ic-74hc74`'s cited doc number (SCLS108) does not match the part's
    current TI literature number (SCLS094F).** Either an older/superseded
@@ -520,3 +529,7 @@ being modelled as a 28C16.
    time is ~10-20x faster than classic's shared 10 ms constant; 28C256's
    matches. Not blocking for W1 (the board never writes either EEPROM), but
    recorded for whoever eventually models a 28C16 write.
+   **Resolved (manager for the owner, 2026-09-29):** the 28C16 takes its own
+   datasheet figure (the AT28C16 write-cycle table, typical 0.5 ms), in both
+   engines as a classic fix, in the next wave that touches the memories. The
+   28C256 keeps 10 ms.
