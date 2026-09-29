@@ -464,19 +464,21 @@ export interface KnownDivergenceHit {
   readonly divergenceId: string;
   readonly decisionRef: string;
   readonly reason: string;
-  /** Only the stimuli path's `richardson-closer-than-classic` rule sets this (run-entry.ts): the numbers its verdict rests on, so a report reads them without parsing `reason`. */
+  /** Set by both of the stimuli path's Richardson rules (run-entry.ts): the numbers the verdict rests on, so a report reads them without parsing `reason` (and the sweep can print how far from R each rule's hits sit). */
   readonly richardson?: RichardsonEvidence;
 }
 
-/** What `richardson-closer-than-classic` records per hit: R is the Richardson reference at the mismatch's instant. */
+/** What a Richardson rule records per hit: R is the Richardson reference at the mismatch's instant. */
 export interface RichardsonEvidence {
   readonly reference: number;
   /** `|core - R|`. */
   readonly coreError: number;
   /** `|classic - R|`. */
   readonly classicError: number;
-  /** `|R' - R|`, R's own convergence estimate: R' from classic at h/4 against h/2. */
-  readonly convergenceEstimate: number;
+  /** The ordinary tolerance at R's magnitude (`absTol + relTol * |R|`, volts or amps by category): the unit the sweep reports both errors in. */
+  readonly tolerance: number;
+  /** `|R' - R|`, R's own convergence estimate: R' from classic at h/4 against h/2. Only `richardson-closer-than-classic` computes it. */
+  readonly convergenceEstimate?: number;
 }
 
 /** Shared by "pass" and "fail": both ran a real comparison and have real error stats. */

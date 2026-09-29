@@ -356,6 +356,7 @@ export function explainRichardsonMismatches(
         reason:
           `core is within tolerance of the Richardson-extrapolated classic reference R=${r} (|core-R|=` +
           `${coreAbsErr.toExponential(3)} <= |classic-R|=${classicAbsErr.toExponential(3)})`,
+        richardson: { reference: r, coreError: coreAbsErr, classicError: classicAbsErr, tolerance: absTol + relTol * Math.abs(r) },
       });
       continue;
     }
@@ -387,7 +388,7 @@ export function explainRichardsonMismatches(
         `core is closer to the Richardson reference R=${r} than classic is (|core-R|=${coreAbsErr.toExponential(3)} < ` +
         `|classic-R|=${classicAbsErr.toExponential(3)}), though not within tolerance of it; R has converged: ` +
         `|R'-R|=${estimate.toExponential(3)} (R'=${rNext}, classic at h/4 against h/2) is within the ordinary tolerance`,
-      richardson: { reference: r, coreError: coreAbsErr, classicError: classicAbsErr, convergenceEstimate: estimate },
+      richardson: { reference: r, coreError: coreAbsErr, classicError: classicAbsErr, tolerance: absTol + relTol * Math.abs(r), convergenceEstimate: estimate },
     });
   }
 

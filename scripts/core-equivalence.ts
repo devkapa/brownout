@@ -101,13 +101,27 @@ interface KnownHitSummary {
     /** Passes with at least one known hit: some mismatch was explained rather than absent. */
     readonly withKnownHits: number;
   };
-  /** Known hits on PASSING entries by divergence id: `hits` counts mismatches, `entries` the passing entries holding at least one. */
-  readonly knownHitsById: Readonly<Record<string, { readonly hits: number; readonly entries: number }>>;
+  /**
+   * Known hits on PASSING entries by divergence id: `hits` counts mismatches,
+   * `entries` the passing entries holding at least one. For a Richardson id,
+   * `maxCoreOverTol` and `maxClassicOverTol` are the largest `|core - R|` and
+   * `|classic - R|` over its hits, in units of the tolerance at R's
+   * magnitude: how far from the reference a pass is allowed to sit, so the
+   * size of what a rule accepts stays visible (manager, 2026-09-29).
+   */
+  readonly knownHitsById: Readonly<Record<string, KnownHitTally>>;
+}
+
+interface KnownHitTally {
+  hits: number;
+  entries: number;
+  maxCoreOverTol?: number;
+  maxClassicOverTol?: number;
 }
 
 function summarizeKnownHits(outcomes: readonly HarnessEntryOutcome[]): KnownHitSummary {
   const byStatus: Record<string, number> = {};
-  const byId = new Map<string, { hits: number; entries: number }>();
+  const byId = new Map<string, KnownHitTally>();
   let clean = 0;
   let withKnownHits = 0;
 
@@ -123,6 +137,11 @@ function summarizeKnownHits(outcomes: readonly HarnessEntryOutcome[]): KnownHitS
     for (const hit of result.knownDivergences) {
       const tally = byId.get(hit.divergenceId) ?? { hits: 0, entries: 0 };
       tally.hits++;
+      if (hit.richardson && hit.richardson.tolerance > 0) {
+        const { coreError, classicError, tolerance } = hit.richardson;
+        tally.maxCoreOverTol = Math.max(tally.maxCoreOverTol ?? 0, coreError / tolerance);
+        tally.maxClassicOverTol = Math.max(tally.maxClassicOverTol ?? 0, classicError / tolerance);
+      }
       if (!seen.has(hit.divergenceId)) {
         seen.add(hit.divergenceId);
         tally.entries++;
@@ -147,8 +166,10 @@ function printKnownHitSummary(summary: KnownHitSummary): void {
     return;
   }
   console.log("known hits on passing entries, by divergence id:");
-  for (const [id, { hits, entries }] of ids) {
-    console.log(`  ${id}: ${hits} hit${hits === 1 ? "" : "s"} in ${entries} entr${entries === 1 ? "y" : "ies"}`);
+  for (const [id, { hits, entries, maxCoreOverTol, maxClassicOverTol }] of ids) {
+    const magnitude =
+      maxCoreOverTol === undefined ? "" : ` (max |core-R|/tol ${maxCoreOverTol.toFixed(2)}, max |classic-R|/tol ${maxClassicOverTol!.toFixed(2)})`;
+    console.log(`  ${id}: ${hits} hit${hits === 1 ? "" : "s"} in ${entries} entr${entries === 1 ? "y" : "ies"}${magnitude}`);
   }
 }
 

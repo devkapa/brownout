@@ -417,6 +417,8 @@ describe("Richardson rules on hand-built numbers (rule 2: richardson-closer-than
     expect(hit.richardson!.coreError).toBeCloseTo(3.5e-3, 12);
     expect(hit.richardson!.classicError).toBeCloseTo(0.02, 12);
     expect(hit.richardson!.convergenceEstimate).toBeCloseTo(4e-4, 12);
+    // 100 uV + 1e-3 of |R| = 1.02 V: the core sits 3.5e-3 / 1.12e-3 = 3.1 tolerances from R.
+    expect(hit.richardson!.tolerance).toBeCloseTo(1.12e-3, 15);
     // Recorded in the reason too, so the plain-text report carries them.
     expect(hit.reason).toContain("3.500e-3");
     expect(hit.reason).toContain("2.000e-2");
@@ -472,7 +474,7 @@ describe("Richardson rules on hand-built numbers (rule 2: richardson-closer-than
     expect(taken.explained[0]!.richardson!.convergenceEstimate).toBeCloseTo(1e-9, 15);
   });
 
-  it("a mismatch rule 1 takes keeps rule 1's own id, records no Richardson evidence, and never runs the h/4 replay", () => {
+  it("a mismatch rule 1 takes keeps rule 1's own id, records its errors against the tolerance but no convergence estimate, and never runs the h/4 replay", () => {
     // Core 1.0205 is 0.5 mV from R = 1.020 (inside 1.12 mV) and classic is 20 mV away.
     const fake = fakeReplay(1.01, 1.0152);
     const m = mismatch(1.0, 1.0205);
@@ -481,7 +483,13 @@ describe("Richardson rules on hand-built numbers (rule 2: richardson-closer-than
     expect(remaining).toEqual([]);
     expect(explained).toHaveLength(1);
     expect(explained[0]!.divergenceId).toBe(RICHARDSON_DIVERGENCE_ID);
-    expect(explained[0]!.richardson).toBeUndefined();
+    const evidence = explained[0]!.richardson!;
+    expect(evidence.coreError).toBeCloseTo(5e-4, 12);
+    expect(evidence.classicError).toBeCloseTo(0.02, 12);
+    // 100 uV + 1e-3 of |R| = 1.02 V.
+    expect(evidence.tolerance).toBeCloseTo(1.12e-3, 15);
+    expect(evidence.coreError).toBeLessThanOrEqual(evidence.tolerance);
+    expect(evidence.convergenceEstimate).toBeUndefined();
     expect(fake.quarterCalls()).toBe(0);
   });
 

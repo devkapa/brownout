@@ -856,6 +856,25 @@ their own, and the source KCL does with W1a point 2's branch fold.
    the trial it already has. Partitions otherwise advance independently, each
    on its own `Step` events, and an IC evaluated at an event of one of them
    reads the others as last published.
+
+   What guards this mechanism is the Rust tests, not a fixture. Fixture 40
+   (a 555 whose watched pin and free supply sit in different stepped
+   partitions) is a smoke test: it passes against classic, and also passes
+   with the supply dependency removed, because classic's fixed step cannot
+   resolve the difference. Fixture 38 (the same layout for an hc14) fails
+   without gap 1's promotion and watch, but has not been checked against the
+   supply dependency alone. These tests fail when a piece is removed:
+   - in `solve/ic_tests.rs`:
+     `gap1_a_read_pin_in_the_supplys_own_stepped_partition_flips_at_the_moving_thresholds_crossing`,
+     `gap1_a_closed_form_pin_beside_a_quiet_stepped_supply_is_promoted_and_flips_at_the_analytic_time`,
+     `gap1_a_read_pin_in_another_partition_meets_a_threshold_that_is_still_moving`,
+     `gap1_a_supply_re_solve_re_aims_the_dependent_watch_to_an_earlier_crossing` and
+     `gap1_a_555_thr_pin_in_another_partition_resets_at_the_moving_thresholds_crossing`;
+   - in `solve/stepped.rs`:
+     `a_threshold_that_reads_another_node_of_the_partition_is_taken_at_the_trial_instant`,
+     the four `a_supply_trace_*` tests (the parabola read) and
+     `a_step_never_runs_past_the_end_of_a_supply_trial_however_long_its_own_control_would_take`;
+   - in `devices/ics.rs`, for the fixed-node driver: the four `gap2_*` tests.
 5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
    0.01)` of the evaluation time; `n = finish(hashState, bucket) /
    0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every
@@ -1890,6 +1909,11 @@ own id, never a silent pass. Digital and time mismatches are never touched.
   sample at the instant, the mismatch stays a failure. Each hit records
   `|core - R|`, `|classic - R|` and `|R' - R|`.
 
+Both rules record their hit's errors against the tolerance at R's
+magnitude. For each rule, `scripts/core-equivalence.ts` prints the largest
+`|core - R|` and `|classic - R|` in units of that tolerance next to its hit
+count, so the size of what a rule accepts stays visible.
+
 Delta (W1e, manager ruling 2026-09-29): the closer-than-classic rule, from plan accuracy gate 2.
 
 ## Hard-won rules for the kernel (from the prototype, and from W1e)
@@ -1913,3 +1937,7 @@ Delta (W1e, manager ruling 2026-09-29): the closer-than-classic rule, from plan 
 - Hysteresis at the IC supply floor, a classic change too: the W1c fixed point
   returns -4 (fallback to classic) when a free supply sits near the power
   floor. Accepted for 1.0.0 (manager, 2026-09-29).
+- LED plus capacitor transients: both engines sit up to about 10x the
+  tolerance from the Richardson reference ("Make a Capacitor Fade an LED",
+  which passes as `richardson-closer-than-classic`). Investigate step
+  control and the LED Newton's accuracy after 1.0.0 (manager, 2026-09-29).
