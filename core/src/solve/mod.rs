@@ -25,10 +25,12 @@ pub mod stepped;
 
 #[cfg(test)]
 mod ic_tests;
+#[cfg(test)]
+mod led_tests;
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::devices;
+use crate::devices::{self, led};
 use crate::digital;
 use crate::drivers::{Driver, DriverStage};
 use crate::error::BoError;
@@ -110,6 +112,15 @@ pub trait PartitionSolver {
     /// Restores exactly what a prior [`Self::snapshot`] call captured.
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>));
 
+    /// The published channel array, one current (amps) per channel slot
+    /// (README, LEDs point 13): the readout's channel slots are a copy of it.
+    /// `NaN` marks a slot whose `getElementChannelI` entry is absent. Default
+    /// empty: a solver with no LED-family device (every mock) publishes no
+    /// channel, and `Engine` then leaves its own slots as they are.
+    fn channels(&self) -> &[f64] {
+        &[]
+    }
+
     /// Toggles the solution-cache exactness switch (`NO_SOLUTION_CACHE`,
     /// core/README.md's Options table, key 2) after load. Default a no-op:
     /// only a solver that actually caches (`static_part::StaticPartitionSolver`)
@@ -141,8 +152,9 @@ pub trait PartitionSolver {
         0.0
     }
 
-    /// Newton iterations run so far, summed across every stepped step
-    /// (contract stat `11`).
+    /// Newton iterations run so far, summed across every stepped step and,
+    /// from W1e, every iteration of an iterated static partition, the polish
+    /// included (contract stat `11`).
     fn newton_iterations(&self) -> f64 {
         0.0
     }
@@ -371,6 +383,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).restore(snapshot)
     }
 
+    fn channels(&self) -> &[f64] {
+        (**self).channels()
+    }
+
     fn set_no_solution_cache(&mut self, off: bool) {
         (**self).set_no_solution_cache(off)
     }
@@ -541,6 +557,19 @@ pub(crate) struct DynCapacitor {
     pub leak_g: f64,
 }
 
+/// One STAMPED LED junction (anode and cathode nodes differ), resolved
+/// against the one partition that holds it (README, LEDs point 4): each end is
+/// a local index when free (necessarily in this partition, by the junction
+/// union) or a fixed voltage. Its companion depends on the Newton iterate, so
+/// unlike a [`DynStamped`] entry it is stamped fresh from `x` every
+/// iteration ([`stamp_junctions`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DynJunction {
+    pub anode: DynPin,
+    pub cathode: DynPin,
+    pub law: led::JunctionLaw,
+}
+
 /// A dynamic partition's whole capacitor-independent-plus-capacitor
 /// compiled shape: every device `compile_dyn_shape` found touching it.
 #[derive(Debug, Clone)]
@@ -551,6 +580,67 @@ pub(crate) struct DynShape {
     pub n: usize,
     pub stamped: Vec<DynStamped>,
     pub capacitors: Vec<DynCapacitor>,
+    /// Every stamped LED junction touching this partition, whichever device
+    /// owns it (W1e). Never non-empty for a `ClosedForm` partition
+    /// (`closed_form::ClosedFormSolver::build` asserts it).
+    pub junctions: Vec<DynJunction>,
+}
+
+/// Resolves `node` against partition `p_idx`: its local index when free in
+/// `p_idx`, its fixed voltage when fixed. A node free in a DIFFERENT
+/// partition is a partitioning regression, not a value a fixed-0V fallback
+/// should ever paper over (`DynPin`'s doc comment).
+pub(crate) fn resolve_pin(node: usize, p_idx: usize, local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>]) -> DynPin {
+    match local_index[node] {
+        Some((p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
+        Some((p, _)) => unreachable!(
+            "compile_dyn_shape: node {node} is free but lives in partition {p}, not the partition {p_idx} being compiled — \
+             partition::build's union-find guarantees a device's free pins share one partition (partition.rs's module doc \
+             comment); this is a partitioning regression, not a value a fixed-0V fallback should ever paper over"
+        ),
+        None => DynPin { local: None, fixed: fixed[node].expect("a node absent from local_index must be fixed") },
+    }
+}
+
+/// The partition a junction belongs to: the one holding its free end, or
+/// `None` for a junction that is not stamped or sits across two fixed nodes
+/// (README, LEDs point 4: it belongs to no partition). By the junction union
+/// a junction with two free ends has both in one partition.
+pub(crate) fn junction_partition(j: &led::Junction, local_index: &[Option<(usize, usize)>]) -> Option<usize> {
+    if !j.stamped() {
+        return None;
+    }
+    local_index[j.anode].or(local_index[j.cathode]).map(|(p, _)| p)
+}
+
+/// `j` resolved against partition `p_idx`, or `None` when it is not stamped
+/// or does not touch that partition.
+pub(crate) fn place_junction(j: &led::Junction, p_idx: usize, local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>]) -> Option<DynJunction> {
+    if junction_partition(j, local_index) != Some(p_idx) {
+        return None;
+    }
+    Some(DynJunction { anode: resolve_pin(j.anode, p_idx, local_index, fixed), cathode: resolve_pin(j.cathode, p_idx, local_index, fixed), law: j.law })
+}
+
+/// Stamps every junction's companion about the iterate `x` (the partition's
+/// local solution vector) into `a`/`b`: conductance `gd + GMIN_D` and Norton
+/// offset `id - gd * vPrev`, so the branch current anode to cathode is `g *
+/// (vA - vK) + ieq` (LEDs point 2, `stamp_two_terminal`'s convention).
+pub(crate) fn stamp_junctions(junctions: &[DynJunction], size: usize, a: &mut [f64], b: &mut [f64], x: &[f64]) {
+    for j in junctions {
+        let v_prev = pin_voltage(&j.anode, x) - pin_voltage(&j.cathode, x);
+        let (g, ieq) = j.law.companion(v_prev);
+        stamp_two_terminal(size, a, b, &j.anode, &j.cathode, g, ieq);
+    }
+}
+
+/// A stamped junction's branch current at the published voltages, anode to
+/// cathode, GMIN included: `I(dV) + GMIN_D * dV` (LEDs point 12), which at
+/// convergence equals the companion current classic's source branch carries.
+/// This is what enters the source KCL; `elementI` excludes GMIN.
+pub(crate) fn junction_branch_current(j: &led::Junction, voltages: &[f64]) -> f64 {
+    let v = voltages[j.anode] - voltages[j.cathode];
+    j.law.current(v) + led::GMIN_D * v
 }
 
 /// Compiles partition `p_idx`'s devices into a [`DynShape`]: every resistor,
@@ -559,28 +649,26 @@ pub(crate) struct DynShape {
 /// fixed or land in a DIFFERENT partition. Called once per dynamic partition
 /// at build time by `closed_form::build`/`stepped::build`.
 pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>], program: &Program) -> DynShape {
-    let resolve = |node: usize| -> DynPin {
-        match local_index[node] {
-            Some((p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
-            Some((p, _)) => unreachable!(
-                "compile_dyn_shape: node {node} is free but lives in partition {p}, not the partition {p_idx} being compiled — \
-                 partition::build's union-find guarantees a device's free pins share one partition (partition.rs's module doc \
-                 comment); this is a partitioning regression, not a value a fixed-0V fallback should ever paper over"
-            ),
-            None => DynPin { local: None, fixed: fixed[node].expect("a node absent from local_index must be fixed") },
-        }
-    };
+    let resolve = |node: usize| -> DynPin { resolve_pin(node, p_idx, local_index, fixed) };
     let touches_partition = |device: &crate::program::Device| -> bool {
         device.pins.iter().any(|pin| matches!(local_index[pin.node], Some((pp, _)) if pp == p_idx))
     };
 
     let mut stamped = Vec::new();
     let mut capacitors = Vec::new();
+    let mut junctions = Vec::new();
     for (d, device) in program.devices.iter().enumerate() {
         if !touches_partition(device) {
             continue;
         }
         match device.kind {
+            // An LED-family device is placed junction by junction (README,
+            // LEDs point 4), never by owner: some of its pins may sit in
+            // another partition, or be fixed, with that junction belonging
+            // elsewhere.
+            kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA => {
+                junctions.extend(led::junctions(d, device, program.options.ambient_c).iter().filter_map(|j| place_junction(j, p_idx, local_index, fixed)));
+            }
             kinds::RESISTOR | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
                 let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
                 stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone() });
@@ -609,7 +697,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
             _ => {}
         }
     }
-    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors }
+    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, junctions }
 }
 
 /// pec3.mjs's `stampH`/`stamp2` two-terminal companion stamp: the branch
@@ -1144,6 +1232,36 @@ struct KclDevice {
     owner: Owner,
 }
 
+/// One LED-family device's readout inputs (README, LEDs point 13): what
+/// `PartitionedSolver::publish_led_devices` needs to compute its `elementI`
+/// and channel values from the published voltages. The device is not one
+/// partition's stamp (its junctions can sit in several, or across two fixed
+/// nodes), so this pass is solver-wide, like `recompute_source_currents`.
+struct LedDevice {
+    device_index: usize,
+    /// A copy of the record: `led::readout` reads its kind and `burnt` flag.
+    device: crate::program::Device,
+    /// Its junctions, stamped or not, in channel order.
+    junctions: Vec<led::Junction>,
+    /// The first of its channel slots and how many it owns (0 for `led`).
+    channel_base: usize,
+    channel_count: usize,
+}
+
+impl LedDevice {
+    /// Whether its `getElementChannelI` entry is absent: `burnt` in W1e
+    /// (`seg7` has no such flag, Q-O22), and `led_failed` from W1g.
+    fn absent(&self) -> bool {
+        let p = &self.device.params;
+        match self.device.kind {
+            kinds::LED => p[kinds::led_param::BURNT] != 0.0,
+            kinds::RGB_LED => p[kinds::rgb_param::BURNT] != 0.0,
+            kinds::BICOLOR_LED => p[kinds::bicolor_param::BURNT] != 0.0,
+            _ => false,
+        }
+    }
+}
+
 /// A switch-family device's dispatch metadata for
 /// `PartitionSolver::validate_params`/`apply_params`/`param_value`.
 struct SwitchInfo {
@@ -1223,6 +1341,17 @@ pub struct PartitionedSolver {
     /// `partition::PartitionBuild::multi_capacitor_partitions`'s doc
     /// comment).
     multi_capacitor_linear_partitions: f64,
+    /// Every stamped LED junction, program-wide, whichever partition holds it
+    /// or none: folded into [`Self::recompute_source_currents`]'s KCL (LEDs
+    /// point 12).
+    junctions: Vec<led::Junction>,
+    /// Every LED-family device, for the device pass
+    /// ([`Self::publish_led_devices`]).
+    led_devices: Vec<LedDevice>,
+    /// The published channel array, one slot per program channel slot
+    /// (`PartitionSolver::channels`). Rolls back with a failed instant, in
+    /// [`PartitionSolver::dynamic_snapshot`] (LEDs point 16).
+    channels: Vec<f64>,
     /// A clone of the kernel's full driver table, as of the most recent
     /// [`PartitionSolver::resolve_dirty`] call (W1c step 2b) — that trait
     /// method is the only one the kernel ever calls WITH a fresh `drivers`
@@ -1251,7 +1380,7 @@ pub struct PartitionedSolver {
 impl PartitionedSolver {
     pub fn build(program: &Program) -> Result<Self, BoError> {
         let pb = partition::build(program)?;
-        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions } = pb;
+        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions, .. } = pb;
 
         let node_count = program.node_count;
         let device_count = program.devices.len();
@@ -1332,6 +1461,21 @@ impl PartitionedSolver {
             }
         }
 
+        let mut junctions = Vec::new();
+        let mut led_devices = Vec::new();
+        for (d, device) in program.devices.iter().enumerate() {
+            if !matches!(device.kind, kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA) {
+                continue;
+            }
+            let device_junctions = led::junctions(d, device, program.options.ambient_c);
+            junctions.extend(device_junctions.iter().filter(|j| j.stamped()).copied());
+            let channel_count = (kinds::shape(device.kind).expect("a program the reader accepted has known kinds").channel_slots)(device.pins.len());
+            // The blob's first value is the first channel slot for a kind
+            // with channel slots, and there is no blob at all for `led`.
+            let channel_base = if channel_count > 0 { device.blob[0] as usize } else { 0 };
+            led_devices.push(LedDevice { device_index: d, device: device.clone(), junctions: device_junctions, channel_base, channel_count });
+        }
+
         let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
         let ics = collect_ics(program);
 
@@ -1362,6 +1506,9 @@ impl PartitionedSolver {
             pending_schedule: Vec::new(),
             largest_partition,
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
+            junctions,
+            led_devices,
+            channels: vec![0.0; program.channel_slot_count],
             driver_snapshot: Vec::new(),
         };
         solver.register_ic_read_pin_watches();
@@ -1658,7 +1805,7 @@ impl PartitionedSolver {
     }
 
     pub fn newton_iterations(&self) -> f64 {
-        self.stepped.newton_iterations()
+        self.stepped.newton_iterations() + self.static_solver.newton_iterations()
     }
 
     /// The crossing-watch API's entry point (W1 plan row B2): registers
@@ -1757,6 +1904,14 @@ impl PartitionedSolver {
             leaving[u] += i;
             leaving[w] -= i;
         }
+        // W1e, LEDs point 12: every stamped junction's branch current, anode
+        // to cathode, whether it sits in a partition or across two fixed
+        // nodes. The datum end feeds no source (`leaving[0]` is never read).
+        for j in &self.junctions {
+            let i = junction_branch_current(j, &self.voltages);
+            leaving[j.anode] += i;
+            leaving[j.cathode] -= i;
+        }
         for (device_index, ic) in &self.ics {
             let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
             if !power.powered {
@@ -1825,6 +1980,24 @@ impl PartitionedSolver {
         }
     }
 
+    /// The LED device pass (README, LEDs point 13): each LED-family device's
+    /// `elementI` and channel values, from the published voltages and its
+    /// `burnt` flag, into `currents` and the channel array. Run beside
+    /// [`Self::recompute_source_currents`] at every point that publishes
+    /// voltages. A pure function of those voltages, so the same numbers come
+    /// out however often it runs. The contract lets a device whose pin
+    /// voltages did not move be skipped; it is not, because a memo would need
+    /// rolling back with the instant and would save a few exponentials per
+    /// device.
+    fn publish_led_devices(&mut self) {
+        for e in &self.led_devices {
+            let mut element_i = 0.0;
+            let channels = &mut self.channels[e.channel_base..e.channel_base + e.channel_count];
+            led::readout(&e.device, &e.junctions, &self.voltages, false, &mut element_i, channels);
+            self.currents[e.device_index] = element_i;
+        }
+    }
+
     fn drain_scheduled(&mut self) {
         for (t, p, v) in self.closed_form.take_scheduled() {
             self.pending_schedule.push((t, EventKind::Crossing { partition: PartitionId(p as u32), version: v }));
@@ -1861,6 +2034,16 @@ impl PartitionedSolver {
         }
         if let Some((device, i)) = self.currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
             return Err(format!("device {device}: published current {i} is not finite"));
+        }
+        // A `NaN` channel is an absent entry (README, Readouts), legitimate
+        // only on a device that is absent; any other non-finite channel is a
+        // failed solve.
+        for e in &self.led_devices {
+            for (c, v) in self.channels[e.channel_base..e.channel_base + e.channel_count].iter().enumerate() {
+                if !v.is_finite() && !(v.is_nan() && e.absent()) {
+                    return Err(format!("device {}: published channel {c} value {v} is not finite", e.device_index));
+                }
+            }
         }
         Ok(())
     }
@@ -1926,6 +2109,7 @@ impl PartitionSolver for PartitionedSolver {
         self.publish_fixed_pair_capacitors(now);
         self.recompute_source_currents(now, drivers);
         self.publish_ne555_currents(drivers);
+        self.publish_led_devices();
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
         self.check_finite()?;
@@ -1938,6 +2122,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn currents(&self) -> &[f64] {
         &self.currents
+    }
+
+    fn channels(&self) -> &[f64] {
+        &self.channels
     }
 
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
@@ -2043,7 +2231,10 @@ impl PartitionSolver for PartitionedSolver {
     /// itself (that field's own doc comment: without it, a `Crossing`/`Step`
     /// that fires on a LATER instant with no `resolve_dirty` of its own could
     /// restamp an IC against the failed attempt's last, never-committed
-    /// driver states).
+    /// driver states) — and, W1e, the published channel array (LEDs point
+    /// 16): the device pass writes it after the partitions publish, so an
+    /// earlier delta of a doomed instant has already changed it by the time a
+    /// later one fails.
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
         Box::new((
             self.static_solver.snapshot(),
@@ -2052,20 +2243,22 @@ impl PartitionSolver for PartitionedSolver {
             self.pending_schedule.clone(),
             self.next_bucket,
             self.driver_snapshot.clone(),
+            self.channels.clone(),
         ))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
-        if let Ok(boxed) =
-            snapshot.downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Vec<Driver>)>()
+        if let Ok(boxed) = snapshot
+            .downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Vec<Driver>, Vec<f64>)>()
         {
-            let (static_snap, cf, st, pending, next_bucket, driver_snapshot) = *boxed;
+            let (static_snap, cf, st, pending, next_bucket, driver_snapshot, channels) = *boxed;
             self.static_solver.restore(static_snap);
             self.closed_form.restore(cf);
             self.stepped.restore(st);
             self.pending_schedule = pending;
             self.next_bucket = next_bucket;
             self.driver_snapshot = driver_snapshot;
+            self.channels = channels;
         }
     }
 
@@ -2106,6 +2299,7 @@ impl PartitionSolver for PartitionedSolver {
         let driver_snapshot = self.driver_snapshot.clone();
         self.recompute_source_currents(now, &driver_snapshot);
         self.publish_ne555_currents(&driver_snapshot);
+        self.publish_led_devices();
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
         self.check_finite()?;
@@ -2123,6 +2317,7 @@ impl PartitionSolver for PartitionedSolver {
         let driver_snapshot = self.driver_snapshot.clone();
         self.recompute_source_currents(t_end, &driver_snapshot);
         self.publish_ne555_currents(&driver_snapshot);
+        self.publish_led_devices();
         self.drain_scheduled();
         self.maybe_schedule_bucket(t_end);
         self.check_finite()?;

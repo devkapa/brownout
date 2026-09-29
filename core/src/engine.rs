@@ -172,7 +172,9 @@ impl Engine {
     /// depth, driver commits) come live from the kernel; 7-12 (solution-cache
     /// hits, closed-form segments, crossings, stepped steps, Newton
     /// iterations, IC evaluations) come live from the partition solver and
-    /// the kernel's own evaluator; 14 is reserved at `0.0` until its
+    /// the kernel's own evaluator (11 counts every stepped Newton iteration
+    /// and, from W1e, every iteration of an iterated static partition, the
+    /// polish included); 14 is reserved at `0.0` until its
     /// machinery lands (W1f). Unknown `i` (>= `STAT_COUNT`) is `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
         match i {
@@ -289,6 +291,20 @@ impl Engine {
         }
     }
 
+    /// Copies the solver's published channel array into the readout's channel
+    /// slots (W1e, LEDs point 13), at the same four points and with the same
+    /// "success or failure" rule as [`Self::apply_digital_writes`]: after a
+    /// failed instant the solver has already rolled its array back with the
+    /// voltages and currents, so the copy shows the last completed instant.
+    /// A solver that publishes none (empty, every mock) leaves the slots as
+    /// they are.
+    fn copy_channels(&mut self) {
+        let published = self.kernel.solver().channels();
+        if published.len() == self.readout.channel_slots().len() {
+            self.readout.channel_slots_mut().copy_from_slice(published);
+        }
+    }
+
     /// Changes an option after load (core/README.md, `bo_engine_set_option`).
     /// Keys 2 and 3 (the exactness switches) take effect at the next event;
     /// keys 1 and 4-7 are load-time only and are always
@@ -361,6 +377,7 @@ impl Engine {
         // `Self::apply_digital_writes`'s own doc comment on why a failed
         // `advance` can still carry real, already-completed instants' writes.
         self.apply_digital_writes();
+        self.copy_channels();
         result.map_err(map_kernel_error)
     }
 
@@ -397,6 +414,7 @@ impl Engine {
         let result = self.kernel.apply_params_as_event(&triples);
         // See `Engine::advance`'s identical call: drained unconditionally.
         self.apply_digital_writes();
+        self.copy_channels();
         result.map_err(map_kernel_error)
     }
 
@@ -420,6 +438,7 @@ impl Engine {
         // See `Engine::advance`'s identical call: drained unconditionally,
         // regardless of outcome.
         self.apply_digital_writes();
+        self.copy_channels();
         match result {
             Ok(()) => Ok(()),
             Err(SeedMemoryError::Rejected(msg)) => Err(BoError::invalid_argument(msg)),
@@ -500,6 +519,7 @@ impl Engine {
         // caller reading `digital_slots()` right after `load()` sees it
         // without a separate `advance()` first.
         engine.apply_digital_writes();
+        engine.copy_channels();
         Ok(engine)
     }
 }

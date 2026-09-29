@@ -180,6 +180,12 @@ impl ClosedFormSolver {
             }
             let shape = compile_dyn_shape(p_idx, &partitions[p_idx], local_index, fixed, program);
             debug_assert_eq!(shape.capacitors.len(), 1, "Decision 14: a ClosedForm partition has exactly one capacitor");
+            // README, LEDs point 5: the exact exponential needs a linear
+            // network, so `partition::build` never classifies a partition
+            // holding a stamped junction ClosedForm. A real assert, not a
+            // debug one: a junction reaching a segment would silently solve
+            // the wrong physics (the segment never stamps one).
+            assert!(shape.junctions.is_empty(), "a ClosedForm partition never holds an LED junction (partition {p_idx}); partition::build must classify it Stepped");
             let cap = shape.capacitors[0];
             for (l, &node) in shape.nodes.iter().enumerate() {
                 node_owner.insert(node, (p_idx, l));

@@ -28,6 +28,17 @@
 //! the clone-and-stamp step produces without changing the partition's own
 //! topology.
 //!
+//! **Iterated partitions (W1c point 3, W1e LEDs points 6, 7 and 9).** A
+//! partition holding a free IC supply node or a stamped LED junction is
+//! solved by [`newton::solve`], restamped from each iterate from the
+//! partition's last published voltages, with classic's per-node test and cap
+//! of 50 iterations (`-4` past it). One holding a junction then runs a
+//! single polish iteration, so what it publishes is the fixed point classic
+//! settles on rather than the first passing iterate. One holding a free IC
+//! supply node bypasses the solution cache (its stamp follows its own
+//! solution); one holding only junctions keeps it, and stores the polished
+//! result. Every other partition takes one direct LU solve, unchanged.
+//!
 //! Devices in a partition are represented two ways, matching whether their
 //! electrical state can change after load:
 //! - **Resistors** are folded into `matrix_base`/`rhs_base` once, at
@@ -41,7 +52,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::devices;
+use crate::devices::{self, led};
 use crate::digital;
 use crate::drivers::Driver;
 use crate::error::BoError;
@@ -50,21 +61,23 @@ use crate::kinds;
 use crate::lu;
 use crate::partition::{self, PartitionKind, ResolvedSource};
 use crate::program::Program;
-use crate::solve::{collect_ics, ic_driver_branches, ic_pull_target, PartitionSolver};
-
-/// The fixed-point iteration's cap and Newton-style per-node tolerance (W1c
-/// contract point 3: "classic's Newton test", `|dx| <= 1e-6 + 1e-3 |x|`) —
-/// shared by every partition that holds a free IC supply node, since R_out
-/// then moves with the very voltages the solve is finding.
-const IC_FIXED_POINT_MAX_ITERATIONS: usize = 50;
-const IC_FIXED_POINT_ABS_TOL: f64 = 1e-6;
-const IC_FIXED_POINT_REL_TOL: f64 = 1e-3;
+use crate::solve::newton;
+use crate::solve::{
+    collect_ics, ic_driver_branches, ic_pull_target, junction_branch_current, junction_partition, place_junction, stamp_junctions, DynJunction,
+    PartitionSolver,
+};
 
 /// Every node except node 0 carries this conductance to the datum (contract,
 /// "W0 kernel semantics", point 2): it keeps an isolated net solvable (reads
 /// 0 V) and its current is folded into every KCL sum below, exactly as the
 /// classic engine stamps it on every node row.
 pub const NODE_RSHUNT_G: f64 = 1e-12;
+
+/// The most keys one partition's cache keeps. Reaching it empties that
+/// partition's map (a cache only ever costs a solve, never a wrong answer),
+/// which bounds memory for a partition whose keys never repeat, and drops the
+/// entries a bumped epoch made unreachable.
+const CACHE_ENTRIES_PER_PARTITION: usize = 256;
 
 /// One static-stamp device's electrical identity: which device it is, its
 /// kind, its own pins (as node ids, in device-pin order) and its current
@@ -92,7 +105,7 @@ struct StaticStamp {
 /// that does not need its own key entry; only the floating model's
 /// bucket-dependent `high` bit can still move the stamp from one resolve to
 /// the next).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 struct CacheKey {
     /// `(driver id, committed mode)` for every driver whose node lives in
     /// this partition, sorted by driver id for a stable comparison —
@@ -222,9 +235,13 @@ pub struct StaticPartitionSolver {
     no_solution_cache: bool,
     /// Bumped by `apply_params` on every live-parameter change.
     epoch: u64,
-    /// partition index -> (the key it was last solved under, its solved
-    /// local voltages).
-    cache: HashMap<usize, (CacheKey, Vec<f64>)>,
+    /// partition index -> every key it has been solved under -> its solved
+    /// local voltages ("cached per driver configuration", W1 plan; the
+    /// prototype's `part.cache` is a map too). One entry per partition would
+    /// never hit on a driver that alternates between two levels, which is
+    /// what an LED on a clocked IC output does (W1e, LEDs point 7: "modes
+    /// repeat every clock cycle"). Bounded by [`CACHE_ENTRIES_PER_PARTITION`].
+    cache: HashMap<usize, HashMap<CacheKey, Vec<f64>>>,
     /// Contract stat 7.
     cache_hits: f64,
     /// Every combinational IC whose driver/pull pins reach a `Static`
@@ -239,8 +256,21 @@ pub struct StaticPartitionSolver {
     /// node of some IC (W1c contract point 3): such a partition's R_out
     /// moves with its own solved state, so `Self::resolve_dirty` iterates it
     /// to a fixed point instead of solving it once and reading (or writing)
-    /// the solution cache — see `Self::iterate_solve`.
+    /// the solution cache — see `Self::iterated_solve`.
     holds_free_ic_supply: Vec<bool>,
+    /// partition index -> every stamped LED junction touching it, resolved
+    /// against it (W1e, LEDs point 4); empty for a partition this solver does
+    /// not own and for one holding none. A non-empty entry makes the
+    /// partition nonlinear: iterated and polished by `Self::iterated_solve`.
+    junctions: Vec<Vec<DynJunction>>,
+    /// Every stamped junction this solver owns the current of: those in a
+    /// `Static` partition and those across two fixed nodes (which belong to
+    /// none). Folded into `Self::recompute_currents`'s source KCL.
+    kcl_junctions: Vec<led::Junction>,
+    /// Contract stat 11's static half: every iteration of every iterated
+    /// partition, the polish and any failed attempt's included. Not rolled
+    /// back, like every stat.
+    newton_iterations: u64,
     /// node -> every IC device index that reads it (its `vcc`/`gnd` pins and
     /// every logic pin, W1c contract point 4's reader rule) — built once so
     /// `Self::resolve_dirty` can turn "this node's published bits changed"
@@ -256,6 +286,19 @@ impl StaticPartitionSolver {
     pub fn build(program: &Program) -> Result<Self, BoError> {
         let pb = partition::build(program)?;
         let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, .. } = pb;
+
+        let mut partition_junctions: Vec<Vec<DynJunction>> = vec![Vec::new(); partitions.len()];
+        let mut kcl_junctions = Vec::new();
+        for j in partition::program_junctions(program).into_iter().filter(|j| j.stamped()) {
+            match junction_partition(&j, &local_index) {
+                Some(p) if partition_kinds[p] == PartitionKind::Static => {
+                    partition_junctions[p].push(place_junction(&j, p, &local_index, &fixed).expect("junction_partition just named this partition"));
+                    kcl_junctions.push(j);
+                }
+                Some(_) => {} // a dynamic partition's junction: that solver places and publishes it.
+                None => kcl_junctions.push(j), // across two fixed nodes: no partition, but its current is real.
+            }
+        }
 
         let mut matrix_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len() * p.len()]).collect();
         let mut rhs_base: Vec<Vec<f64>> = partitions.iter().map(|p| vec![0.0; p.len()]).collect();
@@ -353,8 +396,17 @@ impl StaticPartitionSolver {
             cache_hits: 0.0,
             ics,
             holds_free_ic_supply,
+            junctions: partition_junctions,
+            kcl_junctions,
+            newton_iterations: 0,
             node_to_ic_readers,
         })
+    }
+
+    /// Contract stat 11, the static half (`PartitionedSolver` adds the
+    /// stepped one).
+    pub fn newton_iterations(&self) -> f64 {
+        self.newton_iterations as f64
     }
 
     /// The number of partitions built (contract stat 0), for `Engine::load`
@@ -419,7 +471,7 @@ impl StaticPartitionSolver {
 
     /// `node`'s current voltage for the purposes of resolving partition
     /// `p_idx`: the fixed-point iterate `x` when `node` is free and IN
-    /// `p_idx` (`Self::iterate_solve`'s own local solution vector, valid for
+    /// `p_idx` (`Self::iterated_solve`'s own local solution vector, valid for
     /// indices `0..partitions[p_idx].len()`), otherwise `self.fixed[node]`.
     /// Never reads `self.voltages` directly: every node an IC stamp inside
     /// `p_idx` can ever need (its own free pin, or its IC's supply nodes) is
@@ -573,9 +625,9 @@ impl StaticPartitionSolver {
     /// `Self::read_node` never has to fall through to a node this partition
     /// knows nothing about.
     ///
-    /// `x` is the CURRENT fixed-point iterate (`Self::iterate_solve`'s local
-    /// solution vector) when `p_idx` holds a free IC supply node, or `&[]`
-    /// otherwise: `Self::read_node` only ever indexes into it for a node
+    /// `x` is the CURRENT iterate (`Self::iterated_solve`'s local solution
+    /// vector) in an iterated solve, or `&[]` in a direct one:
+    /// `Self::read_node` only ever indexes into it for a node
     /// free-in-`p_idx`, and when `p_idx` holds no free IC supply at all,
     /// every IC touching it has both supply nodes fixed by definition
     /// (`self.holds_free_ic_supply[p_idx]` is exactly that fact) — so `x`
@@ -648,54 +700,58 @@ impl StaticPartitionSolver {
         lu::solve(a, size, b).map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))
     }
 
-    /// The fixed-point solve for a partition that holds at least one free IC
-    /// supply node (W1c contract point 3): restamps every IC's
-    /// driver/pull from the CURRENT iterate's supply voltage each pass
-    /// (classic's own fixed-point iteration, no Jacobian term), until
-    /// classic's Newton test passes per node or
-    /// [`IC_FIXED_POINT_MAX_ITERATIONS`] is exceeded (`-4`). Writes the
-    /// converged voltages straight into `self.voltages` (never the solution
-    /// cache — W1c contract point 4: "bypass the cache for fixed-point
-    /// partitions", since re-stamping every call already IS the point).
-    fn iterate_solve(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<(), String> {
-        let nodes = self.partitions[p_idx].clone();
-        let size = nodes.len();
-        // Warm start from whatever this partition last published (0.0 at
-        // very first load, like every other free node) — a reasonable guess
-        // that also makes a converged, unchanged re-resolve a fast, few-pass
-        // confirmation rather than starting from scratch every time.
-        let mut x: Vec<f64> = nodes.iter().map(|&n| self.voltages[n]).collect();
-        let mut converged = false;
-        for _iteration in 0..IC_FIXED_POINT_MAX_ITERATIONS {
-            let mut a = self.matrix_base[p_idx].clone();
-            let mut b = self.rhs_base[p_idx].clone();
-            self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
-            self.stamp_switches_into(p_idx, size, &mut a, &mut b);
-            self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &x);
-            let x_new = lu::solve(a, size, b).map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))?;
-            // Classic's Newton test, per node: `|dx| <= 1e-6 + 1e-3 |x|`
-            // (contract point 3), `|x|` read from the NEW iterate.
-            let mut all_within_tol = true;
-            for i in 0..size {
-                let dx = (x_new[i] - x[i]).abs();
-                if dx > IC_FIXED_POINT_ABS_TOL + IC_FIXED_POINT_REL_TOL * x_new[i].abs() {
-                    all_within_tol = false;
-                    break;
-                }
-            }
-            x = x_new;
-            for (l_idx, &node) in nodes.iter().enumerate() {
-                self.voltages[node] = x[l_idx];
-            }
-            if all_within_tol {
-                converged = true;
-                break;
-            }
-        }
-        if !converged {
-            return Err(format!("partition {p_idx} ({size} node(s)): IC fixed-point iteration did not converge within {IC_FIXED_POINT_MAX_ITERATIONS} iterations"));
-        }
+    /// One iteration's stamp for an iterated partition (`Self::iterated_solve`):
+    /// the pristine base, then every non-IC driver, switch contact, IC
+    /// driver and pull (from the iterate's supply voltages when the partition
+    /// holds a free supply, W1c point 3) and LED junction companion (about
+    /// the iterate, W1e LEDs point 2). Classic restamps all of these from the
+    /// latest iterate with one Newton loop; this is that loop restricted to
+    /// one partition (LEDs points 9 and 11).
+    fn stamp_iterate(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) -> Result<(), String> {
+        a.copy_from_slice(&self.matrix_base[p_idx]);
+        b.copy_from_slice(&self.rhs_base[p_idx]);
+        self.stamp_non_ic_drivers_into(p_idx, size, a, b, drivers)?;
+        self.stamp_switches_into(p_idx, size, a, b);
+        self.stamp_ics_into(p_idx, size, a, b, now, drivers, x);
+        stamp_junctions(&self.junctions[p_idx], size, a, b, x);
         Ok(())
+    }
+
+    /// The solve for an iterated partition (a free IC supply node, W1c point
+    /// 3, or a stamped LED junction, W1e LEDs point 6): [`newton::solve`],
+    /// from this partition's last published voltages (0 V before its first
+    /// solve, as classic's first solve starts from `netV = {gnd: 0}`), at
+    /// most 50 iterations, and one polish iteration when it holds a junction.
+    /// A partition that has not passed by then is `-4`. Returns the solved
+    /// local voltages; the caller publishes them.
+    fn iterated_solve(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<Vec<f64>, String> {
+        let size = self.partitions[p_idx].len();
+        let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
+        let polish = !self.junctions[p_idx].is_empty();
+        // A closure cannot return the stamp's own error (`Newton` wants
+        // `()`), so it parks the first one here and leaves the matrix zero,
+        // which fails the solve at once instead of iterating on garbage.
+        let mut stamp_error: Option<String> = None;
+        let result = newton::solve(size, size, &x0, false, polish, |x, a, b| {
+            if stamp_error.is_some() {
+                return;
+            }
+            if let Err(e) = self.stamp_iterate(p_idx, size, a, b, now, drivers, x) {
+                a.fill(0.0);
+                b.fill(0.0);
+                stamp_error = Some(e);
+            }
+        });
+        if let Some(e) = stamp_error {
+            return Err(e);
+        }
+        let result = result.map_err(|e| format!("partition {p_idx} ({size} node(s)): {e}"))?;
+        // Counted before the verdict, like every stat: a failed attempt ran.
+        self.newton_iterations += result.iterations as u64;
+        if !result.converged {
+            return Err(format!("partition {p_idx} ({size} node(s)): Newton did not converge within {} iterations", newton::NEWTON_MAX));
+        }
+        Ok(result.x)
     }
 
     /// Resistor and switch currents by summing every contact's own
@@ -717,6 +773,14 @@ impl StaticPartitionSolver {
                 leaving[w] -= i;
             }
             currents[stamp.device_index] = total;
+        }
+
+        // Every stamped junction's branch current, anode to cathode, GMIN
+        // included (W1e, LEDs point 12).
+        for j in &self.kcl_junctions {
+            let i = junction_branch_current(j, &self.voltages);
+            leaving[j.anode] += i;
+            leaving[j.cathode] -= i;
         }
 
         // Shunt current, every node but the datum (contract, point 2).
@@ -765,30 +829,44 @@ impl PartitionSolver for StaticPartitionSolver {
 
             if self.holds_free_ic_supply[p_idx] {
                 // W1c contract point 3/4: R_out moves with this partition's
-                // own solved state, so the solution cache never applies —
-                // `Self::iterate_solve` writes `self.voltages` directly.
-                self.iterate_solve(p_idx, now, drivers)?;
+                // own solved state, so the solution cache never applies
+                // (junctions or not, W1e LEDs point 7): every solve restamps
+                // from the iterate, and the result goes straight to
+                // `self.voltages`.
+                let x = self.iterated_solve(p_idx, now, drivers)?;
+                for (l_idx, &node) in nodes.iter().enumerate() {
+                    self.voltages[node] = x[l_idx];
+                }
             } else {
                 let key = self.cache_key(p_idx, now, drivers);
                 let mut used_cache = false;
                 if !self.no_solution_cache {
-                    if let Some((cached_key, cached_x)) = self.cache.get(&p_idx) {
-                        if cached_key == &key {
-                            self.cache_hits += 1.0;
-                            for (l_idx, &node) in nodes.iter().enumerate() {
-                                self.voltages[node] = cached_x[l_idx];
-                            }
-                            used_cache = true;
+                    if let Some(cached_x) = self.cache.get(&p_idx).and_then(|entries| entries.get(&key)) {
+                        self.cache_hits += 1.0;
+                        for (l_idx, &node) in nodes.iter().enumerate() {
+                            self.voltages[node] = cached_x[l_idx];
                         }
+                        used_cache = true;
                     }
                 }
                 if !used_cache {
-                    let x = self.direct_solve(p_idx, now, drivers)?;
+                    // A partition holding only junctions is nonlinear but
+                    // keeps the cache (W1e LEDs point 7): a miss runs the
+                    // Newton solve, polish included, and stores that result.
+                    let x = if self.junctions[p_idx].is_empty() {
+                        self.direct_solve(p_idx, now, drivers)?
+                    } else {
+                        self.iterated_solve(p_idx, now, drivers)?
+                    };
                     for (l_idx, &node) in nodes.iter().enumerate() {
                         self.voltages[node] = x[l_idx];
                     }
                     if !self.no_solution_cache {
-                        self.cache.insert(p_idx, (key, x));
+                        let entries = self.cache.entry(p_idx).or_default();
+                        if entries.len() >= CACHE_ENTRIES_PER_PARTITION {
+                            entries.clear();
+                        }
+                        entries.insert(key, x);
                     }
                 }
             }
@@ -837,6 +915,10 @@ impl PartitionSolver for StaticPartitionSolver {
 
     fn cache_hits(&self) -> f64 {
         self.cache_hits
+    }
+
+    fn newton_iterations(&self) -> f64 {
+        StaticPartitionSolver::newton_iterations(self)
     }
 
     /// Owner decision 1's "all or nothing": every triple is checked, in
@@ -1185,5 +1267,134 @@ mod tests {
         let solver = StaticPartitionSolver::build(&p).unwrap();
         assert_eq!(solver.param_value(1, 0), None);
         assert_eq!(solver.param_value(99, 0), None);
+    }
+    // ---- W1e: junction stamping, the polish, the cache (LEDs 6, 7, 9) -----
+
+    use crate::solve::newton::hooks;
+
+    fn seg7_cc(component_index: usize, pins: Vec<PinRecord>) -> Device {
+        assert_eq!(pins.len(), 10);
+        Device { kind: kinds::SEG7_CC, component_index, pins, params: vec![2.0, 0.02], blob: vec![0.0] }
+    }
+
+    /// The drafting probe's worst case (`drled-newton-probe2d.mjs`): a
+    /// `seg7_cc` with all eight segments lit through 330 ohm each from 5 V and
+    /// a shared 100 ohm common resistor, at -40 C. Nodes: 1 the rail, 2..9
+    /// the segment anodes (`a`..`dp`), 10 the common.
+    fn all_lit_seg7_at_minus_40() -> Program {
+        let mut devices = vec![source(0, 1, 0, 5.0)];
+        for i in 0..8 {
+            devices.push(resistor(1 + i, 1, 2 + i, 330.0));
+        }
+        devices.push(resistor(9, 10, 0, 100.0));
+        let mut pins: Vec<PinRecord> = (2..10).map(pin).collect();
+        pins.push(pin(10)); // com
+        pins.push(PinRecord { node: 0, flags: crate::program::PIN_FLAG_OPEN, open_hash: 0, dead_hash: 0 }); // com2
+        devices.push(seg7_cc(10, pins));
+        let mut p = program(11, devices);
+        p.channel_slot_count = 8;
+        p.options.ambient_c = -40.0;
+        p
+    }
+
+    /// The deeply converged fixed point of that circuit, and the warm start
+    /// the probe found worst (`ref +- 0.2 V`, alternating), from
+    /// `e2b-values.mjs` (Newton run to `|dx| = 0`, independent of the core).
+    const POLISH_ANODE: f64 = 4.137971889906031;
+    const POLISH_COMMON: f64 = 2.089765111859904;
+
+    fn solve_polish_case(p: &Program) -> (StaticPartitionSolver, f64) {
+        let mut solver = StaticPartitionSolver::build(p).unwrap();
+        assert_eq!(solver.partitions.len(), 1);
+        assert_eq!(solver.partitions[0], (2..=10).collect::<Vec<usize>>(), "the probe's node order");
+        for (l, &node) in solver.partitions[0].clone().iter().enumerate() {
+            let reference = if node == 10 { POLISH_COMMON } else { POLISH_ANODE };
+            solver.voltages[node] = reference + if l % 2 == 1 { 0.2 } else { -0.2 };
+        }
+        solver.resolve_dirty(&[PartitionId(0)], 0.0, &[]).unwrap();
+        let worst = (2..=10)
+            .map(|node| (solver.voltages()[node] - if node == 10 { POLISH_COMMON } else { POLISH_ANODE }).abs())
+            .fold(0.0f64, f64::max);
+        (solver, worst)
+    }
+
+    #[test]
+    fn the_polish_lands_the_worst_probe_case_within_a_microvolt_of_the_fixed_point() {
+        let (solver, worst) = solve_polish_case(&all_lit_seg7_at_minus_40());
+        assert!(worst < 1e-6, "polished result is {worst:e} V from the fixed point");
+        // The probe's passing iterate came after 9 iterations, and the polish is the 10th.
+        assert_eq!(solver.newton_iterations(), 10.0);
+    }
+
+    #[test]
+    fn with_the_polish_skipped_the_same_case_is_more_than_50_microvolts_off_so_the_test_can_fail() {
+        // The seeded fault: without the polish the passing iterate is the
+        // published one, 144 uV off (the probe measured 1.4418e-4 V).
+        let _guard = hooks::skip_polish();
+        let (solver, worst) = solve_polish_case(&all_lit_seg7_at_minus_40());
+        assert!(worst > 50e-6, "the seeded fault should show: worst {worst:e} V");
+        assert!((worst - 1.4417515579179252e-4).abs() < 1e-9, "and it is the probe's own number: {worst:e}");
+        assert_eq!(solver.newton_iterations(), 9.0, "nine iterations to pass, no polish");
+    }
+
+    #[test]
+    fn a_junction_only_partition_keeps_the_cache_and_a_hit_publishes_the_stored_bits() {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), Device {
+            kind: kinds::LED,
+            component_index: 2,
+            pins: vec![pin(2), pin(0)],
+            params: vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0],
+            blob: vec![],
+        }]);
+        let mut solver = StaticPartitionSolver::build(&p).unwrap();
+        let parts = all_partitions(&solver);
+        solver.resolve_dirty(&parts, 0.0, &[]).unwrap();
+        let (first, iterations) = (solver.voltages().to_vec(), solver.newton_iterations());
+        assert!(iterations >= 2.0);
+        // Disturb the warm start; a hit must not read it.
+        solver.voltages[2] = 4.0;
+        solver.resolve_dirty(&parts, 0.0, &[]).unwrap();
+        assert_eq!(solver.cache_hits(), 1.0);
+        assert_eq!(solver.voltages(), first.as_slice(), "the stored vector, bit for bit");
+        assert_eq!(solver.newton_iterations(), iterations, "a hit iterates nothing");
+    }
+
+    #[test]
+    fn a_junction_partition_without_the_cache_re_solves_from_its_last_voltages_and_agrees_within_a_microvolt() {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), Device {
+            kind: kinds::LED,
+            component_index: 2,
+            pins: vec![pin(2), pin(0)],
+            params: vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0],
+            blob: vec![],
+        }]);
+        let mut solver = StaticPartitionSolver::build(&p).unwrap();
+        solver.set_no_solution_cache(true);
+        let parts = all_partitions(&solver);
+        solver.resolve_dirty(&parts, 0.0, &[]).unwrap();
+        let first = solver.voltages()[2];
+        let iterations = solver.newton_iterations();
+        solver.resolve_dirty(&parts, 0.0, &[]).unwrap();
+        assert_eq!(solver.cache_hits(), 0.0);
+        assert!(solver.newton_iterations() > iterations, "re-iterated");
+        assert!((solver.voltages()[2] - first).abs() < 1e-6);
+        // Warm from the fixed point it passes at once: one iteration and the polish.
+        assert_eq!(solver.newton_iterations() - iterations, 2.0);
+    }
+
+    #[test]
+    fn a_partition_that_cannot_converge_is_a_solve_failure_naming_the_iteration_cap() {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), Device {
+            kind: kinds::LED,
+            component_index: 2,
+            pins: vec![pin(2), pin(0)],
+            params: vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0],
+            blob: vec![],
+        }]);
+        let mut solver = StaticPartitionSolver::build(&p).unwrap();
+        let parts = all_partitions(&solver);
+        let _guard = hooks::force_unconverged(u32::MAX);
+        let err = solver.resolve_dirty(&parts, 0.0, &[]).unwrap_err();
+        assert!(err.contains("did not converge within 50 iterations"), "{err}");
     }
 }

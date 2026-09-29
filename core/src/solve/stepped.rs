@@ -9,10 +9,17 @@
 //! **Per-step solve.** Each attempt at a step of size `h` replaces every
 //! capacitor with its BE or trap companion (`devices::passives::
 //! capacitor_be_companion`/`capacitor_trap_companion`, spec §7.4) and solves
-//! the resulting LINEAR system through [`crate::solve::newton`] — every W1b
-//! kind is linear, so this always converges in exactly one iteration
-//! (W1 plan row B3), but routing through Newton regardless means a real
-//! nonlinear kind (W1c-W1e) needs no restructuring here.
+//! the resulting system through [`crate::solve::newton`]. A partition with
+//! nothing nonlinear in it converges in exactly one iteration (W1 plan row
+//! B3); one holding a free IC supply node (W1c) or a stamped LED junction
+//! (W1e) iterates, with no polish, exactly as classic solves each step.
+//!
+//! **A step whose Newton does not converge is rejected, not fatal** (W1e,
+//! README LEDs point 8, as classic's host does, HL:609-617 and 819-831): `h`
+//! becomes `max(H_MIN, 0.25 h)` and the step-doubling trio is retried, and
+//! only a failure at `h <= 1.01 * H_MIN` is `-4`. A crossing-refinement trial
+//! that does not converge ends the refinement at the best `h` found so far.
+//! A singular or non-finite pivot stays `-4` at once.
 //!
 //! **Step-doubling error control** (`plan_step`): one step of `h` (coarse)
 //! is compared against two steps of `h/2` (fine); the worse of every node
@@ -51,8 +58,8 @@ use crate::partition::PartitionKind;
 use crate::program::Program;
 use crate::solve::newton;
 use crate::solve::{
-    build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, stamp_ics_into_dyn, stamp_linear_base, stamp_two_terminal, DynCapacitor,
-    DynShape, Threshold, ThresholdFn,
+    build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base, stamp_two_terminal,
+    DynCapacitor, DynShape, Threshold, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -139,12 +146,34 @@ struct IcStampCtx<'a> {
     node_owner: &'a HashMap<usize, (usize, usize)>,
     fixed: &'a [Option<f64>],
     p_idx: usize,
-    /// Whether THIS partition holds a free IC supply node (contract point
-    /// 3): when it does, R_out (and hence the whole stamp) moves with the
-    /// very voltages the step is solving for, so [`take_step`] runs a real
+    /// Whether THIS partition's stamp moves with the very voltages the step
+    /// is solving for: it holds a free IC supply node (contract point 3,
+    /// R_out follows the iterate) or a stamped LED junction (W1e, whose
+    /// companion is re-linearised about it). [`take_step`] then runs a real
     /// Newton iteration (`linear = false`) instead of the one-shot linear
-    /// solve every W1b kind alone would need.
-    holds_free_ic_supply: bool,
+    /// solve every other partition needs.
+    iterated: bool,
+}
+
+/// Why a step's solve produced no result.
+#[derive(Debug)]
+enum StepError {
+    /// The iteration hit its cap without passing (README, LEDs point 8): the
+    /// caller rejects the step and retries it smaller, or ends a refinement,
+    /// or fails where there is no smaller step to try.
+    NoConverge,
+    /// A singular or non-finite pivot or iterate: `-4` at once.
+    Failed(String),
+}
+
+impl StepError {
+    /// The message for a caller with no smaller step to retry.
+    fn into_message(self) -> String {
+        match self {
+            StepError::NoConverge => format!("stepped: Newton did not converge within {} iterations", newton::NEWTON_MAX),
+            StepError::Failed(message) => message,
+        }
+    }
 }
 
 /// Solves one BE or trap step of size `h` from `(vc_from, x_from)`, with
@@ -162,35 +191,34 @@ fn take_step(
     method: Method,
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
-) -> Result<StepResult, String> {
+) -> Result<StepResult, StepError> {
     let n = shape.n;
     // `linear = true` short-circuits `newton::solve` to exactly one
-    // iteration (every W1b kind is linear, so a second pass could never move
-    // the answer) — but an IC's driver/pull conductance on a FREE supply
-    // node genuinely depends on the iterate itself (R_out is a function of
-    // the very voltage being solved for), so that partition needs the real
-    // convergence loop instead.
-    let linear = !ic_ctx.holds_free_ic_supply;
-    let result = newton::solve(n, n, x_from, linear, |x, a, b| {
+    // iteration (a linear stamp could never move on a second pass) — but an
+    // IC's driver/pull conductance on a FREE supply node genuinely depends on
+    // the iterate itself (R_out is a function of the very voltage being
+    // solved for), and so does an LED junction's companion, so those
+    // partitions need the real convergence loop instead. No polish: classic
+    // solves each step exactly like this (LEDs point 8).
+    let linear = !ic_ctx.iterated;
+    let result = newton::solve(n, n, x_from, linear, false, |x, a, b| {
         stamp_linear_base(shape, n, a, b, live_params);
         for (i, cap) in shape.capacitors.iter().enumerate() {
             let contrib = companion(cap, h, vc_from[i], i_prev[i], method);
             stamp_two_terminal(n, a, b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection);
         }
         stamp_ics_into_dyn(n, a, b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, ic_ctx.fixed, ic_ctx.p_idx, x);
+        stamp_junctions(&shape.junctions, n, a, b, x);
     })
-    .map_err(|e| format!("stepped: {e}"))?;
-    if !linear && !result.converged {
-        // Classic's own Newton test (contract point 3), applied here exactly
-        // as `static_part.rs::iterate_solve` applies it to a `Static`
-        // partition holding a free IC supply: `newton::solve` itself never
-        // turns "hit the iteration cap unconverged" into an `Err` (a
-        // genuinely nonlinear W1c+ kind may legitimately want the last
-        // iterate anyway), so the caller that KNOWS 50 iterations is the
-        // hard limit is the one that must reject it.
-        return Err(format!("stepped: a free IC supply's fixed-point iteration did not converge within {} iterations", newton::NEWTON_MAX));
-    }
+    .map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+    // Counted before the verdict: a rejected step's iterations were run.
     *newton_iters += result.iterations as u64;
+    if !linear && !result.converged {
+        // `newton::solve` never turns "hit the iteration cap unconverged"
+        // into an `Err`; what that means is the caller's call (retry
+        // smaller, end a refinement, or fail).
+        return Err(StepError::NoConverge);
+    }
 
     let x = result.x;
     let mut vc = vec![0.0; shape.capacitors.len()];
@@ -257,11 +285,15 @@ const SEED_H: f64 = 1e-12;
 /// `capsI` itself. `i_prev` feeding a LATER trap companion is harmless here:
 /// `be_next_step` is set alongside this seed at every call site, so the very
 /// next REAL step is forced to BE regardless, never reading it.
-fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], ic_ctx: &IcStampCtx) -> Result<(Vec<f64>, Vec<f64>), String> {
-    let n = shape.n;
+///
+/// `x_from` is the partition's COMMITTED `x` (W1e, LEDs point 8: classic
+/// warm-starts every solve from the previous accepted one), all zeros at
+/// load. It is not a step and has no smaller `h` to retry, so a Newton that
+/// does not pass there is `-4`. Its iterations are not counted in stat 11.
+fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx) -> Result<(Vec<f64>, Vec<f64>), String> {
     let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
-    let result = take_step(shape, live_params, SEED_H, vc, &vec![0.0; n], &i_prev, Method::Be, &mut newton_iters, ic_ctx)?;
+    let result = take_step(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx).map_err(StepError::into_message)?;
     Ok((result.x, result.i))
 }
 
@@ -303,6 +335,11 @@ struct Partition {
 }
 
 impl Partition {
+    /// Whether the stamp depends on the iterate (`IcStampCtx::iterated`).
+    fn iterated(&self) -> bool {
+        self.holds_free_ic_supply || !self.shape.junctions.is_empty()
+    }
+
     /// `t0` is `program.options.start_time` (contract point 5: "A stepped
     /// partition's clock starts at START_TIME, so a load integrates nothing
     /// and costs the same at any start time"). Starting the clock at 0
@@ -510,8 +547,8 @@ impl SteppedSolver {
             self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages)?;
 
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
-            let holds_free_ic_supply = self.partitions[&p_idx].holds_free_ic_supply;
-            let ic_ctx = IcStampCtx { now, drivers, ics: &self.ics, node_owner: &self.node_owner, fixed: &self.fixed, p_idx, holds_free_ic_supply };
+            let iterated = self.partitions[&p_idx].iterated();
+            let ic_ctx = IcStampCtx { now, drivers, ics: &self.ics, node_owner: &self.node_owner, fixed: &self.fixed, p_idx, iterated };
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
@@ -526,7 +563,7 @@ impl SteppedSolver {
                 // later re-aim it keeps them from publishing the OLD
                 // topology's stale values next to `live_params`-driven
                 // switch/resistor currents that already read the NEW one.
-                let (x, i_prev) = solve_initial_x(&part.shape, live_params, &part.vc, &ic_ctx)?;
+                let (x, i_prev) = solve_initial_x(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
                 part.x = x;
                 part.i_prev = i_prev;
             }
@@ -764,40 +801,36 @@ impl SteppedSolver {
         let vc0 = part.vc.clone();
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, fixed, p_idx, holds_free_ic_supply: part.holds_free_ic_supply };
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, fixed, p_idx, iterated: part.iterated() };
 
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t);
         let mut ratio;
         let mut accepted: StepResult;
         loop {
-            if h <= H_MIN * 2.01 {
-                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
-                ratio = 0.0;
-                break;
-            }
-            let coarse = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
-            let mid = take_step(&part.shape, live_params, h / 2.0, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
-            let fine = take_step(&part.shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, &mut part.newton_iterations, &ic_ctx)?;
-
-            ratio = 0.0f64;
-            for k in 0..shape_n {
-                let r = rel_error(coarse.x[k], fine.x[k]);
-                if r > ratio {
+            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, shape_n, &mut part.newton_iterations, &ic_ctx);
+            match attempt {
+                Ok((step, r)) => {
                     ratio = r;
+                    if ratio <= 1.0 {
+                        accepted = step;
+                        break;
+                    }
+                    h = (h * next_step_factor(ratio, method)).max(H_MIN);
+                    part.changing = true;
                 }
-            }
-            for i in 0..vc0.len() {
-                let r = rel_error(coarse.vc[i], fine.vc[i]);
-                if r > ratio {
-                    ratio = r;
+                // A rejected step (README, LEDs point 8; classic's
+                // `nextFactor: 0.25`, HL:609-617): retry the whole trio at a
+                // quarter of `h`, and give up only when there is no smaller
+                // step to try (classic's `hitMinStep`, HL:827-829).
+                Err(StepError::NoConverge) => {
+                    if h <= H_MIN * 1.01 {
+                        return Err(format!("stepped: Newton did not converge at the minimum step h = {h:e} s"));
+                    }
+                    h = (0.25 * h).max(H_MIN);
+                    part.changing = true;
                 }
+                Err(StepError::Failed(message)) => return Err(message),
             }
-            if ratio <= 1.0 {
-                accepted = fine;
-                break;
-            }
-            h = (h * next_step_factor(ratio, method)).max(H_MIN);
-            part.changing = true;
         }
 
         let order_exp = if method == Method::Trap { 3 } else { 2 };
@@ -810,7 +843,9 @@ impl SteppedSolver {
         if let Some((local, threshold)) = find_crossing(part, &x0, &accepted.x, voltages) {
             let refined_h = refine_crossing_h(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, local, threshold, &mut part.newton_iterations, &ic_ctx)?;
             h = refined_h;
-            accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx)?;
+            // Deterministic: `refined_h` is an `h` a trial (or the accepted
+            // step itself) already converged at.
+            accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx).map_err(StepError::into_message)?;
         }
 
         part.pend_x = accepted.x;
@@ -821,6 +856,46 @@ impl SteppedSolver {
         part.version += 1;
         Ok(())
     }
+}
+
+/// One attempt at the step-doubling trio at `h` (or, at `h <= 2.01 * H_MIN`,
+/// one plain step, which has nothing to compare against): the fine result and
+/// its error ratio. `NoConverge` from any of the three solves rejects the
+/// whole attempt (`plan_step`).
+#[allow(clippy::too_many_arguments)]
+fn attempt_step(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    shape_n: usize,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+) -> Result<(StepResult, f64), StepError> {
+    if h <= H_MIN * 2.01 {
+        return Ok((take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx)?, 0.0));
+    }
+    let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx)?;
+    let mid = take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx)?;
+    let fine = take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, ic_ctx)?;
+
+    let mut ratio = 0.0f64;
+    for k in 0..shape_n {
+        let r = rel_error(coarse.x[k], fine.x[k]);
+        if r > ratio {
+            ratio = r;
+        }
+    }
+    for i in 0..vc0.len() {
+        let r = rel_error(coarse.vc[i], fine.vc[i]);
+        if r > ratio {
+            ratio = r;
+        }
+    }
+    Ok((fine, ratio))
 }
 
 fn rel_error(a: f64, b: f64) -> f64 {
@@ -877,7 +952,13 @@ fn refine_crossing_h(
     let mut best_h = hi;
     for _ in 0..CROSS_REFINE_MAX_ITERS {
         let mid = 0.5 * (lo + hi);
-        let trial = take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx)?;
+        let trial = match take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx) {
+            Ok(trial) => trial,
+            // A trial that does not converge ends the refinement at the best
+            // `h` found so far (README, LEDs point 8).
+            Err(StepError::NoConverge) => return Ok(best_h),
+            Err(StepError::Failed(message)) => return Err(message),
+        };
         let v = trial.x[local];
         let past = if threshold.rising { v >= target } else { v <= target };
         if past {
@@ -1261,5 +1342,129 @@ mod tests {
         // sync_to: the horizon clamp, well past several more committed steps.
         let readers = st.sync_to(5e-4, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
         assert!(readers.contains(&DeviceId(5)), "sync_to must report the ic reader when node2 changes, got {readers:?}");
+    }
+
+    // ---- W1e: junctions in a stepped partition (LEDs point 8) --------------
+
+    use crate::solve::newton::hooks;
+
+    fn red_led(ci: usize, anode: usize, cathode: usize) -> Device {
+        Device { kind: crate::kinds::LED, component_index: ci, pins: vec![pin(anode), pin(cathode)], params: vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0], blob: vec![] }
+    }
+
+    /// `5 V --1 kohm-- n2`, `n2` to the datum through 100 uF and a red LED:
+    /// one capacitor and one junction, so stepped and nonlinear. Node 2 is
+    /// the only free node.
+    fn rc_led() -> (SteppedSolver, Vec<f64>, Vec<f64>) {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 100e-6, 0.0, 0.0), red_led(3, 2, 0)], Options::default());
+        let mut st = build(&p);
+        assert_eq!(st.partitions.len(), 1, "an LED beside one capacitor is stepped, not closed-form");
+        let mut voltages = vec![0.0, 5.0, 0.0];
+        let mut currents = vec![0.0; 4];
+        st.resolve_dirty(&[0], 0.0, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        (st, voltages, currents)
+    }
+
+    fn pending_step(st: &SteppedSolver) -> f64 {
+        let part = &st.partitions[&0];
+        part.pend_t - part.t
+    }
+
+    fn plan(st: &mut SteppedSolver, h: f64, voltages: &[f64]) -> Result<(), String> {
+        st.partitions.get_mut(&0).unwrap().h = h;
+        st.plan_step(0, f64::INFINITY, &[], &HashMap::new(), voltages)
+    }
+
+    #[test]
+    fn a_junction_makes_every_step_a_real_newton_solve() {
+        let (mut st, voltages, _) = rc_led();
+        let before = st.newton_iterations();
+        plan(&mut st, 1e-4, &voltages).unwrap();
+        // The trio is three solves, and a nonlinear one takes at least two
+        // iterations each (the second is what shows the first passed).
+        assert!(st.newton_iterations() - before >= 6.0, "{}", st.newton_iterations() - before);
+    }
+
+    #[test]
+    fn a_step_that_does_not_converge_is_retried_at_a_quarter_of_h() {
+        let (mut control, voltages, _) = rc_led();
+        plan(&mut control, 1e-4, &voltages).unwrap();
+        assert_eq!(pending_step(&control), 1e-4, "smooth RC: the first attempt is accepted at the given h");
+
+        let (mut st, voltages, _) = rc_led();
+        let _guard = hooks::force_unconverged(1);
+        plan(&mut st, 1e-4, &voltages).unwrap();
+        assert_eq!(pending_step(&st), 0.25 * 1e-4, "one rejected attempt, then the retry at 0.25 h");
+        assert!(st.partitions[&0].changing, "the partition is marked changing");
+    }
+
+    #[test]
+    fn a_step_fails_only_when_it_cannot_converge_at_the_floor() {
+        // h runs 1e-6, 2.5e-7, 6.25e-8, 1.5625e-8, then the floor 1e-8: five
+        // attempts. Four rejections leave a fifth that converges at H_MIN.
+        {
+            let (mut st, voltages, _) = rc_led();
+            let _guard = hooks::force_unconverged(4);
+            plan(&mut st, 1e-6, &voltages).unwrap();
+            assert_eq!(pending_step(&st), H_MIN, "converged at the floor, so no error");
+        }
+        // Five rejections fail at the floor, having run each attempt's
+        // solve (3 forced iterations apiece).
+        let (mut st, voltages, _) = rc_led();
+        let before = st.newton_iterations();
+        let _guard = hooks::force_unconverged(u32::MAX);
+        let err = plan(&mut st, 1e-6, &voltages).unwrap_err();
+        assert!(err.contains("minimum step"), "{err}");
+        assert_eq!(st.newton_iterations() - before, 15.0, "5 attempts x 3 iterations, counted though rejected");
+    }
+
+    #[test]
+    fn a_non_finite_stamp_is_minus_4_at_once_not_a_rejected_step() {
+        // The retry is for Newton non-convergence only. A stamp that goes
+        // non-finite fails on the first attempt, with no `0.25 h` loop: a NaN
+        // live value for the resistor makes its conductance NaN.
+        let (mut st, voltages, _) = rc_led();
+        let mut live = HashMap::new();
+        live.insert(1usize, vec![f64::NAN]);
+        let before = st.newton_iterations();
+        let err = st.plan_step(0, f64::INFINITY, &[], &live, &voltages).unwrap_err();
+        assert!(!err.contains("minimum step"), "not a rejected step: {err}");
+        assert!(st.newton_iterations() - before <= 3.0, "gave up on the first attempt");
+    }
+
+    #[test]
+    fn a_refinement_trial_that_does_not_converge_ends_the_refinement_at_the_best_h_so_far() {
+        let watch = |st: &mut SteppedSolver| {
+            // A rising threshold the first 1 ms step crosses: the node charges at
+            // about 50 V/s from 0, so it reaches 0.03 V near 0.6 ms.
+            assert!(st.watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 0.03, rising: true }])));
+        };
+        let (mut control, voltages, _) = rc_led();
+        watch(&mut control);
+        plan(&mut control, 1e-3, &voltages).unwrap();
+        let refined = pending_step(&control);
+        assert!(refined > 5e-4 && refined < 7e-4, "refined to the crossing near 0.6 ms: {refined}");
+        assert!((control.partitions[&0].pend_x[0] - 0.03).abs() < 1e-8, "and it lands on the threshold");
+
+        let (mut st, voltages, _) = rc_led();
+        watch(&mut st);
+        // The trio is three solves; the fourth is the first refinement trial.
+        let _guard = hooks::force_unconverged_after(3, 1);
+        plan(&mut st, 1e-3, &voltages).unwrap();
+        assert_eq!(pending_step(&st), 1e-3, "no trial converged, so the unrefined step stands");
+        assert!(st.partitions[&0].pend_x[0] > 0.03, "having stepped past the threshold");
+    }
+
+    #[test]
+    fn the_re_aim_seed_starts_from_the_committed_x_not_from_zero() {
+        let (mut st, mut voltages, mut currents) = rc_led();
+        st.sync_to(0.05, &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        let committed = st.partitions[&0].x.clone();
+        assert!(committed[0] > 1.0, "charged by now: {committed:?}");
+        let _guard = hooks::record_initial_guesses();
+        // A discontinuity at the instant the partition is already at.
+        st.resolve_dirty(&[0], 0.05, &[], &[], &HashMap::new(), &mut voltages, &mut currents).unwrap();
+        let guesses = hooks::recorded_initial_guesses();
+        assert_eq!(guesses[0], committed, "the seed solve is the first Newton after the catch-up");
     }
 }

@@ -710,7 +710,11 @@ records from it:
    receives one.
 4. **Static partitions** keep a solution cache keyed on driver modes, the
    rail band, the floating bits and an epoch that bumps only on a real value
-   change. `NO_SOLUTION_CACHE` bypasses it. A nonlinear static partition
+   change. Each partition holds up to 256 keys (W1e), so a partition whose
+   drive alternates between configurations (an IC output clocked HIGH, LOW,
+   HIGH) hits on every repeat; a partition's cache is cleared when it is
+   full. A hit replays the vector stored for that exact key.
+   `NO_SOLUTION_CACHE` bypasses it. A nonlinear static partition
    keeps the cache too (W1e, LEDs point 7): `NO_SOLUTION_CACHE` stays
    bit-identical for linear partitions, and a nonlinear one agrees within
    1 µV (the polish residual).

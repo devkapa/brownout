@@ -54,7 +54,21 @@
 //! is what makes it safe for `compile_dyn_shape::resolve` to treat any other
 //! partition's free node as unreachable, rather than a case it has to
 //! silently paper over.
+//!
+//! **LED junctions (W1e, README "Kernel semantics: LEDs and displays" points
+//! 4 and 5) are unioned junction by junction, not device by device.** A
+//! stamped junction (its anode and cathode nodes differ) joins its two nodes
+//! when both are free, exactly as a resistor does, and a device's other pins
+//! join nothing through it: a `bicolor_led`, `rgb_led` or `seg7` whose common
+//! pin is fixed puts each channel in the partition of its own drive. So an
+//! LED-family device can touch several partitions, and nothing downstream may
+//! assume one owner for it: `compile_dyn_shape` and `static_part` place
+//! junctions by node. A partition holding a stamped junction is nonlinear
+//! ([`PartitionBuild::holds_junction`]): static when it holds no counted
+//! capacitor, stepped otherwise, never closed-form. A junction across two
+//! fixed nodes belongs to no partition, and a `burnt` device has none.
 
+use crate::devices::led::{self, Junction};
 use crate::digital;
 use crate::error::BoError;
 use crate::kinds;
@@ -89,8 +103,9 @@ pub enum PartitionKind {
     /// is set, in which case [`build`] reclassifies it as `Stepped` instead
     /// (tests only, core/README.md's Options table key 4).
     ClosedForm,
-    /// More than one capacitor (or, once ported, an inductor or a nonlinear
-    /// element), or any `ClosedForm` partition under `FORCE_STEPPED`: the
+    /// More than one capacitor, or any capacitor beside a nonlinear element
+    /// (a free IC supply node, a 74LS245 `a`/`b` pin, a stamped LED
+    /// junction), or any `ClosedForm` partition under `FORCE_STEPPED`: the
     /// general stepped BE/trap path (`solve/stepped.rs`).
     Stepped,
 }
@@ -131,6 +146,18 @@ pub struct PartitionBuild {
     /// (core/README.md's "Stat indices") — `engine.rs` already exposes it at
     /// that index, pending the orchestrator adding the row.
     pub multi_capacitor_partitions: usize,
+    /// Per partition: whether it holds a stamped LED junction (README, LEDs
+    /// point 5), so it is nonlinear. Such a partition is never `ClosedForm`;
+    /// with no counted capacitor it is `Static` and iterated.
+    pub holds_junction: Vec<bool>,
+}
+
+/// Every LED-family junction of the program, in device order and, within a
+/// device, in channel order (`devices::led::junctions`, at the program's
+/// ambient temperature). Self-shorted junctions are listed (their channel
+/// slot stays fixed) and report `stamped() == false`.
+pub fn program_junctions(program: &Program) -> Vec<Junction> {
+    program.devices.iter().enumerate().flat_map(|(d, device)| led::junctions(d, device, program.options.ambient_c)).collect()
 }
 
 /// The one pin-index pair (into a device's own `pins`) a resistor or
@@ -154,7 +181,10 @@ fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
 /// (this module's doc comment explains why the whole device, not contact by
 /// contact — a switch-family contact can run through a fixed pin), then
 /// classifies each resulting partition (Decision 14, `FORCE_STEPPED` applied
-/// here). A capacitor with BOTH terminals fixed belongs to no partition
+/// here). A stamped LED junction with both nodes free also joins them (W1e,
+/// this module's doc comment), and a partition holding one is nonlinear:
+/// static with no counted capacitor, stepped otherwise, never closed-form. A
+/// capacitor with BOTH terminals fixed belongs to no partition
 /// either — not a resistive network `solve/static_part.rs` can solve, and
 /// not a free-node dynamical system `solve/closed_form.rs`/`solve/stepped.rs`
 /// integrate — but, unlike a loop of ideal sources, this is NOT
@@ -179,6 +209,14 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let mut ic_free_supply_nodes: Vec<usize> = Vec::new();
 
     let mut uf = UnionFind::new(n);
+    // LEDs point 4: junction by junction, as a resistor's two ends are
+    // joined. Kept for the classification below.
+    let junctions = program_junctions(program);
+    for j in &junctions {
+        if j.stamped() && fixed[j.anode].is_none() && fixed[j.cathode].is_none() {
+            uf.union(j.anode, j.cathode);
+        }
+    }
     for device in &program.devices {
         if let Some((pa, pb)) = resistor_or_capacitor_pair(device.kind) {
             let (u, w) = (device.pins[pa].node, device.pins[pb].node);
@@ -321,8 +359,22 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // same shape as `capacitor_count`'s own per-partition accumulation.
     // A dynamic partition that must be stepped rather than closed-form
     // (W1c point 3): it holds a free IC supply node, whose R_out moves with
-    // the partition's state, or a 74LS245 a/b pin (below).
+    // the partition's state, or a 74LS245 a/b pin (below), or (W1e, LEDs
+    // point 5) a stamped junction: the exact exponential needs a linear
+    // network, so an LED beside one capacitor is stepped.
     let mut must_step = vec![false; partitions.len()];
+    let mut holds_junction = vec![false; partitions.len()];
+    for j in junctions.iter().filter(|j| j.stamped()) {
+        // A junction across two fixed nodes matches neither arm: it belongs
+        // to no partition. With one free end the junction sits in that end's
+        // partition, and with two the union above made them the same one.
+        for node in [j.anode, j.cathode] {
+            if let Some((p, _)) = local_index[node] {
+                holds_junction[p] = true;
+                must_step[p] = true;
+            }
+        }
+    }
     for &node in &ic_free_supply_nodes {
         if let Some((p, _)) = local_index[node] {
             must_step[p] = true;
@@ -371,7 +423,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // modules' own segment/step builders), so nothing here needs to reject
     // this topology any more — every partition kind accepts every IC
     // footprint the union rule above can produce.
-    Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions })
+    Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions, holds_junction })
 }
 
 /// Fixed-point propagation from node 0 (contract, point 1). Returns each
@@ -665,5 +717,141 @@ mod tests {
             assert_eq!(uf.find(i), root, "node {i} did not join the single chain's tree");
         }
         assert_eq!(uf.find(n - 1), root);
+    }
+    // ---- W1e: LED junctions (README, LEDs points 4 and 5) -----------------
+
+    use crate::program::PIN_FLAG_OPEN;
+
+    fn led(ci: usize, anode: usize, cathode: usize, burnt: f64) -> Device {
+        Device { kind: kinds::LED, component_index: ci, pins: vec![pin(anode), pin(cathode)], params: vec![1.8, 2.0, 0.02, 0.0, 0.0, burnt], blob: vec![] }
+    }
+
+    fn bicolor(ci: usize, a1: usize, a2: usize, k: usize) -> Device {
+        Device { kind: kinds::BICOLOR_LED, component_index: ci, pins: vec![pin(a1), pin(a2), pin(k)], params: vec![1.8, 2.0, 0.02, 0.02, 0.0], blob: vec![0.0] }
+    }
+
+    fn seg7_cc(ci: usize, pins: Vec<PinRecord>) -> Device {
+        Device { kind: kinds::SEG7_CC, component_index: ci, pins, params: vec![2.0, 0.02], blob: vec![0.0] }
+    }
+
+    fn open_pin() -> PinRecord {
+        PinRecord { node: 0, flags: PIN_FLAG_OPEN, open_hash: 0, dead_hash: 0 }
+    }
+
+    fn kind_of(pb: &PartitionBuild, node: usize) -> PartitionKind {
+        pb.kinds[pb.local_index[node].expect("a free node").0]
+    }
+
+    #[test]
+    fn a_led_beside_a_resistor_is_static_and_holds_a_junction() {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), led(2, 2, 0, 0.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.partitions.len(), 1);
+        assert_eq!(pb.kinds, vec![PartitionKind::Static]);
+        assert_eq!(pb.holds_junction, vec![true]);
+    }
+
+    #[test]
+    fn a_led_beside_one_capacitor_is_stepped_never_closed_form() {
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0), led(3, 2, 0, 0.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(kind_of(&pb, 2), PartitionKind::Stepped, "the exact exponential needs a linear network");
+        // The same circuit without the LED is the ordinary closed-form case.
+        let plain = build(&program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0)])).unwrap();
+        assert_eq!(kind_of(&plain, 2), PartitionKind::ClosedForm);
+        // Stat 15 counts capacitors, not junctions.
+        assert_eq!(pb.multi_capacitor_partitions, 0);
+    }
+
+    #[test]
+    fn a_self_shorted_led_leaves_its_partition_linear() {
+        // Both pins on node 2: the companion cancels, nothing is stamped, and
+        // nothing is classified nonlinear.
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), led(2, 2, 2, 0.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.holds_junction, vec![false]);
+        assert_eq!(pb.kinds, vec![PartitionKind::Static]);
+        // Beside one capacitor it stays closed-form.
+        let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), capacitor(2, 2, 0), led(3, 2, 2, 0.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(kind_of(&pb, 2), PartitionKind::ClosedForm);
+    }
+
+    #[test]
+    fn a_led_straight_across_an_ideal_source_belongs_to_no_partition_and_is_not_a_topology_error() {
+        let p = program(2, vec![source(0, 1, 0, 5.0), led(1, 1, 0, 0.0)]);
+        let pb = build(&p).expect("not -3: it is a constant load on the source");
+        assert!(pb.partitions.is_empty());
+        assert!(pb.holds_junction.is_empty());
+    }
+
+    #[test]
+    fn a_burnt_led_joins_nothing_and_leaves_a_linear_partition() {
+        // 5 V --R-- n2 --LED-- n3 --R-- gnd. Live: one partition holding the
+        // junction. Burnt: no junction, so n2 and n3 are two partitions.
+        let devices = |burnt: f64| vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 220.0), led(2, 2, 3, burnt), resistor(3, 3, 0, 220.0)];
+        let live = build(&program(4, devices(0.0))).unwrap();
+        assert_eq!(live.partitions.len(), 1);
+        assert_eq!(live.holds_junction, vec![true]);
+        let burnt = build(&program(4, devices(1.0))).unwrap();
+        assert_eq!(burnt.partitions.len(), 2, "a burnt device joins nothing");
+        assert_eq!(burnt.holds_junction, vec![false, false]);
+        assert!(burnt.kinds.iter().all(|k| *k == PartitionKind::Static));
+    }
+
+    #[test]
+    fn a_led_with_one_fixed_end_sits_in_the_partition_of_its_free_end() {
+        // Anode on the 5 V rail, cathode free: a junction in the cathode's partition.
+        let p = program(3, vec![source(0, 1, 0, 5.0), led(1, 1, 2, 0.0), resistor(2, 2, 0, 330.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.partitions.len(), 1);
+        assert_eq!(pb.holds_junction, vec![true]);
+    }
+
+    #[test]
+    fn a_bicolor_led_with_its_cathode_on_the_datum_puts_a1_and_a2_in_two_partitions() {
+        let p = program(4, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 150.0), resistor(2, 1, 3, 330.0), bicolor(3, 2, 3, 0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.partitions.len(), 2);
+        assert_ne!(pb.local_index[2].unwrap().0, pb.local_index[3].unwrap().0);
+        assert_eq!(pb.holds_junction, vec![true, true]);
+        // With `k` free they share it.
+        let p = program(5, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 150.0), resistor(2, 1, 3, 330.0), bicolor(3, 2, 3, 4), resistor(4, 4, 0, 47.0)]);
+        let pb = build(&p).unwrap();
+        assert_eq!(pb.partitions.len(), 1);
+    }
+
+    #[test]
+    fn a_seg7_joins_its_segments_through_a_free_common_and_not_at_all_through_a_fixed_one() {
+        let mut pins: Vec<PinRecord> = (2..10).map(pin).collect();
+        pins.push(pin(10)); // com
+        pins.push(open_pin());
+        let mut devices = vec![source(0, 1, 0, 5.0)];
+        for i in 0..8 {
+            devices.push(resistor(1 + i, 1, 2 + i, 330.0));
+        }
+        devices.push(resistor(9, 10, 0, 10.0));
+        devices.push(seg7_cc(10, pins.clone()));
+        let free_common = build(&program(11, devices.clone())).unwrap();
+        assert_eq!(free_common.partitions.len(), 1, "eight segments and the common are one partition");
+        assert_eq!(free_common.partitions[0].len(), 9);
+
+        // Common straight on the datum: each segment is its own partition.
+        pins[8] = pin(0);
+        let mut devices = devices;
+        devices.pop();
+        devices.pop(); // the common resistor and the display
+        devices.push(seg7_cc(10, pins));
+        let fixed_common = build(&program(10, devices)).unwrap();
+        assert_eq!(fixed_common.partitions.len(), 8);
+        assert!(fixed_common.partitions.iter().all(|p| p.len() == 1));
+        assert!(fixed_common.holds_junction.iter().all(|&h| h));
+    }
+
+    #[test]
+    fn force_stepped_and_a_junction_together_stay_stepped() {
+        let mut p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0), led(3, 2, 0, 0.0)]);
+        p.options.force_stepped = true;
+        assert_eq!(kind_of(&build(&p).unwrap(), 2), PartitionKind::Stepped);
     }
 }
