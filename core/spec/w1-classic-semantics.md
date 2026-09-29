@@ -67,6 +67,7 @@ re-pinned.
 | `3497700`, `fccd8bd` (`fix/rp2040-adc-temp`, which carries `fix/rp2040-adc-counts`) | `RP2040Mcu.setAnalogVolts` feeds `round(clamp(v, 0, vcc) / vcc · 4095)` counts to ADC0-2, not volts, with `vcc` the 3V3 rail. ADC4, the temperature sensor, is seeded at boot and on `reset()` with 876 counts (0.706 V, 27 °C per the RP2040 datasheet §4.9.5, against the 3V3 reference), fixed and not temperature-driven. | none (outside W1) | W7, with the ADC cases of `rp2040.test.ts` and `rp2040-micropython.test.ts` (27 ± 1 °C) in gate 1. |
 | `df16d52` (`fix/buzzer-tone-detect`) | A passive buzzer detects its tone with a Schmitt trigger around the drive's own envelope midpoint (envelope tau 0.1 s, hysteresis 10% of the swing, silent below a 50 mV swing), not around 0 V, so a 0-5 V drive now sounds. The frequency comes from a full period (a crossing minus the one before last), each crossing timed at the START of the step that reveals it; only 20 Hz-20 kHz counts, and the tone clears two periods after the last crossing. `envHi`/`envLo` are readout-only and skipped by the step-error estimate. Physics telemetry gains `modelState` `{kind: "buzzer", buzzerType, sounding, toneHz?}` and `{kind: "speaker", sounding}`. | none (outside W1) | Port with the buzzer and speaker, with `wave6-drivers-audio.test.ts` and `physics-telemetry.test.ts` in gate 1. |
 | Q-O64 (owner decision 3; this wave, worker R8, `feat/wasm-core-w1`) | The 74LS157's `/OE` is a strobe `/G`, not a tri-state enable: `/G` HIGH now forces every `Y` LOW (`sim-engine.ts`'s `_combinationalOutputs` `/oe` short-circuit narrows to the 74LS245 alone; `digital.ts`'s `oe ? false : ...` branch, previously dead, is now reachable and drives LOW), matching the real SN74LS157 (TI SDLS058 function table). The tri-state behaviour classic used to model on this pin belongs to a different part, the 74LS257. The 74LS245 is unchanged. | 1.4, 1.7, 2.4, 2.5, 3.4, 3.6, 3.12, 3.13, 11 D5, 13.2, 13.3 G4, 12 | Ported in the same change (core: W1d). `combinational.rs`'s `mux157` returns `Some(false)` for every `Y` at `/oe = 1`; `delay.rs`'s `driver_requests` times the strobe-caused transition with the kind's own `strobe` pair (13 ns release / 14 ns force), and a data/select-caused one with param 12, the larger per direction when both fire together. |
+| Q-O24 (the Q-O24 fix, W1e step 0, worker Q24, `feat/wasm-core-w1`) | `commitLedOvercurrentStress` (`semiconductors.ts:472-508`, shared by led/bicolor_led/rgb_led) now resolves `ifMax = params.iRated ?? specs?.if_max ?? IRATED_LED` (`:481`), the same precedence the I-V stamp already used (`:374, :417, :455`), instead of the reverse. A user-set `iRated` now moves the failure latch together with the curve it already drove: raising `iRated` above the catalog `if_max` raises the point at which the part fails open, and lowering it below the catalog `if_max` fails the part sooner, in both cases matching the current the stamp actually put through the junction. Catalog-only parts (no `iRated` param) are bit-identical, since the fallback order past `iRated` is unchanged. | 6.5, 6.7, 9.5.2 | Not ported. Port in W1e, with `led-damage-limit-irated.test.ts` in gate 1. |
 
 **Where shared mechanics are specified.** Other chapters point here instead of
 repeating them.
@@ -2317,6 +2318,10 @@ The step order is in §10.5 (`sim-engine.ts:5595-5625`). For this family:
 - `Is = params.Is` (temperature-scaled) if present, otherwise
   `shockleyIsFromVf`.
 
+Delta: since the Q-O24 fix (W1e step 0), the led/bicolor_led/rgb_led failure hook's
+own `iRated` resolution (§6.7) uses this same `params.iRated ?? specs?.if_max`
+order, instead of reversing it. See "Deltas since the 2026-09-24 baseline".
+
 **Specs lookup.** `specs = partFor(comp)?.electrical_specs` goes through the
 resolver of §1.2 (`sim-engine.ts:1341-1343`, `:1150-1174`;
 `catalog-resolver.ts:218-220`, `:119-195`):
@@ -2449,6 +2454,11 @@ none of these, and `seg7Model` (`digital-ics.ts:1194-1301`) never checks
   catalog wins over params, which is the reverse of the stamp's precedence
   (`:374`). Every family kind resolves specs, so the threshold is in practice
   the catalog's 0.02 A.
+- Delta: fixed by the Q-O24 fix (W1e step 0). `ifMax` is now
+  `Number(params.iRated ?? specs?.if_max ?? IRATED_LED)` (`:481`), matching
+  the stamp's own precedence, so a user-set `iRated` moves the failure limit
+  together with the curve instead of only the curve. See "Deltas since the
+  2026-09-24 baseline".
 - `peakI = |elementI|` (`:479`). For bicolor_led and rgb_led it is the maximum
   of that and the absolute channel currents (`:480-488`).
 - `r = peakI/ifMax`, or 0 if `ifMax ≤ 0`.
@@ -3867,7 +3877,10 @@ and §7.8. Once latched, the stamp is open (:691-693), updateCurrent returns 0
 `semiconductors.ts:472-508`, wired from led :531-533, bicolor_led :582-584 and
 rgb_led :658-660; gating lines :358, :401, :441, bicolor/rgb :545, :563, :590,
 :612, :635, :666). `params.burnt` is not mutated
-(`failure-states.test.ts:192-226`).
+(`failure-states.test.ts:192-226`). Delta: since the Q-O24 fix (W1e step 0), the
+`ifMax` this integrator damages against resolves `params.iRated` before
+`specs?.if_max`, matching the stamp; see §6.7 and "Deltas since the
+2026-09-24 baseline".
 
 **output_sag.** `_updateFailureStates` (:6181-6243) handles components with
 `vcc_range` specs:
@@ -4824,7 +4837,10 @@ kind on Ben Eater's computer.
 - **Q-O24** [6,9] (W1 board) The LED damage limit reads `specs.if_max` before
   `params.iRated` (`semiconductors.ts:478`), the reverse of the stamp (`:374`),
   so a user-set `iRated` changes the I–V curve but not the damage limit.
-  Intended, and reproduce?
+  Intended, and reproduce? Resolved: not intended; fixed in classic by the
+  Q-O24 fix (W1e step 0, worker Q24, `feat/wasm-core-w1`). `ifMax` now resolves
+  `params.iRated` before `specs?.if_max`, matching the stamp. See "Deltas
+  since the 2026-09-24 baseline" and §6.7. Core: not yet ported, W1e.
 
 **E. Passives and switches**
 - **Q-O25** [7] Keep `modelParam`'s exact-`catalogUid` gate for ESR, leakage,
