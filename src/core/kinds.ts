@@ -146,6 +146,11 @@ export interface CoreRecordShape {
   liveParams: readonly number[];
   /** Digital readout slots a record publishes, starting at `blob[0]` (core/README.md, "Slot indices"). 0 or absent: none. */
   digitalSlots?: number;
+  /**
+   * Channel readout slots a record publishes (core/README.md, "Slot indices"). Their base follows the
+   * digital base in the blob, or is `blob[0]` when the kind has no digital slots. 0 or absent: none.
+   */
+  channelSlots?: number;
 }
 
 /** The params every W1c combinational IC carries, in order (core/README.md, "IC params"; core/src/kinds.rs `ic_param`). */
@@ -195,6 +200,25 @@ export const CORE_EEPROM_PARAM_COUNT = 25;
 /** EEPROM image sizes in bytes; the blob carries `size / 4` little-endian words (core/README.md, "ROM image"). */
 export const CORE_EEPROM_SIZE: Readonly<Record<string, number>> = { "28c16": 2048, "28c256": 32768 };
 
+/**
+ * LED and display params (core/README.md, "LED and display records"; core/src/kinds.rs `led_param`,
+ * `rgb_param`, `bicolor_param`, `seg7_param`). `led` carries no `ifMax`: its damage limit resolves
+ * exactly as `iRated` does. `seg7` has no `burnt` and no damage limit (Q-O22).
+ */
+export const CORE_LED_PARAM = { vf: 0, n: 1, iRated: 2, isSet: 3, is: 4, burnt: 5 } as const;
+export const CORE_LED_PARAM_COUNT = 6;
+export const CORE_RGB_LED_PARAM = { vfR: 0, vfG: 1, vfB: 2, iRated: 3, ifMax: 4, burnt: 5 } as const;
+export const CORE_RGB_LED_PARAM_COUNT = 6;
+export const CORE_BICOLOR_LED_PARAM = { vf1: 0, vf2: 1, iRated: 2, ifMax: 3, burnt: 4 } as const;
+export const CORE_BICOLOR_LED_PARAM_COUNT = 5;
+export const CORE_SEG7_PARAM = { vf: 0, iRated: 1 } as const;
+export const CORE_SEG7_PARAM_COUNT = 2;
+
+/** An LED-family shape (codes 30-34): `pins` by the README's table, `params`, and `channels` slots whose base is the blob's only value. */
+function ledShape(pins: number, params: number, channels: number): CoreRecordShape {
+  return { pins, pinsMax: pins, params, blob: { exact: channels > 0 ? 1 : 0 }, liveParams: [], channelSlots: channels };
+}
+
 /** A sequential or memory IC's shape (codes 70-82): `vcc`, `gnd`, `logic` pins, `params` in all, `blob` values in all. */
 function w1dShape(logic: number, params: number, blob: number, slots: number): CoreRecordShape {
   return { pins: 2 + logic, pinsMax: 2 + logic, params, blob: { exact: blob }, liveParams: [], digitalSlots: slots };
@@ -219,6 +243,13 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.spdt_switch, { pins: 3, pinsMax: 3, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.dip_switch, { pins: 4, pinsMax: 16, params: 9, blob: { exact: 0 }, liveParams: [1, 2, 3, 4, 5, 6, 7, 8] }],
+  [CORE_KIND_CODES.led, ledShape(2, CORE_LED_PARAM_COUNT, 0)],
+  [CORE_KIND_CODES.rgb_led, ledShape(4, CORE_RGB_LED_PARAM_COUNT, 3)],
+  [CORE_KIND_CODES.bicolor_led, ledShape(3, CORE_BICOLOR_LED_PARAM_COUNT, 2)],
+  [CORE_KIND_CODES.seg7_cc, ledShape(10, CORE_SEG7_PARAM_COUNT, 8)],
+  [CORE_KIND_CODES.seg7_ca, ledShape(10, CORE_SEG7_PARAM_COUNT, 8)],
+  // NE555: pins `8 1 2 3 4 5 6 7`, the 13 IC params with 7-9, 11 and 12 forced to 0, blob `[slotBase, 0 x 6]`.
+  [CORE_KIND_CODES.ne555, { pins: 8, pinsMax: 8, params: CORE_IC_PARAM_COUNT, blob: { exact: 7 }, liveParams: [], digitalSlots: 1 }],
   [CORE_KIND_CODES["74ls00"], icShape(12, 4)],
   [CORE_KIND_CODES["74ls04"], icShape(12, 6)],
   [CORE_KIND_CODES["74ls08"], icShape(12, 4)],

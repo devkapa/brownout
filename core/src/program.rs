@@ -293,7 +293,7 @@ impl Program {
 
         let mut devices = Vec::with_capacity(device_count);
         for d in 0..device_count {
-            devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count)?);
+            devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count, channel_slot_count)?);
         }
 
         r.expect("trailer magic", MAGIC)?;
@@ -415,7 +415,7 @@ impl Program {
         Ok(PinRecord { node, flags, open_hash, dead_hash })
     }
 
-    fn parse_device(r: &mut Reader, index: usize, node_count: usize, digital_slot_count: usize) -> Result<Device, BoError> {
+    fn parse_device(r: &mut Reader, index: usize, node_count: usize, digital_slot_count: usize, channel_slot_count: usize) -> Result<Device, BoError> {
         let kind_code = r.bounded_index(&format!("device[{index}] kind code"), u32::MAX as usize)? as u32;
         // componentIndex is opaque (an index into the TS side's
         // `circuit.components`, unrelated to how much program data remains),
@@ -505,15 +505,26 @@ impl Program {
             BoError::malformed(format!("device[{index}] ({}): {msg}", shape.name))
         })?;
 
-        // A kind that publishes digital readouts carries its first slot in
-        // blob[0] (core/README.md, "Slot indices"); every slot it owns must
-        // exist.
-        let slots = (shape.digital_slots)(pin_count);
-        if slots > 0 {
-            let base = blob[0];
-            if base.fract() != 0.0 || base < 0.0 || base + slots as f64 > digital_slot_count as f64 {
+        // The blob leads with the first slot of each readout kind the record
+        // uses, digital before channel (core/README.md, "Slot indices");
+        // every slot it owns must exist. The shapes size every such blob, so
+        // a missing base means a shape table error, reported rather than
+        // indexed past.
+        let mut next_base = 0;
+        for (what, total_name, count, total) in [
+            ("digital", "S", (shape.digital_slots)(pin_count), digital_slot_count),
+            ("channel", "C", (shape.channel_slots)(pin_count), channel_slot_count),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            let base = *blob.get(next_base).ok_or_else(|| {
+                BoError::malformed(format!("device[{index}] ({}): no blob value for its {what} slot base", shape.name))
+            })?;
+            next_base += 1;
+            if base.fract() != 0.0 || base < 0.0 || base + count as f64 > total as f64 {
                 return Err(BoError::malformed(format!(
-                    "device[{index}] ({}): digital slots {base}..{base}+{slots} are outside S = {digital_slot_count}",
+                    "device[{index}] ({}): {what} slots {base}..{base}+{count} are outside {total_name} = {total}",
                     shape.name
                 )));
             }
@@ -1253,5 +1264,115 @@ mod tests {
         let rec = w1d_record(kinds::IC_28C16, 22, &eeprom_tail(), &[10e-3, 1.0], 1.0, &vec![0.0; 512]);
         let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[rec])).unwrap_err();
         assert!(err.message.contains("28c16"), "{}", err.message);
+    }
+
+    // --- W1e: LEDs, displays and the NE555 ------------------------------------
+
+    /// A record of `kind` with `pins` pins on nodes 1, 0, 1, 0, ..., the given
+    /// params and blob.
+    fn record(kind: u32, pins: usize, params: &[f64], blob: &[f64]) -> Vec<f64> {
+        let mut rec = vec![kind as f64, 0.0, pins as f64];
+        for i in 0..pins {
+            rec.extend(simple_pin(((i + 1) % 2) as f64));
+        }
+        rec.push(params.len() as f64);
+        rec.extend_from_slice(params);
+        rec.push(blob.len() as f64);
+        rec.extend_from_slice(blob);
+        rec
+    }
+
+    /// `[vf, n, iRated, isSet, is, burnt]`.
+    fn led_record(n: f64, is_set: f64, is: f64, burnt: f64) -> Vec<f64> {
+        record(kinds::LED, 2, &[1.8, n, 0.02, is_set, is, burnt], &[])
+    }
+
+    fn rgb_led_record(channel_base: f64) -> Vec<f64> {
+        record(kinds::RGB_LED, 4, &[1.8, 2.0, 3.0, 0.02, 0.03, 0.0], &[channel_base])
+    }
+
+    /// The 13 IC params as the compiler resolves them for a catalog 555, the
+    /// forced zeros included; `blob_flag` fills the six pin flags.
+    fn ne555_record(params: [f64; 13], blob_flag: f64) -> Vec<f64> {
+        let mut blob = vec![0.0];
+        blob.extend([blob_flag; 6]);
+        record(kinds::NE555, 8, &params, &blob)
+    }
+
+    const NE555_PARAMS: [f64; 13] = [4.5, 16.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0];
+
+    #[test]
+    fn accepts_a_record_of_each_w1e_kind() {
+        let data = build_full(2.0, &[], 1.0, 3.0 + 2.0 + 8.0 + 8.0, &[
+            led_record(2.0, 0.0, 0.0, 0.0),
+            led_record(1.5, 1.0, 1e-18, 1.0),
+            rgb_led_record(0.0),
+            record(kinds::BICOLOR_LED, 3, &[1.8, 2.0, 0.02, 0.02, 1.0], &[3.0]),
+            record(kinds::SEG7_CC, 10, &[2.0, 0.02], &[5.0]),
+            record(kinds::SEG7_CA, 10, &[2.0, 0.02], &[13.0]),
+            ne555_record(NE555_PARAMS, 0.0),
+        ]);
+        let p = Program::parse(&data).unwrap();
+        let kinds_read: Vec<u32> = p.devices.iter().map(|d| d.kind).collect();
+        assert_eq!(kinds_read, vec![kinds::LED, kinds::LED, kinds::RGB_LED, kinds::BICOLOR_LED, kinds::SEG7_CC, kinds::SEG7_CA, kinds::NE555]);
+    }
+
+    #[test]
+    fn rejects_a_channel_base_out_of_range() {
+        let ok = build_full(2.0, &[], 0.0, 4.0, &[rgb_led_record(1.0)]);
+        assert!(Program::parse(&ok).is_ok(), "slots 1..4 fit C = 4");
+        for base in [2.0, 0.5, -1.0] {
+            let err = Program::parse(&build_full(2.0, &[], 0.0, 4.0, &[rgb_led_record(base)])).unwrap_err();
+            assert_eq!(err.code, -1, "base {base}: {}", err.message);
+            assert!(err.message.contains("channel slots"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_channel_base_is_checked_against_c_not_s() {
+        let err = Program::parse(&build_full(2.0, &[], 3.0, 0.0, &[rgb_led_record(0.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("C = 0"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_a_led_with_n_zero_or_negative() {
+        for n in [0.0, -2.0] {
+            let err = Program::parse(&build(2.0, &[led_record(n, 0.0, 0.0, 0.0)])).unwrap_err();
+            assert_eq!(err.code, -1, "n {n}: {}", err.message);
+            assert!(err.message.contains("n must be > 0"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn rejects_a_led_is_set_outside_0_1_and_a_stray_is() {
+        let err = Program::parse(&build(2.0, &[led_record(2.0, 2.0, 0.0, 0.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("isSet"), "{}", err.message);
+        let err = Program::parse(&build(2.0, &[led_record(2.0, 0.0, 1e-18, 0.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        assert!(err.message.contains("is must be 0"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_burnt_outside_0_1() {
+        let err = Program::parse(&build(2.0, &[led_record(2.0, 0.0, 0.0, 0.5)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+        let bicolor = record(kinds::BICOLOR_LED, 3, &[1.8, 2.0, 0.02, 0.02, 2.0], &[0.0]);
+        let err = Program::parse(&build_full(2.0, &[], 0.0, 2.0, &[bicolor])).unwrap_err();
+        assert!(err.message.contains("burnt"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_an_ne555_with_a_forced_zero_set_or_a_pin_flag() {
+        for (i, name) in [(7, "schmitt"), (8, "vtPlus"), (9, "vtMinus"), (11, "ioMax"), (12, "delay")] {
+            let mut params = NE555_PARAMS;
+            params[i] = if i == 7 { 1.0 } else { 0.2 };
+            let err = Program::parse(&build_full(2.0, &[], 1.0, 0.0, &[ne555_record(params, 0.0)])).unwrap_err();
+            assert_eq!(err.code, -1, "{name}: {}", err.message);
+            assert!(err.message.contains(name), "{}", err.message);
+        }
+        let err = Program::parse(&build_full(2.0, &[], 1.0, 0.0, &[ne555_record(NE555_PARAMS, 1.0)])).unwrap_err();
+        assert!(err.message.contains("pin flags must be 0"), "{}", err.message);
     }
 }

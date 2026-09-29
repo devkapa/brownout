@@ -11,12 +11,16 @@
 //!   `devices::ics`'s dispatcher (W1d worker K1) turns into `DriverRequest`s
 //!   and digital-slot writes, mirroring `delay::driver_requests`'s job for
 //!   the combinational family.
+//! - `ne555`: the NE555's comparators, latch, output stages, element current
+//!   and crossing thresholds (W1e worker E1). Pure functions of an
+//!   [`IcRecord`], its latch and voltages.
 
 pub mod combinational;
 pub mod delay;
 pub mod floating;
 pub mod levels;
 pub mod memory;
+pub mod ne555;
 pub mod power;
 pub mod sequential;
 
@@ -81,10 +85,16 @@ pub fn is_memory_ic(kind: u32) -> bool {
     matches!(kind, kinds::IC_74LS189 | kinds::IC_28C16 | kinds::IC_28C256)
 }
 
-/// Whether `kind` is any IC with an `IcRecord`: combinational, sequential or
-/// memory. W1c's call sites that meant "an IC" use this.
+/// Whether `kind` is the NE555 (code 40), an IC for W1c points 1-3, 8 and 9
+/// with its own evaluator (core/README.md, "Kernel semantics: NE555").
+pub fn is_ne555(kind: u32) -> bool {
+    kind == kinds::NE555
+}
+
+/// Whether `kind` is any IC with an `IcRecord`: combinational, sequential,
+/// memory or the NE555. W1c's call sites that meant "an IC" use this.
 pub fn is_ic(kind: u32) -> bool {
-    is_combinational_ic(kind) || is_sequential_ic(kind) || is_memory_ic(kind)
+    is_combinational_ic(kind) || is_sequential_ic(kind) || is_memory_ic(kind) || is_ne555(kind)
 }
 
 /// Whether `kind` is one of the W1c combinational IC codes.
@@ -150,6 +160,19 @@ const OUT_28C16: [usize; 8] = [14, 15, 16, 17, 18, 19, 20, 21];
 /// 28c256: `a0..a14 /oe /ce /we` (0-17, `r`), `io0..io7` (18-25, `o`/`r`).
 const OUT_28C256: [usize; 8] = [18, 19, 20, 21, 22, 23, 24, 25];
 
+// NE555 logic indices, in the record's pin order after `8` and `1`
+// (core/README.md, "NE555 record"). `digital::ne555` re-exports them under
+// its locked names (`TRIG`, `OUT`, ...); they live here so this table and
+// the evaluator share one definition.
+pub const NE555_TRIG: usize = 0;
+pub const NE555_OUT: usize = 1;
+pub const NE555_RST: usize = 2;
+pub const NE555_CV: usize = 3;
+pub const NE555_THR: usize = 4;
+pub const NE555_DIS: usize = 5;
+/// OUT and DIS: each is its own driver stage, not a logic output.
+const OUT_555: [usize; 2] = [NE555_OUT, NE555_DIS];
+
 /// Indices into an IC's logic pins (pin order) that own a digital slot and a
 /// `Driver`, across every IC kind — combinational (README's "IC logic pins"
 /// table) and W1d sequential/memory (README's "Sequential and memory IC
@@ -169,6 +192,7 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
         kinds::IC_74LS189 => &OUT_189,
         kinds::IC_28C16 => &OUT_28C16,
         kinds::IC_28C256 => &OUT_28C256,
+        kinds::NE555 => &OUT_555,
         _ => &[],
     }
 }
@@ -285,5 +309,16 @@ mod tests {
         assert_eq!(ic.delays[3], (70e-9, 70e-9), "oeEnable is the fourth pair");
         assert_eq!(ic.extra, vec![10e-3, 1.0], "tWC then sdp");
         assert!(is_memory_ic(ic.kind) && is_ic(ic.kind) && !is_combinational_ic(ic.kind));
+    }
+
+    #[test]
+    fn the_ne555_is_an_ic_driving_out_and_dis_only() {
+        assert!(is_ne555(kinds::NE555) && is_ic(kinds::NE555));
+        assert!(!is_combinational_ic(kinds::NE555) && !is_sequential_ic(kinds::NE555) && !is_memory_ic(kinds::NE555));
+        assert_eq!(output_capable(kinds::NE555), &[1, 5]);
+        assert_eq!(output_capable(kinds::NE555), &[ne555::OUT, ne555::DIS]);
+        assert!(!is_read_and_driven(kinds::NE555), "DIS is driven, and THR is a separate read pin");
+        assert_eq!((ne555::TRIG, ne555::RST, ne555::CV, ne555::THR), (0, 2, 3, 4));
+        assert!(!is_ic(kinds::LED) && output_capable(kinds::SEG7_CA).is_empty());
     }
 }

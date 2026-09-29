@@ -28,9 +28,15 @@
 //!   (`solve::PartitionSolver::resolve_dirty` already stamps a `Driver`
 //!   directly, in `solve/static_part.rs`), not a plain per-resolve stamp a
 //!   device hands back on request.
+//! - W1e's LED junctions ([`led`], [`seg7`]) are not behind it either: a
+//!   junction's companion depends on the Newton iterate, and one device's
+//!   junctions can land in several partitions, so the solver places and
+//!   stamps them by node.
 
 pub mod ics;
+pub mod led;
 pub mod passives;
+pub mod seg7;
 pub mod switches;
 
 use crate::kinds;

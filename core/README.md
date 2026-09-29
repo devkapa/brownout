@@ -7,9 +7,9 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W1c done (the digital core and the 11 combinational ICs); W1d
-(sequential ICs, memories, datasheet delays and the W1c enable retrofit)
-contracted.** W0 proved the pipeline with a
+**Status: W1d done (sequential ICs, memories, datasheet delays and the W1c
+enable retrofit); W1e (NE555, LEDs, 7-segment displays) contracted.** W0
+proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
 dispatch plan are in the devolt repo,
@@ -117,16 +117,20 @@ trailer  MAGIC
   option key known, not repeated and its value in range, every node index
   `< N`, flags with no unknown bit, hash states integral and in range, known
   kind codes, the exact pin, param and blob shape per kind, every param and
-  blob value finite, every slot index `< S` or `< C`, the trailer, and no
-  trailing data. Malformed is `-1`, never a panic; a well-formed but unknown
-  kind code is `-2`. Per-kind rules (for example resistor `R > 0`) live in
-  `core/src/kinds.rs`. A bad option inside the program is `-1` (the program
+  blob value finite, every slot index `< S` or `< C` (from each kind's slot
+  bases, below), the trailer, and no trailing data. Malformed is `-1`, never
+  a panic; a well-formed but unknown kind code is `-2`. Per-kind rules (for
+  example resistor `R > 0`, or a `led`'s `n > 0`, `isSet` and `burnt` in
+  `{0, 1}` and `is = 0` when `isSet = 0`) live in `core/src/kinds.rs`. A bad option inside the program is `-1` (the program
   is malformed); the same bad value passed to `bo_engine_set_option` after
   load is `-8` (an invalid argument).
-- **Slot indices.** A kind that publishes digital readouts declares in
-  `kinds.rs` how many slots a record owns (`digital_slots`); its first slot
-  is `blob[0]`, and the reader checks that `blob[0]` is an integer and
-  `blob[0] + count <= S`. The W1c ICs are the first kinds that publish any.
+- **Slot indices.** A kind declares in `kinds.rs` how many digital slots
+  (`digital_slots`) and channel slots (`channel_slots`) a record owns. Its
+  blob starts with the first slot of each kind it uses, digital before
+  channel: `blob[0]` for the first kind used, `blob[1]` for the second. The
+  reader checks that each base is an integer and `base + count <= S`
+  (digital) or `<= C` (channel). The W1c ICs are the first kinds with
+  digital slots, codes 30-34 the first with channel slots.
 
 ## Kind codes and records
 
@@ -145,6 +149,13 @@ is dispatched; a code without a record layout is reserved and rejected as
 | Sequential ICs | 70 `74ls161`, 71 `74ls173`, 72 `74hc74`, 73 `74hc595`, 74 `74hc165`, 75 `cd4017`, 76 `cd4060` |
 | Memories | 80 `74ls189`, 81 `28c16`, 82 `28c256` |
 
+The W1e rows and sections cite classic by file and line at `3b22a3e`: `SE`
+`src/sim/engine/sim-engine.ts`, `SC` `src/sim/engine/devices/semiconductors.ts`,
+`DI` `src/sim/engine/devices/digital-ics.ts`, `EL` `src/sim/engine/elements.ts`,
+`NW` `src/sim/engine/newton.ts`, `GR` `src/sim/engine/graph.ts` and `HL`
+`src/host/headless.ts`. Where one differs from the spec's 2026-09-24
+citation, the code decides.
+
 **Record layouts** (added per sub-wave):
 
 | Code | Kind | Pins, in order | Params | Blob | Added |
@@ -156,6 +167,11 @@ is dispatched; a code without a record layout is reserved and rejected as
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
 | 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
+| 30 | `led` | `pins[0]` (anode), `pins[1]` (cathode) (positional, SC:356-357) | the 6 `led` params (LED records below) | empty | W1e |
+| 31 | `rgb_led` | `r_a`, `g_a`, `b_a`, `com_k` (by id, SC:618-623) | the 6 `rgb_led` params | `[channelBase]`, 3 channel slots | W1e |
+| 32 | `bicolor_led` | `a1`, `a2`, `k` (by id, SC:551-552) | the 5 `bicolor_led` params | `[channelBase]`, 2 channel slots | W1e |
+| 33, 34 | `seg7_cc`, `seg7_ca` | `a b c d e f g dp com com2` (by id; segments in channel order, DI:1206) | the 2 `seg7` params | `[channelBase]`, 8 channel slots | W1e |
+| 40 | `ne555` | `8` (vcc), `1` (gnd), then `2 3 4 5 6 7` (by id; NE555 record below) | the 13 IC params, with 7-9, 11 and 12 set to 0 | `[slotBase, 0 x 6]` | W1e |
 | 50-59, 61 | the 11 combinational ICs: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245` | `vcc`, `gnd` (the pins classic's `supplyPinsForComponent` resolves), then the kind's logic pins in `icPinMap(kind)` order, by id (table below) | the 13 IC params below, then the kind's delay tail (74ls157: 1 pair, 74ls245: 2 pairs, the other nine: none) | `[slotBase, pinFlags x L]`, `L` the logic-pin count | W1c; tail W1d |
 | 70-72 | `74ls161`, `74ls173`, `74hc74` | `vcc`, `gnd`, then the kind's logic pins by id (sequential table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
 | 80 | `74ls189` | `vcc`, `gnd`, then the memory logic pins by id (memory table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
@@ -285,12 +301,144 @@ compiler reads it; classic keeps `prop_delay_ns` and the family prefix.
   `>>> 0`, never a host-endian view. The reader checks every word.
 - Rust never sees base64, a short image, or the contents hash.
 
+**LED and display records** (codes 30-34).
+- **Pins.** A pin id the component lacks maps to node 0 with `OPEN` set (Pins
+  by id, below): classic's `_pinNode` returns the reference node for an
+  absent id (SE:5036-5038) and `_isOpenPin` reports it open (SE:5040-5044).
+  `OPEN_HIGH` is never set on codes 30-34 (`IC_OPEN_HIGH_PINS` names no LED
+  kind). The pin-count declines are in Pins by id; `seg7` has no pin-count
+  gate in classic and none here.
+- **Params** (indices in `kinds.rs` `led_param`, `rgb_param`,
+  `bicolor_param`, `seg7_param` and `kinds.ts` `CORE_LED_PARAM`,
+  `CORE_RGB_LED_PARAM`, `CORE_BICOLOR_LED_PARAM`, `CORE_SEG7_PARAM`). The
+  compiler resolves every value with classic's own expression (§6.5),
+  `specs` being `specsForComponent(comp)` (SE:1373-1375, the value
+  `ctx.electricalSpecs` returns outside the failure pass, SE:1972-1977).
+  Each value is the 25 °C catalog-facing number; Rust applies temperature
+  (LEDs point 2).
+
+  | Kind | Index: name = compiler expression | Classic |
+  |---|---|---|
+  | `led` | `0 vf = Number(p.vf ?? specs?.vf ?? 1.8)`; `1 n = Number(p.n ?? 2)`; `2 iRated = Number(p.iRated ?? specs?.if_max ?? 0.02)`; `3 isSet = p.Is !== undefined ? 1 : 0`; `4 is = isSet ? Number(p.Is) : 0`; `5 burnt = p.burnt ? 1 : 0` (JS truthiness: the string `"0"` is burnt) | SC:358, 369-378 |
+  | `rgb_led` | `0 vfR = Number(p.vf_r ?? 1.8)`; `1 vfG = Number(p.vf_g ?? 2.0)`; `2 vfB = Number(p.vf_b ?? 3.0)`; `3 iRated = Number(p.iRated ?? 0.02)`; `4 ifMax = Number(p.iRated ?? specs?.if_max ?? 0.02)`; `5 burnt` as `led` | SC:615-628, SC:481 |
+  | `bicolor_led` | `0 vf1 = Number(p.vf1 ?? 1.8)`; `1 vf2 = Number(p.vf2 ?? 2.0)`; `2 iRated = Number(p.iRated ?? 0.02)`; `3 ifMax = Number(p.iRated ?? specs?.if_max ?? 0.02)`; `4 burnt` as `led` | SC:548-557, SC:481 |
+  | `seg7_cc`, `seg7_ca` | `0 vf = Number(p.vf ?? specs?.vf ?? 2.0)`; `1 iRated = Number(p.iRated ?? specs?.if_max ?? 0.02)` | DI:1208-1210 |
+
+  - Precedence is §6.5's: params over specs over the literal for `led` and
+    `seg7`; params over the literal only for the `rgb_led` and
+    `bicolor_led` stamps, which never read specs. `n` and the `Is` override
+    exist only on `led` (§6.3); the other kinds use `n = 2` and derive `Is`
+    from `(Vf, iRated)` always.
+  - `ifMax` is the Q-O24 damage limit (SC:481): `params.iRated ??
+    specs?.if_max ?? 0.02`. For `led` it is the same expression as param 2,
+    so `led` carries no separate `ifMax` and W1g reads param 2. For
+    `rgb_led` and `bicolor_led` it differs from param 3 whenever `iRated` is
+    absent and the resolved catalog `if_max` is not 0.02, because the stamp
+    ignores specs and the failure hook does not. Nothing reads `ifMax` in
+    W1e.
+  - `seg7` has no `burnt` and no `ifMax`: it ignores `burnt` and has no
+    failure surface (Q-O22, DI:1195-1302).
+  - The compiler declines `malformed:<componentId>:non-finite-<param>` when
+    any resolved value is not finite, and
+    `malformed:<componentId>:non-positive-n` when `led` param 1 is `<= 0`
+    (classic then divides by `n·Vt = 0` or inverts the junction, and fails
+    its solve). The reader repeats both rules (`-1`), plus `isSet` and
+    `burnt` in `{0, 1}` and `is = 0` when `isSet = 0`. Any other finite
+    value is accepted, `iRated <= 0` included (it gives `Is <= 0`; classic
+    stamps it as is). A plain `led` with an exact thermal identity is
+    declined too, until W1g (LEDs point 3).
+  - `params.color`, `color1`, `color2` are read by nothing (§6.5).
+- **Channel slots.** `kinds.rs` `KindShape.channel_slots`: 3 for `rgb_led`,
+  2 for `bicolor_led`, 8 for `seg7_cc` and `seg7_ca`, 0 elsewhere. The
+  compiler allocates them in component order through the existing
+  `channelSlots` allocator (`compile/index.ts`), consecutively per
+  component, and writes the first into the blob. Keys are
+  `(componentId, channel)`:
+
+  | Kind | Channel `j` | Classic |
+  |---|---|---|
+  | `rgb_led` | `0 r_a`, `1 g_a`, `2 b_a` (against `com_k`) | SE:4503-4519 |
+  | `bicolor_led` | `0 a1`, `1 a2` (against `k`) | SE:4520-4535 |
+  | `seg7_cc`, `seg7_ca` | `0 a` .. `6 g`, `7 dp` | SE:4536-4571 |
+
+  `led` publishes no channel: `getElementChannelI` has no entry for it
+  (SE:4495-4590).
+- **Digital slots, live params.** None: classic publishes no
+  `digitalState` for these kinds (LEDs point 13), and none has a live
+  param.
+
+**NE555 record** (code 40).
+- **Pins.** By id, in the IC layout: `8` and `1`, the pins
+  `supplyPinsForComponent` resolves for a 555 (the catalog's `vcc` and `gnd`
+  functions, or its `"8"`/`"1"` fallback without a catalog entry,
+  SE:1387-1394), then `2 3 4 5 6 7`. So `IcRecord` types the record
+  unchanged, and its logic pins are:
+
+  | Logic index | Pin | Role |
+  |---|---|---|
+  | 0 | `2` TRIG | read |
+  | 1 | `3` OUT | driven (stage `Ne555Out`) |
+  | 2 | `4` RST | read |
+  | 3 | `5` CV | carried; never read or stamped |
+  | 4 | `6` THR | read |
+  | 5 | `7` DIS | driven (stage `Ne555Dis`) |
+
+  The 555 also reads pins 8 and 1 (power and the reference). The compiler
+  declines the component (`topology:ic-pins:<componentId>`) unless its pin
+  ids are exactly `1` to `8` and `supplyPinsForComponent` returns `vcc = "8"`
+  and `gnd = "1"`. Classic's power gate reads the catalog's supply pins while
+  its stamp hard-codes pins 1 and 8 (DI:184-187); the core does not
+  reproduce a catalog in which the two differ.
+- **Pin flags.** `OPEN` by G8. Rust reads it on pins 8 and 1 only (the power
+  gate); an open TRIG, THR or RST reads its node voltage, 0 V through the
+  shunt (Q-O16). `OPEN_HIGH` is never set: `ne555` is not in
+  `IC_OPEN_HIGH_PINS`.
+- **Params.** The 13 IC params, resolved by the helper the ICs use
+  (`icBaseParams`, from `specsForComponent`), then `7 schmitt`, `8 vtPlus`,
+  `9 vtMinus`, `11 ioMax` and `12 delay` set to 0. The reader rejects any
+  other value there.
+  - The kernel reads `0 vccMin` and `1 vccMax`: the power window, 4.5 and 16
+    from the catalog, 2.0 and 18.0 without an entry.
+  - `2 famFlags` to `6 vih` are carried for W1g's output-sag scan of pin 3,
+    which compares it against `thresholdsFor` at `vS` (§5.3). The catalog
+    entry has no `logic_family` and no `v_input`, so that is the generic
+    formula.
+  - `10 nominal` is carried and not read.
+  - The zeros record what classic computes and ignores for this kind: an
+    `outputResistance` from `io_max` (the OUT stage is a fixed 20 Ω) and a
+    package delay (decision 7: no propagation delay). Forcing them to 0
+    keeps a later reader from mistaking them for the OUT stage.
+- **Blob.** `[slotBase, pinFlags x 6]`, every flag 0; the reader rejects any
+  other value. `FLOATING_INPUT` is never set, because classic's 555 stamps no
+  floating pull (§5.2). `OPEN_COLLECTOR` is never set, because DIS is its own
+  driver stage, not a released-HIGH logic output.
+- **Digital slots.** One, at `blob[0]`, keyed by the bare component id
+  (classic's `digitalState[id]`, DI:250). No channel slots.
+- **Live params.** None.
+
+`kinds.rs`: `KindShape { code: NE555, name: "ne555", pins: 8, pins_max: 8,
+params: 13, blob: BlobShape::Exact(7), check: ne555_check, live_params: &[],
+digital_slots: 1, channel_slots: 0 }`, where `ne555_check` is `ic_check` plus
+the zero rules above. `kinds.ts`: `{ pins: 8, pinsMax: 8, params: 13, blob: {
+exact: 7 }, liveParams: [], digitalSlots: 1 }`.
+
+No format version bump and no ABI version change for W1e. A layout for a
+reserved code changes no existing record: a v3 reader without it rejected
+codes 30-34 and 40 as `-2`.
+
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
-maps an absent pin to its reference node (spec §7.2.7). One exception: classic
-stamps nothing at all for an `spdt_switch` with fewer than 3 declared pins
-(`if (pins.length < 3) return`), so the compiler declines one
-(`malformed:<componentId>:too-few-pins`, the circuit runs on classic) rather
-than emit a contact classic never stamps.
+maps an absent pin to its reference node (spec §7.2.7). The exceptions are
+kinds classic stamps nothing for when pins are missing, which the compiler
+declines (`malformed:<componentId>:too-few-pins`, the circuit runs on
+classic) rather than emit a stamp classic never makes:
+- an `spdt_switch` with fewer than 3 declared pins (`if (pins.length < 3)
+  return`);
+- a `led` with fewer than 2, a `bicolor_led` with fewer than 3 and an
+  `rgb_led` with fewer than 4 (SC:355, SC:547, SC:614). A 1-pin `led` also
+  has no `elementI` key (SE:6233), but a 2-pin `bicolor_led` or a 2- or
+  3-pin `rgb_led` still publishes `elementI` and channel currents computed
+  from the absent pins' reference node (SC:563-584, SE:4503-4535), a split
+  the core does not reproduce.
 
 **Currents** (`elementI`, one per record):
 - `capacitor`: series plus leakage current, `pins[0]` to `pins[1]`.
@@ -301,7 +449,23 @@ than emit a contact classic never stamps.
   used to report `com` to `b` at every position.
 - `dip_switch`: the sum of the closed positions' contact currents, `a_i` to
   `b_i`.
+- The LED kinds, from the published voltages with the junction law of LEDs
+  point 2, GMIN excluded (§6.1). These are Q-O23's aggregation conventions,
+  unchanged (D31):
+  - `led`: the signed current `I(V(pins[0]) - V(pins[1]))`, anode to
+    cathode (SC:463-464). It is at least `-Is`. `0` when `burnt`.
+  - `bicolor_led`: `max(I1, I2)` of the unclamped channel currents
+    (SC:582); it can go slightly negative. `0` when `burnt`.
+  - `rgb_led`: `max(0, Ir, Ig, Ib)`, the running maximum starting at 0
+    (SC:647-658). `0` when `burnt`.
+  - `seg7_cc`, `seg7_ca`: the sum, in channel order `a..dp`, of
+    `max(0, I_seg)` over the segments that have a junction (LEDs point 1);
+    `0` when no common pin is stamped (DI:1247-1268).
 - The W1c and W1d ICs: `0`, as classic (no current model).
+- `ne555`: the current delivered out of pin 3 to its load,
+  `-(gLo (V3 - V1) + gHi (V3 - V8))` with `gHi = f/20`, `gLo = (1-f)/20` and
+  `f` the fraction of the committed OUT level (NE555 point 7); 0 while
+  unpowered (§5.2 "Element current"). The DIS current is not reported.
 
 ## C ABI, version 2
 
@@ -322,13 +486,13 @@ export lands in its list in the same change that adds it.
 | `bo_engine_time` | `(h) -> f64` | Current simulation time. | v1 |
 | `bo_engine_node_count` / `bo_engine_node_voltages` | `(h) -> u32` / `(h) -> *const f64` | `N` volts, node 0 = 0. | v1 |
 | `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
-| `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. | v1 |
+| `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. Index 11 counts static iterations too from W1e (below). | v1 |
 | `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
 | `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2 and 3 take effect at the next event; keys 1 and 4-7 are load-time only (`-8` after load). `FORCE_STEPPED` is load-time only because it decides partition classification, which is fixed at load. | v2 (W1a) |
 | `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
 | `bo_engine_next_digital_due_time` | `(h) -> f64` | Time of the earliest pending driver commit (a live token; a commit held by the power-loss hold is not pending), `+Infinity` when none. Classic's `nextScheduledEventTime()` counterpart for a host that clamps its steps onto digital due times; it ignores stepped, crossing and bucket events. | v2 (W1c) |
 | `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
-| `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). | v2 (W1a) |
+| `bo_engine_channel_slot_count` / `bo_engine_channel_slots` | `(h) -> u32` / `(h) -> *const f64` | `C` per-channel currents (amps). All of a component's slots are `NaN` while its `getElementChannelI` entry is absent (a burnt `rgb_led` or `bicolor_led`; `led_failed` from W1g). | v2 (W1a); `NaN` rule W1e |
 | `bo_engine_trace_enable` | `(h, on: u32) -> i32` | Record every digital slot change as `(t, slot, value)`. Harness instrumentation only; W2's host traces are separate. | v2 (W1a) |
 | `bo_engine_trace_ptr` / `bo_engine_trace_len` / `bo_engine_trace_clear` | `(h) -> *const f64` / `(h) -> u32` (f64 count, a multiple of 3) / `(h)` | Read and reset the trace. | v2 (W1a) |
 | `bo_engine_set_params` | `(h, ptr: *const f64, len_f64: u32) -> i32` | `(deviceIndex, paramIndex, value)` triples for each kind's live params (owner decision 1), applied as one event at the current time with all other state kept. | v2 (W1b) |
@@ -356,14 +520,19 @@ export lands in its list in the same change that adds it.
 depth, `7` solution-cache hits, `8` closed-form segments, `9` crossings,
 `10` stepped steps, `11` Newton iterations, `12` IC evaluations, `13` driver
 commits, `14` rail moves, `15` stepped partitions holding two or more
-capacitors (decision 14's count; `FORCE_STEPPED` does not change it).
+capacitors (decision 14's count; `FORCE_STEPPED` does not change it). Stat
+11 counts every Newton iteration of a stepped step (one for a linear
+partition) and, from W1e, every iteration of an iterated static partition:
+LEDs point 6, the polish included, and W1c's static fixed point, which W1c
+did not count.
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
 unsupported topology (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
-(singular, non-finite pivot, a non-finite published value, or an IC fixed
-point that does not converge); `-5` unknown
+(singular, non-finite pivot, a non-finite published value, or a partition's
+Newton iteration that does not converge: a static partition within 50
+iterations, a stepped partition at the `H_MIN` floor); `-5` unknown
 handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
@@ -427,7 +596,10 @@ records from it:
 - `digitalState`: rebuilt from the slots after every advance; a `NaN` slot is
   an absent key, because classic rebuilds `digitalState` from scratch every
   pass (spec §10.9 lists every kind's keys and when they appear).
-- `getElementChannelI()`: from the channel slots.
+- `getElementChannelI()`: from the channel slots. A component whose slots
+  are `NaN` is omitted, as classic omits a burnt or failed `rgb_led` or
+  `bicolor_led` (SE:4503, 4520); `buildElementChannelI`
+  (`src/core/readout.ts`) skips it rather than write the `NaN` through.
 
 ## Kernel semantics: the static solve (W0)
 
@@ -444,7 +616,9 @@ records from it:
    every KCL sum below.
 3. **Partitions.** Union-find over free nodes, joined by every resistor whose
    two terminals are both free (W1b widens the union; see "Kernel semantics:
-   partitions and dynamic solves (W1b)"). A resistor with one fixed end stamps
+   partitions and dynamic solves (W1b)"; W1e adds the anode and cathode of
+   every stamped LED junction whose two nodes are both free, LEDs point 4).
+   A resistor with one fixed end stamps
    the fixed voltage into the right-hand side; one with both ends fixed stamps
    nothing. The union-find itself is iterative (path halving, union by size): no input
    — however long a chain of unions it produces — makes it recurse to a depth
@@ -466,7 +640,9 @@ records from it:
    children before parents in the propagation forest:
    - `R_u` = sum over resistors and switch-family contacts of the current
      leaving node `u` through their live stamps, plus each capacitor's
-     published current leaving `u`, plus the shunt current `1e-12 * V[u]`;
+     published current leaving `u`, plus each stamped LED junction's branch
+     current `I(vA - vK) + GMIN_D * (vA - vK)` leaving its anode and entering
+     its cathode (LEDs point 12), plus the shunt current `1e-12 * V[u]`;
    - a child source `c` at `u` contributes `+i_c` if `c`'s + terminal is `u`
      and `−i_c` if its − terminal is `u`;
    - if source `s` fixed its + terminal `u`: `i_s = −(R_u + children)`;
@@ -486,15 +662,23 @@ records from it:
    - every free pin of one switch-family device with every other free pin of
      it, even when the contact between them runs through a fixed pin (an
      `spdt_switch` whose `com` sits on a source, a `dip_switch` whose `a`
-     side is a rail).
+     side is a rail);
+   - the anode and cathode of every stamped LED junction whose two nodes are
+     both free (W1e, LEDs point 4).
 
-   So every device's free pins share exactly one partition. Partition
-   membership is fixed at load: a toggle only changes what is stamped, never
-   which partition a node is in, and `bo_engine_set_params` marks that one
-   partition dirty.
+   So every device's free pins share exactly one partition, except an IC
+   with both supplies fixed (W1c point 2) and an LED-family device, whose
+   junctions are placed one by one. `compile_dyn_shape` and `static_part`
+   place junctions by node, not by owning device; code that resolves a
+   device's owner (`owner_of`, `owned_by_static`) never sees LED kinds.
+   Partition membership is fixed at load: a toggle only changes what is
+   stamped, never which partition a node is in, and `bo_engine_set_params`
+   marks that one partition dirty.
 2. **Inert capacitor.** A capacitor whose two pins are on the same node
    stamps nothing, does not count toward its partition's classification, and
-   publishes `0`, as classic does (its companion stamps cancel).
+   publishes `0`, as classic does (its companion stamps cancel). An LED
+   junction whose two pins share a node is the same: it stamps nothing, does
+   not classify and carries `I(0) = 0` (W1e, LEDs point 1).
 2a. **Capacitor across two fixed nodes** (a decoupling capacitor on an
    ideal supply; distinct nodes, so not rule 2). It belongs to no partition
    and is not `-3`: its terminal voltage `dV = V(pins[0]) - V(pins[1])` is
@@ -512,13 +696,24 @@ records from it:
      artifacts of its step size; the core reports the exact value.
    - It rolls back with the rest of the instant (rule 7). No fixed-node
      voltage is live in W1b, so nothing re-aims it after load yet.
+   - An LED junction across two fixed nodes is the same case (W1e, LEDs
+     point 4): it belongs to no partition and is not `-3`, publishes
+     `I(dV)` and enters the source KCL.
 3. **Classification** (decision 14). A partition with no counted capacitor
    is static. One with exactly one is closed-form. One with two or more is
    stepped. `FORCE_STEPPED` (load-time only) makes every closed-form
-   partition stepped.
+   partition stepped. A partition holding a stamped LED junction is
+   nonlinear (W1e, LEDs point 5): static when it holds no counted
+   capacitor, stepped otherwise, never closed-form. In code,
+   `partition::build` gains a per-partition `holds_junction` and adds such
+   partitions to `must_step`; `closed_form::build` asserts it never
+   receives one.
 4. **Static partitions** keep a solution cache keyed on driver modes, the
    rail band, the floating bits and an epoch that bumps only on a real value
-   change. `NO_SOLUTION_CACHE` bypasses it.
+   change. `NO_SOLUTION_CACHE` bypasses it. A nonlinear static partition
+   keeps the cache too (W1e, LEDs point 7): `NO_SOLUTION_CACHE` stays
+   bit-identical for linear partitions, and a nonlinear one agrees within
+   1 µV (the polish residual).
 5. **Initial state at load.** Every capacitor starts at `vc = 0` at
    `START_TIME`, in closed-form and stepped partitions alike; carrying charge
    across a reload is W2. A stepped partition's clock starts at
@@ -531,16 +726,27 @@ records from it:
    bisection. When an event (a driver commit, a reset, a `set_params`)
    dirties a stepped partition, its catch-up to the event instant integrates
    with the stamps in force BEFORE the event. The new stamps apply from the
-   instant on.
+   instant on. A step whose Newton does not converge (a partition holding a
+   stamped LED junction or a free IC supply node) is rejected and retried at
+   `max(H_MIN, 0.25 h)`, `-4` only at the floor, and the re-aim seed
+   warm-starts from the committed `x` (W1e, LEDs point 8). This changes
+   W1c's free-supply stepped partitions too, which returned `-4` at once.
 7. **Rollback.** A failed instant (`-4`, `-7`, in `advance` or
    `set_params`) restores every piece of solver state the attempt touched:
-   published arrays, each static partition's own solution and cache, the
-   closed-form and stepped partition state, and any crossing or step event
-   the attempt scheduled. Nothing from the failed attempt reappears later.
+   published arrays (the channel array included, W1e, LEDs point 16), each
+   static partition's own solution and cache, the closed-form and stepped
+   partition state, and any crossing or step event the attempt scheduled. Nothing from the failed attempt reappears later.
 
 ## Kernel semantics: the digital core (W1c)
 
 References are to `core/spec/w1-classic-semantics.md`.
+
+"An IC" below includes code 40, the NE555, for points 1-3, 8 and 9 (NE555
+point 1). In code: `digital::is_ne555`, `is_ic` includes it,
+`output_capable(40) = [1, 5]`, and `is_read_and_driven(40)` is false.
+Partitioning (`partition::build`), the stepped promotion, the reader index,
+`ic_powered` and the power-loss hold then cover the 555 with no change of
+their own, and the source KCL does with W1a point 2's branch fold.
 
 1. **Power** (§1.3), per IC, from its supply-node voltages:
    `vSraw = V(vcc) - V(gnd)`; `powered = !OPEN(vcc) && !OPEN(gnd) &&
@@ -560,10 +766,17 @@ References are to `core/spec/w1-classic-semantics.md`.
 3. **Stamps that depend on power** are an IC's driver conductances (`1/R_out`
    to its own `vcc` or `gnd` node), its floating pulls, and whether it stamps
    at all. Classic recomputes them from every Newton iterate with no Jacobian
-   term, which is a fixed-point iteration, and the core does the same: a
-   partition holding a free IC supply node re-stamps from the latest iterate
-   until classic's Newton test passes (`|dx| <= 1e-6 + 1e-3 |x|` per node, at
-   most 50 iterations; failure is `-4`). A dynamic partition holding a free IC
+   term, which is a fixed-point iteration, and the core does the same in an
+   iterated static partition: one that holds a free IC supply node or (W1e)
+   a stamped LED junction. It re-stamps from the latest iterate until
+   classic's Newton test passes (`|dx| <= 1e-6 + 1e-3 * max(|x_new|,
+   |x_old|)` per node, classic's own form, at most 50 iterations; failure is
+   `-4`). One holding a junction then runs one polish iteration (LEDs point
+   6.4); one holding a free IC supply and no junction does not. Static and
+   stepped partitions share one loop: `static_part` calls `newton::solve`,
+   which gains a non-finite-iterate check and a `polish` argument, and
+   `linear` is `!(holds_free_ic_supply || holds_junction)`. A dynamic
+   partition holding a free IC
    supply node is stepped, because R_out then moves with its state. So is a
    dynamic partition holding a 74ls245 `a`/`b` pin: those pins are read and
    driven, a closed-form crossing watch cannot follow a pin its own IC drives,
@@ -584,7 +797,9 @@ References are to `core/spec/w1-classic-semantics.md`.
    every logic pin's node. A reader whose pin sits on a closed-form or stepped
    partition registers that pin's live thresholds (`vil`/`vih`, or the scaled
    `vtMinus`/`vtPlus`, and the power window on the supply) with the
-   partition's crossing watch, so it is re-evaluated at the crossing instant
+   partition's crossing watch (a 555 registers NE555 point 5's thresholds on
+   pins 2, 4 and 6 instead, and on a stepped partition whatever its supply),
+   so it is re-evaluated at the crossing instant
    (accepted only at `t > now + 1e-15`), not at the next unrelated event. An
    output-capable pin is not watched: its level never changes the kind's
    result (the 74ls245 aside, rule 3), and it sits on its own driver. A
@@ -593,13 +808,23 @@ References are to `core/spec/w1-classic-semantics.md`.
    A watch's thresholds come from the IC's live supply voltages. So an IC
    whose supply sits in a static partition is watched too, and its watches
    are re-aimed whenever that supply moves. Only an IC with a supply node in
-   a dynamic partition relies on the stepped re-read instead.
+   a dynamic partition relies on the stepped re-read instead (a 555 on a
+   stepped partition is watched as well). In code,
+   `register_ic_read_pin_watches` skips code 40 in its generic loop and
+   registers `digital::ne555::watch_thresholds`, and
+   `add_watch_dependent_partitions` re-aims the partitions holding pins 2, 4
+   and 6. `watch_node` and `ThresholdFn` already serve stepped partitions.
 5. **Floating model** (§1.5, owner decision 9): `bucket = floor((t + 1e-12) /
    0.01)` of the evaluation time; `n = finish(hashState, bucket) /
    0xffffffff`; HIGH when `n < pHigh`. At each bucket boundary, every
    partition holding an `OPEN` `FLOATING_INPUT` pin of a powered IC is marked
    dirty (its pull target may change), and every IC holding such a pin or
-   reading a dead-band pin is re-evaluated.
+   reading a dead-band pin is re-evaluated. A 555 takes no part: it never
+   reads through the floating model and holds no `FLOATING_INPUT` pin. In
+   code, `any_powered_ic_needs_bucket_watch` and `bucket_boundary` skip code
+   40; otherwise a 555 pin inside the generic band `(max(0.8, 0.3 vS),
+   max(2.0, 0.6 vS))` (every astable's timing node, most of each period)
+   would schedule a bucket event every 10 ms and wake the 555 for nothing.
 6. **Floating pulls** (§1.6): while powered, each `OPEN` pin with
    `FLOATING_INPUT` and not `OPEN_HIGH` gets `g = 1/(TTL ? 1e6 : 1e7)` toward
    `V(gnd) + (high ? vS : 0)`, `high` from the open-key hash, so the pin
@@ -632,6 +857,8 @@ References are to `core/spec/w1-classic-semantics.md`.
    An output on any other fixed node stamps into its supply node's partition
    when that supply is free, and its current enters the source KCL. A commit
    on a fixed-node driver re-publishes the source currents at that instant.
+   A 555's OUT and DIS stamp by their stages (NE555 point 7), with the same
+   datum and fixed-node rules.
 9. **Power loss** (owner decision 8, Q-O4): while an IC is unpowered its
    drivers keep their committed level and in-flight transition frozen; a
    commit that comes due meanwhile is held, not applied. On the first powered
@@ -641,8 +868,8 @@ References are to `core/spec/w1-classic-semantics.md`.
 10. **Readouts** (codes 50-61). A digital slot holds the pin's committed level
     (electrical: HIGH, or released for open-collector, is 1) while the pin is
     driven, and `NaN` (an absent key) while the IC is unpowered, or the pin is
-    committed HIZ or has never committed. Codes 70-82 publish evaluator state
-    instead (W1d).
+    committed HIZ or has never committed. Code 40 (NE555 point 12) and codes
+    70-82 (W1d) publish evaluator state instead.
 
 ## Kernel semantics: datasheet delays and enables (W1d)
 
@@ -878,6 +1105,646 @@ References are to spec §4.2.4-4.2.5.
    0xF and the EEPROM to its contents image. Classic's carry rules (189 by
    id; EEPROM by contents hash and size) are W2's load carry-forward.
 
+## Kernel semantics: LEDs and displays (W1e)
+
+References are to spec chapter 6, §10.5-10.6 and §10.10; classic line
+citations are at `3b22a3e` ("Kind codes and records").
+
+1. **Junctions.** Every kind is a set of junctions, each an anode node, a
+   cathode node and a law (point 2). A kind's junctions are fixed at load:
+   - `led`: one, `pins[0]` to `pins[1]`.
+   - `bicolor_led`: `a1` to `k`, then `a2` to `k`, both always, even when an
+     anode pin is `OPEN` (§6.6).
+   - `rgb_led`: `r_a`, `g_a`, `b_a`, each to `com_k`, always.
+   - `seg7_cc` / `seg7_ca`: the common node is `com` when `com` is not
+     `OPEN`, else `com2` when `com2` is not `OPEN`, else none (DI:1217-1224,
+     point 14). With a common node, each segment that is not `OPEN` is a
+     junction (DI:1226), with the segment as anode and the common node as
+     cathode on `seg7_cc`, the reverse on `seg7_ca` (DI:1228). `dp` is a
+     segment like the others.
+   - A `burnt` device has no junctions: it stamps nothing (SC:358-360,
+     SC:548-550, SC:615-617).
+
+   A junction is **stamped** when its two nodes differ. One whose two pins
+   share a node stamps nothing (its companion cancels, as a self-shorted
+   capacitor's does), does not count toward classification and carries
+   `I(0) = 0`.
+
+2. **The law** (§6.1; EL:693-786, SE:156-193). Per junction, at temperature
+   `T` (°C), from the resolved params:
+   - `vt = K_B_OVER_Q * max(1, T + 273.15)`, `K_B_OVER_Q = 8.617333262145e-5`
+     (SE:109, 156-159);
+   - `vf = max(0.05, vf25 + (-0.002) * (T - 25))` (SE:111, 162-168);
+   - `vtn = n * vt`, with `n = 2` for every kind but `led`;
+   - `Is = iRated * exp(-vf / (n * vt))` (EL:755-762), or, for a `led` with
+     `isSet = 1`, classic's `saturationCurrentAtTemperature(is, T, n)`
+     (SE:175-193): `nn = max(0.1, n)`, `t = max(1, T + 273.15)`,
+     `tNom = 298.15`, `x = clamp((1.11 / (nn * K_B_OVER_Q)) * (1/tNom - 1/t),
+     -80, 80)`, `Is = clamp(is * (t/tNom)^(3/nn) * exp(x), 1e-30, 1)`;
+   - `vSat = min(max(40 * vtn, vf + 5 * vtn), 80 * vtn)` (SC:381-382), the
+     temperature-adjusted `vf` in it, the `Is` override notwithstanding.
+
+   The current law, `I(v)`: `c = min(v, vSat)`, `e = exp(c / vtn)`,
+   `I = Is * (e - 1) + ((Is * e) / vtn) * max(0, v - vSat)`: the exponential
+   below `vSat`, its tangent above (EL:772-786).
+
+   The companion about the previous iterate `vPrev` (EL:693-742):
+   `v = vPrev > vSat ? vSat : vPrev`, `gd = (Is * exp(v / vtn)) / vtn`,
+   `id = I(vPrev)`, stamped conductance `g = gd + GMIN_D` with
+   `GMIN_D = 1e-12`, Norton offset `ieq = id - gd * vPrev`, so the branch
+   current anode to cathode is `g * (vA - vK) + ieq` (the
+   `stamp_two_terminal` convention, `solve/mod.rs`). GMIN carries no offset
+   (EL:721-725).
+
+   Rust evaluates these in classic's operation order. `f64::exp` and `powf`
+   need not match V8's `Math.exp` and `Math.pow` to the last bit (D13); the
+   goldens against classic compare them within 4 ulp.
+
+3. **Temperature.** `T` is `AMBIENT_C` (option 5) for every junction in W1e.
+   The multi-junction kinds are ambient-only forever (`ctx.junctionVt()` /
+   `junctionVf()`, SE:1818-1828). Self-heating is limited to a plain `led`
+   with an exact thermal identity (Q-O21, §6.3), and it is W1g. Until then
+   the compiler declines such a `led`
+   (`unsupported-feature:led-thermal:<componentId>`, the circuit runs on
+   classic): one whose `catalogUid` classic's `_thermalProfile` accepts
+   (SE:1830-1849). It decides with `thermalProfileForComponent(comp)`, the
+   body of `_thermalProfile` without its cache, exported from `sim-engine.ts`
+   for this and for W1g. So every `led` that reaches the core has no thermal
+   state, and no known divergence is registered for it. W1g removes the
+   decline when it ports self-heating: it feeds that LED's held junction
+   temperature into point 2 and re-solves its partition when the held value
+   moves (D19, orchestrator lock). The tempco is the fixed `-2 mV/°C`
+   (`DEFAULT_VF_TEMPCO`); no param overrides it. The law's inputs are fixed
+   at load in W1e, so each junction's `(vtn, Is, vSat)` is computed once.
+
+4. **Partitions.** The union-find also joins the anode and cathode of every
+   stamped junction whose two nodes are both free, junction by junction, as a
+   resistor's two ends are joined (the prototype's `join(d.a, d.k)`,
+   `pec3.mjs:264`). A device's other pins are not joined through it: a
+   `bicolor_led`, `rgb_led` or `seg7` whose common pin is fixed puts each
+   channel in the partition of its own drive. So an LED-family device can
+   touch several partitions, as a W1c IC with both supplies fixed can (W1c
+   point 2). Each partition stamps exactly the junctions that touch it; a
+   junction's two nodes are each fixed or free in that one partition, by the
+   union rule. A burnt device joins nothing.
+
+   A stamped junction with both nodes fixed belongs to no partition and is
+   not `-3` (an LED straight across an ideal source): its current is `I(dV)`
+   with `dV` fixed, and it enters the source KCL (point 12). No fixed-node
+   voltage is live in W1e, so it is constant.
+
+5. **Classification** (amends W1b point 3). A partition holding a stamped
+   junction is **nonlinear**. A nonlinear partition with no counted
+   capacitor is static and Newton-iterated (point 6). A nonlinear partition
+   with one or more counted capacitors is stepped: it is never closed-form,
+   because the exact exponential needs a linear network. So an LED plus a
+   capacitor is stepped. Classification is fixed at load: a W1g `led_failed`
+   latch removes a junction's stamp but not the classification.
+   `FORCE_STEPPED` and stat 15 are unchanged (stat 15 counts partitions with
+   two or more capacitors, junctions or not).
+
+6. **The nonlinear static solve.** Classic's Newton (NW:73-130), per
+   partition:
+   1. Start from the partition's last published voltages: 0 V before its
+      first solve, as classic's first solve starts from `netV = {gnd: 0}`
+      (SE:2942, 5650-5656); afterwards whatever it last published, as
+      classic warm-starts every solve from the previous accepted `netV`
+      (SE:5650-5669).
+   2. Each iteration restamps the partition from scratch: node shunts,
+      resistors, switch contacts and non-IC drivers as the direct solve
+      does, every IC driver and pull from the iterate (W1c point 3), and
+      every junction's companion about the iterate (point 2). Then one dense
+      LU solve (W0 point 4). A zero or non-finite pivot, or a non-finite
+      entry in the new iterate (NW:109-111), is `-4` at once.
+   3. The iterate passes when every node `i` of the partition has
+      `|x'_i - x_i| <= 1e-6 + 1e-3 * max(|x'_i|, |x_i|)` (NW:112-114,
+      classic's own `max` form). At most 50 iterations (SE:5680,
+      `maxIter: 50`); a partition that has not passed by then is `-4`
+      ("Newton did not converge within 50 iterations"), and the instant
+      rolls back (W1b point 7).
+   4. **Polish.** When the test passes, the partition runs exactly one more
+      iteration from the passing iterate and publishes its result. That
+      iteration is not tested; only a pivot or a non-finite entry fails it.
+      Classic needs no such step because it re-solves every partition at
+      every accepted step, warm-started from the last: each quiet classic
+      step is one more Newton iteration from an already converged point, so
+      one quiet step after any change classic sits where the core's polish
+      puts it, and a step later at the fixed point to rounding (point 11).
+      The core solves a static partition once per change, so it takes that
+      iteration at once. Measured on the drafting probes: the passing
+      iterate is up to 145 µV from the fixed point and its reported junction
+      current up to 5.6 times the amps tolerance (a `seg7_cc` with all eight
+      segments lit through 330 Ω each and a shared 100 Ω common resistor, at
+      -40 °C, warm-started 0.2 V off the fixed point); after the polish, at
+      most 0.39 µV and 0.015 times the tolerance, over 18 000 one-node cases
+      and 180 two- and nine-node cases.
+   5. Stat 11 counts every iteration, the polish included.
+
+7. **The solution cache** (amends W1b point 4). A nonlinear static partition
+   with no free IC supply node keeps the cache, as the plan's static class
+   says ("cached per driver configuration and rail band") and as the
+   prototype did (`pec3.mjs:507-529`). The key is unchanged: driver modes,
+   rail band, floating bits and the epoch; every junction input is fixed at
+   load in W1e. A miss runs point 6 and stores the polished result; a hit
+   publishes the stored vector with no iteration. The epoch is solver-wide
+   (`static_part.rs` `CacheKey`, bumped by `apply_params` on a real change
+   to a static partition's switch), so such a change makes every static
+   partition's next solve a miss, nonlinear or not; a board clocked by a 555
+   or an IC oscillator never moves it. A partition holding a free IC supply
+   node bypasses the cache as before (W1c point 3), junctions or not. With
+   `NO_SOLUTION_CACHE`, a nonlinear partition is solved by point 6 from its
+   last published voltages, so it agrees with the cached run within 1 µV
+   (the polish residual, at most 0.39 µV measured), not bit for bit; linear
+   partitions stay bit-identical. W1g adds each junction's failure bit, and
+   a held junction temperature, to the key or bypasses the cache for those
+   partitions.
+
+8. **Stepped partitions with junctions** (amends W1b point 6). Each BE or
+   trap step runs the same Newton as points 6.1-6.3 (`newton::solve` with
+   `linear = false`), stamping every capacitor companion, IC driver and
+   pull, and junction companion about the iterate, with no polish, exactly
+   as classic solves each step. Warm starts are unchanged: the committed `x`
+   for the coarse and first half legs, the first half's result for the
+   second (`stepped.rs` `plan_step`). Three changes:
+   - A step whose Newton does not pass within 50 iterations is rejected, not
+     `-4`: `h` becomes `max(H_MIN, 0.25 * h)`, the partition is marked
+     changing, and the step-doubling trio is retried, as classic's host does
+     (`nextFactor: 0.25`, HL:609-617, 627-630; retry at HL:819-831). A step
+     that fails at `h <= 1.01 * H_MIN` is `-4`, classic's `hitMinStep`
+     (HL:827-829). A zero or non-finite pivot stays `-4` at once (W1b). This
+     covers every stepped Newton, W1c's free-supply stepped partitions
+     included, which returned `-4` at once before W1e (`stepped.rs`
+     `take_step`).
+   - A crossing-refinement trial (`refine_crossing_h`) that does not
+     converge ends the refinement at the best `h` found so far.
+   - The re-aim seed (`solve_initial_x`, the `1e-12` BE step at load and at
+     every discontinuity) warm-starts from the committed `x`, not from zero.
+     It is not a step and has no smaller `h` to retry: non-convergence there
+     is `-4`.
+
+   The crossing watch and the stepped re-read of ICs (W1c point 4) are
+   unchanged: both already work on whatever a step solves.
+
+9. **With the W1c fixed point.** A partition holding both a free IC supply
+   node and a junction runs one loop: every iteration restamps the IC
+   drivers and pulls and the junction companions from the same iterate, with
+   the test and cap of point 6. That is classic's single global iteration
+   restricted to the partition. Such a static partition polishes (it holds a
+   junction) and bypasses the cache (it holds a free supply). A static
+   partition with a free IC supply and no junction keeps W1c's behaviour,
+   with no polish, save the test's form (W1c point 3).
+
+10. **Topology changes.** Membership is fixed at load. A switch toggle, a
+    `bo_engine_set_params` batch, a driver commit (an IC output driving an
+    LED changes level, or goes HIZ) or a floating-bucket boundary marks the
+    partition dirty, as for any partition. A dirty nonlinear static
+    partition re-runs point 6 from its pre-change voltages, which is where
+    classic's first step after the change starts too; the epoch bump on a
+    real change keeps a toggle from hitting a pre-toggle cache entry. A
+    dirty stepped partition catches up with its pre-change stamps, then
+    re-seeds from its committed `x` (point 8) and restarts at `POST_EVENT_H`
+    with the BE anchor (W1b point 6).
+
+11. **Per-partition Newton against classic's global Newton.** Classic solves
+    every unknown of the circuit in one Newton (§10.5-10.6, D24). After
+    fixed-node elimination the core's partitions are exactly the diagonal
+    blocks of that system: a fixed node's value comes from its source row
+    alone, and every IC coupling that depends on the iterate (driver
+    `R_out`, pulls) lies inside one partition by W1c point 2's union rule. So
+    in exact arithmetic a partition's iterates are the ones classic computes
+    for its rows, from the same warm start. Digital levels are not part of
+    the iteration: the core settles them by delta cycles (events point 3),
+    and classic's zero-delay paths inside Newton (§2.5, G11) are W1c's
+    accepted difference, not this wave's. The iterates differ in five
+    places, none beyond W0's tolerances:
+    - **Stopping.** Classic stops only when every unknown passes on the
+      same iteration, source branch currents included, so a partition that
+      converges early takes more iterations in classic than here. The polish
+      (point 6.4) and classic's per-step re-solve both land on the fixed
+      point: 0.39 µV worst case measured against W0's 100 µV + 1e-3
+      relative, 0.015 of the amps tolerance.
+    - **The cap.** Classic's 50 is shared by the whole circuit, the core's
+      is per partition. Since a partition's iterates are the same, a
+      partition converges in the core whenever it converges in classic. The
+      core can converge where classic does not (another block stalls
+      classic), which only turns a classic failure into a core result.
+    - **Re-solves.** Classic re-solves a quiet LED partition at every step
+      (a polish each time); the core solves it once per change, or serves it
+      from the cache. The polished result and the cached result are both
+      that fixed point.
+    - **Right after an event.** Classic's first step after a change
+      publishes its unpolished iterate for one step; the core publishes the
+      polished one at once. The quiet-instant rule (gate 2b) keeps such
+      samples out of comparisons.
+    - **Failures and health.** Classic retries a non-converged step at
+      `0.25 h` (HL:609-617); static partitions have no `h`, so the core
+      returns `-4` where classic would retry the same failing solve down to
+      `hitMinStep`, and stepped partitions retry exactly as classic (point
+      8). Classic also rejects a solve whose relative residual exceeds
+      `1e-8` (SE:5695-5699); the core checks pivots and finiteness only (W0
+      point 4), which can only accept a solve classic's global matrix
+      rejects for conditioning. Per-partition LU and global LU also round
+      differently (D13).
+
+    The stepped case keeps W1b's accepted stepping divergence: a stepped
+    partition picks its own steps, and classic's plain path also scales `h`
+    by Newton effort (`iters > 15`: 0.7, `iters <= 3`: 1.5, HL:620), which
+    the core's step doubling does not use.
+
+12. **Currents and the source KCL** (amends W0 point 5). Every stamped
+    junction, in a partition or across two fixed nodes, contributes its
+    branch current `I(vA - vK) + GMIN_D * (vA - vK)` leaving the anode and
+    entering the cathode to `R_u` in the source KCL walk
+    (`recompute_source_currents`). At the published voltages that equals the
+    companion current classic's source branch carries at convergence, within
+    Newton tolerance. The datum end of a junction feeds no source, as for
+    every other device. `elementI` ("Currents") excludes GMIN and never
+    enters the KCL walk, since for three kinds it is an aggregate, not a
+    branch current.
+
+13. **Readouts.**
+    - Classic publishes no `digitalState` and no `displayState` for any of
+      the five kinds (no `updateDigital` hook, §6.6, §10.9): no digital
+      slots. `getDisplayState()` stays `{}` in W1 (W1 plan, W1e "Display
+      readout"); hosts derive lit segments from channel currents.
+    - Each record's `elementI` ("Currents") and channel values are pure
+      functions of the published voltages and the device's `burnt` flag
+      (W1g adds `led_failed`). The solver republishes them in one device
+      pass after the partitions publish, at every point that publishes
+      voltages (`resolve_dirty`, `handle_dynamic_event`, `sync_dynamic_to`),
+      beside `recompute_source_currents`. A device none of whose pin
+      voltages changed bitwise since its last pass may be skipped: the
+      result would be identical.
+    - Channel values: `rgb_led` and `bicolor_led` channel `j` is
+      `max(0, I_j)` (SE:4517, 4533); `seg7` channel `j` is `max(0, I_j)` for
+      a stamped segment and `0` for an `OPEN` segment or when no common pin
+      is stamped (SE:4557-4569). While an `rgb_led` or `bicolor_led` is
+      `burnt`, every one of its channel slots is `NaN`, meaning its entry is
+      absent (SE:4503, 4520: classic omits it). `seg7` never is (no `burnt`
+      gate, Q-O22).
+    - Channel values use the same ambient law as the stamp: classic's
+      `getElementChannelI` uses ambient `Vt` and `Vf` (SE:4500, 4513, 4529,
+      4542) and the same param precedence (§10.10), identical to what the
+      stamp uses for these three kinds.
+    - The published values are those of the current instant. Classic
+      computes `getElementChannelI` on demand from `_lastX` (SE:4495-4499),
+      the last accepted solve, which is the same thing.
+    - In code, the solver gains a published channel array (`fn
+      channels(&self) -> &[f64]` on `PartitionSolver`, default empty),
+      written by the device pass and carried in `PartitionedSolver`'s
+      `dynamic_snapshot`. The device pass is a `PartitionedSolver`-level
+      pass like `recompute_source_currents`, because an LED device's current
+      is not one partition's stamp. `Engine` copies the array into
+      `Readout`'s channel slots after `load` and after every `advance`,
+      `set_params` and `seed_memory`, success or failure, as it drains
+      digital writes. `check_finite` accepts a `NaN` channel only on a
+      device that is absent (`burnt`; W1g adds failed); any other non-finite
+      channel value is `-4`.
+
+14. **The com/com2 tie and the com-open check** (§6.9). `buildNets` unions
+    `com` and `com2` of every `seg7` into one net (GR:160-167), so both pin
+    records carry the same node, and the compiler's `OPEN` flags follow
+    classic's rule on that net: wiring either lead makes both non-open (G8).
+    The core stamps from the flags alone (point 1): `com`, else `com2`, else
+    nothing, which is classic's order (DI:1217-1224, SE:4549-4555). The
+    `com2` fallback is reachable only when the pin list lacks `com`. With
+    neither stamped the device stamps nothing, publishes `elementI = 0` and
+    eight zero channels. A source wired from `com` to `com2` is shorted to
+    itself: that is `-3` (W0 point 1), so the circuit falls back to classic,
+    where `seg7-load.test.ts:127-148` expects `lastConverged === false`.
+
+15. **The damage limit (Q-O24).** Classic's fix is in (`3b22a3e`):
+    `ifMax = params.iRated ?? specs?.if_max ?? 0.02` for `led`, `rgb_led`
+    and `bicolor_led` (SC:481). W1e ports the resolution only: the `led`
+    record's `iRated` and the `rgb_led`/`bicolor_led` `ifMax` carry it,
+    validated finite, and nothing reads them. W1g ports the latch on top:
+    stress rate `max(0, r² - 1)` with `r = peakI / ifMax` (0 when
+    `ifMax <= 0`), `peakI = |elementI|`, for `rgb_led` and `bicolor_led` also
+    the maximum `|channel|`, recovery 2/s, threshold 24 (SC:472-511,
+    §9.5.1); the latch removes every junction of the device, zeroes its
+    `elementI`, makes its channels (if any) `NaN`, and marks every partition
+    it touches dirty; the message is classic's (SC:508). `seg7` never fails
+    (Q-O22). `led-damage-limit-irated.test.ts` needs the latch, so it joins
+    gate 1 at W1g.
+
+16. **Rollback** (amends W1b point 7). The channel array is published solver
+    state: a failed instant restores it with the voltages and currents, and
+    restores (or clears) any per-device memo point 13 keeps.
+
+17. **What LEDs do not do.** They create no drivers, schedule no events,
+    register no crossing watches and are not readers. They have no live
+    params. AC small-signal stamps (`shockleyConductanceAtOp`, SC:95-106)
+    are W6, thermal state and failures W1g, telemetry and load carry-forward
+    W2 (§6.8), and `led`'s role as a flyback clamp (`FLYBACK_CLAMP_KINDS`,
+    §6.10) belongs to the `missing_flyback` port. A nonlinear partition on a
+    hub rail is W1f's, against point 6 (the prototype stamped diodes in
+    `_railSens` and re-solved a nonlinear partition past 25 mV of rail
+    drift, `pec3.mjs:478`).
+
+## Kernel semantics: NE555 (W1e)
+
+References are to spec chapter 5, classic's `ne555Model` (DI:178-308) and
+decision 7; classic line citations are at `3b22a3e` ("Kind codes and
+records").
+
+1. **Shared machinery.** Code 40 is an IC for W1c points 1-3, 8 and 9:
+   power, partitions, power-dependent stamps and the stepped promotion, the
+   output stage (with point 7's stages) and the power-loss hold, all through
+   its `IcRecord`. It takes no part in W1c points 4-7 and 10: it reads no
+   logic level, has no floating model, pull or bucket event, no truth table
+   and no delay, and it publishes its latch. The points below replace them.
+   Its evaluation lives in `digital/ne555.rs`, dispatched by the IC
+   evaluator as its own family: `devices/ics.rs` gains
+   `Family::Ne555 { out_high }`, registration creates OUT and DIS with their
+   stages, evaluation branches to `digital::ne555` before any `levels::read`
+   and leaves `last_reads` alone, and `on_settled` publishes its family slot
+   as the W1d families do. Small-signal AC (DI:275-308) and the DC operating
+   point's regime signature (§5.3) are W6.
+2. **Power and reference** (§5.2 "Power detection"; W1c point 1).
+   `powered = !OPEN(8) && !OPEN(1) && vccMin*0.9 <= V(8) - V(1) <= vccMax*1.1`
+   (4.05-17.6 V with the catalog, 1.8-19.8 V without), and
+   `vS = max(0, V(8) - V(1))`.
+   - Every comparator input is relative to pin 1: `vTrig = V(2) - V(1)`,
+     `vThr = V(6) - V(1)`, `vRst = V(4) - V(1)` (DI:227-229).
+   - `vUpper = (2/3)*vS` and `vLower = (1/3)*vS`, computed exactly as
+     classic writes them (`(2.0 / 3.0) * vs`, DI:230-231).
+   - R_out and the logic thresholds of W1c point 1 are not used.
+   - CV (pin 5) is never read or stamped, so an external voltage on it does
+     not move the thresholds. Input bias currents are not modelled (decision
+     7).
+3. **Comparators and latch** (§5.2, DI:245-247). The state is one bit,
+   `outHigh`, with power-on value 1 (`{outHigh: true}`, DI:233). One
+   powered evaluation resolves the following, all comparisons strict, first
+   match wins:
+   1. `vRst < 0.5`, in absolute volts above pin 1, not a supply fraction: 0.
+   2. Otherwise `vTrig < vLower`: 1.
+   3. Otherwise `vThr > vUpper`: 0.
+   4. Otherwise the stored `outHigh`.
+
+   So SET beats RESET when both comparators are true (the monostable hold,
+   DI:235-244), and a node exactly on a threshold changes nothing. With
+   edges live (every evaluation except load settling's frozen passes,
+   point 9) the result is written to `outHigh`. An unpowered 555 reads,
+   writes and requests nothing, so `outHigh` holds (§5.2 "Unpowered").
+   An unwired RST reads 0 V (its node holds only the shunt; §5.2 "Open
+   RST", Q-O16), so OUT is LOW from load on, as in classic, with no special
+   case.
+4. **Requests.** Each powered evaluation requests, with
+   `DelaySet::uniform(0)`, OUT HIGH or LOW as the result, and DIS LOW when
+   the result is 0 or HIGH (released) when it is 1. Both commit in the next
+   delta at the same instant (W1a point 3). OUT and DIS therefore switch at
+   the instant of the evaluation that changes the latch: there is no output
+   lag (decision 7, Q-O19), and no propagation delay.
+5. **Crossing watches** (decision 7, D11; W1c point 4's mechanism). At load
+   the solver registers these watches on each of a 555's read pins that sits
+   on a stepped partition, and on each that sits on a closed-form partition
+   when pins 8 and 1 are both fixed or on static partitions:
+   - pin 2 (TRIG) at `V(1) + vLower`, rising and falling;
+   - pin 6 (THR) at `V(1) + vUpper`, rising and falling;
+   - pin 4 (RST) at `V(1) + 0.5`, rising and falling.
+
+   The `ThresholdFn` reads V(1) and V(8) from the published array at every
+   re-aim or step plan, whatever the power state, so a threshold always
+   follows the live supply. Pins 8, 1, 3, 5 and 7 are never watched. TRIG and
+   THR on one node (an astable) are two registrations; the earliest crossing
+   wins.
+   - **Why both directions.** The latch can change on RST falling (reset)
+     and rising (release to TRIG and THR), on TRIG falling (set) and rising
+     (a held reset appears), and on THR rising (reset). THR falling cannot
+     change it, but it is watched too, so that a watched node's published
+     voltage always lies on the same side of every threshold as its exact
+     value. The 555 is also evaluated at events that do not touch its
+     watched partitions (a TRIG button, a supply re-solve, its own OUT
+     commit), and there it reads a closed-form node's voltage as last
+     published. The invariant makes that read give the exact comparator
+     result.
+   - **Closed form** (W1b point 6). The crossing time is analytic. The
+     crossed node lands 1e-9 V past the threshold, so the strict comparison
+     fires, and the 555 is evaluated at that instant. Its OUT and DIS commits
+     re-stamp and re-aim at the same instant in the next delta, anchored at
+     the exact `vc`, so the trajectory stays continuous. An astable is exact
+     up to the landing nudge: each landing moves the trajectory 1e-9 V along
+     itself, a few picoseconds.
+   - **Echo crossings.** After a SET the node sits 1e-9 V below `vLower` and
+     is now rising, so the TRIG watch fires again about `1e-9 V / slope`
+     later (accepted when that is later than `now + 1e-15`); after a RESET
+     the THR watch fires the same way, falling. The 555 evaluates and holds.
+     An astable takes four crossings per period (two switches, two echoes);
+     stat 9 counts all four. A latch-aware watch (the prototype's THR only
+     while HIGH, TRIG only while LOW, `pec3.mjs:1060-1065`) would avoid the
+     echoes, but a `ThresholdFn` cannot see evaluator state, and it would
+     break the invariant above.
+   - **Stepped** (W1b point 6; the promotion of point 6). A step that shows
+     a crossing is bisected onto it, landing within 1e-9 V past the
+     threshold, and every step re-reads its readers. Crossing times carry
+     the stepped integration error; exact timing needs closed form.
+   - **Moving thresholds.** The thresholds move only with V(8) and V(1).
+     - Both supply nodes fixed (an ideal supply): the thresholds are
+       constant and every crossing is exact.
+     - A supply node on a static partition: the node moves only at events.
+       When that partition re-solves, every closed-form or stepped partition
+       holding one of this 555's watched pins is re-aimed in the same
+       resolve, so its crossings are rescheduled against the new thresholds
+       (W1c point 4). The 555 is also a reader of pins 8 and 1, so it is
+       evaluated at that instant, which catches a threshold that moves
+       across a node that did not move.
+     - A supply node on a dynamic partition: that partition is stepped
+       (point 6), and the watches are registered all the same. Each step
+       plan reads the thresholds from the supply voltages published at the
+       step's start, and a step that shows a crossing is bisected onto it,
+       so the threshold lags the supply by at most one step. W1c's ICs
+       register no watch in this case (W1c point 4's last sentence;
+       `register_ic_read_pin_watches` cites the closed-form backward solve).
+       A stepped crossing is found by bisecting real steps, with no backward
+       solve, and without a watch a 555 would switch only at step ends,
+       coarser than classic's interpolated split. A supply on a hub rail is
+       W1f's.
+6. **Partitions** (W1c points 2-3). OUT (logic index 1) and DIS (5) are the
+   output-capable pins: each free one joins every free supply pin. TRIG,
+   RST, THR and CV join nothing through the 555.
+   - With an ideal supply (pins 8 and 1 fixed), the timing network
+     partitions by its own resistors and capacitor. An astable's or
+     monostable's timing partition holds one capacitor and is closed-form,
+     and OUT partitions with its load.
+   - A dynamic partition holding a free 555 supply node is stepped: OUT's
+     fraction and the power gate move with its state. With a free VCC the
+     timing network joins it through RA (or the monostable's R), so its
+     timing is stepped until W1f treats such a rail as a hub.
+   - The monostable ties DIS to THR. Unlike W1c's read-and-driven pins, that
+     does not force stepping: the DIS commit follows a THR crossing and
+     moves the node away from it, so no crossing races its own commit. The
+     only consequence is point 5's echo.
+7. **OUT and DIS stamps** (§5.2 "OUT stage" and "DIS"; DI:180-219;
+   `_stampRailReferencedOutput`, SE:5369-5380). OUT and DIS are drivers with
+   their own stages (W1a point 2). While the 555 is powered, each stamps
+   from its committed level and the live `vS`:
+   - OUT: `f = vS > 0 ? (HIGH ? 1 - min(0.5, 0.1/vS) : min(0.5, 0.1/vS)) : 0`,
+     clamped to [0, 1]. It stamps `f/20` S from pin 3 to pin 8 when
+     `f > 1e-12`, and `(1-f)/20` S from pin 3 to pin 1 when
+     `f < 1 - 1e-12`. Unloaded, OUT sits at `V(8) - 0.1` HIGH and
+     `V(1) + 0.1` LOW, and `f(1-f)vS/20` flows from pin 8 to pin 1 in either
+     state (4.9 mA at 5 V): classic's stand-in for bipolar idle draw
+     (DI:197-202); R = 20 Ω and the 0.1 V headroom are DI:86-87.
+     Classic stamps the resistances `20/f` and `20/(1-f)`; the core stamps
+     the conductances, a difference of an ulp (D13).
+   - DIS: committed LOW stamps `1/10` S from pin 7 to pin 1; committed HIGH
+     stamps nothing (released).
+   - A pin on node 0 stamps nothing (classic returns for `node < 0`, and
+     tests `pDis >= 0`). An unpowered 555 stamps neither pin.
+   - Both enter the source KCL at fixed nodes (W0 point 5), the idle current
+     included, so a supply's published current carries the 555's draw.
+   - **Re-stamp triggers.** A commit of OUT or DIS marks that driver's
+     partition dirty (W1a point 2). Every solve of a partition holding either
+     pin recomputes `f` and the power gate from the solved supply voltages,
+     or, with a free supply, from the latest fixed-point iterate (W1c
+     point 3). Nothing else is cached. The static solution cache keys on
+     committed modes, which fix the stamp when both supply nodes are fixed;
+     a partition holding a free supply node bypasses the cache.
+8. **Element current** (§5.2, DI:252-273). A 555's `elementI` is the
+   current delivered out of pin 3: `-(gLo (V3 - V1) + gHi (V3 - V8))`, with
+   `gHi = f/20`, `gLo = (1-f)/20` and `f` from the committed OUT level at the
+   published `vS`; 0 while unpowered. The DIS current is not reported. It is
+   recomputed wherever the source currents are (every resolve, crossing,
+   step and horizon clamp), so it follows a moving supply or load:
+   `PartitionedSolver` writes it in its global post-pass, beside
+   `recompute_source_currents`. The 555 is the first IC with a nonzero
+   current. With OUT on node 0 it is still this formula, as classic
+   publishes it, although nothing is stamped: a phantom `f·vS/20` (0.245 A
+   HIGH at 5 V). No fixture wires OUT to ground.
+9. **Load settling** (W1a point 6 and decision 8, amended for the 555).
+   1. Every 555 starts at `outHigh = 1`. Classic's carry by id is W2. In each
+      frozen pass, a powered 555 evaluates point 3 without writing `outHigh`
+      and requests OUT and DIS from the result. A comparator active at the
+      settled voltages drives the output; in the hold region the stored
+      value does. Because nothing is written, a transient glitch during the
+      frozen passes cannot set or reset the latch.
+   2. The edge pass writes `outHigh` from point 3 once, on the settled
+      network.
+   3. Its requests have zero delay and drain at `START_TIME` in the ordinary
+      delta cycle. From then on the 555 is ordinary simulation.
+
+   This departs from classic's seed, whose stamp shows the default latch
+   whatever the comparators say (the one-solve lag, §5.2 "Stamp: committed
+   latch only"; classic publishes 4.803922 V on OUT at load with RST open,
+   into 1 kΩ at 5 V). Decision 7 removes that lag, and the W1-0 post-spike
+   owner ruling accepted the consequence: a register clocked by a 555 whose
+   comparators resolve 0 at load (RST held low, or THR above `vUpper` with
+   TRIG above `vLower`) takes no phantom edge in the core, where classic
+   takes one (harness registration
+   `w1-0-startup-phantom-edge-74hc74-555-rst-low`, widened in W1e from RST
+   held low to that case).
+
+   What stays of classic's startup is the power-on HIGH in the hold region.
+   A monostable with TRIG high and THR low at load fires one pulse from
+   `vc = 0` (0.110406 s in classic, 0.109861 s in the model, for 100 kΩ and
+   1 µF). An astable's first HIGH runs from `vc = 0` to `vUpper` (ln 3 in
+   place of ln 2). A register clocked by an astable 555 still takes
+   classic's phantom rising edge, because TRIG below `vLower` at load
+   resolves HIGH, the same as classic's default.
+10. **Power loss** (W1c point 9; §5.2 "Unpowered"). While unpowered, a 555
+    stamps nothing and reads, writes and requests nothing. `outHigh` holds,
+    the slot is `NaN`, the current is 0, and a commit that comes due is held.
+    The 555 is a reader of pins 8 and 1, so the re-solve that restores power
+    evaluates it, and that first powered evaluation resolves point 3 from the
+    held `outHigh`.
+11. **Rollback** (W1b point 7). `outHigh` is evaluator state and is in the
+    evaluator's snapshot. OUT and DIS, their pending commits, the timing
+    partition's segment or plan, its scheduled crossings and the published
+    voltages and currents roll back with a failed instant as they do for any
+    IC. `bo_engine_set_params` keeps `outHigh`, and a load rebuilds every 555
+    at `outHigh = 1`. A zero-delay loop through the 555 (OUT feeding TRIG and
+    THR through resistors only, which classic oscillates at its step rate)
+    is `-7`, W1c's rule, and the circuit falls back to classic.
+12. **Readouts** (§5.2; §10.9).
+    - Classic publishes `digitalState[id] = outHigh ? 1 : 0` after every
+      accepted solve while powered, the load seed's included, and drops the
+      key while unpowered (DI:249-250; `ds` is rebuilt every pass). Its
+      `elementI[id]` is computed after the latch update (SE:5723-5724), so
+      it pairs the new latch with voltages solved under the previous one.
+      Its OUT voltage runs one solve behind the latch. It publishes no
+      channel current and no display state.
+    - The core's slot holds `outHigh` at every completed instant while the
+      555 is powered, and `NaN` otherwise. The trace records each change at
+      the crossing instant. OUT's voltage and the element current follow
+      the latch at the same instant.
+    - The two agree at every quiet instant. They differ on the one classic
+      solve after each switch (the 10 ns guard in the worker, the rest of
+      the step in headless, a whole step when the split finds no fraction),
+      and at the load frame when the comparators resolve 0 at load. With RST
+      open, into 1 kΩ at 5 V, classic publishes V(out) 4.803922 V and
+      `elementI` -0.2352 A beside `digitalState` 0; the core publishes
+      0.098039 V and 9.8039e-5 A.
+    - Stat 12 counts 555 evaluations, stat 9 its crossings, stat 13 its
+      commits. There are no step breakpoints in W1 (decision 7: W2 derives
+      them from event times). W1g's output-sag scan reads the committed OUT
+      level; without the lag, the step-counted debounce loses its reason
+      (Q-O43).
+13. **Harness comparison** (decision 6; gate 2e; S1 criterion 3).
+    1. **Digital.** `<id>` is in every 555 fixture's projection, and a
+       555-clocked fixture takes its cycle boundary from it
+       (`findClockComponentId`, `test/core/equivalence.test.ts:446`). States
+       compare per cycle after alignment; absolute times are never compared.
+    2. **Period.** The core's switch times come from its trace, at exact
+       event times. With `r_k` the k-th 0-to-1 time of `<id>`, every period
+       `T_k = r_(k+1) - r_k` for `k >= 1` (the power-on cycle excluded), the
+       HIGH and LOW times from the matching 1-to-0 times, and the first HIGH
+       from `START_TIME`, each agree with the sidecar to 1e-6 relative.
+       Classic's are recorded against the same sidecar and do not gate (D11;
+       a probe of the SAP-1 clock astable measured classic +1.58% per
+       period).
+    3. **Sidecar.** It is model-exact and computed by the sidecar generator,
+       never by core code. Take `vU = (2/3) vS`, `vL = (1/3) vS` and
+       `vS = V(8) - V(1)`, thresholds relative to pin 1. The capacitor sees
+       the Thevenin equivalent `(V∞c, Rc)` of its network with DIS released,
+       and `(V∞d, Rd)` with DIS a 10 Ω resistor from pin 7 to pin 1. Both
+       include the 1e-12 S shunt on every free node. Then:
+       - `t_high = Rc C ln((V∞c - vL) / (V∞c - vU))`,
+         `t_low = Rd C ln((vU - V∞d) / (vL - V∞d))`, `T = t_high + t_low`;
+       - the first HIGH, from `vc = 0`, is `Rc C ln(V∞c / (V∞c - vU))`;
+       - a monostable pulse from start voltage `v0` is
+         `Rc C ln((V∞c - v0) / (V∞c - vU))`, with `v0 = 0` at power-on and
+         `v0 = V∞d` after a full discharge.
+
+       For the textbook astable (RA from pin 8 to DIS, RB from DIS to the
+       capacitor), with shunts dropped: `Rc = RA + RB` and `V∞c = vS`, so
+       `t_high = (RA + RB) C ln 2`; `Rd = RB + RA·10/(RA + 10)` and
+       `V∞d = vS·10/(RA + 10)`, so `t_low = Rd C ln((2 - 3k)/(1 - 3k))` with
+       `k = 10/(RA + 10)`. Dropping the shunts moves the W1e astable
+       fixtures' periods by at most 3e-8 relative. It moves a 1 MΩ
+       monostable by 8.2e-7, and a re-triggered monostable's `v0` moves its
+       pulse by 9.1e-6 (1 MΩ) and 9.1e-5 (100 kΩ), so the generator keeps
+       both terms. The 1e-9 V landing nudge moves a half period by 1e-9 V
+       over the threshold slope, below 1e-8 relative for these fixtures. ESR
+       is 0 without a `catalogUid`.
+    4. **Analog.** The engines drift apart in phase (1.58% per period on the
+       SAP-1 clock astable), so after the first half period classic's sample instants,
+       which the core replays (`test/core/equivalence/stimuli.ts`), no
+       longer sample the same phase. In a 555 fixture, the timing network's
+       nodes (TRIG, THR, DIS, the capacitor) compare against the sidecar's
+       exponential at the core's instants, within W0's tolerance. Everything
+       else (OUT and its load, the 555's `elementI`, the supply current, and
+       what OUT drives) compares at phase-aligned quiet instants: the
+       midpoint of each engine's own k-th HIGH and LOW.
+
+**Known gaps (W1e follow-up).** Two gaps inherited from W1c, which no board
+circuit exercises, are closed by a separate W1e change after the 555 and LED
+solver work, with tests:
+- **A watched pin on a closed-form partition with the supply in a dynamic
+  partition.** No watch is registered there, because the supply is not
+  load-stable, so a read at an unrelated event can see a stale closed-form
+  voltage. W1c ICs share the gap, and W1c ICs on a stepped partition with a
+  dynamic supply have no watch at all (point 5's last bullet gives the 555
+  one). A 555's timing network always reaches VCC through RA or R, so it
+  never hits the first case. The fix: promote such a closed-form partition
+  to stepped in `partition.rs`, and let W1c ICs register on stepped
+  partitions as the 555 does.
+- **A driver on a fixed node whose stamp lands in a free supply's
+  partition.** `ics::register` gives such a driver no partition, so its
+  commit dirties nothing, and the supply partition keeps the old stamp until
+  something else re-solves it. For the 555 this is OUT or DIS wired straight
+  to a fixed node while pin 8 or 1 is free. The fix: register the driver
+  against the partition of its free target.
+
 ## Kernel semantics: events (W1a)
 
 1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
@@ -886,9 +1753,20 @@ References are to spec §4.2.4-4.2.5.
 2. **Drivers.** A driver's commit (a commit to HIZ included: the driver stops
    driving, as a tri-stated or direction-flipped pin does) and any other change to what it
    stamps all mark its partition dirty for the next re-solve; readers of that
-   partition are then re-evaluated. Every IC output is a driver: a conductance to its IC's own
-   supply pin nodes (so load current debits the rails, spec §1.7) with mode
-   `HIZ`, `HIGH` or `LOW`. A requested change goes through the inertial rules
+   partition are then re-evaluated. Every IC output is a driver with mode
+   `HIZ`, `HIGH` or `LOW`. Its stage sets what a committed mode stamps,
+   always between the pin and its own IC's supply pin nodes, so load current
+   debits the rails (spec §1.7): a logic output (W1c point 8), or a 555's
+   OUT or DIS (NE555 point 7). In code, `Driver` gains `stage: DriverStage {
+   Logic, Ne555Out, Ne555Dis }` (default `Logic`), and
+   `solve::ic_driver_target` becomes `ic_driver_branches`, returning at most
+   two `(target, g)` pairs that every caller folds
+   (`static_part::stamp_ics_into`, `stamp_ics_into_dyn`,
+   `PartitionedSolver::recompute_source_currents`; closed-form and stepped
+   partitions reach it only through `stamp_ics_into_dyn`). `hi_level` and
+   `lo_level` stay for non-IC drivers: a 555's OUT fraction depends on the
+   live `vS`, so it is computed at stamp time from the stage, not written
+   there. A requested change goes through the inertial rules
    of spec §2.4, as one pure function: the first observation has zero delay;
    a glitch shorter than the delay is swallowed; a re-glitch gets a fresh due
    time; at most one transition is in flight per pin. Each pending commit
@@ -917,7 +1795,11 @@ References are to spec §4.2.4-4.2.5.
       74hc74's `/pre` and `/clr`, a 161's ENT to RCO, a 173's M/N) change the
       outputs, as classic's seed stamp does, but never the register state;
       the edge pass does the state writes. Delays do not apply while settling; this
-      is finding the consistent initial state, not simulating time.
+      is finding the consistent initial state, not simulating time. A 555's
+      latch is not edge history: in a frozen pass a powered 555 drives its
+      comparator result without writing the latch (NE555 point 9). Unlike
+      the other level-sensitive inputs named here, this departs from
+      classic's seed stamp (decision 7).
    2. Run exactly ONE edge pass: every reader is evaluated once with edges
       live. Classic's phantom rising edge (`lastClk` seeded 0 while the clock
       is already HIGH) is kept.
@@ -935,7 +1817,7 @@ References are to spec §4.2.4-4.2.5.
    and every device that reads such a pin gets an event at each bucket
    boundary.
 
-## Hard-won rules for the kernel (from the prototype)
+## Hard-won rules for the kernel (from the prototype, and from W1e)
 
 - Accept a threshold crossing only at `t > now + 1e-15`; rounding can put a
   node back on the threshold and re-schedule it forever.
@@ -944,3 +1826,9 @@ References are to spec §4.2.4-4.2.5.
 - Keep a pending plan's capacitor history separate from the committed `vc`.
 - Bidirectional parts (74LS245) register every A and B pin as a reader as well
   as creating drivers.
+- Polish a static Newton solve once after it passes: classic re-solves every
+  step, so its steady state is the fixed point, not the first passing
+  iterate.
+- Watch every threshold a reader compares against in both directions, so a
+  node's published voltage never sits across a threshold from its exact
+  value; a reader evaluated at an unrelated event then reads the right side.

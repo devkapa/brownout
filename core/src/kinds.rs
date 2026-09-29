@@ -87,6 +87,11 @@ pub struct KindShape {
     /// publishes. When non-zero, `blob[0]` is the first slot and the reader
     /// checks `blob[0] + count <= S` (core/README.md, "Slot indices").
     pub digital_slots: fn(usize) -> usize,
+    /// How many channel readout slots a record with this pin count
+    /// publishes. When non-zero, the blob carries the first channel slot
+    /// right after the digital base (or at `blob[0]` with no digital slots),
+    /// and the reader checks `base + count <= C`.
+    pub channel_slots: fn(usize) -> usize,
 }
 
 fn no_checks(_: usize, _: &[f64], _: &[f64]) -> Result<(), String> {
@@ -297,6 +302,121 @@ fn eeprom_28c16_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<
     Ok(())
 }
 
+/// `led` params (core/README.md, "LED and display records").
+pub mod led_param {
+    pub const VF: usize = 0;
+    pub const N: usize = 1;
+    /// Also the Q-O24 damage limit: for `led` the two resolve identically.
+    pub const I_RATED: usize = 2;
+    pub const IS_SET: usize = 3;
+    pub const IS: usize = 4;
+    pub const BURNT: usize = 5;
+    pub const COUNT: usize = 6;
+}
+
+/// `rgb_led` params.
+pub mod rgb_param {
+    pub const VF_R: usize = 0;
+    pub const VF_G: usize = 1;
+    pub const VF_B: usize = 2;
+    pub const I_RATED: usize = 3;
+    /// The Q-O24 damage limit, which reads specs where the stamp does not.
+    pub const IF_MAX: usize = 4;
+    pub const BURNT: usize = 5;
+    pub const COUNT: usize = 6;
+}
+
+/// `bicolor_led` params.
+pub mod bicolor_param {
+    pub const VF1: usize = 0;
+    pub const VF2: usize = 1;
+    pub const I_RATED: usize = 2;
+    /// The Q-O24 damage limit, as `rgb_param::IF_MAX`.
+    pub const IF_MAX: usize = 3;
+    pub const BURNT: usize = 4;
+    pub const COUNT: usize = 5;
+}
+
+/// `seg7_cc` / `seg7_ca` params. No `burnt` and no damage limit: classic
+/// gives `seg7` no failure surface (Q-O22).
+pub mod seg7_param {
+    pub const VF: usize = 0;
+    pub const I_RATED: usize = 1;
+    pub const COUNT: usize = 2;
+}
+
+fn burnt_check(burnt: f64) -> Result<(), String> {
+    if is_switch_value(burnt) {
+        Ok(())
+    } else {
+        Err(format!("burnt must be 0 or 1, got {burnt}"))
+    }
+}
+
+/// `n <= 0` would divide by `n·Vt = 0` or invert the junction, which classic
+/// fails to solve; the compiler declines it, so only a hand-built program
+/// reaches here with one. `is` is 0 unless the `Is` override is set, so a
+/// record has one encoding per value.
+fn led_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    use led_param::*;
+    if !(params[N] > 0.0) {
+        return Err(format!("led n must be > 0, got {}", params[N]));
+    }
+    if !is_switch_value(params[IS_SET]) {
+        return Err(format!("led isSet must be 0 or 1, got {}", params[IS_SET]));
+    }
+    if params[IS_SET] == 0.0 && params[IS] != 0.0 {
+        return Err(format!("led is must be 0 when isSet is 0, got {}", params[IS]));
+    }
+    burnt_check(params[BURNT])
+}
+
+fn rgb_led_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    burnt_check(params[rgb_param::BURNT])
+}
+
+fn bicolor_led_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    burnt_check(params[bicolor_param::BURNT])
+}
+
+fn rgb_channels(_: usize) -> usize {
+    3
+}
+
+fn bicolor_channels(_: usize) -> usize {
+    2
+}
+
+fn seg7_channels(_: usize) -> usize {
+    8
+}
+
+fn one_slot(_: usize) -> usize {
+    1
+}
+
+/// Pins after `8` and `1` on an `ne555` (core/README.md, "NE555 record").
+const NE555_LOGIC_PINS: usize = 6;
+
+/// The NE555 on top of [`ic_check`]: params 7-9, 11 and 12 must be 0
+/// (classic computes a Schmitt read, an `io_max` output resistance and a
+/// package delay it never uses for this kind, so the record carries none),
+/// and every per-pin flag must be 0 (no floating pull, and DIS is its own
+/// driver stage rather than an open-collector logic output).
+fn ne555_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    use ic_param::*;
+    ic_check(pin_count, params, blob)?;
+    for (i, name) in [(SCHMITT, "schmitt"), (VT_PLUS, "vtPlus"), (VT_MINUS, "vtMinus"), (IO_MAX, "ioMax"), (DELAY, "delay")] {
+        if params[i] != 0.0 {
+            return Err(format!("{name} must be 0 on an ne555, got {}", params[i]));
+        }
+    }
+    if let Some(bad) = blob[1..=NE555_LOGIC_PINS].iter().find(|v| **v != 0.0) {
+        return Err(format!("pin flags must be 0 on an ne555, got {bad}"));
+    }
+    Ok(())
+}
+
 /// Declares one combinational IC: `logic` pins after `vcc` and `gnd`, and
 /// `outputs` of them publish a digital slot each. The 4-arg form is a plain
 /// W1c kind (13 params, no tail); the 6-arg form is a kind with a W1d
@@ -320,6 +440,7 @@ macro_rules! ic_shape {
             check: $check,
             live_params: &[],
             digital_slots: slots,
+            channel_slots: no_slots,
         }
     }};
 }
@@ -342,18 +463,25 @@ macro_rules! w1d_shape {
             check: $check,
             live_params: &[],
             digital_slots: slots,
+            channel_slots: no_slots,
         }
     }};
 }
 
 const SHAPES: &[KindShape] = &[
-    KindShape { code: RESISTOR, name: "resistor", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: resistor_check, live_params: &[], digital_slots: no_slots },
-    KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[], digital_slots: no_slots },
-    KindShape { code: CAPACITOR, name: "capacitor", pins: 2, pins_max: 2, params: 3, blob: BlobShape::Exact(0), check: capacitor_check, live_params: &[], digital_slots: no_slots },
-    KindShape { code: SWITCH, name: "switch", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots },
-    KindShape { code: PUSH_BUTTON, name: "push_button", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots },
-    KindShape { code: SPDT_SWITCH, name: "spdt_switch", pins: 3, pins_max: 3, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots },
-    KindShape { code: DIP_SWITCH, name: "dip_switch", pins: 4, pins_max: 16, params: 9, blob: BlobShape::Exact(0), check: dip_switch_check, live_params: &[1, 2, 3, 4, 5, 6, 7, 8], digital_slots: no_slots },
+    KindShape { code: RESISTOR, name: "resistor", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: resistor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: CAPACITOR, name: "capacitor", pins: 2, pins_max: 2, params: 3, blob: BlobShape::Exact(0), check: capacitor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: SWITCH, name: "switch", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: PUSH_BUTTON, name: "push_button", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: SPDT_SWITCH, name: "spdt_switch", pins: 3, pins_max: 3, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: DIP_SWITCH, name: "dip_switch", pins: 4, pins_max: 16, params: 9, blob: BlobShape::Exact(0), check: dip_switch_check, live_params: &[1, 2, 3, 4, 5, 6, 7, 8], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: LED, name: "led", pins: 2, pins_max: 2, params: led_param::COUNT, blob: BlobShape::Exact(0), check: led_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: RGB_LED, name: "rgb_led", pins: 4, pins_max: 4, params: rgb_param::COUNT, blob: BlobShape::Exact(1), check: rgb_led_check, live_params: &[], digital_slots: no_slots, channel_slots: rgb_channels },
+    KindShape { code: BICOLOR_LED, name: "bicolor_led", pins: 3, pins_max: 3, params: bicolor_param::COUNT, blob: BlobShape::Exact(1), check: bicolor_led_check, live_params: &[], digital_slots: no_slots, channel_slots: bicolor_channels },
+    KindShape { code: SEG7_CC, name: "seg7_cc", pins: 10, pins_max: 10, params: seg7_param::COUNT, blob: BlobShape::Exact(1), check: no_checks, live_params: &[], digital_slots: no_slots, channel_slots: seg7_channels },
+    KindShape { code: SEG7_CA, name: "seg7_ca", pins: 10, pins_max: 10, params: seg7_param::COUNT, blob: BlobShape::Exact(1), check: no_checks, live_params: &[], digital_slots: no_slots, channel_slots: seg7_channels },
+    KindShape { code: NE555, name: "ne555", pins: 2 + NE555_LOGIC_PINS, pins_max: 2 + NE555_LOGIC_PINS, params: ic_param::COUNT, blob: BlobShape::Exact(1 + NE555_LOGIC_PINS), check: ne555_check, live_params: &[], digital_slots: one_slot, channel_slots: no_slots },
     ic_shape!(IC_74LS00, "74ls00", 12, 4),
     ic_shape!(IC_74LS04, "74ls04", 12, 6),
     ic_shape!(IC_74LS08, "74ls08", 12, 4),

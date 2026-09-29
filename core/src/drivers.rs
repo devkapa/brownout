@@ -59,6 +59,19 @@ impl DelaySet {
     }
 }
 
+/// What a committed mode stamps (core/README.md, W1a point 2): a logic
+/// output's `1/R_out` to one supply node (W1c point 8), or one of a 555's
+/// stages (NE555 point 7), whose conductances depend on the live `vS` and so
+/// cannot be fixed levels on the driver. Declared ahead of W1e's `Driver`
+/// field so `digital::ne555::branches` has its locked signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriverStage {
+    #[default]
+    Logic,
+    Ne555Out,
+    Ne555Dis,
+}
+
 /// The pure inertial-cancellation FSM (spec section 2.4) and the token
 /// bookkeeping that lets a superseded `Commit` event be recognised and
 /// dropped, lazily, when it is eventually popped (events.rs's contract).
