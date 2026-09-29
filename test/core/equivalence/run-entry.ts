@@ -344,7 +344,10 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   let coreWallMs: number;
   try {
     const started = performance.now();
-    coreSamples = replayStimuliOnCore(circuit, phases);
+    // The core follows CLASSIC's own recorded schedule (stimuli.ts's
+    // replayStimuliOnCore doc comment: "WHY NOT RE-DERIVE THE SCHEDULE") —
+    // classicSamples IS that schedule, structurally compatible as-is.
+    coreSamples = replayStimuliOnCore(circuit, phases, classicSamples);
     coreWallMs = performance.now() - started;
   } catch (err) {
     if (err instanceof StimuliNotYetSupportedOnCoreError) {

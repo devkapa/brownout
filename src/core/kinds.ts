@@ -47,6 +47,12 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "74hc14",
   "74ls47",
   "74ls245",
+  "74ls161",
+  "74ls173",
+  "74hc74",
+  "74ls189",
+  "28c16",
+  "28c256",
 ]);
 
 /**

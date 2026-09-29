@@ -1,0 +1,63 @@
+{
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_we",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_we",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_oe",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.006
+    },
+    {
+      "set": [
+        {
+          "id": "sw_oe",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.008
+    },
+    {
+      "set": [
+        {
+          "id": "sw_oe",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.004
+    }
+  ]
+}

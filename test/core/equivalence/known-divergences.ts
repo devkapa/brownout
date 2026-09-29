@@ -260,6 +260,41 @@ function seedsForRstLow555ClockedHc74(circuit: SimCircuit): DivergenceSeed[] {
   return seeds;
 }
 
+/** kinds.ts's own switch-family naming (stimuli.ts's header: "switch/push_button/spdt_switch/dip_switch") — used here only to decide whether a memory's /we net can ever actually be toggled (gate 2c's "empty unless the seed condition holds"), never to change compiler behaviour. */
+const SWITCH_FAMILY_KINDS: ReadonlySet<string> = new Set(["switch", "push_button", "spdt_switch", "dip_switch"]);
+
+/**
+ * Every 28C16/28C256 whose /we net is driven, at least in part, by a
+ * switch-family component — i.e. a memory whose write pulse a fixture can
+ * actually toggle, the only kind of circuit where a write can ever be
+ * PENDING. A memory whose /we is tied to a fixed level (fixture 28's
+ * read-only design, for instance) never has a pending write, so its seed
+ * stays empty — the structural, inspectable stand-in for "is a write
+ * pending" that this registration's own condition (a runtime fact) cannot
+ * be computed from the static circuit alone.
+ */
+function seedsForEepromWritePendingPolling(circuit: SimCircuit): DivergenceSeed[] {
+  const built = buildCoreNodes(circuit);
+  const seeds: DivergenceSeed[] = [];
+
+  for (const comp of circuit.components) {
+    if (comp.kind !== "28c16" && comp.kind !== "28c256") continue;
+
+    const netId = netIdAtPin(built, comp.id, "/we");
+    if (netId === null) continue;
+    const net = netById(built, netId);
+    if (!net) continue;
+
+    const weToggleable = net.pins.some(([otherComponentId]) => {
+      const other = circuit.components.find((c) => c.id === otherComponentId);
+      return other !== undefined && SWITCH_FAMILY_KINDS.has(other.kind);
+    });
+    if (weToggleable) seeds.push({ componentId: comp.id, outputPins: new Set(["io6"]) });
+  }
+
+  return seeds;
+}
+
 /**
  * The one registration this worker's brief requires: the W1-0 post-spike
  * owner ruling on the SAP-1's display divider. A 74HC74 clocked by an NE555
@@ -287,6 +322,18 @@ export const KNOWN_DIVERGENCES: readonly KnownDivergence[] = [
       "forever. Ruled correct-and-documented by the owner, not a bug in either engine; the CPU-visible " +
       "state is unaffected.",
     seeds: seedsForRstLow555ClockedHc74,
+  },
+  {
+    id: "28c16-28c256-io6-write-poll-step-grid",
+    decisionRef: "core/README.md \"Kernel semantics: memories (W1d)\" point 4.4 (\"Toggle bit\")",
+    reason:
+      "While a write is pending, classic increments its io6 data-polling bit once per ACCEPTED STEP that " +
+      "/OE and /CE are held low, rather than once per genuinely NEW read cycle (the datasheet's own " +
+      "\"successive reads toggle I/O6\", which is what the core implements) — a step-grid artifact of " +
+      "classic's own solver the contract itself calls out: \"Classic adds 1 per accepted step (a step-grid " +
+      "artifact the core cannot reproduce; a divergence).\" Correct-and-documented by the contract, not a " +
+      "bug in either engine.",
+    seeds: seedsForEepromWritePendingPolling,
   },
 ];
 

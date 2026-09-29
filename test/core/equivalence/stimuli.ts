@@ -73,21 +73,6 @@ export interface StimulusPhase {
 /** devolt's `simulateScript` default step (`apps/learn/lib/seed/simulate.ts`'s `opts.dt ?? 1e-3`). */
 export const STIMULUS_FIXED_STEP_S = 1e-3;
 
-/**
- * Finding 13: classic's own fixed-step loop (`src/host/headless.ts`'s `run()`,
- * `if (untilEvent <= h) { h = Math.max(H_MIN, untilEvent); ... }`) floors
- * EVERY event-aligned step at `H_MIN = 1e-8`, even when landing exactly on a
- * due event — so two due times under `H_MIN` apart make classic OVERSHOOT the
- * second one rather than landing on it exactly. `replayStimuliOnCore`'s own
- * clamp (below) must reproduce that overshoot bit-for-bit, or the two engines
- * land on different instants whenever two ICs with different propagation
- * delays are driven by the same edge. Duplicated here (not imported) because
- * `src/host/headless.ts` is outside this worker's ownership (core/src +
- * test/core only) — this constant must be kept equal to headless.ts's own
- * `H_MIN`, which is a private, unexported module constant there.
- */
-const STIMULI_CLAMP_H_MIN = 1e-8;
-
 export interface StimulusStepSample {
   readonly phaseIndex: number;
   readonly simTime: number;
@@ -187,28 +172,60 @@ export class StimuliNotYetSupportedOnCoreError extends Error {
 }
 
 /**
+ * One instant from CLASSIC's own already-recorded schedule — trimmed to just
+ * the two fields `replayStimuliOnCore` needs to advance to. In practice a
+ * caller passes `replayStimuliOnClassic`'s own `StimulusStepSample[]`
+ * straight through (structurally compatible: the extra fields are simply
+ * ignored), never a hand-built schedule.
+ */
+export interface StimulusScheduleSample {
+  readonly phaseIndex: number;
+  readonly simTime: number;
+}
+
+/**
  * Core replay of every phase, in order, on ONE `CoreEngine` (so `simTime` and
  * every device's committed state — capacitor charge, register contents,
  * pending delays — continue across phases exactly as `bo_engine_set_params`'s
  * "all other state is kept" promises). Loads `circuit` once, unmodified, then
  * for each phase applies `phase.set` through `CoreEngine.setParams` (never a
- * reload) before advancing `phase.durationS`.
+ * reload) before advancing.
  *
- * STEP SCHEDULE (finding 10). This must take EXACTLY the same steps
- * `HeadlessRunner.run()` takes for `replayStimuliOnClassic` (headless.ts's
- * `run()`, the fixed-step branch): full `STIMULUS_FIXED_STEP_S` steps, then
- * one FINAL step clamped to whatever time is left in the phase, using the
- * identical end-of-phase slack (`Math.max(1e-15, phase.durationS * 1e-12)`,
- * headless.ts's own comment: "so a duration that is an exact multiple of the
- * final step does not spin one extra ~1e-16 s step"). The previous
- * `Math.round(phase.durationS / STIMULUS_FIXED_STEP_S)` whole-step count
- * rounded a non-multiple phase duration (e.g. 2.5ms) up or down to a whole
- * number of 1ms steps, silently drifting the core onto different simTime
- * instants than classic — or, for a phase shorter than one step (e.g.
- * 0.4ms), producing ZERO samples where classic produces one. Mirroring the
- * clamp instead means the two engines always land on the identical instant
- * sequence, whether or not `phase.durationS` is a whole multiple of
- * `STIMULUS_FIXED_STEP_S`.
+ * SAMPLE SCHEDULE: `schedule` is CLASSIC's OWN already-recorded sample
+ * instants (`replayStimuliOnClassic`'s output, or anything shaped like
+ * `StimulusScheduleSample[]`) — this function no longer derives a step
+ * schedule of its own at all. For every scheduled instant that falls in a
+ * phase, in order, it calls `engine.advance(simTime)` and records the sample
+ * there; `advance()` itself already processes every event due at or before
+ * that instant (core/README.md's C ABI v2 — "Process every event with
+ * `t <= t_end`, then set time to `t_end`"), so the physics is correct
+ * whether or not `simTime` happens to land on one of the core's own internal
+ * due times.
+ *
+ * WHY NOT RE-DERIVE THE SCHEDULE (supersedes findings 10 and 13; W1d
+ * orchestrator decision, 2026-09-29). An earlier version of this function
+ * derived its own step schedule from `engine.nextDigitalDueTime()`, snapping
+ * a step onto the core's own next pending driver commit to try to land on
+ * the same instants classic's `nextScheduledEventTime()`-based clamp would.
+ * Finding 10 picked the right, narrow ABI call for that (`nextDigitalDueTime`
+ * over the wider `nextEventTime`); finding 13 reproduced classic's own H_MIN
+ * overshoot when two due times fall within H_MIN of each other; a further
+ * `+1e-12` nudge compensated for classic's reload seed solve. That approach
+ * only ever worked as long as classic and the core agreed on WHICH instants
+ * are "due" — decision 3 (datasheet delays) breaks the assumption for every
+ * kind whose classic model predates that retrofit (74LS161/173/74HC74/
+ * 74LS189/28C16/28C256: classic stamps their outputs immediately, writing no
+ * `icState` `due:` entry at all, so `nextScheduledEventTime()` never reports
+ * one for them, while the core's own retrofit gives every one of them a real
+ * due time — W1d worker D4b's fixtures 25/27-29 reproduced this as an outright
+ * sample-count mismatch). Re-deriving the core's schedule from the core's OWN
+ * idea of "due" can never mirror a classic that has no matching concept for
+ * a given kind; that is not a bug to fix by widening the clamp further, it is
+ * the wrong strategy — and the same mismatch would resurface for any future
+ * kind whose classic and core timing models diverge (W1e's 555 exact-crossing
+ * split is the next one already flagged). Taking classic's own recorded
+ * instants as the schedule instead sidesteps the mirroring problem entirely:
+ * the core is simply told when classic sampled, for every kind, unconditionally.
  *
  * `implementedKinds` defaults to `CORE_IMPLEMENTED_KINDS` (kinds.ts's
  * orchestrator-owned table) — the same "a caller (chiefly tests) can widen
@@ -220,14 +237,19 @@ export class StimuliNotYetSupportedOnCoreError extends Error {
  * Throws `StimuliNotYetSupportedOnCoreError` when the core cannot load the
  * circuit at all (see that class's doc comment). Throws a plain `Error`
  * (never that class) when a phase does not complete cleanly (non-convergence
- * — mirrors `replayStimuliOnClassic`'s own "did not complete cleanly" check)
- * or when `CoreEngine.setParams` itself rejects a change (an unknown
- * component/param, or a param that exists but is not live) — a stimulus the
- * caller asked for must fail loudly, never be silently skipped.
+ * — mirrors `replayStimuliOnClassic`'s own "did not complete cleanly" check),
+ * when a phase's slice of `schedule` is empty or its last instant is not
+ * within the usual end-of-phase tolerance of `phaseStart + durationS` (the
+ * schedule passed in is truncated or was not actually built from this same
+ * `phases` array — never silently compared as if the phase ran to
+ * completion), or when `CoreEngine.setParams` itself rejects a change (an
+ * unknown component/param, or a param that exists but is not live) — a
+ * stimulus the caller asked for must fail loudly, never be silently skipped.
  */
 export function replayStimuliOnCore(
   circuit: SimCircuit,
   phases: readonly StimulusPhase[],
+  schedule: readonly StimulusScheduleSample[],
   implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
 ): StimulusStepSample[] {
   const engine = new CoreEngine();
@@ -277,70 +299,13 @@ export function replayStimuliOnCore(
       // Same slack headless.ts's run() uses, sized off THIS phase's own
       // durationS — see this function's doc comment.
       const tolerance = Math.max(1e-15, phase.durationS * 1e-12);
-      let t = phaseStartTime;
-      while (phaseEndTime - t > tolerance) {
-        // W1c EVENT-ALIGNED CLAMP, mirroring headless.ts's own classic-side
-        // clamp (`nextScheduledEventTime()`, whose W1c addition also consults
-        // `icState`'s DIGITAL_DUE_PREFIX due times — a combinational IC's
-        // pending delay-FSM transition, sim-engine.ts). Discovered empirically
-        // wiring the 74HC138/74LS283-DIP-switch fixture (test/fixtures/core/
-        // 20-*): classic's run() ALWAYS snaps a step boundary onto a due
-        // digital transition when one falls inside it, even in fixed-step
-        // mode (that clamp is unconditional, not gated on adaptive/error
-        // control) — landing an extra, short first step right after a phase's
-        // reload whenever the reload leaves a pending delayed transition. This
-        // loop had no equivalent, so it always landed on the plain
-        // STIMULUS_FIXED_STEP_S grid regardless — same eventual PHYSICS
-        // (bo_engine_advance processes every due event up to whatever t_end
-        // it is given, whether or not t_end lands exactly on one), but a
-        // DIFFERENT sample count/schedule, which compareStimuliSamples
-        // rejects outright as a harness bug (it requires two equal-length,
-        // time-aligned sequences).
-        //
-        // FINDING 10: clamping to `engine.nextEventTime()` (bo_engine_next_
-        // event_time) is TOO WIDE — that ABI call reports the earliest of ANY
-        // pending kernel event (a stepped partition's own internal Step
-        // bookkeeping, a closed-form Crossing watch, a floating-input Bucket
-        // boundary), none of which classic's `nextScheduledEventTime()` (the
-        // function this clamp is modeled on) ever considers — it only ever
-        // looks at a genuinely due digital commit. Clamping to the wider call
-        // made a W1b stepped-partition stimuli entry (no combinational IC at
-        // all) explode into millions of 1e-8-spaced samples the instant a
-        // `set` dirtied its stepped partition. `engine.nextDigitalDueTime()`
-        // (bo_engine_next_digital_due_time, core/README.md's C ABI v2, added
-        // for exactly this) reports ONLY a live driver-commit token, the same
-        // narrower thing classic's own function reports — `advance()` already
-        // processes every intervening Step/Crossing/Bucket event on its own
-        // to reach whatever `t_end` this loop picks, so there was never a
-        // reason for this clamp to single-step through the solver's own
-        // internal bookkeeping in the first place.
-        const candidateStep = Math.min(STIMULUS_FIXED_STEP_S, phaseEndTime - t);
-        const untilEvent = engine.nextDigitalDueTime() - t;
-        // FINDING 13: classic's own clamp floors EVERY event-aligned step at
-        // H_MIN (headless.ts: `h = Math.max(H_MIN, untilEvent)`), even when
-        // landing exactly on a due event — so two due times under H_MIN apart
-        // make classic OVERSHOOT the second one (it lands `H_MIN` past the
-        // first, not exactly on the second) rather than snapping to it. This
-        // clamp must reproduce that overshoot, or a fixture with two
-        // different-family ICs (74hc: 15ns, 74ls: 20ns delay) commit-chained
-        // off the same edge lands the two engines on different instants ~5ns
-        // apart, in a way that's `<= 0` (no reproduction of classic's actual
-        // OVERSHOOT of the true due instant), and both simTime and the
-        // resulting stale netV/elementI mismatch.
-        const clampedUntilEvent = Math.max(STIMULI_CLAMP_H_MIN, untilEvent);
-        // The `+ 1e-12` nudge: classic applies each phase by RELOADING, and
-        // load() runs its 1 ps seed solve (spec §2.2), so a delay-FSM
-        // transition scheduled by that seed falls due at `phaseStart + 1e-12
-        // + delay`. The core applies a LATER phase's overrides through
-        // set_params at `phaseStart` exactly (phase 0's own override is now
-        // folded into the initial load instead — see this function's load()
-        // call, above — so it never reaches this nudge at all), so the same
-        // transition falls due 1 ps earlier. Stepping the core to
-        // `clampedUntilEvent + 1e-12` lands its sample on classic's instant,
-        // just after the commit on both sides, instead of loosening
-        // compare.ts's 1e-12 simTime check.
-        t += untilEvent > 0 && untilEvent <= candidateStep ? clampedUntilEvent + 1e-12 : candidateStep;
-        engine.advance(t);
+
+      // Advance to exactly classic's own recorded instants for this phase,
+      // in order — see this function's own doc comment ("SAMPLE SCHEDULE")
+      // for why this replaces the old due-time-derived clamp entirely.
+      const scheduleForPhase = schedule.filter((s) => s.phaseIndex === phaseIndex);
+      for (const scheduled of scheduleForPhase) {
+        engine.advance(scheduled.simTime);
         if (!engine.lastConverged) {
           throw new Error(
             `replayStimuliOnCore: phase ${phaseIndex} (durationS=${phase.durationS}) did not converge, reaching ` +
@@ -354,6 +319,23 @@ export function replayStimuliOnCore(
           elementI: { ...engine.getElementI() },
           digitalState: { ...engine.digitalState },
         });
+      }
+
+      // Integrity check on the SCHEDULE itself (never on the core's own
+      // behaviour, which by construction just followed it): classic's last
+      // recorded instant for this phase must be where this phase's own
+      // durationS says it should be, or `schedule` was not actually built
+      // from replaying THIS `phases` array — a silent truncation here would
+      // make a later phase's setParams apply at the wrong "current time".
+      const lastScheduled = scheduleForPhase[scheduleForPhase.length - 1];
+      if (!lastScheduled || Math.abs(lastScheduled.simTime - phaseEndTime) > tolerance) {
+        throw new Error(
+          `replayStimuliOnCore: phase ${phaseIndex}'s classic schedule ` +
+            (lastScheduled
+              ? `ends at t=${lastScheduled.simTime}s, not within tolerance ${tolerance}s of phaseStart+durationS=${phaseEndTime}s`
+              : "has no scheduled instants at all") +
+            " — the schedule passed in is truncated, or was not built by replaying this same `phases` array.",
+        );
       }
     });
 

@@ -122,7 +122,7 @@ export {
   replayStimuliOnCore,
   StimuliNotYetSupportedOnCoreError,
 } from "./stimuli.js";
-export type { StimulusPhase, StimulusPhaseSet, StimulusStepSample } from "./stimuli.js";
+export type { StimulusPhase, StimulusPhaseSet, StimulusStepSample, StimulusScheduleSample } from "./stimuli.js";
 
 export { KNOWN_DIVERGENCES, classifyMismatches, computeDivergenceCone, digitalOutputPins } from "./known-divergences.js";
 export type { KnownDivergence, DivergenceSeed, DivergenceCone, DivergenceMatch, ClassifiedMismatches } from "./known-divergences.js";

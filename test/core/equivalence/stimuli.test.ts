@@ -176,8 +176,10 @@ function ledOnlyCircuit(): SimCircuit {
 
 describe("replayStimuliOnCore", () => {
   it("throws StimuliNotYetSupportedOnCoreError, naming the missing kind, when the DEFAULT CORE_IMPLEMENTED_KINDS can't load this circuit at all", () => {
+    // The load itself throws before `schedule` is ever consulted, so an
+    // empty schedule is fine here — this is purely about the load failure.
     try {
-      replayStimuliOnCore(ledOnlyCircuit(), [{ durationS: 1e-3 }]);
+      replayStimuliOnCore(ledOnlyCircuit(), [{ durationS: 1e-3 }], []);
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
@@ -192,7 +194,10 @@ describe("replayStimuliOnCore", () => {
       { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2 * STIMULUS_FIXED_STEP_S },
     ];
 
-    const samples = replayStimuliOnCore(switchedDivider(0), phases, WITH_SWITCH);
+    // The core follows classic's OWN recorded schedule now (stimuli.ts's
+    // "SAMPLE SCHEDULE" doc comment) — every test below computes it first.
+    const classicSamples = replayStimuliOnClassic(switchedDivider(0), phases);
+    const samples = replayStimuliOnCore(switchedDivider(0), phases, classicSamples, WITH_SWITCH);
     const phase0 = samples.filter((s) => s.phaseIndex === 0);
     const phase1 = samples.filter((s) => s.phaseIndex === 1);
     expect(phase0).toHaveLength(2);
@@ -208,7 +213,8 @@ describe("replayStimuliOnCore", () => {
 
   it("samples at the fixed step STIMULUS_FIXED_STEP_S, matching the classic path's uniform grid", () => {
     const phases: StimulusPhase[] = [{ durationS: 5 * STIMULUS_FIXED_STEP_S }];
-    const samples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    const samples = replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH);
     expect(samples).toHaveLength(5);
     for (let i = 1; i < samples.length; i++) {
       expect(samples[i]!.simTime - samples[i - 1]!.simTime).toBeCloseTo(STIMULUS_FIXED_STEP_S, 9);
@@ -226,9 +232,13 @@ describe("replayStimuliOnCore", () => {
       { durationS: STIMULUS_FIXED_STEP_S },
       { set: [{ id: "r1", params: { resistance: 5000 } }], durationS: STIMULUS_FIXED_STEP_S },
     ];
-    expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/live/i);
+    // Classic has no "liveness" concept at all (a reload accepts any param),
+    // so its own replay succeeds cleanly for these SAME phases — this is
+    // what supplies the schedule the core-side failure is checked against.
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    expect(() => replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH)).toThrow(/live/i);
     try {
-      replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+      replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH);
       expect.unreachable();
     } catch (err) {
       expect(err).not.toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
@@ -245,7 +255,8 @@ describe("replayStimuliOnCore", () => {
       { durationS: STIMULUS_FIXED_STEP_S },
       { set: [{ id: "no-such-component", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S },
     ];
-    expect(() => replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH)).toThrow(/no device for component/);
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    expect(() => replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH)).toThrow(/no device for component/);
   });
 
   it("throws (does not swallow) when the circuit cannot even be loaded — a source shorted to itself, mirroring replayStimuliOnClassic's own load-failure check", () => {
@@ -253,19 +264,25 @@ describe("replayStimuliOnCore", () => {
       components: [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 })],
       wires: [wire("vsrc", "pos", "vsrc", "neg")],
     };
-    expect(() => replayStimuliOnCore(shorted, [{ durationS: 1e-3 }])).toThrow();
+    // The load itself throws before `schedule` is ever consulted.
+    expect(() => replayStimuliOnCore(shorted, [{ durationS: 1e-3 }], [])).toThrow();
   });
 
-  // Finding 10: phase durations that are NOT whole multiples of
+  // Finding 10 (history): phase durations that are NOT whole multiples of
   // STIMULUS_FIXED_STEP_S used to make the core round to a different whole
   // step count than classic's own clamp-to-remaining behaviour — 2.5ms
   // rounded UP to 3 whole 1ms steps (drifting the next phase's `set` 0.5ms
   // late relative to classic), and 0.4ms rounded DOWN to zero steps (no
   // sample at all, where classic still produces one clamped 0.4ms step).
+  // Now that the core follows classic's own recorded schedule verbatim
+  // (stimuli.ts's "SAMPLE SCHEDULE" doc comment), this is true by
+  // construction rather than by a matching rounding rule — kept as a
+  // regression guard on the basic wiring (schedule → phaseIndex filter →
+  // advance), not on rounding logic that no longer exists.
   it("matches replayStimuliOnClassic's own sample times exactly for a phase duration that is NOT a whole multiple of STIMULUS_FIXED_STEP_S (2.5ms)", () => {
     const phases: StimulusPhase[] = [{ durationS: 2.5 * STIMULUS_FIXED_STEP_S }, { durationS: 2 * STIMULUS_FIXED_STEP_S }];
     const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
-    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH);
 
     expect(coreSamples).toHaveLength(classicSamples.length);
     for (let i = 0; i < classicSamples.length; i++) {
@@ -277,7 +294,7 @@ describe("replayStimuliOnCore", () => {
   it("matches replayStimuliOnClassic's own sample COUNT for a phase shorter than one whole STIMULUS_FIXED_STEP_S (0.4ms) — the old rounding produced ZERO core samples here", () => {
     const phases: StimulusPhase[] = [{ durationS: 0.4 * STIMULUS_FIXED_STEP_S }, { durationS: 2 * STIMULUS_FIXED_STEP_S }];
     const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
-    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, WITH_SWITCH);
+    const coreSamples = replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH);
 
     expect(classicSamples.filter((s) => s.phaseIndex === 0)).toHaveLength(1);
     expect(coreSamples).toHaveLength(classicSamples.length);
@@ -287,25 +304,19 @@ describe("replayStimuliOnCore", () => {
   });
 
   /**
-   * W1c: a toggled DIP switch that flips a 74HC138's address input leaves a
-   * pending delay-FSM transition (the datasheet-delay commit) right at the
-   * phase boundary. Discovered empirically wiring test/fixtures/core/20-
-   * 74hc138-74ls283-dip-switches: classic's run() ALWAYS clamps a step onto
-   * a pending digital due-time when one falls inside it (headless.ts's
-   * `nextScheduledEventTime()`, which since W1c also consults `icState`'s
-   * DIGITAL_DUE_PREFIX due times) — unconditionally, even in fixed-step
-   * mode — landing a short first step (here, exactly the 74HC138's 20 ns
-   * prop_delay_ns) right after the reload, before resuming the plain
-   * STIMULUS_FIXED_STEP_S grid. Before this file's event-aligned clamp
-   * (mirroring that with `engine.nextDigitalDueTime()`,
-   * `bo_engine_next_digital_due_time` — finding 10 narrowed this from the
-   * wider `bo_engine_next_event_time`, see that finding's own regression test
-   * below), replayStimuliOnCore had no such clamp at all, so it produced
-   * FEWER samples than classic for the SAME phases the moment a circuit
-   * contained a combinational IC — compareStimuliSamples (compare.ts) rejects
-   * that outright as a harness bug (unequal sequence lengths), not a
-   * comparable circuit result. This is the regression proof: any implemented
-   * combinational-IC kind whose input a phase changes reproduces it.
+   * W1c (history): a toggled DIP switch that flips a 74HC138's address input
+   * leaves a pending delay-FSM transition (the datasheet-delay commit) right
+   * at the phase boundary. Discovered empirically wiring test/fixtures/core/
+   * 20-74hc138-74ls283-dip-switches: classic's run() ALWAYS clamps a step
+   * onto a pending digital due-time when one falls inside it, landing a
+   * short first step right after the reload before resuming the plain
+   * STIMULUS_FIXED_STEP_S grid — a schedule an unclamped fixed-step core loop
+   * could not reproduce (findings 10 and 13 chased that clamp; see stimuli.ts's
+   * "WHY NOT RE-DERIVE THE SCHEDULE"). The current design sidesteps the whole
+   * class of problem: the core just follows classic's OWN recorded schedule,
+   * so this now checks that following the schedule ALSO reproduces the real
+   * classic-vs-core equivalence for a combinational IC's address input, not
+   * merely the count/time match.
    */
   function hc138DipSwitchCircuit(): SimCircuit {
     const hc138 = part(
@@ -344,9 +355,9 @@ describe("replayStimuliOnCore", () => {
     ];
 
     const classicSamples = replayStimuliOnClassic(circuit, phases);
-    const coreSamples = replayStimuliOnCore(circuit, phases);
+    const coreSamples = replayStimuliOnCore(circuit, phases, classicSamples);
 
-    expect(coreSamples, "the old (unclamped) core loop landed on the plain grid and undercounted here").toHaveLength(classicSamples.length);
+    expect(coreSamples, "following classic's own schedule always matches its count/time by construction").toHaveLength(classicSamples.length);
     for (let i = 0; i < classicSamples.length; i++) {
       expect(coreSamples[i]!.phaseIndex, `sample ${String(i)}`).toBe(classicSamples[i]!.phaseIndex);
       expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
@@ -369,7 +380,7 @@ describe("replayStimuliOnCore", () => {
     ];
 
     const classicSamples = replayStimuliOnClassic(circuit, phases);
-    const coreSamples = replayStimuliOnCore(circuit, phases);
+    const coreSamples = replayStimuliOnCore(circuit, phases, classicSamples);
 
     // Seed a fault: corrupt the core's LAST sample's net voltages (a stand-in
     // for a genuine core regression) so it never recovers — unlike the real
@@ -399,19 +410,17 @@ describe("replayStimuliOnCore", () => {
   });
 
   /**
-   * Finding 10: a W1b-only fixture (a two-capacitor ladder toggled by a
-   * switch — no combinational IC anywhere, exactly the fixture-14 shape) has
-   * no digital due time at all, but its RC ladder's dynamic partition gets
-   * classified STEPPED (decision 14: a dynamic partition holding two or more
-   * capacitors). Clamping to the wider `bo_engine_next_event_time` (which
-   * also reports that partition's own internal step-doubling Step
-   * bookkeeping, `POST_EVENT_H = 1e-8`) made this loop single-step through
-   * every one of the stepped solver's own ~1e-8s internal steps for the rest
-   * of each 20ms phase — millions of samples instead of 40, and a runtime in
-   * the seconds instead of milliseconds. `nextDigitalDueTime()` reports
-   * `+Infinity` for this circuit (nothing digital is ever due), so the loop
-   * falls straight through to the plain `STIMULUS_FIXED_STEP_S` grid, exactly
-   * as it did before W1c ever added a combinational-IC clamp at all.
+   * Finding 10 (history): a W1b-only fixture (a two-capacitor ladder toggled
+   * by a switch — no combinational IC anywhere, exactly the fixture-14
+   * shape) has no digital due time at all, but its RC ladder's dynamic
+   * partition gets classified STEPPED (decision 14: a dynamic partition
+   * holding two or more capacitors). The OLD due-time-derived clamp, widened
+   * to the wrong ABI call, single-stepped through that partition's own
+   * ~1e-8s internal bookkeeping for the rest of each 20ms phase — millions of
+   * samples instead of 40. Following classic's own schedule (stimuli.ts's
+   * "SAMPLE SCHEDULE") makes this moot by construction: there is no clamp
+   * left to widen incorrectly. Kept as a regression guard that the new
+   * schedule-following loop stays O(samples), not O(internal solver steps).
    */
   it("does not explode into millions of samples on a W1b stepped-partition ladder toggled by a switch, and matches classic's 40 samples exactly (finding 10)", () => {
     const ladder: SimCircuit = {
@@ -439,25 +448,26 @@ describe("replayStimuliOnCore", () => {
     ];
 
     const classicSamples = replayStimuliOnClassic(ladder, phases);
-    const coreSamples = replayStimuliOnCore(ladder, phases, WITH_SWITCH);
+    const coreSamples = replayStimuliOnCore(ladder, phases, classicSamples, WITH_SWITCH);
 
     expect(classicSamples).toHaveLength(40);
-    expect(coreSamples, "a wide event clamp explodes into ~4 million samples here — see finding 10").toHaveLength(40);
+    expect(coreSamples, "a wide event clamp used to explode into ~4 million samples here — see finding 10").toHaveLength(40);
     for (let i = 0; i < classicSamples.length; i++) {
       expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
     }
   });
 
   /**
-   * Finding 13: one SPDT drives both a 74HC14 (15ns delay) and a 74LS04
-   * (20ns delay) input. After the toggle, classic's fixed-step loop lands
-   * exactly on the 74HC14's +15ns commit, then computes `untilEvent = 5ns` to
-   * the 74LS04's +20ns commit — 5ns is under classic's own `H_MIN` (10ns)
-   * floor, so classic's NEXT step is forced to 10ns, overshooting to +25ns
-   * instead of landing exactly on +20ns. Without reproducing that floor here,
-   * the core lands its own next step exactly on +20ns (no floor), a 5ns
-   * offset from classic that both `simTime` and the resulting stale
-   * netV/elementI would otherwise flag as a mismatch.
+   * Finding 13 (history): one SPDT drives both a 74HC14 (15ns delay) and a
+   * 74LS04 (20ns delay) input. After the toggle, classic's fixed-step loop
+   * lands exactly on the 74HC14's +15ns commit, then computes `untilEvent =
+   * 5ns` to the 74LS04's +20ns commit — 5ns is under classic's own `H_MIN`
+   * (10ns) floor, so classic's NEXT step is forced to 10ns, overshooting to
+   * +25ns instead of landing exactly on +20ns. The OLD due-time-derived
+   * clamp had to reproduce that overshoot bit-for-bit with its own `+H_MIN`
+   * floor; following classic's own recorded schedule (stimuli.ts's "SAMPLE
+   * SCHEDULE") reproduces it for free, by definition — kept as the
+   * regression proof that this edge case still lands exactly right.
    */
   it("reproduces classic's H_MIN overshoot when two different-family ICs commit under 10ns apart (finding 13)", () => {
     const mixedFamily: SimCircuit = {
@@ -505,11 +515,87 @@ describe("replayStimuliOnCore", () => {
     ];
 
     const classicSamples = replayStimuliOnClassic(mixedFamily, phases);
-    const coreSamples = replayStimuliOnCore(mixedFamily, phases);
+    const coreSamples = replayStimuliOnCore(mixedFamily, phases, classicSamples);
 
     expect(coreSamples).toHaveLength(classicSamples.length);
     for (let i = 0; i < classicSamples.length; i++) {
       expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
     }
+  });
+
+  /**
+   * The actual bug report this whole change fixes (W1d worker D4b's
+   * fixtures 25/27-29): a REGISTER kind changes its output in a LATER
+   * phase, through `set_params` on an input that isn't itself one of the
+   * six new kinds' own live params (a `switch` driving the 74LS173's M
+   * pin — an IC pin is wired topology, never a live param of the IC
+   * itself). Classic's `ls173Model` (src/sim/engine/devices/digital-ics.ts)
+   * stamps M/N tri-state directly with no `icState` `due:` entry at all, so
+   * the OLD due-time-derived clamp had nothing to snap the core onto and the
+   * two replays' sample counts diverged the instant phase 1 flipped the
+   * switch (a hard `compareStimuliSamples` "sample count mismatch" throw,
+   * not a value mismatch). Following classic's own schedule verbatim makes
+   * this a non-issue for every kind, register or otherwise.
+   */
+  it("matches classic's sample counts and times when a register's output changes in a LATER phase (the 74LS173 M/N regression this rewrite fixes)", () => {
+    const ls173Pins = ["m", "n", "q1", "q2", "q3", "q4", "clk", "gnd", "/clr", "d1", "d2", "d3", "d4", "g1", "g2", "vcc"];
+    const circuit: SimCircuit = {
+      components: [
+        part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("u2", "74ls173", ls173Pins),
+        part("sw_m", "switch", ["a", "b"], { closed: 0 }),
+        part("r_m", "resistor", ["a", "b"], { resistance: 10_000 }),
+        part("rq1", "resistor", ["a", "b"], { resistance: 10_000 }),
+        part("rq2", "resistor", ["a", "b"], { resistance: 10_000 }),
+        part("rq3", "resistor", ["a", "b"], { resistance: 10_000 }),
+        part("rq4", "resistor", ["a", "b"], { resistance: 10_000 }),
+      ],
+      wires: [
+        wire("vcc", "pos", "u2", "vcc"),
+        wire("vcc", "neg", "u2", "gnd"),
+        wire("vcc", "neg", "u2", "/clr"),
+        wire("vcc", "neg", "u2", "g1"),
+        wire("vcc", "neg", "u2", "g2"),
+        wire("vcc", "neg", "u2", "clk"),
+        wire("vcc", "pos", "u2", "d1"),
+        wire("vcc", "neg", "u2", "d2"),
+        wire("vcc", "neg", "u2", "d3"),
+        wire("vcc", "neg", "u2", "d4"),
+        wire("vcc", "neg", "u2", "n"),
+        // M driven by a switch (a genuine live param), pulled LOW when open —
+        // NOT an override on the IC's own params, which have none live.
+        wire("vcc", "pos", "sw_m", "a"),
+        wire("sw_m", "b", "u2", "m"),
+        wire("u2", "m", "r_m", "a"),
+        wire("r_m", "b", "vcc", "neg"),
+        wire("u2", "q1", "rq1", "a"),
+        wire("rq1", "b", "vcc", "neg"),
+        wire("u2", "q2", "rq2", "a"),
+        wire("rq2", "b", "vcc", "neg"),
+        wire("u2", "q3", "rq3", "a"),
+        wire("rq3", "b", "vcc", "neg"),
+        wire("u2", "q4", "rq4", "a"),
+        wire("rq4", "b", "vcc", "neg"),
+      ],
+    };
+    const phases: StimulusPhase[] = [
+      { durationS: STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "sw_m", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S },
+      { set: [{ id: "sw_m", params: { closed: 0 } }], durationS: STIMULUS_FIXED_STEP_S },
+    ];
+
+    const classicSamples = replayStimuliOnClassic(circuit, phases);
+    // "switch" and "74ls173" are both already CORE_IMPLEMENTED_KINDS
+    // (kinds.ts) — no widened set needed.
+    const coreSamples = replayStimuliOnCore(circuit, phases, classicSamples);
+
+    expect(coreSamples).toHaveLength(classicSamples.length);
+    for (let i = 0; i < classicSamples.length; i++) {
+      expect(coreSamples[i]!.phaseIndex, `sample ${String(i)}`).toBe(classicSamples[i]!.phaseIndex);
+      expect(coreSamples[i]!.simTime, `sample ${String(i)}`).toBeCloseTo(classicSamples[i]!.simTime, 9);
+    }
+
+    const cmp = compareStimuliSamples(classicSamples, coreSamples, circuit);
+    expect(cmp.mismatches, JSON.stringify(cmp.mismatches, null, 2)).toEqual([]);
   });
 });

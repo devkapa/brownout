@@ -745,7 +745,7 @@ describe("W1b capacitor fixtures (11-15) vs. their analytic reference — core s
     ];
 
     const classicSamples = replayStimuliOnClassic(circuit, phases);
-    const coreSamples = replayStimuliOnCore(circuit, phases, WITH_CAPACITOR);
+    const coreSamples = replayStimuliOnCore(circuit, phases, classicSamples, WITH_CAPACITOR);
 
     const netId = classicNetIdFor(circuit, "c1", "a");
     const endOfPhase1 = classicSamples.findIndex((s) => s.phaseIndex === 1) - 1;

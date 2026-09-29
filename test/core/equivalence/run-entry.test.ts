@@ -200,7 +200,10 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
     const corePhases: StimulusPhase[] = [noOpPhase, noOpPhase];
 
     const classicSamples = replayStimuliOnClassic(circuit, classicPhases);
-    const coreSamples = replayStimuliOnCore(circuit, corePhases);
+    // Both phase arrays share the same per-phase durationS (only their
+    // `set` overrides differ, which is the deliberate seeded fault below) —
+    // classicSamples' timing is a valid schedule for corePhases too.
+    const coreSamples = replayStimuliOnCore(circuit, corePhases, classicSamples);
     const cmp = compareStimuliSamples(classicSamples, coreSamples);
 
     expect(cmp.mismatches.length).toBeGreaterThan(0);
@@ -279,7 +282,7 @@ describe("finding 11 — Richardson-extrapolated forgiveness for the stimuli pat
   it("a seeded core fault (one core sample offset by 10 mV) is NOT explained away — the detector must still fire", () => {
     const phases = fixture13.entry.phases!;
     const classicSamples = replayStimuliOnClassic(fixture13.circuit, phases);
-    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases);
+    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases, classicSamples);
 
     // Perturb the LAST sample's netV on every net by 10mV — comfortably
     // outside both the flat tolerance and any plausible Richardson estimate
@@ -312,7 +315,7 @@ describe("finding 11 — Richardson-extrapolated forgiveness for the stimuli pat
   it("leaves digitalState/simTime mismatches untouched, even when a matching netV/elementI mismatch at the same sample IS explained", () => {
     const phases = fixture13.entry.phases!;
     const classicSamples = replayStimuliOnClassic(fixture13.circuit, phases);
-    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases);
+    const coreSamples = replayStimuliOnCore(fixture13.circuit, phases, classicSamples);
     const cmp = compareStimuliSamples(classicSamples, coreSamples);
 
     // Fabricate a digitalState mismatch alongside the real (Richardson-
