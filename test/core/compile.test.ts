@@ -474,32 +474,36 @@ describe("SlotAllocator — synthetic slot-table machinery (no real kind claims 
 
 describe("compileCircuit — unsupported-kind reasons", () => {
   it("reports one deduplicated, sorted reason per distinct unimplemented kind, for every fixture", () => {
+    let checked = 0;
     for (const name of fixtureNames) {
       const c = loadFixture(name);
       const unimplementedKinds = new Set(
         c.components.map((component) => component.kind).filter((kind) => !CORE_IMPLEMENTED_KINDS.has(kind)),
       );
       const expected = [...unimplementedKinds].map((kind) => `unsupported-kind:${kind}`).sort();
-      expect(expected.length).toBeGreaterThan(0); // every fixture here uses at least one un-implemented IC/sensor kind
+      // W1e made fixtures 02, 03 and 06 fully implemented: they have no unimplemented kind to report.
+      if (expected.length === 0) continue;
+      checked += 1;
 
       const result = compileCircuit(c);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.reasons).toEqual(expected);
     }
+    expect(checked).toBeGreaterThan(0); // fixtures 01, 04, 05 and 07 still use an un-implemented IC/sensor kind
   });
 
   it("dedupes repeated instances of the same unsupported kind on a synthetic circuit", () => {
     const c = circuit([
       part("r1", "resistor", ["a", "b"], { resistance: 100 }),
-      part("led1", "led", ["a", "k"]),
-      part("led2", "led", ["a", "k"]),
+      part("d1", "diode", ["a", "k"]),
+      part("d2", "diode", ["a", "k"]),
       part("ic1", "totally_fake_ic_kind", ["a", "b"]),
     ]);
 
     const result = compileCircuit(c);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reasons).toEqual(["unsupported-kind:led", "unsupported-kind:totally_fake_ic_kind"].sort());
+      expect(result.reasons).toEqual(["unsupported-kind:diode", "unsupported-kind:totally_fake_ic_kind"].sort());
     }
   });
 

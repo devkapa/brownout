@@ -348,7 +348,7 @@ describe("unsupported topology -> CoreUnsupportedError with a topology: reason",
 
 describe("unsupported kind -> CoreUnsupportedError with an unsupported-kind: reason", () => {
   it("reports the kind name", () => {
-    const c = circuit([part("led1", "led", ["a", "k"])]);
+    const c = circuit([part("d1", "diode", ["a", "k"])]);
     const core = new CoreEngine();
     let caught: CoreUnsupportedError | undefined;
     try {
@@ -357,7 +357,7 @@ describe("unsupported kind -> CoreUnsupportedError with an unsupported-kind: rea
       caught = err as CoreUnsupportedError;
     }
     expect(caught).toBeInstanceOf(CoreUnsupportedError);
-    expect(caught!.reasons).toEqual(["unsupported-kind:led"]);
+    expect(caught!.reasons).toEqual(["unsupported-kind:diode"]);
   });
 });
 
@@ -658,7 +658,7 @@ describe("a failed load() clears the previously loaded circuit's readouts", () =
       [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
       [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
     );
-    const bad = circuit([part("led1", "led", ["a", "k"])]);
+    const bad = circuit([part("d1", "diode", ["a", "k"])]);
 
     const core = new CoreEngine();
     core.load(good);
@@ -704,7 +704,7 @@ describe("a failed load() clears the previously loaded circuit's readouts", () =
       [part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("r1", "resistor", ["a", "b"], { resistance: 100 })],
       [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
     );
-    const bad = circuit([part("led1", "led", ["a", "k"])]);
+    const bad = circuit([part("d1", "diode", ["a", "k"])]);
 
     const core = new CoreEngine();
     core.load(good);

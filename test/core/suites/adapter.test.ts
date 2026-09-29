@@ -33,15 +33,14 @@ const DIVIDER: SimCircuit = {
   wires: [wire("src", "pos", "top", "a"), wire("top", "b", "bottom", "a"), wire("bottom", "b", "src", "neg")],
 };
 
-// Same divider, plus one LED -- a kind CORE_IMPLEMENTED_KINDS does not
-// contain (W1e, not yet ported; `capacitor` played this role until this same
-// wave's later step landed the device/solver and the orchestrator added it
-// to CORE_IMPLEMENTED_KINDS). compileCircuit can never turn this into a
+// Same divider, plus one diode -- a kind CORE_IMPLEMENTED_KINDS does not
+// contain (`capacitor` played this role until W1b landed its device/solver,
+// then `led` until W1e ported it). compileCircuit can never turn this into a
 // program, so this is exactly the "force a fallback" case the worker brief's
 // verify step asks for.
 const WITH_UNSUPPORTED_KIND: SimCircuit = {
-  components: [...DIVIDER.components, part("led1", "led", ["a", "b"], {})],
-  wires: [...DIVIDER.wires, wire("bottom", "b", "led1", "a"), wire("bottom", "b", "led1", "b")],
+  components: [...DIVIDER.components, part("d1", "diode", ["a", "k"], {})],
+  wires: [...DIVIDER.wires, wire("bottom", "b", "d1", "a"), wire("bottom", "b", "d1", "k")],
 };
 
 beforeAll(async () => {
@@ -91,6 +90,39 @@ describe("adapter.ts SimEngine — the happy path actually runs on the core", ()
     expect(engine.getNetIdForPin("src", "pos")).toBe(engine.getNetIdForPin("top", "a"));
   });
 
+  it("getElementChannelI() delegates to the core's channel slots: an rgb_led reports three live channels, a device with none reports no entry", () => {
+    const rgb: SimCircuit = {
+      components: [
+        part("src", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r_r", "resistor", ["a", "b"], { resistance: 330 }),
+        part("r_g", "resistor", ["a", "b"], { resistance: 330 }),
+        part("r_b", "resistor", ["a", "b"], { resistance: 330 }),
+        part("led", "rgb_led", ["r_a", "g_a", "b_a", "com_k"]),
+      ],
+      wires: [
+        wire("src", "pos", "r_r", "a"),
+        wire("src", "pos", "r_g", "a"),
+        wire("src", "pos", "r_b", "a"),
+        wire("r_r", "b", "led", "r_a"),
+        wire("r_g", "b", "led", "g_a"),
+        wire("r_b", "b", "led", "b_a"),
+        wire("led", "com_k", "src", "neg"),
+      ],
+    };
+    const engine = new SimEngine();
+    engine.load(rgb);
+    engine.step(1e-4);
+    const channels = engine.getElementChannelI();
+    expect(channels.led).toHaveLength(3);
+    // (5 V - Vf) / 330 ohm is milliamps on every channel; blue's higher Vf (3.0 V against 1.8 V red) leaves it the least.
+    for (const amps of channels.led!) expect(amps).toBeGreaterThan(1e-3);
+    expect(channels.led![2]).toBeLessThan(channels.led![0]!);
+    expect(channels.src).toBeUndefined();
+
+    engine.load(DIVIDER);
+    expect(engine.getElementChannelI()).toEqual({});
+  });
+
   it("solver diagnostics read the documented W1a neutral values (no core meaning yet)", () => {
     const engine = new SimEngine();
     engine.load(DIVIDER);
@@ -113,7 +145,7 @@ describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(CoreSuiteFellBackError);
-    expect((thrown as CoreSuiteFellBackError).reasons).toContain("unsupported-kind:led");
+    expect((thrown as CoreSuiteFellBackError).reasons).toContain("unsupported-kind:diode");
   });
 
   it("also fires when coreSupportedKinds is narrowed below what a portable case needs", () => {
@@ -130,7 +162,7 @@ describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
     expect(() => engine.load(WITH_UNSUPPORTED_KIND)).toThrow(CoreSuiteFellBackError);
     // CoreEngine's own "no program loaded" facade state (engine.ts) surfaces
     // through HeadlessRunner's classic fallback load, which DOES succeed (the
-    // LED circuit is valid on classic) -- readouts must reflect that
+    // diode circuit is valid on classic) -- readouts must reflect that
     // fallback run, not the earlier core one, since accessing them at all
     // outside gate 1's own load()-throws contract is a caller bug the adapter
     // does not otherwise police.

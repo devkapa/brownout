@@ -152,23 +152,23 @@ describe("replayStimuliOnClassic", () => {
 });
 
 /**
- * vsrc -> led1 -> r1 -> gnd. `switch` joined CORE_IMPLEMENTED_KINDS in W1b
+ * vsrc -> d1 -> r1 -> gnd. `switch` joined CORE_IMPLEMENTED_KINDS in W1b
  * (kinds.ts), and `capacitor` joined it once this same wave's later step
  * landed the device/solver — neither still proves "the default set can't
- * load this circuit". `led` (W1e, not yet ported) takes over that role.
+ * load this circuit". `led` joined them in W1e; `diode` (in no wave's kind table) takes over that role.
  */
 function ledOnlyCircuit(): SimCircuit {
   return {
     components: [
       part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
       part("gnd", "ground", ["gnd"]),
-      part("led1", "led", ["a", "b"], {}),
+      part("d1", "diode", ["a", "k"], {}),
       part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
     ],
     wires: [
       wire("vsrc", "neg", "gnd", "gnd"),
-      wire("vsrc", "pos", "led1", "a"),
-      wire("led1", "b", "r1", "a"),
+      wire("vsrc", "pos", "d1", "a"),
+      wire("d1", "k", "r1", "a"),
       wire("r1", "b", "gnd", "gnd"),
     ],
   };
@@ -183,7 +183,7 @@ describe("replayStimuliOnCore", () => {
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(StimuliNotYetSupportedOnCoreError);
-      expect((err as StimuliNotYetSupportedOnCoreError).reasons).toContain("unsupported-kind:led");
+      expect((err as StimuliNotYetSupportedOnCoreError).reasons).toContain("unsupported-kind:diode");
       expect((err as Error).message).toMatch(/bo_engine_set_params/);
     }
   });

@@ -53,6 +53,13 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "74ls189",
   "28c16",
   "28c256",
+  // W1e: LEDs, the 7-segment displays and the NE555.
+  "led",
+  "rgb_led",
+  "bicolor_led",
+  "seg7_cc",
+  "seg7_ca",
+  "ne555",
 ]);
 
 /**

@@ -49,8 +49,9 @@
  * BE/trap dynamics to choose between) is implemented too -- see its own doc
  * comment for why it is a two-step (record, then apply on the next `step()`)
  * rather than an immediate call into `HeadlessRunner`. `getElementChannelI`
- * (added for wave3-passives.test.ts) is implemented as a constant `{}` -- see
- * its own doc comment for why that is provably correct here, not a guess.
+ * (added for wave3-passives.test.ts as a constant `{}`, provably right while no
+ * multi-channel kind was implemented) delegates to the active readout since W1e:
+ * rgb_led, bicolor_led and the 7-segment displays publish channel currents.
  * Nothing else on classic `SimEngine` (saveState/restoreState/
  * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
  * ...) is implemented: no case in classification.json currently needs any of
@@ -234,20 +235,24 @@ export class SimEngine implements EngineReadout {
 
   /**
    * Classic `SimEngine.getElementChannelI()`: per-channel currents for a
-   * multi-channel device (resistor_array's 4 independent channels, ...).
-   * `EngineReadout`/`CoreEngine` have no such concept -- multi-channel
-   * kinds are not in `CORE_IMPLEMENTED_KINDS`. Always `{}`, not a guess: a
-   * circuit that reached this adapter's `load()` at all necessarily used
-   * only core-implemented kinds, so it structurally cannot contain a
-   * multi-channel component for there to be a channel record of in the
-   * first place -- `{}` is the exact, provably-correct answer for every
-   * circuit this adapter can ever be holding, not an invented placeholder.
-   * Added for a test-file helper (wave3-passives.test.ts's `liveFromEngine`)
-   * that calls this unconditionally even on a circuit with no multi-channel
-   * device at all, purely to build a generic `LiveReadings` snapshot.
+   * multi-channel device (rgb_led's 3 channels, bicolor_led's 2, a 7-segment
+   * display's 8; resistor_array's 4 on classic only). `CoreEngine` has the
+   * method (its channel slots, spec section 10.10) but `EngineReadout` does
+   * not declare it, so this reads it off the active readout structurally: the
+   * `CoreEngine` on the core, or classic `SimEngine` after a fallback (which
+   * the no-silent-fallback check makes a caller bug anyway).
+   *
+   * This used to be a constant `{}`, provably right only while no
+   * multi-channel kind was in `CORE_IMPLEMENTED_KINDS`. W1e added three, and
+   * a stub would now make a case that reads a channel fail, and one that
+   * guards on the record being present pass while checking nothing.
    */
   getElementChannelI(): Record<string, number[]> {
-    return {};
+    const readout = this._runner.readout as EngineReadout & { getElementChannelI?: () => Record<string, number[]> };
+    if (typeof readout.getElementChannelI !== "function") {
+      throw new Error("core-suites adapter: the active readout has no getElementChannelI()");
+    }
+    return readout.getElementChannelI();
   }
 
   get digitalState(): Record<string, number> {

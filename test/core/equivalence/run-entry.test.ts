@@ -43,27 +43,27 @@ function wire(a: string, ap: string, b: string, bp: string): SimCircuit["wires"]
 }
 
 /**
- * vsrc -> led1 -> r1 -> gnd. `led` is NOT in CORE_IMPLEMENTED_KINDS
+ * vsrc -> d1 -> r1 -> gnd. `diode` is NOT in CORE_IMPLEMENTED_KINDS
  * (kinds.ts) — this circuit is "not-ported" under the plain flow, and
  * "core-stimuli-pending" under the gate 2d stimuli path. (This "an unported
  * kind" role has moved twice now: `switch` played it until W1b put the
  * switch family into CORE_IMPLEMENTED_KINDS, then `capacitor` played it
  * until this same wave's later step landed the capacitor device/solver and
- * the orchestrator added it too; `led` — W1e, not yet ported — takes over
- * now.)
+ * the orchestrator added it too; then `led` played it until W1e ported it,
+ * and `diode` — in no wave's kind table — takes over now.)
  */
 function unportedKindDivider(): SimCircuit {
   return {
     components: [
       part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
       part("gnd", "ground", ["gnd"]),
-      part("led1", "led", ["a", "b"], {}),
+      part("d1", "diode", ["a", "k"], {}),
       part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
     ],
     wires: [
       wire("vsrc", "neg", "gnd", "gnd"),
-      wire("vsrc", "pos", "led1", "a"),
-      wire("led1", "b", "r1", "a"),
+      wire("vsrc", "pos", "d1", "a"),
+      wire("d1", "k", "r1", "a"),
       wire("r1", "b", "gnd", "gnd"),
     ],
   };
@@ -110,12 +110,12 @@ function baseEntry(overrides: Partial<CorpusEntry> = {}): CorpusEntry {
 }
 
 describe("runCorpusEntry — gate 2d stimuli priority", () => {
-  it("reports core-stimuli-pending for an entry with phases, instead of not-ported, even though `led` is not core-implemented", () => {
+  it("reports core-stimuli-pending for an entry with phases, instead of not-ported, even though `diode` is not core-implemented", () => {
     const entry = baseEntry({
-      kinds: ["ground", "led", "resistor", "voltage_source"],
+      kinds: ["ground", "diode", "resistor", "voltage_source"],
       phases: [
-        { set: [{ id: "led1", params: { forwardVoltage: 2.2 } }], durationS: 2e-3 },
-        { set: [{ id: "led1", params: { forwardVoltage: 1.8 } }], durationS: 2e-3 },
+        { set: [{ id: "d1", params: { forwardVoltage: 2.2 } }], durationS: 2e-3 },
+        { set: [{ id: "d1", params: { forwardVoltage: 1.8 } }], durationS: 2e-3 },
       ],
     });
 
@@ -130,11 +130,11 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
   });
 
   it("falls through to the plain not-ported flow for the SAME circuit when the entry carries no phases", () => {
-    const entry = baseEntry({ kinds: ["ground", "led", "resistor", "voltage_source"], phases: undefined });
+    const entry = baseEntry({ kinds: ["ground", "diode", "resistor", "voltage_source"], phases: undefined });
     const result = runCorpusEntry(entry, unportedKindDivider());
     expect(result.status).toBe("not-ported");
     if (result.status === "not-ported") {
-      expect(result.missingKinds).toContain("led");
+      expect(result.missingKinds).toContain("diode");
     }
   });
 
@@ -154,7 +154,7 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
   });
 
   it("an empty phases array does not trigger the stimuli path (falls through to the plain flow)", () => {
-    const entry = baseEntry({ kinds: ["ground", "led", "resistor", "voltage_source"], phases: [] });
+    const entry = baseEntry({ kinds: ["ground", "diode", "resistor", "voltage_source"], phases: [] });
     const result = runCorpusEntry(entry, unportedKindDivider());
     expect(result.status).toBe("not-ported");
   });

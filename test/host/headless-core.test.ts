@@ -180,7 +180,7 @@ describe('engine absent/"classic" — unchanged', () => {
 // implemented (compiles) but not routed to the core by the (widened, test-
 // only) coreSupportedKinds override used below — forces a live-edit fallback.
 const WITH_UNSUPPORTED_KIND: SimCircuit = {
-  components: [...DIVIDER.components, part("led1", "led", ["a", "k"])],
+  components: [...DIVIDER.components, part("d1", "diode", ["a", "k"])],
   wires: DIVIDER.wires,
 };
 
@@ -197,7 +197,7 @@ describe('engine: "core" — simTime carries across an engine switch (decision: 
     // clock) instead of continuing from where the core left off.
     runner.load(WITH_UNSUPPORTED_KIND);
     expect(runner.activeEngine).toBe("classic");
-    expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:led"]);
+    expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:diode"]);
     expect(runner.simTime).toBeCloseTo(1e-3, 9);
 
     runner.run({ durationS: 1e-4 });

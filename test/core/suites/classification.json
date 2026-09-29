@@ -26,7 +26,11 @@
     "internal detail no test ever names as a component kind). It ALSO fails",
     "when any CORE_IMPLEMENTED_KINDS member except \"ground\" has no portable",
     "case, in any file, that ran and passed (the coverage floor, W1b review",
-    "finding 9): a kind the core implements must be exercised here."
+    "finding 9): a kind the core implements must be exercised here.",
+    "",
+    "W1e added suite files that mix cases of every kind. For those, only the cases that build one of the six W1e kinds (led, rgb_led,",
+    "bicolor_led, seg7_cc, seg7_ca, ne555) are listed; their other cases are unlisted, so the core project never collects them, and are",
+    "classified in the wave that ports the kinds they need. The gate-1 checks above apply to what is listed."
   ],
   "suites": [
     {
@@ -132,13 +136,13 @@
         {
           "describe": "reference physics — diode and LED temperature direction",
           "name": "LED forward drop falls by 0.33 V +/- 30 mV from -40 C to 125 C",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "led"
           ],
-          "reason": "led is W1e (NE555/LEDs/displays); not implemented by the core yet."
+          "reason": "Static led (params vf 1.8, iRated 10 mA, n 2, no catalogUid, so no thermal identity and the core runs it, LEDs point 3) on 320 ohm from 5 V, solved at -40 C and 125 C through environment.temperatureC; asserts the hot drop is lower and the shift is 0.33 V +/- 30 mV. Ran and passed on the core (W1e)."
         },
         {
           "describe": "reference physics — guarded junction overdrive",
@@ -216,13 +220,13 @@
         {
           "describe": "reference physics — active-device rail current and power",
           "name": "NE555 output and compact idle current are withdrawn from its package rails",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "ne555"
           ],
-          "reason": "ne555 is W1e; not implemented by the core yet."
+          "reason": "Static NE555 (reset tied high, trigger held low so the output is HIGH) driving a 1 k load; asserts the 20 ohm output stage and the package rail currents to 20 nA after 8 x 1 us steps in one load, with no reload and no step breakpoint, so the one-solve output lag (decision 7) does not enter. Ran and passed on the core (W1e)."
         },
         {
           "describe": "reference physics — active-device rail current and power",
@@ -557,7 +561,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array (an 8-pin multi-channel kind, distinct from the plain 2-pin resistor) is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core. Also reads engine.getElementChannelI(), a surface the core-suites adapter does not implement."
+          "reason": "resistor_array (an 8-pin multi-channel kind, distinct from the plain 2-pin resistor) is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core. Also reads engine.getElementChannelI(), which the adapter delegates to the core's readout; the core has no resistor_array channels."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -2672,7 +2676,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table at all; not implemented by the core. Also calls engine.getElementChannelI() expecting a real per-channel record, which the core-suites adapter deliberately stubs to {} (see adapter.ts's own doc comment)."
+          "reason": "resistor_array is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table at all; not implemented by the core. Also calls engine.getElementChannelI() expecting a real per-channel record, which the adapter delegates to the core's readout, and the core has no resistor_array channels."
         },
         {
           "describe": "session-only failure states",
@@ -2703,7 +2707,7 @@
             "resistor",
             "led"
           ],
-          "reason": "led is W1e and led_failed detection is W1g; neither is implemented by the core yet. Also calls engine.resetFailures(), unimplemented on the adapter."
+          "reason": "Verified by running against the core: the led (no catalogUid) loads and runs on the core, and the case FAILS with 'expected [] to deeply equal [ led_failed ]': the core reports no failure, because led_failed detection is W1g (slow/failures.rs). Also calls engine.resetFailures(), unimplemented on the adapter."
         },
         {
           "describe": "session-only failure states",
@@ -5053,7 +5057,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError on the FIRST circuit in the loop (01-passive-sensor-transistor-lab.json), whose kinds include bjt_npn, bjt_pnp, nmos, pmos, led, inductor and others the core does not implement (reasons: unsupported-kind:bicolor_led, bjt_npn, bjt_pnp, fuse, inductor, ldr, led, nmos, pmos, potentiometer, rgb_led, thermistor, trimmer). The loop's second circuit (chaser555CounterCircuit) DOES contain the 74ls161 this case's `kinds` list documents, but it never even loads: it also carries ne555/led/bench_psu (none implemented), and the loop fails on its first iteration regardless. Not a 74ls161 problem -- diode/transistor/LED/NE555 family kinds are out of the W1 plan's registers-and-memories scope entirely (core/README.md's kind table; ne555/led are W1e and later)."
+          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError on the FIRST circuit in the loop (01-passive-sensor-transistor-lab.json), reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer. Its led, rgb_led and bicolor_led are implemented since W1e; what blocks it is the transistor, inductor and sensor kinds (W1h and W3). The loop's second circuit (chaser555CounterCircuit) contains the 74ls161 this case's `kinds` list documents, but it never loads: it is powered by a bench_psu (W1f) and the loop fails on its first iteration regardless."
         },
         {
           "describe": "optimization equivalence baselines",
@@ -5080,7 +5084,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bicolor_led, bjt_npn, bjt_pnp, fuse, inductor, ldr, led, nmos, pmos, potentiometer, rgb_led, thermistor, trimmer) -- 01-passive-sensor-transistor-lab.json is a transistor/LED/inductor lab circuit with no 74ls161 or any other W1d kind in it at all; out of this worker's scope on every axis."
+          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer) -- 01-passive-sensor-transistor-lab.json is a transistor/inductor/sensor lab; its LEDs (led, rgb_led, bicolor_led) are implemented since W1e and are not what blocks it."
         },
         {
           "describe": "optimization equivalence baselines",
@@ -5096,7 +5100,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:led, unsupported-kind:ne555). chaser555CounterCircuit does contain a real 74ls161 (the fixture's own u2_74ls161, read by this case's own clockV/count/qa../qd captures) -- the 161 itself is fully implemented and is exactly what test/sim/engine/sequential-memory-ics.test.ts's own 74LS161 cases exercise on the core -- but this circuit ALSO wires it to an ne555 astable and a bench_psu supply, neither of which the core implements yet (ne555 is W1e; bench_psu is not in the W1 plan's kind table at all), and HeadlessRunner declines the WHOLE circuit the moment any one kind is unsupported (no per-device split, core/README.md). This case cannot become portable until either ne555 lands (W1e) or a bench_psu-and-ne555-free equivalent fixture exists -- neither is this worker's brief."
+          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). chaser555CounterCircuit contains a real 74ls161 (the fixture's own u2_74ls161, read by this case's clockV/count/qa..qd captures), an ne555 astable and leds, all implemented (W1d, W1e), but it is powered by a bench_psu (W1f), and HeadlessRunner declines the WHOLE circuit the moment any one kind is unsupported (no per-device split, core/README.md). It becomes portable when bench_psu lands (W1f), if the bit-exact counter states it asserts still match then."
         }
       ]
     },
@@ -5280,6 +5284,1226 @@
             "28c256"
           ],
           "reason": "New case (this worker). Same mechanism as the 28C16 read case, one address-bit family wider (a0..a14, 15 bits, size 32768) -- needed because gate-reporter.ts's coverage-floor check (finding 9) counts \"28c16\" and \"28c256\" as two separate CORE_IMPLEMENTED_KINDS entries, so the 28C16 case alone would leave 28c256 at zero. Address 0x4321, seeded byte 0xC3. Verified by running: IO0..IO7 read back 0xC3's bits exactly."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/environment.test.ts",
+      "cases": [
+        {
+          "describe": "ambient junction temperature",
+          "name": "changes the solved LED forward drop in the physical direction",
+          "status": "portable",
+          "kinds": [
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Static led (params.vf 1.8, no catalogUid, so no thermal identity) on a 1 k resistor, solved at ambient -40 C and 125 C through environment.temperatureC; asserts the anode voltage falls by more than 0.2 V. It cannot pass unless the core applies the -2 mV/C tempco (LEDs point 2). Ran and passed on the core (W1e)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/fixture-audit.test.ts",
+      "cases": [
+        {
+          "describe": "breadboard fixture audit",
+          "name": "keeps the passive fixture finite while the inductor/capacitor node settles",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "keeps the passive fixture bounded without persistent step-cap pressure",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "does not let fixture 01's open-base PNP hold the live worker in red status",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "routes the passive fixture SPDT through one selected LED branch at a time",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "dims the passive fixture potentiometer LED by changing current",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "advances the NE555/counter fixture",
+          "status": "portable",
+          "kinds": [
+            "74ls161",
+            "capacitor",
+            "led",
+            "ne555",
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Fixture 03: an NE555 astable clocking a 74LS161 that feeds a 7-segment display, an LED, resistors and a capacitor, powered by a plain voltage_source; every kind is implemented. 2500 x 1 ms steps in one load, no reload; asserts the 555 output toggles and the counter advances. Ran and passed on the core (W1e). The seg7_cc is only a load on the counter here; the supplemental suite is what reads a segment's junction."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "advances the embedded NE555/counter hero fixture",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "keeps advancing the shift-register fixture latch state",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "clock",
+            "led",
+            "pulse_source",
+            "resistor",
+            "seg7_ca",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:74hc595, clock, pulse_source). 74hc595 is W1d/W1h; clock and pulse_source are W1f. led and seg7_ca are implemented and are not what blocks it."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "loads observable datapath and memory outputs",
+          "status": "not-yet",
+          "kinds": [
+            "74ls157",
+            "74ls173",
+            "74ls245",
+            "74ls283",
+            "clock",
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:clock). clock is W1f; led is implemented and is not what blocks it."
+        },
+        {
+          "describe": "breadboard fixture audit",
+          "name": "keeps dense MNA solve time within the S11 interactive budget",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/extended-integration.test.ts",
+      "cases": [
+        {
+          "describe": "corpus isolation — pre-A6 fixtures stay bitwise deterministic (Wave A6)",
+          "name": "passive lab: two fresh engines replay 200 steps bit-identically",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also reads saveState() snapshots, which the adapter does not implement."
+        },
+        {
+          "describe": "corpus isolation — pre-A6 fixtures stay bitwise deterministic (Wave A6)",
+          "name": "555 chaser: two fresh engines replay 200 steps bit-identically",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also reads saveState() snapshots, which the adapter does not implement."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ac-isolation.test.ts",
+      "cases": [
+        {
+          "describe": "small-signal AC — transient isolation (Wave A5)",
+          "name": "passive lab: cold-reload trajectory is bit-identical across a 20-point sweep",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+        },
+        {
+          "describe": "small-signal AC — transient isolation (Wave A5)",
+          "name": "passive lab: stepping continues bit-identically after the sweep vs after a plain OP",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+        },
+        {
+          "describe": "small-signal AC — transient isolation (Wave A5)",
+          "name": "555 chaser: cold-reload trajectory is bit-identical across a 20-point sweep",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+        },
+        {
+          "describe": "small-signal AC — transient isolation (Wave A5)",
+          "name": "555 chaser: stepping continues bit-identically after the sweep vs after a plain OP",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ac-small-signal.test.ts",
+      "cases": [
+        {
+          "describe": "small-signal AC — committed output stages and open-collector release",
+          "name": "ne555 committed OUT stage loads a probed net with its 20 ohm Thevenin",
+          "status": "not-yet",
+          "kinds": [
+            "ne555",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the ne555 circuit loads on the core, then runSmallSignalAc fails with 'TypeError: engine.loadedComponents is not a function'. Small-signal AC is W6 and the adapter has no AC surface; ne555 loads and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/arduino.test.ts",
+      "cases": [
+        {
+          "describe": "SimEngine MCU commit ordering",
+          "name": "samples once and advances firmware once after a converged NE555 split",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_uno",
+            "ne555"
+          ],
+          "reason": "Replaces classic's private _solve, _find555CrossingFrac and _sampleArduinoInputs with spies and asserts their call order around an arduino_uno MCU step; all three are classic-internal, and the arduino_uno emulator stays TS-only until W4/W7 (fails today with 'avr8js is not registered'). No core counterpart, not part of the accuracy contract."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/catalog-identity.test.ts",
+      "cases": [
+        {
+          "describe": "engine catalog model identity",
+          "name": "keeps same-kind red and blue LED forward-voltage models distinct",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:indicator). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/dc-op-parity.test.ts",
+      "cases": [
+        {
+          "describe": "Wave A3 bit identity — load()+step trajectories",
+          "name": "diode-led: seed converges (rescue gate untaken) and the trajectory is bitwise reproducible",
+          "status": "not-yet",
+          "kinds": [
+            "diode",
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:diode). The diode-led fixture pairs a led with a plain diode; diode is not in the W1 plan's kind table at all."
+        },
+        {
+          "describe": "Wave A3 bit identity — load()+step trajectories",
+          "name": "555-chaser: seed converges (rescue gate untaken) and the trajectory is bitwise reproducible",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+        },
+        {
+          "describe": "Wave A3 dcOperatingPoint — no simTime advance",
+          "name": "diode-led: simTime is bitwise unchanged at t=0 and mid-run",
+          "status": "not-yet",
+          "kinds": [
+            "diode",
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:diode). The diode-led fixture pairs a led with a plain diode; diode is not in the W1 plan's kind table at all. The case also calls dcOperatingPoint(), which the adapter does not implement."
+        },
+        {
+          "describe": "Wave A3 dcOperatingPoint — no simTime advance",
+          "name": "555-chaser: simTime is bitwise unchanged at t=0 and mid-run",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it. The case also calls dcOperatingPoint(), which the adapter does not implement."
+        },
+        {
+          "describe": "Wave A3 dcOperatingPoint — stamping controls fully reset",
+          "name": "diode-led: the step after an OP call matches a fresh engine restored to the same state",
+          "status": "not-yet",
+          "kinds": [
+            "diode",
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:diode). The diode-led fixture pairs a led with a plain diode; diode is not in the W1 plan's kind table at all. The case also calls dcOperatingPoint() and saveState()/restoreState(), which the adapter does not implement."
+        },
+        {
+          "describe": "Wave A3 dcOperatingPoint — stamping controls fully reset",
+          "name": "555-chaser: the step after an OP call matches a fresh engine restored to the same state",
+          "status": "not-yet",
+          "kinds": [
+            "74ls161",
+            "bench_psu",
+            "capacitor",
+            "led",
+            "ne555",
+            "push_button",
+            "resistor",
+            "spdt_switch"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it. The case also calls dcOperatingPoint() and saveState()/restoreState(), which the adapter does not implement."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/hcsr04.test.ts",
+      "cases": [
+        {
+          "describe": "hcsr04 — Pico end-to-end (real MicroPython machine.time_pulse_us)",
+          "name": "measures 10 cm within +-1 cm and lights the LED",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "led",
+            "raspberry_pi_pico",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04, unsupported-kind:raspberry_pi_pico). A Pico runs real MicroPython against an HC-SR04 and lights an LED; the MCU emulator stays TS-only until W4/W7 and hcsr04 is not in CORE_IMPLEMENTED_KINDS. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "hcsr04 — Pico end-to-end (real MicroPython machine.time_pulse_us)",
+          "name": "measures 100 cm within +-1 cm and lights the LED",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "led",
+            "raspberry_pi_pico",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04, unsupported-kind:raspberry_pi_pico). A Pico runs real MicroPython against an HC-SR04 and lights an LED; the MCU emulator stays TS-only until W4/W7 and hcsr04 is not in CORE_IMPLEMENTED_KINDS. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "hcsr04 — Pico end-to-end (real MicroPython machine.time_pulse_us)",
+          "name": "does NOT light the LED when the measured distance is wrong",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "led",
+            "raspberry_pi_pico",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04, unsupported-kind:raspberry_pi_pico). A Pico runs real MicroPython against an HC-SR04 and lights an LED; the MCU emulator stays TS-only until W4/W7 and hcsr04 is not in CORE_IMPLEMENTED_KINDS. led is implemented (W1e) and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/isolated-sections.test.ts",
+      "cases": [
+        {
+          "describe": "electrically isolated sections",
+          "name": "gives a second battery's LED loop a potential the linear solver's rounding cannot move",
+          "status": "not-yet",
+          "kinds": [
+            "battery_pack",
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:battery_pack). battery_pack is W1f; led is implemented (W1e) and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/led-current.test.ts",
+      "cases": [
+        {
+          "describe": "LED current through breadboard fixtures",
+          "name": "keeps generated LED probes below burnout current when a resistor is in series",
+          "status": "not-yet",
+          "kinds": [
+            "bicolor_led",
+            "bjt_npn",
+            "bjt_pnp",
+            "capacitor",
+            "fuse",
+            "inductor",
+            "ldr",
+            "led",
+            "nmos",
+            "pmos",
+            "potentiometer",
+            "push_button",
+            "resistor",
+            "rgb_led",
+            "spdt_switch",
+            "switch",
+            "thermistor",
+            "trimmer",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The loop's first circuit is fixture 01, the passive lab, which needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs (led, rgb_led, bicolor_led) are implemented (W1e)."
+        },
+        {
+          "describe": "getElementChannelI — rgb_led",
+          "name": "returns three channels for rgb_led",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "rgb_led",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the rgb_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — rgb_led",
+          "name": "all channels conduct when all three are driven",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "rgb_led",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the rgb_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — rgb_led",
+          "name": "kills one channel when its resistor is open (very high R)",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "rgb_led",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the rgb_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — rgb_led",
+          "name": "channels are independent — changing one resistor does not affect others",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "rgb_led",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the rgb_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — bicolor_led",
+          "name": "returns two channels for bicolor_led",
+          "status": "portable",
+          "kinds": [
+            "bicolor_led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the bicolor_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — bicolor_led",
+          "name": "both channels conduct when both anodes are driven",
+          "status": "portable",
+          "kinds": [
+            "bicolor_led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the bicolor_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "getElementChannelI — bicolor_led",
+          "name": "channel 2 is off when its anode resistor is open",
+          "status": "portable",
+          "kinds": [
+            "bicolor_led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives each anode of the bicolor_led through its own resistor from 5 V and asserts per-channel currents read through getElementChannelI() (the core's channel slots, core/README.md 'LED and display records'). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/led-damage-limit-irated.test.ts",
+      "cases": [
+        {
+          "describe": "Q-O24: LED damage limit reads iRated before if_max, like the stamp",
+          "name": "fails open on a 10 mA iRated LED driven at ~15.9 mA, under its 20 mA catalog if_max",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the led (no catalogUid) loads and runs, and the case FAILS with 'expected undefined to be defined' (stepUntilFailure never latches): the damage limit and led_failed are W1g (slow/failures.rs). Classic latches at about 15.8 s."
+        },
+        {
+          "describe": "Q-O24: LED damage limit reads iRated before if_max, like the stamp",
+          "name": "control: with no iRated param, the limit stays the catalog's 20 mA if_max",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Passes on the core, but only vacuously: it asserts getFailures() stays empty for 18 s of a 15.9 mA drive, which a core with no failure detection (W1g) satisfies whatever the LED's damage limit is (a 1 mA limit would pass it too). Not counted as portable coverage until W1g lands led_failed."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/microbit-integration.test.ts",
+      "cases": [
+        {
+          "describe": "micro:bit — engine breadboard bridge (P0 drive)",
+          "name": "lights an LED when the program drives P0 high",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — engine breadboard bridge (P0 drive)",
+          "name": "leaves the LED dark when P0 is driven low",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — engine breadboard bridge (P0 drive)",
+          "name": "drives an analog (PWM-duty) level onto P0",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — engine breadboard bridge (P0 drive)",
+          "name": "power=0 (USB unplugged) leaves a P0-driven LED dark",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — drive lifecycle across load()",
+          "name": "keeps a surviving board's drive across a topology edit (reload)",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — drive lifecycle across load()",
+          "name": "prunes drives for boards deleted from the circuit",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — drive lifecycle across load()",
+          "name": "an empty drives push (host clear on re-flash) releases the pin",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — breakout dock GPIO bridge (P8 drive)",
+          "name": "lights an LED when the program drives P8 high",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — breakout dock GPIO bridge (P8 drive)",
+          "name": "leaves the LED dark when P8 is driven low",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — breakout dock GPIO bridge (P8 drive)",
+          "name": "ignores a drive for a pin not in the component's current pin set",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — 3V pad sources a rail (power switch)",
+          "name": "lights a 3V->LED->R rail when powered on",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "micro:bit — 3V pad sources a rail (power switch)",
+          "name": "kills the 3V rail when powered off",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "microbit",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:microbit). The led is only the probe on a micro:bit pad; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/pico-integration.test.ts",
+      "cases": [
+        {
+          "describe": "Raspberry Pi Pico — engine integration (real MicroPython)",
+          "name": "lights the LED when the program drives GP15 high",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "raspberry_pi_pico",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:raspberry_pi_pico). The led is only the probe on a Pico pin; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "Raspberry Pi Pico — engine integration (real MicroPython)",
+          "name": "leaves the LED dark when the program drives GP15 low",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "raspberry_pi_pico",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:raspberry_pi_pico). The led is only the probe on a Pico pin; MCU emulators stay TS-only until W4/W7 (core/README.md, division of labour), out of W1 scope entirely. led is implemented (W1e) and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/potentiometer.test.ts",
+      "cases": [
+        {
+          "describe": "potentiometer",
+          "name": "carries the wiper's LED current at every position, both stops included",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "led",
+            "potentiometer",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:potentiometer). bench_psu is W1f and potentiometer is W1h; led is implemented (W1e) and is not what blocks it."
+        },
+        {
+          "describe": "trimmer",
+          "name": "carries the wiper's LED current at every position, both stops included",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "led",
+            "resistor",
+            "trimmer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:trimmer). bench_psu is W1f and trimmer is W1h; led is implemented (W1e) and is not what blocks it."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/seg7-load.test.ts",
+      "cases": [
+        {
+          "describe": "7-segment package common connectivity",
+          "name": "seg7_cc rejects conflicting voltages on its duplicate COM leads",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "graph.ts bonds COM and COM2 into one net, so the ideal source wired across them has both terminals on one net: a loop of ideal sources, which the core rejects as a topology decline (-3, 'topology:voltage_source (component 1): both terminals already fixed') and HeadlessRunner falls back to classic for. The adapter's load() then throws CoreSuiteFellBackError by design. The case asserts classic's own lastConverged === false for that circuit, which has no core counterpart (same shape as high-impedance's conflicting-source cases)."
+        },
+        {
+          "describe": "7-segment package common connectivity",
+          "name": "seg7_ca rejects conflicting voltages on its duplicate COM leads",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_ca",
+            "voltage_source"
+          ],
+          "reason": "graph.ts bonds COM and COM2 into one net, so the ideal source wired across them has both terminals on one net: a loop of ideal sources, which the core rejects as a topology decline (-3, 'topology:voltage_source (component 1): both terminals already fixed') and HeadlessRunner falls back to classic for. The adapter's load() then throws CoreSuiteFellBackError by design. The case asserts classic's own lastConverged === false for that circuit, which has no core counterpart (same shape as high-impedance's conflicting-source cases)."
+        },
+        {
+          "describe": "seg7_cc electrical load — series resistor",
+          "name": "segment a conducts ~9 mA and is reported lit via getElementChannelI",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Segment a of a seg7_cc through 330 ohm from 5 V: asserts the channel current is 7-11 mA and the record is present. Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "seg7_cc electrical load — series resistor",
+          "name": "total element current equals the single lit segment current",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Asserts the seg7_cc's reported element current equals channel a's current within 1 uA, so it needs a real channel record (`ch!` throws on an absent one). Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "seg7_cc — undriven segment",
+          "name": "unconnected segments report ~0 current",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Only segment a wired; asserts channels b..dp read under 1 uA. `ch!` throws on an absent record, so the core must publish the eight channel slots. Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "seg7_cc — undriven segment",
+          "name": "a seg7_cc with no pins wired has zero channel current",
+          "status": "not-yet",
+          "kinds": [
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Stays not-yet: the assertion sits inside `if (ch !== undefined)` and the case's own comment accepts 'absent or all zeros', so it pins no behaviour. With the delegating adapter the guard is entered and eight zero slots are checked, but with no pin wired there is no junction that could conduct; a core (or a stub) publishing nothing would satisfy it just as well. Not counted as coverage."
+        },
+        {
+          "describe": "seg7_ca electrical load — mirrored polarity",
+          "name": "segment a conducts ~9 mA with common-anode polarity",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "seg7_ca",
+            "voltage_source"
+          ],
+          "reason": "Segment a of a seg7_ca (common to 5 V, segment through 330 ohm to ground): asserts 7-11 mA on channel a. Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "seg7_ca electrical load — mirrored polarity",
+          "name": "reverse polarity (CC wired as CA) produces near-zero current",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "A seg7_cc wired common-to-5 V, so its segment diode is reverse-biased; asserts channel a under 1 uA. The `if (ch !== undefined)` guard is entered (the core publishes all eight slots, checked by probe), and the same wiring on a seg7_ca conducts 7-11 mA in the case above, so the assertion pins junction orientation. Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "74LS47 + seg7_ca — digit 1 (segments b and c lit)",
+          "name": "lit segment (b) draws mA-scale current via 74LS47 open-collector sink",
+          "status": "portable",
+          "kinds": [
+            "74ls47",
+            "resistor",
+            "seg7_ca",
+            "voltage_source"
+          ],
+          "reason": "A 74LS47 decoding BCD 1 sinks segment b of a seg7_ca through 330 ohm; asserts mA-scale current on that channel. Failed while the adapter stubbed getElementChannelI() as {}; ran and passed on the core once the adapter delegated it to the active readout (W1e follow-up)."
+        },
+        {
+          "describe": "CD4511 + seg7_cc — digit 1 (segments b and c lit)",
+          "name": "lit segment (b) draws mA-scale current via CD4511 push-pull source",
+          "status": "not-yet",
+          "kinds": [
+            "cd4511",
+            "resistor",
+            "seg7_cc",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:cd4511). cd4511 is W1h (core/README.md, IC logic pins)."
+        },
+        {
+          "describe": "static diagnostic guard — seg7 without series resistor",
+          "name": "seg7 without series resistor fires led-no-resistor as WARNING not CRITICAL",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_cc",
+            "battery_pack"
+          ],
+          "reason": "Calls buildNets() and runDiagnostics() over a plain Circuit directly and never loads a SimEngine, so there is no load()/step() for the core-suites alias to intercept. Pure static-diagnostic check, not a physics comparison."
+        },
+        {
+          "describe": "static diagnostic guard — seg7 without series resistor",
+          "name": "seg7 with series resistor does NOT fire led-no-resistor",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_cc",
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "Same buildNets()/runDiagnostics() static check as the case above, no SimEngine involved."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/state-rollback-derived.test.ts",
+      "cases": [
+        {
+          "describe": "adaptive rollback derived-state integrity",
+          "name": "restores the converged vector used by channel currents and solver diagnostics",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "rgb_led",
+            "voltage_source"
+          ],
+          "reason": "Calls engine.saveState()/restoreState() and assigns classic's solver diagnostics (Object.assign onto lastIters, lastSolveUs, ... fails on the adapter: 'Cannot set property lastIters of #<SimEngine> which has only a getter') to prove classic's adaptive-rollback bookkeeping restores them. Rollback state and those diagnostics are classic-internal, with no core counterpart."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/step-breakpoints.test.ts",
+      "cases": [
+        {
+          "describe": "SimEngine step breakpoints",
+          "name": "records the state on both sides of each 555 switch, inside the step that switched",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "ne555",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+        },
+        {
+          "describe": "SimEngine step breakpoints",
+          "name": "records nothing unless asked",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "ne555",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+        },
+        {
+          "describe": "SimEngine step breakpoints",
+          "name": "drops the breakpoints of a rolled-back trial",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "ne555",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+        },
+        {
+          "describe": "SimEngine step breakpoints",
+          "name": "changes the trajectory only by the guard sub-step",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "ne555",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/thermal-engine-physics.test.ts",
+      "cases": [
+        {
+          "describe": "engine package thermal coupling",
+          "name": "feeds an identified LED's package self-heating back into its junction law",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:led). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class. The case also asserts thermal state (junction temperature, package heating) that the core does not hold."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "cools a failed-open LED instead of heating the intact junction law across its open voltage",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:led). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class. The case also asserts thermal state (junction temperature, package heating) that the core does not hold."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/graph.test.ts",
+      "cases": [
+        {
+          "describe": "buildNets — physical same-package unions",
+          "name": "unions both seg7_cc common leads",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_cc"
+          ],
+          "reason": "Calls buildNets() directly on a one-component circuit and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's COM/COM2 bonding (a TS net-builder rule the core compiler inherits), not device physics."
+        },
+        {
+          "describe": "buildNets — physical same-package unions",
+          "name": "unions both seg7_ca common leads",
+          "status": "classic-only",
+          "kinds": [
+            "seg7_ca"
+          ],
+          "reason": "Same buildNets()-only check as the seg7_cc case, no SimEngine involved."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/led-display-555-supplemental.test.ts",
+      "cases": [
+        {
+          "describe": "rgb_led — each channel is its own junction against the common cathode",
+          "name": "drops its own forward voltage on every channel: blue above green above red",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "rgb_led"
+          ],
+          "reason": "Three channels driven through 330 ohm from 5 V, common cathode grounded; each anode node is checked against the diode law's load-line solution for that channel's Vf (1.8, 2.0, 3.0 V). Node voltages only, and checked against an independent model rather than a current band. One load, five 100 us steps."
+        },
+        {
+          "describe": "bicolor_led — two anodes against one shared cathode",
+          "name": "drops each anode's own forward voltage through its own resistor",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bicolor_led"
+          ],
+          "reason": "Two anodes driven through 330 ohm and 1 k from 5 V, shared cathode grounded; each anode node is checked against the load-line solution for its own Vf (1.8, 2.0 V). One load, five steps."
+        },
+        {
+          "describe": "7-segment displays — a segment is one junction against the common lead",
+          "name": "seg7_cc: a correctly wired segment drops its forward voltage",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "seg7_cc"
+          ],
+          "reason": "Segment a through 330 ohm from 5 V against the common lead wired the kind's way round (common to ground); the segment's junction voltage is checked against the load-line solution for Vf 2.0 V. One load, five steps."
+        },
+        {
+          "describe": "7-segment displays — a segment is one junction against the common lead",
+          "name": "seg7_ca: a correctly wired segment drops its forward voltage",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "seg7_ca"
+          ],
+          "reason": "Segment a through 330 ohm from 5 V against the common lead wired the kind's way round (common to 5 V, segment to ground); the segment's junction voltage is checked against the load-line solution for Vf 2.0 V. One load, five steps."
+        },
+        {
+          "describe": "7-segment displays — a segment is one junction against the common lead",
+          "name": "seg7_cc: a segment wired against its polarity does not conduct",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "seg7_cc"
+          ],
+          "reason": "Same circuit with the common lead on the wrong rail: the junction is reverse-biased, so the 330 ohm resistor holds the segment node at its far rail within 1 uV."
+        },
+        {
+          "describe": "7-segment displays — a segment is one junction against the common lead",
+          "name": "seg7_ca: a segment wired against its polarity does not conduct",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "seg7_ca"
+          ],
+          "reason": "Same circuit with the common lead on the wrong rail: the junction is reverse-biased, so the 330 ohm resistor holds the segment node at its far rail within 1 uV."
         }
       ]
     }
