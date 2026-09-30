@@ -233,7 +233,9 @@ describe("breadboard fixture audit", () => {
   });
 
   it("dims the passive fixture potentiometer LED by changing current", () => {
-    const currents = [0.15, 0.45, 0.75].map((position) => {
+    // Turning counter-clockwise walks the wiper toward CCW (the LED rail
+    // side) and dims the LED.
+    const currents = [0.85, 0.55, 0.25].map((position) => {
       const fixture = loadFixture("01-passive-sensor-transistor-lab.json");
       const pot = fixture.components.find((c) => c.id === "pot_divider");
       if (!pot) throw new Error("missing pot_divider");

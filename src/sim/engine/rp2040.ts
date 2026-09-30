@@ -15,7 +15,7 @@
  * outputs-valid-after-step / inputs-consumed-next-step phasing as ArduinoMcu.
  */
 
-import { RP2040, Simulator, USBCDC, GPIOPinState } from "rp2040js";
+import { RP2040, Simulator, USBCDC, GPIOPinState, ConsoleLogger, LogLevel } from "rp2040js";
 import type { MicrocontrollerCore, PinDriveState, PinEvent } from "./mcu.js";
 import { bootromB1 } from "./rp2040-bootrom.js";
 
@@ -25,6 +25,10 @@ const CYCLE_NANOS = 1e9 / CLOCK_HZ;
 const MAX_INSTRUCTIONS_PER_STEP = 8_000_000;
 // Flash XIP base — where the UF2 boot2 lives and where the CPU jumps after boot.
 const FLASH_XIP_BASE = 0x10000000;
+// Full-scale result of the RP2040's 12-bit ADC.
+const ADC_MAX_COUNT = 4095;
+// RP2040 datasheet 4.9.5: the sensor's Vbe is 0.706 V at 27 °C, i.e. 876 counts against 3.3 V.
+const ADC_TEMP_SENSOR_COUNTS_27C = Math.round((0.706 / 3.3) * ADC_MAX_COUNT);
 
 // Raw-REPL control bytes (MicroPython).
 const CTRL_C = 0x03; // interrupt
@@ -109,6 +113,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
   private _pendingSource: string | null = null;
   private _replPhase: 0 | 1 | 2 = 0;
   private _nudgeCount = 0;
+  // Reads the firmware armed on a USB OUT endpoint while the host had nothing
+  // to send (endpoint -> byte count). Answered by send(); see boot().
+  private _heldReads = new Map<number, number>();
+  // REPL bytes not yet in USBCDC's tx FIFO, which holds 512 and drops the rest.
+  private _txQueue: number[] = [];
 
   /** @param firmware optional UF2 image (e.g. MicroPython) to boot from flash. */
   constructor(firmware?: Uint8Array) {
@@ -127,9 +136,18 @@ export class RP2040Mcu implements MicrocontrollerCore {
     // ourselves (never call Simulator.execute — that starts a setTimeout pacer).
     this.sim = new Simulator();
     this.rp2040 = this.sim.rp2040;
+    // rp2040js defaults to a Debug-level ConsoleLogger, which prints every USB
+    // transfer, SEV and unimplemented peripheral access: thousands of lines a
+    // second while MicroPython boots, enough to stall the host. Keep errors only
+    // (still thrown, as before).
+    this.rp2040.logger = new ConsoleLogger(LogLevel.Error, true);
     // The boot ROM must be present: on reset the core reads the reset vector
     // from ROM at address 0. Then we jump straight into flash boot2.
     this.rp2040.loadBootrom(bootromB1);
+    // ADC4 is the on-die temperature sensor. The engine never feeds it, and
+    // rp2040js starts it at 0 counts (437 °C by the datasheet formula), so hold
+    // it at room temperature. Set here so reset() re-seeds it too.
+    this.rp2040.adc.channelValues[4] = ADC_TEMP_SENSOR_COUNTS_27C;
     // USB CDC exposes the MicroPython REPL (stdin/stdout) so runScript() can push
     // the student's program at runtime — no on-disk filesystem image needed.
     this.cdc = new USBCDC(this.rp2040.usbCtrl);
@@ -139,6 +157,20 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this.cdc.onSerialData = (buf) => {
       this._serialOut += String.fromCharCode(...buf);
       if (this._serialOut.length > 8192) this._serialOut = this._serialOut.slice(-4096);
+    };
+    // USBCDC answers every read the firmware arms on its OUT endpoint 10 us
+    // later, with an empty packet when there is nothing to send. TinyUSB re-arms
+    // on each one, so a MicroPython program asleep in WFE took a USB interrupt
+    // every ~28 us and its core was busy ~90% of the time: every Pico project ran
+    // below real time. A real host sends OUT data only when it has some, so hold
+    // the armed read until send() queues bytes. Each read also tops the FIFO up
+    // from _txQueue, so a program longer than the FIFO arrives whole.
+    const usb = this.rp2040.usbCtrl;
+    const answerRead = usb.onEndpointRead;
+    usb.onEndpointRead = (endpoint, byteCount) => {
+      this.fillTxFifo();
+      if (this.cdc.txFIFO.empty) this._heldReads.set(endpoint, byteCount);
+      else answerRead?.(endpoint, byteCount);
     };
     if (this._firmware) {
       loadUF2IntoFlash(this._firmware, this.rp2040.flash);
@@ -150,6 +182,8 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this._connected = false;
     this._replPhase = 0;
     this._nudgeCount = 0;
+    this._heldReads.clear();
+    this._txQueue = [];
     this.installListeners();
   }
 
@@ -178,7 +212,22 @@ export class RP2040Mcu implements MicrocontrollerCore {
   }
 
   private send(bytes: number[]): void {
-    for (const b of bytes) this.cdc.sendSerialByte(b);
+    // Queue rather than sendSerialByte(): pushing a whole program into the
+    // 512-byte FIFO dropped its tail and the Ctrl-D that runs it.
+    for (const b of bytes) this._txQueue.push(b);
+    // Answer the reads the firmware armed while there was nothing to send.
+    // USBCDC ignores any that are not its data OUT endpoint, as it always has.
+    const held = [...this._heldReads];
+    this._heldReads.clear();
+    for (const [endpoint, byteCount] of held) this.rp2040.usbCtrl.onEndpointRead?.(endpoint, byteCount);
+  }
+
+  /** Move queued REPL bytes into USBCDC's tx FIFO, as far as it has room. */
+  private fillTxFifo(): void {
+    const fifo = this.cdc.txFIFO;
+    const n = Math.min(fifo.size - fifo.itemCount, this._txQueue.length);
+    for (let i = 0; i < n; i++) fifo.push(this._txQueue[i]);
+    this._txQueue.splice(0, n);
   }
 
   private pumpRepl(): void {
@@ -266,10 +315,18 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this.rp2040.gpio[def.index].setInputValue(level === 1);
   }
 
+  /**
+   * Feed an external analog voltage into an ADC pin. rp2040js reads
+   * `channelValues` as raw 12-bit conversion results, so the voltage is
+   * converted to counts against ADC_VREF. The engine does not model the
+   * ADC_VREF pad separately; on the Pico it is the filtered 3V3 rail, which is
+   * what the engine passes as `vcc`.
+   */
   setAnalogVolts(pin: string, volts: number, vcc = 3.3): void {
     const def = PIN_MAP[pin];
     if (!def || def.adcChannel == null) return;
-    this.rp2040.adc.channelValues[def.adcChannel] = Math.max(0, Math.min(vcc, volts));
+    const fraction = vcc > 0 ? Math.max(0, Math.min(1, volts / vcc)) : 0;
+    this.rp2040.adc.channelValues[def.adcChannel] = Math.round(fraction * ADC_MAX_COUNT);
   }
 
   getStepPinEvents(): readonly PinEvent[] {

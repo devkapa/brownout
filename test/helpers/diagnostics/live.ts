@@ -33,6 +33,9 @@ import { createCatalogResolver } from "../../../src/circuit/catalog-resolver.js"
 import type { DiagnosticFinding, DiagnosticsInput, LiveReadings } from "./types.js";
 
 const RATED_LIMIT_WARNING_MULTIPLIER = 1.1;
+// The engine's POT_SEGMENT_MIN_RATING_SHARE: a short pot track segment shares
+// its heat with the substrate, so its rating share never drops below this.
+const POT_SEGMENT_MIN_RATING_SHARE = 0.25;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Helpers shared with static.ts — exported so static.ts can re-use them
@@ -644,13 +647,16 @@ export function analyzeLive(input: DiagnosticsInput): DiagnosticFinding[] {
         const current = elementI[comp.id] ?? 0;
         power = resistance > 0 ? current * current * resistance : 0;
       } else {
-        const rTotal = Math.max(1, Number(comp.params.rTotal ?? comp.params.resistance ?? 10_000));
+        // Mirrors the engine's pot model (src/sim/engine/devices/passives.ts):
+        // position is rotation from the CCW stop, so 1 puts the wiper at CW,
+        // and no segment's share of the rating drops below a quarter.
+        const rTotal = Math.max(1, Number(comp.params.rTotal ?? 10_000));
         const position = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
-        const effectivePosition = String(comp.params.taper ?? "linear") === "log"
+        const fromCcw = String(comp.params.taper ?? "linear") === "log"
           ? Math.pow(10, 2 * (position - 1))
           : position;
-        const rCw = Math.max(1, rTotal * effectivePosition);
-        const rCcw = Math.max(1, rTotal * (1 - effectivePosition));
+        const rCw = Math.max(1, rTotal * (1 - fromCcw));
+        const rCcw = Math.max(1, rTotal * fromCcw);
         const pinVoltage = (pinId: string): number => {
           const netId = pinNet(comp.id, pinId);
           return netId ? (netV[netId] ?? 0) : 0;
@@ -658,8 +664,8 @@ export function analyzeLive(input: DiagnosticsInput): DiagnosticFinding[] {
         const pCw = (pinVoltage("cw") - pinVoltage("wiper")) ** 2 / rCw;
         const pCcw = (pinVoltage("wiper") - pinVoltage("ccw")) ** 2 / rCcw;
         const trackResistance = rCw + rCcw;
-        const cwLimit = pMax * rCw / trackResistance;
-        const ccwLimit = pMax * rCcw / trackResistance;
+        const cwLimit = pMax * Math.max(rCw / trackResistance, POT_SEGMENT_MIN_RATING_SHARE);
+        const ccwLimit = pMax * Math.max(rCcw / trackResistance, POT_SEGMENT_MIN_RATING_SHARE);
         if (pCw / cwLimit >= pCcw / ccwLimit) {
           power = pCw;
           localLimit = cwLimit;

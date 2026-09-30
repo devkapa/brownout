@@ -183,6 +183,55 @@ describe("structured physics telemetry", () => {
     expect(telemetry.components.range.modelState).not.toHaveProperty("echoRiseSimTimeS");
   });
 
+  it("reports whether a buzzer or speaker is sounding, and a passive buzzer's tone", () => {
+    // 440 Hz 0-5 V clock across a passive buzzer and a speaker; a 0.5 V DC
+    // source (under the active buzzer's 1.5 V oscillator threshold) across an
+    // active buzzer. 20 ms at 10 µs: 8.8 periods and four 5 ms speaker windows.
+    const circuit: SimCircuit = {
+      components: [
+        { id: "clk", kind: "clock_gen", pins: [{ id: "out" }, { id: "gnd" }], params: { frequency: 440, duty: 0.5 } },
+        { id: "low", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 0.5 } },
+        { id: "passive", kind: "buzzer", pins: [{ id: "p1" }, { id: "p2" }], params: { type: "passive", resistance: 32 } },
+        { id: "spk", kind: "speaker", pins: [{ id: "p1" }, { id: "p2" }], params: { resistance: 8 } },
+        { id: "active", kind: "buzzer", pins: [{ id: "p1" }, { id: "p2" }], params: { type: "active", resistance: 32 } },
+      ],
+      wires: [
+        { from_component: "clk", from_pin: "out", to_component: "passive", to_pin: "p1" },
+        { from_component: "clk", from_pin: "gnd", to_component: "passive", to_pin: "p2" },
+        { from_component: "clk", from_pin: "out", to_component: "spk", to_pin: "p1" },
+        { from_component: "clk", from_pin: "gnd", to_component: "spk", to_pin: "p2" },
+        { from_component: "low", from_pin: "pos", to_component: "active", to_pin: "p1" },
+        { from_component: "low", from_pin: "neg", to_component: "active", to_pin: "p2" },
+      ],
+    };
+    // Load's seed solve has seen one sample: no tone yet, so silent.
+    const loaded = new SimEngine();
+    loaded.load(circuit);
+    const seeded = buildPhysicsTelemetry(loaded, circuit, false).components.passive?.modelState;
+    expect(seeded).toMatchObject({ kind: "buzzer", buzzerType: "passive", sounding: false });
+    expect(seeded).not.toHaveProperty("toneHz");
+
+    const engine = run(circuit, 2000, 10e-6);
+    const telemetry = buildPhysicsTelemetry(engine, circuit, true);
+    const passive = telemetry.components.passive.modelState;
+    expect(passive).toMatchObject({ kind: "buzzer", buzzerType: "passive", sounding: true });
+    // Within one 10 µs step of the 2.2727 ms period: 440 Hz ± 0.44 %.
+    expect(passive?.kind === "buzzer" ? passive.toneHz : undefined).toBeGreaterThan(438);
+    expect(passive?.kind === "buzzer" ? passive.toneHz : undefined).toBeLessThan(442);
+    expect(passive?.provenance).toEqual({
+      source: "engine",
+      quality: "behavioral-estimate",
+      method: "engine.getIcState",
+    });
+    expect(telemetry.components.spk.modelState).toMatchObject({ kind: "speaker", sounding: true });
+    expect(telemetry.components.active.modelState).toEqual(expect.objectContaining({
+      kind: "buzzer",
+      buzzerType: "active",
+      sounding: false,
+    }));
+    expect(telemetry.components.active.modelState).not.toHaveProperty("toneHz");
+  });
+
   it("reports exact package thermal provenance, load envelope, and state", () => {
     const circuit: SimCircuit = {
       components: [

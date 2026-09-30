@@ -178,8 +178,13 @@ function acStampClampDiode(
   stampAcAdmittance(ac, anode, cathode, gd + AC_GMIN, 0);
 }
 
+// The contacts follow the committed energized flag, which depends on the
+// coil's differential voltage alone.
+const RELAY_GALVANIC_GROUPS = [["coil_a", "coil_b"], ["com", "no", "nc"]] as const;
+
 export const relayModel: DeviceModel = {
   kinds: ["relay"],
+  galvanicGroups: () => RELAY_GALVANIC_GROUPS,
   stamp: (ctx, comp, _xGuess, h) => {
     // W6.1 — SPDT relay.
     //
@@ -1134,6 +1139,21 @@ export const ulnModel: DeviceModel = {
   },
 };
 
+/** Envelope relaxation time: holds a 20 Hz, 10%-duty square's long half. */
+const PASSIVE_ENV_TAU = 0.1;
+/** Schmitt half-band, as a fraction of the envelope swing. */
+const PASSIVE_HYSTERESIS = 0.1;
+/** Smallest swing that counts as a drive; the speaker's 50 mV p-p floor. */
+const PASSIVE_MIN_SWING = 0.05;
+/** Below 20 Hz a piezo clicks per edge rather than sounding a tone. */
+const AUDIBLE_MIN_HZ = 20;
+const AUDIBLE_MAX_HZ = 20000;
+
+/** Which side of the Schmitt band `v` is on: 1 above, -1 below, 0 inside. */
+function bandSide(v: number, mid: number, band: number): number {
+  return v > mid + band ? 1 : v < mid - band ? -1 : 0;
+}
+
 export const buzzerModel: DeviceModel = {
   kinds: ["buzzer"],
   // ── W6.2 Buzzer (active / passive) ──────────────────────────────────
@@ -1165,12 +1185,19 @@ export const buzzerModel: DeviceModel = {
   //   We use 1.5 V as a conservative threshold that matches common 3.3 V / 5 V
   //   systems where anything above 1.5 V would run the oscillator.
   //
-  // Passive buzzer: sounding = detected frequency > 0.
-  //   Zero-crossing detection: every time the terminal voltage changes sign
-  //   (above/below a small threshold to avoid noise near 0 V), we record
-  //   the simTime and compute: Hz = 1 / (2 × half-period).
-  //   This gives the fundamental frequency of the drive signal.
-  //   The 1 mV threshold avoids noise triggering.
+  // Passive buzzer: sounding = a tone in the audible band is detected.
+  //   A Schmitt trigger around the drive's own midpoint. The envelope
+  //   (envHi/envLo) jumps to each new extreme and relaxes toward the signal
+  //   with PASSIVE_ENV_TAU; a crossing is the voltage leaving the band
+  //   mid ± PASSIVE_HYSTERESIS × swing on the opposite side from last time.
+  //   The midpoint must come from the signal, not 0 V: the 0-5 V square the
+  //   part's help recommends (clock_gen, a PWM pin) never goes negative.
+  //   Hz is 1 / (this crossing − the one before last), a full period, so a
+  //   non-50% duty reads the drive frequency; the first reading, at the
+  //   second crossing, doubles the half-period instead. Swings under
+  //   PASSIVE_MIN_SWING (the speaker's signal-present floor) are silence.
+  //   The tone clears after two periods with no crossing, so a drive that
+  //   stops (noTone(), a clock switched off) stops sounding.
   commitState: (ctx, comp, x, h) => {
     if (!(comp.pins.length >= 2)) return;
     const stBuzz = ctx.state.icState.get(comp.id) ?? defaultIcState("buzzer");
@@ -1179,29 +1206,59 @@ export const buzzerModel: DeviceModel = {
     const buzzerType = String(comp.params.type ?? "active");
     let newLastSign = stBuzz.lastSign as number;
     let newLastCrossT = stBuzz.lastCrossT as number;
+    let newPrevCrossT = stBuzz.prevCrossT as number;
+    let newEnvHi = stBuzz.envHi as number;
+    let newEnvLo = stBuzz.envLo as number;
     let newDetectedHz = stBuzz.detectedHz as number;
 
     if (buzzerType === "passive") {
-      // Passive: zero-crossing frequency detector.
-      // Track sign of terminal voltage. A crossing from positive→negative or
-      // negative→positive (with 1 mV noise floor) marks a half-period.
-      const CROSS_THRESHOLD = 0.001; // 1 mV noise floor
-      const curSign = vBuzz > CROSS_THRESHOLD ? 1 : vBuzz < -CROSS_THRESHOLD ? -1 : 0;
-      if (curSign !== 0) {
-        if (!Number.isNaN(newLastSign) && newLastSign !== 0 && curSign !== newLastSign) {
-          // Sign changed: one half-period elapsed.
-          const now = ctx.simTime() + h;
-          if (!Number.isNaN(newLastCrossT) && newLastCrossT > 0 && now > newLastCrossT) {
-            const halfPeriod = now - newLastCrossT;
-            // hz = 1 / (2 × halfPeriod). Clamp to audio range 1 Hz – 100 kHz
-            // to filter transient glitches from circuit startup noise.
-            const hz = 1 / (2 * halfPeriod);
-            newDetectedHz = (hz >= 1 && hz <= 100000) ? hz : 0;
-          }
-          newLastCrossT = ctx.simTime() + h;
-        }
-        newLastSign = curSign;
+      const now = ctx.simTime() + h;
+      // Backward Euler holds a step's end state across the whole step, so a
+      // crossing seen at this step's end is timed at its start. A square edge
+      // crossed by a 10 ns guard step and one first seen by the next full
+      // step (the source read the old level at the guard's end) then read the
+      // same instant, not a step apart; timed at the end, a 440 Hz clock read
+      // 400 or 489 Hz in the worker whenever consecutive edges differed.
+      const stepStart = ctx.simTime();
+      const prevHi = newEnvHi;
+      const prevLo = newEnvLo;
+      const hadEnvelope = Number.isFinite(prevHi) && Number.isFinite(prevLo);
+      if (hadEnvelope) {
+        const keep = Math.exp(-h / PASSIVE_ENV_TAU);
+        newEnvHi = Math.max(vBuzz, vBuzz + (prevHi - vBuzz) * keep);
+        newEnvLo = Math.min(vBuzz, vBuzz + (prevLo - vBuzz) * keep);
+      } else {
+        newEnvHi = vBuzz;
+        newEnvLo = vBuzz;
       }
+      const swing = newEnvHi - newEnvLo;
+      if (swing >= PASSIVE_MIN_SWING) {
+        const mid = (newEnvHi + newEnvLo) / 2;
+        const band = PASSIVE_HYSTERESIS * swing;
+        // The drive has just started: until this sample the envelope sat
+        // flat at the old level, so that level's side is where this edge
+        // came from. Without it the first edge of every drive is lost.
+        if (hadEnvelope && prevHi - prevLo < PASSIVE_MIN_SWING) {
+          const from = bandSide((prevHi + prevLo) / 2, mid, band);
+          if (from !== 0) newLastSign = from;
+        }
+        const curSign = bandSide(vBuzz, mid, band);
+        if (curSign !== 0) {
+          if (newLastSign === -curSign) {
+            if (Number.isFinite(newLastCrossT)) {
+              const period = Number.isFinite(newPrevCrossT)
+                ? stepStart - newPrevCrossT
+                : 2 * (stepStart - newLastCrossT);
+              const hz = period > 0 ? 1 / period : 0;
+              newDetectedHz = hz >= AUDIBLE_MIN_HZ && hz <= AUDIBLE_MAX_HZ ? hz : 0;
+            }
+            newPrevCrossT = newLastCrossT;
+            newLastCrossT = stepStart;
+          }
+          newLastSign = curSign;
+        }
+      }
+      if (newDetectedHz > 0 && now - newLastCrossT > 2 / newDetectedHz) newDetectedHz = 0;
     }
     // Store sounding flag in the same icState slot for easy UI access.
     // "sounding" is 1 when the buzzer should be audible, 0 when silent.
@@ -1215,6 +1272,9 @@ export const buzzerModel: DeviceModel = {
     ctx.state.icState.set(comp.id, {
       lastSign: newLastSign,
       lastCrossT: newLastCrossT,
+      prevCrossT: newPrevCrossT,
+      envHi: newEnvHi,
+      envLo: newEnvLo,
       detectedHz: newDetectedHz,
       sounding,
     });

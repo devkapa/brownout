@@ -27,7 +27,7 @@
  * state for a hard restart.
  */
 
-import { buildNets, type Net } from "./graph.js";
+import { buildNets, sourceReturnPinId, type Net } from "./graph.js";
 import { createLinearSystem, type LinearSystem } from "./linear-system.js";
 import {
   parallelLossCurrent,
@@ -83,6 +83,19 @@ function nowMs(): number {
 // system with the identical node shunt so both systems are regular under the
 // same topologies.
 export const NODE_RSHUNT_G = 1e-12;
+
+// Reference conductance from one node of each electrically isolated section
+// (a second battery's loop, an optocoupler's LED side, a transformer's
+// secondary) to ground. Such a section has no path to ground by
+// construction, so the anchor carries only the section's RSHUNT currents
+// (~1e-11 A) and moves nothing physical: it is the section's own voltage
+// reference, the coordinate choice buildNets makes for the main section.
+// Without it the section's potential rests on RSHUNT alone, which leaves the
+// matrix singular to rounding (condition ~1e15 once a closed switch stamps
+// 1000 S): LU noise then moves the whole section by tenths of a volt between
+// Newton iterates, and the iteration never converges. Exported for the AC
+// driver, which seeds the same anchors beside the same shunt.
+export const ISOLATED_SECTION_ANCHOR_G = 1;
 
 // Typical internal GPIO pulls. ATmega328P is specified at 20–50 kΩ; RP2040
 // at 50–80 kΩ. Mid-band values give realistic button-divider behaviour while
@@ -1280,13 +1293,14 @@ export function defaultIcState(kind: string): Record<string, number> {
     // W6.2 — ULN2803 (8-channel): same pattern, one extra channel.
     case "uln2803":
       return { in1: NaN, in2: NaN, in3: NaN, in4: NaN, in5: NaN, in6: NaN, in7: NaN, in8: NaN };
-    // W6.2 — buzzer: lastSign tracks zero-crossing state for passive frequency detection.
-    //   lastSign: sign of last terminal voltage sample (1 or -1; NaN = uninitialised).
-    //   lastCrossT: simTime of last zero-crossing (for period measurement).
+    // W6.2 — buzzer: the passive buzzer's tone detector (see buzzerModel).
+    //   lastSign: side of the Schmitt band last seen (1 or -1; NaN = uninitialised).
+    //   lastCrossT / prevCrossT: simTime of the last two crossings (a full period).
+    //   envHi / envLo: envelope of the terminal voltage (NaN until the first sample).
     //   detectedHz: estimated frequency from last period (0 = DC or silent).
-    // Active buzzers do not use lastSign/lastCrossT but share the same state slot.
+    // Active buzzers use none of these but share the same state slot.
     case "buzzer":
-      return { lastSign: NaN, lastCrossT: NaN, detectedHz: 0 };
+      return { lastSign: NaN, lastCrossT: NaN, prevCrossT: NaN, envHi: NaN, envLo: NaN, detectedHz: 0 };
     // W6.2 — speaker: tracks peak and trough of terminal voltage over a short window.
     //   vPeak: running maximum terminal voltage in the window.
     //   vTrough: running minimum terminal voltage in the window.
@@ -1464,6 +1478,11 @@ export class SimEngine {
   // them, but absent from nodeIdx so no netV/probe path can ever see one.
   private internalNodeIdx: Map<string, number> = new Map();
   private nodeCount = 0;
+  // One net row per electrically isolated section, anchored to ground by
+  // ISOLATED_SECTION_ANCHOR_G. Recomputed every load; empty for any circuit
+  // whose nets all share a path to ground, which keeps those solves
+  // bit-identical.
+  private _isolatedSectionAnchorRows: readonly number[] = [];
   // Lazily built per _updateDigitalState call; cleared at its entry so every
   // step rebuilds it fresh from the current solved topology.
   private _dispDrivers: Map<number, { compId: string; pin: string }> | null = null;
@@ -2438,6 +2457,7 @@ export class SimEngine {
     this.nets = buildNets(circuit);
     this._buildMatrix();
     this._compileRuntimeMetadata(circuit);
+    this._compileIsolatedSectionAnchors(circuit);
 
     // Drop program-driven micro:bit pin drives for boards deleted from the
     // circuit; surviving boards keep theirs (their embedded sims are still
@@ -3422,10 +3442,14 @@ export class SimEngine {
       this._dcSolveMode = true;
       this._homotopyGminG = 0;
       this._homotopySourceScale = 1;
-      // Replay of _rebuildStaticStampBase: RSHUNT plus ideal-source
-      // incidence, then the static components, then the dynamic pass.
+      // Replay of _rebuildStaticStampBase: RSHUNT, the isolated-section
+      // anchors and ideal-source incidence, then the static components,
+      // then the dynamic pass.
       for (let row = 0; row < this.nodeCount; row++) {
         recorder.add(row, row, NODE_RSHUNT_G);
+      }
+      for (const row of this._isolatedSectionAnchorRows) {
+        recorder.add(row, row, ISOLATED_SECTION_ANCHOR_G);
       }
       for (const componentId of this._staticIdealSourceIds) {
         const component = this._componentById.get(componentId);
@@ -4412,9 +4436,10 @@ export class SimEngine {
 
   /**
    * Returns the committed IC state record for the given component ID, or
-   * undefined if the component has no IC state.  Used primarily by tests to
-   * inspect the state of ULN, buzzer, speaker, and sequential IC components
-   * without violating the private-state encapsulation in production paths.
+   * undefined if the component has no IC state.  Used by tests to inspect
+   * the state of ULN, buzzer, speaker, and sequential IC components, and by
+   * physics telemetry for the buzzer/speaker sounding readout, without
+   * violating the private-state encapsulation in production paths.
    */
   getIcState(compId: string): Record<string, number> | undefined {
     return this.state.icState.get(compId);
@@ -4625,6 +4650,68 @@ export class SimEngine {
     return minFrac;
   }
 
+  /** Net rows anchored as isolated sections' references (see ISOLATED_SECTION_ANCHOR_G). */
+  isolatedSectionAnchorRows(): readonly number[] {
+    return this._isolatedSectionAnchorRows;
+  }
+
+  /**
+   * Find the electrically isolated sections of the loaded circuit and pick
+   * one anchor row in each. A section is a union of net rows: every pin of a
+   * component joins one group unless its model declares galvanicGroups, so
+   * sections never depend on a switch's position, a relay contact or a
+   * failure state, and a running circuit cannot close a path from an
+   * anchored section to ground. Internal nodes stay out: each couples only
+   * within its own group, which an anchored or grounded section already
+   * fixes.
+   */
+  private _compileIsolatedSectionAnchors(circuit: SimCircuit): void {
+    const netRows = this.nodeCount - this.internalNodeIdx.size;
+    const ground = netRows;
+    const parent = new Int32Array(netRows + 1);
+    for (let i = 0; i <= netRows; i++) parent[i] = i;
+    const find = (i: number): number => {
+      while (parent[i] !== i) {
+        parent[i] = parent[parent[i]!]!;
+        i = parent[i]!;
+      }
+      return i;
+    };
+    for (const comp of circuit.components) {
+      const byPin = this._pinNodeByComp.get(comp.id);
+      if (!byPin) continue;
+      const groups = getDeviceModel(comp.kind)?.galvanicGroups?.(comp)
+        ?? [comp.pins.map((pin) => pin.id)];
+      for (const group of groups) {
+        let root = -1;
+        for (const pinId of group) {
+          const row = byPin.get(pinId);
+          if (row === undefined) continue;
+          const r = find(row < 0 ? ground : row);
+          if (root < 0) root = r;
+          else if (r !== root) parent[r] = root;
+        }
+      }
+    }
+
+    // Prefer a source's return terminal, as buildNets does for the circuit's
+    // ground, so a second battery reads 0 V at its own negative terminal.
+    const groundRoot = find(ground);
+    const anchors = new Map<number, number>();
+    for (const comp of circuit.components) {
+      const pinId = sourceReturnPinId(comp);
+      const row = pinId === undefined ? undefined : this._pinNodeByComp.get(comp.id)?.get(pinId);
+      if (row === undefined || row < 0) continue;
+      const root = find(row);
+      if (root !== groundRoot && !anchors.has(root)) anchors.set(root, row);
+    }
+    for (let row = 0; row < netRows; row++) {
+      const root = find(row);
+      if (root !== groundRoot && !anchors.has(root)) anchors.set(root, row);
+    }
+    this._isolatedSectionAnchorRows = [...anchors.values()].sort((a, b) => a - b);
+  }
+
   private _buildMatrix(): void {
     this.nodeIdx = new Map();
     let idx = 0;
@@ -4805,6 +4892,9 @@ export class SimEngine {
     this.mna.clear();
     for (let row = 0; row < this.nodeCount; row++) {
       this.mna.add(row, row, NODE_RSHUNT_G);
+    }
+    for (const row of this._isolatedSectionAnchorRows) {
+      this.mna.add(row, row, ISOLATED_SECTION_ANCHOR_G);
     }
     for (const componentId of this._staticIdealSourceIds) {
       const component = this._componentById.get(componentId);
