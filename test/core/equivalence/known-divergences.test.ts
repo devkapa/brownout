@@ -5,7 +5,11 @@
  * (classic's icPinMap, and this file's own fallback table — each "naming its
  * source lines" per the fix brief), computeDivergenceCone's forward closure,
  * and classifyMismatches' three id-matching rules end to end on a synthetic
- * SAP-1-shaped circuit.
+ * SAP-1-shaped circuit. S1 adds the widened cone: the analog reach through
+ * resistors, capacitors and LED-family junctions, the sources on the fixed
+ * nodes it touches, a ripple counter's second half, and the two things it
+ * must never do (cross a fixed node, pull in a register that only shares the
+ * rail).
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -40,6 +44,13 @@ describe("digitalOutputPins", () => {
     const expected = new Set(["io0", "io1", "io2", "io3", "io4", "io5", "io6", "io7"]);
     expect(digitalOutputPins("28c16")).toEqual(expected);
     expect(digitalOutputPins("28c256")).toEqual(expected);
+  });
+
+  it("names the registers, counter, RAM and 555 the SAP-1 is built from: core/README.md's sequential and memories tables, and NE555 point 4", () => {
+    expect(digitalOutputPins("74ls173")).toEqual(new Set(["q1", "q2", "q3", "q4"]));
+    expect(digitalOutputPins("74ls161")).toEqual(new Set(["qa", "qb", "qc", "qd", "rco"]));
+    expect(digitalOutputPins("74ls189")).toEqual(new Set(["/o1", "/o2", "/o3", "/o4"]));
+    expect(digitalOutputPins("ne555")).toEqual(new Set(["3", "7"]));
   });
 
   it("is empty for a kind with no known digital outputs (LED, resistor, an unrecognised kind) — the 'stop propagation here' case", () => {
@@ -102,14 +113,14 @@ describe("computeDivergenceCone", () => {
     expect(cone.seedPins.size).toBe(0);
   });
 
-  it("grows forward from a seed's own output pins, and stops at a component with none (the LED) — the seed itself is NOT added to `components` (only its own pins are exempted, via seedPins)", () => {
-    const cone = computeDivergenceCone(phantomEdgeCircuit({ rstLow: true, clockedByNe555: true }), [
-      { componentId: "u_ff", outputPins: new Set(["q1", "q1_n"]) },
-    ]);
+  it("grows forward from a seed's own output pins, and through the LED's junction to the resistor beyond it — the seed itself is NOT added to `components` (only its own pins are exempted, via seedPins)", () => {
+    const c = phantomEdgeCircuit({ rstLow: true, clockedByNe555: true });
+    const cone = computeDivergenceCone(c, [{ componentId: "u_ff", outputPins: new Set(["q1", "q1_n"]) }]);
     expect(cone.components.has("u_ff")).toBe(false); // never whole-package membership for a seed
     expect(cone.seedPins.get("u_ff")).toEqual(new Set(["q1", "q1_n"]));
     expect(cone.components.has("led1")).toBe(true); // joins: wired to u_ff's q1 output
-    expect(cone.components.has("r_after_led")).toBe(false); // beyond the LED — propagation stopped there
+    expect(cone.components.has("r_after_led")).toBe(true); // the analog reach crosses the LED junction (S1)
+    expect(cone.nets.has(findNetIdForPin(c, "r_after_led", "a"))).toBe(true);
     expect(cone.components.has("r_unrelated")).toBe(false);
     expect(cone.components.has("u_555")).toBe(false); // the 555 is not itself downstream of the seed
   });
@@ -236,11 +247,11 @@ describe("classifyMismatches — the phantom-edge registration (structural, not 
     expect(result.unexplained).toHaveLength(2);
   });
 
-  it("seeded fault: the cone stops at the LED — a mismatch on the component wired beyond it is never known", () => {
+  it("the cone follows a driven net through an LED to the resistor beyond it (S1's analog reach), and still not to anything wired elsewhere", () => {
     const c = phantomEdgeCircuit({ rstLow: true, clockedByNe555: true });
-    const result = classifyMismatches(c, [mismatch("elementI", "r_after_led")]);
-    expect(result.known).toEqual([]);
-    expect(result.unexplained).toHaveLength(1);
+    const result = classifyMismatches(c, [mismatch("elementI", "r_after_led"), mismatch("elementI", "r_unrelated")]);
+    expect(result.known.map((h) => h.mismatch.id)).toEqual(["r_after_led"]);
+    expect(result.unexplained.map((m) => m.id)).toEqual(["r_unrelated"]);
   });
 
   it("a board with no RST-low 555 at all gets no exemption — the cone is empty unless the seed condition holds", () => {
@@ -355,5 +366,153 @@ describe("the phantom-edge divergence, widened from 'RST held low' to any 555 th
       w.splice(w.findIndex((x) => x.from_pin === "8"), 1);
     });
     expect(seeded(c)).toBe(false);
+  });
+});
+
+
+// ─── S1: the cone widened from the divider's own outputs to its whole downstream ─────────────────
+//
+// The SAP-1's frozen display: an RST-low 555 clocks a 74HC74 ripple counter, a 74HC138 selects a
+// digit from the counter, and a resistor takes each decoder output to a seg7. The counter stays one
+// count off forever, so everything below it differs by design. Beside it, on the same rail, an
+// unrelated register (a 74LS173 driving an LED) is CPU state that must never be excused.
+
+describe("the widened cone (S1): a frozen display's whole downstream, and nothing beside it", () => {
+  const ff = ["clr1_n", "d1", "clk1", "pre1_n", "q1", "q1_n", "gnd", "q2_n", "q2", "pre2_n", "clk2", "d2", "clr2_n", "vcc"];
+  const sel = ["a0", "a1", "a2", "e1n", "e2n", "e3", "y0n", "y1n", "y2n", "y3n", "y4n", "y5n", "y6n", "y7n", "gnd", "vcc"];
+  const reg = ["/clr", "clk", "m", "n", "g1", "g2", "d1", "d2", "d3", "d4", "q1", "q2", "q3", "q4", "gnd", "vcc"];
+  const seg7 = ["a", "b", "c", "d", "e", "f", "g", "dp", "com", "com2"];
+
+  function displayBoard(): SimCircuit {
+    const components: SimComponent[] = [
+      part("psu", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+      part("gnd", "ground", ["gnd"]),
+      part("u_555", "ne555", ["1", "2", "3", "4", "5", "6", "7", "8"]),
+      part("u_div", "74hc74", ff),
+      part("u_sel", "74hc138", sel),
+      part("r_dig", "resistor", ["a", "b"], { resistance: 220 }),
+      part("dsp1", "seg7_cc", seg7),
+      part("u_reg", "74ls173", reg),
+      part("r_reg", "resistor", ["a", "b"], { resistance: 220 }),
+      part("led_reg", "led", ["a", "k"]),
+      part("r_rail", "resistor", ["a", "b"], { resistance: 1000 }),
+      part("r_pull", "resistor", ["a", "b"], { resistance: 1000 }),
+    ];
+    const wires: SimCircuit["wires"] = [
+      wire("psu", "neg", "gnd", "gnd"),
+      // The 555: RST on the datum, so its comparators resolve 0 at load.
+      wire("u_555", "8", "psu", "pos"),
+      wire("u_555", "1", "psu", "neg"),
+      wire("u_555", "4", "psu", "neg"),
+      // The ripple counter: half 1 on the 555, half 2 on half 1's Q-bar.
+      wire("u_555", "3", "u_div", "clk1"),
+      wire("u_div", "q1_n", "u_div", "d1"),
+      wire("u_div", "q1_n", "u_div", "clk2"),
+      wire("u_div", "q2_n", "u_div", "d2"),
+      wire("u_div", "vcc", "psu", "pos"),
+      wire("u_div", "gnd", "psu", "neg"),
+      // The digit select, and a resistor from its output to a seg7 segment, the common on the datum.
+      wire("u_div", "q1", "u_sel", "a0"),
+      wire("u_div", "q2", "u_sel", "a1"),
+      wire("u_sel", "vcc", "psu", "pos"),
+      wire("u_sel", "gnd", "psu", "neg"),
+      wire("u_sel", "y0n", "r_dig", "a"),
+      wire("r_dig", "b", "dsp1", "a"),
+      wire("dsp1", "com", "psu", "neg"),
+      // A resistor from the cone to the rail: the rail is a fixed node, which the cone never crosses.
+      wire("u_sel", "y1n", "r_pull", "a"),
+      wire("r_pull", "b", "psu", "pos"),
+      // The unrelated register beside it: the same rail, its own output, its own LED.
+      wire("u_reg", "vcc", "psu", "pos"),
+      wire("u_reg", "gnd", "psu", "neg"),
+      wire("u_reg", "q1", "r_reg", "a"),
+      wire("r_reg", "b", "led_reg", "a"),
+      wire("led_reg", "k", "psu", "neg"),
+      wire("r_rail", "a", "psu", "pos"),
+      wire("r_rail", "b", "psu", "neg"),
+    ];
+    return circuit(components, wires);
+  }
+
+  const q1Half = { componentId: "u_div", outputPins: new Set(["q1", "q1_n"]) };
+  const net = (c: SimCircuit, componentId: string, pinId: string): string => findNetIdForPin(c, componentId, pinId);
+
+  it("includes a 138 output driving a seg7 through a resistor: the decoder, the resistor, the seg7, and the nets between", () => {
+    const c = displayBoard();
+    const cone = computeDivergenceCone(c, [q1Half]);
+    for (const id of ["u_sel", "r_dig", "dsp1"]) expect(cone.components.has(id), id).toBe(true);
+    for (const [id, pin] of [["u_sel", "y0n"], ["r_dig", "b"], ["u_div", "q1"], ["u_div", "q1_n"]] as const) {
+      expect(cone.nets.has(net(c, id, pin)), `${id}.${pin}`).toBe(true);
+    }
+  });
+
+  it("excludes an unrelated register beside it on the same rail: its component, its LED chain, its output net", () => {
+    const c = displayBoard();
+    const cone = computeDivergenceCone(c, [q1Half]);
+    for (const id of ["u_reg", "r_reg", "led_reg", "r_rail", "u_555"]) expect(cone.components.has(id), id).toBe(false);
+    for (const [id, pin] of [["u_reg", "q1"], ["r_reg", "b"]] as const) expect(cone.nets.has(net(c, id, pin)), `${id}.${pin}`).toBe(false);
+  });
+
+  it("never crosses a fixed node: a resistor to the rail joins, the rail net and what sits on it do not", () => {
+    const c = displayBoard();
+    const cone = computeDivergenceCone(c, [q1Half]);
+    expect(cone.components.has("r_pull")).toBe(true);
+    expect(cone.nets.has(net(c, "psu", "pos"))).toBe(false);
+    expect(cone.nets.has("gnd")).toBe(false);
+    expect(cone.components.has("r_rail")).toBe(false);
+  });
+
+  it("never adds a source, though the cone draws from it: the supply feeds the whole board, so a supply-current mismatch is never excused here (a caller judges a residual instead)", () => {
+    const cone = computeDivergenceCone(displayBoard(), [q1Half]);
+    expect(cone.components.has("psu")).toBe(false);
+  });
+
+  it("reaches a ripple counter's second half through its own package: Q-bar of half 1 clocks half 2", () => {
+    const cone = computeDivergenceCone(displayBoard(), [q1Half]);
+    expect(cone.seedPins.get("u_div")).toEqual(new Set(["q1", "q1_n", "q2", "q2_n"]));
+    // ... and the decoder's second address line, driven by half 2, is downstream too.
+    expect(cone.components.has("u_sel")).toBe(true);
+  });
+
+  it("does not reach the second half when nothing of it sits on a net the seeded half drives", () => {
+    const c = displayBoard();
+    const wires = c.wires.filter((w) => !(w.from_pin === "q1_n" && w.to_pin === "clk2"));
+    const cone = computeDivergenceCone({ ...c, wires }, [q1Half]);
+    expect(cone.seedPins.get("u_div")).toEqual(new Set(["q1", "q1_n"]));
+  });
+
+  it("classifies every readout the frozen display's divergence explains as known, and CPU state beside it as unexplained", () => {
+    const c = displayBoard();
+    const m = (category: Mismatch["category"], id: string): Mismatch => ({ sampleTime: 0, category, id, classicValue: 1, coreValue: 0, detail: "differs" });
+    const explained: Mismatch[] = [
+      m("digitalState", "u_div/q1"),
+      m("digitalState", "u_div/q2_n"), // the second half, through the ripple
+      m("digitalState", "u_sel/y0n"),
+      m("elementI", "r_dig"),
+      m("elementI", "dsp1"),
+      m("netV", net(c, "u_sel", "y0n")),
+      m("netV", net(c, "r_dig", "b")), // between the resistor and the seg7: no digital driver at all
+    ];
+    const cpu: Mismatch[] = [
+      m("digitalState", "u_reg/q1"),
+      m("netV", net(c, "u_reg", "q1")),
+      m("elementI", "r_reg"),
+      m("elementI", "led_reg"),
+      m("elementI", "r_rail"),
+      m("elementI", "psu"), // the supply current: the display draws some, but so does the CPU
+      m("netV", net(c, "psu", "pos")), // the rail itself
+    ];
+    const result = classifyMismatches(c, [...explained, ...cpu]);
+    expect(result.known.map((h) => `${h.mismatch.category}:${h.mismatch.id}`).sort()).toEqual(explained.map((x) => `${x.category}:${x.id}`).sort());
+    expect(result.unexplained.map((x) => `${x.category}:${x.id}`).sort()).toEqual(cpu.map((x) => `${x.category}:${x.id}`).sort());
+  });
+
+  it("detector: a board whose 555 does not resolve 0 at load has no cone, so the same mismatches are all unexplained", () => {
+    const c = displayBoard();
+    const running: SimCircuit = { ...c, wires: c.wires.map((w) => (w.from_component === "u_555" && w.from_pin === "4" ? { ...w, to_pin: "pos", to_component: "psu" } : w)) };
+    // RST on the supply, TRIG and THR unwired (both read 0 V): TRIG below 1/3 vS resolves HIGH, so there is no phantom edge to excuse.
+    const result = classifyMismatches(running, [{ sampleTime: 0, category: "digitalState", id: "u_sel/y0n", classicValue: 1, coreValue: 0, detail: "differs" }]);
+    expect(result.known).toEqual([]);
+    expect(result.unexplained).toHaveLength(1);
   });
 });

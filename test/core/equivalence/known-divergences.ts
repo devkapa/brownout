@@ -28,6 +28,31 @@
  * whose id names a cone member (in one of the three ways `classifyMismatches`
  * checks) is ever "known" — matching is tight by construction, not by a
  * regex an unrelated id could satisfy.
+ *
+ * S1 WIDENING (the SAP-1's frozen display). The cone used to stop at the
+ * divider's own outputs, so a divider that stays one count off forever left
+ * every readout below it (the digit selects, the decoder EEPROM's address and
+ * data, the seg7 commons and segment nets, their channel currents, and the
+ * supply current they draw) unexplained. It now grows in two structural
+ * steps, and the second never leaves what the first reached:
+ *
+ * - DIGITAL: every IC reached from the seeded outputs through IC inputs, each
+ *   contributing its own digital outputs in turn (a 74HC74's second half is
+ *   reached through its own package: a ripple counter clocks it from the
+ *   first half's Q-bar).
+ * - ANALOG: the nets those outputs drive, and everything reached from them
+ *   through resistors, capacitors and LED-family junctions, stopping at fixed
+ *   nodes (the datum and any net an ideal `voltage_source` sits on).
+ *
+ * The supply's own current is NOT in the cone, though the cone draws from
+ * it: a source feeds the whole board, so putting it in would excuse a
+ * supply-current mismatch whatever caused it. A caller that must judge the
+ * supply past a divergence compares a residual instead (the S1 acceptance's
+ * supply current less the display's draw, scripts/core-accept-sap1.ts).
+ *
+ * It never leaves the cone's own fan-out: nothing that only SHARES a rail, an
+ * address line or an input with a cone member is pulled in, because traversal
+ * follows outputs and passives, never inputs and never a fixed node.
  */
 
 import { buildCoreNodes, corePinKey, type CoreNodeBuild } from "../../../src/core/compile/topology.js";
@@ -51,6 +76,10 @@ import type { Mismatch } from "./types.js";
  *   when /OE or /CE are not asserted, but that is a PER-INSTANT read/write
  *   fact, not a topological one — for cone propagation ("could a mismatch
  *   here explain one downstream") the io pins are outputs unconditionally.
+ * - `74ls161`, `74ls173`, `74ls189`, `ne555`: the `o` pins of core/README.md's
+ *   sequential and memories logic-pin tables and NE555 point 4 (OUT and DIS).
+ *   A kind missing here is a hole in the cone, not a safe default: it would
+ *   stop the traversal, and a net it drives would count as driverless.
  *
  * known-divergences.test.ts's "digitalOutputPins" suite names these same
  * source lines, so a change to that stamp loop that adds/removes/renames an
@@ -59,6 +88,15 @@ import type { Mismatch } from "./types.js";
 const FALLBACK_OUTPUT_PINS: Partial<Record<string, readonly string[]>> = {
   "28c16": ["io0", "io1", "io2", "io3", "io4", "io5", "io6", "io7"],
   "28c256": ["io0", "io1", "io2", "io3", "io4", "io5", "io6", "io7"],
+  // The registers, the counter and the RAM the SAP-1's CPU is built from, and the 555. None has an
+  // `icPinMap` entry, so without these rows a cone that reached one would silently stop there and
+  // the net-driver rule below would not see it as a driver at all. Each row is core/README.md's
+  // "sequential" and "memories" logic-pin tables (the `o` pins) and its NE555 point 4 (OUT and DIS
+  // are the two stages a 555 drives).
+  "74ls161": ["qa", "qb", "qc", "qd", "rco"],
+  "74ls173": ["q1", "q2", "q3", "q4"],
+  "74ls189": ["/o1", "/o2", "/o3", "/o4"],
+  ne555: ["3", "7"],
 };
 
 /**
@@ -107,14 +145,17 @@ export interface DivergenceSeed {
 }
 
 /**
- * Forward closure from `seeds` through digital OUTPUT pins (gate 2c): a
- * component joins `components` when it has ANY pin on a net that a cone
- * member drives from one of ITS OWN digital output pins. Traversal only ever
- * follows a cone member's outputs — an input or control pin shared with a
- * non-cone component never pulls that component in, which is what keeps the
- * cone from leaking into unrelated parts of the board that merely share a
- * rail or an address bus a cone member happens to also sit on without
- * driving.
+ * Forward closure from `seeds` (gate 2c, widened for S1): a component joins
+ * `components` when it has ANY pin on a net that a cone member drives from
+ * one of ITS OWN digital output pins, and, past the digital closure, every
+ * resistor, capacitor and LED-family part on the nets the cone drives (and on
+ * the nets reached from those, up to fixed nodes) joins too; a source never
+ * does. Traversal only ever follows a cone member's outputs and those
+ * passives — an input or control pin shared with a
+ * non-cone component never pulls that component in, and a fixed node is never
+ * crossed, which is what keeps the cone from leaking into unrelated parts of
+ * the board that merely share a rail or an address bus a cone member also
+ * sits on without driving.
  *
  * A SEED component itself is deliberately NOT added to `components` (full,
  * whole-package membership) — only its own `outputPins` are recorded in
@@ -124,20 +165,46 @@ export interface DivergenceSeed {
  * full and propagates onward through all of its own output pins as before —
  * the half-restriction only ever applies to the seed itself, per finding 7's
  * "the cone propagates only from that half's outputs... never the whole
- * package".
+ * package". The one addition: a seed's OTHER section joins `seedPins` when one
+ * of ITS inputs sits on a net the seed's own seeded outputs drive (a ripple
+ * counter's second half is clocked by the first half's Q-bar, so it counts
+ * one off too).
  */
 export interface DivergenceCone {
-  /** Components downstream of a seed's own restricted outputs — full membership, used for elementI/netV/digitalState the same way a plain component-level cone always was. */
+  /** Components downstream of a seed's own restricted outputs — full membership, used for elementI/netV/digitalState the same way a plain component-level cone always was. Includes the passives the analog reach crossed, never a source (this file's header). */
   readonly components: ReadonlySet<string>;
   /** `${seedComponentId}/${pin}` for every seed's own restricted output pin — the ONLY digitalState keys a seed component itself may be exempted through. */
   readonly seedPins: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Net ids the divergence can reach: every net a cone output drives, and every net reached from those through the passives and junctions above, never a fixed node. */
+  readonly nets: ReadonlySet<string>;
 }
 
+/** Kinds whose every pin the analog reach crosses: two-terminal passives and the LED family's junctions (an LED, a bicolor, an RGB, and a seg7, whose segments and commons are one junction group). */
+const ANALOG_REACH_KINDS: ReadonlySet<string> = new Set(["resistor", "capacitor", "led", "bicolor_led", "rgb_led", "seg7_cc", "seg7_ca"]);
+
+/**
+ * The independent sections of a multi-section digital kind: the input pins that
+ * drive a section and the outputs it drives. Only the 74HC74 has any (hc74Model:
+ * two flip-flops sharing power and nothing else); a kind not listed is one
+ * section, whose every output a reached input can move.
+ */
+const HC74_SECTIONS: ReadonlyArray<{ readonly inputPins: ReadonlySet<string>; readonly outputPins: ReadonlySet<string> }> = [
+  { inputPins: new Set(["clk1", "d1", "pre1_n", "clr1_n"]), outputPins: new Set(["q1", "q1_n"]) },
+  { inputPins: new Set(["clk2", "d2", "pre2_n", "clr2_n"]), outputPins: new Set(["q2", "q2_n"]) },
+];
+
 export function computeDivergenceCone(circuit: SimCircuit, seeds: readonly DivergenceSeed[]): DivergenceCone {
-  if (seeds.length === 0) return { components: new Set(), seedPins: new Map() };
+  if (seeds.length === 0) return { components: new Set(), seedPins: new Map(), nets: new Set() };
 
   const built = buildCoreNodes(circuit);
   const kindById = new Map(circuit.components.map((c) => [c.id, c.kind]));
+  const netsByPin = (componentId: string): string[] => {
+    const comp = circuit.components.find((c) => c.id === componentId);
+    return (comp?.pins ?? []).flatMap((pin) => {
+      const id = netIdAtPin(built, componentId, pin.id);
+      return id === null ? [] : [id];
+    });
+  };
 
   const components = new Set<string>();
   const seedPins = new Map<string, ReadonlySet<string>>();
@@ -157,8 +224,19 @@ export function computeDivergenceCone(circuit: SimCircuit, seeds: readonly Diver
       const net = netById(built, netId);
       if (!net) continue;
 
-      for (const [otherComponentId] of net.pins) {
-        if (otherComponentId === componentId || components.has(otherComponentId)) continue;
+      for (const [otherComponentId, otherPinId] of net.pins) {
+        if (otherComponentId === componentId) {
+          // The same package: an input of one of its OTHER sections sits on a net this section drives.
+          const covered = seedPins.get(componentId);
+          if (kindById.get(componentId) !== "74hc74" || covered === undefined) continue;
+          const section = HC74_SECTIONS.find((s) => s.inputPins.has(otherPinId));
+          if (section && [...section.outputPins].some((pin) => !covered.has(pin))) {
+            seedPins.set(componentId, new Set([...covered, ...section.outputPins]));
+            queue.push({ componentId, outputPins: section.outputPins });
+          }
+          continue;
+        }
+        if (components.has(otherComponentId)) continue;
         components.add(otherComponentId);
         const kind = kindById.get(otherComponentId);
         queue.push({ componentId: otherComponentId, outputPins: kind ? digitalOutputPins(kind) : new Set() });
@@ -166,7 +244,42 @@ export function computeDivergenceCone(circuit: SimCircuit, seeds: readonly Diver
     }
   }
 
-  return { components, seedPins };
+  // The analog reach: from every net a cone output drives, through resistors, capacitors and
+  // LED-family junctions, up to fixed nodes.
+  const fixedNets = new Set<string>();
+  const datum = built.netIdOfNode[0];
+  if (datum) fixedNets.add(datum);
+  for (const source of circuit.components.filter((c) => c.kind === "voltage_source")) {
+    for (const netId of netsByPin(source.id)) fixedNets.add(netId);
+  }
+
+  const nets = new Set<string>();
+  const netQueue: string[] = [];
+  const reach = (netId: string): void => {
+    if (fixedNets.has(netId) || nets.has(netId)) return;
+    nets.add(netId);
+    netQueue.push(netId);
+  };
+  const coneDrivers: Array<{ componentId: string; pins: ReadonlySet<string> }> = [
+    ...[...seedPins].map(([componentId, pins]) => ({ componentId, pins })),
+    ...[...components].map((componentId) => ({ componentId, pins: digitalOutputPins(kindById.get(componentId) ?? "") })),
+  ];
+  for (const { componentId, pins } of coneDrivers) {
+    for (const pinId of pins) {
+      const netId = netIdAtPin(built, componentId, pinId);
+      if (netId !== null) reach(netId);
+    }
+  }
+  while (netQueue.length > 0) {
+    const netId = netQueue.shift()!;
+    for (const [componentId] of netById(built, netId)?.pins ?? []) {
+      const kind = kindById.get(componentId);
+      if (kind === undefined || !ANALOG_REACH_KINDS.has(kind)) continue;
+      components.add(componentId);
+      for (const other of netsByPin(componentId)) reach(other);
+    }
+  }
+  return { components, seedPins, nets };
 }
 
 /** Every (componentId, pinId) that drives `netId` from one of the component's own digital output pins — `mismatchIsInCone`'s netV rule. */
@@ -448,6 +561,9 @@ function mismatchIsInCone(circuit: SimCircuit, built: CoreNodeBuild, cone: Diver
       return [...cone.components].some((coneId) => mismatch.id === coneId || mismatch.id.startsWith(`${coneId}/`));
     }
     case "netV": {
+      // The nets the cone drives or reaches through passives (the analog widening); a net driven
+      // only by cone members is the same set seen from the other side, kept as a second route.
+      if (cone.nets.has(mismatch.id)) return true;
       const drivers = netDriverPins(circuit, built, mismatch.id);
       if (drivers.length === 0) return false;
       return drivers.every(
@@ -484,7 +600,7 @@ export function classifyMismatches(
 
   for (const mismatch of mismatches) {
     const hit = cones.find(
-      ({ cone }) => (cone.components.size > 0 || cone.seedPins.size > 0) && mismatchIsInCone(circuit, built, cone, mismatch),
+      ({ cone }) => (cone.components.size > 0 || cone.seedPins.size > 0 || cone.nets.size > 0) && mismatchIsInCone(circuit, built, cone, mismatch),
     );
     if (hit) known.push({ mismatch, divergence: hit.divergence });
     else unexplained.push(mismatch);
