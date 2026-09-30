@@ -1,5 +1,0 @@
----
-"brownout": minor
----
-
-`current_source` now drives its programmed current out of its `pos` pin, through the external circuit and back into `neg`, like a battery's `+`. It used the SPICE I-element's naming, where the current flows from n+ THROUGH the source to n-, so it entered at `pos` and left by `neg`. A part labelled `+` (de:volt's Current Source) therefore ran backwards: 1 mA into 220 ohm from `+` to `-` read -220 mV across the resistor instead of +220 mV. The transient stamp, the published element current (pin0 -> pin1, so a sourcing current_source now reads `-I`, plus its parallel shunt's current) and the small-signal input injection all flip together. SPICE decks keep their meaning: the parser attaches an I card's n+ to `neg` and its n- to `pos`, so `I1 0 out 1m` still lifts `out` to +1 V across 1k, and `runSpice`'s `.op` reports an I card's element current in its own n+ -> n- order, equal to its value, as before. A hand-built `SimCircuit` that wired `current_source` in the SPICE sense must swap its two pins.
