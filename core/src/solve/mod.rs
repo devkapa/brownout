@@ -29,6 +29,7 @@ mod ic_tests;
 mod led_tests;
 
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use crate::devices::{self, led};
 use crate::digital;
@@ -83,8 +84,18 @@ pub trait PartitionSolver {
     fn voltages(&self) -> &[f64];
 
     /// Every device's currently published current, in record order
-    /// (`bo_engine_device_currents`'s contract).
+    /// (`bo_engine_device_currents`'s contract). Current as of the last
+    /// [`Self::prepare_readout`]; a solver that defers part of it may assert
+    /// that nothing is owed.
     fn currents(&self) -> &[f64];
+
+    /// Brings `currents()` and `channels()` up to date with the last publish.
+    /// `Engine` calls it at the end of `load`, `advance`, `set_params` and
+    /// `seed_memory`, on success and failure alike, before anything reads
+    /// them. A solver that computes derived values (source, LED, 555
+    /// currents) only when asked, because they are pure functions of the
+    /// published state, does that work here. Default: nothing owed.
+    fn prepare_readout(&mut self) {}
 
     /// Owned copies of every array [`Self::resolve_dirty`] can mutate —
     /// today exactly `voltages()` and `currents()`, the only two this trait
@@ -104,7 +115,10 @@ pub trait PartitionSolver {
     /// Given a default in terms of `voltages`/`currents` because every
     /// implementation already has to provide those; only [`Self::restore`]
     /// needs a per-implementation body, since nothing here can reach into a
-    /// concrete solver's private storage to write them back.
+    /// concrete solver's private storage to write them back. A solver that
+    /// fills part of `currents()` in later (`PartitionedSolver`) overrides
+    /// this to copy its raw arrays, and keeps the flag saying what is still
+    /// owed in [`Self::dynamic_snapshot`].
     fn snapshot(&self) -> (Vec<f64>, Vec<f64>) {
         (self.voltages().to_vec(), self.currents().to_vec())
     }
@@ -379,8 +393,19 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).currents()
     }
 
+    // Forwarded, not left to the default: the default reads `self.currents()`,
+    // which `PartitionedSolver` forbids while its readout pass is owed (see
+    // its own `snapshot`).
+    fn snapshot(&self) -> (Vec<f64>, Vec<f64>) {
+        (**self).snapshot()
+    }
+
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
         (**self).restore(snapshot)
+    }
+
+    fn prepare_readout(&mut self) {
+        (**self).prepare_readout()
     }
 
     fn channels(&self) -> &[f64] {
@@ -1042,6 +1067,10 @@ pub(crate) fn stamp_ics_into_dyn(
     p_idx: usize,
     x: &[f64],
 ) {
+    // No IC, nothing to stamp (the loop below would not run).
+    if ics.is_empty() {
+        return;
+    }
     let resolve = |node: usize| -> DynPin {
         match node_owner.get(&node) {
             Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
@@ -1053,16 +1082,55 @@ pub(crate) fn stamp_ics_into_dyn(
             },
         }
     };
-    let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
+    // `in_partition(node)` is `node_owner[node].0 == p_idx`. The `touches`
+    // test below asks it about every driver, floating pin and supply node of
+    // every IC, and a SipHash lookup for each dominated this function. The
+    // owned nodes are gathered once instead (one pass over `node_owner`,
+    // which costs about as much as a lookup per eight drivers, hence the
+    // bound); the answers are the same either way. The two scratch vectors
+    // live between calls so the function allocates nothing.
+    let (mut owned, mut driver_touched) = STAMP_ICS_SCRATCH.with(|c| c.take());
+    owned.clear();
+    driver_touched.clear();
+    let by_list = node_owner.len() <= 4 * (drivers.len() + 4);
+    if by_list {
+        owned.extend(node_owner.iter().filter(|(_, &(p, _))| p == p_idx).map(|(&n, _)| n));
+        owned.sort_unstable();
+    }
+    let in_partition = |node: usize| {
+        if by_list {
+            owned.binary_search(&node).is_ok()
+        } else {
+            matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx)
+        }
+    };
 
-    for (device_index, ic) in ics {
+    // Which ICs have a driver on one of this partition's nodes (their
+    // positions in `ics`, sorted), in one pass over the drivers rather than
+    // one pass per IC. Valid when `ics` is strictly ascending by device
+    // index (as `collect_ics` builds it), so a driver's IC is found by
+    // binary search; any other order falls back to the per-IC scan below.
+    let ics_sorted = ics.windows(2).all(|w| w[0].0 < w[1].0);
+    if ics_sorted {
+        for d in drivers {
+            if in_partition(d.node) {
+                if let Ok(pos) = ics.binary_search_by_key(&d.device, |(device_index, _)| *device_index) {
+                    driver_touched.push(pos);
+                }
+            }
+        }
+        driver_touched.sort_unstable();
+    }
+
+    for (pos, (device_index, ic)) in ics.iter().enumerate() {
         // `touches` also fires when this IC's own free supply node lives in
         // `p_idx`, even if every one of its driver/pull pins is fixed
         // elsewhere (findings 3/8's dynamic-partition twin): an output pin
         // wired straight onto a fixed/ideal node still loads its IC's free
         // `vcc`/`gnd` through `1/R_out`, and that belongs in whichever
         // partition holds the free end.
-        let touches = drivers.iter().any(|d| d.device == *device_index && in_partition(d.node))
+        let by_driver = if ics_sorted { driver_touched.binary_search(&pos).is_ok() } else { drivers.iter().any(|d| d.device == *device_index && in_partition(d.node)) };
+        let touches = by_driver
             || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node))
             || in_partition(ic.vcc.node)
             || in_partition(ic.gnd.node);
@@ -1124,6 +1192,13 @@ pub(crate) fn stamp_ics_into_dyn(
             }
         }
     }
+    STAMP_ICS_SCRATCH.with(|c| c.replace((owned, driver_touched)));
+}
+
+thread_local! {
+    /// `stamp_ics_into_dyn`'s working vectors (the partition's node list and
+    /// the positions of the ICs with a driver in it), kept between calls.
+    static STAMP_ICS_SCRATCH: std::cell::RefCell<(Vec<usize>, Vec<usize>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 // ============================================================================
@@ -1217,6 +1292,33 @@ impl FixedPairCapacitor {
     }
 }
 
+/// Limits under which the readout passes are deferred to the first read
+/// ([`PartitionedSolver::lazy_publish_ok`]). A node voltage above
+/// `LAZY_V_LIMIT`, a coefficient above `LAZY_G_LIMIT` or a current above
+/// `LAZY_I_LIMIT` selects the eager passes, so they only need to keep every
+/// product and sum of at most `LAZY_TERM_LIMIT` terms inside the f64 range:
+/// `1e6 * (1e12 * 2e9)` and `1e6 * 1e100` both are, by a wide margin.
+const LAZY_V_LIMIT: f64 = 1e9;
+const LAZY_G_LIMIT: f64 = 1e12;
+const LAZY_I_LIMIT: f64 = 1e100;
+const LAZY_TERM_LIMIT: usize = 1_000_000;
+
+/// Whether `law.current(v)` and the KCL's `current(v) + GMIN_D * v` are at
+/// most [`LAZY_I_LIMIT`] for every `|v| <= 2 * LAZY_V_LIMIT`. Below `vsat` the
+/// exponential is at most `exp(vsat / vtn)`; above it the tangent adds
+/// `is * exp(vsat / vtn) / vtn` per volt. A non-positive or non-finite `vtn`
+/// (the exponent could then grow without limit) or a bound that overflows
+/// fails, and `!(x <= LIMIT)` also fails a NaN.
+fn junction_current_bounded(law: &led::JunctionLaw) -> bool {
+    if !(law.vtn > 0.0 && law.vtn.is_finite() && law.is.is_finite() && law.vsat.is_finite()) {
+        return false;
+    }
+    let e_sat = (law.vsat / law.vtn).exp();
+    let span = 2.0 * LAZY_V_LIMIT + law.vsat.abs();
+    let bound = law.is.abs() * (e_sat + 1.0) + (law.is.abs() * e_sat / law.vtn) * span + led::GMIN_D * 2.0 * LAZY_V_LIMIT;
+    bound <= LAZY_I_LIMIT
+}
+
 /// A resistor or switch-family device, program-wide, kept for the
 /// source-current KCL walk ([`PartitionedSolver::recompute_source_currents`])
 /// and for copying a `Static`-owned one's current out of
@@ -1225,11 +1327,19 @@ struct KclDevice {
     device_index: usize,
     kind: u32,
     nodes: Vec<usize>,
-    /// The load-time snapshot — correct forever for a resistor (no live
-    /// params); for a switch-family device, only a FALLBACK, overridden by
-    /// `PartitionedSolver::live_params` at every actual use.
-    params: Vec<f64>,
     owner: Owner,
+    /// `devices::stamp(kind, nodes.len(), <its current params>)` resolved to
+    /// `(node, node, conductance)`, kept so the KCL walk allocates nothing
+    /// and looks no params up. A resistor's is fixed at load; a switch's is
+    /// rebuilt by [`PartitionedSolver::refresh_kcl_contributions`] whenever
+    /// `apply_params` writes one of its live params (the only writer).
+    contributions: Vec<(usize, usize, f64)>,
+}
+
+impl KclDevice {
+    fn resolve_contributions(kind: u32, nodes: &[usize], params: &[f64]) -> Vec<(usize, usize, f64)> {
+        devices::stamp(kind, nodes.len(), params).into_iter().map(|c| (nodes[c.pin_a], nodes[c.pin_b], c.conductance)).collect()
+    }
 }
 
 /// One LED-family device's readout inputs (README, LEDs point 13): what
@@ -1274,6 +1384,10 @@ struct SwitchInfo {
 /// `Box<dyn PartitionSolver>` (`solve::PartitionedSolver::build`).
 pub struct PartitionedSolver {
     voltages: Vec<f64>,
+    /// The published device currents. The slots the readout pass derives
+    /// (source, 555, LED and fixed-pair capacitor currents) may be stale
+    /// until [`PartitionSolver::prepare_readout`] runs the pass; reading
+    /// `currents()` while that is owed is a bug (`debug_assert`).
     currents: Vec<f64>,
     resolved: Vec<partition::ResolvedSource>,
     local_index: Vec<Option<(usize, usize)>>,
@@ -1289,6 +1403,9 @@ pub struct PartitionedSolver {
     /// Every resistor and switch-family device, program-wide (this module's
     /// doc comment).
     kcl_devices: Vec<KclDevice>,
+    /// The `device_index` of every `kcl_devices` entry a `Static` partition
+    /// owns: [`Self::copy_in_static`] copies exactly these currents.
+    static_kcl_devices: Vec<usize>,
     /// device index -> dispatch metadata, for every switch-family device
     /// only (a resistor/capacitor/voltage_source never takes a live param).
     switches: HashMap<usize, SwitchInfo>,
@@ -1352,6 +1469,39 @@ pub struct PartitionedSolver {
     /// (`PartitionSolver::channels`). Rolls back with a failed instant, in
     /// [`PartitionSolver::dynamic_snapshot`] (LEDs point 16).
     channels: Vec<f64>,
+    /// Whether `currents`' derived slots and `channels` are stale: a publish
+    /// point found the lazy readout provably identical to the eager one
+    /// ([`Self::lazy_publish_ok`]) and left the compute to
+    /// [`PartitionSolver::prepare_readout`]. Rolls back with a failed
+    /// instant, in [`PartitionSolver::dynamic_snapshot`], together with
+    /// `derived_now` and `driver_snapshot`, the other inputs the deferred
+    /// compute needs.
+    derived_dirty: bool,
+    /// The `now` of the publish that set `derived_dirty` (a floating pull's
+    /// target depends on time).
+    derived_now: f64,
+    /// Whether every coefficient of the readout pass is bounded well inside
+    /// the f64 range, so that with bounded voltages no derived value can
+    /// overflow (see [`Self::lazy_static_ok`]). Fixed at load.
+    lazy_static_ok: bool,
+    /// Capacitors whose current a partition solver publishes (every one but a
+    /// [`FixedPairCapacitor`]), for [`Self::lazy_publish_ok`]'s magnitude scan.
+    partition_cap_devices: Vec<usize>,
+    /// `leaving`/`extra` arrays the KCL walk reuses (zeroed at each use), so
+    /// a compute allocates nothing.
+    kcl_scratch: (Vec<f64>, Vec<f64>),
+    /// device index -> position in `ics` (`u32::MAX`: not an IC), so
+    /// [`PartitionSolver::ic_powered`] does not walk the list per call.
+    ic_position: Vec<u32>,
+    /// device index -> position in `kcl_devices`, for
+    /// [`Self::refresh_kcl_contributions`].
+    kcl_position: HashMap<usize, usize>,
+    /// The previous `driver_snapshot` table. Each resolve swaps it with
+    /// `driver_snapshot`, so the table `stepped.resolve_dirty` needs as its
+    /// pre-commit input is already in hand, and the new `driver_snapshot` is
+    /// written over the older buffer in place instead of a fresh allocation.
+    /// Meaningless between resolves.
+    pre_commit_drivers: Rc<Vec<Driver>>,
     /// A clone of the kernel's full driver table, as of the most recent
     /// [`PartitionSolver::resolve_dirty`] call (W1c step 2b) — that trait
     /// method is the only one the kernel ever calls WITH a fresh `drivers`
@@ -1374,7 +1524,7 @@ pub struct PartitionedSolver {
     /// nothing else dirty that same delta) would restamp against the failed
     /// attempt's last, never-committed driver states instead of the
     /// correctly-restored ones.
-    driver_snapshot: Vec<Driver>,
+    driver_snapshot: Rc<Vec<Driver>>,
 }
 
 impl PartitionedSolver {
@@ -1413,13 +1563,15 @@ impl PartitionedSolver {
             match device.kind {
                 kinds::RESISTOR => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
-                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, params: device.params.clone(), owner: owner_of(device) });
+                    let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
+                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, owner: owner_of(device), contributions });
                 }
                 kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let pin_count = nodes.len();
                     let owner = owner_of(device);
-                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, params: device.params.clone(), owner });
+                    let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
+                    kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, owner, contributions });
                     switches.insert(d, SwitchInfo { kind: device.kind, pin_count, owner });
                     live_params.insert(d, device.params.clone());
                 }
@@ -1485,6 +1637,17 @@ impl PartitionedSolver {
 
         let _ = device_count; // documents intent; `currents` is already sized from it above.
 
+        let static_kcl_devices: Vec<usize> = kcl_devices.iter().filter(|kd| kd.owner == Owner::Static).map(|kd| kd.device_index).collect();
+        let kcl_position: HashMap<usize, usize> = kcl_devices.iter().enumerate().map(|(i, kd)| (kd.device_index, i)).collect();
+        let mut ic_position = vec![u32::MAX; device_count];
+        for (i, (d, _)) in ics.iter().enumerate() {
+            ic_position[*d] = i as u32;
+        }
+        let fixed_pair_device: BTreeSet<usize> = fixed_pair_capacitors.iter().map(|c| c.device_index).collect();
+        let partition_cap_devices: Vec<usize> = cap_devices.iter().map(|&(d, _, _)| d).filter(|d| !fixed_pair_device.contains(d)).collect();
+        let channel_slot_count = program.channel_slot_count;
+        let readout_term_count = node_count + device_count + 4 * program.devices.iter().map(|d| d.pins.len()).sum::<usize>();
+
         let mut solver = PartitionedSolver {
             voltages,
             currents,
@@ -1496,6 +1659,7 @@ impl PartitionedSolver {
             closed_form,
             stepped,
             kcl_devices,
+            static_kcl_devices,
             switches,
             live_params,
             cap_devices,
@@ -1508,9 +1672,18 @@ impl PartitionedSolver {
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
             junctions,
             led_devices,
-            channels: vec![0.0; program.channel_slot_count],
-            driver_snapshot: Vec::new(),
+            channels: vec![0.0; channel_slot_count],
+            derived_dirty: false,
+            derived_now: 0.0,
+            lazy_static_ok: false,
+            partition_cap_devices,
+            kcl_scratch: (vec![0.0; node_count], vec![0.0; node_count]),
+            ic_position,
+            kcl_position,
+            pre_commit_drivers: Rc::new(Vec::new()),
+            driver_snapshot: Rc::new(Vec::new()),
         };
+        solver.lazy_static_ok = solver.compute_lazy_static_ok(readout_term_count);
         solver.register_ic_read_pin_watches();
         Ok(solver)
     }
@@ -1860,21 +2033,23 @@ impl PartitionedSolver {
     }
 
     fn copy_in_static(&mut self) {
+        let static_voltages = self.static_solver.voltages();
         for &node in &self.static_nodes {
-            self.voltages[node] = self.static_solver.voltages()[node];
+            self.voltages[node] = static_voltages[node];
         }
-        for kd in &self.kcl_devices {
-            if kd.owner == Owner::Static {
-                self.currents[kd.device_index] = self.static_solver.currents()[kd.device_index];
-            }
+        let static_currents = self.static_solver.currents();
+        for &d in &self.static_kcl_devices {
+            self.currents[d] = static_currents[d];
         }
     }
 
     /// Publishes every [`FixedPairCapacitor`]'s current at `now`
     /// (core/README.md's rule 2a: "publishes... at every advance, horizon
-    /// clamp and set_params instant"). Called unconditionally from all three
-    /// of those points ([`PartitionSolver::resolve_dirty`],
-    /// `handle_dynamic_event`, `sync_dynamic_to`) — mirroring
+    /// clamp and set_params instant"). The eager form ran unconditionally
+    /// from all three of those points ([`PartitionSolver::resolve_dirty`],
+    /// `handle_dynamic_event`, `sync_dynamic_to`); it now runs inside
+    /// [`Self::compute_derived`], at each of them or on the first read after
+    /// them, with the `now` of the last one — mirroring
     /// [`Self::recompute_source_currents`]'s own "recomputed unconditionally"
     /// contract just below, and for the same reason: this device belongs to
     /// no partition, so nothing ever marks it "dirty" the way a driver commit
@@ -1884,16 +2059,17 @@ impl PartitionedSolver {
     /// published `currents[device_index]` into the KCL of whichever source(s)
     /// fixed this capacitor's two nodes (`self.cap_devices` already lists it,
     /// core/README.md rule 2a's own last bullet).
-    fn publish_fixed_pair_capacitors(&mut self, now: f64) {
+    fn publish_fixed_pair_capacitors(&self, currents: &mut [f64], now: f64) {
         for cap in &self.fixed_pair_capacitors {
-            self.currents[cap.device_index] = cap.current_at(now, self.start_time);
+            currents[cap.device_index] = cap.current_at(now, self.start_time);
         }
     }
 
     /// The authoritative `voltage_source` current computation for the WHOLE
     /// program (this module's doc comment): rebuilds the KCL `leaving`
     /// array from every resistor/switch contact (`devices::stamp`, live
-    /// params) plus every capacitor's ALREADY-PUBLISHED total current, then
+    /// params, cached in [`KclDevice::contributions`]) plus every capacitor's
+    /// ALREADY-PUBLISHED total current, then
     /// walks `resolved` children-before-parents exactly as
     /// `static_part::StaticPartitionSolver::recompute_currents` does for a
     /// purely static program. Always run, even with nothing dirty this call
@@ -1918,13 +2094,13 @@ impl PartitionedSolver {
     /// power computation and the actual `g*(Va-Vb)` current read off
     /// already-final values, exactly like every other term in `leaving`
     /// above them.
-    fn recompute_source_currents(&mut self, now: f64, drivers: &[Driver]) {
-        let mut leaving = vec![0.0; self.voltages.len()];
+    fn recompute_source_currents(&self, currents: &mut [f64], scratch: &mut (Vec<f64>, Vec<f64>), now: f64, drivers: &[Driver]) {
+        let (leaving, extra) = scratch;
+        leaving.fill(0.0);
+        extra.fill(0.0);
         for kd in &self.kcl_devices {
-            let params: &[f64] = self.live_params.get(&kd.device_index).map(|v| v.as_slice()).unwrap_or(&kd.params);
-            for c in devices::stamp(kd.kind, kd.nodes.len(), params) {
-                let (u, w) = (kd.nodes[c.pin_a], kd.nodes[c.pin_b]);
-                let i = c.conductance * (self.voltages[u] - self.voltages[w]);
+            for &(u, w, conductance) in &kd.contributions {
+                let i = conductance * (self.voltages[u] - self.voltages[w]);
                 leaving[u] += i;
                 leaving[w] -= i;
             }
@@ -1933,7 +2109,7 @@ impl PartitionedSolver {
             leaving[node] += static_part::NODE_RSHUNT_G * v;
         }
         for &(d, u, w) in &self.cap_devices {
-            let i = self.currents[d];
+            let i = currents[d];
             leaving[u] += i;
             leaving[w] -= i;
         }
@@ -1975,12 +2151,11 @@ impl PartitionedSolver {
                 }
             }
         }
-        let mut extra = vec![0.0; self.voltages.len()];
         for r in self.resolved.iter().rev() {
             let total = leaving[r.child_node] + extra[r.child_node];
             let child_is_pos = !r.parent_is_pos;
             let i_s = if child_is_pos { -total } else { total };
-            self.currents[r.device_index] = i_s;
+            currents[r.device_index] = i_s;
             let contribution = if r.parent_is_pos { i_s } else { -i_s };
             extra[r.parent_node] += contribution;
         }
@@ -1993,14 +2168,14 @@ impl PartitionedSolver {
     /// voltages, so it follows a moving supply or load. 0 while unpowered or
     /// while OUT has never committed. A 555 is not in `kcl_devices` and no
     /// other pass writes its `currents` slot, so this is its only writer.
-    fn publish_ne555_currents(&mut self, drivers: &[Driver]) {
+    fn publish_ne555_currents(&self, currents: &mut [f64], drivers: &[Driver]) {
         for (device_index, ic) in &self.ics {
             if !digital::is_ne555(ic.kind) {
                 continue;
             }
             let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
             let committed = drivers.iter().find(|d| d.device == *device_index && d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
-            self.currents[*device_index] = match (power.powered, committed) {
+            currents[*device_index] = match (power.powered, committed) {
                 (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(
                     level == Mode::High,
                     power.vs,
@@ -2016,18 +2191,130 @@ impl PartitionedSolver {
     /// The LED device pass (README, LEDs point 13): each LED-family device's
     /// `elementI` and channel values, from the published voltages and its
     /// `burnt` flag, into `currents` and the channel array. Run beside
-    /// [`Self::recompute_source_currents`] at every point that publishes
-    /// voltages. A pure function of those voltages, so the same numbers come
-    /// out however often it runs. The contract lets a device whose pin
-    /// voltages did not move be skipped; it is not, because a memo would need
-    /// rolling back with the instant and would save a few exponentials per
-    /// device.
-    fn publish_led_devices(&mut self) {
+    /// [`Self::recompute_source_currents`] by [`Self::compute_derived`]. A
+    /// pure function of those voltages, so the same numbers come out however
+    /// often it runs, which is what lets the whole readout pass wait for the
+    /// first read (`publish_readout`) instead of memoising it per device.
+    fn publish_led_devices(&self, currents: &mut [f64], channels: &mut [f64]) {
         for e in &self.led_devices {
             let mut element_i = 0.0;
-            let channels = &mut self.channels[e.channel_base..e.channel_base + e.channel_count];
-            led::readout(&e.device, &e.junctions, &self.voltages, false, &mut element_i, channels);
-            self.currents[e.device_index] = element_i;
+            let own = &mut channels[e.channel_base..e.channel_base + e.channel_count];
+            led::readout(&e.device, &e.junctions, &self.voltages, false, &mut element_i, own);
+            currents[e.device_index] = element_i;
+        }
+    }
+
+    /// The four readout passes, in the order the eager publish ran them: the
+    /// fixed-pair capacitors' currents (which the KCL fold reads), the
+    /// sources', the 555s' and the LED devices'. The arrays they write are
+    /// taken out of `self` for the call, because the passes read the rest of
+    /// it.
+    fn compute_derived(&mut self, now: f64) {
+        let mut currents = std::mem::take(&mut self.currents);
+        let mut channels = std::mem::take(&mut self.channels);
+        let mut scratch = std::mem::take(&mut self.kcl_scratch);
+        let drivers = Rc::clone(&self.driver_snapshot);
+        self.publish_fixed_pair_capacitors(&mut currents, now);
+        self.recompute_source_currents(&mut currents, &mut scratch, now, &drivers);
+        self.publish_ne555_currents(&mut currents, &drivers);
+        self.publish_led_devices(&mut currents, &mut channels);
+        self.currents = currents;
+        self.channels = channels;
+        self.kcl_scratch = scratch;
+    }
+
+    /// The tail every publish point ends its readout with: the eager passes
+    /// (`compute_derived`) when a derived value could be non-finite, else
+    /// only a note that they are owed.
+    ///
+    /// Why deferring cannot change a result: the passes are pure functions of
+    /// the published state at the publish point, and nothing changes that
+    /// state without another publish, or a rollback that restores it and the
+    /// flag together. The one thing an eager pass can do that a deferred one
+    /// cannot is make `check_finite` fail the instant on a derived value that
+    /// overflowed to infinity or NaN. [`Self::lazy_publish_ok`] proves that
+    /// cannot happen, or the pass runs here, exactly as before.
+    ///
+    /// Returns whether the passes were deferred, which also means every node
+    /// voltage was found finite (`check_finite` need not scan them again).
+    fn publish_readout(&mut self, now: f64) -> bool {
+        if self.lazy_publish_ok(now) {
+            self.derived_now = now;
+            self.derived_dirty = true;
+            true
+        } else {
+            self.compute_derived(now);
+            self.derived_dirty = false;
+            false
+        }
+    }
+
+    /// Whether every value `compute_derived` would produce is provably
+    /// finite, so `check_finite` could not tell a deferred publish from an
+    /// eager one. Sufficient conditions, all cheap:
+    /// - `lazy_static_ok`: every coefficient the passes multiply by is
+    ///   bounded (`compute_lazy_static_ok`);
+    /// - every node voltage is at most [`LAZY_V_LIMIT`] in magnitude (a NaN
+    ///   or infinite one fails the test, and `check_finite` then reports it
+    ///   exactly as before, after the eager passes ran);
+    /// - every partition-published capacitor current is at most
+    ///   [`LAZY_I_LIMIT`];
+    /// - `now >= start_time`, so a fixed-pair capacitor's exponential is at
+    ///   most 1.
+    /// A term is then at most `max(G * 2 * V, I)` and there are at most
+    /// [`LAZY_TERM_LIMIT`] of them, far inside the f64 range. Failing any
+    /// of these merely selects the eager path.
+    fn lazy_publish_ok(&self, now: f64) -> bool {
+        if !self.lazy_static_ok || !(now >= self.start_time) {
+            return false;
+        }
+        if !self.voltages.iter().all(|v| v.abs() <= LAZY_V_LIMIT) {
+            return false;
+        }
+        self.partition_cap_devices.iter().all(|&d| self.currents[d].abs() <= LAZY_I_LIMIT)
+    }
+
+    /// The load-time half of [`Self::lazy_publish_ok`]: whether every
+    /// coefficient is bounded. Conductances of resistors are `1/R`
+    /// (`R > 0` is all `kinds` checks, so `1/R` can overflow); a switch's
+    /// is `0` or `1/0.001` whatever its live params (`switches::stamp`);
+    /// an IC driver's, a pull's and a 555's are constants or `1/r_out` with
+    /// `r_out >= 50` (`digital::power`); a junction's current is bounded by
+    /// its law; a fixed-pair capacitor's by its constants.
+    fn compute_lazy_static_ok(&self, term_count: usize) -> bool {
+        if term_count > LAZY_TERM_LIMIT {
+            return false;
+        }
+        for kd in &self.kcl_devices {
+            if !kd.contributions.iter().all(|&(_, _, g)| g.abs() <= LAZY_G_LIMIT) {
+                return false;
+            }
+        }
+        for e in &self.led_devices {
+            if !e.junctions.iter().all(|j| junction_current_bounded(&j.law)) {
+                return false;
+            }
+        }
+        self.fixed_pair_capacitors.iter().all(|cap| {
+            let series_bound = if cap.esr > 0.0 { (cap.d_v / cap.esr).abs() } else { 0.0 };
+            let leak_term = (cap.leak_g * cap.d_v).abs();
+            // The exponent is `-(now - start) / (esr * C)`, at most 0 for
+            // `now >= start` and never NaN when `esr * C` is a positive
+            // finite number.
+            let time_constant_ok = cap.esr == 0.0 || (cap.esr * cap.c > 0.0 && (cap.esr * cap.c).is_finite());
+            cap.d_v.abs() <= 2.0 * LAZY_V_LIMIT && series_bound <= LAZY_I_LIMIT && leak_term <= LAZY_I_LIMIT && time_constant_ok
+        })
+    }
+
+    /// Rebuilds the cached KCL contributions of every switch-family device in
+    /// `triples`, after `apply_params` wrote their live params.
+    fn refresh_kcl_contributions(&mut self, triples: &[(usize, usize, f64)]) {
+        for &(device_index, _, _) in triples {
+            let (Some(&pos), Some(params)) = (self.kcl_position.get(&device_index), self.live_params.get(&device_index)) else {
+                continue;
+            };
+            let kd = &mut self.kcl_devices[pos];
+            kd.contributions = KclDevice::resolve_contributions(kd.kind, &kd.nodes, params);
         }
     }
 
@@ -2061,9 +2348,11 @@ impl PartitionedSolver {
         self.pending_schedule.push((boundary, EventKind::Bucket));
     }
 
-    fn check_finite(&self) -> Result<(), String> {
-        if let Some((node, v)) = self.voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(format!("node {node}: published voltage {v} is not finite"));
+    fn check_finite(&self, voltages_known_finite: bool) -> Result<(), String> {
+        if !voltages_known_finite {
+            if let Some((node, v)) = self.voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+                return Err(format!("node {node}: published voltage {v} is not finite"));
+            }
         }
         if let Some((device, i)) = self.currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
             return Err(format!("device {device}: published current {i} is not finite"));
@@ -2119,10 +2408,19 @@ impl PartitionSolver for PartitionedSolver {
         // `stepped.resolve_dirty` below can hand its pre-`now` catch-up
         // (`SteppedSolver::sync_partition`) the driver table that was
         // actually in force for that whole span, not the one THIS commit
-        // just produced. `std::mem::replace`, not a second `.clone()`: the
-        // old table is only needed for this one call, and it already holds
-        // exactly what `drivers.to_vec()` would otherwise recompute.
-        let pre_commit_drivers = std::mem::replace(&mut self.driver_snapshot, drivers.to_vec());
+        // just produced. A swap, not a second copy: the old table is only
+        // needed for this one call, and swapping leaves the older buffer to
+        // be overwritten in place with `drivers`. That buffer is still
+        // shared only when an instant's `dynamic_snapshot` holds it (a
+        // second resolve within the instant), and then a copy is the price.
+        std::mem::swap(&mut self.driver_snapshot, &mut self.pre_commit_drivers);
+        match Rc::get_mut(&mut self.driver_snapshot) {
+            Some(table) => {
+                table.clear();
+                table.extend_from_slice(drivers);
+            }
+            None => self.driver_snapshot = Rc::new(drivers.to_vec()),
+        }
 
         let mut readers = Vec::new();
         readers.extend(self.static_solver.resolve_dirty(&static_ids, now, drivers)?);
@@ -2138,14 +2436,11 @@ impl PartitionSolver for PartitionedSolver {
             self.add_watch_dependent_partitions(&static_ids, &mut cf_ids, &mut st_ids);
         }
         readers.extend(self.closed_form.resolve_dirty(&cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
-        readers.extend(self.stepped.resolve_dirty(&st_ids, now, &pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
-        self.publish_fixed_pair_capacitors(now);
-        self.recompute_source_currents(now, drivers);
-        self.publish_ne555_currents(drivers);
-        self.publish_led_devices();
+        readers.extend(self.stepped.resolve_dirty(&st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        let voltages_finite = self.publish_readout(now);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
-        self.check_finite()?;
+        self.check_finite(voltages_finite)?;
         Ok(readers)
     }
 
@@ -2154,11 +2449,33 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn currents(&self) -> &[f64] {
+        debug_assert!(!self.derived_dirty, "currents() read while the readout pass is owed: call prepare_readout() first");
         &self.currents
     }
 
     fn channels(&self) -> &[f64] {
+        debug_assert!(!self.derived_dirty, "channels() read while the readout pass is owed: call prepare_readout() first");
         &self.channels
+    }
+
+    /// Runs the readout pass if a publish left one pending. The pass reads
+    /// only state a failed instant restores (`voltages`, the
+    /// partition-published capacitor currents, `live_params`,
+    /// `driver_snapshot`, `derived_now`), so what it computes here is bit for
+    /// bit what the eager publish would have computed at the publish point.
+    fn prepare_readout(&mut self) {
+        if self.derived_dirty {
+            self.derived_dirty = false;
+            self.compute_derived(self.derived_now);
+        }
+    }
+
+    /// The raw arrays, not [`Self::currents`]: the pass is never run for a
+    /// snapshot. A slot it still owes is captured stale;
+    /// [`PartitionSolver::dynamic_snapshot`] captures the flag that says so,
+    /// and the kernel restores both.
+    fn snapshot(&self) -> (Vec<f64>, Vec<f64>) {
+        (self.voltages.clone(), self.currents.clone())
     }
 
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
@@ -2231,6 +2548,7 @@ impl PartitionSolver for PartitionedSolver {
         if !static_triples.is_empty() {
             touched.extend(self.static_solver.apply_params(&static_triples));
         }
+        self.refresh_kcl_contributions(triples);
         touched.into_iter().collect()
     }
 
@@ -2275,16 +2593,18 @@ impl PartitionSolver for PartitionedSolver {
             self.stepped.snapshot(),
             self.pending_schedule.clone(),
             self.next_bucket,
-            self.driver_snapshot.clone(),
+            Rc::clone(&self.driver_snapshot),
             self.channels.clone(),
+            self.derived_dirty,
+            self.derived_now,
         ))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         if let Ok(boxed) = snapshot
-            .downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Vec<Driver>, Vec<f64>)>()
+            .downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64)>()
         {
-            let (static_snap, cf, st, pending, next_bucket, driver_snapshot, channels) = *boxed;
+            let (static_snap, cf, st, pending, next_bucket, driver_snapshot, channels, derived_dirty, derived_now) = *boxed;
             self.static_solver.restore(static_snap);
             self.closed_form.restore(cf);
             self.stepped.restore(st);
@@ -2292,6 +2612,8 @@ impl PartitionSolver for PartitionedSolver {
             self.next_bucket = next_bucket;
             self.driver_snapshot = driver_snapshot;
             self.channels = channels;
+            self.derived_dirty = derived_dirty;
+            self.derived_now = derived_now;
         }
     }
 
@@ -2315,7 +2637,6 @@ impl PartitionSolver for PartitionedSolver {
         } else {
             self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)?
         };
-        self.publish_fixed_pair_capacitors(now);
         // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
         // now touch a dynamic partition: `handle_crossing`/`handle_step`
         // above already restamped its driver/pull contribution correctly
@@ -2329,31 +2650,24 @@ impl PartitionSolver for PartitionedSolver {
         // that too, not `&[]`: an empty slice would silently stop
         // republishing every IC driver's contribution to a fixed rail's own
         // current on every crossing/step in between actual commits.
-        let driver_snapshot = self.driver_snapshot.clone();
-        self.recompute_source_currents(now, &driver_snapshot);
-        self.publish_ne555_currents(&driver_snapshot);
-        self.publish_led_devices();
+        let voltages_finite = self.publish_readout(now);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
-        self.check_finite()?;
+        self.check_finite(voltages_finite)?;
         Ok(readers)
     }
 
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
         let readers = self.stepped.sync_to(t_end, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)?;
-        self.publish_fixed_pair_capacitors(t_end);
         // Same reasoning as `handle_dynamic_event` above: the horizon clamp
         // re-publishes a dynamic partition's exact state at `t_end`, and a
         // fixed rail's own current must track that continuously, not only at
         // the instants a driver actually commits.
-        let driver_snapshot = self.driver_snapshot.clone();
-        self.recompute_source_currents(t_end, &driver_snapshot);
-        self.publish_ne555_currents(&driver_snapshot);
-        self.publish_led_devices();
+        let voltages_finite = self.publish_readout(t_end);
         self.drain_scheduled();
         self.maybe_schedule_bucket(t_end);
-        self.check_finite()?;
+        self.check_finite(voltages_finite)?;
         Ok(readers)
     }
 
@@ -2362,7 +2676,7 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn ic_powered(&self, device: usize) -> bool {
-        match self.ics.iter().find(|(d, _)| *d == device) {
+        match self.ic_position.get(device).filter(|&&i| i != u32::MAX).map(|&i| &self.ics[i as usize]) {
             Some((_, ic)) => digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]).powered,
             // Not a tracked IC at all (a non-IC driver, `Driver::device ==
             // usize::MAX`, or an out-of-range index): "true for a non-IC"
@@ -2502,6 +2816,7 @@ mod partitioned_solver_tests {
         let mut solver = PartitionedSolver::build(&p).unwrap();
         let dirty = all_partitions(&solver);
         solver.resolve_dirty(&dirty, 0.0, &[]).unwrap();
+        solver.prepare_readout();
         assert!((solver.voltages()[3] - 5.0).abs() < 1e-3, "v(c) = {}", solver.voltages()[3]);
         // 5V across ~10k (the 1 milliohm contact is negligible), not the
         // 5000A a fabricated 0V fixed boundary on c would have produced.
@@ -2518,6 +2833,7 @@ mod partitioned_solver_tests {
 
         kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap(); // device 1 = spdt, param 0 = sel.
 
+        kernel.solver_mut().prepare_readout();
         assert!((kernel.solver().voltages()[3] - 5.0).abs() < 1e-3, "v(c) = {}", kernel.solver().voltages()[3]);
         assert!((kernel.solver().currents()[1] - 5e-4).abs() < 1e-5, "spdt current = {}", kernel.solver().currents()[1]);
     }
@@ -2547,6 +2863,7 @@ mod partitioned_solver_tests {
         let dirty = all_partitions(&solver);
         solver.resolve_dirty(&dirty, 0.0, &[]).unwrap();
         assert!((solver.voltages()[3] - 5.0).abs() < 1e-3, "v(b2) = {}", solver.voltages()[3]);
+        solver.prepare_readout();
         assert!((solver.currents()[1] - 5e-4).abs() < 1e-5, "dip current = {}", solver.currents()[1]);
     }
 
@@ -2561,6 +2878,7 @@ mod partitioned_solver_tests {
         kernel.apply_params_as_event(&[(1, 2, 1.0)]).unwrap(); // device 1 = dip, param 2 = sw2.
 
         assert!((kernel.solver().voltages()[3] - 5.0).abs() < 1e-3, "v(b2) = {}", kernel.solver().voltages()[3]);
+        kernel.solver_mut().prepare_readout();
         assert!((kernel.solver().currents()[1] - 5e-4).abs() < 1e-5, "dip current = {}", kernel.solver().currents()[1]);
     }
 
@@ -2782,6 +3100,7 @@ mod partitioned_solver_tests {
         kernel.settle(0.0, &all, &[]).unwrap();
 
         let v2_before = kernel.solver().voltages()[2];
+        kernel.solver_mut().prepare_readout();
         let i1_before = kernel.solver().currents()[1];
 
         // Close S1 and S2 together as one event: S2 shorts the 1e306V
@@ -2790,6 +3109,7 @@ mod partitioned_solver_tests {
         let err = kernel.apply_params_as_event(&[(2, 0, 1.0), (3, 0, 1.0)]).unwrap_err();
         assert!(matches!(err, crate::kernel::KernelError::SolveFailed(_)));
 
+        kernel.solver_mut().prepare_readout();
         assert_eq!(kernel.solver().voltages()[2], v2_before, "the published node2 voltage must roll back");
         assert_eq!(kernel.solver().currents()[1], i1_before, "R1's published current must roll back too");
 
@@ -2797,6 +3117,7 @@ mod partitioned_solver_tests {
         // node4): must not republish node2's doomed, S1-closed voltage —
         // nor the R1 current that stale voltage would imply.
         kernel.apply_params_as_event(&[(6, 0, 1.0)]).unwrap();
+        kernel.solver_mut().prepare_readout();
         assert_eq!(kernel.solver().voltages()[2], v2_before, "an unrelated successful set_params must not resurrect the failed attempt's node2 voltage");
         assert_eq!(kernel.solver().currents()[1], i1_before, "...or R1's doomed current either");
     }
@@ -2896,6 +3217,7 @@ mod partitioned_solver_tests {
         let mut solver = PartitionedSolver::build(&p).unwrap();
         solver.resolve_dirty(&[], 0.0, &[]).unwrap();
 
+        solver.prepare_readout();
         let expected_at_load = v0 / esr; // dV/esr, exactly (the contract's own "5/0.5=10").
         let at_load = solver.currents()[1];
         assert!((at_load - expected_at_load).abs() / expected_at_load.abs() < 1e-9, "at load: got {at_load} expected {expected_at_load}");
@@ -2903,6 +3225,7 @@ mod partitioned_solver_tests {
         let tau = esr * c; // 0.5 us.
         for &t in &[1e-6, 5e-6, 20e-6] {
             solver.sync_dynamic_to(t).unwrap();
+            solver.prepare_readout();
             let got = solver.currents()[1];
             let expected = (v0 / esr) * (-t / tau).exp();
             let rel = (got - expected).abs() / expected.abs();
@@ -2920,9 +3243,11 @@ mod partitioned_solver_tests {
         let p = fixed_pair_program(5.0, 1e-6, 0.0, 0.0);
         let mut solver = PartitionedSolver::build(&p).unwrap();
         solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+        solver.prepare_readout();
         assert_eq!(solver.currents()[1], 0.0, "esr=0: series current must be exactly 0 at load");
 
         solver.sync_dynamic_to(1e-3).unwrap();
+        solver.prepare_readout();
         assert_eq!(solver.currents()[1], 0.0, "esr=0: series current must stay exactly 0 (vc=dV) at any later time");
     }
 
@@ -2935,12 +3260,14 @@ mod partitioned_solver_tests {
         let mut solver = PartitionedSolver::build(&p).unwrap();
         solver.resolve_dirty(&[], 0.0, &[]).unwrap();
 
+        solver.prepare_readout();
         let expected_leak = v0 / leak;
         let expected_series_at_load = v0 / esr;
         let got = solver.currents()[1];
         assert!((got - (expected_series_at_load + expected_leak)).abs() < 1e-9, "at load: got {got} expected series {expected_series_at_load} + leak {expected_leak}");
 
         solver.sync_dynamic_to(1e-2).unwrap(); // ~2e4 time constants: series fully decayed.
+        solver.prepare_readout();
         let steady = solver.currents()[1];
         assert!((steady - expected_leak).abs() < 1e-9, "steady state should be exactly the leakage term, got {steady} expected {expected_leak}");
     }
@@ -2956,6 +3283,7 @@ mod partitioned_solver_tests {
         // shunt (W0 point 2), included in every KCL sum — `recompute_source_
         // currents`'s own `leaving` walk folds both this and the capacitor's
         // published current together before deriving the source's current.
+        solver.prepare_readout();
         let cap_i = solver.currents()[1];
         let shunt = static_part::NODE_RSHUNT_G;
         let expected_source_i = -(shunt * v0 + cap_i);
@@ -2975,6 +3303,7 @@ mod partitioned_solver_tests {
             let p = Program { node_count: 2, options, digital_slot_count: 0, channel_slot_count: 0, devices: vec![source(0, 1, 0, v0), capacitor(1, 1, 0, c, esr, 0.0)] };
             let mut solver = PartitionedSolver::build(&p).unwrap();
             solver.resolve_dirty(&[], start_time, &[]).unwrap();
+            solver.prepare_readout();
             solver
         };
         let mut s0 = build_at(0.0);
@@ -2992,6 +3321,8 @@ mod partitioned_solver_tests {
         // ordinary floating-point subtraction artifact, not a bug.
         s0.sync_dynamic_to(5e-6).unwrap();
         s5.sync_dynamic_to(5.0 + 5e-6).unwrap();
+        s0.prepare_readout();
+        s5.prepare_readout();
         let rel = (s5.currents()[1] - s0.currents()[1]).abs() / s0.currents()[1].abs();
         assert!(rel < 1e-9, "5us after their own START_TIME: START_TIME=0 got {} START_TIME=5 got {} rel {rel}", s0.currents()[1], s5.currents()[1]);
     }
@@ -3009,11 +3340,13 @@ mod partitioned_solver_tests {
         let p = fixed_pair_program(v0, c, esr, 0.0);
         let mut solver = PartitionedSolver::build(&p).unwrap();
         solver.resolve_dirty(&[], 0.0, &[]).unwrap();
+        solver.prepare_readout();
         let at_load = solver.currents()[1];
         assert!((at_load - v0 / esr).abs() < 1e-9);
 
         let snapshot = solver.snapshot();
         solver.sync_dynamic_to(1e-5).unwrap(); // ~20 time constants later: fully decayed.
+        solver.prepare_readout();
         let decayed = solver.currents()[1];
         assert!(decayed.abs() < 1e-6, "expected the series current to have decayed to ~0 by 1e-5s, got {decayed}");
 
@@ -3024,5 +3357,304 @@ mod partitioned_solver_tests {
             "a rollback must restore the fixed-pair capacitor's published current to its pre-attempt value, not leave the decayed one in place"
         );
     }
-}
 
+    // ---- deferred readout (`publish_readout`, `prepare_readout`) ------------
+
+    /// One program with every kind of derived value that needs no IC: a
+    /// source whose current folds in a resistor, a switch, three capacitors'
+    /// currents (an RC, a fixed-pair one) and two LED junctions; an RGB LED
+    /// (channels) across the fixed rail; a plain LED inside the RC's
+    /// partition.
+    fn readout_program() -> Program {
+        let led = |ci: usize, anode: usize, cathode: usize| Device {
+            kind: kinds::LED,
+            component_index: ci,
+            pins: vec![pin(anode), pin(cathode)],
+            params: vec![2.0, 2.0, 0.02, 0.0, 0.0, 0.0],
+            blob: vec![],
+        };
+        let rgb = Device {
+            kind: kinds::RGB_LED,
+            component_index: 7,
+            pins: vec![pin(1), pin(1), pin(1), pin(0)],
+            params: vec![2.0, 2.1, 3.0, 0.02, 0.03, 0.0],
+            blob: vec![0.0],
+        };
+        Program {
+            node_count: 3,
+            options: Options::default(),
+            digital_slot_count: 0,
+            channel_slot_count: 3,
+            devices: vec![
+                source(0, 1, 0, 5.0),
+                resistor(1, 1, 2, 1000.0),
+                capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+                switch_dev(3, 1, 2, 0.0),
+                capacitor(4, 1, 0, 1e-6, 0.5, 1e7),
+                rgb,
+                led(6, 2, 0),
+            ],
+        }
+    }
+
+    /// The program above plus the readout inputs that only an IC has: a
+    /// 74ls04 whose `1a` is an open floating-input pin on the RAIL (its pull
+    /// enters the source KCL, and depends on time), whose `1y` drives an RC
+    /// and whose `2y` drives the rail itself (a driver folded into the
+    /// source KCL); and an ne555 whose OUT level (the latch, read through
+    /// the driver table) sets its `elementI`. Devices: 0 source, 1 ls04, 2 R,
+    /// 3 C, 4 ne555, 5 and 6 its load and DIS resistors, 7 a fixed-pair C.
+    fn ic_readout_program(open_hash: u32) -> Program {
+        let flags = |i: usize| if i % 2 == 0 { kinds::PIN_FLOATING_INPUT as f64 } else { 0.0 };
+        let mut ls04_pins = vec![pin(1), pin(0)];
+        for (i, node) in [1usize, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0].into_iter().enumerate() {
+            ls04_pins.push(if i == 0 { PinRecord { node, flags: crate::program::PIN_FLAG_OPEN, open_hash, dead_hash: 0 } } else { pin(node) });
+        }
+        let mut ls04_params = vec![0.0; kinds::ic_param::COUNT];
+        ls04_params[kinds::ic_param::VCC_MIN] = 4.75;
+        ls04_params[kinds::ic_param::VCC_MAX] = 5.25;
+        ls04_params[kinds::ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+        ls04_params[kinds::ic_param::VIL_FIXED] = 1.0;
+        ls04_params[kinds::ic_param::VIL] = 0.8;
+        ls04_params[kinds::ic_param::VIH_FIXED] = 1.0;
+        ls04_params[kinds::ic_param::VIH] = 2.0;
+        ls04_params[kinds::ic_param::NOMINAL] = 5.0;
+        ls04_params[kinds::ic_param::IO_MAX] = 0.008;
+        ls04_params[kinds::ic_param::DELAY] = 20e-9;
+        let mut ls04_blob = vec![0.0];
+        ls04_blob.extend((0..12).map(flags));
+        let ls04 = Device { kind: kinds::IC_74LS04, component_index: 1, pins: ls04_pins, params: ls04_params, blob: ls04_blob };
+
+        let mut ne555_params = vec![0.0; kinds::ic_param::COUNT];
+        ne555_params[kinds::ic_param::VCC_MIN] = 2.0;
+        ne555_params[kinds::ic_param::VCC_MAX] = 18.0;
+        ne555_params[kinds::ic_param::NOMINAL] = 5.0;
+        // `8 1` then TRIG, OUT, RST, CV, THR, DIS.
+        let ne555_pins = [1, 0, 0, 3, 1, 0, 0, 4].into_iter().map(pin).collect();
+        let ne555 = Device { kind: kinds::NE555, component_index: 4, pins: ne555_pins, params: ne555_params, blob: vec![0.0; 7] };
+
+        Program {
+            node_count: 5,
+            options: Options::default(),
+            digital_slot_count: 0,
+            channel_slot_count: 0,
+            devices: vec![
+                source(0, 1, 0, 5.0),
+                ls04,
+                resistor(2, 2, 0, 1000.0),
+                capacitor(3, 2, 0, 1e-6, 0.0, 0.0),
+                ne555,
+                resistor(5, 3, 0, 1000.0),
+                resistor(6, 4, 1, 10000.0),
+                capacitor(7, 1, 0, 1e-6, 0.5, 1e7),
+            ],
+        }
+    }
+
+    /// The `ic_readout_program`'s driver table: the ls04's `1y` and `2y`, the
+    /// 555's OUT and DIS.
+    fn ic_readout_drivers() -> Vec<Driver> {
+        let mut out = Driver::new_ic_output(3, 1, 0, 4, false);
+        out.stage = DriverStage::Ne555Out;
+        let mut dis = Driver::new_ic_output(4, 1, 0, 4, false);
+        dis.stage = DriverStage::Ne555Dis;
+        vec![Driver::new_ic_output(2, 1, 0, 1, false), Driver::new_ic_output(1, 1, 0, 1, false), out, dis]
+    }
+
+    /// Commits `levels[i]` on `drivers[i]` at `now`, where it changes.
+    fn commit_levels(drivers: &mut [Driver], levels: [Mode; 4], now: f64) {
+        for (d, level) in drivers.iter_mut().zip(levels) {
+            if d.committed() != Some(level) {
+                let (_, mode, token) = d.request(level, now, &crate::drivers::DelaySet::uniform(0.0)).expect("a level change schedules a commit");
+                assert!(d.apply_commit(mode, token));
+            }
+        }
+    }
+
+    /// Every published number of `s`, as bits, after bringing its readout up
+    /// to date.
+    fn published_bits(s: &mut PartitionedSolver) -> Vec<u64> {
+        s.prepare_readout();
+        s.voltages().iter().chain(s.currents()).chain(s.channels()).map(|v| v.to_bits()).collect()
+    }
+
+    /// A lazy solver and its twin with the deferral forced off (the eager
+    /// passes at every publish point: the reference).
+    fn lazy_and_eager(p: &Program) -> (PartitionedSolver, PartitionedSolver) {
+        let lazy = PartitionedSolver::build(p).unwrap();
+        let mut eager = PartitionedSolver::build(p).unwrap();
+        assert!(lazy.lazy_static_ok, "this program's coefficients are all bounded");
+        eager.lazy_static_ok = false;
+        (lazy, eager)
+    }
+
+    #[test]
+    fn a_deferred_readout_matches_the_eager_one_bit_for_bit_and_rolls_back_with_the_instant() {
+        let p = readout_program();
+        let (mut lazy, mut eager) = lazy_and_eager(&p);
+        let all = all_partitions(&lazy);
+
+        for s in [&mut lazy, &mut eager] {
+            s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        }
+        assert!(lazy.derived_dirty, "the lazy solver owes its readout until it is prepared");
+        assert!(!eager.derived_dirty);
+        assert_eq!(published_bits(&mut lazy), published_bits(&mut eager), "at load");
+        assert!(!lazy.derived_dirty, "preparing runs the owed pass");
+        assert!(lazy.currents()[0] != 0.0 && lazy.channels().iter().any(|&c| c > 0.0), "the readout must be non-trivial");
+
+        for t in [1e-4, 3e-4, 1e-3] {
+            for s in [&mut lazy, &mut eager] {
+                s.sync_dynamic_to(t).unwrap();
+            }
+            assert!(lazy.derived_dirty);
+            assert_eq!(published_bits(&mut lazy), published_bits(&mut eager), "after a horizon clamp at {t}");
+        }
+
+        // A rollback taken while the readout is still owed (nothing has read
+        // it since the last publish), then one taken after a read.
+        for read_before_snapshot in [false, true] {
+            for s in [&mut lazy, &mut eager] {
+                s.sync_dynamic_to(2e-3).unwrap();
+            }
+            let expected = published_bits(&mut eager);
+            if read_before_snapshot {
+                assert_eq!(published_bits(&mut lazy), expected);
+            }
+            assert_eq!(lazy.derived_dirty, !read_before_snapshot);
+            let (snapshot, dynamic) = (lazy.snapshot(), lazy.dynamic_snapshot());
+
+            // The doomed attempt: a later publish, a toggled switch, and a read.
+            let touched = lazy.apply_params(&[(3, 0, 1.0)]);
+            lazy.resolve_dirty(&touched, 2.5e-3, &[]).unwrap();
+            lazy.sync_dynamic_to(3e-3).unwrap();
+            assert_ne!(published_bits(&mut lazy), expected, "the attempt must have changed the published state");
+
+            lazy.restore(snapshot);
+            lazy.dynamic_restore(dynamic);
+            lazy.apply_params(&[(3, 0, 0.0)]);
+            assert_eq!(published_bits(&mut lazy), expected, "a rollback must restore the readout it took (read first: {read_before_snapshot})");
+        }
+
+        // A live-param change publishes its new readout.
+        for s in [&mut lazy, &mut eager] {
+            let touched = s.apply_params(&[(3, 0, 1.0)]);
+            s.resolve_dirty(&touched, 2e-3, &[]).unwrap();
+        }
+        assert_eq!(published_bits(&mut lazy), published_bits(&mut eager), "after closing the switch");
+    }
+
+    #[test]
+    fn a_deferred_readout_with_ics_and_a_555_matches_the_eager_one_across_commits_time_and_a_rolled_back_instant() {
+        use crate::events::Mode::{High, Low};
+        // A floating-pull hash whose coin comes up heads, tails, heads, tails
+        // over the 10 ms buckets at these four times (far apart, since
+        // neighbouring buckets' coins are nearly equal): the rail's source
+        // current then differs between them by the pull, so a wrong
+        // `derived_now` shows.
+        let times = [0.003, 0.173, 0.427, 0.913];
+        let open_hash = (0u32..100_000)
+            .find(|&h| times.iter().map(|&t| digital::floating::floating_high(h, t, true)).collect::<Vec<_>>() == [true, false, true, false])
+            .expect("some hash flips at each of these times");
+        let p = ic_readout_program(open_hash);
+        let (mut lazy, mut eager) = lazy_and_eager(&p);
+        let all = all_partitions(&lazy);
+        let mut drivers = ic_readout_drivers();
+        let mut source_currents = Vec::new();
+        fn check(lazy: &mut PartitionedSolver, eager: &mut PartitionedSolver, what: &str, log: &mut Vec<u64>) {
+            assert_eq!(published_bits(lazy), published_bits(eager), "{what}");
+            log.push(lazy.currents()[0].to_bits());
+        }
+
+        for s in [&mut lazy, &mut eager] {
+            s.resolve_dirty(&all, 0.0, &drivers).unwrap();
+        }
+        assert!(lazy.derived_dirty && !eager.derived_dirty);
+        check(&mut lazy, &mut eager, "at load, every driver uncommitted", &mut source_currents);
+
+        // A commit between publishes, then time alone, then a toggle.
+        commit_levels(&mut drivers, [High, Low, High, Low], times[0]);
+        for s in [&mut lazy, &mut eager] {
+            s.resolve_dirty(&all, times[0], &drivers).unwrap();
+        }
+        check(&mut lazy, &mut eager, "after the first commits", &mut source_currents);
+        assert!(lazy.currents()[4] != 0.0, "the 555 delivers current while OUT is committed HIGH");
+        for s in [&mut lazy, &mut eager] {
+            s.sync_dynamic_to(times[1]).unwrap();
+        }
+        check(&mut lazy, &mut eager, "after a horizon clamp into the next bucket", &mut source_currents);
+        commit_levels(&mut drivers, [Low, High, Low, High], times[2]);
+        for s in [&mut lazy, &mut eager] {
+            s.resolve_dirty(&all, times[2], &drivers).unwrap();
+        }
+        check(&mut lazy, &mut eager, "after every commit toggled", &mut source_currents);
+        let distinct: std::collections::BTreeSet<u64> = source_currents.iter().copied().collect();
+        assert_eq!(distinct.len(), source_currents.len(), "each step must have moved the source current: {source_currents:?}");
+
+        // A doomed instant of two delta passes with commit changes, rolled
+        // back, taken while the readout is owed and again after a read.
+        for read_before_snapshot in [false, true] {
+            for s in [&mut lazy, &mut eager] {
+                s.sync_dynamic_to(times[2] + 1e-3).unwrap();
+            }
+            let expected = published_bits(&mut eager);
+            if read_before_snapshot {
+                assert_eq!(published_bits(&mut lazy), expected);
+            }
+            assert_eq!(lazy.derived_dirty, !read_before_snapshot);
+            let (snapshot, dynamic) = (lazy.snapshot(), lazy.dynamic_snapshot());
+
+            let levels = |table: &[Driver]| table.iter().map(|d| d.committed()).collect::<Vec<_>>();
+            let before = levels(&drivers);
+            let mut doomed = drivers.clone();
+            commit_levels(&mut doomed, [High, High, High, Low], times[3]);
+            lazy.resolve_dirty(&all, times[3], &doomed).unwrap();
+            assert!(
+                std::rc::Rc::strong_count(&lazy.pre_commit_drivers) > 1,
+                "the table the snapshot holds is now the pre-commit one: the next resolve must copy over the other buffer, not write into it"
+            );
+            assert_eq!((levels(&lazy.driver_snapshot), levels(&lazy.pre_commit_drivers)), (levels(&doomed), before));
+            let first = levels(&doomed);
+            commit_levels(&mut doomed, [Low, Low, Low, High], times[3]);
+            lazy.resolve_dirty(&all, times[3], &doomed).unwrap();
+            assert_eq!((levels(&lazy.driver_snapshot), levels(&lazy.pre_commit_drivers)), (levels(&doomed), first));
+            lazy.sync_dynamic_to(times[3] + 1e-3).unwrap();
+            assert_ne!(published_bits(&mut lazy), expected, "the attempt must have changed the published state");
+
+            lazy.restore(snapshot);
+            lazy.dynamic_restore(dynamic);
+            assert_eq!(published_bits(&mut lazy), expected, "a rollback must restore the readout it took (read first: {read_before_snapshot})");
+        }
+
+        // Both go on from there, from the same state.
+        commit_levels(&mut drivers, [High, Low, High, Low], times[3]);
+        for s in [&mut lazy, &mut eager] {
+            s.resolve_dirty(&all, times[3], &drivers).unwrap();
+        }
+        check(&mut lazy, &mut eager, "after the rolled-back instants, at the next publish", &mut source_currents);
+    }
+
+    #[test]
+    fn a_coefficient_that_could_overflow_selects_the_eager_readout() {
+        // 1/R for R = 1e-320 is infinite, and a bound on it cannot be proved.
+        let p = program(2, vec![source(0, 1, 0, 5.0), resistor(1, 1, 0, 1e-320)]);
+        assert!(!PartitionedSolver::build(&p).unwrap().lazy_static_ok);
+        let p = program(2, vec![source(0, 1, 0, 5.0), resistor(1, 1, 0, 1000.0)]);
+        assert!(PartitionedSolver::build(&p).unwrap().lazy_static_ok);
+        // A node voltage past the limit selects it at run time.
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        s.resolve_dirty(&[], 0.0, &[]).unwrap();
+        assert!(s.derived_dirty);
+        s.voltages[1] = 2.0 * LAZY_V_LIMIT;
+        assert!(!s.lazy_publish_ok(0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "call prepare_readout() first")]
+    fn reading_the_currents_while_the_readout_is_owed_is_a_bug_that_fails_loudly() {
+        let p = program(2, vec![source(0, 1, 0, 5.0), resistor(1, 1, 0, 1000.0)]);
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        s.resolve_dirty(&[], 0.0, &[]).unwrap();
+        let _ = s.currents();
+    }
+}

@@ -1690,6 +1690,7 @@ fn finding3_8_static_output_pin_on_a_fixed_node_loads_its_free_supply_and_balanc
 
     // KCL: with only these two sources (plus negligible universal-shunt
     // noise), everything leaving v1 must return through v2.
+    kernel.solver_mut().prepare_readout();
     let currents = kernel.solver().currents();
     let (i_v1, i_v2) = (currents[0], currents[1]);
     assert!(i_v1.abs() > 1e-4, "I(v1) must be a real, nonzero loading current now that the coupling is stamped, got {i_v1}");
@@ -1726,6 +1727,7 @@ fn finding3_8_dynamic_output_pin_on_a_fixed_node_loads_a_stepped_free_supply() {
     assert!(kernel.solver().ic_powered(4), "vcc must have charged into the power window by 500us");
     assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH once powered");
 
+    kernel.solver_mut().prepare_readout();
     let currents = kernel.solver().currents();
     let (i_v1, i_v2) = (currents[0], currents[1]);
     assert!(i_v1.abs() > 1e-4, "I(v1) must be a real, nonzero loading current, got {i_v1}");
@@ -1758,6 +1760,7 @@ fn finding9_output_on_the_datum_node_stamps_nothing_and_draws_no_source_current(
     // committed driver -- here that would be -5V/156.25ohm = -0.032A. With
     // it, a driver on the datum node contributes nothing, matching classic's
     // I(vsrc) (RSHUNT noise only, ~1e-11A).
+    kernel.solver_mut().prepare_readout();
     let i_vsrc = kernel.solver().currents()[0];
     assert!(i_vsrc.abs() < 1e-8, "I(vsrc) should be near zero (shunt noise only), got {i_vsrc}");
 }
@@ -1818,6 +1821,7 @@ fn w1d_p1_static_driven_open_floating_output_leaves_supply_current_clean() {
     let v_pin = kernel.solver().voltages()[2];
     assert!((v_pin - expected_v).abs() / expected_v < 1e-2, "V(1y) = {v_pin}, expected ~{expected_v} (unaffected by the fix)");
 
+    kernel.solver_mut().prepare_readout();
     let i_vcc = kernel.solver().currents()[0];
     assert!(i_vcc.abs() < 1e-8, "I(vcc) must show only the universal per-node shunt's noise, no phantom pull leakage, got {i_vcc}");
 }
@@ -1865,6 +1869,7 @@ fn w1d_p1_dynamic_driven_open_floating_output_pull_stamps_to_the_datum() {
     let v_pin = kernel.solver().voltages()[2];
     assert!((v_pin - expected_v).abs() / expected_v < 1e-2, "V(1y) = {v_pin}, expected ~{expected_v}");
 
+    kernel.solver_mut().prepare_readout();
     let i_vcc = kernel.solver().currents()[0];
     assert!(i_vcc.abs() < 1e-6, "I(vcc) must show no phantom pull leakage once 1y's own node is dynamic either, got {i_vcc}");
 }
@@ -1891,6 +1896,7 @@ fn w1d_p1_undriven_open_floating_input_settles_at_pull_target_with_zero_current(
     let v_1a = kernel.solver().voltages()[2];
     assert!((v_1a - 5.0).abs() < 1e-4, "V(1a) = {v_1a}, expected ~5V (the pull's own HIGH target, nothing else stamped on this node)");
 
+    kernel.solver_mut().prepare_readout();
     let i_vcc = kernel.solver().currents()[0];
     assert!(i_vcc.abs() < 1e-8, "an undriven open input's pull current must return entirely through its own IC, never the supply source, got {i_vcc}");
 }
@@ -1915,6 +1921,7 @@ fn finding7_a_commit_on_a_fixed_node_driver_republishes_the_source_current_immed
 
     let y = driver_for(&kernel, &p, 2, 1); // 1y
     assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1a LOW -> 1y HIGH (targets its own vcc rail: no extra current)");
+    kernel.solver_mut().prepare_readout();
     assert!(kernel.solver().currents()[0].abs() < 1e-8, "HIGH onto its own rail draws no extra current at settle");
 
     // 1a -> HIGH: 1y commits LOW after 20ns, now targeting gnd instead of
@@ -1925,6 +1932,7 @@ fn finding7_a_commit_on_a_fixed_node_driver_republishes_the_source_current_immed
     kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
     kernel.advance(t0 + 20e-9).unwrap();
     assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "1y must have committed LOW by now");
+    kernel.solver_mut().prepare_readout();
     let i_after_low = kernel.solver().currents()[0];
     assert!((i_after_low - (-0.032)).abs() < 1e-3, "I(vsrc) must reflect the new LOW commit's R_out-to-gnd current immediately, got {i_after_low}");
 
@@ -1937,6 +1945,7 @@ fn finding7_a_commit_on_a_fixed_node_driver_republishes_the_source_current_immed
     kernel.apply_params_as_event(&[(1, 0, 0.0)]).unwrap();
     kernel.advance(t1 + 20e-9).unwrap();
     assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "1y must have committed HIGH again by now");
+    kernel.solver_mut().prepare_readout();
     let i_after_high = kernel.solver().currents()[0];
     assert!(i_after_high.abs() < 1e-3, "I(vsrc) must revert to ~0 immediately once 1y is back on its own rail, got {i_after_high}");
 }

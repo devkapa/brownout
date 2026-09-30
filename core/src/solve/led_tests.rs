@@ -719,14 +719,17 @@ fn the_channel_array_is_part_of_the_dynamic_snapshot() {
     let mut solver = PartitionedSolver::build(&p).unwrap();
     let all: Vec<crate::events::PartitionId> = (0..solver.partition_count() as u32).map(crate::events::PartitionId).collect();
     solver.resolve_dirty(&all, 0.0, &[]).unwrap();
+    solver.prepare_readout();
     let lit = solver.channels().to_vec();
     assert!(lit[0] > 1e-3);
     let snapshot = (solver.snapshot(), solver.dynamic_snapshot());
     let touched = solver.apply_params(&[(1, 0, 0.0)]);
     solver.resolve_dirty(&touched, 0.0, &[]).unwrap();
+    solver.prepare_readout();
     assert!(solver.channels()[0] < 1e-9, "the toggle darkened it");
     solver.restore(snapshot.0);
     solver.dynamic_restore(snapshot.1);
+    solver.prepare_readout();
     assert_eq!(solver.channels(), lit.as_slice());
 }
 

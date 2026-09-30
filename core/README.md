@@ -1430,12 +1430,16 @@ citations are at `3b22a3e` ("Kind codes and records").
       readout"); hosts derive lit segments from channel currents.
     - Each record's `elementI` ("Currents") and channel values are pure
       functions of the published voltages and the device's `burnt` flag
-      (W1g adds `led_failed`). The solver republishes them in one device
-      pass after the partitions publish, at every point that publishes
-      voltages (`resolve_dirty`, `handle_dynamic_event`, `sync_dynamic_to`),
-      beside `recompute_source_currents`. A device none of whose pin
-      voltages changed bitwise since its last pass may be skipped: the
-      result would be identical.
+      (W1g adds `led_failed`). The solver computes them in one device pass,
+      beside `recompute_source_currents`, when the engine prepares a
+      readout (`PartitionSolver::prepare_readout`, at the end of `load`,
+      `advance`, `set_params` and `seed_memory`, success or failure). That is
+      identical to computing them at every point that publishes voltages
+      (`resolve_dirty`, `handle_dynamic_event`, `sync_dynamic_to`), which the
+      solver still does whenever a derived value could be non-finite, since
+      that would fail the instant. A device none of whose pin voltages
+      changed bitwise since its last pass may be skipped: the result would
+      be identical.
     - Channel values: `rgb_led` and `bicolor_led` channel `j` is
       `max(0, I_j)` (SE:4517, 4533); `seg7` channel `j` is `max(0, I_j)` for
       a stamped segment and `0` for an `OPEN` segment or when no common pin

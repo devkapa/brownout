@@ -254,6 +254,12 @@ impl Engine {
     /// control).
     fn publish_digital(&mut self, t: f64, slot: usize, value: f64) {
         let current = self.readout.digital_slots()[slot];
+        // The same bits (a NaN included) are no change and the store below
+        // would rewrite what is there: most writes are this, since the
+        // evaluator republishes every slot at every settled instant.
+        if current.to_bits() == value.to_bits() {
+            return;
+        }
         let changed = current.is_nan() != value.is_nan() || (!current.is_nan() && current != value);
         if changed {
             self.readout.record(t, slot, value);
@@ -302,6 +308,20 @@ impl Engine {
         let published = self.kernel.solver().channels();
         if published.len() == self.readout.channel_slots().len() {
             self.readout.channel_slots_mut().copy_from_slice(published);
+        }
+    }
+
+    /// The end of every call that can have published: has the solver bring
+    /// its readout up to date (`PartitionSolver::prepare_readout`, a solver
+    /// may compute derived currents and channels only then), then copies the
+    /// channel array. Run at the same four points as
+    /// [`Self::apply_digital_writes`], on failure as well as success, so
+    /// `currents()` and `channels()` are always current between calls.
+    fn finish_readout(&mut self) {
+        self.kernel.solver_mut().prepare_readout();
+        // Nothing to copy into, for a program with no channel slot.
+        if !self.readout.channel_slots().is_empty() {
+            self.copy_channels();
         }
     }
 
@@ -377,7 +397,7 @@ impl Engine {
         // `Self::apply_digital_writes`'s own doc comment on why a failed
         // `advance` can still carry real, already-completed instants' writes.
         self.apply_digital_writes();
-        self.copy_channels();
+        self.finish_readout();
         result.map_err(map_kernel_error)
     }
 
@@ -414,7 +434,7 @@ impl Engine {
         let result = self.kernel.apply_params_as_event(&triples);
         // See `Engine::advance`'s identical call: drained unconditionally.
         self.apply_digital_writes();
-        self.copy_channels();
+        self.finish_readout();
         result.map_err(map_kernel_error)
     }
 
@@ -438,7 +458,7 @@ impl Engine {
         // See `Engine::advance`'s identical call: drained unconditionally,
         // regardless of outcome.
         self.apply_digital_writes();
-        self.copy_channels();
+        self.finish_readout();
         match result {
             Ok(()) => Ok(()),
             Err(SeedMemoryError::Rejected(msg)) => Err(BoError::invalid_argument(msg)),
@@ -519,7 +539,7 @@ impl Engine {
         // caller reading `digital_slots()` right after `load()` sees it
         // without a separate `advance()` first.
         engine.apply_digital_writes();
-        engine.copy_channels();
+        engine.finish_readout();
         Ok(engine)
     }
 }
@@ -773,6 +793,21 @@ mod tests {
         let err = Engine::load(&p).unwrap_err();
         assert_eq!(err.code, ERR_SOLVE_FAILED);
         assert!(err.message.contains("device 0"), "message was: {}", err.message);
+    }
+
+    #[test]
+    fn load_fails_the_same_way_when_only_a_derived_current_overflows() {
+        // Two sources at the same voltage with a 1e-320 ohm resistor between
+        // them: the resistor's own current is (5 - 5) / R = 0, finite, but
+        // its KCL term is g * 0 = inf * 0 = NaN, so only the SOURCES'
+        // currents, which the solver derives, are non-finite. The solver
+        // must not defer that pass past the check that fails the instant.
+        // The message is what the eager pass produced before the deferral
+        // existed (recorded on the 2b5faf1 base).
+        let p = program(3, vec![source(0, 1, 0, 5.0), source(1, 2, 0, 5.0), resistor(2, 1, 2, 1e-320)]);
+        let err = Engine::load(&p).unwrap_err();
+        assert_eq!(err.code, ERR_SOLVE_FAILED);
+        assert_eq!(err.message, "device 0: published current NaN is not finite");
     }
 
     #[test]
