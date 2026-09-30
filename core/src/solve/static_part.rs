@@ -79,6 +79,26 @@ pub const NODE_RSHUNT_G: f64 = 1e-12;
 /// entries a bumped epoch made unreachable.
 const CACHE_ENTRIES_PER_PARTITION: usize = 256;
 
+/// One contact of a static-stamp device, reduced to what every consumer of
+/// `devices::stamp` reads: the two NODES it joins and its conductance. The
+/// zero-conductance ("open") contacts are kept: the current walk has always
+/// summed them (a `0.0 * dV` term is `+-0.0` or NaN, and adding it can
+/// change a sum's sign of zero), so dropping them would not be identical.
+#[derive(Debug, Clone, Copy)]
+struct Contact {
+    u: usize,
+    w: usize,
+    g: f64,
+}
+
+/// `devices::stamp(kind, pins.len(), params)` reduced to [`Contact`]s. Both
+/// callers used to allocate that list on every resolve; it is a pure function
+/// of `(kind, pin count, params)`, so it is computed once and again only when
+/// `apply_params` changes `params`.
+fn contacts_of(kind: u32, pins: &[usize], params: &[f64]) -> Vec<Contact> {
+    devices::stamp(kind, pins.len(), params).into_iter().map(|c| Contact { u: pins[c.pin_a], w: pins[c.pin_b], g: c.conductance }).collect()
+}
+
 /// One static-stamp device's electrical identity: which device it is, its
 /// kind, its own pins (as node ids, in device-pin order) and its current
 /// params. Used for BOTH the immutable resistor list (params never change
@@ -92,53 +112,154 @@ struct StaticStamp {
     kind: u32,
     pins: Vec<usize>,
     params: Vec<f64>,
+    /// `devices::stamp` of `params`, always in step with them.
+    contacts: Vec<Contact>,
 }
 
-/// The solution cache's key (W1 plan row B1): everything that can change
-/// what a partition solves to without changing the partition's own topology.
-/// `rail_band` is reserved for W1f's hub rails — always its default today.
-/// `floating_pulls` is W1c's: every would-be-pulled pin in this partition's
-/// CURRENT `high` bit (this partition never reaches the cache at all when it
-/// holds a free IC supply node — `Self::resolve_dirty`'s own branch —
-/// so an IC touching this partition always has BOTH its supply nodes fixed,
-/// meaning `digital::power::ic_power`'s result is a build-time constant
-/// that does not need its own key entry; only the floating model's
-/// bucket-dependent `high` bit can still move the stamp from one resolve to
-/// the next).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-struct CacheKey {
-    /// `(driver id, committed mode)` for every driver whose node lives in
-    /// this partition, sorted by driver id for a stable comparison —
-    /// generic over what kind of driver it is (an IC output included: its
-    /// `device`/`open_collector` are fixed identity, not part of what
-    /// varies resolve to resolve, so the committed mode alone is enough to
-    /// key on, exactly like any other driver).
-    driver_modes: Vec<(u32, u8)>,
-    /// Reserved for W1f's hub-rail band (pec3's 50 mV rail band); always 0
-    /// until then.
-    rail_band: i64,
-    /// One `high` bit per would-be-pulled pin touching this partition (an
-    /// `OPEN` `FLOATING_INPUT`, non-`OPEN_HIGH` logic pin of an IC whose
-    /// supply is fixed), in a fixed enumeration order (device order, then
-    /// logic-pin order) — `Self::cache_key`'s own doc comment on why power
-    /// itself never needs to be in this key. Included regardless of whether
-    /// the owning IC is CURRENTLY powered (a cheap, always-safe
-    /// over-inclusion: an unpowered IC's pull never stamps either way, so a
-    /// spurious cache miss from its hash flipping costs nothing but a
-    /// redundant, correct resolve).
-    floating_pulls: Vec<bool>,
-    /// Bumped by `apply_params` on every live-parameter change (owner
-    /// decision 1) — the only thing that can change a switch-family
-    /// device's stamp after load. A single, solver-wide counter (not
-    /// per-partition): `resolve_dirty` only ever checks this key for a
-    /// partition actually named in `dirty`, so a bump from an unrelated
-    /// partition's toggle costs that OTHER partition nothing unless it is
-    /// independently dirtied later anyway, in which case recomputing (rather
-    /// than serving a stale hit) is exactly what must happen.
-    epoch: u64,
+/// One term of a source child node's KCL sum (`leaving[child]`), in the exact
+/// order the whole-circuit walk has always added them: every contact of every
+/// resistor and then every switch (a contact adds to its `u` end and then
+/// subtracts from its `w` end), then every stamped junction (anode, then
+/// cathode), then the node's shunt. The sum is folded from `0.0` in that
+/// order, so it is bit-identical to the whole-circuit array walk it replaces.
+#[derive(Debug, Clone, Copy)]
+enum Term {
+    /// `stamp` indexes resistors then switches as one list.
+    Contact { stamp: u32, contact: u32, plus: bool },
+    Junction { junction: u32, plus: bool },
+    Shunt,
 }
 
-fn mode_discriminant(m: Mode) -> u8 {
+/// A junction's last branch current and the two voltages it was computed
+/// from. `exp` is the one expensive term of the source KCL, and it is a pure
+/// function of those two voltages, so the same bits give the same current.
+#[derive(Debug, Clone, Copy, Default)]
+struct JunctionMemo {
+    v_anode: u64,
+    v_cathode: u64,
+    current: f64,
+    valid: bool,
+}
+
+/// One partition's solution cache entry.
+#[derive(Debug)]
+struct CacheEntry {
+    hash: u64,
+    key: Box<[u8]>,
+    x: Box<[f64]>,
+}
+
+/// One partition's solution cache (W1 plan row B1). The key is exactly what
+/// the old `CacheKey` struct held, packed into bytes so a lookup allocates nothing
+/// and hashes without SipHash:
+/// - `(driver id, committed mode)` for every driver whose node lives in this
+///   partition and that has a committed mode, ascending id (an IC output's
+///   `device`/`open_collector` are fixed identity, so the committed mode
+///   alone is enough to key on, like any other driver);
+/// - one `high` bit per would-be-pulled pin touching this partition (an
+///   `OPEN` `FLOATING_INPUT`, non-`OPEN_HIGH` logic pin), in a fixed
+///   enumeration order (device order, then logic-pin order). This partition
+///   never reaches the cache when it holds a free IC supply node, so an IC
+///   touching it always has BOTH supply nodes fixed and
+///   `digital::power::ic_power`'s result is a build-time constant that needs
+///   no key entry; only the floating model's bucket-dependent `high` bit can
+///   still move the stamp from one resolve to the next. Included regardless
+///   of whether the owning IC is CURRENTLY powered (a cheap, always-safe
+///   over-inclusion: an unpowered IC's pull never stamps either way);
+/// - `epoch`, bumped by `apply_params` on every live-parameter change (owner
+///   decision 1), the only thing that can change a switch-family device's
+///   stamp after load. A single, solver-wide counter: a bump from an
+///   unrelated partition's toggle costs another partition nothing unless it
+///   is independently dirtied later anyway, in which case recomputing (rather
+///   than serving a stale hit) is exactly what must happen. Entries under an
+///   older epoch stay (unreachable) until the map empties, and count toward
+///   [`CACHE_ENTRIES_PER_PARTITION`] exactly as they always did.
+///
+/// `rail_band` (W1f's hub-rail band) was reserved and always 0, so it is not
+/// in the packed key. Which keys hit, and when the map empties, are exactly
+/// what they were with the `HashMap`: a hit is what a junction partition's
+/// `iterated_solve` result depends on (it starts from the last published
+/// voltages), so that pattern is part of the results.
+#[derive(Debug, Default)]
+struct PartCache {
+    entries: Vec<CacheEntry>,
+    /// Open-addressed table of `entries` indices plus one (`0` is empty),
+    /// keyed by the low bits of the entry's hash; a power-of-two length, at
+    /// most half full.
+    slots: Vec<u32>,
+}
+
+impl PartCache {
+    fn find(&self, hash: u64, key: &[u8]) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = (hash as usize) & mask;
+        loop {
+            let slot = self.slots[i];
+            if slot == 0 {
+                return None;
+            }
+            let e = &self.entries[slot as usize - 1];
+            if e.hash == hash && *e.key == *key {
+                return Some(slot as usize - 1);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn insert(&mut self, hash: u64, key: &[u8], x: &[f64]) {
+        if self.entries.len() >= CACHE_ENTRIES_PER_PARTITION {
+            self.entries.clear();
+            self.slots.fill(0);
+        }
+        if (self.entries.len() + 1) * 2 > self.slots.len() {
+            let new_len = (self.slots.len() * 2).max(8);
+            self.slots.clear();
+            self.slots.resize(new_len, 0);
+            let mask = new_len - 1;
+            for (ix, e) in self.entries.iter().enumerate() {
+                let mut i = (e.hash as usize) & mask;
+                while self.slots[i] != 0 {
+                    i = (i + 1) & mask;
+                }
+                self.slots[i] = ix as u32 + 1;
+            }
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = (hash as usize) & mask;
+        while self.slots[i] != 0 {
+            i = (i + 1) & mask;
+        }
+        self.entries.push(CacheEntry { hash, key: key.into(), x: x.into() });
+        self.slots[i] = self.entries.len() as u32;
+    }
+}
+
+/// Hashes a packed cache key eight bytes at a time (FxHash's mix). Only ever
+/// used to pick a slot: a hit still compares the whole key.
+fn hash_key(bytes: &[u8]) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h: u64 = 0;
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(c.try_into().expect("chunk of 8"))).wrapping_mul(K);
+    }
+    let rest = chunks.remainder();
+    if !rest.is_empty() {
+        let mut buf = [0u8; 8];
+        buf[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(K);
+    }
+    // The length distinguishes keys that differ only in trailing zero bytes;
+    // the fold moves the well-mixed high bits down to where the slot index
+    // reads them.
+    let h = (h.rotate_left(5) ^ bytes.len() as u64).wrapping_mul(K);
+    h ^ (h >> 32)
+}
+
+pub(crate) fn mode_discriminant(m: Mode) -> u8 {
     match m {
         Mode::Hiz => 0,
         Mode::High => 1,
@@ -223,7 +344,6 @@ pub struct StaticPartitionSolver {
     /// device index -> index into `switches`, for O(1) lookup during
     /// `validate_params`/`apply_params`/`param_value`.
     switch_index_by_device: HashMap<usize, usize>,
-    device_count: usize,
     voltages: Vec<f64>,
     currents: Vec<f64>,
     /// `NO_SOLUTION_CACHE` (option key 2): bypasses the cache below when
@@ -241,7 +361,7 @@ pub struct StaticPartitionSolver {
     /// never hit on a driver that alternates between two levels, which is
     /// what an LED on a clocked IC output does (W1e, LEDs point 7: "modes
     /// repeat every clock cycle"). Bounded by [`CACHE_ENTRIES_PER_PARTITION`].
-    cache: HashMap<usize, HashMap<CacheKey, Vec<f64>>>,
+    caches: Vec<PartCache>,
     /// Contract stat 7.
     cache_hits: f64,
     /// Every combinational IC whose driver/pull pins reach a `Static`
@@ -275,7 +395,59 @@ pub struct StaticPartitionSolver {
     /// every logic pin, W1c contract point 4's reader rule) — built once so
     /// `Self::resolve_dirty` can turn "this node's published bits changed"
     /// into "these readers must be queued" by a single lookup per node.
-    node_to_ic_readers: HashMap<usize, Vec<usize>>,
+    node_to_ic_readers: Vec<Vec<usize>>,
+    /// The order-independent state `Self::resolve_dirty` keeps so it costs
+    /// what CHANGED rather than what the circuit holds. None of it is part
+    /// of a snapshot: it is either derived from the immutable topology, a
+    /// scratch buffer, or self-validating (see each field).
+    ///
+    /// partition index -> ids of the drivers whose own node is free in it
+    /// (ascending), for the cache key. Derived from the driver table's
+    /// `node` fields, which never change after a driver is registered (load
+    /// time), so it is rebuilt only when the table's LENGTH differs from
+    /// `driver_index_len`; a debug build re-derives and compares it on every
+    /// call.
+    part_drivers: Vec<Vec<u32>>,
+    /// IC index (into `ics`) -> ids of every driver of that IC (`device`
+    /// equal to its device index), ascending; derived with `part_drivers`.
+    ic_drivers: Vec<Vec<u32>>,
+    driver_index_len: usize,
+    /// partition index -> indices into `ics` of every IC with a supply or
+    /// logic pin free in it, in `ics` order: the only ICs `stamp_ics_into`'s
+    /// `touches` test can ever accept for that partition (a driver's or a
+    /// pull's node is one of the IC's logic pins), so the stamp visits these
+    /// instead of every IC in the program.
+    part_ics: Vec<Vec<u32>>,
+    /// device index -> index into `ics`, `u32::MAX` for a device that is no IC.
+    ic_of_device: Vec<u32>,
+    /// partition index -> `(index into `ics`, logic-pin index)` of every
+    /// would-be-pulled pin in it (an `OPEN` `FLOATING_INPUT`, non-`OPEN_HIGH`
+    /// pin of a static IC record), in the key's fixed enumeration order.
+    part_pulls: Vec<Vec<(u32, u32)>>,
+    /// The packed cache key being built, reused across calls.
+    key_scratch: Vec<u8>,
+    /// Nodes whose published bits changed in the current `resolve_dirty`.
+    changed_scratch: Vec<usize>,
+    /// node -> ids of the stamps (resistors, then switches, as one list) with
+    /// a pin on it, ascending, no repeats.
+    stamps_by_node: Vec<Vec<u32>>,
+    /// Stamps whose params `apply_params` touched since the last resolve.
+    param_dirty: Vec<u32>,
+    /// Stamps to recompute in the current call, and which are already listed.
+    work: Vec<u32>,
+    stamp_listed: Vec<bool>,
+    /// One per `resolved` source: the terms of its child node's KCL sum.
+    resolved_terms: Vec<Vec<Term>>,
+    /// One per `kcl_junctions` entry.
+    junction_memo: Vec<JunctionMemo>,
+    /// `extra` of the KCL walk, node-indexed and all `0.0` between calls (the
+    /// walk clears exactly the entries it touched).
+    walk_extra: Vec<f64>,
+    /// Whether the next `resolve_dirty` must recompute every current and
+    /// check every value, as the whole-array version always did: set at
+    /// `build`, by `restore` (the published arrays just jumped back to a
+    /// snapshot) and by a failed resolve (a half-updated state).
+    full: bool,
 }
 
 impl StaticPartitionSolver {
@@ -286,6 +458,7 @@ impl StaticPartitionSolver {
     pub fn build(program: &Program) -> Result<Self, BoError> {
         let pb = partition::build(program)?;
         let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, .. } = pb;
+        let partitions_len = partitions.len();
 
         let mut partition_junctions: Vec<Vec<DynJunction>> = vec![Vec::new(); partitions.len()];
         let mut kcl_junctions = Vec::new();
@@ -341,15 +514,17 @@ impl StaticPartitionSolver {
             match device.kind {
                 kinds::RESISTOR if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
-                    for c in devices::stamp(device.kind, pins.len(), &device.params) {
-                        fold_static_stamp(&partitions, &local_index, &fixed, &mut matrix_base, &mut rhs_base, pins[c.pin_a], pins[c.pin_b], c.conductance);
+                    let contacts = contacts_of(device.kind, &pins, &device.params);
+                    for c in &contacts {
+                        fold_static_stamp(&partitions, &local_index, &fixed, &mut matrix_base, &mut rhs_base, c.u, c.w, c.g);
                     }
-                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone() });
+                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
                 }
                 kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     switch_index_by_device.insert(d, switches.len());
-                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone() });
+                    let contacts = contacts_of(device.kind, &pins, &device.params);
+                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
                 }
                 _ => {}
             }
@@ -364,18 +539,79 @@ impl StaticPartitionSolver {
 
         let ics = collect_ics(program);
         let mut holds_free_ic_supply = vec![false; partitions.len()];
-        let mut node_to_ic_readers: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (device_index, ic) in &ics {
+        let mut node_to_ic_readers: Vec<Vec<usize>> = vec![Vec::new(); program.node_count];
+        let mut part_pulls: Vec<Vec<(u32, u32)>> = vec![Vec::new(); partitions.len()];
+        let mut part_ics: Vec<Vec<u32>> = vec![Vec::new(); partitions.len()];
+        let mut ic_of_device = vec![u32::MAX; program.devices.len()];
+        for (ic_index, (device_index, ic)) in ics.iter().enumerate() {
+            ic_of_device[*device_index] = ic_index as u32;
+            let mut touched: Vec<usize> = std::iter::once(ic.vcc.node).chain(std::iter::once(ic.gnd.node)).chain(ic.logic.iter().map(|pin| pin.node)).filter_map(|n| local_index[n].map(|(p, _)| p)).collect();
+            touched.sort_unstable();
+            touched.dedup();
+            for p in touched {
+                part_ics[p].push(ic_index as u32);
+            }
             for &node in &[ic.vcc.node, ic.gnd.node] {
-                node_to_ic_readers.entry(node).or_default().push(*device_index);
+                node_to_ic_readers[node].push(*device_index);
                 if let Some((p, _)) = local_index[node] {
                     holds_free_ic_supply[p] = true;
                 }
             }
-            for pin in &ic.logic {
-                node_to_ic_readers.entry(pin.node).or_default().push(*device_index);
+            for (pin_index, pin) in ic.logic.iter().enumerate() {
+                node_to_ic_readers[pin.node].push(*device_index);
+                if pin.open && pin.floating_input && !pin.open_high {
+                    if let Some((p, _)) = local_index[pin.node] {
+                        part_pulls[p].push((ic_index as u32, pin_index as u32));
+                    }
+                }
             }
         }
+
+        // Which stamps a node's voltage feeds, so a resolve recomputes only
+        // the devices on nodes whose bits moved.
+        let mut stamps_by_node: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
+        for (id, stamp) in resistors.iter().chain(switches.iter()).enumerate() {
+            for &node in &stamp.pins {
+                if stamps_by_node[node].last() != Some(&(id as u32)) {
+                    stamps_by_node[node].push(id as u32);
+                }
+            }
+        }
+
+        // Each source child node's KCL terms, in the whole-circuit walk's
+        // historical addition order (see [`Term`]).
+        let resolved_terms: Vec<Vec<Term>> = resolved
+            .iter()
+            .map(|r| {
+                let child = r.child_node;
+                let mut terms = Vec::new();
+                for (id, stamp) in resistors.iter().chain(switches.iter()).enumerate() {
+                    for (ci, c) in stamp.contacts.iter().enumerate() {
+                        if c.u == child {
+                            terms.push(Term::Contact { stamp: id as u32, contact: ci as u32, plus: true });
+                        }
+                        if c.w == child {
+                            terms.push(Term::Contact { stamp: id as u32, contact: ci as u32, plus: false });
+                        }
+                    }
+                }
+                for (ji, j) in kcl_junctions.iter().enumerate() {
+                    if j.anode == child {
+                        terms.push(Term::Junction { junction: ji as u32, plus: true });
+                    }
+                    if j.cathode == child {
+                        terms.push(Term::Junction { junction: ji as u32, plus: false });
+                    }
+                }
+                if child >= 1 {
+                    terms.push(Term::Shunt);
+                }
+                terms
+            })
+            .collect();
+        let junction_memo = vec![JunctionMemo::default(); kcl_junctions.len()];
+        let ics_len = ics.len();
+        let stamp_count = resistors.len() + switches.len();
 
         Ok(StaticPartitionSolver {
             partitions,
@@ -387,12 +623,11 @@ impl StaticPartitionSolver {
             resistors,
             switches,
             switch_index_by_device,
-            device_count: program.devices.len(),
             voltages,
             currents: vec![0.0; program.devices.len()],
             no_solution_cache: program.options.no_solution_cache,
             epoch: 0,
-            cache: HashMap::new(),
+            caches: (0..partitions_len).map(|_| PartCache::default()).collect(),
             cache_hits: 0.0,
             ics,
             holds_free_ic_supply,
@@ -400,6 +635,22 @@ impl StaticPartitionSolver {
             kcl_junctions,
             newton_iterations: 0,
             node_to_ic_readers,
+            part_drivers: vec![Vec::new(); partitions_len],
+            ic_drivers: vec![Vec::new(); ics_len],
+            driver_index_len: usize::MAX,
+            part_ics,
+            ic_of_device,
+            part_pulls,
+            key_scratch: Vec::new(),
+            changed_scratch: Vec::new(),
+            stamps_by_node,
+            param_dirty: Vec::new(),
+            work: Vec::with_capacity(stamp_count),
+            stamp_listed: vec![false; stamp_count],
+            resolved_terms,
+            junction_memo,
+            walk_extra: vec![0.0; program.node_count],
+            full: true,
         })
     }
 
@@ -426,40 +677,64 @@ impl StaticPartitionSolver {
         self.fixed.iter().filter(|v| v.is_some()).count()
     }
 
-    fn cache_key(&self, p_idx: usize, now: f64, drivers: &[Driver]) -> CacheKey {
-        let mut driver_modes: Vec<(u32, u8)> = drivers
-            .iter()
-            .enumerate()
-            .filter_map(|(id, d)| {
-                let (dp, _) = self.local_index.get(d.node).copied().flatten()?;
-                if dp != p_idx {
-                    return None;
-                }
-                let mode = d.committed()?;
-                Some((id as u32, mode_discriminant(mode)))
-            })
-            .collect();
-        driver_modes.sort_unstable();
+    /// Derives `part_drivers` from `drivers` when the table's length is not
+    /// the one it was derived for (the table only ever grows, at load, and a
+    /// driver's `node` never changes once registered).
+    fn ensure_driver_index(&mut self, drivers: &[Driver]) {
+        if self.driver_index_len != drivers.len() {
+            let (part_drivers, ic_drivers) = self.derive_driver_index(drivers);
+            self.part_drivers = part_drivers;
+            self.ic_drivers = ic_drivers;
+            self.driver_index_len = drivers.len();
+        }
+        #[cfg(debug_assertions)]
+        {
+            let (part_drivers, ic_drivers) = self.derive_driver_index(drivers);
+            debug_assert!(part_drivers == self.part_drivers && ic_drivers == self.ic_drivers, "the driver table changed without changing its length");
+        }
+    }
 
-        // Fixed device order, then logic-pin order (both already
-        // deterministic — `self.ics`'/`IcRecord.logic`'s own construction
-        // order), so this key compares stably across calls: the CONTENTS,
-        // not merely the length, must match for two resolves to be
-        // considered the same stamp.
-        let mut floating_pulls = Vec::new();
-        for (_, ic) in &self.ics {
-            for pin in &ic.logic {
-                if !(pin.open && pin.floating_input && !pin.open_high) {
-                    continue;
+    /// `(partition -> its drivers, IC -> its drivers)` for `drivers`, both
+    /// ascending by driver id.
+    fn derive_driver_index(&self, drivers: &[Driver]) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        let mut part_drivers: Vec<Vec<u32>> = vec![Vec::new(); self.partitions.len()];
+        let mut ic_drivers: Vec<Vec<u32>> = vec![Vec::new(); self.ics.len()];
+        for (id, d) in drivers.iter().enumerate() {
+            if let Some((p, _)) = self.local_index.get(d.node).copied().flatten() {
+                part_drivers[p].push(id as u32);
+            }
+            if let Some(&ic_index) = self.ic_of_device.get(d.device) {
+                if ic_index != u32::MAX {
+                    ic_drivers[ic_index as usize].push(id as u32);
                 }
-                if !self.in_partition(pin.node, p_idx) {
-                    continue;
-                }
-                floating_pulls.push(digital::floating::floating_high(pin.open_hash, now, ic.ttl));
             }
         }
+        (part_drivers, ic_drivers)
+    }
 
-        CacheKey { driver_modes, rail_band: 0, floating_pulls, epoch: self.epoch }
+    /// Packs partition `p_idx`'s cache key (see [`PartCache`]) into
+    /// `self.key_scratch`.
+    fn build_key(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) {
+        let key = &mut self.key_scratch;
+        key.clear();
+        key.extend_from_slice(&[0; 4]);
+        let mut committed = 0u32;
+        for &id in &self.part_drivers[p_idx] {
+            if let Some(mode) = drivers[id as usize].committed() {
+                key.extend_from_slice(&id.to_le_bytes());
+                key.push(mode_discriminant(mode));
+                committed += 1;
+            }
+        }
+        key[..4].copy_from_slice(&committed.to_le_bytes());
+        // Fixed device order, then logic-pin order: the CONTENTS, not merely
+        // the length, must match for two resolves to be the same stamp.
+        for &(ic_index, pin_index) in &self.part_pulls[p_idx] {
+            let (_, ic) = &self.ics[ic_index as usize];
+            let pin = &ic.logic[pin_index as usize];
+            key.push(digital::floating::floating_high(pin.open_hash, now, ic.ttl) as u8);
+        }
+        key.extend_from_slice(&self.epoch.to_le_bytes());
     }
 
     /// Whether `node` is a FREE node belonging to partition `p_idx`
@@ -608,11 +883,11 @@ impl StaticPartitionSolver {
     /// `Self::fold_local`.
     fn stamp_switches_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
         for sw in &self.switches {
-            for c in devices::stamp(sw.kind, sw.pins.len(), &sw.params) {
-                if c.conductance == 0.0 {
+            for c in &sw.contacts {
+                if c.g == 0.0 {
                     continue; // README: "open stamps nothing".
                 }
-                self.fold_local(p_idx, size, a, b, sw.pins[c.pin_a], sw.pins[c.pin_b], c.conductance);
+                self.fold_local(p_idx, size, a, b, c.u, c.w, c.g);
             }
         }
     }
@@ -633,7 +908,9 @@ impl StaticPartitionSolver {
     /// (`self.holds_free_ic_supply[p_idx]` is exactly that fact) — so `x`
     /// is never actually indexed in that case, and an empty slice is safe.
     fn stamp_ics_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) {
-        for (device_index, ic) in &self.ics {
+        for &ic_index in &self.part_ics[p_idx] {
+            let (_, ic) = &self.ics[ic_index as usize];
+            let driver_ids = &self.ic_drivers[ic_index as usize];
             // `touches` also fires when this IC's own free supply node lives
             // in `p_idx`, even if every one of its driver/pull pins is fixed
             // elsewhere (findings 3/8): an output pin wired straight onto a
@@ -641,7 +918,7 @@ impl StaticPartitionSolver {
             // `1/R_out`, and that conductance belongs in whichever partition
             // holds the free end, regardless of which end named this IC in
             // the first place.
-            let touches = drivers.iter().any(|d| d.device == *device_index && self.in_partition(d.node, p_idx))
+            let touches = driver_ids.iter().any(|&id| self.in_partition(drivers[id as usize].node, p_idx))
                 || ic.logic.iter().any(|p| p.open && p.floating_input && !p.open_high && self.in_partition(p.node, p_idx))
                 || self.in_partition(ic.vcc.node, p_idx)
                 || self.in_partition(ic.gnd.node, p_idx);
@@ -654,16 +931,14 @@ impl StaticPartitionSolver {
             if !power.powered {
                 continue;
             }
-            for driver in drivers {
+            for &id in driver_ids {
+                let driver = &drivers[id as usize];
                 // No `in_partition(driver.node, p_idx)` guard here (findings
                 // 3/8): `Self::fold_local` already stamps correctly whether
                 // the driver's own node or its commit target is the free end
                 // in `p_idx` (or no-ops when NEITHER is), so pre-filtering on
                 // the driver's own node only, as before, silently dropped
                 // the "driver fixed, target free-in-`p_idx`" case entirely.
-                if driver.device != *device_index {
-                    continue;
-                }
                 // Every branch folds (W1a point 2): a 555's OUT stamps up to
                 // two, to its own vcc and gnd nodes.
                 for branch in ic_driver_branches(&power, driver, ic) {
@@ -754,13 +1029,233 @@ impl StaticPartitionSolver {
         Ok(result.x)
     }
 
-    /// Resistor and switch currents by summing every contact's own
-    /// conductance times its own terminal voltage difference (folding the
-    /// same total into `leaving` for the KCL walk below), then source
+    /// [`PartitionSolver::resolve_dirty`]'s body; `changed` collects every
+    /// node whose published bits moved.
+    fn resolve_dirty_inner(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], changed: &mut Vec<usize>) -> Result<Vec<DeviceId>, String> {
+        for &partition in dirty {
+            let p_idx = partition.0 as usize;
+            let size = self.partitions[p_idx].len();
+            if size == 0 {
+                continue;
+            }
+
+            if self.holds_free_ic_supply[p_idx] {
+                // W1c contract point 3/4: R_out moves with this partition's
+                // own solved state, so the solution cache never applies
+                // (junctions or not, W1e LEDs point 7): every solve restamps
+                // from the iterate, and the result goes straight to
+                // `self.voltages`.
+                let x = self.iterated_solve(p_idx, now, drivers)?;
+                self.publish_partition(p_idx, &x, changed);
+            } else {
+                let mut key_hash = None;
+                let mut used_cache = false;
+                if !self.no_solution_cache {
+                    self.build_key(p_idx, now, drivers);
+                    let hash = hash_key(&self.key_scratch);
+                    key_hash = Some(hash);
+                    if let Some(entry) = self.caches[p_idx].find(hash, &self.key_scratch) {
+                        self.cache_hits += 1.0;
+                        // Replayed straight out of the entry: nothing is
+                        // allocated on a hit.
+                        for l in 0..size {
+                            let node = self.partitions[p_idx][l];
+                            let new = self.caches[p_idx].entries[entry].x[l];
+                            if new.to_bits() != self.voltages[node].to_bits() {
+                                changed.push(node);
+                            }
+                            self.voltages[node] = new;
+                        }
+                        used_cache = true;
+                    }
+                }
+                if !used_cache {
+                    // A partition holding only junctions is nonlinear but
+                    // keeps the cache (W1e LEDs point 7): a miss runs the
+                    // Newton solve, polish included, and stores that result.
+                    let x = if self.junctions[p_idx].is_empty() {
+                        self.direct_solve(p_idx, now, drivers)?
+                    } else {
+                        self.iterated_solve(p_idx, now, drivers)?
+                    };
+                    self.publish_partition(p_idx, &x, changed);
+                    if let Some(hash) = key_hash {
+                        self.caches[p_idx].insert(hash, &self.key_scratch, &x);
+                    }
+                }
+            }
+        }
+
+        // Recomputed on every call (even with an empty `dirty`): a device's
+        // current can depend purely on already-fixed voltages, which no
+        // partition solve ever touches, so this is the only place that ever
+        // (re)publishes it. Only what a changed node or a live-parameter
+        // change can have moved is actually recomputed.
+        let bad_device = self.recompute_currents(changed);
+        #[cfg(test)]
+        {
+            let reference = self.recompute_currents_reference();
+            for (device, (got, want)) in self.currents.iter().zip(&reference).enumerate() {
+                assert_eq!(got.to_bits(), want.to_bits(), "device {device}: incremental current {got} != whole-circuit {want}");
+            }
+        }
+
+        // Non-finite values can only sit in what this call just wrote: every
+        // other published value passed this check when it was written (or is
+        // a snapshot of one that did, `self.full` covering the rest). The
+        // lowest node index is reported, as the whole-array scan did.
+        let bad_node = if self.full {
+            self.voltages.iter().position(|v| !v.is_finite())
+        } else {
+            changed.iter().copied().filter(|&n| !self.voltages[n].is_finite()).min()
+        };
+        if let Some(node) = bad_node {
+            return Err(format!("node {node}: published voltage {} is not finite", self.voltages[node]));
+        }
+        let bad_device = if self.full { self.currents.iter().position(|i| !i.is_finite()) } else { bad_device };
+        if let Some(device) = bad_device {
+            return Err(format!("device {device}: published current {} is not finite", self.currents[device]));
+        }
+        self.full = false;
+
+        // Ascending and duplicate-free, like the `BTreeSet` it replaces.
+        let mut readers: Vec<usize> = Vec::new();
+        for &node in changed.iter() {
+            readers.extend_from_slice(&self.node_to_ic_readers[node]);
+        }
+        readers.sort_unstable();
+        readers.dedup();
+        Ok(readers.into_iter().map(|d| DeviceId(d as u32)).collect())
+    }
+
+    /// Writes partition `p_idx`'s solved local voltages `x` into
+    /// `self.voltages`, noting every node whose bits moved (W1c contract
+    /// point 5's reader rule compares bitwise: a plain `f64 != f64` would
+    /// miss a NaN-to-NaN "no-op", which `to_bits` does not).
+    fn publish_partition(&mut self, p_idx: usize, x: &[f64], changed: &mut Vec<usize>) {
+        for (l, &node) in self.partitions[p_idx].iter().enumerate() {
+            if x[l].to_bits() != self.voltages[node].to_bits() {
+                changed.push(node);
+            }
+            self.voltages[node] = x[l];
+        }
+    }
+
+    /// The junction's branch current at the published voltages, from its
+    /// memo when neither end's voltage bits moved since it was computed.
+    fn memo_junction_current(&mut self, k: usize) -> f64 {
+        let j = &self.kcl_junctions[k];
+        let (va, vk) = (self.voltages[j.anode].to_bits(), self.voltages[j.cathode].to_bits());
+        let memo = &mut self.junction_memo[k];
+        if !(memo.valid && memo.v_anode == va && memo.v_cathode == vk) {
+            *memo = JunctionMemo { v_anode: va, v_cathode: vk, current: junction_branch_current(j, &self.voltages), valid: true };
+        }
+        memo.current
+    }
+
+    /// The published resistor, switch and source currents, brought up to date
+    /// with `self.voltages` and the current switch params, at the cost of
+    /// what changed instead of the whole circuit. `changed` is every node
+    /// whose published bits moved in this resolve. Returns the lowest device
+    /// index whose recomputed current is not finite, if any.
+    ///
+    /// A resistor or switch current is `sum(g * (V[u] - V[w]))` over its
+    /// contacts, a pure function of its pins' voltages and its params: only a
+    /// device on a changed node, or one `apply_params` touched, can differ
+    /// from the value already published (`self.full` recomputes them all).
+    /// A source current is the children-before-parents KCL walk (contract,
+    /// point 5) over `leaving[child]`, each summed from its own terms in the
+    /// historical order (see [`Term`]) so the bits are those of the
+    /// whole-array walk.
+    fn recompute_currents(&mut self, changed: &[usize]) -> Option<usize> {
+        let resistor_count = self.resistors.len();
+        let stamp_count = resistor_count + self.switches.len();
+        let mut work = std::mem::take(&mut self.work);
+        work.clear();
+        if self.full {
+            work.extend(0..stamp_count as u32);
+        } else {
+            for &node in changed {
+                for &id in &self.stamps_by_node[node] {
+                    if !self.stamp_listed[id as usize] {
+                        self.stamp_listed[id as usize] = true;
+                        work.push(id);
+                    }
+                }
+            }
+            for &id in &self.param_dirty {
+                if !self.stamp_listed[id as usize] {
+                    self.stamp_listed[id as usize] = true;
+                    work.push(id);
+                }
+            }
+            for &id in &work {
+                self.stamp_listed[id as usize] = false;
+            }
+        }
+        self.param_dirty.clear();
+
+        let mut bad: Option<usize> = None;
+        for &id in &work {
+            let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
+            let mut total = 0.0;
+            for c in &stamp.contacts {
+                total += c.g * (self.voltages[c.u] - self.voltages[c.w]);
+            }
+            self.currents[stamp.device_index] = total;
+            if !total.is_finite() {
+                bad = Some(bad.map_or(stamp.device_index, |b| b.min(stamp.device_index)));
+            }
+        }
+        self.work = work;
+
+        for k in (0..self.resolved.len()).rev() {
+            let mut leaving = 0.0;
+            for t in 0..self.resolved_terms[k].len() {
+                match self.resolved_terms[k][t] {
+                    Term::Contact { stamp, contact, plus } => {
+                        let stamp = if (stamp as usize) < resistor_count { &self.resistors[stamp as usize] } else { &self.switches[stamp as usize - resistor_count] };
+                        let c = stamp.contacts[contact as usize];
+                        let i = c.g * (self.voltages[c.u] - self.voltages[c.w]);
+                        leaving = if plus { leaving + i } else { leaving - i };
+                    }
+                    Term::Junction { junction, plus } => {
+                        let i = self.memo_junction_current(junction as usize);
+                        leaving = if plus { leaving + i } else { leaving - i };
+                    }
+                    Term::Shunt => {
+                        leaving += NODE_RSHUNT_G * self.voltages[self.resolved[k].child_node];
+                    }
+                }
+            }
+            let r = &self.resolved[k];
+            let total = leaving + self.walk_extra[r.child_node];
+            let child_is_pos = !r.parent_is_pos;
+            let i_s = if child_is_pos { -total } else { total };
+            self.currents[r.device_index] = i_s;
+            if !i_s.is_finite() {
+                bad = Some(bad.map_or(r.device_index, |b| b.min(r.device_index)));
+            }
+            let contribution = if r.parent_is_pos { i_s } else { -i_s };
+            self.walk_extra[r.parent_node] += contribution;
+        }
+        for r in &self.resolved {
+            self.walk_extra[r.parent_node] = 0.0;
+        }
+        bad
+    }
+
+    /// What `recompute_currents` used to be, kept verbatim (over
+    /// `devices::stamp` itself, not the cached contacts) as the oracle every
+    /// test-build resolve checks the incremental result against, bit for
+    /// bit: resistor and switch currents by summing every
+    /// contact's own conductance times its own terminal voltage difference
+    /// (folding the same total into `leaving` for the KCL walk), then source
     /// currents by the children-before-parents walk (contract, point 5),
     /// from `self.voltages` as it currently stands.
-    fn recompute_currents(&self) -> Vec<f64> {
-        let mut currents = vec![0.0; self.device_count];
+    #[cfg(test)]
+    fn recompute_currents_reference(&self) -> Vec<f64> {
+        let mut currents = vec![0.0; self.currents.len()];
         let mut leaving = vec![0.0; self.voltages.len()];
 
         for stamp in self.resistors.iter().chain(self.switches.iter()) {
@@ -815,85 +1310,18 @@ impl PartitionSolver for StaticPartitionSolver {
     /// happens here, `check_finite` rejects NaN outright, but `to_bits`
     /// costs nothing extra and is exactly what "bitwise" calls for anyway).
     fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
-        let mut changed_readers: BTreeSet<usize> = BTreeSet::new();
-
-        for &partition in dirty {
-            let p_idx = partition.0 as usize;
-            let nodes = self.partitions[p_idx].clone();
-            let size = nodes.len();
-            if size == 0 {
-                continue;
-            }
-
-            let old_bits: Vec<u64> = nodes.iter().map(|&n| self.voltages[n].to_bits()).collect();
-
-            if self.holds_free_ic_supply[p_idx] {
-                // W1c contract point 3/4: R_out moves with this partition's
-                // own solved state, so the solution cache never applies
-                // (junctions or not, W1e LEDs point 7): every solve restamps
-                // from the iterate, and the result goes straight to
-                // `self.voltages`.
-                let x = self.iterated_solve(p_idx, now, drivers)?;
-                for (l_idx, &node) in nodes.iter().enumerate() {
-                    self.voltages[node] = x[l_idx];
-                }
-            } else {
-                let key = self.cache_key(p_idx, now, drivers);
-                let mut used_cache = false;
-                if !self.no_solution_cache {
-                    if let Some(cached_x) = self.cache.get(&p_idx).and_then(|entries| entries.get(&key)) {
-                        self.cache_hits += 1.0;
-                        for (l_idx, &node) in nodes.iter().enumerate() {
-                            self.voltages[node] = cached_x[l_idx];
-                        }
-                        used_cache = true;
-                    }
-                }
-                if !used_cache {
-                    // A partition holding only junctions is nonlinear but
-                    // keeps the cache (W1e LEDs point 7): a miss runs the
-                    // Newton solve, polish included, and stores that result.
-                    let x = if self.junctions[p_idx].is_empty() {
-                        self.direct_solve(p_idx, now, drivers)?
-                    } else {
-                        self.iterated_solve(p_idx, now, drivers)?
-                    };
-                    for (l_idx, &node) in nodes.iter().enumerate() {
-                        self.voltages[node] = x[l_idx];
-                    }
-                    if !self.no_solution_cache {
-                        let entries = self.cache.entry(p_idx).or_default();
-                        if entries.len() >= CACHE_ENTRIES_PER_PARTITION {
-                            entries.clear();
-                        }
-                        entries.insert(key, x);
-                    }
-                }
-            }
-
-            for (l_idx, &node) in nodes.iter().enumerate() {
-                if self.voltages[node].to_bits() != old_bits[l_idx] {
-                    if let Some(readers) = self.node_to_ic_readers.get(&node) {
-                        changed_readers.extend(readers.iter().copied());
-                    }
-                }
-            }
+        self.ensure_driver_index(drivers);
+        let mut changed = std::mem::take(&mut self.changed_scratch);
+        changed.clear();
+        let result = self.resolve_dirty_inner(dirty, now, drivers, &mut changed);
+        if result.is_err() {
+            // A half-updated state: the next resolve recomputes everything,
+            // as the whole-array version always did (the kernel normally
+            // restores a snapshot first, which does the same).
+            self.full = true;
         }
-
-        // Recomputed unconditionally (even with an empty `dirty`): a
-        // device's current can depend purely on already-fixed voltages,
-        // which no partition solve ever touches, so this is the only place
-        // that ever (re)publishes it.
-        self.currents = self.recompute_currents();
-
-        if let Some((node, v)) = self.voltages.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(format!("node {node}: published voltage {v} is not finite"));
-        }
-        if let Some((device, i)) = self.currents.iter().enumerate().find(|(_, i)| !i.is_finite()) {
-            return Err(format!("device {device}: published current {i} is not finite"));
-        }
-
-        Ok(changed_readers.into_iter().map(|d| DeviceId(d as u32)).collect())
+        self.changed_scratch = changed;
+        result
     }
 
     fn voltages(&self) -> &[f64] {
@@ -907,6 +1335,10 @@ impl PartitionSolver for StaticPartitionSolver {
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
         self.voltages = snapshot.0;
         self.currents = snapshot.1;
+        // The published arrays just jumped to another state: the next resolve
+        // recomputes and checks everything rather than trusting which nodes
+        // it sees change.
+        self.full = true;
     }
 
     fn set_no_solution_cache(&mut self, off: bool) {
@@ -977,6 +1409,9 @@ impl PartitionSolver for StaticPartitionSolver {
                     changed = true;
                 }
                 self.switches[idx].params[param_index] = value;
+                let sw = &mut self.switches[idx];
+                sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+                self.param_dirty.push((self.resistors.len() + idx) as u32);
                 for &pin_node in &self.switches[idx].pins {
                     if let Some((p_idx, _)) = self.local_index[pin_node] {
                         dirty.insert(PartitionId(p_idx as u32));
@@ -1396,5 +1831,100 @@ mod tests {
         let _guard = hooks::force_unconverged(u32::MAX);
         let err = solver.resolve_dirty(&parts, 0.0, &[]).unwrap_err();
         assert!(err.contains("did not converge within 50 iterations"), "{err}");
+    }
+
+    /// The packed cache is the `HashMap` it replaced: the same keys hit, the
+    /// stored values come back unchanged, and it empties at the same moment
+    /// (when an insert finds [`CACHE_ENTRIES_PER_PARTITION`] entries). The
+    /// hit/miss pattern is part of the results: a junction partition's
+    /// `iterated_solve` starts from the last published voltages, so a hit and
+    /// a re-solve can differ in the last bits.
+    #[test]
+    fn the_packed_cache_hits_and_empties_exactly_like_the_hash_map_it_replaced() {
+        let mut cache = PartCache::default();
+        let mut reference: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (mut hits, mut clears) = (0, 0);
+        for step in 0..20_000 {
+            // A small alphabet over short keys repeats a lot; long ones never do.
+            let len = 1 + (next() % 10) as usize;
+            let key: Vec<u8> = (0..len).map(|_| (next() % 4) as u8).collect();
+            let hash = hash_key(&key);
+            let got = cache.find(hash, &key).map(|i| cache.entries[i].x.to_vec());
+            assert_eq!(got.as_ref(), reference.get(&key), "step {step}");
+            if got.is_some() {
+                hits += 1;
+            } else {
+                let x = vec![step as f64, -(step as f64)];
+                if reference.len() >= CACHE_ENTRIES_PER_PARTITION {
+                    reference.clear();
+                    clears += 1;
+                }
+                reference.insert(key.clone(), x.clone());
+                cache.insert(hash, &key, &x);
+            }
+            assert_eq!(cache.entries.len(), reference.len(), "step {step}");
+        }
+        assert!(hits > 1000 && clears > 10, "the walk must exercise both hits ({hits}) and the emptying ({clears})");
+    }
+
+    /// A rail feeding two resistor legs through switches: the published
+    /// currents follow every toggle, every rolled-back toggle and every
+    /// re-solve bit for bit as the whole-circuit walk they are computed
+    /// incrementally instead of (`resolve_dirty` also asserts this after each
+    /// of its own calls in a test build).
+    #[test]
+    fn the_incremental_currents_match_the_whole_circuit_walk_through_toggles_and_rollbacks() {
+        // Device 8 sits across two FIXED nodes (10 V and 3 V), so toggling it
+        // moves its own current and the rail's, and no node voltage at all.
+        let p = program(
+            6,
+            vec![
+                source(0, 1, 0, 10.0),
+                resistor(1, 1, 2, 1000.0),
+                switch_dev(2, 2, 3, 1.0),
+                resistor(3, 3, 0, 2000.0),
+                switch_dev(4, 2, 4, 0.0),
+                resistor(5, 4, 0, 500.0),
+                resistor(6, 1, 0, 4700.0),
+                source(8, 5, 0, 3.0),
+                switch_dev(7, 1, 5, 0.0),
+            ],
+        );
+        let mut solver = StaticPartitionSolver::build(&p).unwrap();
+        let parts = all_partitions(&solver);
+        let check = |solver: &StaticPartitionSolver| {
+            let reference = solver.recompute_currents_reference();
+            assert_eq!(solver.currents().iter().map(|c| c.to_bits()).collect::<Vec<_>>(), reference.iter().map(|c| c.to_bits()).collect::<Vec<_>>());
+        };
+        solver.resolve_dirty(&parts, 0.0, &[]).unwrap();
+        check(&solver);
+        let before = solver.snapshot();
+
+        // Toggle each switch, one at a time and together, re-solving only
+        // what the toggle touched.
+        for triples in [vec![(2, 0, 0.0)], vec![(8, 0, 1.0)], vec![(4, 0, 1.0)], vec![(2, 0, 1.0), (4, 0, 0.0)], vec![(8, 0, 0.0)], vec![(4, 0, 1.0), (2, 0, 0.0)]] {
+            solver.validate_params(&triples).unwrap();
+            let dirty = solver.apply_params(&triples);
+            solver.resolve_dirty(&dirty, 1e-3, &[]).unwrap();
+            check(&solver);
+        }
+        // A re-solve with nothing dirty leaves them as they are.
+        solver.resolve_dirty(&[], 2e-3, &[]).unwrap();
+        check(&solver);
+
+        // A rolled-back instant: the published arrays jump back, the params
+        // are put back by the caller, and the next resolve is still exact.
+        solver.restore(before.clone());
+        solver.apply_params(&[(2, 0, 1.0), (4, 0, 0.0)]);
+        solver.resolve_dirty(&[], 3e-3, &[]).unwrap();
+        check(&solver);
+        assert_eq!(solver.voltages().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), before.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
     }
 }

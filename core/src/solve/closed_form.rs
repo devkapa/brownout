@@ -39,6 +39,7 @@
 //! it and reschedule forever) and re-aims from there.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::digital;
 use crate::drivers::Driver;
@@ -47,9 +48,10 @@ use crate::kernel::accepts_crossing;
 use crate::lu;
 use crate::partition::PartitionKind;
 use crate::program::Program;
+use crate::solve::static_part::mode_discriminant;
 use crate::solve::{
-    build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage_global, stamp_branch_terminal, stamp_ics_into_dyn, stamp_linear_base,
-    DynCapacitor, DynShape, ThresholdFn,
+    build_ic_reader_index, collect_ics, compile_dyn_shape, live_params_for, pin_voltage_global, stamp_branch_terminal, stamp_ics_into_dyn,
+    stamp_linear_base, DynCapacitor, DynShape, ThresholdFn,
 };
 
 /// The 1e-9 V nudge past a crossed threshold (W1 plan row B2; pec3.mjs
@@ -65,14 +67,22 @@ struct Segment {
     dx: Vec<f64>,
     i0: f64,
     di: f64,
+    /// Everything [`build_segment`] read that can change between two builds
+    /// of the same partition (see [`ClosedFormSolver::segment_key`]). Two builds
+    /// with the same key are the same function of the same inputs, so the
+    /// second is skipped and the first segment reused.
+    key: Vec<u8>,
 }
 
 struct Partition {
+    /// This partition's GLOBAL index.
+    global: usize,
     shape: DynShape,
     cap: DynCapacitor,
     /// `None` until the first segment exists (pec3's `segReady` guard: `_aim`
-    /// on a segment that was never built would read garbage/NaN).
-    seg: Option<Segment>,
+    /// on a segment that was never built would read garbage/NaN). Shared, so a
+    /// snapshot of it is a reference count, not two vector copies.
+    seg: Option<Rc<Segment>>,
     seg_t0: f64,
     seg_vc0: f64,
     /// `di / C` — the segment's exponential rate.
@@ -95,11 +105,39 @@ struct Partition {
     /// not per-instant state (this module's doc comment on
     /// `ClosedFormSolver::snapshot`).
     watches: HashMap<usize, Vec<(DeviceId, ThresholdFn)>>,
+    /// Every registered reader, once per registration: what a re-aim queues.
+    /// Kept beside `watches` (whose hash order the crossing tie-break
+    /// follows) so queuing them walks one flat list.
+    watch_ids: Vec<DeviceId>,
     /// Contract stats 8/9 (this partition's own share). NOT rolled back by
     /// `restore` (core/README.md, "A failed advance": "the stat counters...
     /// keep the failed attempt's counts").
     segments_built: u64,
     crossings_hit: u64,
+    /// The ICs that can touch this partition, in program order: those with a
+    /// supply or logic pin free in it. `stamp_ics_into_dyn` skips every other
+    /// IC (its `touches` test needs a driver, a pull, or a supply of that IC
+    /// in the partition, and a driver's or a pull's node is one of the IC's
+    /// logic pins), so handing it only these is the same stamp without
+    /// scanning the whole program's ICs and drivers on every segment.
+    touch_ics: Vec<(usize, digital::IcRecord)>,
+    /// `(index into touch_ics, logic-pin index)` of every open
+    /// `FLOATING_INPUT` non-`OPEN_HIGH` pin free in this partition, in stamp
+    /// order: the pins whose pull follows the floating bucket of `now`.
+    touch_pulls: Vec<(u32, u32)>,
+    /// Ids of every driver of a `touch_ics` IC, ascending. Derived from the
+    /// driver table's `device` fields, which never change after a driver is
+    /// registered (load time), so it is rebuilt only when the table's length
+    /// differs from `driver_index_len`; a debug build re-derives and compares
+    /// it on every call.
+    driver_ids: Vec<u32>,
+    driver_index_len: usize,
+    /// Scratch, reused across calls: the packed segment key, the copies of
+    /// `driver_ids`' drivers handed to `stamp_ics_into_dyn`, and the node
+    /// bits from before a publish.
+    key_scratch: Vec<u8>,
+    driver_scratch: Vec<Driver>,
+    bits_scratch: Vec<u64>,
 }
 
 /// Everything [`ClosedFormSolver::snapshot`] captures, restored verbatim by
@@ -115,13 +153,14 @@ struct Partition {
 /// only in `pending_schedule`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    partitions: HashMap<usize, PartitionSnapshot>,
+    /// One per partition, in the solver's own (ascending global index) order.
+    partitions: Vec<PartitionSnapshot>,
     scheduled: Vec<(f64, usize, u64)>,
 }
 
 #[derive(Debug, Clone)]
 struct PartitionSnapshot {
-    seg: Option<Segment>,
+    seg: Option<Rc<Segment>>,
     seg_t0: f64,
     seg_vc0: f64,
     seg_f: f64,
@@ -131,12 +170,16 @@ struct PartitionSnapshot {
     cross_v: f64,
 }
 
-/// Owns every `ClosedForm` partition (Decision 14), keyed by its GLOBAL
+/// Owns every `ClosedForm` partition (Decision 14), addressed by its GLOBAL
 /// partition index (the same numbering `partition::build`/`PartitionId` use)
 /// so `solve::PartitionedSolver` can route a dirty id straight here without
 /// a separate id-remapping table.
 pub struct ClosedFormSolver {
-    partitions: HashMap<usize, Partition>,
+    /// The closed-form partitions, ascending by global index.
+    parts: Vec<Partition>,
+    /// global partition index -> index into `parts`, `u32::MAX` for a
+    /// partition this solver does not own.
+    slot_of: Vec<u32>,
     /// node id -> (partition index, local index), for `watch_node` — built
     /// once at [`Self::build`] time so a caller registering a watch never
     /// needs `partition::build`'s own tables in hand.
@@ -148,22 +191,20 @@ pub struct ClosedFormSolver {
     /// fails first (see [`Snapshot`]'s doc comment), so it is part of
     /// [`Snapshot`] after all.
     scheduled: Vec<(f64, usize, u64)>,
-    /// Every combinational IC in the program (W1c step 2b, lifting
-    /// `partition.rs`'s former decline): [`build_segment`] restamps
-    /// whichever of these touch a given `ClosedForm` partition fresh on
-    /// every segment build, mirroring `static_part.rs`'s own `ics` list.
-    /// Every IC that ever touches a `ClosedForm` partition is guaranteed to
-    /// have BOTH supply nodes fixed (`stamp_ics_into_dyn`'s own doc
-    /// comment on why), so its power here is a build-time constant in
-    /// everything but WHICH driver/pull target it currently selects.
-    ics: Vec<(usize, digital::IcRecord)>,
     /// Fixed voltages, node -> `Some(v)` — `stamp_ics_into_dyn`'s own
     /// resolver needs this to place an IC pin whose node is fixed.
+    ///
+    /// (W1c step 2b lifted `partition.rs`'s former decline: every IC that
+    /// touches a `ClosedForm` partition is restamped fresh on every segment
+    /// build, through that partition's own `touch_ics`. Each has BOTH supply
+    /// nodes fixed — `stamp_ics_into_dyn`'s own doc comment on why — so its
+    /// power here is a build-time constant in everything but WHICH
+    /// driver/pull target it currently selects.)
     fixed: Vec<Option<f64>>,
     /// node -> every IC device index that reads it (contract point 4's
     /// last bullet: "resolves of dynamic partitions must also report IC
-    /// readers of nodes that changed, as static does").
-    node_to_ic_readers: HashMap<usize, Vec<usize>>,
+    /// readers of nodes that changed, as static does"), by node id.
+    node_to_ic_readers: Vec<Vec<usize>>,
 }
 
 impl ClosedFormSolver {
@@ -172,7 +213,8 @@ impl ClosedFormSolver {
     /// already has `FORCE_STEPPED` folded in (`partition::build`), so this
     /// never has to check the option itself.
     pub fn build(program: &Program, partitions: &[Vec<usize>], local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>], kinds: &[PartitionKind]) -> Self {
-        let mut parts = HashMap::new();
+        let mut parts = Vec::new();
+        let mut slot_of = vec![u32::MAX; kinds.len()];
         let mut node_owner = HashMap::new();
         for (p_idx, kind) in kinds.iter().enumerate() {
             if *kind != PartitionKind::ClosedForm {
@@ -190,32 +232,59 @@ impl ClosedFormSolver {
             for (l, &node) in shape.nodes.iter().enumerate() {
                 node_owner.insert(node, (p_idx, l));
             }
-            parts.insert(
-                p_idx,
-                Partition {
-                    shape,
-                    cap,
-                    seg: None,
-                    seg_t0: 0.0,
-                    seg_vc0: 0.0,
-                    seg_f: 0.0,
-                    seg_inf: 0.0,
-                    version: 0,
-                    cross_local: 0,
-                    cross_v: 0.0,
-                    watches: HashMap::new(),
-                    segments_built: 0,
-                    crossings_hit: 0,
-                },
-            );
+            slot_of[p_idx] = parts.len() as u32;
+            parts.push(Partition {
+                global: p_idx,
+                shape,
+                cap,
+                seg: None,
+                seg_t0: 0.0,
+                seg_vc0: 0.0,
+                seg_f: 0.0,
+                seg_inf: 0.0,
+                version: 0,
+                cross_local: 0,
+                cross_v: 0.0,
+                watches: HashMap::new(),
+                watch_ids: Vec::new(),
+                segments_built: 0,
+                crossings_hit: 0,
+                touch_ics: Vec::new(),
+                touch_pulls: Vec::new(),
+                driver_ids: Vec::new(),
+                driver_index_len: usize::MAX,
+                key_scratch: Vec::new(),
+                driver_scratch: Vec::new(),
+                bits_scratch: Vec::new(),
+            });
         }
         let ics = collect_ics(program);
-        let node_to_ic_readers = build_ic_reader_index(&ics);
-        ClosedFormSolver { partitions: parts, node_owner, scheduled: Vec::new(), ics, fixed: fixed.to_vec(), node_to_ic_readers }
+        let in_partition = |node: usize, p_idx: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
+        for part in &mut parts {
+            let p_idx = part.global;
+            for (device_index, ic) in &ics {
+                let touches = in_partition(ic.vcc.node, p_idx) || in_partition(ic.gnd.node, p_idx) || ic.logic.iter().any(|pin| in_partition(pin.node, p_idx));
+                if !touches {
+                    continue;
+                }
+                let ti = part.touch_ics.len() as u32;
+                for (pi, pin) in ic.logic.iter().enumerate() {
+                    if pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node, p_idx) {
+                        part.touch_pulls.push((ti, pi as u32));
+                    }
+                }
+                part.touch_ics.push((*device_index, ic.clone()));
+            }
+        }
+        let mut node_to_ic_readers = vec![Vec::new(); fixed.len()];
+        for (node, readers) in build_ic_reader_index(&ics) {
+            node_to_ic_readers[node] = readers;
+        }
+        ClosedFormSolver { parts, slot_of, node_owner, scheduled: Vec::new(), fixed: fixed.to_vec(), node_to_ic_readers }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.partitions.is_empty()
+        self.parts.is_empty()
     }
 
     /// The crossing-watch API (W1 plan row B2): registers `reader` against
@@ -227,26 +296,28 @@ impl ClosedFormSolver {
         let Some(&(p_idx, local)) = self.node_owner.get(&node) else {
             return false;
         };
-        let part = self.partitions.get_mut(&p_idx).expect("node_owner and partitions built together");
+        let slot = self.slot_of[p_idx] as usize;
+        let part = &mut self.parts[slot];
         part.watches.entry(local).or_default().push((reader, thresholds));
+        part.watch_ids.push(reader);
         true
     }
 
     /// Contract stat 8 (closed-form segments built), summed over every
     /// partition.
     pub fn segments_built(&self) -> f64 {
-        self.partitions.values().map(|p| p.segments_built as f64).sum()
+        self.parts.iter().map(|p| p.segments_built as f64).sum()
     }
 
     /// Contract stat 9 (crossings), summed over every partition.
     pub fn crossings(&self) -> f64 {
-        self.partitions.values().map(|p| p.crossings_hit as f64).sum()
+        self.parts.iter().map(|p| p.crossings_hit as f64).sum()
     }
 
     /// Whether a `Crossing` event carrying `version` for `partition` is
     /// still current (events.rs's lazy-deletion contract).
     pub fn is_current(&self, partition: usize, version: u64) -> bool {
-        self.partitions.get(&partition).is_some_and(|p| p.version == version)
+        self.slot(partition).is_some_and(|slot| self.parts[slot].version == version)
     }
 
     /// Re-aims every partition in `dirty` (a switch toggle or driver commit
@@ -272,16 +343,17 @@ impl ClosedFormSolver {
     ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
         for &p_idx in dirty {
-            let Some(part) = self.partitions.get_mut(&p_idx) else { continue };
+            let Some(slot) = self.slot(p_idx) else { continue };
+            let part = &mut self.parts[slot];
             let vc_now = match &part.seg {
                 Some(_) => vc_at(part.seg_f, part.seg_inf, part.seg_vc0, part.seg_t0, now),
                 None => 0.0,
             };
-            let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
-            Self::segment_and_aim(part, now, vc_now, p_idx, drivers, &self.ics, &self.node_owner, &self.fixed, live_params)?;
+            Self::note_bits(part, voltages);
+            Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &self.fixed, live_params)?;
             Self::publish(part, live_params, voltages, currents);
-            readers.extend(part.watches.values().flatten().map(|(id, _)| *id));
-            Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
+            readers.extend_from_slice(&part.watch_ids);
+            Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
             if let Some(t) = Self::schedule_crossing(part, now, voltages) {
                 self.scheduled.push((t, p_idx, part.version));
             }
@@ -302,7 +374,8 @@ impl ClosedFormSolver {
         voltages: &mut [f64],
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
-        let part = self.partitions.get_mut(&partition).ok_or_else(|| format!("closed-form: unknown partition {partition}"))?;
+        let slot = self.slot(partition).ok_or_else(|| format!("closed-form: unknown partition {partition}"))?;
+        let part = &mut self.parts[slot];
         part.crossings_hit += 1;
         let seg = part.seg.as_ref().expect("a Crossing was only ever scheduled after a segment existed");
         let mut vc = vc_at(part.seg_f, part.seg_inf, part.seg_vc0, part.seg_t0, now);
@@ -314,11 +387,11 @@ impl ClosedFormSolver {
         if dx != 0.0 {
             vc = (part.cross_v - seg.x0[part.cross_local]) / dx;
         }
-        let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
-        Self::segment_and_aim(part, now, vc, partition, drivers, &self.ics, &self.node_owner, &self.fixed, live_params)?;
+        Self::note_bits(part, voltages);
+        Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &self.fixed, live_params)?;
         Self::publish(part, live_params, voltages, currents);
-        let mut readers: Vec<DeviceId> = part.watches.values().flatten().map(|(id, _)| *id).collect();
-        Self::report_changed_ic_readers(part, &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
+        let mut readers: Vec<DeviceId> = part.watch_ids.clone();
+        Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
         if let Some(t) = Self::schedule_crossing(part, now, voltages) {
             self.scheduled.push((t, partition, part.version));
         }
@@ -339,7 +412,7 @@ impl ClosedFormSolver {
     /// without touching `seg_t0`/`seg_vc0` (the segment's own anchor stays
     /// wherever it was last aimed; only the PUBLISHED reading moves).
     pub fn publish_at(&self, t_end: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) {
-        for part in self.partitions.values() {
+        for part in &self.parts {
             if part.seg.is_none() {
                 continue; // load not settled yet; nothing to publish.
             }
@@ -351,22 +424,17 @@ impl ClosedFormSolver {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             partitions: self
-                .partitions
+                .parts
                 .iter()
-                .map(|(&p, part)| {
-                    (
-                        p,
-                        PartitionSnapshot {
-                            seg: part.seg.clone(),
-                            seg_t0: part.seg_t0,
-                            seg_vc0: part.seg_vc0,
-                            seg_f: part.seg_f,
-                            seg_inf: part.seg_inf,
-                            version: part.version,
-                            cross_local: part.cross_local,
-                            cross_v: part.cross_v,
-                        },
-                    )
+                .map(|part| PartitionSnapshot {
+                    seg: part.seg.clone(),
+                    seg_t0: part.seg_t0,
+                    seg_vc0: part.seg_vc0,
+                    seg_f: part.seg_f,
+                    seg_inf: part.seg_inf,
+                    version: part.version,
+                    cross_local: part.cross_local,
+                    cross_v: part.cross_v,
                 })
                 .collect(),
             scheduled: self.scheduled.clone(),
@@ -375,36 +443,108 @@ impl ClosedFormSolver {
 
     pub fn restore(&mut self, snapshot: Snapshot) {
         self.scheduled = snapshot.scheduled;
-        for (p, s) in snapshot.partitions {
-            if let Some(part) = self.partitions.get_mut(&p) {
-                part.seg = s.seg;
-                part.seg_t0 = s.seg_t0;
-                part.seg_vc0 = s.seg_vc0;
-                part.seg_f = s.seg_f;
-                part.seg_inf = s.seg_inf;
-                part.version = s.version;
-                part.cross_local = s.cross_local;
-                part.cross_v = s.cross_v;
-            }
+        for (part, s) in self.parts.iter_mut().zip(snapshot.partitions) {
+            part.seg = s.seg;
+            part.seg_t0 = s.seg_t0;
+            part.seg_vc0 = s.seg_vc0;
+            part.seg_f = s.seg_f;
+            part.seg_inf = s.seg_inf;
+            part.version = s.version;
+            part.cross_local = s.cross_local;
+            part.cross_v = s.cross_v;
+        }
+    }
+
+    /// The index into `parts` of global partition `p_idx`, if this solver
+    /// owns it.
+    fn slot(&self, p_idx: usize) -> Option<usize> {
+        match self.slot_of.get(p_idx) {
+            Some(&slot) if slot != u32::MAX => Some(slot as usize),
+            _ => None,
         }
     }
 
     // ---- internals ---------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
+    /// Re-derives what `part.driver_ids` is derived from when the driver
+    /// table's length is not the one it was derived for (see the field's doc
+    /// comment).
+    fn ensure_driver_ids(part: &mut Partition, drivers: &[Driver]) {
+        if part.driver_index_len != drivers.len() {
+            part.driver_ids.clear();
+            for (id, d) in drivers.iter().enumerate() {
+                if part.touch_ics.iter().any(|(device_index, _)| *device_index == d.device) {
+                    part.driver_ids.push(id as u32);
+                }
+            }
+            part.driver_index_len = drivers.len();
+        }
+        #[cfg(debug_assertions)]
+        {
+            let fresh: Vec<u32> = drivers
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| part.touch_ics.iter().any(|(device_index, _)| *device_index == d.device))
+                .map(|(id, _)| id as u32)
+                .collect();
+            debug_assert_eq!(fresh, part.driver_ids, "the driver table changed without changing its length");
+        }
+    }
+
+    /// Packs into `part.key_scratch` everything a segment build reads that
+    /// can differ from one build of this partition to the next: the
+    /// committed mode of every driver of an IC that can touch it (`3` for
+    /// none yet), the floating bucket's `high` bit of every pull pin in it
+    /// (the only place `now` enters the stamp), and the live params of every
+    /// resistor/switch it holds. Everything else `build_segment` reads (the
+    /// shape, the capacitor, every IC record and driver's fixed fields, the
+    /// fixed supply voltages, `node_owner`) is immutable after load, so equal
+    /// keys mean equal inputs and a bit-identical segment.
+    fn segment_key(part: &mut Partition, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>) {
+        let key = &mut part.key_scratch;
+        key.clear();
+        for &id in &part.driver_ids {
+            key.push(drivers[id as usize].committed().map_or(3, mode_discriminant));
+        }
+        for &(ic_index, pin_index) in &part.touch_pulls {
+            let (_, ic) = &part.touch_ics[ic_index as usize];
+            let pin = &ic.logic[pin_index as usize];
+            key.push(digital::floating::floating_high(pin.open_hash, now, ic.ttl) as u8);
+        }
+        for stamped in &part.shape.stamped {
+            for v in live_params_for(stamped, live_params) {
+                key.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
+    }
+
+    /// Builds this partition's segment for the current stamp — or reuses the
+    /// one it already has when nothing the build reads has changed (a
+    /// `Crossing` re-aims the same network from a new anchor) — and anchors
+    /// it at `(now, vc_now)`. The reuse still counts as a segment built (stat
+    /// 8 counts re-aims), and the rate and asymptote are re-derived from
+    /// `vc_now` exactly as before (`seg_inf` is `vc_now` when `di == 0`).
     fn segment_and_aim(
         part: &mut Partition,
         now: f64,
         vc_now: f64,
-        p_idx: usize,
         drivers: &[Driver],
-        ics: &[(usize, digital::IcRecord)],
         node_owner: &HashMap<usize, (usize, usize)>,
         fixed: &[Option<f64>],
         live_params: &HashMap<usize, Vec<f64>>,
     ) -> Result<(), String> {
-        let seg = build_segment(&part.shape, &part.cap, p_idx, now, drivers, ics, node_owner, fixed, live_params)?;
-        part.seg = Some(seg);
+        Self::ensure_driver_ids(part, drivers);
+        Self::segment_key(part, now, drivers, live_params);
+        let reusable = matches!(&part.seg, Some(seg) if seg.key == part.key_scratch);
+        if !reusable {
+            // Only the drivers `stamp_ics_into_dyn` can read, in table order,
+            // and only the ICs that can touch this partition.
+            part.driver_scratch.clear();
+            part.driver_scratch.extend(part.driver_ids.iter().map(|&id| drivers[id as usize].clone()));
+            let mut seg = build_segment(&part.shape, &part.cap, part.global, now, &part.driver_scratch, &part.touch_ics, node_owner, fixed, live_params)?;
+            seg.key = part.key_scratch.clone();
+            part.seg = Some(Rc::new(seg));
+        }
         part.segments_built += 1;
         let seg = part.seg.as_ref().unwrap();
         part.seg_f = seg.di / part.cap.c;
@@ -415,21 +555,26 @@ impl ClosedFormSolver {
         Ok(())
     }
 
+    /// Notes the published bits of every node of `part`, in
+    /// `part.shape.nodes` order, before a re-aim publishes over them.
+    fn note_bits(part: &mut Partition, voltages: &[f64]) {
+        part.bits_scratch.clear();
+        part.bits_scratch.extend(part.shape.nodes.iter().map(|&n| voltages[n].to_bits()));
+    }
+
     /// W1c contract point 4's last bullet, mirrored from `static_part.rs`'s
     /// own `node_to_ic_readers` walk: for every one of this partition's own
     /// local nodes whose PUBLISHED bits actually changed this re-aim,
     /// extends `readers` with every IC that reads it (its `vcc`, `gnd`, or
     /// any logic pin) — not only the ones with an explicit crossing watch
-    /// registered. `old_bits` is `part.shape.nodes`-order, captured by the
-    /// caller BEFORE `Self::publish`; `readers` may already hold entries
+    /// registered. `part.bits_scratch` is `part.shape.nodes`-order, captured by the
+    /// caller BEFORE `Self::publish` (`Self::note_bits`); `readers` may already hold entries
     /// (from `part.watches`), and a duplicate here is harmless — `Kernel`
     /// dedups across a whole delta's readers regardless.
-    fn report_changed_ic_readers(part: &Partition, old_bits: &[u64], voltages: &[f64], node_to_ic_readers: &HashMap<usize, Vec<usize>>, readers: &mut Vec<DeviceId>) {
+    fn report_changed_ic_readers(part: &Partition, voltages: &[f64], node_to_ic_readers: &[Vec<usize>], readers: &mut Vec<DeviceId>) {
         for (l, &node) in part.shape.nodes.iter().enumerate() {
-            if voltages[node].to_bits() != old_bits[l] {
-                if let Some(ics) = node_to_ic_readers.get(&node) {
-                    readers.extend(ics.iter().map(|&d| DeviceId(d as u32)));
-                }
+            if voltages[node].to_bits() != part.bits_scratch[l] {
+                readers.extend(node_to_ic_readers[node].iter().map(|&d| DeviceId(d as u32)));
             }
         }
     }
@@ -602,7 +747,7 @@ fn build_segment(
     let dx: Vec<f64> = (0..n).map(|k| x1[k] - x0[k]).collect();
     let i0 = x0[r];
     let di = x1[r] - i0;
-    Ok(Segment { x0: x0[..n].to_vec(), dx, i0, di })
+    Ok(Segment { x0: x0[..n].to_vec(), dx, i0, di, key: Vec::new() })
 }
 
 /// See [`build_segment`]'s doc comment on why this exists. `r` is the branch
@@ -913,5 +1058,85 @@ mod tests {
             let kcl_residual = cur[1] - cur[2] - shunt * v[2];
             assert!(kcl_residual.abs() < 1e-12, "t={t}: KCL residual at node2 = {kcl_residual}");
         }
+    }
+
+    fn switch(component_index: usize, a: usize, b: usize, closed: f64) -> Device {
+        Device { kind: crate::kinds::SWITCH, component_index, pins: vec![pin(a), pin(b)], params: vec![closed], blob: vec![] }
+    }
+
+    fn assert_same_bits(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    /// A re-aim whose stamp inputs did not change (a crossing landing on the
+    /// same network, a `resolve_dirty` with nothing new) shares the segment
+    /// it already has instead of rebuilding it, and what it shares is
+    /// bit-for-bit what a fresh build would have produced. It is still a
+    /// re-aim: the stat and the version move as before.
+    #[test]
+    fn a_reaim_with_an_unchanged_stamp_reuses_the_segment_a_rebuild_would_produce() {
+        let (v0, r, c) = (5.0, 1000.0, 1e-6);
+        let p = rc_program(v0, r, c, 0.0, 1e6);
+        let mut cf = build(&p);
+        let live = HashMap::new();
+        let mut voltages = vec![0.0, v0, 0.0];
+        let mut currents = vec![0.0; 3];
+        cf.resolve_dirty(&[0], 0.0, &[], &live, &mut voltages, &mut currents).unwrap();
+        cf.watch_node(2, DeviceId(0), Box::new(|_v: &[f64]| vec![Threshold { value: 3.0, rising: true }]));
+        let first = Rc::clone(cf.parts[0].seg.as_ref().unwrap());
+        let version = cf.parts[0].version;
+
+        cf.resolve_dirty(&[0], 1e-4, &[], &live, &mut voltages, &mut currents).unwrap();
+        let again = cf.parts[0].seg.as_ref().unwrap();
+        assert!(Rc::ptr_eq(&first, again), "nothing in the stamp changed, so the segment is shared");
+        assert_eq!(cf.segments_built(), 2.0, "a reused re-aim still counts as a re-aim");
+        assert!(cf.parts[0].version > version, "and still cancels the crossings scheduled under the old aim");
+
+        let (t, _, _) = cf.take_scheduled()[0];
+        cf.handle_crossing(0, t, &[], &live, &mut voltages, &mut currents).unwrap();
+        assert!(Rc::ptr_eq(&first, cf.parts[0].seg.as_ref().unwrap()), "a landed crossing re-aims the same network");
+
+        let part = &cf.parts[0];
+        let fresh = build_segment(&part.shape, &part.cap, part.global, t, &[], &part.touch_ics, &cf.node_owner, &cf.fixed, &live).unwrap();
+        assert_same_bits(&fresh.x0, &first.x0);
+        assert_same_bits(&fresh.dx, &first.dx);
+        assert_eq!(fresh.i0.to_bits(), first.i0.to_bits());
+        assert_eq!(fresh.di.to_bits(), first.di.to_bits());
+    }
+
+    /// The other half: a live-parameter change (a switch toggle) is an input
+    /// of the build, so it must not be served the old segment, and the
+    /// rebuilt one is the fresh build.
+    #[test]
+    fn a_live_param_change_forces_a_rebuild_and_a_restore_brings_the_old_segment_back() {
+        let (v0, r, c) = (5.0, 1000.0, 1e-6);
+        let p = program(3, vec![source(0, 1, 0, v0), resistor(1, 1, 2, r), capacitor(2, 2, 0, c, 0.0, 0.0), switch(3, 2, 0, 0.0)]);
+        let mut cf = build(&p);
+        let mut live: HashMap<usize, Vec<f64>> = HashMap::new();
+        live.insert(3, vec![0.0]);
+        let mut voltages = vec![0.0, v0, 0.0];
+        let mut currents = vec![0.0; 4];
+        cf.resolve_dirty(&[0], 0.0, &[], &live, &mut voltages, &mut currents).unwrap();
+        let open = Rc::clone(cf.parts[0].seg.as_ref().unwrap());
+        let snapshot = cf.snapshot();
+
+        live.insert(3, vec![1.0]);
+        cf.resolve_dirty(&[0], 1e-4, &[], &live, &mut voltages, &mut currents).unwrap();
+        let closed = Rc::clone(cf.parts[0].seg.as_ref().unwrap());
+        assert!(!Rc::ptr_eq(&open, &closed), "closing the switch changes the network");
+        assert_ne!(open.di.to_bits(), closed.di.to_bits());
+        let part = &cf.parts[0];
+        let fresh = build_segment(&part.shape, &part.cap, part.global, 1e-4, &[], &part.touch_ics, &cf.node_owner, &cf.fixed, &live).unwrap();
+        assert_same_bits(&fresh.x0, &closed.x0);
+        assert_eq!(fresh.di.to_bits(), closed.di.to_bits());
+
+        cf.restore(snapshot);
+        assert!(Rc::ptr_eq(&open, cf.parts[0].seg.as_ref().unwrap()), "a rolled-back instant gets its own segment back, key and all");
+        live.insert(3, vec![0.0]);
+        cf.resolve_dirty(&[0], 2e-4, &[], &live, &mut voltages, &mut currents).unwrap();
+        assert!(Rc::ptr_eq(&open, cf.parts[0].seg.as_ref().unwrap()), "and the reopened switch matches that key again");
     }
 }
