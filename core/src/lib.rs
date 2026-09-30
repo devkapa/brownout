@@ -27,6 +27,7 @@ pub mod kinds;
 pub mod lu;
 pub mod partition;
 pub mod program;
+pub mod rails;
 pub mod readout;
 pub mod solve;
 

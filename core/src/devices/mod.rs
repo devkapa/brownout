@@ -33,10 +33,12 @@
 //!   junctions can land in several partitions, so the solver places and
 //!   stamps them by node.
 
+pub mod battery;
 pub mod ics;
 pub mod led;
 pub mod passives;
 pub mod seg7;
+pub mod sources;
 pub mod switches;
 
 use crate::kinds;

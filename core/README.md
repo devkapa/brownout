@@ -7,8 +7,8 @@ plan and the locked owner decisions live in the devolt repo:
 contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
-**Status: W1d done (sequential ICs, memories, datasheet delays and the W1c
-enable retrofit); W1e (NE555, LEDs, 7-segment displays) contracted.** W0
+**Status: W1e done (NE555, LEDs, 7-segment displays; checkpoint S1); W1f
+(rails and sources) contracted.** W0
 proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
@@ -73,7 +73,7 @@ trailer  MAGIC
   |---|---|---|---|
   | 1 | `INTEGRATION` | `0` backward Euler, `1` trapezoidal | `0` |
   | 2 | `NO_SOLUTION_CACHE` | `0` / `1` (exactness switch) | `0` |
-  | 3 | `NO_RAIL_SHORTCUT` | `0` / `1` (exactness switch) | `0` |
+  | 3 | `NO_RAIL_SHORTCUT` | `0` / `1` (exactness switch; load-time only from W1f) | `0` |
   | 4 | `FORCE_STEPPED` | `0` / `1` (tests only) | `0` |
   | 5 | `AMBIENT_C` | finite °C | `25` |
   | 6 | `FLOATING_MODEL` | `0` classic hash (the only value in W1) | `0` |
@@ -146,7 +146,7 @@ is dispatched; a code without a record layout is reserved and rejected as
 | Block | Codes |
 |---|---|
 | Passives and switches | 1 `resistor`, 3 `capacitor`, 4 `switch`, 5 `push_button`, 6 `spdt_switch`, 7 `dip_switch`, 8 `potentiometer`, 9 `trimmer`, 10 `fuse`, 11 `ldr`, 12 `thermistor` |
-| Sources | 2 `voltage_source` (kept from v1), 20 `battery_pack`, 21 `bench_psu`, 22 `clock`, 23 `clock_gen`, 24 `pulse_source`, 25 `pulse_gen` |
+| Sources | 2 `voltage_source` (kept from v1), 20 `battery_pack`, 21 `bench_psu`, 22 `clock`, 23 `clock_gen`, 24 `pulse_source`, 25 `pulse_gen`, 26 `section_anchor` (synthetic: emitted by the compiler, never a component kind) |
 | LEDs and displays | 30 `led`, 31 `rgb_led`, 32 `bicolor_led`, 33 `seg7_cc`, 34 `seg7_ca` |
 | Timers | 40 `ne555` |
 | Combinational ICs | 50 `74ls00`, 51 `74ls04`, 52 `74ls08`, 53 `74ls32`, 54 `74ls86`, 55 `74ls157`, 56 `74ls283`, 57 `74hc138`, 58 `74hc14`, 59 `74ls47`, 60 `cd4511`, 61 `74ls245` |
@@ -160,6 +160,16 @@ The W1e rows and sections cite classic by file and line at `3b22a3e`: `SE`
 `src/host/headless.ts`. Where one differs from the spec's 2026-09-24
 citation, the code decides.
 
+The W1f rows and sections cite classic at `2b5faf1` (its `sim-engine.ts`
+moved after `3b22a3e`): `SE` `src/sim/engine/sim-engine.ts`, `SO`
+`src/sim/engine/devices/sources.ts`, `BP` `src/sim/battery-physics.ts`, `WF`
+`src/sim/engine/digital.ts` (the waveform functions), `GR`
+`src/sim/engine/graph.ts` and `HL` `src/host/headless.ts`; `P3` is the
+prototype's `brownout-core-prototype/js/pec3.mjs`. "W1f Qn" is ruling `n` of
+the W1f contract review (orchestrator and manager, 2026-09-30; devolt repo,
+`memory/progress/brownout-core-w1e-drafts/w1f-draft.md`, section 10), and
+"probe Pn" or "probe Qn" is a classic probe in that draft's section 8.
+
 **Record layouts** (added per sub-wave):
 
 | Code | Kind | Pins, in order | Params | Blob | Added |
@@ -171,6 +181,11 @@ citation, the code decides.
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
 | 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
+| 20 | `battery_pack` | `pos`, `neg` (by id, SO:146-150) | the 9 battery params (Battery record below) | the OCV table `[n, (soc, volts) x n]` | W1f |
+| 21 | `bench_psu` | `pins[0]` (+), `pins[1]` (−) (positional, SO:226-227, 276-281) | `[V, iLimit]` (Bench PSU record) | empty | W1f |
+| 22, 23 | `clock`, `clock_gen` | `pins[0]` (+), `pins[1]` (−) (positional) | `[freq, duty, vHigh, vLow, delay]` | `[slotBase]`, 1 digital slot | W1f |
+| 24, 25 | `pulse_source`, `pulse_gen` | `pins[0]` (+), `pins[1]` (−) (positional) | `[v1, v2, td, tr, tf, pw, per]` | `[slotBase]`, 1 digital slot | W1f |
+| 26 | `section_anchor` (synthetic) | one pin, the anchor node | none | empty | W1f |
 | 30 | `led` | `pins[0]` (anode), `pins[1]` (cathode) (positional, SC:356-357) | the 6 `led` params (LED records below) | empty | W1e |
 | 31 | `rgb_led` | `r_a`, `g_a`, `b_a`, `com_k` (by id, SC:618-623) | the 6 `rgb_led` params | `[channelBase]`, 3 channel slots | W1e |
 | 32 | `bicolor_led` | `a1`, `a2`, `k` (by id, SC:551-552) | the 5 `bicolor_led` params | `[channelBase]`, 2 channel slots | W1e |
@@ -430,6 +445,135 @@ No format version bump and no ABI version change for W1e. A layout for a
 reserved code changes no existing record: a v3 reader without it rejected
 codes 30-34 and 40 as `-2`.
 
+**Source records** (codes 20-26).
+- **Pins.** Codes 21-25 read `pins[0]`/`pins[1]` by position, as classic's
+  `stampIndependentVoltageSource` and the bench_psu stamps do. Code 20 reads
+  `pos`/`neg` by id (`ctx.pinNode(comp.id, "pos")`, SO:148-149). The declines
+  are in Pins by id. `OPEN` and `OPEN_HIGH` are computed as for every pin
+  (G8) and never read by Rust for these kinds.
+- **Digital slots.** Codes 22-25 own one, at `blob[0]`, keyed by the bare
+  component id (classic's `ds[comp.id]`). Codes 20, 21 and 26 own none. No
+  source kind has channel slots or live params.
+
+**Battery record** (code 20). The compiler resolves the model with classic's
+own code, never re-derived: a helper exported from `sim-engine.ts` that
+`_batteryModel` (SE:1857-1899) and `_batteryOperatingPoint` (SE:1901-1915)
+also call, bit-identical.
+
+| Index | Name | Compiler expression (classic) |
+|---|---|---|
+| 0 | `ocvScale` | `nominalVoltageScale`: `configuredVoltage / profile.nominalVoltageV`, or 1 when nominal `<= 0` (SE:1892-1894) |
+| 1 | `rBase` | `finiteNonNegative(referenceInternalResistanceOhm, profile.freshInternalResistanceOhm)` (BP:412-415), with `referenceInternalResistanceOhm = configuredResistance` (SE:1871-1874, 1895) |
+| 2 | `tempFactor` | `max(Fmin, exp(alpha * (T_ref - T)))` with `T` the load's ambient clamped to the profile's operating range, non-finite giving `T_ref` (BP:420-434). The ambient is `environment.temperatureC ?? 25` (SE:1836-1838), constant per load. |
+| 3 | `depA` | `profile.resistance.depletionScale` |
+| 4 | `depP` | `profile.resistance.depletionExponent` |
+| 5 | `depK` | `profile.resistance.kneeSoc` |
+| 6 | `capacityAh` | `max(1e-12, Number(params.capacityAh ?? profile.referenceCapacityAh))`, which also replaces the profile's reference capacity (SE:1883-1889) |
+| 7 | `soc0` | `clampSoc(clamp01(Number(params.charge ?? 1)))` (SE:1902, BP:307-309, 439-445): NaN gives 0 |
+| 8 | `profileCode` | 0 generic, 1 `alkaline-aa-4s`, 2 `alkaline-pp3-9v`, 3 `lithium-cr2032`. Rust ignores it; TS keeps the id and label for the readout. |
+
+- **Identity** (§8.3.1). `profile` is `BATTERY_PROFILES_BY_CATALOG_UID[
+  catalogUid.trim()]` when that exists, else the generic fallback built with
+  `fallbackNominalVoltageV = configuredVoltage`, `fallbackCapacityAh =
+  Number(params.capacityAh ?? 1)` and `fallbackFreshInternalResistanceOhm =
+  configuredResistance ?? 0` (SE:1866-1882, BP:311-382). Catalog defaults
+  (`voltage`, `rInternal`) apply only when `catalogUid` is set and resolves
+  exactly (`partFor`, SE:1177-1202, read at SE:1866). The compiler never
+  infers an identity, and never applies the host-side legacy alias
+  (`legacyBatteryPackUid`, §8.3.1 (b)): a `{voltage: 5}` battery is generic
+  unless a host persisted `catalogUid: "supply-5v"` (Q-O38). So:
+  - identity-less, no `rInternal`: `rBase = 0`, an ideal rail (probe P2);
+  - identity-less with `rInternal`: generic shape (A 0.5, K 0.05, T_ref
+    25 °C, x2.5 at −20 °C), `rBase = rInternal` (probe Q1);
+  - `supply-5v` with `{voltage: 5}`: AA_4S, `ocvScale = 5/6`, fresh OCV
+    5.3333 V, `rBase = 0.9` from the catalog, 0.8041 Ω at 25 °C and 0.9 Ω at
+    21 °C (probe P3; Q-O33's 21 °C reference, mirrored).
+- **Blob: the OCV table.** `[n, soc_0, v_0, ..., soc_{n-1}, v_{n-1}]`, the
+  profile's `ocvCurve` UNSCALED (volts before `ocvScale`), `n >= 1`. Generic
+  is `[2, 0, 0, 1, nominal]`; AA_4S and PP3 are the alkaline cell curve x4
+  and x6 (8 points, BP:147-158, 192, 225); CR2032 is 9 points (BP:259-269).
+  Rust interpolates exactly as `batteryOpenCircuitVoltageV` (BP:384-403):
+  `soc <= soc_0` gives `v_0`; the first point with `soc <= soc_i` bounds the
+  segment; a zero-width segment gives `v_i`; past the end gives `v_{n-1}`.
+- **Validation** (`kinds.rs`, `-1`): every value finite; `ocvScale >= 0`;
+  `rBase >= 0`; `tempFactor > 0`; `depA >= 0`, `depK > 0`; `capacityAh >=
+  1e-12`; `soc0` in `[0, 1]`; `profileCode` in `{0, 1, 2, 3}`; `n` a
+  positive integer with blob length `1 + 2n`, every `soc_i` in `[0, 1]` and
+  non-decreasing. The compiler declines
+  `malformed:<componentId>:non-finite-<param>` for a non-finite resolved
+  value (a non-numeric `voltage` makes classic's OCV NaN).
+- A battery param edit is a reload, as in classic; SoC carry-forward across a
+  reload is W2 (§8.3.4, D25), so until then the core restarts at `soc0`.
+
+**Bench PSU record** (code 21).
+- **Params.** `0 V = Number(params.voltage ?? 5)`, `1 iLimit =
+  Number(params.iLimit ?? 0)` (SO:218-219, 294). No catalog default is ever
+  read: a `supply-var` part with no `iLimit` is an ideal source (probe P6;
+  Q-W18). A non-finite `V` declines `non-finite-voltage`. An `iLimit` that is
+  not `> 0` (negative, zero, NaN) is emitted as 0, classic's ideal path
+  (SO:274-283, `iLimitPsu > 0` false); `+Infinity` declines
+  `non-finite-iLimit`.
+- **Two forms, decided at load.** `iLimit = 0`: an ideal source, handled
+  exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
+  a hub candidate (Rails point 1), with device state `reg` (C ABI, device
+  state).
+- Regime carry-forward across a reload is W2 (Q-O37).
+
+**Waveform source records** (codes 22-25).
+- **Clock** (SO:360-364, SE:6188-6197): `0 freq = max(1e-6,
+  Number(frequency ?? 1000))`, `1 duty = Number(duty ?? 0.5)`, `2 vHigh =
+  Number(v_high ?? 5)`, `3 vLow = Number(v_low ?? 0)`, `4 delay =
+  Number(delay ?? 0)`. The period is `1 / freq`, computed in Rust exactly as
+  classic passes it to `clockVoltage`.
+- **Pulse** (SO:386-392, SE:6200-6211): `0 v1 = Number(v1 ?? 0)`, `1 v2 =
+  Number(v2 ?? 5)`, `2 td = Number(td ?? 0)`, `3 tr = Number(tr ?? 1e-6)`,
+  `4 tf = Number(tf ?? 1e-6)`, `5 pw = Number(pw ?? 5e-4)`, `6 per =
+  Number(per ?? 1e-3)`. A `per` that is not finite and positive is one-shot
+  (WF:51); the compiler emits it as 0.
+- Params come from `comp.params` only; no catalog default is read (§8.8).
+- The compiler declines `non-finite-<param>` for any other non-finite value,
+  `negative-<param>` for `tr`, `tf` or `pw < 0`, and `truncated-pulse` when
+  `per > 0` and `per < tr + pw + tf` (a cycle cut short, WF:52-56; Sources
+  point 3). The reader repeats these rules (`-1`).
+
+**Section anchor record** (code 26, synthetic). The `bd90847` port (spec,
+"Deltas since the 2026-09-24 baseline"; W1f Q8). The compiler computes
+classic's isolated sections exactly as `_compileIsolatedSectionAnchors`
+(SE:4690-4735): a union over each component's pins (no W1 kind declares
+`galvanicGroups`, so every component is one group), with the reference net
+as ground. For each section that does not contain the reference net, it
+emits one record whose single pin is the anchor: the return pin
+(`sourceReturnPinId`, GR:56-59: `neg`, else `gnd`) of the first
+`SOURCE_KINDS` component in circuit order with that pin in the section, else
+the section's lowest net row. `componentIndex` is the index of the component
+owning that pin (the first one in circuit order for the lowest-row
+fallback). Records are emitted after every component record, in ascending
+anchor row, the order classic sorts its anchors in. Rust fixes the anchor
+node at 0 V (Rails point 1), where classic ties it to ground through 1 S
+(`ISOLATED_SECTION_ANCHOR_G`), so the core reads 0 V where classic reads
+about 1e-11 V (probe Q4). No readout is published for the record: its entry
+in `bo_engine_device_currents` is the anchor's source-KCL current (W0 point
+5, the section's shunt draw, about 0 A), and the facade gives it no
+`elementI` key.
+
+`kinds.rs` (`BATTERY_PACK` to `PULSE_GEN` exist; `SECTION_ANCHOR = 26` is
+new), with `live_params: &[]` and `channel_slots: 0` throughout:
+- `battery_pack`: `pins: 2, pins_max: 2, params: 9, blob: BlobShape::Table,
+  check: battery_check, digital_slots: 0`;
+- `bench_psu`: `pins: 2, pins_max: 2, params: 2, blob: Exact(0),
+  digital_slots: 0`;
+- `clock`, `clock_gen`: `pins: 2, pins_max: 2, params: 5, blob: Exact(1),
+  digital_slots: 1`;
+- `pulse_source`, `pulse_gen`: `pins: 2, pins_max: 2, params: 7, blob:
+  Exact(1), digital_slots: 1`;
+- `section_anchor`: `pins: 1, pins_max: 1, params: 0, blob: Exact(0),
+  digital_slots: 0`.
+
+`BlobShape::Table` is new: `blob[0] = n`, length `1 + 2n`. The reader checks
+the shape; `battery_check` checks the values. `kinds.ts` mirrors every shape.
+No format version bump and no ABI version change for W1f: a v3 reader
+rejected codes 20-26 as `-2`.
+
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
 maps an absent pin to its reference node (spec §7.2.7). The exceptions are
 kinds classic stamps nothing for when pins are missing, which the compiler
@@ -442,7 +586,13 @@ classic) rather than emit a stamp classic never makes:
   has no `elementI` key (SE:6233), but a 2-pin `bicolor_led` or a 2- or
   3-pin `rgb_led` still publishes `elementI` and channel currents computed
   from the absent pins' reference node (SC:563-584, SE:4503-4535), a split
-  the core does not reproduce.
+  the core does not reproduce;
+- a source of codes 20-25 with fewer than 2 pins: classic stamps nothing but
+  still allocates an all-zero branch row (§8.1.1, Q-W17).
+
+One decline is not of this kind: a `battery_pack` whose `pos` or `neg` is
+absent declines `malformed:<componentId>:missing-pin`, because classic maps
+the absent pin to its reference node and stamps a shorted battery.
 
 **Currents** (`elementI`, one per record):
 - `capacitor`: series plus leakage current, `pins[0]` to `pins[1]`.
@@ -470,6 +620,13 @@ classic) rather than emit a stamp classic never makes:
   `-(gLo (V3 - V1) + gHi (V3 - V8))` with `gHi = f/20`, `gLo = (1-f)/20` and
   `f` the fraction of the committed OUT level (NE555 point 7); 0 while
   unpowered (§5.2 "Element current"). The DIS current is not reported.
+- `battery_pack`, `bench_psu`, `clock`, `clock_gen`, `pulse_source`,
+  `pulse_gen`: classic's branch value `x[k]`, the current entering the
+  source at `pins[0]`/`pos` from the circuit, negative while it delivers
+  (SO:74-82, §8.1.1). It includes the node shunts the source feeds (probe
+  P2: `−0.500000000005` A into 10 Ω at 5 V). A bench_psu in CC publishes
+  exactly `−dir·iLimit` (SO:258-260; probe P5).
+- `section_anchor`: no `elementI` key (Section anchor record).
 
 ## C ABI, version 2
 
@@ -492,7 +649,7 @@ export lands in its list in the same change that adds it.
 | `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
 | `bo_engine_stat` | `(h, i: u32) -> f64` | Counters (below). Unknown `i` gives `NaN`. Index 11 counts static iterations too from W1e (below). | v1 |
 | `bo_error_ptr` / `bo_error_len` | `() -> *const u8` / `() -> u32` | UTF-8 message for the most recent non-zero return. | v1 |
-| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Keys 2 and 3 take effect at the next event; keys 1 and 4-7 are load-time only (`-8` after load). `FORCE_STEPPED` is load-time only because it decides partition classification, which is fixed at load. | v2 (W1a) |
+| `bo_engine_set_option` | `(h, key: u32, value: f64) -> i32` | Change an option after load. Key 2 takes effect at the next event; keys 1 and 3-7 are load-time only (`-8` after load). `FORCE_STEPPED` and `NO_RAIL_SHORTCUT` are load-time only because each decides partition classification or membership, which is fixed at load. | v2 (W1a); key 3 load-time only from W1f |
 | `bo_engine_next_event_time` | `(h) -> f64` | Time of the earliest pending event, `+Infinity` when none. | v2 (W1a) |
 | `bo_engine_next_digital_due_time` | `(h) -> f64` | Time of the earliest pending driver commit (a live token; a commit held by the power-loss hold is not pending), `+Infinity` when none. Classic's `nextScheduledEventTime()` counterpart for a host that clamps its steps onto digital due times; it ignores stepped, crossing and bucket events. | v2 (W1c) |
 | `bo_engine_digital_slot_count` / `bo_engine_digital_slots` | `(h) -> u32` / `(h) -> *const f64` | `S` values; `NaN` means the key is absent this pass. | v2 (W1a) |
@@ -503,6 +660,38 @@ export lands in its list in the same change that adds it.
 | `bo_engine_seed_memory` | `(h, device: u32, ptr: *const f64, len_f64: u32) -> i32` | Replace a 74ls189's 16 stored nibbles (owner decision 2). | v2 (W1d) |
 | `bo_engine_take_eeprom_updates` | `(h) -> i32` | Collect and clear every dirty EEPROM image; returns the update buffer's length in f64 (`>= 0`), `-5` with no program. | v2 (W1d) |
 | `bo_engine_eeprom_updates_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. | v2 (W1d) |
+| `bo_engine_device_state` | `(h, device: u32) -> i32` | Collect one device's runtime state into the engine's state buffer; returns its length in f64 (`>= 0`, the per-kind layout below). `-8` for an index out of range or a kind with no device state, `-5` with no program. | v2 (W1f) |
+| `bo_engine_device_state_ptr` | `(h) -> *const f64` | The buffer from the last collect, valid until the next call on that engine. | v2 (W1f) |
+
+**`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
+through W1e. Exact mode makes the rail node free and merges every partition
+that reads it (Rails point 9), and partition membership changes only at a
+load. So key 3 after load is `-8`, as keys 1 and 4-7 are. This is a
+behaviour change of a public export, part of 1.0.0. No TS caller sets it
+after load (the S1 script and the compiler pass it in the program); the two
+Rust tests that did (`abi.rs:796`, `engine.rs:955`) change with it.
+
+**`bo_engine_device_state`** (W1f Q11). One generic pair, so that W3's
+regulators and later stateful kinds reuse it; it replaces the plan's
+`bo_engine_battery_state` and separate bench_psu `reg` read. Layouts, per
+kind:
+
+| Kind | Length | Values, in order |
+|---|---|---|
+| `battery_pack` | 6 | `0 soc`, `1 openCircuitVoltageV` (scaled: `OCV(soc) * ocvScale`), `2 internalResistanceOhm` (`R(soc)`, unscaled), `3 remainingCapacityCoulombs` (`capacityAh * 3600 * soc`), `4 dischargedCoulombs`, `5 rejectedRechargeCoulombs` (SE:4312-4331) |
+| `bench_psu`, `iLimit > 0` | 1 | `0 reg`: 0 (CV) or 2 (CC) |
+| `bench_psu`, `iLimit = 0` | 0 | none |
+
+- Every battery value is projected to the current time without committing
+  it (Rails point 6), so a collect never changes the simulation.
+- **Extending a layout.** The returned length is the layout's version. A
+  later wave extends a kind's layout only by appending values, never by
+  reordering, removing or reusing an index, and records the new length in
+  this table. The TS wrapper checks the returned length against the length
+  it expects for the kind (a mismatch throws, as an ABI version mismatch
+  does) and exposes typed accessors that name each value, so no caller
+  indexes raw offsets.
+- The buffer is valid until the next call on that engine (Memory, below).
 
 **`bo_engine_set_params`** (W1b, owner decision 1). The buffer holds
 `(deviceIndex, paramIndex, value)` triples.
@@ -524,14 +713,21 @@ export lands in its list in the same change that adds it.
 depth, `7` solution-cache hits, `8` closed-form segments, `9` crossings,
 `10` stepped steps, `11` Newton iterations, `12` IC evaluations, `13` driver
 commits, `14` rail moves, `15` stepped partitions holding two or more
-capacitors (decision 14's count; `FORCE_STEPPED` does not change it). Stat
-11 counts every Newton iteration of a stepped step (one for a linear
-partition) and, from W1e, every iteration of an iterated static partition:
+capacitors (decision 14's count; `FORCE_STEPPED` does not change it), `16`
+rail sensitivity computations (pec3's `railSens`), `17` rail scans (pec3's
+`railScans`), `18` rail events processed, `19` source edges processed, `20`
+reader flips found at a rail scan. Stat 11 counts every Newton iteration of
+a stepped step (one for a linear partition) and, from W1e, every iteration
+of an iterated static partition:
 LEDs point 6, the polish included, and W1c's static fixed point, which W1c
-did not count.
+did not count. Stat 14 was reserved from W1a and counts from W1f (Rails
+point 3); stats 16-20 are W1f's (Rails points 3 and 4, Sources points 2 and
+3, and for 20 the reader-scan divergence under Equivalence harness rules).
+Stats 16-18 and 20 stay 0 in exact mode.
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
-unsupported topology (the TS side falls back to classic; so do `-4` and `-7`
+unsupported topology, which from W1f includes the hub classification cases
+of Rails point 1 (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
 (singular, non-finite pivot, a non-finite published value, or a partition's
@@ -541,7 +737,8 @@ handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
 unknown option key, a value out of range, a load-time option after load, a
-device or param index out of range, or a param that is not live).
+device or param index out of range, a param that is not live, or a device
+state read of a kind with none). W1f adds no code.
 
 **`bo_engine_seed_memory`** (W1d, owner decision 2).
 - `device` is a device record index. The buffer holds 16 values; value `i`
@@ -605,6 +802,33 @@ records from it:
   `bicolor_led` (SE:4503, 4520); `buildElementChannelI`
   (`src/core/readout.ts`) skips it rather than write the `NaN` through.
 
+W1f adds:
+- `getNetV()`: the rail node publishes `u`; nodes of hub partitions publish
+  their rail-corrected voltage (Rails point 3).
+- `digitalState`: a clock or pulse slot holds 1 while the source's value is
+  `> (vHigh + vLow) / 2` (clock) or `> (v1 + v2) / 2` (pulse), else 0,
+  strictly greater (SE:6195, 6209). The slot is never `NaN`: classic
+  publishes the key on every pass.
+- `getBatteryState(id)`: `undefined` unless `id` is a `battery_pack` record;
+  otherwise classic's `BatteryRuntimeReadout` (SE:540-551): the six numbers
+  from `bo_engine_device_state`, plus `profileId` and `label` from the
+  compiler's profile (the generic one is `"generic-primary"` and `"Generic
+  primary battery (fallback)"`, probe P2), and `modelTemperatureC` and
+  `temperatureWasClamped` computed by the compiler from the ambient and the
+  profile's range (BP:492-510; constant per load).
+- `getIcState(id)`: for a `bench_psu` with `iLimit > 0`, a fresh `{ reg }`
+  object (classic returns its live `icState` object, SE:4466-4468; a caller
+  mutating it is not supported). `undefined` for a bench_psu with `iLimit =
+  0`, as classic creates no entry (SE:2854-2855). For every other kind the
+  facade returns `undefined` in W1f; classic's IC `icState` objects are not
+  mirrored (W1f Q11; whether to mirror them is W2's call, and no host reads
+  them).
+- Both read device state through the typed accessors (C ABI,
+  `bo_engine_device_state`), never raw offsets. Neither method is on
+  `EngineReadout` (`src/core/surface.ts`); both live on `CoreEngine` for
+  gate 1 (`battery-engine-physics`, `wave5-regulators`). No devolt host calls
+  either (only comments in `packages/simcore/src/canvas/renderer.ts`).
+
 ## Kernel semantics: the static solve (W0)
 
 1. **Fixed nodes.** Node 0 is fixed at 0 V. A `voltage_source` with one
@@ -613,7 +837,9 @@ records from it:
    whose terminals are both already fixed (a loop of ideal sources, including
    a source shorted to itself) is `-3`, whether or not the voltages agree —
    the classic MNA is singular there too. A source with neither terminal
-   reachable is `-3` (floating ideal source).
+   reachable is `-3` (floating ideal source). From W1f every
+   `section_anchor` node is fixed at 0 V before propagation starts, so a
+   source in an isolated section propagates from its anchor (Rails point 1).
 2. **Node shunt.** Every node except node 0 carries `NODE_RSHUNT_G = 1e-12` S
    to the datum, exactly as the classic engine stamps it on every node row.
    It keeps an isolated net solvable (it reads 0 V) and it is included in
@@ -699,7 +925,8 @@ records from it:
      load and `C * dV / h` on its first step when `esr = 0`. Both are
      artifacts of its step size; the core reports the exact value.
    - It rolls back with the rest of the instant (rule 7). No fixed-node
-     voltage is live in W1b, so nothing re-aims it after load yet.
+     voltage is live in W1b, so nothing re-aims it after load yet; from W1f a
+     rail move or a source edge re-aims it (Rails point 7).
    - An LED junction across two fixed nodes is the same case (W1e, LEDs
      point 4): it belongs to no partition and is not `-3`, publishes
      `I(dV)` and enters the source KCL.
@@ -721,7 +948,9 @@ records from it:
    `NO_SOLUTION_CACHE` bypasses it. A nonlinear static partition
    keeps the cache too (W1e, LEDs point 7): `NO_SOLUTION_CACHE` stays
    bit-identical for linear partitions, and a nonlinear one agrees within
-   1 µV (the polish residual).
+   1 µV (the polish residual). W1f fills the rail band, gates a hub
+   partition's hit on its distance from the stored rail (Rails point 3) and
+   adds each feeding waveform source's level (Rails point 7).
 5. **Initial state at load.** Every capacitor starts at `vc = 0` at
    `START_TIME`, in closed-form and stepped partitions alike; carrying charge
    across a reload is W2. A stepped partition's clock starts at
@@ -1256,7 +1485,8 @@ citations are at `3b22a3e` ("Kind codes and records").
    A stamped junction with both nodes fixed belongs to no partition and is
    not `-3` (an LED straight across an ideal source): its current is `I(dV)`
    with `dV` fixed, and it enters the source KCL (point 12). No fixed-node
-   voltage is live in W1e, so it is constant.
+   voltage is live in W1e, so it is constant; from W1f it re-publishes at
+   each rail move or source edge (Rails point 7).
 
 5. **Classification** (amends W1b point 3). A partition holding a stamped
    junction is **nonlinear**. A nonlinear partition with no counted
@@ -1820,11 +2050,458 @@ supply is free in a stepped partition and a driver on a fixed node whose stamp
 lands in a free supply's partition, are W1c points 3 and 4; fixtures 38 and
 39 cover them.
 
+## Kernel semantics: rails and sources (W1f)
+
+References are to spec chapter 8, §10.1 and the delta table; classic line
+citations are at `2b5faf1`, and "W1f Qn" is a ruling ("Kind codes and
+records"). Constants, all from P3:35-38 unless marked new:
+
+| Name | Value | Use |
+|---|---|---|
+| `RAIL_DELTA` | `1e-6` V | the finite-difference step of the sensitivity |
+| `RAIL_RESOLVE_V` | `0.025` V | re-solve a nonlinear hub partition once the rail has moved this far since its solve |
+| `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
+| `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
+| `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
+| `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event (Rails point 4) |
+| `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
+| `RAIL_TAU_MAX` | `1e-4` s (new) | the largest battery rail time constant `r·C_rail` the core accepts (Rails point 7) |
+| `RAMP_STEP_RATIO` | `0.01` (new) | the longest pulse ramp, relative to the source's event timescale, that is a midpoint step (Sources point 3) |
+
+### Rails
+
+1. **Hub classification** (at load, before partitioning). A **hub
+   candidate** is every `battery_pack` and every `bench_psu` with `iLimit >
+   0`. A `bench_psu` with `iLimit = 0` is an ideal source like code 2.
+   - **Anchors first.** Every `section_anchor` node is fixed at 0 V before
+     propagation, as a 0 V source from the datum. So a source whose section
+     has no conductive path to the datum is no longer floating: it
+     propagates from its anchor (probe Q4: a second battery reads
+     −1.1e-11 V at its own `neg` in classic; the core reads 0). A source
+     joined to the datum only through resistors is still floating and still
+     `-3` (Q-O39 stands; the anchor covers only isolated sections). A loop
+     of ideal sources is still `-3`.
+   - **At most one hub** (W1 limit, orchestrator lock). Two or more
+     candidates: `-3`, "more than one hub rail (W1 limit)".
+   - With one candidate, its `pos` node becomes the **rail node** and its
+     `neg` node the **return**. `-3` unless all hold:
+     - the return is fixed at 0 V: node 0, or an anchor node;
+     - the rail node is not node 0, not the return, and not fixed by any
+       ideal source (a hub in parallel with an ideal source is a loop
+       classic cannot solve either, except through `R`);
+     - no ideal source (codes 2, 21 with `iLimit = 0`, 22-25) has a pin on
+       the rail node (it would propagate from a moving node);
+     - for a battery, `R(soc0)·C_rail < RAIL_TAU_MAX`, where `C_rail` is the
+       summed capacitance of the rail capacitors (point 7).
+   - The rail node is neither fixed nor free. The union-find skips it as it
+     skips fixed nodes, so a device between the rail and a free node puts
+     only the free node in a partition, and an IC whose `vcc` is the rail
+     joins none of its pins to it (W1c point 2): partitions stay as small as
+     on an ideal supply. This is what the hub buys.
+   - In exact mode (point 9) the same rules apply, and then the rail node is
+     made free.
+
+2. **The rail equation.** Every **hub partition** (one with any stamp that
+   reads the rail node: a conductance, an IC driver or pull whose supply is
+   the rail, an LED junction, a capacitor, a switch contact) keeps, from its
+   latest solve at rail voltage `u_p`: its draw `I_p` (the current flowing
+   from the rail node into the partition), its slope `g_p = dI_p/du` and its
+   node sensitivities `s_p = dx/du` (P3:437-448). Every **direct device**
+   (all of its pins on fixed nodes or the rail, at least one on the rail: a
+   resistor or closed switch contact from the rail to a fixed node, an LED
+   junction across them, an IC driver on a fixed node stamping into a rail
+   supply, the rail node's own `NODE_RSHUNT_G`, the leakage of a rail
+   capacitor) is evaluated exactly at any `u`: `I_d(u)`, `g_d(u)`. A rail
+   capacitor itself is not a term (point 7). With
+   `A0 = Σ_p (I_p − g_p u_p) + Σ_d (I_d(u) − g_d(u) u)` and `G = Σ_p g_p +
+   Σ_d g_d(u)`, the rail solves (P3:462-484):
+   - battery: `u = (E − r A0) / (1 + r G)` with `E = OCV(soc) * ocvScale`
+     and `r = R(soc)` (point 6); `r = 0` gives `u = E`;
+   - bench_psu in CV: `u = V`;
+   - bench_psu in CC: `u = (dir * iLimit − A0) / G`, `dir = V < 0 ? −1 : 1`
+     (SO:228). `G >= 1e-12` always, from the rail node's own shunt. With a
+     rail capacitor the CC rail is a closed form instead (point 4).
+
+   The direct devices are iterated inside the solve (a scalar Newton on
+   `u`, to `|Δu| <= 1e-12`, at most 50 iterations, else `-4`); they cost no
+   partition solve. `A0` and `G`'s partition terms are running sums updated
+   per contribution, with a full recompute every 4096 updates and after any
+   restore (P3:450-460, 465).
+
+3. **Sensitivity, publication and re-solve.** After a hub partition solves
+   (static, a closed-form segment, a stepped commit), its `(I_p, g_p, s_p)`
+   come from three residual stamps and one re-solve (P3:437-448): residuals
+   `F0 = r(x, u)` and `F1 = r(x, u + RAIL_DELTA)`; `s = −A⁻¹ (F1 − F0) /
+   RAIL_DELTA` through the partition's existing factors (`lu_apply`); `I1 =
+   I(x + s·RAIL_DELTA, u + RAIL_DELTA)`; `g = (I1 − I0) / RAIL_DELTA`. For a
+   Newton partition `A` is the last iteration's Jacobian. Stat 16 counts
+   each computation.
+   - A hub node's published voltage is `x + s (u − u_p)` (P3:486-506); the
+     rail node's is `u`. A closed-form hub partition publishes its segment
+     re-aimed at `u` instead, with `s = 0` (P3:558-569).
+   - After every rail solve, a **nonlinear** hub partition (one holding a
+     stamped LED junction or a free IC supply) whose `|u − u_p|` exceeds
+     `RAIL_RESOLVE_V` (`RAIL_CC_RESOLVE_V` while the hub PSU is in CC with
+     no rail capacitor) is re-solved at the new `u`, and the rail solves
+     again. The loop runs inside one `resolve_dirty` call until no partition
+     is past its band, at most 50 passes (then `-4`, as a static Newton that
+     does not converge). A linear partition, and a partition whose draw
+     depends on `u` only through an IC driver's `R_out`, keeps its
+     first-order correction (pec3's rule; its second-order error is about
+     20 µV on the SAP-1, P3:36). CC needs the tighter band because `u` there
+     is set by the draws alone: a 25 mV linearisation error on an LED is a
+     14% current error.
+   - **The 25 mV band is measured** (W1f Q6). F1 runs an LED straight across
+     a 0.9 Ω battery, with no resistor, in default and in exact mode and
+     records the difference here. If it is outside W0's tolerance (volts
+     100 µV plus 1e-3 relative, amps 1 nA plus 1e-3 relative),
+     `RAIL_RESOLVE_V` becomes 1 mV.
+   - **Rail moves.** A solve that changes `u` by more than `RAIL_MOVE_EPS`
+     is a move (stat 14). On a move (P3:469-483):
+     - every closed-form hub partition, and every closed-form partition
+       holding a watched pin of an IC whose `vcc` or `gnd` is the rail, is
+       re-aimed at the current `u` from its current `vc` (P3:570-574), which
+       reschedules its crossings;
+     - rule 2a capacitors and LED junctions across the rail and a fixed node
+       re-aim (point 7);
+     - when `|u − u_scan| > RAIL_SCAN_V`: `u_scan = u` (stat 17); every
+       nonlinear static hub partition past `RAIL_RESOLVE_V` is marked dirty;
+       every reader of a watched node of the other static hub partitions,
+       and every IC whose `vcc` or `gnd` is the rail, is queued for this
+       delta. A 555 whose supply is the rail is queued too. Each queued
+       reader whose logic-pin reads differ from its previous powered
+       evaluation's counts once in stat 20: that flip may be up to
+       `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
+       scan).
+   - **Static cache.** A static hub partition's key includes the band
+     `round(u / RAIL_BUCKET_V)`; an entry stores `x`, `s`, `I_p`, `g_p` and
+     `u_p`, and a hit is taken only when `|u − u_p| <= RAIL_RESOLVE_V`
+     (P3:507-531). A hit replays the contribution and publishes `x + s (u −
+     u_p)`. So cache on and cache off agree within the rail-correction bound
+     on hub fixtures, as row B1's verify expects.
+
+4. **Rail events** (W1f Q1; pec3 has none). Between events the static draws
+   are constant, but a closed-form hub partition's draw follows its
+   capacitor, and SoC moves `E` and `r`. So after every rail solve at `t0`,
+   the rail holds its **implied trajectory** `u*(t)`: the equation of point
+   2 with each closed-form hub contribution at `I_p(t) = a_p + b_p vc_p(t) +
+   g_p (u − u_p)` (its segment's `vc_p(t)`, P3:575-579) and the battery's
+   `E(t)`, `r(t)` from the held discharge (point 6). One `Rail` event is
+   pending at a time, versioned; every rail solve supersedes it. It is due
+   at the earliest `t > t0 + 1e-15` at which any of these is reached:
+   - **drift:** `|u*(t) − u(t0)| >= RAIL_DRIFT_V`;
+   - **power window:** `u*(t)` crosses `V(gnd) + vccMin*0.9` or `V(gnd) +
+     vccMax*1.1` of an IC (555 included) whose `vcc` is the rail and whose
+     `gnd` is fixed, computed as W1c point 1 computes them;
+   - **CV entry** (PSU in CV): the implied draw `I*(t) = A0(t) + G V`
+     reaches `|I*| > iLimit`;
+   - **CC exit** (PSU in CC): `dir·u*(t) >= 0.98 |V|` and `dir·(A0(t) + G V)
+     <= iLimit` both hold (point 5);
+   - **SoC:** `soc` reaches the next OCV-table knot below it, or 0.
+
+   **Locating the time.** Each threshold is a level of one scalar function
+   of `t`: `u*(t)` in volts, or the draw `I*(t)` in amps (CV entry, the
+   exit's current test). For each function, each moving term (a closed-form
+   contribution, the SoC) gets an equal share of the smallest distance from
+   its value at `t0` to that function's nearest threshold, capped at
+   `RAIL_DRIFT_V` for `u*`. A term's time to use its share is closed form:
+   a log for an exponential segment (P3:580-608's form), linear for SoC
+   within a table segment. The event is the earliest of these times. With
+   one moving term the event lands on the threshold exactly; with several,
+   successive events close on it geometrically, and a distance below
+   `1e-12 * max(1, |value|)` counts as reached. At a `Rail` event (stat 18):
+   SoC advances to `t`, every closed-form hub contribution is refreshed at
+   its `vc(t)`, the rail solves (point 2), the regime rules run (point 5),
+   and a new event is scheduled. A stepped hub partition contributes afresh
+   at each committed step, so the rail solves at its step events; a
+   threshold it crosses within a step is found at that step's end, as
+   classic finds it (a step granularity, not an exact time).
+
+   So the rail is exact at events and never further than `RAIL_DRIFT_V` from
+   its implied value between them, the power gate flips at the exact
+   instant the rail crosses it (a digital fact, D1), and CC entry and exit
+   are exact state transitions (Q-O36). Cost on the SAP-1 battery variant:
+   about 75 drift events per clock half-period from the clock 555's timing
+   network (a 1 mA swing through 0.9 Ω); each re-aims three closed-form
+   partitions and solves a scalar.
+
+   **The CC rail with a rail capacitor** (W1f Q2). In CC a rail capacitance
+   `C_rail` is the whole dynamics: a PSU limiting into a capacitor ramps it
+   at `iLimit/C` (probe P9). So while a PSU with `C_rail > 0` is in CC, the
+   rail is a closed form of its own, `C_rail du/dt = dir·iLimit − (A0 + G
+   u)`: `u(t) = u∞ + (u(t0) − u∞) e^(−G (t − t0) / C_rail)` with `u∞ = (dir·
+   iLimit − A0) / G`, and the linear ramp `u(t0) + (dir·iLimit − A0 − G
+   u(t0)) (t − t0) / C_rail` while `G (t − t0) / C_rail < 1e-9`. It starts
+   from `u = V` at CC entry (continuous), is published live, and each rail
+   capacitor carries `C·du/dt`. Its own motion adds four thresholds to the
+   rail event: `u_scan ± RAIL_SCAN_V`, the nearest nonlinear hub
+   partition's `u_p ± RAIL_RESOLVE_V` (the CC band `RAIL_CC_RESOLVE_V` does
+   not apply here: the capacitor, not the draws, sets `u`), `RAIL_DRIFT_V`
+   of motion since the last re-aim when a closed-form hub partition exists,
+   and the exit (point 5). Each is a log (or a line) on the rail's own
+   segment.
+
+5. **Bench PSU regimes** (Q-O36: classic's state machine, exact; entry at a
+   current crossing; the hub tolerance applies to voltages only). The state
+   is `reg`: 0 (CV) or 2 (CC), starting at 0 at load. The rules run at
+   every rail solve (so at load, at every instant that touches the rail,
+   and at every rail event), at most one transition per PSU per solve:
+   - **CV → CC** when `|I| > iLimit`, strictly (SO:319), where `I = A0 + G V`
+     is the draw at the setpoint, unless the CC solution would have
+     `dir·u_CC >= max(0, |V|) − (1e-9 + 1e-6 max(1, |V|))`, which keeps CV
+     (the compliance clamp, SE:1793-1815). The instant is the event where
+     the draw first exceeds the limit: a commit, a toggle, load, or a rail
+     event at the crossing. The rail then solves in CC at the same instant.
+   - **CC → CV** when `dir·u >= 0.98 |V|` (the unscaled setpoint, SO:294,
+     315) **and** the draw at the setpoint `dir·(A0 + G V) <= iLimit` (W1f
+     Q7). With a rail capacitor, a jump to `V` would draw without bound, so
+     the exit needs `dir·u >= |V| − (1e-9 + 1e-6 max(1, |V|))` instead
+     (probe P9: classic stays in CC, −0.1 A, up to 5.0 V). The rail then
+     solves in CV at the same instant.
+   - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
+
+   The second condition on exit is not in classic's commit, but it gives
+   classic's electrical trajectory. Classic's commit exits at 98% (reg 0),
+   and its next solve re-enters CC inside the solve (the entry clamp,
+   SE:1778-1791) while the CV current still exceeds the limit, so its `reg`
+   alternates 0, 2, 0, ... every step while the solution stays CC (probe P7:
+   12 `reg` changes in 600 steps, current −0.1 A throughout, CV only once
+   the CV current falls to 0.1 A at `vc = 4.0 V`). A literal copy would
+   re-enter at the exit instant forever (`-7`). Known divergence
+   (`w1f-cc-exit-reg`, Equivalence harness rules): the core's `reg` reads 2
+   through that window where classic flickers. Only `reg` differs: the
+   settled output voltage and current match classic within the ordinary
+   criterion there. Classic's in-solve entry tolerance (`iLimit + 1e-12 +
+   1e-6 iLimit`) is not reproduced: in the band between it and `iLimit`
+   classic enters one step late, the core at once. Scale is 1 (Q-O40): the
+   setpoint is never scaled.
+
+6. **Battery chemistry and SoC** (§8.3.2, D16, B2; `battery-physics.ts`,
+   not pec3's fixed `E` and `R`, P3:159).
+   - `OCV(soc)`: the table of the record, interpolated as BP:384-403.
+   - `R(soc) = (rBase * dep) * tempFactor`, `dep = 1 + depA * (1 − soc)^depP
+     / (soc + depK)`, in classic's order (BP:417-418, 436). `soc` is clamped
+     to `[0, 1]` first. With `depP = 2` the power is `x * x`, as V8's
+     `Math.pow(x, 2)`.
+   - `E = OCV(soc) * ocvScale`, `r = R(soc)`. `rBase = 0` makes `r = 0`
+     for every `soc`: an ideal rail at `u = E` that still drains.
+   - **Coulomb counting per event interval** (orchestrator lock; W1f Q9).
+     SoC is advanced from `t_last` to `t` at every rail solve and every rail
+     event, and only there. A read (device state, the published `u`)
+     projects it to the current time without committing it, so reading
+     never changes the simulation, and the host's choice of `t_end` changes
+     nothing but the horizon clamp's own steps. The charge `Q` delivered out
+     of `pos` over `[t_last, t]` is the exact integral of the implied rail
+     current: static and direct terms held (exact between events), each
+     closed-form hub term integrated in closed form (`(a + b·inf)·Δt +
+     b·(vc0 − inf)·(e^(FΔt) − 1)/F`, and `(a + b vc0) Δt` when `F = 0`),
+     each stepped term held from its last commit (one step, like classic).
+     Then, exactly as `advancePrimaryBatteryState` (BP:447-482) with `Q` in
+     place of `I·dt`: `requested = max(0, Q)`, `rejected += max(0, −Q)`,
+     `accepted = min(requested, capacityAh·3600·soc)`, `soc' = clampSoc(soc
+     − accepted / (capacityAh·3600))`, `discharged += accepted`.
+   - Classic counts `max(0, I_end)·h` per accepted step, with the step's
+     start SoC in the stamp (SO:146-177): an explicit rule that drains too
+     fast by O(h). Probe P4 (a 0.1 mAh cell into 100 Ω, 24% drained in 2 s
+     at h = 1e-3): classic's SoC is 1.44e-5 below the exact ODE, 72 µV of
+     OCV; the core's integral is closer. At 1 Ah and the SAP-1's draw the
+     difference is below 1 µV. The harness treats it as a
+     closer-than-classic case (Equivalence harness rules).
+   - **Load.** No time passes at load (owner decision 8): SoC stays `soc0`
+     and `discharged` stays 0, where classic's 1 ps seed commits `I·1e-12`
+     (probe P1: `4.587e-13` C). Known divergence, far below every tolerance.
+   - **Empty.** At `soc = 0` the OCV is `v_0` (0 V for every profile) and
+     `R` is `rBase·(1 + depA/depK)·tempFactor` (11x for generic): the rail
+     collapses as in classic. Further discharge is simply not accepted
+     (BP:459-465).
+   - Temperature is fixed per load; battery self-heating is a non-goal
+     (BP:40-42).
+
+7. **Live fixed nodes** (W1b rule 2a noted "no fixed-node voltage is live
+   in W1b"). From W1f a fixed node's voltage can change: the rail node at
+   every move, and a waveform source's nodes at every edge or through a
+   resolved ramp (Sources point 3).
+   - Every stamp reads a non-free node through one live boundary array, not
+     a value baked at build. A change re-runs the fixed-node propagation for
+     the sources it touches (a `voltage_source` stacked on a clock node moves
+     with it) and marks dirty every partition that reads a changed node.
+     Closed-form and stepped partitions catch up to the instant with the old
+     boundary first (W1b rule 6). The W0 source KCL re-publishes.
+   - **Rule 2a across a moving node** (W1f Q2). A capacitor whose two pins
+     are on fixed or rail nodes re-aims at each change: `vc` is continuous
+     and the new `dV` sets its target (`esr > 0`: the exponential with
+     `esr·C`; `esr = 0`: `vc = dV` at once, current 0, W1b rule 2a's known
+     divergence). An LED junction across such nodes re-publishes `I(dV)`.
+     A **rail capacitor** (one pin on the rail, the other on a fixed node)
+     is this case too in CV and on a battery, with `esr` of any value (two
+     corpus circuits carry `cap-ceramic` parts with `esr` 0.05 across a
+     PSU): its current enters the published source current, as rule 2a's
+     does, but not the rail equation, and the charge it moves is not counted
+     in SoC. In CV, and on a battery with `r = 0`, this is exact. On a
+     battery with `r > 0` the rail's own `r·C_rail` time constant is not
+     modelled (90 ns for 0.9 Ω and 100 nF); above `RAIL_TAU_MAX` it would
+     show at quiet instants, so the load is `-3` (point 1). In CC the rail
+     capacitance makes the rail a closed form (point 4), with each
+     capacitor's `esr` ignored there (5 ns for the corpus parts).
+   - **Watches.** A change re-aims every watch whose thresholds read the
+     changed node, as a moving static supply does (W1c point 4,
+     `add_watch_dependent_partitions`).
+   - **Static cache.** The key of a static partition that reads a waveform
+     source's node includes that source's level index (0 or 1), as a driver
+     mode is included, so a partition fed by a clock hits its cache on the
+     second cycle instead of missing on every edge.
+
+8. **Rollback.** A failed instant (`-4`, `-7`) restores, with everything W1b
+   rule 7 names: `u`, `u_scan`, every hub contribution and the running sums,
+   `reg`, the battery state (`soc`, `t_last`, the held discharge,
+   `discharged`, `rejected`), the live boundary array, each waveform
+   source's edge counter and level, the pending `Rail` and `Source` events,
+   and the device-state buffer.
+
+9. **Exact mode** (`NO_RAIL_SHORTCUT = 1`, load-time only, W1f Q10;
+   orchestrator lock: "merges hub-coupled partitions with the rail node as
+   an unknown"; kept as locked, W1f Q3).
+   - The rail node is a free node. Every partition that reads it, and every
+     direct device, joins one partition with it, classified by the usual
+     rules (on the SAP-1 it holds nearly the whole board and is stepped).
+   - The source stamps in that partition: a battery with `r > 0` as a
+     Norton, `1/r` from the rail to the return plus `E/r` injected, with `E`
+     and `r` held per step from the SoC at the step's start (classic's
+     cadence, SO:141-156); a battery with `r = 0` and a PSU in CV replace
+     the rail row by `u = E` or `u = V`; a PSU in CC keeps the KCL row and
+     injects `dir·iLimit`. The source current is the Norton branch current,
+     or the replaced row's KCL residual.
+   - No sensitivity, band, scan or rail event: the partition solves the
+     rail with everything else. SoC advances per committed step with the
+     committed current; the regime rules of point 5 run per committed step
+     on the solved `u` and draw.
+   - Cost: the merged partition is a dense Newton over the board, the same
+     class of work as classic's global Newton (83-112 s CPU per simulated
+     second on the SAP-1, build log 2026-09-30) or worse, since every commit
+     instant lands a step. So S2 compares against it over a declared window,
+     the first 20 clock cycles (Equivalence harness rules), and the rail
+     fixtures cover the rest. F1 measures its cost on that window and
+     records it here.
+
+### Sources
+
+1. **Identity rules** are the compiler's (Battery record): explicit uid
+   only, catalog defaults only with an exact uid, the generic fallback
+   otherwise, no legacy alias, the 21 °C reference of the exact profiles
+   kept (at 25 °C `supply-5v` is 0.8041 Ω, probe P3). Nothing in Rust
+   depends on identity.
+
+2. **Clock edges** (§8.5; decision 6, Q-O34: exact in every host, since the
+   core owns time). The level at any `t` is classic's `clockVoltage(t,
+   1/freq, duty, vHigh, vLow, delay)` (WF:12-23): `vLow` before `delay`,
+   then `vHigh` while `((t − delay) % P) / P < duty`. The core never samples
+   it between edges; it schedules them:
+   - `duty >= 1`: `vHigh` from `delay` on, one edge at `delay` if `delay >
+     START_TIME`. `duty <= 0`: `vLow` always, no edge.
+   - Otherwise rising edges at `delay + n P` and falling edges at `delay +
+     n P + duty·P`, for every integer `n` with the edge time `> START_TIME`
+     and `>= delay` (a negative `delay` is a phase shift, WF:20-21). Each
+     time is computed from `n`, never accumulated.
+   - The level at load is `clockVoltage(START_TIME)`, computed exactly as
+     classic. At an edge event the level is the edge's own (HIGH after a
+     rising edge), never `clockVoltage` of the edge time: fmod can put an
+     edge instant on the wrong side (probe P8: `(0.011 % 0.001) / 0.001 =
+     0.99999...`, so classic reads LOW at t = 11 ms, where the rising edge
+     is due). The two agree everywhere except on edge instants themselves.
+   - At an edge (stat 19) the source's node takes the new value (Rails
+     point 7), the slot updates, and the next edge is scheduled.
+
+3. **Pulse edges and ramps** (§8.6; W1f Q5). `pulseVoltage` (WF:37-57) is
+   piecewise linear. Each ramp, the rise `tr` and the fall `tf` separately,
+   is either a midpoint step or resolved, decided at load from the params
+   against the source's **event timescale** `T_ev`, the shortest flat
+   segment of its cycle: `min(pw, per − tr − pw − tf)` when periodic, `pw`
+   when one-shot.
+   - **Threshold.** A ramp of length `t_r` is a midpoint step when `t_r <=
+     RAMP_STEP_RATIO · T_ev`, and resolved otherwise. A ramp of length 0 is
+     a step at its instant whatever `T_ev`. The catalog's `pulse-source`
+     defaults (1 µs ramps, `pw` 500 µs, `per` 1 ms: 0.002 of `T_ev`) and
+     every corpus pulse source (1 µs ramps, `pw` 30 ms or more) are steps; a
+     user-authored 1 ms rise with `pw` 4 ms and `per` 10 ms (0.25 of `T_ev`)
+     is resolved.
+   - **Why this bound.** Below it a reader on the node flips at most
+     `t_r / 2 <= 0.005 T_ev` from its exact instant, inside the same flat
+     segment, so no per-cycle state changes. An RC load of time constant τ
+     differs after the ramp from its exact response by `(t_r/τ)² / 24` of
+     the swing to leading order, decaying with τ: below 1e-3 of the swing
+     for `τ >= 6.5 t_r`, and a faster load has settled within a few τ, long
+     before the segment's quiet instants. Classic's headless host never
+     resolves such a ramp either (`per/10` steps, HL:150-153).
+   - **Midpoint steps.** Per cycle `c` (only `c = 0` when one-shot) from
+     `td + c·per`: `v1 → v2` at `+ tr/2` (`+ 0` when `tr = 0`), `v2 → v1`
+     at `+ tr + pw + tf/2` (`+ tr + pw` when `tf = 0`); `v1` before `td`.
+     Each time is computed from `c`, never accumulated. `v1 = v2`: no edge.
+     `pw = 0` with `tr = tf = 0`: no edge (classic never leaves `v1`). The
+     digital slot flips at the same instants classic's readout does, the
+     ramp midpoints (probe P8: 0 at 0.2 µs and 1 at 0.6 µs of a 1 µs rise).
+     The analog value differs only inside a ramp.
+   - **Resolved ramps.** A resolved ramp never collapses to a step:
+     - the node carries `pulseVoltage`'s exact linear value through the
+       ramp. A `Source` event lands on each corner (the ramp's start and
+       end) and one on its midpoint (the slot); between the corners the live
+       boundary value (Rails point 7) is linear in `t`, read at the instant
+       of each stamp and read;
+     - every partition that reads the node, directly or through a source
+       stacked on it, is classified stepped at load, whatever it holds
+       (membership and classification stay fixed at load). It lands a step
+       on each corner and restarts there at `POST_EVENT_H` with the BE
+       anchor, as after any discontinuity, and each step reads the boundary
+       at its own instant;
+     - a reader pin on the node itself gets a crossing watch on the ramp:
+       the threshold crossing time is linear in `t` and exact (accepted only
+       at `t > now + 1e-15`). The digital slot flips at the ramp midpoint,
+       as on the step path;
+     - a capacitor or LED junction across the node and another fixed node
+       (W1b rule 2a) is `-3`: its ramp response is not ported.
+   - **Truncated cycles** (`per > 0` and `per < tr + pw + tf`) are declined
+     by the compiler (Waveform source records).
+   - **Fixtures, one side each** (F4, each against classic with a sidecar):
+     - below: `pulse-161`, a pulse at the catalog defaults clocking a
+       `74ls161` and driving a 1 kΩ, 1 µF RC, compared per cycle and against
+       the RC's sidecar. The corpus's `engine-test-04` and `engine-test-07`
+       join this side once W1h ports the `74hc595` and `74hc165` they feed
+       (until then they fall back to classic);
+     - above: `pulse-ramp-1ms`, `{v1 0, v2 5, td 0, tr 1e-3, tf 1e-3, pw
+       4e-3, per 1e-2}` driving the same RC and a `74hc14` input on the
+       pulse node, against a sidecar holding the RC's exact trapezoid
+       response and the hc14's crossing times on the ramp. It must fail with
+       the ramp seeded to collapse to a midpoint step.
+
+4. **Load settling** (owner decision 8, events point 6). The rail joins the
+   frozen settle: each settle pass solves the rail after the partitions and
+   runs the regime rules, and a rail move over `1e-9` V or a regime change
+   counts as a change of the fixed point (P3:746). So a PSU overloaded at
+   load starts in CC, as classic's seed latches it (probe P5: `reg 2`, 1 V,
+   −0.1 A at load). A clock takes `clockVoltage(START_TIME)`; a pulse takes
+   the level of its edge model at `START_TIME` (the level after its last
+   step at or before it, or `pulseVoltage(START_TIME)` inside a resolved
+   ramp). A register such a source clocks sees classic's phantom edge if
+   that level is HIGH. No SoC advances. The rail and source events are
+   scheduled after settling.
+
+5. **Kernel events** (events point 1). Two solver-owned kinds, dispatched
+   like `Bucket` in phase 1 of the delta cycle: `Rail { version }` and
+   `Source { device, version }`. Each returns dirty partitions and readers,
+   as `bucket_boundary` does; a stale version drops silently.
+   `bo_engine_next_event_time` includes them;
+   `bo_engine_next_digital_due_time` does not (it stays drivers only).
+
+6. **Failures and warnings.** None of these kinds fails (§8.4.3, §8.7). The
+   `missing_flyback` rail-kind rule (`FLYBACK_RAIL_KINDS`, §8.7) is W1g's.
+   Small-signal AC stamps are W6.
+
 ## Kernel semantics: events (W1a)
 
 1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
    `seq` is a global insertion counter, so events at equal `t` run first in,
-   first out.
+   first out. W1f adds two solver-owned kinds, `Rail { version }` and
+   `Source { device, version }`, dispatched like `Bucket` in phase 1 of the
+   delta cycle (Sources point 5).
 2. **Drivers.** A driver's commit (a commit to HIZ included: the driver stops
    driving, as a tri-stated or direction-flipped pin does) and any other change to what it
    stamps all mark its partition dirty for the next re-solve; readers of that
@@ -1924,7 +2601,79 @@ count, so the size of what a rule accepts stays visible.
 
 Delta (W1e, manager ruling 2026-09-29): the closer-than-classic rule, from plan accuracy gate 2.
 
-## Hard-won rules for the kernel (from the prototype, and from W1e)
+W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
+- **Battery drain.** SoC, `dischargedCoulombs` and the OCV compare against
+  an analytic sidecar where one exists (the ODE of Rails point 6, solved by
+  the sidecar generator), else under `richardson-closer-than-classic`, since
+  classic's per-step count is O(h). `dischargedCoulombs` uses the amps
+  tolerance integrated over the run: `(1 nA + 1e-3·|I|avg)·T`.
+- **Regime** (W1f Q7). `reg` is not a compared readout; the harness compares
+  the electrical result (`netV`, `elementI`). Known divergence
+  `w1f-cc-exit-reg`: where classic's `reg` flickers 0, 2, 0 on a CC exit,
+  the core's reads 2 (Rails point 5). Only `reg` may differ: the settled
+  output voltage and current in and after that window match classic within
+  the ordinary criterion, and this id never excuses a mismatch in them.
+  Gate 1's `wave5-regulators` asserts `reg` at points outside the window.
+- **Source edges.** Clock and pulse edges are compared per cycle (decision
+  6). Headless classic lags an edge by up to one step (`1/(10 f)` for a
+  clock, `per/10` for a pulse, HL:141-168); the core does not.
+- **The reader scan** (W1f Q12). Known divergence
+  `w1f-rail-scan-late-flip`: a reader whose pin moves with the rail against
+  a fixed threshold (an LS input on a divider off the rail) is re-evaluated
+  at the next rail scan, so it can flip up to `RAIL_SCAN_V` of rail late
+  (Rails point 3; the power window is exact, Rails point 4). It is measured,
+  not assumed:
+  - a Rust test pins the bound: on a slowly draining battery, such a reader
+    flips when the rail has moved at most `RAIL_SCAN_V` past its exact
+    crossing, plus the one rail move that crossed the band (`RAIL_DRIFT_V`
+    on a smooth drain), and never before the crossing;
+  - stat 20 counts every reader flip found at a rail scan, and
+    `scripts/core-equivalence.ts` lists by name every corpus and fixture
+    circuit whose run ends with stat 20 above 0, counted as hits of this id.
+- **The 555 period on a moving rail** (W1f Q4). NE555 point 13.2's 1e-6
+  against the model-exact sidecar assumes a constant supply. The
+  **moving-rail set** is exactly:
+  - every 555 with pin 8 or pin 1 on the rail node of a `battery_pack` hub;
+  - every 555 with pin 8 or pin 1 on the rail node of a `bench_psu` hub
+    whose PSU is in CC at any instant of the compared cycles.
+
+  Neither engine has a closed form there. For that set only, each period,
+  HIGH and LOW time compares at 1e-5 relative against a refined classic run
+  (fixed 1 µs trapezoidal steps, the first 20 cycles, cached as the classic
+  references are), and the closed form at each cycle's mean rail is
+  reported alongside at 1e-4, without gating. Every other 555 with a
+  sidecar keeps criterion 3 at 1e-6: both supply pins on fixed nodes (an
+  ideal source, a `bench_psu` with `iLimit = 0`), or on a `bench_psu` hub
+  that stays in CV (`u = V`) through the compared cycles.
+- **S2, the SAP-1 on the battery.** The board is `gen-sap1 max battery`:
+  `BAT1 {voltage: 5, rInternal: 0.9}`, no uid, so generic: `R = 0.9·dep`,
+  `OCV = 5·soc`, 1 Ah, 25 °C (factor 1). Every IC's `vcc` is the rail; no
+  capacitor sits across it. The plan's seven criteria (§3.4.4) per variant,
+  with:
+  1. machine state per cycle: unchanged;
+  2. node voltages at quiet instants: W0's tolerance, the rail node
+     included; the supply current judged as S1 judges it (the residual less
+     the display's draw);
+  3. the 555 period: every 555 on the board is in the moving-rail set, so
+     1e-5 against the refined classic run, the mean-rail closed form
+     reported at 1e-4;
+  4. the display digits equal OUT: unchanged;
+  5. failure and warning sets: as S1 (criterion 5 on the running variant
+     is W1g's item);
+  6. core against core-exact (Rails point 9), over the declared window, the
+     first 20 clock cycles (W1f Q3): identical per cycle, voltages at
+     phase-aligned instants within a measured bound. P3:36's 20 µV is the
+     rail's share only: exact mode steps the timing networks (they join the
+     merged partition), so their step-control error, of the order of W0's
+     tolerance, dominates the bound;
+  7. real time: unchanged; the rail's own cost is reported apart (the
+     battery variant against the ideal one on the same trace length).
+
+  Two S2-only checks: the battery state at the end of the run (SoC and
+  `dischargedCoulombs`, tolerance above), and the rail's minimum and
+  maximum over the run against classic's (the sag range).
+
+## Hard-won rules for the kernel (from the prototype, W1e and the W1f probes)
 
 - Accept a threshold crossing only at `t > now + 1e-15`; rounding can put a
   node back on the threshold and re-schedule it forever.
@@ -1939,6 +2688,17 @@ Delta (W1e, manager ruling 2026-09-29): the closer-than-classic rule, from plan 
 - Watch every threshold a reader compares against in both directions, so a
   node's published voltage never sits across a threshold from its exact
   value; a reader evaluated at an unrelated event then reads the right side.
+- Never re-evaluate a waveform at its own edge instant to learn its new
+  level: fmod rounding puts some edges on the wrong side (probe P8).
+- An exact CC exit needs the CV current back under the limit, not only the
+  98% voltage, or the state machine re-enters at the exit instant forever
+  (probe P7).
+- A probe load must stay under the resistor's default rating: classic's
+  `resistor_overload` opens a 2 W load within a second and the source then
+  reads its node shunts only (probe P1's first run, 10 Ω on 5 V).
+- An IC given a `catalogUid` that is not in the library takes classic's
+  degraded path (powered, drives to `params.vcc ?? 5`), not the rail (probe
+  Q3's first run: `ic-74ls00` is the uid, not `74ls00`).
 
 ## Deferred past 1.0.0
 
