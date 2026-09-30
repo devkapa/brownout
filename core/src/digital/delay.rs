@@ -100,21 +100,31 @@ pub fn driver_requests(
     reads: &[bool],
     last_reads: Option<&[bool]>,
 ) -> Vec<DriverRequest> {
+    let mut requests = Vec::with_capacity(drivers.len());
+    driver_requests_into(ic, drivers, result, reads, last_reads, &mut requests);
+    requests
+}
+
+/// [`driver_requests`], appending to `out` (the evaluator's reusable buffer)
+/// instead of returning a fresh `Vec`.
+pub fn driver_requests_into(
+    ic: &IcRecord,
+    drivers: &[DriverId],
+    result: &[Option<bool>],
+    reads: &[bool],
+    last_reads: Option<&[bool]>,
+    out: &mut Vec<DriverRequest>,
+) {
     debug_assert_eq!(drivers.len(), result.len(), "one driver per output-capable pin, in the same order");
-    drivers
-        .iter()
-        .zip(result.iter())
-        .enumerate()
-        .map(|(i, (&driver, level))| {
-            let delays = delay_set(ic, reads, last_reads, i);
-            let mode = match level {
-                Some(true) => Mode::High,
-                Some(false) => Mode::Low,
-                None => Mode::Hiz,
-            };
-            DriverRequest::Level { driver, level: mode, delays }
-        })
-        .collect()
+    out.extend(drivers.iter().zip(result.iter()).enumerate().map(|(i, (&driver, level))| {
+        let delays = delay_set(ic, reads, last_reads, i);
+        let mode = match level {
+            Some(true) => Mode::High,
+            Some(false) => Mode::Low,
+            None => Mode::Hiz,
+        };
+        DriverRequest::Level { driver, level: mode, delays }
+    }));
 }
 
 #[cfg(test)]

@@ -292,9 +292,11 @@ impl Program {
         let channel_slot_count = r.bounded_index("channel slot count C", MAX_SLOT_COUNT)?;
 
         let mut devices = Vec::with_capacity(device_count);
+        let mut claims = Vec::new();
         for d in 0..device_count {
-            devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count, channel_slot_count)?);
+            devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count, channel_slot_count, &mut claims)?);
         }
+        Self::check_slot_ranges_disjoint(&mut claims)?;
 
         r.expect("trailer magic", MAGIC)?;
         if r.remaining() != 0 {
@@ -415,7 +417,43 @@ impl Program {
         Ok(PinRecord { node, flags, open_hash, dead_hash })
     }
 
-    fn parse_device(r: &mut Reader, index: usize, node_count: usize, digital_slot_count: usize, channel_slot_count: usize) -> Result<Device, BoError> {
+    /// Rejects two devices claiming the same digital slot, or the same channel
+    /// slot (core/README.md, "Slot indices": the ranges are disjoint). The
+    /// compiler never emits an overlap; the reader enforces it because the
+    /// digital readout publishes only the slots whose value changed
+    /// (`devices::ics::IcEvaluator::on_settled`), which is exact only while a
+    /// slot has a single writer. Sorting the claims keeps this proportional to
+    /// the device count, not to `S` or `C`.
+    fn check_slot_ranges_disjoint(claims: &mut [SlotClaim]) -> Result<(), BoError> {
+        claims.sort_by_key(|c| (c.channel, c.base, c.device));
+        for pair in claims.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.channel == b.channel && b.base < a.base + a.count {
+                let what = if a.channel { "channel" } else { "digital" };
+                return Err(BoError::malformed(format!(
+                    "device[{}] ({}): {what} slots {}..{} overlap device[{}] ({})'s {}..{}",
+                    b.device,
+                    b.name,
+                    b.base,
+                    b.base + b.count,
+                    a.device,
+                    a.name,
+                    a.base,
+                    a.base + a.count
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_device(
+        r: &mut Reader,
+        index: usize,
+        node_count: usize,
+        digital_slot_count: usize,
+        channel_slot_count: usize,
+        claims: &mut Vec<SlotClaim>,
+    ) -> Result<Device, BoError> {
         let kind_code = r.bounded_index(&format!("device[{index}] kind code"), u32::MAX as usize)? as u32;
         // componentIndex is opaque (an index into the TS side's
         // `circuit.components`, unrelated to how much program data remains),
@@ -511,9 +549,9 @@ impl Program {
         // a missing base means a shape table error, reported rather than
         // indexed past.
         let mut next_base = 0;
-        for (what, total_name, count, total) in [
-            ("digital", "S", (shape.digital_slots)(pin_count), digital_slot_count),
-            ("channel", "C", (shape.channel_slots)(pin_count), channel_slot_count),
+        for (what, total_name, count, total, channel) in [
+            ("digital", "S", (shape.digital_slots)(pin_count), digital_slot_count, false),
+            ("channel", "C", (shape.channel_slots)(pin_count), channel_slot_count, true),
         ] {
             if count == 0 {
                 continue;
@@ -528,10 +566,21 @@ impl Program {
                     shape.name
                 )));
             }
+            claims.push(SlotClaim { channel, base: base as usize, count, device: index, name: shape.name });
         }
 
         Ok(Device { kind: kind_code, component_index, pins, params, blob })
     }
+}
+
+/// One device's claim on a run of readout slots, gathered while parsing so
+/// [`Program::check_slot_ranges_disjoint`] can compare them.
+struct SlotClaim {
+    channel: bool,
+    base: usize,
+    count: usize,
+    device: usize,
+    name: &'static str,
 }
 
 #[cfg(test)]
@@ -1326,6 +1375,43 @@ mod tests {
             assert_eq!(err.code, -1, "base {base}: {}", err.message);
             assert!(err.message.contains("channel slots"), "{}", err.message);
         }
+    }
+
+    #[test]
+    fn rejects_two_devices_whose_digital_slot_ranges_overlap() {
+        // A 74ls00 owns 4 digital slots. Bases 0 and 4 tile S = 8; base 2
+        // reaches into the first one's 0..4. The readout publishes only
+        // changed slots, which is exact only if a slot has one writer.
+        let two = |second: f64| build_full(3.0, &[], 8.0, 0.0, &[ls00_record(0.0, 1.0, 1.0), ls00_record(second, 1.0, 1.0)]);
+        assert!(Program::parse(&two(4.0)).is_ok(), "0..4 and 4..8 are disjoint");
+        for second in [2.0, 0.0, 3.0] {
+            let err = Program::parse(&two(second)).unwrap_err();
+            assert_eq!(err.code, -1, "second base {second}: {}", err.message);
+            assert!(err.message.contains("digital slots") && err.message.contains("overlap"), "{}", err.message);
+            assert!(err.message.contains("device[1]") && err.message.contains("device[0]"), "names both devices: {}", err.message);
+        }
+        // Declaration order is not the slot order: the overlap is found either way round.
+        let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[ls00_record(4.0, 1.0, 1.0), ls00_record(2.0, 1.0, 1.0)])).unwrap_err();
+        assert_eq!(err.code, -1, "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_two_devices_whose_channel_slot_ranges_overlap() {
+        // An rgb_led owns 3 channel slots.
+        let two = |second: f64| build_full(2.0, &[], 0.0, 6.0, &[rgb_led_record(0.0), rgb_led_record(second)]);
+        assert!(Program::parse(&two(3.0)).is_ok(), "0..3 and 3..6 are disjoint");
+        for second in [2.0, 0.0, 1.0] {
+            let err = Program::parse(&two(second)).unwrap_err();
+            assert_eq!(err.code, -1, "second base {second}: {}", err.message);
+            assert!(err.message.contains("channel slots") && err.message.contains("overlap"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_digital_range_and_a_channel_range_may_share_index_numbers() {
+        // Digital slot 0 and channel slot 0 are different arrays.
+        let data = build_full(3.0, &[], 4.0, 3.0, &[ls00_record(0.0, 1.0, 1.0), rgb_led_record(0.0)]);
+        assert!(Program::parse(&data).is_ok());
     }
 
     #[test]

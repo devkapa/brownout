@@ -192,6 +192,30 @@ impl EventHeap {
         self.heap.push(std::cmp::Reverse(ev));
     }
 
+    /// The sequence number the next [`Self::push`] will assign: a checkpoint
+    /// marker for [`Self::rollback`]. Every event pushed after this call has a
+    /// `seq` at or above it, and every event already queued has one below it.
+    pub fn next_seq(&self) -> Seq {
+        self.next_seq
+    }
+
+    /// Undoes every push and pop made since [`Self::next_seq`] returned
+    /// `checkpoint`, given the events popped in that span (in any order; ones
+    /// that were pushed after the checkpoint too are ignored, they did not
+    /// exist then). Replaces cloning the whole heap before every instant:
+    /// `(time, seq)` is a strict total order (`seq` is unique), so the pop
+    /// order depends only on WHICH events are queued, never on the heap
+    /// array's internal layout, and a rebuilt heap pops exactly like a
+    /// cloned one. `next_seq` goes back too, so later sequence numbers match
+    /// what they would have been had the span never run.
+    pub fn rollback(&mut self, checkpoint: Seq, popped: &[Event]) {
+        let mut events = std::mem::take(&mut self.heap).into_vec();
+        events.retain(|std::cmp::Reverse(ev)| ev.seq < checkpoint);
+        events.extend(popped.iter().filter(|ev| ev.seq < checkpoint).map(|&ev| std::cmp::Reverse(ev)));
+        self.heap = std::collections::BinaryHeap::from(events);
+        self.next_seq = checkpoint;
+    }
+
     /// Every still-pending event, in no particular order (the underlying
     /// `BinaryHeap`'s own storage order, not `(time, seq)`) — for a caller
     /// that needs to SCAN the whole heap rather than pop it in order
@@ -242,6 +266,43 @@ mod tests {
             match ev.kind {
                 EventKind::Commit { driver, .. } => assert_eq!(driver, DriverId(i)),
                 _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_undoes_pushes_and_pops_since_the_checkpoint_and_keeps_fifo_order() {
+        // Replaces cloning the heap before every instant: what was queued at
+        // the checkpoint comes back (popped events re-inserted, pushed ones
+        // dropped, an event pushed AND popped in the span forgotten), the
+        // sequence counter goes back, and the pop order (time, then insertion
+        // order) is exactly what an untouched heap would give.
+        let build = || {
+            let mut h = EventHeap::new();
+            h.push(5.0, commit(0, Mode::High, 1));
+            h.push(5.0, commit(1, Mode::High, 1));
+            h.push(7.0, commit(2, Mode::Low, 1));
+            h.push(9.0, commit(3, Mode::Low, 1));
+            h
+        };
+        let mut h = build();
+        let checkpoint = h.next_seq();
+        let mut popped = Vec::new();
+        popped.push(h.pop().unwrap()); // the first t = 5 commit
+        h.push(5.0, commit(4, Mode::High, 2)); // pushed after the checkpoint...
+        popped.push(h.pop().unwrap()); // ...the second t = 5 commit
+        popped.push(h.pop().unwrap()); // ...the pushed one, which must not come back
+        h.push(6.0, commit(5, Mode::Low, 1));
+        h.rollback(checkpoint, &popped);
+
+        let mut untouched = build();
+        assert_eq!(h.next_seq(), untouched.next_seq());
+        assert_eq!(h.len(), untouched.len());
+        loop {
+            let (a, b) = (h.pop(), untouched.pop());
+            assert_eq!(a, b);
+            if a.is_none() {
+                break;
             }
         }
     }

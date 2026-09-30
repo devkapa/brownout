@@ -39,6 +39,16 @@ pub struct IcPower {
 /// sim-engine.ts:985).
 const GATE_R_OUT: f64 = 50.0;
 
+/// Whether the IC is powered at these supply voltages: [`ic_power`]'s
+/// `powered` field, on its own. A caller that only needs the verdict (the
+/// digital-slot readout asks it of every IC at every completed instant) skips
+/// the thresholds and the output resistance `ic_power` also derives;
+/// `ic_power` itself calls this, so the two cannot drift apart.
+pub fn powered(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> bool {
+    let v_supply_raw = v_vcc - v_gnd;
+    !ic.vcc.open && !ic.gnd.open && v_supply_raw >= ic.vcc_min * 0.9 && v_supply_raw <= ic.vcc_max * 1.1
+}
+
 /// `_icPowerInfo`, normal path (spec §1.3). `v_vcc` and `v_gnd` are the raw
 /// solved (or Newton-iterate) node voltages at the IC's `vcc`/`gnd` pins —
 /// callers read them off whatever voltage vector the pins' nodes sit in;
@@ -50,10 +60,7 @@ pub fn ic_power(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> IcPower {
     // in f64 at run time, never folded into a decimal constant, per the
     // contract's explicit note (spec §1.3).
     let v_supply_raw = v_vcc - v_gnd;
-    let powered = !ic.vcc.open
-        && !ic.gnd.open
-        && v_supply_raw >= ic.vcc_min * 0.9
-        && v_supply_raw <= ic.vcc_max * 1.1;
+    let powered = powered(ic, v_vcc, v_gnd);
     let vs = v_supply_raw.max(0.0);
 
     // `ic.io_max` is already `None` unless the compiler resolved

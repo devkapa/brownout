@@ -252,7 +252,10 @@ pub mod fsm {
 /// state (`committed`/`pending`/`token`) is private, mutated only through
 /// [`Driver::request`], [`Driver::apply_commit`] and [`Driver::reset`], each
 /// a thin wrapper around the matching pure function in [`fsm`].
-#[derive(Debug, Clone)]
+// `Copy` because every field is: the solver and the kernel copy the whole
+// driver table on their hot paths, and a `Vec<Driver>` of `Copy` items clones
+// as one memcpy instead of a per-element clone loop.
+#[derive(Debug, Clone, Copy)]
 pub struct Driver {
     /// The pin's own node.
     pub node: usize,

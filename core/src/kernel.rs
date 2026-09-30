@@ -23,10 +23,8 @@
 //! [`DeviceEvaluator`], mapping [`KernelError`] onto `BoError` (`Livelock` to
 //! `-7`, `SolveFailed` to `-4`).
 
-use std::collections::BTreeSet;
-
 use crate::drivers::{DelaySet, Driver};
-use crate::events::{DeviceId, DriverId, EventHeap, EventKind, Mode, PartitionId, Token, Version};
+use crate::events::{DeviceId, DriverId, Event, EventHeap, EventKind, Mode, PartitionId, Seq, Token, Version};
 use crate::solve::PartitionSolver;
 
 /// The per-instant delta-pass cap (contract point 3: "More than 1000 deltas
@@ -158,6 +156,41 @@ pub enum DriverRequest {
 pub trait DeviceEvaluator {
     fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest>;
 
+    /// [`Self::evaluate`], appending its requests to `out` instead of
+    /// returning a fresh `Vec`: the kernel calls this once per affected
+    /// reader per delta pass with one reusable buffer, so an evaluator that
+    /// can fill it directly saves an allocation per call. The default
+    /// forwards to `evaluate`, so an implementation that only defines
+    /// `evaluate` (every test mock) behaves exactly as before.
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], out: &mut Vec<DriverRequest>) {
+        out.extend(self.evaluate(reader, now, acting_on_edges, voltages));
+    }
+
+    /// Opens the rollback window for one instant (core/README.md, "A failed
+    /// advance"): the kernel calls it before the instant's first delta pass
+    /// and then exactly one of [`Self::end_instant`] (the instant completed)
+    /// or [`Self::rollback_instant`] (it failed), handing back what this
+    /// returned. The default takes a whole [`Self::snapshot`], the behaviour
+    /// this trait always had; an evaluator whose state is large next to what
+    /// one instant touches overrides all three to journal only the state it
+    /// actually writes, so a completed instant (the overwhelmingly common
+    /// case) pays for what it changed and not for a copy of everything.
+    fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
+        self.snapshot()
+    }
+
+    /// The instant opened by [`Self::begin_instant`] completed: nothing to
+    /// undo any more. Default drops the snapshot.
+    fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        let _ = checkpoint;
+    }
+
+    /// The instant opened by [`Self::begin_instant`] failed: put back
+    /// exactly the state it had. Default restores the snapshot.
+    fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        self.restore(checkpoint)
+    }
+
     /// An owned copy of every piece of state this evaluator would need to
     /// undo a failed instant (core/README.md, "A failed advance") — Schmitt
     /// per-pin hysteresis state, register contents, anything else an
@@ -248,6 +281,22 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).evaluate(reader, now, acting_on_edges, voltages)
     }
 
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], out: &mut Vec<DriverRequest>) {
+        (**self).evaluate_into(reader, now, acting_on_edges, voltages, out)
+    }
+
+    fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
+        (**self).begin_instant()
+    }
+
+    fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        (**self).end_instant(checkpoint)
+    }
+
+    fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        (**self).rollback_instant(checkpoint)
+    }
+
     fn snapshot(&self) -> Box<dyn std::any::Any> {
         (**self).snapshot()
     }
@@ -332,6 +381,39 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// rolls back, since [`Self::publish_settled`] only ever runs after one
     /// that already committed — so there is nothing to undo.
     pending_digital_writes: Vec<(f64, usize, f64)>,
+    /// Whether a rollback window ([`Self::open_window`]) is open: only then
+    /// do pops and driver writes leave the undo records below.
+    windowed: bool,
+    /// Every event popped since the window opened, so a rollback can put it
+    /// back ([`EventHeap::rollback`]). Replaces cloning the whole heap before
+    /// every instant.
+    heap_popped: Vec<Event>,
+    /// The pre-image of every driver written since the window opened, one per
+    /// driver (`driver_journaled` marks the ones already saved): what a
+    /// rollback writes back. Replaces cloning the whole driver table before
+    /// every instant, when an instant writes a handful of them.
+    driver_journal: Vec<(u32, Driver)>,
+    driver_journaled: Vec<bool>,
+    /// Scratch buffers the delta cycle reuses so it allocates nothing per
+    /// pass once they have grown to size: the partitions to re-solve, the
+    /// readers to evaluate (each kept sorted and duplicate-free, which is the
+    /// order the `BTreeSet`s they replace iterated in), and one reader's
+    /// requests.
+    dirty_buf: Vec<PartitionId>,
+    affected_buf: Vec<DeviceId>,
+    requests_buf: Vec<DriverRequest>,
+}
+
+/// What [`Kernel::open_window`] captured for a rollback that the kernel does
+/// not keep incrementally: the solver's snapshots and the held commits (the
+/// solver's side is another owner's to make cheaper), the evaluator's
+/// checkpoint token, and where the heap's sequence counter stood.
+struct Window {
+    heap_seq: Seq,
+    held_commits: Vec<(DriverId, Mode, Token)>,
+    solver: (Vec<f64>, Vec<f64>),
+    dynamic: Box<dyn std::any::Any>,
+    evaluator: Box<dyn std::any::Any>,
 }
 
 impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
@@ -346,6 +428,88 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             stats: KernelStats::default(),
             held_commits: Vec::new(),
             pending_digital_writes: Vec::new(),
+            windowed: false,
+            heap_popped: Vec::new(),
+            driver_journal: Vec::new(),
+            driver_journaled: Vec::new(),
+            dirty_buf: Vec::new(),
+            affected_buf: Vec::new(),
+            requests_buf: Vec::new(),
+        }
+    }
+
+    /// Opens the rollback window for one instant (or one event, for
+    /// [`Self::apply_params_as_event`]/[`Self::seed_memory`]): everything a
+    /// failed one must put back is captured or, for the heap, the drivers
+    /// and the evaluator, journaled from here on as it is written. The
+    /// window ends with exactly one of [`Self::close_window`] (the instant
+    /// completed) or [`Self::roll_back`].
+    fn open_window(&mut self) -> Window {
+        // A real assert: a nested window would overwrite the journals of the
+        // one it sits inside, and a later rollback would silently restore the
+        // wrong state.
+        assert!(!self.windowed, "rollback windows do not nest");
+        self.windowed = true;
+        self.heap_popped.clear();
+        self.driver_journal.clear();
+        Window {
+            heap_seq: self.heap.next_seq(),
+            held_commits: self.held_commits.clone(),
+            solver: self.solver.snapshot(),
+            dynamic: self.solver.dynamic_snapshot(),
+            evaluator: self.evaluator.begin_instant(),
+        }
+    }
+
+    /// Ends a window whose instant completed: the journals are dropped, the
+    /// evaluator's checkpoint released.
+    fn close_window(&mut self, window: Window) {
+        self.end_journals();
+        self.evaluator.end_instant(window.evaluator);
+    }
+
+    /// Ends a window whose instant failed, restoring what
+    /// [`Self::open_window`] captured, in the order the whole-copy snapshots
+    /// always restored in: heap, drivers, solver, held commits, evaluator.
+    /// The caller restores `self.time` (and anything else of its own).
+    fn roll_back(&mut self, window: Window) {
+        self.heap.rollback(window.heap_seq, &self.heap_popped);
+        for (idx, driver) in self.driver_journal.drain(..) {
+            self.drivers[idx as usize] = driver;
+            self.driver_journaled[idx as usize] = false;
+        }
+        self.heap_popped.clear();
+        self.windowed = false;
+        self.solver.restore(window.solver);
+        self.solver.dynamic_restore(window.dynamic);
+        self.held_commits = window.held_commits;
+        self.evaluator.rollback_instant(window.evaluator);
+    }
+
+    /// Ends a window that changed nothing the kernel journals (a rejected
+    /// `seed_memory`, which stops before any delta pass): only the
+    /// evaluator's own state can differ, so only it is rolled back.
+    fn abandon_window(&mut self, window: Window) {
+        self.end_journals();
+        self.evaluator.rollback_instant(window.evaluator);
+    }
+
+    fn end_journals(&mut self) {
+        for (idx, _) in self.driver_journal.drain(..) {
+            self.driver_journaled[idx as usize] = false;
+        }
+        self.heap_popped.clear();
+        self.windowed = false;
+    }
+
+    /// Saves driver `idx`'s current state before its first write inside an
+    /// open window. Called ahead of every mutation of `self.drivers[idx]`
+    /// (`request`, `reset`, `apply_commit`); a no-op outside a window
+    /// (`settle`'s own passes have no rollback).
+    fn journal_driver(&mut self, idx: usize) {
+        if self.windowed && !self.driver_journaled[idx] {
+            self.driver_journaled[idx] = true;
+            self.driver_journal.push((idx as u32, self.drivers[idx]));
         }
     }
 
@@ -514,6 +678,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let id = DriverId(self.drivers.len() as u32);
         self.drivers.push(driver);
         self.driver_partition.push(partition);
+        self.driver_journaled.push(false);
         id
     }
 
@@ -562,6 +727,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             DriverRequest::Level { driver, level, delays } => {
                 let delays = if zero_delays { DelaySet::uniform(0.0) } else { delays };
                 let idx = driver.0 as usize;
+                self.journal_driver(idx);
                 if let Some((due, mode, token)) = self.drivers[idx].request(level, now, &delays) {
                     self.heap.push(due, EventKind::Commit { driver, mode, token });
                 }
@@ -574,6 +740,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // driver going through `reset()` is not an observable
                 // change, so it must not force a re-solve of anything).
                 let was_committed = self.drivers[idx].committed().is_some();
+                self.journal_driver(idx);
                 self.drivers[idx].reset();
                 if was_committed { self.driver_partition[idx] } else { None }
             }
@@ -606,13 +773,20 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// fold into `self.stats` (or not: `run_settle_pass` calls this too, and
     /// deliberately does not count settling toward the same stats — see
     /// `KernelStats`'s doc comment).
-    fn apply_due_events(&mut self) -> Result<(BTreeSet<PartitionId>, BTreeSet<DeviceId>, u64, u64), KernelError> {
-        let mut dirty = BTreeSet::new();
-        let mut directly_affected = BTreeSet::new();
+    ///
+    /// `dirty` and `directly_affected` are appended to, unsorted and possibly
+    /// with repeats: the caller sorts and dedups them once before use
+    /// (ascending, unique: the order the `BTreeSet`s this used to return
+    /// iterated in), which costs one small sort per pass instead of a node
+    /// allocation per insert.
+    fn apply_due_events(&mut self, dirty: &mut Vec<PartitionId>, directly_affected: &mut Vec<DeviceId>) -> Result<(u64, u64), KernelError> {
         let mut popped = 0u64;
         let mut changed = 0u64;
         while self.heap.peek_time() <= self.time {
             let ev = self.heap.pop().expect("peek_time <= time implies an event is present");
+            if self.windowed {
+                self.heap_popped.push(ev);
+            }
             popped += 1;
             match ev.kind {
                 EventKind::Commit { driver, mode, token } => {
@@ -635,11 +809,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         // stay exactly as they are; `Self::retry_held_commits`
                         // re-queues this once the IC is powered again.
                         self.held_commits.push((driver, mode, token));
-                    } else if self.drivers[idx].apply_commit(mode, token) {
-                        if let Some(p) = self.driver_partition[idx] {
-                            dirty.insert(p);
+                    } else {
+                        self.journal_driver(idx);
+                        if self.drivers[idx].apply_commit(mode, token) {
+                            if let Some(p) = self.driver_partition[idx] {
+                                dirty.push(p);
+                            }
+                            changed += 1;
                         }
-                        changed += 1;
                     }
                 }
                 EventKind::Crossing { partition, version } => {
@@ -665,7 +842,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                     // never needs to cancel one either: a stray pop simply
                     // finds nothing left to do, contract point 5 under
                     // "Kernel semantics: memories").
-                    directly_affected.insert(device);
+                    directly_affected.push(device);
                 }
                 EventKind::Bucket => {
                     let (dirty_partitions, readers) = self.solver.bucket_boundary(self.time);
@@ -674,7 +851,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 }
             }
         }
-        Ok((dirty, directly_affected, popped, changed))
+        Ok((popped, changed))
     }
 
     /// Re-queues every held commit (W1c contract point 9) whose owning IC
@@ -756,19 +933,25 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// the way an ordinary `Crossing`/`Step`'s readers do — they are folded
     /// straight into the first pass's `affected` set instead, exactly as if
     /// a step had landed on them at `t_end`. Like `seed_dirty`, only the
-    /// first pass ever sees it: [`BTreeSet::append`] drains the caller's set
-    /// into `affected` once, and every later pass's own (empty) leftover
-    /// appends as a no-op.
+    /// first pass ever sees it: the first pass drains the caller's `Vec` into
+    /// `affected`, and every later pass's own (empty) leftover appends as a
+    /// no-op.
     ///
     /// `count_stats` gates every `self.stats` update in here: `true` from
     /// [`Self::advance`], `false` from [`Self::settle`]'s hand-off, which is
     /// still load-time bookkeeping, not a live delta cycle (`KernelStats`'s
     /// doc comment: only `advance`'s real delta cycle counts towards these,
     /// the same line `run_settle_pass` already draws for its own passes).
-    fn run_deltas(&mut self, mut seed_dirty: BTreeSet<PartitionId>, mut seed_affected: BTreeSet<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
+    fn run_deltas(&mut self, mut seed_dirty: Vec<PartitionId>, mut seed_affected: Vec<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
         let mut settled = false;
         let mut depth = 0u64;
-        let mut carried_dirty = BTreeSet::new();
+        let mut carried_dirty: Vec<PartitionId> = Vec::new();
+        // The scratch buffers are taken out of `self` for the whole cycle
+        // (the loop below calls `&mut self` methods) and put back at the end;
+        // an early `?` return just drops them and the next call regrows them.
+        let mut dirty = std::mem::take(&mut self.dirty_buf);
+        let mut affected = std::mem::take(&mut self.affected_buf);
+        let mut requests = std::mem::take(&mut self.requests_buf);
         for _delta in 0..DELTA_CAP {
             depth += 1;
             if count_stats {
@@ -782,7 +965,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // contributing straight to `affected` below rather than to
             // `dirty` — its own partition's electrical update already
             // happened.
-            let (mut dirty, mut affected, popped, changed) = self.apply_due_events()?;
+            dirty.clear();
+            affected.clear();
+            let (popped, changed) = self.apply_due_events(&mut dirty, &mut affected)?;
             dirty.append(&mut seed_dirty);
             dirty.append(&mut carried_dirty);
             affected.append(&mut seed_affected);
@@ -812,7 +997,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // `driver_snapshot`) exactly one commit stale until some
             // unrelated event happened to dirty a partition.
             if !dirty.is_empty() || changed > 0 {
-                let dirty: Vec<PartitionId> = dirty.into_iter().collect();
+                dirty.sort_unstable();
+                dirty.dedup();
                 affected.extend(self.solver.resolve_dirty(&dirty, self.time, &self.drivers).map_err(KernelError::SolveFailed)?);
             }
             self.drain_scheduled();
@@ -834,16 +1020,23 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 break;
             }
 
-            // Phase 4: evaluate each affected reader exactly once.
-            for reader in affected {
-                let requests = self.evaluator.evaluate(reader, self.time, true, self.solver.voltages());
-                for req in requests {
+            // Phase 4: evaluate each affected reader exactly once, in
+            // ascending device order.
+            affected.sort_unstable();
+            affected.dedup();
+            for &reader in &affected {
+                requests.clear();
+                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), &mut requests);
+                for req in requests.drain(..) {
                     if let Some(p) = self.apply_request(req, self.time, false) {
-                        carried_dirty.insert(p);
+                        carried_dirty.push(p);
                     }
                 }
             }
         }
+        self.dirty_buf = dirty;
+        self.affected_buf = affected;
+        self.requests_buf = requests;
 
         if count_stats && depth > self.stats.max_delta_depth {
             self.stats.max_delta_depth = depth;
@@ -879,24 +1072,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
 
             let previous_time = self.time;
-            let heap_snapshot = self.heap.clone();
-            let drivers_snapshot = self.drivers.clone();
-            let solver_snapshot = self.solver.snapshot();
-            let dynamic_snapshot = self.solver.dynamic_snapshot();
-            let held_commits_snapshot = self.held_commits.clone();
-            let evaluator_snapshot = self.evaluator.snapshot();
+            let window = self.open_window();
 
             self.time = t;
-            if let Err(e) = self.run_deltas(BTreeSet::new(), BTreeSet::new(), true) {
+            if let Err(e) = self.run_deltas(Vec::new(), Vec::new(), true) {
                 self.time = previous_time;
-                self.heap = heap_snapshot;
-                self.drivers = drivers_snapshot;
-                self.solver.restore(solver_snapshot);
-                self.solver.dynamic_restore(dynamic_snapshot);
-                self.held_commits = held_commits_snapshot;
-                self.evaluator.restore(evaluator_snapshot);
+                self.roll_back(window);
                 return Err(e);
             }
+            self.close_window(window);
             // This instant reached a quiet fixed point and was NOT rolled
             // back: exactly "a completed instant" (W1c contract point 3), so
             // its digital-slot readout is published now, at ITS OWN `t`, not
@@ -916,12 +1100,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // stepped partition's forced step can fail to converge exactly as an
         // ordinary one can.
         let previous_time = self.time;
-        let heap_snapshot = self.heap.clone();
-        let drivers_snapshot = self.drivers.clone();
-        let solver_snapshot = self.solver.snapshot();
-        let dynamic_snapshot = self.solver.dynamic_snapshot();
-        let held_commits_snapshot = self.held_commits.clone();
-        let evaluator_snapshot = self.evaluator.snapshot();
+        let window = self.open_window();
 
         self.time = t_end;
         // W1a contract point 5 (amended by finding 1): a stepped partition's
@@ -948,7 +1127,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.drain_scheduled();
                 Ok(())
             }
-            Ok(readers) => self.run_deltas(BTreeSet::new(), readers.into_iter().collect(), true),
+            Ok(readers) => self.run_deltas(Vec::new(), readers, true),
             Err(e) => Err(KernelError::SolveFailed(e)),
         };
         match clamp_result {
@@ -963,17 +1142,13 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // (`drain_scheduled` runs inside it every pass); the empty-
                 // reader branch above drains it directly instead, so either
                 // way nothing more is needed here before publishing.
+                self.close_window(window);
                 self.publish_settled();
                 Ok(())
             }
             Err(e) => {
                 self.time = previous_time;
-                self.heap = heap_snapshot;
-                self.drivers = drivers_snapshot;
-                self.solver.restore(solver_snapshot);
-                self.solver.dynamic_restore(dynamic_snapshot);
-                self.held_commits = held_commits_snapshot;
-                self.evaluator.restore(evaluator_snapshot);
+                self.roll_back(window);
                 Err(e)
             }
         }
@@ -1006,18 +1181,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// snapshot `advance` already takes. This is a judgment call beyond
     /// what the contract states outright; the orchestrator can override it.
     pub fn apply_params_as_event(&mut self, triples: &[(usize, usize, f64)]) -> Result<(), KernelError> {
-        let heap_snapshot = self.heap.clone();
-        let drivers_snapshot = self.drivers.clone();
-        let solver_snapshot = self.solver.snapshot();
-        let dynamic_snapshot = self.solver.dynamic_snapshot();
-        let held_commits_snapshot = self.held_commits.clone();
-        let evaluator_snapshot = self.evaluator.snapshot();
+        let window = self.open_window();
         let old_values: Vec<(usize, usize, f64)> = triples
             .iter()
             .map(|&(d, p, _)| (d, p, self.solver.param_value(d, p).expect("validate_params must run and succeed before apply_params_as_event")))
             .collect();
 
-        let dirty: BTreeSet<PartitionId> = self.solver.apply_params(triples).into_iter().collect();
+        let mut dirty: Vec<PartitionId> = self.solver.apply_params(triples);
+        dirty.sort_unstable();
+        dirty.dedup();
 
         // A device every one of whose pins sits on an already-fixed node
         // names no partition at all (mirrors a resistor with both ends
@@ -1032,19 +1204,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let result = if dirty.is_empty() {
             self.solver.resolve_dirty(&[], self.time, &self.drivers).map(|_| ()).map_err(KernelError::SolveFailed)
         } else {
-            self.run_deltas(dirty, BTreeSet::new(), true)
+            self.run_deltas(dirty, Vec::new(), true)
         };
 
         if let Err(e) = result {
-            self.heap = heap_snapshot;
-            self.drivers = drivers_snapshot;
-            self.solver.restore(solver_snapshot);
-            self.solver.dynamic_restore(dynamic_snapshot);
-            self.held_commits = held_commits_snapshot;
-            self.evaluator.restore(evaluator_snapshot);
+            self.roll_back(window);
             self.solver.apply_params(&old_values);
             return Err(e);
         }
+        self.close_window(window);
         // The one event this call applies reached a quiet fixed point and
         // was not rolled back: a completed instant, same as any `advance`
         // delta.
@@ -1066,29 +1234,18 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// addrO pair"). Rolls back exactly like `apply_params_as_event` on
     /// `-4`/`-7`.
     pub fn seed_memory(&mut self, device: DeviceId, words: &[f64]) -> Result<(), SeedMemoryError> {
-        let heap_snapshot = self.heap.clone();
-        let drivers_snapshot = self.drivers.clone();
-        let solver_snapshot = self.solver.snapshot();
-        let dynamic_snapshot = self.solver.dynamic_snapshot();
-        let held_commits_snapshot = self.held_commits.clone();
-        let evaluator_snapshot = self.evaluator.snapshot();
+        let window = self.open_window();
 
         if let Err(msg) = self.evaluator.seed_memory(device.0 as usize, words) {
-            self.evaluator.restore(evaluator_snapshot);
+            self.abandon_window(window);
             return Err(SeedMemoryError::Rejected(msg));
         }
 
-        let mut seed_affected = BTreeSet::new();
-        seed_affected.insert(device);
-        if let Err(e) = self.run_deltas(BTreeSet::new(), seed_affected, true) {
-            self.heap = heap_snapshot;
-            self.drivers = drivers_snapshot;
-            self.solver.restore(solver_snapshot);
-            self.solver.dynamic_restore(dynamic_snapshot);
-            self.held_commits = held_commits_snapshot;
-            self.evaluator.restore(evaluator_snapshot);
+        if let Err(e) = self.run_deltas(Vec::new(), vec![device], true) {
+            self.roll_back(window);
             return Err(SeedMemoryError::Kernel(e));
         }
+        self.close_window(window);
         // This instant reached a quiet fixed point and was not rolled back:
         // a completed instant, same as any `advance` delta or
         // `apply_params_as_event`'s own event.
@@ -1127,16 +1284,18 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // re-solved this pass and for whether this pass counts as a change
         // at all (a settle pass whose only effect is a `Reset` must not be
         // mistaken for a fixed point).
-        let mut reset_dirty = BTreeSet::new();
+        let mut reset_dirty: Vec<PartitionId> = Vec::new();
         for &reader in all_readers {
             let requests = self.evaluator.evaluate(reader, self.time, acting_on_edges, self.solver.voltages());
             for req in requests {
                 if let Some(p) = self.apply_request(req, self.time, true) {
-                    reset_dirty.insert(p);
+                    reset_dirty.push(p);
                 }
             }
         }
-        let (mut dirty, directly_affected, _popped, commits_changed) = self.apply_due_events()?;
+        let mut dirty = Vec::new();
+        let mut directly_affected = Vec::new();
+        let (_popped, commits_changed) = self.apply_due_events(&mut dirty, &mut directly_affected)?;
         let changed = commits_changed > 0 || !reset_dirty.is_empty() || !directly_affected.is_empty();
         dirty.append(&mut reset_dirty);
         let is_first_pass = *resolve_all_once;
@@ -1144,7 +1303,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             *resolve_all_once = false;
             all_partitions.to_vec()
         } else {
-            dirty.into_iter().collect()
+            dirty.sort_unstable();
+            dirty.dedup();
+            dirty
         };
         if is_first_pass || !to_resolve.is_empty() {
             // The returned reader list is intentionally unused here: this
@@ -1231,17 +1392,17 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         self.time = now;
         self.run_to_fixed_point(all_partitions, all_readers, false, true)?;
 
-        let mut edge_pass_dirty = BTreeSet::new();
+        let mut edge_pass_dirty: Vec<PartitionId> = Vec::new();
         for &reader in all_readers {
             let requests = self.evaluator.evaluate(reader, now, true, self.solver.voltages());
             for req in requests {
                 if let Some(p) = self.apply_request(req, now, false) {
-                    edge_pass_dirty.insert(p);
+                    edge_pass_dirty.push(p);
                 }
             }
         }
 
-        self.run_deltas(edge_pass_dirty, BTreeSet::new(), false)?;
+        self.run_deltas(edge_pass_dirty, Vec::new(), false)?;
         // Load settling is itself one completed "instant" at `now` (the
         // three-step process above is how it gets there, not three separate
         // ones — core/README.md's own "Load settling" point 6 describes it
@@ -2075,6 +2236,100 @@ mod tests {
         // instant's own work), so it must still be pending afterward -- the
         // rollback undoes the instant's own work, not history before it.
         assert_eq!(k.next_event_time(), 10.0, "the still-pending commit that was about to run must not be lost");
+    }
+
+    #[test]
+    fn a_failed_instant_that_touched_several_drivers_and_heap_events_leaves_the_kernel_as_if_it_never_ran() {
+        // The rollback no longer clones the heap and the driver table before
+        // every instant: it journals the drivers an instant writes and the
+        // events it pops, and truncates the events it pushes. This is the
+        // case that has to hold for that to be a rollback and not a hope: one
+        // doomed instant writes four drivers many times over (four commits
+        // and thousands of re-requests, each pushing and popping heap
+        // events), with pending events queued at later times, and afterwards
+        // the kernel must be indistinguishable from a control kernel that
+        // never attempted it: same drivers (tokens and pending transitions
+        // included), same heap sequence counter, same next event, and the
+        // same result once both run the same benign evaluator to the end.
+        struct AlwaysAffects;
+        impl PartitionSolver for AlwaysAffects {
+            fn resolve_dirty(&mut self, dirty: &[PartitionId], _now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+                Ok(if dirty.is_empty() { Vec::new() } else { vec![DeviceId(0)] })
+            }
+            fn voltages(&self) -> &[f64] {
+                &[]
+            }
+            fn currents(&self) -> &[f64] {
+                &[]
+            }
+            fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {
+                // No state to restore.
+            }
+        }
+        // Flips every driver on every call, at zero delay: the partition
+        // never settles.
+        struct FlipsAllFour {
+            next: Mode,
+        }
+        impl DeviceEvaluator for FlipsAllFour {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+                let level = self.next;
+                self.next = if level == High { Low } else { High };
+                (0..4).map(|d| DriverRequest::Level { driver: DriverId(d), level, delays: DelaySet::uniform(0.0) }).collect()
+            }
+        }
+        struct Benign;
+        impl DeviceEvaluator for Benign {
+            fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+                Vec::new()
+            }
+        }
+
+        type K = Kernel<AlwaysAffects, Box<dyn DeviceEvaluator>>;
+        fn scenario() -> K {
+            let mut k: K = Kernel::new(AlwaysAffects, Box::new(Benign));
+            for node in 0..4 {
+                k.add_driver(driver(node), Some(PartitionId(0)));
+                // A first request is a first observation: it commits at once,
+                // whatever the delay. Settle them all LOW at t = 0 so the
+                // delayed requests below really are delayed.
+                k.request_driver(DriverId(node as u32), Low, 0.0, 0.0);
+            }
+            k.advance(0.0).unwrap();
+            // Two commits due together at t = 10 (FIFO between them), one at
+            // 15, one beyond the horizon the test advances to.
+            k.request_driver(DriverId(0), High, 0.0, 10.0);
+            k.request_driver(DriverId(1), High, 0.0, 10.0);
+            k.request_driver(DriverId(2), High, 0.0, 15.0);
+            k.request_driver(DriverId(3), High, 0.0, 25.0);
+            k
+        }
+        let dump = |k: &K| format!("{:?} seq={} next={} held={:?}", k.drivers, k.heap.next_seq(), k.heap.peek_time(), k.held_commits);
+
+        let mut control = scenario();
+        control.advance(20.0).unwrap();
+
+        let mut doomed = scenario();
+        doomed.set_evaluator(Box::new(FlipsAllFour { next: Low }));
+        let before = dump(&doomed);
+        let err = doomed.advance(20.0).unwrap_err();
+        assert_eq!(err, KernelError::Livelock { at: 10.0 });
+        assert_eq!(doomed.time(), 0.0, "the doomed instant never completed");
+        assert_eq!(before, dump(&doomed), "drivers (tokens and pending transitions included), the heap's sequence counter and its next event are back exactly");
+        assert!(doomed.driver_journal.is_empty() && doomed.heap_popped.is_empty() && !doomed.windowed, "no journal outlives its window");
+        assert!(doomed.driver_journaled.iter().all(|&j| !j), "every journal mark is cleared");
+        assert_eq!(doomed.next_event_time(), 10.0, "the commits that were about to run are still queued");
+
+        // Both run the same benign evaluator from here; the whole state must
+        // come out identical, which it can only do if the rollback put every
+        // driver token and every queued event (FIFO order included) back.
+        doomed.set_evaluator(Box::new(Benign));
+        doomed.advance(20.0).unwrap();
+        assert_eq!(dump(&control), dump(&doomed));
+        assert_eq!(control.time(), doomed.time());
+        for d in 0..4 {
+            assert_eq!(control.driver(DriverId(d)).committed(), doomed.driver(DriverId(d)).committed());
+        }
     }
 
     // ---- W1d: DriverRequest::Timer -----------------------------------------

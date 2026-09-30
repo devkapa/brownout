@@ -129,8 +129,12 @@ trailer  MAGIC
   blob starts with the first slot of each kind it uses, digital before
   channel: `blob[0]` for the first kind used, `blob[1]` for the second. The
   reader checks that each base is an integer and `base + count <= S`
-  (digital) or `<= C` (channel). The W1c ICs are the first kinds with
-  digital slots, codes 30-34 the first with channel slots.
+  (digital) or `<= C` (channel). No two devices' digital ranges overlap, and
+  no two devices' channel ranges overlap; the reader rejects an overlap as
+  malformed (`-1`), because the digital readout publishes only the slots whose
+  value changed, which is exact only while each slot has a single writer. The
+  W1c ICs are the first kinds with digital slots, codes 30-34 the first with
+  channel slots.
 
 ## Kind codes and records
 
