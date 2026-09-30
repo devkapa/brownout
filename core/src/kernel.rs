@@ -411,8 +411,8 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
 struct Window {
     heap_seq: Seq,
     held_commits: Vec<(DriverId, Mode, Token)>,
-    solver: (Vec<f64>, Vec<f64>),
-    dynamic: Box<dyn std::any::Any>,
+    /// The solver's own checkpoint (`PartitionSolver::begin_instant`).
+    solver: Box<dyn std::any::Any>,
     evaluator: Box<dyn std::any::Any>,
 }
 
@@ -455,8 +455,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         Window {
             heap_seq: self.heap.next_seq(),
             held_commits: self.held_commits.clone(),
-            solver: self.solver.snapshot(),
-            dynamic: self.solver.dynamic_snapshot(),
+            solver: self.solver.begin_instant(),
             evaluator: self.evaluator.begin_instant(),
         }
     }
@@ -465,6 +464,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// evaluator's checkpoint released.
     fn close_window(&mut self, window: Window) {
         self.end_journals();
+        self.solver.end_instant(window.solver);
         self.evaluator.end_instant(window.evaluator);
     }
 
@@ -480,8 +480,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         }
         self.heap_popped.clear();
         self.windowed = false;
-        self.solver.restore(window.solver);
-        self.solver.dynamic_restore(window.dynamic);
+        self.solver.rollback_instant(window.solver);
         self.held_commits = window.held_commits;
         self.evaluator.rollback_instant(window.evaluator);
     }
@@ -491,6 +490,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// evaluator's own state can differ, so only it is rolled back.
     fn abandon_window(&mut self, window: Window) {
         self.end_journals();
+        self.solver.end_instant(window.solver);
         self.evaluator.rollback_instant(window.evaluator);
     }
 

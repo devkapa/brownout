@@ -250,6 +250,32 @@ pub trait PartitionSolver {
         let _ = snapshot;
     }
 
+    /// The solver's side of the kernel's per-instant rollback window: the
+    /// checkpoint a failed instant goes back to. The defaults take exactly
+    /// what the kernel took before this method existed (`snapshot` plus
+    /// `dynamic_snapshot`) and restore it in the same order, so a solver that
+    /// does not override them behaves as it always did. An override may
+    /// capture only what the instant can touch, as long as
+    /// `rollback_instant` leaves the solver bit for bit where
+    /// `begin_instant` found it.
+    fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
+        Box::new((self.snapshot(), self.dynamic_snapshot()))
+    }
+
+    /// The instant completed: the checkpoint is no longer needed.
+    fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        let _ = checkpoint;
+    }
+
+    /// The instant failed: back to the checkpoint.
+    fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        let (snapshot, dynamic) = *checkpoint
+            .downcast::<((Vec<f64>, Vec<f64>), Box<dyn std::any::Any>)>()
+            .expect("a checkpoint made by this solver's begin_instant");
+        self.restore(snapshot);
+        self.dynamic_restore(dynamic);
+    }
+
     /// Drains every `(time, EventKind::Crossing | EventKind::Step)` a dynamic
     /// partition has asked to be scheduled since the last drain — a fresh
     /// re-aim from [`Self::resolve_dirty`], [`Self::handle_dynamic_event`] or
@@ -454,6 +480,18 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         (**self).dynamic_restore(snapshot)
+    }
+
+    fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
+        (**self).begin_instant()
+    }
+
+    fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        (**self).end_instant(checkpoint)
+    }
+
+    fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        (**self).rollback_instant(checkpoint)
     }
 
     fn take_scheduled(&mut self) -> Vec<(f64, EventKind)> {
