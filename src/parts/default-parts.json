@@ -7384,7 +7384,7 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Active buzzer: DC threshold 1.5 V for internal oscillator to run. Passive buzzer: must be driven with an AC/PWM signal; frequency reported from zero-crossing detection. Both types modelled as a fixed resistor (resistance param, default 32 Ω). No audio synthesis — sounding state and detected frequency only."
+        "notes": "Active buzzer: DC threshold 1.5 V for internal oscillator to run. Passive buzzer: must be driven with an AC/PWM signal; frequency reported from crossings around the drive's own midpoint, so a 0-5 V square registers. Both types modelled as a fixed resistor (resistance param, default 32 Ω). No audio synthesis — sounding state and detected frequency only."
       }
     },
     {
@@ -7413,7 +7413,7 @@
         }
       ],
       "electrical_specs": {
-        "notes": "Passive buzzer: requires AC/PWM drive signal. Frequency detected via zero-crossing counting. Sounding when detected frequency > 0 Hz. Same resistor model as active buzzer (resistance param). No audio synthesis."
+        "notes": "Passive buzzer: requires AC/PWM drive signal. Frequency detected from crossings around the drive's own midpoint (a 0-5 V square or PWM pin registers), timed over a full period. Sounding while a 20 Hz-20 kHz tone is detected; clears two periods after the drive stops. Same resistor model as active buzzer (resistance param). No audio synthesis."
       }
     },
     {

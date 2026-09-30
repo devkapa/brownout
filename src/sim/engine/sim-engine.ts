@@ -1293,13 +1293,14 @@ export function defaultIcState(kind: string): Record<string, number> {
     // W6.2 — ULN2803 (8-channel): same pattern, one extra channel.
     case "uln2803":
       return { in1: NaN, in2: NaN, in3: NaN, in4: NaN, in5: NaN, in6: NaN, in7: NaN, in8: NaN };
-    // W6.2 — buzzer: lastSign tracks zero-crossing state for passive frequency detection.
-    //   lastSign: sign of last terminal voltage sample (1 or -1; NaN = uninitialised).
-    //   lastCrossT: simTime of last zero-crossing (for period measurement).
+    // W6.2 — buzzer: the passive buzzer's tone detector (see buzzerModel).
+    //   lastSign: side of the Schmitt band last seen (1 or -1; NaN = uninitialised).
+    //   lastCrossT / prevCrossT: simTime of the last two crossings (a full period).
+    //   envHi / envLo: envelope of the terminal voltage (NaN until the first sample).
     //   detectedHz: estimated frequency from last period (0 = DC or silent).
-    // Active buzzers do not use lastSign/lastCrossT but share the same state slot.
+    // Active buzzers use none of these but share the same state slot.
     case "buzzer":
-      return { lastSign: NaN, lastCrossT: NaN, detectedHz: 0 };
+      return { lastSign: NaN, lastCrossT: NaN, prevCrossT: NaN, envHi: NaN, envLo: NaN, detectedHz: 0 };
     // W6.2 — speaker: tracks peak and trough of terminal voltage over a short window.
     //   vPeak: running maximum terminal voltage in the window.
     //   vTrough: running minimum terminal voltage in the window.
@@ -4435,9 +4436,10 @@ export class SimEngine {
 
   /**
    * Returns the committed IC state record for the given component ID, or
-   * undefined if the component has no IC state.  Used primarily by tests to
-   * inspect the state of ULN, buzzer, speaker, and sequential IC components
-   * without violating the private-state encapsulation in production paths.
+   * undefined if the component has no IC state.  Used by tests to inspect
+   * the state of ULN, buzzer, speaker, and sequential IC components, and by
+   * physics telemetry for the buzzer/speaker sounding readout, without
+   * violating the private-state encapsulation in production paths.
    */
   getIcState(compId: string): Record<string, number> | undefined {
     return this.state.icState.get(compId);

@@ -210,6 +210,21 @@ export type PhysicsModelStateTelemetry =
       echoRiseSimTimeS?: number;
       echoFallSimTimeS?: number;
       provenance: PhysicsTelemetryProvenance;
+    }
+  | {
+      kind: "buzzer";
+      /** An active buzzer sounds on DC; a passive one sounds at its drive frequency. */
+      buzzerType: "active" | "passive";
+      sounding: boolean;
+      /** Passive only, and only while a tone in the audible band is detected. */
+      toneHz?: number;
+      provenance: PhysicsTelemetryProvenance;
+    }
+  | {
+      kind: "speaker";
+      /** At least 50 mV peak-to-peak across the coil over the last 5 ms window. */
+      sounding: boolean;
+      provenance: PhysicsTelemetryProvenance;
     };
 
 export interface ComponentPhysicsTelemetry {
