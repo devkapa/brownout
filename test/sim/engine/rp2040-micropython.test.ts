@@ -51,4 +51,35 @@ describe("RP2040Mcu — runs real MicroPython (slow)", () => {
     expect(runUntil(mcu, "gp16", "out-high")).toBe(true);
     expect(mcu.scriptStarted).toBe(true);
   }, 40_000);
+
+  // rp2040js reads adc.channelValues as raw 12-bit counts. Volts written there
+  // made 3.3 V read as 3 counts, so read_u16() returned 48 and the pot example
+  // never lit its LED. MicroPython scales 12 bits to 16 as raw << 4 | raw >> 8.
+  it.each([
+    [0, 0],
+    [1.65, 32776], // 2048 counts: 2048 << 4 | 2048 >> 8
+    [3.3, 65535],
+  ])("reads %s V on GP26 as read_u16() = %s", (volts, expected) => {
+    const mcu = new RP2040Mcu(UF2);
+    mcu.setAnalogVolts("gp26", volts, 3.3);
+    mcu.runScript("from machine import ADC, Pin\r\nprint('ADC=%d' % ADC(Pin(26)).read_u16())\r\n");
+    const serial = () => (mcu as unknown as { _serialOut: string })._serialOut;
+    for (let i = 0; i < 250 && !/ADC=\d+/.test(serial()); i++) mcu.step(0.002);
+    expect(Number(/ADC=(\d+)/.exec(serial())?.[1])).toBe(expected);
+  }, 30_000);
+
+  // ADC4 is the on-die temperature sensor. Nothing fed it, so it read 0 counts,
+  // which the datasheet formula below turns into 437 °C.
+  it("reads the temperature sensor (ADC4) as about 27 °C", () => {
+    const mcu = new RP2040Mcu(UF2);
+    mcu.runScript(
+      "from machine import ADC\r\nr = ADC(4).read_u16()\r\n" +
+        "print('T=%.2f' % (27 - (r * 3.3 / 65535 - 0.706) / 0.001721))\r\n",
+    );
+    const serial = () => (mcu as unknown as { _serialOut: string })._serialOut;
+    const done = /T=(-?[\d.]+)\r?\n/;
+    for (let i = 0; i < 250 && !done.test(serial()); i++) mcu.step(0.002);
+    const celsius = Number(done.exec(serial())?.[1]);
+    expect(Math.abs(celsius - 27)).toBeLessThanOrEqual(1);
+  }, 30_000);
 });

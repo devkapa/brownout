@@ -75,23 +75,37 @@ describe("RP2040Mcu — MicrocontrollerCore coupling", () => {
     expect(gp16[gp16.length - 1].level).toBe(1);
   });
 
-  it("injects an analog voltage into the ADC channel for gp26/27/28", () => {
+  it("injects an analog voltage as 12-bit counts into the ADC channel for gp26/27/28", () => {
     const mcu = new RP2040Mcu();
     mcu.setAnalogVolts("gp26", 1.65);
+    mcu.setAnalogVolts("gp27", 1.0, 2.5);
     mcu.setAnalogVolts("gp28", 3.3);
     const adc = (mcu as unknown as { rp2040: { adc: { channelValues: number[] } } }).rp2040.adc;
-    expect(adc.channelValues[0]).toBeCloseTo(1.65);
-    expect(adc.channelValues[2]).toBeCloseTo(3.3);
+    // rp2040js reads channelValues as raw conversion results, not volts.
+    expect(adc.channelValues[0]).toBe(2048);
+    expect(adc.channelValues[1]).toBe(1638); // scaled to the supplied reference
+    expect(adc.channelValues[2]).toBe(4095);
     // digital-only pin is ignored
     mcu.setAnalogVolts("gp5", 2);
     expect(mcu.pinDriveState("gp5")).toBe("input-pulldown");
   });
 
-  it("clamps injected analog voltage to [0, vcc]", () => {
+  it("clamps injected analog voltage to the ADC's 0..4095 range", () => {
     const mcu = new RP2040Mcu();
     mcu.setAnalogVolts("gp27", 9, 3.3);
+    mcu.setAnalogVolts("gp28", -1, 3.3);
     const adc = (mcu as unknown as { rp2040: { adc: { channelValues: number[] } } }).rp2040.adc;
-    expect(adc.channelValues[1]).toBeCloseTo(3.3);
+    expect(adc.channelValues[1]).toBe(4095);
+    expect(adc.channelValues[2]).toBe(0);
+  });
+
+  it("holds the temperature sensor (ADC4) at 27 °C, including after reset()", () => {
+    const mcu = new RP2040Mcu();
+    const adc = () => (mcu as unknown as { rp2040: { adc: { channelValues: number[] } } }).rp2040.adc;
+    // 0.706 V (datasheet Vbe at 27 °C) against 3.3 V is 876 of 4095 counts.
+    expect(adc().channelValues[4]).toBe(876);
+    mcu.reset(); // rebuilds the emulator, so a fresh RPADC starts at 0 again
+    expect(adc().channelValues[4]).toBe(876);
   });
 
   it("accepts a digital input level without throwing", () => {
