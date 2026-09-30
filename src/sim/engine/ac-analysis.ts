@@ -62,7 +62,8 @@ const AC_INPUT_KINDS = new Set([
   "pulse_source",
   "pulse_gen",
   "signal_gen",
-  // Wave A7: unit 1 A Norton injection (SPICE I-element AC convention);
+  // Wave A7: unit 1 A Norton injection out of the pos terminal, the same
+  // polarity as the transient stamp (the parser maps a SPICE I card onto it);
   // reported node magnitudes are then transfer impedances in ohms.
   "current_source",
 ]);
@@ -366,7 +367,7 @@ export function runSmallSignalAc(
   // Wave A7: a designated current_source injects current, not a branch
   // voltage, so the human-readable reference must not claim a 1 V drive.
   const injection = input.kind === "current_source"
-    ? "unit 1 A AC Norton injection (out of pos, into neg); all other independent sources AC-zeroed"
+    ? "unit 1 A AC Norton injection (out of the pos terminal into the circuit, back into neg); all other independent sources AC-zeroed"
     : input.kind === "signal_gen" && rSource > 0
       ? `unit 1 V AC Thevenin drive behind rSource = ${String(rSource)} ohm `
         + "(injected as its Norton equivalent); all other independent sources AC-zeroed"
