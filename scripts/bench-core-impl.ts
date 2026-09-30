@@ -15,6 +15,20 @@
  *   - the 1-minute load average is logged (a warning, not a silent discard --
  *     a script cannot itself decide a run is untrustworthy and hide it).
  *
+ * PERF REGRESSION CHECK (plan 3.5's tracking rule). After each core run the
+ * median CPU ms per simulated second is compared with the board's entry in
+ * scripts/perf/core-baseline.json (checked in), and a warning is printed when
+ * it is more than 25% above it (a note when it is more than 25% below, so a
+ * speed-up does not leave a stale baseline behind). Every board is tracked;
+ * the rep-to-rep spread decides what is noise. scripts/perf/baseline.ts has
+ * the rules. Flags: --baseline=<file>, --no-baseline, --update-baseline
+ * (record this run's numbers; refused on a busy machine unless --force),
+ * --strict-baseline (exit code 1 on a regression, on a board with no baseline
+ * entry, on a rep that stopped early, on a board the core cannot run, or on
+ * an unusable baseline file; for a quiet machine), --sap1-frozen (the SAP-1
+ * with the display 555 held in reset, FREEZE_DISPLAY=1, key
+ * sap1-max-ideal-frozen).
+ *
  * DECISION 12 (SAP-1 generator location): kept outside both repos, read by
  * path. `--sap1` shells out to it exactly as a person would from the CLI
  * (`node gen-sap1.mjs <hz> <power> <outFile>`) and reads back the .sim.json
@@ -60,6 +74,19 @@ import { HeadlessRunner } from "../src/host.js";
 import type { HeadlessRunResult } from "../src/host.js";
 import { initCore } from "../src/core/wasm.js";
 import type { SimCircuit } from "../src/sim/engine/sim-engine.js";
+import {
+  BaselineError,
+  boardKey,
+  checkAgainstBaseline,
+  DEFAULT_TOLERANCE,
+  loadBaseline,
+  updateRefusal,
+  withEntry,
+  writeBaseline,
+  type Baseline,
+  type BaselineCheck,
+} from "./perf/baseline.js";
+import { pokeClassicRam, programNibbles } from "./perf/boards.js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -75,6 +102,7 @@ const CLASSIC_REPETITIONS = 3;
 /** Decision 12: the generator lives outside both repos, read by path. This is the documented, fixed location; --sap1-generator overrides it. */
 const DEFAULT_SAP1_GENERATOR = "/Users/dev/Documents/DEVOLTProject/brownout-core-prototype/bench/gen-sap1.mjs";
 const DEFAULT_BOARD = path.join(repoRoot, "test", "fixtures", "core", "02-resistor-bridge.sim.json");
+const DEFAULT_BASELINE = path.join(scriptDir, "perf", "core-baseline.json");
 
 // ---- CLI --------------------------------------------------------------------
 
@@ -85,6 +113,13 @@ interface ParsedArgs {
   sap1Power: string;
   sap1Generator: string;
   sap1RunClassicToo: boolean;
+  /** FREEZE_DISPLAY=1 for the generator: the display 555 held in reset. */
+  sap1Frozen: boolean;
+  baselinePath: string | null;
+  updateBaseline: boolean;
+  strictBaseline: boolean;
+  /** Record a baseline even though the machine is busy. */
+  force: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -94,6 +129,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   let sap1Power = "ideal";
   let sap1Generator = DEFAULT_SAP1_GENERATOR;
   let sap1RunClassicToo = false;
+  let sap1Frozen = false;
+  let baselinePath: string | null = DEFAULT_BASELINE;
+  let updateBaseline = false;
+  let strictBaseline = false;
+  let force = false;
 
   for (const arg of argv) {
     if (arg === "--sap1") {
@@ -107,6 +147,19 @@ function parseArgs(argv: string[]): ParsedArgs {
       sap1Generator = arg.slice("--sap1-generator=".length);
     } else if (arg === "--sap1-classic") {
       sap1RunClassicToo = true;
+    } else if (arg === "--sap1-frozen") {
+      sap1 = true;
+      sap1Frozen = true;
+    } else if (arg.startsWith("--baseline=")) {
+      baselinePath = path.resolve(arg.slice("--baseline=".length));
+    } else if (arg === "--no-baseline") {
+      baselinePath = null;
+    } else if (arg === "--update-baseline") {
+      updateBaseline = true;
+    } else if (arg === "--strict-baseline") {
+      strictBaseline = true;
+    } else if (arg === "--force") {
+      force = true;
     } else if (arg.startsWith("--")) {
       throw new Error(`bench-core: unknown flag ${arg}`);
     } else {
@@ -115,7 +168,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   if (!sap1 && boardPaths.length === 0) boardPaths.push(DEFAULT_BOARD);
-  return { boardPaths, sap1, sap1Hz, sap1Power, sap1Generator, sap1RunClassicToo };
+  return { boardPaths, sap1, sap1Hz, sap1Power, sap1Generator, sap1RunClassicToo, sap1Frozen, baselinePath, updateBaseline, strictBaseline, force };
 }
 
 // ---- SAP-1 generator (decision 12) -------------------------------------------
@@ -128,7 +181,7 @@ function parseArgs(argv: string[]): ParsedArgs {
  * shelling out rather than guessing at an internal API is the honest choice
  * here too).
  */
-function runSap1Generator(generatorPath: string, hz: string, power: string): SimCircuit {
+function runSap1Generator(generatorPath: string, hz: string, power: string, frozen: boolean): SimCircuit {
   if (!fs.existsSync(generatorPath)) {
     throw new Error(
       `bench-core: --sap1 generator not found at ${generatorPath}\n` +
@@ -137,9 +190,13 @@ function runSap1Generator(generatorPath: string, hz: string, power: string): Sim
     );
   }
   const outFile = path.join(os.tmpdir(), `bench-core-sap1-${String(process.pid)}.sim.json`);
+  const env = { ...process.env };
+  delete env.FREEZE_DISPLAY;
+  if (frozen) env.FREEZE_DISPLAY = "1";
   const result = spawnSync(process.execPath, [generatorPath, hz, power, outFile], {
     cwd: path.dirname(generatorPath),
     encoding: "utf8",
+    env,
   });
   if (result.error || result.status !== 0) {
     throw new Error(
@@ -248,7 +305,14 @@ function benchCore(circuit: SimCircuit): { summary: Summary; stats: ReturnType<C
     const engine = new CoreEngine();
     try {
       engine.load(circuit);
-      // (RAM preload per decision 2 would run here once a memory kind exists.)
+      // The generated SAP-1 carries its program and its two RAM chips in `bench`; without this poke the RAM
+      // holds zeros and the computer runs a different, cheaper program than the one the acceptance and the
+      // perf tools run (a ~2x lower ms/s on the frozen board), so this number would not be the workload.
+      const bench = (circuit as unknown as { bench?: { program: Record<string, number>; ramLo: string; ramHi: string } }).bench;
+      if (bench) {
+        engine.setMemoryContents(bench.ramLo, programNibbles(bench.program, 0));
+        engine.setMemoryContents(bench.ramHi, programNibbles(bench.program, 4));
+      }
       for (let f = 0; f < warmupFrames; f++) engine.advance(engine.simTime + FRAME_S);
 
       // The core clock is the "real" time this rep covers: on a
@@ -288,6 +352,9 @@ function benchClassic(circuit: SimCircuit): Summary {
   for (let rep = 0; rep < CLASSIC_REPETITIONS; rep++) {
     const runner = new HeadlessRunner(); // engine: "classic" (default) -- byte-for-byte today's baseline path.
     runner.load(circuit);
+    // Same poke as the core path: a SAP-1 with empty RAM runs a different (cheaper) program than the one measured elsewhere.
+    const bench = (circuit as unknown as { bench?: { program: Record<string, number>; ramLo: string; ramHi: string } }).bench;
+    if (bench) pokeClassicRam(runner.engine, bench);
     runner.run({ durationS: CLASSIC_WARMUP_S });
     let measured: HeadlessRunResult | undefined;
     const { cpuMs, wallMs } = timeIt(() => {
@@ -341,6 +408,9 @@ function printSummaryLine(label: string, s: Summary): void {
 
 interface BoardReport {
   board: string;
+  /** The board's key in the perf baseline (scripts/perf/baseline.ts). */
+  key: string;
+  baselineCheck?: BaselineCheck;
   kinds: string[];
   classic?: Summary;
   core?: { summary: Summary; stats: ReturnType<CoreEngine["stats"]> };
@@ -349,7 +419,7 @@ interface BoardReport {
   skippedClassic?: string;
 }
 
-function benchBoard(label: string, circuit: SimCircuit, opts: { runClassic: boolean }): BoardReport {
+function benchBoard(label: string, key: string, circuit: SimCircuit, opts: { runClassic: boolean }): BoardReport {
   const kinds = [...new Set(circuit.components.map((c) => c.kind))].sort();
   const missingKinds = unsupportedCoreKinds(circuit, CORE_IMPLEMENTED_KINDS);
   const corePortable = missingKinds.length === 0;
@@ -357,7 +427,7 @@ function benchBoard(label: string, circuit: SimCircuit, opts: { runClassic: bool
   console.log(`\n${label}`);
   console.log(`  kinds: ${kinds.join(", ") || "(none)"}`);
 
-  const report: BoardReport = { board: label, kinds, corePortable, missingKinds };
+  const report: BoardReport = { board: label, key, kinds, corePortable, missingKinds };
 
   if (!corePortable) {
     console.log(`  core: not portable -- missing kinds: ${missingKinds.join(", ")}`);
@@ -405,20 +475,123 @@ async function main(): Promise<void> {
   for (const boardPath of args.boardPaths) {
     const resolved = path.resolve(boardPath);
     const circuit = JSON.parse(fs.readFileSync(resolved, "utf8")) as SimCircuit;
-    reports.push(benchBoard(path.relative(repoRoot, resolved) || resolved, circuit, { runClassic: true }));
+    reports.push(benchBoard(path.relative(repoRoot, resolved) || resolved, boardKey(resolved), circuit, { runClassic: true }));
   }
 
   if (args.sap1) {
-    const circuit = runSap1Generator(args.sap1Generator, args.sap1Hz, args.sap1Power);
+    const circuit = runSap1Generator(args.sap1Generator, args.sap1Hz, args.sap1Power, args.sap1Frozen);
+    const variant = args.sap1Frozen ? "frozen" : "running";
     reports.push(
-      benchBoard(`SAP-1 (gen-sap1 ${args.sap1Hz} Hz, ${args.sap1Power}, via ${args.sap1Generator})`, circuit, {
-        runClassic: args.sap1RunClassicToo,
-      }),
+      benchBoard(
+        `SAP-1 (gen-sap1 ${args.sap1Hz} Hz, ${args.sap1Power}, display ${variant}, via ${args.sap1Generator})`,
+        `sap1-${args.sap1Hz}-${args.sap1Power}-${variant}`,
+        circuit,
+        { runClassic: args.sap1RunClassicToo },
+      ),
     );
   }
 
+  const outcome = applyBaseline(args, reports, loadAvg1min, cpuCount);
+
   console.log("\n--- JSON ---");
   console.log(JSON.stringify({ loadAvg1min, cpuCount, boards: reports }, null, 2));
+  // An unusable baseline file, or an --update-baseline that was asked for and refused, is an error whatever the mode;
+  // a regression, an unchecked board or an early stop only fail a --strict-baseline run.
+  if (outcome.error !== undefined || outcome.refusedUpdate !== undefined) process.exitCode = 1;
+  if (args.strictBaseline && (outcome.regressed || outcome.unchecked.length > 0)) process.exitCode = 1;
+}
+
+interface BaselineOutcome {
+  regressed: boolean;
+  /** Boards the baseline could not judge (no entry, an early stop, no core number), each with why. --strict-baseline fails on these. */
+  unchecked: string[];
+  /** Set when the baseline file is unusable. */
+  error?: string;
+  /** Set when --update-baseline was asked for and refused (busy machine). */
+  refusedUpdate?: string;
+}
+
+/** `git rev-parse --short HEAD`, or "unknown" when git is missing, fails, or this is not a checkout. */
+function gitCommit(): string {
+  const result = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+  if (result.error || result.status !== 0) return "unknown";
+  return (result.stdout ?? "").trim() || "unknown";
+}
+
+/**
+ * The plan 3.5 tracking rule, scripts/perf/baseline.ts's docs say why it is a
+ * warning: compare each core run against the checked-in baseline, print the
+ * verdicts, and with --update-baseline record this run's numbers. A run that
+ * stopped early has no ms/simulated-s to compare (printSummaryLine withholds
+ * it), so it is neither checked nor recorded; nor is a board the core cannot
+ * run. Everything that could not be judged is returned, so --strict-baseline
+ * can refuse to call the run clean.
+ */
+function applyBaseline(args: ParsedArgs, reports: BoardReport[], loadAvg1min: number, cpuCount: number): BaselineOutcome {
+  const outcome: BaselineOutcome = { regressed: false, unchecked: [] };
+  if (args.baselinePath === null) return outcome;
+  const shown = path.relative(repoRoot, args.baselinePath);
+  console.log(`\nperf baseline (${shown === "" || shown.startsWith("..") ? args.baselinePath : shown}, tolerance +${String(DEFAULT_TOLERANCE * 100)}%):`);
+
+  let baseline: Baseline | undefined;
+  try {
+    baseline = loadBaseline(args.baselinePath);
+  } catch (err) {
+    if (!(err instanceof BaselineError)) throw err;
+    // The measurement above stands; only the comparison is lost, and a recording would overwrite the file that was there.
+    outcome.error = err.message;
+    console.log(`  ERROR: the baseline file is unusable, so nothing was compared${args.updateBaseline ? " and nothing was recorded" : ""}: ${err.message}`);
+    return outcome;
+  }
+
+  const refusal = args.updateBaseline ? updateRefusal(loadAvg1min, cpuCount, args.force) : undefined;
+  if (refusal !== undefined) {
+    outcome.refusedUpdate = refusal;
+    console.log(`  refusing --update-baseline: ${refusal}. A baseline recorded under load is inflated. Re-run on a quiet machine, or pass --force.`);
+  }
+  const recording = args.updateBaseline && refusal === undefined;
+  const commit = recording ? gitCommit() : "unknown";
+  let recorded = 0;
+
+  for (const report of reports) {
+    const core = report.core;
+    if (!core) {
+      outcome.unchecked.push(`${report.key}: not portable to the core, so nothing was measured`);
+      console.log(`  "${report.key}": not portable to the core (${report.missingKinds.join(", ")}); nothing to compare`);
+      continue;
+    }
+    if (core.summary.earlyStops.length > 0) {
+      const why = core.summary.earlyStops.map((e) => `rep ${String(e.rep)}: ${e.reason}`).join(", ");
+      outcome.unchecked.push(`${report.key}: a rep stopped early (${why})`);
+      console.log(`  "${report.key}": a rep stopped early (${why}); not compared and not recorded`);
+      continue;
+    }
+    const measured = core.summary.cpuMsPerSimSecond;
+    const check = checkAgainstBaseline(report.key, measured, baseline, { loadAverage1min: loadAvg1min, cpuCount });
+    report.baselineCheck = check;
+    console.log(`  ${check.message}`);
+    if (check.status === "regression") outcome.regressed = true;
+    if (recording) {
+      baseline = withEntry(baseline, report.key, {
+        coreCpuMsPerSimSecond: Number(measured.median.toFixed(3)),
+        minCpuMsPerSimSecond: Number(measured.min.toFixed(3)),
+        maxCpuMsPerSimSecond: Number(measured.max.toFixed(3)),
+        reps: core.summary.repetitions,
+        measuredS: core.summary.requestedS,
+        recordedAt: new Date().toISOString(),
+        commit,
+        loadAverage1min: Number(loadAvg1min.toFixed(2)),
+      });
+      recorded += 1;
+    } else if (check.status === "no-baseline") {
+      outcome.unchecked.push(`${report.key}: no baseline entry`);
+    }
+  }
+  if (recording && baseline && recorded > 0) {
+    writeBaseline(args.baselinePath, baseline);
+    console.log(`  baseline updated: ${args.baselinePath}`);
+  }
+  return outcome;
 }
 
 // Guarded so a test can `import` this module for its pure pieces (summarize,
