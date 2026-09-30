@@ -69,6 +69,17 @@ re-pinned.
 | Q-O64 (owner decision 3; this wave, worker R8, `feat/wasm-core-w1`) | The 74LS157's `/OE` is a strobe `/G`, not a tri-state enable: `/G` HIGH now forces every `Y` LOW (`sim-engine.ts`'s `_combinationalOutputs` `/oe` short-circuit narrows to the 74LS245 alone; `digital.ts`'s `oe ? false : ...` branch, previously dead, is now reachable and drives LOW), matching the real SN74LS157 (TI SDLS058 function table). The tri-state behaviour classic used to model on this pin belongs to a different part, the 74LS257. The 74LS245 is unchanged. | 1.4, 1.7, 2.4, 2.5, 3.4, 3.6, 3.12, 3.13, 11 D5, 13.2, 13.3 G4, 12 | Ported in the same change (core: W1d). `combinational.rs`'s `mux157` returns `Some(false)` for every `Y` at `/oe = 1`; `delay.rs`'s `driver_requests` times the strobe-caused transition with the kind's own `strobe` pair (13 ns release / 14 ns force), and a data/select-caused one with param 12, the larger per direction when both fire together. |
 | Q-O24 (the Q-O24 fix, W1e step 0, worker Q24, `feat/wasm-core-w1`) | `commitLedOvercurrentStress` (`semiconductors.ts:472-508`, shared by led/bicolor_led/rgb_led) now resolves `ifMax = params.iRated ?? specs?.if_max ?? IRATED_LED` (`:481`), the same precedence the I-V stamp already used (`:374, :417, :455`), instead of the reverse. A user-set `iRated` now moves the failure latch together with the curve it already drove: raising `iRated` above the catalog `if_max` raises the point at which the part fails open, and lowering it below the catalog `if_max` fails the part sooner, in both cases matching the current the stamp actually put through the junction. Catalog-only parts (no `iRated` param) are bit-identical, since the fallback order past `iRated` is unchanged. | 6.5, 6.7, 9.5.2 | Not ported. W1e ports the limit's resolution; `led-damage-limit-irated.test.ts` joins gate 1 at W1g, which ports the latch. |
 
+**Released in 0.6.0.** brownout 0.6.0 (tag `v0.6.0`) released six of the
+rows above: `bd90847`, `2c6ba7d`, `990232e`, `fccd8bd`/`3497700`,
+`a05089b`/`bc1cfd6`/`b70be41` and `df16d52`, each at the same tip this
+branch had already merged. Released main was merged into
+`feat/wasm-core-w1` at `7ee4f89`. That merge changed only the version,
+the changelog and the consumed changesets, and every fix's own tests pass
+on its tip. So classic behaviour on this branch is unchanged by it, and no
+row above moves. Q-O26 (`spdt-switch-current`), Q-O64 (the 74LS157
+strobe) and Q-O24 (the LED damage limit) are not in 0.6.0: they ship with
+1.0.0.
+
 **Where shared mechanics are specified.** Other chapters point here instead of
 repeating them.
 
