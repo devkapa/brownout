@@ -53,6 +53,41 @@ import {
 } from "../sim-engine.js";
 
 /**
+ * Potentiometer/trimmer track, split at the wiper. `position` is the shaft's
+ * rotation from the counter-clockwise stop (0) to the clockwise stop (1), the
+ * way the knob and the Inspector show it, so a pot turned fully clockwise has
+ * its wiper at the CW terminal. The audio (log) taper grows the wiper-to-CCW
+ * resistance exponentially with rotation, as an A-taper volume control does.
+ * Each segment bottoms out at 1 Ω, standing in for the end termination and
+ * wiper contact when the wiper sits at a stop.
+ */
+function potentiometerSegments(comp: DeviceComponent): { rCw: number; rCcw: number } {
+  const rTotal = Math.max(1, Number(comp.params.rTotal ?? 10000));
+  const position = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
+  const fromCcw = String(comp.params.taper ?? "linear") === "log"
+    ? Math.pow(10, 2 * (position - 1))
+    : position;
+  return {
+    rCw: Math.max(1, rTotal * (1 - fromCcw)),
+    rCcw: Math.max(1, rTotal * fromCcw),
+  };
+}
+
+/**
+ * Smallest share of a pot's power rating any one track segment gets. The
+ * proportional share models a segment that sheds heat only along its own
+ * length; a short segment also spreads heat into the substrate and the track
+ * beside it, so its safe dissipation stops shrinking with length. Without a
+ * floor the rule is a fixed wiper-current limit of sqrt(p_max / rTotal),
+ * 4.5 mA for a 10 kΩ 0.2 W pot, and a 5 V pot feeding an LED through 220 Ω
+ * failed in the last few percent of travel and at the stop, where the
+ * segment's share was zero. That circuit peaks at 13 mW in one segment; a
+ * rheostat pushing hundreds of milliwatts through a short segment, or a wiper
+ * shorted across the supply at a stop, still fails.
+ */
+export const POT_SEGMENT_MIN_RATING_SHARE = 0.25;
+
+/**
  * Shared resistive-overload damage integrator for resistor, potentiometer,
  * and trimmer — one body in the engine's _updateFailureStates, kept as one
  * body here (the internal kind branch is part of the moved code).
@@ -74,25 +109,21 @@ function commitResistiveOverloadStress(
     power = resistance > 0 ? current * current * resistance : 0;
   } else {
     // A loaded wiper carries different current in each track segment.
-    // Pot power ratings apply to the full track, so the short segment's
-    // safe share scales with its resistance/length. Using terminal-to-
+    // Pot power ratings apply to the full track, so a segment's safe share
+    // scales with its resistance/length, down to a floor. Using terminal-to-
     // terminal voltage here would miss a common rheostat overload by
     // orders of magnitude.
-    const rTotal = Math.max(1, Number(comp.params.rTotal ?? comp.params.resistance ?? 10_000));
-    const position = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
-    const effectivePosition = String(comp.params.taper ?? "linear") === "log"
-      ? Math.pow(10, 2 * (position - 1))
-      : position;
-    const rCw = Math.max(1, rTotal * effectivePosition);
-    const rCcw = Math.max(1, rTotal * (1 - effectivePosition));
+    const { rCw, rCcw } = potentiometerSegments(comp);
     const vCw = ctx.vAt(x, ctx.pinNode(comp.id, "cw"));
     const vWiper = ctx.vAt(x, ctx.pinNode(comp.id, "wiper"));
     const vCcw = ctx.vAt(x, ctx.pinNode(comp.id, "ccw"));
     const pCw = (vCw - vWiper) ** 2 / rCw;
     const pCcw = (vWiper - vCcw) ** 2 / rCcw;
     const trackResistance = rCw + rCcw;
-    const cwLimit = pMax != null ? pMax * rCw / trackResistance : undefined;
-    const ccwLimit = pMax != null ? pMax * rCcw / trackResistance : undefined;
+    const segmentLimit = (r: number): number | undefined =>
+      pMax != null ? pMax * Math.max(r / trackResistance, POT_SEGMENT_MIN_RATING_SHARE) : undefined;
+    const cwLimit = segmentLimit(rCw);
+    const ccwLimit = segmentLimit(rCcw);
     const cwRatio = cwLimit != null && cwLimit > 0 ? pCw / cwLimit : 0;
     const ccwRatio = ccwLimit != null && ccwLimit > 0 ? pCcw / ccwLimit : 0;
     if (cwRatio >= ccwRatio) {
@@ -610,17 +641,12 @@ export const potentiometerModel: DeviceModel = {
     const cwNode  = ctx.pinNode(comp.id, "cw");
     const wNode   = ctx.pinNode(comp.id, "wiper");
     const ccwNode = ctx.pinNode(comp.id, "ccw");
-    const rTotal  = Math.max(1, Number(comp.params.rTotal ?? 10000));
-    const pos     = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
-    const taper   = String(comp.params.taper ?? "linear");
-    const effPos  = taper === "log"
-      ? Math.pow(10, 2 * (pos - 1))
-      : pos;
     if (ctx.hasFailure(comp.id, "resistor_overload")) {
       return;
     } else {
-      stampResistor(ctx.mna, cwNode,  wNode,   Math.max(1, rTotal * effPos));
-      stampResistor(ctx.mna, wNode,   ccwNode, Math.max(1, rTotal * (1 - effPos)));
+      const { rCw, rCcw } = potentiometerSegments(comp);
+      stampResistor(ctx.mna, cwNode,  wNode,   rCw);
+      stampResistor(ctx.mna, wNode,   ccwNode, rCcw);
     }
   },
   updateCurrent: (ctx, comp, x) => {
@@ -632,12 +658,7 @@ export const potentiometerModel: DeviceModel = {
     }
     const cwV  = ctx.vAt(x, ctx.pinNode(comp.id, "cw"));
     const wiperV = ctx.vAt(x, ctx.pinNode(comp.id, "wiper"));
-    const rTotal = Math.max(1, Number(comp.params.rTotal ?? 10000));
-    const position = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
-    const effectivePosition = String(comp.params.taper ?? "linear") === "log"
-      ? Math.pow(10, 2 * (position - 1))
-      : position;
-    const rCw = Math.max(1, rTotal * effectivePosition);
+    const { rCw } = potentiometerSegments(comp);
     // Per-component current convention is pin 0 → pin 1. For a pot that
     // is CW → wiper, not the unrelated end-to-end track current.
     ctx.setElementCurrent(comp.id, (cwV - wiperV) / rCw);
@@ -651,16 +672,12 @@ export const potentiometerModel: DeviceModel = {
     const pins = comp.pins;
     if (pins.length < 3) return;
     if (ctx.hasFailure(comp.id, "resistor_overload")) return;
-    const rTotal = Math.max(1, Number(comp.params.rTotal ?? 10000));
-    const pos = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
-    const effPos = String(comp.params.taper ?? "linear") === "log"
-      ? Math.pow(10, 2 * (pos - 1))
-      : pos;
+    const { rCw, rCcw } = potentiometerSegments(comp);
     const cwNode = ctx.pinNode(comp.id, "cw");
     const wNode = ctx.pinNode(comp.id, "wiper");
     const ccwNode = ctx.pinNode(comp.id, "ccw");
-    stampAcAdmittance(ac, cwNode, wNode, 1 / Math.max(1, rTotal * effPos), 0);
-    stampAcAdmittance(ac, wNode, ccwNode, 1 / Math.max(1, rTotal * (1 - effPos)), 0);
+    stampAcAdmittance(ac, cwNode, wNode, 1 / rCw, 0);
+    stampAcAdmittance(ac, wNode, ccwNode, 1 / rCcw, 0);
   },
 };
 
