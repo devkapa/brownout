@@ -2730,7 +2730,9 @@ export class SimEngine {
             targetTemperatureC: initial.targetTemperatureC,
             allowedPowerW: initial.derating.allowedPowerW,
             withinContinuousLimits: initial.withinContinuousLimits,
-            warnings: [...initial.warnings],
+            // The same union every later step publishes; the seed solve may be
+            // rejected, and then this is all the readout would ever show.
+            warnings: [...new Set([...thermalProfile.warnings, ...initial.warnings])],
           });
         }
       }
