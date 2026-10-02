@@ -496,7 +496,7 @@ also call, bit-identical.
   `soc <= soc_0` gives `v_0`; the first point with `soc <= soc_i` bounds the
   segment; a zero-width segment gives `v_i`; past the end gives `v_{n-1}`.
 - **Validation** (`kinds.rs`, `-1`): every value finite; `ocvScale >= 0`;
-  `rBase >= 0`; `tempFactor > 0`; `depA >= 0`, `depK > 0`; `capacityAh >=
+  `rBase >= 0`; `tempFactor > 0`; `depA >= 0`, `depP >= 0`, `depK > 0`; `capacityAh >=
   1e-12`; `soc0` in `[0, 1]`; `profileCode` in `{0, 1, 2, 3}`; `n` a
   positive integer with blob length `1 + 2n`, every `soc_i` in `[0, 1]` and
   non-decreasing. The compiler declines
@@ -517,6 +517,8 @@ also call, bit-identical.
   exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
   a hub candidate (Rails point 1), with device state `reg` (C ABI, device
   state).
+- **Validation** (`kinds.rs`, `-1`): `V` finite; `iLimit` finite and `>=
+  0` (the compiler never emits a negative one).
 - Regime carry-forward across a reload is W2 (Q-O37).
 
 **Waveform source records** (codes 22-25).
@@ -530,11 +532,16 @@ also call, bit-identical.
   `4 tf = Number(tf ?? 1e-6)`, `5 pw = Number(pw ?? 5e-4)`, `6 per =
   Number(per ?? 1e-3)`. A `per` that is not finite and positive is one-shot
   (WF:51); the compiler emits it as 0.
+- A battery whose resolved profile is none of the four `profileCode` names
+  declines `unsupported-feature:battery-profile:<profileId>`: Rust carries
+  the table, but the readout's id and label could not round-trip.
 - Params come from `comp.params` only; no catalog default is read (§8.8).
 - The compiler declines `non-finite-<param>` for any other non-finite value,
   `negative-<param>` for `tr`, `tf` or `pw < 0`, and `truncated-pulse` when
-  `per > 0` and `per < tr + pw + tf` (a cycle cut short, WF:52-56; Sources
-  point 3). The reader repeats these rules (`-1`).
+  `per > 0` and `per < (tr + pw) + tf`, summed left to right as classic's
+  `tr + pw + tf` (a cycle cut short, WF:52-56; Sources point 3). The reader
+  repeats these rules (`-1`), and also requires `freq >= 1e-6` for a clock
+  and `per >= 0` for a pulse (the compiler's own output).
 
 **Section anchor record** (code 26, synthetic). The `bd90847` port (spec,
 "Deltas since the 2026-09-24 baseline"; W1f Q8). The compiler computes
@@ -554,7 +561,10 @@ node at 0 V (Rails point 1), where classic ties it to ground through 1 S
 about 1e-11 V (probe Q4). No readout is published for the record: its entry
 in `bo_engine_device_currents` is the anchor's source-KCL current (W0 point
 5, the section's shunt draw, about 0 A), and the facade gives it no
-`elementI` key.
+`elementI` key. A net that names a component absent from the circuit (an
+ownerless pin) declines `malformed:<componentId>:unknown-component`: the
+compiler never throws on a user circuit, and such a circuit stays with
+classic.
 
 `kinds.rs` (`BATTERY_PACK` to `PULSE_GEN` exist; `SECTION_ANCHOR = 26` is
 new), with `live_params: &[]` and `channel_slots: 0` throughout:
@@ -2259,6 +2269,13 @@ records"). Constants, all from P3:35-38 unless marked new:
      (probe P9: classic stays in CC, −0.1 A, up to 5.0 V). The rail then
      solves in CV at the same instant.
    - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
+   - The rules are pure functions (`devices/sources.rs`): `regime_step(reg,
+     i_at_v, u_cc, u_rail, V, iLimit)` and `regime_step_rail_cap` with the
+     same arguments. `u_cc` is the rail voltage of the CC solution, which the
+     CV → CC clamp tests (in CV the rail is `V`, so the caller computes the
+     CC candidate; passing the CV rail would make the clamp keep CV
+     forever); `u_rail` is the present rail, which the CC → CV exit tests.
+     An `iLimit` that is not `> 0` has no regime.
 
    The second condition on exit is not in classic's commit, but it gives
    classic's electrical trajectory. Classic's commit exits at 98% (reg 0),
@@ -2402,12 +2419,23 @@ records"). Constants, all from P3:35-38 unless marked new:
      n P + duty·P`, for every integer `n` with the edge time `> START_TIME`
      and `>= delay` (a negative `delay` is a phase shift, WF:20-21). Each
      time is computed from `n`, never accumulated.
-   - The level at load is `clockVoltage(START_TIME)`, computed exactly as
-     classic. At an edge event the level is the edge's own (HIGH after a
-     rising edge), never `clockVoltage` of the edge time: fmod can put an
-     edge instant on the wrong side (probe P8: `(0.011 % 0.001) / 0.001 =
+   - At an edge event the level is the edge's own (HIGH after a rising
+     edge), never `clockVoltage` of the edge time: fmod can put an edge
+     instant on the wrong side (probe P8: `(0.011 % 0.001) / 0.001 =
      0.99999...`, so classic reads LOW at t = 11 ms, where the rising edge
      is due). The two agree everywhere except on edge instants themselves.
+   - The level at load is the level after the last edge whose time (the
+     same expression as the schedule) is `<= START_TIME`, and `vLow` when
+     there is none. So every edge is either in the load level or scheduled,
+     never both and never neither. This is `clockVoltage(START_TIME)`
+     except when `START_TIME` is itself an edge instant, where fmod can read
+     the pre-edge level: a literal `clockVoltage` there would lose the edge
+     (at 1 kHz, 1,467 of 2,999 decimal-millisecond start times sit on a
+     rising edge that reads LOW, and the clock stayed LOW for its whole
+     first HIGH half-period). Classic reads that level for one solve and
+     takes the edge on its next; the core takes it at `START_TIME` (a
+     register it clocks sees the phantom edge at load instead of a real one
+     a step later: same count, the instant within the edge-instant rule).
    - At an edge (stat 19) the source's node takes the new value (Rails
      point 7), the slot updates, and the next edge is scheduled.
 
@@ -2435,7 +2463,12 @@ records"). Constants, all from P3:35-38 unless marked new:
    - **Midpoint steps.** Per cycle `c` (only `c = 0` when one-shot) from
      `td + c·per`: `v1 → v2` at `+ tr/2` (`+ 0` when `tr = 0`), `v2 → v1`
      at `+ tr + pw + tf/2` (`+ tr + pw` when `tf = 0`); `v1` before `td`.
-     Each time is computed from `c`, never accumulated. `v1 = v2`: no edge.
+     Each time is `(td + c·per) + offset`, the offset independent of `c`
+     (`tr/2`, `tr`, `(tr + pw)`, `(tr + pw) + tf/2`, `(tr + pw) + tf`), so
+     never accumulated. Events of one instant keep the schedule order, the
+     rise's before the fall's: a triangle (`pw = 0`) puts the rise's end and
+     the fall's start on one instant, and a zero-length ramp's step shares
+     its instant with the next corner. `v1 = v2`: no edge.
      `pw = 0` with `tr = tf = 0`: no edge (classic never leaves `v1`). The
      digital slot flips at the same instants classic's readout does, the
      ramp midpoints (probe P8: 0 at 0.2 µs and 1 at 0.6 µs of a 1 µs rise).
@@ -2477,10 +2510,10 @@ records"). Constants, all from P3:35-38 unless marked new:
    runs the regime rules, and a rail move over `1e-9` V or a regime change
    counts as a change of the fixed point (P3:746). So a PSU overloaded at
    load starts in CC, as classic's seed latches it (probe P5: `reg 2`, 1 V,
-   −0.1 A at load). A clock takes `clockVoltage(START_TIME)`; a pulse takes
-   the level of its edge model at `START_TIME` (the level after its last
-   step at or before it, or `pulseVoltage(START_TIME)` inside a resolved
-   ramp). A register such a source clocks sees classic's phantom edge if
+   −0.1 A at load). A clock takes the level after its last edge at or
+   before `START_TIME` (point 2); a pulse takes the level of its edge model
+   at `START_TIME` (the level after its last event at or before it, or
+   `pulseVoltage(START_TIME)` inside a resolved ramp). A register such a source clocks sees classic's phantom edge if
    that level is HIGH. No SoC advances. The rail and source events are
    scheduled after settling.
 
