@@ -68,6 +68,10 @@ re-pinned.
 | `df16d52` (`fix/buzzer-tone-detect`) | A passive buzzer detects its tone with a Schmitt trigger around the drive's own envelope midpoint (envelope tau 0.1 s, hysteresis 10% of the swing, silent below a 50 mV swing), not around 0 V, so a 0-5 V drive now sounds. The frequency comes from a full period (a crossing minus the one before last), each crossing timed at the START of the step that reveals it; only 20 Hz-20 kHz counts, and the tone clears two periods after the last crossing. `envHi`/`envLo` are readout-only and skipped by the step-error estimate. Physics telemetry gains `modelState` `{kind: "buzzer", buzzerType, sounding, toneHz?}` and `{kind: "speaker", sounding}`. | none (outside W1) | Port with the buzzer and speaker, with `wave6-drivers-audio.test.ts` and `physics-telemetry.test.ts` in gate 1. |
 | Q-O64 (owner decision 3; this wave, worker R8, `feat/wasm-core-w1`) | The 74LS157's `/OE` is a strobe `/G`, not a tri-state enable: `/G` HIGH now forces every `Y` LOW (`sim-engine.ts`'s `_combinationalOutputs` `/oe` short-circuit narrows to the 74LS245 alone; `digital.ts`'s `oe ? false : ...` branch, previously dead, is now reachable and drives LOW), matching the real SN74LS157 (TI SDLS058 function table). The tri-state behaviour classic used to model on this pin belongs to a different part, the 74LS257. The 74LS245 is unchanged. | 1.4, 1.7, 2.4, 2.5, 3.4, 3.6, 3.12, 3.13, 11 D5, 13.2, 13.3 G4, 12 | Ported in the same change (core: W1d). `combinational.rs`'s `mux157` returns `Some(false)` for every `Y` at `/oe = 1`; `delay.rs`'s `driver_requests` times the strobe-caused transition with the kind's own `strobe` pair (13 ns release / 14 ns force), and a data/select-caused one with param 12, the larger per direction when both fire together. |
 | Q-O24 (the Q-O24 fix, W1e step 0, worker Q24, `feat/wasm-core-w1`) | `commitLedOvercurrentStress` (`semiconductors.ts:472-508`, shared by led/bicolor_led/rgb_led) now resolves `ifMax = params.iRated ?? specs?.if_max ?? IRATED_LED` (`:481`), the same precedence the I-V stamp already used (`:374, :417, :455`), instead of the reverse. A user-set `iRated` now moves the failure latch together with the curve it already drove: raising `iRated` above the catalog `if_max` raises the point at which the part fails open, and lowering it below the catalog `if_max` fails the part sooner, in both cases matching the current the stamp actually put through the junction. Catalog-only parts (no `iRated` param) are bit-identical, since the fallback order past `iRated` is unchanged. | 6.5, 6.7, 9.5.2 | Not ported. W1e ports the limit's resolution; `led-damage-limit-irated.test.ts` joins gate 1 at W1g, which ports the latch. |
+| `7b1056d` (`fix/output-sag-direction-debounce`, merged `9dc1eb7`) | The `output_sag` debounce count carries the commanded direction in its sign (HIGH positive, LOW negative). A flip restarts it at 1, and below 2 the failure is unpublished, so a latched sag whose commanded direction flips while the pin still sags drops for one step and re-latches on the next, and an output that flips on every step never latches. A one-solve decoder glitch ("commanded LOW, pin at 5 V", then "commanded HIGH, pin at the glitch's low level") no longer latches a false sag (the S1 running item, `U41.y2n`). The signed count also enters the step-error estimate's stress map, where any count difference already clamps the step factor to 0.2. | 9.5.2, 3 | W1g, stated against this behaviour (window `W = 10 ns`, a flip restarts it). `output-sag-direction.test.ts` joins gate 1 at W1g. |
+| `fe9b38a` (`fix/resistor-default-overload`, merged `a63dac3`; Q-O27) | A resistor with no `resistance` param is rated at the 1 kΩ it is stamped with (`?? 1000` in `commitResistiveOverloadStress`), so it can overload; a fuse with no `iRating` uses the catalog's 1 A (`?? 1`), so it can trip. An explicit `iRating` of 0 is still no limit, and an explicit `resistance` of 0 still reads 0 W. | 7, 9.5.1 | W1g (the fuse and `ptc_fuse` records are pulled into W1g). `resistor-default-overload.test.ts` joins gate 1 there. |
+| `efceffb` (`fix/cold-start-thermal-warnings`, merged `699961a`; Q-O42) | The cold-start thermal state publishes the profile's warnings unioned with the derating warnings, the same `new Set([...profile, ...stepped])` form every step uses, so a circuit whose 1 ps seed is rejected still shows them. | 9.2, 9.3 | W1g. `thermal-cold-start-warnings.test.ts` joins gate 1 there. |
+| `d1dee17` (`fix/74ls47-released-segment-sag`, merged `60a9154`; Q-O49) | The released-pin sweep covers `open_collector` pins, so a 74LS47 segment (or an LM393 output) that stops sinking clears its `output_sag` on the next step. A released open-collector pin restarts its debounce. The 555's pin 7 is never a target, so the sweep changes nothing there. | 3, 9.5.2 | W1g (the target rule already lists only sinking pins). `ls47-released-segment-sag.test.ts` joins gate 1 there. |
 
 **Released in 0.6.0.** brownout 0.6.0 (tag `v0.6.0`) released six of the
 rows above: `bd90847`, `2c6ba7d`, `990232e`, `fccd8bd`/`3497700`,
@@ -79,6 +83,14 @@ on its tip. So classic behaviour on this branch is unchanged by it, and no
 row above moves. Q-O26 (`spdt-switch-current`), Q-O64 (the 74LS157
 strobe) and Q-O24 (the LED damage limit) are not in 0.6.0: they ship with
 1.0.0.
+
+**For 0.6.1.** The four rows `7b1056d`, `fe9b38a`, `efceffb` and `d1dee17`
+are owner-approved for brownout 0.6.1, each on its own branch off `v0.6.0`
+with its own patch changeset; this branch merged each tip as it will be
+released. The classic-only corpus sweep is identical before and after every
+one of the four merges (134 of 134 entries, failure and warning sets
+included): no corpus circuit reaches these paths in its sampled window. The
+SAP-1 S1 running board is where the first one shows.
 
 **Where shared mechanics are specified.** Other chapters point here instead of
 repeating them.
@@ -474,7 +486,8 @@ high   = n < pHigh
     hook. No kind in this area has such a hook.
   - When powered, `_drivenOutputTargets` (`:6259+`) lists the driven pins. A
     HIGH pin sags when `V - gnd < vih`; a LOW pin sags when `V - gnd > vil`.
-  - The failure latches after 2 steps (`:118`) and clears when the condition
+  - The failure latches after 2 steps in one commanded direction (`:118`,
+    `7b1056d`) and clears when the condition
     clears. Pins that are no longer driven are cleared (`:6222-6231`), and
     everything is cleared while unpowered (`:6240-6257`). Full rules in §9.5.2.
   - The ULN case never runs, because ULN has no `vcc_range`.
@@ -1285,9 +1298,10 @@ The general order is in §10.5. For these kinds:
   - Combinational kinds: every output with its delayed level (`6271-6285`).
   - 74ls47: only sinking pins, with `high:false` (`6286-6293`).
   - cd4511: `evalCD4511` of the just-committed latch (`6367-6373`).
-- A released 74ls47 `open_collector` segment is not in the cleanup loop's
-  function list (output/io/tri_state, `6231-6239`), so a stale `output_sag`
-  persists on it (Q-O49). No other failure kind applies to these parts
+- A released 74ls47 `open_collector` segment is cleared by the cleanup loop
+  (`6231-6239`, which covers open_collector since `d1dee17`; until then a
+  stale `output_sag` persisted on it, Q-O49). No other failure kind applies
+  to these parts
   (`SimFailureKind`, `579-583`).
 - `warnings`: the producers are the flyback topology check (`5465-5504`) and
   `_recordAccumulatedWarning` (`5435-5457`). Neither fires for these kinds.
@@ -3898,14 +3912,17 @@ rgb_led :658-660; gating lines :358, :401, :441, bicolor/rgb :545, :563, :590,
 - If the part is unpowered, all sag keys are cleared (:6240-6242, :6251-6257).
 - For each driven target from `_drivenOutputTargets` (:6259-6465), the pin
   sags when HIGH is below vih or LOW is above vil. The `failureStress` value
-  counts consecutive accepted steps.
+  counts consecutive accepted steps in one commanded direction, signed
+  (HIGH positive, LOW negative); a flip of the commanded direction restarts
+  it at 1 (`7b1056d`, delta table).
 - At `seen >= OUTPUT_SAG_DEBOUNCE_STEPS = 2` (:118), the count is capped at 2
   and the failure is set again **every step** with `since = simTime+h` and
   `value = actual` (:6206-6218). Below the debounce count the failure is
   deleted while the count is kept.
 - The failure is deleted as soon as the pin stops sagging (:6225-6228) or is no
-  longer targeted (:6231-6239; only pins whose catalog function is output, io
-  or tri_state are swept). It never alters a stamp (:6193-6197).
+  longer targeted (:6231-6239; pins whose catalog function is output, io,
+  tri_state or, since `d1dee17`, open_collector are swept). It never alters
+  a stamp (:6193-6197).
 - The load seed counts as one debounce step (`failure-states.test.ts:318-353`).
   Reversibility is covered at :266-317.
 - Assembly note: the failure record is built at :6208-6218, with `limit` set to
@@ -4864,7 +4881,7 @@ kind on Ben Eater's computer.
   both engines (`c221994`, `0a0b37c`; core W1b).
 - **Q-O27** [7,9] (W1 board) A resistor with no `resistance` param stamps 1 kΩ
   but never overloads (`passives.ts:107` vs `:175`); a fuse with no `iRating`
-  never trips. Mirror or fix?
+  never trips. Mirror or fix? **Fixed in classic** (`fe9b38a`, 0.6.1).
 - **Q-O28** [7] `resetFailures()` runs a 1 ps seed without restoring
   caps/inds/capsI/indsV, unlike `load()`. Must the core mirror that tiny state
   advance?
@@ -4917,7 +4934,8 @@ kind on Ben Eater's computer.
   cleared-failures regulator must still cool down physically. Deliberate?
 - **Q-O42** [9] The cold-start thermal warning set (`sim-engine.ts:2685`) does
   not union the profile warnings; it is visible after `load()` only when the
-  1 ps seed is rejected. Should the cold start union them too?
+  1 ps seed is rejected. Should the cold start union them too? **Fixed in
+  classic** (`efceffb`, 0.6.1).
 - **Q-O43** [9] What time-based rule replaces the step-counted
   `OUTPUT_SAG_DEBOUNCE_STEPS = 2`?
 - **Q-O44** [9] `output_sag` is a `SimFailureKind` but is reversible,
@@ -4934,7 +4952,8 @@ kind on Ben Eater's computer.
   same step, not the one the stamp used. Reproduce?
 - **Q-O49** [3] A released 74LS47 segment keeps a stale `output_sag`, because
   the cleanup loop sweeps only output/io/tri_state functions
-  (`sim-engine.ts:6231-6239`). Reproduce or fix?
+  (`sim-engine.ts:6231-6239`). Reproduce or fix? **Fixed in classic**
+  (`d1dee17`, 0.6.1).
 
 **H. Host contract**
 - **Q-O50** [10] Which tolerance defines "analog values agree within solver
