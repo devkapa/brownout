@@ -77,7 +77,7 @@ const DEFAULT_GENERATOR = "/Users/dev/Documents/DEVOLTProject/brownout-core-prot
 // ─── Constants of the acceptance ─────────────────────────────────────────────────────────────
 
 /** Bumped whenever what the classic collector records (not how it is judged) changes: it is part of the cache key. */
-const COLLECTOR_VERSION = "core-accept-sap1/collector-v1";
+const COLLECTOR_VERSION = "core-accept-sap1/collector-v2";
 
 /**
  * Gate 2a's declared offset bound. The W1-0 spike saw about 6 cycles between the prototype core and classic; two more
@@ -811,7 +811,6 @@ function collectClassicReference(board: Board, schedule: ClassicSchedule, coreHe
   let stepSum = 0;
   let steps = 0;
   let maxStep = 0;
-  let stepsSincePoll = 0;
 
   const alignOnline = (): void => {
     const trace = eventsFromColumns(keys, ev);
@@ -834,10 +833,9 @@ function collectClassicReference(board: Board, schedule: ClassicSchedule, coreHe
       pushProbe(board, probes, t, engine.digitalState, engine.getElementChannelI());
       while (nextProbe <= t) nextProbe += schedule.probeIntervalS;
     }
-    if (++stepsSincePoll >= 50) {
-      stepsSincePoll = 0;
-      noteFailures(seen, engine.getFailures(), engine.getWarnings());
-    }
+    // Every accepted step: a debounced failure can latch and clear between two polls 50 steps apart, and criterion 5
+    // judges the set seen over the whole run, so a sparse poll could miss one.
+    noteFailures(seen, engine.getFailures(), engine.getWarnings());
     if (pending && t >= pending.target) {
       if (!engine.lastConverged) throw new Error(`classic did not converge at t=${t} s: its state is not a trusted reference.`);
       snapshots.push({
