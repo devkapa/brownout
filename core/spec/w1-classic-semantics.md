@@ -84,10 +84,13 @@ row above moves. Q-O26 (`spdt-switch-current`), Q-O64 (the 74LS157
 strobe) and Q-O24 (the LED damage limit) are not in 0.6.0: they ship with
 1.0.0.
 
-**For 0.6.1.** The four rows `7b1056d`, `fe9b38a`, `efceffb` and `d1dee17`
-are owner-approved for brownout 0.6.1, each on its own branch off `v0.6.0`
-with its own patch changeset; this branch merged each tip as it will be
-released. The classic-only corpus sweep is identical before and after every
+**Released in 0.6.1.** brownout 0.6.1 released the four rows `7b1056d`,
+`fe9b38a`, `efceffb` and `d1dee17`, each on its own branch off `v0.6.0`
+with its own patch changeset, at the tips this branch had already merged
+(`9dc1eb7`, `a63dac3`, `699961a`, `60a9154`). Released main (`1dc724f`) was
+merged into `feat/wasm-core-w1` at `5498518`; that merge changed only the
+version, the changelog and the consumed changesets, so classic behaviour on
+this branch is unchanged by it. The classic-only corpus sweep is identical before and after every
 one of the four merges (134 of 134 entries, failure and warning sets
 included): no corpus circuit reaches these paths in its sampled window. The
 SAP-1 S1 running board is where the first one shows.
