@@ -501,7 +501,10 @@ also call, bit-identical.
   positive integer with blob length `1 + 2n`, every `soc_i` in `[0, 1]` and
   non-decreasing. The compiler declines
   `malformed:<componentId>:non-finite-<param>` for a non-finite resolved
-  value (a non-numeric `voltage` makes classic's OCV NaN).
+  value (a non-numeric `voltage` makes classic's OCV NaN), and
+  `malformed:<componentId>:non-finite-ocvTable` for a non-finite table
+  entry (no shipped profile has one). `depP` has no decline: every profile's
+  is a positive constant.
 - A battery param edit is a reload, as in classic; SoC carry-forward across a
   reload is W2 (§8.3.4, D25), so until then the core restarts at `soc0`.
 
@@ -561,10 +564,14 @@ node at 0 V (Rails point 1), where classic ties it to ground through 1 S
 about 1e-11 V (probe Q4). No readout is published for the record: its entry
 in `bo_engine_device_currents` is the anchor's source-KCL current (W0 point
 5, the section's shunt draw, about 0 A), and the facade gives it no
-`elementI` key. A net that names a component absent from the circuit (an
-ownerless pin) declines `malformed:<componentId>:unknown-component`: the
-compiler never throws on a user circuit, and such a circuit stays with
-classic.
+`elementI` key. An ownerless net, one none of whose pins belongs to a
+component of the circuit (only wires to absent components), declines
+`malformed:<componentId>:unknown-component` for each absent id: the anchor
+needs an owning pin, the compiler never throws on a user circuit, and
+classic loads such a circuit (it anchors the ghost net as one more
+section). A ghost pin on a net that also has a real pin still compiles, as
+before W1f, and classic anchors nothing extra for it. Before W1f an
+ownerless net compiled with no anchor; it now stays with classic.
 
 `kinds.rs` (`BATTERY_PACK` to `PULSE_GEN` exist; `SECTION_ANCHOR = 26` is
 new), with `live_params: &[]` and `channel_slots: 0` throughout:
