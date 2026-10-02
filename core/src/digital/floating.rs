@@ -12,6 +12,8 @@
 //! finishes that state over the bucket's decimal digits ([`finish`]) and
 //! never sees a component or pin id.
 
+use std::cell::Cell;
+
 use crate::digital::power::IcPower;
 use crate::digital::{IcPin, IcRecord};
 
@@ -99,12 +101,32 @@ pub fn next_bucket_boundary(t: f64) -> f64 {
 /// `openHash` or `deadHash`, already advanced over `${id}:${pin}:` or
 /// `${id}:${pin}:undefined:`.
 ///
-/// Digits are produced least-significant-first into a stack buffer and
-/// hashed in reverse, rather than allocating a decimal string, because this
-/// runs on the hot path of every open or dead-band pin read.
+/// The digits are those of one bucket, the same for every pin read inside
+/// its 10 ms, and producing them (up to twenty 64-bit divisions by ten) costs
+/// far more than hashing them (a multiply per digit), so the last bucket's
+/// digits are kept and only a read in a new bucket rebuilds them. That is a
+/// memo of a pure function of `bucket`, never of `prefix`: the result is the
+/// same whatever this thread last asked about.
 pub fn finish(prefix: u32, bucket: u64) -> u32 {
-    let mut digits = [0u8; 20]; // u64::MAX has 20 decimal digits.
-    let mut n = bucket;
+    LAST_DIGITS.with(|last| {
+        if !last.valid.get() || last.bucket.get() != bucket {
+            let (digits, start) = decimal_digits(bucket);
+            last.digits.set(digits);
+            last.start.set(start);
+            last.bucket.set(bucket);
+            last.valid.set(true);
+        }
+        let digits = last.digits.get();
+        digits[last.start.get()..].iter().fold(prefix, |h, &byte| fnv1a_step(h, byte))
+    })
+}
+
+/// The decimal digits of `n` (ASCII, most significant first) in the tail of a
+/// 20-byte buffer, and where they start (`u64::MAX` has 20 decimal digits).
+/// Produced least-significant-first into a stack buffer rather than an
+/// allocated string.
+fn decimal_digits(mut n: u64) -> ([u8; 20], usize) {
+    let mut digits = [0u8; 20];
     let mut i = digits.len();
     loop {
         i -= 1;
@@ -114,7 +136,21 @@ pub fn finish(prefix: u32, bucket: u64) -> u32 {
             break;
         }
     }
-    digits[i..].iter().fold(prefix, |h, &byte| fnv1a_step(h, byte))
+    (digits, i)
+}
+
+/// The digits of the last bucket [`finish`] hashed over.
+struct LastDigits {
+    valid: Cell<bool>,
+    bucket: Cell<u64>,
+    start: Cell<usize>,
+    digits: Cell<[u8; 20]>,
+}
+
+thread_local! {
+    static LAST_DIGITS: LastDigits = const {
+        LastDigits { valid: Cell::new(false), bucket: Cell::new(0), start: Cell::new(0), digits: Cell::new([0; 20]) }
+    };
 }
 
 /// `_floatingLogicHigh` (spec §1.5, sim-engine.ts:5029-5035): the coin flip
@@ -348,5 +384,31 @@ mod tests {
         let mut driven = pin_at(1, false, false);
         driven.floating_input = true;
         assert_eq!(pull(&ic, &power, &driven, 0.0), None);
+    }
+    #[test]
+    fn finish_over_the_remembered_digits_equals_the_hash_of_the_decimal_string() {
+        // The memo in `finish` must never change a result, whatever bucket the
+        // previous call left behind: every call checked against the FNV-1a of
+        // the bucket's `to_string`, with buckets revisited, alternated between
+        // and stepped across every digit-count boundary.
+        let prefixes = [fnv1a("u1:1b:"), fnv1a("u1:1b:undefined:"), 0, 0x811c_9dc5, u32::MAX];
+        let mut buckets = vec![0u64, 1, 9, 10, 11, 99, 100, 101, 999, 1000, u32::MAX as u64, u32::MAX as u64 + 1, u64::MAX - 1, u64::MAX];
+        let mut power = 1u64;
+        while let Some(next) = power.checked_mul(10) {
+            buckets.extend([power - 1, power, power + 1]);
+            power = next;
+        }
+        let expected = |prefix: u32, bucket: u64| bucket.to_string().bytes().fold(prefix, fnv1a_step);
+        for round in 0..3 {
+            for (i, &bucket) in buckets.iter().enumerate() {
+                let bucket = if round == 1 { buckets[buckets.len() - 1 - i] } else { bucket };
+                for &prefix in &prefixes {
+                    assert_eq!(finish(prefix, bucket), expected(prefix, bucket), "prefix {prefix:#x}, bucket {bucket}, round {round}");
+                    // The same bucket again, and a different one in between.
+                    assert_eq!(finish(prefix, bucket), expected(prefix, bucket));
+                    assert_eq!(finish(prefix, bucket ^ 1), expected(prefix, bucket ^ 1));
+                }
+            }
+        }
     }
 }

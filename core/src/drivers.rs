@@ -377,6 +377,21 @@ impl Driver {
         t.schedule.map(|(due, mode)| (due, mode, self.token))
     }
 
+    /// Whether [`Self::request`] for `level` would change nothing and
+    /// schedule nothing: the two inert rows of [`fsm::request`] (the level
+    /// already committed with no transition in flight, or a transition
+    /// already on its way to exactly `level`). The kernel skips both the
+    /// call and the rollback journal's save of the driver for such a request,
+    /// which is most of them: a reader re-evaluated because a neighbour moved
+    /// usually asks for what it already asked.
+    pub fn request_is_noop(&self, level: Mode) -> bool {
+        match self.committed {
+            None => false,
+            Some(committed) if committed == level => self.pending.is_none(),
+            Some(_) => self.pending.is_some_and(|p| p.target == level),
+        }
+    }
+
     /// Applies a popped `Commit { mode, token }` event. Returns `true` only
     /// when the committed level actually changed, which is the caller's
     /// (`kernel.rs`'s) signal to mark this driver's partition dirty.
@@ -704,5 +719,48 @@ mod tests {
         assert_eq!(d.committed(), Some(Hiz));
         assert!(!d.apply_commit(mode, stale_token), "the now-stale HIGH commit must never apply");
         assert_eq!(d.committed(), Some(Hiz));
+    }
+    // ---- Driver::request_is_noop ------------------------------------------
+
+    #[test]
+    fn request_is_noop_agrees_with_request_over_every_state_and_level() {
+        // The kernel skips a request `request_is_noop` calls inert, and skips
+        // its journal save with it, so the predicate must be true exactly when
+        // `request` would leave the driver bit for bit as it is and schedule
+        // nothing. Every committed level (and none), every in-flight target
+        // (and none), every requested level, and an unremarkable token.
+        let modes = [Hiz, High, Low];
+        let committeds = [None, Some(Hiz), Some(High), Some(Low)];
+        let pendings = [None, Some(Hiz), Some(High), Some(Low)];
+        let mut inert = 0;
+        let mut active = 0;
+        for &committed in &committeds {
+            for &pending_target in &pendings {
+                for &level in &modes {
+                    let mut d = Driver::new(1, 2, 3, 1.0 / 50.0, 1.0, 0.0);
+                    d.committed = committed;
+                    d.pending = pending_target.map(|target| Pending { target, due: 12.5 });
+                    d.token = 41;
+                    let predicted = d.request_is_noop(level);
+
+                    let mut after = d;
+                    let scheduled = after.request(level, 10.0, &distinct_delays());
+                    let unchanged = after.committed == d.committed && after.pending == d.pending && after.token == d.token;
+                    assert_eq!(
+                        predicted,
+                        unchanged && scheduled.is_none(),
+                        "committed {committed:?}, pending {pending_target:?}, requested {level:?}: request left the driver {} and scheduled {scheduled:?}",
+                        if unchanged { "as it was" } else { "changed" }
+                    );
+                    if predicted {
+                        inert += 1;
+                    } else {
+                        active += 1;
+                    }
+                }
+            }
+        }
+        // Both answers occur, so the comparison above is not vacuous.
+        assert!(inert > 0 && active > 0, "inert {inert}, active {active}");
     }
 }

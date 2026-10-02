@@ -23,7 +23,7 @@ use crate::kinds;
 /// variant per kind. `Clone` so `devices::ics::IcEntry` (which owns one per
 /// device) rolls back with a failed instant, same as every other piece of
 /// per-device evaluator state (`core/README.md`, "A failed advance").
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SeqState {
     /// 74ls161: the 4-bit count (0-15) and the clock's read level at the
     /// device's last LIVE evaluation.
@@ -69,7 +69,14 @@ fn combine_causes(causes: &[(f64, f64)], first: (f64, f64)) -> (f64, f64) {
 /// ~335-397). Logic pins (README's sequential table): `/clr clk /load enp
 /// ent a b c d` (0-8, read), `qa qb qc qd rco` (9-13, driven). Delay tail
 /// (README's "IC delay tail"): `clkQ, clrQ, clkRco, entRco`.
+#[cfg(test)]
 fn eval_161(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    eval_161_into(ic, count, last_clk, reads, last_reads, edges_live, &mut out);
+    out
+}
+
+fn eval_161_into(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, out: &mut FamilyOutput) {
     let clr_low = !reads[0];
     let clk_now = reads[1];
     let load_low = !reads[2];
@@ -115,8 +122,8 @@ fn eval_161(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], 
     // Q cause: clrQ when the clear changed the count, else clkQ (delays
     // point 3's table; clkQ is also this kind's first pair, the fallback
     // for "no identified cause").
-    let q_causes: Vec<(f64, f64)> = if clear_applied && count_changed { vec![ic.delays[1]] } else { vec![] };
-    let (q_lh, q_hl) = combine_causes(&q_causes, ic.delays[0]);
+    let q_causes: &[(f64, f64)] = if clear_applied && count_changed { std::slice::from_ref(&ic.delays[1]) } else { &[] };
+    let (q_lh, q_hl) = combine_causes(q_causes, ic.delays[0]);
 
     // RCO cause: clkRco when the count changed on an edge; clrQ on a clear;
     // entRco when this evaluation's ENT read differs from lastReads (target
@@ -127,17 +134,21 @@ fn eval_161(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], 
     // point 3's "several causes: the larger figure per direction wins" must
     // see both.
     let ent_changed = last_reads.is_some_and(|lr| lr[4] != ent_high);
-    let mut rco_causes: Vec<(f64, f64)> = Vec::new();
+    let mut rco_causes = [(0.0, 0.0); 3];
+    let mut rco_cause_count = 0;
     if edge_applied && count_changed {
-        rco_causes.push(ic.delays[2]); // clkRco
+        rco_causes[rco_cause_count] = ic.delays[2]; // clkRco
+        rco_cause_count += 1;
     }
     if clear_applied {
-        rco_causes.push(ic.delays[1]); // clrQ
+        rco_causes[rco_cause_count] = ic.delays[1]; // clrQ
+        rco_cause_count += 1;
     }
     if ent_changed {
-        rco_causes.push(ic.delays[3]); // entRco
+        rco_causes[rco_cause_count] = ic.delays[3]; // entRco
+        rco_cause_count += 1;
     }
-    let (rco_lh, rco_hl) = combine_causes(&rco_causes, ic.delays[0]);
+    let (rco_lh, rco_hl) = combine_causes(&rco_causes[..rco_cause_count], ic.delays[0]);
 
     // qa..qd and rco are always driven (no enable pin on a 161): fill the
     // unselectable zh/zl/hz/lz slots with the kind's first pair, never 0
@@ -156,13 +167,13 @@ fn eval_161(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], 
     let rco = new_count == 15 && ent_high;
 
     let level = |b: bool| if b { Mode::High } else { Mode::Low };
-    FamilyOutput {
-        // Pin order (output_capable): qa qb qc qd rco.
-        requests: vec![(level(qa), q_delay), (level(qb), q_delay), (level(qc), q_delay), (level(qd), q_delay), (level(rco), rco_delay)],
-        // Slot order (README): the bare count, then qa..qd — no rco slot.
-        slots: vec![new_count as f64, qa as u8 as f64, qb as u8 as f64, qc as u8 as f64, qd as u8 as f64],
-        timers: Vec::new(),
-    }
+    out.requests.clear();
+    // Pin order (output_capable): qa qb qc qd rco.
+    out.requests.extend([(level(qa), q_delay), (level(qb), q_delay), (level(qc), q_delay), (level(qd), q_delay), (level(rco), rco_delay)]);
+    out.slots.clear();
+    // Slot order (README): the bare count, then qa..qd — no rco slot.
+    out.slots.extend([new_count as f64, qa as u8 as f64, qb as u8 as f64, qc as u8 as f64, qd as u8 as f64]);
+    out.timers.clear();
 }
 
 /// 74LS173: quad D register, 3-state (README points 5-6; classic
@@ -170,7 +181,14 @@ fn eval_161(ic: &IcRecord, count: &mut u8, last_clk: &mut bool, reads: &[bool], 
 /// (0-9, read), `q1 q2 q3 q4` (10-13, driven). The pin named `/clr` is
 /// tested active HIGH (classic, matching the real 74LS173's active-HIGH
 /// CLR). Delay tail: `clkQ, clrQ, mnEnable, mnDisable`.
+#[cfg(test)]
 fn eval_173(ic: &IcRecord, q: &mut [bool; 4], last_clk: &mut bool, reads: &[bool], edges_live: bool) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    eval_173_into(ic, q, last_clk, reads, edges_live, &mut out);
+    out
+}
+
+fn eval_173_into(ic: &IcRecord, q: &mut [bool; 4], last_clk: &mut bool, reads: &[bool], edges_live: bool, out: &mut FamilyOutput) {
     let clr_high = reads[0];
     let clk_now = reads[1];
     let m_high = reads[2];
@@ -196,8 +214,8 @@ fn eval_173(ic: &IcRecord, q: &mut [bool; 4], last_clk: &mut bool, reads: &[bool
     }
 
     let q_changed = *q != old_q;
-    let causes: Vec<(f64, f64)> = if clear_applied && q_changed { vec![ic.delays[1]] } else { vec![] };
-    let (lh, hl) = combine_causes(&causes, ic.delays[0]);
+    let causes: &[(f64, f64)] = if clear_applied && q_changed { std::slice::from_ref(&ic.delays[1]) } else { &[] };
+    let (lh, hl) = combine_causes(causes, ic.delays[0]);
     let mn_enable = ic.delays[2];
     let mn_disable = ic.delays[3];
     let delay = DelaySet { lh, hl, zh: mn_enable.0, zl: mn_enable.1, hz: mn_disable.0, lz: mn_disable.1 };
@@ -208,13 +226,13 @@ fn eval_173(ic: &IcRecord, q: &mut [bool; 4], last_clk: &mut bool, reads: &[bool
     let tri_stated = m_high || n_high;
     let level = |bit: bool| if tri_stated { Mode::Hiz } else if bit { Mode::High } else { Mode::Low };
 
-    FamilyOutput {
-        requests: vec![(level(q[0]), delay), (level(q[1]), delay), (level(q[2]), delay), (level(q[3]), delay)],
-        // The register, not the tri-stated pin view (README point 8: "the
-        // 173 shows its register while M or N tri-states the pins").
-        slots: vec![q[0] as u8 as f64, q[1] as u8 as f64, q[2] as u8 as f64, q[3] as u8 as f64],
-        timers: Vec::new(),
-    }
+    out.requests.clear();
+    out.requests.extend([(level(q[0]), delay), (level(q[1]), delay), (level(q[2]), delay), (level(q[3]), delay)]);
+    out.slots.clear();
+    // The register, not the tri-stated pin view (README point 8: "the 173
+    // shows its register while M or N tri-states the pins").
+    out.slots.extend([q[0] as u8 as f64, q[1] as u8 as f64, q[2] as u8 as f64, q[3] as u8 as f64]);
+    out.timers.clear();
 }
 
 /// One 74HC74 flip-flop's update (contract point 5) and target (point 6).
@@ -267,6 +285,7 @@ fn eval_hc74_unit(clr_low: bool, pre_low: bool, clk_now: bool, d: bool, edges_li
 /// classic `digital-ics.ts` ~615-753). Logic pins: `clr1_n d1 clk1 pre1_n`
 /// (0-3), `q1 q1_n q2_n q2` (4-7, driven — NOT the order the slots use),
 /// `pre2_n clk2 d2 clr2_n` (8-11). Delay tail: `clkQ, preClrQ`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn eval_74hc74(
     ic: &IcRecord,
@@ -279,6 +298,24 @@ fn eval_74hc74(
     reads: &[bool],
     edges_live: bool,
 ) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    eval_74hc74_into(ic, q1, q1n, last_clk1, q2, q2n, last_clk2, reads, edges_live, &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_74hc74_into(
+    ic: &IcRecord,
+    q1: &mut bool,
+    q1n: &mut bool,
+    last_clk1: &mut bool,
+    q2: &mut bool,
+    q2n: &mut bool,
+    last_clk2: &mut bool,
+    reads: &[bool],
+    edges_live: bool,
+    out: &mut FamilyOutput,
+) {
     let clr1_low = !reads[0];
     let d1 = reads[1];
     let clk1_now = reads[2];
@@ -295,25 +332,25 @@ fn eval_74hc74(
     // kind's first pair (clkQ), same reasoning as the 161's Q/RCO.
     let filler = ic.delays[0];
     let delay_for = |async_applied: bool| {
-        let causes: Vec<(f64, f64)> = if async_applied { vec![ic.delays[1]] } else { vec![] };
-        let (lh, hl) = combine_causes(&causes, ic.delays[0]);
+        let causes: &[(f64, f64)] = if async_applied { std::slice::from_ref(&ic.delays[1]) } else { &[] };
+        let (lh, hl) = combine_causes(causes, ic.delays[0]);
         DelaySet { lh, hl, zh: filler.0, zl: filler.1, hz: filler.0, lz: filler.1 }
     };
     let d1_delay = delay_for(async1);
     let d2_delay = delay_for(async2);
 
     let level = |b: bool| if b { Mode::High } else { Mode::Low };
-    FamilyOutput {
-        // Pin order (output_capable): q1 q1_n q2_n q2 -- the TARGET (the
-        // live async override during a frozen pass, contract point 6), not
-        // necessarily the stored state.
-        requests: vec![(level(q1_target), d1_delay), (level(q1n_target), d1_delay), (level(q2n_target), d2_delay), (level(q2_target), d2_delay)],
-        // Slot order (README, "classic's key order"): q1 q1_n q2 q2_n --
-        // ALWAYS the stored register (point 8), never the frozen-settle
-        // target, since `eval_hc74_unit` never writes `q`/`qn` while frozen.
-        slots: vec![*q1 as u8 as f64, *q1n as u8 as f64, *q2 as u8 as f64, *q2n as u8 as f64],
-        timers: Vec::new(),
-    }
+    out.requests.clear();
+    // Pin order (output_capable): q1 q1_n q2_n q2 -- the TARGET (the live
+    // async override during a frozen pass, contract point 6), not
+    // necessarily the stored state.
+    out.requests.extend([(level(q1_target), d1_delay), (level(q1n_target), d1_delay), (level(q2n_target), d2_delay), (level(q2_target), d2_delay)]);
+    out.slots.clear();
+    // Slot order (README, "classic's key order"): q1 q1_n q2 q2_n -- ALWAYS
+    // the stored register (point 8), never the frozen-settle target, since
+    // `eval_hc74_unit` never writes `q`/`qn` while frozen.
+    out.slots.extend([*q1 as u8 as f64, *q1n as u8 as f64, *q2 as u8 as f64, *q2n as u8 as f64]);
+    out.timers.clear();
 }
 
 /// One evaluation of a powered 161/173/74hc74 (contract point 3): `reads` is
@@ -324,12 +361,22 @@ fn eval_74hc74(
 /// entirely"), `now` the current simulation time (unused: none of these
 /// three kinds schedules a timer).
 pub fn evaluate(ic: &IcRecord, state: &mut SeqState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    evaluate_into(ic, state, reads, last_reads, edges_live, now, &mut out);
+    out
+}
+
+/// [`evaluate`], replacing the contents of `out` (the caller's reusable
+/// buffers) instead of returning a fresh [`FamilyOutput`]: this runs once per
+/// affected reader per delta, and the three vectors are the whole of its
+/// allocation.
+pub fn evaluate_into(ic: &IcRecord, state: &mut SeqState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64, out: &mut FamilyOutput) {
     let _ = now;
     match (ic.kind, state) {
-        (kinds::IC_74LS161, SeqState::Ls161 { count, last_clk }) => eval_161(ic, count, last_clk, reads, last_reads, edges_live),
-        (kinds::IC_74LS173, SeqState::Ls173 { q, last_clk }) => eval_173(ic, q, last_clk, reads, edges_live),
+        (kinds::IC_74LS161, SeqState::Ls161 { count, last_clk }) => eval_161_into(ic, count, last_clk, reads, last_reads, edges_live, out),
+        (kinds::IC_74LS173, SeqState::Ls173 { q, last_clk }) => eval_173_into(ic, q, last_clk, reads, edges_live, out),
         (kinds::IC_74HC74, SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 }) => {
-            eval_74hc74(ic, q1, q1n, last_clk1, q2, q2n, last_clk2, reads, edges_live)
+            eval_74hc74_into(ic, q1, q1n, last_clk1, q2, q2n, last_clk2, reads, edges_live, out)
         }
         (kind, _) => panic!("sequential::evaluate: {kind} is not a sequential IC kind (70-72), or its state does not match"),
     }
@@ -701,7 +748,7 @@ mod tests {
     fn hc74_frozen_settle_drives_the_request_without_writing_any_state() {
         let ic = ic_74hc74();
         let before = SeqState::Hc74 { q1: false, q1n: true, last_clk1: true, q2: false, q2n: true, last_clk2: false };
-        let mut state = before.clone();
+        let mut state = before;
         let (q1, q1n, lc1, q2, q2n, lc2) = match &mut state {
             SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => (q1, q1n, last_clk1, q2, q2n, last_clk2),
             _ => unreachable!(),
@@ -788,5 +835,41 @@ mod tests {
             SeqState::power_on(&ic_74hc74()),
             SeqState::Hc74 { q1: false, q1n: true, last_clk1: false, q2: false, q2n: true, last_clk2: false }
         );
+    }
+    #[test]
+    fn evaluate_into_over_one_reused_output_matches_evaluate_across_kinds_states_and_reads() {
+        // One `FamilyOutput` for all three kinds and many passes, each pass
+        // checked against a fresh `evaluate` from a copy of the same state:
+        // neither the request/slot vectors' leftovers nor their lengths may
+        // reach a result, and the state each leaves behind must be the same.
+        let kinds_and_records = [(ic_161(), 14usize), (ic_173(), 14), (ic_74hc74(), 12)];
+        let mut seed = 0x1234_5679u32;
+        let mut bit = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed & 0x40 != 0
+        };
+        let junk = FamilyOutput { requests: vec![(Mode::High, DelaySet::uniform(1.0)); 9], slots: vec![7.0; 9], timers: vec![(1.0, 2)] };
+        let mut reused = junk.clone();
+        for (ic, len) in &kinds_and_records {
+            let mut state = SeqState::power_on(ic);
+            let mut last: Option<Vec<bool>> = None;
+            for pass in 0..300 {
+                let reads: Vec<bool> = (0..*len).map(|_| bit()).collect();
+                let edges_live = pass % 7 != 0;
+                let mut fresh_state = state;
+                let expected = evaluate(ic, &mut fresh_state, &reads, last.as_deref(), edges_live, 0.0);
+                if pass % 2 == 0 {
+                    // Every other pass starts from leftovers no evaluation
+                    // wrote; the rest reuse what the previous one left.
+                    reused = junk.clone();
+                }
+                evaluate_into(ic, &mut state, &reads, last.as_deref(), edges_live, 0.0, &mut reused);
+                assert_eq!(reused, expected, "kind {}, pass {pass}", ic.kind);
+                assert_eq!(state, fresh_state, "kind {}, pass {pass}: the state left behind", ic.kind);
+                last = Some(reads);
+            }
+        }
     }
 }

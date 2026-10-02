@@ -27,6 +27,7 @@
 //! module's; this file only creates the `Driver`s and answers what they
 //! should request each delta.
 
+use crate::digital::power::IcPower;
 use crate::digital::{self, IcRecord};
 use crate::drivers::{DelaySet, Driver, DriverStage};
 use crate::events::{DeviceId, DriverId, Mode};
@@ -57,18 +58,24 @@ impl Clone for Family {
     fn clone(&self) -> Self {
         match self {
             Family::Combinational { schmitt_state } => Family::Combinational { schmitt_state: schmitt_state.clone() },
-            Family::Sequential(state) => Family::Sequential(state.clone()),
+            Family::Sequential(state) => Family::Sequential(*state),
             Family::Memory(state) => Family::Memory(state.clone()),
             Family::Ne555(state) => Family::Ne555(state.clone()),
         }
     }
 
-    /// Reuses the Schmitt vector's storage when both sides are combinational,
-    /// which is what lets the rollback journal save a pre-image without
-    /// allocating once its pool has warmed up.
+    /// The rollback journal refills a pre-image of the same variant every
+    /// time (an IC's family never changes). The Schmitt vector's storage is
+    /// reused, and a register's or 555's state is a plain copy. A memory's is
+    /// overwritten whole by its derived `clone` (a 189's 16 nibbles are
+    /// copied; an EEPROM's image is an `Rc`, so the pre-image shares it
+    /// copy-on-write, as the old pool did), not refilled in place.
     fn clone_from(&mut self, source: &Self) {
         match (&mut *self, source) {
             (Family::Combinational { schmitt_state: to }, Family::Combinational { schmitt_state: from }) => to.clone_from(from),
+            (Family::Sequential(to), Family::Sequential(from)) => *to = *from,
+            (Family::Ne555(to), Family::Ne555(from)) => *to = *from,
+            (Family::Memory(to), Family::Memory(from)) => to.clone_from(from),
             _ => *self = source.clone(),
         }
     }
@@ -104,24 +111,131 @@ struct IcEntry {
     /// count, and a different meaning per index, from `output_drivers.len()`
     /// (a 161 has 5 output-capable pins — `qa..qd rco` — but 5 slots keyed
     /// `<id> qa qb qc qd`: the bare count has no driver of its own, and
-    /// `rco` has no slot at all). Left empty (and unused) for a
-    /// combinational entry, whose slots instead come from driver levels,
-    /// exactly as W1c already did.
+    /// `rco` has no slot at all). For a combinational entry it is sized the
+    /// same way (the kind's slot count, one per output-capable pin) but is
+    /// all NaN and never written or read: its slots instead come from driver
+    /// levels, exactly as W1c already did.
     family_slots: Vec<f64>,
     /// Whether the open rollback window's journal already holds this IC's
-    /// pre-image.
+    /// pre-image (`saved`).
     journaled: bool,
+    /// The pre-image, valid while `journaled`.
+    saved: Saved,
+    /// Whether an evaluation can write anything of this IC but its
+    /// `last_reads`, so whether the pre-image must carry `family` and
+    /// `family_slots` too. Not the case for a combinational IC without
+    /// hysteresis: it keeps no per-pin state (`Family::Combinational`'s
+    /// `schmitt_state` is written only by a Schmitt part's reads) and writes
+    /// no slot readout (its `family_slots` stay the NaN vector `register`
+    /// made, unread), so those two never change.
+    saves_state: bool,
     /// The bits of every digital slot this IC owns (`record.slot_base + i`)
     /// as `on_settled` last handed them to the kernel; see
     /// [`IcEvaluator::on_settled`].
     published: Vec<u64>,
+    /// Whether this IC was powered at the last `on_settled` call, kept exact
+    /// (`IcEvaluator::on_settled`'s supply scan moves it whenever a supply
+    /// node's voltage does), so a powered check costs no arithmetic there.
+    powered: bool,
+    /// Whether this IC is on `IcEvaluator::dirty`, the list of ICs whose
+    /// published slots the next `on_settled` must re-derive.
+    dirty: bool,
+    /// The supply voltages' bits `power` was derived from, and the result:
+    /// `digital::power::ic_power` is a pure function of them, so an
+    /// evaluation whose supply has not moved (almost all of them) reuses it.
+    power_key: Option<(u64, u64)>,
+    power: IcPower,
+}
+
+/// One node some IC takes its supply from (`vcc` or `gnd`), with the ICs that
+/// do and the bits of the voltage `on_settled` last saw on it. A supply
+/// almost never moves, so watching these few nodes replaces asking every IC
+/// whether it is still powered.
+#[derive(Debug)]
+struct SupplyNode {
+    node: usize,
+    bits: u64,
+    ics: Vec<u32>,
+}
+
+impl IcEntry {
+    /// Appends this IC's changed slots to `out` and records them as
+    /// published; `all` publishes every one regardless (the first call).
+    fn publish(&mut self, drivers: &[Driver], all: bool, out: &mut Vec<(usize, f64)>) {
+        slot_writes(&self.family, &self.output_drivers, &self.family_slots, self.record.slot_base, &mut self.published, self.powered, drivers, all, out);
+    }
+}
+
+/// The slots of one IC whose value differs from the bits in `published` (or
+/// every one, when `all`), in slot order, with `published` updated to match.
+///
+/// Contract point 10 ("Readouts") for the combinational family: a digital
+/// slot holds the pin's committed level while driven (1.0 HIGH, 0.0 LOW — an
+/// `OPEN_COLLECTOR` pin released HIGH reads exactly like a push-pull HIGH
+/// here, since its `Driver::committed()` is `Some(High)` regardless of
+/// whether the solver's own stamp then releases it or drives it — point 8's
+/// electrical distinction, not a readout one) and `NaN` while the IC is
+/// unpowered or the driver is uncommitted/reset (`None`) or mid-HIZ
+/// (`Some(Hiz)`, unreachable in practice — `digital::delay::driver_requests`
+/// never requests it — but handled rather than assumed impossible).
+///
+/// W1d sequential point 8 / memories point 6 for the other families: a slot
+/// holds the evaluator's OWN view from its latest evaluation (`family_slots`,
+/// already NaN while unpowered — see `IcEvaluator::evaluate`'s own doc
+/// comment), not a driver's committed level at all — `powered` is still
+/// applied here too, defensively, for parity with the combinational branch's
+/// identical belt-and-suspenders read of live power state rather than
+/// trusting a value computed earlier in the same instant.
+#[allow(clippy::too_many_arguments)]
+fn slot_writes(
+    family: &Family,
+    output_drivers: &[DriverId],
+    family_slots: &[f64],
+    slot_base: usize,
+    published: &mut [u64],
+    powered: bool,
+    drivers: &[Driver],
+    all: bool,
+    out: &mut Vec<(usize, f64)>,
+) {
+    match family {
+        Family::Combinational { .. } => {
+            for (i, &driver_id) in output_drivers.iter().enumerate() {
+                let value = if !powered {
+                    f64::NAN
+                } else {
+                    match drivers[driver_id.0 as usize].committed() {
+                        Some(Mode::High) => 1.0,
+                        Some(Mode::Low) => 0.0,
+                        Some(Mode::Hiz) | None => f64::NAN,
+                    }
+                };
+                if all || value.to_bits() != published[i] {
+                    published[i] = value.to_bits();
+                    out.push((slot_base + i, value));
+                }
+            }
+        }
+        Family::Sequential(_) | Family::Memory(_) | Family::Ne555(_) => {
+            for (i, &value) in family_slots.iter().enumerate() {
+                let value = if powered { value } else { f64::NAN };
+                if all || value.to_bits() != published[i] {
+                    published[i] = value.to_bits();
+                    out.push((slot_base + i, value));
+                }
+            }
+        }
+    }
 }
 
 /// One IC's pre-image, taken before the first thing an instant wrote to it:
 /// exactly the state `snapshot` used to clone for every IC at every instant.
-#[derive(Debug)]
+/// It lives inside the IC's own entry (`IcEntry::saved`) and is only
+/// meaningful while `IcEntry::journaled` is set, so taking one refills
+/// storage that is already there instead of moving a record in and out of a
+/// pool.
+#[derive(Debug, Clone)]
 struct Saved {
-    at: usize,
     family: Family,
     last_reads: Option<Vec<bool>>,
     family_slots: Vec<f64>,
@@ -159,17 +273,32 @@ pub struct IcEvaluator {
     /// `rollback_instant`): only then does a write to an IC save its
     /// pre-image first.
     journaling: bool,
-    /// The pre-images of the ICs written in the open window, one each
-    /// (`IcEntry::journaled`).
-    journal: Vec<Saved>,
-    /// Pre-image records from finished windows, kept with their storage so
-    /// the next window's saves allocate nothing.
-    spare: Vec<Saved>,
+    /// The positions in `ics` of the ICs written in the open window, one
+    /// each, whose pre-images are in `IcEntry::saved` (`IcEntry::journaled`).
+    journal: Vec<u32>,
     /// Scratch for one evaluation's pin reads.
     levels: Vec<bool>,
+    /// Scratch for a combinational evaluation's truth-table result.
+    results: Vec<Option<bool>>,
+    /// Scratch for a sequential or memory evaluation's result.
+    family_out: digital::FamilyOutput,
     /// Whether `on_settled` has published yet: its first call hands the
     /// kernel every slot, later ones only what changed.
     published_once: bool,
+    /// Positions in `ics` whose published slots `on_settled` must re-derive:
+    /// an IC joins when a driver of its own commits or resets
+    /// ([`DeviceEvaluator::driver_changed`]), when one that keeps its readout
+    /// in `family_slots` is evaluated, and when its supply crosses its power
+    /// window. `IcEntry::dirty` marks membership.
+    dirty: Vec<u32>,
+    /// `DriverId -> position in `ics``, `u32::MAX` for a driver no IC owns.
+    driver_owner: Vec<u32>,
+    /// Every distinct supply node of every IC; see [`SupplyNode`].
+    supplies: Vec<SupplyNode>,
+    /// How many ICs `on_settled_into`'s incremental path has looked at, for
+    /// the tests that pin its cost to what changed.
+    #[cfg(test)]
+    visited: u64,
 }
 
 impl IcEvaluator {
@@ -179,15 +308,49 @@ impl IcEvaluator {
         for (at, entry) in ics.iter().enumerate() {
             position_of_device[entry.device_index] = at as u32;
         }
+        let driver_count = ics.iter().flat_map(|e| e.output_drivers.iter()).map(|d| d.0 as usize + 1).max().unwrap_or(0);
+        let mut driver_owner = vec![u32::MAX; driver_count];
+        let mut supply_uses: Vec<(usize, u32)> = Vec::new();
+        for (at, entry) in ics.iter().enumerate() {
+            for driver in &entry.output_drivers {
+                driver_owner[driver.0 as usize] = at as u32;
+            }
+            supply_uses.push((entry.record.vcc.node, at as u32));
+            supply_uses.push((entry.record.gnd.node, at as u32));
+        }
+        supply_uses.sort_unstable();
+        supply_uses.dedup();
+        let mut supplies: Vec<SupplyNode> = Vec::new();
+        for (node, at) in supply_uses {
+            match supplies.last_mut() {
+                Some(last) if last.node == node => last.ics.push(at),
+                _ => supplies.push(SupplyNode { node, bits: 0, ics: vec![at] }),
+            }
+        }
         IcEvaluator {
             ics,
             evaluations: 0,
             position_of_device,
             journaling: false,
             journal: Vec::new(),
-            spare: Vec::new(),
             levels: Vec::new(),
+            results: Vec::new(),
+            family_out: digital::FamilyOutput::default(),
             published_once: false,
+            dirty: Vec::new(),
+            driver_owner,
+            supplies,
+            #[cfg(test)]
+            visited: 0,
+        }
+    }
+
+    /// Adds IC `at` to the list `on_settled` re-derives, once.
+    fn mark_dirty(&mut self, at: usize) {
+        let entry = &mut self.ics[at];
+        if !entry.dirty {
+            entry.dirty = true;
+            self.dirty.push(at as u32);
         }
     }
 
@@ -207,27 +370,175 @@ impl IcEvaluator {
             return;
         }
         entry.journaled = true;
-        let saved = match self.spare.pop() {
-            Some(mut saved) => {
-                saved.at = at;
-                saved.family.clone_from(&entry.family);
-                saved.last_reads.clone_from(&entry.last_reads);
-                saved.family_slots.clone_from(&entry.family_slots);
-                saved
-            }
-            None => Saved { at, family: entry.family.clone(), last_reads: entry.last_reads.clone(), family_slots: entry.family_slots.clone() },
-        };
-        self.journal.push(saved);
+        entry.saved.last_reads.clone_from(&entry.last_reads);
+        if entry.saves_state {
+            entry.saved.family.clone_from(&entry.family);
+            entry.saved.family_slots.clone_from(&entry.family_slots);
+        }
+        self.journal.push(at as u32);
     }
 
-    /// Closes the window, keeping every write: the pre-images go back to the
-    /// pool.
+    /// Closes the window, keeping every write: the pre-images are simply no
+    /// longer valid.
     fn end_window(&mut self) {
-        for saved in self.journal.drain(..) {
-            self.ics[saved.at].journaled = false;
-            self.spare.push(saved);
+        for &at in &self.journal {
+            self.ics[at as usize].journaled = false;
         }
+        self.journal.clear();
         self.journaling = false;
+    }
+
+    /// [`DeviceEvaluator::evaluate`]'s body. `live`, when given, is the
+    /// kernel's driver table: a request `Driver::request_is_noop` calls inert
+    /// is left out of `out` instead of built, and (kernel-side) never
+    /// journaled, applied or counted. Without it every request is kept, which
+    /// is what load settling's `evaluate` wants.
+    fn evaluate_impl(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], live: Option<&[Driver]>, out: &mut Vec<DriverRequest>) {
+        self.evaluations += 1;
+        let at = self.position(reader.0 as usize).unwrap_or_else(|| panic!("IcEvaluator: no IC registered for reader {reader:?}"));
+        if self.journaling {
+            self.save(at);
+        }
+        let entry = &mut self.ics[at];
+        let ic = &entry.record;
+        // A combinational IC's readout comes from its drivers' committed
+        // levels and its power (`on_settled`), neither of which an evaluation
+        // writes; the other families keep theirs in `family_slots`. Whether an
+        // evaluation changed one is tracked as it writes them, and puts the IC
+        // on the list `on_settled` re-derives.
+        let mut slots_changed = false;
+
+        // NE555 point 1: dispatched before any `levels::read`/power-gate/
+        // `last_reads` bookkeeping the other three families share below --
+        // it has no logic-pin read concept of its own ("no logic level...
+        // it publishes its latch instead"). `digital::ne555::evaluate`
+        // already re-derives power itself (`None` while unpowered), so this
+        // branch does its own power gate rather than sharing the one below.
+        if let Family::Ne555(state) = &mut entry.family {
+            match digital::ne555::evaluate(ic, state, voltages, acting_on_edges) {
+                None => {
+                    // Point 10: unpowered -- the slot goes NaN and nothing is
+                    // requested (drivers keep their frozen committed level
+                    // through the kernel's own power-loss hold).
+                    for s in entry.family_slots.iter_mut() {
+                        slots_changed |= set_slot(s, f64::NAN);
+                    }
+                }
+                Some(out_high) => {
+                    // Point 12: the slot holds `outHigh` at every completed
+                    // instant while powered.
+                    slots_changed |= set_slot(&mut entry.family_slots[0], if out_high { 1.0 } else { 0.0 });
+                    // Point 4: OUT HIGH/LOW as the result, DIS LOW when the
+                    // result is 0 or HIGH (released) when it is 1 -- the SAME
+                    // `Mode` for both drivers -- with DelaySet::uniform(0):
+                    // no output lag, no propagation delay.
+                    let level = if out_high { Mode::High } else { Mode::Low };
+                    let delays = DelaySet::uniform(0.0);
+                    push_level(out, live, entry.output_drivers[0], level, delays);
+                    push_level(out, live, entry.output_drivers[1], level, delays);
+                }
+            }
+            if slots_changed && !entry.dirty {
+                entry.dirty = true;
+                self.dirty.push(at as u32);
+            }
+            return;
+        }
+
+        let (v_vcc, v_gnd) = (voltages[ic.vcc.node], voltages[ic.gnd.node]);
+        let key = (v_vcc.to_bits(), v_gnd.to_bits());
+        if entry.power_key != Some(key) {
+            entry.power = digital::power::ic_power(ic, v_vcc, v_gnd);
+            entry.power_key = Some(key);
+        }
+        let power = entry.power;
+        if !power.powered {
+            // W1c contract point 9 / W1d sequential point 3 ("an unpowered
+            // device reads, writes and requests nothing, so its state and
+            // lastClk freeze") / memories points 3-4: a sequential/memory
+            // slot goes NaN while unpowered. The combinational path already
+            // returned nothing here before W1d and still does — its slots
+            // come from driver levels at `on_settled` time, not from a
+            // stored readout, so there is nothing of its own to blank here.
+            if !matches!(entry.family, Family::Combinational { .. }) {
+                for s in entry.family_slots.iter_mut() {
+                    slots_changed |= set_slot(s, f64::NAN);
+                }
+                if slots_changed && !entry.dirty {
+                    entry.dirty = true;
+                    self.dirty.push(at as u32);
+                }
+            }
+            return;
+        }
+
+        // Every logic pin's read, in pin order (W1c contract point 4).
+        // Schmitt hysteresis state only exists for the combinational
+        // family (`kinds::seq_check` rejects `schmitt = 1` on every W1d
+        // kind), so a sequential/memory read uses a throwaway per-pin
+        // scratch slot instead of a stored one.
+        let levels = &mut self.levels;
+        levels.clear();
+        if power.schmitt.is_none() {
+            // No hysteresis state to consult or write: one loop for every pin.
+            digital::levels::read_plain_into(ic, &power, voltages, now, levels);
+        } else if let Family::Combinational { schmitt_state } = &mut entry.family {
+            levels.extend(ic.logic.iter().zip(schmitt_state.iter_mut()).map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st)));
+        } else {
+            levels.extend(ic.logic.iter().map(|p| {
+                let mut scratch = false;
+                digital::levels::read(ic, &power, p, voltages[p.node], now, &mut scratch)
+            }));
+        }
+
+        // "lastReads is written at every powered evaluation, frozen-settle
+        // passes included" (W1d delays point 3) — for every family, not
+        // only sequential/memory (this entry's own doc comment on the
+        // field). The previous reads are taken out for the evaluation (which
+        // only ever sees them as its `last_reads` argument) and their storage
+        // is refilled with this evaluation's reads afterwards.
+        let previous = entry.last_reads.take();
+
+        match &mut entry.family {
+            Family::Combinational { .. } => {
+                digital::combinational::evaluate_into(ic.kind, levels, &mut self.results);
+                digital::delay::driver_requests_into(ic, &entry.output_drivers, &self.results, levels, previous.as_deref(), live, out);
+            }
+            Family::Sequential(state) => {
+                digital::sequential::evaluate_into(ic, state, levels, previous.as_deref(), acting_on_edges, now, &mut self.family_out);
+                slots_changed = store_slots(&mut entry.family_slots, &self.family_out.slots);
+                family_requests_into(entry.device_index, &entry.output_drivers, &self.family_out, live, out);
+            }
+            Family::Memory(state) => {
+                digital::memory::evaluate_into(ic, state, levels, previous.as_deref(), acting_on_edges, now, &mut self.family_out);
+                slots_changed = store_slots(&mut entry.family_slots, &self.family_out.slots);
+                family_requests_into(entry.device_index, &entry.output_drivers, &self.family_out, live, out);
+            }
+            // Returned above, before any read or `last_reads` write.
+            Family::Ne555(_) => unreachable!("a 555 is dispatched at the top of `evaluate`"),
+        }
+        if slots_changed && !entry.dirty {
+            entry.dirty = true;
+            self.dirty.push(at as u32);
+        }
+
+        let mut reads = previous.unwrap_or_default();
+        reads.clear();
+        reads.extend_from_slice(levels);
+        entry.last_reads = Some(reads);
+    }
+
+    /// What [`DeviceEvaluator::on_settled_into`] would append if it looked at
+    /// every IC: the reference its incremental form is asserted against.
+    #[cfg(test)]
+    fn full_scan(&self, drivers: &[Driver], voltages: &[f64]) -> Vec<(usize, f64)> {
+        let mut out = Vec::new();
+        for entry in &self.ics {
+            let powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+            let mut published = entry.published.clone();
+            slot_writes(&entry.family, &entry.output_drivers, &entry.family_slots, entry.record.slot_base, &mut published, powered, drivers, false, &mut out);
+        }
+        out
     }
 
     /// The device ids `Kernel::settle`'s `all_readers` needs — every
@@ -248,11 +559,41 @@ impl IcEvaluator {
 /// `digital::delay::driver_requests` for the combinational family — like
 /// that function since W1d point 4 ("no IC requests a reset any more"),
 /// there is no `None`/`Reset` arm here at all: every entry in `out.requests`
-/// is already a concrete `Mode` (`Hiz` included).
-fn family_requests_into(device_index: usize, output_drivers: &[DriverId], out: &digital::FamilyOutput, reqs: &mut Vec<DriverRequest>) {
+/// is already a concrete `Mode` (`Hiz` included). A `Level` the driver would
+/// ignore (`live`, see [`push_level`]) is left out; a `Timer` never is.
+fn family_requests_into(device_index: usize, output_drivers: &[DriverId], out: &digital::FamilyOutput, live: Option<&[Driver]>, reqs: &mut Vec<DriverRequest>) {
     debug_assert_eq!(output_drivers.len(), out.requests.len(), "one driver per output-capable pin, in the same order");
-    reqs.extend(output_drivers.iter().zip(out.requests.iter()).map(|(&driver, &(level, delays))| DriverRequest::Level { driver, level, delays }));
+    for (&driver, &(level, delays)) in output_drivers.iter().zip(out.requests.iter()) {
+        push_level(reqs, live, driver, level, delays);
+    }
     reqs.extend(out.timers.iter().map(|&(at, tag)| DriverRequest::Timer { device: DeviceId(device_index as u32), at, tag }));
+}
+
+/// Appends a `Level` request for `driver`, unless `live` (the kernel's driver
+/// table) shows the driver would ignore it (`Driver::request_is_noop`).
+fn push_level(out: &mut Vec<DriverRequest>, live: Option<&[Driver]>, driver: DriverId, level: Mode, delays: DelaySet) {
+    if live.is_some_and(|live| live[driver.0 as usize].request_is_noop(level)) {
+        return;
+    }
+    out.push(DriverRequest::Level { driver, level, delays });
+}
+
+/// Writes `value` into a family slot, reporting whether its bits changed
+/// (a NaN over a NaN of the same payload is no change).
+fn set_slot(slot: &mut f64, value: f64) -> bool {
+    let changed = slot.to_bits() != value.to_bits();
+    *slot = value;
+    changed
+}
+
+/// Stores an evaluation's slot readout into `family_slots` (a slot the
+/// evaluation left out reads as NaN), reporting whether any changed.
+fn store_slots(family_slots: &mut [f64], readout: &[f64]) -> bool {
+    let mut changed = false;
+    for (i, v) in family_slots.iter_mut().enumerate() {
+        changed |= set_slot(v, readout.get(i).copied().unwrap_or(f64::NAN));
+    }
+    changed
 }
 
 /// A memory device's ROM image, decoded from its blob tail (core/README.md,
@@ -275,124 +616,18 @@ impl DeviceEvaluator for IcEvaluator {
     /// this function itself.
     fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
         let mut out = Vec::new();
-        self.evaluate_into(reader, now, acting_on_edges, voltages, &mut out);
+        self.evaluate_impl(reader, now, acting_on_edges, voltages, None, &mut out);
         out
     }
 
     /// The body of [`Self::evaluate`], appending to the kernel's reusable
-    /// request buffer. Everything it needs per call (the pin reads, the
-    /// previous reads' storage) is reused rather than allocated: this runs
-    /// tens of thousands of times per simulated second.
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], out: &mut Vec<DriverRequest>) {
-        self.evaluations += 1;
-        let at = self.position(reader.0 as usize).unwrap_or_else(|| panic!("IcEvaluator: no IC registered for reader {reader:?}"));
-        if self.journaling {
-            self.save(at);
-        }
-        let entry = &mut self.ics[at];
-        let ic = &entry.record;
-
-        // NE555 point 1: dispatched before any `levels::read`/power-gate/
-        // `last_reads` bookkeeping the other three families share below --
-        // it has no logic-pin read concept of its own ("no logic level...
-        // it publishes its latch instead"). `digital::ne555::evaluate`
-        // already re-derives power itself (`None` while unpowered), so this
-        // branch does its own power gate rather than sharing the one below.
-        if let Family::Ne555(state) = &mut entry.family {
-            match digital::ne555::evaluate(ic, state, voltages, acting_on_edges) {
-                None => {
-                    // Point 10: unpowered -- the slot goes NaN and nothing is
-                    // requested (drivers keep their frozen committed level
-                    // through the kernel's own power-loss hold).
-                    for s in entry.family_slots.iter_mut() {
-                        *s = f64::NAN;
-                    }
-                }
-                Some(out_high) => {
-                    // Point 12: the slot holds `outHigh` at every completed
-                    // instant while powered.
-                    entry.family_slots[0] = if out_high { 1.0 } else { 0.0 };
-                    // Point 4: OUT HIGH/LOW as the result, DIS LOW when the
-                    // result is 0 or HIGH (released) when it is 1 -- the SAME
-                    // `Mode` for both drivers -- with DelaySet::uniform(0):
-                    // no output lag, no propagation delay.
-                    let level = if out_high { Mode::High } else { Mode::Low };
-                    let delays = DelaySet::uniform(0.0);
-                    out.push(DriverRequest::Level { driver: entry.output_drivers[0], level, delays });
-                    out.push(DriverRequest::Level { driver: entry.output_drivers[1], level, delays });
-                }
-            }
-            return;
-        }
-
-        let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
-        if !power.powered {
-            // W1c contract point 9 / W1d sequential point 3 ("an unpowered
-            // device reads, writes and requests nothing, so its state and
-            // lastClk freeze") / memories points 3-4: a sequential/memory
-            // slot goes NaN while unpowered. The combinational path already
-            // returned nothing here before W1d and still does — its slots
-            // come from driver levels at `on_settled` time, not from a
-            // stored readout, so there is nothing of its own to blank here.
-            if !matches!(entry.family, Family::Combinational { .. }) {
-                for s in entry.family_slots.iter_mut() {
-                    *s = f64::NAN;
-                }
-            }
-            return;
-        }
-
-        // Every logic pin's read, in pin order (W1c contract point 4).
-        // Schmitt hysteresis state only exists for the combinational
-        // family (`kinds::seq_check` rejects `schmitt = 1` on every W1d
-        // kind), so a sequential/memory read uses a throwaway per-pin
-        // scratch slot instead of a stored one.
-        let levels = &mut self.levels;
-        levels.clear();
-        if let Family::Combinational { schmitt_state } = &mut entry.family {
-            levels.extend(ic.logic.iter().zip(schmitt_state.iter_mut()).map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st)));
-        } else {
-            levels.extend(ic.logic.iter().map(|p| {
-                let mut scratch = false;
-                digital::levels::read(ic, &power, p, voltages[p.node], now, &mut scratch)
-            }));
-        }
-
-        // "lastReads is written at every powered evaluation, frozen-settle
-        // passes included" (W1d delays point 3) — for every family, not
-        // only sequential/memory (this entry's own doc comment on the
-        // field). The previous reads are taken out for the evaluation (which
-        // only ever sees them as its `last_reads` argument) and their storage
-        // is refilled with this evaluation's reads afterwards.
-        let previous = entry.last_reads.take();
-
-        match &mut entry.family {
-            Family::Combinational { .. } => {
-                let result = digital::combinational::evaluate(ic.kind, levels);
-                digital::delay::driver_requests_into(ic, &entry.output_drivers, &result, levels, previous.as_deref(), out);
-            }
-            Family::Sequential(state) => {
-                let result = digital::sequential::evaluate(ic, state, levels, previous.as_deref(), acting_on_edges, now);
-                for (i, v) in entry.family_slots.iter_mut().enumerate() {
-                    *v = result.slots.get(i).copied().unwrap_or(f64::NAN);
-                }
-                family_requests_into(entry.device_index, &entry.output_drivers, &result, out);
-            }
-            Family::Memory(state) => {
-                let result = digital::memory::evaluate(ic, state, levels, previous.as_deref(), acting_on_edges, now);
-                for (i, v) in entry.family_slots.iter_mut().enumerate() {
-                    *v = result.slots.get(i).copied().unwrap_or(f64::NAN);
-                }
-                family_requests_into(entry.device_index, &entry.output_drivers, &result, out);
-            }
-            // Returned above, before any read or `last_reads` write.
-            Family::Ne555(_) => unreachable!("a 555 is dispatched at the top of `evaluate`"),
-        }
-
-        let mut reads = previous.unwrap_or_default();
-        reads.clear();
-        reads.extend_from_slice(levels);
-        entry.last_reads = Some(reads);
+    /// request buffer and leaving out the requests `drivers` (the kernel's
+    /// driver table) would ignore. Everything it needs per call (the pin
+    /// reads, the previous reads' storage, the truth-table and family
+    /// results) is reused rather than allocated: this runs tens of thousands
+    /// of times per simulated second.
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+        self.evaluate_impl(reader, now, acting_on_edges, voltages, Some(drivers), out);
     }
 
     /// Every piece of per-device mutable state `evaluate` (or `seed_memory`)
@@ -418,6 +653,10 @@ impl DeviceEvaluator for IcEvaluator {
             entry.last_reads = last_reads;
             entry.family_slots = family_slots;
         }
+        // Whatever the snapshot held may differ from what was last published.
+        for at in 0..self.ics.len() {
+            self.mark_dirty(at);
+        }
     }
 
     /// Opens the journal: from here every write to an IC saves that IC's
@@ -437,14 +676,16 @@ impl DeviceEvaluator for IcEvaluator {
     /// never wrote are untouched, which is what makes this equal to
     /// restoring a whole-state snapshot.
     fn rollback_instant(&mut self, _checkpoint: Box<dyn std::any::Any>) {
-        for mut saved in self.journal.drain(..) {
-            let entry = &mut self.ics[saved.at];
-            std::mem::swap(&mut entry.family, &mut saved.family);
-            std::mem::swap(&mut entry.last_reads, &mut saved.last_reads);
-            std::mem::swap(&mut entry.family_slots, &mut saved.family_slots);
+        for &at in &self.journal {
+            let entry = &mut self.ics[at as usize];
+            std::mem::swap(&mut entry.last_reads, &mut entry.saved.last_reads);
+            if entry.saves_state {
+                std::mem::swap(&mut entry.family, &mut entry.saved.family);
+                std::mem::swap(&mut entry.family_slots, &mut entry.saved.family_slots);
+            }
             entry.journaled = false;
-            self.spare.push(saved);
         }
+        self.journal.clear();
         self.journaling = false;
     }
 
@@ -476,46 +717,96 @@ impl DeviceEvaluator for IcEvaluator {
     /// (or NaN payload) it already holds is a no-op there, for the slot array
     /// and for the trace alike; leaving those out saves building, queueing
     /// and replaying every IC's every slot at every completed instant.
-    fn on_settled(&mut self, _now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
+    fn on_settled(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
+        self.on_settled_into(now, drivers, solver, &mut out);
+        out
+    }
+
+    /// [`Self::on_settled`]'s body, appending to the kernel's reusable buffer.
+    ///
+    /// A slot's value is a function of three things: for a combinational IC
+    /// its drivers' committed levels and its power, for the others their
+    /// `family_slots` and their power. So only an IC one of those touched
+    /// since the last call needs looking at, which is what keeps this
+    /// proportional to what changed and not to the number of ICs: `dirty`
+    /// collects the ICs whose driver committed or reset
+    /// ([`DeviceEvaluator::driver_changed`]) and the family ICs that were
+    /// evaluated, and the supply scan below adds the ICs whose power verdict
+    /// flipped. The writes come out in IC order, as a scan over every IC
+    /// produced them. Under `cfg(test)` every call also runs the scan over
+    /// every IC and asserts the two agree, so a missed mark fails whichever
+    /// test hits it.
+    fn on_settled_into(&mut self, _now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
         let voltages = solver.voltages();
-        let all = !self.published_once;
-        self.published_once = true;
-        for entry in &mut self.ics {
-            // The same verdict `PartitionSolver::ic_powered` gives (it reads
-            // the same record's supply nodes off the same published
-            // voltages), without its scan for the IC among all of them.
-            let powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
-            match &entry.family {
-                Family::Combinational { .. } => {
-                    for (i, &driver_id) in entry.output_drivers.iter().enumerate() {
-                        let value = if !powered {
-                            f64::NAN
-                        } else {
-                            match drivers[driver_id.0 as usize].committed() {
-                                Some(Mode::High) => 1.0,
-                                Some(Mode::Low) => 0.0,
-                                Some(Mode::Hiz) | None => f64::NAN,
-                            }
-                        };
-                        if all || value.to_bits() != entry.published[i] {
-                            entry.published[i] = value.to_bits();
-                            out.push((entry.record.slot_base + i, value));
-                        }
-                    }
-                }
-                Family::Sequential(_) | Family::Memory(_) | Family::Ne555(_) => {
-                    for (i, &value) in entry.family_slots.iter().enumerate() {
-                        let value = if powered { value } else { f64::NAN };
-                        if all || value.to_bits() != entry.published[i] {
-                            entry.published[i] = value.to_bits();
-                            out.push((entry.record.slot_base + i, value));
-                        }
+        if !self.published_once {
+            self.published_once = true;
+            for supply in &mut self.supplies {
+                supply.bits = voltages[supply.node].to_bits();
+            }
+            self.dirty.clear();
+            for entry in &mut self.ics {
+                entry.dirty = false;
+                entry.powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+                entry.publish(drivers, true, out);
+            }
+            return;
+        }
+
+        #[cfg(test)]
+        let (first_write, expected) = (out.len(), self.full_scan(drivers, voltages));
+
+        // The power verdict only depends on the two supply voltages, so an IC
+        // is re-checked only when one of its supply nodes moved, and joins
+        // `dirty` only when the verdict itself flipped.
+        for supply in &mut self.supplies {
+            let bits = voltages[supply.node].to_bits();
+            if bits == supply.bits {
+                continue;
+            }
+            supply.bits = bits;
+            for &at in &supply.ics {
+                let entry = &mut self.ics[at as usize];
+                let powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+                if powered != entry.powered {
+                    entry.powered = powered;
+                    if !entry.dirty {
+                        entry.dirty = true;
+                        self.dirty.push(at);
                     }
                 }
             }
         }
-        out
+
+        if !self.dirty.is_empty() {
+            self.dirty.sort_unstable();
+            for &at in &self.dirty {
+                let entry = &mut self.ics[at as usize];
+                entry.dirty = false;
+                entry.publish(drivers, false, out);
+                #[cfg(test)]
+                {
+                    self.visited += 1;
+                }
+            }
+            self.dirty.clear();
+        }
+
+        #[cfg(test)]
+        {
+            let bits = |writes: &[(usize, f64)]| writes.iter().map(|&(slot, v)| (slot, v.to_bits())).collect::<Vec<_>>();
+            assert_eq!(bits(&out[first_write..]), bits(&expected), "on_settled's incremental writes differ from a scan over every IC: a change was not marked");
+        }
+    }
+
+    /// A driver's committed level moved: the IC that owns it has a slot to
+    /// re-derive (`on_settled_into`). A driver no IC owns is ignored.
+    fn driver_changed(&mut self, driver: DriverId) {
+        if let Some(&at) = self.driver_owner.get(driver.0 as usize) {
+            if at != u32::MAX {
+                self.mark_dirty(at as usize);
+            }
+        }
     }
 
     fn ic_evaluations(&self) -> f64 {
@@ -646,7 +937,24 @@ pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E
         // output-capable pin for a combinational IC, `family_slots`' own count
         // for the others.
         let published_len = if matches!(family, Family::Combinational { .. }) { output_drivers.len() } else { family_slots.len() };
-        ics.push(IcEntry { device_index, record, output_drivers, family, last_reads: None, family_slots, journaled: false, published: vec![0; published_len] });
+        let saved = Saved { family: family.clone(), last_reads: None, family_slots: family_slots.clone() };
+        let saves_state = !matches!(family, Family::Combinational { .. }) || record.schmitt.is_some();
+        ics.push(IcEntry {
+            device_index,
+            record,
+            output_drivers,
+            family,
+            last_reads: None,
+            family_slots,
+            journaled: false,
+            saved,
+            saves_state,
+            published: vec![0; published_len],
+            powered: false,
+            dirty: false,
+            power_key: None,
+            power: IcPower { powered: false, v_gnd: 0.0, vs: 0.0, r_out: 0.0, vil: 0.0, vih: 0.0, schmitt: None },
+        });
     }
     IcEvaluator::new(ics)
 }
@@ -1307,5 +1615,377 @@ mod tests {
         engine.advance(t0).unwrap();
         assert_eq!(engine.digital_slots()[0], 0.0, "THR on the rail resets OUT LOW");
         assert!((engine.voltages()[3] - low).abs() < 1e-4, "vcc = {} at the commit, hand solution {low}", engine.voltages()[3]);
+    }
+    // ---- on_settled visits only the ICs that changed -----------------------
+
+    /// A 74ls04 with only `1a` and `1y` wired (`1a` on `a`, `1y` on `y`); every
+    /// other input on gnd and every other output on `dump`.
+    fn inverter(ci: usize, vcc: usize, a: usize, y: usize, dump: usize, delay: f64, slot_base: usize) -> Device {
+        at_slot(ls04(ci, vcc, 0, [a, y, 0, dump, 0, dump, 0, dump, 0, dump, 0, dump], [false; 12], 0.008, delay), slot_base)
+    }
+
+    #[test]
+    fn a_supply_that_leaves_its_power_window_blanks_a_combinational_ic_with_nothing_else_moving() {
+        // Nothing evaluates a combinational IC into a slot change, and no
+        // driver of it commits, when its supply collapses: the power verdict
+        // flipping is the only thing that moves its slot, so it is the only
+        // thing that can put the IC on the list `on_settled` re-derives.
+        //
+        // 0=gnd, 1=rail (5 V), 2=vcc (spdt: sel 0 to the rail, 1 to gnd),
+        // 3=1a (gnd through a resistor), 4=1y, 5=dump.
+        let p = program(6, 6, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 1, 0, 0.0),
+            resistor(2, 3, 0, 1_000.0),
+            inverter(3, 2, 3, 4, 5, 20e-9, 0),
+        ]);
+        let mut engine = Engine::load(&p).unwrap();
+        assert_eq!(engine.digital_slots()[0], 1.0, "1a LOW, powered: 1y HIGH");
+
+        engine.set_params(&[(1, 0, 1.0)]).unwrap();
+        engine.advance(engine.time() + 1e-6).unwrap();
+        assert!(engine.voltages()[2].abs() < 0.1, "vcc collapsed to {}", engine.voltages()[2]);
+        assert!(engine.digital_slots()[0].is_nan(), "unpowered: the slot goes NaN, though no driver committed anything");
+
+        engine.set_params(&[(1, 0, 0.0)]).unwrap();
+        engine.advance(engine.time() + 1e-6).unwrap();
+        assert_eq!(engine.digital_slots()[0], 1.0, "powered again: the committed level shows again");
+    }
+
+    #[test]
+    fn a_counters_readout_follows_its_clock_edges_after_load() {
+        // A family IC's slots change only by evaluation, so an evaluation is
+        // what puts it on the list `on_settled` re-derives. A 161 counting
+        // edges from a switch, its enables and clear/load released on the rail.
+        //
+        // 0=gnd, 1=rail, 2=clock (spdt: sel 0 to gnd, 1 to the rail).
+        let wire = |mut d: Device, logic: &[(usize, usize)]| {
+            for &(i, node) in logic {
+                d.pins[2 + i] = pin(node);
+            }
+            d
+        };
+        let p = program(3, 5, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            wire(w1d_ic(kinds::IC_74LS161, 2, 1, 0, 14, w1d_params(4, &[]), 0), &[(0, 1), (1, 2), (2, 1), (3, 1), (4, 1)]),
+        ]);
+        let mut engine = Engine::load(&p).unwrap();
+        assert_eq!(engine.digital_slots()[0], 0.0);
+        for expected in 1..=3 {
+            engine.set_params(&[(1, 0, 1.0)]).unwrap();
+            engine.advance(engine.time() + 1e-6).unwrap();
+            assert_eq!(engine.digital_slots()[0], expected as f64, "the rising edge counted");
+            engine.set_params(&[(1, 0, 0.0)]).unwrap();
+            engine.advance(engine.time() + 1e-6).unwrap();
+            assert_eq!(engine.digital_slots()[0], expected as f64, "the falling edge holds it");
+        }
+    }
+
+    #[test]
+    fn the_writes_of_one_instant_come_out_in_ic_order_whatever_order_the_commits_landed() {
+        // Two inverters fall at the same instant, the second one's request
+        // queued first (a longer delay, started earlier), so the commits apply
+        // second-IC-first. `on_settled` must still return the writes the way a
+        // scan over the ICs in order does: the first IC's slot, then the
+        // second's.
+        //
+        // 0=gnd, 1=rail, 2=A's input (spdt), 3=A's output, 4=B's input (spdt),
+        // 5=B's output, 6=dump. A falls 10 ns after its input rises, B 20 ns.
+        let p = program(7, 12, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            spdt(2, 4, 0, 1, 0.0),
+            inverter(3, 1, 2, 3, 6, 10e-9, 0),
+            inverter(4, 1, 4, 5, 6, 20e-9, 6),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        kernel.take_digital_writes();
+
+        kernel.solver().validate_params(&[(2, 0, 1.0)]).unwrap();
+        kernel.apply_params_as_event(&[(2, 0, 1.0)]).unwrap();
+        kernel.advance(10e-9).unwrap();
+        kernel.solver().validate_params(&[(1, 0, 1.0)]).unwrap();
+        kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+        kernel.take_digital_writes();
+        kernel.advance(20e-9).unwrap();
+        let writes = kernel.take_digital_writes();
+        let at_20ns: Vec<(usize, f64)> = writes.iter().filter(|w| w.0 == 20e-9).map(|w| (w.1, w.2)).collect();
+        assert_eq!(at_20ns, vec![(0, 0.0), (6, 0.0)], "A's 1y (slot 0) then B's 1y (slot 6), both fallen: {writes:?}");
+    }
+
+    #[test]
+    fn a_quiet_instant_looks_at_no_ic_and_a_commit_looks_at_only_the_ic_it_moved() {
+        // Three independent inverters, one switch on the first. Nothing
+        // commits at the instant the switch moves (the output is 20 ns away)
+        // and the settled instant 20 ns later commits one output, so one IC
+        // is looked at over the whole run and the others never.
+        //
+        // 0=gnd, 1=rail, 2=switch, 3=first 1y, 4=second 1a, 5=second 1y,
+        // 6=third 1a, 7=third 1y, 8=dump.
+        let p = program(9, 18, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            inverter(2, 1, 2, 3, 8, 20e-9, 0),
+            inverter(3, 1, 4, 5, 8, 20e-9, 6),
+            inverter(4, 1, 6, 7, 8, 20e-9, 12),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        kernel.take_digital_writes();
+        assert_eq!(kernel.evaluator().visited, 0, "the first publish is the one that looks at everything, and is not counted");
+
+        kernel.solver().validate_params(&[(1, 0, 1.0)]).unwrap();
+        kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+        assert_eq!(kernel.evaluator().visited, 0, "the switch moved, nothing committed");
+        assert!(kernel.take_digital_writes().is_empty());
+
+        kernel.advance(40e-9).unwrap();
+        assert_eq!(kernel.evaluator().visited, 1, "one commit, one IC looked at");
+        let writes = kernel.take_digital_writes();
+        assert_eq!(writes.iter().map(|w| (w.1, w.2)).collect::<Vec<_>>(), vec![(0, 0.0)], "only the first inverter's 1y changed");
+        assert!(kernel.evaluator().dirty.is_empty() && kernel.evaluator().ics.iter().all(|e| !e.dirty), "the list is consumed");
+
+        kernel.advance(80e-9).unwrap();
+        assert_eq!(kernel.evaluator().visited, 1, "a quiet stretch looks at nothing");
+    }
+    // ---- the journal's pre-image, one IC of every family --------------------
+
+    /// Program with one IC of every kind that has its own evaluator state — a
+    /// Schmitt inverter, a plain inverter, the three registers, the RAM, an
+    /// EEPROM and a 555 — each logic pin on a node of its own so a test can
+    /// set every read by hand, all supplied from node 1 (5 V) and node 0.
+    fn one_of_every_family() -> (Program, usize) {
+        // Returns the program and the node of the 555's first logic pin (TRIG;
+        // RST and THR follow at +2 and +4).
+        let mut next_node = 2;
+        let mut fresh = |count: usize| -> Vec<usize> {
+            let nodes: Vec<usize> = (next_node..next_node + count).collect();
+            next_node += count;
+            nodes
+        };
+        let mut next_slot = 0;
+        let mut slots = |count: usize| {
+            let base = next_slot;
+            next_slot += count;
+            base
+        };
+        let own_pins = |mut d: Device, nodes: Vec<usize>| {
+            for (i, node) in nodes.into_iter().enumerate() {
+                d.pins[2 + i] = pin(node);
+            }
+            d
+        };
+        let mut devices = vec![source(0, 1, 0, 5.0)];
+        let ls04_nodes = fresh(12);
+        devices.push(at_slot(ls04(1, 1, 0, ls04_nodes.try_into().unwrap(), [false; 12], 0.008, 20e-9), slots(6)));
+        let hc14_nodes = fresh(12);
+        let mut hc14 = ls04(2, 1, 0, hc14_nodes.try_into().unwrap(), [false; 12], 0.02, 15e-9);
+        hc14.kind = kinds::IC_74HC14;
+        hc14.params[ic_param::SCHMITT] = 1.0;
+        hc14.params[ic_param::VT_PLUS] = 2.7;
+        hc14.params[ic_param::VT_MINUS] = 1.6;
+        devices.push(at_slot(hc14, slots(6)));
+        devices.push(at_slot(own_pins(w1d_ic(kinds::IC_74LS161, 3, 1, 0, 14, w1d_params(4, &[]), 0), fresh(14)), slots(5)));
+        devices.push(at_slot(own_pins(w1d_ic(kinds::IC_74LS173, 4, 1, 0, 14, w1d_params(4, &[]), 0), fresh(14)), slots(4)));
+        devices.push(at_slot(own_pins(w1d_ic(kinds::IC_74HC74, 5, 1, 0, 12, w1d_params(2, &[]), 0), fresh(12)), slots(4)));
+        devices.push(at_slot(own_pins(w1d_ic(kinds::IC_74LS189, 6, 1, 0, 14, w1d_params(5, &[]), 0), fresh(14)), slots(4)));
+        devices.push(at_slot(own_pins(w1d_ic(kinds::IC_28C16, 7, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4), fresh(22)), slots(8)));
+        let ne555_nodes = fresh(6);
+        let first_555_node = ne555_nodes[0];
+        let mut ne555 = ne555_dev(8, 1, 0, ne555_nodes.try_into().unwrap());
+        ne555.blob[0] = slots(1) as f64;
+        devices.push(ne555);
+        (program(next_node, next_slot, devices), first_555_node)
+    }
+
+    /// The evaluator state one IC's rollback has to restore.
+    fn ic_state(evaluator: &IcEvaluator, at: usize) -> String {
+        let e = &evaluator.ics[at];
+        format!("{:?}", (&e.family, &e.last_reads, &e.family_slots))
+    }
+
+    #[test]
+    fn every_familys_pre_image_comes_back_from_a_rolled_back_window_and_a_completed_window_keeps_its_writes() {
+        let (p, first_555_node) = one_of_every_family();
+        let node_count = p.node_count;
+        let (mut kernel, ..) = build(&p);
+        let evaluator = kernel.evaluator_mut();
+        let readers: Vec<DeviceId> = evaluator.reader_ids();
+        assert_eq!(readers.len(), 8);
+
+        // Every logic pin's node set to a random rail, the supplies as wired.
+        let mut seed = 0x9e37_79b9u32;
+        let mut scramble = |volts: &mut Vec<f64>| {
+            for v in volts.iter_mut().skip(2) {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *v = if seed & 0x100 != 0 { 5.0 } else { 0.0 };
+            }
+        };
+        let mut volts = vec![0.0; node_count];
+        volts[1] = 5.0;
+        let mut now = 0.0;
+        let mut requests = Vec::new();
+        let mut run = |evaluator: &mut IcEvaluator, volts: &mut Vec<f64>, now: &mut f64, passes: usize, script: &mut dyn FnMut(&mut Vec<f64>)| {
+            for _ in 0..passes {
+                script(volts);
+                *now += 1e-6;
+                for &reader in &readers {
+                    requests.clear();
+                    evaluator.evaluate_impl(reader, *now, true, volts, None, &mut requests);
+                }
+            }
+        };
+
+        // Away from power-on first, with no window open, so the state a
+        // window saves is not the one the entries were registered with. The
+        // last pass resets the 555's latch (TRIG, THR and RST all HIGH), which
+        // the window's own last pass sets again, so the latch is known to
+        // differ across the window whatever the random passes between did.
+        run(evaluator, &mut volts, &mut now, 40, &mut scramble);
+        run(evaluator, &mut volts, &mut now, 1, &mut |volts: &mut Vec<f64>| {
+            for offset in [0, 2, 4] {
+                volts[first_555_node + offset] = 5.0;
+            }
+        });
+        let before: Vec<String> = (0..readers.len()).map(|at| ic_state(evaluator, at)).collect();
+
+        // The same scripted passes, once rolled back and once kept. The
+        // script is a copy of the generator's state, so both see one sequence.
+        let script_seed = seed;
+        let scripted = |seed: u32| {
+            let mut seed = seed;
+            let mut pass = 0;
+            move |volts: &mut Vec<f64>| {
+                for v in volts.iter_mut().skip(2) {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    *v = if seed & 0x100 != 0 { 5.0 } else { 0.0 };
+                }
+                pass += 1;
+                if pass == 30 {
+                    // TRIG and THR LOW, RST HIGH: the latch sets.
+                    volts[first_555_node] = 0.0;
+                    volts[first_555_node + 2] = 5.0;
+                    volts[first_555_node + 4] = 0.0;
+                }
+            }
+        };
+
+        let mut volts_a = volts.clone();
+        let mut now_a = now;
+        evaluator.begin_instant();
+        run(evaluator, &mut volts_a, &mut now_a, 30, &mut scripted(script_seed));
+        let written: Vec<String> = (0..readers.len()).map(|at| ic_state(evaluator, at)).collect();
+        for at in 0..readers.len() {
+            assert_ne!(before[at], written[at], "IC {at}: the window's evaluations must have changed its state, or the rollback below proves nothing");
+        }
+        // Each family's own state (not only its reads and slots) moved in at
+        // least one IC of that family.
+        evaluator.rollback_instant(Box::new(()));
+        for at in 0..readers.len() {
+            assert_eq!(before[at], ic_state(evaluator, at), "IC {at} is back to its pre-image");
+        }
+        assert!(!evaluator.journaling && evaluator.journal.is_empty() && evaluator.ics.iter().all(|e| !e.journaled));
+
+        // The same passes again, this time completed: the writes stay, and
+        // they are what the rolled-back run had written.
+        let mut volts_b = volts.clone();
+        let mut now_b = now;
+        evaluator.begin_instant();
+        run(evaluator, &mut volts_b, &mut now_b, 30, &mut scripted(script_seed));
+        evaluator.end_instant(Box::new(()));
+        for at in 0..readers.len() {
+            assert_eq!(written[at], ic_state(evaluator, at), "IC {at}: a completed window keeps what it wrote, and replaying from the restored pre-image reproduces it");
+        }
+        assert!(!evaluator.journaling && evaluator.journal.is_empty() && evaluator.ics.iter().all(|e| !e.journaled));
+    }
+    #[test]
+    fn evaluate_into_leaves_out_exactly_the_requests_the_driver_would_ignore() {
+        // At a settled state every level an IC asks for is one its driver
+        // already holds, so `evaluate_into` (given the driver table) returns
+        // no `Level`; `evaluate` (without one) returns them all. Put one
+        // driver's opposite level in flight and its request, and only its
+        // request, is one the driver no longer ignores.
+        let (p, _) = one_of_every_family();
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        let volts = kernel.solver().voltages().to_vec();
+        let driver_count: u32 = kernel.evaluator().ics.iter().map(|e| e.output_drivers.len() as u32).sum();
+        let drivers: Vec<Driver> = (0..driver_count).map(|i| *kernel.driver(DriverId(i))).collect();
+        let levels_of = |requests: &[DriverRequest]| -> Vec<(DriverId, Mode)> {
+            requests
+                .iter()
+                .filter_map(|r| match r {
+                    DriverRequest::Level { driver, level, .. } => Some((*driver, *level)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut levels_checked = 0;
+        for reader in all_readers {
+            let now = 1e-6;
+            let asked = levels_of(&kernel.evaluator_mut().evaluate(reader, now, true, &volts));
+            let mut filtered = Vec::new();
+            kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &drivers, &mut filtered);
+            assert!(levels_of(&filtered).is_empty(), "{reader:?}: at a settled state nothing is worth asking, got {filtered:?}");
+
+            for &(driver, level) in &asked {
+                let mut perturbed = drivers.clone();
+                let opposite = if level == Mode::High { Mode::Low } else { Mode::High };
+                perturbed[driver.0 as usize].request(opposite, now, &DelaySet::uniform(1e-9));
+                filtered.clear();
+                kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &perturbed, &mut filtered);
+                assert_eq!(levels_of(&filtered), vec![(driver, level)], "{reader:?}: only the disturbed driver's request survives");
+                levels_checked += 1;
+            }
+        }
+        assert_eq!(levels_checked, driver_count as usize, "every driver of every family was checked");
+    }
+
+    #[test]
+    fn the_cached_power_state_follows_each_supply_pin_and_never_goes_stale() {
+        // `evaluate_impl` reuses an IC's `ic_power` while neither supply
+        // voltage's bits moved. Every pair below is checked against a fresh
+        // `ic_power`, and the sequence moves each supply on its own (the key
+        // must hold both), repeats a pair (a hit), goes unpowered and comes
+        // back. The Schmitt part's thresholds and every part's output
+        // resistance scale with the supply, so a stale entry is visible.
+        let (p, _) = one_of_every_family();
+        let node_count = p.node_count;
+        let (mut kernel, ..) = build(&p);
+        let evaluator = kernel.evaluator_mut();
+        let readers = evaluator.reader_ids();
+        let mut volts = vec![0.0; node_count];
+        let mut out = Vec::new();
+        let mut distinct = std::collections::HashSet::new();
+        let mut unpowered = 0;
+        let supplies = [(5.0, 0.0), (5.0, 0.0), (5.0, 0.4), (4.6, 0.4), (4.6, 0.4), (0.0, 0.0), (5.0, 0.0), (5.5, 0.5), (3.0, 0.0), (5.0, 0.0), (5.0, 0.0)];
+        let mut now = 0.0;
+        for &(v_vcc, v_gnd) in &supplies {
+            volts[1] = v_vcc;
+            volts[0] = v_gnd;
+            now += 1e-6;
+            for &reader in &readers {
+                out.clear();
+                evaluator.evaluate_impl(reader, now, true, &volts, None, &mut out);
+                let at = evaluator.position(reader.0 as usize).unwrap();
+                let entry = &evaluator.ics[at];
+                if matches!(entry.family, Family::Ne555(_)) {
+                    continue; // dispatched before any power derivation
+                }
+                let fresh = digital::power::ic_power(&entry.record, v_vcc, v_gnd);
+                assert_eq!(format!("{:?}", entry.power), format!("{fresh:?}"), "IC {at} with vcc {v_vcc}, gnd {v_gnd}");
+                distinct.insert(format!("{:?}", entry.power));
+                unpowered += usize::from(!entry.power.powered);
+            }
+        }
+        assert!(unpowered > 0, "an unpowered verdict was cached and checked");
+        assert!(distinct.len() > 8, "the supplies changed what was derived: {} distinct states", distinct.len());
     }
 }

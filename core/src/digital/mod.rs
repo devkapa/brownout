@@ -202,7 +202,7 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
 /// sequential ICs"/"...memories") — what `devices::ics`'s dispatcher turns
 /// into `DriverRequest`s and digital-slot writes, the W1d counterpart of
 /// `delay::driver_requests` for the combinational family.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FamilyOutput {
     /// One `(level, delays)` per [`output_capable`]`(kind)` pin, in that same
     /// order — always a concrete [`Mode`] (`Hiz` included: W1d delays point

@@ -159,10 +159,25 @@ pub trait DeviceEvaluator {
     /// [`Self::evaluate`], appending its requests to `out` instead of
     /// returning a fresh `Vec`: the kernel calls this once per affected
     /// reader per delta pass with one reusable buffer, so an evaluator that
-    /// can fill it directly saves an allocation per call. The default
-    /// forwards to `evaluate`, so an implementation that only defines
-    /// `evaluate` (every test mock) behaves exactly as before.
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], out: &mut Vec<DriverRequest>) {
+    /// can fill it directly saves an allocation per call. `drivers` is the
+    /// kernel's driver table, current as of this call: an evaluator may leave
+    /// out a `Level` request for a driver that ignores it
+    /// ([`Driver::request_is_noop`]), which the kernel would drop unseen
+    /// anyway. The default forwards to `evaluate`, so an implementation that
+    /// only defines `evaluate` (every test mock) behaves exactly as before.
+    ///
+    /// **A condition on every batch.** That equivalence holds only because
+    /// the table is read once, before the batch is applied, while the kernel
+    /// judges each request against the table as the batch before it left it.
+    /// The two agree when no driver is named by a `Level` and by any other
+    /// `Level` or `Reset` of the same batch (a first request that changes the
+    /// driver, or a reset that clears it, would change what the second is
+    /// judged against). Every evaluator in this crate meets it (one `Level`
+    /// per output-capable pin, each pin its own driver; a 555's OUT and DIS
+    /// are two drivers), and the kernel asserts it in debug builds
+    /// ([`Kernel::run_deltas`]).
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+        let _ = drivers;
         out.extend(self.evaluate(reader, now, acting_on_edges, voltages));
     }
 
@@ -237,6 +252,30 @@ pub trait DeviceEvaluator {
         Vec::new()
     }
 
+    /// [`Self::on_settled`], appending to `out` (the kernel's reusable
+    /// buffer, cleared before the call) instead of returning a fresh `Vec`:
+    /// the kernel calls this once per completed instant, so an evaluator that
+    /// can fill it directly saves an allocation per instant. The default
+    /// forwards to `on_settled`, so an implementation that only defines that
+    /// (every test mock) behaves exactly as before.
+    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
+        out.extend(self.on_settled(now, drivers, solver));
+    }
+
+    /// The kernel changed `driver`'s COMMITTED level: a commit that moved it
+    /// (`Driver::apply_commit` returned `true`) or a reset that dropped a
+    /// committed one. Called at the moment it happens, inside or outside a
+    /// rollback window, and never for a request, a stale commit or a reset of
+    /// a never-committed driver, none of which changes what a driver reads
+    /// as. An evaluator whose [`Self::on_settled`] readout depends on driver
+    /// levels uses it to visit only the devices that moved instead of every
+    /// one; a rolled-back change is reported too (the kernel does not undo the
+    /// call), which costs the evaluator one extra look and nothing else.
+    /// Default: ignore.
+    fn driver_changed(&mut self, driver: DriverId) {
+        let _ = driver;
+    }
+
     /// IC evaluations so far (contract stat 12) — "stats keep failed-attempt
     /// counts" (core/README.md, "A failed advance"), so an implementation
     /// must count every [`Self::evaluate`] call here regardless of whether
@@ -281,8 +320,8 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).evaluate(reader, now, acting_on_edges, voltages)
     }
 
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], out: &mut Vec<DriverRequest>) {
-        (**self).evaluate_into(reader, now, acting_on_edges, voltages, out)
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+        (**self).evaluate_into(reader, now, acting_on_edges, voltages, drivers, out)
     }
 
     fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
@@ -309,6 +348,14 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).on_settled(now, drivers, solver)
     }
 
+    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
+        (**self).on_settled_into(now, drivers, solver, out)
+    }
+
+    fn driver_changed(&mut self, driver: DriverId) {
+        (**self).driver_changed(driver)
+    }
+
     fn ic_evaluations(&self) -> f64 {
         (**self).ic_evaluations()
     }
@@ -320,6 +367,23 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
     fn take_eeprom_updates(&mut self) -> Vec<f64> {
         (**self).take_eeprom_updates()
     }
+}
+
+/// Whether `requests` (one reader's batch) names every driver it names in a
+/// `Level` exactly once: no other `Level` and no `Reset` for it. The
+/// condition `DeviceEvaluator::evaluate_into` documents, under which dropping
+/// an inert `Level` against the table as it stood before the batch equals the
+/// kernel skipping it against the table as the batch before it left it.
+fn one_request_per_level_driver(requests: &[DriverRequest]) -> bool {
+    let named = |r: &DriverRequest| match *r {
+        DriverRequest::Level { driver, .. } => Some((driver, true)),
+        DriverRequest::Reset { driver } => Some((driver, false)),
+        DriverRequest::Timer { .. } => None,
+    };
+    requests.iter().enumerate().all(|(i, r)| match named(r) {
+        None => true,
+        Some((driver, is_level)) => requests[..i].iter().filter_map(named).all(|(other, other_is_level)| other != driver || !(is_level || other_is_level)),
+    })
 }
 
 /// Whether a candidate threshold-crossing time is far enough past `now` to
@@ -402,6 +466,9 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     dirty_buf: Vec<PartitionId>,
     affected_buf: Vec<DeviceId>,
     requests_buf: Vec<DriverRequest>,
+    /// The slot writes one `DeviceEvaluator::on_settled_into` call fills,
+    /// reused across instants.
+    settled_buf: Vec<(usize, f64)>,
 }
 
 /// What [`Kernel::open_window`] captured for a rollback that the kernel does
@@ -435,6 +502,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             dirty_buf: Vec::new(),
             affected_buf: Vec::new(),
             requests_buf: Vec::new(),
+            settled_buf: Vec::new(),
         }
     }
 
@@ -725,8 +793,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     fn apply_request(&mut self, req: DriverRequest, now: f64, zero_delays: bool) -> Option<PartitionId> {
         match req {
             DriverRequest::Level { driver, level, delays } => {
-                let delays = if zero_delays { DelaySet::uniform(0.0) } else { delays };
                 let idx = driver.0 as usize;
+                // A request that changes nothing (most of them: a reader
+                // re-evaluated because a neighbour moved asks for what it
+                // already asked) needs neither the FSM nor a journal entry.
+                if self.drivers[idx].request_is_noop(level) {
+                    return None;
+                }
+                let delays = if zero_delays { DelaySet::uniform(0.0) } else { delays };
                 self.journal_driver(idx);
                 if let Some((due, mode, token)) = self.drivers[idx].request(level, now, &delays) {
                     self.heap.push(due, EventKind::Commit { driver, mode, token });
@@ -741,8 +815,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // change, so it must not force a re-solve of anything).
                 let was_committed = self.drivers[idx].committed().is_some();
                 self.journal_driver(idx);
+                self.solver.driver_changing(idx);
                 self.drivers[idx].reset();
-                if was_committed { self.driver_partition[idx] } else { None }
+                if was_committed {
+                    self.evaluator.driver_changed(driver);
+                    self.driver_partition[idx]
+                } else {
+                    None
+                }
             }
             DriverRequest::Timer { device, at, tag } => {
                 self.heap.push(at, EventKind::Timer { device, tag });
@@ -811,7 +891,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         self.held_commits.push((driver, mode, token));
                     } else {
                         self.journal_driver(idx);
+                        self.solver.driver_changing(idx);
                         if self.drivers[idx].apply_commit(mode, token) {
+                            self.evaluator.driver_changed(driver);
                             if let Some(p) = self.driver_partition[idx] {
                                 dirty.push(p);
                             }
@@ -888,9 +970,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// instant completed").
     fn publish_settled(&mut self) {
         let now = self.time;
-        for (slot, value) in self.evaluator.on_settled(now, &self.drivers, &self.solver) {
-            self.pending_digital_writes.push((now, slot, value));
-        }
+        let mut writes = std::mem::take(&mut self.settled_buf);
+        writes.clear();
+        self.evaluator.on_settled_into(now, &self.drivers, &self.solver, &mut writes);
+        self.pending_digital_writes.extend(writes.iter().map(|&(slot, value)| (now, slot, value)));
+        self.settled_buf = writes;
     }
 
     /// Pushes every `Crossing`/`Step` a dynamic partition asked to be
@@ -1026,7 +1110,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             affected.dedup();
             for &reader in &affected {
                 requests.clear();
-                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), &mut requests);
+                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), &self.drivers, &mut requests);
+                debug_assert!(
+                    one_request_per_level_driver(&requests),
+                    "evaluator returned a batch in which a driver is named by a Level and by another Level or Reset: {requests:?} (see DeviceEvaluator::evaluate_into)"
+                );
                 for req in requests.drain(..) {
                     if let Some(p) = self.apply_request(req, self.time, false) {
                         carried_dirty.push(p);
@@ -2447,5 +2535,152 @@ mod tests {
         assert_eq!(err, SeedMemoryError::Kernel(KernelError::Livelock { at: 0.0 }));
         assert_eq!(k.evaluator().seeded, None, "a rolled-back seed must undo the hook's own mutation too");
         assert_eq!(k.driver(d0).committed(), None, "the oscillator's own doomed commits must roll back too");
+    }
+    // ---- driver_changed and the request short-circuit ---------------------
+
+    struct ChangeLog {
+        changed: Vec<DriverId>,
+    }
+    impl DeviceEvaluator for ChangeLog {
+        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+            Vec::new()
+        }
+        fn driver_changed(&mut self, driver: DriverId) {
+            self.changed.push(driver);
+        }
+    }
+
+    #[test]
+    fn the_evaluator_is_told_of_exactly_the_committed_moves_and_resets() {
+        let mut k = Kernel::new(NoOpSolver, ChangeLog { changed: Vec::new() });
+        let d0 = k.add_driver(driver(1), Some(PartitionId(0)));
+        let d1 = k.add_driver(driver(2), Some(PartitionId(1)));
+        let level = |driver: DriverId, level: Mode, delay: f64| DriverRequest::Level { driver, level, delays: DelaySet::uniform(delay) };
+
+        // A request alone moves nothing that is committed.
+        k.apply_request(level(d0, High, 5.0), 0.0, false);
+        assert!(k.evaluator().changed.is_empty(), "a request is not a commit");
+        // The commit that lands is one.
+        k.advance(5.0).unwrap();
+        assert_eq!(k.evaluator().changed, vec![d0]);
+
+        // A superseded commit is dropped, and reports nothing: d1's HIGH is
+        // cancelled by a reset of a driver that never committed anything.
+        k.apply_request(level(d1, High, 5.0), 5.0, false);
+        assert_eq!(k.apply_request(DriverRequest::Reset { driver: d1 }, 5.0, false), None, "a never-committed driver's reset marks nothing");
+        k.advance(20.0).unwrap();
+        assert_eq!(k.evaluator().changed, vec![d0], "neither the reset of a never-committed driver nor the stale commit it left is a change");
+
+        // A reset of a committed driver is one.
+        assert_eq!(k.apply_request(DriverRequest::Reset { driver: d0 }, 20.0, false), Some(PartitionId(0)));
+        assert_eq!(k.evaluator().changed, vec![d0, d0]);
+    }
+
+    #[test]
+    fn a_request_that_changes_nothing_leaves_no_journal_entry_and_no_event() {
+        let mut k = Kernel::new(NoOpSolver, NoOpEvaluator);
+        let d0 = k.add_driver(driver(1), Some(PartitionId(0)));
+        let level = |level: Mode| DriverRequest::Level { driver: d0, level, delays: DelaySet::uniform(5.0) };
+        k.apply_request(level(High), 0.0, false);
+        k.advance(5.0).unwrap();
+        assert_eq!(k.driver(d0).committed(), Some(High));
+
+        let window = k.open_window();
+        let events = k.heap.len();
+        // Already committed HIGH with nothing in flight: inert.
+        k.apply_request(level(High), 5.0, false);
+        assert!(k.driver_journal.is_empty(), "an inert request saves no pre-image");
+        assert_eq!(k.heap.len(), events);
+
+        // A real change is journaled, scheduled, and inert on the second ask.
+        k.apply_request(level(Low), 5.0, false);
+        assert_eq!(k.driver_journal.len(), 1);
+        assert_eq!(k.heap.len(), events + 1);
+        k.apply_request(level(Low), 5.0, false);
+        assert_eq!((k.driver_journal.len(), k.heap.len()), (1, events + 1), "asking again for the target already in flight is inert too");
+
+        // Rolled back, the driver is exactly as it was.
+        k.roll_back(window);
+        assert_eq!(k.driver(d0).committed(), Some(High));
+        assert_eq!(k.driver(d0).pending(), None);
+        assert_eq!(k.heap.len(), events);
+    }
+
+    // ---- one request per Level driver in a batch --------------------------
+
+    #[test]
+    fn a_driver_named_by_a_level_must_be_named_by_no_other_level_or_reset_in_its_batch() {
+        let (a, b) = (DriverId(0), DriverId(1));
+        let level = |driver: DriverId, level: Mode| DriverRequest::Level { driver, level, delays: DelaySet::uniform(0.0) };
+        let reset = |driver: DriverId| DriverRequest::Reset { driver };
+        let timer = DriverRequest::Timer { device: DeviceId(0), at: 1.0, tag: 0 };
+
+        assert!(one_request_per_level_driver(&[]));
+        assert!(one_request_per_level_driver(&[level(a, High), level(b, Low), timer.clone(), timer.clone()]), "distinct drivers, any number of timers");
+        assert!(one_request_per_level_driver(&[reset(a), reset(a), level(b, High)]), "two resets of one driver are the same reset");
+        assert!(!one_request_per_level_driver(&[level(a, High), level(a, High)]), "two levels to one driver, even equal ones");
+        assert!(!one_request_per_level_driver(&[level(a, High), level(b, Low), level(a, Low)]), "not adjacent");
+        assert!(!one_request_per_level_driver(&[reset(a), level(a, High)]), "a level after a reset is judged against a cleared driver");
+        assert!(!one_request_per_level_driver(&[level(a, High), reset(a)]), "and a reset after a level is a second request for it");
+    }
+
+    /// A solver whose every dirty partition affects one reader, so a commit
+    /// reaches that reader's evaluation.
+    struct AffectsOneReader(DeviceId);
+    impl PartitionSolver for AffectsOneReader {
+        fn resolve_dirty(&mut self, dirty: &[PartitionId], _now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+            Ok(if dirty.is_empty() { Vec::new() } else { vec![self.0] })
+        }
+        fn voltages(&self) -> &[f64] {
+            &[]
+        }
+        fn currents(&self) -> &[f64] {
+            &[]
+        }
+        fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {}
+    }
+
+    /// An evaluator that returns `batch` for every evaluation.
+    struct FixedBatch(Vec<DriverRequest>);
+    impl DeviceEvaluator for FixedBatch {
+        fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+            self.0.clone()
+        }
+    }
+
+    /// Runs one instant at which the driver's commit lands and the reader
+    /// evaluates to `batch`.
+    fn run_one_evaluation_of(batch: Vec<DriverRequest>) -> Result<(), KernelError> {
+        let d0 = DriverId(0);
+        let mut k = Kernel::new(AffectsOneReader(DeviceId(0)), FixedBatch(batch));
+        assert_eq!(k.add_driver(driver(1), Some(PartitionId(0))), d0);
+        k.apply_request(DriverRequest::Level { driver: d0, level: High, delays: DelaySet::uniform(0.0) }, 0.0, false);
+        k.advance(0.0)
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "named by a Level and by another Level or Reset")]
+    fn an_evaluator_that_returns_two_levels_for_one_driver_trips_the_debug_assertion() {
+        let level = |level: Mode| DriverRequest::Level { driver: DriverId(0), level, delays: DelaySet::uniform(0.0) };
+        // Each is a perfectly good request alone; together `evaluate_into`'s
+        // inert-request filter could no longer agree with the kernel's own.
+        let _ = run_one_evaluation_of(vec![level(Low), level(High)]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "named by a Level and by another Level or Reset")]
+    fn an_evaluator_that_resets_a_driver_it_also_requests_a_level_of_trips_the_debug_assertion() {
+        let d0 = DriverId(0);
+        let _ = run_one_evaluation_of(vec![DriverRequest::Reset { driver: d0 }, DriverRequest::Level { driver: d0, level: High, delays: DelaySet::uniform(0.0) }]);
+    }
+
+    #[test]
+    fn a_batch_with_one_request_per_driver_is_applied_without_tripping_the_assertion() {
+        // The same mock and instant as the two tests above, with a batch that
+        // meets the condition: proves their panics come from the batch and
+        // not from the harness.
+        run_one_evaluation_of(vec![DriverRequest::Level { driver: DriverId(0), level: Low, delays: DelaySet::uniform(5.0) }, DriverRequest::Timer { device: DeviceId(0), at: 9.0, tag: 1 }]).unwrap();
     }
 }

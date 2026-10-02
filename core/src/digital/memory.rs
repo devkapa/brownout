@@ -125,14 +125,22 @@ fn bits(reads: &[bool], base: usize, n: usize) -> usize {
     v
 }
 
-/// The largest of `vals`, or `fallback` when `vals` is empty (delays point
-/// 3: "with no identified cause, the kind's first pair applies" / WHAT TO
-/// BUILD point 3: "unselectable entries take the kind's first pair, never
-/// 0").
-fn max_or(vals: &[f64], fallback: f64) -> f64 {
-    match vals.iter().copied().fold(None::<f64>, |acc, v| Some(acc.map_or(v, |a| a.max(v)))) {
-        Some(m) => m,
-        None => fallback,
+/// The running largest of the delay figures of the causes that apply to one
+/// transition, folded in the order they are pushed (`f64::max`, so exactly
+/// what a fold over a collected slice gives) without collecting them: `or`
+/// yields it, or `fallback` when no cause was pushed (delays point 3: "with no
+/// identified cause, the kind's first pair applies" / WHAT TO BUILD point 3:
+/// "unselectable entries take the kind's first pair, never 0").
+#[derive(Default)]
+struct Largest(Option<f64>);
+
+impl Largest {
+    fn push(&mut self, v: f64) {
+        self.0 = Some(self.0.map_or(v, |a| a.max(v)));
+    }
+
+    fn or(self, fallback: f64) -> f64 {
+        self.0.unwrap_or(fallback)
     }
 }
 
@@ -140,9 +148,17 @@ fn max_or(vals: &[f64], fallback: f64) -> f64 {
 /// 3-4) — see `sequential::evaluate`'s doc comment for the parameter
 /// convention this mirrors exactly.
 pub fn evaluate(ic: &IcRecord, state: &mut MemState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    evaluate_into(ic, state, reads, last_reads, edges_live, now, &mut out);
+    out
+}
+
+/// [`evaluate`], replacing the contents of `out` (the caller's reusable
+/// buffers) instead of returning a fresh [`FamilyOutput`].
+pub fn evaluate_into(ic: &IcRecord, state: &mut MemState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64, out: &mut FamilyOutput) {
     match state {
-        MemState::Ram189(st) => evaluate_189(ic, st, reads, last_reads, edges_live),
-        MemState::Eeprom(st) => evaluate_eeprom(ic, st, reads, last_reads, edges_live, now),
+        MemState::Ram189(st) => evaluate_189_into(ic, st, reads, last_reads, edges_live, out),
+        MemState::Eeprom(st) => evaluate_eeprom_into(ic, st, reads, last_reads, edges_live, now, out),
     }
 }
 
@@ -158,7 +174,14 @@ const DATA189: usize = 4;
 const CS189: usize = 8;
 const WE189: usize = 9;
 
+#[cfg(test)]
 fn evaluate_189(ic: &IcRecord, state: &mut Ram189State, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    evaluate_189_into(ic, state, reads, last_reads, edges_live, &mut out);
+    out
+}
+
+fn evaluate_189_into(ic: &IcRecord, state: &mut Ram189State, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, out: &mut FamilyOutput) {
     let cs_low = !reads[CS189];
     let we_high = reads[WE189];
 
@@ -181,25 +204,25 @@ fn evaluate_189(ic: &IcRecord, state: &mut Ram189State, reads: &[bool], last_rea
     let word = state.mem[addr];
     let delays = delay_set_189(ic, reads, last_reads);
 
-    let mut requests = Vec::with_capacity(4);
+    out.requests.clear();
     if cs_low && we_high {
         for bit in 0..4 {
             let level = (word >> bit) & 1 == 0; // inverted outputs
-            requests.push((if level { Mode::High } else { Mode::Low }, delays));
+            out.requests.push((if level { Mode::High } else { Mode::Low }, delays));
         }
     } else {
-        requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 4));
+        out.requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 4));
     }
 
-    let mut slots = vec![f64::NAN; 4];
+    out.slots.clear();
+    out.slots.resize(4, f64::NAN);
     if cs_low {
         // Write mode included (memories point 3.4 / classic's own DI:489-495).
-        for (bit, slot) in slots.iter_mut().enumerate() {
+        for (bit, slot) in out.slots.iter_mut().enumerate() {
             *slot = if (word >> bit) & 1 == 0 { 1.0 } else { 0.0 };
         }
     }
-
-    FamilyOutput { requests, slots, timers: Vec::new() }
+    out.timers.clear();
 }
 
 /// `ic.delays` in the README's pair order: `addrO(0) csEnable(1)
@@ -208,10 +231,10 @@ fn delay_set_189(ic: &IcRecord, reads: &[bool], last_reads: Option<&[bool]>) -> 
     let d = &ic.delays;
     let (lh, hl) = d[0];
 
-    let mut zh_c = Vec::new();
-    let mut zl_c = Vec::new();
-    let mut hz_c = Vec::new();
-    let mut lz_c = Vec::new();
+    let mut zh_c = Largest::default();
+    let mut zl_c = Largest::default();
+    let mut hz_c = Largest::default();
+    let mut lz_c = Largest::default();
 
     if let Some(last) = last_reads {
         let cs_low_now = !reads[CS189];
@@ -243,7 +266,7 @@ fn delay_set_189(ic: &IcRecord, reads: &[bool], last_reads: Option<&[bool]>) -> 
         }
     }
 
-    DelaySet { lh, hl, zh: max_or(&zh_c, d[0].0), zl: max_or(&zl_c, d[0].1), hz: max_or(&hz_c, d[0].0), lz: max_or(&lz_c, d[0].1) }
+    DelaySet { lh, hl, zh: zh_c.or(d[0].0), zl: zl_c.or(d[0].1), hz: hz_c.or(d[0].0), lz: lz_c.or(d[0].1) }
 }
 
 // ---- 28c16 / 28c256 ---------------------------------------------------------
@@ -273,7 +296,14 @@ fn consume_eeprom_write(state: &mut EepromState, sdp_enabled: bool, addr: usize,
     false
 }
 
+#[cfg(test)]
 fn evaluate_eeprom(ic: &IcRecord, state: &mut EepromState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64) -> FamilyOutput {
+    let mut out = FamilyOutput::default();
+    evaluate_eeprom_into(ic, state, reads, last_reads, edges_live, now, &mut out);
+    out
+}
+
+fn evaluate_eeprom_into(ic: &IcRecord, state: &mut EepromState, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64, out: &mut FamilyOutput) {
     let addr_bits = if ic.kind == kinds::IC_28C16 { 11 } else { 15 };
     let mask = (1usize << addr_bits) - 1;
     let oe_pin = addr_bits;
@@ -343,8 +373,9 @@ fn evaluate_eeprom(ic: &IcRecord, state: &mut EepromState, reads: &[bool], last_
     // Steps 5-6: drive and publish.
     let delays = delay_set_eeprom(ic, addr_bits, reads, last_reads);
     let byte = state.image[addr];
-    let mut requests = Vec::with_capacity(8);
-    let mut slots = vec![f64::NAN; 8];
+    out.requests.clear();
+    out.slots.clear();
+    out.slots.resize(8, f64::NAN);
 
     if oe_low && ce_low {
         let polling_byte = state.pending.and_then(|(pending_addr, pending_byte, _)| (pending_addr == addr).then_some(pending_byte));
@@ -354,19 +385,21 @@ fn evaluate_eeprom(ic: &IcRecord, state: &mut EepromState, reads: &[bool], last_
                 (Some(_), 6) => state.poll_reads & 1 == 1,
                 _ => (byte >> bit) & 1 == 1,
             };
-            requests.push((if level { Mode::High } else { Mode::Low }, delays));
+            out.requests.push((if level { Mode::High } else { Mode::Low }, delays));
         }
         if state.pending.is_none() {
-            for (bit, slot) in slots.iter_mut().enumerate() {
+            for (bit, slot) in out.slots.iter_mut().enumerate() {
                 *slot = ((byte >> bit) & 1) as f64;
             }
         }
     } else {
-        requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 8));
+        out.requests.extend(std::iter::repeat_n((Mode::Hiz, delays), 8));
     }
 
-    let timers = newly_accepted_at.map(|at| vec![(at, WRITE_COMPLETE_TAG)]).unwrap_or_default();
-    FamilyOutput { requests, slots, timers }
+    out.timers.clear();
+    if let Some(at) = newly_accepted_at {
+        out.timers.push((at, WRITE_COMPLETE_TAG));
+    }
 }
 
 /// `ic.delays` in the README's pair order: `addrIo(0) ceEnable(1)
@@ -377,10 +410,10 @@ fn delay_set_eeprom(ic: &IcRecord, addr_bits: usize, reads: &[bool], last_reads:
     let oe_pin = addr_bits;
     let ce_pin = addr_bits + 1;
 
-    let mut zh_c = Vec::new();
-    let mut zl_c = Vec::new();
-    let mut hz_c = Vec::new();
-    let mut lz_c = Vec::new();
+    let mut zh_c = Largest::default();
+    let mut zl_c = Largest::default();
+    let mut hz_c = Largest::default();
+    let mut lz_c = Largest::default();
 
     if let Some(last) = last_reads {
         let ce_low_now = !reads[ce_pin];
@@ -412,7 +445,7 @@ fn delay_set_eeprom(ic: &IcRecord, addr_bits: usize, reads: &[bool], last_reads:
         }
     }
 
-    DelaySet { lh, hl, zh: max_or(&zh_c, d[0].0), zl: max_or(&zl_c, d[0].1), hz: max_or(&hz_c, d[0].0), lz: max_or(&lz_c, d[0].1) }
+    DelaySet { lh, hl, zh: zh_c.or(d[0].0), zl: zl_c.or(d[0].1), hz: hz_c.or(d[0].0), lz: lz_c.or(d[0].1) }
 }
 
 // ---- exports behind the C ABI ----------------------------------------------
@@ -869,5 +902,70 @@ mod tests {
 
         let mut ram = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true });
         assert!(take_update(&mut ram).is_none(), "a 74ls189 never reports a dirty EEPROM image");
+    }
+    #[test]
+    fn evaluate_into_over_one_reused_output_matches_evaluate_across_kinds_states_and_reads() {
+        let mut seed = 0x7654_3211u32;
+        let mut bit = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed & 0x80 != 0
+        };
+        let junk = FamilyOutput { requests: vec![(Mode::Low, DelaySet::uniform(2.0)); 11], slots: vec![3.0; 11], timers: vec![(1.0, 9), (2.0, 9)] };
+        let mut reused = junk.clone();
+        let mut timers_seen = 0;
+        for (ic, len, image) in [(ic_189(), 14usize, Vec::new()), (ic_28c16(), 22, vec![0xA5; 2048])] {
+            let mut state = MemState::power_on(&ic, &image.iter().map(|&b| u32::from_le_bytes([b; 4])).collect::<Vec<_>>());
+            let mut last: Option<Vec<bool>> = None;
+            for pass in 0..400 {
+                let reads: Vec<bool> = (0..len).map(|_| bit()).collect();
+                let edges_live = pass % 5 != 0;
+                let now = pass as f64 * 3e-3;
+                let mut fresh_state = state.clone();
+                let expected = evaluate(&ic, &mut fresh_state, &reads, last.as_deref(), edges_live, now);
+                if pass % 2 == 0 {
+                    reused = junk.clone();
+                }
+                evaluate_into(&ic, &mut state, &reads, last.as_deref(), edges_live, now, &mut reused);
+                // Slots compare by bits: a NaN slot ("absent") is never `==`.
+                let slot_bits = |o: &FamilyOutput| o.slots.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!((&reused.requests, slot_bits(&reused), &reused.timers), (&expected.requests, slot_bits(&expected), &expected.timers), "kind {}, pass {pass}", ic.kind);
+                assert_eq!(state, fresh_state, "kind {}, pass {pass}: the state left behind", ic.kind);
+                timers_seen += reused.timers.len();
+                last = Some(reads);
+            }
+        }
+        assert!(timers_seen > 0, "an EEPROM write was accepted, so a scheduled timer was checked too");
+    }
+    #[test]
+    fn largest_folds_exactly_like_the_collect_then_max_or_it_replaced() {
+        // The delay-cause maxima used to be collected into a `Vec` and folded
+        // by `max_or`; `Largest` folds as the causes arrive. Same values in the
+        // same order must give the same bits, NaN and signed zero included.
+        fn max_or(vals: &[f64], fallback: f64) -> f64 {
+            match vals.iter().copied().fold(None::<f64>, |acc, v| Some(acc.map_or(v, |a| a.max(v)))) {
+                Some(m) => m,
+                None => fallback,
+            }
+        }
+        let pool = [0.0, -0.0, 1.0, 2.5, -3.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 7e-9, 20e-9];
+        let mut seed = 0x0bad_cafeu32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as usize
+        };
+        for _ in 0..500 {
+            let count = next() % 6;
+            let vals: Vec<f64> = (0..count).map(|_| pool[next() % pool.len()]).collect();
+            let fallback = pool[next() % pool.len()];
+            let mut largest = Largest::default();
+            for &v in &vals {
+                largest.push(v);
+            }
+            assert_eq!(largest.or(fallback).to_bits(), max_or(&vals, fallback).to_bits(), "{vals:?} with fallback {fallback}");
+        }
     }
 }

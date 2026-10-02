@@ -356,6 +356,9 @@ struct Partition {
     /// `partition::build`'s own union rule decides it before this solver
     /// even exists.
     holds_free_ic_supply: bool,
+    /// Whether this partition's pre-image is already in the open window's
+    /// journal ([`SteppedSolver::journal`]).
+    journaled: bool,
 }
 
 impl Partition {
@@ -401,6 +404,7 @@ impl Partition {
             prev_x: Vec::new(),
             has_prev: false,
             holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
+            journaled: false,
         }
     }
 }
@@ -415,7 +419,17 @@ pub struct Snapshot {
     scheduled: Vec<(f64, usize, u64)>,
 }
 
-#[derive(Debug, Clone)]
+impl Snapshot {
+    /// Every captured value, printed in partition order (tests compare states
+    /// by this; the map's own order is arbitrary).
+    #[cfg(test)]
+    pub(crate) fn digest(&self) -> String {
+        let ordered: std::collections::BTreeMap<_, _> = self.partitions.iter().collect();
+        format!("{ordered:?} {:?}", self.scheduled)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct PartitionSnapshot {
     x: Vec<f64>,
     vc: Vec<f64>,
@@ -433,6 +447,28 @@ struct PartitionSnapshot {
     prev_t: f64,
     prev_x: Vec<f64>,
     has_prev: bool,
+}
+
+impl PartitionSnapshot {
+    /// Becomes a copy of `part`'s state, reusing this snapshot's buffers.
+    fn fill_from(&mut self, part: &Partition) {
+        self.x.clone_from(&part.x);
+        self.vc.clone_from(&part.vc);
+        self.i_prev.clone_from(&part.i_prev);
+        self.t = part.t;
+        self.h = part.h;
+        self.changing = part.changing;
+        self.be_next_step = part.be_next_step;
+        self.version = part.version;
+        self.has_pend = part.has_pend;
+        self.pend_t = part.pend_t;
+        self.pend_x.clone_from(&part.pend_x);
+        self.pend_vc.clone_from(&part.pend_vc);
+        self.pend_i.clone_from(&part.pend_i);
+        self.prev_t = part.prev_t;
+        self.prev_x.clone_from(&part.prev_x);
+        self.has_prev = part.has_prev;
+    }
 }
 
 /// Owns every `Stepped` partition (>= 2 capacitors, or a single one under
@@ -462,6 +498,21 @@ pub struct SteppedSolver {
     /// planned ([`ThresholdEnv`]), kept between plans so a plan costs a copy
     /// and not an allocation. No state: it is overwritten before every use.
     threshold_scratch: Vec<f64>,
+    /// The rollback window (`PartitionedSolver::begin_instant`): while it is
+    /// open, each partition's state is saved (`journal`) before the first
+    /// call of the window that can change it, so a completed instant costs
+    /// nothing and a failed one puts back only what it touched. `spare` holds
+    /// the saved states of earlier windows for reuse, buffers and all.
+    window: bool,
+    journal: Vec<(usize, PartitionSnapshot)>,
+    spare: Vec<PartitionSnapshot>,
+    window_scheduled: Vec<(f64, usize, u64)>,
+    /// Test builds keep every partition's state from when the window opened
+    /// (keyed by partition) and check, at the window's end, that a partition
+    /// the journal does not hold is unchanged, and after a rollback that all
+    /// of them are back.
+    #[cfg(test)]
+    w_saved: Option<std::collections::BTreeMap<usize, String>>,
 }
 
 impl SteppedSolver {
@@ -505,6 +556,12 @@ impl SteppedSolver {
             fixed: fixed.to_vec(),
             node_to_ic_readers,
             threshold_scratch: Vec::new(),
+            window: false,
+            journal: Vec::new(),
+            spare: Vec::new(),
+            window_scheduled: Vec::new(),
+            #[cfg(test)]
+            w_saved: None,
         }
     }
 
@@ -598,6 +655,7 @@ impl SteppedSolver {
             if !self.partitions.contains_key(&p_idx) {
                 continue;
             }
+            self.journal(p_idx);
             self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages)?;
 
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
@@ -654,6 +712,7 @@ impl SteppedSolver {
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
         let _ = now; // the due time IS `part.pend_t`; `now` is only a sanity anchor.
+        self.journal(partition);
         let old_bits: Vec<u64> = self.partitions[&partition].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
         {
             let part = self.partitions.get_mut(&partition).ok_or_else(|| format!("stepped: unknown partition {partition}"))?;
@@ -681,6 +740,7 @@ impl SteppedSolver {
             if self.partitions[&p_idx].t >= t_end - 1e-15 {
                 continue;
             }
+            self.journal(p_idx);
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
             self.sync_partition(p_idx, t_end, drivers, live_params, voltages)?;
             Self::publish(self.partitions.get(&p_idx).unwrap(), live_params, voltages, currents);
@@ -712,6 +772,115 @@ impl SteppedSolver {
 
     pub fn take_scheduled(&mut self) -> Vec<(f64, usize, u64)> {
         std::mem::take(&mut self.scheduled)
+    }
+
+    /// [`Self::take_scheduled`] without giving the queue's buffer away, for a
+    /// caller that moves the entries on at once.
+    pub(crate) fn drain_scheduled(&mut self) -> std::vec::Drain<'_, (f64, usize, u64)> {
+        self.scheduled.drain(..)
+    }
+
+    /// The compiled shape of global partition `p_idx`, if this solver owns it.
+    pub(crate) fn shape(&self, p_idx: usize) -> Option<&DynShape> {
+        self.partitions.get(&p_idx).map(|part| &part.shape)
+    }
+
+    /// The instant partition `p_idx` has been committed to (tests look at it).
+    #[cfg(test)]
+    pub(crate) fn time_of(&self, p_idx: usize) -> Option<f64> {
+        self.partitions.get(&p_idx).map(|part| part.t)
+    }
+
+    /// Opens the rollback window (see the field): nothing is copied yet.
+    pub(crate) fn begin_window(&mut self) {
+        self.window = true;
+        self.window_scheduled.clone_from(&self.scheduled);
+        #[cfg(test)]
+        {
+            self.w_saved = Some(self.partitions.iter().map(|(&p, part)| (p, Self::state_digest(part))).collect());
+        }
+    }
+
+    #[cfg(test)]
+    fn state_digest(part: &Partition) -> String {
+        let mut snap = PartitionSnapshot::default();
+        snap.fill_from(part);
+        format!("{snap:?}")
+    }
+
+    /// Saves partition `p`'s state before the window's first call that can
+    /// change it. A no-op outside a window and for a partition already saved:
+    /// the first pre-image is the one a rollback needs. Every entry point
+    /// that changes a partition calls this first (`resolve_dirty`,
+    /// `handle_step`, `sync_to`, `sync_supplies`); `plan_step`, `sync_partition`
+    /// and `commit` only ever run on a partition one of them named.
+    fn journal(&mut self, p: usize) {
+        if !self.window {
+            return;
+        }
+        let Some(part) = self.partitions.get_mut(&p) else { return };
+        if part.journaled {
+            return;
+        }
+        part.journaled = true;
+        let mut saved = self.spare.pop().unwrap_or_default();
+        saved.fill_from(part);
+        self.journal.push((p, saved));
+    }
+
+    /// The window's instant completed: the journal is dropped (its buffers
+    /// kept for the next window).
+    pub(crate) fn end_window(&mut self) {
+        #[cfg(test)]
+        if let Some(saved) = self.w_saved.take() {
+            for (p, part) in &self.partitions {
+                assert!(part.journaled || Self::state_digest(part) == saved[p], "stepped partition {p} changed in the window without being journaled");
+            }
+        }
+        self.window = false;
+        for (p, saved) in self.journal.drain(..) {
+            if let Some(part) = self.partitions.get_mut(&p) {
+                part.journaled = false;
+            }
+            self.spare.push(saved);
+        }
+    }
+
+    /// The window's instant failed: every partition it touched, and the queue
+    /// of steps to schedule, go back to what the window found.
+    pub(crate) fn rollback_window(&mut self) {
+        self.scheduled.clone_from(&self.window_scheduled);
+        self.window = false;
+        for (p, mut saved) in self.journal.drain(..) {
+            if let Some(part) = self.partitions.get_mut(&p) {
+                part.journaled = false;
+                // Swapped, not moved: the buffers the partition held go to the
+                // spare snapshot instead of to the allocator.
+                std::mem::swap(&mut part.x, &mut saved.x);
+                std::mem::swap(&mut part.vc, &mut saved.vc);
+                std::mem::swap(&mut part.i_prev, &mut saved.i_prev);
+                part.t = saved.t;
+                part.h = saved.h;
+                part.changing = saved.changing;
+                part.be_next_step = saved.be_next_step;
+                part.version = saved.version;
+                part.has_pend = saved.has_pend;
+                part.pend_t = saved.pend_t;
+                std::mem::swap(&mut part.pend_x, &mut saved.pend_x);
+                std::mem::swap(&mut part.pend_vc, &mut saved.pend_vc);
+                std::mem::swap(&mut part.pend_i, &mut saved.pend_i);
+                part.prev_t = saved.prev_t;
+                std::mem::swap(&mut part.prev_x, &mut saved.prev_x);
+                part.has_prev = saved.has_prev;
+            }
+            self.spare.push(saved);
+        }
+        #[cfg(test)]
+        if let Some(saved) = self.w_saved.take() {
+            for (p, part) in &self.partitions {
+                assert_eq!(Self::state_digest(part), saved[p], "stepped partition {p}: a rollback left it changed");
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -931,6 +1100,7 @@ impl SteppedSolver {
                 continue;
             }
             let old_bits: Vec<u64> = part.shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
+            self.journal(b);
             visiting.push(b);
             let result = (|| {
                 self.sync_partition(b, now, catchup_drivers, live_params, voltages)?;

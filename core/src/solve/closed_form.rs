@@ -125,11 +125,14 @@ struct Partition {
     /// `FLOATING_INPUT` non-`OPEN_HIGH` pin free in this partition, in stamp
     /// order: the pins whose pull follows the floating bucket of `now`.
     touch_pulls: Vec<(u32, u32)>,
-    /// Ids of every driver of a `touch_ics` IC, ascending. Derived from the
-    /// driver table's `device` fields, which never change after a driver is
-    /// registered (load time), so it is rebuilt only when the table's length
-    /// differs from `driver_index_len`; a debug build re-derives and compares
-    /// it on every call.
+    /// Ids of every driver that stamps into this partition ([`ClosedFormSolver::stamps_into`]:
+    /// a driver of a `touch_ics` IC whose pin or supply is free in it, not
+    /// every driver of an IC that merely reads it), ascending. They are the
+    /// only drivers a segment build reads, so they are what its key covers.
+    /// Derived from the driver table's `node` and `device` fields, which never
+    /// change after a driver is registered (load time), so it is rebuilt only
+    /// when the table's length differs from `driver_index_len`; a debug build
+    /// re-derives and compares it on every call.
     driver_ids: Vec<u32>,
     driver_index_len: usize,
     /// Scratch, reused across calls: the packed segment key, the copies of
@@ -138,6 +141,9 @@ struct Partition {
     key_scratch: Vec<u8>,
     driver_scratch: Vec<Driver>,
     bits_scratch: Vec<u64>,
+    /// Whether this partition's pre-image is already in the open window's
+    /// journal ([`ClosedFormSolver::journal`]).
+    journaled: bool,
 }
 
 /// Everything [`ClosedFormSolver::snapshot`] captures, restored verbatim by
@@ -156,6 +162,15 @@ pub struct Snapshot {
     /// One per partition, in the solver's own (ascending global index) order.
     partitions: Vec<PartitionSnapshot>,
     scheduled: Vec<(f64, usize, u64)>,
+}
+
+impl Snapshot {
+    /// Every captured value, printed in a fixed order (tests compare states by
+    /// this).
+    #[cfg(test)]
+    pub(crate) fn digest(&self) -> String {
+        format!("{self:?}")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +220,20 @@ pub struct ClosedFormSolver {
     /// last bullet: "resolves of dynamic partitions must also report IC
     /// readers of nodes that changed, as static does"), by node id.
     node_to_ic_readers: Vec<Vec<usize>>,
+    /// The rollback window (`PartitionedSolver::begin_instant`): while it is
+    /// open, each partition's state is saved (`journal`) before the first
+    /// call of the window that can change it, and `scheduled` as the window
+    /// found it is kept, so the whole solver is no longer copied at every
+    /// instant. A completed instant just drops the journal.
+    window: bool,
+    journal: Vec<(u32, PartitionSnapshot)>,
+    window_scheduled: Vec<(f64, usize, u64)>,
+    /// Test builds keep every partition's state from when the window opened
+    /// and check, at the window's end, that a partition the journal does not
+    /// hold is unchanged, and after a rollback that all of them are back: a
+    /// change made without saving fails the test that ran it.
+    #[cfg(test)]
+    w_saved: Option<Vec<String>>,
 }
 
 impl ClosedFormSolver {
@@ -256,6 +285,7 @@ impl ClosedFormSolver {
                 key_scratch: Vec::new(),
                 driver_scratch: Vec::new(),
                 bits_scratch: Vec::new(),
+                journaled: false,
             });
         }
         let ics = collect_ics(program);
@@ -280,7 +310,19 @@ impl ClosedFormSolver {
         for (node, readers) in build_ic_reader_index(&ics) {
             node_to_ic_readers[node] = readers;
         }
-        ClosedFormSolver { parts, slot_of, node_owner, scheduled: Vec::new(), fixed: fixed.to_vec(), node_to_ic_readers }
+        ClosedFormSolver {
+            parts,
+            slot_of,
+            node_owner,
+            scheduled: Vec::new(),
+            fixed: fixed.to_vec(),
+            node_to_ic_readers,
+            window: false,
+            journal: Vec::new(),
+            window_scheduled: Vec::new(),
+            #[cfg(test)]
+            w_saved: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -344,6 +386,7 @@ impl ClosedFormSolver {
         let mut readers = Vec::new();
         for &p_idx in dirty {
             let Some(slot) = self.slot(p_idx) else { continue };
+            self.journal(slot);
             let part = &mut self.parts[slot];
             let vc_now = match &part.seg {
                 Some(_) => vc_at(part.seg_f, part.seg_inf, part.seg_vc0, part.seg_t0, now),
@@ -375,6 +418,7 @@ impl ClosedFormSolver {
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
         let slot = self.slot(partition).ok_or_else(|| format!("closed-form: unknown partition {partition}"))?;
+        self.journal(slot);
         let part = &mut self.parts[slot];
         part.crossings_hit += 1;
         let seg = part.seg.as_ref().expect("a Crossing was only ever scheduled after a segment existed");
@@ -404,6 +448,35 @@ impl ClosedFormSolver {
         std::mem::take(&mut self.scheduled)
     }
 
+    /// [`Self::take_scheduled`] without giving the queue's buffer away, for a
+    /// caller that moves the entries on at once.
+    pub(crate) fn drain_scheduled(&mut self) -> std::vec::Drain<'_, (f64, usize, u64)> {
+        self.scheduled.drain(..)
+    }
+
+    /// The compiled shape of global partition `p_idx`, if this solver owns it.
+    pub(crate) fn shape(&self, p_idx: usize) -> Option<&DynShape> {
+        self.slot(p_idx).map(|slot| &self.parts[slot].shape)
+    }
+
+    /// Which segment partition `p_idx` currently holds, as an identity: it
+    /// changes exactly when a re-aim built a new one (tests look at it).
+    #[cfg(test)]
+    pub(crate) fn segment_id(&self, p_idx: usize) -> Option<usize> {
+        self.slot(p_idx).and_then(|slot| self.parts[slot].seg.as_ref().map(|seg| Rc::as_ptr(seg) as usize))
+    }
+
+    /// Makes every partition's next re-aim rebuild its segment, as if the key
+    /// never matched (tests use it for the reference a reuse is compared with).
+    #[cfg(test)]
+    pub(crate) fn forget_segment_keys(&mut self) {
+        for part in &mut self.parts {
+            if let Some(seg) = part.seg.as_mut() {
+                Rc::make_mut(seg).key.clear();
+            }
+        }
+    }
+
     /// The exact node voltages and capacitor current AT `t_end`
     /// (`PartitionedSolver::sync_dynamic_to`'s closed-form half — see that
     /// trait method's doc comment for why this is not a no-op even though no
@@ -421,37 +494,96 @@ impl ClosedFormSolver {
         }
     }
 
+    fn partition_snapshot(part: &Partition) -> PartitionSnapshot {
+        PartitionSnapshot {
+            seg: part.seg.clone(),
+            seg_t0: part.seg_t0,
+            seg_vc0: part.seg_vc0,
+            seg_f: part.seg_f,
+            seg_inf: part.seg_inf,
+            version: part.version,
+            cross_local: part.cross_local,
+            cross_v: part.cross_v,
+        }
+    }
+
+    fn restore_partition(part: &mut Partition, s: PartitionSnapshot) {
+        part.seg = s.seg;
+        part.seg_t0 = s.seg_t0;
+        part.seg_vc0 = s.seg_vc0;
+        part.seg_f = s.seg_f;
+        part.seg_inf = s.seg_inf;
+        part.version = s.version;
+        part.cross_local = s.cross_local;
+        part.cross_v = s.cross_v;
+    }
+
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            partitions: self
-                .parts
-                .iter()
-                .map(|part| PartitionSnapshot {
-                    seg: part.seg.clone(),
-                    seg_t0: part.seg_t0,
-                    seg_vc0: part.seg_vc0,
-                    seg_f: part.seg_f,
-                    seg_inf: part.seg_inf,
-                    version: part.version,
-                    cross_local: part.cross_local,
-                    cross_v: part.cross_v,
-                })
-                .collect(),
-            scheduled: self.scheduled.clone(),
+        Snapshot { partitions: self.parts.iter().map(Self::partition_snapshot).collect(), scheduled: self.scheduled.clone() }
+    }
+
+    /// Opens the rollback window (see the field): nothing is copied yet.
+    pub(crate) fn begin_window(&mut self) {
+        self.window = true;
+        self.window_scheduled.clone_from(&self.scheduled);
+        #[cfg(test)]
+        {
+            self.w_saved = Some(self.parts.iter().map(|part| format!("{:?}", Self::partition_snapshot(part))).collect());
+        }
+    }
+
+    /// Saves partition `slot`'s state before the window's first call that can
+    /// change it. A no-op outside a window and for a partition already saved:
+    /// the first pre-image is the one a rollback needs.
+    fn journal(&mut self, slot: usize) {
+        if self.window && !self.parts[slot].journaled {
+            self.parts[slot].journaled = true;
+            let saved = Self::partition_snapshot(&self.parts[slot]);
+            self.journal.push((slot as u32, saved));
+        }
+    }
+
+    /// The window's instant completed: the journal is dropped.
+    pub(crate) fn end_window(&mut self) {
+        #[cfg(test)]
+        if let Some(saved) = self.w_saved.take() {
+            for (slot, (part, was)) in self.parts.iter().zip(&saved).enumerate() {
+                assert!(
+                    part.journaled || format!("{:?}", Self::partition_snapshot(part)) == *was,
+                    "closed-form partition {} changed in the window without being journaled",
+                    part.global
+                );
+                let _ = slot;
+            }
+        }
+        self.window = false;
+        for (slot, _) in self.journal.drain(..) {
+            self.parts[slot as usize].journaled = false;
+        }
+    }
+
+    /// The window's instant failed: every partition it touched, and the
+    /// queue of crossings to schedule, go back to what the window found.
+    pub(crate) fn rollback_window(&mut self) {
+        self.scheduled.clone_from(&self.window_scheduled);
+        self.window = false;
+        for (slot, saved) in self.journal.drain(..) {
+            let part = &mut self.parts[slot as usize];
+            Self::restore_partition(part, saved);
+            part.journaled = false;
+        }
+        #[cfg(test)]
+        if let Some(saved) = self.w_saved.take() {
+            for (part, was) in self.parts.iter().zip(&saved) {
+                assert_eq!(format!("{:?}", Self::partition_snapshot(part)), *was, "closed-form partition {}: a rollback left it changed", part.global);
+            }
         }
     }
 
     pub fn restore(&mut self, snapshot: Snapshot) {
         self.scheduled = snapshot.scheduled;
         for (part, s) in self.parts.iter_mut().zip(snapshot.partitions) {
-            part.seg = s.seg;
-            part.seg_t0 = s.seg_t0;
-            part.seg_vc0 = s.seg_vc0;
-            part.seg_f = s.seg_f;
-            part.seg_inf = s.seg_inf;
-            part.version = s.version;
-            part.cross_local = s.cross_local;
-            part.cross_v = s.cross_v;
+            Self::restore_partition(part, s);
         }
     }
 
@@ -466,27 +598,32 @@ impl ClosedFormSolver {
 
     // ---- internals ---------------------------------------------------
 
+    /// Whether driver `d` can put anything into `part`'s system: the same test
+    /// `stamp_ics_into_dyn` applies to each branch of a committed driver (its
+    /// own pin, or the supply node it is committed towards, is free in the
+    /// partition; every branch targets one of its IC's two supply nodes).
+    /// A driver of an IC that merely reads a node of the partition stamps
+    /// nothing here, whatever it commits.
+    fn stamps_into(part: &Partition, d: &Driver, node_owner: &HashMap<usize, (usize, usize)>) -> bool {
+        let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == part.global);
+        part.touch_ics
+            .iter()
+            .find(|(device_index, _)| *device_index == d.device)
+            .is_some_and(|(_, ic)| in_partition(d.node) || in_partition(ic.vcc.node) || in_partition(ic.gnd.node))
+    }
+
     /// Re-derives what `part.driver_ids` is derived from when the driver
     /// table's length is not the one it was derived for (see the field's doc
     /// comment).
-    fn ensure_driver_ids(part: &mut Partition, drivers: &[Driver]) {
+    fn ensure_driver_ids(part: &mut Partition, drivers: &[Driver], node_owner: &HashMap<usize, (usize, usize)>) {
         if part.driver_index_len != drivers.len() {
-            part.driver_ids.clear();
-            for (id, d) in drivers.iter().enumerate() {
-                if part.touch_ics.iter().any(|(device_index, _)| *device_index == d.device) {
-                    part.driver_ids.push(id as u32);
-                }
-            }
+            let ids: Vec<u32> = drivers.iter().enumerate().filter(|(_, d)| Self::stamps_into(part, d, node_owner)).map(|(id, _)| id as u32).collect();
+            part.driver_ids = ids;
             part.driver_index_len = drivers.len();
         }
         #[cfg(debug_assertions)]
         {
-            let fresh: Vec<u32> = drivers
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| part.touch_ics.iter().any(|(device_index, _)| *device_index == d.device))
-                .map(|(id, _)| id as u32)
-                .collect();
+            let fresh: Vec<u32> = drivers.iter().enumerate().filter(|(_, d)| Self::stamps_into(part, d, node_owner)).map(|(id, _)| id as u32).collect();
             debug_assert_eq!(fresh, part.driver_ids, "the driver table changed without changing its length");
         }
     }
@@ -533,7 +670,7 @@ impl ClosedFormSolver {
         fixed: &[Option<f64>],
         live_params: &HashMap<usize, Vec<f64>>,
     ) -> Result<(), String> {
-        Self::ensure_driver_ids(part, drivers);
+        Self::ensure_driver_ids(part, drivers, node_owner);
         Self::segment_key(part, now, drivers, live_params);
         let reusable = matches!(&part.seg, Some(seg) if seg.key == part.key_scratch);
         if !reusable {

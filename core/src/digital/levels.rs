@@ -62,6 +62,36 @@ pub fn read(ic: &IcRecord, power: &IcPower, pin: &IcPin, v_pin: f64, t: f64, sch
     }
 }
 
+/// Every logic pin of `ic`, in pin order, read exactly as [`read`] reads it
+/// when `power` has no Schmitt pair, appended to `out`: the same three
+/// branches per pin, with the Schmitt test, the thresholds and the ground
+/// offset lifted out of the per-pin loop. `voltages` is indexed by each pin's
+/// node, `t` the current time (the floating model's argument).
+///
+/// A Schmitt part (`power.schmitt.is_some()`) has per-pin hysteresis state and
+/// goes through [`read`] pin by pin instead.
+pub fn read_plain_into(ic: &IcRecord, power: &IcPower, voltages: &[f64], t: f64, out: &mut Vec<bool>) {
+    debug_assert!(power.schmitt.is_none(), "a Schmitt part reads through `read`, which keeps its hysteresis state");
+    let (v_gnd, vil, vih) = (power.v_gnd, power.vil, power.vih);
+    out.extend(ic.logic.iter().map(|pin| {
+        if pin.open {
+            // `read`'s first branch, then its open branch.
+            pin.open_high || floating::floating_high(pin.open_hash, t, ic.ttl)
+        } else {
+            let v = voltages[pin.node] - v_gnd;
+            // Most levels are decided by one comparison each and are as
+            // random as the data, so the verdict is the first comparison
+            // itself; only the rare dead-band read takes a branch.
+            let high = v >= vih;
+            if high | (v <= vil) {
+                high
+            } else {
+                floating::floating_high(pin.dead_hash, t, ic.ttl)
+            }
+        }
+    }));
+}
+
 /// The absolute node voltages at which this pin's [`read`] can change —
 /// crossing watches for the solver (spec §1.4: "A reader ... registers that
 /// pin's live thresholds ... with the partition's crossing watch"). Empty
@@ -268,5 +298,45 @@ mod tests {
         let (lo, hi) = power_window(&cmos);
         assert!((lo - 2.7).abs() < 1e-12);
         assert!((hi - 16.5).abs() < 1e-12);
+    }
+    #[test]
+    fn read_plain_into_reads_every_pin_exactly_as_read_does() {
+        // Every combination of open / open-high / TTL-vs-CMOS pin, and
+        // voltages on both sides of both thresholds, at the thresholds
+        // themselves, and inside the dead band (where the floating model,
+        // keyed by each pin's own hash, decides). A tiny deterministic
+        // generator picks hashes and times.
+        let mut seed = 0x2545_f491u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let voltages_pool = [-0.3, 0.0, 0.79, 0.8, 0.81, 1.4, 1.99, 2.0, 2.01, 3.3, 5.0, 5.4];
+        let mut dead_band_pins = 0;
+        for ttl in [false, true] {
+            for (v_gnd, vil, vih) in [(0.0, 0.8, 2.0), (0.4, 0.8, 2.0), (0.0, 1.5, 3.5)] {
+                let mut ic = ic_with(ttl, None);
+                let mut voltages = Vec::new();
+                for i in 0..48u32 {
+                    let flags = next() % 4;
+                    let mut p = pin(voltages.len(), flags & 1 != 0, flags & 2 != 0);
+                    p.open_hash = next();
+                    p.dead_hash = next();
+                    ic.logic.push(p);
+                    voltages.push(voltages_pool[(next() as usize + i as usize) % voltages_pool.len()]);
+                }
+                let power = IcPower { powered: true, v_gnd, vs: 5.0, r_out: 50.0, vil, vih, schmitt: None };
+                for t in [0.0, 1.0e-3, 0.137, 12.5] {
+                    let mut got = Vec::new();
+                    read_plain_into(&ic, &power, &voltages, t, &mut got);
+                    let expected: Vec<bool> = ic.logic.iter().map(|p| read(&ic, &power, p, voltages[p.node], t, &mut false)).collect();
+                    assert_eq!(got, expected, "ttl {ttl}, ground {v_gnd}, t {t}");
+                    dead_band_pins += ic.logic.iter().filter(|p| !p.open && (voltages[p.node] - v_gnd) > vil && (voltages[p.node] - v_gnd) < vih).count();
+                }
+            }
+        }
+        assert!(dead_band_pins > 100, "the dead band was exercised: {dead_band_pins} pin reads");
     }
 }

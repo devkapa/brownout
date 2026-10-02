@@ -448,6 +448,38 @@ pub struct StaticPartitionSolver {
     /// `build`, by `restore` (the published arrays just jumped back to a
     /// snapshot) and by a failed resolve (a half-updated state).
     full: bool,
+    /// The rollback window (`Self::begin_window`): while it is open, every
+    /// published value a resolve changes is recorded first, as `(slot, old
+    /// bits)`, so closing the window costs nothing and rolling it back puts
+    /// exactly the changed slots back, where a whole-array snapshot copied
+    /// both arrays at every instant. Only a value whose bits change is
+    /// recorded: writing the bits it already holds changes nothing to undo.
+    window: bool,
+    v_log: Vec<(u32, u64)>,
+    i_log: Vec<(u32, u64)>,
+    /// Set by the owning `PartitionedSolver` when nothing reads this solver's
+    /// source currents (it computes its own from the whole circuit) and it has
+    /// proved every value they could be built from is bounded
+    /// (`set_source_walk_skippable`); the walk then only runs when a value
+    /// outside the bound could make it non-finite. Off for a solver used on
+    /// its own, whose source currents are its output.
+    source_walk_skippable: bool,
+    /// Set before a call by the owner: every coefficient the source walk
+    /// multiplies by is bounded and every published voltage is within
+    /// `LAZY_V_LIMIT` as of the last publish. Together with the nodes this
+    /// call changes, that bounds everything the walk reads.
+    inputs_bounded: bool,
+    /// Whether the last resolve skipped the source walk, for the test oracle.
+    walk_skipped: bool,
+    /// The readers of one resolve before they are sorted and deduplicated,
+    /// reused across calls.
+    readers_scratch: Vec<usize>,
+    /// Test builds keep a whole copy of both arrays from when the window
+    /// opened, and check on every window's end that undoing the log
+    /// reproduces it: a slot written without being logged fails the test that
+    /// ran it, not a rollback nobody happened to write.
+    #[cfg(test)]
+    w_saved: Option<(Vec<f64>, Vec<f64>)>,
 }
 
 impl StaticPartitionSolver {
@@ -651,6 +683,15 @@ impl StaticPartitionSolver {
             junction_memo,
             walk_extra: vec![0.0; program.node_count],
             full: true,
+            window: false,
+            v_log: Vec::new(),
+            i_log: Vec::new(),
+            source_walk_skippable: false,
+            inputs_bounded: false,
+            walk_skipped: false,
+            readers_scratch: Vec::new(),
+            #[cfg(test)]
+            w_saved: None,
         })
     }
 
@@ -658,6 +699,133 @@ impl StaticPartitionSolver {
     /// stepped one).
     pub fn newton_iterations(&self) -> f64 {
         self.newton_iterations as f64
+    }
+
+    /// Opens the rollback window: from here every published value a resolve
+    /// changes is recorded, until [`Self::end_window`] or
+    /// [`Self::rollback_window`].
+    pub(crate) fn begin_window(&mut self) {
+        self.window = true;
+        self.v_log.clear();
+        self.i_log.clear();
+        #[cfg(test)]
+        {
+            self.w_saved = Some((self.voltages.clone(), self.currents.clone()));
+        }
+    }
+
+    /// Undoes the log on copies of the arrays, newest first, and checks that
+    /// they come out as the arrays the window found (test builds only).
+    #[cfg(test)]
+    fn check_log_reproduces_the_window_start(&mut self) {
+        let Some((v0, i0)) = self.w_saved.take() else { return };
+        let (mut v, mut i) = (self.voltages.clone(), self.currents.clone());
+        for &(node, bits) in self.v_log.iter().rev() {
+            v[node as usize] = f64::from_bits(bits);
+        }
+        for &(device, bits) in self.i_log.iter().rev() {
+            i[device as usize] = f64::from_bits(bits);
+        }
+        for (n, (a, b)) in v.iter().zip(&v0).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "static solver: voltage of node {n} changed in the window without being logged");
+        }
+        for (d, (a, b)) in i.iter().zip(&i0).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "static solver: current of device {d} changed in the window without being logged");
+        }
+    }
+
+    /// The window's instant completed: what it recorded is dropped.
+    pub(crate) fn end_window(&mut self) {
+        #[cfg(test)]
+        self.check_log_reproduces_the_window_start();
+        self.window = false;
+        self.v_log.clear();
+        self.i_log.clear();
+    }
+
+    /// The window's instant failed: every slot it changed goes back to the
+    /// bits it held when the window opened (the log is undone newest first, so
+    /// a slot written twice ends at its first pre-image), and the next resolve
+    /// recomputes and checks everything, as after [`PartitionSolver::restore`].
+    pub(crate) fn rollback_window(&mut self) {
+        for &(node, bits) in self.v_log.iter().rev() {
+            self.voltages[node as usize] = f64::from_bits(bits);
+        }
+        for &(device, bits) in self.i_log.iter().rev() {
+            self.currents[device as usize] = f64::from_bits(bits);
+        }
+        #[cfg(test)]
+        if let Some((v0, i0)) = self.w_saved.take() {
+            assert!(self.voltages.iter().zip(&v0).all(|(a, b)| a.to_bits() == b.to_bits()), "static solver: a rollback left a voltage changed");
+            assert!(self.currents.iter().zip(&i0).all(|(a, b)| a.to_bits() == b.to_bits()), "static solver: a rollback left a current changed");
+        }
+        self.window = false;
+        self.v_log.clear();
+        self.i_log.clear();
+        self.full = true;
+    }
+
+    /// The nodes whose published bits moved in the last resolve (any that
+    /// failed midway included), ascending order not guaranteed.
+    pub(crate) fn changed_nodes(&self) -> &[usize] {
+        &self.changed_scratch
+    }
+
+    /// The devices whose published current the last resolve recomputed
+    /// (resistors and switches; every one after a `full` resolve). A
+    /// current outside this list is exactly as the resolve before left it.
+    pub(crate) fn recomputed_devices(&self) -> impl Iterator<Item = usize> + '_ {
+        let resistor_count = self.resistors.len();
+        self.work.iter().map(move |&id| {
+            let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
+            stamp.device_index
+        })
+    }
+
+    /// Whether the last resolve skipped the source walk (tests look at it).
+    #[cfg(test)]
+    pub(crate) fn skipped_the_source_walk(&self) -> bool {
+        self.walk_skipped
+    }
+
+    /// Whether the next resolve recomputes and checks everything (the field
+    /// `full`; tests look at it).
+    #[cfg(test)]
+    pub(crate) fn needs_full_recompute(&self) -> bool {
+        self.full
+    }
+
+    /// Every resistor and switch this solver publishes a current for.
+    #[cfg(debug_assertions)]
+    pub(crate) fn stamp_devices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.resistors.iter().chain(self.switches.iter()).map(|s| s.device_index)
+    }
+
+    /// See the field of the same name.
+    pub(crate) fn set_source_walk_skippable(&mut self, on: bool) {
+        self.source_walk_skippable = on;
+    }
+
+    /// See the field of the same name.
+    pub(crate) fn set_inputs_bounded(&mut self, on: bool) {
+        self.inputs_bounded = on;
+    }
+
+    /// [`PartitionSolver::resolve_dirty`] appending its readers to `out`
+    /// instead of returning a fresh vector.
+    pub(crate) fn resolve_dirty_into(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], out: &mut Vec<DeviceId>) -> Result<(), String> {
+        self.ensure_driver_index(drivers);
+        let mut changed = std::mem::take(&mut self.changed_scratch);
+        changed.clear();
+        let result = self.resolve_dirty_inner(dirty, now, drivers, &mut changed, out);
+        if result.is_err() {
+            // A half-updated state: the next resolve recomputes everything,
+            // as the whole-array version always did (the kernel normally
+            // restores a snapshot first, which does the same).
+            self.full = true;
+        }
+        self.changed_scratch = changed;
+        result
     }
 
     /// The number of partitions built (contract stat 0), for `Engine::load`
@@ -1030,8 +1198,9 @@ impl StaticPartitionSolver {
     }
 
     /// [`PartitionSolver::resolve_dirty`]'s body; `changed` collects every
-    /// node whose published bits moved.
-    fn resolve_dirty_inner(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], changed: &mut Vec<usize>) -> Result<Vec<DeviceId>, String> {
+    /// node whose published bits moved, and the readers of those nodes are
+    /// appended to `out`, ascending and without repeats.
+    fn resolve_dirty_inner(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], changed: &mut Vec<usize>, out: &mut Vec<DeviceId>) -> Result<(), String> {
         for &partition in dirty {
             let p_idx = partition.0 as usize;
             let size = self.partitions[p_idx].len();
@@ -1063,6 +1232,9 @@ impl StaticPartitionSolver {
                             let new = self.caches[p_idx].entries[entry].x[l];
                             if new.to_bits() != self.voltages[node].to_bits() {
                                 changed.push(node);
+                                if self.window {
+                                    self.v_log.push((node as u32, self.voltages[node].to_bits()));
+                                }
                             }
                             self.voltages[node] = new;
                         }
@@ -1095,7 +1267,13 @@ impl StaticPartitionSolver {
         #[cfg(test)]
         {
             let reference = self.recompute_currents_reference();
+            // A skipped source walk leaves the sources' slots as they were:
+            // that is the point, and nothing reads them.
+            let sources: std::collections::HashSet<usize> = self.resolved.iter().map(|r| r.device_index).collect();
             for (device, (got, want)) in self.currents.iter().zip(&reference).enumerate() {
+                if self.walk_skipped && sources.contains(&device) {
+                    continue;
+                }
                 assert_eq!(got.to_bits(), want.to_bits(), "device {device}: incremental current {got} != whole-circuit {want}");
             }
         }
@@ -1119,13 +1297,16 @@ impl StaticPartitionSolver {
         self.full = false;
 
         // Ascending and duplicate-free, like the `BTreeSet` it replaces.
-        let mut readers: Vec<usize> = Vec::new();
+        let mut readers = std::mem::take(&mut self.readers_scratch);
+        readers.clear();
         for &node in changed.iter() {
             readers.extend_from_slice(&self.node_to_ic_readers[node]);
         }
         readers.sort_unstable();
         readers.dedup();
-        Ok(readers.into_iter().map(|d| DeviceId(d as u32)).collect())
+        out.extend(readers.iter().map(|&d| DeviceId(d as u32)));
+        self.readers_scratch = readers;
+        Ok(())
     }
 
     /// Writes partition `p_idx`'s solved local voltages `x` into
@@ -1136,6 +1317,9 @@ impl StaticPartitionSolver {
         for (l, &node) in self.partitions[p_idx].iter().enumerate() {
             if x[l].to_bits() != self.voltages[node].to_bits() {
                 changed.push(node);
+                if self.window {
+                    self.v_log.push((node as u32, self.voltages[node].to_bits()));
+                }
             }
             self.voltages[node] = x[l];
         }
@@ -1202,12 +1386,33 @@ impl StaticPartitionSolver {
             for c in &stamp.contacts {
                 total += c.g * (self.voltages[c.u] - self.voltages[c.w]);
             }
+            let old = self.currents[stamp.device_index];
+            if self.window && total.to_bits() != old.to_bits() {
+                self.i_log.push((stamp.device_index as u32, old.to_bits()));
+            }
             self.currents[stamp.device_index] = total;
             if !total.is_finite() {
                 bad = Some(bad.map_or(stamp.device_index, |b| b.min(stamp.device_index)));
             }
         }
         self.work = work;
+
+        // The source walk sums, for each source, every term at its child node
+        // (the rail, in a logic circuit: one term per resistor and junction on
+        // it). Its results are read by nothing when the owner computes the
+        // source currents itself, and it can only fail (a non-finite sum) if
+        // some voltage or coefficient it reads is out of bounds, which the
+        // owner has excluded for the coefficients and for every voltage as of
+        // the last publish; the nodes this call changed are checked here. So
+        // with all of those in hand the walk is skipped, and otherwise it runs
+        // exactly as it always did, error included.
+        self.walk_skipped = self.source_walk_skippable
+            && self.inputs_bounded
+            && !self.full
+            && changed.iter().all(|&n| self.voltages[n].abs() <= crate::solve::LAZY_V_LIMIT);
+        if self.walk_skipped {
+            return bad;
+        }
 
         for k in (0..self.resolved.len()).rev() {
             let mut leaving = 0.0;
@@ -1232,6 +1437,10 @@ impl StaticPartitionSolver {
             let total = leaving + self.walk_extra[r.child_node];
             let child_is_pos = !r.parent_is_pos;
             let i_s = if child_is_pos { -total } else { total };
+            let old = self.currents[r.device_index];
+            if self.window && i_s.to_bits() != old.to_bits() {
+                self.i_log.push((r.device_index as u32, old.to_bits()));
+            }
             self.currents[r.device_index] = i_s;
             if !i_s.is_finite() {
                 bad = Some(bad.map_or(r.device_index, |b| b.min(r.device_index)));
@@ -1310,18 +1519,9 @@ impl PartitionSolver for StaticPartitionSolver {
     /// happens here, `check_finite` rejects NaN outright, but `to_bits`
     /// costs nothing extra and is exactly what "bitwise" calls for anyway).
     fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
-        self.ensure_driver_index(drivers);
-        let mut changed = std::mem::take(&mut self.changed_scratch);
-        changed.clear();
-        let result = self.resolve_dirty_inner(dirty, now, drivers, &mut changed);
-        if result.is_err() {
-            // A half-updated state: the next resolve recomputes everything,
-            // as the whole-array version always did (the kernel normally
-            // restores a snapshot first, which does the same).
-            self.full = true;
-        }
-        self.changed_scratch = changed;
-        result
+        let mut readers = Vec::new();
+        self.resolve_dirty_into(dirty, now, drivers, &mut readers)?;
+        Ok(readers)
     }
 
     fn voltages(&self) -> &[f64] {

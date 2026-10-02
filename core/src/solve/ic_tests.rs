@@ -2355,3 +2355,112 @@ fn gap1_a_555_thr_pin_in_another_partition_resets_at_the_moving_thresholds_cross
     let model = model_crossing(|_, y| [(5.0 - y[0]) / 5_000.0 / 1e-6, (5.0 - y[1]) / 20_000.0 / 1e-6], 2.0 / 3.0, &[]);
     assert_flips_at_the_model_crossing(p, |_| {}, 0, 0.0, 0.0, (3, 2, 2.0 / 3.0), model, "555 THR, another partition, supply moving");
 }
+
+// ---- a closed-form segment's key covers the drivers that stamp into it -----
+
+/// A rail (1), an RC node (2, a closed-form partition: a resistor and a
+/// capacitor to ground), a load node (3, a static partition) and one
+/// 74ls04 whose `1a` READS the RC node, whose `2y` DRIVES it and whose `1y`
+/// drives the load node. Devices: 0 source, 1 R, 2 C, 3 ls04, 4 load R.
+fn reader_and_driver_of_an_rc_node() -> (Program, Vec<Driver>) {
+    let p = program(4, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 2, 0, 1000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0, 0.0),
+        ls04(3, 1, 0, [2, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], [false; 12], [0; 12], 0.008, 20e-9),
+        resistor(4, 3, 0, 1000.0),
+    ]);
+    // `1y` (node 3), then `2y` (node 2).
+    let drivers = vec![Driver::new_ic_output(3, 1, 0, 3, false), Driver::new_ic_output(2, 1, 0, 3, false)];
+    (p, drivers)
+}
+
+fn commit(drivers: &mut [Driver], i: usize, level: Mode, now: f64) {
+    let (_, mode, token) = drivers[i].request(level, now, &crate::drivers::DelaySet::uniform(0.0)).expect("a level change schedules a commit");
+    assert!(drivers[i].apply_commit(mode, token));
+}
+
+#[test]
+fn a_closed_form_segment_is_not_rebuilt_when_an_ic_that_only_reads_its_node_commits_an_output_elsewhere() {
+    let (p, mut drivers) = reader_and_driver_of_an_rc_node();
+    let pb = crate::partition::build(&p).unwrap();
+    let (rc, _) = pb.local_index[2].unwrap();
+    assert_eq!(pb.kinds[rc], crate::partition::PartitionKind::ClosedForm);
+    let all: Vec<PartitionId> = (0..pb.kinds.len()).map(|i| PartitionId(i as u32)).collect();
+    let mut s = PartitionedSolver::build(&p).unwrap();
+    let mut reference = PartitionedSolver::build(&p).unwrap();
+    // The reference rebuilds its segment at every re-aim.
+    let step = |s: &mut PartitionedSolver, reference: &mut PartitionedSolver, dirty: &[PartitionId], t: f64, drivers: &[Driver]| {
+        s.resolve_dirty(dirty, t, drivers).unwrap();
+        reference.closed_form.forget_segment_keys();
+        reference.resolve_dirty(dirty, t, drivers).unwrap();
+        s.prepare_readout();
+        reference.prepare_readout();
+        let bits = |s: &PartitionedSolver| s.voltages().iter().chain(s.currents()).map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(s), bits(reference), "reusing a segment must publish what rebuilding it does (t = {t})");
+    };
+
+    step(&mut s, &mut reference, &all, 0.0, &drivers);
+    let built_at_load = s.closed_form.segment_id(rc).unwrap();
+
+    // The driver that stamps into the RC node commits: a real change, so a
+    // new segment.
+    commit(&mut drivers, 1, Mode::High, 1e-6);
+    step(&mut s, &mut reference, &[PartitionId(rc as u32)], 1e-6, &drivers);
+    let after_own_commit = s.closed_form.segment_id(rc).unwrap();
+    assert_ne!(after_own_commit, built_at_load, "a driver on the node changed what the partition stamps");
+
+    // The same IC's other output, on a node this partition does not hold,
+    // commits; a crossing then re-aims the partition. Nothing it stamps has
+    // changed, so the segment is the one it already had.
+    commit(&mut drivers, 0, Mode::High, 2e-6);
+    step(&mut s, &mut reference, &[PartitionId(rc as u32)], 2e-6, &drivers);
+    assert_eq!(s.closed_form.segment_id(rc).unwrap(), after_own_commit, "an output the partition never sees must not rebuild its segment");
+    commit(&mut drivers, 0, Mode::Low, 3e-6);
+    step(&mut s, &mut reference, &[PartitionId(rc as u32)], 3e-6, &drivers);
+    assert_eq!(s.closed_form.segment_id(rc).unwrap(), after_own_commit);
+
+    // And the one that does stamp still rebuilds it.
+    commit(&mut drivers, 1, Mode::Low, 4e-6);
+    step(&mut s, &mut reference, &[PartitionId(rc as u32)], 4e-6, &drivers);
+    assert_ne!(s.closed_form.segment_id(rc).unwrap(), after_own_commit);
+}
+
+// ---- the re-aim of a watch whose IC's supply sits in a static partition ----
+
+#[test]
+fn a_static_supply_that_is_re_solved_brings_the_partitions_holding_its_ics_watched_pins_along_in_pin_order() {
+    // The IC's supply (node 2) is fed through a resistor, so it is free in a
+    // static partition; its `1a` and `2a` read two RC nodes (3 and 4), each a
+    // closed-form partition with a watch registered on it. The RC node of `2a`
+    // is numbered first, so the partitions are added in pin order, not in
+    // partition order.
+    let p = program(5, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 100.0),
+        resistor(2, 1, 4, 1000.0),
+        capacitor(3, 4, 0, 1e-6, 0.0, 0.0),
+        resistor(4, 1, 3, 1000.0),
+        capacitor(5, 3, 0, 1e-6, 0.0, 0.0),
+        ls04(6, 2, 0, [3, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], [false; 12], [0; 12], 0.008, 20e-9),
+    ]);
+    let pb = crate::partition::build(&p).unwrap();
+    let supply = PartitionId(pb.local_index[2].unwrap().0 as u32);
+    let (rc3, rc4) = (pb.local_index[3].unwrap().0, pb.local_index[4].unwrap().0);
+    assert!(pb.kinds[supply.0 as usize] == crate::partition::PartitionKind::Static);
+    assert!(pb.kinds[rc3] == crate::partition::PartitionKind::ClosedForm && pb.kinds[rc4] == crate::partition::PartitionKind::ClosedForm);
+    let s = PartitionedSolver::build(&p).unwrap();
+    assert_eq!(s.watch_dependents.len(), 1, "the one IC is the only one that can add partitions");
+    let (mut cf, mut st) = (Vec::new(), Vec::new());
+    s.add_watch_dependent_partitions(&[supply], &mut cf, &mut st);
+    assert_eq!(cf, vec![rc3, rc4], "pin 1a's partition, then pin 2a's");
+    assert!(st.is_empty());
+    // A partition already named is not named twice, and one that does not hold
+    // the supply adds nothing.
+    let (mut cf, mut st) = (vec![rc4], Vec::new());
+    s.add_watch_dependent_partitions(&[supply], &mut cf, &mut st);
+    assert_eq!(cf, vec![rc4, rc3]);
+    let (mut cf, mut st) = (Vec::new(), Vec::new());
+    s.add_watch_dependent_partitions(&[PartitionId(rc3 as u32)], &mut cf, &mut st);
+    assert!(cf.is_empty() && st.is_empty());
+}

@@ -75,18 +75,29 @@ pub use super::output_capable;
 /// result carries that pin's key, `None` when it does not (a 245 tri-stated
 /// by `/oe`, or its undriven side; the 157 is always driven, see [`mux157`]).
 pub fn evaluate(kind: u32, levels: &[bool]) -> Vec<Option<bool>> {
+    let mut out = Vec::new();
+    evaluate_into(kind, levels, &mut out);
+    out
+}
+
+/// [`evaluate`], replacing the contents of `out` (the caller's reusable
+/// buffer) instead of returning a fresh `Vec`: the kernel evaluates a
+/// combinational IC tens of thousands of times per simulated second, so the
+/// allocation is worth not making.
+pub fn evaluate_into(kind: u32, levels: &[bool], out: &mut Vec<Option<bool>>) {
+    out.clear();
     match kind {
-        kinds::IC_74LS00 => gate3(levels, Gate::Nand, 4),
-        kinds::IC_74LS08 => gate3(levels, Gate::And, 4),
-        kinds::IC_74LS32 => gate3(levels, Gate::Or, 4),
-        kinds::IC_74LS86 => gate3(levels, Gate::Xor, 4),
-        kinds::IC_74LS04 | kinds::IC_74HC14 => gate2_not(levels, 6),
-        kinds::IC_74LS157 => mux157(levels),
-        kinds::IC_74LS283 => adder283(levels),
-        kinds::IC_74HC138 => decoder138(levels),
-        kinds::IC_74LS47 => bcd47(levels),
-        kinds::IC_74LS245 => transceiver245(levels),
-        _ => Vec::new(),
+        kinds::IC_74LS00 => gate3(levels, Gate::Nand, 4, out),
+        kinds::IC_74LS08 => gate3(levels, Gate::And, 4, out),
+        kinds::IC_74LS32 => gate3(levels, Gate::Or, 4, out),
+        kinds::IC_74LS86 => gate3(levels, Gate::Xor, 4, out),
+        kinds::IC_74LS04 | kinds::IC_74HC14 => gate2_not(levels, 6, out),
+        kinds::IC_74LS157 => mux157(levels, out),
+        kinds::IC_74LS283 => adder283(levels, out),
+        kinds::IC_74HC138 => decoder138(levels, out),
+        kinds::IC_74LS47 => bcd47(levels, out),
+        kinds::IC_74LS245 => transceiver245(levels, out),
+        _ => {}
     }
 }
 
@@ -109,16 +120,16 @@ fn eval_gate(gate: Gate, a: bool, b: bool) -> bool {
 
 /// `74ls00`/`74ls08`/`74ls32`/`74ls86`: `gates` groups of `(a, b, y)`,
 /// `y = gate(a, b)`. Always fully driven; these kinds have no `/oe`.
-fn gate3(levels: &[bool], gate: Gate, gates: usize) -> Vec<Option<bool>> {
-    (0..gates).map(|g| Some(eval_gate(gate, levels[g * 3], levels[g * 3 + 1]))).collect()
+fn gate3(levels: &[bool], gate: Gate, gates: usize, out: &mut Vec<Option<bool>>) {
+    out.extend((0..gates).map(|g| Some(eval_gate(gate, levels[g * 3], levels[g * 3 + 1]))));
 }
 
 /// `74ls04`/`74hc14`: `gates` groups of `(a, y)`, `y = !a`. 74hc14's Schmitt
 /// hysteresis is applied upstream, before this function ever sees a level
 /// (spec §3.1: "same topology as 74ls04; hysteresis applied upstream"), so
 /// the truth table itself is a plain inverter for both kinds.
-fn gate2_not(levels: &[bool], gates: usize) -> Vec<Option<bool>> {
-    (0..gates).map(|g| Some(!levels[g * 2])).collect()
+fn gate2_not(levels: &[bool], gates: usize, out: &mut Vec<Option<bool>>) {
+    out.extend((0..gates).map(|g| Some(!levels[g * 2])));
 }
 
 /// `74ls157`: pins `sel(0) /oe(1) 1a(2) 1b(3) 1y(4) ... 4a(11) 4b(12) 4y(13)`.
@@ -127,44 +138,41 @@ fn gate2_not(levels: &[bool], gates: usize) -> Vec<Option<bool>> {
 /// (TI SDLS058 function table), so unlike the 74ls245 this kind is always
 /// driven. The tri-state behaviour classic used to model on this pin belongs
 /// to the 74LS257.
-fn mux157(levels: &[bool]) -> Vec<Option<bool>> {
+fn mux157(levels: &[bool], out: &mut Vec<Option<bool>>) {
     let sel = levels[0];
     let oe = levels[1];
     if oe {
-        return vec![Some(false); 4];
+        out.extend([Some(false); 4]);
+        return;
     }
-    (0..4)
-        .map(|g| {
-            let a = levels[2 + g * 3];
-            let b = levels[3 + g * 3];
-            Some(if sel { b } else { a })
-        })
-        .collect()
+    out.extend((0..4).map(|g| {
+        let a = levels[2 + g * 3];
+        let b = levels[3 + g * 3];
+        Some(if sel { b } else { a })
+    }));
 }
 
 /// `74ls283`: pins `a1(0) b1(1) a2(2) b2(3) a3(4) b3(5) a4(6) b4(7) c0(8)`,
 /// outputs `s1(9) s2(10) s3(11) s4(12) c4(13)`. Ripple sum from `c0`
 /// (digital.ts:504-514); no `/oe`, always fully driven.
-fn adder283(levels: &[bool]) -> Vec<Option<bool>> {
+fn adder283(levels: &[bool], out: &mut Vec<Option<bool>>) {
     let bit = |l: bool| u8::from(l);
     let mut carry = bit(levels[8]);
-    let mut out = Vec::with_capacity(5);
     for i in 0..4 {
         let sum = bit(levels[i * 2]) + bit(levels[i * 2 + 1]) + carry;
         out.push(Some((sum & 1) == 1));
         carry = sum >> 1;
     }
     out.push(Some(carry == 1));
-    out
 }
 
 /// `74hc138`: pins `a0(0) a1(1) a2(2) e1n(3) e2n(4) e3(5)`, outputs
 /// `y0n(6)..y7n(13)`. Disabled drives every output HIGH, not hi-Z
 /// (digital.ts:532-554); no `/oe`-style absence.
-fn decoder138(levels: &[bool]) -> Vec<Option<bool>> {
+fn decoder138(levels: &[bool], out: &mut Vec<Option<bool>>) {
     let enabled = !levels[3] && !levels[4] && levels[5];
     let sel = usize::from(levels[0]) | (usize::from(levels[1]) << 1) | (usize::from(levels[2]) << 2);
-    (0..8).map(|i| Some(!enabled || sel != i)).collect()
+    out.extend((0..8).map(|i| Some(!enabled || sel != i)));
 }
 
 /// `LS47_SEGMENTS` (digital.ts:444-477), sinking convention: `true` means the
@@ -197,7 +205,7 @@ const LS47_SEGMENTS: [[bool; 7]; 16] = [
 /// Priority `rbo_n > lt_n > rbi_n` (spec §3.6); always fully driven -- the
 /// 74ls47's open-collector-ness is an output-STAGE property (`mod.rs`'s
 /// `open_collector` flag, stamped by the solver), not an absence here.
-fn bcd47(levels: &[bool]) -> Vec<Option<bool>> {
+fn bcd47(levels: &[bool], out: &mut Vec<Option<bool>>) {
     let rbo_low = !levels[3];
     let lt_low = !levels[2];
     let rbi_low = !levels[4];
@@ -216,7 +224,7 @@ fn bcd47(levels: &[bool]) -> Vec<Option<bool>> {
     // Electrical order is e,d,c,b,a,g,f (README's pin order) over the
     // sinking-convention `segs` indexed a,b,c,d,e,f,g; classic inverts
     // sinking -> electrical once (digital.ts:586-592) and so do we.
-    [4usize, 3, 2, 1, 0, 6, 5].iter().map(|&i| Some(!segs[i])).collect()
+    out.extend([4usize, 3, 2, 1, 0, 6, 5].iter().map(|&i| Some(!segs[i])));
 }
 
 /// `74ls245`: pins `dir(0) /oe(1) a1(2) b1(3) a2(4) b2(5) ... a8(16) b8(17)`.
@@ -225,12 +233,12 @@ fn bcd47(levels: &[bool]) -> Vec<Option<bool>> {
 /// engine-level gate as the 157, module doc). Otherwise `dir` picks which
 /// side of each pair is driven from the other; the undriven side is `None`
 /// (tri-stated, spec §3.6's table), never a stale level.
-fn transceiver245(levels: &[bool]) -> Vec<Option<bool>> {
+fn transceiver245(levels: &[bool], out: &mut Vec<Option<bool>>) {
     let dir = levels[0];
     let oe = levels[1];
-    let mut out = vec![None; 16];
+    out.resize(16, None);
     if oe {
-        return out;
+        return;
     }
     for g in 0..8 {
         let a_level = levels[2 + g * 2];
@@ -241,7 +249,6 @@ fn transceiver245(levels: &[bool]) -> Vec<Option<bool>> {
             out[g * 2] = Some(b_level); // a_i = b_i; b_i itself stays None
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -430,5 +437,18 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn evaluate_into_over_a_reused_buffer_matches_evaluate_for_every_golden_row() {
+        // One buffer for every row, whatever kind the row before it was: its
+        // leftover contents and length must never leak into a result.
+        let mut buffer = vec![Some(true); 40];
+        for &(kind, input_bits, ..) in combinational_golden::GOLDEN_ROWS {
+            let levels: Vec<bool> = (0..logic_pin_count(kind)).map(|i| (input_bits >> i) & 1 == 1).collect();
+            evaluate_into(kind, &levels, &mut buffer);
+            assert_eq!(buffer, evaluate(kind, &levels), "kind {kind}, input_bits {input_bits:#x}");
+        }
+        evaluate_into(0, &[], &mut buffer);
+        assert!(buffer.is_empty(), "a kind this module does not own leaves nothing behind");
     }
 }

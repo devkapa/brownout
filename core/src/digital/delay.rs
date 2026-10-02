@@ -10,7 +10,7 @@
 //! `Level`/`Hiz` vocabulary were already in place (K1's kernel-infrastructure
 //! wave).
 
-use crate::drivers::DelaySet;
+use crate::drivers::{DelaySet, Driver};
 use crate::events::{DriverId, Mode};
 use crate::kernel::DriverRequest;
 use crate::kinds;
@@ -101,30 +101,35 @@ pub fn driver_requests(
     last_reads: Option<&[bool]>,
 ) -> Vec<DriverRequest> {
     let mut requests = Vec::with_capacity(drivers.len());
-    driver_requests_into(ic, drivers, result, reads, last_reads, &mut requests);
+    driver_requests_into(ic, drivers, result, reads, last_reads, None, &mut requests);
     requests
 }
 
 /// [`driver_requests`], appending to `out` (the evaluator's reusable buffer)
-/// instead of returning a fresh `Vec`.
+/// instead of returning a fresh `Vec`. With `live` (the kernel's driver
+/// table) a request the driver would ignore (`Driver::request_is_noop`) is
+/// left out rather than built, which is most of them; `None` keeps every one.
 pub fn driver_requests_into(
     ic: &IcRecord,
     drivers: &[DriverId],
     result: &[Option<bool>],
     reads: &[bool],
     last_reads: Option<&[bool]>,
+    live: Option<&[Driver]>,
     out: &mut Vec<DriverRequest>,
 ) {
     debug_assert_eq!(drivers.len(), result.len(), "one driver per output-capable pin, in the same order");
-    out.extend(drivers.iter().zip(result.iter()).enumerate().map(|(i, (&driver, level))| {
-        let delays = delay_set(ic, reads, last_reads, i);
+    for (i, (&driver, level)) in drivers.iter().zip(result.iter()).enumerate() {
         let mode = match level {
             Some(true) => Mode::High,
             Some(false) => Mode::Low,
             None => Mode::Hiz,
         };
-        DriverRequest::Level { driver, level: mode, delays }
-    }));
+        if live.is_some_and(|live| live[driver.0 as usize].request_is_noop(mode)) {
+            continue;
+        }
+        out.push(DriverRequest::Level { driver, level: mode, delays: delay_set(ic, reads, last_reads, i) });
+    }
 }
 
 #[cfg(test)]
