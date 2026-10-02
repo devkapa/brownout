@@ -56,7 +56,12 @@ const outPath = path.join(scriptDir, "..", "core", "src", "devices", "led_golden
 // the orchestrator's E2a test plan: T in {-300, -40, 25, 85, 125}. -300 is
 // below absolute zero on purpose, to exercise the `max(1, T+273.15)` floor
 // both `thermalVoltage` and `saturationCurrentAtTemperature` apply.
-const T_VALUES = [-300, -40, 25, 85, 125];
+//
+// 46.1619 is W1g's held junction temperature (core/README.md, W1g kernel
+// semantics, point 4): probe F `ledHeat` settles a self-heating LED at
+// 46.1619 °C after 10 s, and `led::led_law_at` is replayed there against
+// classic's own functions. It is last so the earlier rows keep their place.
+const T_VALUES = [-300, -40, 25, 85, 125, 46.1619];
 
 // vf25: 0.05 forces the `max(0.05, ...)` floor to engage at every T tried
 // (its tempco-adjusted value would otherwise go negative at the high end);

@@ -142,6 +142,23 @@ pub(crate) fn is_open(device: &Device, pin_index: usize) -> bool {
     device.pins[pin_index].flags & PIN_FLAG_OPEN != 0
 }
 
+/// A plain `led`'s law at `t_c` from its resolved params (LEDs point 2). One
+/// body for the load-time law in [`junctions`] and W1g's held-temperature law
+/// in [`led_law_at`], so the two cannot drift apart.
+fn led_law(params: &[f64], t_c: f64) -> JunctionLaw {
+    let is_override = if params[led_param::IS_SET] != 0.0 { Some(params[led_param::IS]) } else { None };
+    JunctionLaw::at(params[led_param::VF], params[led_param::I_RATED], params[led_param::N], is_override, t_c)
+}
+
+/// The law of a plain `led` at a held junction temperature `t_c` (W1g point 4:
+/// `vt`, `vf(T)`, `Is(T)` and `vSat` all at `T_hold`). `None` for any other
+/// kind: only a plain `led` with a thermal identity couples, and every other
+/// junction stays at `AMBIENT_C` (LEDs point 3). At `t_c = AMBIENT_C` this is
+/// the law [`junctions`] builds, bit for bit.
+pub fn led_law_at(device: &Device, t_c: f64) -> Option<JunctionLaw> {
+    (device.kind == kinds::LED).then(|| led_law(&device.params, t_c))
+}
+
 /// The junctions of one LED-family device, fixed at load, at `ambient_c`
 /// (LEDs points 1 and 3). Empty for a `burnt` device.
 pub fn junctions(device_index: usize, device: &Device, ambient_c: f64) -> Vec<Junction> {
@@ -151,8 +168,7 @@ pub fn junctions(device_index: usize, device: &Device, ambient_c: f64) -> Vec<Ju
             if p[led_param::BURNT] != 0.0 {
                 return Vec::new();
             }
-            let is_override = if p[led_param::IS_SET] != 0.0 { Some(p[led_param::IS]) } else { None };
-            let law = JunctionLaw::at(p[led_param::VF], p[led_param::I_RATED], p[led_param::N], is_override, ambient_c);
+            let law = led_law(p, ambient_c);
             vec![Junction { device: device_index, channel: 0, anode: device.pins[0].node, cathode: device.pins[1].node, law }]
         }
         kinds::RGB_LED => {
@@ -191,10 +207,11 @@ pub fn junctions(device_index: usize, device: &Device, ambient_c: f64) -> Vec<Ju
 }
 
 /// The device's `elementI` and channel values from the published voltages
-/// ("Currents"; LEDs point 13). `failed` is W1g's `led_failed`, always
-/// `false` in W1e; it takes the same path as `burnt`. `voltages` is the
-/// whole circuit's node-voltage array (`Junction.anode`/`cathode` index into
-/// it directly).
+/// ("Currents"; LEDs point 13). `failed` is W1g's `led_failed` latch and takes
+/// the same path as `burnt`: `elementI` 0 and, for an `rgb_led` or
+/// `bicolor_led`, `NaN` channels, meaning absent (W1g point 12). A `seg7` has no
+/// failure surface (Q-O22) and ignores it. `voltages` is the whole circuit's
+/// node-voltage array (`Junction.anode`/`cathode` index into it directly).
 pub fn readout(device: &Device, junctions: &[Junction], voltages: &[f64], failed: bool, element_i: &mut f64, channels: &mut [f64]) {
     match device.kind {
         kinds::LED => {
@@ -252,6 +269,73 @@ pub fn readout(device: &Device, junctions: &[Junction], voltages: &[f64], failed
         kinds::SEG7_CC | kinds::SEG7_CA => super::seg7::readout(device, junctions, voltages, element_i, channels),
         _ => {}
     }
+}
+
+/// The Q-O24 damage limit `ifMax` of an LED-family device (LEDs point 15):
+/// `led` param 2 (`iRated`, which for a `led` is the same expression), and the
+/// `ifMax` param of an `rgb_led` or `bicolor_led`, which reads specs where the
+/// stamp does not. `None` for a `seg7`, which has no damage surface (Q-O22),
+/// and for any other kind.
+pub fn if_max(device: &Device) -> Option<f64> {
+    match device.kind {
+        kinds::LED => Some(device.params[led_param::I_RATED]),
+        kinds::RGB_LED => Some(device.params[rgb_param::IF_MAX]),
+        kinds::BICOLOR_LED => Some(device.params[bicolor_param::IF_MAX]),
+        _ => None,
+    }
+}
+
+/// Classic's `peakI` (SC:482-491) from a device's junction currents in
+/// channel order, GMIN excluded: `max(|elementI|, max over |channel|)` with
+/// the `elementI` and channel rules of "Currents" and LEDs point 13:
+/// - `led`: `|I|`;
+/// - `bicolor_led`: `max(|max(I1, I2)|, max(0, I1), max(0, I2))`, so with both
+///   channels reverse-biased it is `|max(I1, I2)|`, the smaller saturation
+///   current;
+/// - `rgb_led`: `max(0, Ir, Ig, Ib)`.
+///
+/// `0` for any other kind. A channel the slice lacks counts as no current.
+pub fn peak_from_currents(kind: u32, currents: &[f64]) -> f64 {
+    let at = |i: usize| currents.get(i).copied().unwrap_or(0.0);
+    match kind {
+        kinds::LED => at(0).abs(),
+        kinds::BICOLOR_LED => {
+            let element = at(0).max(at(1));
+            element.abs().max(at(0).max(0.0).abs()).max(at(1).max(0.0).abs())
+        }
+        kinds::RGB_LED => {
+            // `elementI` starts its running maximum at 0, and every channel is
+            // `max(0, I)`, so each `|.|` is the value itself.
+            let element = 0.0f64.max(at(0)).max(at(1)).max(at(2));
+            element.abs()
+        }
+        _ => 0.0,
+    }
+}
+
+/// `peakI` of a device at the published `voltages`, from its own junction
+/// currents with each junction's current law (the held temperature's, for an
+/// identified `led`), and `0` for a `burnt` device, which stamps nothing so its
+/// stress only bleeds. A latched device does nothing afterwards (point 5), so
+/// the caller does not ask. `voltages` is the whole circuit's node-voltage
+/// array.
+pub fn peak_current(device: &Device, junctions: &[Junction], voltages: &[f64]) -> f64 {
+    let burnt = match device.kind {
+        kinds::LED => device.params[led_param::BURNT],
+        kinds::RGB_LED => device.params[rgb_param::BURNT],
+        kinds::BICOLOR_LED => device.params[bicolor_param::BURNT],
+        _ => return 0.0,
+    };
+    if burnt != 0.0 {
+        return 0.0;
+    }
+    let mut currents = [0.0f64; 3];
+    for j in junctions {
+        if j.channel < currents.len() {
+            currents[j.channel] = j.law.current(voltages[j.anode] - voltages[j.cathode]);
+        }
+    }
+    peak_from_currents(device.kind, &currents)
 }
 
 // Pulls in the generated golden table (`scripts/gen-led-golden.ts`) as a
@@ -577,5 +661,239 @@ mod tests {
         readout(&d, &js, &voltages, false, &mut element_i, &mut channels);
         assert_eq!(element_i, 0.0);
         assert!(channels.iter().all(|c| c.is_nan()));
+    }
+
+    // ---- W1g: the law at a held temperature ---------------------------------
+
+    /// A plain `led` as the catalog's red: `vf` 1.8, `n` 2, `iRated` 0.02.
+    fn red_led() -> Device {
+        led_device(vec![pin(1), pin(0)], led_params(1.8, 2.0, 0.02, 0.0, 0.0, 0.0))
+    }
+
+    #[test]
+    fn led_law_at_ambient_is_the_load_time_law_bit_for_bit() {
+        for (vf, n, i_rated, is_set, is) in [(1.8, 2.0, 0.02, 0.0, 0.0), (2.0, 1.0, 0.05, 0.0, 0.0), (3.2, 2.0, 0.02, 1.0, 1e-18), (0.05, 0.1, 0.0, 0.0, 0.0)] {
+            let d = led_device(vec![pin(1), pin(0)], led_params(vf, n, i_rated, is_set, is, 0.0));
+            let loaded = junctions(0, &d, 25.0)[0].law;
+            let held = led_law_at(&d, 25.0).expect("a plain led");
+            assert_eq!(held.vtn.to_bits(), loaded.vtn.to_bits());
+            assert_eq!(held.is.to_bits(), loaded.is.to_bits());
+            assert_eq!(held.vsat.to_bits(), loaded.vsat.to_bits());
+        }
+    }
+
+    #[test]
+    fn only_a_plain_led_has_a_held_temperature_law() {
+        assert!(led_law_at(&rgb_device(vec![pin(1), pin(2), pin(3), pin(0)], vec![1.8, 2.0, 3.0, 0.02, 0.02, 0.0]), 46.0).is_none());
+        assert!(led_law_at(&bicolor_device(vec![pin(1), pin(2), pin(0)], vec![1.8, 2.0, 0.02, 0.02, 0.0]), 46.0).is_none());
+    }
+
+    #[test]
+    fn led_law_at_46_1619_matches_classics_functions_within_4_ulp() {
+        // The golden rows at probe F `ledHeat`'s settled temperature, generated
+        // by `scripts/gen-led-golden.ts` from classic's own `thermalVoltage`,
+        // `junctionForwardVoltage`, `shockleyIsFromVf`, `saturationCurrentAtTemperature`
+        // and `shockleyDiodeCurrent`, replayed through the `led` law function.
+        let mut rows = 0usize;
+        let mut worst = 0u64;
+        for &(vf25, i_rated, n, is_set, is_value, t_c, v, vtn, is, vsat, current, g, ieq) in led_golden::GOLDEN_ROWS {
+            if t_c != 46.1619 {
+                continue;
+            }
+            rows += 1;
+            let d = led_device(vec![pin(1), pin(0)], led_params(vf25, n, i_rated, is_set, is_value, 0.0));
+            let law = led_law_at(&d, t_c).expect("a plain led");
+            assert_within_ulp(law.vtn, vtn, 4, "vtn");
+            assert_within_ulp(law.is, is, 4, "is");
+            assert_within_ulp(law.vsat, vsat, 4, "vsat");
+            assert_within_ulp(law.current(v), current, 4, "current");
+            let (got_g, got_ieq) = law.companion(v);
+            assert_within_ulp(got_g, g, 4, "g");
+            assert_within_ulp(got_ieq, ieq, 4, "ieq");
+            worst = worst.max(ulp_diff(law.is, is)).max(ulp_diff(law.current(v), current));
+        }
+        assert_eq!(rows, 640, "5 vf25 x 4 n x 8 (iRated and Is override) x 4 voltages");
+        println!("led law at 46.1619 C: {rows} rows, worst ulp {worst}");
+    }
+
+    /// The anode voltage of a red LED on `r` ohm from `v_supply`, the model's
+    /// own operating point by bisection on its law (the closed form for a
+    /// diode in series with a resistor has none).
+    fn operating_point(law: &JunctionLaw, r: f64, v_supply: f64) -> (f64, f64) {
+        let (mut lo, mut hi) = (0.0, v_supply);
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            if v_supply - r * law.current(mid) - mid > 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let v = (lo + hi) / 2.0;
+        (v, law.current(v))
+    }
+
+    #[test]
+    fn a_self_heated_led_on_150_ohm_carries_probe_f_ledheat_current_at_46_1619() {
+        // Probe F `ledHeat`: 150 ohm from 5 V, 21.5875 mA at 46.1619 C after 10
+        // s (six digits, so 5e-8 A); the rise is why the law moves with T.
+        let d = red_led();
+        let hot = led_law_at(&d, 46.1619).unwrap();
+        let (_, i_hot) = operating_point(&hot, 150.0, 5.0);
+        assert!((i_hot - 0.0215875).abs() < 5e-8, "hot current {i_hot}");
+        let cold = led_law_at(&d, 25.0).unwrap();
+        let (_, i_cold) = operating_point(&cold, 150.0, 5.0);
+        assert!(i_cold < i_hot, "heating raises the current at a fixed supply");
+        assert!((i_cold - 0.0213116).abs() < 2e-7, "ambient current {i_cold}");
+    }
+
+    // ---- W1g: peakI and the damage limit ------------------------------------
+
+    #[test]
+    fn peak_i_of_a_led_is_the_absolute_current() {
+        assert_eq!(peak_from_currents(kinds::LED, &[0.03]), 0.03);
+        assert_eq!(peak_from_currents(kinds::LED, &[-0.004]), 0.004, "a reverse-biased led is |I|");
+        assert_eq!(peak_from_currents(kinds::SEG7_CC, &[0.03]), 0.0, "no damage surface");
+    }
+
+    #[test]
+    fn peak_i_of_an_rgb_led_is_the_running_maximum_from_zero() {
+        // `max(0, Ir, Ig, Ib)` (SC:647-658): the example currents of the draft.
+        assert_eq!(peak_from_currents(kinds::RGB_LED, &[0.03, 0.01, 0.0]), 0.03);
+        assert_eq!(peak_from_currents(kinds::RGB_LED, &[0.01, 0.0, 0.05]), 0.05);
+        assert_eq!(peak_from_currents(kinds::RGB_LED, &[-1e-9, -2e-9, -3e-9]), 0.0, "reverse-biased channels floor at 0");
+    }
+
+    #[test]
+    fn peak_i_of_a_bicolor_led_is_classics_aggregate() {
+        // `max(|max(I1, I2)|, max(0, I1), max(0, I2))`.
+        assert_eq!(peak_from_currents(kinds::BICOLOR_LED, &[0.03, -1e-12]), 0.03);
+        assert_eq!(peak_from_currents(kinds::BICOLOR_LED, &[-1e-12, 0.02]), 0.02);
+        // Both reverse-biased: |max(I1, I2)|, the smaller magnitude.
+        assert_eq!(peak_from_currents(kinds::BICOLOR_LED, &[-3e-17, -1e-17]), 1e-17);
+        assert_eq!(peak_from_currents(kinds::BICOLOR_LED, &[-1e-17, -3e-17]), 1e-17);
+    }
+
+    #[test]
+    fn a_bicolor_led_with_both_channels_reverse_biased_peaks_at_the_smaller_saturation_current() {
+        // vf1 1.8 and vf2 2.0 at 25 C: the higher vf has the smaller Is, so the
+        // reverse current closest to zero is the 2.0 V channel's -Is.
+        let d = bicolor_device(vec![pin(1), pin(2), pin(0)], vec![1.8, 2.0, 0.02, 0.02, 0.0]);
+        let js = junctions(0, &d, 25.0);
+        let (is1, is2) = (js[0].law.is, js[1].law.is);
+        assert!(is2 < is1);
+        // Hard reverse bias on both anodes: the exponential underflows to 0 and
+        // each current is exactly -Is.
+        let voltages = [0.0, -50.0, -50.0];
+        assert_eq!(peak_current(&d, &js, &voltages), is2);
+
+        // The same through the readout's own aggregate, which feeds classic's max.
+        let (mut element_i, mut channels) = (0.0, [0.0; 2]);
+        readout(&d, &js, &voltages, false, &mut element_i, &mut channels);
+        assert_eq!(element_i.abs(), peak_current(&d, &js, &voltages));
+    }
+
+    #[test]
+    fn peak_current_reads_the_junctions_at_their_own_law() {
+        // Probe F `ledOver`: a red LED on 50 ohm from 5 V sits at the model's
+        // 1.8588155 V and 62.82369 mA; against `ifMax` 0.02 that is rate 8.867040.
+        let d = red_led();
+        let js = junctions(0, &d, 25.0);
+        let (v, i) = operating_point(&js[0].law, 50.0, 5.0);
+        assert!((v - 1.8588155).abs() < 1e-7, "junction voltage {v}");
+        let voltages = [0.0, v];
+        let peak = peak_current(&d, &js, &voltages);
+        assert_eq!(peak, i);
+        assert!((peak - 0.06282369).abs() < 1e-8, "peak {peak}");
+        assert_eq!(if_max(&d), Some(0.02));
+        let drive = crate::slow::failures::led_failed(peak, if_max(&d).unwrap());
+        assert!((drive.rate - 8.867040).abs() < 1e-6, "rate {}", drive.rate);
+    }
+
+    #[test]
+    fn a_burnt_device_has_no_peak_current() {
+        // `junctions()` is already empty for a burnt device, so that alone never
+        // reaches the burnt gate. Hand `peak_current` the live device's junctions
+        // with the burnt flag set, so only the gate can return 0.
+        let live = led_device(vec![pin(1), pin(0)], led_params(1.8, 2.0, 0.02, 0.0, 0.0, 0.0));
+        let burnt = led_device(vec![pin(1), pin(0)], led_params(1.8, 2.0, 0.02, 0.0, 0.0, 1.0));
+        assert!(junctions(0, &burnt, 25.0).is_empty());
+        let js = junctions(0, &live, 25.0);
+        assert!(peak_current(&live, &js, &[0.0, 5.0]) > 0.0, "the same junctions carry current");
+        assert_eq!(peak_current(&burnt, &js, &[0.0, 5.0]), 0.0);
+
+        let rgb_params = |burnt: f64| vec![1.8, 2.0, 3.0, 0.02, 0.02, burnt];
+        let rgb_live = rgb_device(vec![pin(1), pin(2), pin(3), pin(0)], rgb_params(0.0));
+        let rgb_burnt = rgb_device(vec![pin(1), pin(2), pin(3), pin(0)], rgb_params(1.0));
+        let js = junctions(0, &rgb_live, 25.0);
+        assert!(peak_current(&rgb_live, &js, &[0.0, 5.0, 5.0, 5.0]) > 0.0);
+        assert_eq!(peak_current(&rgb_burnt, &js, &[0.0, 5.0, 5.0, 5.0]), 0.0);
+
+        let bi_params = |burnt: f64| vec![1.8, 2.0, 0.02, 0.02, burnt];
+        let bi_live = bicolor_device(vec![pin(1), pin(2), pin(0)], bi_params(0.0));
+        let bi_burnt = bicolor_device(vec![pin(1), pin(2), pin(0)], bi_params(1.0));
+        let js = junctions(0, &bi_live, 25.0);
+        assert!(peak_current(&bi_live, &js, &[0.0, 5.0, 5.0]) > 0.0);
+        assert_eq!(peak_current(&bi_burnt, &js, &[0.0, 5.0, 5.0]), 0.0);
+    }
+
+    #[test]
+    fn if_max_follows_each_kinds_param() {
+        // `rgb_led` and `bicolor_led` read the ifMax param, which differs from
+        // iRated whenever specs carry an `if_max` the stamp ignores (LEDs point 15).
+        let rgb = rgb_device(vec![pin(1), pin(2), pin(3), pin(0)], vec![1.8, 2.0, 3.0, 0.02, 0.035, 0.0]);
+        assert_eq!(if_max(&rgb), Some(0.035));
+        let bi = bicolor_device(vec![pin(1), pin(2), pin(0)], vec![1.8, 2.0, 0.02, 0.025, 0.0]);
+        assert_eq!(if_max(&bi), Some(0.025));
+        let seg7 = Device { kind: kinds::SEG7_CC, component_index: 0, pins: (1..=10).map(pin).collect(), params: vec![2.0, 0.02], blob: vec![0.0] };
+        assert_eq!(if_max(&seg7), None);
+    }
+
+    // ---- W1g: the failed flag in the readout --------------------------------
+
+    #[test]
+    fn a_failed_led_reads_zero_and_a_failed_rgb_or_bicolor_reads_nan_channels() {
+        let voltages = [0.0, 3.0, 3.0, 3.0];
+        let mut channels: [f64; 0] = [];
+
+        let led = red_led();
+        let js = junctions(0, &led, 25.0);
+        let mut element_i = 99.0;
+        readout(&led, &js, &voltages, true, &mut element_i, &mut channels);
+        assert_eq!(element_i, 0.0);
+        readout(&led, &js, &voltages, false, &mut element_i, &mut channels);
+        assert!(element_i > 0.0, "the same device is live without the flag");
+
+        let rgb = rgb_device(vec![pin(1), pin(2), pin(3), pin(0)], vec![1.8, 2.0, 3.0, 0.02, 0.02, 0.0]);
+        let js = junctions(0, &rgb, 25.0);
+        let (mut element_i, mut channels) = (99.0, [0.5; 3]);
+        readout(&rgb, &js, &voltages, true, &mut element_i, &mut channels);
+        assert_eq!(element_i, 0.0);
+        assert!(channels.iter().all(|c| c.is_nan()));
+
+        let bi = bicolor_device(vec![pin(1), pin(2), pin(0)], vec![1.8, 2.0, 0.02, 0.02, 0.0]);
+        let js = junctions(0, &bi, 25.0);
+        let (mut element_i, mut channels) = (99.0, [0.5; 2]);
+        readout(&bi, &js, &voltages, true, &mut element_i, &mut channels);
+        assert_eq!(element_i, 0.0);
+        assert!(channels.iter().all(|c| c.is_nan()));
+    }
+
+    #[test]
+    fn a_seg7_ignores_the_failed_flag() {
+        let pins: Vec<PinRecord> = (1..=8).map(pin).chain([pin(9), open_pin()]).collect();
+        let d = Device { kind: kinds::SEG7_CC, component_index: 0, pins, params: vec![2.0, 0.02], blob: vec![0.0] };
+        let js = junctions(0, &d, 25.0);
+        let voltages = [0.0, 2.2, 2.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let (mut live_i, mut live_ch) = (0.0, [0.0; 8]);
+        let (mut failed_i, mut failed_ch) = (0.0, [0.0; 8]);
+        readout(&d, &js, &voltages, false, &mut live_i, &mut live_ch);
+        readout(&d, &js, &voltages, true, &mut failed_i, &mut failed_ch);
+        assert!(live_i > 0.0);
+        assert_eq!(live_i.to_bits(), failed_i.to_bits());
+        for (a, b) in live_ch.iter().zip(failed_ch.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+            assert!(!a.is_nan());
+        }
     }
 }

@@ -1,5 +1,6 @@
-//! The resistor and capacitor (core/README.md's kind-code table; spec §7.3,
-//! §7.4). The resistor's `stamp`/`current` were moved from `engine.rs`'s
+//! The resistor, capacitor, fuse and PTC fuse (core/README.md's kind-code
+//! table; spec §7.3, §7.4; W1g's Fuse and PTC records). The resistor's
+//! `stamp`/`current` were moved from `engine.rs`'s
 //! inline `ResistorStamp` handling with no behaviour change: they produce
 //! exactly the `g = 1/R` conductance and `(Va-Vb)/R` current that used to be
 //! written directly into `StaticPartitionSolver::build`/`recompute_currents`.
@@ -35,6 +36,85 @@ pub fn stamp(params: &[f64]) -> Vec<Contribution> {
 /// `(Va-Vb)/R`, spec §7.3.
 pub fn current(params: &[f64], pin_voltages: &[f64]) -> f64 {
     (pin_voltages[0] - pin_voltages[1]) / params[0]
+}
+
+/// A resistor's stamp with the W1g failed flag: a latched `resistor_overload`
+/// is an open, not a large resistance (W1g point 12;
+/// `failure-states.test.ts:69-96`), so it stamps nothing.
+pub fn resistor_stamp(params: &[f64], failed: bool) -> Vec<Contribution> {
+    if failed {
+        Vec::new()
+    } else {
+        stamp(params)
+    }
+}
+
+/// A resistor's `elementI` with the failed flag: `0` once latched (PA:191-194).
+pub fn resistor_current(params: &[f64], pin_voltages: &[f64], failed: bool) -> f64 {
+    if failed {
+        0.0
+    } else {
+        current(params, pin_voltages)
+    }
+}
+
+/// `fuse` params, Fuse record: `[rNormal, iRating]`. `rNormal >= 0.001` is
+/// the reader's check, so the stamp never divides by zero.
+pub mod fuse_param {
+    pub const R_NORMAL: usize = 0;
+    pub const I_RATING: usize = 1;
+}
+
+/// `ptc_fuse` params, PTC record: `[rNormal, iHold]`.
+pub mod ptc_param {
+    pub const R_NORMAL: usize = 0;
+    pub const I_HOLD: usize = 1;
+}
+
+/// A tripped PTC is `rNormal * 200`: high enough to limit a fault, but a PTC
+/// goes high-R rather than open (PA:757-759).
+pub const PTC_TRIPPED_FACTOR: f64 = 200.0;
+
+/// An intact fuse is `1/rNormal` between `pins[0]` and `pins[1]`; a tripped
+/// one stamps nothing (PA:697-699), an open like a failed resistor's.
+pub fn fuse_stamp(params: &[f64], failed: bool) -> Vec<Contribution> {
+    if failed {
+        Vec::new()
+    } else {
+        vec![Contribution::conductance(0, 1, 1.0 / params[fuse_param::R_NORMAL])]
+    }
+}
+
+/// `(V(pins[0]) - V(pins[1])) / rNormal`, and `0` once `fuse_tripped` has
+/// latched (PA:701-710).
+pub fn fuse_current(params: &[f64], pin_voltages: &[f64], failed: bool) -> f64 {
+    if failed {
+        0.0
+    } else {
+        (pin_voltages[0] - pin_voltages[1]) / params[fuse_param::R_NORMAL]
+    }
+}
+
+/// A PTC's resistance: `rNormal`, or `rNormal * 200` while tripped, the
+/// product taken first as classic stamps it (PA:757-759), so `1/R` rounds the
+/// way classic's does.
+pub fn ptc_resistance(r_normal: f64, tripped: bool) -> f64 {
+    if tripped {
+        r_normal * PTC_TRIPPED_FACTOR
+    } else {
+        r_normal
+    }
+}
+
+/// A PTC's stamp, `1/R` between its pins (PA:757-767). It always stamps: a
+/// trip is a resistance change, never an open.
+pub fn ptc_stamp(params: &[f64], tripped: bool) -> Vec<Contribution> {
+    vec![Contribution::conductance(0, 1, 1.0 / ptc_resistance(params[ptc_param::R_NORMAL], tripped))]
+}
+
+/// `(V(pins[0]) - V(pins[1])) / R` with `R` as [`ptc_resistance`] (PA:764-772).
+pub fn ptc_current(params: &[f64], pin_voltages: &[f64], tripped: bool) -> f64 {
+    (pin_voltages[0] - pin_voltages[1]) / ptc_resistance(params[ptc_param::R_NORMAL], tripped)
 }
 
 /// Capacitor params, core/README.md's record-layout table: `[C, esr,
@@ -102,6 +182,70 @@ mod tests {
     fn current_is_ohms_law() {
         let i = current(&[1000.0], &[5.0, 1.0]);
         assert!((i - 0.004).abs() < 1e-15);
+    }
+
+    // ---- W1g: failed resistor, fuse, PTC fuse ---------------------------------
+
+    #[test]
+    fn a_failed_resistor_stamps_nothing_and_carries_no_current() {
+        assert_eq!(resistor_stamp(&[2000.0], false), stamp(&[2000.0]));
+        assert!(resistor_stamp(&[2000.0], true).is_empty(), "an open, not a large resistance");
+        assert_eq!(resistor_current(&[1000.0], &[5.0, 1.0], false), current(&[1000.0], &[5.0, 1.0]));
+        assert_eq!(resistor_current(&[1000.0], &[5.0, 1.0], true), 0.0);
+    }
+
+    #[test]
+    fn an_intact_fuse_is_its_normal_resistance_and_a_tripped_one_is_open() {
+        // rNormal 0.1 ohm, 0.1 V across: 1 A (probe F `fuse2x`'s fuse).
+        let params = [0.1, 0.5];
+        let s = fuse_stamp(&params, false);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].pin_a, s[0].pin_b, s[0].injection), (0, 1, 0.0));
+        assert_eq!(s[0].conductance, 1.0 / 0.1);
+        assert!((fuse_current(&params, &[0.1, 0.0], false) - 1.0).abs() < 1e-12);
+        assert!((fuse_current(&params, &[0.0, 0.1], false) + 1.0).abs() < 1e-12, "signed, pins[0] to pins[1]");
+
+        assert!(fuse_stamp(&params, true).is_empty());
+        assert_eq!(fuse_current(&params, &[0.1, 0.0], true), 0.0);
+    }
+
+    #[test]
+    fn a_ptc_tripped_at_half_an_ohm_is_one_hundred_ohms() {
+        // rNormal 0.5 ohm (the catalog default) times 200 (PA:759).
+        let params = [0.5, 0.5];
+        assert_eq!(ptc_resistance(0.5, false), 0.5);
+        assert_eq!(ptc_resistance(0.5, true), 100.0);
+        assert_eq!(ptc_stamp(&params, false)[0].conductance, 2.0);
+        assert_eq!(ptc_stamp(&params, true)[0].conductance, 0.01);
+        // 0.5 V across the tripped PTC is 5 mA (probe F `ptc`: "at 0.5 V the
+        // tripped current is 5 mA").
+        assert!((ptc_current(&params, &[0.5, 0.0], true) - 0.005).abs() < 1e-15);
+        assert_eq!(ptc_current(&params, &[0.5, 0.0], false), 1.0);
+    }
+
+    #[test]
+    fn a_ptc_never_stamps_an_open() {
+        for tripped in [false, true] {
+            let s = ptc_stamp(&[0.5, 0.5], tripped);
+            assert_eq!(s.len(), 1);
+            assert_eq!((s[0].pin_a, s[0].pin_b, s[0].injection), (0, 1, 0.0));
+        }
+    }
+
+    #[test]
+    fn the_tripped_resistance_is_multiplied_before_it_is_inverted() {
+        // classic: `stampResistor(.., rNormal * 200)` then `g = 1 / R`. Inverting
+        // first and dividing by 200 rounds differently for these `rNormal`
+        // (values computed with node's `1 / (r * 200)`).
+        for (r, g) in [
+            (0.11099999999999999, 0.04504504504504506),
+            (0.185, 0.02702702702702703),
+            (0.37, 0.013513513513513514),
+            (0.481, 0.010395010395010394),
+        ] {
+            assert_eq!(ptc_stamp(&[r, 0.5], true)[0].conductance, g, "rNormal {r}");
+            assert_ne!((1.0 / r) / PTC_TRIPPED_FACTOR, g, "the other order would round differently at {r}");
+        }
     }
 
     #[test]

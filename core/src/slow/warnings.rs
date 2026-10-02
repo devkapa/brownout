@@ -1,1 +1,49 @@
-//! The Rust warning channel, empty in W1 (G2a): core/README.md, W1g kernel semantics, point 11.
+//! The Rust warning channel, empty in W1 (G2a): core/README.md, W1g kernel
+//! semantics, point 11; "C ABI", `bo_engine_records` channel 1.
+//!
+//! `transistor_overcurrent` is W3, and `missing_flyback` is a static topology
+//! check over nets, kinds and the inductance param that the facade derives
+//! with classic's own helper (point 11), so no Rust producer exists yet. The
+//! channel and its codes are declared now so the ABI has one place that says
+//! "empty" and a later wave adds a producer without a new export.
+
+/// Warning codes of `bo_engine_records` channel 1. Both are reserved: no W1
+/// kind produces either in Rust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningKind {
+    TransistorOvercurrent = 1,
+    MissingFlyback = 2,
+}
+
+impl WarningKind {
+    pub fn code(self) -> f64 {
+        self as u32 as f64
+    }
+}
+
+/// Appends the Rust warnings to `out`, 7 f64 each (`RECORD_LEN`, the same
+/// layout as a failure record). Nothing in W1.
+pub fn collect(_out: &mut Vec<f64>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slow::failures::RECORD_LEN;
+
+    #[test]
+    fn the_warning_codes_are_reserved_as_one_and_two() {
+        assert_eq!(WarningKind::TransistorOvercurrent.code(), 1.0);
+        assert_eq!(WarningKind::MissingFlyback.code(), 2.0);
+    }
+
+    #[test]
+    fn the_w1_channel_is_empty_and_leaves_the_buffer_alone() {
+        let mut out = vec![1.0, 2.0];
+        collect(&mut out);
+        assert_eq!(out, vec![1.0, 2.0]);
+        let mut empty = Vec::new();
+        collect(&mut empty);
+        assert_eq!(empty.len() % RECORD_LEN, 0);
+        assert!(empty.is_empty());
+    }
+}
