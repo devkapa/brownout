@@ -567,7 +567,9 @@ in `bo_engine_device_currents` is the anchor's source-KCL current (W0 point
 `elementI` key. An ownerless net, one none of whose pins belongs to a
 component of the circuit (only wires to absent components), declines
 `malformed:<componentId>:unknown-component` for each absent id: the anchor
-needs an owning pin, the compiler never throws on a user circuit, and
+needs an owning pin, the compiler never throws on a user circuit (one
+that meets the `SimCircuit` types: a non-string `catalogUid` throws in
+classic's `load` too), and
 classic loads such a circuit (it anchors the ghost net as one more
 section). A ghost pin on a net that also has a real pin still compiles, as
 before W1f, and classic anchors nothing extra for it. Before W1f an
@@ -2448,9 +2450,16 @@ records"). Constants, all from P3:35-38 unless marked new:
      loads the pre-edge level and takes the edge one ulp later (399 of the
      2,999 starts `m / 1000` at 1 kHz); either way the edge happens once.
      Edges apply by index, `[0, k)` for the first `k` whose time is `>
-     START_TIME`, which is "every edge at or before" while the computed
-     times rise with `k` (they do, short of a `duty` within an ulp of 1 at
-     an enormous time).
+     START_TIME`, which is "every edge at or before" because the times
+     never fall with `k`: a falling edge's time is `min(delay + n P +
+     duty·P, delay + (n + 1) P)`, both terms computed from `n`. Without the
+     `min`, a `duty` with `(1 − duty)·P` under an ulp of the time (1 kHz,
+     `duty` 0.9999999999999999, `t` 0.019: the fall computes to
+     0.019000000000000003, after the next rise at 0.019) would put a fall
+     after its successor. Clamped, the fall shares the rise's instant and
+     keeps its place before it in the schedule, so the clock reads HIGH
+     there, as classic's `clockVoltage` does everywhere but on that one
+     instant.
    - Past `2^52` periods (`MAX_INDEX`), where edge times no longer resolve,
      the level at load is `clockVoltage(START_TIME)` and no edge is
      scheduled, as for a pulse past its search range.
