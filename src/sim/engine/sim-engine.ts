@@ -6320,7 +6320,13 @@ export class SimEngine {
 
           const part = partFor(comp);
           for (const pin of part?.pin_layout ?? []) {
-            if (pin.function !== "output" && pin.function !== "io" && pin.function !== "tri_state") continue;
+            // An open-collector output is a target only while it sinks, so a
+            // released one is absent from targetPins and must be swept too, or
+            // the sag it latched while sinking stays on it.
+            if (
+              pin.function !== "output" && pin.function !== "io" &&
+              pin.function !== "tri_state" && pin.function !== "open_collector"
+            ) continue;
             if (!targetPins.has(pin.id)) {
               const keySag = failureKey("output_sag", comp.id, pin.id);
               this.state.failures.delete(keySag);
