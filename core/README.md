@@ -2975,11 +2975,16 @@ Constants:
      the catalogUid SAP-1 (83 LEDs) at W1z.
    - **The junction memo** (perf round 1's `memo_junction_current`, keyed on
      the two terminal voltages' bits). A re-arm changes the law without
-     changing the voltages. So each junction carries a `law_gen: u32`,
-     bumped at every re-arm, latch and reset, and the memo's key includes it:
-     a re-armed law never reuses a stale memo. The law parameters `(vtn, Is,
-     vSat)` become per-junction state for identified LEDs; every other
-     junction keeps its load-time values.
+     changing the voltages. So each device carries a `law_gen: u32`, bumped
+     by `mark_device_changed` at every re-arm, latch and reset (point 12),
+     and the memo's key includes it: a re-armed law never reuses a stale
+     memo. `law_gen` rolls back with its instant, so a generation number can
+     be reused after a rollback for a different law; the memo is a cache,
+     not instant state, so `rollback_instant` clears it whenever the window
+     bumped any `law_gen`. The law parameters `(vtn, Is, vSat)` are a pure
+     function of `T_hold` for identified LEDs (recomputed, not stored, after
+     a rollback restores `T_hold`); every other junction keeps its
+     load-time values.
 
 5. **Stress integrators and analytic threshold events** (D16, D18;
    §9.5.1). Classic's dwell integrator (SE:5510-5531): `S' = rate` when
@@ -2990,13 +2995,16 @@ Constants:
    - **Constant rate** (static, fixed-pair, and within a stepped step): `S(t)
      = S0 + rate·(t − t0)`. With `rate > 0` the latch time `t_x = t0 +
      (threshold − S0)/rate` is scheduled as a slow event. A bleeding
-     integrator schedules nothing, and its entry is dropped at the time it
-     reaches 0, lazily.
+     integrator schedules nothing; at 0 it stays at 0 (the floor), and its
+     zero time is computable but never an event.
    - **Closed-form segments** (resistors and fuses): `rate(s) = max(0,
      P(s)/pMax − 1)`, or `(I(s)/iRating)² − 1` for a fuse, with `P(s)` the
-     squared exponential of point 3. `P` is monotone on at most two pieces,
-     split where the device's voltage crosses zero, so `{rate > 0}` is at
-     most two intervals and `S(s)` has a closed form on each. `t_x` is found
+     squared exponential of point 3. The rate is `k·V(s)² − c` (resistor `k
+     = rPower/(R²·pMax)`, `c = 1`; fuse `k = 1/(rNormal·iRating)²`, `c = 1`;
+     PTC `k = 1/R²`, `c = iHold²`), positive exactly where `|V(s)| > √(c/k)`.
+     `V(s)` is monotone over a segment, so `{rate > 0}` is at most two
+     disjoint intervals (`V > L` and `V < −L`), and `S(s)` has a closed form
+     on each. `t_x` is found
      by safeguarded Newton on that closed form, monotone wherever `rate > 0`,
      to 1e-12 relative, and scheduled. W1h's multi-segment kinds (the pot's
      two track segments) meet the same requirement with their own pieces.
@@ -3196,8 +3204,11 @@ Constants:
       about `I < 0.02236·iHold`): `Rt' = 1`, with a recovery event at `Rt =
       2.0` (PA:809) that clears all three.
     - Tripped and not cool: `Rt = 0`, set at the publish that observes it.
-    - In a closed-form segment `I` is monotone, so each condition flips at
-      most once per segment, at a root scheduled like a threshold.
+    - In a closed-form segment `I` is monotone, so the trip condition flips
+      at most once per segment, at a root scheduled like a threshold. The
+      cool test `|V| < level` can begin and end in one segment (a `V`
+      sweeping through 0), so it is a window `Cool{from, until}`: recovery
+      needs 2.0 s inside it, and the window ending resets `Rt`.
     - A trip or a recovery is a stamp change (point 12), never a failure or
       warning record.
     - Recovery starts at the trip instant itself when the tripped current is
@@ -3315,8 +3326,9 @@ Constants:
       bit for bit with a failed instant (`-4`/`-7` in `advance`,
       `set_params`, `seed_memory` and `reset_failures`): each device's
       integrators, tokens and latch flags (`led_failed` included), its
-      `output_sag` state, each identified junction's `T_hold`, law and
-      `law_gen`, the PTC state, the latch order and the latch log.
+      `output_sag` state, each identified junction's `T_hold` (its law
+      follows from it) and `law_gen`, the PTC state, the latch order and the
+      latch log. The junction memo is cleared instead (point 4).
       - It lives in the solver's instant checkpoint (`begin_instant`,
         `end_instant` and `rollback_instant` on `PartitionSolver`), as a
         journal of first-touch copies per instant, the pattern
