@@ -8,7 +8,8 @@ contract the TypeScript front end and the Rust back end are both written
 against. Change it first, then both sides.
 
 **Status: W1e done (NE555, LEDs, 7-segment displays; checkpoint S1); W1f
-(rails and sources) contracted.** W0
+(rails and sources) contracted; W1g (thermal, failures and warnings)
+contracted.** W0
 proved the pipeline with a
 static slice (`ground`, `resistor`, grounded ideal `voltage_source`). W1 builds
 the event kernel and the Ben Eater path; its locked owner decisions and
@@ -145,13 +146,14 @@ is dispatched; a code without a record layout is reserved and rejected as
 
 | Block | Codes |
 |---|---|
-| Passives and switches | 1 `resistor`, 3 `capacitor`, 4 `switch`, 5 `push_button`, 6 `spdt_switch`, 7 `dip_switch`, 8 `potentiometer`, 9 `trimmer`, 10 `fuse`, 11 `ldr`, 12 `thermistor` |
+| Passives and switches | 1 `resistor`, 3 `capacitor`, 4 `switch`, 5 `push_button`, 6 `spdt_switch`, 7 `dip_switch`, 8 `potentiometer`, 9 `trimmer`, 10 `fuse`, 11 `ldr`, 12 `thermistor`, 13 `ptc_fuse` |
 | Sources | 2 `voltage_source` (kept from v1), 20 `battery_pack`, 21 `bench_psu`, 22 `clock`, 23 `clock_gen`, 24 `pulse_source`, 25 `pulse_gen`, 26 `section_anchor` (synthetic: emitted by the compiler, never a component kind) |
 | LEDs and displays | 30 `led`, 31 `rgb_led`, 32 `bicolor_led`, 33 `seg7_cc`, 34 `seg7_ca` |
 | Timers | 40 `ne555` |
 | Combinational ICs | 50 `74ls00`, 51 `74ls04`, 52 `74ls08`, 53 `74ls32`, 54 `74ls86`, 55 `74ls157`, 56 `74ls283`, 57 `74hc138`, 58 `74hc14`, 59 `74ls47`, 60 `cd4511`, 61 `74ls245` |
 | Sequential ICs | 70 `74ls161`, 71 `74ls173`, 72 `74hc74`, 73 `74hc595`, 74 `74hc165`, 75 `cd4017`, 76 `cd4060` |
 | Memories | 80 `74ls189`, 81 `28c16`, 82 `28c256` |
+| Slow physics | 90 `rating`, 91 `thermal` (both synthetic: emitted by the compiler, never a component kind) |
 
 The W1e rows and sections cite classic by file and line at `3b22a3e`: `SE`
 `src/sim/engine/sim-engine.ts`, `SC` `src/sim/engine/devices/semiconductors.ts`,
@@ -170,6 +172,21 @@ the W1f contract review (orchestrator and manager, 2026-09-30; devolt repo,
 `memory/progress/brownout-core-w1e-drafts/w1f-draft.md`, section 10), and
 "probe Pn" or "probe Qn" is a classic probe in that draft's section 8.
 
+The W1g rows and sections cite classic at `2b5faf1` too, with W1f's keys
+plus `PA` `src/sim/engine/devices/passives.ts`, `SC`
+`src/sim/engine/devices/semiconductors.ts` and `TP` `src/sim/thermal-physics.ts`
+(all three unchanged since `3b22a3e`). The classic they describe carries the
+four brownout 0.6.1 fixes of W1g step 0, each on its own branch, which change
+lines cited at `2b5faf1`: `fix/output-sag-direction-debounce` (`7b1056d`, the
+`output_sag` debounce, W1g Q1), `fix/resistor-default-overload` (`fe9b38a`,
+the resistor's and the fuse's absent-param defaults, Q-O27 and W1g Q3),
+`fix/cold-start-thermal-warnings` (`efceffb`, Q-O42) and
+`fix/74ls47-released-segment-sag` (`d1dee17`, Q-O49). "W1g Qn" is ruling
+`n` of the W1g contract review (manager, 2026-10-01; devolt repo,
+`memory/progress/brownout-core-w1e-drafts/w1g-draft.md`, section 11), and
+"probe F", "probe S" or "probe C" is a classic probe in that draft's section
+10.
+
 **Record layouts** (added per sub-wave):
 
 | Code | Kind | Pins, in order | Params | Blob | Added |
@@ -181,6 +198,8 @@ the W1f contract review (orchestrator and manager, 2026-09-30; devolt repo,
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
 | 6 | `spdt_switch` | `com`, `b`, `c` (by id) | `[sel]`: `Number(params.position ?? 0) === 0 ? 0 : 1` (0 or absent selects `b`; anything else, NaN included, selects `c`) | empty | W1b; live param 0 |
 | 7 | `dip_switch` | `a1, b1, ..., ak, bk` (by id) | `[k, sw1..sw8]`: `k` is `positions` rounded and clamped to `[2, 8]` as classic does; `sw_i = Number(params["sw"+i] ?? 0) !== 0 ? 1 : 0`, inert past `k` | empty | W1b; live params 1-8 |
+| 10 | `fuse` | `pins[0]`, `pins[1]` (positional, PA:695-696) | `[rNormal, iRating]` (Fuse and PTC records below) | empty | W1g |
+| 13 | `ptc_fuse` | `pins[0]`, `pins[1]` (positional, PA:760-761) | `[rNormal, iHold]` (Fuse and PTC records below) | empty | W1g |
 | 20 | `battery_pack` | `pos`, `neg` (by id, SO:146-150) | the 9 battery params (Battery record below) | the OCV table `[n, (soc, volts) x n]` | W1f |
 | 21 | `bench_psu` | `pins[0]` (+), `pins[1]` (−) (positional, SO:226-227, 276-281) | `[V, iLimit]` (Bench PSU record) | empty | W1f |
 | 22, 23 | `clock`, `clock_gen` | `pins[0]` (+), `pins[1]` (−) (positional) | `[freq, duty, vHigh, vLow, delay]` | `[slotBase]`, 1 digital slot | W1f |
@@ -195,6 +214,8 @@ the W1f contract review (orchestrator and manager, 2026-09-30; devolt repo,
 | 70-72 | `74ls161`, `74ls173`, `74hc74` | `vcc`, `gnd`, then the kind's logic pins by id (sequential table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
 | 80 | `74ls189` | `vcc`, `gnd`, then the memory logic pins by id (memory table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
 | 81, 82 | `28c16`, `28c256` | `vcc`, `gnd`, then the memory logic pins by id | the 13 IC params, the delay tail, then `tWC` and `sdp` | `[slotBase, pinFlags x L, word x W]` (ROM image below) | W1d |
+| 90 | `rating` (synthetic) | none | `[device, pMax, rPower]` (Rating record below) | empty | W1g |
+| 91 | `thermal` (synthetic) | none | `[device, rThetaJA, tauS, hasShutdown, tripC, restartC]` (Thermal record below) | empty | W1g |
 
 **IC logic pins**, after `vcc` and `gnd` (`icPinMap`, src/sim/engine/digital.ts;
 `i` input, `c` control, `o` output). `cd4511` (code 60) is W1h.
@@ -364,8 +385,9 @@ compiler reads it; classic keeps `prop_delay_ns` and the family prefix.
     its solve). The reader repeats both rules (`-1`), plus `isSet` and
     `burnt` in `{0, 1}` and `is = 0` when `isSet = 0`. Any other finite
     value is accepted, `iRated <= 0` included (it gives `Is <= 0`; classic
-    stamps it as is). A plain `led` with an exact thermal identity is
-    declined too, until W1g (LEDs point 3).
+    stamps it as is). Through W1f a plain `led` with an exact thermal
+    identity was declined too (LEDs point 3); W1g lifts that decline (LED
+    records: the `led-thermal` decline is lifted).
   - `params.color`, `color1`, `color2` are read by nothing (§6.5).
 - **Channel slots.** `kinds.rs` `KindShape.channel_slots`: 3 for `rgb_led`,
   2 for `bicolor_led`, 8 for `seg7_cc` and `seg7_ca`, 0 elsewhere. The
@@ -593,6 +615,113 @@ the shape; `battery_check` checks the values. `kinds.ts` mirrors every shape.
 No format version bump and no ABI version change for W1f: a v3 reader
 rejected codes 20-26 as `-2`.
 
+**Fuse and PTC records** (codes 10 and 13; W1g Q3). Both are two-terminal
+and read `pins[0]` and `pins[1]` by position, as `fuseModel` and
+`ptcFuseModel` do. Params come from `comp.params` only, with classic's own
+literals (the catalog's `fuse` and `ptc-fuse` defaults are the same numbers,
+§9.8):
+- `fuse`: `0 rNormal = max(0.001, Number(params.rNormal ?? 0.1))` (PA:694),
+  `1 iRating = Number(params.iRating ?? 1)`. The `?? 1` is the catalog
+  default and the 0.6.1 fix (`fix/resistor-default-overload`); classic read
+  `?? 0` at `2b5faf1` (PA:713), so a fuse with no `iRating` never tripped.
+  An `iRating <= 0` is emitted as it is: it means no limit, as classic's
+  current ratio is 0 then (PA:715).
+- `ptc_fuse`: `0 rNormal = max(0.001, Number(params.rNormal ?? 0.5))`
+  (PA:755), `1 iHold = max(1e-6, Number(params.iHold ?? 0.5))` (PA:774).
+- The compiler declines `malformed:<componentId>:too-few-pins` with fewer
+  than 2 pins, and `malformed:<componentId>:non-finite-<param>` for a
+  non-finite resolved value. The reader repeats finiteness (`-1`) and
+  requires `rNormal >= 0.001`, and for a PTC `iHold >= 1e-6`.
+- The stamps (W1g point 12): an intact fuse is `1/rNormal` between its pins,
+  and a failed one stamps nothing (PA:697-699). A PTC is `1/rNormal`, or
+  `1/(rNormal * 200)` while tripped, with the product taken first as classic
+  stamps it (PA:759).
+- No digital or channel slots, no live params, and no thermal identity.
+
+**Rating record** (code 90, synthetic). One per `resistor` record, emitted
+by `src/core/compile/thermal.ts`. W1h's `potentiometer`, `trimmer` and
+`resistor_array` carry `p_max` in their own records.
+- `device`: the resistor's record index. `componentIndex` is the resistor's
+  component index.
+- `pMax = specs?.p_max` when it is a finite number, else `0`, with `specs`
+  from `specsForComponent(comp)`: the value the failure pass reads through
+  `ctx.electricalSpecs` (PA:101-102, SE:1960-1961 and 6281-6285). A
+  `pMax <= 0` means no limit, as classic's `powerRatio` is 0 when
+  `localLimit` is absent or not `> 0` (PA:138).
+- `rPower = Number(params.resistance ?? 1000)`: the resistance classic
+  multiplies the squared current by (PA:107), unfloored. The `?? 1000` is
+  the 0.6.1 fix (`fix/resistor-default-overload`, Q-O27). At `2b5faf1`
+  classic read `?? 0`, so a resistor with no `resistance` param never
+  overloaded (probe F `resistorNoParam`: 50 V across the 1 kΩ default,
+  2.5 W, no latch in 2 s). It is finite whenever the resistor compiles
+  (its own `non-finite-resistance` decline).
+- The power is `P = I² · rPower` with `I = (V(pins[0]) − V(pins[1])) / R`,
+  `R` the resistor record's stamped value, and `0` when `rPower <= 0`
+  (PA:106-109; W1g point 6).
+- Every resistor gets one, identity or not: classic's failure hook does not
+  depend on thermal identity (§9.3.1, Q-O47).
+
+**Thermal record** (code 91, synthetic). One per device with an exact
+thermal identity: the compiler emits it iff `thermalProfileForComponent(comp)`
+(SE:1404) is defined, which takes an explicit `catalogUid`, a kind match and
+an exact-catalog source (§9.2.3). An identity-less part fails and warns but
+never heats (Q-O47).
+- In W1 the kinds are `resistor` (uid `resistor`) and plain `led` (any LED
+  uid, §9.3.1). A thermal identity on any other kind declines the circuit
+  with `unsupported-feature:thermal:<componentId>`. None is reachable in W1:
+  the other profiles are W3's regulators and op-amps.
+- `rThetaJA = profile.network.rThetaJA_CPerW` and `tauS =
+  thermalTimeConstantS(profile.network)` (TP:452-459): 340 and 8 for the
+  resistor, 560 and 2 for the LED (TP:285-324).
+- `hasShutdown` is 1 when `profile.shutdown` is set, and then `tripC` and
+  `restartC` carry its `tripTemperatureC` and `restartTemperatureC`.
+  Otherwise all three are 0. No W1 profile has a shutdown.
+- The profile id, label, derating limits and static warnings stay in TS
+  (Readouts). Rust needs only the one-pole and the shutdown.
+
+**Reader rules for codes 90 and 91.** They come after every component
+record and after W1f's code 26 anchors, in ascending `device`, 90 before 91
+for one device. `device` names an earlier non-synthetic record: a `resistor`
+for 90, a `resistor` or `led` for 91. At most one of each code per device,
+and exactly one 90 per resistor. Every value is finite, with `rThetaJA > 0`,
+`tauS > 0`, `hasShutdown` in `{0, 1}`, `tripC = restartC = 0` when
+`hasShutdown = 0`, and `restartC < tripC` otherwise. `kinds.rs` checks the
+shapes and values; `program.rs` checks the order and the `device`
+references, which span records. A synthetic record publishes nothing: its
+`bo_engine_device_currents` entry is 0, and the facade gives it no
+`elementI` key.
+
+**LED records: the `led-thermal` decline is lifted.** LEDs point 3's decline
+(`unsupported-feature:led-thermal:<componentId>`, `src/core/compile/leds.ts`)
+is removed. A plain `led` with an exact identity compiles like any other,
+plus a code 91 record. The damage limit needs no new param: `led` reads
+param 2 (`iRated`, the Q-O24 expression), and `rgb_led` and `bicolor_led`
+read their `ifMax` param (LEDs point 15).
+
+**IC records: the output-sag scan.** Classic scans every component whose
+specs carry `vcc_range` (SE:6296). Every IC kind that reaches the core has a
+catalog entry (a supply-less IC declines, `topology:ic-pins`), and every W1
+and W1h IC entry in `default-parts.json` carries `vcc_range` (all 23 kinds
+checked). So every IC record is scanned, and no param changes. The compiler
+declines an IC whose resolved specs lack `vcc_range`
+(`unsupported-feature:no-vcc-range:<componentId>`); that is unreachable
+today and keeps the rule true. The thresholds come from IC params 2-6 at the
+live `vS` (W1c point 1). The NE555 record carries them for exactly this
+(NE555 record, "`2 famFlags` to `6 vih`").
+
+`kinds.rs` (`FUSE = 10` exists; `PTC_FUSE = 13`, `RATING = 90` and
+`THERMAL = 91` are new), with `live_params: &[]`, `digital_slots: 0` and
+`channel_slots: 0` throughout:
+- `fuse`, `ptc_fuse`: `pins: 2, pins_max: 2, params: 2, blob: Exact(0)`,
+  with `fuse_check` and `ptc_fuse_check`;
+- `rating`: `pins: 0, pins_max: 0, params: 3, blob: Exact(0)`;
+- `thermal`: `pins: 0, pins_max: 0, params: 6, blob: Exact(0)`, with
+  `thermal_check`.
+
+`kinds.ts` mirrors every shape, and `CORE_KIND_CODES` gains `ptc_fuse: 13`.
+No format version bump and no ABI version change for W1g: a v3 reader
+rejected codes 13, 90 and 91 as `-2`, and code 10 had no shape.
+
 **Pins by id.** A pin id the component lacks maps to node 0, because classic
 maps an absent pin to its reference node (spec §7.2.7). The exceptions are
 kinds classic stamps nothing for when pins are missing, which the compiler
@@ -607,7 +736,9 @@ classic) rather than emit a stamp classic never makes:
   from the absent pins' reference node (SC:563-584, SE:4503-4535), a split
   the core does not reproduce;
 - a source of codes 20-25 with fewer than 2 pins: classic stamps nothing but
-  still allocates an all-zero branch row (§8.1.1, Q-W17).
+  still allocates an all-zero branch row (§8.1.1, Q-W17);
+- a `fuse` or `ptc_fuse` with fewer than 2 pins (W1g; classic reads
+  `pins[1].id` unguarded, PA:696, 761).
 
 One decline is not of this kind: a `battery_pack` whose `pos` or `neg` is
 absent declines `malformed:<componentId>:missing-pin`, because classic maps
@@ -647,6 +778,16 @@ the absent pin to its reference node and stamps a shorted battery.
   exactly `−dir·iLimit` (SO:258-260; probe P5).
 - `section_anchor`: no `elementI` key (Section anchor record).
 
+W1g adds (W1g point 12):
+- `resistor`: `0` once `resistor_overload` has latched (PA:191-194).
+- `fuse`: `(V(pins[0]) − V(pins[1])) / rNormal`, and `0` once
+  `fuse_tripped` has latched (PA:701-710).
+- `ptc_fuse`: `(V(pins[0]) − V(pins[1])) / R`, with `R = rNormal` or
+  `rNormal * 200` while tripped (PA:764-772).
+- `led`, `rgb_led`, `bicolor_led`: `0` once `led_failed` has latched, as
+  when `burnt`.
+- `rating`, `thermal`: no `elementI` key (Rating and Thermal records).
+
 ## C ABI, version 2
 
 All exports are `extern "C"` with `#[no_mangle]`. The module has **zero
@@ -681,6 +822,9 @@ export lands in its list in the same change that adds it.
 | `bo_engine_eeprom_updates_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. | v2 (W1d) |
 | `bo_engine_device_state` | `(h, device: u32) -> i32` | Collect one device's runtime state into the engine's state buffer; returns its length in f64 (`>= 0`, the per-kind layout below). `-8` for an index out of range or a kind with no device state, `-5` with no program. | v2 (W1f) |
 | `bo_engine_device_state_ptr` | `(h) -> *const f64` | The buffer from the last collect, valid until the next call on that engine. | v2 (W1f) |
+| `bo_engine_reset_failures` | `(h) -> i32` | Classic's `resetFailures()`, applied as ONE event at the current time (W1g point 13). `0`; `-5` with no program; `-4` or `-7` when the re-solve at that instant fails, and then the reset rolls back and the engine is exactly as it was. | v2 (W1g) |
+| `bo_engine_records` | `(h, channel: u32) -> i32` | Collect one channel's records into the engine's record buffer; returns its length in f64, a multiple of 7. Channel `0` failures, `1` warnings (empty in W1), `2` tripped PTCs, `3` the latch log. `-8` for any other channel, `-5` with no program. Channels 0-2 are read-only: they project to the current time and commit nothing. Collecting channel 3 empties it (below). | v2 (W1g) |
+| `bo_engine_records_ptr` | `(h) -> *const f64` | The buffer from the last collect, valid until the next call on that engine. | v2 (W1g) |
 
 **`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
 through W1e. Exact mode makes the rail node free and merges every partition
@@ -700,9 +844,13 @@ kind:
 | `battery_pack` | 6 | `0 soc`, `1 openCircuitVoltageV` (scaled: `OCV(soc) * ocvScale`), `2 internalResistanceOhm` (`R(soc)`, unscaled), `3 remainingCapacityCoulombs` (`capacityAh * 3600 * soc`), `4 dischargedCoulombs`, `5 rejectedRechargeCoulombs` (SE:4312-4331) |
 | `bench_psu`, `iLimit > 0` | 1 | `0 reg`: 0 (CV) or 2 (CC) |
 | `bench_psu`, `iLimit = 0` | 0 | none |
+| `resistor`, `led` with a code 91 record | 3 | `0 temperatureC`, `1 dissipatedPowerW`, `2 thermalShutdown` (0 or 1) (W1g point 3) |
+| `resistor`, `led` without one | 0 | none |
+| `ptc_fuse` | 3 | `0 tripped` (0 or 1), `1 tripStress`, `2 recoveryTime` (W1g point 10) |
 
 - Every battery value is projected to the current time without committing
-  it (Rails point 6), so a collect never changes the simulation.
+  it (Rails point 6), so a collect never changes the simulation. So is
+  every W1g value (W1g point 16).
 - **Extending a layout.** The returned length is the layout's version. A
   later wave extends a kind's layout only by appending values, never by
   reordering, removing or reusing an index, and records the new length in
@@ -711,6 +859,42 @@ kind:
   does) and exposes typed accessors that name each value, so no caller
   indexes raw offsets.
 - The buffer is valid until the next call on that engine (Memory, below).
+
+**`bo_engine_records`** (W1g). One record is 7 f64: `device, code, pin,
+since, value, limit, aux`.
+- `device` is the device record index. `pin` is the pin's index in that
+  device's pin records (for an IC, `vcc` and `gnd` are 0 and 1), or `-1` for
+  none (classic's `pinId` absent).
+- **Failure codes** (channels 0 and 3): `1 resistor_overload`,
+  `2 fuse_tripped`, `3 led_failed`, `4 output_sag`. **Warning codes**
+  (channel 1): `1 transistor_overcurrent` (W3), `2 missing_flyback`
+  (reserved: the facade derives it, W1g point 11). **PTC** (channel 2):
+  `1 ptc_tripped`, with `since` the trip time and `value = limit = aux = 0`.
+  A PTC trip is never a failure or a warning (Q-O45).
+- `aux` is the `output_sag` direction (`1` HIGH, `0` LOW), and `0`
+  otherwise. Every W1 failure record has a `value` and a `limit` (classic
+  sets both for all four kinds).
+- **Order.** Records come in latch order, the order classic's `failures`
+  map iterates. A latched `output_sag` keeps its place while it stays
+  latched (classic re-`set`s an existing key, SE:6325). A clear or an
+  unpublished direction flip followed by a re-latch moves it to the end, as
+  classic's delete and set do (W1g point 9).
+- **Channel 3, the latch log** (harness instrumentation). Every failure key
+  `(device, code, pin)` that has latched at least once since the previous
+  collect of channel 3, or since load, appears once, in the order of its
+  first latch in that span, with that latch's `since` (the latch time, for
+  `output_sag` too), `value`, `limit` and `aux`. Collecting it empties it,
+  as `bo_engine_take_eeprom_updates` does. It holds at most one record per
+  key, so a host that never collects it costs a bounded amount. It rolls
+  back with a failed instant; `bo_engine_reset_failures` leaves it alone,
+  and a load empties it. It exists so that the harness sees every latch over
+  a run, not a poll (Equivalence harness rules, W1g).
+
+**`bo_engine_reset_failures`** (W1g, W1g point 13). No argument. It applies
+as one event at the current time, like `bo_engine_set_params`: it does not
+advance time, and there is no 1 ps seed. A failed re-solve (`-4`, `-7`)
+rolls the whole reset back, which is a recorded divergence from classic
+(W1g Q6; Equivalence harness rules, W1g). `-5` before a successful load.
 
 **`bo_engine_set_params`** (W1b, owner decision 1). The buffer holds
 `(deviceIndex, paramIndex, value)` triples.
@@ -735,14 +919,16 @@ commits, `14` rail moves, `15` stepped partitions holding two or more
 capacitors (decision 14's count; `FORCE_STEPPED` does not change it), `16`
 rail sensitivity computations (pec3's `railSens`), `17` rail scans (pec3's
 `railScans`), `18` rail events processed, `19` source edges processed, `20`
-reader flips found at a rail scan. Stat 11 counts every Newton iteration of
+reader flips found at a rail scan, `21` slow interval closes, `22` slow
+events fired, `23` latches, `24` junction re-arms. Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
 LEDs point 6, the polish included, and W1c's static fixed point, which W1c
 did not count. Stat 14 was reserved from W1a and counts from W1f (Rails
 point 3); stats 16-20 are W1f's (Rails points 3 and 4, Sources points 2 and
 3, and for 20 the reader-scan divergence under Equivalence harness rules).
-Stats 16-18 and 20 stay 0 in exact mode.
+Stats 16-18 and 20 stay 0 in exact mode. Stats 21-24 are W1g's (W1g point
+18).
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
 unsupported topology, which from W1f includes the hub classification cases
@@ -756,8 +942,9 @@ handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
 unknown option key, a value out of range, a load-time option after load, a
-device or param index out of range, a param that is not live, or a device
-state read of a kind with none). W1f adds no code.
+device or param index out of range, a param that is not live, a device
+state read of a kind with none, or an unknown record channel). W1f and W1g
+add no code.
 
 **`bo_engine_seed_memory`** (W1d, owner decision 2).
 - `device` is a device record index. The buffer holds 16 values; value `i`
@@ -847,6 +1034,62 @@ W1f adds:
   `EngineReadout` (`src/core/surface.ts`); both live on `CoreEngine` for
   gate 1 (`battery-engine-physics`, `wave5-regulators`). No devolt host calls
   either (only comments in `packages/simcore/src/canvas/renderer.ts`).
+
+W1g adds (records from `bo_engine_records`; the pure decoding, keys and
+message builders live in `src/core/failures.ts`, which the facade calls):
+- **`getFailures()`**: a fresh object in record order (channel 0), keyed by
+  classic's `failureKey` (SE:928-945): `${kind}\0${componentId}\0${pinId}`,
+  with `pinId` `""` when absent. Each record becomes `{componentId, kind,
+  since, value, limit, message}` in classic's key order, with `pinId` after
+  `kind` on `output_sag` only (classic sets it only there, SE:6328). The
+  compiler keeps each record's pin ids in pin-record order, so the facade
+  names `pin`. Through W1f this was always `{}`.
+- **Messages** come from builders that copy classic's template literals
+  character for character (G10), applied to the record's own `value` and
+  `limit`:
+  - `resistor_overload`: `` `${id} dissipated ${value.toFixed(3)} W through a ${limit.toFixed(3)} W rating long enough to fail open.` `` (PA:155; the pot and trimmer segment form, PA:156, and `resistor_array`'s per-channel one, PA:949, are W1h's);
+  - `fuse_tripped`: `` `${id} carried ${(value * 1000).toFixed(1)} mA through a ${(limit * 1000).toFixed(1)} mA fuse rating and tripped open.` `` (PA:731);
+  - `led_failed`: `` `${id} exceeded its ${(limit * 1000).toFixed(1)} mA LED rating with ${(value * 1000).toFixed(1)} mA long enough to fail open.` `` (SC:508);
+  - `output_sag`: the SE:6333 template, `HIGH` or `LOW` from `aux`.
+- **`getWarnings()`, `takeNewWarnings()`**: the facade's static warnings
+  (W1g point 11) plus channel 1 (empty in W1), keyed by classic's
+  `warningKey`. The announce queue lives in TS and works as classic's
+  (SE:2372-2381, 5536-5544): a warning is queued once when it latches, a
+  still-true warning keeps its `since` and is not queued again, and a key
+  that is gone is pruned.
+- **`getPtcTripped()`**: a fresh `Set` of the component ids in channel 2.
+- **`getThermalState(id)`**: `undefined` unless the component has a code 91
+  record. Otherwise the facade reads `[T, P, shutdown]` from
+  `bo_engine_device_state` and calls classic's own pure
+  `stepThermalDevice(profile, {temperatureC: T, thermalShutdown},
+  {ambientTemperatureC: AMBIENT_C, dissipatedPowerW: P, dtSeconds: 0})`
+  (TP:506-572). With `dt = 0` it returns `T` unchanged,
+  `targetTemperatureC = Ta + P·Rθ`, the derating, the per-state warnings and
+  `withinContinuousLimits`, exactly as classic computes them. The readout is
+  `{temperatureC: T, thermalShutdown (Rust's flag), catalogUid, profileId,
+  dissipatedPowerW: P, targetTemperatureC, allowedPowerW,
+  withinContinuousLimits, warnings: [...new Set([...profile.warnings,
+  ...stepped.warnings])], label}` (SE:6045-6053, 2398-2405), so every string
+  is classic's by construction. At load `T = Ta`, and the warnings include
+  the profile's, as classic's cold start does since 0.6.1 even when its
+  seed solve is rejected (Q-O42, `fix/cold-start-thermal-warnings`).
+  Q-O52's stale-profile case cannot arise in W1: nothing carries across a
+  load (W1g point 15).
+- **`getPartTemperature(id)`**: `T` from the device state, else `undefined`
+  (the thermistor's body temperature is W1h's).
+- **`resetFailures()`**: calls `bo_engine_reset_failures`. On `0` it clears
+  the announce queue, re-derives the static warnings with `since` = the
+  current time and queues them again (SE:2407-2448). On `-4` or `-7` it sets
+  `lastConverged = false` and changes nothing else (W1g point 13).
+- **`takeLatchedFailures()`**: channel 3 as `SimFailure` objects, each with
+  its latch's `since`. Harness instrumentation; classic has no counterpart.
+- `getElementI()`: a failed `resistor`, `fuse` or LED-family device reads `0`
+  (Currents). `getElementChannelI()` omits a failed `rgb_led` or
+  `bicolor_led`, whose channel slots are `NaN` (LEDs point 13).
+- `getFailures`, `getWarnings` and `takeNewWarnings` are already on
+  `EngineReadout`. `getPtcTripped`, `getThermalState`, `getPartTemperature`,
+  `resetFailures` and `takeLatchedFailures` live on `CoreEngine` only (W1g
+  Q5), for gate 1, as W1f's methods do; the worker path is W2.
 
 ## Kernel semantics: the static solve (W0)
 
@@ -1569,9 +1812,10 @@ citations are at `3b22a3e` ("Kind codes and records").
    `NO_SOLUTION_CACHE`, a nonlinear partition is solved by point 6 from its
    last published voltages, so it agrees with the cached run within 1 µV
    (the polish residual, at most 0.39 µV measured), not bit for bit; linear
-   partitions stay bit-identical. W1g adds each junction's failure bit, and
-   a held junction temperature, to the key or bypasses the cache for those
-   partitions.
+   partitions stay bit-identical. W1g leaves the key alone and instead
+   clears a partition's cache at every slow stamp change (a latch, a
+   junction re-arm, a PTC trip or recovery, a reset), since the key carries
+   no failure or law state (W1g point 12).
 
 8. **Stepped partitions with junctions** (amends W1b point 6). Each BE or
    trap step runs the same Newton as points 6.1-6.3 (`newton::solve` with
@@ -2556,13 +2800,647 @@ records"). Constants, all from P3:35-38 unless marked new:
    `missing_flyback` rail-kind rule (`FLYBACK_RAIL_KINDS`, §8.7) is W1g's.
    Small-signal AC stamps are W6.
 
+## Kernel semantics: thermal, failures and warnings (W1g)
+
+References are to spec chapter 9 (§9.1-9.10), §6.7, §7.2.5 and §7.8;
+classic line citations are at `2b5faf1`, "classic" is classic with the
+0.6.1 fixes, and "W1g Qn" is a ruling ("Kind codes and records").
+Constants:
+
+| Name | Value | Use |
+|---|---|---|
+| `RESISTOR_DAMAGE_THRESHOLD` | `1` | the `resistor_overload` latch (SE:120) |
+| `FUSE_I2T_THRESHOLD` | `0.3` | the `fuse_tripped` latch (SE:121) |
+| `LED_DAMAGE_THRESHOLD` | `24` | the `led_failed` latch (SE:122) |
+| `THERMAL_BAND_C` | `0.01` °C (new, W1g Q4) | the held junction temperature's band (point 4) |
+| `OUTPUT_SAG_WINDOW` | `1e-8` s (new, W1g Q2) | how long an `output_sag` must persist in one direction (point 9) |
+
+1. **Scope and ownership** (W1g Q9). A **slow device** is any device W1g
+   integrates:
+   - every `resistor` with `pMax > 0` or a thermal identity;
+   - every `fuse` and `ptc_fuse` (W1g Q3);
+   - every `led`, `rgb_led` and `bicolor_led` (damage, and heat for an
+     identified `led`);
+   - every IC (`output_sag`);
+   - from their records on, W1h's `potentiometer`, `trimmer`,
+     `resistor_array` and `thermistor`.
+
+   `seg7_cc` and `seg7_ca` never fail (Q-O22), and a `resistor` with `pMax
+   <= 0` and no identity is not a slow device.
+
+   All slow state lives in one `slow::SlowState` owned by
+   `PartitionedSolver`, with one `Slow` event kind and one post-delta hook
+   (points 14 and 17). A latch is a stamp change that only the solver can
+   make (point 12), and the solver already holds the device records, the
+   junction laws, the published voltages and each dynamic partition's
+   trajectory. Classic's state maps (`failureStress`, `failures`, `warnings`,
+   `ptcs`, `thermalDevices`, SE:547-577) become per-device entries in
+   `SlowState`.
+
+   **Slow physics computes its own currents.** It never reads `elementI`,
+   channel currents or the source KCL. Since perf round 1 those are derived
+   only when the engine prepares a readout (P1), and the static currents are
+   incremental (P3), so no event inside an advance can see them, and a
+   whole-circuit current pass per event would undo P3. Each slow device
+   computes the currents it needs from node voltages with its own law
+   (points 6-10).
+
+2. **Intervals and publishes.** Each integrator is lazy: it holds its value
+   at `t0` and what drives it (a rate, or a thermal target). It is closed,
+   meaning brought exactly to a later time, only when needed.
+   - **Publishes.** A device's inputs change only when a partition it
+     touches **publishes** new voltages:
+     - a static re-solve (a commit, a toggle, `set_params`, a bucket
+       boundary, a W1g stamp change);
+     - a closed-form segment start or re-aim;
+     - a stepped step commit, the horizon landing included;
+     - for a device whose nodes are all fixed (a resistor or LED straight
+       across ideal sources), a fixed-node voltage change (W1f's rail moves
+       and source edges) and the load.
+   - At the end of every completed instant, after the last delta pass
+     (point 14), `SlowState::settle(now)` visits the slow devices of every
+     partition that published during that instant:
+     1. it closes each integrator over `[t0, now]` with what drove it over
+        that interval;
+     2. it reads the new voltages and computes the new drive;
+     3. it schedules the device's next event, if any.
+   - What drove it depends on the partition class:
+     - **Static and fixed-pair:** the pre-publish drive, constant over the
+       interval, so the close is exact.
+     - **Closed-form:** the segment's own exponential trajectory, closed in
+       closed form (points 3 and 5).
+     - **Stepped:** the drive at the step's end voltages, held over the step:
+       classic's backward rule (`rate·h` from the accepted step's solution,
+       SE:5510-5531, 6029-6054).
+   - A readout projects to `now` without closing anything (point 16).
+   - Slow state never influences step size: the stepped controller ignores
+     it. Classic's `estimateStepError` compares thermal and stress terms
+     (§9.3.8); D21 is not ported.
+
+3. **Package thermal state** (§9.2-9.3). Per identified device `(T0, t0,
+   P)`, with `Ta = AMBIENT_C` and `T∞ = Ta + P·rThetaJA`.
+   - **Static and fixed-pair:** `T(t) = T∞ + (T0 − T∞)·exp(−(t − t0)/tauS)`,
+     classic's formula (TP:520-524), evaluated once per interval rather than
+     once per step (D16). It is exact for a constant `P`, and splitting an
+     interval changes `T` only by rounding.
+   - **Closed-form** (resistors only: an LED is never in a closed-form
+     partition, LEDs point 5). The resistor voltage is `V(s) = a +
+     b·e^{−s/τc}` over the segment (`s = t − t_seg`), so `P(s) = (a² +
+     2ab·e^{−s/τc} + b²·e^{−2s/τc}) / R`, and the one-pole has the forced
+     solution `T(s) = Ta + (Rθ/R)·a²·(1 − e^{−s/tauS}) + (T(0) − Ta)·e^{−s/tauS}
+     + (Rθ/R)·Σ_m c_m·e^{−s/tauS}·(s/tauS)·φ(−δ_m s)`, with `c_1 = 2ab`, `c_2 =
+     b²`, `δ_m = m/τc − 1/tauS` and `φ(x) = expm1(x)/x` (`φ(0) = 1`). Each
+     `m`-term is `c_m·(e^{−m s/τc} − e^{−s/tauS})/(1 − m·tauS/τc)` rewritten so
+     that it never divides by a small difference: at `δ_m = 0` it is the
+     resonant form `c_m·(s/tauS)·e^{−s/tauS}`, and near it there is no
+     cancellation and no switch-over threshold. This is exact and does not
+     depend on when the interval is read or split.
+   - **Stepped:** `P` from the step's end voltages, held over the step, with
+     the formula above per step: classic's own cadence, since a stepped
+     partition steps anyway.
+   - **Power** (§9.3.4, SE:5947-6025):
+     - `resistor`: `V²/R`, with `R` the stamped resistance (`max(1e-3,
+       resistance ?? 1000)`, SE:5958), and `0` once `resistor_overload` has
+       latched;
+     - `led`: `max(0, V·I(V))` with the junction law at the held temperature
+       (point 4), and `0` once `led_failed` has latched or while `burnt`
+       (SE:5962-5968).
+   - **Readout:** `T(now)`, the one-pole value, not the held temperature,
+     and `P` of the current interval.
+   - **Shutdown:** evaluated on `T` with classic's hysteresis (TP:526-538).
+     With `hasShutdown`, an analytic slow event at the time `T` reaches
+     `tripC` (or `restartC` while shut down). No W1 kind has one.
+   - `resetFailures` leaves `T` and the shutdown flag alone (Q-O41). At load
+     `T0 = Ta`: the core has no carry-forward (point 15).
+
+4. **LED junction coupling** (D19, orchestrator lock: hold and re-arm; W1g
+   Q4). Only a plain `led` with a thermal identity couples; every other
+   junction stays at `AMBIENT_C` (LEDs point 3).
+   - **The held temperature `T_hold`.** Each such junction evaluates the law
+     of LEDs point 2 at `T_hold` (`vt`, `vf(T)`, `Is(T)` and `vSat` all at
+     `T_hold`) for its stamp, its current, its power and its stress. This is
+     what classic does with its committed temperature (SC:365-367,
+     SE:5972-5985). At load `T_hold = Ta`.
+   - **Static partitions and fixed-pair junctions.** `T_hold` changes only
+     at a **thermal boundary**: the instant `T(t)` reaches `T_hold ±
+     THERMAL_BAND_C`, a fixed 0.01 °C (W1g Q4). Given the interval's `(T0,
+     t0, T∞)` the boundary is analytic, `t_b = t0 + tauS·ln((T0 − T∞) /
+     (T_hold ± THERMAL_BAND_C − T∞))`, on the side `T∞` lies; there is none
+     while `|T∞ − T_hold| < THERMAL_BAND_C`.
+     1. It is scheduled as a slow event (point 14).
+     2. At `t_b`: `T_hold := T(t_b)`, the law is recomputed, the device's
+        stamps change (point 12), and the partition re-solves at `t_b`.
+     3. The new voltages give a new `P` and a new boundary.
+
+     A re-solve for any other reason (a commit, a toggle) does NOT move
+     `T_hold`, so a boundary-free re-solve can still hit the solution cache,
+     which is cleared only when `T_hold` actually moves.
+   - **Stepped partitions.** `T_hold := T` after every committed step,
+     classic's one-step lag exactly (SC:365-367 reads the committed
+     temperature, which the previous step wrote). This forces no event and
+     no re-seed, so a thermal boundary never becomes a discontinuity in a
+     stepped partition.
+   - **Why 0.01 °C** (the analog tolerance applies):
+     - At a fixed junction voltage, `∂ln I/∂T = (0.002 + (vf − v)/T_K) /
+       (n·vt)`: 0.039/°C at the rated current, up to about 0.06/°C well
+       below it; the `Is` override path gives about −0.05/°C. So a held
+       temperature at most 0.01 °C stale moves a junction's current by at
+       most 6e-4 relative, inside W0's 1e-3 with room for the Newton
+       residual.
+     - That is the worst case, an LED straight across a source. With a
+       series resistor the sensitivity is about 6e-4/°C (probe F `ledHeat`:
+       +1.3% over a 21 °C rise through 150 Ω), and the band error is about
+       6e-6.
+     - Classic's own lag is one step of heating, 23 µs of `τ = 2 s` on the
+       SAP-1.
+   - **Cost:** one re-solve per 0.01 °C of drift, about 2 100 over a 21 °C
+     warm-up (probe F `ledHeat`), then almost none once `T` settles. An LED
+     toggled faster than `τ` ripples below the band (5.5 m°C for a 1 ms
+     toggle at 11 °C of rise). Stat 24 counts the re-arms; it is measured on
+     the catalogUid SAP-1 (83 LEDs) at W1z.
+   - **The junction memo** (perf round 1's `memo_junction_current`, keyed on
+     the two terminal voltages' bits). A re-arm changes the law without
+     changing the voltages. So each junction carries a `law_gen: u32`,
+     bumped at every re-arm, latch and reset, and the memo's key includes it:
+     a re-armed law never reuses a stale memo. The law parameters `(vtn, Is,
+     vSat)` become per-junction state for identified LEDs; every other
+     junction keeps its load-time values.
+
+5. **Stress integrators and analytic threshold events** (D16, D18;
+   §9.5.1). Classic's dwell integrator (SE:5510-5531): `S' = rate` when
+   `rate > 0`, else `S' = −recovery`, floored at 0; it latches at `S >=
+   threshold`, and once latched it does nothing. The per-kind rate, recovery
+   and threshold are in points 6-8; Rust computes each rate in classic's
+   operation order.
+   - **Constant rate** (static, fixed-pair, and within a stepped step): `S(t)
+     = S0 + rate·(t − t0)`. With `rate > 0` the latch time `t_x = t0 +
+     (threshold − S0)/rate` is scheduled as a slow event. A bleeding
+     integrator schedules nothing, and its entry is dropped at the time it
+     reaches 0, lazily.
+   - **Closed-form segments** (resistors and fuses): `rate(s) = max(0,
+     P(s)/pMax − 1)`, or `(I(s)/iRating)² − 1` for a fuse, with `P(s)` the
+     squared exponential of point 3. `P` is monotone on at most two pieces,
+     split where the device's voltage crosses zero, so `{rate > 0}` is at
+     most two intervals and `S(s)` has a closed form on each. `t_x` is found
+     by safeguarded Newton on that closed form, monotone wherever `rate > 0`,
+     to 1e-12 relative, and scheduled. W1h's multi-segment kinds (the pot's
+     two track segments) meet the same requirement with their own pieces.
+   - **Stepped partitions** use the step's end rate over the step (point 2).
+     A latch falls on the end of the step in which `S` reaches the threshold,
+     with `since` that step's end: classic's rule (`since = simTime + h`,
+     PA:150; W1g Q11). This is the one place a latch time is quantized to a
+     step.
+   - **The event is the latch.** At `t_x` the latch happens without
+     re-testing `S >= threshold`: rounding can leave `S` one ulp short and
+     reschedule forever (the hard-won crossing rule's twin). A publish before
+     `t_x` bumps the device's token, which makes the pending event stale, and
+     schedules afresh. A `t_x <= now + 1e-15` at scheduling time latches at
+     once, inside the current instant (point 14).
+   - **`since`** of an integrated kind is its latch time, and `value` is the
+     drive at that instant: the power or the current. Neither changes
+     afterwards (classic: `if failures.has(key) return`, SE:5518).
+   - Classic's integrators are the exact solution of the same ODE sampled
+     per step, so the core's trip times are the analytic ones. Probe F,
+     classic on the harness host: the resistor at 2× latches at 1.0017965 s
+     against 1.0 analytic; the fuse at 2× at 0.1017965 s against 0.1; the
+     LED overdrive at 2.7066605 s, a 64 µs step end, against 2.7066528 s. The
+     core is held to the analytic time and classic's is recorded (Q-O31).
+
+6. **`resistor_overload`** (PA:95-159; §7.2.5).
+   - Rate `max(0, P/pMax − 1)`, recovery `1`, threshold
+     `RESISTOR_DAMAGE_THRESHOLD`.
+   - `P = I²·rPower` with `I = ΔV/R` (Rating record), and `0` when `rPower
+     <= 0`. The rate is `0` when `pMax <= 0`. `rPower` is classic's
+     `resistance ?? 1000` (Q-O27, `fix/resistor-default-overload`).
+   - Record: `value = P` at the latch, `limit = pMax`, `pin = −1`.
+   - Effect: an open (point 12).
+   - A resistor at exactly 2× (5 V across 50 Ω, `p_max` 0.25 W) latches at
+     `t = 1` (probe F).
+
+7. **`led_failed`** (SC:472-511; §6.7; LEDs point 15, Q-O24).
+   - Rate `max(0, r² − 1)` with `r = peakI/ifMax` (`0` when `ifMax <= 0`),
+     recovery `2`, threshold `LED_DAMAGE_THRESHOLD`.
+   - `ifMax` is `led` param 2 and the `rgb_led` or `bicolor_led` `ifMax`
+     param.
+   - `peakI` comes from the device's own junction currents at the published
+     voltages (the law at `T_hold` for an identified `led`, ambient
+     otherwise), GMIN excluded, aggregated as classic does:
+     - `led`: `|I|`;
+     - `bicolor_led`: `max(|max(I1, I2)|, max(0, I1), max(0, I2))`;
+     - `rgb_led`: `max(0, Ir, Ig, Ib)`.
+
+     These are the `elementI` and channel rules of LEDs "Currents" and point
+     13, fed through classic's `max(|elementI|, ...|channel|)` (SC:482-491).
+   - A `burnt` device has `peakI = 0` (it stamps nothing), so its stress
+     only bleeds. `seg7` has no damage surface.
+   - Record: `value = peakI` at the latch, `limit = ifMax`, `pin = −1`.
+     `params.burnt` is never written (`failure-states.test.ts:192-226`).
+   - Effect: point 12.
+   - Probe F `ledOver`: a red LED (no uid, `vf` 1.8, `if_max` 0.02) on 50 Ω
+     from 5 V carries 62.824 mA, `r = 3.1412`, rate 8.8670/s, and latches at
+     2.7066528 s analytic.
+
+8. **`fuse_tripped`** (PA:690-750; §7.8; W1g Q3).
+   - Rate `max(0, (I/iRating)² − 1)` with `I = |ΔV|/rNormal`, recovery
+     `0.3`, threshold `FUSE_I2T_THRESHOLD`. The rate is `0` when `iRating <=
+     0`. An absent `iRating` is classic's `?? 1` (Fuse and PTC records).
+   - Record: `value = I` at the latch, `limit = iRating`, `pin = −1`.
+   - Effect: an open (point 12).
+   - At 2× (1 A through a 0.5 A fuse) the latch is at `t = 0.1` (probe F:
+     classic 0.1018 at a 10 ms step end).
+
+9. **`output_sag`** (SE:6274-6365, targets SE:6375-6555; §9.5.2).
+   - **Targets.** For a powered IC (W1c point 1), every driver whose stage
+     is `Logic` or `Ne555Out`, committed `HIGH` or `LOW`, is a target,
+     except an `OPEN_COLLECTOR` pin committed `HIGH` (released). This one
+     rule reproduces classic's per-kind table for every W1 and W1h kind:
+     - the 555's pin 3 only (DIS is `Ne555Dis`);
+     - a 74LS47 segment only while it sinks;
+     - disabled 173, 189, EEPROM and 595 outputs, which are committed `HIZ`;
+     - the 74LS245's driven side.
+
+     A pin committed `HIZ` or never committed, a released one, or any pin of
+     an unpowered IC is not a target, and its state clears. That covers
+     classic's unpowered clear (SE:6357, 6367-6373) and its cleanup sweep
+     (SE:6345-6355), which since 0.6.1 also clears a released
+     open-collector output (Q-O49, `fix/74ls47-released-segment-sag`).
+   - **Committed, not live, targets** (W1g Q12: accepted, bounded). Classic
+     lists combinational outputs from the live evaluation with the delayed
+     level (SE:6396-6400). So inside a pending enable or disable delay it
+     can list a pin the core still holds `HIZ`, or drop one the core still
+     drives. The difference lasts less than the pending delay, and once the
+     delay expires the committed state is identical. A fixture pins it, and
+     it is registered (`w1g-sag-committed-target`, Equivalence harness
+     rules).
+   - **Predicate.** `actual = V(pin) − V(gnd)`, compared with the thresholds
+     at the live `vS` (W1c point 1; `digital::power::ic_power`). `HIGH` sags
+     when `actual < vih`, `LOW` when `actual > vil`, strictly, as classic
+     (SE:6304-6306).
+   - **Window** (W1g Q2, Q-O43: `W = OUTPUT_SAG_WINDOW = 1e-8` s, recorded
+     here; the owner sees it at W1z). Per `(IC, pin)` the state is `Ok`,
+     `Pending{dir, t_s}` or `Latched{dir}`, `dir` the commanded direction.
+     Only `Latched` is published. At each scan (below):
+     - no sag: `Ok`, which clears a latch;
+     - a sag in direction `dir` while `Ok`, or while `Pending` or `Latched`
+       in the other direction: `Pending{dir, now}`, with a slow event at
+       `now + OUTPUT_SAG_WINDOW`;
+     - a sag in direction `dir` while `Pending{dir}` or `Latched{dir}`: no
+       change.
+
+     At the event, a current `Pending{dir, t_s}` whose predicate still holds
+     in direction `dir` latches. So after a flip the latch is unpublished
+     until the new direction has persisted for the window: a latched sag
+     whose commanded direction flips while the pin still sags is unpublished
+     and re-latches once the new direction has held for `W`, and an output
+     that sags in both directions but flips before every window ends never
+     latches. That is classic's direction-aware debounce, counted in time
+     instead of steps (Direction, below).
+     - "Still holds" is read at the event time. Static: the voltages are
+       unchanged unless a publish, which re-evaluated, intervened.
+       Closed-form: `V(t_s + W)` from the segment, which is monotone within
+       a segment, so one reading decides whether the sag lasted the whole
+       window. Stepped: the last step's value, and each step is itself a
+       publish.
+     - The scan runs in `settle` for the ICs whose output or supply
+       partitions published this instant: once per instant, after the last
+       delta pass, so a mid-delta transient has zero duration and never
+       counts.
+   - **Why `W = 10 ns`:**
+     1. Classic latches at `seen >= OUTPUT_SAG_DEBOUNCE_STEPS = 2`
+        observations in one direction (SE:131, 6318-6335, with `7b1056d`):
+        two consecutive accepted steps, which are at least `H_MIN = 1e-8`
+        apart (HL:88). So classic latches nothing that has not persisted
+        across at least 10 ns.
+     2. The load seed counts as the first observation (§9.5.2), and
+        HeadlessRunner's first step is `H_INITIAL = 1e-8` (HL:90). Classic
+        latches a sag present at load at `t = 1e-8` (probe F `sag`: 74LS00
+        1Y into 100 Ω, 1.9512 V against `vih` 2.0, latched at 1e-8). The
+        core, with `Pending` from `START_TIME`, latches at `START_TIME +
+        1e-8`, the same instant.
+     3. On capacitively loaded edges, W = 10 ns splits edges as classic does
+        wherever classic's integration resolves the edge (probe C, a 74LS04
+        into `C`, driven by a 555; run before the debounce fix, and G4's
+        fixture re-measures it on fixed classic):
+        - 10 nF (crossings 0.80 µs and 2.86 µs): classic latches every edge
+          (26 in 20 ms), and so does the core;
+        - 100 pF (model crossings 8.0 ns HIGH, 28.6 ns LOW): classic latches
+          13 LOW edges and 1 HIGH, the power-on edge under BE; the core
+          latches the LOW edges only;
+        - 30 pF (LOW crossing 8.6 ns): classic still latches 13 LOW edges,
+          because its 10 ns BE step leaves the node at 1.6 V against the
+          exact 0.59 V, above `vil`. The core, closer to the model, latches
+          none: a Q-O31-style "closer to the analytic answer" case, recorded
+          here.
+     4. The step count existed to hide the one-solve lag between a committed
+        level and the voltage solved under the previous stamp (Q-O19; the
+        test comment at `failure-states.test.ts:318-326`). The core has no
+        such lag (decision 7: it stamps what it commits), so what W must
+        keep is the minimum persistence, not the lag cover.
+   - **Direction** (W1g Q1). The window restarts when the commanded
+     direction changes, as classic's count does since 0.6.1
+     (`fix/output-sag-direction-debounce`, `7b1056d`): the count carries the
+     commanded direction, a flip restarts it at 1, and below 2 the failure is
+     not published. At `2b5faf1` the count was keyed by pin only, so a
+     ripple-counter decoder glitch read "commanded LOW, pin still HIGH" and,
+     one step later, "commanded HIGH, pin at the glitch's LOW", and latched
+     a false sag for one step: the S1 running board's `output_sag` on
+     `U41.y2n` (the draft's section 8). The core never sees that pair, since
+     it stamps what it commits. With the fix, the S1 running classic
+     reference is rerun and both engines' failure sets are expected empty
+     (point 19).
+   - **Record**, projected at collect time:
+     - `since = now` (classic re-sets `since = simTime + h` every step while
+       latched, SE:6329, so at any readout it is the current time);
+     - `value = actual` and `limit = vih` or `vil`, both at `now`;
+     - `aux` = direction, `pin` = the pin's index.
+
+     A latched sag whose predicate no longer holds at `now` (a closed-form
+     segment crossed back since the last publish) is not reported, and its
+     state clears at the next publish. The record never alters a stamp
+     (SE:6309-6313, comment). `output_sag` stays a failure kind (Q-O44).
+   - **Load and reset.** A sag present after load settling is `Pending` from
+     `START_TIME`; after `resetFailures`, from the reset instant (classic
+     counts both seeds as one observation, D17).
+
+10. **PTC** (PA:751-830; §9.6), classic's separate channel (Q-O45; W1g Q3).
+    Per device `(tripped, S, Rt)`, with `rNormal` and `iHold` from the
+    record.
+    - `I = |ΔV|/R`, with `R = rNormal`, or `rNormal * 200` while tripped.
+    - Not tripped, `I >= iHold`: `S' = max(0, I² − iHold²)`, with a trip
+      event at `S = 3·iHold·iHold·0.1`, in that operation order (PA:789).
+      The trip zeroes `S` and `Rt`.
+    - Not tripped, `I < iHold`: `S' = −iHold²·0.5`, floored at 0.
+    - Tripped and cool, meaning `I < iHold/2` and `I·I·rNormal·200 <
+      iHold·iHold·rNormal·0.1` in classic's operation order (PA:805-807;
+      about `I < 0.02236·iHold`): `Rt' = 1`, with a recovery event at `Rt =
+      2.0` (PA:809) that clears all three.
+    - Tripped and not cool: `Rt = 0`, set at the publish that observes it.
+    - In a closed-form segment `I` is monotone, so each condition flips at
+      most once per segment, at a root scheduled like a threshold.
+    - A trip or a recovery is a stamp change (point 12), never a failure or
+      warning record.
+    - Recovery starts at the trip instant itself when the tripped current is
+      already cool. Probe F `ptc`: 1 A through `iHold` 0.5 A trips at 0.1 s
+      (classic 0.1018). At 0.5 V the tripped current is 5 mA, which is
+      cool, and it recovers 2.0 s after the trip, not after the later drop.
+    - Readout: channel 2 and `bo_engine_device_state`.
+
+11. **Warnings** (§9.7). No Rust producer exists in W1:
+    `transistor_overcurrent` is W3, and `missing_flyback` is a static
+    topology check (SE:5581-5627) over nets, kinds and the inductance param,
+    run at `load()` and `resetFailures()`. So the facade derives it with
+    classic's own logic, through a pure helper exported from classic's
+    `sim-engine.ts` that `_evaluateStaticWarnings` itself calls
+    (behaviour-neutral, on the wave branch; W1g Q7), as
+    `thermalProfileForComponent` is exported.
+    - `since` is `START_TIME` at load and the current time at a reset.
+    - `value` is the inductance for an inductor.
+    - The message is classic's (SE:5616).
+    - A reload re-latches and re-announces it: no carry-forward in W1
+      (point 15).
+
+    Its windings are the inductor (W1h), the relay and the dc_motor (later
+    waves), and its clamp kinds include `led` (SE:975-977). Its rail-kind
+    rule (`FLYBACK_RAIL_KINDS`, §8.7; Sources point 6) is in the same
+    helper. W1g ships the facade path; it fires live once an inductor
+    compiles.
+
+12. **What a latch does afterwards** (§9.5.2; SE:5498 `_hasFailure`).
+    - **The stamp.** A failed `resistor` or `fuse` stamps nothing: an open,
+      not a large resistance (`failure-states.test.ts:69-96`). A failed LED
+      device stamps no junction at all. A PTC trip or recovery changes its
+      resistance. A thermal re-arm changes one junction's law. `output_sag`
+      changes nothing.
+    - **Currents.** A failed device's `elementI` is 0 and its channels are
+      `NaN`, meaning absent. `check_finite` accepts `NaN` channels on a
+      failed device, as on a `burnt` one (LEDs point 13), and `led::readout`
+      receives the real failed flag instead of `false`.
+    - **Partitions and classification.** Membership and classification are
+      fixed at load (W1b point 1, LEDs point 5). An open can split a
+      partition into two islands inside one LU. Every node's `NODE_RSHUNT_G`
+      keeps it solvable, and an isolated island reads 0 V through the shunt
+      (`failure-states.test.ts:69-96` asserts exactly that). A nonlinear
+      partition whose last junction failed stays nonlinear; its Newton
+      converges in one iteration plus the polish.
+    - **One entry point.** Every slow change that alters a stamp (a latch, a
+      re-arm, a PTC trip or recovery, a reset) goes through
+      `mark_device_changed(device)`, which does what `apply_params` does for
+      a toggle, minus the value write:
+      - it marks the device's stamps dirty, or sets the static solver's
+        `full` flag: the static currents are incremental (P3), and would
+        otherwise miss a change that moves a current without moving a node
+        voltage;
+      - it marks every partition the device touches dirty;
+      - it **clears those partitions' solution caches**, since the cache key
+        carries no failure or law state, and an entry stored under the
+        pre-latch stamps would otherwise be served after a reset;
+      - it bumps the junction's `law_gen` (point 4).
+
+      For a device on two fixed nodes (no partition) it recomputes that
+      device's current and republishes the source currents at that instant
+      (W1c point 8's fixed-node rule).
+    - **The instant.** The change applies at the latch instant, and the
+      dirty partitions re-solve in a delta pass at that same instant (point
+      14). A stepped partition catches up with its pre-change stamps,
+      re-seeds and restarts at `POST_EVENT_H` (LEDs point 10).
+    - **Classic's latching step.** Classic applies the open from the step
+      after the latch, and that step's heat is still computed on the intact
+      part (§9.3.3). The core opens at `t_x`, and its power is 0 from `t_x`.
+      The two agree as `h → 0`.
+
+13. **`resetFailures`** (SE:2407-2448; §9.5.4).
+    - It clears every latch, every stress integrator (the PTC's included),
+      every `output_sag` state and window, and every Rust warning.
+    - It resets every PTC (`tripped = false`, `S = Rt = 0`).
+    - It leaves `T`, `T_hold` and the shutdown flag alone (Q-O41), and the
+      latch log (C ABI, `bo_engine_records`).
+    - It applies as ONE event at the current time, as `bo_engine_set_params`
+      does: `mark_device_changed` for each device whose stamp returns, then
+      the delta cycle at that instant. It does not advance time (Q-O28), and
+      there is no 1 ps seed.
+    - A device still over its rating starts integrating from 0 at the reset
+      instant. Probe F `reset`: classic re-latches exactly 1.0 s after the
+      reset.
+    - **A failed re-solve** (W1g Q6). `-4` or `-7` rolls the reset back with
+      the instant, as `set_params` rolls back: the engine is exactly as it
+      was before the call. Classic instead keeps its maps cleared and marks
+      the seed non-converged (the comment at SE:2421-2431; the seed at
+      SE:2439). This is a recorded divergence
+      (`w1g-reset-failures-failed-seed`), reachable only when un-failing a
+      part makes the circuit unsolvable. A test reaches it and asserts that
+      BOTH engines report non-convergence (`lastConverged = false`).
+
+14. **Order within an instant** (amends events point 3).
+    1. The delta cycle runs to quiescence as before: commits, re-solves,
+       readers.
+    2. `settle(now)` (point 2) closes and re-drives the slow devices of every
+       partition published this instant, and runs the `output_sag` scan.
+    3. It returns the partitions dirtied by any latch due at once (`t_x <=
+       now + 1e-15`). If there are any, another delta cycle runs at `now`,
+       then `settle` again.
+
+    A device latches at most once per instant, and `output_sag` never
+    dirties anything, so this terminates; the 1000-pass cap still applies.
+    `on_settled` (digital slots) runs after the last `settle`. Slow events
+    (threshold, window expiry, thermal boundary, PTC trip and recovery) are
+    one event kind, `EventKind::Slow { device, token }`. Popped with a
+    current token, it runs `handle_slow_event`, which closes the device to
+    `now`, applies the latch, re-arm or window decision, and returns any
+    dirty partitions for that delta. Ties at one instant keep the heap's
+    FIFO order (events point 1).
+
+15. **Rollback and load** (amends W1b point 7).
+    - **Rollback.** Everything in `SlowState` is instant state and rolls back
+      bit for bit with a failed instant (`-4`/`-7` in `advance`,
+      `set_params`, `seed_memory` and `reset_failures`): each device's
+      integrators, tokens and latch flags (`led_failed` included), its
+      `output_sag` state, each identified junction's `T_hold`, law and
+      `law_gen`, the PTC state, the latch order and the latch log.
+      - It lives in the solver's instant checkpoint (`begin_instant`,
+        `end_instant` and `rollback_instant` on `PartitionSolver`), as a
+        journal of first-touch copies per instant, the pattern
+        `DeviceEvaluator::begin_instant` documents. The common instant
+        touches no slow entry (on the uid-less SAP-1 every resistor and LED
+        sits at rate 0), so a completed instant pays nothing.
+      - The slow events a failed instant scheduled or popped roll back with
+        the kernel heap, as crossings do.
+      - A rollback leaves the static solver's `full` flag set (perf round
+        2's rule), so the incremental currents recompute after a restored
+        latch.
+    - **Load** (W1g Q8). A load starts every slow device fresh: `T = T_hold =
+      Ta`, no stress, no latch, every PTC untripped, an empty latch log.
+      Classic carries failures, stress, warnings, PTC and thermal state
+      across `load()` by id and kind (SE:2690-2733, 2829-2850). That is W2's
+      carry-forward (D25; Plan W1z "Deferred to W2"), and the gate 1 cases
+      that reload mid-failure are classified `W2`.
+
+16. **Readouts and the derived currents.** `bo_engine_records` and the
+    thermal and PTC device state are computed on demand from `SlowState` and
+    the published voltages, projected to `now` without committing anything.
+    The solver's derived readouts (source currents, LED `elementI` and
+    channels, prepared once at the end of `load`, `advance`, `set_params`,
+    `seed_memory` and now `reset_failures`, P1) read `SlowState` only for
+    the failed flags and the PTC resistance. Nothing flows the other way
+    (point 1).
+
+17. **What W1g needs from the perf-wave and W1f files.** Kept to these
+    hooks; everything else is in `slow/*`, `digital/sag.rs` and
+    `devices/{passives,led}.rs`.
+    - `events.rs`: `EventKind::Slow { device: DeviceId, token: u32 }`.
+    - `kernel.rs`:
+      - the `Slow` arm in `apply_due_events`: if `solver.slow_is_current(
+        device, token)`, extend `dirty` with `solver.handle_slow_event(device,
+        time)?`;
+      - after `run_deltas` quiesces, point 14's loop around
+        `solver.slow_settle(time, &drivers)`;
+      - `reset_failures_as_event`, a copy of `apply_params_as_event`'s
+        envelope around `solver.reset_failures()`.
+    - `solve/mod.rs` (`PartitionSolver`, all default no-ops, so the kernel's
+      mock solvers compile unchanged): `slow_settle`, `handle_slow_event`,
+      `slow_is_current`, `reset_failures`, `collect_records(channel, out)`
+      and `slow_device_state(device, out)`.
+      - `PartitionedSolver` owns `slow: SlowState`, pushes each publishing
+        partition onto a `published: Vec<PartitionId>` that `slow_settle`
+        drains, and carries `SlowState` in its instant checkpoint.
+      - It passes each LED device's failed flag to `led::readout`.
+      - Every stamp path reads the failed flags and the PTC resistance
+        through one accessor: the static stamps, `stamp_linear_base` (closed
+        form and stepped), the junction stamps and the KCL walk.
+    - `solve/static_part.rs`: `mark_device_changed(device)` (point 12) and
+      the memo's `law_gen` key (point 4).
+    - `solve/closed_form.rs`: `node_trajectory(node) -> Option<(v_inf, v0,
+      t0, tau)>` for the current segment (points 3, 5 and 9).
+    - `solve/stepped.rs`: one setter for a junction's law and stamped flag,
+      because a stepped partition owns its `DynShape` (`T_hold` after a step,
+      a failed junction); nothing else, since steps publish through
+      `handle_dynamic_event`.
+    - `partition.rs`: `fuse` and `ptc_fuse` join their two free pins, as a
+      resistor does (W0 point 3).
+    - `devices/mod.rs`: the `fuse` and `ptc_fuse` arms of `stamp` and
+      `current`.
+    - `engine.rs`, `abi.rs`, `program.rs`, `kinds.rs`, `readout.rs`: the
+      three exports, codes 10, 13, 90 and 91, and the failed-device `NaN`
+      rule in `check_finite`. `scripts/build-core.mjs` lists the three
+      exports.
+    - `devices/ics.rs` and the rest of `digital/*`: none edited. The sag scan
+      (`digital/sag.rs`) reads the kernel's drivers, `ic_powered` and
+      `digital::power::ic_power`.
+
+18. **Stats** (C ABI): `21` slow interval closes, one device's integrators
+    brought to a publish instant; `22` slow events fired (threshold, window
+    expiry, thermal boundary, PTC trip and recovery), current tokens only;
+    `23` latches (failures, `output_sag` latches, PTC trips and recoveries);
+    `24` junction re-arms, a thermal LED's law recomputed at a new held
+    temperature. They keep failed-attempt counts, as the others do.
+
+19. **Harness comparison.**
+    1. **Gate 2c** (Plan 3.4.2). Each fixture first shows the failure firing
+       on classic, with its firing time recorded. Then the core's trip time
+       is held to the sidecar's analytic time within `1e-9 s + 1e-9`
+       relative, with classic's recorded (Q-O31). The classic values are
+       probe F's, at `2b5faf1`; none of these cases moves with the 0.6.1
+       fixes.
+       - resistor at 2× `p_max`: analytic 1.0 s; classic 1.0018 s;
+       - fuse at 2× (1 A, `iRating` 0.5): analytic 0.1 s; classic 0.1018 s;
+       - PTC at 2× hold (1 A, `iHold` 0.5): trip analytic 0.1 s, classic
+         0.1018 s; at 0.5 V, recovery 2.0 s after the trip;
+       - LED overdrive: analytic 2.7066528 s; classic 2.7066605 s;
+       - 74LS00 1Y into 100 Ω: classic and core both latch at 1e-8, value
+         1.9512195 V, limit 2.0;
+       - the capacitive edge (probe C at 100 pF): LOW edges latch, HIGH edges
+         do not;
+       - battery rail out of the power window, and bench_psu CC entry and
+         exit: W1f's fixtures, gated here on the sag clearing and returning
+         with power;
+       - self-heating resistor with a uid: `T(4 s) = 110 − 85·e^{−0.5} =
+         58.44489392442616`, classic within 5.5e-12;
+       - self-heating LED with a uid, 150 Ω from 5 V: classic 21.3117 mA at
+         1 ms, 21.5875 mA and 46.1619 °C at 10 s. The sidecar integrates the
+         model's own ODE, since the coupled rise has no closed form;
+       - `resetFailures`: re-latch 1.0 s after the reset;
+       - the failed reset (point 13): both engines report non-convergence;
+       - the committed-target case (point 9): an enable or a disable delay
+         into a sagging load, where the sets differ only inside the delay.
+
+       A failure set compares `(componentId, kind, pinId)` exactly,
+       `value`/`limit` within decision 6's tolerance, and `message` against
+       classic's template applied to the core's own numbers. Temperatures
+       compare within 1e-3 of the rise above ambient plus 1e-3 °C.
+    2. **The S1 running item** (manager ruling: must pass by W1z; W1g Q1).
+       Classic's `output_sag` on `U41.y2n` was its pin-keyed debounce (point
+       9, Direction). With fixed classic the S1 running classic reference is
+       rerun (the cache key moves with the classic commit), and both
+       engines' failure sets are expected empty. Criterion 5 polls classic
+       at every accepted step (`4d6fdb8`) and reads the core's latch log at
+       every advance end (Equivalence harness rules, W1g).
+    3. **Gate 1 joins** (classification rows):
+       - `led-damage-limit-irated` (both cases; manager ruling);
+       - `failure-states`: the resistor overload, fuse, LED and both
+         `output_sag` cases become portable; the reload-mid-failure case is
+         `W2` (W1g Q8); the potentiometer and resistor_array cases wait for
+         W1h's records;
+       - `thermal-engine-physics`: resistor one-pole, identity-less,
+         kind-mismatched uid, LED feedback and failed-open LED become
+         portable; the rejected-trial case (`saveState`) is `W2`; the 7805
+         and op-amp cases are W3;
+       - `catalog-identity` (`led`: its decline was `led-thermal`);
+       - `wave3-protection`'s `ptc_fuse` cases (W1g Q3);
+       - the 0.6.1 fixes' own tests (`output-sag-direction`,
+         `resistor-default-overload`, `thermal-cold-start-warnings`,
+         `ls47-released-segment-sag`), each case whose kinds compile;
+       - `engine-warnings`' `missing_flyback` cases join as their kinds
+         compile (the inductor W1h, the relay and dc_motor later);
+         `transistor_overcurrent` is W3.
+
 ## Kernel semantics: events (W1a)
 
 1. **Event order.** One heap ordered by `(t, seq)` with `f64::total_cmp`;
    `seq` is a global insertion counter, so events at equal `t` run first in,
    first out. W1f adds two solver-owned kinds, `Rail { version }` and
    `Source { device, version }`, dispatched like `Bucket` in phase 1 of the
-   delta cycle (Sources point 5).
+   delta cycle (Sources point 5). W1g adds one more, `Slow { device, token
+   }`, dispatched in phase 1 too and stale when the device's token has moved
+   on (W1g point 14).
 2. **Drivers.** A driver's commit (a commit to HIZ included: the driver stops
    driving, as a tri-stated or direction-flipped pin does) and any other change to what it
    stamps all mark its partition dirty for the next re-solve; readers of that
@@ -2592,7 +3470,9 @@ records"). Constants, all from P3:35-38 unless marked new:
    2. re-solve the dirty partitions, then evaluate each affected reader once;
    3. zero-delay outputs scheduled at `t` form the next delta. Repeat.
 
-   More than 1000 deltas at one instant is `-7`, never a silent exit.
+   More than 1000 deltas at one instant is `-7`, never a silent exit. From
+   W1g, once the cycle quiesces the slow settle runs, and a latch due at
+   once starts another cycle at the same instant (W1g point 14).
 4. **Crossings.** A threshold crossing is accepted only at `t > now + 1e-15`.
 5. **Advance.** Process every event with `t <= t_end`, then set time to
    `t_end`. Stepped partitions land exactly on `t_end` (a horizon clamp), so a
@@ -2734,7 +3614,37 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   `dischargedCoulombs`, tolerance above), and the rail's minimum and
   maximum over the run against classic's (the sag range).
 
-## Hard-won rules for the kernel (from the prototype, W1e and the W1f probes)
+W1g adds (thermal, failures and warnings, "Kernel semantics: thermal,
+failures and warnings (W1g)"):
+- **Failure and warning sets over a run.** Classic is sampled at every
+  accepted step (S1 criterion 5, `4d6fdb8`): a latch that lasts one step is
+  otherwise caught about once in fifty. The core side reads the latch log
+  (`bo_engine_records` channel 3, `CoreEngine.takeLatchedFailures()`) and
+  `takeNewWarnings()` at every advance end, so it sees every latch over the
+  run, never a sparse poll of `getFailures()`.
+- **Integrated latch times** (Q-O31). The core is held to the sidecar's
+  analytic time within `1e-9 s + 1e-9` relative; classic's time is recorded
+  and does not gate. `output_sag`'s `since` is the readout time and is not
+  compared.
+- **Failure sets** compare `(componentId, kind, pinId)` exactly, `value` and
+  `limit` within decision 6's tolerance, and `message` against classic's
+  template applied to the core's own numbers (W1g point 19).
+- **The failed reset** (W1g Q6). Known divergence
+  `w1g-reset-failures-failed-seed`: when the re-solve after
+  `resetFailures()` fails, the core rolls the reset back, where classic
+  keeps its failures cleared over a non-converged seed (W1g point 13). Both
+  engines report `lastConverged = false`, and a gate 2c fixture asserts it;
+  the id excuses only the failure and warning sets after that call, never
+  the convergence flag.
+- **Committed against live sag targets** (W1g Q12). Known divergence
+  `w1g-sag-committed-target`: inside a pending enable or disable delay,
+  classic's `output_sag` targets follow the live evaluation and the core's
+  the committed drivers (W1g point 9). It is bounded: a hit must lie inside
+  that driver's pending delay, and the sets must agree once the delay
+  expires. A gate 2c fixture pins it, and it fails with a hit outside the
+  delay.
+
+## Hard-won rules for the kernel (from the prototype, W1e, and the W1f and W1g probes)
 
 - Accept a threshold crossing only at `t > now + 1e-15`; rounding can put a
   node back on the threshold and re-schedule it forever.
@@ -2760,6 +3670,18 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
 - An IC given a `catalogUid` that is not in the library takes classic's
   degraded path (powered, drives to `params.vcc ?? 5`), not the rail (probe
   Q3's first run: `ic-74ls00` is the uid, not `74ls00`).
+- A slow event is its own latch: never re-test a stress, window or boundary
+  condition with `>=` at the event's own time. Rounding leaves it one ulp
+  short and it reschedules forever.
+- Clear a partition's solution cache at every slow stamp change. The keys
+  carry no failure or law state, so a pre-latch entry is a valid key again
+  after a reset.
+- A thermal LED's held temperature moves only at a band boundary (static)
+  or a step commit (stepped), never at an unrelated re-solve. Otherwise
+  every commit misses the cache.
+- The `output_sag` window is per pin AND direction. A pin-keyed count
+  latches a glitch's LOW-then-HIGH as one sag (the S1 `U41.y2n` latch, W1g
+  point 9).
 
 ## Deferred past 1.0.0
 

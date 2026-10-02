@@ -29,6 +29,7 @@ pub mod partition;
 pub mod program;
 pub mod rails;
 pub mod readout;
+pub mod slow;
 pub mod solve;
 
 mod abi;

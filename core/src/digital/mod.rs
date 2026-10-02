@@ -22,6 +22,7 @@ pub mod levels;
 pub mod memory;
 pub mod ne555;
 pub mod power;
+pub mod sag;
 pub mod sequential;
 
 use crate::drivers::DelaySet;
