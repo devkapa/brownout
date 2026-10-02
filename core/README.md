@@ -3103,7 +3103,13 @@ Constants:
        change.
 
      At the event, a current `Pending{dir, t_s}` whose predicate still holds
-     in direction `dir` latches. So after a flip the latch is unpublished
+     in direction `dir` latches. The event only marks the window due; the
+     decision is taken in `settle`, after the instant's delta cycle (point
+     14), against the state then: it latches only if the pin is still a
+     target commanded in `dir` and its predicate holds. A commit at the same
+     instant that flips the commanded direction restarts the window
+     instead, as classic's count restarts on the flip at that step, so no
+     zero-length latch reaches the record or the latch log. So after a flip the latch is unpublished
      until the new direction has persisted for the window: a latched sag
      whose commanded direction flips while the pin still sags is unpublished
      and re-latches once the new direction has held for `W`, and an output
