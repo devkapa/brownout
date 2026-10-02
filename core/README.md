@@ -1082,7 +1082,9 @@ message builders live in `src/core/failures.ts`, which the facade calls):
   current time and queues them again (SE:2407-2448). On `-4` or `-7` it sets
   `lastConverged = false` and changes nothing else (W1g point 13).
 - **`takeLatchedFailures()`**: channel 3 as `SimFailure` objects, each with
-  its latch's `since`. Harness instrumentation; classic has no counterpart.
+  its latch's `since`. Harness instrumentation, classic has no counterpart,
+  and it is NOT public API: marked `@internal` in the declarations, left
+  out of the 1.0 public API surface and of the changeset (manager ruling).
 - `getElementI()`: a failed `resistor`, `fuse` or LED-family device reads `0`
   (Currents). `getElementChannelI()` omits a failed `rgb_led` or
   `bicolor_led`, whose channel slots are `NaN` (LEDs point 13).
