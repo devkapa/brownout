@@ -236,10 +236,20 @@ export const benchPsuModel: DeviceModel = {
       const outputMagnitudeGuess = sourceDirection * (
         ctx.vAt(xGuess, posNode) - ctx.vAt(xGuess, negNode)
       );
+      // CV takes over only once the CC candidate reaches the setpoint itself,
+      // not the shared band just under it. With a capacitor on the rail an
+      // overloaded supply's CC candidate falls only (excess current) * h / C
+      // per step, so at fine steps the band held it at the setpoint: the
+      // supply sat in CV past its limit with reg flipping every step. For a
+      // load whose draw rises with voltage, a candidate under the setpoint
+      // means the draw at the setpoint exceeds the limit, so CC is right for
+      // it. A removed load still sends the candidate far above the setpoint,
+      // so CV holds the rail in that same solve.
       const complianceClamp = currentLimited && ctx.useCurrentLimitComplianceClamp(
         activeSetKey,
         outputMagnitudeGuess,
         Math.abs(Vpsu),
+        0,
       );
 
       if (currentLimited && !complianceClamp) {
@@ -291,13 +301,6 @@ export const benchPsuModel: DeviceModel = {
       const stBpsu = ctx.state.icState.get(comp.id);
       const prevRegBpsu = stBpsu ? (stBpsu.reg ?? 0) : 0;
       const iBpsu = x[kBpsu] ?? 0;  // negative when delivering current (MNA convention)
-      const VBpsu = Number(comp.params.voltage ?? 5);
-      const posNodeBpsu = ctx.pinNode(comp.id, comp.pins[0].id);
-      const negNodeBpsu = ctx.pinNode(comp.id, comp.pins[1].id);
-      const sourceDirectionBpsu = VBpsu < 0 ? -1 : 1;
-      const vOutBpsu = sourceDirectionBpsu * (
-        ctx.vAt(x, posNodeBpsu) - ctx.vAt(x, negNodeBpsu)
-      );
       let newRegBpsu: number;
       const activeSetKeyBpsu = `bench_psu:${comp.id}`;
       if (
@@ -307,12 +310,16 @@ export const benchPsuModel: DeviceModel = {
         newRegBpsu = 2;
       } else if (prevRegBpsu === 2) {
         // In CC mode: x[k] is forced to −iLimit; cannot use |i| to detect recovery.
-        // Exit CC when the voltage at the pos node has risen to near the source
-        // voltage — this means the effective load resistance has increased to the
-        // point where the natural (CV) current would be ≤ iLimit.
-        // Condition uses the source differential (and its configured
-        // polarity), rather than assuming the negative terminal is ground.
-        newRegBpsu = vOutBpsu >= Math.abs(VBpsu) * 0.98 ? 0 : 2;
+        // Exit CC exactly when this solve's CC candidate reached the setpoint
+        // and the compliance branch took over: for a load whose draw rises
+        // with voltage, that is when the natural (CV) current at V is ≤ iLimit.
+        // Reusing the solve's own decision keeps the exit on the stamp's
+        // threshold. An exit that fires anywhere below the setpoint lets a
+        // slightly overloaded supply, whose CC rail sits just under V, leave
+        // CC here and re-enter it in the next solve, flipping reg every step,
+        // which the adaptive controller rejects as a regime change on every
+        // other step.
+        newRegBpsu = ctx.currentLimitComplianceClampActive(activeSetKeyBpsu) ? 0 : 2;
       } else {
         // In CV: enter CC if the supplied current exceeds the limit.
         // x[k] is negative (source delivers current); |iBpsu| is the magnitude.

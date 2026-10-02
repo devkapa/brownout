@@ -294,6 +294,12 @@ export interface DeviceContext {
     key: string,
     outputMagnitudeGuess: number,
     complianceMagnitude: number,
+    /**
+     * How far below the compliance voltage a candidate still selects the
+     * compliance branch. Omitted, it is the shared band
+     * 1e-9 + 1e-6 * max(1, complianceMagnitude).
+     */
+    toleranceBelow?: number,
   ): boolean;
   /** Read-only views of the same active sets for post-solve regime commits. */
   currentLimitEntryClampActive(key: string): boolean;
