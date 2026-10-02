@@ -2430,12 +2430,23 @@ records"). Constants, all from P3:35-38 unless marked new:
      never both and never neither. This is `clockVoltage(START_TIME)`
      except when `START_TIME` is itself an edge instant, where fmod can read
      the pre-edge level: a literal `clockVoltage` there would lose the edge
-     (at 1 kHz, 1,467 of 2,999 decimal-millisecond start times sit on a
-     rising edge that reads LOW, and the clock stayed LOW for its whole
-     first HIGH half-period). Classic reads that level for one solve and
-     takes the edge on its next; the core takes it at `START_TIME` (a
-     register it clocks sees the phantom edge at load instead of a real one
-     a step later: same count, the instant within the edge-instant rule).
+     (at 1 kHz, 1,467 of the 2,999 start times `m · 1e-3` sit on a rising
+     edge that reads LOW, and the clock stayed LOW for its whole first HIGH
+     half-period). Classic reads that level for one solve and takes the
+     edge on its next; the core takes it at `START_TIME` (a register it
+     clocks sees the phantom edge at load instead of a real one a step
+     later: same count, the instant within the edge-instant rule).
+   - The test is on the computed edge time, not the decimal one. A
+     `START_TIME` that the computed `delay + n P` overshoots by an ulp
+     loads the pre-edge level and takes the edge one ulp later (399 of the
+     2,999 starts `m / 1000` at 1 kHz); either way the edge happens once.
+     Edges apply by index, `[0, k)` for the first `k` whose time is `>
+     START_TIME`, which is "every edge at or before" while the computed
+     times rise with `k` (they do, short of a `duty` within an ulp of 1 at
+     an enormous time).
+   - Past `2^52` periods (`MAX_INDEX`), where edge times no longer resolve,
+     the level at load is `clockVoltage(START_TIME)` and no edge is
+     scheduled, as for a pulse past its search range.
    - At an edge (stat 19) the source's node takes the new value (Rails
      point 7), the slot updates, and the next edge is scheduled.
 
@@ -2513,8 +2524,9 @@ records"). Constants, all from P3:35-38 unless marked new:
    −0.1 A at load). A clock takes the level after its last edge at or
    before `START_TIME` (point 2); a pulse takes the level of its edge model
    at `START_TIME` (the level after its last event at or before it, or
-   `pulseVoltage(START_TIME)` inside a resolved ramp). A register such a source clocks sees classic's phantom edge if
-   that level is HIGH. No SoC advances. The rail and source events are
+   `pulseVoltage(START_TIME)` inside a resolved ramp). A register such a
+   source clocks sees classic's phantom edge if that level is HIGH. No SoC
+   advances. The rail and source events are
    scheduled after settling.
 
 5. **Kernel events** (events point 1). Two solver-owned kinds, dispatched
