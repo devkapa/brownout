@@ -1,5 +1,14 @@
 # brownout
 
+## 0.6.1
+
+### Patch Changes
+
+- d1dee17: A 74LS47 segment that turns off no longer keeps the `output_sag` it raised while it was lit. The segments are open-collector outputs, so only a segment that is sinking can sag; once the decoder releases it the load alone sets its voltage and the sag no longer applies. The scan stopped reporting the released segment, but the clean-up that drops the old record skipped open-collector pins, so a segment overloaded on one digit (a segment driven with too little series resistance, say) kept its sag on every later digit that leaves it dark, through reloads, until failures were cleared. The clean-up now covers open-collector pins, so the sag clears on the next step after the segment is released. An LM393's released output clears the same way.
+- efceffb: A part's thermal warnings now include its profile's assumptions from the moment the circuit loads. Every step publishes the profile's own caveats (the first-order thermal model, a headline rating that needs a heatsink, an assumed shutdown restart point) together with that step's derating warnings, but a part that starts cold on `load()` carried only the derating warnings. The profile's caveats showed up only once the 1 ps operating-point solve at the end of `load()` had converged, so on a circuit whose seed solve is rejected `getThermalState` reported none of them until the first accepted step. The cold start now publishes the same set.
+- 7b1056d: A digital output no longer reports a false `output_sag` when a one-step glitch flips it. The debounce counted consecutive sagging steps whatever the commanded direction, so a glitch on a decoder output read "commanded LOW, pin still at 5 V" and the very next step read "commanded HIGH, pin still at the glitch's low level". Those two observations reached the two-step threshold and latched a sag that no real load caused. A breadboard computer's display board did it: a 74HC74 ripple counter feeding a 74HC138 digit select shows the intermediate address for one solve on 01 to 10, and the lit digit's line raised a false `output_sag` about once every 70 ms. The count now remembers the commanded direction and restarts at 1 when it flips. A real sag, a HIGH output dragged low or a LOW output dragged high, still latches on its second step.
+- fe9b38a: A resistor with no `resistance` param can now overload, and a fuse with no `iRating` param can now trip. The engine conducted it as 1 kohm, its fallback for a missing value, but the overload check read the missing value as 0 ohm and so as 0 W: 50 V across it dissipated 2.5 W through the 0.25 W default rating and it never failed open. It now uses the same 1 kohm, so it latches `resistor_overload` in about 0.1 s at that power. A fuse with no `iRating` read as 0 A and never tripped; it now uses the catalog's 1 A default. Parts that set the param are unchanged, and an explicit `iRating` of 0 still means no limit.
+
 ## 0.6.0
 
 ### Minor Changes
