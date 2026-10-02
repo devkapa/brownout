@@ -6293,9 +6293,17 @@ export class SimEngine {
               // switching edge (>= OUTPUT_SAG_DEBOUNCE_STEPS) surface as a
               // warning; the count is capped so a sustained sag stays published
               // without growing unbounded.
-              const seen = (this.state.failureStress.get(keySag) ?? 0) + 1;
+              //
+              // The count carries the commanded direction in its sign (HIGH
+              // positive, LOW negative), and a flip restarts it at 1. A
+              // one-step glitch reads "commanded LOW, pin still HIGH" and then
+              // "commanded HIGH, pin still at the glitch's LOW": two sags in
+              // opposite directions, not one that persisted.
+              const direction = target.high ? 1 : -1;
+              const prior = this.state.failureStress.get(keySag) ?? 0;
+              const seen = (Math.sign(prior) === direction ? Math.abs(prior) : 0) + 1;
               if (seen >= OUTPUT_SAG_DEBOUNCE_STEPS) {
-                this.state.failureStress.set(keySag, OUTPUT_SAG_DEBOUNCE_STEPS);
+                this.state.failureStress.set(keySag, direction * OUTPUT_SAG_DEBOUNCE_STEPS);
                 this.state.failures.set(keySag, {
                   componentId: comp.id,
                   kind: "output_sag",
@@ -6309,7 +6317,7 @@ export class SimEngine {
               } else {
                 // Still within the debounce window — record progress but do not
                 // surface the warning yet.
-                this.state.failureStress.set(keySag, seen);
+                this.state.failureStress.set(keySag, direction * seen);
                 this.state.failures.delete(keySag);
               }
             } else {
