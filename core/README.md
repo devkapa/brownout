@@ -595,7 +595,12 @@ classic's `load` too), and
 classic loads such a circuit (it anchors the ghost net as one more
 section). A ghost pin on a net that also has a real pin still compiles, as
 before W1f, and classic anchors nothing extra for it. Before W1f an
-ownerless net compiled with no anchor; it now stays with classic.
+ownerless net compiled with no anchor; it now stays with classic. A
+component id that two components share declines `malformed:<id>:duplicate-id`
+once per shared id, for every kind: the core's tables are keyed by id, and
+classic's load keys by id too (a shared source id leaves its matrix
+singular; shared passive ids alias as parallel stamps). No corpus circuit
+has one.
 
 `kinds.rs` (`BATTERY_PACK` to `PULSE_GEN` exist; `SECTION_ANCHOR = 26` is
 new), with `live_params: &[]` and `channel_slots: 0` throughout:
