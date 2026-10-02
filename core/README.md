@@ -2465,8 +2465,9 @@ records"). Constants, all from P3:35-38 unless marked new:
      `gnd` is fixed, computed as W1c point 1 computes them;
    - **CV entry** (PSU in CV): the implied draw `I*(t) = A0(t) + G V`
      reaches `|I*| > iLimit`;
-   - **CC exit** (PSU in CC): `dir·u*(t) >= 0.98 |V|` and `dir·(A0(t) + G V)
-     <= iLimit` both hold (point 5);
+   - **CC exit** (PSU in CC): `dir·(A0(t) + G V) <= iLimit`, the draw at
+     the setpoint back within the limit; with a rail capacitor, `dir·u*(t)
+     >= |V|` (point 5);
    - **SoC:** `soc` reaches the next OCV-table knot below it, or 0.
 
    **Locating the time.** Each threshold is a level of one scalar function
@@ -2517,17 +2518,26 @@ records"). Constants, all from P3:35-38 unless marked new:
    every rail solve (so at load, at every instant that touches the rail,
    and at every rail event), at most one transition per PSU per solve:
    - **CV → CC** when `|I| > iLimit`, strictly (SO:319), where `I = A0 + G V`
-     is the draw at the setpoint, unless the CC solution would have
-     `dir·u_CC >= max(0, |V|) − (1e-9 + 1e-6 max(1, |V|))`, which keeps CV
-     (the compliance clamp, SE:1793-1815). The instant is the event where
-     the draw first exceeds the limit: a commit, a toggle, load, or a rail
-     event at the crossing. The rail then solves in CC at the same instant.
-   - **CC → CV** when `dir·u >= 0.98 |V|` (the unscaled setpoint, SO:294,
-     315) **and** the draw at the setpoint `dir·(A0 + G V) <= iLimit` (W1f
-     Q7). With a rail capacitor, a jump to `V` would draw without bound, so
-     the exit needs `dir·u >= |V| − (1e-9 + 1e-6 max(1, |V|))` instead
-     (probe P9: classic stays in CC, −0.1 A, up to 5.0 V). The rail then
-     solves in CV at the same instant.
+     is the draw at the setpoint, unless the CC solution reaches the
+     setpoint, `dir·u_cc >= |V|`, which keeps CV (the compliance clamp,
+     SE:1793-1815, with no tolerance band below `|V|` for a bench PSU since
+     `fix/psu-railcap-cc-entry`). `u_cc` is the CC solution's settled rail,
+     `(dir·iLimit − A0)/G` (point 2), with or without a rail capacitor: the
+     capacitor only sets how fast the rail gets there. For a linear rail
+     `dir·u_cc >= |V|` is the same as `dir·(A0 + G V) <= iLimit`, so the
+     clamp never vetoes an entry; it is the guard for a removed load (the
+     CC candidate far above `V`). The instant is the event where the draw
+     first exceeds the limit: a commit, a toggle, load, or a rail event at
+     the crossing. The rail then solves in CC at the same instant.
+   - **CC → CV** when the CC solution reaches the setpoint, which for a
+     linear rail is the draw at the setpoint back within the limit,
+     `dir·(A0 + G V) <= iLimit` (classic since `fix/psu-cc-exit`: its
+     commit leaves CC exactly when the solve's own compliance clamp selected
+     CV, so there is one threshold, not two). With a rail capacitor, a
+     jump to `V` would draw without bound, so the exit is the rail itself
+     reaching the setpoint, `dir·u >= |V|` (probe P9: classic stays in CC,
+     −0.1 A, up to 5.0 V). The rail then solves in CV at the same
+     instant.
    - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
    - The rules are pure functions (`devices/sources.rs`): `regime_step(reg,
      i_at_v, u_cc, u_rail, V, iLimit)` and `regime_step_rail_cap` with the
@@ -2537,21 +2547,19 @@ records"). Constants, all from P3:35-38 unless marked new:
      forever); `u_rail` is the present rail, which the CC → CV exit tests.
      An `iLimit` that is not `> 0` has no regime.
 
-   The second condition on exit is not in classic's commit, but it gives
-   classic's electrical trajectory. Classic's commit exits at 98% (reg 0),
-   and its next solve re-enters CC inside the solve (the entry clamp,
-   SE:1778-1791) while the CV current still exceeds the limit, so its `reg`
-   alternates 0, 2, 0, ... every step while the solution stays CC (probe P7:
-   12 `reg` changes in 600 steps, current −0.1 A throughout, CV only once
-   the CV current falls to 0.1 A at `vc = 4.0 V`). A literal copy would
-   re-enter at the exit instant forever (`-7`). Known divergence
-   (`w1f-cc-exit-reg`, Equivalence harness rules): the core's `reg` reads 2
-   through that window where classic flickers. Only `reg` differs: the
-   settled output voltage and current match classic within the ordinary
-   criterion there. Classic's in-solve entry tolerance (`iLimit + 1e-12 +
-   1e-6 iLimit`) is not reproduced: in the band between it and `iLimit`
-   classic enters one step late, the core at once. Scale is 1 (Q-O40): the
-   setpoint is never scaled.
+   Before the 0.6.2 fixes classic exited at 98% of the setpoint and
+   re-entered inside the next solve, so its `reg` flickered every step on a
+   slight overload and its adaptive step locked at 10-15 ns (probe P12);
+   with a rail capacitor its compliance band held an overloaded supply in
+   CV past its limit (probes P10, P11). Both are fixed in classic
+   (`fix/psu-cc-exit`, `fix/psu-railcap-cc-entry`), and the rules above are
+   fixed classic's, so `reg` is compared like any state. Classic's in-solve
+   entry tolerance (`iLimit + 1e-12 + 1e-6 iLimit`) is not reproduced: in
+   the band between it and `iLimit` classic enters one step late, at its
+   commit (at most 1 ppm over the limit for that step), the core at once. A
+   rail landing exactly on the setpoint at a classic step boundary may read
+   either regime there. Scale is 1 (Q-O40): the setpoint is never
+   scaled.
 
 6. **Battery chemistry and SoC** (§8.3.2, D16, B2; `battery-physics.ts`,
    not pec3's fixed `E` and `R`, P3:159).
@@ -3556,12 +3564,10 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   classic's per-step count is O(h). `dischargedCoulombs` uses the amps
   tolerance integrated over the run: `(1 nA + 1e-3·|I|avg)·T`.
 - **Regime** (W1f Q7). `reg` is not a compared readout; the harness compares
-  the electrical result (`netV`, `elementI`). Known divergence
-  `w1f-cc-exit-reg`: where classic's `reg` flickers 0, 2, 0 on a CC exit,
-  the core's reads 2 (Rails point 5). Only `reg` may differ: the settled
-  output voltage and current in and after that window match classic within
-  the ordinary criterion, and this id never excuses a mismatch in them.
-  Gate 1's `wave5-regulators` asserts `reg` at points outside the window.
+  the electrical result (`netV`, `elementI`). Against fixed classic (0.6.2's
+  PSU fixes) the two regimes agree except inside classic's 1 ppm entry
+  tolerance and on a rail that lands on the setpoint at a step boundary
+  (Rails point 5); there is no registered divergence for `reg`.
 - **Source edges.** Clock and pulse edges are compared per cycle (decision
   6). Headless classic lags an edge by up to one step (`1/(10 f)` for a
   clock, `per/10` for a pulse, HL:141-168); the core does not.
@@ -3668,9 +3674,10 @@ failures and warnings (W1g)"):
   value; a reader evaluated at an unrelated event then reads the right side.
 - Never re-evaluate a waveform at its own edge instant to learn its new
   level: fmod rounding puts some edges on the wrong side (probe P8).
-- An exact CC exit needs the CV current back under the limit, not only the
-  98% voltage, or the state machine re-enters at the exit instant forever
-  (probe P7).
+- An exact CC exit needs the CV current back under the limit, not a voltage
+  fraction below the setpoint, or the state machine re-enters at the exit
+  instant forever (probe P7; classic had exactly that flicker until
+  `fix/psu-cc-exit`).
 - A probe load must stay under the resistor's default rating: classic's
   `resistor_overload` opens a 2 W load within a second and the source then
   reads its node shunts only (probe P1's first run, 10 Ω on 5 V).
