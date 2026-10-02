@@ -104,7 +104,9 @@ function commitResistiveOverloadStress(
   let localLimit = pMax;
 
   if (comp.kind === "resistor") {
-    const resistance = Number(comp.params.resistance ?? 0);
+    // The same 1 kohm fallback the stamp uses, or a part with no `resistance`
+    // conducts as 1 kohm yet reads as 0 W here and can never fail.
+    const resistance = Number(comp.params.resistance ?? 1000);
     const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
     power = resistance > 0 ? current * current * resistance : 0;
   } else {
@@ -704,7 +706,8 @@ export const fuseModel: DeviceModel = {
     ctx.setElementCurrent(comp.id, (va - vc) / rNormal);
   },
   updateFailures: (ctx, comp, _x, h) => {
-    const iRating = Number(comp.params.iRating ?? 0);
+    // The catalog's default rating (1 A); an absent rating is not "no limit".
+    const iRating = Number(comp.params.iRating ?? 1);
     const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
     const currentRatio = iRating > 0 ? current / iRating : 0;
     ctx.recordAccumulatedStress(
