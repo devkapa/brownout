@@ -72,6 +72,7 @@ re-pinned.
 | `fe9b38a` (`fix/resistor-default-overload`, merged `a63dac3`; Q-O27) | A resistor with no `resistance` param is rated at the 1 kΩ it is stamped with (`?? 1000` in `commitResistiveOverloadStress`), so it can overload; a fuse with no `iRating` uses the catalog's 1 A (`?? 1`), so it can trip. An explicit `iRating` of 0 is still no limit, and an explicit `resistance` of 0 still reads 0 W. | 7, 9.5.1 | W1g (the fuse and `ptc_fuse` records are pulled into W1g). `resistor-default-overload.test.ts` joins gate 1 there. |
 | `efceffb` (`fix/cold-start-thermal-warnings`, merged `699961a`; Q-O42) | The cold-start thermal state publishes the profile's warnings unioned with the derating warnings, the same `new Set([...profile, ...stepped])` form every step uses, so a circuit whose 1 ps seed is rejected still shows them. | 9.2, 9.3 | W1g. `thermal-cold-start-warnings.test.ts` joins gate 1 there. |
 | `d1dee17` (`fix/74ls47-released-segment-sag`, merged `60a9154`; Q-O49) | The released-pin sweep covers `open_collector` pins, so a 74LS47 segment (or an LM393 output) that stops sinking clears its `output_sag` on the next step. A released open-collector pin restarts its debounce. The 555's pin 7 is never a target, so the sweep changes nothing there. | 3, 9.5.2 | W1g (the target rule already lists only sinking pins). `ls47-released-segment-sag.test.ts` joins gate 1 there. |
+| `b872148` (`fix/psu-current-limit`, merged `dda56d1`; owner-approved for 0.6.2) | A current-limited bench PSU leaves CC exactly when the solve's own compliance clamp selected CV, and its clamp keeps CV only once the CC candidate reaches the setpoint (`toleranceBelow` 0; a new optional parameter of `DeviceContext.useCurrentLimitComplianceClamp`). A slightly overloaded supply no longer flips reg every step (the adaptive step had locked at 10-15 ns: over 4 million steps for 50 ms), a load at exactly the limit no longer crawls, and a supply with a rail capacitor now enters CC and delivers its limit when its load steps over it (it had stayed at the setpoint delivering 0.12 A through a 0.1 A limit). The classic-only corpus sweep changed one entry, `ai-fixture/13-inductive-load-no-flyback` (a 2 A-limited PSU never in CC): at most 5e-5 V and 8e-7 A at its last sample, failure and warning key sets identical; transient Newton iterates that cross the entry clamp now resolve compliance at the setpoint. | 8.4 | Rails point 5 states fixed classic (README 35bcd28); the `w1f-cc-exit-reg` divergence is deleted. The three bench-psu test files join gate 1 at the W1f integration. |
 
 **Released in 0.6.0.** brownout 0.6.0 (tag `v0.6.0`) released six of the
 rows above: `bd90847`, `2c6ba7d`, `990232e`, `fccd8bd`/`3497700`,
@@ -3382,8 +3383,12 @@ Consequences for this area:
     - For each key, the first call in a solve returns false. This is tracked in
       `_currentLimitCurrentBranchTried` (`sim-engine.ts:1672,1744-1747`).
     - It then latches when
-      `outputGuess >= max(0,|Vpsu|) − (1e-9 + 1e-6·max(1,·))`; non-finite
-      values give false (`sim-engine.ts:1734-1757`).
+      `outputGuess >= max(0,|Vpsu|) − tolerance`; non-finite values give
+      false (`sim-engine.ts:1734-1757`). The tolerance is the caller's
+      `toleranceBelow`, else `1e-9 + 1e-6·max(1,·)`; the bench PSU passes 0
+      since `b872148` (`fix/psu-current-limit`), so CV takes over only once
+      the CC candidate reaches the setpoint itself (dcdc_converter,
+      linear_reg and lm317 keep the band).
   - All three sets are cleared at every `_solve` (`sim-engine.ts:5534-5536`).
   - **CC stamp** (`sources.ts:245-260`): when current-limited and not
     compliance-clamped, `add(pos,k,1)` / `add(neg,k,−1)` with node >= 0 guards,
@@ -3392,12 +3397,15 @@ Consequences for this area:
   - `Vpsu` is homotopy-scaled (`sources.ts:218`).
 - **Commit** (`sources.ts:285-323`):
   - If the entry clamp is active and compliance is not, reg becomes 2.
-  - Else, if the previous reg was 2, reg becomes 0 when `vOut >= |VBpsu|·0.98`,
-    otherwise stays 2.
+  - Else, if the previous reg was 2, reg becomes 0 exactly when this solve's
+    compliance clamp is active (`b872148`), otherwise stays 2. Until then it
+    exited at `vOut >= |VBpsu|·0.98`, so a supply whose CC rail sat between
+    98% and 100% of the setpoint flipped reg every step (delta table).
   - Else reg becomes 2 when `|x[k]| > iLimit`. This comparison is strict, with
     no tolerance.
-  - `VBpsu = Number(voltage ?? 5)` is **not** scaled (`sources.ts:294`), so on a
-    source-stepping rung the 98% exit test uses the full setpoint.
+  - The exit follows the clamp, which compares against the rung-scaled
+    `Vpsu`; the old 98% test used the unscaled `VBpsu` (`sources.ts:294`, gone
+    since `b872148`).
   - The commit runs on DC-OP rungs (§8.1.5) and at load's seed.
 - **AC** (`sources.ts:327-349`): when reg is 2, `addAc(pos,k,1)`,
   `addAc(neg,k,−1)`, `addAc(k,k,1)` (dI = 0); otherwise an ideal AC branch.
@@ -4916,7 +4924,9 @@ kind on Ben Eater's computer.
 - **Q-O36** [8] Should bench_psu's regime transitions (strict `|i| > iLimit`
   entry at commit, 98%-of-unscaled-setpoint exit, per-solve entry and
   compliance latches) match classic exactly, or within tolerance under the hub
-  correction? `estimateStepError` treats `reg` as an exact match.
+  correction? `estimateStepError` treats `reg` as an exact match. **Settled:**
+  classic is fixed (`b872148`: exit = the compliance clamp, clamp at the
+  setpoint) and the core matches it exactly (README Rails point 5).
 - **Q-O37** [8] bench_psu's icState carry-forward ignores kind (a same-id kind
   swap inherits the old icState object), and toggling `iLimit` through 0 drops
   and recreates `reg`, restarting at CV. Reproduce, or use a cleaner reset
