@@ -1754,6 +1754,7 @@ export class SimEngine {
     key: string,
     outputMagnitudeGuess: number,
     complianceMagnitude: number,
+    toleranceBelow?: number,
   ): boolean {
     if (this._currentLimitComplianceClamps.has(key)) return true;
     // A newly-entered CC regime inherits the preceding CV solution as xInit.
@@ -1768,7 +1769,7 @@ export class SimEngine {
       return false;
     }
     const boundedCompliance = Math.max(0, complianceMagnitude);
-    const tolerance = 1e-9 + 1e-6 * Math.max(1, boundedCompliance);
+    const tolerance = toleranceBelow ?? (1e-9 + 1e-6 * Math.max(1, boundedCompliance));
     if (outputMagnitudeGuess >= boundedCompliance - tolerance) {
       this._currentLimitComplianceClamps.add(key);
       return true;
@@ -1969,8 +1970,8 @@ export class SimEngine {
       batteryOperatingPoint: (comp) => engine._batteryOperatingPoint(comp),
       useCurrentLimitEntryClamp: (key, branchCurrentGuess, currentLimit) =>
         engine._useCurrentLimitEntryClamp(key, branchCurrentGuess, currentLimit),
-      useCurrentLimitComplianceClamp: (key, outputMagnitudeGuess, complianceMagnitude) =>
-        engine._useCurrentLimitComplianceClamp(key, outputMagnitudeGuess, complianceMagnitude),
+      useCurrentLimitComplianceClamp: (key, outputMagnitudeGuess, complianceMagnitude, toleranceBelow) =>
+        engine._useCurrentLimitComplianceClamp(key, outputMagnitudeGuess, complianceMagnitude, toleranceBelow),
       currentLimitEntryClampActive: (key) => engine._currentLimitEntryClamps.has(key),
       currentLimitComplianceClampActive: (key) => engine._currentLimitComplianceClamps.has(key),
       bjtJunctionCache: (compId) => engine._bjtCache.get(compId),

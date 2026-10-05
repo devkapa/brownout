@@ -1,0 +1,11 @@
+---
+"brownout": patch
+---
+
+A current-limited bench supply now holds its limit cleanly in two cases where it did not.
+
+A supply only slightly overloaded crawled. It left constant-current mode as soon as its rail climbed past 98% of the setpoint, so a load drawing just over the limit, whose current-limited rail sits between 98% and 100% of the setpoint (5 V with a 0.1 A limit into 49.9 ohm holds 4.99 V), left CC after every step and re-entered it inside the next one. The readings were right, but the supply's CV/CC state flickered on every step and the adaptive stepper rejected every other step as a regime change, holding the step at 10-15 ns: 50 ms of that circuit took at least 4 million accepted steps, and now takes 25. A load drawing exactly the limit (5 V and 0.1 A into 50 ohm) flickered and crawled the same way.
+
+A supply with a capacitor across its output delivered past its limit. Settled at 5 V with 100 uF on its rail, a supply whose load stepped to 20% over a 0.1 A limit stayed at exactly 5 V and delivered 0.12 A for as long as the simulation ran. Within each step the supply checks whether its current-limited output comes back at the setpoint, so that a supply whose load is removed holds its setpoint instead of pushing the limit current into nothing. That check accepted anything within a few microvolts under the setpoint, and the capacitor lets an overloaded rail fall only a few microvolts per step at fine steps, so the supply never left CV.
+
+The supply now leaves CC exactly when its current-limited output reaches the setpoint, and is back in CV in that same step; for a resistive load that is when its draw at the setpoint is back within the limit. An overloaded supply delivers the limit from the first step, a capacitor-backed rail sags toward the current-limited voltage as the capacitor discharges, and a supply whose load is removed still holds its setpoint from the next step. A supply within its limit, including a cold start whose inrush stays under it, never enters CC. Negative setpoints behave the same way, mirrored. `DeviceContext.useCurrentLimitComplianceClamp` takes a new optional fourth argument, `toleranceBelow`, how far below the compliance voltage a candidate still counts as reaching it; left out, it is the existing band of 1e-9 + 1e-6 * max(1, V), so custom devices that call it are unchanged.
