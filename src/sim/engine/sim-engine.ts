@@ -1102,6 +1102,22 @@ const IC_STATE_KINDS = new Set<string>([
   "analog_switch",
 ]);
 
+/**
+ * Packages whose every stamp (transient, DC and AC) returns early while
+ * _icPowerInfo reads them unpowered, so they conduct between their pins only
+ * while powered. Other supplied parts stay out because they can conduct
+ * unpowered (an op-amp clamps its output to its V- pin, an H-bridge keeps
+ * its freewheel diodes, an MCU board is a source), so they always join the
+ * supply-return union (_compileIsolatedSectionAnchors).
+ */
+const SUPPLY_GATED_KINDS = new Set<string>([
+  "ne555",
+  ...COMBINATIONAL_IC_KINDS,
+  "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
+  "cd4017", "cd4511", "cd4060", "28c16", "28c256",
+  "hd44780", "max7219", "lm393",
+]);
+
 /** Component kinds that can mutate accepted analogue/device state post-solve. */
 const STATE_UPDATE_KINDS = new Set<string>([
   "battery_pack", "bench_psu", "buzzer", "capacitor", "dc_motor",
@@ -1483,6 +1499,10 @@ export class SimEngine {
   // whose nets all share a path to ground, which keeps those solves
   // bit-identical.
   private _isolatedSectionAnchorRows: readonly number[] = [];
+  // Supply-gated parts with no supply return (see
+  // _compileIsolatedSectionAnchors), read as unpowered. Empty whenever every
+  // such part has one, which keeps those solves bit-identical.
+  private _noSupplyReturnIds: ReadonlySet<string> = new Set();
   // Lazily built per _updateDigitalState call; cleared at its entry so every
   // step rebuilds it fresh from the current solved topology.
   private _dispDrivers: Map<number, { compId: string; pin: string }> | null = null;
@@ -1754,6 +1774,7 @@ export class SimEngine {
     key: string,
     outputMagnitudeGuess: number,
     complianceMagnitude: number,
+    toleranceBelow?: number,
   ): boolean {
     if (this._currentLimitComplianceClamps.has(key)) return true;
     // A newly-entered CC regime inherits the preceding CV solution as xInit.
@@ -1768,7 +1789,7 @@ export class SimEngine {
       return false;
     }
     const boundedCompliance = Math.max(0, complianceMagnitude);
-    const tolerance = 1e-9 + 1e-6 * Math.max(1, boundedCompliance);
+    const tolerance = toleranceBelow ?? (1e-9 + 1e-6 * Math.max(1, boundedCompliance));
     if (outputMagnitudeGuess >= boundedCompliance - tolerance) {
       this._currentLimitComplianceClamps.add(key);
       return true;
@@ -1969,8 +1990,8 @@ export class SimEngine {
       batteryOperatingPoint: (comp) => engine._batteryOperatingPoint(comp),
       useCurrentLimitEntryClamp: (key, branchCurrentGuess, currentLimit) =>
         engine._useCurrentLimitEntryClamp(key, branchCurrentGuess, currentLimit),
-      useCurrentLimitComplianceClamp: (key, outputMagnitudeGuess, complianceMagnitude) =>
-        engine._useCurrentLimitComplianceClamp(key, outputMagnitudeGuess, complianceMagnitude),
+      useCurrentLimitComplianceClamp: (key, outputMagnitudeGuess, complianceMagnitude, toleranceBelow) =>
+        engine._useCurrentLimitComplianceClamp(key, outputMagnitudeGuess, complianceMagnitude, toleranceBelow),
       currentLimitEntryClampActive: (key) => engine._currentLimitEntryClamps.has(key),
       currentLimitComplianceClampActive: (key) => engine._currentLimitComplianceClamps.has(key),
       bjtJunctionCache: (compId) => engine._bjtCache.get(compId),
@@ -4666,6 +4687,18 @@ export class SimEngine {
    * anchored section to ground. Internal nodes stay out: each couples only
    * within its own group, which an anchored or grounded section already
    * fixes.
+   *
+   * The same union finds the supply-gated parts that have no supply return.
+   * Such a part conducts only while powered, so it joins once its VCC and
+   * GND rows are joined without it, and a part that joins can complete
+   * another's return, hence the repeat. A part still waiting would return its
+   * supply current through nothing but itself, so it cannot stay powered: its
+   * stamps pull the floating rail onto the other one. A floating ground rail
+   * then drops back to the shunts' 0 V and powers it again, and Newton
+   * alternated between the two on every iterate, so no step converged (a 555
+   * whose ground is on a breadboard rail wired to nothing). _icPowerInfo
+   * reads such a part as unpowered for the whole load. It then joins like any
+   * other part, so the sections do not change.
    */
   private _compileIsolatedSectionAnchors(circuit: SimCircuit): void {
     const netRows = this.nodeCount - this.internalNodeIdx.size;
@@ -4679,9 +4712,7 @@ export class SimEngine {
       }
       return i;
     };
-    for (const comp of circuit.components) {
-      const byPin = this._pinNodeByComp.get(comp.id);
-      if (!byPin) continue;
+    const join = (comp: SimComponent, byPin: ReadonlyMap<string, number>): void => {
       const groups = getDeviceModel(comp.kind)?.galvanicGroups?.(comp)
         ?? [comp.pins.map((pin) => pin.id)];
       for (const group of groups) {
@@ -4694,7 +4725,38 @@ export class SimEngine {
           else if (r !== root) parent[r] = root;
         }
       }
+    };
+    type GatedPart = { comp: SimComponent; byPin: ReadonlyMap<string, number>; vcc: number; gnd: number };
+    let waiting: GatedPart[] = [];
+    for (const comp of circuit.components) {
+      const byPin = this._pinNodeByComp.get(comp.id);
+      if (!byPin) continue;
+      if (SUPPLY_GATED_KINDS.has(comp.kind)) {
+        const { vccPin, gndPin } = supplyPinsForComponent(comp);
+        const vcc = vccPin === null ? undefined : byPin.get(vccPin);
+        const gnd = gndPin === null ? undefined : byPin.get(gndPin);
+        if (vcc !== undefined && gnd !== undefined) {
+          waiting.push({ comp, byPin, vcc: vcc < 0 ? ground : vcc, gnd: gnd < 0 ? ground : gnd });
+          continue;
+        }
+      }
+      join(comp, byPin);
     }
+    for (let joined = true; joined;) {
+      joined = false;
+      const stillWaiting: GatedPart[] = [];
+      for (const part of waiting) {
+        if (find(part.vcc) === find(part.gnd)) {
+          join(part.comp, part.byPin);
+          joined = true;
+        } else {
+          stillWaiting.push(part);
+        }
+      }
+      waiting = stillWaiting;
+    }
+    this._noSupplyReturnIds = new Set(waiting.map((part) => part.comp.id));
+    for (const part of waiting) join(part.comp, part.byPin);
 
     // Prefer a source's return terminal, as buildNets does for the circuit's
     // ground, so a second battery reads 0 V at its own negative terminal.
@@ -5093,7 +5155,8 @@ export class SimEngine {
     const vSupply = vcc - gnd;
     const minV = specs?.vcc_range?.min ?? 2.0;
     const maxV = specs?.vcc_range?.max ?? 18.0;
-    const suppliesConnected = !this._isOpenPin(comp.id, vccPin) && !this._isOpenPin(comp.id, gndPin);
+    const suppliesConnected = !this._isOpenPin(comp.id, vccPin) && !this._isOpenPin(comp.id, gndPin)
+      && !this._noSupplyReturnIds.has(comp.id);
     const powered =
       suppliesConnected &&
       vSupply >= minV * 0.9 &&
