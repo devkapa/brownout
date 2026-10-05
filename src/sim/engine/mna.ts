@@ -8,6 +8,24 @@
  * Sparse LU can replace this later without changing the stamp API.
  */
 
+/**
+ * Smallest scale a solve's residual is measured against. Below about 1e-300
+ * the ratio stops measuring the solve. A circuit coming to rest decays toward
+ * exact zero, and once its values are subnormal (under 2.2e-308) every
+ * operation rounds to a fixed 5e-324 grid instead of to a relative error, so a
+ * correct solve's residual can be one grid step against a 1e-318 scale: 5e-6,
+ * which fails the engine's 1e-8 gate. A failed step commits nothing, so the
+ * next step solves the same state and fails the same way, for good. That
+ * rounding is at most about n * |G|max * 5e-324 in an n-unknown row, so the
+ * gate needs a scale of n * |G|max * 5e-316; 1e-300 covers any n * |G|max
+ * under 2e15 (a thousand nodes with 1 uohm shorts is 1e9). It is also far
+ * below any scale a circuit with a measurable value has: the 1 pS node shunt
+ * at Newton's 1 uV tolerance carries 1e-18 A. So every solve with a scale
+ * above 1e-300, a wrong one included, is judged exactly as before, and the
+ * floor never touches the singular or non-finite checks.
+ */
+export const RESIDUAL_SCALE_FLOOR = 1e-300;
+
 export class MNA {
   readonly size: number;
   readonly G: Float64Array; // row-major size×size conductance matrix
@@ -161,8 +179,8 @@ export class MNA {
       maxResidual = Math.max(maxResidual, Math.abs(ax - rhsValue));
       if (!Number.isFinite(ax) || !Number.isFinite(rhsValue)) nonFinite = true;
     }
-    const residualScale = maxMatrix * maxX + maxRhs;
-    const relativeResidual = residualScale > 0 ? maxResidual / residualScale : maxResidual;
+    const residualScale = Math.max(maxMatrix * maxX + maxRhs, RESIDUAL_SCALE_FLOOR);
+    const relativeResidual = maxResidual / residualScale;
     if (!Number.isFinite(relativeResidual)) nonFinite = true;
     this.lastSolveInfo = {
       singular: factor.rank < n,
@@ -302,7 +320,10 @@ export interface MnaSolveInfo {
   rank: number;
   /** Smallest accepted pivot after row/column equilibration. */
   minScaledPivot: number;
-  /** Backward error in the original, unscaled matrix units. */
+  /**
+   * Backward error in the original, unscaled matrix units: the largest
+   * |G·x - b| over max(|G|max·|x|max + |b|max, RESIDUAL_SCALE_FLOOR).
+   */
   relativeResidual: number;
   nonFinite: boolean;
 }

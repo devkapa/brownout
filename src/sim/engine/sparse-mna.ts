@@ -28,7 +28,7 @@
 
 import { amdOrder } from "./amd-ordering.js";
 import type { LinearSystem } from "./linear-system.js";
-import type { MnaSolveInfo } from "./mna.js";
+import { RESIDUAL_SCALE_FLOOR, type MnaSolveInfo } from "./mna.js";
 
 /**
  * Same acceptance threshold as the dense backend: equilibration normalises
@@ -406,7 +406,7 @@ export class SparseMNA implements LinearSystem {
     }
 
     // Residual validation in original, unscaled units over the slot arrays:
-    // O(nnz) replacing the dense O(n^2) sweep, same formula and zero guard.
+    // O(nnz) replacing the dense O(n^2) sweep, same formula and scale floor.
     const ax = this.axScratch;
     ax.fill(0);
     let maxMatrix = 0;
@@ -429,8 +429,8 @@ export class SparseMNA implements LinearSystem {
       maxResidual = Math.max(maxResidual, Math.abs(ax[row] - rhsValue));
       if (!Number.isFinite(ax[row]) || !Number.isFinite(rhsValue)) nonFinite = true;
     }
-    const residualScale = maxMatrix * maxX + maxRhs;
-    const relativeResidual = residualScale > 0 ? maxResidual / residualScale : maxResidual;
+    const residualScale = Math.max(maxMatrix * maxX + maxRhs, RESIDUAL_SCALE_FLOOR);
+    const relativeResidual = maxResidual / residualScale;
     if (!Number.isFinite(relativeResidual)) nonFinite = true;
     this.lastSolveInfo = {
       singular: this.fRank < n,
