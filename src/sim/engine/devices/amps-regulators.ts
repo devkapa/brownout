@@ -551,10 +551,21 @@ export const dcdcConverterModel: DeviceModel = {
       );
     const currentLimitedDcdc = voltageRegDcdc === 2 || entryClampDcdc;
     const outputMagnitudeGuess = ctx.vAt(xGuess, nOutPos) - ctx.vAt(xGuess, nOutNeg);
+    // The voltage branch takes over only once the CC candidate reaches the
+    // attainable voltage itself (the setpoint, or the buck's dropout
+    // ceiling), not the shared band just under it. With a capacitor on the
+    // output an overloaded converter's CC candidate falls only
+    // (excess current) * h / C per step, so at fine steps the band held it at
+    // the setpoint: the converter sat in REG past its limit with reg flipping
+    // every step. For a load whose draw rises with voltage, a candidate under
+    // that voltage means the draw there exceeds the limit, so CC is right for
+    // it. A removed load still sends the candidate far above it, so the
+    // voltage branch holds the output in that same solve.
     const complianceClamp = currentLimitedDcdc && ctx.useCurrentLimitComplianceClamp(
       activeSetKeyDcdc,
       outputMagnitudeGuess,
       complianceVoltageDcdc,
+      0,
     );
     const regDcdc = complianceClamp
       ? requiredBuckVoltageRegDcdc
@@ -653,13 +664,10 @@ export const dcdcConverterModel: DeviceModel = {
       && vinCommitted < voutDcdcU + buckDropoutDcdcU
       ? 1
       : 0;
-    const complianceVoltageDcdcU = buckDropoutDcdcU !== null
-      ? Math.min(voutDcdcU, Math.max(0, vinCommitted - buckDropoutDcdcU))
-      : voutDcdcU;
 
     // Output-regime state machine (no latch — CC relaxes to REG when load eases).
     //   from REG: enter CC if |I_out| > iLimit×1.001.
-    //   from CC:  exit to REG when V_out has recovered near the setpoint (hysteresis).
+    //   from CC:  exit when this solve's compliance branch took over.
     let newRegDcdcU: number;
     if (!inputPoweredDcdc) {
       newRegDcdcU = 3;
@@ -669,9 +677,16 @@ export const dcdcConverterModel: DeviceModel = {
     ) {
       newRegDcdcU = 2;
     } else if (prevRegDcdcU === 2) {
-      // In CC: exit when V_out has risen back near the attainable buck
-      // compliance voltage (regulated setpoint or max-duty dropout ceiling).
-      newRegDcdcU = vOutCommitted >= complianceVoltageDcdcU * 0.98
+      // In CC: exit exactly when this solve's CC candidate reached the
+      // attainable compliance voltage (the setpoint, or the identified buck's
+      // max-duty dropout ceiling) and the compliance branch took over: for a
+      // load whose draw rises with voltage, that is when the draw at that
+      // voltage is back within iLimit. The old exit at 98% of it let a
+      // converter still over its limit, whose CC output sits in the last 2%,
+      // leave CC here and re-enter it in the next solve, flipping the regime
+      // every step, which the adaptive controller kept rejecting as a regime
+      // change.
+      newRegDcdcU = ctx.currentLimitComplianceClampActive(`dcdc_converter:${comp.id}`)
         ? buckVoltageRegDcdcU
         : 2;
     } else {
@@ -1304,10 +1319,20 @@ export const linearRegModel: DeviceModel = {
       );
     const currentRegLR = entryClampLR ? 2 : headroomRegLR;
     const complianceLR = Math.max(0, Math.min(VregLR, headroomGuessLR - vdropLR));
+    // REG/DROPOUT takes over only once the CC candidate reaches
+    // min(vout, headroom - vdropout) itself, not the shared band just under
+    // it. With a capacitor on the output an overloaded regulator's CC
+    // candidate falls only (excess current) * h / C per step, so at fine
+    // steps the band held it at the setpoint: the regulator sat in REG past
+    // its limit, or flipped reg every step. For a load whose draw rises with
+    // voltage, a candidate under that voltage means the draw there exceeds
+    // the limit, so CC is right for it. A removed load still sends the
+    // candidate far above it, so REG holds the output in that same solve.
     const complianceClampLR = currentRegLR === 2 && ctx.useCurrentLimitComplianceClamp(
       activeSetKeyLR,
       vOutGuessLR - vRefGuessLR,
       complianceLR,
+      0,
     );
     const stampRegLR = complianceClampLR
       ? (headroomGuessLR <= vdropLR ? 3 : headroomGuessLR < VregLR + vdropLR ? 1 : 0)
@@ -1329,7 +1354,6 @@ export const linearRegModel: DeviceModel = {
     const iLRU    = x[kLRU] ?? 0;
     const vInLRU  = ctx.vAt(x, ctx.pinNode(comp.id, "in"));
     const vRefLRU = ctx.vAt(x, ctx.pinNode(comp.id, "gnd"));
-    const vOutLRU = ctx.vAt(x, ctx.pinNode(comp.id, "out"));
     const VregLRU   = Number(comp.params.vout ?? 5.0);
     const vdropLRU  = Number(comp.params.vdropout ?? 2.0);
     const iLimLRU   = Number(comp.params.iLimit ?? 1.0);
@@ -1341,8 +1365,9 @@ export const linearRegModel: DeviceModel = {
       ? 3
       : activeSetEnteredLRU
         ? 2
-      : regulatorRegime(stLRU.reg, iLRU, vInLRU, vRefLRU, vOutLRU,
-          VregLRU, vdropLRU, iLimLRU);
+      : regulatorRegime(stLRU.reg, iLRU, vInLRU, vRefLRU,
+          VregLRU, vdropLRU, iLimLRU,
+          ctx.currentLimitComplianceClampActive(activeSetKeyLRU));
     ctx.state.icState.set(comp.id, { reg: newRegLRU });
   },
   updateCurrent: (ctx, comp, x) => {
@@ -1428,10 +1453,16 @@ export const lm317Model: DeviceModel = {
       );
     const currentRegL3 = entryClampL3 ? 2 : headroomRegL3;
     const complianceL3 = Math.max(0, Math.min(VrefL3, headroomGuessL3 - vdropL3));
+    // Same rule as linear_reg: REG/DROPOUT only once the CC candidate reaches
+    // the compliance voltage itself. The band mattered more here, since the
+    // compliance voltage is Vout - Vadj and the divider moves it by only
+    // R1 / (R1 + R2) of the output's fall: at 10 ns steps the band held an
+    // LM317 20% over its limit in REG with a capacitor on its output.
     const complianceClampL3 = currentRegL3 === 2 && ctx.useCurrentLimitComplianceClamp(
       activeSetKeyL3,
       vOutGuessL3 - vAdjGuessL3,
       complianceL3,
+      0,
     );
     const stampRegL3 = complianceClampL3
       ? (headroomGuessL3 <= vdropL3 ? 3 : headroomGuessL3 < VrefL3 + vdropL3 ? 1 : 0)
@@ -1450,7 +1481,6 @@ export const lm317Model: DeviceModel = {
     const iL3U    = x[kL3U] ?? 0;
     const vInL3U  = ctx.vAt(x, ctx.pinNode(comp.id, "in"));
     const vAdjL3U = ctx.vAt(x, ctx.pinNode(comp.id, "adj"));
-    const vOutL3U = ctx.vAt(x, ctx.pinNode(comp.id, "out"));
     const VrefL3U  = Number(comp.params.vref ?? 1.25);
     const vdropL3U = Number(comp.params.vdropout ?? 2.0);
     const iLimL3U  = Number(comp.params.iLimit ?? 1.5);
@@ -1462,8 +1492,9 @@ export const lm317Model: DeviceModel = {
       ? 3
       : activeSetEnteredL3U
         ? 2
-      : regulatorRegime(stL3U.reg, iL3U, vInL3U, vAdjL3U, vOutL3U,
-          VrefL3U, vdropL3U, iLimL3U);
+      : regulatorRegime(stL3U.reg, iL3U, vInL3U, vAdjL3U,
+          VrefL3U, vdropL3U, iLimL3U,
+          ctx.currentLimitComplianceClampActive(activeSetKeyL3U));
     ctx.state.icState.set(comp.id, { reg: newRegL3U });
   },
   updateCurrent: (ctx, comp, x) => {
