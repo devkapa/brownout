@@ -55,6 +55,12 @@ Included:
   their pins into isolated groups, so a section cut off only by another
   multi-channel part (a DPDT pole, a resistor array) still rests on the node
   shunt.
+- A chip that conducts only while powered (the 555, 74xx and CD4000 logic,
+  the 28C EEPROMs, the HD44780, the MAX7219 and the LM393) reads unpowered for
+  the whole load when its VCC and GND pins are not joined outside it, through
+  the wiring and other parts, another such chip counting only once its own
+  supply is joined. With no return path for its supply current it cannot
+  hold a powered state.
 - Rail-referenced, finite-resistance digital and MCU outputs, real internal GPIO
   pulls, board idle current, IC quiescent current, and conservative supply-current
   routing for modeled active parts.
