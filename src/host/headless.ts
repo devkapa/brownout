@@ -59,7 +59,7 @@
 
 import { estimateStepError, nextStepFactor } from "../sim/adaptive-step.js";
 import { parseSpiceNetlist } from "../sim/engine/spice/netlist.js";
-import { SIGNAL_GEN_NOISE_UPDATE_RATE_HZ } from "../sim/engine/waveform.js";
+import { SIGNAL_GEN_NOISE_UPDATE_RATE_HZ, parseSignalGenParams } from "../sim/engine/waveform.js";
 import { SimEngine } from "../sim/engine/sim-engine.js";
 import type {
   SimCircuit,
@@ -138,7 +138,8 @@ function sourceStepLimit(circuit: SimCircuit): number {
     }
     if (component.kind !== "signal_gen" || Number(p.enabled ?? 1) === 0) continue;
     const frequency = Math.max(1e-6, Number(p.frequency ?? 1000));
-    const waveform = String(p.waveform ?? "sine");
+    // Unrecognised strings play as a sine and need its ceiling.
+    const waveform = parseSignalGenParams(p).waveform;
     if (waveform === "sine" || waveform === "triangle" || waveform === "ramp") {
       limit = Math.min(limit, 1 / (frequency * 40));
     } else if (waveform === "square" || waveform === "pulse") {
