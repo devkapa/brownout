@@ -1680,10 +1680,13 @@ export function stampLinearRegulator(
  *   i          — branch current x[k] (positive = flowing in→out).
  *   vIn        — committed voltage at the input pin.
  *   vRef       — committed voltage at the ref pin (gnd or adj).
- *   vOut       — committed voltage at the output pin.
  *   Vreg       — regulated voltage above vRef (e.g. 5.0 for 7805, 1.25 for LM317).
  *   vdropout   — minimum headroom required above the regulated point (e.g. 2.0 V).
  *   iLimit     — maximum output current in amps.
+ *   complianceSelected — the accepted solve's own current-limit compliance
+ *                decision (ctx.currentLimitComplianceClampActive): its CC
+ *                candidate reached the REG/DROPOUT voltage, so it stamped
+ *                that voltage branch instead of CC.
  *
  * Transition table:
  *   prevRegime = NaN/initial
@@ -1703,8 +1706,8 @@ export function stampLinearRegulator(
  *     → else                        → DROPOUT (1)
  *
  *   from CC (2)
- *     → vOut >= Vreg + vRef − 0.05  → REG (0)   [load eased, output recovered]
- *     → headroom < Vreg + vdropout  → DROPOUT (1)
+ *     → complianceSelected and headroom < Vreg + vdropout → DROPOUT (1)
+ *     → complianceSelected          → REG (0)   [load eased, output recovered]
  *     → else                        → CC (2)
  *
  *   from OFF (3)
@@ -1712,17 +1715,20 @@ export function stampLinearRegulator(
  *     → headroom > vdropout         → DROPOUT (1)
  *     → else                        → OFF (3)
  *
- * The 1.001 factor and 0.05 V hysteresis prevent chattering at regime edges.
+ * (Every regime first goes OFF when headroom <= vdropout.)
+ *
+ * The 1.001 factor keeps REG/DROPOUT from chattering into CC at the limit.
+ * CC needs no margin of its own: it leaves exactly when the solve did.
  */
 export function regulatorRegime(
   prevRegime: number,
   i: number,
   vIn: number,
   vRef: number,
-  vOut: number,
   Vreg: number,
   vdropout: number,
   iLimit: number,
+  complianceSelected: boolean,
 ): 0 | 1 | 2 | 3 {
   const headroom = vIn - vRef; // voltage available above the reference node
 
@@ -1759,10 +1765,19 @@ export function regulatorRegime(
     return headroom >= Vreg + vdropout ? 0 : 1;
   }
 
-  // prevRegime === 2: currently current-limited.
-  if (vOut >= Vreg + vRef - 0.05) return 0;           // output recovered       → REG
-  if (headroom < Vreg + vdropout) return 1;            // low headroom           → DROPOUT
-  return 2;
+  // prevRegime === 2: currently current-limited. Leave CC exactly when this
+  // solve's CC candidate reached the voltage the pass device can hold,
+  // min(Vreg, headroom - vdropout) above vRef, and the compliance branch
+  // took over: for a load whose draw rises with voltage, that is when the
+  // draw at that voltage is back within iLimit. The branch it stamped (REG,
+  // or DROPOUT under low headroom) is the regime committed here. The old
+  // exits, 50 mV under Vreg above vRef (on Vout - Vadj for the LM317, about
+  // 200 mV of output with a 240/720 ohm divider) and on any headroom short
+  // of Vreg + vdropout, let a regulator still over its limit leave CC here
+  // and re-enter it in the next solve, flipping the regime every step, which
+  // the adaptive controller kept rejecting as a regime change.
+  if (!complianceSelected) return 2;
+  return headroom < Vreg + vdropout ? 1 : 0;
 }
 
 /** Pure MOSFET drain-current computation — matches `stampMOSFET` math. */
