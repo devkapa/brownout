@@ -74,6 +74,10 @@ re-pinned.
 | `d1dee17` (`fix/74ls47-released-segment-sag`, merged `60a9154`; Q-O49) | The released-pin sweep covers `open_collector` pins, so a 74LS47 segment (or an LM393 output) that stops sinking clears its `output_sag` on the next step. A released open-collector pin restarts its debounce. The 555's pin 7 is never a target, so the sweep changes nothing there. | 3, 9.5.2 | W1g (the target rule already lists only sinking pins). `ls47-released-segment-sag.test.ts` joins gate 1 there. |
 | `b872148` (`fix/psu-current-limit`, merged `dda56d1`; owner-approved for 0.6.2) | A current-limited bench PSU leaves CC exactly when the solve's own compliance clamp selected CV, and its clamp keeps CV only once the CC candidate reaches the setpoint (`toleranceBelow` 0; a new optional parameter of `DeviceContext.useCurrentLimitComplianceClamp`). A slightly overloaded supply no longer flips reg every step (the adaptive step had locked at 10-15 ns: over 4 million steps for 50 ms), a load at exactly the limit no longer crawls, and a supply with a rail capacitor now enters CC and delivers its limit when its load steps over it (it had stayed at the setpoint delivering 0.12 A through a 0.1 A limit). The classic-only corpus sweep changed one entry, `ai-fixture/13-inductive-load-no-flyback` (a 2 A-limited PSU never in CC): at most 5e-5 V and 8e-7 A at its last sample, failure and warning key sets identical; transient Newton iterates that cross the entry clamp now resolve compliance at the setpoint. | 8.4 | Rails point 5 states fixed classic (README 35bcd28); the `w1f-cc-exit-reg` divergence is deleted. The three bench-psu test files join gate 1 at the W1f integration. |
 | `f198ed9` (`fix/regulator-cc-exit`, on `b872148`, merged `9fc1062`; owner-approved for 0.6.2) | dcdc_converter, linear_reg and lm317 leave CC exactly when the solve's own compliance clamp selected the voltage branch (`regulatorRegime` takes `complianceSelected`: from CC, stay CC unless selected; then DROPOUT when `headroom < Vreg + vdropout`, else REG; the OFF check on `headroom <= vdropout` still first; the dcdc's exit commits `buckVoltageReg`), and each clamp passes `toleranceBelow` 0. Before, the exits were 98% of the attainable voltage (dcdc), and `Vreg − 50 mV` above vRef or any short headroom (linear_reg, lm317: for the LM317 the 50 mV is on `Vout − Vadj`), so a slightly overloaded regulator flipped its regime every step and the adaptive step locked near 12 ns, a linear regulator in dropout flickered at any overload, and a regulator with an output capacitor held its voltage past its limit at fine steps. Electrics are bit-identical outside the old 1 ppm band; inside it the regime now reads CC at the limit. The classic-only corpus sweep is identical (134 of 134). | 7, 8.4 | Classic behaviour for kinds the core does not port in W1 (regulators are W3); the rule is recorded for the W3 contract. |
+| `119fa20` (`fix/isolated-section-stall`, merged `2b2b1c7`; owner-approved for 0.6.2) | A supply-gated chip (`SUPPLY_GATED_KINDS`: ne555, the combinational ICs, 74ls161/173/189, 74hc595/165/74, cd4017/4511/4060, 28c16/28c256, hd44780, max7219, lm393) with mapped vcc and gnd pins joins the section union-find only once its vcc and gnd rows already share a section through other parts. The joins repeat to a fixed point, so chips that power each other resolve in any order. A chip still waiting after that has no supply return outside itself: its id goes into `_noSupplyReturnIds`, `_icPowerInfo` reads it unpowered (`suppliesConnected` also requires it to be absent from that set) for as long as it is wired that way, and its pins then join as before, so sections and anchors are unchanged. Before, such a chip's power decision alternated every Newton iterate: powered, it pulled the floating return up to its own supply and starved itself; unpowered, the return fell back to 0 V. The solve hit its 50-iteration cap every step and the clock froze (the 0.6.1 "SETTLING fail=1/1" stall, present since v0.2.0). A return that exists in the wiring but cannot carry the supply current (a capacitor, an open switch, another chip's input) is not covered. Circuits whose gated chips all have a supply return are bit-identical; the classic-only corpus sweep is identical (134 of 134). | 1.3, 8.9 | The set is load-time topology, so the compiler can fold it into the chip's open-supply flag, which the core's power gate already honours. Port with the section anchors in W1f (row `bd90847`), with `isolated-section-stall.test.ts` in gate 1. |
+| `f1dca71` (`fix/mna-residual-floor`, merged `7ac37e6`; owner-approved for 0.6.2) | The solve-health ratio is `max\|G·x − b\| / max(\|G\|max·\|x\|max + \|b\|max, RESIDUAL_SCALE_FLOOR)` with `RESIDUAL_SCALE_FLOOR = 1e-300`, in both backends (`mna.ts`, `sparse-mna.ts`). Before, a circuit decaying to rest reached subnormal values, where doubles round on a fixed 5e-324 grid, and one rounding step against a ~1e-318 scale read up to 5e-6, past the 1e-8 gate. A rejected step commits nothing, so every later step re-solved the same state and failed again: an LM317 driving an LED, switched to 0 V, stalled for 16 of 46 loads on the dense backend; the sparse backend fails the same way at other drives. Every solve with a scale above 1e-300 is judged exactly as before, and the singular and non-finite checks are unchanged. No corpus solve has a scale below 1e-300 (the smallest is 3.06); the classic-only sweep is identical (134 of 134). | 10.5 | The core's LU judges health by its pivots and has no relative-residual gate, so there is nothing to port; recorded under D24. |
+| `685179c` (`fix/headless-source-breakpoints`, merged `d885d70`; for 0.6.3) | HeadlessRunner ports the browser worker's source-edge clamp (§8.1.6): the same `sourceEventDescriptors`, `nextSourceEventTime` and epsilon `max(1e-15, \|t\|·1e-12)`. Its events are clock edges, pulse corners (one-shot when `per` is not finite and positive), signal_gen square, pulse and ramp corners with phase, noise samples every 0.1 ms from the delay, PWL knots at absolute time, and the delayed start of a continuous waveform. When `untilEvent ≤ h + epsilon`, it sets `h = untilEvent > 1.5·H_MIN ? untilEvent − H_MIN : max(H_MIN, untilEvent)` and marks the step event-clamped, so the controller resumes its earlier step after the guard. The clamp binds in fixed-step runs too. Before, headless had only the P/10 ceiling (none for PWL; a pulse's `pw` ignored), so a step straddling an edge applied the new level for the whole step, and a narrow feature could be missed: a 0.2 ms PWL pulse was never seen, and 20 µs pulses read 11.2 µs HIGH of 420 µs. The classic-only corpus sweep changed 4 of 134 entries. Three moved one ulp in the sample time only. In `engine-test/04-74hc595-shift-7seg` an 8 ms step had straddled the 320 ms SRCLK edge and the 323.5 ms SER fall and shifted in a 0; the run now shifts in the 1 and latches `0 0 1 1 1 1 1 0` at 480 ms, the hand-computed sequence. Circuits with no timed source step exactly as before. | 8.1.6, D28, Q-O34 | Host behaviour. The core's event kernel already places source edges exactly, so nothing to port. |
+| `5657a9a` (`fix/waveform-classification`, merged `4753e05`; for 0.6.3) | HeadlessRunner's `sourceStepLimit` classifies a signal_gen with `parseSignalGenParams(p).waveform`, the engine's own parse. Any value outside the eight names (dc, sine, square, pulse, triangle, ramp, pwl, noise), or a non-string, therefore gets a sine's `1/(40·f)` ceiling, matching the sine the engine plays. Before, it tested `String(p.waveform ?? "sine")`, so `"Sine"` at 1 kHz got no ceiling: 22 steps over 20 ms, and 1.1 ms HIGH of 10 ms. The eight names step exactly as before, and the corpus sweep is identical (134 of 134). The browser worker's matching change is devolt's (`8ae8792`). | 8.1.6 | Host behaviour; no core change. |
 
 **Released in 0.6.0.** brownout 0.6.0 (tag `v0.6.0`) released six of the
 rows above: `bd90847`, `2c6ba7d`, `990232e`, `fccd8bd`/`3497700`,
@@ -249,6 +253,12 @@ outputResistance = (ioMax && ioMax>0 && vSupply>0)
     ? max(50, min(1000, vSupply/(ioMax*4))) : 50
 return { ..., vcc, gnd, vSupply: max(0,vSupply), thresholds: thresholdsFor(specs, max(0,vSupply)), outputResistance, propagationDelay }
 ```
+
+Delta: since `119fa20` (`fix/isolated-section-stall`), `suppliesConnected`
+also requires the chip to be absent from `_noSupplyReturnIds`: the gated chips
+whose vcc and gnd rows reach each other only through the chip itself, computed
+at `load()` with the isolated-section union-find (§8.9). Such a chip reads
+unpowered for as long as it is wired that way.
 
 - The gate is tested on the raw difference. Every catalog `min` is positive,
   so a reversed supply simply reads as unpowered. There is no separate
@@ -3165,6 +3175,11 @@ Consequences for this area:
   - The headless runner does **not** port source-edge clamping, so edge timing
     can be off by up to one step (`headless.ts:40-48`). The comment explains why
     error control cannot replace the density floor (`headless.ts:129-136`).
+  - Delta: since `685179c` (`fix/headless-source-breakpoints`) it does. It
+    ports the worker's descriptors, epsilon and clamp below verbatim, in fixed-step
+    runs too, so both hosts place every clock and pulse edge within one 10 ns
+    guard step. Since `5657a9a` its ceiling also classifies a signal_gen through
+    `parseSignalGenParams`, so an unrecognised `waveform` gets the sine ceiling.
 - **Browser worker** (`devolt/packages/simcore/src/sim/sim.worker.ts`):
   - Its `sourceStepLimit` is identical (`sim.worker.ts:218-245`).
   - It also clamps each step to land H_MIN before the next source edge, then
@@ -4297,7 +4312,9 @@ This is the canonical post-solve order; the other chapters point here.
 6. Diagnostics: `linearSolveHealthy = !singular && !nonFinite &&
    relativeResidual<=1e-8` (`:5585-5588`) and
    `lastConverged = result.converged && linearSolveHealthy` (`:5589`).
-   `illConditioned` is recorded but is not part of the gate.
+   `illConditioned` is recorded but is not part of the gate. Since `f1dca71`
+   (`fix/mna-residual-floor`) the ratio's denominator is floored at
+   `RESIDUAL_SCALE_FLOOR = 1e-300` in both backends.
 7. If not converged, return (`:5595`). Every trusted state is kept, but the
    diagnostics now describe the failed trial.
 8. Build a fresh `netV` object (`:5598-5600`).
@@ -4745,7 +4762,7 @@ but not the rule). Plan lines are in
 | D25 | Snapshot, rollback, load carry-forward | Deep clone of about 20 maps (§10.8); carry rules of §10.2. | W2 host features, new work on the partitioned state (Plan:134-136); W4 lifts the Arduino replay restriction (Plan:152-158). | Mandated (W2) | 7,8,10 |
 | D26 | DC operating point and homotopy | Ladders in classic; seed rescue at load; bench_psu latches during scaled rungs (§2.15, §8.1.3-8.1.5). | Ported only in W6 (Plan:164-167). | Mandated (W6; Q-O40) | 2,8 |
 | D27 | Evaluation counters | `digitalEvaluationCount`/`ReuseCount` feed the devolt worker's per-batch stats (§2.10, §10.16). | Parity, or the host telemetry changes. | Owner decision (Q-O51) | 2,10 |
-| D28 | Clock and pulse edge placement | Endpoint sampling; the worker clamps steps to source edges, headless does not (§8.1.4, §8.1.6). | Decision 3 names 555/RC and register/tri-state/memory only (Plan:38-43). | Not addressed (Q-O34) | 8 |
+| D28 | Clock and pulse edge placement | Endpoint sampling; both hosts clamp steps to source edges (headless since `685179c`; before, it did not) (§8.1.4, §8.1.6). | Decision 3 names 555/RC and register/tri-state/memory only (Plan:38-43). | Not addressed (Q-O34) | 8 |
 | D29 | Floating ideal sources | Classic MNA solves a floating source. | The W0 kernel rejects it with error −3 (`core/README.md:133-139`). | Open (Q-O39) | 8 |
 | D30 | cd4511 segment timing | 250 ns catalog delay unused; electrical output lags one step, digitalState none (§3.8). | Datasheet delay, treating the part as a latch (Plan:41-42). | Inferred (Q-O9) | 3 |
 | D31 | Areas the plan leaves alone | LED/seg7 aggregation conventions, self-heating only for plain `led` with an exact uid, no seg7 failure surface, ideal switches with no bounce, inert `momentary` (§6, §7.6). | No change mandated; any change is an explicit owner design call, not something to "fix" silently during the port. | Not addressed (Q-O21 to Q-O23, Q-O30) | 6,7 |
@@ -4919,7 +4936,8 @@ kind on Ben Eater's computer.
   "0.9 ohm". Confirm.
 - **Q-O34** [8] Does decision 3 require exact edge placement for plain clock and
   pulse sources? Classic places them exactly only in the browser worker (edge
-  clamping); headless can be off by a step.
+  clamping); headless can be off by a step. Since `685179c` headless clamps
+  too, so both classic hosts place every edge within a 10 ns guard step.
 - **Q-O35** [8] Must the core reproduce `load()`'s 1 ps seed commit (the battery
   SoC nudge, the bench_psu regime latch and the clock level at t = 0 + 1e-12,
   which the handoff links to a double clock edge)? And the seed-rescue gmin and
