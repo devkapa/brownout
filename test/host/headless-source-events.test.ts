@@ -372,7 +372,7 @@ const NO_SOURCE_EVENTS: Record<string, { run: (withoutEvents?: boolean) => Finge
   },
 };
 
-/** The forced-sparse lane eliminates in another order, so its floats match the dense capture to roundoff only. */
+/** Both backends compare floats to the capture at 1e-6: the sparse lane eliminates in another order, and platforms differ in the last ulps. The exact identity claim is against the same run's own pre-source-event reference. */
 const FORCED_SPARSE = process.env.SIMCORE_LINEAR_BACKEND === "sparse";
 
 describe("HeadlessRunner with no source events", () => {
