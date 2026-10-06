@@ -202,6 +202,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _cyclesOwed = 0;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
+  // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver).
+  // Null on every circuit without a clocked part the MCU reads back, so the
+  // per-write cost below is one null check.
+  private _writeObserver: ((events: readonly PinEvent[]) => void) | null = null;
 
   constructor(hexText: string) {
     this.avr = requireAvr8();
@@ -280,6 +284,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   /** All GPIO edges captured during the most recent step(), in capture order. */
   public getStepPinEvents(): readonly PinEvent[] { return this._pinEvents; }
 
+  /** H11 readback seam (see MicrocontrollerCore.setStepWriteObserver). */
+  public setStepWriteObserver(observer: ((events: readonly PinEvent[]) => void) | null): void {
+    this._writeObserver = observer;
+  }
+
   reset(): void {
     // Re-construct from the existing flash image.
     const flashWords = this.cpu.progMem;
@@ -320,10 +329,13 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // 0-7, compares each changed digital pin's current drive level against the
   // last emitted level, and appends a PinEvent for each change.  Multiple
   // bit changes from a single byte write fire in bit-index order — fine for
-  // protocol decoders that sort by cycle anyway.
+  // protocol decoders that sort by cycle anyway.  The H11 readback observer,
+  // when installed, receives just the events this write appended, still
+  // inside the instruction that made them.
   private _capturePort(portLetter: PortName, port: InstanceType<Avr8Module["AVRIOPort"]>): void {
     const bitMap = PORT_BIT_TO_PIN[portLetter];
     const { PinState } = this.avr;
+    const from = this._pinEvents.length;
     for (let bit = 0; bit < 8; bit++) {
       const pin = bitMap[bit];
       if (pin === undefined) continue;
@@ -334,6 +346,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
         this._pinEvents.push({ pin, level, cycle: this.cpu.cycles });
         this._lastPinLevel.set(pin, level);
       }
+    }
+    if (this._writeObserver !== null && this._pinEvents.length > from) {
+      this._writeObserver(this._pinEvents.slice(from));
     }
   }
 

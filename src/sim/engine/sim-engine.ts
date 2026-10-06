@@ -66,6 +66,8 @@ import {
   type DeviceContext,
   type DeviceModel,
   type McuInputEdges,
+  type McuStepShadow,
+  type McuStepShadowSpec,
 } from "./device-registry.js";
 // Deterministic device-model registration (Wave A4). This call is the single
 // point where registered kinds enter the engine: devices/index registers
@@ -947,6 +949,25 @@ function mcuPinLevels(mcu: MicrocontrollerCore): Map<string, 0 | 1 | null> {
     levels.set(pin, drive === "out-high" ? 1 : drive === "out-low" ? 0 : null);
   }
   return levels;
+}
+
+/**
+ * One registered clocked part a single MCU both writes and reads (H11
+ * readback). Collected per load by _buildReadbackCandidates; each MCU step
+ * that has candidates gets a fresh shadow of each part
+ * (_stepMcuWithReadback).
+ */
+interface ReadbackCandidate {
+  readonly comp: SimComponent;
+  readonly spec: McuStepShadowSpec;
+  /**
+   * MCU pin -> the part input pins on its net, the same mapping
+   * DeviceContext.mcuInputEdges builds for the part (the engine's collapsed
+   * driver map keys the node, so the LAST MCU pin on a net wins there too).
+   */
+  readonly pinsByMcuPin: ReadonlyMap<string, readonly string[]>;
+  /** The part's output pins this MCU can read -> the MCU pin on the net. */
+  readonly outputs: ReadonlyArray<{ partPin: string; mcuPin: string }>;
 }
 
 // failureKey runs for every stressed device on every step; memoised per
@@ -2039,6 +2060,15 @@ export class SimEngine {
   // solves several times (the NE555 split). It rolls back with the
   // snapshot, as the icState the replay writes does.
   private _mcuEdgesPending = false;
+  // H11 readback: clocked parts whose inputs one MCU writes and whose
+  // outputs the SAME MCU reads (see _buildReadbackCandidates), keyed by the
+  // MCU's component id. Null until the first MCU advance after a load();
+  // rebuilt per load because nets only change there.
+  private _readbackCandidates: Map<string, ReadbackCandidate[]> | null = null;
+  // H11 diagnostics: shadows installed since the last load() — zero for
+  // every circuit without a part the MCU both writes and reads, which is
+  // what the identity tests pin.
+  private _readbackShadowInstalls = 0;
   // Pass-scoped lazy channel-current readout for _updateFailureStates,
   // reached via ctx.elementChannelCurrents: the old pass computed
   // getElementChannelI() at most once and shared it across every
@@ -4257,9 +4287,198 @@ export class SimEngine {
       const comp = this._componentById.get(id);
       if (!comp || !this._mcuPowered(comp)) continue;
       if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
-      mcu.step(h);
+      // A registered clocked part this core both writes and reads gets a
+      // shadow for the step (H11 readback): the core's own writes run the
+      // part's replay walker inside the step and the part's output levels
+      // are pushed into the core's input path, so a read between two writes
+      // (shiftIn) sees the level the writes produced.
+      const readback = this._readbackCandidatesFor(id);
+      if (readback) this._stepMcuWithReadback(mcu, id, readback, h);
+      else mcu.step(h);
     }
     if (recordStarts && this._mcuStepStartLevels.size > 0) this._mcuEdgesPending = true;
+  }
+
+  /** This MCU's readback candidates, or null when it has none (H11). */
+  private _readbackCandidatesFor(mcuId: string): readonly ReadbackCandidate[] | null {
+    this._readbackCandidates ??= this._buildReadbackCandidates();
+    const candidates = this._readbackCandidates.get(mcuId);
+    return candidates && candidates.length > 0 ? candidates : null;
+  }
+
+  /**
+   * Scan the loaded topology once per load for registered clocked parts an
+   * MCU can read back mid-step (H11). A part qualifies for an MCU only when
+   * the SAME single MCU shares a net with one of its shadow inputs (it
+   * writes the part) and with one of its shadow outputs (it reads the
+   * part): two MCUs on any of those nets means no shadow, matching the
+   * null rule the committed replay (mcuInputEdges) applies to two drivers.
+   * Every other circuit — including an MCU with no clocked part — collects
+   * nothing, and its stepping stays byte-identical.
+   */
+  private _buildReadbackCandidates(): Map<string, ReadbackCandidate[]> {
+    const byMcu = new Map<string, ReadbackCandidate[]>();
+    if (!this.circuit || this._mcuComponents.length === 0) return byMcu;
+    // Every MCU I/O pin on each net, uncollapsed: the driver map below in
+    // this file collapses two MCUs on one net to the last, which is fine
+    // for replay but cannot enforce the readback's one-MCU rule.
+    const mcuPinsByNode = new Map<number, Array<{ compId: string; pin: string }>>();
+    for (const mcuComp of this._mcuComponents) {
+      if (!isMcuBoardKind(mcuComp.kind)) continue;
+      const mcu = this.state.arduinos.get(mcuComp.id);
+      if (!mcu) continue;
+      for (const pinId of mcu.ioPins) {
+        const node = this._pinNode(mcuComp.id, pinId);
+        if (node < 0) continue;
+        const attached = mcuPinsByNode.get(node);
+        if (attached) attached.push({ compId: mcuComp.id, pin: pinId });
+        else mcuPinsByNode.set(node, [{ compId: mcuComp.id, pin: pinId }]);
+      }
+    }
+    for (const comp of this.circuit.components) {
+      const spec = getDeviceModel(comp.kind)?.mcuStepShadow;
+      if (!spec) continue;
+      let owner: string | null = null;
+      const pinsByMcuPin = new Map<string, string[]>();
+      let conflicted = false;
+      for (const pinId of spec.inputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1) { conflicted = true; break; }
+        // The engine's driver map keeps the LAST MCU pin on a net; match it
+        // so the shadow's pin mapping is the committed replay's.
+        const driver = attached[attached.length - 1]!;
+        if (owner === null) owner = driver.compId;
+        else if (owner !== driver.compId) { conflicted = true; break; }
+        const pins = pinsByMcuPin.get(driver.pin);
+        if (pins) pins.push(pinId);
+        else pinsByMcuPin.set(driver.pin, [pinId]);
+      }
+      if (conflicted || owner === null || pinsByMcuPin.size === 0) continue;
+      const outputs: Array<{ partPin: string; mcuPin: string }> = [];
+      for (const pinId of spec.outputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1 || attached[0]!.compId !== owner) { conflicted = true; break; }
+        outputs.push({ partPin: pinId, mcuPin: attached[0]!.pin });
+      }
+      if (conflicted || outputs.length === 0) continue;
+      const candidates = byMcu.get(owner);
+      if (candidates) candidates.push({ comp, spec, pinsByMcuPin, outputs });
+      else byMcu.set(owner, [{ comp, spec, pinsByMcuPin, outputs }]);
+    }
+    return byMcu;
+  }
+
+  /**
+   * Run one MCU step with its readback shadows installed (H11). Each write
+   * the core captures drives every shadow's replay walker — grouped into
+   * writes exactly as the committed pass will group them, by cycle — and
+   * each shadow's output levels are pushed into the core's input path as
+   * they change. At install the current output levels are pushed once too:
+   * the solve the core just sampled stamps the part's outputs one replay
+   * behind, and a read before any write this step belongs to the register
+   * as it stands now. The committed digital pass remains the state of
+   * record; the shadows are discarded with the step.
+   */
+  private _stepMcuWithReadback(
+    mcu: MicrocontrollerCore,
+    mcuId: string,
+    candidates: readonly ReadbackCandidate[],
+    h: number,
+  ): void {
+    // A core that cannot feed its writes (or nothing to shadow): the step
+    // runs exactly as it would without the readback machinery — no shadow
+    // is built for it and nothing is installed.
+    if (candidates.length === 0 || mcu.setStepWriteObserver === undefined) {
+      mcu.step(h);
+      return;
+    }
+    const installed: Array<{
+      candidate: ReadbackCandidate;
+      shadow: McuStepShadow;
+      outputs: Array<{ partPin: string; mcuPin: string; last: 0 | 1 }>;
+    }> = [];
+    const x = this._lastX ?? new Float64Array(this.mna?.size ?? 0);
+    for (const candidate of candidates) {
+      const power = this._icPowerInfo(candidate.comp, x);
+      // An unpowered part is skipped by its committed pass; its shadow
+      // must not move either.
+      if (!power.powered) continue;
+      const st = this.state.icState.get(candidate.comp.id)
+        ?? defaultIcState(candidate.comp.kind);
+      // The start levels the committed replay walks from (McuInputEdges
+      // start): what the MCU drove at step start for pins that share its
+      // nets, null where it left the net to the circuit. The recorded map
+      // is exactly this moment's levels; fall back to reading them direct
+      // if no model asked for edges yet.
+      const recorded = this._mcuStepStartLevels.get(mcuId);
+      const startLevels = recorded ?? mcuPinLevels(mcu);
+      const start: Record<string, 0 | 1 | null> = {};
+      for (const [mcuPin, pins] of candidate.pinsByMcuPin) {
+        const level = startLevels.get(mcuPin) ?? null;
+        for (const pin of pins) start[pin] = level;
+      }
+      const shadow = candidate.spec.build({
+        st,
+        start,
+        solved: (pin) => (this._logicHigh(candidate.comp, pin, x, power) ? 1 : 0),
+        pinNode: (pin) => this._pinNode(candidate.comp.id, pin),
+      });
+      const levels = shadow.outputLevels();
+      const outputs = candidate.outputs.map(({ partPin, mcuPin }) => {
+        const last = levels[partPin] ?? 0;
+        mcu.setInputBit(mcuPin, last);
+        return { partPin, mcuPin, last };
+      });
+      installed.push({ candidate, shadow, outputs });
+      this._readbackShadowInstalls++;
+    }
+    // Buffer the core's write events and cut them into writes on cycle
+    // changes, the same cut _mcuInputEdges makes; a group is complete once
+    // a later event carries a new cycle.
+    let pending: Array<{ pin: string; level: 0 | 1 | null }> = [];
+    let pendingCycle = Number.NaN;
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      for (const { candidate, shadow, outputs } of installed) {
+        const events: Array<{ pin: string; level: 0 | 1 | null }> = [];
+        for (const event of pending) {
+          const pins = candidate.pinsByMcuPin.get(event.pin);
+          if (pins) for (const pin of pins) events.push({ pin, level: event.level });
+        }
+        if (events.length === 0) continue;
+        shadow.applyWrite(events);
+        const out = shadow.outputLevels();
+        for (const target of outputs) {
+          const level = out[target.partPin];
+          if (level !== undefined && level !== target.last) {
+            mcu.setInputBit(target.mcuPin, level);
+            target.last = level;
+          }
+        }
+      }
+      pending = [];
+    };
+    mcu.setStepWriteObserver((events) => {
+      for (const event of events) {
+        if (pending.length > 0 && event.cycle !== pendingCycle) flush();
+        pending.push(event);
+        pendingCycle = event.cycle;
+      }
+    });
+    // A throw from inside the step (a third-party model's shadow could)
+    // must not leave this observer installed with this step's closures.
+    try {
+      mcu.step(h);
+      flush();
+    } finally {
+      mcu.setStepWriteObserver(null);
+    }
   }
 
   /**
@@ -4655,6 +4874,15 @@ export class SimEngine {
     return this.state.icState.get(compId);
   }
 
+  /**
+   * H11 diagnostics: MCU-step readback shadows installed since the last
+   * load(). Zero for every circuit without a registered clocked part the MCU
+   * both writes and reads — the guard the identity tests pin.
+   */
+  get readbackShadowInstalls(): number {
+    return this._readbackShadowInstalls;
+  }
+
   /** Per-board runtime state for onboard LED/button art. Only boards with an MCU are included. */
   getArduinoState(): Record<string, import("../messages.js").ArduinoState> {
     if (!this.circuit) return {};
@@ -5039,6 +5267,10 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    // H11 readback: nets only change on load(), so the per-load candidate
+    // scan (and its diagnostics counter) restart here.
+    this._readbackCandidates = null;
+    this._readbackShadowInstalls = 0;
     // Wave A4: bucket membership is (engine const set) OR (registry hook
     // present). Migrated kinds remain listed in the sets, so the union is an
     // exact no-op for them; only a third-party registered kind can extend a

@@ -84,6 +84,19 @@ export interface MicrocontrollerCore {
   getStepPinEvents(): readonly PinEvent[];
   /** Re-load the program image and clear runtime state. */
   reset(): void;
+  /**
+   * H11 readback: feed every GPIO write the core captures during the next
+   * step() to this observer, synchronously as each write happens, with only
+   * the events that write appended — the same stream, in the same order,
+   * getStepPinEvents() returns at the end of the step. The engine uses it to
+   * run a clocked part's digital shadow inside the step and push the part's
+   * output levels back through setInputBit, so a read between two writes
+   * (a shiftIn()) sees the level the writes produced. One observer pairs
+   * with exactly one step(); the engine passes null right after. Optional: a
+   * core without it cannot be read back to mid-step, and the engine builds
+   * no shadow against it.
+   */
+  setStepWriteObserver?(observer: ((events: readonly PinEvent[]) => void) | null): void;
 }
 
 /**

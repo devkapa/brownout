@@ -63,6 +63,7 @@ import type {
   DeviceContext,
   DeviceModel,
   McuInputEdges,
+  McuStepShadow,
 } from "../device-registry.js";
 import { stampAcAdmittance, type AcStampSurface } from "../ac-system.js";
 import {
@@ -237,14 +238,27 @@ function ownOutputNets(
   inputs: readonly string[],
   outputs: readonly string[],
 ): Map<string, string> {
+  return feedbackNetsFor((pin) => ctx.pinNode(comp.id, pin), inputs, outputs);
+}
+
+/**
+ * The own-output net map behind ownOutputNets, over a bare pin-node resolver
+ * so the MCU-step shadow (which has no DeviceContext) finds the same nets
+ * the committed pass will.
+ */
+function feedbackNetsFor(
+  pinNode: (pin: string) => number,
+  inputs: readonly string[],
+  outputs: readonly string[],
+): Map<string, string> {
   const outputByNode = new Map<number, string>();
   for (const output of outputs) {
-    const node = ctx.pinNode(comp.id, output);
+    const node = pinNode(output);
     if (node >= 0) outputByNode.set(node, output);
   }
   const wired = new Map<string, string>();
   for (const input of inputs) {
-    const node = ctx.pinNode(comp.id, input);
+    const node = pinNode(input);
     const output = node >= 0 ? outputByNode.get(node) : undefined;
     if (output !== undefined) wired.set(input, output);
   }
@@ -875,12 +889,45 @@ const HC165_EDGE_PINS = [
 const HC165_OUTPUT_PINS = ["q7", "/q7"] as const;
 
 /**
+ * The 74HC165's write semantics, one closure for both consumers: the
+ * committed replay (replay165McuEdges) and the MCU-step shadow
+ * (build165StepShadow), so the two cannot drift apart. /PL low loads D0-D7
+ * at once and holds them; a CP rise with CP_INH low shifts DS in, both read
+ * from before the write. `outputs` gives the two output pins' levels for the
+ * register as it currently stands; `state` is the committed icState the
+ * replay ends on.
+ */
+function hc165Clocking(st: Record<string, number>) {
+  let shift = st.shift ?? 0;
+  return {
+    onWrite(
+      before: Readonly<Record<string, 0 | 1>>,
+      after: Readonly<Record<string, 0 | 1>>,
+    ): void {
+      if (!after["/pl"]) {
+        shift = 0;
+        for (let i = 0; i < 8; i++) if (after[`d${i}`]) shift |= 1 << i;
+      } else if (after.cp && !before.cp && !before.cp_inh && before["/pl"]) {
+        shift = ((shift << 1) | before.ds) & 0xff;
+      }
+    },
+    outputs(): Record<string, 0 | 1> {
+      const q7 = ((shift >> 7) & 1) as 0 | 1;
+      return { q7, "/q7": (q7 ^ 1) as 0 | 1 };
+    },
+    state(levels: Record<string, 0 | 1>): Record<string, number> {
+      return { ...st, shift, lastClk: levels.cp, lastLoad: levels["/pl"] };
+    },
+  };
+}
+
+/**
  * Clock a 74HC165 through the edges an MCU drove onto it during its last
  * step (replayMcuWrites). /PL low loads D0-D7 at once and holds them; a CP
- * rise with CP_INH low shifts DS in, both read from before its write. Only
- * the register is replayed: an MCU that reads Q7 inside the same step (a
- * shiftIn()) still reads the level of the last solve. Null when no MCU edge
- * reached the part.
+ * rise with CP_INH low shifts DS in, both read from before its write. Null
+ * when no MCU edge reached the part. An MCU that reads Q7 inside the same
+ * step (a shiftIn()) is fed by the part's shadow instead
+ * (hc165Model.mcuStepShadow).
  */
 function replay165McuEdges(
   ctx: DeviceContext,
@@ -891,38 +938,73 @@ function replay165McuEdges(
 ): McuReplay | null {
   const edges = ctx.mcuInputEdges?.(comp, HC165_EDGE_PINS);
   if (!edges) return null;
-  let shift = st.shift ?? 0;
+  const clocking = hc165Clocking(st);
   const feedbackPins = ownOutputNets(ctx, comp, HC165_EDGE_PINS, HC165_OUTPUT_PINS);
   const levels = replayMcuWrites(
     edges,
     HC165_EDGE_PINS,
     { cp: st.lastClk ? 1 : 0 },
     (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
-    (before, after) => {
-      if (!after["/pl"]) {
-        shift = 0;
-        for (let i = 0; i < 8; i++) if (after[`d${i}`]) shift |= 1 << i;
-      } else if (after.cp && !before.cp && !before.cp_inh && before["/pl"]) {
-        shift = ((shift << 1) | before.ds) & 0xff;
-      }
-    },
+    clocking.onWrite,
     feedbackPins.size === 0 ? undefined : {
       pins: feedbackPins,
-      outputs: () => {
-        const q7 = ((shift >> 7) & 1) as 0 | 1;
-        return { q7, "/q7": (q7 ^ 1) as 0 | 1 };
-      },
+      outputs: () => clocking.outputs(),
     },
   );
+  return { state: clocking.state(levels), levels, feedbackPins };
+}
+
+/**
+ * A 74HC165 shadow run inside the MCU step (H11 readback). The committed
+ * pass replays a step's writes only in the next digital pass, so a program
+ * that reads Q7 between two of its own writes (a shiftIn()) read the last
+ * solve's level. The shadow runs the SAME replayMcuWrites walker with the
+ * SAME hc165Clocking semantics, one write at a time as the core captures
+ * it, so it lands where the committed replay will: the first walk seeds CP
+ * from the committed clock level and fills the other inputs exactly as the
+ * committed walk does, and every later walk resumes from the full level map
+ * the previous one ended on (the settle pass is idempotent once settled, so
+ * walking one write at a time equals walking them all at once).
+ */
+function build165StepShadow(args: {
+  st: Record<string, number>;
+  start: Record<string, 0 | 1 | null>;
+  solved: (pin: string) => 0 | 1;
+  pinNode: (pin: string) => number;
+}): McuStepShadow {
+  const clocking = hc165Clocking(args.st);
+  const feedbackPins = feedbackNetsFor(args.pinNode, HC165_EDGE_PINS, HC165_OUTPUT_PINS);
+  const feedback = feedbackPins.size === 0 ? undefined : {
+    pins: feedbackPins,
+    outputs: () => clocking.outputs(),
+  };
+  let seeded = false;
+  let current: Record<string, 0 | 1> = {};
   return {
-    state: { ...st, shift, lastClk: levels.cp, lastLoad: levels["/pl"] },
-    levels,
-    feedbackPins,
+    applyWrite(events) {
+      current = replayMcuWrites(
+        { start: seeded ? current : args.start, groups: [events] },
+        HC165_EDGE_PINS,
+        seeded ? {} : { cp: args.st.lastClk ? 1 : 0 },
+        args.solved,
+        clocking.onWrite,
+        feedback,
+      );
+      seeded = true;
+    },
+    outputLevels: () => clocking.outputs(),
   };
 }
 
 export const hc165Model: DeviceModel = {
   kinds: ["74hc165"],
+  // H11 readback: shadow the register inside an MCU step that clocks it, so
+  // the program's own reads (shiftIn) see the level each write produced.
+  mcuStepShadow: {
+    inputs: HC165_EDGE_PINS,
+    outputs: HC165_OUTPUT_PINS,
+    build: build165StepShadow,
+  },
   stamp: (ctx, comp, xGuess, _h) => {
     const power = ctx.icPowerInfo(comp, xGuess);
     if (!power.powered) return;
