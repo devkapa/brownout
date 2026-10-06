@@ -399,8 +399,13 @@ describe("output_sag on a capacitively loaded edge", () => {
       // The exact pin reaches 0.45 V, so the HIGH edge after it is out of band
       // for 10.4 ns. Backward Euler only reaches 0.66 V, from which the edge
       // would take 9.2 ns; the window must not be judged from that lagging level.
-      const runner = new HeadlessRunner();
-      runner.load({
+      // Stepped directly rather than through the HeadlessRunner: since H2 the
+      // runner lands steps on the pulse's corners, and this test's margin
+      // (10.4 ns against the 10 ns window) is narrower than the sub-nanosecond
+      // shift that landing moves the pin by. Nothing it measures involves the
+      // host's step policy.
+      const engine = new SimEngine();
+      engine.load({
         components: [
           source("vcc", 5),
           pulse("vin", { v1: 0, v2: 5, td: 1e-6, tr: 1e-9, tf: 1e-9, pw: 60e-9, per: 0 }),
@@ -412,8 +417,11 @@ describe("output_sag on a capacitively loaded edge", () => {
           w("vin", "pos", "u1", "1a"), w("u1", "1y", "cl", "a"), w("cl", "b", "vcc", "neg"),
         ],
       } as SimCircuit);
-      const { tally, observe } = edgeTally(runner.engine);
-      runner.run({ durationS: 1.3e-6, adaptive: false, fixedStepS: 1e-8, onSample: observe });
+      const { tally, observe } = edgeTally(engine);
+      for (let i = 0; i < 130; i++) {
+        engine.step(1e-8);
+        observe();
+      }
       expect(tally.LOW).toEqual({ edges: 1, latched: 1 });
       expect(tally.HIGH).toEqual({ edges: 1, latched: 1 });
     });
@@ -707,5 +715,14 @@ describe("the pole-provability kind lists", () => {
       expect(COMBINATIONAL_IC_KINDS.has(kind)).toBe(true);
       expect(RC_OUTPUT_IC_KINDS.has(kind)).toBe(false);
     }
+  });
+
+  it("pins the sequential half of the list too", () => {
+    // Dropping a sequential kind must also be a decision: it would quietly
+    // return that kind to 0.6.1's two-step count and its false latches.
+    expect([...RC_OUTPUT_IC_KINDS].filter((kind) => !COMBINATIONAL_IC_KINDS.has(kind)).sort()).toEqual([
+      "28c16", "28c256", "74hc165", "74hc595", "74hc74",
+      "74ls161", "74ls173", "74ls189", "cd4017", "cd4060", "cd4511",
+    ]);
   });
 });
