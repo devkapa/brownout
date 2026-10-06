@@ -134,8 +134,13 @@ function stepRecord(engine: SimEngine, circuit: SimCircuit): string {
   const ds = sorted(engine.digitalState as unknown as Record<string, unknown>).map(([k, v]) => [k, f64(v as number)]);
   return JSON.stringify({ ds, nv, ic });
 }
-function runDigest(circuit: SimCircuit, h: number, durationS: number): string {
+function runDigest(circuit: SimCircuit, h: number, durationS: number, withoutReadback = false): string {
   const engine = new SimEngine();
+  if (withoutReadback) {
+    // The same run with the readback machinery switched off: every MCU
+    // steps plainly, the pre-H11 path, on this build of the engine.
+    (engine as unknown as { _readbackCandidatesFor: () => never[] })._readbackCandidatesFor = () => [];
+  }
   engine.load(circuit);
   const digest = createHash("sha1");
   const steps = Math.round(durationS / h);
@@ -146,8 +151,6 @@ function runDigest(circuit: SimCircuit, h: number, durationS: number): string {
   return digest.digest("hex");
 }
 
-const MCU_595_DIGEST = "535282133d26a0dbc7f5eb8007a36e88c17c324f";
-const MCU_BLINK_DIGEST = "0373b0ba84688f5566f0537005a6cc90bd452ab9";
 const NON_MCU_165_DIGEST = "c42a66548f8d2b0a4d184f7919b2ed29824ea4f7";
 
 describe("an Arduino reading a 74HC165 mid-step", () => {
@@ -291,7 +294,11 @@ describe("circuits the readback must not touch", () => {
     const engine = runFixed(circuit, 100e-6, 5e-3);
     expect(outputs(engine, "u1")).toBe(0xb2);
     expect(shadowInstalls(engine)).toBe(0);
-    expect(runDigest(circuit, 100e-6, 5e-3)).toBe(MCU_595_DIGEST);
+    // Identity is asserted against the same run with the readback off, not
+    // against a captured constant: a constant moves with any sibling that
+    // touches the 595 (H12's QH' cascade output did, in the 0.6.4
+    // composition), while the machinery's inertness is what this pins.
+    expect(runDigest(circuit, 100e-6, 5e-3)).toBe(runDigest(circuit, 100e-6, 5e-3, true));
   });
 
   it("runs an MCU in isolation byte-identically", () => {
@@ -313,7 +320,7 @@ describe("circuits the readback must not touch", () => {
     };
     const engine = runFixed(circuit, 100e-6, 0.2);
     expect(shadowInstalls(engine)).toBe(0);
-    expect(runDigest(circuit, 100e-6, 0.2)).toBe(MCU_BLINK_DIGEST);
+    expect(runDigest(circuit, 100e-6, 0.2)).toBe(runDigest(circuit, 100e-6, 0.2, true));
   });
 
   it("reads a 74HC165 with no MCU at step end byte-identically", () => {
