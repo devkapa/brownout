@@ -128,7 +128,18 @@ export const LED_DAMAGE_THRESHOLD = 24;
 // one-shot's trailing edge). That single-step switching transient is normal and
 // must not raise a warning; a genuine sustained sag persists past it. Two steps
 // filters the artifact while surfacing real sags within an imperceptible delay.
+// On a provable RC pole the first step must also pass OUTPUT_SAG_WINDOW below.
 const OUTPUT_SAG_DEBOUNCE_STEPS = 2;
+
+// How long a sag must last in one commanded direction before it latches. The
+// second observation of an edge is the first solve under the new stamp, where
+// backward Euler lags a fast RC edge: a 74LS04 into 30 pF re-enters its LOW
+// band 8.6 ns after the edge, yet a 10 ns step still leaves the pin at 1.6 V
+// against vil 0.8. Where the pin's net is provably one RC pole (_outputSagPole),
+// a sag counts only if an upper bound of its exact length reaches the window.
+// Anywhere else the step count stands: a series resistor, a DC load or a second
+// pole can make an edge outlast what one solve implies.
+const OUTPUT_SAG_WINDOW = 1e-8;
 
 /** A missing, invalid, or negative series loss keeps the historical ideal model. */
 export function seriesLossResistance(value: unknown): number {
@@ -1052,11 +1063,32 @@ const MICROBIT_EDGE_PIN_TO_SIM: Record<string, string> = {
   p8: "pin8", p12: "pin12", p13: "pin13", p14: "pin14", p15: "pin15", p16: "pin16",
 };
 
-// Sequential IC kinds that carry internal state across load().
-const COMBINATIONAL_IC_KINDS = new Set<string>([
+// Combinational IC kinds (their icState carries delay keys, and the 74HC14's
+// Schmitt hysteresis levels).
+export const COMBINATIONAL_IC_KINDS = new Set<string>([
   "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
   "74hc14", "74hc138", "74ls47",
 ]);
+
+// Combinational kinds deliberately judged NOT provable as a single RC pole
+// (_outputSagPole). Empty today: every entry must carry the reason its output
+// stage or input stamping breaks the pole proof.
+export const RC_OUTPUT_EXCLUDED_COMBINATIONAL = new Set<string>([]);
+
+// Digital ICs whose stamps drive an output only as R_out to a supply pin
+// (_stampDigitalOutput) and write an input only while it is open, so a
+// connected input of theirs carries no current (_outputSagPole). Written out
+// by hand, not spread from COMBINATIONAL_IC_KINDS: membership is a decision
+// about a kind's stamps, and output-sag-capacitive-edge.test fails until
+// every combinational kind appears here or in
+// RC_OUTPUT_EXCLUDED_COMBINATIONAL.
+export const RC_OUTPUT_IC_KINDS = new Set<string>([
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
+  "74hc14", "74hc138", "74ls47",
+  "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
+  "cd4017", "cd4511", "cd4060", "28c16", "28c256",
+]);
+const HIGH_Z_INPUT_FUNCTIONS = new Set<string>(["input", "clock", "reset", "enable", "load"]);
 
 const IC_STATE_KINDS = new Set<string>([
   ...COMBINATIONAL_IC_KINDS,
@@ -1695,6 +1727,8 @@ export class SimEngine {
   private _dynamicStampModels: (DeviceModel | undefined)[] = [];
   private _elementCurrentModels: (DeviceModel | undefined)[] = [];
   private _staticStampSignature = "";
+  // Nodes ideal voltage sources pin to ground (_fixedNodes), rebuilt per load.
+  private _fixedNodeSet: Set<number> | null = null;
   private _combinationalEvalCache = new Map<string, {
     signature: string;
     outputs: Record<string, boolean>;
@@ -4894,6 +4928,7 @@ export class SimEngine {
     this._thermalProfileCache.clear();
     this._batteryModelCache.clear();
     this._combinationalEvalCache.clear();
+    this._fixedNodeSet = null;
     this._nextDigitalDueTimeCache = null;
     this._digitalDueCacheDirty = true;
     this._stepBreakpoints = [];
@@ -6592,6 +6627,30 @@ export class SimEngine {
               const direction = target.high ? 1 : -1;
               const prior = this.state.failureStress.get(keySag) ?? 0;
               const seen = (Math.sign(prior) === direction ? Math.abs(prior) : 0) + 1;
+              // On a provable RC pole a sag starts counting only if it can last
+              // OUTPUT_SAG_WINDOW. This is its first observation, and it began
+              // within this solve: at its end where a commit after the solve
+              // flipped the level, at its start where an output enable, a live
+              // input or an edit between steps acted within it. `start` bounds
+              // the exact capacitor's distance from the asymptote at either
+              // instant, so the bound never shortens a real sag; one it rules
+              // out is not a sag yet. Trapezoidal mode keeps the count: its
+              // capacitor update is not a backward-Euler step, and its history
+              // can carry classic's capacitor past the exact one.
+              if (seen === 1 && this._integrationMethod === "be") {
+                const pole = this._outputSagPole(comp, target.pinId, target.high, power, x, h);
+                const now = pole ? actual - pole.vInf : 0;
+                const band = pole ? limit - pole.vInf : 0;
+                if (
+                  pole &&
+                  Math.sign(band) === Math.sign(now) &&
+                  pole.tau * Math.log((pole.divider * pole.start) / Math.abs(band)) < OUTPUT_SAG_WINDOW
+                ) {
+                  this.state.failures.delete(keySag);
+                  this.state.failureStress.delete(keySag);
+                  continue;
+                }
+              }
               if (seen >= OUTPUT_SAG_DEBOUNCE_STEPS) {
                 this.state.failureStress.set(keySag, direction * OUTPUT_SAG_DEBOUNCE_STEPS);
                 this.state.failures.set(keySag, {
@@ -6640,6 +6699,114 @@ export class SimEngine {
     this._failureSpecsComp = null;
     this._failureSpecsValue = undefined;
     this._failureChannelCurrents = null;
+  }
+
+  /**
+   * The single RC pole a driven output's net relaxes on, when that is provable,
+   * else null. It is provable when the driver is in RC_OUTPUT_IC_KINDS, both
+   * its supply pins sit on fixed nodes, and every other pin on the net is a
+   * capacitor whose far end sits on a fixed node or a high-impedance input of
+   * such an IC. Each capacitor is its ESR and C in series with its leakage
+   * across both: one capacitor with any ESR, or several with none, is one pole.
+   * A resistor, source, second driver or any other part on the net, a capacitor
+   * behind a series resistor, or two capacitors with ESR adds a jump, an
+   * asymptote or a pole this cannot see, so the answer is null and the step
+   * count stands. Params are read afresh, since direct callers may edit them in
+   * place between steps. Voltages are from the IC's ground:
+   * - vInf: where the pin settles, from R_out's rail and the leakages' far ends;
+   * - tau: (ESR + the Thevenin resistance of R_out and the leakages) * C;
+   * - divider: the pin's share of the capacitor's distance from vInf;
+   * - start: the farthest from vInf the exact capacitor can be when a sag first
+   *   seen in this backward-Euler solve begins, at either end of the solve. The
+   *   capacitors' own states, stepped back by their branch currents, give where
+   *   classic held it at the solve's start, an edit's jump included. A solve
+   *   still under the old level only moved it toward that level's asymptote,
+   *   and the exact capacitor sits nearer that asymptote than classic's; both
+   *   lie within the rails and far ends, which therefore bound the rest.
+   */
+  private _outputSagPole(
+    comp: SimComponent,
+    pinId: string,
+    high: boolean,
+    power: IcPowerInfo,
+    x: Float64Array,
+    h: number,
+  ): { tau: number; vInf: number; divider: number; start: number } | null {
+    if (!RC_OUTPUT_IC_KINDS.has(comp.kind)) return null;
+    const fixed = this._fixedNodes();
+    const fixedPin = (compId: string, pin: string | null): boolean =>
+      pin !== null && !this._isOpenPin(compId, pin) && fixed.has(this._pinNode(compId, pin));
+    if (!fixedPin(comp.id, power.vccPin) || !fixedPin(comp.id, power.gndPin)) return null;
+    const netId = this.getNetIdForPin(comp.id, pinId);
+    const net = netId === undefined ? undefined : this.nets.find((candidate) => candidate.id === netId);
+    if (!net || this._pinNode(comp.id, pinId) < 0) return null;
+    const rOut = power.outputResistance;
+    let conductance = 1 / rOut;
+    let current = (high ? power.vSupply : 0) / rOut;
+    let capacitance = 0;
+    let esr = 0;
+    let capacitors = 0;
+    // Charge-weighted capacitor position at the solve's start.
+    let qStart = 0;
+    const ends = [0, power.vSupply];
+    for (const [otherId, otherPin] of net.pins) {
+      if (otherId === comp.id && otherPin === pinId) continue;
+      const other = this._componentById.get(otherId);
+      if (other?.kind === "capacitor" && other.pins.length === 2) {
+        const near = otherPin === other.pins[0]!.id ? 1 : -1;
+        const far = near === 1 ? other.pins[1]!.id : other.pins[0]!.id;
+        if (!fixedPin(otherId, far)) return null;
+        const farV = this._vAt(x, this._pinNode(otherId, far)) - power.gnd;
+        const c = Math.max(1e-15, Number(other.params.capacitance ?? 1e-6));
+        const leakage = parallelLossResistance(modelParam(other, "leakageResistance", 0));
+        if (Number.isFinite(leakage)) {
+          conductance += 1 / leakage;
+          current += farV / leakage;
+        }
+        // The internal voltage runs pin a to pin b; this solve advanced it by
+        // h/C times the series current, its terminal current less the leakage's.
+        const terminal = near * (this._vAt(x, this._pinNode(comp.id, pinId)) - power.gnd - farV);
+        const series = (this.state.capCurrents.get(otherId) ?? 0) - parallelLossCurrent(terminal, leakage);
+        const internal = this.state.caps.get(otherId) ?? 0;
+        qStart += c * (farV + near * (internal - (h / c) * series));
+        capacitance += c;
+        esr = Math.max(esr, seriesLossResistance(modelParam(other, "esr", 0)));
+        capacitors++;
+        ends.push(farV);
+        continue;
+      }
+      const fn = other ? partFor(other)?.pin_layout.find((p) => p.id === otherPin)?.function : undefined;
+      if (!other || !RC_OUTPUT_IC_KINDS.has(other.kind) || !fn || !HIGH_Z_INPUT_FUNCTIONS.has(fn)) return null;
+    }
+    if (capacitors === 0 || (capacitors > 1 && esr > 0)) return null;
+    const rTh = 1 / conductance;
+    const vInf = current / conductance;
+    let start = Math.abs(qStart / capacitance - vInf);
+    for (const end of ends) start = Math.max(start, Math.abs(end - vInf));
+    return { tau: (esr + rTh) * capacitance, vInf, divider: rTh / (rTh + esr), start };
+  }
+
+  /** Ground and every node an ideal voltage source chain pins to it. */
+  private _fixedNodes(): Set<number> {
+    if (this._fixedNodeSet) return this._fixedNodeSet;
+    const fixed = new Set<number>([-1]);
+    const sources = (this.circuit?.components ?? []).filter((c) =>
+      c.kind === "voltage_source" && c.pins.length === 2 && this.vsrcIdx.has(c.id) &&
+      !this._isOpenPin(c.id, c.pins[0]!.id) && !this._isOpenPin(c.id, c.pins[1]!.id),
+    );
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const source of sources) {
+        const a = this._pinNode(source.id, source.pins[0]!.id);
+        const b = this._pinNode(source.id, source.pins[1]!.id);
+        if (fixed.has(a) !== fixed.has(b)) {
+          fixed.add(fixed.has(a) ? b : a);
+          grew = true;
+        }
+      }
+    }
+    this._fixedNodeSet = fixed;
+    return fixed;
   }
 
   private _clearOutputSagWarnings(comp: SimComponent): void {
