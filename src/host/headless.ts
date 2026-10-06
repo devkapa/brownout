@@ -18,6 +18,8 @@
  *
  *   - attemptStep()               <- sim.worker.ts attemptStep()
  *   - sourceStepLimit()           <- sim.worker.ts sourceStepLimit()
+ *   - sourceEventDescriptors(), nextSourceEventTime() and the source-event
+ *     clamp in run()              <- sim.worker.ts, same names and clamp
  *   - circuitSupportsStepReplay() <- sim.worker.ts, same name
  *   - the accept/reject arms      <- sim.worker.ts's batch `while` loop
  *   - H_MIN/H_MAX/H_INITIAL/MCU_H_MAX, and the 0.25 reject factor and the
@@ -37,17 +39,6 @@
  *     conservative — it costs ~3 solves per step and can only tighten h — and
  *     it makes the worker's postDiscontinuityChecks bookkeeping moot, since
  *     that exists solely to force checks the gap would otherwise skip.
- *   - Source-EDGE clamping (worker: sourceEventDescriptors /
- *     nextSourceEventTime), which lands a step boundary immediately before a
- *     waveform discontinuity and crosses it in a 10 ns guard step. Without it
- *     a backward-Euler step that straddles an edge applies the new level
- *     across the whole interval, so edge TIMING carries an error of up to one
- *     step. The source density floor below bounds that (>= 10 steps per
- *     period), which is why the omission costs fidelity rather than
- *     correctness; callers needing exact edge placement want `.tran` via
- *     brownout/spice, which owns SPICE's fixed-grid semantics.
- *     sourceStepLimit() IS ported — see its comment for why it cannot be
- *     treated as an optimization the error estimate subsumes.
  *   - Probe acquisition (uniform sample grid + interpolation). onSample fires
  *     on ACCEPTED STEP BOUNDARIES, which under adaptive control are not
  *     uniformly spaced — see HeadlessSample.
@@ -59,7 +50,7 @@
 
 import { estimateStepError, nextStepFactor } from "../sim/adaptive-step.js";
 import { parseSpiceNetlist } from "../sim/engine/spice/netlist.js";
-import { SIGNAL_GEN_NOISE_UPDATE_RATE_HZ } from "../sim/engine/waveform.js";
+import { SIGNAL_GEN_NOISE_UPDATE_RATE_HZ, parseSignalGenParams } from "../sim/engine/waveform.js";
 import { SimEngine } from "../sim/engine/sim-engine.js";
 import type {
   SimCircuit,
@@ -138,7 +129,8 @@ function sourceStepLimit(circuit: SimCircuit): number {
     }
     if (component.kind !== "signal_gen" || Number(p.enabled ?? 1) === 0) continue;
     const frequency = Math.max(1e-6, Number(p.frequency ?? 1000));
-    const waveform = String(p.waveform ?? "sine");
+    // Unrecognised strings play as a sine and need its ceiling.
+    const waveform = parseSignalGenParams(p).waveform;
     if (waveform === "sine" || waveform === "triangle" || waveform === "ramp") {
       limit = Math.min(limit, 1 / (frequency * 40));
     } else if (waveform === "square" || waveform === "pulse") {
@@ -151,17 +143,185 @@ function sourceStepLimit(circuit: SimCircuit): number {
   return Math.max(H_MIN, limit);
 }
 
+/**
+ * A source event this close to a time counts as reached: floating point
+ * cannot tell an edge from a step boundary rounded onto it. The clamp in
+ * run() uses the same margin, so a step that ends this close to an edge is
+ * the step that handles it. sim.worker.ts sourceEdgeEpsilon(), verbatim.
+ */
+function sourceEdgeEpsilon(t: number): number {
+  return Math.max(1e-15, Math.abs(t) * 1e-12);
+}
+
+/** sim.worker.ts nextPeriodicEvent(), verbatim. */
+function nextPeriodicEvent(
+  now: number,
+  origin: number,
+  period: number,
+  offsets: readonly number[],
+): number | null {
+  if (!Number.isFinite(period) || period <= 0) return null;
+  const epsilon = sourceEdgeEpsilon(now);
+  let next: number | null = null;
+  for (const rawOffset of offsets) {
+    const offset = ((rawOffset % period) + period) % period;
+    const cycles = Math.floor((now - origin - offset) / period) + 1;
+    const candidate = origin + offset + Math.max(0, cycles) * period;
+    if (candidate > now + epsilon && (next === null || candidate < next)) next = candidate;
+  }
+  return next;
+}
+
+/** Run-invariant, pre-parsed source breakpoint description. */
+type SourceEventDescriptor =
+  | {
+      kind: "periodic";
+      startAt: number;
+      origin: number;
+      period: number;
+      offsets: readonly number[];
+    }
+  | {
+      kind: "fixed";
+      startAt: number | null;
+      times: readonly number[];
+    };
+
+/**
+ * Every timed source's edges and corners. sim.worker.ts
+ * sourceEventDescriptors(), verbatim.
+ *
+ * WHY THE CEILING ALONE IS NOT ENOUGH: sourceStepLimit() sets how many steps
+ * a period gets, not where they fall, and the engine samples a source at the
+ * END of a step. A step that straddles an edge applies the new level across
+ * the whole step, and a feature narrower than the step is never sampled at
+ * all. PWL has no ceiling and a pulse's ignores its width, so a 0.2 ms PWL
+ * pulse was never seen in 20 ms, and of a 20 us pulse every 1 ms only the
+ * first was (11.2 us HIGH against 420 us). run() lands a step on each event.
+ */
+function sourceEventDescriptors(circuit: SimCircuit): SourceEventDescriptor[] {
+  const descriptors: SourceEventDescriptor[] = [];
+  const addFixed = (times: number[], startAt: number | null = null): void => {
+    const finiteTimes = [...new Set(times.filter(Number.isFinite))].sort((a, b) => a - b);
+    descriptors.push({ kind: "fixed", startAt, times: finiteTimes });
+  };
+  const addPeriodic = (
+    startAt: number,
+    origin: number,
+    period: number,
+    offsets: readonly number[],
+  ): void => {
+    descriptors.push({ kind: "periodic", startAt, origin, period, offsets });
+  };
+
+  for (const component of circuit.components) {
+    const p = component.params;
+    if (component.kind === "clock" || component.kind === "clock_gen") {
+      const frequency = Math.max(1e-6, Number(p.frequency ?? 1000));
+      const period = 1 / frequency;
+      const duty = Math.max(0, Math.min(1, Number(p.duty ?? 0.5)));
+      const delay = Math.max(0, Number(p.delay ?? 0));
+      addPeriodic(delay, delay, period, [0, duty * period]);
+      continue;
+    }
+
+    if (component.kind === "pulse_source" || component.kind === "pulse_gen") {
+      const delay = Math.max(0, Number(p.td ?? 0));
+      const rise = Math.max(H_MIN, Number(p.tr ?? 1e-6));
+      const width = Math.max(0, Number(p.pw ?? 5e-4));
+      const fall = Math.max(H_MIN, Number(p.tf ?? 1e-6));
+      const period = Number(p.per ?? 1e-3);
+      const offsets = [0, rise, rise + width, rise + width + fall];
+      if (Number.isFinite(period) && period > 0) {
+        addPeriodic(delay, delay, period, offsets);
+      } else {
+        addFixed(offsets.map((offset) => delay + offset));
+      }
+      continue;
+    }
+
+    if (component.kind !== "signal_gen" || Number(p.enabled ?? 1) === 0) continue;
+    // The engine's own parse: a string it does not recognise ("SQUARE",
+    // "Sine", a typo) plays as a sine, and PWL corners are read with its
+    // parseFloat, sort and 64-point cap.
+    const parsed = parseSignalGenParams(p);
+    const waveform = parsed.waveform;
+    const frequency = Math.max(1e-6, Number(p.frequency ?? 1000));
+    const period = 1 / frequency;
+    const delay = Math.max(0, Number(p.delay ?? 0));
+
+    if (waveform === "square") {
+      const duty = Math.max(0.01, Math.min(0.99, Number(p.duty ?? 0.5)));
+      const phaseOffset = ((Number(p.phaseDeg ?? 0) / 360) * period + period) % period;
+      addPeriodic(delay, delay - phaseOffset, period, [0, duty * period]);
+    } else if (waveform === "pulse") {
+      const rise = Math.max(H_MIN, Number(p.tr ?? 1e-6));
+      const width = Math.max(0, Number(p.pw ?? 5e-4));
+      const fall = Math.max(H_MIN, Number(p.tf ?? 1e-6));
+      addPeriodic(delay, delay, period, [0, rise, rise + width, rise + width + fall]);
+    } else if (waveform === "ramp") {
+      const phaseOffset = ((Number(p.phaseDeg ?? 0) / 360) * period + period) % period;
+      addPeriodic(delay, delay - phaseOffset, period, [0]);
+    } else if (waveform === "noise") {
+      const bucket = 1 / SIGNAL_GEN_NOISE_UPDATE_RATE_HZ;
+      addPeriodic(delay, delay, bucket, [0]);
+    } else if (waveform === "pwl") {
+      // No delay gate: the engine plays PWL corners at absolute time and
+      // ignores `delay`, so a corner before the delay is still an edge.
+      addFixed(parsed.pwlPoints.map((point) => point.t));
+    } else {
+      // Continuous waveforms still have one authored start boundary.
+      addFixed([delay]);
+    }
+  }
+  return descriptors;
+}
+
+/** Earliest source event after `now`. sim.worker.ts nextSourceEventTime(), verbatim. */
+function nextSourceEventTime(
+  now: number,
+  descriptors: readonly SourceEventDescriptor[],
+): number | null {
+  let next: number | null = null;
+  const consider = (candidate: number | null): void => {
+    if (candidate !== null && candidate > now && (next === null || candidate < next)) {
+      next = candidate;
+    }
+  };
+
+  for (const descriptor of descriptors) {
+    if (descriptor.startAt !== null && now < descriptor.startAt) {
+      consider(descriptor.startAt);
+      continue;
+    }
+    if (descriptor.kind === "periodic") {
+      consider(nextPeriodicEvent(now, descriptor.origin, descriptor.period, descriptor.offsets));
+      continue;
+    }
+    for (const eventTime of descriptor.times) {
+      if (eventTime > now) {
+        consider(eventTime);
+        break;
+      }
+    }
+  }
+  return next;
+}
+
 /** One accepted step's committed readout, delivered to HeadlessRunOptions.onSample. */
 export interface HeadlessSample {
   /** Simulation time (s) at the END of the accepted step. */
   simTime: number;
   /**
-   * The accepted step interval (s) that produced this sample. Under adaptive
-   * control this VARIES step to step, so samples are not a uniform grid and
-   * must not be treated as one (no fixed sample rate, no FFT without
-   * resampling). Callers wanting a uniform grid should either run with
-   * `adaptive: false` and a fixed step, or use the `.tran` runner in
-   * brownout/spice, which owns SPICE's fixed-grid semantics.
+   * The accepted step interval (s) that produced this sample. It VARIES, so
+   * samples are not a uniform grid and must not be treated as one (no fixed
+   * sample rate, no FFT without resampling). Under adaptive control it
+   * changes step to step. With `adaptive: false` it is `fixedStepS` only
+   * away from events: a step lands 10 ns before each source edge, corner or
+   * PWL point, a 10 ns step crosses it, and the grid restarts there (a 1 kHz
+   * clock at 10 us steps takes 9.99 us and 10 ns at each edge). Callers
+   * wanting a uniform grid should use the `.tran` runner in brownout/spice,
+   * which owns SPICE's fixed-grid semantics.
    */
   h: number;
   /** Net id -> volts. A per-sample copy: the engine's own map is live and is mutated in place by the next step. */
@@ -198,10 +358,12 @@ export interface HeadlessRunOptions {
   /** Simulated seconds to advance. Added to whatever time already elapsed — successive run() calls continue. */
   durationS: number;
   /**
-   * Error-controlled adaptive stepping (default true). False pins the step to
-   * `fixedStepS` and disables trial replay entirely — the equivalent of the
-   * worker's manualStepH path, where a caller-chosen step is honored as
-   * given rather than overridden by the controller.
+   * Error-controlled adaptive stepping (default true). False steps at
+   * `fixedStepS` and disables trial replay entirely, the equivalent of the
+   * worker's manualStepH path: no controller overrides the caller's step,
+   * but the source step ceiling still caps it, and steps still land on
+   * source and device events, so the samples around an event are not
+   * evenly spaced (see HeadlessSample.h).
    */
   adaptive?: boolean;
   /** Step size (s) when `adaptive` is false. Required in that mode; clamped to [H_MIN, H_MAX]. */
@@ -425,6 +587,16 @@ export class HeadlessRunner {
     return { accepted: true, iters, errorRatio: estimate.ratio, nextFactor: factor, reason: "accepted" };
   }
 
+  /**
+   * The source events this run lands its steps on. A subclass returning an
+   * empty list steps exactly the path from before source events existed,
+   * which is how the regression tests compute their reference on the
+   * platform under test instead of against numbers captured elsewhere.
+   */
+  protected _sourceEvents(circuit: SimCircuit): SourceEventDescriptor[] {
+    return sourceEventDescriptors(circuit);
+  }
+
   /** Apply a run's integrationMethod request. See HeadlessRunOptions.integrationMethod for why t=0 is the only legal point. */
   private applyIntegrationMethod(method: "be" | "trap", circuit: SimCircuit): void {
     if (method === this._integrationMethod) return;
@@ -474,10 +646,12 @@ export class HeadlessRunner {
     const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     // Error control needs BOTH a rewindable circuit and no caller-pinned step.
     const errorControlEnabled = this._errorReplay && fixedH === null;
-    // The source floor binds even in fixed-step mode: a caller-chosen step
-    // that aliases the source is a wrong answer, not a caller preference.
+    // The source floor and source events bind even in fixed-step mode: a
+    // caller-chosen step that aliases the source or steps over its edges is
+    // a wrong answer, not a caller preference.
     // The changing-circuit ceiling does not: it tunes the controller's choice.
     const sourceMaxH = sourceStepLimit(circuit);
+    const sourceEvents = this._sourceEvents(circuit);
     const order = this._integrationMethod === "trap" ? 2 : 1;
 
     let simmed = 0;
@@ -521,6 +695,21 @@ export class HeadlessRunner {
         // departs the discontinuity.
         if (untilEvent <= h) {
           h = Math.max(H_MIN, untilEvent);
+          eventClamped = true;
+        }
+      }
+      const nextSourceEvent = nextSourceEventTime(engine.simTime, sourceEvents);
+      if (nextSourceEvent !== null) {
+        const untilEvent = nextSourceEvent - engine.simTime;
+        // The epsilon: a square's edges sit on multiples of its P/10 ceiling
+        // at 50% duty, and a step starting P/10 before one measured it a
+        // rounding error beyond h, so it ended on the edge and applied the
+        // new level across the whole step.
+        if (untilEvent <= h + sourceEdgeEpsilon(nextSourceEvent)) {
+          // Land one minimum step before the event, then cross it in a 10 ns
+          // guard step: the source is sampled at a step's end, so only that
+          // guard step carries the new level early.
+          h = untilEvent > H_MIN * 1.5 ? untilEvent - H_MIN : Math.max(H_MIN, untilEvent);
           eventClamped = true;
         }
       }

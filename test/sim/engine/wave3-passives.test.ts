@@ -125,7 +125,9 @@ describe("ferrite_bead — DC series resistance model", () => {
     expect(part).toBeDefined();
     expect(part?.kind).toBe("ferrite_bead");
     expect(part?.bom).toBeDefined();
-    expect(part?.default_params.rDc).toBe(0.5);
+    // The resistance of the 22 AWG lead the Fair-Rite part is built on; the
+    // simulations above set rDc explicitly and are unaffected by the default.
+    expect(part?.default_params.rDc).toBe(0.0035);
   });
 });
 
