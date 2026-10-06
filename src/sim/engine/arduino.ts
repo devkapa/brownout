@@ -288,6 +288,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
   public setStepWriteObserver(observer: ((events: readonly PinEvent[]) => void) | null): void {
     this._writeObserver = observer;
   }
+  /** Drop the captured edges without advancing (see MicrocontrollerCore). */
+  public clearStepPinEvents(): void { this._pinEvents = []; }
 
   reset(): void {
     // Re-construct from the existing flash image.

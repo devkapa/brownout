@@ -82,6 +82,18 @@ export interface MicrocontrollerCore {
   setAnalogVolts(pin: string, volts: number, vcc?: number): void;
   /** GPIO edges captured during the most recent `step()`, in capture order. */
   getStepPinEvents(): readonly PinEvent[];
+  /**
+   * Drop the captured step events without advancing. The engine calls this
+   * when it decides a core will not step (unpowered): step() is the only
+   * place a core clears its own list, so a skipped core would otherwise keep
+   * describing its last powered step forever, and edge decoders must not
+   * re-replay those stale edges. Optional: this interface is public
+   * (brownout/mcu, and DeviceContext.arduinos), so a core that predates it
+   * keeps compiling, and the engine treats a missing implementation as the
+   * pre-H13 behaviour for that core (its stale list is fenced by the
+   * consumed-once gate alone).
+   */
+  clearStepPinEvents?(): void;
   /** Re-load the program image and clear runtime state. */
   reset(): void;
   /**

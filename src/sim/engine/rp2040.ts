@@ -341,6 +341,11 @@ export class RP2040Mcu implements MicrocontrollerCore {
     this._writeObserver = observer;
   }
 
+  /** Drop the captured edges without advancing (see MicrocontrollerCore). */
+  clearStepPinEvents(): void {
+    this._pinEvents = [];
+  }
+
   reset(): void {
     // Full rebuild (fresh Simulator/USB) so USB re-enumerates and any queued
     // program is re-fed to the REPL after the firmware re-boots.
