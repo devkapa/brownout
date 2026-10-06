@@ -1055,17 +1055,28 @@ const MICROBIT_EDGE_PIN_TO_SIM: Record<string, string> = {
   p8: "pin8", p12: "pin12", p13: "pin13", p14: "pin14", p15: "pin15", p16: "pin16",
 };
 
-// Sequential IC kinds that carry internal state across load().
-const COMBINATIONAL_IC_KINDS = new Set<string>([
+// Combinational IC kinds (their icState carries delay keys, and the 74HC14's
+// Schmitt hysteresis levels).
+export const COMBINATIONAL_IC_KINDS = new Set<string>([
   "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
   "74hc14", "74hc138", "74ls47",
 ]);
 
+// Combinational kinds deliberately judged NOT provable as a single RC pole
+// (_outputSagPole). Empty today: every entry must carry the reason its output
+// stage or input stamping breaks the pole proof.
+export const RC_OUTPUT_EXCLUDED_COMBINATIONAL = new Set<string>([]);
+
 // Digital ICs whose stamps drive an output only as R_out to a supply pin
 // (_stampDigitalOutput) and write an input only while it is open, so a
-// connected input of theirs carries no current (_outputSagPole).
-const RC_OUTPUT_IC_KINDS = new Set<string>([
-  ...COMBINATIONAL_IC_KINDS,
+// connected input of theirs carries no current (_outputSagPole). Written out
+// by hand, not spread from COMBINATIONAL_IC_KINDS: membership is a decision
+// about a kind's stamps, and output-sag-capacitive-edge.test fails until
+// every combinational kind appears here or in
+// RC_OUTPUT_EXCLUDED_COMBINATIONAL.
+export const RC_OUTPUT_IC_KINDS = new Set<string>([
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
+  "74hc14", "74hc138", "74ls47",
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
 ]);

@@ -26,7 +26,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { HeadlessRunner } from "../../../src/host/headless.js";
-import { SimEngine, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import {
+  COMBINATIONAL_IC_KINDS,
+  RC_OUTPUT_EXCLUDED_COMBINATIONAL,
+  RC_OUTPUT_IC_KINDS,
+  SimEngine,
+  type SimCircuit,
+} from "../../../src/sim/engine/sim-engine.js";
 
 type Dir = "HIGH" | "LOW";
 type Tally = Record<Dir, { edges: number; latched: number }>;
@@ -679,5 +685,27 @@ describe("output_sag on a capacitively loaded edge", () => {
       expect(tally.LOW.edges).toBeGreaterThanOrEqual(3);
       expect(tally.LOW.latched).toBe(tally.LOW.edges);
     });
+  });
+});
+
+describe("the pole-provability kind lists", () => {
+  // RC_OUTPUT_IC_KINDS is written out by hand, not spread from
+  // COMBINATIONAL_IC_KINDS: a new combinational kind must be decided — added
+  // here once its stamps are proven to drive outputs only through
+  // _stampDigitalOutput and touch connected inputs not at all, or named in
+  // RC_OUTPUT_EXCLUDED_COMBINATIONAL with that reason — before it can inherit
+  // the single-pole sag proof.
+  it("decides every combinational kind explicitly", () => {
+    const undecided = [...COMBINATIONAL_IC_KINDS].filter(
+      (kind) => !RC_OUTPUT_IC_KINDS.has(kind) && !RC_OUTPUT_EXCLUDED_COMBINATIONAL.has(kind),
+    );
+    expect(undecided).toEqual([]);
+  });
+
+  it("keeps the exclusion list honest", () => {
+    for (const kind of RC_OUTPUT_EXCLUDED_COMBINATIONAL) {
+      expect(COMBINATIONAL_IC_KINDS.has(kind)).toBe(true);
+      expect(RC_OUTPUT_IC_KINDS.has(kind)).toBe(false);
+    }
   });
 });
