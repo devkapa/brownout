@@ -586,6 +586,16 @@ export class HeadlessRunner {
     return { accepted: true, iters, errorRatio: estimate.ratio, nextFactor: factor, reason: "accepted" };
   }
 
+  /**
+   * The source events this run lands its steps on. A subclass returning an
+   * empty list steps exactly the path from before source events existed,
+   * which is how the regression tests compute their reference on the
+   * platform under test instead of against numbers captured elsewhere.
+   */
+  protected _sourceEvents(circuit: SimCircuit): SourceEventDescriptor[] {
+    return sourceEventDescriptors(circuit);
+  }
+
   /** Apply a run's integrationMethod request. See HeadlessRunOptions.integrationMethod for why t=0 is the only legal point. */
   private applyIntegrationMethod(method: "be" | "trap", circuit: SimCircuit): void {
     if (method === this._integrationMethod) return;
@@ -640,7 +650,7 @@ export class HeadlessRunner {
     // a wrong answer, not a caller preference.
     // The changing-circuit ceiling does not: it tunes the controller's choice.
     const sourceMaxH = sourceStepLimit(circuit);
-    const sourceEvents = sourceEventDescriptors(circuit);
+    const sourceEvents = this._sourceEvents(circuit);
     const order = this._integrationMethod === "trap" ? 2 : 1;
 
     let simmed = 0;
