@@ -623,20 +623,53 @@ describe("a supply rising through a chip's power-on threshold", () => {
     // step and lands the crossing, and the LED lights while the supply is in
     // the chip's window. Held off instead, the chip would miss the window and
     // the LED would never light.
+    //
+    // The straddle is driven directly, not through the runner's adaptive
+    // stepping: since H2 the runner lands its steps on source corners, and
+    // where that trajectory happens to put them for this circuit, no step
+    // ends inside the chip's alternation band. Switched on at its threshold
+    // the chip draws about 7 mA, so its supply through the 22 ohm feed is
+    // 155 mV short of the threshold: steps ending inside that band fail at
+    // any size, steps ending past it converge with the chip on. A 295 us
+    // grid puts its tenth boundary at 2.950 ms, 4.3875 V, inside the band,
+    // with the step started clearly below the threshold; the halved retry
+    // from there ends below the threshold, and the regrown step after it
+    // clears the band and lands the chip on — the host's landing, with the
+    // same 10 ns floor the hosts stop at.
     const run = (withFallback: boolean) => {
-      const runner = new HeadlessRunner();
-      if (!withFallback) disableFallback(runner.engine);
-      runner.load(rampedInverter());
+      const engine = new SimEngine();
+      if (!withFallback) disableFallback(engine);
+      engine.load(rampedInverter());
       const samples: number[][] = [];
       let brightest = 0;
-      const result = runner.run({
-        durationS: 8e-3,
-        onSample: (sample) => {
-          samples.push([sample.simTime, ...Object.values(sample.netV), ...Object.values(sample.elementI)]);
-          brightest = Math.max(brightest, sample.elementI.led ?? 0);
-        },
-      });
-      return { result, samples, brightest, counts: holdOffCounts(runner.engine) };
+      let acceptedSteps = 0;
+      let failedSteps = 0;
+      let hitMinStep = false;
+      let h = 2.95e-4;
+      while (engine.simTime < 8e-3 - 1e-12) {
+        engine.step(h);
+        if (engine.lastConverged) {
+          acceptedSteps += 1;
+          const netV = engine.getNetV();
+          const elementI = engine.getElementI();
+          samples.push([engine.simTime, ...Object.values(netV), ...Object.values(elementI)]);
+          brightest = Math.max(brightest, elementI.led ?? 0);
+          h = Math.min(h * 2, 2.95e-4);
+        } else {
+          failedSteps += 1;
+          h /= 2;
+          if (h < 1e-8) {
+            hitMinStep = true;
+            break;
+          }
+        }
+      }
+      return {
+        result: { acceptedSteps, failedSteps, hitMinStep },
+        samples,
+        brightest,
+        counts: holdOffCounts(engine),
+      };
     };
     const asBefore = run(false);
     expect(asBefore.result.failedSteps).toBeGreaterThan(0);
