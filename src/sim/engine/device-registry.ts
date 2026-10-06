@@ -124,6 +124,46 @@ export interface McuInputEdges {
 }
 
 /**
+ * A registered clocked part's digital shadow, run inside the MCU step that
+ * writes it (H11 readback). The engine feeds each GPIO write the core
+ * captures to applyWrite — one replay-walker group, the same semantics the
+ * committed digital pass will replay this step with — and reads the levels
+ * the part's outputs hold after it, pushing them into the core's input path
+ * so a read between two writes (a shiftIn()) returns them. A shadow lives
+ * for exactly one MCU step and is then discarded; the committed pass remains
+ * the state of record.
+ */
+export interface McuStepShadow {
+  /** One MCU write's pin levels, as McuInputEdges group members. */
+  applyWrite(events: ReadonlyArray<{ pin: string; level: 0 | 1 | null }>): void;
+  /** The part's output pin levels after the writes applied so far. */
+  outputLevels(): Readonly<Record<string, 0 | 1>>;
+}
+
+/** What a device model supplies to run an McuStepShadow for one part. */
+export interface McuStepShadowSpec {
+  /** Input pins the MCU's writes can reach (the part's replay pin list). */
+  readonly inputs: readonly string[];
+  /** Output pins whose level a program can read back mid-step. */
+  readonly outputs: readonly string[];
+  /**
+   * Build one step's shadow from the part's committed state and the input
+   * levels the MCU step begins from — the same start the committed pass's
+   * replay walker walks this step from: `st` as the last digital pass left
+   * it, `start` holding the part pins that share the MCU's nets at the level
+   * the MCU drove them (null when it left the net alone), `solved` for every
+   * other input pin, and `pinNode` to find the part's own-output feedback
+   * nets.
+   */
+  build(args: {
+    st: Record<string, number>;
+    start: Record<string, 0 | 1 | null>;
+    solved: (pin: string) => 0 | 1;
+    pinNode: (pin: string) => number;
+  }): McuStepShadow;
+}
+
+/**
  * Element-state maps a device may read and commit. Each getter returns the
  * engine's LIVE map for the currently loaded topology (load() replaces the
  * maps, so consumers must always go through the context, never retain one).
@@ -856,6 +896,22 @@ export interface DeviceModel {
     x: Float64Array,
     h: number,
   ): void;
+  /**
+   * H11 readback: a digital shadow of this registered clocked part, run
+   * INSIDE the MCU step that writes it. Present only for kinds a program can
+   * read back between two of its own writes (the 74HC165 today); the engine
+   * installs a shadow for one MCU step only when the SAME single MCU drives
+   * one of `inputs` and reads one of `outputs` (never when a relevant net
+   * carries two MCUs). The shadow must apply the SAME replay walker
+   * semantics the committed updateDigital pass uses, one write at a time, so
+   * the register the committed pass commits and the levels the shadow feeds
+   * back cannot diverge in its clocking semantics: both walks share the
+   * factory. Inputs the microcontroller does not drive are read at the
+   * step's starting solve (the committed pass reads the step's end), so a
+   * non-driven input crossing a threshold inside one step can differ there
+   * for that step. The committed pass stays the state of record.
+   */
+  mcuStepShadow?: McuStepShadowSpec;
   /**
    * Publish the component's element current via ctx.setElementCurrent.
    * `h` is the accepted step interval — the engine's element-current pass
