@@ -266,10 +266,10 @@ describe("ferrite_bead overload", () => {
     { label: "no catalogUid", catalogUid: undefined },
     { label: "catalogUid ferrite-bead", catalogUid: "ferrite-bead" },
   ])("a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ($label)", ({ catalogUid }) => {
-    // The engine's fallback for a missing rDc is its own rather than catalog
-    // data, so the power is read back from the current the bead conducts at
-    // this drive. A rating that read the missing rDc as 0 ohm would see 0 W
-    // and never fail.
+    // The power is read back from the current the bead conducts at this
+    // drive, so the rating is checked against the resistance actually
+    // stamped. A rating that read the missing rDc as 0 ohm would see 0 W and
+    // never fail.
     const volts = 1;
     const circuit = () => acrossSource(bead({}, catalogUid), volts);
     const power = conductedPower(circuit(), volts);
@@ -284,6 +284,53 @@ describe("ferrite_bead overload", () => {
     expect(latchedAt).toBeLessThan(expectedS + STEP_S + EDGE_S);
     expect(failure.value).toBeCloseTo(power, 6);
     expect(failure.limit).toBe(P_MAX);
+  });
+
+  it.each([
+    { label: "no catalogUid", catalogUid: undefined },
+    { label: "catalogUid ferrite-bead", catalogUid: "ferrite-bead" },
+  ])("a bead with no rDc conducts at the catalog's DC resistance ($label)", ({ catalogUid }) => {
+    // The catalog's 2 A at the catalog's resistance: a fallback of its own
+    // would conduct some other current here. The source's current is what
+    // the stamp lets through; the bead's is what updateCurrent reports.
+    const engine = new SimEngine();
+    engine.load(acrossSource(bead({}, catalogUid), RATED_A * R_DC));
+    engine.step(STEP_S);
+    expect(Math.abs(engine.getElementI()["vcc"] ?? 0)).toBeCloseTo(RATED_A, 9);
+    expect(engine.getElementI()["fb1"]).toBeCloseTo(RATED_A, 9);
+  });
+
+  it("restamps when an rDc is set in place on a bead that had none", () => {
+    // The static stamp is rebuilt only when a part's signature changes, so a
+    // signature that wrote a missing rDc as anything but the stamped value
+    // could miss this edit and keep the old resistance in the matrix.
+    const circuit = beadFeedingLoad(RATED_A);
+    const beadPart = circuit.components.find((part) => part.id === "fb1")!;
+    beadPart.params = {};
+    const engine = new SimEngine();
+    engine.load(circuit);
+    const mid = netIdFor(engine, "rl", "a");
+    engine.step(STEP_S);
+    const supply = RATED_A * (R_DC + R_LOAD);
+    expect(engine.getNetV()[mid]).toBeCloseTo((supply * R_LOAD) / (R_DC + R_LOAD), 9);
+
+    beadPart.params.rDc = 0.5;
+    engine.step(STEP_S);
+    expect(engine.getNetV()[mid]).toBeCloseTo((supply * R_LOAD) / (0.5 + R_LOAD), 9);
+  });
+
+  it("takes the same DC resistance in the small-signal analysis when it has no rDc", () => {
+    const circuit = beadFeedingLoad(RATED_A);
+    circuit.components.find((part) => part.id === "fb1")!.params = {};
+    const engine = new SimEngine();
+    engine.load(circuit);
+    const result = runSmallSignalAc(engine, {
+      inputId: "vcc",
+      outputNetIds: [netIdFor(engine, "rl", "a")],
+      frequenciesHz: [1000],
+    });
+    const out = result.outputs[0]!;
+    expect(Math.hypot(out.re[0]!, out.im[0]!)).toBeCloseTo(R_LOAD / (R_LOAD + R_DC), 6);
   });
 
   it("rates the resistance it stamps, so an rDc of 0 (stamped as 1 mohm) still fails", () => {
