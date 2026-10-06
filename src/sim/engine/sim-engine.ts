@@ -1935,18 +1935,20 @@ export class SimEngine {
   // above — that cache is built includePico=false and the display decoders
   // must keep their exact prior uno/nano-only behaviour.
   private _mcuEventDrivers: Map<number, { compId: string; pin: string }> | null = null;
-  // ctx.mcuInputEdges bookkeeping. A PinEvent says where a pin went, not
-  // where it started, so each MCU's pin levels are recorded as its step
-  // begins, once some device has asked for edges (recording costs every
-  // MCU step a pass over its pins). Only MCUs that stepped in the last
-  // advance have an entry: an unpowered core keeps its old events, and they
-  // must not be replayed again.
+  // ctx.mcuInputEdges bookkeeping; the merged display-event path
+  // (_mergedDisplayEvents) arms these same flags. A PinEvent says where a
+  // pin went, not where it started, so each MCU's pin levels are recorded
+  // as its step begins, once some device has asked for edges (recording
+  // costs every MCU step a pass over its pins). Only MCUs that stepped in
+  // the last advance have an entry: a core that did not step owes no
+  // replay, and its stale event list is cleared where the skip is decided.
   private _mcuStepStartLevels = new Map<string, ReadonlyMap<string, 0 | 1 | null>>();
   private _mcuInputEdgesWanted = false;
   // Set by an MCU advance, cleared by the next completed digital pass, so
   // each MCU step's edges are replayed once even when one electrical step
-  // solves several times (the NE555 split). It rolls back with the
-  // snapshot, as the icState the replay writes does.
+  // solves several times (the NE555 split) — by the clocked-IC edge path
+  // and the merged display-event path alike. It rolls back with the
+  // snapshot, as the icState/lcds the replays write do.
   private _mcuEdgesPending = false;
   // Pass-scoped lazy channel-current readout for _updateFailureStates,
   // reached via ctx.elementChannelCurrents: the old pass computed
@@ -4150,7 +4152,17 @@ export class SimEngine {
     if (recordStarts) this._mcuStepStartLevels = new Map();
     for (const [id, mcu] of this.state.arduinos) {
       const comp = this._componentById.get(id);
-      if (!comp || !this._mcuPowered(comp)) continue;
+      if (!comp || !this._mcuPowered(comp)) {
+        // A core that did not step keeps the events its last powered step
+        // produced — step() is the only place a core clears its own list —
+        // and the decoders that read getStepPinEvents() would re-replay
+        // those stale edges on every later step (a display's bit count grew
+        // 32 -> 48 -> 64 after the board lost power). Fence the list at the
+        // advance that skips the core: edges from a step that did not
+        // happen are owed to nobody.
+        mcu.clearStepPinEvents?.();
+        continue;
+      }
       if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
       mcu.step(h);
     }
@@ -6195,7 +6207,9 @@ export class SimEngine {
   // the ordered sub-step PinEvents contributed by the single Arduino that
   // drives all those pins.  If the pins span multiple Arduinos (multi-master),
   // or no Arduino drives any of them, returns an empty event list so callers
-  // can fall back to sampled-level decoding.
+  // can fall back to sampled-level decoding.  The events are consumed once
+  // per MCU step: they are handed out only while _mcuEdgesPending says the
+  // driving advance's replay is still owed (see the flags' comments above).
   private _mergedDisplayEvents(
     comp: SimComponent,
     pinNames: string[],
@@ -6221,6 +6235,16 @@ export class SimEngine {
     const thatCompId = [...driverCompIds][0];
     const mcu = this.state.arduinos.get(thatCompId);
     if (!mcu) return { arduinoCompId: null, events: [] };
+
+    // A display decoder is a per-step MCU-edge consumer exactly like the
+    // clocked-IC path's ctx.mcuInputEdges: asking arms the start-level
+    // recording (so the next advance arms _mcuEdgesPending), and the merged
+    // events are handed out only while that advance's replay is still owed.
+    // The first completed digital pass consumes the flag, so the NE555
+    // split's re-solves — and every later pass — cannot re-merge one MCU
+    // step's events into the decoder twice.
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return { arduinoCompId: thatCompId, events: [] };
 
     const mapped = mcu
       .getStepPinEvents()
@@ -6295,8 +6319,9 @@ export class SimEngine {
     this._displayStateOut = null;
     this.digitalState = ds;
     this._displayState = disp;
-    // This pass replayed the last MCU step's edges (ctx.mcuInputEdges); a
-    // later pass in the same electrical step must not apply them again.
+    // This pass replayed the last MCU step's edges (ctx.mcuInputEdges,
+    // ctx.mergedDisplayEvents); a later pass in the same electrical step
+    // must not apply them again.
     this._mcuEdgesPending = false;
   }
 

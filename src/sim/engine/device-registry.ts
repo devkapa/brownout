@@ -495,7 +495,9 @@ export interface DeviceContext {
    * Ordered sub-step MCU pin events for a display's protocol pins, with
    * the engine's lazily built shared Arduino-pin-driver map behind it
    * (first display in the pass builds it, later ones reuse it — exactly
-   * the old `_dispDrivers ??=` behavior). Empty events = sampled fallback.
+   * the old `_dispDrivers ??=` behavior). Consumed once per MCU step: a
+   * pass the driving advance does not owe events to gets an empty list.
+   * Empty events = sampled fallback.
    */
   mergedDisplayEvents(
     comp: DeviceComponent,

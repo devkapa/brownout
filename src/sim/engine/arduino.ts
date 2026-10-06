@@ -280,6 +280,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
   /** All GPIO edges captured during the most recent step(), in capture order. */
   public getStepPinEvents(): readonly PinEvent[] { return this._pinEvents; }
 
+  /** Drop the captured edges without advancing (see MicrocontrollerCore). */
+  public clearStepPinEvents(): void { this._pinEvents = []; }
+
   reset(): void {
     // Re-construct from the existing flash image.
     const flashWords = this.cpu.progMem;
