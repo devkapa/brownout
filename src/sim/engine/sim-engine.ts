@@ -4746,8 +4746,13 @@ export class SimEngine {
    * then drops back to the shunts' 0 V and powers it again, and Newton
    * alternated between the two on every iterate, so no step converged (a 555
    * whose ground is on a breadboard rail wired to nothing). _icPowerInfo
-   * reads such a part as unpowered for the whole load. It then joins like any
-   * other part, so the sections do not change.
+   * reads such a part as unpowered for the whole load, and it joins no
+   * section: through its own power pins it would merge the island on one
+   * side of its missing supply return into the section on the other, while
+   * its off stamps leave that island without a reference row. An island left
+   * holding charge then rested on the node shunts alone, and no step
+   * converged at any size. The island stays what the rest of the wiring
+   * makes it, an isolated section with its own anchor.
    */
   private _compileIsolatedSectionAnchors(circuit: SimCircuit): void {
     const netRows = this.nodeCount - this.internalNodeIdx.size;
@@ -4805,7 +4810,6 @@ export class SimEngine {
       waiting = stillWaiting;
     }
     this._noSupplyReturnIds = new Set(waiting.map((part) => part.comp.id));
-    for (const part of waiting) join(part.comp, part.byPin);
 
     // Prefer a source's return terminal, as buildNets does for the circuit's
     // ground, so a second battery reads 0 V at its own negative terminal.

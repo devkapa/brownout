@@ -1,0 +1,5 @@
+---
+"brownout": patch
+---
+
+A chip still waiting for its supply return no longer joins its island to the battery's section through its own power pins. A floating island it straddles, such as a breadboard rail cut off from the battery, is now an isolated section like any other, with its own 1 S anchor at one of its nets, instead of resting on the matrix's 1e-12 S node shunts alone. That is what stopped the clock: cutting a supply lead or pulling a ground wire while such an island held charge left it with no usable reference, and no step converged at any size. Voltages on such an island now read from its anchor, so they shift by a common offset. The differences across its parts, and so its currents, are as before, to within the shunts' picoamps; an LED on it still lights from the charge it holds. The one exception is the instant a cut strands a current-carrying inductor on the island: its kick is placed relative to the anchor. In the test circuit random-6087, for the first 25 ns one LED carries 402 mA where both carried 54 mA, after which both runs agree.
