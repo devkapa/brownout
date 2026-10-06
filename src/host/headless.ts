@@ -129,7 +129,8 @@ function sourceStepLimit(circuit: SimCircuit): number {
     }
     if (component.kind !== "signal_gen" || Number(p.enabled ?? 1) === 0) continue;
     const frequency = Math.max(1e-6, Number(p.frequency ?? 1000));
-    const waveform = String(p.waveform ?? "sine");
+    // Unrecognised strings play as a sine and need its ceiling.
+    const waveform = parseSignalGenParams(p).waveform;
     if (waveform === "sine" || waveform === "triangle" || waveform === "ramp") {
       limit = Math.min(limit, 1 / (frequency * 40));
     } else if (waveform === "square" || waveform === "pulse") {
