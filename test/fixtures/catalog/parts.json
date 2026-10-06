@@ -7275,7 +7275,7 @@
       "height": 20,
       "keywords": ["noise suppression", "emi filter", "hf choke"],
       "default_params": {
-        "rDc": 0.5
+        "rDc": 0.0035
       },
       "paramUnits": {
         "rDc": "Ω"
@@ -7302,16 +7302,16 @@
       ],
       "applications": "EMI/RFI suppression on power rails and signal lines — place in series between a noisy power supply output and a sensitive IC VCC pin. At low frequency the part is simply a small DC resistance. HF insertion loss (the bead's actual job) is not modelled.",
       "electrical_specs": {
-        "p_max": 0.25,
-        "notes": "DC/LF model only: the simulator stamps rDc as a plain series resistor. HF impedance (the bead's actual function) needs a frequency-dependent lossy model that is not included; adaptive timesteps do not add it. Use for BOM/layout realism and DC voltage-drop verification."
+        "p_max": 0.056,
+        "notes": "DC/LF model only: the simulator stamps rDc as a plain series resistor. HF impedance (the bead's actual function) needs a frequency-dependent lossy model that is not included; adaptive timesteps do not add it. Use for BOM/layout realism and DC voltage-drop verification. Rating convention: Fair-Rite controls this bead for impedance only and gives it no current rating, so this catalog assumes 2 A, unverified. p_max is (2 × 2 A)² × 3.5 mΩ = 0.056 W, with 3.5 mΩ the resistance of the 22 AWG lead, so a bead at 2 A never fails and the simulator fails it above about 4 A DC."
       },
       "bom": {
         "bomFamily": "ferrite-bead",
-        "genericName": "Ferrite bead 600 Ω @ 100 MHz (Fair-Rite 2743001111 or equivalent)",
+        "genericName": "Ferrite bead 70 Ω @ 100 MHz (Fair-Rite 2743001111 or equivalent)",
         "package": "axial",
         "mounting": "through-hole",
         "breadboardFriendly": true,
-        "ratings": "2 A DC current, 600 mΩ DC resistance typical",
+        "ratings": "3.5 mΩ DC (22 AWG lead); impedance-controlled part with no manufacturer current rating; rated 2 A in this catalog (unverified)",
         "commonSubstitutions": ["Murata BLM18 SMD series (need adapter for breadboard)", "TDK MMZ series"],
         "beginnerDescription": "A tiny cylinder that looks like a resistor but suppresses high-frequency noise — place it in series on a power line to stop switching noise from reaching sensitive chips."
       }

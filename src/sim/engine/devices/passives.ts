@@ -88,9 +88,21 @@ function potentiometerSegments(comp: DeviceComponent): { rCw: number; rCcw: numb
 export const POT_SEGMENT_MIN_RATING_SHARE = 0.25;
 
 /**
- * Shared resistive-overload damage integrator for resistor, potentiometer,
- * and trimmer — one body in the engine's _updateFailureStates, kept as one
- * body here (the internal kind branch is part of the moved code).
+ * A ferrite bead's DC resistance when its params carry none: the bundled
+ * catalog's value, the 22 AWG lead of the Fair-Rite 2743001111 the part is
+ * modelled on. Every place that reads a bead's rDc shares it, so a param-less
+ * bead conducts, rates and restamps at the catalog's resistance, and a bead
+ * with no rDc is rated against the catalog's p_max at the resistance that
+ * p_max was derived for.
+ */
+const FERRITE_BEAD_DEFAULT_R_DC_OHM = 0.0035;
+
+/**
+ * Shared resistive-overload damage integrator for resistor, ferrite_bead,
+ * potentiometer, and trimmer — one body in the engine's _updateFailureStates,
+ * kept as one body here (the internal kind branch is part of the moved code).
+ * A bead rates by the resistor's rule and latches the same `resistor_overload`
+ * kind: a kind of its own would be a public SimFailureKind change.
  */
 function commitResistiveOverloadStress(
   ctx: DeviceContext,
@@ -109,6 +121,14 @@ function commitResistiveOverloadStress(
     const resistance = Number(comp.params.resistance ?? 1000);
     const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
     power = resistance > 0 ? current * current * resistance : 0;
+  } else if (comp.kind === "ferrite_bead") {
+    // Rate the resistance the bead stamps, fallback and floor included, so it
+    // cannot conduct at one resistance and dissipate at another. The model is
+    // its DC resistance and nothing else (no frequency-dependent impedance),
+    // so I^2 * rDc is all the heat there is to count.
+    const resistance = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
+    const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
+    power = current * current * resistance;
   } else {
     // A loaded wiper carries different current in each track segment.
     // Pot power ratings apply to the full track, so a segment's safe share
@@ -153,7 +173,7 @@ function commitResistiveOverloadStress(
       value: power,
       limit: localLimit,
       message:
-        comp.kind === "resistor"
+        comp.kind === "resistor" || comp.kind === "ferrite_bead"
           ? `${comp.id} dissipated ${power.toFixed(3)} W through a ${localLimit!.toFixed(3)} W rating long enough to fail open.`
           : `${comp.id} dissipated ${power.toFixed(3)} W in one wiper track segment, above that segment's ${localLimit!.toFixed(3)} W share, long enough to fail open.`,
     }),
@@ -835,9 +855,12 @@ export const ptcFuseModel: DeviceModel = {
 export const ferriteBeadModel: DeviceModel = {
   kinds: ["ferrite_bead"],
   staticStamp: true,
-  staticSignature: (_ctx, comp, out) => {
+  staticSignature: (ctx, comp, out) => {
     const p = comp.params;
-    out.push(String(p.rDc ?? 0.5));
+    out.push(
+      String(p.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM),
+      String(ctx.hasFailure(comp.id, "resistor_overload")),
+    );
   },
   stamp: (ctx, comp, _xGuess, _h) => {
     // DC/LF model: stamp as a plain series resistor using the DC resistance
@@ -846,7 +869,9 @@ export const ferriteBeadModel: DeviceModel = {
     // turn this deliberately DC-only part into an RF material model.
     const pins = comp.pins;
     if (pins.length < 2) return;
-    const rDc = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    // An overloaded bead fails open, as a resistor does.
+    if (ctx.hasFailure(comp.id, "resistor_overload")) return;
+    const rDc = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     const aFb = ctx.pinNode(comp.id, pins[0].id);
     const bFb = ctx.pinNode(comp.id, pins[1].id);
     stampResistor(ctx.mna, aFb, bFb, rDc);
@@ -855,18 +880,30 @@ export const ferriteBeadModel: DeviceModel = {
     // Reconstruct I from the converged voltages using the DC resistance.
     const pins = comp.pins;
     if (pins.length < 2) { ctx.setElementCurrent(comp.id, 0); return; }
-    const rDcI = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    if (ctx.hasFailure(comp.id, "resistor_overload")) {
+      ctx.setElementCurrent(comp.id, 0);
+      return;
+    }
+    const rDcI = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     const vaFb = ctx.vAt(x, ctx.pinNode(comp.id, pins[0].id));
     const vbFb = ctx.vAt(x, ctx.pinNode(comp.id, pins[1].id));
     ctx.setElementCurrent(comp.id, (vaFb - vbFb) / rDcI);
   },
+  updateFailures: (ctx, comp, x, h) => {
+    // Joins the failure pass through this hook (bucket membership is the
+    // engine's set OR a registered hook), so PASSIVE_FAILURE_UPDATE_KINDS
+    // needs no entry for it.
+    commitResistiveOverloadStress(ctx, comp, x, h);
+  },
   acStamp: (ctx, comp, ac, _omega) => {
     // The bead's transient model is deliberately DC-only (rDc); its AC model
     // mirrors that same resistance rather than inventing an RF impedance
-    // curve the large-signal engine does not carry.
+    // curve the large-signal engine does not carry. A failed-open bead stays
+    // open, mirroring the stamp's gate.
     const pins = comp.pins;
     if (pins.length < 2) return;
-    const rDc = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    if (ctx.hasFailure(comp.id, "resistor_overload")) return;
+    const rDc = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     stampAcAdmittance(
       ac,
       ctx.pinNode(comp.id, pins[0].id),
