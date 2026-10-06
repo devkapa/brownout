@@ -61,6 +61,23 @@ Included:
   the wiring and other parts, another such chip counting only once its own
   supply is joined. With no return path for its supply current it cannot
   hold a powered state.
+- When a step fails while such a chip's power reading alternates between
+  Newton iterates (its own draw pulls its supply below the power-on
+  threshold, and its absence lets the supply recover, as when only a
+  charged capacitor and resistance feed it), the chip is held powered for a
+  1 ps solve with every capacitor at its present charge and every other such
+  chip held as it settled. If its supply reads unpowered there but powered
+  when the chip is held off at the same instant, the chip starves itself,
+  and the step is solved with it held off. A supply that reads unpowered
+  either way is still rising through the threshold at the step's start, and
+  so is one that read unpowered when the host's step began, in a piece of a
+  step the engine splits at a 555's switching point; that step, like one
+  whose chip holds its supply or whose held-off solve fails too, is rejected
+  as before, and the host lands the crossing with a shorter step. Only a
+  step already at the hosts' 10 ns floor, where no
+  shorter step is left and the host used to stop, holds such a chip off as
+  well: for that one 10 ns step, after which it turns on as soon as its
+  supply can carry it.
 - Rail-referenced, finite-resistance digital and MCU outputs, real internal GPIO
   pulls, board idle current, IC quiescent current, and conservative supply-current
   routing for modeled active parts.

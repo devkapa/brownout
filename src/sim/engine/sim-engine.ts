@@ -37,7 +37,7 @@ import {
   stampResistor,
   stampVSource,
 } from "./elements.js";
-import { solveNonlinear } from "./newton.js";
+import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
 import { type PinEvent } from "./arduino.js";
 import { type MicrocontrollerCore, mcuFactory } from "./mcu.js";
@@ -818,6 +818,14 @@ export interface StepBreakpoint {
 const NE555_GUARD_STEP_S = 1e-8;
 
 /**
+ * The shortest step either host takes: H_MIN in HeadlessRunner
+ * (src/host/headless.ts) and in de:volt's worker (sim.worker.ts). Neither can
+ * shorten a step that fails at this size, so such a failure stops the clock
+ * in both.
+ */
+const HOST_MIN_STEP_S = 1e-8;
+
+/**
  * Minimal immutable view used by the worker's coarse/refined error estimate.
  * It intentionally excludes EEPROM bytes, LCD buffers, display/current
  * readouts, the MNA vector, and diagnostics because none participate in the
@@ -1117,6 +1125,14 @@ const SUPPLY_GATED_KINDS = new Set<string>([
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
   "hd44780", "max7219", "lm393",
 ]);
+
+/** A supply-gated part's power reading across one solve's Newton iterates. */
+interface PowerReadings {
+  /** The reading at the first iterate, the solve's starting state. */
+  first: boolean;
+  powered: boolean;
+  flips: number;
+}
 
 /** Component kinds that can mutate accepted analogue/device state post-solve. */
 const STATE_UPDATE_KINDS = new Set<string>([
@@ -1503,6 +1519,26 @@ export class SimEngine {
   // _compileIsolatedSectionAnchors), read as unpowered. Empty whenever every
   // such part has one, which keeps those solves bit-identical.
   private _noSupplyReturnIds: ReadonlySet<string> = new Set();
+  // Each supply-gated part's latest power reading, and how often it changed,
+  // over the Newton iterates of a solve that may hold parts unpowered (see
+  // _solveHoldingUnholdableOff); null while no solve is watched.
+  private _powerReadings: Map<string, PowerReadings> | null = null;
+  // Power that _solveHoldingUnholdableOff holds parts at, in place of their readings.
+  private _heldPower: Map<string, boolean> | null = null;
+  // How each _solveHoldingUnholdableOff call ended; diagnostics only.
+  // heldAtFloor counts the accepted ones that held a part whose supply was
+  // still low, which only a step at the hosts' floor does.
+  private _holdOffCounts = { accepted: 0, probeFailed: 0, partsHold: 0, supplyLow: 0, heldOffFailed: 0, heldAtFloor: 0 };
+  // Set for the whole of a step() whose own h is at or below
+  // HOST_MIN_STEP_S, for every solve inside it (a 555's split sub-steps
+  // included, whatever their own length).
+  private _stepAtHostFloor = false;
+  // While a step() runs: when it started, and each supply-gated part's power
+  // reading at that moment (the first iterate of the step's first solve).
+  // A 555's split re-solves the step from that moment, then from points
+  // inside it, and only the host's step start says whether a part's supply
+  // was still low when the step began.
+  private _stepStart: { time: number; power: Map<string, boolean> | null } | null = null;
   // Lazily built per _updateDigitalState call; cleared at its entry so every
   // step rebuilds it fresh from the current solved topology.
   private _dispDrivers: Map<number, { compId: string; pin: string }> | null = null;
@@ -2428,7 +2464,7 @@ export class SimEngine {
       // discontinuity for the trapezoidal history, so re-anchor with one BE
       // step (and keep this seed solve itself on BE).
       this._beNextStep = true;
-      this._solve(1e-12);
+      this._solve(1e-12, true);
       // The rebuild above re-captured the sparse base over the full pattern
       // discovered so far, which raises the backend's truncation floor above
       // the load-time watermark and would silently turn dcOperatingPoint's
@@ -2979,6 +3015,7 @@ export class SimEngine {
     // restores below keeps the authored initial conditions exact whether or
     // not the ladder had to touch them.
     if (!this.lastConverged) this._rescueSeedOperatingPoint();
+    if (!this.lastConverged) this._retrySeedHoldingUnholdableOff();
     this.state.caps = initializedCaps;
     this.state.inds = initializedInds;
     this.state.capsI = initializedCapsI;
@@ -4018,12 +4055,25 @@ export class SimEngine {
    * full step.
    */
   step(h: number): void {
+    // Whether this step is at the hosts' floor is a question about the host's
+    // h, not about the shorter sub-steps the 555 split solves within it.
+    this._stepAtHostFloor = h <= HOST_MIN_STEP_S;
+    this._stepStart = { time: this.simTime, power: null };
+    try {
+      this._stepSolves(h);
+    } finally {
+      this._stepAtHostFloor = false;
+      this._stepStart = null;
+    }
+  }
+
+  private _stepSolves(h: number): void {
     if (!this.circuit) return;
 
     const has555 = this._hasNe555;
 
     if (!has555) {
-      this._solve(h);
+      this._solve(h, true);
       if (!this.lastConverged) return;
       this.simTime += h;
       this._advanceMcusAfterAcceptedSolve(h);
@@ -4038,7 +4088,7 @@ export class SimEngine {
     const preNe555s = new Map(this.state.ne555s);
     const snap = this.saveState();
 
-    this._solve(h);
+    this._solve(h, true);
 
     // A failed electrical trial is not a physical interval. In particular, do
     // not sample inputs or advance an external CPU that saveState cannot rewind.
@@ -4059,7 +4109,7 @@ export class SimEngine {
     this.restoreState(snap);
     this.simTime = snap.simTime;
 
-    this._solve(h * frac);
+    this._solve(h * frac, true);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4079,7 +4129,7 @@ export class SimEngine {
         // The split is clamped to 98% of the step, so a crossing in the last
         // 2% leaves the first sub-step short of it. Carry on to one guard
         // short of the step end and let the switch land there instead.
-        this._solve(rest - guard);
+        this._solve(rest - guard, true);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4089,7 +4139,7 @@ export class SimEngine {
       }
       if (this._ne555Switched(preNe555s)) {
         this._stepBreakpoints.push({ time: this.simTime, netV: { ...this.netV } });
-        this._solve(guard);
+        this._solve(guard, true);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4100,7 +4150,7 @@ export class SimEngine {
       }
     }
 
-    if (rest > 0) this._solve(rest);
+    if (rest > 0) this._solve(rest, true);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -5156,10 +5206,18 @@ export class SimEngine {
     const maxV = specs?.vcc_range?.max ?? 18.0;
     const suppliesConnected = !this._isOpenPin(comp.id, vccPin) && !this._isOpenPin(comp.id, gndPin)
       && !this._noSupplyReturnIds.has(comp.id);
-    const powered =
+    const powered = this._heldPower?.get(comp.id) ?? (
       suppliesConnected &&
       vSupply >= minV * 0.9 &&
-      vSupply <= maxV * 1.1;
+      vSupply <= maxV * 1.1);
+    if (this._powerReadings !== null && SUPPLY_GATED_KINDS.has(comp.kind)) {
+      const reading = this._powerReadings.get(comp.id);
+      if (!reading) this._powerReadings.set(comp.id, { first: powered, powered, flips: 0 });
+      else if (reading.powered !== powered) {
+        reading.powered = powered;
+        reading.flips += 1;
+      }
+    }
     const ioMax = specs?.io_max;
     const outputResistance =
       ioMax && ioMax > 0 && vSupply > 0
@@ -5662,7 +5720,7 @@ export class SimEngine {
     this._pruneUnannouncedWarnings();
   }
 
-  private _solve(h: number): void {
+  private _solve(h: number, holdUnholdableOff = false): void {
     this._refreshStaticStampBaseIfNeeded();
     this.electricalSolveCount += 1;
     const started = nowMs();
@@ -5679,17 +5737,6 @@ export class SimEngine {
       return;
     }
     this.lastMatrixSize = this.mna.size;
-
-    // Reset pnjlim per-junction history so Newton iter 1 sees an empty map
-    // → falls back to `vRaw` (the previous time-step's converged value via
-    // xInit) → pnjlim is a no-op on iter 1, then damps iter 2+ against the
-    // limited iter-1 value. This is the standard SPICE behaviour.
-    this._vPrevBJT.clear();
-    this._currentLimitComplianceClamps.clear();
-    this._currentLimitCurrentBranchTried.clear();
-    this._currentLimitEntryClamps.clear();
-    this._regulatorHeadroomBranchTried.clear();
-    this._regulatorHeadroomSelections.clear();
 
     // Initial guess: last-step node voltages (zero vector on first solve).
     const xInit = new Float64Array(this.mna.size);
@@ -5712,7 +5759,96 @@ export class SimEngine {
       }
     }
 
-    const result = solveNonlinear({
+    this._powerReadings = holdUnholdableOff ? new Map() : null;
+    let result: NewtonResult;
+    let readings: Map<string, PowerReadings> | null;
+    try {
+      result = this._runNewton(h, xInit);
+    } finally {
+      // A throw from inside Newton must not leave the next solve watched.
+      readings = this._powerReadings;
+      this._powerReadings = null;
+    }
+    if (readings !== null && this._stepStart !== null && this._stepStart.power === null) {
+      this._stepStart.power = new Map([...readings].map(([id, reading]) => [id, reading.first]));
+    }
+
+    this.lastIters = result.iters;
+    const solveInfo = this.mna.lastSolveInfo;
+    this.lastMatrixSingular = solveInfo.singular;
+    this.lastMatrixIllConditioned = solveInfo.illConditioned;
+    this.lastRelativeResidual = solveInfo.relativeResidual;
+    const linearSolveHealthy =
+      !solveInfo.singular &&
+      !solveInfo.nonFinite &&
+      solveInfo.relativeResidual <= 1e-8;
+    this.lastConverged = result.converged && linearSolveHealthy;
+
+    let x = result.x;
+    if (!this.lastConverged && readings !== null && [...readings.values()].some((reading) => reading.flips >= 2)) {
+      const held = this._solveHoldingUnholdableOff(h, xInit, readings);
+      if (held) {
+        x = held;
+        this.lastConverged = true;
+      }
+    }
+    // Includes the fallback's probes and held-off solve, accepted or not: the
+    // host paid for them as part of this attempt.
+    this.lastSolveUs = Math.max(0, (nowMs() - started) * 1000);
+
+    // A Newton or linear failure is a rejected trial, not a physical interval.
+    // Keep the last trusted electrical, dynamic, thermal, failure, and display
+    // state intact for direct callers as well as the worker's retry path.
+    if (!this.lastConverged) return;
+
+    try {
+      // Extract net voltages from solution
+      const netV: Record<string, number> = { gnd: 0 };
+      for (const [netId, row] of this.nodeIdx) {
+        netV[netId] = row >= 0 && row < this.nodeCount ? (x[row] ?? 0) : 0;
+      }
+      this.netV = netV;
+
+      const previousMosfetGates = new Map(this.state.mosfetGates);
+      this._lastX = x;
+      this._updateState(h, x);
+      // Homotopy rung solves hold digital state: their voltages are overlay
+      // artifacts, and a committed phantom clock edge would survive ladder
+      // success (only total failure restores the entry snapshot). See
+      // _homotopyRungConverged for the full rationale.
+      if (!this._dcDigitalHold) this._updateDigitalState(h, x);
+      this._updateElementI(h, x, previousMosfetGates);
+      // Operating-point solves advance no physical time, so the h-scaled
+      // physical integrators hold: without this, stage d's pseudo-steps feed
+      // up to ~0.5 s of pseudo-time into package heating and stress
+      // accumulators — enough to latch a permanent component failure — while
+      // simTime stands still. Held state also keeps the stamped topology
+      // fixed across the ladder (a failure latching mid-ladder would change
+      // the system under the continuation's feet).
+      if (!this._dcPhysicalTimeHold) {
+        this._updatePackageThermalState(h, x);
+        this._updateFailureStates(h, x);
+      }
+    } finally {
+      // A part held unpowered stays held through its own step's commit, so
+      // its digital state, currents and heat agree with the stamps solved.
+      this._heldPower = null;
+    }
+  }
+
+  /** One Newton solve of a step of length h from xInit, against the system in this.mna. */
+  private _runNewton(h: number, xInit: Float64Array): NewtonResult {
+    // Reset pnjlim per-junction history so Newton iter 1 sees an empty map
+    // → falls back to `vRaw` (the previous time-step's converged value via
+    // xInit) → pnjlim is a no-op on iter 1, then damps iter 2+ against the
+    // limited iter-1 value. This is the standard SPICE behaviour.
+    this._vPrevBJT.clear();
+    this._currentLimitComplianceClamps.clear();
+    this._currentLimitCurrentBranchTried.clear();
+    this._currentLimitEntryClamps.clear();
+    this._regulatorHeadroomBranchTried.clear();
+    this._regulatorHeadroomSelections.clear();
+    return solveNonlinear({
       size: this.mna.size,
       xInit,
       // Cold/low-temperature junctions can require more than the generic
@@ -5730,52 +5866,141 @@ export class SimEngine {
       solve: () => this.mna.solve(),
       limitedThisIteration: () => this._junctionLimitedThisIteration,
     });
+  }
 
-    this.lastIters = result.iters;
-    const solveInfo = this.mna.lastSolveInfo;
-    this.lastMatrixSingular = solveInfo.singular;
-    this.lastMatrixIllConditioned = solveInfo.illConditioned;
-    this.lastRelativeResidual = solveInfo.relativeResidual;
-    const linearSolveHealthy =
-      !solveInfo.singular &&
-      !solveInfo.nonFinite &&
-      solveInfo.relativeResidual <= 1e-8;
-    this.lastConverged = result.converged && linearSolveHealthy;
-    this.lastSolveUs = Math.max(0, (nowMs() - started) * 1000);
+  /**
+   * The load seed's last resort, after the rescue ladder has failed too: the
+   * seed solved again with _solveHoldingUnholdableOff armed, as a step's
+   * solve would be. Waiting for the ladder keeps every seed it rescues
+   * exactly as before. If this fails as well, the diagnostics, the sparse
+   * pattern and the pivot history go back to how the failed ladder left them.
+   */
+  private _retrySeedHoldingUnholdableOff(): void {
+    const diagnostics = {
+      lastIters: this.lastIters,
+      lastSolveUs: this.lastSolveUs,
+      lastMatrixSingular: this.lastMatrixSingular,
+      lastMatrixIllConditioned: this.lastMatrixIllConditioned,
+      lastRelativeResidual: this.lastRelativeResidual,
+    };
+    const pattern = this.mna.patternCheckpoint?.();
+    this._solve(DC_OP_COMPANION_H, true);
+    if (this.lastConverged) return;
+    Object.assign(this, diagnostics);
+    if (pattern !== undefined) this.mna.restorePatternCheckpoint?.(pattern);
+    this.mna.invalidateFactorization?.();
+  }
 
-    // A Newton or linear failure is a rejected trial, not a physical interval.
-    // Keep the last trusted electrical, dynamic, thermal, failure, and display
-    // state intact for direct callers as well as the worker's retry path.
-    if (!this.lastConverged) return;
-
-    const x = result.x;
-
-    // Extract net voltages from solution
-    const netV: Record<string, number> = { gnd: 0 };
-    for (const [netId, row] of this.nodeIdx) {
-      netV[netId] = row >= 0 && row < this.nodeCount ? (x[row] ?? 0) : 0;
+  /**
+   * Last resort for a solve that failed while a supply-gated part's power
+   * reading alternated between Newton iterates: read powered, its own draw
+   * pulled its supply below the power-on threshold; read unpowered, the
+   * supply recovered. A chip fed only through a charged capacitor and
+   * resistance (a 555 blinker switched off, or with its ground wire pulled,
+   * while its timing capacitor holds more than that threshold) has no
+   * consistent state at any step size, so hosts retried down to their floor
+   * and the clock stopped.
+   *
+   * The parts that alternated are held powered for a solve at the load
+   * seed's 1 ps interval, where every capacitor keeps its present charge,
+   * with every other supply-gated part held at the reading it settled on:
+   * the probe asks only whether the alternating parts can hold their supply.
+   * (Left free, a second chip at its own threshold could alternate at 1 ps
+   * though not at h, and fail the probe for a reason the step does not
+   * have.) A part whose supply still reads unpowered there is asked again at
+   * the same instant held unpowered. Only one whose supply then reads
+   * powered starves itself; one that reads unpowered either way sits on a
+   * supply still below its threshold at the step's start, rising through it
+   * within the step, and that crossing is the host's to land with a shorter
+   * step, as it always has. So is a part that read unpowered when the host's
+   * step began, in a 555 split's sub-step that starts inside that step just
+   * past the threshold its supply has risen through. Only a step already at
+   * the hosts' floor (HOST_MIN_STEP_S) has no shorter step left, so there
+   * those parts are held unpowered too: they turn on at most that one floor
+   * step late, where the host would otherwise stop. The step is solved again
+   * with these parts held unpowered and the rest free; that solution is the
+   * step's. Anything else (a probe that does not converge, parts that do hold
+   * their supply, supplies that are still low above the floor, or a held-off
+   * solve that fails too) rejects the step exactly as before: the trial
+   * solves run on a scratch matrix, so this.mna keeps its pattern and pivot
+   * history, and nothing is committed.
+   */
+  private _solveHoldingUnholdableOff(
+    h: number,
+    xInit: Float64Array,
+    readings: ReadonlyMap<string, PowerReadings>,
+  ): Float64Array | null {
+    const alternating: SimComponent[] = [];
+    for (const [id, reading] of readings) {
+      const comp = reading.flips >= 2 ? this._componentById.get(id) : undefined;
+      if (comp) alternating.push(comp);
     }
-    this.netV = netV;
+    const probePower = new Map<string, boolean>();
+    for (const [id, reading] of readings) probePower.set(id, reading.flips >= 2 || reading.powered);
 
-    const previousMosfetGates = new Map(this.state.mosfetGates);
-    this._lastX = x;
-    this._updateState(h, x);
-    // Homotopy rung solves hold digital state: their voltages are overlay
-    // artifacts, and a committed phantom clock edge would survive ladder
-    // success (only total failure restores the entry snapshot). See
-    // _homotopyRungConverged for the full rationale.
-    if (!this._dcDigitalHold) this._updateDigitalState(h, x);
-    this._updateElementI(h, x, previousMosfetGates);
-    // Operating-point solves advance no physical time, so the h-scaled
-    // physical integrators hold: without this, stage d's pseudo-steps feed
-    // up to ~0.5 s of pseudo-time into package heating and stress
-    // accumulators — enough to latch a permanent component failure — while
-    // simTime stands still. Held state also keeps the stamped topology
-    // fixed across the ladder (a failure latching mid-ladder would change
-    // the system under the continuation's feet).
-    if (!this._dcPhysicalTimeHold) {
-      this._updatePackageThermalState(h, x);
-      this._updateFailureStates(h, x);
+    const converged = (result: NewtonResult): boolean => {
+      const info = this.mna.lastSolveInfo;
+      return result.converged && !info.singular && !info.nonFinite && info.relativeResidual <= 1e-8;
+    };
+    const realMna = this.mna;
+    let held: Float64Array | null = null;
+    try {
+      this.mna = createLinearSystem(realMna.size);
+      this._rebuildStaticStampBase();
+      this._heldPower = probePower;
+      const onProbe = this._runNewton(DC_OP_COMPANION_H, xInit);
+      this._heldPower = null;
+      if (!converged(onProbe)) {
+        this._holdOffCounts.probeFailed += 1;
+        return null;
+      }
+      const starved = alternating.filter((comp) => !this._icPowerInfo(comp, onProbe.x).powered);
+      if (starved.length === 0) {
+        this._holdOffCounts.partsHold += 1;
+        return null;
+      }
+      const offPower = new Map(probePower);
+      for (const comp of starved) offPower.set(comp.id, false);
+      this._heldPower = offPower;
+      const offProbe = this._runNewton(DC_OP_COMPANION_H, xInit);
+      this._heldPower = null;
+      if (!converged(offProbe)) {
+        this._holdOffCounts.probeFailed += 1;
+        return null;
+      }
+      // A solve that starts inside the host's step (a 555 split's later
+      // sub-steps) may begin just past a threshold the step's start was still
+      // below: that part's supply was low when the host's step began.
+      const start = this._stepStart;
+      const lowAtStepStart = (comp: SimComponent): boolean =>
+        start !== null && start.power !== null && this.simTime > start.time && start.power.get(comp.id) === false;
+      const supplyLow = starved.filter((comp) => !this._icPowerInfo(comp, offProbe.x).powered || lowAtStepStart(comp));
+      // A supply still rising through a part's threshold is the host's to
+      // land with a shorter step. At its floor there is none to take: the
+      // part is held off for this one floor step instead of stopping the clock.
+      const unholdable = this._stepAtHostFloor ? starved : starved.filter((comp) => !supplyLow.includes(comp));
+      if (unholdable.length === 0) {
+        this._holdOffCounts.supplyLow += 1;
+        return null;
+      }
+      this._heldPower = new Map(unholdable.map((comp) => [comp.id, false]));
+      const result = this._runNewton(h, xInit);
+      if (!converged(result)) {
+        this._holdOffCounts.heldOffFailed += 1;
+        return null;
+      }
+      const info = this.mna.lastSolveInfo;
+      this.lastIters = result.iters;
+      this.lastMatrixSingular = info.singular;
+      this.lastMatrixIllConditioned = info.illConditioned;
+      this.lastRelativeResidual = info.relativeResidual;
+      this._holdOffCounts.accepted += 1;
+      if (this._stepAtHostFloor && supplyLow.length > 0) this._holdOffCounts.heldAtFloor += 1;
+      held = result.x;
+      return held;
+    } finally {
+      this.mna = realMna;
+      if (held === null) this._heldPower = null;
     }
   }
 
