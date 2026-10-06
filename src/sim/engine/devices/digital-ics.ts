@@ -793,6 +793,13 @@ export const hc595Model: DeviceModel = {
     ctx.stampFloatingDigitalInputs(comp, xGuess, power);
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
     const latch = st.latch ?? 0;
+    // QH' (pin 9) is the shift register's eighth stage sent back out for
+    // daisy chains: it changes on SRCLK, never on RCLK, and the /OE gate
+    // sits after the storage register and gates only QA-QH, so QH' drives
+    // on whatever the shift register holds (SN74HC595, SCLS041J, section 5
+    // pin functions and the section 8.2 block diagram, which branches pin 9
+    // off stage 8 before the storage flops and the 3-state gate).
+    ctx.stampDigitalOutput(comp, "qh2", (((st.shift ?? 0) >> 7) & 1) === 1, power);
     const oeHigh = ctx.logicHigh(comp, "/oe", xGuess, power);
     if (oeHigh) return; // outputs disabled
     for (const [pin, bit] of [["qa",0],["qb",1],["qc",2],["qd",3],["qe",4],["qf",5],["qg",6],["qh",7]] as [string, number][]) {
@@ -841,14 +848,20 @@ export const hc595Model: DeviceModel = {
       const pinName = ["qa","qb","qc","qd","qe","qf","qg","qh"][b];
       ctx.setDigitalState(`${comp.id}/${pinName}`, (latch >> b) & 1);
     }
+    // QH' follows the register this pass committed — the one the MCU edge
+    // replay above brought to its final level, not the one the step began
+    // with — and rides the shift register, not the storage register.
+    ctx.setDigitalState(`${comp.id}/qh2`, (shift >> 7) & 1);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // Committed latch stages behind the same /OE tristate gate (over the
-    // held OP) the transient stamp used.
+    // held OP) the transient stamp used; QH' carries the shift register's
+    // eighth stage around that gate, as in the transient stamp.
     const power = ctx.icPowerInfoAtOp(comp);
     if (!power.powered) return;
-    if (ctx.logicHighAtOp(comp, "/oe", power)) return;
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
+    acStampDigitalOutput(ctx, comp, ac, "qh2", (((st.shift ?? 0) >> 7) & 1) === 1, power);
+    if (ctx.logicHighAtOp(comp, "/oe", power)) return;
     const latch = st.latch ?? 0;
     for (const [pin, bit] of [["qa",0],["qb",1],["qc",2],["qd",3],["qe",4],["qf",5],["qg",6],["qh",7]] as [string, number][]) {
       acStampDigitalOutput(ctx, comp, ac, pin, ((latch >> bit) & 1) === 1, power);
