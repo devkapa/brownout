@@ -88,6 +88,16 @@ function potentiometerSegments(comp: DeviceComponent): { rCw: number; rCcw: numb
 export const POT_SEGMENT_MIN_RATING_SHARE = 0.25;
 
 /**
+ * A ferrite bead's DC resistance when its params carry none: the bundled
+ * catalog's value, the 22 AWG lead of the Fair-Rite 2743001111 the part is
+ * modelled on. Every place that reads a bead's rDc shares it, so a param-less
+ * bead conducts, rates and restamps at the catalog's resistance, and a bead
+ * with no rDc is rated against the catalog's p_max at the resistance that
+ * p_max was derived for.
+ */
+const FERRITE_BEAD_DEFAULT_R_DC_OHM = 0.0035;
+
+/**
  * Shared resistive-overload damage integrator for resistor, ferrite_bead,
  * potentiometer, and trimmer — one body in the engine's _updateFailureStates,
  * kept as one body here (the internal kind branch is part of the moved code).
@@ -116,7 +126,7 @@ function commitResistiveOverloadStress(
     // cannot conduct at one resistance and dissipate at another. The model is
     // its DC resistance and nothing else (no frequency-dependent impedance),
     // so I^2 * rDc is all the heat there is to count.
-    const resistance = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    const resistance = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     const current = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
     power = current * current * resistance;
   } else {
@@ -848,7 +858,7 @@ export const ferriteBeadModel: DeviceModel = {
   staticSignature: (ctx, comp, out) => {
     const p = comp.params;
     out.push(
-      String(p.rDc ?? 0.5),
+      String(p.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM),
       String(ctx.hasFailure(comp.id, "resistor_overload")),
     );
   },
@@ -861,7 +871,7 @@ export const ferriteBeadModel: DeviceModel = {
     if (pins.length < 2) return;
     // An overloaded bead fails open, as a resistor does.
     if (ctx.hasFailure(comp.id, "resistor_overload")) return;
-    const rDc = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    const rDc = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     const aFb = ctx.pinNode(comp.id, pins[0].id);
     const bFb = ctx.pinNode(comp.id, pins[1].id);
     stampResistor(ctx.mna, aFb, bFb, rDc);
@@ -874,7 +884,7 @@ export const ferriteBeadModel: DeviceModel = {
       ctx.setElementCurrent(comp.id, 0);
       return;
     }
-    const rDcI = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    const rDcI = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     const vaFb = ctx.vAt(x, ctx.pinNode(comp.id, pins[0].id));
     const vbFb = ctx.vAt(x, ctx.pinNode(comp.id, pins[1].id));
     ctx.setElementCurrent(comp.id, (vaFb - vbFb) / rDcI);
@@ -893,7 +903,7 @@ export const ferriteBeadModel: DeviceModel = {
     const pins = comp.pins;
     if (pins.length < 2) return;
     if (ctx.hasFailure(comp.id, "resistor_overload")) return;
-    const rDc = Math.max(0.001, Number(comp.params.rDc ?? 0.5));
+    const rDc = Math.max(0.001, Number(comp.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
     stampAcAdmittance(
       ac,
       ctx.pinNode(comp.id, pins[0].id),
