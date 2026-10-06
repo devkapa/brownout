@@ -2529,6 +2529,22 @@ records"). Constants, all from P3:35-38 unless marked new:
      CC candidate far above `V`). The instant is the event where the draw
      first exceeds the limit: a commit, a toggle, load, or a rail event at
      the crossing. The rail then solves in CC at the same instant.
+   - **A rail capacitor below the setpoint is demand** (F1's P9; manager
+     ruling 2026-10-06). A rail capacitor is not a term of `A0` or `G`
+     (point 7), but the CV → CC test adds the draw it would take at the
+     setpoint while it holds the rail short of `V`. With the deficit
+     `d = dir·(V − V_f − vc) > 0` (`V_f` its fixed pin's voltage, `vc` its
+     charge, both in the PSU's direction), that draw is `d / esr` for
+     `esr > 0` and unbounded for `esr = 0`. So a load's discharged capacitor
+     puts the PSU in CC at once, as in fixed classic (whose capacitor starts
+     at 0 V and whose 1 ps load seed sees the charging current), and the
+     rail ramps at the limit by point 4's closed form until the exit below.
+     A capacitor at or above the setpoint adds nothing: one carried charged
+     across a reload stays CV. In CV the deficit is zero (`esr = 0`, rule
+     2a) or decays with `esr·C`, so a supply inside its limit never
+     re-enters. Contract tests: 100 µF on a 5 V, 0.1 A PSU rises at
+     1000 V/s and reaches 5 V at about 5 ms, matching classic within the
+     normal criterion; the same capacitor charged to 5 V at load stays CV.
    - **CC → CV** when the CC solution reaches the setpoint, which for a
      linear rail is the draw at the setpoint back within the limit,
      `dir·(A0 + G V) <= iLimit` (classic since `fix/psu-cc-exit`: its
@@ -3587,8 +3603,12 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   tolerance and on a rail that lands on the setpoint at a step boundary
   (Rails point 5); there is no registered divergence for `reg`.
 - **Source edges.** Clock and pulse edges are compared per cycle (decision
-  6). Headless classic lags an edge by up to one step (`1/(10 f)` for a
-  clock, `per/10` for a pulse, HL:141-168); the core does not.
+  6). Headless classic lagged an edge by up to one step (`1/(10 f)` for a
+  clock, `per/10` for a pulse, HL:141-168) until `685179c`
+  (`fix/headless-source-breakpoints`, 0.6.3): it now lands a step 10 ns
+  before each source event and crosses it in a 10 ns guard step, as the
+  browser worker does, so both classic hosts place an edge within one guard
+  step. The core places it exactly.
 - **The reader scan** (W1f Q12). Known divergence
   `w1f-rail-scan-late-flip`: a reader whose pin moves with the rail against
   a fixed threshold (an LS input on a divider off the rail) is re-evaluated
@@ -3657,6 +3677,17 @@ failures and warnings (W1g)"):
   analytic time within `1e-9 s + 1e-9` relative; classic's time is recorded
   and does not gate. `output_sag`'s `since` is the readout time and is not
   compared.
+- **The power-gate ping-pong** (F1; manager ruling 2026-10-06). Known
+  divergence `w1f-power-gate-pingpong`: an IC whose own draw sags a weak
+  rail back across its power window makes the rail loop alternate, and the
+  core returns `-4` after point 3's 50 passes (the TS side falls back to
+  classic), where classic chatters for one step (repro: 4.279 V, r 5 Ω, a
+  74LS00 driving 1 kΩ). Classic's fix for an alternating gated power
+  reading is H8 (`fix/power-off-stall`): after a failed solve it holds the
+  chip powered for a probe solve and keeps it off if its supply still reads
+  unpowered. Once H8 is verified, its rule is ported into the rail loop so
+  both engines resolve the alternation the same way, and this id is
+  deleted. No core-only damping.
 - **Failure sets** compare `(componentId, kind, pinId)` exactly, `value` and
   `limit` within decision 6's tolerance, and `message` against classic's
   template applied to the core's own numbers (W1g point 19).
