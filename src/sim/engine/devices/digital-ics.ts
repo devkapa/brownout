@@ -530,19 +530,35 @@ export const hc595Model: DeviceModel = {
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
+    // SRCLK and RCLK on one net (common hobby wiring) are one clock, so the
+    // net is read once: between VIL and VIH the seeded level is drawn per
+    // pin, and two reads could split one slow edge across two steps. Row -1
+    // is ground or an unmapped pin, and two unmapped pins float apart.
+    const srclkNode = ctx.pinNode(comp.id, "srclk");
+    const tiedClocks = srclkNode >= 0 && srclkNode === ctx.pinNode(comp.id, "rclk");
     const srclkNow = ctx.logicHigh(comp, "srclk", x, power);
-    const rclkNow  = ctx.logicHigh(comp, "rclk", x, power);
+    const rclkNow  = tiedClocks ? srclkNow : ctx.logicHigh(comp, "rclk", x, power);
     const clrLow   = !ctx.logicHigh(comp, "/srclr", x, power);
     const rising595 = srclkNow && !(st.lastSRCLK ?? 0);
     const latchRise = rclkNow  && !(st.lastRCLK  ?? 0);
     let shift = st.shift ?? 0;
     let latch = st.latch ?? 0;
     if (clrLow) { shift = 0; }
-    else if (rising595) {
+    // A tied edge reaches the storage register before its own shift does.
+    // With both clocks connected together, TI's data sheet says "the shift
+    // register always is one clock pulse ahead of the storage register"
+    // (SN74HC595, SCLS041J, section 8.1). /SRCLR is a direct overriding clear
+    // (section 3), so one asserted in this step has already emptied the
+    // register, the order the separate-clock latch has always used.
+    const beforeEdge = shift;
+    if (!clrLow && rising595) {
       const serBit = ctx.logicHigh(comp, "ser", x, power) ? 1 : 0;
       shift = ((shift << 1) | serBit) & 0xff;
     }
-    if (latchRise) latch = shift;
+    // Separate clocks store the shifted value even when both rises land in
+    // one step: a latch pulse just after the last shift can share its step,
+    // and the sampled levels cannot tell that from two simultaneous edges.
+    if (latchRise) latch = tiedClocks ? beforeEdge : shift;
     ctx.state.icState.set(comp.id, { shift, latch, lastSRCLK: srclkNow ? 1 : 0, lastRCLK: rclkNow ? 1 : 0 });
     for (let b = 0; b < 8; b++) {
       const pinName = ["qa","qb","qc","qd","qe","qf","qg","qh"][b];
