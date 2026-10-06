@@ -287,8 +287,25 @@ interface Fingerprint {
   final: number;
 }
 
-function fingerprint(circuit: SimCircuit, durationS: number, options: RunOptions = {}, method?: "be" | "trap"): Fingerprint {
-  const runner = new HeadlessRunner(method ? { integrationMethod: method } : undefined);
+/**
+ * Steps with the source-event landing switched off: the path from before
+ * source events existed, on this platform, in this process.
+ */
+class PreSourceEventRunner extends HeadlessRunner {
+  protected override _sourceEvents(): never[] {
+    return [];
+  }
+}
+
+function fingerprint(
+  circuit: SimCircuit,
+  durationS: number,
+  options: RunOptions = {},
+  method?: "be" | "trap",
+  withoutEvents = false,
+): Fingerprint {
+  const Runner = withoutEvents ? PreSourceEventRunner : HeadlessRunner;
+  const runner = new Runner(method ? { integrationMethod: method } : undefined);
   runner.load(circuit);
   const net = runner.netIdFor("c", "a")!;
   let sumH2 = 0;
@@ -312,41 +329,45 @@ const disabledPulse = part("off", "signal_gen", ["pos", "neg"], { waveform: "pul
 
 /**
  * Runs with nothing to land on: no timed source, a disabled one, or a
- * continuous waveform whose only event is its start at t = 0. Captured on
- * the dense backend at brownout 0.6.1, before source events existed here,
- * so they must step exactly as they did.
+ * continuous waveform whose only event is its start at t = 0. The `was`
+ * capture is the dense backend at brownout 0.6.1 on macOS; platforms differ
+ * from it in the last ulps (V8's transcendentals differ, and the trapezoidal
+ * battery run reaches these numbers only to 1e-12), so identity against the
+ * capture is asserted on integers and to 1e-6 on floats, and the exact
+ * identity claim — landing changes nothing when there is nothing to land on
+ * — is made against the same run's own pre-source-event reference.
  */
-const NO_SOURCE_EVENTS: Record<string, { run: () => Fingerprint; was: Fingerprint }> = {
+const NO_SOURCE_EVENTS: Record<string, { run: (withoutEvents?: boolean) => Fingerprint; was: Fingerprint }> = {
   "battery RC": {
-    run: () => fingerprint(rc(battery), 5e-3),
+    run: (withoutEvents) => fingerprint(rc(battery), 5e-3, {}, undefined, withoutEvents),
     was: { accepted: 62, rejected: 0, failed: 0, sumH2: 0.000005614181152085763, integral: 0.02451080960719315, final: 4.999999993157764 },
   },
   "battery RC, trapezoidal": {
-    run: () => fingerprint(rc(battery), 5e-3, {}, "trap"),
+    run: (withoutEvents) => fingerprint(rc(battery), 5e-3, {}, "trap", withoutEvents),
     was: { accepted: 55, rejected: 0, failed: 0, sumH2: 0.000003853193324752912, integral: 0.024543893870414314, final: 4.999999994947919 },
   },
   "battery RC, fixed 10 us": {
-    run: () => fingerprint(rc(battery), 2e-3, { adaptive: false, fixedStepS: 1e-5 }),
+    run: (withoutEvents) => fingerprint(rc(battery), 2e-3, { adaptive: false, fixedStepS: 1e-5 }, undefined, withoutEvents),
     was: { accepted: 200, rejected: 0, failed: 0, sumH2: 1.9999999999999908e-8, integral: 0.009499999993632893, final: 4.999999968671096 },
   },
   "555 astable": {
-    run: () => fingerprint(astable(), 20e-3),
+    run: (withoutEvents) => fingerprint(astable(), 20e-3, {}, undefined, withoutEvents),
     was: { accepted: 357, rejected: 39, failed: 0, sumH2: 0.0000012260511645207803, integral: 0.04931132477725497, final: 2.059396382727353 },
   },
   "sine signal_gen into RC": {
-    run: () => fingerprint(rc(generator("sine")), 5e-3),
+    run: (withoutEvents) => fingerprint(rc(generator("sine")), 5e-3, {}, undefined, withoutEvents),
     was: { accepted: 480, rejected: 26, failed: 0, sumH2: 6.896038561936105e-8, integral: 0.012321543054380414, final: 1.3613673830839441 },
   },
   "triangle signal_gen into RC": {
-    run: () => fingerprint(rc(generator("triangle")), 5e-3),
+    run: (withoutEvents) => fingerprint(rc(generator("triangle")), 5e-3, {}, undefined, withoutEvents),
     was: { accepted: 387, rejected: 22, failed: 0, sumH2: 9.170639142993196e-8, integral: 0.012361299662034893, final: 1.0279127429154946 },
   },
   "dc signal_gen into RC": {
-    run: () => fingerprint(rc(generator("dc")), 5e-3),
+    run: (withoutEvents) => fingerprint(rc(generator("dc")), 5e-3, {}, undefined, withoutEvents),
     was: { accepted: 60, rejected: 0, failed: 0, sumH2: 0.0000050382470645252705, integral: 0.012243271233703936, final: 2.4999999957050196 },
   },
   "disabled pulse signal_gen beside a battery RC": {
-    run: () => fingerprint(rc(battery, [disabledPulse], [wire("off", "pos", "c", "a"), wire("off", "neg", "c", "b")]), 5e-3),
+    run: (withoutEvents) => fingerprint(rc(battery, [disabledPulse], [wire("off", "pos", "c", "a"), wire("off", "neg", "c", "b")]), 5e-3, {}, undefined, withoutEvents),
     was: { accepted: 62, rejected: 0, failed: 0, sumH2: 0.000005614181152085763, integral: 0.02451080960719315, final: 4.999999993157764 },
   },
 };
@@ -364,11 +385,13 @@ describe("HeadlessRunner with no source events", () => {
 
   for (const [name, { run, was }] of Object.entries(NO_SOURCE_EVENTS)) {
     it(`steps the ${name} exactly as before`, () => {
-      const now = run();
-      if (!FORCED_SPARSE) {
-        expect(now).toEqual(was);
-        return;
-      }
+      const before = run(true);
+      const now = run(false);
+      // Exact identity, on every platform and backend: with no event to
+      // land on, the landing changes nothing.
+      expect(now).toEqual(before);
+      // The 0.6.1 capture: integers exactly, floats to 1e-6 (see the map's
+      // comment for why not bit-for-bit).
       expect([now.accepted, now.rejected, now.failed]).toEqual([was.accepted, was.rejected, was.failed]);
       for (const key of ["sumH2", "integral", "final"] as const) {
         expect(Math.abs(now[key] - was[key]), key).toBeLessThanOrEqual(1e-9 + 1e-6 * Math.abs(was[key]));
