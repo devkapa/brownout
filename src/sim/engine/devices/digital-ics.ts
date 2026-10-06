@@ -62,6 +62,8 @@ import type {
   DeviceComponent,
   DeviceContext,
   DeviceModel,
+  McuInputEdges,
+  McuStepShadow,
 } from "../device-registry.js";
 import { stampAcAdmittance, type AcStampSurface } from "../ac-system.js";
 import {
@@ -145,6 +147,146 @@ function acStampDigitalOutput(
     return;
   }
   ac.addAc(node, node, g, 0);
+}
+
+/**
+ * Walk the edges an MCU drove onto a part's inputs during its last step,
+ * one port write at a time, oldest first, calling `onWrite` with the input
+ * levels just before and just after each write. The solver sees MCU pins
+ * only as they stand at the end of each MCU step (up to 100 us), so a part
+ * that read its inputs once per solve missed every pulse that started and
+ * ended inside one, such as each clock of a shiftOut().
+ *
+ * Pins changed by one write change together, as on hardware, so a register
+ * clocked by the write samples the levels in `before`. The walk moves a pin
+ * only to a level the MCU drives: a pin no MCU drives keeps its solved
+ * level, and a pin the MCU lets go of (an input, with or without its
+ * pull-up) holds its level until the part's step-end read, which is the
+ * only point where the solve shows that net without the MCU. `levels` gives
+ * the starting level of pins whose last read the part keeps (its clocks);
+ * any other pin starts where the MCU held it when the step began, or at its
+ * solved level. Returns the levels the walk ends on.
+ *
+ * An input wired to one of the part's own outputs (a flip-flop's D to its
+ * /Q, a CD4017's RESET to Q5) cannot keep its solved level: the solve
+ * shows the output from before the walk. With `feedback`, such inputs
+ * follow the outputs the part's state gives, and when a write moves them,
+ * the move is applied as a further write of its own, since on hardware it
+ * arrives a propagation delay later.
+ */
+function replayMcuWrites(
+  edges: McuInputEdges,
+  pins: readonly string[],
+  levels: Record<string, 0 | 1>,
+  solved: (pin: string) => 0 | 1,
+  onWrite: (before: Readonly<Record<string, 0 | 1>>, after: Readonly<Record<string, 0 | 1>>) => void,
+  feedback?: OwnOutputFeedback,
+): Record<string, 0 | 1> {
+  let current: Record<string, 0 | 1> = { ...levels };
+  for (const pin of pins) {
+    if (current[pin] === undefined) current[pin] = edges.start[pin] ?? solved(pin);
+  }
+  // A part whose outputs feed its inputs can chase itself (an asynchronous
+  // reset that clears its own trigger settles in two passes); the bound
+  // stops a ring that would oscillate forever.
+  const settle = (): void => {
+    if (!feedback) return;
+    for (let pass = 0; pass < 8; pass++) {
+      const outputs = feedback.outputs(current);
+      let next: Record<string, 0 | 1> | null = null;
+      for (const [pin, output] of feedback.pins) {
+        const level = outputs[output];
+        if (level === undefined || level === current[pin]) continue;
+        next ??= { ...current };
+        next[pin] = level;
+      }
+      if (!next) return;
+      onWrite(current, next);
+      current = next;
+    }
+  };
+  // An edge the last solve-paced read had not yet seen through the part's
+  // own outputs is still owed, so it is applied before the MCU's writes.
+  settle();
+  for (const group of edges.groups) {
+    const next = { ...current };
+    for (const { pin, level } of group) {
+      if (level !== null) next[pin] = level;
+    }
+    onWrite(current, next);
+    current = next;
+    settle();
+  }
+  return current;
+}
+
+/** A part's inputs that share a net with its own outputs (replayMcuWrites). */
+interface OwnOutputFeedback {
+  /** Input pin -> the output pin on its net. */
+  readonly pins: ReadonlyMap<string, string>;
+  /**
+   * The levels the part's outputs drive for its current state, given its
+   * input levels; an output it is not driving (disabled) is left out.
+   */
+  readonly outputs: (levels: Readonly<Record<string, 0 | 1>>) => Record<string, 0 | 1>;
+}
+
+/** Map each of `inputs` that shares a net with one of `outputs` to that output. */
+function ownOutputNets(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  inputs: readonly string[],
+  outputs: readonly string[],
+): Map<string, string> {
+  return feedbackNetsFor((pin) => ctx.pinNode(comp.id, pin), inputs, outputs);
+}
+
+/**
+ * The own-output net map behind ownOutputNets, over a bare pin-node resolver
+ * so the MCU-step shadow (which has no DeviceContext) finds the same nets
+ * the committed pass will.
+ */
+function feedbackNetsFor(
+  pinNode: (pin: string) => number,
+  inputs: readonly string[],
+  outputs: readonly string[],
+): Map<string, string> {
+  const outputByNode = new Map<number, string>();
+  for (const output of outputs) {
+    const node = pinNode(output);
+    if (node >= 0) outputByNode.set(node, output);
+  }
+  const wired = new Map<string, string>();
+  for (const input of inputs) {
+    const node = pinNode(input);
+    const output = node >= 0 ? outputByNode.get(node) : undefined;
+    if (output !== undefined) wired.set(input, output);
+  }
+  return wired;
+}
+
+/**
+ * A step-end pin reader for a part that just replayed MCU edges: an input
+ * wired to its own outputs reads the level the walk ended on, because the
+ * solve still shows the outputs from before the walk; every other pin reads
+ * its solved level exactly as before.
+ */
+function stepEndReader(
+  read: (pin: string) => boolean,
+  feedbackPins: ReadonlyMap<string, string> | undefined,
+  walked: Readonly<Record<string, 0 | 1>> | undefined,
+): (pin: string) => boolean {
+  if (!feedbackPins || !walked || feedbackPins.size === 0) return read;
+  return (pin) => (feedbackPins.has(pin) ? walked[pin] === 1 : read(pin));
+}
+
+/** A part's state after an MCU's edges (replayMcuWrites), for its step-end read. */
+interface McuReplay {
+  readonly state: Record<string, number>;
+  /** The input levels the edges left. */
+  readonly levels: Readonly<Record<string, 0 | 1>>;
+  /** Inputs wired to the part's own outputs (see stepEndReader). */
+  readonly feedbackPins: ReadonlyMap<string, string>;
 }
 
 /** Stamp a combinational IC (74LS00/04/08/32/86/157/245/283) using evalCombinationalIC. */
@@ -332,6 +474,54 @@ export const combinationalIcModel: DeviceModel = {
 };
 
 // ── S4 sequential ICs (stamp committed output state) ───────────
+const LS161_EDGE_PINS = ["clk", "/clr", "/load", "enp", "ent", "a", "b", "c", "d"] as const;
+const LS161_OUTPUT_PINS = ["qa", "qb", "qc", "qd", "rco"] as const;
+
+/**
+ * Count a 74LS161 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). /CLR clears at once and holds while low. A CLK
+ * rise loads A-D while /LOAD is low, or counts while ENP and ENT are high,
+ * with all of them read from before its write. Null when no MCU edge
+ * reached the part.
+ */
+function replay161McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, LS161_EDGE_PINS);
+  if (!edges) return null;
+  let count = st.count ?? 0;
+  const feedbackPins = ownOutputNets(ctx, comp, LS161_EDGE_PINS, LS161_OUTPUT_PINS);
+  const levels = replayMcuWrites(
+    edges,
+    LS161_EDGE_PINS,
+    { clk: st.lastClk ? 1 : 0 },
+    (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
+    (before, after) => {
+      if (!after["/clr"]) {
+        count = 0;
+      } else if (after.clk && !before.clk && before["/clr"]) {
+        if (!before["/load"]) count = before.a | (before.b << 1) | (before.c << 2) | (before.d << 3);
+        else if (before.enp && before.ent) count = (count + 1) & 0xf;
+      }
+    },
+    feedbackPins.size === 0 ? undefined : {
+      pins: feedbackPins,
+      outputs: (inputs) => ({
+        qa: (count & 1) as 0 | 1,
+        qb: ((count >> 1) & 1) as 0 | 1,
+        qc: ((count >> 2) & 1) as 0 | 1,
+        qd: ((count >> 3) & 1) as 0 | 1,
+        rco: count === 15 && inputs.ent ? 1 : 0,
+      }),
+    },
+  );
+  return { state: { ...st, count, lastClk: levels.clk }, levels, feedbackPins };
+}
+
 export const ls161Model: DeviceModel = {
   kinds: ["74ls161"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -352,12 +542,16 @@ export const ls161Model: DeviceModel = {
   updateDigital: (ctx, comp, x, _h) => {
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74ls161");
-    const clkNow  = ctx.logicHigh(comp, "clk", x, power);
-    const clrLow  = !ctx.logicHigh(comp, "/clr", x, power);
-    const loadLow = !ctx.logicHigh(comp, "/load", x, power);
-    const enpHigh = ctx.logicHigh(comp, "enp", x, power);
-    const entHigh = ctx.logicHigh(comp, "ent", x, power);
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("74ls161");
+    // An MCU's pulses inside its last step come first (see hc595Model).
+    const replay = replay161McuEdges(ctx, comp, x, power, committed);
+    const st = replay?.state ?? committed;
+    const high = stepEndReader((pin) => ctx.logicHigh(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
+    const clkNow  = high("clk");
+    const clrLow  = !high("/clr");
+    const loadLow = !high("/load");
+    const enpHigh = high("enp");
+    const entHigh = high("ent");
     const rising  = clkNow && !st.lastClk;
     let count = st.count ?? 0;
     if (clrLow) {
@@ -367,7 +561,7 @@ export const ls161Model: DeviceModel = {
         // Synchronous parallel load
         let loaded = 0;
         for (const [bit, pin] of [["a",0],["b",1],["c",2],["d",3]] as [string,number][]) {
-          if (ctx.logicHigh(comp, bit, x, power)) loaded |= (1 << pin);
+          if (high(bit)) loaded |= (1 << pin);
         }
         count = loaded;
       } else if (enpHigh && entHigh) {
@@ -396,6 +590,53 @@ export const ls161Model: DeviceModel = {
   },
 };
 
+const LS173_EDGE_PINS = ["clk", "/clr", "g1", "g2", "d1", "d2", "d3", "d4", "m", "n"] as const;
+const LS173_OUTPUT_PINS = ["q1", "q2", "q3", "q4"] as const;
+
+/**
+ * Load a 74LS173 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). This model's CLR pin clears while high, as on
+ * the real chip, and holds. A CLK rise with G1 and G2 low stores D1-D4,
+ * all read from before its write. M or N high only floats the outputs.
+ * Null when no MCU edge reached the part.
+ */
+function replay173McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, LS173_EDGE_PINS);
+  if (!edges) return null;
+  let q: number[] = [st.q1 ?? 0, st.q2 ?? 0, st.q3 ?? 0, st.q4 ?? 0];
+  const feedbackPins = ownOutputNets(ctx, comp, LS173_EDGE_PINS, LS173_OUTPUT_PINS);
+  const levels = replayMcuWrites(
+    edges,
+    LS173_EDGE_PINS,
+    { clk: st.lastClk ? 1 : 0 },
+    (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
+    (before, after) => {
+      if (after["/clr"]) q = [0, 0, 0, 0];
+      else if (after.clk && !before.clk && !before["/clr"] && !before.g1 && !before.g2) {
+        q = [before.d1, before.d2, before.d3, before.d4];
+      }
+    },
+    feedbackPins.size === 0 ? undefined : {
+      pins: feedbackPins,
+      outputs: (inputs): Record<string, 0 | 1> =>
+        inputs.m || inputs.n
+          ? {}
+          : { q1: q[0] ? 1 : 0, q2: q[1] ? 1 : 0, q3: q[2] ? 1 : 0, q4: q[3] ? 1 : 0 },
+    },
+  );
+  return {
+    state: { ...st, q1: q[0]!, q2: q[1]!, q3: q[2]!, q4: q[3]!, lastClk: levels.clk },
+    levels,
+    feedbackPins,
+  };
+}
+
 export const ls173Model: DeviceModel = {
   kinds: ["74ls173"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -415,20 +656,24 @@ export const ls173Model: DeviceModel = {
   updateDigital: (ctx, comp, x, _h) => {
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74ls173");
-    const clkNow  = ctx.logicHigh(comp, "clk", x, power);
-    const clrHigh = ctx.logicHigh(comp, "/clr", x, power);
-    const g1Low   = !ctx.logicHigh(comp, "g1", x, power);
-    const g2Low   = !ctx.logicHigh(comp, "g2", x, power);
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("74ls173");
+    // An MCU's pulses inside its last step come first (see hc595Model).
+    const replay = replay173McuEdges(ctx, comp, x, power, committed);
+    const st = replay?.state ?? committed;
+    const high = stepEndReader((pin) => ctx.logicHigh(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
+    const clkNow  = high("clk");
+    const clrHigh = high("/clr");
+    const g1Low   = !high("g1");
+    const g2Low   = !high("g2");
     const rising  = clkNow && !st.lastClk;
     let q1 = st.q1 ?? 0, q2 = st.q2 ?? 0, q3 = st.q3 ?? 0, q4 = st.q4 ?? 0;
     if (clrHigh) {
       q1 = q2 = q3 = q4 = 0;
     } else if (rising && g1Low && g2Low) {
-      q1 = ctx.logicHigh(comp, "d1", x, power) ? 1 : 0;
-      q2 = ctx.logicHigh(comp, "d2", x, power) ? 1 : 0;
-      q3 = ctx.logicHigh(comp, "d3", x, power) ? 1 : 0;
-      q4 = ctx.logicHigh(comp, "d4", x, power) ? 1 : 0;
+      q1 = high("d1") ? 1 : 0;
+      q2 = high("d2") ? 1 : 0;
+      q3 = high("d3") ? 1 : 0;
+      q4 = high("d4") ? 1 : 0;
     }
     ctx.state.icState.set(comp.id, { q1, q2, q3, q4, lastClk: clkNow ? 1 : 0 });
     ctx.setDigitalState(`${comp.id}/q1`, q1); ctx.setDigitalState(`${comp.id}/q2`, q2);
@@ -512,6 +757,48 @@ export const ls189Model: DeviceModel = {
   },
 };
 
+// The 74HC595 inputs an MCU's sub-step pulses can reach. /OE only gates the
+// output stage, which the stamp reads afresh at every solve.
+const HC595_EDGE_PINS = ["srclk", "rclk", "ser", "/srclr"] as const;
+
+/**
+ * Clock a 74HC595 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). SRCLK shifts in the SER level from before its
+ * write. RCLK rising in the same write as SRCLK stores the byte from before
+ * that shift, as tied clocks do, and RCLK raised by a later write stores the
+ * shifted byte. /SRCLR empties the shift register and holds it empty while
+ * low. Null when no MCU edge reached the part.
+ */
+function replay595McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, HC595_EDGE_PINS);
+  if (!edges) return null;
+  let shift = st.shift ?? 0;
+  let latch = st.latch ?? 0;
+  const levels = replayMcuWrites(
+    edges,
+    HC595_EDGE_PINS,
+    { srclk: st.lastSRCLK ? 1 : 0, rclk: st.lastRCLK ? 1 : 0 },
+    (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
+    (before, after) => {
+      const beforeWrite = shift;
+      if (after.srclk && !before.srclk && before["/srclr"]) shift = ((shift << 1) | before.ser) & 0xff;
+      if (!after["/srclr"]) shift = 0;
+      if (after.rclk && !before.rclk) latch = beforeWrite;
+    },
+  );
+  return {
+    state: { ...st, shift, latch, lastSRCLK: levels.srclk, lastRCLK: levels.rclk },
+    levels,
+    feedbackPins: new Map(),
+  };
+}
+
 export const hc595Model: DeviceModel = {
   kinds: ["74hc595"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -520,6 +807,13 @@ export const hc595Model: DeviceModel = {
     ctx.stampFloatingDigitalInputs(comp, xGuess, power);
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
     const latch = st.latch ?? 0;
+    // QH' (pin 9) is the shift register's eighth stage sent back out for
+    // daisy chains: it changes on SRCLK, never on RCLK, and the /OE gate
+    // sits after the storage register and gates only QA-QH, so QH' drives
+    // on whatever the shift register holds (SN74HC595, SCLS041J, section 5
+    // pin functions and the section 8.2 block diagram, which branches pin 9
+    // off stage 8 before the storage flops and the 3-state gate).
+    ctx.stampDigitalOutput(comp, "qh2", (((st.shift ?? 0) >> 7) & 1) === 1, power);
     const oeHigh = ctx.logicHigh(comp, "/oe", xGuess, power);
     if (oeHigh) return; // outputs disabled
     for (const [pin, bit] of [["qa",0],["qb",1],["qc",2],["qd",3],["qe",4],["qf",5],["qg",6],["qh",7]] as [string, number][]) {
@@ -529,7 +823,11 @@ export const hc595Model: DeviceModel = {
   updateDigital: (ctx, comp, x, _h) => {
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
+    // Pulses an MCU drove inside its last step are applied first. They leave
+    // the clock levels where the MCU left them, so the step-end read below
+    // finds an edge only on a clock the MCU does not drive.
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
+    const st = replay595McuEdges(ctx, comp, x, power, committed)?.state ?? committed;
     // SRCLK and RCLK on one net (common hobby wiring) are one clock, so the
     // net is read once: between VIL and VIH the seeded level is drawn per
     // pin, and two reads could split one slow edge across two steps. Row -1
@@ -564,14 +862,20 @@ export const hc595Model: DeviceModel = {
       const pinName = ["qa","qb","qc","qd","qe","qf","qg","qh"][b];
       ctx.setDigitalState(`${comp.id}/${pinName}`, (latch >> b) & 1);
     }
+    // QH' follows the register this pass committed — the one the MCU edge
+    // replay above brought to its final level, not the one the step began
+    // with — and rides the shift register, not the storage register.
+    ctx.setDigitalState(`${comp.id}/qh2`, (shift >> 7) & 1);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // Committed latch stages behind the same /OE tristate gate (over the
-    // held OP) the transient stamp used.
+    // held OP) the transient stamp used; QH' carries the shift register's
+    // eighth stage around that gate, as in the transient stamp.
     const power = ctx.icPowerInfoAtOp(comp);
     if (!power.powered) return;
-    if (ctx.logicHighAtOp(comp, "/oe", power)) return;
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc595");
+    acStampDigitalOutput(ctx, comp, ac, "qh2", (((st.shift ?? 0) >> 7) & 1) === 1, power);
+    if (ctx.logicHighAtOp(comp, "/oe", power)) return;
     const latch = st.latch ?? 0;
     for (const [pin, bit] of [["qa",0],["qb",1],["qc",2],["qd",3],["qe",4],["qf",5],["qg",6],["qh",7]] as [string, number][]) {
       acStampDigitalOutput(ctx, comp, ac, pin, ((latch >> bit) & 1) === 1, power);
@@ -579,8 +883,128 @@ export const hc595Model: DeviceModel = {
   },
 };
 
+const HC165_EDGE_PINS = [
+  "cp", "cp_inh", "/pl", "ds", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+] as const;
+const HC165_OUTPUT_PINS = ["q7", "/q7"] as const;
+
+/**
+ * The 74HC165's write semantics, one closure for both consumers: the
+ * committed replay (replay165McuEdges) and the MCU-step shadow
+ * (build165StepShadow), so the two cannot drift apart. /PL low loads D0-D7
+ * at once and holds them; a CP rise with CP_INH low shifts DS in, both read
+ * from before the write. `outputs` gives the two output pins' levels for the
+ * register as it currently stands; `state` is the committed icState the
+ * replay ends on.
+ */
+function hc165Clocking(st: Record<string, number>) {
+  let shift = st.shift ?? 0;
+  return {
+    onWrite(
+      before: Readonly<Record<string, 0 | 1>>,
+      after: Readonly<Record<string, 0 | 1>>,
+    ): void {
+      if (!after["/pl"]) {
+        shift = 0;
+        for (let i = 0; i < 8; i++) if (after[`d${i}`]) shift |= 1 << i;
+      } else if (after.cp && !before.cp && !before.cp_inh && before["/pl"]) {
+        shift = ((shift << 1) | before.ds) & 0xff;
+      }
+    },
+    outputs(): Record<string, 0 | 1> {
+      const q7 = ((shift >> 7) & 1) as 0 | 1;
+      return { q7, "/q7": (q7 ^ 1) as 0 | 1 };
+    },
+    state(levels: Record<string, 0 | 1>): Record<string, number> {
+      return { ...st, shift, lastClk: levels.cp, lastLoad: levels["/pl"] };
+    },
+  };
+}
+
+/**
+ * Clock a 74HC165 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). /PL low loads D0-D7 at once and holds them; a CP
+ * rise with CP_INH low shifts DS in, both read from before its write. Null
+ * when no MCU edge reached the part. An MCU that reads Q7 inside the same
+ * step (a shiftIn()) is fed by the part's shadow instead
+ * (hc165Model.mcuStepShadow).
+ */
+function replay165McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, HC165_EDGE_PINS);
+  if (!edges) return null;
+  const clocking = hc165Clocking(st);
+  const feedbackPins = ownOutputNets(ctx, comp, HC165_EDGE_PINS, HC165_OUTPUT_PINS);
+  const levels = replayMcuWrites(
+    edges,
+    HC165_EDGE_PINS,
+    { cp: st.lastClk ? 1 : 0 },
+    (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
+    clocking.onWrite,
+    feedbackPins.size === 0 ? undefined : {
+      pins: feedbackPins,
+      outputs: () => clocking.outputs(),
+    },
+  );
+  return { state: clocking.state(levels), levels, feedbackPins };
+}
+
+/**
+ * A 74HC165 shadow run inside the MCU step (H11 readback). The committed
+ * pass replays a step's writes only in the next digital pass, so a program
+ * that reads Q7 between two of its own writes (a shiftIn()) read the last
+ * solve's level. The shadow runs the SAME replayMcuWrites walker with the
+ * SAME hc165Clocking semantics, one write at a time as the core captures
+ * it, so it lands where the committed replay will: the first walk seeds CP
+ * from the committed clock level and fills the other inputs exactly as the
+ * committed walk does, and every later walk resumes from the full level map
+ * the previous one ended on (the settle pass is idempotent once settled, so
+ * walking one write at a time equals walking them all at once).
+ */
+function build165StepShadow(args: {
+  st: Record<string, number>;
+  start: Record<string, 0 | 1 | null>;
+  solved: (pin: string) => 0 | 1;
+  pinNode: (pin: string) => number;
+}): McuStepShadow {
+  const clocking = hc165Clocking(args.st);
+  const feedbackPins = feedbackNetsFor(args.pinNode, HC165_EDGE_PINS, HC165_OUTPUT_PINS);
+  const feedback = feedbackPins.size === 0 ? undefined : {
+    pins: feedbackPins,
+    outputs: () => clocking.outputs(),
+  };
+  let seeded = false;
+  let current: Record<string, 0 | 1> = {};
+  return {
+    applyWrite(events) {
+      current = replayMcuWrites(
+        { start: seeded ? current : args.start, groups: [events] },
+        HC165_EDGE_PINS,
+        seeded ? {} : { cp: args.st.lastClk ? 1 : 0 },
+        args.solved,
+        clocking.onWrite,
+        feedback,
+      );
+      seeded = true;
+    },
+    outputLevels: () => clocking.outputs(),
+  };
+}
+
 export const hc165Model: DeviceModel = {
   kinds: ["74hc165"],
+  // H11 readback: shadow the register inside an MCU step that clocks it, so
+  // the program's own reads (shiftIn) see the level each write produced.
+  mcuStepShadow: {
+    inputs: HC165_EDGE_PINS,
+    outputs: HC165_OUTPUT_PINS,
+    build: build165StepShadow,
+  },
   stamp: (ctx, comp, xGuess, _h) => {
     const power = ctx.icPowerInfo(comp, xGuess);
     if (!power.powered) return;
@@ -594,10 +1018,14 @@ export const hc165Model: DeviceModel = {
   updateDigital: (ctx, comp, x, _h) => {
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc165");
-    const plLow    = !ctx.logicHigh(comp, "/pl", x, power);
-    const cpNow    = ctx.logicHigh(comp, "cp", x, power);
-    const cpInhHigh = ctx.logicHigh(comp, "cp_inh", x, power);
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc165");
+    // An MCU's pulses inside its last step come first (see hc595Model).
+    const replay = replay165McuEdges(ctx, comp, x, power, committed);
+    const st = replay?.state ?? committed;
+    const high = stepEndReader((pin) => ctx.logicHigh(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
+    const plLow    = !high("/pl");
+    const cpNow    = high("cp");
+    const cpInhHigh = high("cp_inh");
     const clockEnable = !cpInhHigh;
     const rising165 = cpNow && !(st.lastClk ?? 0) && clockEnable;
     let shift = st.shift ?? 0;
@@ -606,10 +1034,10 @@ export const hc165Model: DeviceModel = {
       shift = 0;
       for (let i = 0; i < 8; i++) {
         const pin = i < 4 ? `d${i}` : `d${i}`;
-        if (ctx.logicHigh(comp, pin, x, power)) shift |= (1 << i);
+        if (high(pin)) shift |= (1 << i);
       }
     } else if (rising165) {
-      const dsBit = ctx.logicHigh(comp, "ds", x, power) ? 1 : 0;
+      const dsBit = high("ds") ? 1 : 0;
       shift = (((shift << 1) | dsBit) & 0xff);
     }
     ctx.state.icState.set(comp.id, { shift, lastClk: cpNow ? 1 : 0, lastLoad: plLow ? 0 : 1 });
@@ -628,6 +1056,67 @@ export const hc165Model: DeviceModel = {
 };
 
 // ── W2.2 sequential ICs ──────────────────────────────────────────
+const HC74_EDGE_PINS = ["clk1", "d1", "pre1_n", "clr1_n", "clk2", "d2", "pre2_n", "clr2_n"] as const;
+const HC74_OUTPUT_PINS = ["q1", "q1_n", "q2", "q2_n"] as const;
+
+/**
+ * Clock a 74HC74 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). Per flip-flop, /CLR and /PRE act at once and
+ * hold, both low setting Q and /Q high; otherwise a CLK rise stores D, both
+ * read from before its write. A D or CLK wired to the chip's own outputs (a
+ * toggle, or the second flip-flop clocked by the first) follows them
+ * through the walk. Null when no MCU edge reached the part.
+ */
+function replay74McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, HC74_EDGE_PINS);
+  if (!edges) return null;
+  const q = [0, (st.q1 ?? 0) >= 0.5 ? 1 : 0, (st.q2 ?? 0) >= 0.5 ? 1 : 0];
+  const qn = [0, (st.q1n ?? 1) >= 0.5 ? 1 : 0, (st.q2n ?? 1) >= 0.5 ? 1 : 0];
+  const flipFlop = (n: 1 | 2, before: Readonly<Record<string, 0 | 1>>, after: Readonly<Record<string, 0 | 1>>): void => {
+    const clrLow = !after[`clr${n}_n`];
+    const preLow = !after[`pre${n}_n`];
+    if (clrLow || preLow) {
+      q[n] = preLow ? 1 : 0;
+      qn[n] = clrLow ? 1 : 0;
+    } else if (after[`clk${n}`] && !before[`clk${n}`] && before[`clr${n}_n`] && before[`pre${n}_n`]) {
+      q[n] = before[`d${n}`];
+      qn[n] = q[n] ? 0 : 1;
+    }
+  };
+  const feedbackPins = ownOutputNets(ctx, comp, HC74_EDGE_PINS, HC74_OUTPUT_PINS);
+  const levels = replayMcuWrites(
+    edges,
+    HC74_EDGE_PINS,
+    { clk1: st.lastClk1 ? 1 : 0, clk2: st.lastClk2 ? 1 : 0 },
+    // logicHighH reads an open /PRE or /CLR high, as the step-end read does.
+    (pin) => (ctx.logicHighH(comp, pin, x, power) ? 1 : 0),
+    (before, after) => {
+      flipFlop(1, before, after);
+      flipFlop(2, before, after);
+    },
+    feedbackPins.size === 0 ? undefined : {
+      pins: feedbackPins,
+      outputs: (): Record<string, 0 | 1> => ({
+        q1: q[1] ? 1 : 0,
+        q1_n: qn[1] ? 1 : 0,
+        q2: q[2] ? 1 : 0,
+        q2_n: qn[2] ? 1 : 0,
+      }),
+    },
+  );
+  return {
+    state: { ...st, q1: q[1]!, q1n: qn[1]!, lastClk1: levels.clk1, q2: q[2]!, q2n: qn[2]!, lastClk2: levels.clk2 },
+    levels,
+    feedbackPins,
+  };
+}
+
 export const hc74Model: DeviceModel = {
   kinds: ["74hc74"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -683,7 +1172,12 @@ export const hc74Model: DeviceModel = {
     // In the both-asserted case Q and Q_n are both HIGH per datasheet.
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc74");
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("74hc74");
+    // An MCU's pulses inside its last step come first (see hc595Model).
+    const replay = replay74McuEdges(ctx, comp, x, power, committed);
+    const st = replay?.state ?? committed;
+    const high = stepEndReader((pin) => ctx.logicHigh(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
+    const highH = stepEndReader((pin) => ctx.logicHighH(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
 
     let q1  = (st.q1  ?? 0) >= 0.5;
     let q1n = (st.q1n ?? 1) >= 0.5;
@@ -693,9 +1187,9 @@ export const hc74Model: DeviceModel = {
     // --- FF1 ---
     // Use _logicHighH for /PRE and /CLR: IC_OPEN_HIGH_PINS makes open
     // pins deterministically HIGH (inactive) rather than using the seeded model.
-    const clr1Low = !ctx.logicHighH(comp, "clr1_n", x, power);
-    const pre1Low = !ctx.logicHighH(comp, "pre1_n", x, power);
-    const clk1Now = ctx.logicHigh(comp, "clk1", x, power);
+    const clr1Low = !highH("clr1_n");
+    const pre1Low = !highH("pre1_n");
+    const clk1Now = high("clk1");
     const rising1 = clk1Now && !(st.lastClk1 ?? 0);
     if (clr1Low && pre1Low) {
       // Both asserted simultaneously: Q and Q_n both HIGH (unstable per datasheet)
@@ -705,15 +1199,15 @@ export const hc74Model: DeviceModel = {
     } else if (pre1Low) {
       q1 = true; q1n = false;
     } else if (rising1) {
-      q1 = ctx.logicHigh(comp, "d1", x, power);
+      q1 = high("d1");
       q1n = !q1;
     }
     // else: hold — q1/q1n unchanged
 
     // --- FF2 ---
-    const clr2Low = !ctx.logicHighH(comp, "clr2_n", x, power);
-    const pre2Low = !ctx.logicHighH(comp, "pre2_n", x, power);
-    const clk2Now = ctx.logicHigh(comp, "clk2", x, power);
+    const clr2Low = !highH("clr2_n");
+    const pre2Low = !highH("pre2_n");
+    const clk2Now = high("clk2");
     const rising2 = clk2Now && !(st.lastClk2 ?? 0);
     if (clr2Low && pre2Low) {
       q2 = true; q2n = true;
@@ -722,7 +1216,7 @@ export const hc74Model: DeviceModel = {
     } else if (pre2Low) {
       q2 = true; q2n = false;
     } else if (rising2) {
-      q2 = ctx.logicHigh(comp, "d2", x, power);
+      q2 = high("d2");
       q2n = !q2;
     }
     // else: hold — q2/q2n unchanged
@@ -768,6 +1262,49 @@ export const hc74Model: DeviceModel = {
   },
 };
 
+const CD4017_EDGE_PINS = ["clk", "clkinh", "reset"] as const;
+const CD4017_OUTPUT_PINS = ["q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "co"] as const;
+
+/**
+ * Count a CD4017 through the edges an MCU drove onto it during its last
+ * step (replayMcuWrites). RESET high clears at once and holds; a CLK rise
+ * counts while CLKINH and RESET are low, both read from before its write.
+ * A RESET wired to one of the chip's own outputs (Q5 for a count of five)
+ * follows it through the walk, so the count wraps where it should. Null
+ * when no MCU edge reached the part.
+ */
+function replay4017McuEdges(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+  power: IcPowerInfo,
+  st: Record<string, number>,
+): McuReplay | null {
+  const edges = ctx.mcuInputEdges?.(comp, CD4017_EDGE_PINS);
+  if (!edges) return null;
+  let count = st.count ?? 0;
+  const feedbackPins = ownOutputNets(ctx, comp, CD4017_EDGE_PINS, CD4017_OUTPUT_PINS);
+  const levels = replayMcuWrites(
+    edges,
+    CD4017_EDGE_PINS,
+    { clk: st.lastClk ? 1 : 0 },
+    (pin) => (ctx.logicHigh(comp, pin, x, power) ? 1 : 0),
+    (before, after) => {
+      if (after.reset) count = 0;
+      else if (after.clk && !before.clk && !before.clkinh && !before.reset) count = (count + 1) % 10;
+    },
+    feedbackPins.size === 0 ? undefined : {
+      pins: feedbackPins,
+      outputs: () => {
+        const outputs: Record<string, 0 | 1> = { co: count < 5 ? 1 : 0 };
+        for (let i = 0; i <= 9; i++) outputs[`q${i}`] = count === i ? 1 : 0;
+        return outputs;
+      },
+    },
+  );
+  return { state: { ...st, count, lastClk: levels.clk }, levels, feedbackPins };
+}
+
 export const cd4017Model: DeviceModel = {
   kinds: ["cd4017"],
   stamp: (ctx, comp, xGuess, _h) => {
@@ -791,11 +1328,15 @@ export const cd4017Model: DeviceModel = {
     // CLK rising edge with CLKINH LOW: advance count.
     const power = ctx.icPowerInfo(comp, x);
     if (!power.powered) return;
-    const st = ctx.state.icState.get(comp.id) ?? defaultIcState("cd4017");
+    const committed = ctx.state.icState.get(comp.id) ?? defaultIcState("cd4017");
+    // An MCU's pulses inside its last step come first (see hc595Model).
+    const replay = replay4017McuEdges(ctx, comp, x, power, committed);
+    const st = replay?.state ?? committed;
+    const high = stepEndReader((pin) => ctx.logicHigh(comp, pin, x, power), replay?.feedbackPins, replay?.levels);
 
-    const resetHigh = ctx.logicHigh(comp, "reset", x, power);
-    const clkinhHigh = ctx.logicHigh(comp, "clkinh", x, power);
-    const clkNow = ctx.logicHigh(comp, "clk", x, power);
+    const resetHigh = high("reset");
+    const clkinhHigh = high("clkinh");
+    const clkNow = high("clk");
     const rising4017 = clkNow && !(st.lastClk ?? 0) && !clkinhHigh;
 
     let count = st.count ?? 0;

@@ -60,7 +60,15 @@ import {
 } from "../thermal-physics.js";
 import type { DisplayInfo, Hcsr04EchoEvent } from "../messages.js";
 import type { ComponentKind, ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
-import { getDeviceModel, type AcDeviceContext, type DeviceContext, type DeviceModel } from "./device-registry.js";
+import {
+  getDeviceModel,
+  type AcDeviceContext,
+  type DeviceContext,
+  type DeviceModel,
+  type McuInputEdges,
+  type McuStepShadow,
+  type McuStepShadowSpec,
+} from "./device-registry.js";
 // Deterministic device-model registration (Wave A4). This call is the single
 // point where registered kinds enter the engine: devices/index registers
 // every model in a fixed explicit order before this module's body evaluates,
@@ -809,6 +817,12 @@ export interface StateSnapshot {
   solverDiagnostics?: SolverDiagnosticsSnapshot;
   /** Optional for compatibility with snapshots created before step breakpoints. */
   stepBreakpointCount?: number;
+  /**
+   * Whether the last MCU step's edges still await the digital pass that
+   * replays them into clocked ICs. Optional for compatibility with older
+   * snapshots.
+   */
+  mcuEdgesPending?: boolean;
   simTime: number;
 }
 
@@ -925,6 +939,35 @@ function cloneValueMap<K, V extends object>(source: Map<K, V> | undefined): Map<
   const out = new Map<K, V>();
   if (source) for (const [key, value] of source) out.set(key, { ...value });
   return out;
+}
+
+/** Each I/O pin's drive as a PinEvent level: 1 or 0 when driven, null when released. */
+function mcuPinLevels(mcu: MicrocontrollerCore): Map<string, 0 | 1 | null> {
+  const levels = new Map<string, 0 | 1 | null>();
+  for (const pin of mcu.ioPins) {
+    const drive = mcu.pinDriveState(pin);
+    levels.set(pin, drive === "out-high" ? 1 : drive === "out-low" ? 0 : null);
+  }
+  return levels;
+}
+
+/**
+ * One registered clocked part a single MCU both writes and reads (H11
+ * readback). Collected per load by _buildReadbackCandidates; each MCU step
+ * that has candidates gets a fresh shadow of each part
+ * (_stepMcuWithReadback).
+ */
+interface ReadbackCandidate {
+  readonly comp: SimComponent;
+  readonly spec: McuStepShadowSpec;
+  /**
+   * MCU pin -> the part input pins on its net, the same mapping
+   * DeviceContext.mcuInputEdges builds for the part (the engine's collapsed
+   * driver map keys the node, so the LAST MCU pin on a net wins there too).
+   */
+  readonly pinsByMcuPin: ReadonlyMap<string, readonly string[]>;
+  /** The part's output pins this MCU can read -> the MCU pin on the net. */
+  readonly outputs: ReadonlyArray<{ partPin: string; mcuPin: string }>;
 }
 
 // failureKey runs for every stressed device on every step; memoised per
@@ -1998,11 +2041,38 @@ export class SimEngine {
   private _previousMosfetGates: ReadonlyMap<string, MosfetGateState> | null = null;
   // Pass-scoped lazy MCU pin-driver map for _updateState device handlers
   // (servo PWM decode, hcsr04 TRIG edges), reached via
-  // ctx.mcuEventDriverForNode: built with includePico=true on first use,
+  // ctx.mcuEventDriverForNode, and for ctx.mcuInputEdges in the digital pass
+  // that follows in the same solve: built with includePico=true on first use,
   // reset at _updateState entry. Deliberately SEPARATE from `_dispDrivers`
   // above — that cache is built includePico=false and the display decoders
   // must keep their exact prior uno/nano-only behaviour.
   private _mcuEventDrivers: Map<number, { compId: string; pin: string }> | null = null;
+  // ctx.mcuInputEdges bookkeeping; the merged display-event path
+  // (_mergedDisplayEvents) and the raw servo/hcsr04 handout
+  // (_mcuStepPinEvents) arm these same flags. A PinEvent says where a
+  // pin went, not where it started, so each MCU's pin levels are recorded
+  // as its step begins, once some device has asked for edges (recording
+  // costs every MCU step a pass over its pins). Only MCUs that stepped in
+  // the last advance have an entry: a core that did not step owes no
+  // replay, and its stale event list is cleared where the skip is decided.
+  private _mcuStepStartLevels = new Map<string, ReadonlyMap<string, 0 | 1 | null>>();
+  private _mcuInputEdgesWanted = false;
+  // Set by an MCU advance, cleared by the next completed digital pass, so
+  // each MCU step's edges are replayed once even when one electrical step
+  // solves several times (the NE555 split) — by the clocked-IC edge path,
+  // the merged display-event path, and the servo/hcsr04 raw handout alike.
+  // It rolls back with the snapshot, as the icState/lcds the replays write
+  // do.
+  private _mcuEdgesPending = false;
+  // H11 readback: clocked parts whose inputs one MCU writes and whose
+  // outputs the SAME MCU reads (see _buildReadbackCandidates), keyed by the
+  // MCU's component id. Null until the first MCU advance after a load();
+  // rebuilt per load because nets only change there.
+  private _readbackCandidates: Map<string, ReadbackCandidate[]> | null = null;
+  // H11 diagnostics: shadows installed since the last load() — zero for
+  // every circuit without a part the MCU both writes and reads, which is
+  // what the identity tests pin.
+  private _readbackShadowInstalls = 0;
   // Pass-scoped lazy channel-current readout for _updateFailureStates,
   // reached via ctx.elementChannelCurrents: the old pass computed
   // getElementChannelI() at most once and shared it across every
@@ -2147,9 +2217,11 @@ export class SimEngine {
         engine._mcuEventDrivers ??= engine._buildArduinoPinDrivers(true);
         return engine._mcuEventDrivers.get(node);
       },
+      mcuStepPinEvents: (compId) => engine._mcuStepPinEvents(compId),
       mcuPowered: (comp, x) => engine._mcuPowered(comp, x),
       mcuBootSimTime: (compId) => engine._mcuBootSimTime.get(compId),
       hcsr04MicrobitBridge: (comp) => engine._hcsr04MicrobitBridge(comp),
+      mcuInputEdges: (comp, pinIds) => engine._mcuInputEdges(comp, pinIds),
       state: {
         get caps() {
           return engine.state.caps;
@@ -2293,6 +2365,7 @@ export class SimEngine {
         lastRelativeResidual: this.lastRelativeResidual,
       },
       stepBreakpointCount: this._stepBreakpoints.length,
+      mcuEdgesPending: this._mcuEdgesPending,
       simTime: this.simTime,
     };
     // Trap-mode-only: the histories are read only by trap stamps, so copying
@@ -2408,6 +2481,9 @@ export class SimEngine {
     if (snap.stepBreakpointCount !== undefined && this._stepBreakpoints.length > snap.stepBreakpointCount) {
       this._stepBreakpoints.length = snap.stepBreakpointCount;
     }
+    // The icState just restored predates the replay the trial ran, so the
+    // edges are owed again.
+    this._mcuEdgesPending = snap.mcuEdgesPending ?? this._mcuEdgesPending;
   }
 
   /** The breakpoints committed since the last call, oldest first. See StepBreakpoint. */
@@ -3130,6 +3206,9 @@ export class SimEngine {
     this.netV = { gnd: 0 };
     this.elementI = {};
     this.digitalState = {};
+    // The cores are rebuilt, so the old ones' edges belong to nothing.
+    this._mcuStepStartLevels = new Map();
+    this._mcuEdgesPending = false;
     this.load(circuit);
   }
 
@@ -4202,13 +4281,294 @@ export class SimEngine {
    * exactly once. Its resulting GPIO state and ordered PinEvents are retained
    * for the next electrical interval. This explicit ordering keeps an MCU out
    * of Newton/NE555 trial solves and makes a worker retry firmware-neutral.
+   * Once a model has asked for MCU input edges, each core's pin levels are
+   * recorded before it steps and its edges wait for the next digital pass.
    */
   private _advanceMcusAfterAcceptedSolve(h: number): void {
     this._sampleArduinoInputs();
+    const recordStarts = this._mcuInputEdgesWanted;
+    if (recordStarts) this._mcuStepStartLevels = new Map();
     for (const [id, mcu] of this.state.arduinos) {
       const comp = this._componentById.get(id);
-      if (comp && this._mcuPowered(comp)) mcu.step(h);
+      if (!comp || !this._mcuPowered(comp)) {
+        // A core that did not step keeps the events its last powered step
+        // produced — step() is the only place a core clears its own list —
+        // and the decoders that read getStepPinEvents() would re-replay
+        // those stale edges on every later step (a display's bit count grew
+        // 32 -> 48 -> 64 after the board lost power). Fence the list at the
+        // advance that skips the core: edges from a step that did not
+        // happen are owed to nobody.
+        mcu.clearStepPinEvents?.();
+        continue;
+      }
+      if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
+      // A registered clocked part this core both writes and reads gets a
+      // shadow for the step (H11 readback): the core's own writes run the
+      // part's replay walker inside the step and the part's output levels
+      // are pushed into the core's input path, so a read between two writes
+      // (shiftIn) sees the level the writes produced.
+      const readback = this._readbackCandidatesFor(id);
+      if (readback) this._stepMcuWithReadback(mcu, id, readback, h);
+      else mcu.step(h);
     }
+    if (recordStarts && this._mcuStepStartLevels.size > 0) this._mcuEdgesPending = true;
+  }
+
+  /** This MCU's readback candidates, or null when it has none (H11). */
+  private _readbackCandidatesFor(mcuId: string): readonly ReadbackCandidate[] | null {
+    this._readbackCandidates ??= this._buildReadbackCandidates();
+    const candidates = this._readbackCandidates.get(mcuId);
+    return candidates && candidates.length > 0 ? candidates : null;
+  }
+
+  /**
+   * Scan the loaded topology once per load for registered clocked parts an
+   * MCU can read back mid-step (H11). A part qualifies for an MCU only when
+   * the SAME single MCU shares a net with one of its shadow inputs (it
+   * writes the part) and with one of its shadow outputs (it reads the
+   * part): two MCUs on any of those nets means no shadow, matching the
+   * null rule the committed replay (mcuInputEdges) applies to two drivers.
+   * Every other circuit — including an MCU with no clocked part — collects
+   * nothing, and its stepping stays byte-identical.
+   */
+  private _buildReadbackCandidates(): Map<string, ReadbackCandidate[]> {
+    const byMcu = new Map<string, ReadbackCandidate[]>();
+    if (!this.circuit || this._mcuComponents.length === 0) return byMcu;
+    // Every MCU I/O pin on each net, uncollapsed: the driver map below in
+    // this file collapses two MCUs on one net to the last, which is fine
+    // for replay but cannot enforce the readback's one-MCU rule.
+    const mcuPinsByNode = new Map<number, Array<{ compId: string; pin: string }>>();
+    for (const mcuComp of this._mcuComponents) {
+      if (!isMcuBoardKind(mcuComp.kind)) continue;
+      const mcu = this.state.arduinos.get(mcuComp.id);
+      if (!mcu) continue;
+      for (const pinId of mcu.ioPins) {
+        const node = this._pinNode(mcuComp.id, pinId);
+        if (node < 0) continue;
+        const attached = mcuPinsByNode.get(node);
+        if (attached) attached.push({ compId: mcuComp.id, pin: pinId });
+        else mcuPinsByNode.set(node, [{ compId: mcuComp.id, pin: pinId }]);
+      }
+    }
+    for (const comp of this.circuit.components) {
+      const spec = getDeviceModel(comp.kind)?.mcuStepShadow;
+      if (!spec) continue;
+      let owner: string | null = null;
+      const pinsByMcuPin = new Map<string, string[]>();
+      let conflicted = false;
+      for (const pinId of spec.inputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1) { conflicted = true; break; }
+        // The engine's driver map keeps the LAST MCU pin on a net; match it
+        // so the shadow's pin mapping is the committed replay's.
+        const driver = attached[attached.length - 1]!;
+        if (owner === null) owner = driver.compId;
+        else if (owner !== driver.compId) { conflicted = true; break; }
+        const pins = pinsByMcuPin.get(driver.pin);
+        if (pins) pins.push(pinId);
+        else pinsByMcuPin.set(driver.pin, [pinId]);
+      }
+      if (conflicted || owner === null || pinsByMcuPin.size === 0) continue;
+      const outputs: Array<{ partPin: string; mcuPin: string }> = [];
+      for (const pinId of spec.outputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1 || attached[0]!.compId !== owner) { conflicted = true; break; }
+        outputs.push({ partPin: pinId, mcuPin: attached[0]!.pin });
+      }
+      if (conflicted || outputs.length === 0) continue;
+      const candidates = byMcu.get(owner);
+      if (candidates) candidates.push({ comp, spec, pinsByMcuPin, outputs });
+      else byMcu.set(owner, [{ comp, spec, pinsByMcuPin, outputs }]);
+    }
+    return byMcu;
+  }
+
+  /**
+   * Run one MCU step with its readback shadows installed (H11). Each write
+   * the core captures drives every shadow's replay walker — grouped into
+   * writes exactly as the committed pass will group them, by cycle — and
+   * each shadow's output levels are pushed into the core's input path as
+   * they change. At install the current output levels are pushed once too:
+   * the solve the core just sampled stamps the part's outputs one replay
+   * behind, and a read before any write this step belongs to the register
+   * as it stands now. The committed digital pass remains the state of
+   * record; the shadows are discarded with the step.
+   */
+  private _stepMcuWithReadback(
+    mcu: MicrocontrollerCore,
+    mcuId: string,
+    candidates: readonly ReadbackCandidate[],
+    h: number,
+  ): void {
+    // A core that cannot feed its writes (or nothing to shadow): the step
+    // runs exactly as it would without the readback machinery — no shadow
+    // is built for it and nothing is installed.
+    if (candidates.length === 0 || mcu.setStepWriteObserver === undefined) {
+      mcu.step(h);
+      return;
+    }
+    const installed: Array<{
+      candidate: ReadbackCandidate;
+      shadow: McuStepShadow;
+      outputs: Array<{ partPin: string; mcuPin: string; last: 0 | 1 }>;
+    }> = [];
+    const x = this._lastX ?? new Float64Array(this.mna?.size ?? 0);
+    for (const candidate of candidates) {
+      const power = this._icPowerInfo(candidate.comp, x);
+      // An unpowered part is skipped by its committed pass; its shadow
+      // must not move either.
+      if (!power.powered) continue;
+      const st = this.state.icState.get(candidate.comp.id)
+        ?? defaultIcState(candidate.comp.kind);
+      // The start levels the committed replay walks from (McuInputEdges
+      // start): what the MCU drove at step start for pins that share its
+      // nets, null where it left the net to the circuit. The recorded map
+      // is exactly this moment's levels; fall back to reading them direct
+      // if no model asked for edges yet.
+      const recorded = this._mcuStepStartLevels.get(mcuId);
+      const startLevels = recorded ?? mcuPinLevels(mcu);
+      const start: Record<string, 0 | 1 | null> = {};
+      for (const [mcuPin, pins] of candidate.pinsByMcuPin) {
+        const level = startLevels.get(mcuPin) ?? null;
+        for (const pin of pins) start[pin] = level;
+      }
+      const shadow = candidate.spec.build({
+        st,
+        start,
+        solved: (pin) => (this._logicHigh(candidate.comp, pin, x, power) ? 1 : 0),
+        pinNode: (pin) => this._pinNode(candidate.comp.id, pin),
+      });
+      const levels = shadow.outputLevels();
+      const outputs = candidate.outputs.map(({ partPin, mcuPin }) => {
+        const last = levels[partPin] ?? 0;
+        mcu.setInputBit(mcuPin, last);
+        return { partPin, mcuPin, last };
+      });
+      installed.push({ candidate, shadow, outputs });
+      this._readbackShadowInstalls++;
+    }
+    // Buffer the core's write events and cut them into writes on cycle
+    // changes, the same cut _mcuInputEdges makes; a group is complete once
+    // a later event carries a new cycle.
+    let pending: Array<{ pin: string; level: 0 | 1 | null }> = [];
+    let pendingCycle = Number.NaN;
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      for (const { candidate, shadow, outputs } of installed) {
+        const events: Array<{ pin: string; level: 0 | 1 | null }> = [];
+        for (const event of pending) {
+          const pins = candidate.pinsByMcuPin.get(event.pin);
+          if (pins) for (const pin of pins) events.push({ pin, level: event.level });
+        }
+        if (events.length === 0) continue;
+        shadow.applyWrite(events);
+        const out = shadow.outputLevels();
+        for (const target of outputs) {
+          const level = out[target.partPin];
+          if (level !== undefined && level !== target.last) {
+            mcu.setInputBit(target.mcuPin, level);
+            target.last = level;
+          }
+        }
+      }
+      pending = [];
+    };
+    mcu.setStepWriteObserver((events) => {
+      for (const event of events) {
+        if (pending.length > 0 && event.cycle !== pendingCycle) flush();
+        pending.push(event);
+        pendingCycle = event.cycle;
+      }
+    });
+    // A throw from inside the step (a third-party model's shadow could)
+    // must not leave this observer installed with this step's closures.
+    try {
+      mcu.step(h);
+      flush();
+    } finally {
+      mcu.setStepWriteObserver(null);
+    }
+  }
+
+  /**
+   * The edges one MCU drove onto `pinIds` in its last step (see
+   * DeviceContext.mcuInputEdges). Pins map to MCU pins through the same
+   * includePico driver map the servo and HC-SR04 decoders use.
+   */
+  private _mcuInputEdges(comp: SimComponent, pinIds: readonly string[]): McuInputEdges | null {
+    if (this._mcuComponents.length === 0) return null;
+    this._mcuEventDrivers ??= this._buildArduinoPinDrivers(true);
+    let mcuId: string | null = null;
+    const pinsByMcuPin = new Map<string, string[]>();
+    for (const pinId of pinIds) {
+      const node = this._pinNode(comp.id, pinId);
+      if (node < 0) continue;
+      const driver = this._mcuEventDrivers.get(node);
+      if (!driver) continue;
+      // Two cores count cycles from different boots on different clocks, so
+      // their edges have no common order to replay in.
+      if (mcuId !== null && driver.compId !== mcuId) return null;
+      mcuId = driver.compId;
+      const pins = pinsByMcuPin.get(driver.pin);
+      if (pins) pins.push(pinId);
+      else pinsByMcuPin.set(driver.pin, [pinId]);
+    }
+    if (mcuId === null) return null;
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return null;
+    const startLevels = this._mcuStepStartLevels.get(mcuId);
+    const mcu = this.state.arduinos.get(mcuId);
+    if (!startLevels || !mcu) return null;
+    const groups: Array<Array<{ pin: string; level: 0 | 1 | null }>> = [];
+    let groupCycle = Number.NaN;
+    // A core appends events as its instructions write, so they arrive in
+    // time order; one write that moves several pins stamps them one cycle.
+    for (const event of mcu.getStepPinEvents()) {
+      const pins = pinsByMcuPin.get(event.pin);
+      if (!pins) continue;
+      if (event.cycle !== groupCycle) {
+        groups.push([]);
+        groupCycle = event.cycle;
+      }
+      const group = groups[groups.length - 1]!;
+      for (const pin of pins) group.push({ pin, level: event.level });
+    }
+    if (groups.length === 0) return null;
+    const start: Record<string, 0 | 1 | null> = {};
+    for (const [mcuPin, pins] of pinsByMcuPin) {
+      const level = startLevels.get(mcuPin) ?? null;
+      for (const pin of pins) start[pin] = level;
+    }
+    return { start, groups };
+  }
+
+  // Shared empty handout for _mcuStepPinEvents' gated-out passes (the servo
+  // and hcsr04 decoders only iterate it, and the servo's filter allocates a
+  // fresh array regardless, so one frozen constant covers every caller).
+  private static readonly _NO_STEP_PIN_EVENTS: readonly PinEvent[] = Object.freeze([] as PinEvent[]);
+
+  /**
+   * The raw step-event handout behind ctx.mcuStepPinEvents (servo PWM
+   * decode, hcsr04 TRIG edges): the same consumed-once lifecycle as
+   * _mcuInputEdges and _mergedDisplayEvents. Asking arms the start-level
+   * recording (so the next advance arms _mcuEdgesPending), and the events
+   * are handed out only while that advance's replay is still owed; the
+   * first completed digital pass consumes the flag, so the NE555 split's
+   * re-solves — and every later pass — cannot re-feed one MCU step's edges
+   * into these decoders twice (at the base the split's second feed of the
+   * boot-time [low, high] first-observation pair on TRIG read as a complete
+   * pulse and armed a phantom echo 250 us after boot).
+   */
+  private _mcuStepPinEvents(compId: string): readonly PinEvent[] {
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return SimEngine._NO_STEP_PIN_EVENTS;
+    return this.state.arduinos.get(compId)?.getStepPinEvents() ?? SimEngine._NO_STEP_PIN_EVENTS;
   }
 
   /** Restore the trusted pre-trial state while preserving failed-solve diagnostics. */
@@ -4550,6 +4910,15 @@ export class SimEngine {
    */
   getIcState(compId: string): Record<string, number> | undefined {
     return this.state.icState.get(compId);
+  }
+
+  /**
+   * H11 diagnostics: MCU-step readback shadows installed since the last
+   * load(). Zero for every circuit without a registered clocked part the MCU
+   * both writes and reads — the guard the identity tests pin.
+   */
+  get readbackShadowInstalls(): number {
+    return this._readbackShadowInstalls;
   }
 
   /** Per-board runtime state for onboard LED/button art. Only boards with an MCU are included. */
@@ -4936,6 +5305,10 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    // H11 readback: nets only change on load(), so the per-load candidate
+    // scan (and its diagnostics counter) restart here.
+    this._readbackCandidates = null;
+    this._readbackShadowInstalls = 0;
     // Wave A4: bucket membership is (engine const set) OR (registry hook
     // present). Migrated kinds remain listed in the sets, so the union is an
     // exact no-op for them; only a third-party registered kind can extend a
@@ -6415,7 +6788,9 @@ export class SimEngine {
   // the ordered sub-step PinEvents contributed by the single Arduino that
   // drives all those pins.  If the pins span multiple Arduinos (multi-master),
   // or no Arduino drives any of them, returns an empty event list so callers
-  // can fall back to sampled-level decoding.
+  // can fall back to sampled-level decoding.  The events are consumed once
+  // per MCU step: they are handed out only while _mcuEdgesPending says the
+  // driving advance's replay is still owed (see the flags' comments above).
   private _mergedDisplayEvents(
     comp: SimComponent,
     pinNames: string[],
@@ -6441,6 +6816,16 @@ export class SimEngine {
     const thatCompId = [...driverCompIds][0];
     const mcu = this.state.arduinos.get(thatCompId);
     if (!mcu) return { arduinoCompId: null, events: [] };
+
+    // A display decoder is a per-step MCU-edge consumer exactly like the
+    // clocked-IC path's ctx.mcuInputEdges: asking arms the start-level
+    // recording (so the next advance arms _mcuEdgesPending), and the merged
+    // events are handed out only while that advance's replay is still owed.
+    // The first completed digital pass consumes the flag, so the NE555
+    // split's re-solves — and every later pass — cannot re-merge one MCU
+    // step's events into the decoder twice.
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return { arduinoCompId: thatCompId, events: [] };
 
     const mapped = mcu
       .getStepPinEvents()
@@ -6515,6 +6900,10 @@ export class SimEngine {
     this._displayStateOut = null;
     this.digitalState = ds;
     this._displayState = disp;
+    // This pass replayed the last MCU step's edges (ctx.mcuInputEdges,
+    // ctx.mergedDisplayEvents, ctx.mcuStepPinEvents); a later pass in the
+    // same electrical step must not apply them again.
+    this._mcuEdgesPending = false;
   }
 
   /**

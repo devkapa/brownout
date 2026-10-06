@@ -14,7 +14,11 @@
  * `mcuEventDrivers ??= this._buildArduinoPinDrivers(true)` +
  * `mcuEventDrivers.get(node)` calls -> ctx.mcuEventDriverForNode(node)
  * (the lazy shared-map build now lives inside the context alias, still
- * built at most once per state pass), this._componentById.get ->
+ * built at most once per state pass), and the servo/hcsr04
+ * `driverMcu.getStepPinEvents()` reads -> ctx.mcuStepPinEvents(
+ * driver.compId) (the consumed-once handout: each MCU step's events reach
+ * these decoders exactly once, split solves included),
+ * this._componentById.get ->
  * ctx.componentById, this._mcuPowered -> ctx.mcuPowered,
  * this._mcuBootSimTime.get -> ctx.mcuBootSimTime,
  * this._hcsr04MicrobitBridge -> ctx.hcsr04MicrobitBridge,
@@ -529,7 +533,7 @@ export const servoModel: DeviceModel = {
     const driverMcu = driver ? ctx.state.arduinos.get(driver.compId) : undefined;
     const driverPowered = driverComp ? ctx.mcuPowered(driverComp, x) : false;
     const driverPinEvents = driver && driverMcu
-      ? driverMcu.getStepPinEvents().filter(
+      ? (ctx.mcuStepPinEvents?.(driver.compId) ?? []).filter(
           (event) => event.pin === driver.pin && event.level !== null,
         )
       : [];
@@ -888,7 +892,7 @@ export const hcsr04Model: DeviceModel = {
       if (driver && driverMcu && driverPowered) {
         const clockHz = _mcuClockHz(driverComp!.kind);
         const bootT = ctx.mcuBootSimTime(driver.compId) ?? 0;
-        for (const ev of driverMcu.getStepPinEvents()) {
+        for (const ev of ctx.mcuStepPinEvents?.(driver.compId) ?? []) {
           if (ev.pin !== driver.pin || ev.level === null) continue;
           edges.push({ level: ev.level, time: bootT + ev.cycle / clockHz });
         }
