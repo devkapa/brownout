@@ -74,7 +74,7 @@
 
 import type { AcStampSurface } from "./ac-system.js";
 import type { MnaStampSurface } from "./linear-system.js";
-import type { MicrocontrollerCore } from "./mcu.js";
+import type { MicrocontrollerCore, PinEvent } from "./mcu.js";
 import type { ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
 import type {
   BatteryOperatingPoint,
@@ -527,6 +527,21 @@ export interface DeviceContext {
    * SEPARATE cache from mergedDisplayEvents' uno/nano-only map.
    */
   mcuEventDriverForNode(node: number): { compId: string; pin: string } | undefined;
+  /**
+   * The raw ordered PinEvents one driver MCU produced during its last step,
+   * for cycle-timestamped decode (servo PWM widths, HC-SR04 TRIG edges).
+   * Consumed once per MCU step, like mergedDisplayEvents and mcuInputEdges:
+   * a pass the driving advance does not owe events to gets an empty list,
+   * so the NE555 split's re-solves cannot re-feed one MCU step's edges into
+   * a decoder twice (at the base the split's second feed of the boot-time
+   * [low, high] first-observation pair on TRIG read as a complete pulse and
+   * armed a phantom echo). Empty events = nothing happened this step.
+   * Optional like mcuInputEdges (mergedDisplayEvents, by contrast,
+   * is required): a context built
+   * outside this engine keeps compiling, and its decoders read no MCU
+   * events (the pre-H15 sampled behaviour).
+   */
+  mcuStepPinEvents?(compId: string): readonly PinEvent[];
   /** Whether an MCU board is powered enough to run (engine _mcuPowered). */
   mcuPowered(comp: DeviceComponent, x: Float64Array): boolean;
   /**

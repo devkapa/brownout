@@ -1936,7 +1936,8 @@ export class SimEngine {
   // must keep their exact prior uno/nano-only behaviour.
   private _mcuEventDrivers: Map<number, { compId: string; pin: string }> | null = null;
   // ctx.mcuInputEdges bookkeeping; the merged display-event path
-  // (_mergedDisplayEvents) arms these same flags. A PinEvent says where a
+  // (_mergedDisplayEvents) and the raw servo/hcsr04 handout
+  // (_mcuStepPinEvents) arm these same flags. A PinEvent says where a
   // pin went, not where it started, so each MCU's pin levels are recorded
   // as its step begins, once some device has asked for edges (recording
   // costs every MCU step a pass over its pins). Only MCUs that stepped in
@@ -1946,9 +1947,10 @@ export class SimEngine {
   private _mcuInputEdgesWanted = false;
   // Set by an MCU advance, cleared by the next completed digital pass, so
   // each MCU step's edges are replayed once even when one electrical step
-  // solves several times (the NE555 split) — by the clocked-IC edge path
-  // and the merged display-event path alike. It rolls back with the
-  // snapshot, as the icState/lcds the replays write do.
+  // solves several times (the NE555 split) — by the clocked-IC edge path,
+  // the merged display-event path, and the servo/hcsr04 raw handout alike.
+  // It rolls back with the snapshot, as the icState/lcds the replays write
+  // do.
   private _mcuEdgesPending = false;
   // Pass-scoped lazy channel-current readout for _updateFailureStates,
   // reached via ctx.elementChannelCurrents: the old pass computed
@@ -2094,6 +2096,7 @@ export class SimEngine {
         engine._mcuEventDrivers ??= engine._buildArduinoPinDrivers(true);
         return engine._mcuEventDrivers.get(node);
       },
+      mcuStepPinEvents: (compId) => engine._mcuStepPinEvents(compId),
       mcuPowered: (comp, x) => engine._mcuPowered(comp, x),
       mcuBootSimTime: (compId) => engine._mcuBootSimTime.get(compId),
       hcsr04MicrobitBridge: (comp) => engine._hcsr04MicrobitBridge(comp),
@@ -4221,6 +4224,29 @@ export class SimEngine {
     return { start, groups };
   }
 
+  // Shared empty handout for _mcuStepPinEvents' gated-out passes (the servo
+  // and hcsr04 decoders only iterate it, and the servo's filter allocates a
+  // fresh array regardless, so one frozen constant covers every caller).
+  private static readonly _NO_STEP_PIN_EVENTS: readonly PinEvent[] = Object.freeze([] as PinEvent[]);
+
+  /**
+   * The raw step-event handout behind ctx.mcuStepPinEvents (servo PWM
+   * decode, hcsr04 TRIG edges): the same consumed-once lifecycle as
+   * _mcuInputEdges and _mergedDisplayEvents. Asking arms the start-level
+   * recording (so the next advance arms _mcuEdgesPending), and the events
+   * are handed out only while that advance's replay is still owed; the
+   * first completed digital pass consumes the flag, so the NE555 split's
+   * re-solves — and every later pass — cannot re-feed one MCU step's edges
+   * into these decoders twice (at the base the split's second feed of the
+   * boot-time [low, high] first-observation pair on TRIG read as a complete
+   * pulse and armed a phantom echo 250 us after boot).
+   */
+  private _mcuStepPinEvents(compId: string): readonly PinEvent[] {
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return SimEngine._NO_STEP_PIN_EVENTS;
+    return this.state.arduinos.get(compId)?.getStepPinEvents() ?? SimEngine._NO_STEP_PIN_EVENTS;
+  }
+
   /** Restore the trusted pre-trial state while preserving failed-solve diagnostics. */
   private _restoreFailedSplitTrial(snap: StateSnapshot): void {
     const diagnostics: SolverDiagnosticsSnapshot = {
@@ -6320,8 +6346,8 @@ export class SimEngine {
     this.digitalState = ds;
     this._displayState = disp;
     // This pass replayed the last MCU step's edges (ctx.mcuInputEdges,
-    // ctx.mergedDisplayEvents); a later pass in the same electrical step
-    // must not apply them again.
+    // ctx.mergedDisplayEvents, ctx.mcuStepPinEvents); a later pass in the
+    // same electrical step must not apply them again.
     this._mcuEdgesPending = false;
   }
 
