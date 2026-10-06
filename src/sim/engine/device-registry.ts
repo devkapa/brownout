@@ -105,6 +105,24 @@ import type {
 /** One loaded component instance, exactly as the engine passes see it. */
 export type DeviceComponent = SimCircuit["components"][number];
 
+/** An MCU's edges on a component's pins during one MCU step (DeviceContext.mcuInputEdges). */
+export interface McuInputEdges {
+  /**
+   * Each listed pin that shares a net with the MCU, keyed by the
+   * component's own pin id, at the moment the step began: 1 or 0 while
+   * the MCU drove it, null while the MCU left it to the rest of the circuit
+   * (an input, with or without its pull-up). Pins on no MCU net are absent.
+   */
+  readonly start: Readonly<Record<string, 0 | 1 | null>>;
+  /**
+   * The edges in the order they happened, as the levels the MCU drove.
+   * Edges written by one instruction (two bits of one port write) share a
+   * cycle and arrive as one group, because on hardware they are
+   * simultaneous.
+   */
+  readonly groups: ReadonlyArray<ReadonlyArray<{ readonly pin: string; readonly level: 0 | 1 | null }>>;
+}
+
 /**
  * Element-state maps a device may read and commit. Each getter returns the
  * engine's LIVE map for the currently loaded topology (load() replaces the
@@ -528,6 +546,29 @@ export interface DeviceContext {
   hcsr04MicrobitBridge(
     comp: DeviceComponent,
   ): { boardComponentId: string; pinId: string } | null;
+  /**
+   * The edges an MCU drove onto some of `pinIds` during its last step, for a
+   * clocked part to replay before it reads its step-end levels. The solver
+   * sees an MCU's pins only as they stand at the end of each MCU step (up to
+   * 100 us), so a pulse that starts and ends inside one step, like each
+   * shiftOut() clock, never reaches a once-per-solve edge detector.
+   *
+   * Each MCU step is handed out by one digital pass: the first pass after
+   * the step, and again only if that pass is rolled back, so a step that
+   * solves more than once (the NE555 split) does not replay it twice.
+   * Valid only inside updateDigital. Null when no listed pin shares a net
+   * with an Arduino or Pico I/O pin, when they share nets with two
+   * different MCUs, or when that MCU did not step or changed none of them.
+   * The engine starts recording MCU steps the first time a model asks, so
+   * the steps before that ask are not available.
+   *
+   * Optional so that a context built outside this engine still satisfies
+   * the interface; callers treat an absent member as no edges.
+   */
+  mcuInputEdges?(
+    comp: DeviceComponent,
+    pinIds: readonly string[],
+  ): McuInputEdges | null;
 
   // ── Element state ────────────────────────────────────────────────────────
   readonly state: DeviceStateMaps;
