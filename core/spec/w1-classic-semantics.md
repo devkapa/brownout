@@ -32,6 +32,15 @@ code and was not executed.
   they start with `devolt/` or `brownout-core-prototype/`.
 - Line numbers refer to the working tree on 2026-09-24. The brownout folder is
   not a git repository, so there is no commit to pin.
+- §7.14-7.16, §8.4.4 and §8.12-8.13, rows D34-D36 and Q-O67 to Q-O78 were
+  added for W1h (W1 plan Decision 13, option A) by the SX-H spec extension.
+  They cite brownout at `52eb434` and devolt at `afffa6c`, and they describe
+  classic at `52eb434` (the delta rows through `4878620`); later rows reach
+  them as inline Delta notes (`13e433a` in §7.14, `14b2a07` in §4.2.7).
+  "Probe Pn" in them is a classic probe in section 7 of the SX-H draft, run
+  at `52eb434` (`devolt/memory/progress/brownout-core-w1e-drafts/sx-h/`,
+  scripts in `probes/`, and `q71/` for P9). §8.4.4 is a bench_psu limitation
+  for W3 recorded at the same time, not a W1h kind.
 - The chapters were gathered by separate readers. A few citations of the same
   statement differ by one or two lines (for example the load seed solve at
   `sim-engine.ts:2927` and `:2928`). Both are kept; the code decides.
@@ -42,7 +51,7 @@ code and was not executed.
 - "Assembly note:" marks a fact added or corrected while this document was
   assembled. It carries its own citation.
 - Each chapter's core-divergence material is consolidated in chapter 11 (rows
-  D1-D33). Each chapter's open questions are consolidated in chapter 12, tagged
+  D1-D36). Each chapter's open questions are consolidated in chapter 12, tagged
   with the chapter number.
 - Classic changes that landed after the baseline are listed under "Deltas
   since the 2026-09-24 baseline" below. Where a delta and a chapter disagree,
@@ -62,7 +71,7 @@ re-pinned.
 | `c221994`, `0a0b37c` (Q-O26; on this branch since W1b) | `spdt_switch` reports the current com -> the selected throw (`b` at position 0, `c` otherwise, the stamp's own selection), and 0 A with fewer than 3 pins. | 7.6, 7.11, Q-O26 | Ported in W1b (`core/README.md`, kind 6). |
 | `bd90847` (`fix/floating-section-solve`) | Every electrically isolated section gets a 1 S tie to ground (`ISOLATED_SECTION_ANCHOR_G`) at one net row: the return pin (`neg`, else `gnd`) of the first `SOURCE_KINDS` component in the section, else its lowest net row. Sections are a union-find over each component's pins, split only where a model declares `galvanicGroups` (optocoupler, coupled inductor, relay), recomputed every `load()`, and never depend on a switch position, relay contact or failure; internal nodes stay out. The static stamp base, the DC-stability replay and the AC seed all stamp the anchors. A circuit whose every net reaches ground is bit-identical. | 8.9, 10.1, 10.2 | Not ported: isolated nets still rest on `NODE_RSHUNT_G`, and a floating ideal source is `-3`, so every circuit this changes falls back to classic. Port in W1f, with `isolated-sections.test.ts` in gate 1. |
 | `990232e` (`fix/pot-rotation-end-stops`) | `position` is rotation from the CCW stop: position 1 puts the wiper at `cw`, the log taper grows `rCcw` with rotation, and each segment's overload limit is floored at `0.25·p_max` (`POT_SEGMENT_MIN_RATING_SHARE`), rated against `rCw + rCcw` rather than the unused `resistance` param. | 7.1, 7.2.5, 7.7 | Those sections already describe this: the baseline working tree carried the fix before it was committed, so until this merge the branch's classic code disagreed with them (position 1 put the wiper at `ccw`). Port in W1h, with `potentiometer.test.ts` in gate 1. |
-| `2c6ba7d` (`fix/current-source-polarity`) | `current_source` drives its current out of `pos`, through the circuit and back into `neg`, like a battery's `+`. The transient stamp, the element current (pin0 -> pin1, so a sourcing source reads `-I` plus its shunt's current) and the small-signal injection flip together. The SPICE parser attaches an I card's n+ to `neg`, so decks keep their meaning. | 8.6a | Not a W1 kind. Port with the kind, with `current-source-polarity.test.ts` in gate 1. |
+| `2c6ba7d` (`fix/current-source-polarity`) | `current_source` drives its current out of `pos`, through the circuit and back into `neg`, like a battery's `+`. The transient stamp, the element current (pin0 -> pin1, so a sourcing source reads `-I` plus its shunt's current) and the small-signal injection flip together. The SPICE parser attaches an I card's n+ to `neg`, so decks keep their meaning. | 8.6a, 8.13 | W1h under W1 plan Decision 13, option A (§8.13), with a portable twin of `current-source-polarity.test.ts` in gate 1 (that file's own cases are W6 and W2, §8.13). Note: the kind's type comment (`src/circuit/types.ts:155-157`) still states the pre-fix convention ("flowing pos -> neg through the source, the SPICE convention"). It is stale, and it is left for a classic fix branch rather than edited here. |
 | `b70be41`, `bc1cfd6`, `a05089b` (`fix/rp2040-long-script`, which carries `perf/rp2040-idle-skip` and `fix/rp2040-quiet-logger`) | `RP2040Mcu` logs errors only, on every boot and `reset()`. An armed USB CDC OUT read is held until the host has data, never completed with zero bytes, so a sleeping core no longer takes a USB interrupt every ~28 µs. Host-to-device REPL bytes go into an unbounded host-side queue that tops up the 512-entry CDC FIFO each time the firmware arms an OUT read, so a program over 512 bytes (and its Ctrl-D) is no longer dropped. | none (outside W1) | W7, with `rp2040-idle.test.ts` (busy fraction < 0.01) and `rp2040-long-script.test.ts` in gate 1. |
 | `3497700`, `fccd8bd` (`fix/rp2040-adc-temp`, which carries `fix/rp2040-adc-counts`) | `RP2040Mcu.setAnalogVolts` feeds `round(clamp(v, 0, vcc) / vcc · 4095)` counts to ADC0-2, not volts, with `vcc` the 3V3 rail. ADC4, the temperature sensor, is seeded at boot and on `reset()` with 876 counts (0.706 V, 27 °C per the RP2040 datasheet §4.9.5, against the 3V3 reference), fixed and not temperature-driven. | none (outside W1) | W7, with the ADC cases of `rp2040.test.ts` and `rp2040-micropython.test.ts` (27 ± 1 °C) in gate 1. |
 | `df16d52` (`fix/buzzer-tone-detect`) | A passive buzzer detects its tone with a Schmitt trigger around the drive's own envelope midpoint (envelope tau 0.1 s, hysteresis 10% of the swing, silent below a 50 mV swing), not around 0 V, so a 0-5 V drive now sounds. The frequency comes from a full period (a crossing minus the one before last), each crossing timed at the START of the step that reveals it; only 20 Hz-20 kHz counts, and the tone clears two periods after the last crossing. `envHi`/`envLo` are readout-only and skipped by the step-error estimate. Physics telemetry gains `modelState` `{kind: "buzzer", buzzerType, sounding, toneHz?}` and `{kind: "speaker", sounding}`. | none (outside W1) | Port with the buzzer and speaker, with `wave6-drivers-audio.test.ts` and `physics-telemetry.test.ts` in gate 1. |
@@ -76,9 +85,10 @@ re-pinned.
 | `f198ed9` (`fix/regulator-cc-exit`, on `b872148`, merged `9fc1062`; owner-approved for 0.6.2) | dcdc_converter, linear_reg and lm317 leave CC exactly when the solve's own compliance clamp selected the voltage branch (`regulatorRegime` takes `complianceSelected`: from CC, stay CC unless selected; then DROPOUT when `headroom < Vreg + vdropout`, else REG; the OFF check on `headroom <= vdropout` still first; the dcdc's exit commits `buckVoltageReg`), and each clamp passes `toleranceBelow` 0. Before, the exits were 98% of the attainable voltage (dcdc), and `Vreg − 50 mV` above vRef or any short headroom (linear_reg, lm317: for the LM317 the 50 mV is on `Vout − Vadj`), so a slightly overloaded regulator flipped its regime every step and the adaptive step locked near 12 ns, a linear regulator in dropout flickered at any overload, and a regulator with an output capacitor held its voltage past its limit at fine steps. Electrics are bit-identical outside the old 1 ppm band; inside it the regime now reads CC at the limit. The classic-only corpus sweep is identical (134 of 134). | 7, 8.4 | Classic behaviour for kinds the core does not port in W1 (regulators are W3); the rule is recorded for the W3 contract. |
 | `119fa20` (`fix/isolated-section-stall`, merged `2b2b1c7`; owner-approved for 0.6.2) | A supply-gated chip (`SUPPLY_GATED_KINDS`: ne555, the combinational ICs, 74ls161/173/189, 74hc595/165/74, cd4017/4511/4060, 28c16/28c256, hd44780, max7219, lm393) with mapped vcc and gnd pins joins the section union-find only once its vcc and gnd rows already share a section through other parts. The joins repeat to a fixed point, so chips that power each other resolve in any order. A chip still waiting after that has no supply return outside itself: its id goes into `_noSupplyReturnIds`, `_icPowerInfo` reads it unpowered (`suppliesConnected` also requires it to be absent from that set) for as long as it is wired that way, and its pins then join as before, so sections and anchors are unchanged. Before, such a chip's power decision alternated every Newton iterate: powered, it pulled the floating return up to its own supply and starved itself; unpowered, the return fell back to 0 V. The solve hit its 50-iteration cap every step and the clock froze (the 0.6.1 "SETTLING fail=1/1" stall, present since v0.2.0). A return that exists in the wiring but cannot carry the supply current (a capacitor, an open switch, another chip's input) is not covered. Circuits whose gated chips all have a supply return are bit-identical; the classic-only corpus sweep is identical (134 of 134). | 1.3, 8.9 | The set is load-time topology, so the compiler can fold it into the chip's open-supply flag, which the core's power gate already honours. Port with the section anchors in W1f (row `bd90847`), with `isolated-section-stall.test.ts` in gate 1. |
 | `f1dca71` (`fix/mna-residual-floor`, merged `7ac37e6`; owner-approved for 0.6.2) | The solve-health ratio is `max\|G·x − b\| / max(\|G\|max·\|x\|max + \|b\|max, RESIDUAL_SCALE_FLOOR)` with `RESIDUAL_SCALE_FLOOR = 1e-300`, in both backends (`mna.ts`, `sparse-mna.ts`). Before, a circuit decaying to rest reached subnormal values, where doubles round on a fixed 5e-324 grid, and one rounding step against a ~1e-318 scale read up to 5e-6, past the 1e-8 gate. A rejected step commits nothing, so every later step re-solved the same state and failed again: an LM317 driving an LED, switched to 0 V, stalled for 16 of 46 loads on the dense backend; the sparse backend fails the same way at other drives. Every solve with a scale above 1e-300 is judged exactly as before, and the singular and non-finite checks are unchanged. No corpus solve has a scale below 1e-300 (the smallest is 3.06); the classic-only sweep is identical (134 of 134). | 10.5 | The core's LU judges health by its pivots and has no relative-residual gate, so there is nothing to port; recorded under D24. |
-| `685179c` (`fix/headless-source-breakpoints`, merged `d885d70`; for 0.6.3) | HeadlessRunner ports the browser worker's source-edge clamp (§8.1.6): the same `sourceEventDescriptors`, `nextSourceEventTime` and epsilon `max(1e-15, \|t\|·1e-12)`. Its events are clock edges, pulse corners (one-shot when `per` is not finite and positive), signal_gen square, pulse and ramp corners with phase, noise samples every 0.1 ms from the delay, PWL knots at absolute time, and the delayed start of a continuous waveform. When `untilEvent ≤ h + epsilon`, it sets `h = untilEvent > 1.5·H_MIN ? untilEvent − H_MIN : max(H_MIN, untilEvent)` and marks the step event-clamped, so the controller resumes its earlier step after the guard. The clamp binds in fixed-step runs too. Before, headless had only the P/10 ceiling (none for PWL; a pulse's `pw` ignored), so a step straddling an edge applied the new level for the whole step, and a narrow feature could be missed: a 0.2 ms PWL pulse was never seen, and 20 µs pulses read 11.2 µs HIGH of 420 µs. The classic-only corpus sweep changed 4 of 134 entries. Three moved one ulp in the sample time only. In `engine-test/04-74hc595-shift-7seg` an 8 ms step had straddled the 320 ms SRCLK edge and the 323.5 ms SER fall and shifted in a 0; the run now shifts in the 1 and latches `0 0 1 1 1 1 1 0` at 480 ms, the hand-computed sequence. Circuits with no timed source step exactly as before. | 8.1.6, D28, Q-O34 | Host behaviour. The core's event kernel already places source edges exactly, so nothing to port. |
-| `5657a9a` (`fix/waveform-classification`, merged `4753e05`; for 0.6.3) | HeadlessRunner's `sourceStepLimit` classifies a signal_gen with `parseSignalGenParams(p).waveform`, the engine's own parse. Any value outside the eight names (dc, sine, square, pulse, triangle, ramp, pwl, noise), or a non-string, therefore gets a sine's `1/(40·f)` ceiling, matching the sine the engine plays. Before, it tested `String(p.waveform ?? "sine")`, so `"Sine"` at 1 kHz got no ceiling: 22 steps over 20 ms, and 1.1 ms HIGH of 10 ms. The eight names step exactly as before, and the corpus sweep is identical (134 of 134). The browser worker's matching change is devolt's (`8ae8792`). | 8.1.6 | Host behaviour; no core change. |
-| `4878620` (`fix/ferrite-bead-overload`, merged `cd1dc98`; for 0.6.3; SX-H draft Q-O76) | A ferrite_bead dissipates `I² · max(1e-3, rDc ?? 0.5)`, the resistance it stamps, and is rated against its catalog `p_max` by the resistor's rule through a new `updateFailures` hook. Damage grows at `max(0, P/p_max − 1)` per second and bleeds at 1 per second; at 1 it latches `resistor_overload` with the resistor's message. The bead then stamps nothing in the transient, DC operating-point and AC analyses (open) and publishes 0 A until `resetFailures()`. The failure flag joins its static signature. A `p_max` of 0 or less, or none, is no limit. The bundled catalog's bead becomes rDc 3.5 mΩ and p_max 0.056 W (was 0.5 Ω and 0.25 W), from the Fair-Rite 2743001111 datasheet. The engine's fallback for a missing rDc is still 0.5 Ω, pending a manager decision. The classic-only corpus sweep is identical (134 of 134): no corpus bead overloads. | 7.2.2, 9.5.2, 13.3 | The core does not port ferrite_bead yet (W1h); SX-H's chapter takes this rule. |
+| `685179c` (`fix/headless-source-breakpoints`, merged `d885d70`; for 0.6.3) | HeadlessRunner ports the browser worker's source-edge clamp (§8.1.6): the same `sourceEventDescriptors`, `nextSourceEventTime` and epsilon `max(1e-15, \|t\|·1e-12)`. Its events are clock edges, pulse corners (one-shot when `per` is not finite and positive), signal_gen square, pulse and ramp corners (with phase for square and ramp), noise samples every 0.1 ms from the delay, PWL knots at absolute time, and the delayed start of a continuous waveform. When `untilEvent ≤ h + epsilon`, it sets `h = untilEvent > 1.5·H_MIN ? untilEvent − H_MIN : max(H_MIN, untilEvent)` and marks the step event-clamped, so the controller resumes its earlier step after the guard. The clamp binds in fixed-step runs too. Before, headless had only the P/10 ceiling (none for PWL; a pulse's `pw` ignored), so a step straddling an edge applied the new level for the whole step, and a narrow feature could be missed: a 0.2 ms PWL pulse was never seen, and 20 µs pulses read 11.2 µs HIGH of 420 µs. The classic-only corpus sweep changed 4 of 134 entries. Three moved one ulp in the sample time only. In `engine-test/04-74hc595-shift-7seg` an 8 ms step had straddled the 320 ms SRCLK edge and the 323.5 ms SER fall and shifted in a 0; the run now shifts in the 1 and latches `0 0 1 1 1 1 1 0` at 480 ms, the hand-computed sequence. Circuits with no timed source step exactly as before. | 8.1.6, 8.12.5, D28, Q-O34 | Host behaviour. The core's event kernel already places source edges exactly, so nothing to port. |
+| `5657a9a` (`fix/waveform-classification`, merged `4753e05`; for 0.6.3) | HeadlessRunner's `sourceStepLimit` classifies a signal_gen with `parseSignalGenParams(p).waveform`, the engine's own parse. Any value outside the eight names (dc, sine, square, pulse, triangle, ramp, pwl, noise), or a non-string, therefore gets a sine's `1/(40·f)` ceiling, matching the sine the engine plays. Before, it tested `String(p.waveform ?? "sine")`, so `"Sine"` at 1 kHz got no ceiling: 22 steps over 20 ms, and 1.1 ms HIGH of 10 ms. The eight names step exactly as before, and the corpus sweep is identical (134 of 134). The browser worker's matching change is devolt's (`8ae8792`). | 8.1.6, 8.12.5 | Host behaviour; no core change. |
+| `4878620`, `13e433a` (`fix/ferrite-bead-overload`, merged `cd1dc98` and `8d0b986`; for 0.6.3; SX-H draft Q-O76) | A ferrite_bead dissipates `I² · max(1e-3, rDc ?? 0.0035)`, the resistance it stamps, and is rated against its catalog `p_max` by the resistor's rule through a new `updateFailures` hook. Damage grows at `max(0, P/p_max − 1)` per second and bleeds at 1 per second; at 1 it latches `resistor_overload` with the resistor's message. The bead then stamps nothing in the transient, DC operating-point and AC analyses (open) and publishes 0 A until `resetFailures()`. The failure flag joins its static signature. A `p_max` of 0 or less, or none, is no limit. The bundled catalog's bead becomes rDc 3.5 mΩ and p_max 0.056 W (was 0.5 Ω and 0.25 W), from the Fair-Rite 2743001111 datasheet. Since `13e433a` (manager ruling) a missing rDc takes the catalog's 3.5 mΩ, one constant (`FERRITE_BEAD_DEFAULT_R_DC_OHM`) at every read (rating, signature, stamp, `updateCurrent`, `acStamp`); it was 0.5 Ω. The classic-only corpus sweep is identical for both commits (134 of 134): no corpus bead overloads or lacks an rDc. | 7.2.2, 7.14, 9.5.2, 13.3 | The core does not port ferrite_bead yet (W1h); its chapter, §7.14, takes this rule. |
+| `14b2a07` (`fix/74hc595-tied-clocks`, merged `a67832e`; for 0.6.3) | A 74HC595 whose `srclk` and `rclk` are on one net (`pinNode(srclk) >= 0 && pinNode(srclk) === pinNode(rclk)`) reads that net once, and a rising edge latches the shift register from before this evaluation's shift (0 while `/srclr` is LOW), so the storage register trails the shift register by one clock (TI SCLS041J §8.1). Before, it latched the post-shift value, so tied boards ran one clock early, and two reads could split one slow edge across two steps. Separate nets are unchanged, including two rises in one evaluation (a latch pulse just after the last shift shares its step, and hardware stores the shifted byte there); coincident rises on separate nets remain post-shift, a documented limitation (§4.2.7). Verified bit-identical for separate clocks over 2.09 M steps; the classic-only corpus sweep is identical (134 of 134). | 4.2.7 | The core does not port the 74HC595 yet; its port takes this rule. |
 | `e61b082` (on `685179c`, merged `8734ac2`; for 0.6.3) | Test-only: `run()` reads its source events through a `protected _sourceEvents(circuit)` seam (the same function at the same single call site), so the no-event regression steps the pre-`685179c` path in its own process and requires exact equality of the two fingerprints, instead of pinning macOS-captured floats — V8's transcendentals differ per platform, and Linux CI reached the capture only in the last ulps (final 1 ulp, integral 1e-15, sumH2 1e-12; counts identical). The 0.6.1 capture stays as an absolute pin: step counts exact, floats within 1e-9 + 1e-6 relative, the tolerance the forced-sparse lane always used. No behaviour change; the corpus sweep is identical (134 of 134). | 8.1.6 | Host behaviour; no core change. |
 | `8024715`+`2a1ac80` (`fix/power-off-stall`, merged `20df6c3`; for 0.6.3) | After a FAILED solve in which a supply-gated part's power reading alternated at least twice between Newton iterates (its own draw pulls its supply below the power-on threshold and its absence lets it recover), the engine probes on a scratch matrix at the load seed's 1 ps with every capacitor at its present charge: the alternating parts held powered, every other such part at its settled reading; a part unpowered there is probed again at the same instant held off. Only a part whose supply then reads powered starves itself, and the step is re-solved with it held off, the hold lasting through that solve's commit. A part unpowered either way, or one that read unpowered when the host's step began (the step-start record, taken at the first iterate of the step's first armed solve; a 555 split's later sub-steps qualify via `simTime > start.time`), has a supply still rising through its threshold: the step rejects exactly as before so the host lands the crossing — unless the step is already at the hosts' 10 ns floor (`HOST_MIN_STEP_S`), where such parts are held off for that one step and the clock keeps running. A probe that fails to converge, parts that hold their supply, or a held-off solve that fails reject as before. Armed in `step()`'s six solves and `resetFailures`' seed; the load seed reaches it only after the rescue ladder fails. The per-solve Newton history clears moved into `_runNewton`. Stalls 1 and 3 (a 9 V 555 blinker switched off in either lead or with its ground pulled while its timing capacitor holds charge; a 555 running on a decoupling capacitor) no longer stop the clock; a 74LS04 powering up through 100 Ω onto 100 µF runs past the 5.984 ms point where HeadlessRunner stopped and lights its LEDs about 12 µs after its rail crosses. Stall 2 (a stiff floating island) is unchanged (H8b follow-up). Circuits that never hit it are bit-identical; the classic-only corpus sweep is identical (134 of 134). | 1.3, 8.9 | The hold is solve-internal state around the classic power gate; the core ports the rule with the W1f power-gate loop (the `w1f-power-gate-pingpong` divergence names it). |
 | `a1413c1`+`5e52b85`+`f3ae7e0` (`fix/output-sag-capacitive-edge`, merged `6035d9b`; for 0.6.3) | An `output_sag` on a logic output latches only when the sag lasts at least `OUTPUT_SAG_WINDOW = 10 ns`, whenever the output's net is provably one RC pole: the driver is in `RC_OUTPUT_IC_KINDS` (an explicit hand-written list, guarded by a test that decides every combinational kind), both supply pins and every capacitor's far end sit on ideal-source-fixed nodes, the only other pins on the net are high-Z inputs, and the net holds one capacitor with any ESR and leakage, or several without ESR. On a provable pole the exact-edge bound `tau·ln(B·start/|band|) >= 10 ns` keeps the sag and anything shorter is dropped; `start` is the exact back-stepped capacitor state at the solve's start, max'd with the rail/far-end hull. Every other net keeps the two-step count exactly as 0.6.1 ran it; the fast path never runs under the trapezoidal rule. The start-of-solve back-step covers enables, reloads and in-place edits; the inter-solve memo is gone. A 74LS04 into 30 pF is back inside its LOW band 8.6 ns after a falling edge, but at a 10 ns step the old check read 1.6 V against the 0.8 V limit and latched a false sag on every falling edge (into 100 pF, on every rising edge). The classic-only corpus sweep is identical (134 of 134). | 9.5.2, 3 | Classic-side failure heuristic; the window `W = 10 ns` is unchanged for the W1g G3 record. |
@@ -127,6 +137,8 @@ repeating them.
 | `load()` sequence and carry-forward table | 10.2 |
 | `step()` and `_solve()` order | 10.4, 10.5 |
 | Snapshots | 10.8 |
+| `signal_gen` time functions (`signalGenVoltage`) | 8.12.4 |
+| Internal solver nodes (`internalNodes`) | 7.15 |
 
 **Chapters.**
 1. IC power, output stage and input thresholds
@@ -1856,6 +1868,19 @@ Behaviour:
   3. A rising RCLK then sets `latch = shift`, using the value computed just
      above. A simultaneous SRCLK and RCLK therefore latches the post-shift
      value, and RCLK during a clear latches 0.
+  Delta: since `14b2a07` (`fix/74hc595-tied-clocks`), when `srclk` and
+  `rclk` sit on one net (`pinNode(srclk) >= 0` and equal to
+  `pinNode(rclk)`), the net is read once and a rising edge latches the shift
+  register from BEFORE this evaluation's shift (0 while `/srclr` is LOW), as
+  TI's data sheet gives for tied clocks (SCLS041J, section 8.1): the storage
+  register trails by one clock. Separate nets keep step 3 exactly, including
+  two rises seen in one evaluation. Limitation: on hardware an RCLK rise at
+  or before an SRCLK rise on separate nets also stores the old shift
+  register (SRCLK must lead by its set-up time for the new one), but sampled
+  levels cannot order two rises inside one step, so two rises seen together
+  stay post-shift. MCU writes inside one step are not replayed at this
+  point: the pin-event replay that orders them (H10, released in 0.6.4)
+  brings its own delta row with its wave merge.
 - `qh2` (QH′) is never referenced, so QH′→SER daisy-chaining does not work.
 - Power-on: all zero.
 
@@ -2633,7 +2658,10 @@ Open questions for this chapter: Q-O21 to Q-O24, Q-W13, Q-W14.
 
 Source key `passives-switches`. Scope: `resistor`, `capacitor`, `inductor`,
 `switch`/`push_button`, `spdt_switch`, `dip_switch`, `push_dpdt`,
-`potentiometer`/`trimmer`, `fuse` (with `ptc_fuse` alongside), `ldr`. Device
+`potentiometer`/`trimmer`, `fuse` (with `ptc_fuse` alongside), `ldr`; and, for
+W1h under W1 plan Decision 13, option A, `ferrite_bead`, `crystal` and
+`coupled_inductor` (§7.14-7.16; the last two are in
+`src/sim/engine/devices/model-families.ts`). Device
 bodies: `src/sim/engine/devices/passives.ts` (1088 lines). Companion math:
 `src/sim/engine/elements.ts`. Orchestration: `src/sim/engine/sim-engine.ts`.
 Nets: `src/sim/engine/graph.ts`. Catalog: `src/parts/default-parts.json` via
@@ -3037,6 +3065,256 @@ Prototype (`brownout-core-prototype/js/pec2.mjs`, `pec3.mjs`):
 - There is no trap mode, DC mode or failure model.
 
 Open questions for this chapter: Q-O25 to Q-O32, Q-O45, Q-O62, Q-W15.
+§7.14-7.16 add D35 and D36, and Q-O76 to Q-O78.
+
+### 7.14 Ferrite bead (`passives.ts:851-911`)
+
+Delta: this section describes classic since `4878620`
+(`fix/ferrite-bead-overload`, delta table), which settled Q-O76.
+
+- **Registration.** An engine switch body moved verbatim in Wave A4
+  (`passives.ts:1-13`), registered at `devices/index.ts:121`. A full static
+  stamp (`staticStamp`, `passives.ts:853`; `FULL_STATIC_STAMP_KINDS`,
+  `sim-engine.ts:1167-1171`). No commit and no digital hook; its
+  `updateFailures` hook puts it in the failure pass
+  (`sim-engine.ts:4888-4892`; probe P6).
+- **Pins.** `pins[0]`, `pins[1]`, by position (`passives.ts:871-872,884-885`).
+- **Params.** `R = max(0.001, Number(params.rDc ?? 0.5))` at every read: the
+  stamp, `updateCurrent`, the overload rule and `acStamp`
+  (`passives.ts:870,883,119,902`). Delta: since `13e433a` the fallback is
+  `FERRITE_BEAD_DEFAULT_R_DC_OHM = 0.0035`, the catalog's value, at all five
+  reads (the signature too). An explicit 0 stamps 1 mΩ (probe P3a:
+  22.7 µV across it at 22.7 mA). A NaN survives `Math.max`. There is no
+  `modelParam` read: a catalog `rDc` reaches the engine only as an authored
+  param, which devolt's store copies from `default_params` when a part is
+  placed (`devolt/packages/simcore/src/store/circuit-store.ts:455`).
+- **Catalog.** The bundled `ferrite-bead` is `{rDc: 0.0035}`, pins `a`/`b`
+  (function `passive`), `p_max` 0.056 W, with a note deriving the rating
+  (2 A assumed and unverified, so `p_max = (2·2 A)²·3.5 mΩ`; Fair-Rite
+  2743001111) (`default-parts.json:6027-6055`). Since `13e433a` the engine's
+  fallback for a missing `rDc` is the same 3.5 mΩ (delta table). Before, a
+  bead with no `rDc` param stamped 0.5 Ω against the 0.056 W rating and so
+  failed above about 0.335 A where the catalog part fails above 4 A. devolt's
+  injected catalog (`devolt/packages/catalog/parts.json:7486`, through
+  `setPartLibrary` at `devolt/packages/simcore/src/parts/catalog-injection.ts:41-49`)
+  still carries the old `{rDc: 0.5}` and `p_max` 0.25 W at `afffa6c`.
+- **Stamp.** `stampResistor(pins[0], pins[1], R)` (`passives.ts:861-874`), the
+  same in the transient, the DC operating point and every rung, and not
+  scaled by source stepping. Nothing is stamped once `resistor_overload` is
+  latched (`passives.ts:869`). The static signature is `String(params.rDc ??
+  0.5)` (`?? 0.0035` since `13e433a`) plus the latch flag (`passives.ts:854-860`), so an edit or a latch
+  restamps on the next solve (§7.2.2).
+- **`elementI`.** `(V(pins[0]) − V(pins[1]))/R`, pin0 -> pin1; 0 with fewer
+  than 2 pins or once latched (`passives.ts:875-887`). Telemetry reads it as a
+  pin0-to-pin1 single path (`physics-telemetry.ts:26-52`).
+- **Overload.** `updateFailures` (`passives.ts:888-893`) runs
+  `commitResistiveOverloadStress` (`passives.ts:97-171`) with `P = I²·R`, where
+  `I` is the magnitude of `elementI` and `R` the stamped resistance
+  (`passives.ts:114-121`). The rule is the
+  resistor's (§7.2.5): rate `max(0, P/p_max − 1)`, recovery 1, threshold 1
+  (`RESISTOR_DAMAGE_THRESHOLD`), `since = simTime + h`, the resistor's
+  message (`passives.ts:165-168`). `p_max` comes from `ctx.electricalSpecs`,
+  so kind inference supplies it without a `catalogUid`; a `p_max` of 0 or
+  less, or none, is no limit. Probe P3g, driven by a current source:
+  - no `rDc`, so the 0.5 Ω fallback before `13e433a`, 1 A: 0.5 W, latched
+    at 0.127 s;
+  - the same fallback, 0.3 A: 0.045 W, never; 0.4 A: 0.08 W, latched at
+    2.334 s;
+  - `rDc` 3.5 mΩ, 5 A: 0.0875 W, latched at 1.778 s; 3.9 A for 5 s, never;
+  - after `resetFailures()` the bead conducts again.
+- **Thermal.** None: no profile (`thermal-physics.ts:326-335,348-357`).
+- **Warnings.** None: not a winding, switch, clamp or rail kind (§9.7.4).
+- **Carry-forward, snapshots.** No electrical state. The latch and its stress
+  carry by id and kind (§9.5.5).
+- **AC** (W6): `1/R`, or open once latched (`passives.ts:894-910`).
+- **Core note.** A resistor under its own kind code: `R` as above, the W1g
+  rating record with `p_max` by kind inference, and no thermal record. It
+  fits the existing kernel (a static stamp, plus the W1g latch).
+- Gate 1: `wave3-passives.test.ts:69-135` and
+  `ferrite-bead-overload.test.ts:144-370`.
+
+### 7.15 Crystal (`model-families.ts:885-1111`)
+
+- **Registration.** Written registry-first in Wave A6
+  (`model-families.ts:1-7`), registered at `devices/index.ts:197`. In the
+  commit bucket through its `commitState` hook. No digital hook, and not in
+  the failure pass (probe P6).
+- **Params** (`crystalParams`, `model-families.ts:909-921`), from
+  `comp.params` only (no `modelParam`), all with `??`:
+  - `fSeries = max(1e-3, Number(fSeries ?? 1e6))` Hz;
+  - `q = max(1, Number(q ?? 50000))`;
+  - `rs = max(1e-3, Number(rs ?? 50))` Ω;
+  - `c0 = max(0, Number(c0 ?? 5))·1e-12` F (authored in pF,
+    `src/circuit/types.ts:151`);
+  - derived: `ωs = 2π·fSeries`, `Ls = q·rs/ωs`, `Cs = 1/(ωs²·Ls)`. The engine
+    defaults give `Ls` 0.3978874 H, `Cs` 6.366198e-14 F and an
+    antiresonance at 1.0063461·`fSeries` with `C0` 5 pF (probe P3c).
+- **Catalog.** None in the bundled catalog. devolt's injected catalog has
+  `crystal-16mhz`, `{fSeries 16e6, q 25000, rs 20, c0 5}`
+  (`devolt/packages/catalog/parts.json:8267-8311`). devolt's store copies them
+  into a placed part (`devolt/packages/simcore/src/store/circuit-store.ts:455`);
+  the engine's defaults apply only to absent ones.
+- **Pins and topology.** `pins[0]` (a) and `pins[1]` (b), by position
+  (`model-families.ts:937-939,1001-1003`), plus one internal solver node `m`
+  (`internalNodes`, `model-families.ts:887,929`):
+  - `Cs` with `rs` in its ESR slot, from a to `m`;
+  - `Ls` (no DCR, no core loss), from `m` to b;
+  - `C0` from a to b when `c0 > 0` (no ESR, no leakage).
+- **The internal node.** Allocated after every net row and inside
+  `nodeCount`, so the node-row machinery covers it: `NODE_RSHUNT_G`, the gmin
+  overlay and `_vAt` (`sim-engine.ts:4808-4823,4976-4981`). It stays out of
+  `nodeIdx`, so `netV` never publishes it (`magnetics-crystal.test.ts:951-1025`;
+  probe P3b: net keys `gnd n0 n1`, `nodeCount` 3). Each Newton solve
+  warm-starts it from the committed `_lastX` (`sim-engine.ts:5728-5740`).
+  The isolated-section union covers net rows only (`sim-engine.ts:4726`),
+  and a and b are one galvanic group.
+- **Stamp** (`model-families.ts:930-994`); nothing with fewer than 2 pins or
+  without `m`:
+  - BE: `stampCapacitor(a, m, Cs, h, vcs, rs)`, `stampInductor(m, b, Ls, h,
+    ils, 0)` and, when `c0 > 0`, `stampCapacitor(a, b, C0, h, vc0, 0)`, the
+    companions of §7.4-7.5;
+  - trap (`useTrapThisSolve`, §7.2.3): the `…Trap` companions, with histories
+    `capsI` (`cs`, `c0`) and `indsV` (`ls`);
+  - `_dcSolveMode`: only `stampResistor(m, b, 1e-6)`
+    (`model-families.ts:942-949`), so a is open, both capacitors block and
+    `m` follows b;
+  - not scaled by source stepping.
+- **State.** Composite keys `<id>:cs`, `<id>:ls` and `<id>:c0`
+  (`model-families.ts:96-104`) in the engine's `caps`, `capsI`,
+  `capCurrents`, `inds` and `indsV`. Snapshots, the adaptive error walk
+  (`adaptive-step.ts:162-176`) and same-id carry therefore treat them as three
+  ordinary parts (`magnetics-crystal.test.ts:555-667` round-trips them).
+- **`commitState`** (`model-families.ts:995-1074`), per branch exactly as the
+  capacitor and inductor commits (§7.4-7.5):
+  - `Cs` from `V(a) − V(m)`, `Ls` from `V(m) − V(b)`, and `C0` from `V(a) −
+    V(b)` when `c0 > 0` (otherwise `capCurrents.c0 = 0` and `caps.c0` is left
+    alone);
+  - `capsI` and `indsV` are refreshed when the method is trap, even on a
+    forced-BE step;
+  - in `_dcSolveMode` (`model-families.ts:1010-1025`): `caps.cs = V(a) −
+    V(m)` and `caps.c0 = V(a) − V(b)` (even when `c0` is 0), their `capsI`
+    and `capCurrents` 0, `inds.ls = (V(m) − V(b))/1e-6` and `indsV.ls = V(m)
+    − V(b)`. Probe P3b: after `dcOperatingPoint` with 5 V through 1 kΩ, `cs`
+    and `c0` hold 5 V, `ls` 0 A and `elementI` 0.
+- **`elementI`** = `capCurrents.cs + capCurrents.c0`
+  (`model-families.ts:1075-1084`), the pin-a terminal current, a -> b. The
+  `Ls` current is not added; it equals the `Cs` current up to `m`'s node
+  shunt. After `load()` it is the 1 ps seed's current, because the seed
+  restore covers `caps`, `inds`, `capsI` and `indsV` only
+  (`sim-engine.ts:2985-3008`): with 5 V through 1 kΩ it reads 4.999 mA and
+  `V(a)` 1 mV at load, with `cs` and `c0` back at 0, then 1.6667 mA and
+  3.3333 V after one 10 ns BE step (probe P3b). This is the capacitor's
+  Q-O29 (D36).
+- **Carry-forward** (`sim-engine.ts:2695-2708`): same id only, with no kind
+  check. `caps` and `capsI` come from the old maps (else 0), `capCurrents` is
+  set to 0 (then the seed's), and `inds`/`indsV` likewise. There is no net-pair
+  fingerprint, because a branch ends on the internal node. Probe P3b: a reload
+  with another `fSeries` keeps `cs` and `c0`.
+- **Failures, thermal, warnings.** None. `Ls` is not a `missing_flyback`
+  winding (`sim-engine.ts:986-998`).
+- **AC** (W6, `model-families.ts:1085-1110`): the exact series motional
+  admittance plus `jωC0`; `m` is left unstamped.
+- **Core note.** The kernel lacks two things the crystal needs: an
+  **internal node** in the program format (a node row after the net rows,
+  never published in `netV` and never part of a section), and the **inductor
+  companion** (BE and trap, DCR 0, no core loss), shared with W1h's
+  `inductor`. With the W1b capacitor-with-ESR companion that makes three state
+  variables (two when `c0` is 0), so the partition is always stepped (W1 plan
+  Decision 14; D35). The crystal has no events of its own; readers of its
+  nodes cross by bisection. A default part (1 MHz, Q 50 000) rings for about
+  16 ms and needs sub-µs steps whenever it is excited, in classic too.
+- Gate 1: `magnetics-crystal.test.ts:837-950` (trap ringdown) and
+  `:951-1025` (the `netV` surface; its `dcOperatingPoint` half is W6). The AC
+  case (`:769-836`) is W6 and the snapshot case (`:555-667`) is W2.
+
+### 7.16 Coupled inductor (`model-families.ts:122-299`)
+
+- **Registration.** Written registry-first in Wave A6, registered at
+  `devices/index.ts:192`. In the commit bucket through its `commitState`
+  hook. No digital hook, and not in the failure pass.
+- **Pins.** `a1`, `b1` (winding 1) and `a2`, `b2` (winding 2), by id; `a1` and
+  `a2` are the dotted terminals. With fewer than 4 pins it stamps and commits
+  nothing (`model-families.ts:166,200,271`).
+- **Params** (`coupledInductorParams`, `model-families.ts:141-156`):
+  - `l1 = max(1e-12, Number(l1 ?? 1e-3))`, `l2` likewise;
+  - `k = min(0.9999, max(0, Number(k ?? 0.98)))` (`COUPLING_K_MAX`,
+    `model-families.ts:124-131`): a negative `k` reads 0, and `k = 1` reads
+    0.9999 so the 2×2 block stays invertible;
+  - `M = k·sqrt(l1·l2)`;
+  - `dcr1`, `dcr2` = `seriesLossResistance(modelParam(comp, "dcr1"|"dcr2",
+    0))` (`sim-engine.ts:134-137`): the authored value, else an exact-uid
+    catalog default (§7.2.6); finite and `> 0`, else 0. The bundled catalog has
+    no part, so only the authored value applies there. devolt's injected
+    catalog has `coupled-inductor`, `{l1 1e-3, l2 1e-3, k 0.98, dcr1 5, dcr2
+    5}` (`devolt/packages/catalog/parts.json:8178-8225`), which gives 5 Ω to a
+    component with that `catalogUid` and no authored DCR (probe P10);
+  - no core loss, unlike the inductor.
+- **SPICE.** A `K` card merges its two `L` cards into one component at the
+  first `L`'s position, with `l1`/`l2` from their `inductance` and each `L`'s
+  first node on `a1`/`a2`; `k` must lie in (0, 1]
+  (`spice/netlist.ts:838-868,1139-1196`).
+- **Stamp** (`model-families.ts:163-198`), with `v_w = V(a_w) − V(b_w)` and
+  `i_w` positive `a_w -> b_w`:
+  - BE (`coupledInductorCompanion`, `elements.ts:520-551`): `A = [[L1/h +
+    DCR1, M/h], [M/h, L2/h + DCR2]]` and `c = [(L1·i1 + M·i2)/h, (M·i1 +
+    L2·i2)/h]` from the last accepted currents; `G = A⁻¹` (`G11 = a22/det`,
+    `G22 = a11/det`, `G12 = −a12/det`) and `Ihist = G·c`; floors `max(1e-12,
+    L)` and `max(1e-30, h)`, DCR finite and `>= 0`;
+  - trap (`coupledInductorCompanionTrap`, `elements.ts:580-614`): the same
+    inversion of `A_trap = [[2L1/h + DCR1, 2M/h], [2M/h, 2L2/h + DCR2]]`, with
+    `c_trap = [(2L1/h − DCR1)·i1 + (2M/h)·i2 + v1Prev, (2M/h)·i1 + (2L2/h −
+    DCR2)·i2 + v2Prev]` and `vPrev` the last accepted winding voltages;
+  - `stampCoupledInductor` (`elements.ts:623-648`): `stampConductance` for
+    each self block, the eight cross entries `±G12` written explicitly
+    (ground skipped), `−Ihist_w` at `a_w` and `+Ihist_w` at `b_w`;
+  - `_dcSolveMode`: each winding is a resistor `max(dcr_w, 1e-6)`, with no
+    mutual term (`model-families.ts:172-179`);
+  - not scaled by source stepping.
+- **State.** `inds` and `indsV` under `<id>:1` and `<id>:2`
+  (`model-families.ts:86-94`).
+- **`commitState`** (`model-families.ts:199-248`): the same companion from the
+  same previous state, then `i_w = Σ G_wj·v_j + Ihist_w`
+  (`coupledInductorWindingCurrents`, `elements.ts:655-664`); `indsV` is
+  refreshed when the method is trap. In `_dcSolveMode`
+  (`model-families.ts:207-219`): `i_w = v_w/max(dcr_w, 1e-6)` and `indsV_w =
+  v_w`. Probe P3f: 5 V through 100 Ω into winding 1 with `dcr1` 2 gives `i1 =
+  5/102` and `i2 = 0`.
+- **`elementI`** = `inds.<id>:1`, winding 1, a1 -> b1
+  (`model-families.ts:249-253`). Winding 2's current is published nowhere:
+  no channel and no readout except `saveState().inds` (probe P3d: `i2`
+  peaked at 14.3 mA, the load's current, visible only in state). Q-O78.
+- **Galvanic groups.** `[[a1, b1], [a2, b2]]` (`model-families.ts:158,162`):
+  the isolated-section union joins each winding's own pins, never the two
+  windings (`sim-engine.ts:4737-4750`), so a floating secondary gets its own
+  1 S anchor (probe P3d: one anchor row; `isolated-sections.test.ts:192-207`).
+  The matrix still couples all four pins through `G12`.
+- **Carry-forward** (`sim-engine.ts:2680-2693`): same id only, with no kind
+  check; `inds` and `indsV` per winding, else 0. There is no net-pair
+  fingerprint: pairing and dot polarity across an id change are ambiguous.
+- **Failures, thermal.** None.
+- **`missing_flyback`.** Not a winding: `inductiveWindingPins` covers
+  `inductor`, `relay` and `dc_motor` only (`sim-engine.ts:986-998`). A
+  transformer primary switched by a switch with no diode raises nothing,
+  where an inductor in the same place warns (probe P3e). Q-O77.
+- **AC** (W6, `model-families.ts:254-298`): the exact 2×2 complex admittance.
+- **Core note.** Two coupled windings give two state variables plus the trap
+  histories, so the partition is stepped (W1 plan Decision 14; D35). The port
+  needs:
+  1. the union-find to join **all four free pins** into one partition,
+     because `G12` couples the pairs in the matrix although they are
+     galvanically separate;
+  2. the section-anchor compiler to honour `galvanicGroups` (README "Section
+     anchor record" states that no W1 kind declares them), so a floating
+     secondary gets its own anchor;
+  3. the 2×2 BE and trap companions, with `k` clamped to `[0, 0.9999]`;
+  4. `dcr1` and `dcr2` by the `modelParam` exact-uid rule.
+
+  `elementI` is `i1`; `i2` goes out through the device-state readout (Q-O78).
+  No events.
+- Gate 1: `magnetics-crystal.test.ts:286-396` (turns ratio) and `:474-554`
+  (trap energy), `isolated-sections.test.ts:192-207`. The AC case
+  (`:397-473`) and `dcOperatingPoint` (`:668-768`) are W6, the snapshot case
+  (`:555-667`) is W2.
 
 ---
 
@@ -3044,7 +3322,8 @@ Open questions for this chapter: Q-O25 to Q-O32, Q-O45, Q-O62, Q-W15.
 
 Source key `sources-rails`. Scope: `voltage_source`, `battery_pack`,
 `bench_psu`, `clock`, `clock_gen`, `pulse_source`, `pulse_gen`. The same cohort
-file also holds `signal_gen` and `current_source` (§8.6a).
+file also holds `signal_gen` and `current_source`, specified in §8.12-8.13 for
+W1h (W1 plan Decision 13, option A).
 
 ### 8.0 Where the code lives
 
@@ -3463,6 +3742,36 @@ Consequences for this area:
   - The PSU has no output/io/tri_state pins.
 - Tests assert `getFailures()` is `{}` (`wave5-regulators.test.ts:868,882,895`).
 
+#### 8.4.4 Model limitation: a constant-power load on a current limit
+
+This is a documented model limitation, parked for an owner-level modelling
+decision (manager, 2026-10-02); there is no fix branch. It lives in the shared
+compliance clamp (§8.4.1; `_useCurrentLimitComplianceClamp`,
+`sim-engine.ts:1813-1838`), so it reaches the bench PSU (`sources.ts:248`)
+and the W3 regulators dcdc_converter, linear_reg and lm317
+(`amps-regulators.ts:564,1331,1461`).
+- A constant-power load draws `I = P/V`, less as the voltage rises. The
+  dcdc_converter's input is one: a current source of `P_out/(eta·V_in)`
+  (`amps-regulators.ts:629,702-704`).
+- When such a load draws more than `iLimit` at the setpoint, the supply has no
+  current-limited operating point, because `I = iLimit` needs `V = P/iLimit`,
+  which is above the setpoint. A real supply's output collapses toward the
+  load's undervoltage lockout. Classic's clamp instead finds the CC
+  candidate's output at or above the setpoint and selects the voltage branch.
+  So the supply holds its setpoint and delivers more than its limit, and the
+  committed regime alternates between CC and the voltage regime on
+  successive steps. This is not the slight-overload flicker that `b872148`
+  and `f198ed9` removed: those fixes assume a load whose draw rises with
+  voltage.
+- Probe P7: a 12 V source into `linear_reg {vout 9, vdropout 2, iLimit 1}`
+  feeding `dcdc_converter {vout 3.3, eta 0.85, iLimit 10}` into 1 Ω holds 9 V
+  at 1.4235 A, with `reg` 2, 0, 2, 0 over the last steps and no failure. Into
+  10 Ω it delivers 0.1424 A in REG, as it should. Probe P8: `bench_psu
+  {voltage 9, iLimit 1}` with the same load holds 9 V at 1.4235 A, `reg` 0, 2,
+  0, 2.
+- No W1 kind is a constant-power load, so no W1 circuit reaches this; the core
+  meets it with the W3 regulators.
+
 ### 8.5 `clock` / `clock_gen`
 
 - **Model.** One model for both kinds, because they shared a case body
@@ -3507,20 +3816,10 @@ Consequences for this area:
 
 ### 8.6a Same-cohort kinds not in the listed scope
 
-- **signal_gen**:
-  - It registers a branch row only when enabled and `rSource <= 0`
-    (`sources.ts:478-489`).
-  - It stamps either an ideal `stampVSource` or, with the default rSource of
-    50 Ω, a Norton pair (`sources.ts:513-525`).
-  - It is not in the static or digital kind sets.
-  - Params are clamped at parse time: duty 0.01-0.99, tr/tf/pw >= 1e-9,
-    delay >= 0 (`waveform.ts:112-131`).
-  - Host floors: `1/(40f)` for sine/triangle/ramp, `1/(10f)` for square/pulse,
-    `1/20 kHz` for noise (`headless.ts:155-164`).
-- **current_source** has no branch row, and both its stamp and its elementI are
-  homotopy-scaled (`sources.ts:406-474`). Delta: since `2c6ba7d` it drives its
-  current out of `pos`, and its elementI and small-signal injection flip with
-  it. See "Deltas since the 2026-09-24 baseline".
+`signal_gen` and `current_source` share the cohort file
+(`sources.ts:413-597`). They are specified in §8.12 and §8.13, added for W1h
+under W1 plan Decision 13, option A; `current_source` there is classic since
+`2c6ba7d` (delta table).
 
 ### 8.7 Readout summary
 
@@ -3531,6 +3830,8 @@ Consequences for this area:
 | bench_psu | yes | x[k] (−dir·iLimit in CC) | none | n/a | `{reg}` when iLimit > 0 | never; in failure pass; flyback rail kind |
 | clock/clock_gen | yes | x[k] | 0/1 at midpoint | n/a | n/a | never (clock_gen in failure pass via vcc_range) |
 | pulse_source/pulse_gen | yes | x[k] | 0/1 at midpoint | n/a | n/a | never (pulse_gen in failure pass; has an output-function pin) |
+| signal_gen | yes | Norton: the delivered current, positive while delivering; ideal: x[k], negative while delivering; 0 when disabled (§8.12.3) | none | n/a | n/a | never (in failure pass via vcc_range; has an output-function pin); not a flyback rail kind |
+| current_source | yes | −I plus the shunt's current, pin0 -> pin1 (§8.13) | none | n/a | n/a | never; not in the failure pass |
 
 - **Enums.** `SimFailureKind` is resistor_overload, fuse_tripped, led_failed or
   output_sag (`sim-engine.ts:579-583`). `SimWarningCode` is
@@ -3622,6 +3923,355 @@ Handoff doc:
   `getWarnings` (`handoff.md:162-165`).
 
 Open questions for this chapter: Q-O33 to Q-O40, Q-W16, Q-W17, Q-W18.
+§8.12-8.13 add D34 and Q-O67 to Q-O75. §8.4.4 records a model limitation,
+which has no open question.
+
+### 8.12 `signal_gen`
+
+Added for W1h (W1 plan Decision 13, option A). Classic as of `52eb434`,
+after `685179c` and `5657a9a` (delta table).
+
+#### 8.12.1 Where it lives, params and defaults
+
+- **Model.** `signalGenModel` (`sources.ts:488-597`), an engine switch body
+  moved verbatim in Wave A4 (`sources.ts:1-31`), registered at
+  `devices/index.ts:132`. Waveforms: `src/sim/engine/waveform.ts` (pure).
+- **Buckets** (probe P6, no `catalogUid`): no commit and no digital hook; in
+  the failure pass through the catalog's `vcc_range` by kind inference
+  (`sim-engine.ts:4888-4892`); not a full static stamp and not a static ideal
+  source (`sim-engine.ts:1163-1171`).
+- **Catalog.** `signal-gen` (`default-parts.json:144-189`; devolt's injected
+  catalog has the same part, `devolt/packages/catalog/parts.json:284`):
+  default_params as the table's last column, pins `pos` (function `output`)
+  and `neg` (function `gnd`), `vcc_range {0, 5, 24}`. No `modelParam` or
+  `partFor` read reaches the stamp: params come from `comp.params` only, as for
+  the other sources (§8.8).
+- **Parse.** `parseSignalGenParams` (`waveform.ts:112-131`) runs once per
+  params object (the `signalGenCache` WeakMap, `sources.ts:60-66,507-511,552-556`).
+  Every read is `??`, so an explicit `0`, `""` or `NaN` is kept, then clamped:
+
+| Param | Rule | Catalog default |
+|---|---|---|
+| `waveform` | a string in `{dc, sine, square, pulse, triangle, ramp, pwl, noise}` (`waveform.ts:85`), else `sine`: a non-string or unknown value (`"SINE"`, `3`) plays a sine (`waveform.ts:113-116`; probe P1a) | `sine` |
+| `amplitude` | `max(0, Number(amplitude ?? 2.5))` (`:118`) | 2.5 |
+| `offset` | `Number(offset ?? 2.5)`, unclamped (`:119`) | 2.5 |
+| `frequency` | `max(1e-6, Number(frequency ?? 1000))` (`:120`); `""` reads 0 and clamps to 1e-6 | 1000 |
+| `phaseDeg` | `Number(phaseDeg ?? 0)` (`:121`) | 0 |
+| `duty` | `min(0.99, max(0.01, Number(duty ?? 0.5)))` (`:122`), square only | 0.5 |
+| `delay` | `max(0, Number(delay ?? 0))` (`:123`) | 0 |
+| `tr`, `tf` | `max(1e-9, Number(… ?? 1e-6))` (`:124-125`), pulse only | 1e-6 |
+| `pw` | `max(1e-9, Number(pw ?? 5e-4))` (`:126`), pulse only | 5e-4 |
+| `pwl` | `"t:v,t:v,…"`, parsed by `parsePwl` (`:87-104`; §8.12.4) | `""` |
+| `seed` | `Math.round(Number(seed ?? 1))` (`:128`); 2.5 becomes 3 | 1 |
+| `enabled` | `Number(enabled ?? 1) !== 0` (`:138-140`); NaN counts as enabled | 1 |
+| `rSource` | `Number(rSource ?? 50)`, read raw at each hook (`sources.ts:496,523,544,583`) | 50 |
+
+- `Math.max` and `Math.min` return NaN for a NaN argument, so a non-finite
+  authored number survives the clamps and reaches the output (probe P1a:
+  amplitude, offset, frequency, phase and duty all stay NaN). The W1f compiler
+  declines `non-finite-<param>` for its sources; the same rule fits here.
+
+#### 8.12.2 Three forms, decided at load
+
+The form is fixed at load: a param edit goes through a fresh `load()`, and
+`branchRows` allocates the row under the stamp's own condition
+(`sources.ts:490-501`).
+
+| Form | Condition | Stamp (`sources.ts:502-538`) | Matrix |
+|---|---|---|---|
+| Disabled | `enabled` is 0 | nothing: hi-Z, the node rests on `NODE_RSHUNT_G` (`:513-514`) | no branch row (probe P2b: `pos` 0 V) |
+| Ideal | enabled and `rSource <= 0` (a negative value counts; probe P2a) | `stampVSource(pos, neg, k, Vt)` (`:525-530`), the full incidence every solve | one branch row, allocated at the component's position |
+| Norton | enabled and `rSource > 0` (the catalog default, 50 Ω) | `stampResistor(pos, neg, rSource)`, then `stampCurrentSource(pos, neg, Vt/rSource)`: `+Vt/rSource` into `pos`, `−Vt/rSource` at `neg` (`:531-537`; `elements.ts:21-29,138-141`) | no branch row |
+
+- `Vt = independentSourceMagnitude(signalGenVoltage(parsed,
+  waveformSampleTime(h)))` (`sources.ts:520-522`), computed before the branch,
+  so both forms ramp together on a source-stepping rung (§8.1.3).
+- `stampResistor` has no guard, unlike `stampConductance` (`elements.ts:31-39`):
+  a NaN `rSource` takes the Norton path (`NaN <= 0` is false) and stamps NaN.
+- The Norton form is the terminal equivalent of `Vt` behind `rSource` with no
+  internal node (`sources.ts:531-534`). Its `pos` node is a free node, not a
+  fixed one, in every circuit that keeps the catalog default.
+- **Pins.** `pins[0]` (+) and `pins[1]` (−), by position
+  (`sources.ts:516-517,564-565,581-582`). The datum and anchor rules find the
+  return by id (`neg`, else `gnd`; `graph.ts:56-59`), so a front end that
+  serialises `[neg, pos]` inverts the drive without moving the datum (G7).
+- **Regimes.**
+  - Transient, BE or trap: no companion and no state, so the method does not
+    reach it. The sample instant is the interval's end, `simTime + h`
+    (§8.1.4).
+  - Load seed: `_solve(1e-12)` samples `simTime + 1e-12` (§8.1.5); a 1 Hz
+    ramp reads −0.999999999998 V at load (probe P2c).
+  - DC operating point and the seed rescue: the stamp is unchanged in
+    `_dcSolveMode`, and the waveform is sampled at `simTime +
+    DC_OP_COMPANION_H` (1e-12; `sim-engine.ts:670,5102-5104`). A 1 MHz sine
+    reads `sin(2π·1e6·1e-12)` = 6.283e-6 at the operating point (probe P2e).
+    It is not in `DC_OP_PHYSICAL_TIME_HOLD_KINDS` (`sim-engine.ts:744-751`):
+    it has no state to hold.
+  - Source stepping: `Vt` is scaled (`sim-engine.ts:5058-5085`); see §8.12.3
+    for the published current.
+  - AC (W6, `sources.ts:573-596`): the three forms again: nothing; an ideal
+    branch with the unit drive when designated; or `1/rSource` plus an
+    injection of `magnitude/rSource`.
+
+#### 8.12.3 `updateCurrent` and the published `elementI`
+
+There is no `commitState`. `updateCurrent` (`sources.ts:539-572`):
+- disabled: 0;
+- ideal: `x[k]`, the branch current entering from `pins[0]`, **negative while
+  delivering** (§8.1.1). 5 V into 1 kΩ reads `−5.000000005e-3` A, the node
+  shunt included (probe P2a);
+- Norton: `(Vt − (V(pins[0]) − V(pins[1])))/rSource`, with `Vt` sampled at
+  the same `waveformSampleTime(h)` as the stamp (`sources.ts:557-561`). This is
+  the current the instrument sources out of `pos`, **positive while
+  delivering**: 5 V behind 50 Ω into 1 kΩ reads `+4.761904766e-3` A (probe
+  P2a). Unlike the stamp it is not homotopy-scaled (`sources.ts:561` against
+  `:520-522`), so it disagrees with the stamp on a source-stepping rung; at an
+  accepted point the scale is 1.
+
+The sign convention therefore flips with `rSource` (Q-O67, ruled: mirrored,
+and on the classic-bug review list). Classic's own readers compensate:
+`physics-telemetry` labels the Norton current `source-output,
+positive-delivered` and the ideal one `pin0-to-pin1`
+(`physics-telemetry.ts:104-115`) and leaves `signal_gen` out of signed
+terminal power (`:54-59`), and the meter negates the Norton scalar
+(`meter.ts:260-278`).
+
+No channel currents and no `digitalState`: `signal_gen` is not in
+`DIGITAL_UPDATE_KINDS` (`sim-engine.ts:1144-1150`), unlike the clock and the
+pulse (probe P6: `digitalState` is `{}`).
+
+#### 8.12.4 Waveform evaluation (`signalGenVoltage`, `waveform.ts:166-200`)
+
+`V(t) = offset + amplitude·unit(t')`, with `t' = t < delay ? 0 : t − delay`
+(`waveform.ts:170`). Before `delay` the output holds the shape's own `t' = 0`
+value, not `offset`: a sine with `phaseDeg` 90 and `delay` 1 ms holds 5 V
+until 1 ms (probe P1c). `unit` lies in [−1, +1] except for noise.
+
+| Shape | `unit(t')`, with `P = 1/frequency` | Notes |
+|---|---|---|
+| `dc` | none: returns `offset` (`waveform.ts:173-175`) | `amplitude` ignored |
+| `sine` | `sin(2π·f·t' + phaseDeg·π/180)` (`:206-209`) | no `%`; phase in degrees |
+| `square` | `phaseOffset = ((phaseDeg/360)·P + P) % P`; `s = ((t' + phaseOffset) % P + P) % P`; `+1` when `s < duty·P`, else `−1` (`:211-217`) | phase 90 advances it by `P/4` (probe P1c: HIGH on [0, 0.25 ms) and [0.75, 1 ms)); any phase wraps (−450 acts as −90) |
+| `triangle` | `pos = s/P` (the same `s`); `−1 + 4·pos` for `pos < 0.5`, else `3 − 4·pos` (`:219-231`) | starts at the trough at phase 0; corners at `pos` 0 and 0.5 |
+| `ramp` | `−1 + 2·pos` (`:233-239`) | rising sawtooth; the drop to −1 at each `pos = 0` is a discontinuity |
+| `pulse` | `m = ((t' % P) + P) % P`; rise `−1 + 2m/tr` on [0, tr), `+1` on [tr, tr+pw), fall `1 − 2(m−tr−pw)/tf` on [tr+pw, tr+pw+tf), else `−1` (`:252-268`) | phase ignored (`:161-164`; probe P1c); no zero-length ramp (the 1e-9 floors); `tr+pw+tf > P` truncates the cycle: what fits in `P` plays, then the rise restarts from −1 (probe P1c, `pw` 2 ms at 1 kHz: no fall at all) |
+| `pwl` | absolute voltages at **absolute `t`** (`:276-295`) | `delay`, `offset` and `amplitude` ignored (`:157-160,270-275`) |
+| `noise` | Gaussian; `bucket = floor((t' + 1e-12)/1e-4)` (`:312-318`) | `amplitude` is the 1-sigma RMS; unbounded |
+
+- **PWL.** `parsePwl` (`waveform.ts:87-104`) splits on `,`, splits each pair
+  at its first `:`, reads both sides with `parseFloat` (trailing text is
+  ignored: `1e-3abc` reads 1e-3), skips non-finite pairs, sorts by `t`
+  (stably, so equal times keep authored order) and keeps the **first 64
+  points after sorting**: a longer table loses its latest points (probe P1d:
+  of 70 points, those up to 0.063 s survive and the output holds there). The
+  value is `pts[0].v` for `t <= pts[0].t`, the last value for `t >=
+  pts[last].t`, and otherwise linear between the first bracketing pair found
+  from the left (`:285-292`). Two points at one `t` form a vertical step; at
+  the instant itself the earlier-authored value applies (probe P1d: 5 V at 1
+  ms, 1.9999999 just after). An empty or unparseable table returns `offset`
+  (`:279`).
+- **Noise.** `hash32` is 32-bit FNV-1a over the UTF-16 code units
+  (`waveform.ts:49-56`). `hashToOpenUnit` applies the integer finalizer
+  `h ^= h >>> 16; h = Math.imul(h, 0x7feb352d); h ^= h >>> 15;
+  h = Math.imul(h, 0x846ca68b); h ^= h >>> 16` and maps to
+  `((h >>> 0) + 0.5)/2^32` (`:65-73`). The variate is `sqrt(−2·ln u1)·cos(2π·u2)`,
+  with `u1` from `"<seed>:<bucket>:radius"` and `u2` from
+  `"<seed>:<bucket>:angle"`, both numbers formatted by `String()` (`:315-317`).
+  Buckets are 1e-4 s (`SIGNAL_GEN_NOISE_UPDATE_RATE_HZ` 10 000, `:76`),
+  counted from `delay`, each boundary 1e-12 s early (probe P1e: `t' = 1e-4 −
+  1e-12` already reads bucket 1). Over 20 000 buckets the mean is −0.0022 and
+  the RMS 0.9967 (probe P1e). The draw is deterministic per `(seed, bucket)`
+  by design (`:303-306`).
+- **Edge instants.** Square edges and the ramp's reset are decided by `%` on
+  floats, so at a computed edge instant the side the waveform reads is a
+  rounding accident, as for the clock (§8.5). At 1 kHz and 50 % duty, over
+  `m = 1..3000` (probe P1f):
+
+| Instants | Rising edge reads LOW | Falling edge reads HIGH | Ramp reset reads the top |
+|---|---|---|---|
+| `t = m·1e-3` (falls at `+ 5e-4`) | 1468 | 1607 | 1468 |
+| `t = m/1000` (falls at `+ 5e-4`) | 1867 | 1936 | 1867 |
+
+At `t = 0.011` the square reads 0 V and the ramp 4.999999999999996 V. Inside a
+run the instants come from summed step sizes, so whether an endpoint lands on
+one depends on the float path: 48 steps of 0.25 ms hit none (probe P2d).
+
+#### 8.12.5 How the hosts step it
+
+`SimEngine.step(h)` knows nothing of the generator's timing (§8.1.6). Both
+hosts classify it through `parseSignalGenParams` and add a step ceiling and
+breakpoints; a disabled generator gets neither. Delta: the headless host lands
+steps on source events since `685179c` and classifies through the parse since
+`5657a9a`; devolt's worker reads the parse since its `8ae8792` (delta table).
+- **Step ceiling** (`sourceStepLimit`, `headless.ts:132-160`,
+  `sim.worker.ts:227-256`):
+  - `sine`, `triangle`, `ramp`, and any other name (it plays as a sine):
+    `1/(40·f)`;
+  - `square`, `pulse`: `1/(10·f)`;
+  - `noise`: 50 µs, two steps per bucket;
+  - `dc`, `pwl`: none;
+  - then `max(H_MIN, limit)` with `H_MIN = 1e-8`, so the intended points per
+    period hold up to 2.5 MHz for the first group and 10 MHz for square and
+    pulse. There is no upper frequency clamp.
+- **Breakpoints** (`sourceEventDescriptors`, `headless.ts:218-294` and
+  `sim.worker.ts:301-378`; `nextSourceEventTime`, `headless.ts:297-325` and
+  `sim.worker.ts:381-409`). A step that would reach an event ends `H_MIN`
+  before it, and the next crosses it in a 10 ns guard step, with epsilon
+  `max(1e-15, |t|·1e-12)` (`headless.ts:168-170,975-988`;
+  `sim.worker.ts:264-266,617-633`). In trap mode the step after a clamp is
+  forced BE (`headless.ts:1039-1041`). The events per shape
+  (`headless.ts:269-291`):
+  - `square`: periodic from origin `delay − phaseOffset`, offsets `{0,
+    duty·P}`, duty clamped to [0.01, 0.99] as the parse does;
+  - `pulse`: origin `delay`, offsets `{0, tr, tr+pw, tr+pw+tf}`, with `tr` and
+    `tf` floored at `H_MIN` (the parse floors at 1e-9) and `pw` at 0 (the
+    parse: 1e-9);
+  - `ramp`: origin `delay − phaseOffset`, offset `{0}`;
+  - `noise`: every 1e-4 s from `delay` (the engine's boundaries are 1e-12 s
+    earlier, inside the guard step);
+  - `pwl`: the parsed knots (`parsePwl`'s `parseFloat`, sort and 64-point cap)
+    at absolute time, not gated on `delay`;
+  - `sine`, `triangle`, `dc` and any other name: one event at `delay`.
+- **Error-check gap** (devolt's worker only, `sim.worker.ts:200-219`):
+  `square`, `pulse`, `ramp` and `noise` count as event-aligned (gap 15); the
+  other shapes keep the default 3. The headless host checks every step.
+- A generator into resistors gives step doubling nothing to see: coarse and
+  refined steps agree at the endpoint (`headless.ts:117-131`), so only the
+  ceiling and the breakpoints bound `h` there. Probes P4a-P4d, headless, rerun
+  at `52eb434`:
+  - a 0.2 ms PWL pulse at 3 ms reads 0.2000 ms HIGH, in 28 steps;
+  - 20 µs pulses at 1 kHz read 419.6 µs HIGH of 420 µs over 20 ms;
+  - `"Sine"` at 1 kHz steps exactly as `"sine"` (812 steps at 25 µs);
+  - a 1 kHz square reads 10.00002 ms HIGH of 20 ms.
+
+  Before the fixes the first three read 0 ms, 11.2 µs and 1.1 ms of 10 ms
+  (delta table).
+
+#### 8.12.6 Failures, thermal, warnings, datum
+
+- **Failure pass.** The catalog's `vcc_range` puts every `signal_gen` in the
+  pass (§8.12.1). Nothing fires: `_drivenOutputTargets` has no `signal_gen`
+  arm and returns `[]` from its default arm (`sim-engine.ts:6454-6660`, `:6657`),
+  and the released-pin sweep finds no failure key on `pos`. As for
+  `pulse_gen` (§8.7).
+- **Thermal.** None: no profile (`thermal-physics.ts:326-335,348-357`).
+- **Warnings.** Not in `FLYBACK_RAIL_KINDS`, `FLYBACK_SWITCH_KINDS` or
+  `FLYBACK_CLAMP_KINDS` (`sim-engine.ts:971-983`). A winding net that touches
+  a generator is therefore not skipped as a rail (§9.7.4).
+- **Datum and anchors.** In `SOURCE_KINDS` (`graph.ts:40-49`) whatever
+  `enabled` says. Its `neg` (else `gnd`) is the circuit's datum when it is the
+  first source in component order (`graph.ts:113-115`), and the preferred
+  anchor of an isolated section (`sim-engine.ts:4783-4798`).
+
+#### 8.12.7 Carry-forward, snapshots, readouts
+
+Stateless: nothing to carry, snapshot or restore. Readouts: `netV` and
+`elementI` (§8.12.3). No `getIcState`, no digital slot, no channel.
+
+#### 8.12.8 Core note
+
+- **Forms.** Disabled publishes 0 and stamps nothing. Ideal is a fixed node
+  whose value is a time function: `-3` when floating (Q-O39), and `-3` on the
+  hub rail node, where README Rails point 1 lists codes 2, 21 and 22-25; the W1h contract
+  adds signal_gen's code to that list. Norton, the default, is a conductance plus a time-varying injection in
+  the partition that holds `pos`: the drive channel of Q-O70.
+- **Partition class by shape** (Q-O69, all eight ported):
+  - piecewise constant (`dc`, `square`, `noise`, and `pulse` ramps under the
+    W1f Q5 threshold, Q-O72): the partition stays static and re-solves at
+    `Source` events (README Sources point 5), with the level index or noise
+    bucket in its cache key;
+  - linear in `t` (`triangle`, `ramp`, `pwl`, and `pulse` ramps above the
+    threshold): W1f's resolved-ramp path (corner events, reader partitions
+    stepped, exact linear crossings);
+  - `sine`: the one new mechanism, a nonlinear time function with stepped
+    readers and crossings by bisection (or in closed form through `asin`).
+- **Events.** Edges and corners are computed from their index, never
+  accumulated, and take the edge's own level at the instant (Q-O68, the W1f
+  clock rule); a noise bucket every 1e-4 s from `delay`, each 1e-12 s early;
+  PWL knots at absolute time. The load level follows README Sources point 4
+  (the level after the last edge at or before `START_TIME`), so a register a
+  generator clocks sees classic's phantom edge when that level is HIGH.
+- **Readouts.** `elementI` keeps the form-dependent sign (Q-O67). No digital
+  slot: readers see the node through ordinary crossing watches.
+- **Noise.** Port the hash and the variate; the tolerance rule is Q-O71's.
+- **Compiler.** It can call `parseSignalGenParams` itself, so clamps,
+  fallbacks and the PWL table match by construction; truncated pulse cycles
+  decline (Q-O72).
+- Gate 1: `signal-gen.test.ts:113-405`, `waveform.test.ts` (pure TS),
+  `isolated-sections.test.ts:192-207` (with `coupled_inductor`), the
+  `trap-integration.test.ts` square-wave cases classified away today for
+  `signal_gen` (`test/core/suites/classification.json:840-900`), and the
+  host files `headless-source-events.test.ts` and
+  `headless-waveform-classification.test.ts`. Fixture references follow
+  Q-O74.
+
+### 8.13 `current_source`
+
+Added for W1h (W1 plan Decision 13, option A). Delta: this section describes
+classic since `2c6ba7d` (`fix/current-source-polarity`, released in 0.6.0;
+delta table).
+
+- **Model.** `currentSourceModel` (`sources.ts:413-486`), written
+  registry-first in Wave A7 (`sources.ts:415-420`), registered at
+  `devices/index.ts:203`. No commit, no digital hook, not in the failure pass,
+  no branch row.
+- **Params.** `current = Number(params.current ?? 0)` and `rParallel =
+  Number(params.rParallel ?? 0)`, read raw at every hook
+  (`sources.ts:437,439,455,456,476`). No `modelParam`. The bundled catalog
+  has no part; devolt's injected catalog has `current-source`, `{current
+  1e-3, rParallel 0}` (`devolt/packages/catalog/parts.json:8227-8265`), which
+  devolt's store copies into a placed part
+  (`devolt/packages/simcore/src/store/circuit-store.ts:455`).
+- **Pins.** `pins[0]` (+) and `pins[1]` (−), by position
+  (`sources.ts:433-434,458-459,474-475`).
+- **Stamp** (`sources.ts:430-443`), skipped with fewer than 2 pins: `I =
+  independentSourceMagnitude(current)`, then `stampCurrentSource(pos, neg, I)`,
+  which injects `+I` at `pins[0]` and `−I` at `pins[1]` (`elements.ts:138-141`).
+  The current **leaves `pos`**, runs through the circuit and returns into
+  `neg` (`sources.ts:422-429`). Then a resistor `rParallel` across the pins
+  when it is finite and `> 0`. RHS only: no branch row, and no matrix entry
+  without `rParallel` (`sources.ts:415-420`).
+- **Regimes.** The same in the transient (BE or trap), the load seed and
+  `_dcSolveMode`. Scaled on source-stepping rungs (`sim-engine.ts:5058-5085`).
+  No state and no commit.
+- **`elementI`** (`sources.ts:444-464`), pin0 -> pin1 through the part: `−I`,
+  plus `vd/rParallel` when the shunt is stamped, with `vd = V(pins[0]) −
+  V(pins[1])`. `I` is scaled here too, so a rung publishes the drive it
+  stamped. 1 mA into 1 kΩ: `elementI` −1e-3 and the resistor's +0.999999999e-3
+  (probe P2f); with `rParallel` 1 kΩ, −0.5e-3 and 0.5 V across the load
+  (probe P2h).
+- **Open circuit.** A node fed only by the source rests on `NODE_RSHUNT_G`, so
+  `V = I/1e-12`: 1 mA with nothing connected reads −1e9 V at `neg`, converged,
+  with no failure or warning (probe P2g). Q-O75, ruled: mirrored.
+- **Datum.** Not in `SOURCE_KINDS` (`graph.ts:40-49`): it never names the
+  datum or an anchor's preferred pin. A circuit whose only source is a current
+  source has no `gnd` net, and its section anchor (1 S, §8.9) goes on the
+  lowest net row (probe P2f: nets `n0` and `n1`, `V(pos)` 1e-12, `V(neg)`
+  −0.999999999).
+- **SPICE.** The parser attaches an `I` card's `n+` to `neg` and `n−` to `pos`
+  (`spice/netlist.ts:928-948`), so `I1 0 out 1m` lifts `out` positive, and
+  `runSpice` negates the published current back to SPICE's sign
+  (`spice/run.ts:222-227`).
+- **Failures, thermal, warnings.** None. Not a flyback rail, switch or clamp
+  kind.
+- **AC** (W6, `sources.ts:465-485`): open when not designated; the unit
+  injection with the transient polarity when it is; `rParallel` stays a
+  conductance.
+- **Carry-forward, snapshots.** Stateless.
+- **Core note.** Static: a constant RHS injection (`+I` at `pins[0]`, `−I` at
+  `pins[1]`) plus an optional resistor, entering the source KCL (W0 point 5)
+  where a pin is fixed. It fits the existing kernel with one new stamp
+  primitive. Its free pins share no matrix entry without `rParallel`, so the
+  union may join them only when the shunt is stamped, or always, for the W1b
+  "one partition per device" rule; both are exact. Not a `SOURCE_KINDS`
+  member, so it never fixes a node and is never a floating source (`-3`); an
+  isolated loop is held by its section anchor (code 26, the lowest row). A
+  partition with one capacitor stays closed form (a constant drive). An open
+  source reproduces `I/1e-12` through `NODE_RSHUNT_G`. No events.
+- Gate 1: `current-source-polarity.test.ts:61-101` calls `dcOperatingPoint`
+  (W6) and its AC case `runSmallSignalAc` (W6), and `:102-136` runs SPICE
+  (W2/W6). Classify them W6, or add a portable twin through `load`: the load
+  seed's values equal the stepped ones (probe P2f).
 
 ---
 
@@ -3927,6 +4577,10 @@ facts from this chapter:
 - Once latched, stamp and acStamp skip the branch and updateCurrent returns 0
   (:174, :191-194, :206; :644-658, :674; :893, :906, :920, :952). The failure
   flag is part of each `staticSignature` (:164-170, :629-637, :880-886).
+- Delta: since `4878620` (`fix/ferrite-bead-overload`), `ferrite_bead` runs
+  the same integrator through its own `updateFailures` hook, at
+  `I²·max(1e-3, rDc ?? 0.0035)` (the fallback since `13e433a`), with the
+  resistor's message (§7.14).
 
 **fuse_tripped.** `fuseModel.updateFailures` (:706-728), specified in §7.2.5
 and §7.8. Once latched, the stamp is open (:691-693), updateCurrent returns 0
@@ -3993,7 +4647,8 @@ unchanged.
   potentiometer, ptc_fuse, resistor, resistor_array, rgb_led, trimmer, uln2003}
   (:1110-1113);
 - any kind whose model defines `updateFailures` (this adds
-  bjt_npn/bjt_pnp/nmos/pmos for the warning);
+  bjt_npn/bjt_pnp/nmos/pmos for the warning, and since `4878620`
+  ferrite_bead);
 - any component with `vcc_range`.
 
 The failure pass calls the model's `updateFailures` hook first, then the
@@ -4075,7 +4730,8 @@ with `since = simTime` and `value = inductance` for inductors (:5489-5501).
 Otherwise it **deletes** the key (:5503), so the warning clears on reload once
 the topology is fixed. A still-true warning keeps its original `since` and is
 not re-announced. Driver ICs are excluded (comment :941-943). The message text
-is quoted in §7.5.
+is quoted in §7.5. A `coupled_inductor`'s windings and a crystal's `Ls` are not
+on the winding list (§7.15-7.16, Q-O77).
 
 ### 9.8 Catalog parameters read by this area (`default-parts.json`)
 
@@ -4084,6 +4740,7 @@ is quoted in §7.5.
 | resistor | p_max | 0.25 W | :216 |
 | potentiometer / trimmer | p_max | 0.2 W / 0.1 W | :1249 / :1285 |
 | resistor-array | p_max per channel | 0.125 W | :6019 |
+| ferrite-bead | p_max (read since `4878620`) | 0.056 W | :6052 |
 | led-* (led) | if_max | 0.02 A (p_max 0.075 exists but is **not read**) | e.g. :454 |
 | led-bicolor / led-rgb | if_max | 0.02 A | :759 / :808 |
 | bjt-npn/pnp; nmos/pmos | i_c_max | 0.6 A; 5 A | :1008, :1051; :1093, :1134 |
@@ -4563,6 +5220,10 @@ iteration heuristic.
 - `signal_gen` with `enabled≠0`: sine/triangle/ramp → `1/(f·40)`;
   square/pulse → `1/(f·10)`; noise → `1/(SIGNAL_GEN_NOISE_UPDATE_RATE_HZ·2)`.
 - The result is floored at `H_MIN`.
+- Delta: since `5657a9a` the `signal_gen` arm classifies through
+  `parseSignalGenParams`, so an unrecognised name gets the sine ceiling, and
+  since `685179c` the runner also lands steps on source events (§8.1.6,
+  §8.12.5).
 
 `load` (`:408-439`):
 1. In `engine:"core"` mode, try `_tryLoadCore` first (`:449-462`).
@@ -4634,7 +5295,9 @@ Constants:
 
 `maxErrorCheckGap` (`:191-213`) returns 15 when the circuit has an ne555, a
 clock or pulse source, or an enabled square/pulse/ramp/noise `signal_gen`.
-Otherwise it returns 3.
+Otherwise it returns 3. Delta: since devolt `8ae8792` it, `sourceStepLimit` and
+`sourceEventDescriptors` classify a `signal_gen` through `parseSignalGenParams`
+(§8.12.5).
 
 `attemptStep` (`:418-487`) matches headless, plus `solveUs` accounting.
 
@@ -4735,8 +5398,8 @@ One row per divergence, deduplicated across chapters. **Status** is one of:
 *Mandated* (the plan says so explicitly), *Inferred* (a chapter reader's
 reading of the plan; needs owner confirmation), *Not addressed* (the plan is
 silent; keep classic unless the owner decides), *Open* (the plan names the goal
-but not the rule). Plan lines are in
-`devolt/memory/decisions/2026-09-24-brownout-rust-wasm-core.md`.
+but not the rule), *Ruled* (a manager or owner ruling recorded in chapter 12).
+Plan lines are in `devolt/memory/decisions/2026-09-24-brownout-rust-wasm-core.md`.
 
 | ID | Item | Classic | Core intent | Status | Ch. |
 |---|---|---|---|---|---|
@@ -4773,6 +5436,9 @@ but not the rule). Plan lines are in
 | D31 | Areas the plan leaves alone | LED/seg7 aggregation conventions, self-heating only for plain `led` with an exact uid, no seg7 failure surface, ideal switches with no bounce, inert `momentary` (§6, §7.6). | No change mandated; any change is an explicit owner design call, not something to "fix" silently during the port. | Not addressed (Q-O21 to Q-O23, Q-O30) | 6,7 |
 | D32 | Facade surface | Snapshot/restore; step breakpoints: two per 555 switch, 1e-8 s apart, rolled back by restore, cleared on load (§5.4). | `CoreEngine` implements the SimEngine surface the worker and HeadlessRunner use: load, advance, readouts, failures, warnings, telemetry, snapshot/restore, breakpoints, acquisition (Plan:102-106). Shared read type at `src/core/surface.ts:24-55`. | Mandated (Q-O20) | 5,10 |
 | D33 | Prototype subset | The prototype lacks rgb/bicolor LEDs, self-heating, failures, 74hc14/74ls47/cd4511, 74hc595/165, cd4017/4060, 28c256 and EEPROM writes, trap and DC modes, the floating hash and the power gate. | The core implements the full classic surface; the prototype is a cross-check only. | Authority rule | 1,3,4,6,7 |
+| D34 | `signal_gen` time placement | `f(t)` is sampled at each solve's end (§8.1.4); square edges and the ramp reset are decided by float `%`, so an edge instant reads either side (probe P1f); both hosts cross every square, pulse and ramp corner, noise sample and PWL knot in a 10 ns guard step, the headless host since `685179c` (§8.12.5). | Edges and corners scheduled from their index, with the edge's own level at its instant (the W1f clock rule, README Sources point 2); pulse ramps by the W1f Q5 threshold; noise samples within Q-O71's 4-ulp bound. | Ruled (Q-O68, Q-O71, Q-O72) | 8 |
+| D35 | Multi-state magnetics and the crystal | One global BE (or trap) step for the whole circuit (§7.2.3). | Stepped partitions with classic's controller: W1 plan Decision 14 steps multi-capacitor partitions, and the same rule covers inductor and winding states. | Inferred from Decision 14, which names capacitors only | 7 |
+| D36 | Crystal `elementI` at load | The 1 ps seed's current (probe P3b: 4.999 mA). | The exact `t0` value, as W1b rule 2a's known divergence for the capacitor (Q-O29). | Inferred | 7 |
 
 Delta: since Q-O64 (owner decision 3), D5's tri-state figure is 74ls245 only.
 A 74ls157 `/OE` transition is a datasheet-delayed level change (its own
@@ -5061,6 +5727,160 @@ kind on Ben Eater's computer.
   `apps/sim/lib/fixtures/ben-eater-clock-module.json` (breadboard,
   potentiometer, push_dpdt)? The answer changes the kind list (§13.1).
 
+**K. The W1h kinds of W1 plan Decision 13, option A (§7.14-7.16, §8.12-8.13)**
+
+The manager ruled on each of these on 2026-10-02. Each entry keeps its
+options above the ruling. **[contract]** marks a ruled outcome that changes
+the equivalence contract (a classic change, a new divergence or tolerance, or
+a changed harness reference).
+
+- **Q-O67** [8] `signal_gen`'s `elementI` sign depends on its form: it is
+  positive while delivering in the Norton form (`rSource > 0`, the default) and
+  `x[k]`, negative while delivering, in the ideal form (probe P2a: +4.76 mA
+  against −5.00 mA). Classic's telemetry and meter compensate
+  (`physics-telemetry.ts:104-115`, `meter.ts:260-278`).
+  - A: mirror per form.
+  - B: unify on pin0 -> pin1 in both engines (a classic fix, then the
+    telemetry, the meter and devolt's readers).
+  - Ruled (manager, 2026-10-02): A, mirror per form. The sign mismatch goes on
+    the classic-bug review list: if the Inspector shows a different sign for
+    the same physical current depending on the form, it becomes a fix branch
+    later.
+- **Q-O68** [8] Edge instants of `square` and the `ramp` reset: classic reads
+  either side, by float rounding (probe P1f: 1468 of 3000 rising instants
+  `m·1e-3` read LOW).
+  - A: the W1f clock rule (README Sources point 2): edges scheduled from their
+    index, the edge's own level at the instant, the load level from the last
+    edge at or before `START_TIME`.
+  - B: evaluate `signalGenVoltage` literally at every read, which loses edges.
+  - Ruled (manager, 2026-10-02): A, the W1f clock rule, edges by their computed
+    time. **[contract]**: a known divergence on edge instants only (D34), as
+    for the clock.
+- **Q-O69** [8] Which shapes W1h ports, and on what mechanism. The core's
+  sources so far are piecewise constant, with midpoint steps or resolved linear
+  ramps (README Sources point 3); `sine` is nonlinear in `t`, `noise` needs the
+  hash ported, and `triangle`, `ramp` and `pwl` are piecewise linear.
+  - A: all eight. `dc`, `square`, `noise` and `pulse` ramps under the W1f Q5
+    threshold go on the existing Source-event path; `triangle`, `ramp`, `pwl`
+    and `pulse` ramps above it on the resolved-ramp path (a linear boundary,
+    reader partitions stepped, exact linear crossings); `sine` on a new
+    nonlinear time-function path (reader partitions stepped, each step reading
+    `f(t)` at its own instant, crossings by bisection or in closed form
+    through `asin`).
+  - B: A without `sine` and `noise`, which decline
+    `unsupported-feature:signal-gen-<shape>` until a later wave.
+  - C: only `dc`, `square` and `pulse`.
+  - Ruled (manager, 2026-10-02): A, all eight shapes, `sine` and `noise`
+    included.
+- **Q-O70** [8] The Norton form (the catalog default) is not a fixed node: it
+  is a conductance plus a time-varying injection inside a partition.
+  - A: a partition drive channel. Each partition holding a Norton generator
+    evaluates `Vt/rSource` at every stamp; for piecewise-constant shapes the
+    level index enters the static cache key (as README Rails point 7 does for
+    fixed nodes), and for continuous shapes the partition is stepped.
+  - B: compile it as a Thevenin, an ideal time-varying source on an internal
+    fixed node plus `rSource`. This reuses the fixed-node machinery and the
+    crystal's internal node, but a generator whose `neg` is not fixed becomes
+    `-3` (Q-O39), where classic solves it.
+  - Ruled (manager, 2026-10-02): A, the drive channel.
+- **Q-O71** [8] Noise determinism. The integer hash ports exactly; `Math.log`,
+  `Math.cos` and `Math.sqrt` in V8 and the Rust core's `f64` math can differ in
+  the last places.
+  - A: port FNV-1a, the finalizer and Box-Muller to Rust (`String()` of an
+    integer is its decimal digits) and accept the differences under a stated
+    bound.
+  - B: the TS compiler precomputes a bucket table to a horizon, and the core
+    declines past it.
+  - C: decline `noise`.
+  - Measured (probe P9): classic's variate in V8 (Node v26.9.0) against the
+    same `f64` expression compiled by Rust 1.95.0 for `wasm32-unknown-unknown`
+    (the core's pinned toolchain), over 2 100 000 draws (seeds 1, 2, 3, 7, 42,
+    1000 and −5, buckets 0 to 299 999). `sqrt` agreed on every draw. `ln`
+    differed on 2.19 % of draws and `cos` on 1.36 %, each by at most 1 ulp.
+    The variate `sqrt(−2·ln u1)·cos(2π·u2)` differed on 2.18 % of draws, by at
+    most 3 ulp: at most 4.61e-16 relative and 8.9e-16 absolute.
+  - Ruled (manager, 2026-10-02): A, accepted as a tolerance rule with a
+    concrete bound. With the same bucket index, a core noise variate may
+    differ from classic's by at most **4 ulp**, so by at most 8.9e-16
+    (`4·2^-52`) relative. The node value `offset + amplitude·unit` may then
+    differ by at most `8.9e-16·|amplitude·unit|`, plus one rounding each of
+    the product and the sum. Basis: the measured maximum of 3 ulp, and the
+    expression's error budget (`ln`'s 1 ulp halved by `sqrt`, a differing
+    rounding each in `sqrt` and the product, and `cos`'s 1 ulp: 3.5 ulp in
+    all). The bucket index
+    itself must match exactly: at a boundary instant it comes from the event
+    schedule, as edges do (Q-O68). **[contract]**: a new tolerance rule for
+    noise samples.
+- **Q-O72** [8] Truncated pulse cycles (`tr + pw + tf > 1/f`): classic plays
+  them (probe P1c), while W1f declines a truncated `pulse_gen`
+  (`truncated-pulse`). Options: decline them the same way, with the W1f Q5
+  ramp threshold at `T_ev = min(pw, P − tr − pw − tf)`, or port them. The
+  1e-9 floors mean no zero-length ramp exists.
+  - Ruled (manager, 2026-10-02): decline truncated cycles, and apply the W1f
+    ramp threshold. **[contract]**: the W1f Q5 midpoint-step divergence now
+    covers `signal_gen`'s pulse ramps, and a declined circuit stays on
+    classic.
+- **Q-O73** [8] PWL ignores `delay` in the engine (`waveform.ts:157-160`,
+  `:270-275`), while devolt's worker gated PWL breakpoints on `delay`.
+  - A: the core mirrors the engine (absolute `t`, and the compiler passes
+    `parsePwl`'s sorted, capped list); the worker is fixed.
+  - B: make `delay` shift PWL in both engines.
+  - Ruled (manager, 2026-10-02): A, mirror the engine, which is the reference;
+    the manager has devolt's worker fixed. Done in devolt `37fe2a2` (merged
+    `8ae8792`): the worker reads the parsed knots with no `delay` gate
+    (`sim.worker.ts:347,371`), as the headless host has since `685179c`.
+- **Q-O74** [8] Which classic run is the reference for `signal_gen` fixtures?
+  At the time of the draft the adaptive headless classic had no breakpoints,
+  lost features narrower than its step and aliased unrecognised waveform
+  names.
+  - A: gate 2e's refined fixed-step classic run (a fixed `h` of at most a
+    tenth of the narrowest feature, trap), cached as in gate 2g.
+  - B: the adaptive classic, once the host is fixed.
+  - Ruled (manager, 2026-10-02): A, the refined fixed-step run as gate 2e's
+    fallback, to be revisited once the headless breakpoint bug is fixed.
+    **[contract]**: the harness reference for these fixtures.
+  - Since then `685179c` and `5657a9a` fixed the headless host, and devolt's
+    `8ae8792` the worker (delta table; §8.12.5). Both hosts now land a step
+    within one 10 ns guard step of every square, pulse and ramp corner, noise
+    sample and PWL knot, and give an unrecognised name the sine ceiling.
+    Probes P4a-P4c, rerun at `52eb434`, see the 0.2 ms PWL pulse (0.2000 ms
+    HIGH), the 20 µs pulses (419.6 µs HIGH of 420 µs) and `"Sine"` stepped as
+    `"sine"`. The adaptive classic run no longer misses features, and it
+    places edges to within the guard step. What still separates it from the
+    refined run is its ordinary step error on continuous shapes, under the
+    `1/(40·f)` ceiling. The revisit the ruling names is now due.
+- **Q-O75** [8] An open current source drives its node to `I/1e-12` (probe
+  P2g: −1e9 V for 1 mA), converged and silent.
+  - A: mirror (the core keeps `NODE_RSHUNT_G`).
+  - B: a compliance limit or a warning in both engines.
+  - Ruled (manager, 2026-10-02): A, mirror. The catalog note documents the
+    open source as a teaching hazard: devolt's injected `current-source` calls
+    it "a real teaching hazard rather than a bug"
+    (`devolt/packages/catalog/parts.json:8227-8265`).
+- **Q-O76** [7] `ferrite_bead`'s catalog `p_max` was never read, so a bead
+  never failed (before `4878620`, 50 W against 0.25 W for 2 s raised
+  nothing).
+  - A: mirror (no rating record).
+  - B: rate it like a resistor (`resistor_overload`) in both engines.
+  - Ruled (manager, 2026-10-02): B, not mirrored. A part with a catalog
+    `p_max` that can never fail is a classic bug of Q-O27's class. Settled by
+    the fix branch `4878620` (`fix/ferrite-bead-overload`, delta table), and
+    the core follows fixed classic (§7.14). A separate manager ruling
+    aligned the engine's fallback for a missing `rDc` to the catalog's
+    3.5 mΩ (`13e433a`). **[contract]**: a classic change.
+- **Q-O77** [7,9] `coupled_inductor` windings are not `missing_flyback`
+  windings (probe P3e).
+  - A: mirror (the W1g winding list stays inductor, relay and dc_motor).
+  - B: add both windings in both engines.
+  - Ruled (manager, 2026-10-02): A, mirror.
+- **Q-O78** [7] Winding 2's current is published nowhere (probe P3d).
+  - A: mirror `elementI` = `i1`, and expose both winding currents through the
+    generic device-state readout (W1f Q11's `bo_engine_device_state`) as
+    core-only data.
+  - B: add a channel readout in both engines.
+  - Ruled (manager, 2026-10-02): A, mirror, with winding 2's current exposed
+    through `bo_engine_device_state`.
+
 ### 12.2 Worker-settleable
 
 - **Q-W1** [1,3] `vth_tol` is never read by the engine; `src/circuit/types.ts:363-371`
@@ -5237,6 +6057,11 @@ alone. Gap IDs refer to §13.3.
 | 74hc74 | Yes (§4.2.3) | Yes (catalog 25 ns available) | Classic yes; core uses 25 ns or not (Q-O1) | Yes | Yes (stored q/qn only) | none beyond Q-O1 |
 | 74hc138 | Yes | Yes (20 ns) | Yes (combinational, unchanged) | Yes | Yes | none |
 | 28c16 | Yes (§4.2.5) | Yes (`contents` base64, assembly note in §4.1.5) | Classic yes; core access delays missing | Yes | Yes (output_sag; see Q-W11, Q-W23) | G4, E1 |
+| signal_gen | Yes, by position; datum and anchor by id `neg` (§8.12.2) | Yes (§8.12.1) | Classic yes (§8.12.4-8.12.5); core needs the time-function and drive-channel mechanisms (Q-O69, Q-O70) | Yes; the sign depends on the form (Q-O67) | Yes, none | D34, Q-O67 to Q-O74 |
+| current_source | Yes, by position (§8.13) | Yes | Static | Yes (`−I` plus the shunt) | Yes, none | Q-O75 |
+| ferrite_bead | Yes, by position (§7.14) | Yes; a missing `rDc` takes the catalog's 3.5 mΩ since `13e433a` | Static | Yes | Yes (`resistor_overload` since `4878620`) | Q-O76 (ruled) |
+| crystal | Yes, by position, plus the internal node `m` (§7.15) | Yes | Classic yes; core needs internal nodes and the inductor companion | Yes (the seed's current at load, D36) | Yes, none | D35, D36 |
+| coupled_inductor | Yes, by id (§7.16) | Yes | Classic yes; core needs the four-pin union and galvanic groups in the anchor compiler | Winding 1 only; winding 2 through device state (Q-O78) | Yes, none; no flyback check (Q-O77) | D35, Q-O77, Q-O78 |
 
 Delta: since Q-O64 (owner decision 3), the 74ls157 row's timing verdict and
 gap are resolved: the strobe figures (13 ns release / 14 ns force) are TI
@@ -5396,11 +6221,13 @@ Cross-cutting kinds the board touches without listing them: `voltage_source`
 
 **W1 scope beyond the board**
 
-- `signal_gen` and `current_source` (sources) are only sketched in §8.6a: the
-  waveform shapes, the noise source and the Norton pair are not specified.
-- `ferrite_bead`, `crystal` and `coupled_inductor` (passives) have no stamp
-  specification; `resistor_array` is covered only for failures (§9.5.2) and
-  channel currents (§10.10); `thermistor` is covered in §9.4.
+- `signal_gen` and `current_source` (sources) are specified in §8.12-8.13, and
+  `ferrite_bead`, `crystal` and `coupled_inductor` (passives) in §7.14-7.16,
+  for W1h under W1 plan Decision 13, option A. Their open items, Q-O67 to
+  Q-O78, are ruled, and the ferrite bead's `rDc` fallback was aligned to the
+  catalog in `13e433a` (§7.14).
+- `resistor_array` is covered only for failures (§9.5.2) and channel currents
+  (§10.10); `thermistor` is covered in §9.4.
 - bench_psu is complete for classic (§8.4; positional pins, assembly note). Its
   hub-rail form (D15) and regime rule (Q-O36) are open.
 - The remaining logic kinds (74hc14, 74ls47, 74hc595, 74hc165, cd4017, cd4060,
