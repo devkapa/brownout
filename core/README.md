@@ -2503,8 +2503,16 @@ records"). Constants, all from P3:35-38 unless marked new:
    u)`: `u(t) = u∞ + (u(t0) − u∞) e^(−G (t − t0) / C_rail)` with `u∞ = (dir·
    iLimit − A0) / G`, and the linear ramp `u(t0) + (dir·iLimit − A0 − G
    u(t0)) (t − t0) / C_rail` while `G (t − t0) / C_rail < 1e-9`. It starts
-   from `u = V` at CC entry (continuous), is published live, and each rail
-   capacitor carries `C·du/dt`. Its own motion adds four thresholds to the
+   from `u = V` at a CC entry from a load (continuous), and from the rail
+   the capacitors hold when their own charge was the demand that entered CC
+   (point 5: their charge shared at the rail, `V − dir·Σ(C_k/C_rail)·d_k`
+   over the capacitors short of `V`). It is published live, and each rail
+   capacitor carries `C·du/dt`. The rail sits a static `esr_eff·I_cap`
+   above the capacitors' C-weighted charge (manager ruling 2026-10-07, F1
+   finding C; classic shows the offset), with `I_cap = dir·iLimit − (A0 +
+   G u)` their current and `esr_eff = Σ esr_k·C_k² / C_rail²` (a lone
+   capacitor's own `esr`); the offset keeps the closed form linear. The
+   `esr·C` transient that sets it (nanoseconds) is not modelled. Its own motion adds four thresholds to the
    rail event: `u_scan ± RAIL_SCAN_V`, the nearest nonlinear hub
    partition's `u_p ± RAIL_RESOLVE_V` (the CC band `RAIL_CC_RESOLVE_V` does
    not apply here: the capacitor, not the draws, sets `u`), `RAIL_DRIFT_V`
@@ -2539,6 +2547,9 @@ records"). Constants, all from P3:35-38 unless marked new:
      puts the PSU in CC at once, as in fixed classic (whose capacitor starts
      at 0 V and whose 1 ps load seed sees the charging current), and the
      rail ramps at the limit by point 4's closed form until the exit below.
+     The compliance clamp then reads the rail those capacitors hold, not the
+     settled CC rail, which with no load is far above `V` (`iLimit / G` at
+     the node shunt) and would keep CV.
      A capacitor at or above the setpoint adds nothing: one carried charged
      across a reload stays CV. In CV the deficit is zero (`esr = 0`, rule
      2a) or decays with `esr·C`, so a supply inside its limit never
@@ -2553,7 +2564,11 @@ records"). Constants, all from P3:35-38 unless marked new:
      jump to `V` would draw without bound, so the exit is the rail itself
      reaching the setpoint, `dir·u >= |V|` (probe P9: classic stays in CC,
      −0.1 A, up to 5.0 V). The rail then solves in CV at the same
-     instant.
+     instant, and every hub partition re-solves at the new rail there
+     instead of carrying a first-order correction from where it was last
+     solved (manager ruling 2026-10-07, F1 finding D: a linear partition
+     solved at power-on and extrapolated 0.725 V read 1.1 nA where classic
+     reads 0.01 nA).
    - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
    - The rules are pure functions (`devices/sources.rs`): `regime_step(reg,
      i_at_v, u_cc, u_rail, V, iLimit)` and `regime_step_rail_cap` with the
@@ -2642,8 +2657,12 @@ records"). Constants, all from P3:35-38 unless marked new:
      battery with `r > 0` the rail's own `r·C_rail` time constant is not
      modelled (90 ns for 0.9 Ω and 100 nF); above `RAIL_TAU_MAX` it would
      show at quiet instants, so the load is `-3` (point 1). In CC the rail
-     capacitance makes the rail a closed form (point 4), with each
-     capacitor's `esr` ignored there (5 ns for the corpus parts).
+     capacitance makes the rail a closed form (point 4), with the
+     capacitors' `esr` entering as a static offset and its nanosecond
+     transient not modelled. A rail capacitor whose far pin is a waveform
+     source's node is not handled (an edge there does not solve the rail,
+     and the CC segment ignores the far node moving), so such a load is
+     `-3` (point 1) until it is.
    - **Watches.** A change re-aims every watch whose thresholds read the
      changed node, as a moving static supply does (W1c point 4,
      `add_watch_dependent_partitions`).
@@ -3683,11 +3702,15 @@ failures and warnings (W1g)"):
   core returns `-4` after point 3's 50 passes (the TS side falls back to
   classic), where classic chatters for one step (repro: 4.279 V, r 5 Ω, a
   74LS00 driving 1 kΩ). Classic's fix for an alternating gated power
-  reading is H8 (`fix/power-off-stall`): after a failed solve it holds the
-  chip powered for a probe solve and keeps it off if its supply still reads
-  unpowered. Once H8 is verified, its rule is ported into the rail loop so
-  both engines resolve the alternation the same way, and this id is
-  deleted. No core-only damping.
+  reading is H8 (`fix/power-off-stall`, released in 0.6.3): after a failed
+  solve it holds the chip powered for a probe solve and keeps it off if its
+  supply still reads unpowered. Porting it into the rail loop needs a
+  kernel-to-evaluator hold channel (the power verdict is recomputed from
+  voltages in about 17 places) and amendments to W1c points 1, 4, 9 and 10,
+  so it is the named follow-up **F5, the ping-pong hold**, after the W1f
+  integration and W1g, which reworks the evaluator (manager ruling
+  2026-10-07). Until then `-4` is pinned by a test; this id is deleted when
+  F5 lands. No core-only damping.
 - **Failure sets** compare `(componentId, kind, pinId)` exactly, `value` and
   `limit` within decision 6's tolerance, and `message` against classic's
   template applied to the core's own numbers (W1g point 19).
