@@ -87,6 +87,50 @@ pub fn ic_power(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> IcPower {
     IcPower { powered, v_gnd, vs, r_out, vil, vih, schmitt }
 }
 
+/// A driver conductance as a function of the supply difference `vs`, of the
+/// form `alpha + beta / vs` on each of three pieces split at `kinks` (ascending, either
+/// may be infinite), the form every output stage's conductance takes. The
+/// curvature band reads its derivatives (Rails point 3: a driver's `R_out`
+/// moves with a rail supply).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupplyCurve {
+    pub kinks: [f64; 2],
+    pub pieces: [(f64, f64); 3],
+}
+
+impl SupplyCurve {
+    pub fn constant(g: f64) -> SupplyCurve {
+        SupplyCurve { kinks: [f64::INFINITY; 2], pieces: [(g, 0.0); 3] }
+    }
+
+    /// `(alpha, beta)` of the piece holding `vs` (a kink belongs to the
+    /// piece below it, as the clamps that make it do).
+    pub fn piece(&self, vs: f64) -> (f64, f64) {
+        if vs <= self.kinks[0] {
+            self.pieces[0]
+        } else if vs <= self.kinks[1] {
+            self.pieces[1]
+        } else {
+            self.pieces[2]
+        }
+    }
+
+    /// The conductance and its first three derivatives in `vs`.
+    pub fn derivs(&self, vs: f64) -> [f64; 4] {
+        let (a, b) = self.piece(vs);
+        [a + b / vs, -b / (vs * vs), 2.0 * b / (vs * vs * vs), -6.0 * b / (vs * vs * vs * vs)]
+    }
+}
+
+/// `1 / ic_power(..).r_out` as a [`SupplyCurve`]: `vs / (4 io_max)` clamped
+/// to `[GATE_R_OUT, 1000]`, or `GATE_R_OUT` with no `io_max`.
+pub fn r_out_curve(ic: &IcRecord) -> SupplyCurve {
+    match ic.io_max {
+        Some(io_max) => SupplyCurve { kinks: [4.0 * io_max * GATE_R_OUT, 4.0 * io_max * 1000.0], pieces: [(1.0 / GATE_R_OUT, 0.0), (0.0, 4.0 * io_max), (1.0 / 1000.0, 0.0)] },
+        None => SupplyCurve::constant(1.0 / GATE_R_OUT),
+    }
+}
+
 /// `thresholdsFor` (spec §1.3, sim-engine.ts:1362-1377). `vil` and `vih` are
 /// resolved independently, exactly as classic's two `??` fallbacks are
 /// independent: a CMOS-ratio part ignores both fixed catalog values, but
@@ -101,6 +145,24 @@ fn thresholds_for(ic: &IcRecord, vs: f64) -> (f64, f64) {
     let vil = ic.vil.unwrap_or_else(|| f64::max(0.8, 0.3 * vs));
     let vih = ic.vih.unwrap_or_else(|| f64::max(2.0, 0.6 * vs));
     (vil, vih)
+}
+
+/// The supply differences `vs` at which [`thresholds_for`]'s clamps start
+/// to scale: past them each generic threshold is affine in `vs`, and a
+/// crossing solved under a moving supply must not step across one (Rails
+/// point 4). Empty when both levels are fixed.
+pub fn threshold_kinks(ic: &IcRecord) -> Vec<f64> {
+    if ic.cmos_ratio {
+        return vec![0.2 / 0.3, 0.4 / 0.7];
+    }
+    let mut kinks = Vec::new();
+    if ic.vil.is_none() {
+        kinks.push(0.8 / 0.3);
+    }
+    if ic.vih.is_none() {
+        kinks.push(2.0 / 0.6);
+    }
+    kinks
 }
 
 #[cfg(test)]
@@ -133,6 +195,28 @@ mod tests {
             slot_base: 0,
             delays: Vec::new(),
             extra: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_r_out_curve_is_the_conductance_ic_power_stamps() {
+        // The curvature band reads R_out's derivatives off this curve; it is
+        // the same function as `ic_power`'s on every piece and across both
+        // clamps, and its derivatives are the curve's own.
+        for io_max in [None, Some(0.008), Some(1e-3), Some(0.025)] {
+            let ic = IcRecord { io_max, vcc_min: 0.0, vcc_max: 100.0, ..base_ic() };
+            let curve = r_out_curve(&ic);
+            for k in 1..=4000 {
+                let vs = 0.01 * k as f64;
+                let want = 1.0 / ic_power(&ic, vs, 0.0).r_out;
+                let [g, dg, ..] = curve.derivs(vs);
+                assert!((g - want).abs() <= 1e-14 * want, "io_max {io_max:?} vs {vs}: {g} against {want}");
+                let h = 1e-6;
+                if curve.kinks.iter().all(|k| (k - vs).abs() > 2.0 * h) {
+                    let fd = (curve.derivs(vs + h)[0] - curve.derivs(vs - h)[0]) / (2.0 * h);
+                    assert!((dg - fd).abs() <= 1e-6 * want, "io_max {io_max:?} vs {vs}: slope {dg} against {fd}");
+                }
+            }
         }
     }
 

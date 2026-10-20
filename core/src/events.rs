@@ -96,6 +96,16 @@ pub enum EventKind {
     /// never stale by construction and is always handled by calling
     /// `PartitionSolver::bucket_boundary` outright.
     Bucket,
+    /// The hub rail's next event (W1f, core/README.md Rails point 4): due when
+    /// its implied trajectory drifts, crosses an IC's power window, reaches a
+    /// PSU's regime threshold or an OCV knot. One is pending at a time; every
+    /// rail solve supersedes it, so it is stale when `version` is not the
+    /// rail's pending one (`PartitionSolver::rail_current`).
+    Rail { version: Version },
+    /// A waveform source's next edge (W1f, Sources points 2, 3 and 5), stale
+    /// when `version` is not the source's present one
+    /// (`PartitionSolver::source_current`).
+    Source { device: DeviceId, version: Version },
 }
 
 /// One scheduled occurrence: a time and a payload. `seq` is set by
@@ -173,6 +183,11 @@ impl EventHeap {
     /// ABI v2), so a caller polling this needs no separate empty check.
     pub fn peek_time(&self) -> f64 {
         self.heap.peek().map_or(f64::INFINITY, |std::cmp::Reverse(ev)| ev.time)
+    }
+
+    /// The earliest-ordered event, left in place, or `None` when empty.
+    pub fn peek(&self) -> Option<&Event> {
+        self.heap.peek().map(|std::cmp::Reverse(ev)| ev)
     }
 
     /// Removes and returns the earliest-ordered event, or `None` when empty.

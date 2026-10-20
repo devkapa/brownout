@@ -78,11 +78,14 @@
 //! partition of its own, `devices::ics::register` dirties its free supply's,
 //! and a driver dirties exactly one.
 
+use crate::devices::battery::{clamp_soc, BatteryModel};
 use crate::devices::led::{self, Junction};
+use crate::devices::sources::{Clock, Pulse};
 use crate::digital;
 use crate::error::BoError;
 use crate::kinds;
-use crate::program::Program;
+use crate::program::{Device, Program};
+use crate::rails::RAIL_TAU_MAX;
 
 /// One entry per source that fixed a node during propagation, in the order
 /// it was resolved. `parent_node` was already fixed at the moment `source`
@@ -160,6 +163,76 @@ pub struct PartitionBuild {
     /// point 5), so it is nonlinear. Such a partition is never `ClosedForm`;
     /// with no counted capacitor it is `Static` and iterated.
     pub holds_junction: Vec<bool>,
+    /// The hub rail, when the program has one (README, Rails point 1).
+    pub rail: Option<RailTopology>,
+    /// node -> whether its boundary value can change after load: the rail
+    /// (outside exact mode), and every node a waveform source fixes, directly
+    /// or through a source stacked on it (Rails point 7).
+    pub live: Vec<bool>,
+    /// node -> whether a waveform source with a resolved ramp moves it
+    /// (Sources point 3).
+    pub ramp_node: Vec<bool>,
+    /// Per partition: the non-free nodes its stamps read, ascending.
+    pub reads: Vec<Vec<usize>>,
+    /// Per partition: whether it reads the rail node (a hub partition, Rails
+    /// point 2). Always false in exact mode, where the rail is free.
+    pub hub: Vec<bool>,
+}
+
+/// The hub rail's topology (README, Rails point 1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RailTopology {
+    /// The hub source's device index.
+    pub device: usize,
+    /// Its `pos` node, the rail.
+    pub rail: usize,
+    /// Its `neg` node, the return: node 0 or an anchor node.
+    pub ret: usize,
+    /// `NO_RAIL_SHORTCUT`: the rail is a free node (Rails point 9).
+    pub exact: bool,
+    /// The rail's published value before its first solve: the open-circuit
+    /// voltage `E(soc0)` of a battery, `V` of a PSU.
+    pub u0: f64,
+}
+
+/// Whether a device is an ideal source in the fixed-node propagation: a
+/// `voltage_source`, a `bench_psu` with no current limit (`iLimit = 0` is
+/// code 2's path, README "Bench PSU record"), and the waveform sources.
+pub(crate) fn is_ideal_source(device: &Device) -> bool {
+    match device.kind {
+        kinds::VOLTAGE_SOURCE | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN => true,
+        kinds::BENCH_PSU => !(device.params[1] > 0.0),
+        _ => false,
+    }
+}
+
+/// Whether a device is a hub candidate: a battery, or a current-limited
+/// bench PSU (Rails point 1).
+pub(crate) fn is_hub_candidate(device: &Device) -> bool {
+    match device.kind {
+        kinds::BATTERY_PACK => true,
+        kinds::BENCH_PSU => device.params[1] > 0.0,
+        _ => false,
+    }
+}
+
+pub(crate) fn is_waveform(kind: u32) -> bool {
+    matches!(kind, kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN)
+}
+
+/// An ideal source's value at load: the param of a constant source, the
+/// level at `START_TIME` of a waveform source (Sources point 4).
+pub(crate) fn source_value_at_load(device: &Device, start_time: f64) -> f64 {
+    match device.kind {
+        kinds::CLOCK | kinds::CLOCK_GEN => Clock::from_params(&device.params).load_state(start_time).0.value,
+        kinds::PULSE_SOURCE | kinds::PULSE_GEN => Pulse::from_params(&device.params).load_state(start_time).0.value,
+        _ => device.params[0],
+    }
+}
+
+/// Whether a waveform source has a resolved ramp (Sources point 3).
+fn has_resolved_ramp(device: &Device) -> bool {
+    matches!(device.kind, kinds::PULSE_SOURCE | kinds::PULSE_GEN) && Pulse::from_params(&device.params).has_resolved_ramp()
 }
 
 /// Every LED-family junction of the program, in device order and, within a
@@ -207,7 +280,21 @@ fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
 /// excluded.
 pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
-    let (fixed, resolved) = derive_fixed_nodes(program, n)?;
+    let (mut fixed, mut resolved, anchor_nodes) = derive_fixed_nodes(program, n)?;
+    let rail = classify_hub(program, &fixed, &resolved, &anchor_nodes)?;
+    if let Some(r) = rail {
+        // The rail is neither fixed nor free (Rails point 1): outside exact
+        // mode the union-find skips it as it skips a fixed node, so every
+        // `fixed[node].is_none()` test below reads it as not free, and a
+        // stamp reads it through the live boundary. In exact mode it is free.
+        if !r.exact {
+            fixed[r.rail] = Some(r.u0);
+        }
+        // The hub joins the propagation forest as the source of its rail, so
+        // the source-current walk computes its current by KCL at the rail
+        // (Rails point 5: `-I` in CV, and the battery's branch current).
+        resolved.push(ResolvedSource { device_index: r.device, parent_node: r.ret, child_node: r.rail, parent_is_pos: false });
+    }
 
     // Every free IC supply (`vcc`/`gnd`) node — used below to promote a
     // ClosedForm partition that holds one to Stepped (contract point 3).
@@ -437,6 +524,82 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         })
         .collect();
 
+    // W1f: which non-free nodes can move after load (Rails point 7), and
+    // which a resolved ramp moves (Sources point 3), walking the forest in
+    // resolution order so a source stacked on a moving node moves too.
+    let mut live = vec![false; n];
+    let mut ramp_node = vec![false; n];
+    for r in &resolved {
+        let device = &program.devices[r.device_index];
+        if rail.is_some_and(|t| t.device == r.device_index) {
+            continue;
+        }
+        live[r.child_node] = live[r.parent_node] || is_waveform(device.kind);
+        ramp_node[r.child_node] = ramp_node[r.parent_node] || has_resolved_ramp(device);
+    }
+    if let Some(t) = rail {
+        if !t.exact {
+            live[t.rail] = true;
+        }
+    }
+    // A capacitor or LED junction across a ramping node and another non-free
+    // node would follow the ramp in a closed form nobody ported (Sources
+    // point 3).
+    for device in &program.devices {
+        if device.kind != kinds::CAPACITOR {
+            continue;
+        }
+        let (u, w) = (device.pins[0].node, device.pins[1].node);
+        if u != w && fixed[u].is_some() && fixed[w].is_some() && (ramp_node[u] || ramp_node[w]) {
+            return Err(BoError::unsupported_topology(format!(
+                "capacitor (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                device.component_index
+            )));
+        }
+    }
+    for j in junctions.iter().filter(|j| j.stamped()) {
+        if fixed[j.anode].is_some() && fixed[j.cathode].is_some() && (ramp_node[j.anode] || ramp_node[j.cathode]) {
+            return Err(BoError::unsupported_topology(format!(
+                "LED junction (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                program.devices[j.device].component_index
+            )));
+        }
+    }
+    let reads = partition_reads(program, &partitions, &local_index, &fixed, &junctions);
+    let hub: Vec<bool> = match rail {
+        Some(t) if !t.exact => reads.iter().map(|nodes| nodes.binary_search(&t.rail).is_ok()).collect(),
+        _ => vec![false; partitions.len()],
+    };
+    // A partition that reads a ramping node is stepped, so each step reads
+    // the boundary at its own instant, unless it is a linear closed-form
+    // reader: its segment is then driven exactly by the ramp's straight line
+    // (Sources point 3, R3 (b)). Membership and classification stay fixed at
+    // load.
+    let ramp_bound = ramp_nonlinear_readers(program, &local_index, &ramp_node, &hub, rail.filter(|t| !t.exact).map(|t| t.rail));
+    for (p, nodes) in reads.iter().enumerate() {
+        if nodes.iter().any(|&node| ramp_node[node]) && !(kinds_by_partition[p] == PartitionKind::ClosedForm && !hub[p] && !ramp_bound[p]) {
+            kinds_by_partition[p] = PartitionKind::Stepped;
+        }
+    }
+    // Exact mode: the rail's own partition carries the hub source, whose
+    // SoC and regime advance per committed step (Rails point 9), so it has
+    // steps whenever it holds a capacitor: a closed form has none. A
+    // battery's SoC is state on its own (the owner's rule, 2026-10-15): E
+    // and r move with it, so a static partition, solved only at events,
+    // would hold the rail and the draw at their load values and charge SoC
+    // at that frozen current. Its partition is stepped whatever else it
+    // holds, with `r = 0` too, where `u = E(soc)` moves the same way.
+    if let Some(t) = rail {
+        if t.exact {
+            if let Some((p, _)) = local_index[t.rail] {
+                let battery = program.devices[t.device].kind == kinds::BATTERY_PACK;
+                if kinds_by_partition[p] == PartitionKind::ClosedForm || battery {
+                    kinds_by_partition[p] = PartitionKind::Stepped;
+                }
+            }
+        }
+    }
+
     // W1e follow-up, gap 1 (W1c point 4): a closed-form node cannot be
     // watched against a supply that moves between events, because the
     // closed-form crossing is solved once for a fixed threshold. A free
@@ -479,7 +642,107 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // modules' own segment/step builders), so nothing here needs to reject
     // this topology any more — every partition kind accepts every IC
     // footprint the union rule above can produce.
-    Ok(PartitionBuild { partitions, local_index, fixed, resolved, kinds: kinds_by_partition, multi_capacitor_partitions, holds_junction })
+    Ok(PartitionBuild {
+        partitions,
+        local_index,
+        fixed,
+        resolved,
+        kinds: kinds_by_partition,
+        multi_capacitor_partitions,
+        holds_junction,
+        rail,
+        live,
+        ramp_node,
+        reads,
+        hub,
+    })
+}
+
+/// Per partition, whether an IC makes its response to a resolved ramp
+/// something other than a linear drive of its segment (Sources point 3, D3
+/// (b)), so that a closed-form reader of the ramp is stepped after all: an IC
+/// supplied from a ramping node stamps into it (its `R_out` and power gate
+/// follow the supply), or one of its watched read pins sits in it with a
+/// threshold that moves between events, against a ramping supply, the rail,
+/// or a hub partition's node (the rail's own drive, Rails point 4, which the
+/// closed form does not compose with a ramp's).
+fn ramp_nonlinear_readers(program: &Program, local_index: &[Option<(usize, usize)>], ramp_node: &[bool], hub: &[bool], rail: Option<usize>) -> Vec<bool> {
+    let mut out = vec![false; hub.len()];
+    let part = |node: usize| local_index[node].map(|(p, _)| p);
+    for device in &program.devices {
+        if !digital::is_ic(device.kind) {
+            continue;
+        }
+        let ic = digital::IcRecord::from_device(device);
+        let supplies = [ic.vcc.node, ic.gnd.node];
+        let ramp_supply = supplies.iter().any(|&s| ramp_node[s]);
+        let moving_supply = ramp_supply || supplies.iter().any(|&s| Some(s) == rail || part(s).is_some_and(|p| hub[p]));
+        if ramp_supply {
+            let stamped = digital::output_capable(ic.kind).iter().map(|&i| ic.logic[i].node).chain(ic.logic.iter().filter(|pin| pin.open && pin.floating_input && !pin.open_high).map(|pin| pin.node)).chain(supplies);
+            for p in stamped.filter_map(part) {
+                out[p] = true;
+            }
+        }
+        if moving_supply {
+            for (i, pin) in ic.logic.iter().enumerate() {
+                if let Some(p) = part(pin.node).filter(|_| is_watched_read_pin(&ic, i)) {
+                    out[p] = true;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Per partition, the non-free nodes its stamps read (W1f, Rails points 2
+/// and 7): the fixed end of a resistor, capacitor, switch contact or LED
+/// junction with a free end in it; for an IC, both supplies wherever one of
+/// its drivers, pulls or supplies is free (they set the driver's `R_out` and
+/// the power gate), and an output on a non-free, non-datum node in the
+/// partition of its free supply. Ascending, without repeats. A superset is
+/// harmless: it only dirties or re-keys a partition that did not need it.
+fn partition_reads(program: &Program, partitions: &[Vec<usize>], local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>], junctions: &[Junction]) -> Vec<Vec<usize>> {
+    let mut reads: Vec<Vec<usize>> = vec![Vec::new(); partitions.len()];
+    let part = |node: usize| local_index[node].map(|(p, _)| p);
+    let non_free = |node: usize| fixed[node].is_some();
+    for device in &program.devices {
+        match device.kind {
+            kinds::RESISTOR | kinds::CAPACITOR | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+                if let Some(p) = device.pins.iter().find_map(|pin| part(pin.node)) {
+                    reads[p].extend(device.pins.iter().map(|pin| pin.node).filter(|&node| non_free(node)));
+                }
+            }
+            kind if digital::is_ic(kind) => {
+                let ic = digital::IcRecord::from_device(device);
+                let supplies: Vec<usize> = [ic.vcc.node, ic.gnd.node].into_iter().filter(|&node| non_free(node)).collect();
+                let output_capable = digital::output_capable(ic.kind);
+                let mut touched: Vec<usize> = Vec::new();
+                touched.extend(output_capable.iter().filter_map(|&i| part(ic.logic[i].node)));
+                touched.extend(ic.logic.iter().filter(|pin| pin.open && pin.floating_input && !pin.open_high).filter_map(|pin| part(pin.node)));
+                let supply_parts: Vec<usize> = [ic.vcc.node, ic.gnd.node].into_iter().filter_map(part).collect();
+                touched.extend(&supply_parts);
+                for &p in &touched {
+                    reads[p].extend(&supplies);
+                }
+                for &p in &supply_parts {
+                    reads[p].extend(output_capable.iter().map(|&i| ic.logic[i].node).filter(|&node| node != 0 && non_free(node)));
+                }
+            }
+            _ => {}
+        }
+    }
+    for j in junctions.iter().filter(|j| j.stamped()) {
+        match (part(j.anode), part(j.cathode)) {
+            (Some(p), None) => reads[p].push(j.cathode),
+            (None, Some(p)) => reads[p].push(j.anode),
+            _ => {}
+        }
+    }
+    for nodes in &mut reads {
+        nodes.sort_unstable();
+        nodes.dedup();
+    }
+    reads
 }
 
 /// Whether logic pin `logic_index` of `ic` is one whose node voltage a
@@ -504,22 +767,45 @@ pub(crate) fn drives_a_fixed_node(ic: &digital::IcRecord, logic_index: usize, fi
 }
 
 /// Fixed-point propagation from node 0 (contract, point 1). Returns each
-/// node's fixed voltage (`None` for free nodes) and the list of sources that
-/// did the fixing, in resolution order. `ERR_UNSUPPORTED_TOPOLOGY` (-3) for a
-/// loop of ideal sources or a floating one.
-fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, Vec<ResolvedSource>), BoError> {
+/// node's fixed voltage (`None` for free nodes), the list of sources that did
+/// the fixing, in resolution order, and the anchor nodes. `ERR_UNSUPPORTED_TOPOLOGY`
+/// (-3) for a loop of ideal sources or a floating one.
+///
+/// From W1f every `section_anchor` node is fixed at 0 V first, as a 0 V
+/// source from the datum (Rails point 1), and the ideal sources are code 2, a
+/// `bench_psu` with no limit and the four waveform kinds, each at its value
+/// at `START_TIME` (Sources point 4). A hub candidate is not an ideal source.
+fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, Vec<ResolvedSource>, Vec<usize>), BoError> {
     let mut fixed: Vec<Option<f64>> = vec![None; n];
     fixed[0] = Some(0.0);
+    let mut resolved = Vec::new();
+
+    let mut anchor_nodes = Vec::new();
+    for (device_index, device) in program.devices.iter().enumerate() {
+        if device.kind != kinds::SECTION_ANCHOR {
+            continue;
+        }
+        let node = device.pins[0].node;
+        if fixed[node].is_some() {
+            return Err(BoError::unsupported_topology(format!(
+                "section_anchor (component {}): its node is already fixed",
+                device.component_index
+            )));
+        }
+        fixed[node] = Some(0.0);
+        anchor_nodes.push(node);
+        resolved.push(ResolvedSource { device_index, parent_node: 0, child_node: node, parent_is_pos: false });
+    }
 
     let source_indices: Vec<usize> = program
         .devices
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.kind == kinds::VOLTAGE_SOURCE)
+        .filter(|(_, d)| is_ideal_source(d))
         .map(|(i, _)| i)
         .collect();
+    let values: Vec<f64> = source_indices.iter().map(|&i| source_value_at_load(&program.devices[i], program.options.start_time)).collect();
     let mut is_resolved = vec![false; source_indices.len()];
-    let mut resolved = Vec::with_capacity(source_indices.len());
 
     // Each pass can resolve at least one source or the loop is done; a chain
     // of k sources needs at most k passes in the worst ordering.
@@ -531,7 +817,7 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
             }
             let device = &program.devices[device_index];
             let (pos, neg) = (device.pins[0].node, device.pins[1].node);
-            let v = device.params[0];
+            let v = values[si];
             match (fixed[pos], fixed[neg]) {
                 (Some(vp), None) => {
                     fixed[neg] = Some(vp - v);
@@ -564,20 +850,95 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
         }
         let device = &program.devices[device_index];
         let (pos, neg) = (device.pins[0].node, device.pins[1].node);
+        let name = kinds::shape(device.kind).map_or("source", |s| s.name);
         return Err(BoError::unsupported_topology(if fixed[pos].is_some() && fixed[neg].is_some() {
-            format!(
-                "voltage_source (component {}): both terminals already fixed — a loop of ideal sources",
-                device.component_index
-            )
+            format!("{name} (component {}): both terminals already fixed — a loop of ideal sources", device.component_index)
         } else {
-            format!(
-                "voltage_source (component {}): floating — neither terminal is reachable from the datum",
-                device.component_index
-            )
+            format!("{name} (component {}): floating — neither terminal is reachable from the datum", device.component_index)
         }));
     }
 
-    Ok((fixed, resolved))
+    Ok((fixed, resolved, anchor_nodes))
+}
+
+/// Hub classification (README, Rails point 1), after the propagation: at
+/// most one candidate, its return fixed at 0 V (node 0 or an anchor), its
+/// rail free, no ideal source on the rail, no rail capacitor to a node a
+/// waveform source moves, and a battery's `R(soc0) C_rail` below
+/// `RAIL_TAU_MAX`. Every failure is `-3`.
+fn classify_hub(program: &Program, fixed: &[Option<f64>], resolved: &[ResolvedSource], anchor_nodes: &[usize]) -> Result<Option<RailTopology>, BoError> {
+    let mut candidates = program.devices.iter().enumerate().filter(|(_, d)| is_hub_candidate(d));
+    let Some((device_index, device)) = candidates.next() else { return Ok(None) };
+    if candidates.next().is_some() {
+        return Err(BoError::unsupported_topology("more than one hub rail (W1 limit)".to_string()));
+    }
+    let name = kinds::shape(device.kind).map_or("hub", |s| s.name);
+    let ci = device.component_index;
+    let (rail, ret) = (device.pins[0].node, device.pins[1].node);
+    if !(ret == 0 || anchor_nodes.contains(&ret)) {
+        return Err(BoError::unsupported_topology(format!("{name} (component {ci}): hub rail return is not fixed at 0 V (node 0 or a section anchor)")));
+    }
+    if rail == 0 || rail == ret {
+        return Err(BoError::unsupported_topology(format!("{name} (component {ci}): hub rail on the datum or on its own return")));
+    }
+    if fixed[rail].is_some() {
+        return Err(BoError::unsupported_topology(format!("{name} (component {ci}): hub rail is fixed by an ideal source")));
+    }
+    if let Some(other) = program.devices.iter().find(|d| is_ideal_source(d) && d.pins.iter().any(|p| p.node == rail)) {
+        return Err(BoError::unsupported_topology(format!(
+            "{name} (component {ci}): an ideal source (component {}) has a pin on the hub rail",
+            other.component_index
+        )));
+    }
+    // A rail capacitor whose far pin a waveform source moves, directly or
+    // through a source stacked on it: an edge there does not solve the rail,
+    // and the CC segment ignores the far node moving (Rails point 7). The
+    // forest is in resolution order, so a parent is marked before its child.
+    let mut by_wave = vec![false; fixed.len()];
+    for r in resolved {
+        by_wave[r.child_node] = by_wave[r.parent_node] || is_waveform(program.devices[r.device_index].kind);
+    }
+    // The kind test comes first: a section anchor has one pin.
+    let across_wave = |d: &&Device| {
+        if d.kind != kinds::CAPACITOR {
+            return false;
+        }
+        let (a, b) = (d.pins[0].node, d.pins[1].node);
+        a != b && ((a == rail && by_wave[b]) || (b == rail && by_wave[a]))
+    };
+    if let Some(cap) = program.devices.iter().find(across_wave) {
+        return Err(BoError::unsupported_topology(format!(
+            "{name} (component {ci}): capacitor (component {}) from the hub rail to a waveform source's node is not handled",
+            cap.component_index
+        )));
+    }
+    let u0 = match device.kind {
+        kinds::BATTERY_PACK => {
+            let model = BatteryModel::from_record(&device.params, &device.blob);
+            let soc0 = clamp_soc(model.soc0);
+            // The rail capacitors: one pin on the rail, the other on a fixed
+            // node (Rails point 7).
+            let c_rail: f64 = program
+                .devices
+                .iter()
+                .filter(|d| d.kind == kinds::CAPACITOR)
+                .filter(|d| {
+                    let (a, b) = (d.pins[0].node, d.pins[1].node);
+                    a != b && ((a == rail && fixed[b].is_some()) || (b == rail && fixed[a].is_some()))
+                })
+                .map(|d| d.params[0])
+                .sum();
+            let tau = model.resistance(soc0) * c_rail;
+            if !(tau < RAIL_TAU_MAX) {
+                return Err(BoError::unsupported_topology(format!(
+                    "{name} (component {ci}): battery rail time constant r*C_rail = {tau:e} s is not below {RAIL_TAU_MAX:e} s"
+                )));
+            }
+            model.emf(soc0)
+        }
+        _ => device.params[0],
+    };
+    Ok(Some(RailTopology { device: device_index, rail, ret, exact: program.options.no_rail_shortcut, u0 }))
 }
 
 struct UnionFind {

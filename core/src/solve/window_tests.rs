@@ -156,11 +156,8 @@ fn published_bits(s: &mut PartitionedSolver) -> Vec<u64> {
 fn pieces(s: &PartitionedSolver) -> Vec<(&'static str, String)> {
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     let (voltages, currents) = s.snapshot();
-    let dynamic = s
-        .dynamic_snapshot()
-        .downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64)>()
-        .expect("PartitionedSolver's dynamic snapshot");
-    let (static_snapshot, closed, stepped, pending, next_bucket, drivers, channels, dirty, dirty_now) = *dynamic;
+    let dynamic = s.dynamic_snapshot().downcast::<(DynamicSnapshot, super::hub::W1fSnapshot)>().expect("PartitionedSolver's dynamic snapshot");
+    let ((static_snapshot, closed, stepped, pending, next_bucket, drivers, channels, dirty, dirty_now), w1f) = *dynamic;
     vec![
         ("voltages", format!("{:?}", bits(&voltages))),
         ("currents", format!("{:?}", bits(&currents))),
@@ -184,6 +181,7 @@ fn pieces(s: &PartitionedSolver) -> Vec<(&'static str, String)> {
         ("driver table", format!("{:?}", drivers.iter().map(|d| (d.node, d.hi_node, d.lo_node, d.device, d.stage, d.committed())).collect::<Vec<_>>())),
         ("channels", format!("{:?}", bits(&channels))),
         ("readout flags", format!("{dirty} {}", dirty_now.to_bits())),
+        ("rails and sources", w1f.digest()),
     ]
 }
 
@@ -326,6 +324,11 @@ fn run_a_failed_instant(eager: bool) {
     for ((name, was), (_, now)) in before.iter().zip(&after) {
         // An eager solver never owes its readout, so that flag never moves.
         if eager && *name == "readout flags" {
+            continue;
+        }
+        // This circuit has no rail and no waveform source; their rollback is
+        // `rail_tests`' to prove.
+        if *name == "rails and sources" {
             continue;
         }
         assert_ne!(was, now, "the failed instant must change the solver's {name}, or the test proves nothing about restoring it");
@@ -1151,7 +1154,7 @@ type DynamicSnapshot = ((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Sn
 
 /// The committed levels of the driver table a `dynamic_snapshot()` holds.
 fn held_table(snapshot: &dyn std::any::Any) -> Vec<Option<Mode>> {
-    snapshot.downcast_ref::<DynamicSnapshot>().expect("PartitionedSolver's dynamic snapshot").5.iter().map(|d| d.committed()).collect()
+    snapshot.downcast_ref::<(DynamicSnapshot, super::hub::W1fSnapshot)>().expect("PartitionedSolver's dynamic snapshot").0 .5.iter().map(|d| d.committed()).collect()
 }
 
 #[test]

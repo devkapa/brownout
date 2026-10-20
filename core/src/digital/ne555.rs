@@ -141,6 +141,27 @@ pub fn branches(stage: DriverStage, committed: Option<Mode>, power: &IcPower, _d
     }
 }
 
+/// The conductances [`branches`] stamps, as curves in the supply difference
+/// (in the same slots, whether or not `STAMP_EPS` stamps them): OUT's
+/// `f / 20` to pin 8 and `(1 - f) / 20` to pin 1, `f` the headroom split
+/// [`out_fraction`] clamps at `vs = 2 * headroom`; DIS's constant `1 / 10`.
+pub fn branch_curves(stage: DriverStage, committed: Option<Mode>) -> [Option<super::power::SupplyCurve>; 2] {
+    use super::power::SupplyCurve;
+    let (h, r) = (OUTPUT_HEADROOM_V, OUTPUT_R_OHM);
+    // `H / vs` over `r`, and its complement, each held at `1 / 2r` below the
+    // clamp.
+    let split = |beta_sign: f64| SupplyCurve {
+        kinks: [2.0 * h, f64::INFINITY],
+        pieces: [(0.5 / r, 0.0), (if beta_sign < 0.0 { 1.0 / r } else { 0.0 }, beta_sign * h / r), (if beta_sign < 0.0 { 1.0 / r } else { 0.0 }, beta_sign * h / r)],
+    };
+    match (stage, committed) {
+        (DriverStage::Ne555Out, Some(Mode::High)) => [Some(split(-1.0)), Some(split(1.0))],
+        (DriverStage::Ne555Out, Some(Mode::Low)) => [Some(split(1.0)), Some(split(-1.0))],
+        (DriverStage::Ne555Dis, Some(Mode::Low)) => [Some(SupplyCurve::constant(1.0 / DIS_R_OHM)), None],
+        _ => [None, None],
+    }
+}
+
 /// The current delivered out of pin 3 (NE555 point 8; DI:252-273): the same
 /// Thevenin split as [`branches`], but reported unconditionally (classic
 /// publishes the formula even when nothing was actually stamped, node 0
@@ -322,6 +343,31 @@ mod tests {
         assert!((v_lo_unloaded - 0.1).abs() < 1e-12);
         assert!((g_hi_vcc * (vs - v_hi_unloaded) - 4.9e-3).abs() < 1e-12);
         assert!((g_lo_vcc * (vs - v_lo_unloaded) - 4.9e-3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_branch_curves_are_the_conductances_branches_stamps() {
+        // The curvature band reads the OUT and DIS conductances' derivatives
+        // off these curves: slot for slot they are what `branches` stamps,
+        // across the headroom clamp at 2 * 0.1 V.
+        let ic = test_ic();
+        let drv = Driver::new_ic_output(3, 1, 0, 0, false);
+        for stage in [DriverStage::Ne555Out, DriverStage::Ne555Dis] {
+            for committed in [Some(Mode::High), Some(Mode::Low), None] {
+                let curves = branch_curves(stage, committed);
+                for k in 1..=2000 {
+                    let vs = 0.01 * k as f64;
+                    let power = ic_power(&ic, vs, 0.0);
+                    for (slot, (stamped, curve)) in branches(stage, committed, &power, &drv, &ic).into_iter().zip(curves).enumerate() {
+                        match (stamped, curve) {
+                            (Some((_, g)), Some(c)) => assert!((c.derivs(vs)[0] - g).abs() <= 1e-15, "{stage:?} {committed:?} slot {slot} at {vs}: {} against {g}", c.derivs(vs)[0]),
+                            (None, _) => {}
+                            (Some(_), None) => panic!("{stage:?} {committed:?} slot {slot} at {vs}: stamped with no curve"),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A bare `IcRecord` for the pure `evaluate`/`resolve` tests above: pins

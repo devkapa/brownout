@@ -787,13 +787,16 @@ mod tests {
         bo_engine_trace_clear(bogus); // must not panic
     }
 
+    /// W1f Q10: `NO_RAIL_SHORTCUT` (key 3) became load-time only, so after
+    /// load only key 2 is accepted.
     #[test]
-    fn set_option_accepts_keys_2_and_3_after_load() {
+    fn set_option_accepts_key_2_and_rejects_key_3_after_load() {
         let _guard = lock();
         let h = bo_engine_create();
         assert_eq!(load(h, &divider_program()), 0);
         assert_eq!(bo_engine_set_option(h, 2, 1.0), 0);
-        assert_eq!(bo_engine_set_option(h, 3, 0.0), 0);
+        assert_eq!(bo_engine_set_option(h, 3, 0.0), -8);
+        assert_eq!(bo_engine_set_option(h, 3, 1.0), -8);
     }
 
     /// Section 5 of the W1b review: `FORCE_STEPPED` (key 4) after load used

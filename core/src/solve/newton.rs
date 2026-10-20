@@ -43,22 +43,26 @@ pub struct NewtonResult {
     pub converged: bool,
 }
 
-/// One restamp and one dense solve about `x`.
-fn iterate<F>(size: usize, x: &[f64], stamp: &mut F) -> Result<Vec<f64>, String>
+/// One restamp and one dense solve about `x`, with the factors it solved
+/// through (`lu::solve` is exactly this factor and apply).
+fn iterate<F>(size: usize, x: &[f64], stamp: &mut F) -> Result<(Vec<f64>, lu::LuFactorization), String>
 where
     F: FnMut(&[f64], &mut [f64], &mut [f64]),
 {
     let mut a = vec![0.0; size * size];
     let mut b = vec![0.0; size];
     stamp(x, &mut a, &mut b);
-    let solved = lu::solve(a, size, b).map_err(|_| "singular or non-finite pivot in a Newton iteration".to_string())?;
+    let fail = |_| "singular or non-finite pivot in a Newton iteration".to_string();
+    let factors = lu::lu_factor(a, size).map_err(fail)?;
+    factors.solve(&mut b).map_err(fail)?;
+    let solved = b;
     // A finite pivot at every step does not rule out an overflowing entry,
     // and a NaN in the iterate would compare "converged" against itself
     // forever below (NaN > tol is false).
     if solved.iter().any(|v| !v.is_finite()) {
         return Err("non-finite entry in a Newton iterate".to_string());
     }
-    Ok(solved)
+    Ok((solved, factors))
 }
 
 /// Solves `A(x) x = b(x)` starting from `x_init`, re-stamping via `stamp` on
@@ -88,7 +92,17 @@ where
 /// Classic re-solves a quiet partition on every step, so its steady state is
 /// the fixed point, not the first passing iterate; a static partition is
 /// solved once per change and takes that iteration at once.
-pub fn solve<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, mut stamp: F) -> Result<NewtonResult, String>
+pub fn solve<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, stamp: F) -> Result<NewtonResult, String>
+where
+    F: FnMut(&[f64], &mut [f64], &mut [f64]),
+{
+    solve_keeping_factors(size, n, x_init, linear, polish, stamp).map(|(result, _)| result)
+}
+
+/// [`solve`], also returning the factors of the last iteration it ran (the
+/// polish included): a hub partition's rail sensitivity solves through the
+/// last iteration's Jacobian (README, Rails point 3).
+pub fn solve_keeping_factors<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, mut stamp: F) -> Result<(NewtonResult, lu::LuFactorization), String>
 where
     F: FnMut(&[f64], &mut [f64], &mut [f64]),
 {
@@ -105,7 +119,7 @@ where
 
     loop {
         iterations += 1;
-        let solved = iterate(size, &x, &mut stamp)?;
+        let (solved, factors) = iterate(size, &x, &mut stamp)?;
 
         let mut converged = !forced_unconverged;
         for k in 0..n {
@@ -117,17 +131,18 @@ where
         x = solved;
 
         if linear {
-            return Ok(NewtonResult { x, iterations, converged: true });
+            return Ok((NewtonResult { x, iterations, converged: true }, factors));
         }
         if converged {
             if polish {
                 iterations += 1;
-                x = iterate(size, &x, &mut stamp)?;
+                let (polished, polish_factors) = iterate(size, &x, &mut stamp)?;
+                return Ok((NewtonResult { x: polished, iterations, converged: true }, polish_factors));
             }
-            return Ok(NewtonResult { x, iterations, converged: true });
+            return Ok((NewtonResult { x, iterations, converged: true }, factors));
         }
         if iterations >= max_iterations {
-            return Ok(NewtonResult { x, iterations, converged: false });
+            return Ok((NewtonResult { x, iterations, converged: false }, factors));
         }
     }
 }

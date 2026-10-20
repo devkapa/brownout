@@ -53,10 +53,9 @@ pub const STAT_FIXED_NODES: u32 = 3;
 // (Newton iterations) come live from the partition solver (W1b step 2); 12
 // (IC evaluations) comes live from the kernel's own evaluator
 // (`kernel::DeviceEvaluator::ic_evaluations`, W1c) — see `Engine::stat`. 14
-// (rail moves) stays reserved at 0 until W1f builds that machinery;
-// `Engine::stat` still answers it (as 0), not `NaN`, so a caller can't
-// mistake "not implemented yet" for "unknown index" — that stays reserved
-// for indices past the contract's table (>= `STAT_COUNT`).
+// and 16-20 (rail moves, rail sensitivity computations, rail scans, rail
+// events, source edges, reader flips at a scan) come live from the partition
+// solver (W1f). An index past the table (>= `STAT_COUNT`) is `NaN`.
 pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// W1b's report to the orchestrator: index 15 is NOT in core/README.md's
 /// "Stat indices" table yet (that file is off limits to this worker) — it is
@@ -64,7 +63,7 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// plan row B2's "W1b reports the count of multi-capacitor linear
 /// partitions in the corpus". The `bo_engine_stat` export list itself is
 /// unaffected either way (it already accepts any `u32` index).
-const STAT_COUNT: usize = 16;
+const STAT_COUNT: usize = 21;
 
 /// The placeholder evaluator every `Engine::load` installs a `Kernel` with
 /// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
@@ -81,6 +80,71 @@ struct NoDevices;
 impl DeviceEvaluator for NoDevices {
     fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
         Vec::new()
+    }
+}
+
+/// The IC evaluator with the waveform sources' digital slots added to every
+/// completed instant's readout (W1f, Readouts: a clock or pulse slot is 1
+/// while its value is above the midpoint of its two levels). Every other
+/// method forwards, so the ICs evaluate exactly as without it.
+struct WithSources {
+    inner: Box<dyn DeviceEvaluator>,
+}
+
+impl DeviceEvaluator for WithSources {
+    fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
+        self.inner.evaluate(reader, now, acting_on_edges, voltages)
+    }
+
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[crate::drivers::Driver], out: &mut Vec<DriverRequest>) {
+        self.inner.evaluate_into(reader, now, acting_on_edges, voltages, drivers, out)
+    }
+
+    fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
+        self.inner.begin_instant()
+    }
+
+    fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        self.inner.end_instant(checkpoint)
+    }
+
+    fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
+        self.inner.rollback_instant(checkpoint)
+    }
+
+    fn snapshot(&self) -> Box<dyn std::any::Any> {
+        self.inner.snapshot()
+    }
+
+    fn restore(&mut self, snapshot: Box<dyn std::any::Any>) {
+        self.inner.restore(snapshot)
+    }
+
+    fn on_settled(&mut self, now: f64, drivers: &[crate::drivers::Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
+        let mut out = self.inner.on_settled(now, drivers, solver);
+        solver.source_slots(&mut out);
+        out
+    }
+
+    fn on_settled_into(&mut self, now: f64, drivers: &[crate::drivers::Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
+        self.inner.on_settled_into(now, drivers, solver, out);
+        solver.source_slots(out);
+    }
+
+    fn driver_changed(&mut self, driver: crate::events::DriverId) {
+        self.inner.driver_changed(driver)
+    }
+
+    fn ic_evaluations(&self) -> f64 {
+        self.inner.ic_evaluations()
+    }
+
+    fn seed_memory(&mut self, device: usize, words: &[f64]) -> Result<(), String> {
+        self.inner.seed_memory(device, words)
+    }
+
+    fn take_eeprom_updates(&mut self) -> Vec<f64> {
+        self.inner.take_eeprom_updates()
     }
 }
 
@@ -131,6 +195,9 @@ pub struct Engine {
     /// this engine" (the contract's own promise for every such pointer),
     /// exactly like `Readout`'s digital/channel slot arrays.
     eeprom_updates: Vec<f64>,
+    /// The last `bo_engine_device_state` collect (W1f), valid until the next
+    /// call on this engine.
+    state_buf: Vec<f64>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -174,8 +241,9 @@ impl Engine {
     /// iterations, IC evaluations) come live from the partition solver and
     /// the kernel's own evaluator (11 counts every stepped Newton iteration
     /// and, from W1e, every iteration of an iterated static partition, the
-    /// polish included); 14 is reserved at `0.0` until its
-    /// machinery lands (W1f). Unknown `i` (>= `STAT_COUNT`) is `NaN`.
+    /// polish included); 14 and 16-20 (the rail and the sources) come live
+    /// from the partition solver (W1f). Unknown `i` (>= `STAT_COUNT`) is
+    /// `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
         match i {
             4 => self.kernel.stats().events_processed as f64,
@@ -188,6 +256,8 @@ impl Engine {
             11 => self.kernel.solver().newton_iterations(),
             12 => self.kernel.evaluator().ic_evaluations(),
             13 => self.kernel.stats().driver_commits as f64,
+            14 => self.kernel.solver().rail_stats()[0],
+            16..=20 => self.kernel.solver().rail_stats()[i as usize - 15],
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }
@@ -355,11 +425,9 @@ impl Engine {
                 self.kernel.solver_mut().set_no_solution_cache(off);
                 Ok(())
             }
-            3 => {
-                self.options.no_rail_shortcut = Self::require_switch("NO_RAIL_SHORTCUT", value)?;
-                Ok(())
-            }
-            1 | 4 | 5 | 6 | 7 => Err(BoError::invalid_argument(format!(
+            // W1f (Q10): exact mode decides partition membership, which only a
+            // load fixes, so `NO_RAIL_SHORTCUT` is load-time only too.
+            1 | 3 | 4 | 5 | 6 | 7 => Err(BoError::invalid_argument(format!(
                 "option key {key} is load-time only and cannot be changed after load"
             ))),
             _ => Err(BoError::invalid_argument(format!("unknown option key {key}"))),
@@ -484,6 +552,35 @@ impl Engine {
         &self.eeprom_updates
     }
 
+    /// `bo_engine_device_state` (W1f Q11): collects one device's runtime
+    /// state into the engine's buffer (C ABI, the per-kind layout), projected
+    /// to the current time without committing anything. `-8` for an index
+    /// out of range or a kind with no device state. Either failure empties
+    /// the buffer, so the pointer never offers the previous device's values
+    /// as if they answered this call.
+    pub fn device_state(&mut self, device: u32) -> Result<&[f64], BoError> {
+        if device as usize >= self.device_count {
+            self.state_buf.clear();
+            return Err(BoError::invalid_argument(format!("device_state: device index {device} out of range")));
+        }
+        let now = self.kernel.time();
+        let mut buf = std::mem::take(&mut self.state_buf);
+        let found = self.kernel.solver().device_state(device as usize, now, &mut buf);
+        self.state_buf = buf;
+        match found {
+            Some(_) => Ok(&self.state_buf),
+            None => {
+                self.state_buf.clear();
+                Err(BoError::invalid_argument(format!("device_state: device {device} has no device state")))
+            }
+        }
+    }
+
+    /// The buffer from the last [`Self::device_state`] collect.
+    pub fn device_state_buffer(&self) -> &[f64] {
+        &self.state_buf
+    }
+
     /// Loads a program from scratch: build the static topology, register
     /// every IC's output drivers (combinational, sequential and memory
     /// alike — W1d widened this from combinational-only) and install the
@@ -514,7 +611,15 @@ impl Engine {
         // module's own doc comment).
         let ic_evaluator = ics::register(&mut kernel, program);
         let all_readers = ic_evaluator.reader_ids();
-        kernel.set_evaluator(Box::new(ic_evaluator) as Box<dyn DeviceEvaluator>);
+        // W1f: a program with a waveform source also publishes its digital
+        // slot at every completed instant (Readouts); every other program
+        // keeps the evaluator exactly as it was.
+        let has_waveform = program.devices.iter().any(|d| crate::partition::is_waveform(d.kind));
+        if has_waveform {
+            kernel.set_evaluator(Box::new(WithSources { inner: Box::new(ic_evaluator) }) as Box<dyn DeviceEvaluator>);
+        } else {
+            kernel.set_evaluator(Box::new(ic_evaluator) as Box<dyn DeviceEvaluator>);
+        }
         kernel.settle(program.options.start_time, &all_partitions, &all_readers).map_err(map_kernel_error)?;
 
         let mut stats = [0.0; STAT_COUNT];
@@ -532,6 +637,7 @@ impl Engine {
             options: program.options,
             readout: Readout::new(program.digital_slot_count, program.channel_slot_count),
             eeprom_updates: Vec::new(),
+            state_buf: Vec::new(),
         };
         // The settle above already queued every IC's initial digital-slot
         // state on the kernel side (`Kernel::settle`'s own `publish_settled`
@@ -983,18 +1089,19 @@ mod tests {
     }
 
     #[test]
-    fn set_option_accepts_keys_2_and_3_after_load() {
+    fn set_option_accepts_key_2_after_load() {
         let p = program(1, vec![]);
         let mut e = Engine::load(&p).unwrap();
         assert!(e.set_option(2, 1.0).is_ok());
-        assert!(e.set_option(3, 0.0).is_ok());
     }
 
+    /// Key 3 joined the load-time keys in W1f (Q10): exact mode decides
+    /// partition membership.
     #[test]
     fn set_option_rejects_load_time_only_keys_after_load() {
         let p = program(1, vec![]);
         let mut e = Engine::load(&p).unwrap();
-        for key in [1, 4, 5, 6, 7] {
+        for key in [1, 3, 4, 5, 6, 7] {
             let err = e.set_option(key, 0.0).unwrap_err();
             assert_eq!(err.code, ERR_INVALID_ARGUMENT, "key {key}");
         }

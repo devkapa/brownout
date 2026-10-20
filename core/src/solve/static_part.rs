@@ -62,9 +62,10 @@ use crate::lu;
 use crate::partition::{self, PartitionKind, ResolvedSource};
 use crate::program::Program;
 use crate::solve::newton;
+use crate::rails::{self, Contrib};
 use crate::solve::{
-    collect_ics, ic_driver_branches, ic_pull_target, junction_branch_current, junction_partition, place_junction, stamp_junctions, DynJunction,
-    PartitionSolver,
+    collect_ics, compile_dyn_shape, ic_driver_branches, ic_pull_target, junction_branch_current, junction_partition, place_junction, rail_sensitivity,
+    stamp_ics_into_dyn, stamp_junctions, stamp_linear_base, Bnd, DynJunction, DynShape, PartitionSolver,
 };
 
 /// Every node except node 0 carries this conductance to the datum (contract,
@@ -141,12 +142,58 @@ struct JunctionMemo {
     valid: bool,
 }
 
-/// One partition's solution cache entry.
+/// One partition's solution cache entry. A hub partition's entry also holds
+/// the rail sensitivity of its solve (README, Rails point 3, "Static cache").
 #[derive(Debug)]
 struct CacheEntry {
     hash: u64,
     key: Box<[u8]>,
     x: Box<[f64]>,
+    hub: Option<Box<HubSolve>>,
+}
+
+/// A static hub partition's latest solve at rail `u_p`: its solution `x`,
+/// sensitivity `s`, draw `i` and slope `g` (Rails point 2). It publishes `x +
+/// s (u - u_p)`, within `band` of `u_p` (Rails point 3): its curvature band,
+/// `RAIL_RESOLVE_V` for a linear one.
+#[derive(Debug, Clone, PartialEq)]
+struct HubSolve {
+    x: Vec<f64>,
+    s: Vec<f64>,
+    i: f64,
+    g: f64,
+    u_p: f64,
+    band: Option<f64>,
+}
+
+/// A hub partition's IC stamps that are no fixed conductance, by what its
+/// band reads (Rails point 3): none (a linear partition), those that follow
+/// the rail (`curvature::hub_band`), or, holding a free IC supply, every
+/// one that follows a supply (`curvature::supply_band`).
+enum HubIc {
+    Linear,
+    Rail(crate::solve::curvature::IcRail),
+    Supply(crate::solve::curvature::IcSupply),
+}
+
+/// A hub partition's solve as a whole snapshot holds it (opaque outside this
+/// module).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HubSolveSnapshot(HubSolve);
+
+/// What a static hub partition needs for its residual stamps: the partition
+/// compiled as a dynamic shape (its resistors, switches and junctions), the
+/// node map and ICs `stamp_ics_into_dyn` reads, and whether its response to
+/// the rail is curved (re-solved past the band, Rails point 3): it holds a
+/// junction, a free IC supply, or a pin of an IC supplied from the rail,
+/// whose driver's `R_out` follows the rail even into a linear network.
+#[derive(Debug)]
+struct StaticHub {
+    shape: DynShape,
+    node_owner: HashMap<usize, (usize, usize)>,
+    touch_ics: Vec<(usize, digital::IcRecord)>,
+    nonlinear: bool,
+    solve: Option<HubSolve>,
 }
 
 /// One partition's solution cache (W1 plan row B1). The key is exactly what
@@ -175,11 +222,14 @@ struct CacheEntry {
 ///   older epoch stay (unreachable) until the map empties, and count toward
 ///   [`CACHE_ENTRIES_PER_PARTITION`] exactly as they always did.
 ///
-/// `rail_band` (W1f's hub-rail band) was reserved and always 0, so it is not
-/// in the packed key. Which keys hit, and when the map empties, are exactly
-/// what they were with the `HashMap`: a hit is what a junction partition's
-/// `iterated_solve` result depends on (it starts from the last published
-/// voltages), so that pattern is part of the results.
+/// W1f appends, for a hub partition only, the rail band `round(u /
+/// RAIL_BUCKET_V)` and the power gate of each IC on the rail touching it, and
+/// for a partition reading a waveform source, that source's level index; a
+/// partition with neither keys exactly as before. Which keys hit, and when
+/// the map empties, are exactly what they were with the `HashMap`: a hit is
+/// what a junction partition's `iterated_solve` result depends on (it starts
+/// from the last published voltages), so that pattern is part of the
+/// results.
 #[derive(Debug, Default)]
 struct PartCache {
     entries: Vec<CacheEntry>,
@@ -209,7 +259,29 @@ impl PartCache {
         }
     }
 
-    fn insert(&mut self, hash: u64, key: &[u8], x: &[f64]) {
+    /// The first entry under `key` whose hub solve `accept`s, past any that
+    /// does not: a hub partition stores one entry per rail it solved at, all
+    /// under one key (Rails point 3).
+    fn find_hub(&self, hash: u64, key: &[u8], accept: impl Fn(&HubSolve) -> bool) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = (hash as usize) & mask;
+        loop {
+            let slot = self.slots[i];
+            if slot == 0 {
+                return None;
+            }
+            let e = &self.entries[slot as usize - 1];
+            if e.hash == hash && *e.key == *key && e.hub.as_deref().is_some_and(&accept) {
+                return Some(slot as usize - 1);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn insert(&mut self, hash: u64, key: &[u8], x: &[f64], hub: Option<Box<HubSolve>>) {
         if self.entries.len() >= CACHE_ENTRIES_PER_PARTITION {
             self.entries.clear();
             self.slots.fill(0);
@@ -232,7 +304,7 @@ impl PartCache {
         while self.slots[i] != 0 {
             i = (i + 1) & mask;
         }
-        self.entries.push(CacheEntry { hash, key: key.into(), x: x.into() });
+        self.entries.push(CacheEntry { hash, key: key.into(), x: x.into(), hub });
         self.slots[i] = self.entries.len() as u32;
     }
 }
@@ -274,12 +346,15 @@ pub(crate) fn mode_discriminant(m: Mode) -> u8 {
 /// "open stamps nothing" — nothing calls this with `g == 0` today, since
 /// only the immutable resistor list ever reaches it, but the guard costs
 /// nothing and keeps the function honest about its own contract).
+#[allow(clippy::too_many_arguments)]
 fn fold_static_stamp(
     partitions: &[Vec<usize>],
     local_index: &[Option<(usize, usize)>],
     fixed: &[Option<f64>],
+    live: &[bool],
     matrix_base: &mut [Vec<f64>],
     rhs_base: &mut [Vec<f64>],
+    live_rhs: &mut [Vec<(usize, f64, usize)>],
     u: usize,
     w: usize,
     g: f64,
@@ -297,15 +372,26 @@ fn fold_static_stamp(
             a[lu_ * size + lw] -= g;
             a[lw * size + lu_] -= g;
         }
+        // A live boundary node (the rail, a waveform source's node) is not
+        // baked: its term is added at each stamp from its present value
+        // (README, Rails point 7).
         (Some((pu, lu_)), None) => {
             let size = partitions[pu].len();
             matrix_base[pu][lu_ * size + lu_] += g;
-            rhs_base[pu][lu_] += g * fixed[w].unwrap();
+            if live[w] {
+                live_rhs[pu].push((lu_, g, w));
+            } else {
+                rhs_base[pu][lu_] += g * fixed[w].unwrap();
+            }
         }
         (None, Some((pw, lw))) => {
             let size = partitions[pw].len();
             matrix_base[pw][lw * size + lw] += g;
-            rhs_base[pw][lw] += g * fixed[u].unwrap();
+            if live[u] {
+                live_rhs[pw].push((lw, g, u));
+            } else {
+                rhs_base[pw][lw] += g * fixed[u].unwrap();
+            }
         }
         (None, None) => {
             // Both ends fixed: no stamp. Current is Ohm's law on two
@@ -469,6 +555,13 @@ pub struct StaticPartitionSolver {
     /// `LAZY_V_LIMIT` as of the last publish. Together with the nodes this
     /// call changes, that bounds everything the walk reads.
     inputs_bounded: bool,
+    /// How far from its stored rail a hub partition's cache entry may answer
+    /// (Rails point 3): within the entry's own band, which the rail keeps in
+    /// step with its regime (`set_hub_cache_rule`); `Flat(0)` for the
+    /// re-solve at a CC exit, which must not be a first-order correction
+    /// (Rails point 5). A wider hit would hand the rail loop back the solve
+    /// it found past its band, and the re-solve would never happen.
+    hub_cache_rule: rails::BandRule,
     /// Whether the last resolve skipped the source walk, for the test oracle.
     walk_skipped: bool,
     /// The readers of one resolve before they are sorted and deduplicated,
@@ -480,6 +573,44 @@ pub struct StaticPartitionSolver {
     /// ran it, not a rollback nobody happened to write.
     #[cfg(test)]
     w_saved: Option<(Vec<f64>, Vec<f64>)>,
+
+    // ---- W1f: the live boundary and the hub rail --------------------------
+    /// The rail node outside exact mode (README, Rails point 1).
+    rail: Option<usize>,
+    /// partition index -> its resistor terms on live boundary nodes, `(local,
+    /// g, node)`, added at each stamp instead of baked into `rhs_base`.
+    live_rhs: Vec<Vec<(usize, f64, usize)>>,
+    /// partition index -> its hub state, `None` for a partition that does
+    /// not read the rail.
+    hubs: Vec<Option<Box<StaticHub>>>,
+    /// partition index -> the waveform sources (by index in device order)
+    /// whose level its cache key carries (Rails point 7, "Static cache").
+    part_waves: Vec<Vec<u32>>,
+    /// Each waveform source's level index, set by the owner at its edges.
+    wave_levels: Vec<u8>,
+    /// Every switch-family device's current params by device index, for the
+    /// residual stamps (`stamp_linear_base` reads them by device).
+    switch_params: HashMap<usize, Vec<f64>>,
+    /// Boundary writes the owner queued for the next resolve, and whether it
+    /// re-publishes every hub partition's correction at the present rail.
+    pending_bnd: Vec<(usize, f64)>,
+    republish_hubs: bool,
+    /// How many of `changed_scratch`'s nodes the last resolve changed without
+    /// solving (boundary writes and rail corrections): they come first, and
+    /// queue no reader (Rails point 3: readers of hub partitions are queued
+    /// by a rail scan).
+    silent_len: usize,
+    /// Contributions the last calls produced, for the owner to drain.
+    hub_updates: Vec<(usize, Contrib)>,
+    /// Contract stat 16, this solver's share.
+    sensitivities: u64,
+    /// The window's journal of hub states (first touch).
+    hub_journal: Vec<(u32, Option<HubSolve>)>,
+    hub_journaled: Vec<bool>,
+    /// Exact mode's hub source, set by the owner before each call (README,
+    /// Rails point 9); its partition bypasses the cache, whose key does not
+    /// carry the source's state.
+    exact: Option<crate::solve::ExactStamp>,
 }
 
 impl StaticPartitionSolver {
@@ -489,8 +620,9 @@ impl StaticPartitionSolver {
     /// later re-solve works.
     pub fn build(program: &Program) -> Result<Self, BoError> {
         let pb = partition::build(program)?;
-        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, .. } = pb;
+        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, rail: rail_topology, live, hub, reads, .. } = pb;
         let partitions_len = partitions.len();
+        let mut live_rhs: Vec<Vec<(usize, f64, usize)>> = vec![Vec::new(); partitions_len];
 
         let mut partition_junctions: Vec<Vec<DynJunction>> = vec![Vec::new(); partitions.len()];
         let mut kcl_junctions = Vec::new();
@@ -548,7 +680,7 @@ impl StaticPartitionSolver {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contacts = contacts_of(device.kind, &pins, &device.params);
                     for c in &contacts {
-                        fold_static_stamp(&partitions, &local_index, &fixed, &mut matrix_base, &mut rhs_base, c.u, c.w, c.g);
+                        fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u, c.w, c.g);
                     }
                     resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
                 }
@@ -645,6 +777,51 @@ impl StaticPartitionSolver {
         let ics_len = ics.len();
         let stamp_count = resistors.len() + switches.len();
 
+        // W1f: the hub partitions this solver owns, compiled for their
+        // residual stamps, and the waveform sources each partition's key
+        // carries.
+        let rail = rail_topology.filter(|t| !t.exact).map(|t| t.rail);
+        let mut hubs: Vec<Option<Box<StaticHub>>> = (0..partitions_len).map(|_| None).collect();
+        if let Some(rail) = rail {
+            let rail_ic = crate::solve::curvature::holds_rail_ic_pin(&ics, &local_index, rail, partitions_len);
+            for p in 0..partitions_len {
+                if !(hub[p] && partition_kinds[p] == PartitionKind::Static) {
+                    continue;
+                }
+                let shape = compile_dyn_shape(p, &partitions[p], &local_index, &fixed, program);
+                let node_owner: HashMap<usize, (usize, usize)> = partitions[p].iter().enumerate().map(|(l, &node)| (node, (p, l))).collect();
+                let touch_ics: Vec<(usize, digital::IcRecord)> = part_ics[p].iter().map(|&k| ics[k as usize].clone()).collect();
+                let nonlinear = holds_free_ic_supply[p] || !partition_junctions[p].is_empty() || rail_ic[p];
+                hubs[p] = Some(Box::new(StaticHub { shape, node_owner, touch_ics, nonlinear, solve: None }));
+            }
+        }
+        let mut wave_of_device = vec![u32::MAX; program.devices.len()];
+        let mut wave_count = 0u32;
+        for (d, device) in program.devices.iter().enumerate() {
+            if partition::is_waveform(device.kind) {
+                wave_of_device[d] = wave_count;
+                wave_count += 1;
+            }
+        }
+        let mut node_waves: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
+        for r in &resolved {
+            let mut waves = node_waves[r.parent_node].clone();
+            if wave_of_device[r.device_index] != u32::MAX {
+                waves.push(wave_of_device[r.device_index]);
+            }
+            node_waves[r.child_node] = waves;
+        }
+        let part_waves: Vec<Vec<u32>> = reads
+            .iter()
+            .map(|nodes| {
+                let mut waves: Vec<u32> = nodes.iter().flat_map(|&n| node_waves[n].iter().copied()).collect();
+                waves.sort_unstable();
+                waves.dedup();
+                waves
+            })
+            .collect();
+        let switch_params: HashMap<usize, Vec<f64>> = switches.iter().map(|sw| (sw.device_index, sw.params.clone())).collect();
+
         Ok(StaticPartitionSolver {
             partitions,
             local_index,
@@ -688,11 +865,37 @@ impl StaticPartitionSolver {
             i_log: Vec::new(),
             source_walk_skippable: false,
             inputs_bounded: false,
+            hub_cache_rule: rails::BandRule::Curvature { fallback: rails::RAIL_RESOLVE_V },
             walk_skipped: false,
             readers_scratch: Vec::new(),
             #[cfg(test)]
             w_saved: None,
+            rail,
+            live_rhs,
+            hubs,
+            part_waves,
+            wave_levels: vec![0; wave_count as usize],
+            switch_params,
+            pending_bnd: Vec::new(),
+            republish_hubs: false,
+            silent_len: 0,
+            hub_updates: Vec::new(),
+            sensitivities: 0,
+            hub_journal: Vec::new(),
+            hub_journaled: vec![false; partitions_len],
+            exact: None,
         })
+    }
+
+    /// Exact mode's hub source for the calls that follow.
+    pub(crate) fn set_exact(&mut self, exact: Option<crate::solve::ExactStamp>) {
+        self.exact = exact;
+    }
+
+    fn apply_exact(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
+        if let Some(e) = self.exact.filter(|e| e.partition == p_idx) {
+            e.apply(size, a, b);
+        }
     }
 
     /// Contract stat 11, the static half (`PartitionedSolver` adds the
@@ -708,6 +911,7 @@ impl StaticPartitionSolver {
         self.window = true;
         self.v_log.clear();
         self.i_log.clear();
+        self.hub_journal.clear();
         #[cfg(test)]
         {
             self.w_saved = Some((self.voltages.clone(), self.currents.clone()));
@@ -741,6 +945,9 @@ impl StaticPartitionSolver {
         self.window = false;
         self.v_log.clear();
         self.i_log.clear();
+        for (p, _) in self.hub_journal.drain(..) {
+            self.hub_journaled[p as usize] = false;
+        }
     }
 
     /// The window's instant failed: every slot it changed goes back to the
@@ -762,6 +969,16 @@ impl StaticPartitionSolver {
         self.window = false;
         self.v_log.clear();
         self.i_log.clear();
+        for (p, solve) in self.hub_journal.drain(..).rev() {
+            self.hub_journaled[p as usize] = false;
+            if let Some(hub) = self.hubs[p as usize].as_mut() {
+                hub.solve = solve;
+            }
+        }
+        // Owner requests are per call and never span a failed instant.
+        self.pending_bnd.clear();
+        self.republish_hubs = false;
+        self.hub_updates.clear();
         self.full = true;
     }
 
@@ -809,6 +1026,16 @@ impl StaticPartitionSolver {
     /// See the field of the same name.
     pub(crate) fn set_inputs_bounded(&mut self, on: bool) {
         self.inputs_bounded = on;
+    }
+
+    /// See the field `hub_cache_rule`.
+    pub(crate) fn set_hub_cache_rule(&mut self, rule: rails::BandRule) {
+        self.hub_cache_rule = rule;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hub_cache_rule(&self) -> rails::BandRule {
+        self.hub_cache_rule
     }
 
     /// [`PartitionSolver::resolve_dirty`] appending its readers to `out`
@@ -903,6 +1130,24 @@ impl StaticPartitionSolver {
             key.push(digital::floating::floating_high(pin.open_hash, now, ic.ttl) as u8);
         }
         key.extend_from_slice(&self.epoch.to_le_bytes());
+        // W1f: a hub partition's rail band and the level of every waveform
+        // source it reads (README, Rails points 3 and 7). Empty for every
+        // partition before W1f, so its key is unchanged.
+        if let (Some(rail), Some(hub)) = (self.rail, &self.hubs[p_idx]) {
+            let band = (self.voltages[rail] / rails::RAIL_BUCKET_V).round();
+            key.extend_from_slice(&band.to_bits().to_le_bytes());
+            // A power window can sit inside a band, and an unpowered IC
+            // stamps nothing: the gate of every IC on the rail is part of
+            // the stamp, as a committed mode is.
+            for (_, ic) in &hub.touch_ics {
+                if ic.vcc.node == rail || ic.gnd.node == rail {
+                    key.push(digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]) as u8);
+                }
+            }
+        }
+        for &w in &self.part_waves[p_idx] {
+            key.push(self.wave_levels[w as usize]);
+        }
     }
 
     /// Whether `node` is a FREE node belonging to partition `p_idx`
@@ -926,7 +1171,10 @@ impl StaticPartitionSolver {
     fn read_node(&self, node: usize, p_idx: usize, x: &[f64]) -> f64 {
         match self.local_index.get(node).copied().flatten() {
             Some((p, l)) if p == p_idx => x[l],
-            _ => self.fixed[node].expect("an IC pin's node reachable from a Static partition must be fixed or free within it (partition.rs's union rule / W1c step 2's -3 decline)"),
+            _ => {
+                debug_assert!(self.fixed[node].is_some(), "an IC pin's node reachable from a Static partition must be fixed or free within it (partition.rs's union rule / W1c step 2's -3 decline)");
+                self.voltages[node]
+            }
         }
     }
 
@@ -953,11 +1201,13 @@ impl StaticPartitionSolver {
             }
             (Some((pu, lu_)), _) if pu == p_idx => {
                 a[lu_ * size + lu_] += g;
-                b[lu_] += g * self.fixed[w].expect("the far end of a within-partition stamp must be fixed when it is not itself free in this partition");
+                debug_assert!(self.fixed[w].is_some(), "the far end of a within-partition stamp must be fixed when it is not itself free in this partition");
+                b[lu_] += g * self.voltages[w];
             }
             (_, Some((pw, lw))) if pw == p_idx => {
                 a[lw * size + lw] += g;
-                b[lw] += g * self.fixed[u].expect("the far end of a within-partition stamp must be fixed when it is not itself free in this partition");
+                debug_assert!(self.fixed[u].is_some(), "the far end of a within-partition stamp must be fixed when it is not itself free in this partition");
+                b[lw] += g * self.voltages[u];
             }
             _ => {}
         }
@@ -1017,8 +1267,9 @@ impl StaticPartitionSolver {
                 Mode::Low => driver.lo_level,
                 Mode::Hiz => unreachable!("filtered above"),
             };
-            let hi_v = self.fixed.get(driver.hi_node).copied().flatten();
-            let lo_v = self.fixed.get(driver.lo_node).copied().flatten();
+            let live = |node: usize| self.fixed.get(node).copied().flatten().map(|_| self.voltages[node]);
+            let hi_v = live(driver.hi_node);
+            let lo_v = live(driver.lo_node);
             let (hi_v, lo_v) = match (hi_v, lo_v) {
                 (Some(hv), Some(lv)) => (hv, lv),
                 _ => {
@@ -1137,10 +1388,36 @@ impl StaticPartitionSolver {
         let size = self.partitions[p_idx].len();
         let mut a = self.matrix_base[p_idx].clone();
         let mut b = self.rhs_base[p_idx].clone();
+        self.stamp_live_rhs(p_idx, &mut b);
         self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
         self.stamp_switches_into(p_idx, size, &mut a, &mut b);
         self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[]);
+        self.apply_exact(p_idx, size, &mut a, &mut b);
         lu::solve(a, size, b).map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))
+    }
+
+    /// [`Self::direct_solve`], keeping the factors (a hub partition's rail
+    /// sensitivity solves through them). `lu::solve` is this factor and
+    /// apply, so the solution is the same either way.
+    fn direct_solve_factored(&self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        let size = self.partitions[p_idx].len();
+        let mut a = self.matrix_base[p_idx].clone();
+        let mut b = self.rhs_base[p_idx].clone();
+        self.stamp_live_rhs(p_idx, &mut b);
+        self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
+        self.stamp_switches_into(p_idx, size, &mut a, &mut b);
+        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[]);
+        let fail = |_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot");
+        let factors = lu::lu_factor(a, size).map_err(fail)?;
+        factors.solve(&mut b).map_err(fail)?;
+        Ok((b, factors))
+    }
+
+    /// Adds every resistor term on a live boundary node at its present value.
+    fn stamp_live_rhs(&self, p_idx: usize, b: &mut [f64]) {
+        for &(l, g, node) in &self.live_rhs[p_idx] {
+            b[l] += g * self.voltages[node];
+        }
     }
 
     /// One iteration's stamp for an iterated partition (`Self::iterated_solve`):
@@ -1153,10 +1430,12 @@ impl StaticPartitionSolver {
     fn stamp_iterate(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) -> Result<(), String> {
         a.copy_from_slice(&self.matrix_base[p_idx]);
         b.copy_from_slice(&self.rhs_base[p_idx]);
+        self.stamp_live_rhs(p_idx, b);
         self.stamp_non_ic_drivers_into(p_idx, size, a, b, drivers)?;
         self.stamp_switches_into(p_idx, size, a, b);
         self.stamp_ics_into(p_idx, size, a, b, now, drivers, x);
-        stamp_junctions(&self.junctions[p_idx], size, a, b, x);
+        stamp_junctions(&self.junctions[p_idx], size, a, b, x, &Bnd::new(&self.voltages));
+        self.apply_exact(p_idx, size, a, b);
         Ok(())
     }
 
@@ -1168,6 +1447,11 @@ impl StaticPartitionSolver {
     /// A partition that has not passed by then is `-4`. Returns the solved
     /// local voltages; the caller publishes them.
     fn iterated_solve(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<Vec<f64>, String> {
+        self.iterated_solve_factored(p_idx, now, drivers).map(|(x, _)| x)
+    }
+
+    /// [`Self::iterated_solve`] with the factors of its last iteration.
+    fn iterated_solve_factored(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<(Vec<f64>, lu::LuFactorization), String> {
         let size = self.partitions[p_idx].len();
         let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
         let polish = !self.junctions[p_idx].is_empty();
@@ -1175,7 +1459,7 @@ impl StaticPartitionSolver {
         // `()`), so it parks the first one here and leaves the matrix zero,
         // which fails the solve at once instead of iterating on garbage.
         let mut stamp_error: Option<String> = None;
-        let result = newton::solve(size, size, &x0, false, polish, |x, a, b| {
+        let result = newton::solve_keeping_factors(size, size, &x0, false, polish, |x, a, b| {
             if stamp_error.is_some() {
                 return;
             }
@@ -1188,27 +1472,259 @@ impl StaticPartitionSolver {
         if let Some(e) = stamp_error {
             return Err(e);
         }
-        let result = result.map_err(|e| format!("partition {p_idx} ({size} node(s)): {e}"))?;
+        let (result, factors) = result.map_err(|e| format!("partition {p_idx} ({size} node(s)): {e}"))?;
         // Counted before the verdict, like every stat: a failed attempt ran.
         self.newton_iterations += result.iterations as u64;
         if !result.converged {
             return Err(format!("partition {p_idx} ({size} node(s)): Newton did not converge within {} iterations", newton::NEWTON_MAX));
         }
-        Ok(result.x)
+        Ok((result.x, factors))
+    }
+
+    // ---- W1f: the live boundary and the hub rail ------------------------
+
+    /// Queues a boundary node's new value for the next resolve, which writes
+    /// it before it solves anything (README, Rails point 7).
+    pub(crate) fn set_boundary(&mut self, node: usize, value: f64) {
+        self.pending_bnd.push((node, value));
+    }
+
+    /// Asks the next resolve to re-publish every hub partition at the
+    /// present rail, `x + s (u - u_p)` (Rails point 3).
+    pub(crate) fn request_hub_republish(&mut self) {
+        self.republish_hubs = true;
+    }
+
+    /// Sets a waveform source's level index (its cache key, Rails point 7).
+    pub(crate) fn set_wave_level(&mut self, wave: usize, level: u8) {
+        if let Some(slot) = self.wave_levels.get_mut(wave) {
+            *slot = level;
+        }
+    }
+
+    /// The contributions solved since the last drain.
+    pub(crate) fn drain_hub_updates(&mut self) -> std::vec::Drain<'_, (usize, Contrib)> {
+        self.hub_updates.drain(..)
+    }
+
+    pub(crate) fn sensitivities(&self) -> u64 {
+        self.sensitivities
+    }
+
+    /// Hub partition `p`'s last solve: `(x, s, i, g, u_p)` (tests read it).
+    #[cfg(test)]
+    pub(crate) fn hub_solve(&self, p: usize) -> Option<(Vec<f64>, Vec<f64>, f64, f64, f64)> {
+        let h = self.hubs.get(p)?.as_ref()?.solve.as_ref()?;
+        Some((h.x.clone(), h.s.clone(), h.i, h.g, h.u_p))
+    }
+
+    /// Hub partition `p`'s curvature band at its last solve (tests read it).
+    #[cfg(test)]
+    pub(crate) fn hub_band(&self, p: usize) -> Option<f64> {
+        self.hubs.get(p)?.as_ref()?.solve.as_ref()?.band
+    }
+
+    /// The curved hub partitions whose last solve is more than its band
+    /// under `rule` from `u` (Rails point 3).
+    pub(crate) fn hubs_past_band(&self, u: f64, rule: rails::BandRule, out: &mut Vec<PartitionId>) {
+        for (p, hub) in self.hubs.iter().enumerate() {
+            if let Some(hub) = hub {
+                if hub.nonlinear && hub.solve.as_ref().is_some_and(|s| (u - s.u_p).abs() > rule.band(s.band)) {
+                    out.push(PartitionId(p as u32));
+                }
+            }
+        }
+    }
+
+    /// A node of a static hub partition that has solved, as the line it
+    /// publishes on the rail (Rails point 3): `x + s (u - u_p)` as `(x - s
+    /// u_p, s)`.
+    pub(crate) fn hub_node_line(&self, node: usize) -> Option<(f64, f64)> {
+        let (p, l) = self.local_index.get(node).copied().flatten()?;
+        let h = self.hubs.get(p)?.as_ref()?.solve.as_ref()?;
+        Some((h.x[l] - h.s[l] * h.u_p, h.s[l]))
+    }
+
+    /// Every hub partition that has solved (a CC exit solves them all again,
+    /// Rails point 5).
+    pub(crate) fn hub_partitions(&self, out: &mut Vec<PartitionId>) {
+        for (p, hub) in self.hubs.iter().enumerate() {
+            if hub.as_ref().is_some_and(|h| h.solve.is_some()) {
+                out.push(PartitionId(p as u32));
+            }
+        }
+    }
+
+    /// The `u_p` of every curved hub partition and its band under `rule`
+    /// (the CC rail capacitor's re-solve thresholds, Rails point 4).
+    pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
+        out.extend(self.hubs.iter().flatten().filter(|h| h.nonlinear).filter_map(|h| h.solve.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+    }
+
+    /// Every hub partition's solve, for a whole snapshot.
+    pub(crate) fn hub_snapshot(&self) -> Vec<Option<HubSolveSnapshot>> {
+        self.hubs.iter().map(|h| h.as_ref().and_then(|h| h.solve.clone()).map(HubSolveSnapshot)).collect()
+    }
+
+    pub(crate) fn hub_restore(&mut self, snap: Vec<Option<HubSolveSnapshot>>) {
+        for (hub, saved) in self.hubs.iter_mut().zip(snap) {
+            if let Some(hub) = hub {
+                hub.solve = saved.map(|s| s.0);
+            }
+        }
+    }
+
+    /// Writes the queued boundary values and, when asked, every hub
+    /// partition's correction, noting each node whose bits moved.
+    fn apply_pending_boundary(&mut self, changed: &mut Vec<usize>) {
+        for k in 0..self.pending_bnd.len() {
+            let (node, value) = self.pending_bnd[k];
+            self.write_voltage(node, value, changed);
+        }
+        self.pending_bnd.clear();
+        if std::mem::take(&mut self.republish_hubs) {
+            for p in 0..self.hubs.len() {
+                self.publish_hub(p, changed);
+            }
+        }
+    }
+
+    fn write_voltage(&mut self, node: usize, value: f64, changed: &mut Vec<usize>) {
+        if value.to_bits() != self.voltages[node].to_bits() {
+            changed.push(node);
+            if self.window {
+                self.v_log.push((node as u32, self.voltages[node].to_bits()));
+            }
+            self.voltages[node] = value;
+        }
+    }
+
+    /// Publishes hub partition `p` at the present rail: `x + s (u - u_p)`.
+    fn publish_hub(&mut self, p: usize, changed: &mut Vec<usize>) {
+        let (Some(rail), Some(hub)) = (self.rail, self.hubs[p].as_ref()) else { return };
+        let Some(solve) = hub.solve.as_ref() else { return };
+        let du = self.voltages[rail] - solve.u_p;
+        let values: Vec<f64> = solve.x.iter().zip(&solve.s).map(|(x, s)| x + s * du).collect();
+        for (l, value) in values.into_iter().enumerate() {
+            let node = self.partitions[p][l];
+            self.write_voltage(node, value, changed);
+        }
+    }
+
+    /// Replaces hub partition `p`'s solve (journaled), publishes it and hands
+    /// the rail its contribution.
+    fn set_hub_solve(&mut self, p: usize, solve: HubSolve, changed: &mut Vec<usize>) {
+        if self.window && !self.hub_journaled[p] {
+            self.hub_journaled[p] = true;
+            let old = self.hubs[p].as_ref().and_then(|h| h.solve.clone());
+            self.hub_journal.push((p as u32, old));
+        }
+        let contrib = Contrib { active: true, i: solve.i, g: solve.g, u_p: solve.u_p, b: None };
+        self.hubs[p].as_mut().expect("a hub partition").solve = Some(solve);
+        self.publish_hub(p, changed);
+        self.hub_updates.push((p, contrib));
+    }
+
+    /// The rail sensitivity of hub partition `p` solved to `x` at rail `u`
+    /// through `factors` (Rails point 3): its own stamps, the rail stamped as
+    /// one more unknown. A curved partition takes it exactly at `x`, and
+    /// hands back its IC stamps that are no fixed conductance: those that
+    /// follow the rail, or with a free IC supply, every one that follows a
+    /// supply.
+    #[allow(clippy::type_complexity)]
+    fn hub_sensitivity(&self, p: usize, now: f64, drivers: &[Driver], x: &[f64], u: f64, factors: &lu::LuFactorization) -> Result<(crate::solve::RailSens, HubIc), String> {
+        let hub = self.hubs[p].as_ref().expect("a hub partition");
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let n = hub.shape.n;
+        let z: Vec<f64> = if hub.nonlinear { x.iter().copied().chain(std::iter::once(u)).collect() } else { Vec::new() };
+        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        let ic = (hub.nonlinear && !self.holds_free_ic_supply[p]).then(|| {
+            let ic = crate::solve::ic_rail_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z, n);
+            let explicit = ic.explicit_u(&z, n);
+            (ic, explicit)
+        });
+        let supply = self.holds_free_ic_supply[p].then(|| {
+            let ic = crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z);
+            let extra = ic.extra_jacobian(&z, n);
+            (ic, extra)
+        });
+        let sens = rail_sensitivity(n, x, u, factors, ic.as_ref().map(|(_, e)| &e[..]), supply.as_ref().map(|(_, e)| &e[..]), |z, a, b| {
+            let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+            stamp_linear_base(&hub.shape, n + 1, a, b, &self.switch_params, &bnd);
+            stamp_ics_into_dyn(n + 1, a, b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z);
+            stamp_junctions(&hub.shape.junctions, n + 1, a, b, z, &bnd);
+        })
+        .map_err(|e| format!("partition {p}: {e}"))?;
+        let ic = match (ic, supply) {
+            (Some((ic, _)), _) => HubIc::Rail(ic),
+            (None, Some((ic, _))) => HubIc::Supply(ic),
+            (None, None) => HubIc::Linear,
+        };
+        Ok((sens, ic))
+    }
+
+    /// Solves hub partition `p` at the present rail (Rails points 2 and 3):
+    /// a cache hit within its band of its stored rail replays the
+    /// contribution; otherwise the partition solves, its sensitivity and
+    /// band follow through the same factors, and the entry is stored.
+    fn solve_hub(&mut self, p: usize, now: f64, drivers: &[Driver], changed: &mut Vec<usize>) -> Result<(), String> {
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let u = self.voltages[rail];
+        let free_supply = self.holds_free_ic_supply[p];
+        let mut key_hash = None;
+        if !free_supply && !self.no_solution_cache {
+            self.build_key(p, now, drivers);
+            let hash = hash_key(&self.key_scratch);
+            key_hash = Some(hash);
+            let rule = self.hub_cache_rule;
+            if let Some(e) = self.caches[p].find_hub(hash, &self.key_scratch, |h| (u - h.u_p).abs() <= rule.band(h.band)) {
+                let solve = (**self.caches[p].entries[e].hub.as_ref().expect("a hub entry")).clone();
+                self.cache_hits += 1.0;
+                self.set_hub_solve(p, solve, changed);
+                return Ok(());
+            }
+        }
+        let (x, factors) = if free_supply || !self.junctions[p].is_empty() { self.iterated_solve_factored(p, now, drivers)? } else { self.direct_solve_factored(p, now, drivers)? };
+        let (sens, ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
+        self.sensitivities += 1;
+        let band = {
+            let hub = self.hubs[p].as_ref().expect("a hub partition");
+            let bnd = Bnd::new(&self.voltages).with_ext(rail, hub.shape.n);
+            match ic {
+                HubIc::Linear => Some(rails::RAIL_RESOLVE_V),
+                HubIc::Rail(ic) => crate::solve::curvature::hub_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic),
+                HubIc::Supply(ic) => crate::solve::curvature::supply_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic),
+            }
+        };
+        let solve = HubSolve { x, s: sens.s, i: sens.i, g: sens.g, u_p: u, band };
+        if let Some(hash) = key_hash {
+            self.caches[p].insert(hash, &self.key_scratch, &solve.x, Some(Box::new(solve.clone())));
+        }
+        self.set_hub_solve(p, solve, changed);
+        Ok(())
     }
 
     /// [`PartitionSolver::resolve_dirty`]'s body; `changed` collects every
     /// node whose published bits moved, and the readers of those nodes are
     /// appended to `out`, ascending and without repeats.
     fn resolve_dirty_inner(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], changed: &mut Vec<usize>, out: &mut Vec<DeviceId>) -> Result<(), String> {
+        // W1f: the boundary and the hub corrections move first, so every
+        // solve below reads them; they queue no reader of their own.
+        self.apply_pending_boundary(changed);
+        let silent_len = changed.len();
+        self.silent_len = silent_len;
         for &partition in dirty {
             let p_idx = partition.0 as usize;
             let size = self.partitions[p_idx].len();
             if size == 0 {
                 continue;
             }
+            if self.hubs[p_idx].is_some() {
+                self.solve_hub(p_idx, now, drivers, changed)?;
+                continue;
+            }
 
-            if self.holds_free_ic_supply[p_idx] {
+            if self.holds_free_ic_supply[p_idx] || self.exact.is_some_and(|e| e.partition == p_idx) {
                 // W1c contract point 3/4: R_out moves with this partition's
                 // own solved state, so the solution cache never applies
                 // (junctions or not, W1e LEDs point 7): every solve restamps
@@ -1252,7 +1768,7 @@ impl StaticPartitionSolver {
                     };
                     self.publish_partition(p_idx, &x, changed);
                     if let Some(hash) = key_hash {
-                        self.caches[p_idx].insert(hash, &self.key_scratch, &x);
+                        self.caches[p_idx].insert(hash, &self.key_scratch, &x, None);
                     }
                 }
             }
@@ -1299,7 +1815,7 @@ impl StaticPartitionSolver {
         // Ascending and duplicate-free, like the `BTreeSet` it replaces.
         let mut readers = std::mem::take(&mut self.readers_scratch);
         readers.clear();
-        for &node in changed.iter() {
+        for &node in changed[silent_len..].iter() {
             readers.extend_from_slice(&self.node_to_ic_readers[node]);
         }
         readers.sort_unstable();
@@ -1611,6 +2127,7 @@ impl PartitionSolver for StaticPartitionSolver {
                 self.switches[idx].params[param_index] = value;
                 let sw = &mut self.switches[idx];
                 sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+                self.switch_params.insert(device_index, sw.params.clone());
                 self.param_dirty.push((self.resistors.len() + idx) as u32);
                 for &pin_node in &self.switches[idx].pins {
                     if let Some((p_idx, _)) = self.local_index[pin_node] {
@@ -2067,7 +2584,7 @@ mod tests {
                     clears += 1;
                 }
                 reference.insert(key.clone(), x.clone());
-                cache.insert(hash, &key, &x);
+                cache.insert(hash, &key, &x, None);
             }
             assert_eq!(cache.entries.len(), reference.len(), "step {step}");
         }

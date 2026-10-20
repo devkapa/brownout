@@ -19,6 +19,9 @@
 //! through any of them.
 
 pub mod closed_form;
+mod curvature;
+mod hub;
+pub(crate) mod live;
 pub mod newton;
 pub mod static_part;
 pub mod stepped;
@@ -27,6 +30,8 @@ pub mod stepped;
 mod ic_tests;
 #[cfg(test)]
 mod led_tests;
+#[cfg(test)]
+mod rail_tests;
 #[cfg(test)]
 mod window_tests;
 
@@ -416,6 +421,75 @@ pub trait PartitionSolver {
         let _ = now;
         (Vec::new(), Vec::new())
     }
+
+    // ---- W1f: rails and sources ---------------------------------------------
+    //
+    // Default-provided like every hook above: a solver with no rail and no
+    // waveform source (every mock) never schedules either event.
+
+    /// Whether a popped `Rail { version }` is the rail's pending event
+    /// (README, Rails point 4).
+    fn rail_current(&self, version: Version) -> bool {
+        let _ = version;
+        false
+    }
+
+    /// A due `Rail` event: SoC advances, the closed-form draws refresh, the
+    /// rail solves, the regime rules run, and the next event is scheduled.
+    /// Returns `(partitions to re-solve, readers)` like `bucket_boundary`, or
+    /// a solve failure.
+    fn rail_event(&mut self, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        let _ = now;
+        Ok((Vec::new(), Vec::new()))
+    }
+
+    /// Whether a popped `Source { device, version }` is that source's next
+    /// edge (Sources point 5).
+    fn source_current(&self, device: DeviceId, version: Version) -> bool {
+        let _ = (device, version);
+        false
+    }
+
+    /// A due waveform source event (Sources points 2 and 3): an edge, where
+    /// the source's nodes take their new value, the slot updates and the next
+    /// edge is scheduled; or, on a resolved ramp, a reader's threshold
+    /// crossing. Returns `(partitions to re-solve, readers)`.
+    fn source_edge(&mut self, device: DeviceId, version: Version, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        let _ = (device, version, now);
+        Ok((Vec::new(), Vec::new()))
+    }
+
+    /// One device's runtime state (C ABI, `bo_engine_device_state`) at `now`,
+    /// written into `out`; `None` for a kind with none. Never changes the
+    /// simulation.
+    fn device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        let _ = (device, now, out);
+        None
+    }
+
+    /// Whether a resolve since the last call moved the rail by more than
+    /// 1e-9 V or changed a regime (Sources point 4), clearing the note.
+    fn take_settle_change(&mut self) -> bool {
+        false
+    }
+
+    /// The waveform sources' digital slots, `(slot, value)` (Readouts).
+    fn source_slots(&self, out: &mut Vec<(usize, f64)>) {
+        let _ = out;
+    }
+
+    /// Stats 14 and 16-20: rail moves, sensitivity computations, rail scans,
+    /// rail events, source edges, scan flips.
+    fn rail_stats(&self) -> [f64; 6] {
+        [0.0; 6]
+    }
+
+    /// The node the hub rail publishes, whose `Rail` events exist to move
+    /// it: the kernel's no-progress guard counts a `Rail`-only instant that
+    /// left it where it was ([`crate::kernel::NO_PROGRESS_MAX`]).
+    fn rail_node(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -542,6 +616,42 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
     fn bucket_boundary(&mut self, now: f64) -> (Vec<PartitionId>, Vec<DeviceId>) {
         (**self).bucket_boundary(now)
     }
+
+    fn rail_current(&self, version: Version) -> bool {
+        (**self).rail_current(version)
+    }
+
+    fn rail_event(&mut self, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        (**self).rail_event(now)
+    }
+
+    fn source_current(&self, device: DeviceId, version: Version) -> bool {
+        (**self).source_current(device, version)
+    }
+
+    fn source_edge(&mut self, device: DeviceId, version: Version, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        (**self).source_edge(device, version, now)
+    }
+
+    fn device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        (**self).device_state(device, now, out)
+    }
+
+    fn take_settle_change(&mut self) -> bool {
+        (**self).take_settle_change()
+    }
+
+    fn source_slots(&self, out: &mut Vec<(usize, f64)>) {
+        (**self).source_slots(out)
+    }
+
+    fn rail_stats(&self) -> [f64; 6] {
+        (**self).rail_stats()
+    }
+
+    fn rail_node(&self) -> Option<usize> {
+        (**self).rail_node()
+    }
 }
 
 // ============================================================================
@@ -586,24 +696,109 @@ pub type ThresholdFn = Box<dyn Fn(&[f64]) -> Vec<Threshold>>;
 
 /// One of a device's own pins, already resolved against a SPECIFIC dynamic
 /// partition: `local` is `Some(index)` into that partition's own node list
-/// when the pin is free and belongs to it, `None` when the pin is a fixed
-/// node (in which case `fixed` is that node's voltage — meaningless
-/// otherwise, left `0.0`). A pin can never resolve to a DIFFERENT
-/// partition's free node: every device `compile_dyn_shape` considers has
-/// every one of its free pins in the partition being compiled, since
-/// `partition::build`'s union-find guarantees a device's free pins share one
-/// partition — for a switch-family device, by unioning every one of its free
-/// pins together directly (`partition.rs`'s module doc comment), not merely
-/// each contact's own two ends, precisely so a pin can never land here
-/// resolved against the wrong partition. `compile_dyn_shape`'s own `resolve`
-/// enforces this as a hard error rather than trusting it silently: a free
-/// node that resolves to a DIFFERENT partition than the one being compiled
-/// is a partitioning regression, not a value `fixed: 0.0` should ever paper
-/// over.
+/// when the pin is free and belongs to it, `None` when the pin is a non-free
+/// node, whose voltage a stamp reads through the live boundary ([`Bnd`]) at
+/// `node` (W1f, Rails point 7: no fixed-node voltage is baked at build any
+/// more, since the rail and a waveform source's nodes move). A pin can never
+/// resolve to a DIFFERENT partition's free node: every device
+/// `compile_dyn_shape` considers has every one of its free pins in the
+/// partition being compiled, since `partition::build`'s union-find
+/// guarantees a device's free pins share one partition — for a switch-family
+/// device, by unioning every one of its free pins together directly
+/// (`partition.rs`'s module doc comment), not merely each contact's own two
+/// ends, precisely so a pin can never land here resolved against the wrong
+/// partition. `compile_dyn_shape`'s own `resolve` enforces this as a hard
+/// error rather than trusting it silently.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DynPin {
     pub local: Option<usize>,
-    pub fixed: f64,
+    pub node: usize,
+}
+
+/// The live boundary a stamp reads every non-free node through (README,
+/// Rails point 7): the published voltage array, whose non-free entries are
+/// the boundary values, with four overrides that only the rail and the
+/// waveform sources need.
+/// - `rail`: the rail node read at another voltage than the published one,
+///   for the sensitivity residuals at `u + RAIL_DELTA` (Rails point 3).
+/// - `ext`: the rail node stamped as one more unknown at a local index, so
+///   one residual stamp yields both the partition's residual and, in the
+///   extra row, the current the partition draws from the rail.
+/// - `ramps`: the nodes under a resolved pulse ramp, evaluated at the step's
+///   own instant (Sources point 3).
+/// - `power_u`: the rail at which an IC whose `vcc` or `gnd` is the `ext`
+///   rail is judged powered, held at the solve's `u` for the sensitivity
+///   residuals: power flips only at a rail event (Rails point 4), so the
+///   slope is the present power state's. Judged at `u + RAIL_DELTA` instead,
+///   a rail that landed on a falling power floor, within `RAIL_DELTA` under
+///   it, differenced an unpowered IC against a powered one: `1/R_out` over
+///   an output's shunt-only node, about -2.4e14 S per output for a 74LS00
+///   at 4.275 V, which sent a CC rail capacitor's segment to infinity.
+/// A partition that reads none of these sees exactly the values it baked
+/// before W1f, bit for bit: the published array holds each constant fixed
+/// node's propagated value and nothing writes it.
+#[derive(Clone, Copy)]
+pub(crate) struct Bnd<'a> {
+    values: &'a [f64],
+    ext: Option<(usize, usize)>,
+    ramps: Option<(&'a live::RampEval, f64)>,
+    power_u: Option<f64>,
+}
+
+impl<'a> Bnd<'a> {
+    pub(crate) fn new(values: &'a [f64]) -> Self {
+        Bnd { values, ext: None, ramps: None, power_u: None }
+    }
+
+    pub(crate) fn with_ext(mut self, node: usize, local: usize) -> Self {
+        self.ext = Some((node, local));
+        self
+    }
+
+    /// Judges the power of an IC on the `ext` rail at `u` whatever the rail
+    /// unknown reads (a sensitivity's residuals).
+    pub(crate) fn hold_power_at(mut self, u: f64) -> Self {
+        self.power_u = Some(u);
+        self
+    }
+
+    /// `pin`'s voltage for an IC power test: the held rail for the `ext`
+    /// rail when one is held, else [`pin_voltage`].
+    #[inline]
+    pub(crate) fn power_voltage(&self, pin: &DynPin, x: &[f64]) -> f64 {
+        match (self.power_u, self.ext) {
+            (Some(u), Some((rail, _))) if pin.local.is_none() && pin.node == rail => u,
+            _ => pin_voltage(pin, x, self),
+        }
+    }
+
+    /// The boundary at instant `t` for the nodes a resolved ramp moves; the
+    /// rest read their published value. `None` leaves the ramps out.
+    pub(crate) fn at_time(mut self, ramps: Option<&'a live::RampEval>, t: f64) -> Self {
+        self.ramps = ramps.filter(|r| r.any_ramping()).map(|r| (r, t));
+        self
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, node: usize) -> f64 {
+        if let Some((ramps, t)) = self.ramps {
+            if let Some(v) = ramps.value(node, t, self.values) {
+                return v;
+            }
+        }
+        self.values[node]
+    }
+
+    /// `pin`'s local index, the rail's included when it is stamped as an
+    /// unknown.
+    #[inline]
+    pub(crate) fn local(&self, pin: &DynPin) -> Option<usize> {
+        match (pin.local, self.ext) {
+            (Some(l), _) => Some(l),
+            (None, Some((rail, l))) if rail == pin.node => Some(l),
+            _ => None,
+        }
+    }
 }
 
 /// A resistor or switch-family device touching this partition, kept by
@@ -671,18 +866,22 @@ pub(crate) struct DynShape {
 }
 
 /// Resolves `node` against partition `p_idx`: its local index when free in
-/// `p_idx`, its fixed voltage when fixed. A node free in a DIFFERENT
-/// partition is a partitioning regression, not a value a fixed-0V fallback
-/// should ever paper over (`DynPin`'s doc comment).
+/// `p_idx`, the node itself (read through the live boundary) when it is not
+/// free. A node free in a DIFFERENT partition is a partitioning regression,
+/// not a value a fixed-0V fallback should ever paper over (`DynPin`'s doc
+/// comment).
 pub(crate) fn resolve_pin(node: usize, p_idx: usize, local_index: &[Option<(usize, usize)>], fixed: &[Option<f64>]) -> DynPin {
     match local_index[node] {
-        Some((p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
+        Some((p, l)) if p == p_idx => DynPin { local: Some(l), node },
         Some((p, _)) => unreachable!(
             "compile_dyn_shape: node {node} is free but lives in partition {p}, not the partition {p_idx} being compiled — \
              partition::build's union-find guarantees a device's free pins share one partition (partition.rs's module doc \
              comment); this is a partitioning regression, not a value a fixed-0V fallback should ever paper over"
         ),
-        None => DynPin { local: None, fixed: fixed[node].expect("a node absent from local_index must be fixed") },
+        None => {
+            assert!(fixed[node].is_some(), "a node absent from local_index must be fixed");
+            DynPin { local: None, node }
+        }
     }
 }
 
@@ -710,11 +909,11 @@ pub(crate) fn place_junction(j: &led::Junction, p_idx: usize, local_index: &[Opt
 /// local solution vector) into `a`/`b`: conductance `gd + GMIN_D` and Norton
 /// offset `id - gd * vPrev`, so the branch current anode to cathode is `g *
 /// (vA - vK) + ieq` (LEDs point 2, `stamp_two_terminal`'s convention).
-pub(crate) fn stamp_junctions(junctions: &[DynJunction], size: usize, a: &mut [f64], b: &mut [f64], x: &[f64]) {
+pub(crate) fn stamp_junctions(junctions: &[DynJunction], size: usize, a: &mut [f64], b: &mut [f64], x: &[f64], bnd: &Bnd) {
     for j in junctions {
-        let v_prev = pin_voltage(&j.anode, x) - pin_voltage(&j.cathode, x);
+        let v_prev = pin_voltage(&j.anode, x, bnd) - pin_voltage(&j.cathode, x, bnd);
         let (g, ieq) = j.law.companion(v_prev);
-        stamp_two_terminal(size, a, b, &j.anode, &j.cathode, g, ieq);
+        stamp_two_terminal(size, a, b, &j.anode, &j.cathode, g, ieq, bnd);
     }
 }
 
@@ -792,11 +991,12 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
 /// (`ieq` = its `-Ihist`, `devices::passives::capacitor_be_companion`/
 /// `capacitor_trap_companion`). `size` may exceed `a`/`b`'s node count (the
 /// closed-form segment solve adds one extra branch-current row/column).
-pub(crate) fn stamp_two_terminal(size: usize, a: &mut [f64], b: &mut [f64], pin_a: &DynPin, pin_b: &DynPin, g: f64, ieq: f64) {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stamp_two_terminal(size: usize, a: &mut [f64], b: &mut [f64], pin_a: &DynPin, pin_b: &DynPin, g: f64, ieq: f64, bnd: &Bnd) {
     if g == 0.0 && ieq == 0.0 {
         return;
     }
-    match (pin_a.local, pin_b.local) {
+    match (bnd.local(pin_a), bnd.local(pin_b)) {
         (Some(la), Some(lb)) => {
             a[la * size + la] += g;
             a[lb * size + lb] += g;
@@ -807,14 +1007,210 @@ pub(crate) fn stamp_two_terminal(size: usize, a: &mut [f64], b: &mut [f64], pin_
         }
         (Some(la), None) => {
             a[la * size + la] += g;
-            b[la] += g * pin_b.fixed - ieq;
+            b[la] += g * bnd.get(pin_b.node) - ieq;
         }
         (None, Some(lb)) => {
             a[lb * size + lb] += g;
-            b[lb] += g * pin_a.fixed + ieq;
+            b[lb] += g * bnd.get(pin_a.node) + ieq;
         }
         (None, None) => {}
     }
+}
+
+/// What the dynamic solvers need of W1f's topology at build: the rail node
+/// (outside exact mode), which partitions read it, and which non-free nodes
+/// each partition reads that can move after load (README, Rails points 2 and
+/// 7).
+#[derive(Clone, Copy)]
+pub(crate) struct LiveTopology<'a> {
+    pub rail: Option<usize>,
+    pub hub: &'a [bool],
+    pub reads: &'a [Vec<usize>],
+    pub live: &'a [bool],
+}
+
+impl<'a> LiveTopology<'a> {
+    pub(crate) fn of(pb: &'a partition::PartitionBuild) -> Self {
+        LiveTopology { rail: pb.rail.filter(|t| !t.exact).map(|t| t.rail), hub: &pb.hub, reads: &pb.reads, live: &pb.live }
+    }
+
+    /// Partition `p`'s live nodes, ascending.
+    pub(crate) fn live_reads(&self, p: usize) -> Vec<usize> {
+        self.reads[p].iter().copied().filter(|&n| self.live[n]).collect()
+    }
+}
+
+/// `A z - b` for one stamp of size `size` at `z`.
+pub(crate) fn stamp_residual(size: usize, z: &[f64], stamp: impl FnOnce(&mut [f64], &mut [f64])) -> Vec<f64> {
+    let mut a = vec![0.0; size * size];
+    let mut b = vec![0.0; size];
+    stamp(&mut a, &mut b);
+    (0..size).map(|k| a[k * size..(k + 1) * size].iter().zip(z).map(|(aij, zj)| aij * zj).sum::<f64>() - b[k]).collect()
+}
+
+/// Exact mode's hub source, stamped into the rail's own partition (README,
+/// Rails point 9): a battery with `r > 0` as a Norton (`1/r` from the rail to
+/// the return at 0 V, `E/r` injected), a battery with `r = 0` or a PSU in CV
+/// as the rail row replaced by `u = E` or `u = V`, a PSU in CC as `dir
+/// iLimit` injected into the kept KCL row. Set by the owner before every
+/// call, from the hub's state at the step's start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ExactStamp {
+    pub partition: usize,
+    pub local: usize,
+    pub kind: ExactKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ExactKind {
+    Norton { g: f64, inject: f64 },
+    Row { value: f64 },
+    Inject { current: f64 },
+}
+
+impl ExactKind {
+    /// A cell's stamp at `soc`: E and r from the model there.
+    pub(crate) fn battery(m: &crate::devices::battery::BatteryModel, soc: f64) -> ExactKind {
+        let (e, r) = (m.emf(soc), m.resistance(soc));
+        if r > 0.0 {
+            ExactKind::Norton { g: 1.0 / r, inject: e / r }
+        } else {
+            ExactKind::Row { value: e }
+        }
+    }
+}
+
+impl ExactStamp {
+    /// Stamps the source into a partition's `size x size` system, after
+    /// every other stamp (the row replacement must see the whole row).
+    pub(crate) fn apply(&self, size: usize, a: &mut [f64], b: &mut [f64]) {
+        let l = self.local;
+        match self.kind {
+            ExactKind::Norton { g, inject } => {
+                a[l * size + l] += g;
+                b[l] += inject;
+            }
+            ExactKind::Row { value } => {
+                a[l * size..(l + 1) * size].fill(0.0);
+                a[l * size + l] = 1.0;
+                b[l] = value;
+            }
+            ExactKind::Inject { current } => b[l] += current,
+        }
+    }
+}
+
+/// A hub partition's rail sensitivity after a solve at rail `u_p` (README,
+/// Rails point 3): its draw `i` from the rail, the slope `g = di/du`, and the
+/// node sensitivities `s = dx/du` of its own unknowns.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RailSens {
+    pub i: f64,
+    pub g: f64,
+    pub s: Vec<f64>,
+    /// The residual stamp's matrix at the solve, `(sys + 1)^2` with the rail
+    /// as the last unknown: the curvature band reads the partition's
+    /// Jacobian from it (`curvature::hub_band`).
+    pub jac: Vec<f64>,
+}
+
+/// Three residual stamps and one re-solve (P3:437-448): `F0 = r(x, u)`,
+/// `F1 = r(x, u + RAIL_DELTA)`, `s = -A^-1 (F1 - F0) / RAIL_DELTA` through the
+/// partition's own factors `lu`, `I0 = I(x, u)`, `I1 = I(x + s RAIL_DELTA, u +
+/// RAIL_DELTA)`, `g = (I1 - I0) / RAIL_DELTA`.
+///
+/// `explicit_u` (a partition the curvature band covers,
+/// `curvature::hub_band`): `s` is the derivative of the solution at `x`
+/// itself instead, so the published correction errs by its second-order
+/// remainder alone (V5 finding 2: the last Newton iteration's Jacobian, a
+/// step behind `x`, and the forward difference left `s` 4.2e-4 off, a
+/// first-order error). `F0`'s own matrix, from stamps linearised about `x`,
+/// is the exact Jacobian in `x` and, in its rail column, in `u` as far as
+/// a stamp reaches the rail through a conductance; `explicit_u` adds the
+/// rest of `dF/du` (rows `0..=sys`), the IC stamps that follow the rail
+/// otherwise (`curvature::IcRail::explicit_u`). `s = -J^-1 dF/du` through
+/// `J` factored afresh, and `g = dI/dx s + dI/du` from the same matrix: no
+/// difference is taken, so `s` is exact to rounding. `lu` is not read.
+///
+/// `stamp_ext(z, a, b)` stamps the partition's `sys` unknowns plus the rail as
+/// unknown `sys` (`size = sys + 1`), every nonlinear element linearised about
+/// `z` itself, so `A z - b` is the true residual: rows `0..sys` are `r(x,
+/// u)`, and row `sys` is the KCL of the rail node over this partition's
+/// stamps alone, which is the current the partition draws from the rail.
+///
+/// Each difference `F(z') - F(z)` is formed as `(A' - A) z' + A (z' - z) -
+/// (b' - b)`, with `z' - z` the intended step itself: a linear stamp is the
+/// same at both points, so it contributes `A (z' - z)` exactly instead of
+/// the difference of two residuals the size of its own current. Subtracting
+/// whole residuals leaves their rounding, a part in 1e16 of each, in a step
+/// of 1e-6: through a closed switch (1000 S) on a 5 V rail that is about
+/// 1e-6 S of slope, a part in 1e5 of a typical rail.
+///
+/// `extra` (a partition holding a free IC supply, `curvature::supply_band`):
+/// the rest of the exact `dF/dz` over every unknown and the rail
+/// (`curvature::IcSupply::extra_jacobian`, `(sys + 1)^2`), taken the same
+/// way; the returned `jac` then holds it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rail_sensitivity(sys: usize, x: &[f64], u: f64, lu: &crate::lu::LuFactorization, explicit_u: Option<&[f64]>, extra: Option<&[f64]>, mut stamp_ext: impl FnMut(&[f64], &mut [f64], &mut [f64])) -> Result<RailSens, String> {
+    let size = sys + 1;
+    let mut stamp_at = |z: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        let mut a = vec![0.0; size * size];
+        let mut b = vec![0.0; size];
+        stamp_ext(z, &mut a, &mut b);
+        (a, b)
+    };
+    let difference = |(a0, b0): &(Vec<f64>, Vec<f64>), (a1, b1): &(Vec<f64>, Vec<f64>), z1: &[f64], dz: &[f64], k: usize| -> f64 {
+        let row = k * size;
+        let mut acc = -(b1[k] - b0[k]);
+        for j in 0..size {
+            let (x0, x1) = (a0[row + j], a1[row + j]);
+            acc += (x1 - x0) * z1[j] + x0 * dz[j];
+        }
+        acc
+    };
+    let delta = crate::rails::RAIL_DELTA;
+    let mut z0: Vec<f64> = x[..sys].to_vec();
+    z0.push(u);
+    let mut at0 = stamp_at(&z0);
+    let i0 = at0.0[sys * size..].iter().zip(&z0).map(|(a, z)| a * z).sum::<f64>() - at0.1[sys];
+    if let Some(extra) = extra {
+        for (a, e) in at0.0.iter_mut().zip(extra) {
+            *a += e;
+        }
+    }
+    if explicit_u.is_some() || extra.is_some() {
+        let fu: Vec<f64> = (0..size).map(|k| at0.0[k * size + sys] + explicit_u.map_or(0.0, |e| e[k])).collect();
+        let mut jac = vec![0.0; sys * sys];
+        for r in 0..sys {
+            jac[r * sys..(r + 1) * sys].copy_from_slice(&at0.0[r * size..r * size + sys]);
+        }
+        let singular = |_| "rail sensitivity: singular or non-finite pivot".to_string();
+        let mut s: Vec<f64> = fu[..sys].iter().map(|f| -f).collect();
+        crate::lu::lu_factor(jac, sys).map_err(singular)?.solve(&mut s).map_err(singular)?;
+        let g = (0..sys).map(|k| at0.0[sys * size + k] * s[k]).sum::<f64>() + fu[sys];
+        if !(i0.is_finite() && g.is_finite() && s.iter().all(|v| v.is_finite())) {
+            return Err("rail sensitivity: a non-finite draw, slope or sensitivity".to_string());
+        }
+        return Ok(RailSens { i: i0, g, s, jac: at0.0 });
+    }
+    let mut z1 = z0.clone();
+    z1[sys] = u + delta;
+    let at1 = stamp_at(&z1);
+    let mut dz = vec![0.0; size];
+    dz[sys] = delta;
+    let mut s: Vec<f64> = (0..sys).map(|k| -difference(&at0, &at1, &z1, &dz, k) / delta).collect();
+    lu.solve(&mut s).map_err(|_| "rail sensitivity: singular or non-finite pivot".to_string())?;
+    let mut z2 = z1;
+    for k in 0..sys {
+        z2[k] = x[k] + s[k] * delta;
+        dz[k] = s[k] * delta;
+    }
+    let at2 = stamp_at(&z2);
+    let g = difference(&at0, &at2, &z2, &dz, sys) / delta;
+    if !(i0.is_finite() && g.is_finite() && s.iter().all(|v| v.is_finite())) {
+        return Err("rail sensitivity: a non-finite draw, slope or sensitivity".to_string());
+    }
+    Ok(RailSens { i: i0, g, s, jac: at0.0 })
 }
 
 /// The current flowing `pin_a -> pin_b` through a branch stamped by
@@ -833,24 +1229,24 @@ pub(crate) fn branch_current(g: f64, ieq: f64, va: f64, vb: f64) -> f64 {
 /// committed `vc`) — both replace a capacitor with an ideal source in series
 /// with its `esr` to solve the REST of the network exactly, just for
 /// different reasons.
-pub(crate) fn stamp_branch_terminal(a: &mut [f64], b: &mut [f64], size: usize, r: usize, pin: &DynPin, sign: f64) {
-    match pin.local {
+pub(crate) fn stamp_branch_terminal(a: &mut [f64], b: &mut [f64], size: usize, r: usize, pin: &DynPin, sign: f64, bnd: &Bnd) {
+    match bnd.local(pin) {
         Some(l) => {
             a[l * size + r] += sign;
             a[r * size + l] += sign;
         }
         None => {
-            b[r] -= sign * pin.fixed;
+            b[r] -= sign * bnd.get(pin.node);
         }
     }
 }
 
 /// A resolved [`DynPin`]'s current voltage, given the partition's own local
 /// solution vector `x` (only valid for entries `0..n`).
-pub(crate) fn pin_voltage(pin: &DynPin, x: &[f64]) -> f64 {
-    match pin.local {
+pub(crate) fn pin_voltage(pin: &DynPin, x: &[f64], bnd: &Bnd) -> f64 {
+    match bnd.local(pin) {
         Some(l) => x[l],
-        None => pin.fixed,
+        None => bnd.get(pin.node),
     }
 }
 
@@ -860,11 +1256,8 @@ pub(crate) fn pin_voltage(pin: &DynPin, x: &[f64]) -> f64 {
 /// been written into the shared array (`closed_form`/`stepped` publishing
 /// their own capacitor's terminal voltages for its leakage/series current,
 /// after already having written every node this same call).
-pub(crate) fn pin_voltage_global(pin: &DynPin, shape: &DynShape, voltages: &[f64]) -> f64 {
-    match pin.local {
-        Some(l) => voltages[shape.nodes[l]],
-        None => pin.fixed,
-    }
+pub(crate) fn pin_voltage_global(pin: &DynPin, voltages: &[f64]) -> f64 {
+    voltages[pin.node]
 }
 
 /// Looks up a [`DynStamped`] device's CURRENT params: `live_params` (keyed by
@@ -882,19 +1275,19 @@ pub(crate) fn live_params_for<'a>(stamped: &'a DynStamped, live_params: &'a Hash
 /// row. Shared by `closed_form`'s segment solve and `stepped`'s BE/trap
 /// companion solve, which differ only in how they additionally stamp the
 /// capacitor(s) themselves on top of this.
-pub(crate) fn stamp_linear_base(shape: &DynShape, size: usize, a: &mut [f64], b: &mut [f64], live_params: &HashMap<usize, Vec<f64>>) {
+pub(crate) fn stamp_linear_base(shape: &DynShape, size: usize, a: &mut [f64], b: &mut [f64], live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd) {
     for l in 0..shape.n {
         a[l * size + l] += static_part::NODE_RSHUNT_G;
     }
     for s in &shape.stamped {
         let params = live_params_for(s, live_params);
         for c in devices::stamp(s.kind, s.pins.len(), params) {
-            stamp_two_terminal(size, a, b, &s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, 0.0);
+            stamp_two_terminal(size, a, b, &s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, 0.0, bnd);
         }
     }
     for cap in &shape.capacitors {
         if cap.leak_g != 0.0 {
-            stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], cap.leak_g, 0.0);
+            stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], cap.leak_g, 0.0, bnd);
         }
     }
 }
@@ -917,7 +1310,7 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
         let params = live_params_for(s, live_params);
         let mut total = 0.0;
         for c in devices::stamp(s.kind, s.pins.len(), params) {
-            let (va, vb) = (pin_voltage_global(&s.pins[c.pin_a], shape, voltages), pin_voltage_global(&s.pins[c.pin_b], shape, voltages));
+            let (va, vb) = (pin_voltage_global(&s.pins[c.pin_a], voltages), pin_voltage_global(&s.pins[c.pin_b], voltages));
             total += c.conductance * (va - vb);
         }
         currents[s.device_index] = total;
@@ -1001,6 +1394,170 @@ pub(crate) fn ic_driver_branches(power: &digital::power::IcPower, driver: &Drive
         }
         DriverStage::Ne555Out | DriverStage::Ne555Dis => digital::ne555::branches(driver.stage, driver.committed(), power, driver, ic),
     }
+}
+
+/// The conductances [`ic_driver_branches`] stamps for `driver`, slot by
+/// slot, as curves in the IC's supply difference (Rails point 3).
+pub(crate) fn ic_driver_curves(driver: &Driver, ic: &digital::IcRecord) -> [Option<digital::power::SupplyCurve>; 2] {
+    match driver.stage {
+        DriverStage::Logic => match driver.committed() {
+            Some(Mode::High) if !driver.open_collector => [Some(digital::power::r_out_curve(ic)), None],
+            Some(Mode::Low) => [Some(digital::power::r_out_curve(ic)), None],
+            _ => [None, None],
+        },
+        DriverStage::Ne555Out | DriverStage::Ne555Dis => digital::ne555::branch_curves(driver.stage, driver.committed()),
+    }
+}
+
+/// The stamps of [`stamp_ics_into_dyn`] in hub partition `p_idx` that move
+/// with the rail (unknown `rail_local` of `bnd`'s ext) other than through
+/// their conductance to it: every driver branch of an IC with a supply on
+/// the rail, its conductance a curve in that supply, and every floating
+/// pull whose target is the rail. The same walk as the stamp, so the two
+/// see the same branches; `x` is read for nothing but the supplies, which
+/// are never free here (a partition holding a free IC supply is not
+/// covered by the curvature band).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ic_rail_terms(now: f64, drivers: &[Driver], ics: &[(usize, digital::IcRecord)], node_owner: &HashMap<usize, (usize, usize)>, bnd: &Bnd, p_idx: usize, x: &[f64], rail_local: usize) -> curvature::IcRail {
+    let mut out = curvature::IcRail::default();
+    let resolve = |node: usize| -> DynPin {
+        match node_owner.get(&node) {
+            Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), node },
+            _ => DynPin { local: None, node },
+        }
+    };
+    let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
+    // Only a driver on one of this partition's nodes stamps a branch the
+    // band reads (no supply is free here): one pass over the drivers.
+    let local: Vec<&Driver> = drivers.iter().filter(|d| in_partition(d.node)).collect();
+    for (_, ic) in ics {
+        for pin in [&ic.vcc, &ic.gnd].into_iter().chain(&ic.logic) {
+            if in_partition(pin.node) {
+                out.pinned.push(node_owner[&pin.node].1);
+            }
+        }
+    }
+    for (device_index, ic) in ics {
+        let touches = local.iter().any(|d| d.device == *device_index)
+            || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node))
+            || in_partition(ic.vcc.node)
+            || in_partition(ic.gnd.node);
+        if !touches {
+            continue;
+        }
+        let (vcc_pin, gnd_pin) = (resolve(ic.vcc.node), resolve(ic.gnd.node));
+        let on_rail = |pin: &DynPin| bnd.local(pin) == Some(rail_local);
+        let sigma = match (on_rail(&vcc_pin), on_rail(&gnd_pin)) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => {
+                // A chip off the rail that stamps here stamps toward its own
+                // supplies: somewhere for the draw to go.
+                out.sinks = true;
+                continue;
+            }
+        };
+        // Judged as the stamp judges it (`Bnd::hold_power_at`): the terms
+        // are the derivative within the present power state.
+        let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
+        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
+        if !power.powered {
+            continue;
+        }
+        for driver in local.iter().filter(|d| d.device == *device_index) {
+            let curves = ic_driver_curves(driver, ic);
+            for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
+                let Some((target, _)) = branch else { continue };
+                let far = resolve(target);
+                let to_rail = on_rail(&far);
+                out.touches_rail |= to_rail;
+                out.sinks |= !to_rail;
+                let Some(curve) = curve else { continue };
+                let o = node_owner[&driver.node].1;
+                out.drivers.push(curvature::RailDriver { o, to_rail, t: pin_voltage(&far, x, bnd), sigma, vs: power.vs, curve, window: digital::levels::power_window(ic) });
+            }
+        }
+        for pin in &ic.logic {
+            if !in_partition(pin.node) {
+                continue;
+            }
+            if let Some((g, _)) = ic_pull_target(ic, &power, pin, now) {
+                // The target is `gnd + vs` (the vcc pin) when the pull is
+                // high, `gnd` when low: it follows the rail when that pin is
+                // the rail.
+                let high = digital::floating::floating_high(pin.open_hash, now, ic.ttl);
+                let follows = if high { sigma > 0.0 } else { sigma < 0.0 };
+                if follows {
+                    out.pulls.push((node_owner[&pin.node].1, g));
+                    out.touches_rail = true;
+                } else {
+                    out.sinks = true;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The stamps of [`stamp_ics_into_dyn`] in a hub partition `p_idx` holding a
+/// free IC supply that are not a fixed conductance (`curvature::IcSupply`),
+/// the rail stamped as unknown `rail_local` of `bnd`'s ext: every driver
+/// branch whose IC's supply is not fixed, its conductance a curve in that
+/// supply, and every floating pull whose target, its IC's `vcc` or `gnd`, is
+/// not. The same walk as the stamp, with power judged as the stamp judges
+/// it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ic_supply_terms(now: f64, drivers: &[Driver], ics: &[(usize, digital::IcRecord)], node_owner: &HashMap<usize, (usize, usize)>, bnd: &Bnd, p_idx: usize, x: &[f64]) -> curvature::IcSupply {
+    let mut out = curvature::IcSupply::default();
+    let resolve = |node: usize| -> DynPin {
+        match node_owner.get(&node) {
+            Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), node },
+            _ => DynPin { local: None, node },
+        }
+    };
+    let in_partition = |node: usize| matches!(node_owner.get(&node), Some(&(p, _)) if p == p_idx);
+    let end = |pin: &DynPin| match bnd.local(pin) {
+        Some(l) => curvature::End::Z(l),
+        None => curvature::End::Fixed(bnd.get(pin.node)),
+    };
+    for (device_index, ic) in ics {
+        let touches = drivers.iter().any(|d| d.device == *device_index && in_partition(d.node))
+            || ic.logic.iter().any(|pin| pin.open && pin.floating_input && !pin.open_high && in_partition(pin.node))
+            || in_partition(ic.vcc.node)
+            || in_partition(ic.gnd.node);
+        if !touches {
+            continue;
+        }
+        let (vcc_pin, gnd_pin) = (resolve(ic.vcc.node), resolve(ic.gnd.node));
+        let (vcc, gnd) = (end(&vcc_pin), end(&gnd_pin));
+        let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
+        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
+        if !power.powered {
+            continue;
+        }
+        let supply_fixed = matches!((vcc, gnd), (curvature::End::Fixed(_), curvature::End::Fixed(_)));
+        for driver in drivers.iter().filter(|d| d.device == *device_index) {
+            let curves = ic_driver_curves(driver, ic);
+            for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
+                let (Some((target, _)), Some(curve)) = (branch, curve) else { continue };
+                if supply_fixed || !(in_partition(driver.node) || in_partition(target)) {
+                    continue;
+                }
+                out.drivers.push(curvature::SupplyDriver { a: end(&resolve(driver.node)), f: end(&resolve(target)), vcc, gnd, curve });
+            }
+        }
+        for pin in &ic.logic {
+            if !in_partition(pin.node) || ic_pull_target(ic, &power, pin, now).is_none() {
+                continue;
+            }
+            let high = digital::floating::floating_high(pin.open_hash, now, ic.ttl);
+            let target = if high { vcc } else { gnd };
+            if let curvature::End::Z(_) = target {
+                out.pulls.push(curvature::SupplyPull { pin: node_owner[&pin.node].1, target, g: ic_pull_target(ic, &power, pin, now).unwrap().0 });
+            }
+        }
+    }
+    out
 }
 
 /// Where an open `FLOATING_INPUT` pin's floating pull currently stamps, and
@@ -1122,7 +1679,7 @@ pub(crate) fn stamp_ics_into_dyn(
     drivers: &[Driver],
     ics: &[(usize, digital::IcRecord)],
     node_owner: &HashMap<usize, (usize, usize)>,
-    fixed: &[Option<f64>],
+    bnd: &Bnd,
     p_idx: usize,
     x: &[f64],
 ) {
@@ -1130,15 +1687,13 @@ pub(crate) fn stamp_ics_into_dyn(
     if ics.is_empty() {
         return;
     }
+    // A node that is not free in `p_idx` is read through the live boundary:
+    // partition.rs's union rule guarantees it is not free in another
+    // partition.
     let resolve = |node: usize| -> DynPin {
         match node_owner.get(&node) {
-            Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), fixed: 0.0 },
-            _ => DynPin {
-                local: None,
-                fixed: fixed[node].expect(
-                    "an IC pin reachable from a dynamic partition must be fixed or free within it (partition.rs's union rule)",
-                ),
-            },
+            Some(&(p, l)) if p == p_idx => DynPin { local: Some(l), node },
+            _ => DynPin { local: None, node },
         }
     };
     // `in_partition(node)` is `node_owner[node].0 == p_idx`. The `touches`
@@ -1198,7 +1753,8 @@ pub(crate) fn stamp_ics_into_dyn(
         }
         let vcc_pin = resolve(ic.vcc.node);
         let gnd_pin = resolve(ic.gnd.node);
-        let power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x), pin_voltage(&gnd_pin, x));
+        let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
+        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
         if !power.powered {
             continue;
         }
@@ -1227,7 +1783,7 @@ pub(crate) fn stamp_ics_into_dyn(
                 // OUT's up-to-two branches is folded independently (W1a
                 // point 2's "each caller folds every branch").
                 if in_partition(driver.node) || in_partition(target) {
-                    stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0);
+                    stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0, bnd);
                 }
             }
         }
@@ -1246,8 +1802,8 @@ pub(crate) fn stamp_ics_into_dyn(
                 // classic's own `mna.add(node,node,g); mna.addB(node,
                 // target*g)` (`_stampFloatingDigitalInputs`) restated as a
                 // two-terminal stamp instead of a direct matrix/RHS poke.
-                let datum = DynPin { local: None, fixed: 0.0 };
-                stamp_two_terminal(size, a, b, &resolve(pin.node), &datum, g, -g * target_v);
+                let datum = DynPin { local: None, node: 0 };
+                stamp_two_terminal(size, a, b, &resolve(pin.node), &datum, g, -g * target_v, bnd);
             }
         }
     }
@@ -1323,12 +1879,19 @@ enum Owner {
 #[derive(Debug, Clone, Copy)]
 struct FixedPairCapacitor {
     device_index: usize,
-    /// `V(pins[0]) - V(pins[1])`, constant forever (both nodes are fixed).
+    /// `(pins[0], pins[1])`'s nodes.
+    nodes: (usize, usize),
+    /// `V(pins[0]) - V(pins[1])`: constant on constant nodes, re-aimed at
+    /// each change of a live one (README, Rails point 7).
     d_v: f64,
     c: f64,
     esr: f64,
     /// `1/leakage`, or `0.0` for "none" — same convention as `DynCapacitor::leak_g`.
     leak_g: f64,
+    /// The charge's anchor: `vc0` at `t0` (0 at `START_TIME` until a live
+    /// node moves).
+    vc0: f64,
+    t0: f64,
 }
 
 impl FixedPairCapacitor {
@@ -1345,9 +1908,54 @@ impl FixedPairCapacitor {
     /// i.e. forever. Current flows `pins[0] -> pins[1]`, the same convention
     /// `DynCapacitor`'s published current and `PartitionedSolver::cap_devices`'s
     /// KCL folding already use.
-    fn current_at(&self, now: f64, start_time: f64) -> f64 {
-        let series = if self.esr > 0.0 { (self.d_v / self.esr) * (-(now - start_time) / (self.esr * self.c)).exp() } else { 0.0 };
+    fn current_at(&self, now: f64) -> f64 {
+        // With the load's anchor (`vc0 = 0`, `t0 = START_TIME`) this is the
+        // pre-W1f expression bit for bit: `d_v - 0.0` is `d_v`.
+        let series = if self.esr > 0.0 { ((self.d_v - self.vc0) / self.esr) * (-(now - self.t0) / (self.esr * self.c)).exp() } else { 0.0 };
         series + self.leak_g * self.d_v
+    }
+
+    /// `vc` at `now` (`dV` at once when `esr = 0`).
+    fn vc_at(&self, now: f64) -> f64 {
+        if self.esr > 0.0 {
+            self.d_v + (self.vc0 - self.d_v) * (-(now - self.t0) / (self.esr * self.c)).exp()
+        } else {
+            self.d_v
+        }
+    }
+
+    /// The charge a bench PSU's CV -> CC test reads (Rails point 5): `vc` for
+    /// `esr > 0`. At `esr = 0` it is the anchor, the charge the capacitor
+    /// was loaded with (W1b point 5) until a live node first moves, and from
+    /// then on `dV`, which rule 2a jumps it to at once ([`Self::reaim`]): so
+    /// in CV only a capacitor discharged at load is short of the setpoint.
+    fn charge(&self, now: f64) -> f64 {
+        if self.esr > 0.0 {
+            self.vc_at(now)
+        } else {
+            self.vc0
+        }
+    }
+
+    /// A live node moved (Rails point 7): `vc` is continuous and the new `dV`
+    /// is its target. At `esr = 0` the anchor records the jump to it, which
+    /// nothing else reads (the series current and `vc` there are `0` and
+    /// `dV` whatever the anchor), so that [`Self::charge`] holds it.
+    fn reaim(&mut self, now: f64, d_v: f64) {
+        if d_v.to_bits() == self.d_v.to_bits() {
+            return;
+        }
+        self.vc0 = if self.esr > 0.0 { self.vc_at(now) } else { d_v };
+        self.t0 = now;
+        self.d_v = d_v;
+    }
+
+    /// Takes `vc` as its charge at `now`, heading for `dV`: where a PSU
+    /// leaving CC carried it (Rails point 4).
+    fn hold_at(&mut self, now: f64, d_v: f64, vc: f64) {
+        self.vc0 = vc;
+        self.t0 = now;
+        self.d_v = d_v;
     }
 }
 
@@ -1760,12 +2368,55 @@ pub struct PartitionedSolver {
     /// static solver's field of the same name).
     #[cfg(test)]
     w_saved: Option<(Vec<f64>, Vec<f64>, Vec<f64>)>,
+    /// Test builds record the battery steps exact mode charges, `(its end,
+    /// the charge)`, one list per call that charged.
+    #[cfg(test)]
+    pub(crate) bill_log: Vec<Vec<(f64, f64)>>,
+
+    // ---- W1f: the live boundary and the hub rail ([`hub`]) ---------------
+    /// The waveform sources and the propagation forest, shared with the
+    /// stepped solver while a ramp runs. A window holds the `Rc` it found.
+    wave: Rc<live::RampEval>,
+    w_wave: Option<Rc<live::RampEval>>,
+    /// waveform source -> the forest entries under it, resolution order;
+    /// and every partition reading a node under it.
+    wave_entries: Vec<Vec<u32>>,
+    wave_parts: Vec<Vec<usize>>,
+    /// node -> the partitions, the watched closed-form or stepped partitions
+    /// (through an IC supplied from it), the ICs and the rule-2a capacitors
+    /// that read it. Filled for live nodes only.
+    node_parts: Vec<Vec<u32>>,
+    node_watch_parts: Vec<Vec<u32>>,
+    node_ic_readers: Vec<Vec<u32>>,
+    node_caps: Vec<Vec<u32>>,
+    /// Whether a rule-2a capacitor sits on a live node (its anchor is then
+    /// instant state).
+    live_caps: bool,
+    w_caps: Vec<(f64, f64, f64)>,
+    /// node -> not free (fixed, or the rail outside exact mode).
+    fixed_node: Vec<bool>,
+    /// device -> its kind code.
+    device_kinds: Vec<u32>,
+    /// The hub rail outside exact mode, and exact mode's hub.
+    hub: Option<Box<hub::Hub>>,
+    exact: Option<Box<hub::ExactHub>>,
+    /// Stat 19.
+    source_edges: u64,
+    /// Whether this call re-solved exact mode's rail partition (static, or a
+    /// stepped one's seed), which runs the regime rules even with no step
+    /// committed since the last (Rails point 5: at load, the only solve).
+    exact_solved: bool,
 }
 
 impl PartitionedSolver {
     pub fn build(program: &Program) -> Result<Self, BoError> {
+        #[cfg(test)]
+        curvature::hook::clear();
         let pb = partition::build(program)?;
-        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions, .. } = pb;
+        // The dynamic solvers read W1f's topology as they build.
+        let closed_form = closed_form::ClosedFormSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
+        let stepped = stepped::SteppedSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
+        let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions, rail, live, reads, hub, .. } = pb;
 
         let node_count = program.node_count;
         let device_count = program.devices.len();
@@ -1837,10 +2488,13 @@ impl PartitionedSolver {
                         let leak = device.params[2];
                         fixed_pair_capacitors.push(FixedPairCapacitor {
                             device_index: d,
+                            nodes: (u, w),
                             d_v: fixed[u].expect("a fixed node always carries a voltage") - fixed[w].expect("a fixed node always carries a voltage"),
                             c: device.params[0],
                             esr: device.params[1],
                             leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
+                            vc0: 0.0,
+                            t0: program.options.start_time,
                         });
                     }
                 }
@@ -1867,8 +2521,6 @@ impl PartitionedSolver {
         let ics = collect_ics(program);
 
         let static_solver = static_part::StaticPartitionSolver::build(program)?;
-        let closed_form = closed_form::ClosedFormSolver::build(program, &partitions, &local_index, &fixed, &partition_kinds);
-        let stepped = stepped::SteppedSolver::build(program, &partitions, &local_index, &fixed, &partition_kinds);
 
         let _ = device_count; // documents intent; `currents` is already sized from it above.
 
@@ -1975,7 +2627,26 @@ impl PartitionedSolver {
             window_mirror: false,
             #[cfg(test)]
             w_saved: None,
+            #[cfg(test)]
+            bill_log: Vec::new(),
+            wave: Rc::new(live::RampEval::default()),
+            w_wave: None,
+            wave_entries: Vec::new(),
+            wave_parts: Vec::new(),
+            node_parts: Vec::new(),
+            node_watch_parts: Vec::new(),
+            node_ic_readers: Vec::new(),
+            node_caps: Vec::new(),
+            live_caps: false,
+            w_caps: Vec::new(),
+            fixed_node: fixed.iter().map(|f| f.is_some()).collect(),
+            device_kinds: program.devices.iter().map(|d| d.kind).collect(),
+            hub: None,
+            exact: None,
+            source_edges: 0,
+            exact_solved: false,
         };
+        solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.lazy_static_ok = solver.compute_lazy_static_ok(readout_term_count);
         solver.rescan_bounds();
         // Nothing reads the static solver's own source currents: this solver
@@ -1990,6 +2661,15 @@ impl PartitionedSolver {
             debug_assert_eq!(owned, listed, "the static solver owns exactly the devices `copy_in_static` copies");
         }
         solver.register_ic_read_pin_watches();
+        // After the watches: they decide whether another partition supplies
+        // the battery's (`SteppedSolver::set_defer`).
+        if let Some(e) = solver.exact.as_ref() {
+            if let crate::rails::HubKind::Battery(m) = &e.kind {
+                let (p, model, state) = (e.partition, m.clone(), e.battery);
+                solver.stepped.set_defer(Some(p));
+                solver.stepped.set_cell(model, state);
+            }
+        }
         Ok(solver)
     }
 
@@ -2341,7 +3021,8 @@ impl PartitionedSolver {
 
     /// Contract stat 3: every fixed node, node 0 included.
     pub fn fixed_count(&self) -> usize {
-        self.local_index.iter().filter(|x| x.is_none()).count()
+        let rail = self.hub.as_ref().map(|h| h.node);
+        self.local_index.iter().enumerate().filter(|(n, x)| x.is_none() && Some(*n) != rail).count()
     }
 
     pub fn multi_capacitor_linear_partitions(&self) -> f64 {
@@ -2439,6 +3120,18 @@ impl PartitionedSolver {
         if stepped {
             self.written.extend(self.stepped_parts.iter().map(|&p| p as u32));
         }
+        self.log_written();
+    }
+
+    /// [`Self::begin_dynamic_writes`] for a list of dynamic partitions, added
+    /// to the ones already named in this call (the rail loop writes more
+    /// after the call's own resolves, W1f).
+    fn begin_dynamic_writes_list(&mut self, parts: &[usize]) {
+        self.written.extend(parts.iter().map(|&p| p as u32));
+        self.log_written();
+    }
+
+    fn log_written(&mut self) {
         if self.window {
             for i in 0..self.written.len() {
                 let p = self.written[i] as usize;
@@ -2506,7 +3199,20 @@ impl PartitionedSolver {
     /// core/README.md rule 2a's own last bullet).
     fn publish_fixed_pair_capacitors(&self, currents: &mut [f64], now: f64) {
         for cap in &self.fixed_pair_capacitors {
-            currents[cap.device_index] = cap.current_at(now, self.start_time);
+            currents[cap.device_index] = cap.current_at(now);
+        }
+        // While a PSU with a rail capacitor is in CC, each rail capacitor
+        // carries its share `C dq/dt` of the capacitors' current, `q` their
+        // charge in the rail's closed form (Rails point 4).
+        if let Some(hub) = self.hub.as_ref() {
+            if let Some(seg) = &hub.state.cap_seg {
+                let dq = seg.charge_slope_at(now);
+                for &(k, _) in &hub.caps {
+                    let cap = &self.fixed_pair_capacitors[k as usize];
+                    let sign = if cap.nodes.0 == hub.node { 1.0 } else { -1.0 };
+                    currents[cap.device_index] = sign * cap.c * dq + cap.leak_g * (self.voltages[cap.nodes.0] - self.voltages[cap.nodes.1]);
+                }
+            }
         }
     }
 
@@ -2594,14 +3300,38 @@ impl PartitionedSolver {
                 }
             }
         }
+        let cc_hub = self.cc_hub_current();
         for r in self.resolved.iter().rev() {
             let total = leaving[r.child_node] + extra[r.child_node];
             let child_is_pos = !r.parent_is_pos;
-            let i_s = if child_is_pos { -total } else { total };
+            let mut i_s = if child_is_pos { -total } else { total };
+            // A PSU in CC publishes `-dir iLimit` exactly (Rails point 5).
+            if let Some((device, i)) = cc_hub {
+                if device == r.device_index {
+                    i_s = i;
+                }
+            }
             currents[r.device_index] = i_s;
             let contribution = if r.parent_is_pos { i_s } else { -i_s };
             extra[r.parent_node] += contribution;
         }
+    }
+
+    /// `(device, -dir iLimit)` while the hub PSU is in CC.
+    fn cc_hub_current(&self) -> Option<(usize, f64)> {
+        use crate::devices::sources::{direction, Regime};
+        use crate::rails::HubKind;
+        if let Some(hub) = self.hub.as_ref() {
+            if let (HubKind::Psu { v, i_limit }, Regime::Cc) = (&hub.kind, hub.state.reg) {
+                return Some((hub.device, -direction(*v) * i_limit));
+            }
+        }
+        if let Some(e) = self.exact.as_ref() {
+            if let (HubKind::Psu { v, i_limit }, Regime::Cc) = (&e.kind, e.reg) {
+                return Some((e.device, -direction(*v) * i_limit));
+            }
+        }
+        None
     }
 
     /// NE555 point 8 / C11: publishes each 555's `elementI`, the current
@@ -2784,7 +3514,10 @@ impl PartitionedSolver {
             }
         }
         self.fixed_pair_capacitors.iter().all(|cap| {
-            let series_bound = if cap.esr > 0.0 { (cap.d_v / cap.esr).abs() } else { 0.0 };
+            // A capacitor on a live node re-aims at any `dV` the bounded
+            // voltages allow, from any charge it held (Rails point 7).
+            let live = self.fixed_node.len() > cap.nodes.0.max(cap.nodes.1) && (self.node_caps.get(cap.nodes.0).is_some_and(|v| !v.is_empty()) || self.node_caps.get(cap.nodes.1).is_some_and(|v| !v.is_empty()));
+            let series_bound = if cap.esr > 0.0 { if live { 4.0 * LAZY_V_LIMIT / cap.esr } else { (cap.d_v / cap.esr).abs() } } else { 0.0 };
             let leak_term = (cap.leak_g * cap.d_v).abs();
             // The exponent is `-(now - start) / (esr * C)`, at most 0 for
             // `now >= start` and never NaN when `esr * C` is a positive
@@ -3065,8 +3798,17 @@ impl PartitionedSolver {
         // to `dirty`'s own partitions), so there is no "nothing changed"
         // shortcut to take.
         let refreshed_in_place = self.refresh_driver_snapshot(drivers);
+        self.ensure_ic_driver_ids(drivers);
+        // W1f: a running ramp's nodes at this instant, before anything reads them.
+        self.refresh_ramps(now);
+        if self.exact.is_some() {
+            self.push_exact_stamp();
+        }
 
         self.static_solver.set_inputs_bounded(self.lazy_static_ok && self.v_hint <= LAZY_V_LIMIT);
+        if let Some(e) = self.exact.as_ref() {
+            self.exact_solved = static_ids.iter().any(|pid| pid.0 as usize == e.partition) || st_ids.contains(&e.partition);
+        }
         self.static_solver.resolve_dirty_into(static_ids, now, drivers, readers)?;
         self.copy_in_static();
         // Finding 2/6: a watched IC's supply can sit in a `Static`
@@ -3083,9 +3825,12 @@ impl PartitionedSolver {
             self.rebuild_pre_commit_table();
         }
         self.begin_dynamic_writes(cf_ids, false, !st_ids.is_empty());
+        self.sync_rail_drive();
         readers.extend(self.closed_form.resolve_dirty(cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
         readers.extend(self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
         self.end_dynamic_writes();
+        // W1f (Rails point 3): the rail loop runs inside this one call.
+        self.rail_loop(now, drivers, readers)?;
         self.finish_publish(now)
     }
 }
@@ -3107,6 +3852,7 @@ impl PartitionSolver for PartitionedSolver {
                 None => {}
             }
         }
+        self.end_gate_chase();
         let mut readers = Vec::new();
         let result = self.resolve_dirty_with(&static_ids, &mut cf_ids, &mut st_ids, now, drivers, &mut readers);
         self.static_ids = static_ids;
@@ -3224,6 +3970,14 @@ impl PartitionSolver for PartitionedSolver {
             touched.extend(self.static_solver.apply_params(&static_triples));
         }
         self.refresh_kcl_contributions(triples);
+        // A switch contact from the rail to a fixed node is a direct device,
+        // which no partition re-solve reports; any other switch reaches the
+        // rail through its partition's new contribution.
+        if let Some(hub) = self.hub.as_mut() {
+            if triples.iter().any(|&(d, _, _)| hub.direct_devices.binary_search(&d).is_ok()) {
+                hub.dirty = true;
+            }
+        }
         touched.into_iter().collect()
     }
 
@@ -3263,24 +4017,29 @@ impl PartitionSolver for PartitionedSolver {
     /// later one fails.
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
         Box::new((
-            self.static_solver.snapshot(),
-            self.closed_form.snapshot(),
-            self.stepped.snapshot(),
-            self.pending_schedule.clone(),
-            self.next_bucket,
-            Rc::clone(&self.driver_snapshot),
-            self.channels.clone(),
-            self.derived_dirty,
-            self.derived_now,
+            (
+                self.static_solver.snapshot(),
+                self.closed_form.snapshot(),
+                self.stepped.snapshot(),
+                self.pending_schedule.clone(),
+                self.next_bucket,
+                Rc::clone(&self.driver_snapshot),
+                self.channels.clone(),
+                self.derived_dirty,
+                self.derived_now,
+            ),
+            self.w1f_snapshot(),
         ))
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
-        if let Ok(boxed) = snapshot
-            .downcast::<((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64)>()
-        {
-            let (static_snap, cf, st, pending, next_bucket, driver_snapshot, channels, derived_dirty, derived_now) = *boxed;
+        type Base = ((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64);
+        if let Ok(boxed) = snapshot.downcast::<(Base, hub::W1fSnapshot)>() {
+            let (base, w1f) = *boxed;
+            self.w1f_restore(w1f);
+            let (static_snap, cf, st, pending, next_bucket, driver_snapshot, channels, derived_dirty, derived_now) = base;
             self.static_solver.restore(static_snap);
+            self.sync_hub_cache_band();
             self.closed_form.restore(cf);
             self.stepped.restore(st);
             self.pending_schedule = pending;
@@ -3301,6 +4060,17 @@ impl PartitionSolver for PartitionedSolver {
         self.mirror_seen = true;
         if self.mirror_live {
             self.stale.push(idx as u32);
+        }
+        // W1f: a commit of an IC on the rail can change a direct device's
+        // draw (Rails point 2), which no partition re-solve reports.
+        if let Some(hub) = self.hub.as_mut() {
+            if !hub.dirty {
+                if let Some(d) = self.driver_snapshot.get(idx) {
+                    if self.ic_position.get(d.device).is_some_and(|&p| p != u32::MAX && hub.rail_ics.contains(&p)) {
+                        hub.dirty = true;
+                    }
+                }
+            }
         }
     }
 
@@ -3340,6 +4110,19 @@ impl PartitionSolver for PartitionedSolver {
             self.w_driver_snapshot = Some(Rc::clone(&self.driver_snapshot));
         }
         self.w_derived = (self.derived_dirty, self.derived_now);
+        // W1f (Rails point 8): the rail's whole state, its contribution
+        // journal, the sources and the rule-2a anchors on live nodes.
+        if let Some(hub) = self.hub.as_mut() {
+            hub.begin_window();
+        }
+        if let Some(e) = self.exact.as_mut() {
+            e.w_saved = Some((e.reg, e.battery, e.t_last, e.held));
+        }
+        self.w_wave = Some(Rc::clone(&self.wave));
+        if self.live_caps {
+            self.w_caps.clear();
+            self.w_caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)));
+        }
         #[cfg(test)]
         {
             self.w_saved = Some((self.voltages.clone(), self.currents.clone(), self.channels.clone()));
@@ -3356,6 +4139,13 @@ impl PartitionSolver for PartitionedSolver {
         self.static_solver.end_window();
         self.closed_form.end_window();
         self.stepped.end_window();
+        if let Some(hub) = self.hub.as_mut() {
+            hub.end_window();
+        }
+        if let Some(e) = self.exact.as_mut() {
+            e.w_saved = None;
+        }
+        self.w_wave = None;
     }
 
     /// Undoes the logs newest first (a slot written twice ends at its first
@@ -3401,6 +4191,36 @@ impl PartitionSolver for PartitionedSolver {
             self.mirror_valid = false;
         }
         (self.derived_dirty, self.derived_now) = self.w_derived;
+        // W1f (Rails point 8).
+        if let Some(hub) = self.hub.as_mut() {
+            hub.rollback_window();
+        }
+        self.sync_hub_cache_band();
+        if let Some(e) = self.exact.as_mut() {
+            if let Some((reg, battery, t_last, held)) = e.w_saved.take() {
+                (e.reg, e.battery, e.t_last, e.held) = (reg, battery, t_last, held);
+            }
+        }
+        // A resolve that failed after marking the rail's partition solved
+        // never reached the rail loop that takes the mark; left set, the next
+        // event's rail loop would run the regime rules for a solve that did
+        // not happen.
+        self.exact_solved = false;
+        if self.exact.is_some() {
+            self.push_exact_stamp();
+        }
+        if let Some(wave) = self.w_wave.take() {
+            self.wave = wave;
+            self.sync_ramps();
+            for (w, src) in self.wave.sources.iter().enumerate() {
+                self.static_solver.set_wave_level(w, src.level_index);
+            }
+        }
+        if self.live_caps {
+            for (cap, &(d_v, vc0, t0)) in self.fixed_pair_capacitors.iter_mut().zip(&self.w_caps) {
+                (cap.d_v, cap.vc0, cap.t0) = (d_v, vc0, t0);
+            }
+        }
         // Values from before the bounds were last exact are back.
         self.v_hint = f64::INFINITY;
         self.i_hint = f64::INFINITY;
@@ -3427,18 +4247,41 @@ impl PartitionSolver for PartitionedSolver {
 
     fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
         let p = partition.0 as usize;
+        self.end_gate_chase();
+        if self.exact.is_some() {
+            self.push_exact_stamp();
+        }
+        self.refresh_ramps(now);
+        // A crossing under a known rail lands against the solved rail; if
+        // that solve re-aimed the partition, the crossing is rescheduled
+        // under it and nothing lands here.
+        let mut readers = Vec::new();
+        if is_crossing {
+            let early = self.solve_rail_before_crossing(p, now, &mut readers);
+            if self.on_error(early)? {
+                let published = self.finish_publish(now);
+                self.on_error(published)?;
+                return Ok(readers);
+            }
+        }
         if is_crossing {
             self.begin_dynamic_writes(&[p], false, false);
         } else {
             self.begin_dynamic_writes(&[], false, true);
         }
+        self.sync_rail_drive();
         let result = if is_crossing {
             self.closed_form.handle_crossing(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)
         } else {
             self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)
         };
-        let readers = self.on_error(result)?;
+        readers.extend(self.on_error(result)?);
         self.end_dynamic_writes();
+        // W1f: a closed-form crossing or a stepped commit of a hub partition
+        // changes its contribution, so the rail solves at it (Rails point 4).
+        let drivers = Rc::clone(&self.driver_snapshot);
+        let rail = self.rail_loop(now, &drivers, &mut readers);
+        self.on_error(rail)?;
         // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
         // now touch a dynamic partition: `handle_crossing`/`handle_step`
         // above already restamped its driver/pull contribution correctly
@@ -3458,11 +4301,30 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
+        let ramps_moved = self.refresh_ramps(t_end);
         self.begin_dynamic_writes(&[], true, true);
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
         let result = self.stepped.sync_to(t_end, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
-        let readers = self.on_error(result)?;
+        let mut readers = self.on_error(result)?;
         self.end_dynamic_writes();
+        // W1f: the stepped hub partitions the clamp committed contribute, and
+        // a CC rail capacitor is published live (Rails point 4).
+        let drivers = Rc::clone(&self.driver_snapshot);
+        let rail = self.rail_at_clamp(t_end, &drivers, &mut readers);
+        self.on_error(rail)?;
+        // A running ramp's nodes moved to `t_end`: the static solver publishes
+        // what they feed, and their readers read them there (Sources point 3).
+        if ramps_moved {
+            for node in 0..self.wave.ramping.len() {
+                if self.wave.ramping[node] {
+                    readers.extend(self.node_ic_readers[node].iter().map(|&d| DeviceId(d)));
+                }
+            }
+            self.static_solver.set_inputs_bounded(false);
+            let result = self.static_solver.resolve_dirty_into(&[], t_end, &drivers, &mut readers);
+            self.on_error(result)?;
+            self.copy_in_static();
+        }
         // Same reasoning as `handle_dynamic_event` above: the horizon clamp
         // re-publishes a dynamic partition's exact state at `t_end`, and a
         // fixed rail's own current must track that continuously, not only at
@@ -3534,6 +4396,62 @@ impl PartitionSolver for PartitionedSolver {
         }
         self.maybe_schedule_bucket(now);
         (dirty.into_iter().collect(), readers.into_iter().collect())
+    }
+
+    fn rail_current(&self, version: Version) -> bool {
+        self.hub.as_ref().is_some_and(|h| h.state.version == version && h.state.event_t.is_some())
+    }
+
+    fn rail_event(&mut self, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        self.rail_event_at(now)
+    }
+
+    fn source_current(&self, device: DeviceId, version: Version) -> bool {
+        let d = device.0 as usize;
+        match self.wave.wave_of.get(d) {
+            Some(&w) if w != u32::MAX => {
+                let src = &self.wave.sources[w as usize];
+                if version & live::WATCH_BIT != 0 {
+                    src.ramp.is_some() && version & !live::WATCH_BIT == src.watch_gen
+                } else {
+                    src.version == version && src.next.is_some()
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn source_edge(&mut self, device: DeviceId, version: Version, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        self.end_gate_chase();
+        if version & live::WATCH_BIT != 0 {
+            self.ramp_crossing_at(device.0 as usize, now)
+        } else {
+            self.source_edge_at(device.0 as usize, now)
+        }
+    }
+
+    fn device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        self.hub_device_state(device, now, out)
+    }
+
+    fn take_settle_change(&mut self) -> bool {
+        self.hub.as_mut().is_some_and(|h| std::mem::take(&mut h.state.settle_changed))
+    }
+
+    fn source_slots(&self, out: &mut Vec<(usize, f64)>) {
+        self.wave_slots(out);
+    }
+
+    fn rail_stats(&self) -> [f64; 6] {
+        let sens = (self.static_solver.sensitivities() + self.closed_form.sensitivities() + self.stepped.sensitivities()) as f64;
+        match self.hub.as_ref() {
+            Some(h) => [h.stats.moves as f64, sens, h.stats.scans as f64, h.stats.events as f64, self.source_edges as f64, h.stats.flips as f64],
+            None => [0.0, sens, 0.0, 0.0, self.source_edges as f64, 0.0],
+        }
+    }
+
+    fn rail_node(&self) -> Option<usize> {
+        self.hub.as_ref().map(|h| h.node)
     }
 }
 

@@ -35,6 +35,42 @@ use crate::solve::PartitionSolver;
 /// rather than left uncapped or given an arbitrary smaller number.
 pub const DELTA_CAP: u32 = 1000;
 
+/// The no-progress guard (coordinator ruling R6 (a)): completed instants
+/// each within this of the one before form a run, and inside a run each is
+/// judged by what it did to the state ([`NO_PROGRESS_MAX`]). Time alone
+/// cannot tell a livelock from fast dynamics: a 50 ns RC inrush off a 5 ohm
+/// cell lands some 28,000 rail drift events 0.7 ps apart (NP2), while V11's
+/// CC-exit stall (B1070) repeats a rail that does not move every 1.14 ps and
+/// the power-gate ping-pong every 5 and 9 fs. Since the state decides, the
+/// window only has to hold a livelock's instants: 1 ns is a decade under the
+/// stepped solver's smallest step (`stepped::H_MIN`, 1e-8 s), and a clock's
+/// edges inside it count as progress. The longest run of instants inside it
+/// measured on a legitimate board was 82,763 (the inrush); the most
+/// no-progress instants one run counted, 3 (NP2, 2026-10-16).
+pub const NO_PROGRESS_DT: f64 = 1e-9;
+
+/// Within a run of completed instants (see [`NO_PROGRESS_DT`]), an instant
+/// made no progress if it moved no published node voltage, turned one back
+/// (moved it against its own last move in the run), or ran only `Rail`
+/// events and left the rail node where it was (a `Rail` event exists to move
+/// the rail: B1070's other nodes crept on by their own trajectories while
+/// the rail sat still). An instant that applied a waveform source's edge
+/// progressed whatever it turned, and each node's direction starts afresh
+/// after it: the edges are the board's scheduled input, not the circuit
+/// chasing itself, and a clock has no frequency cap, so one at 10 GHz runs
+/// indefinitely. Once this many have made no progress, the next instant
+/// inside the run declines with `-4` and the rail ping-pong's own message
+/// ([`crate::rails::loop_unsettled`]), before it runs. A livelock repeats
+/// states, and a node that returns to a value must turn back on the way, so
+/// any cycle counts at least one instant a period (two between source edges),
+/// and a crawl that moves nothing counts every instant. Instants that
+/// progress neither count nor reset it, so a cycle cannot hide its turns
+/// between them; only an instant outside the window ends the run. A counter,
+/// not a tolerance: the sign of each change is exact, and it changes nothing
+/// in a run it does not stop. At microseconds an instant, a livelock declines
+/// well inside a second.
+pub const NO_PROGRESS_MAX: u32 = 10_000;
+
 /// The crossing-acceptance margin (contract point 4; "Hard-won rules":
 /// rounding can put a node back exactly on its threshold and re-schedule it
 /// forever if accepted at `t == now`).
@@ -469,6 +505,29 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// The slot writes one `DeviceEvaluator::on_settled_into` call fills,
     /// reused across instants.
     settled_buf: Vec<(usize, f64)>,
+    /// The no-progress guard ([`NO_PROGRESS_MAX`]): the time of the last
+    /// completed instant `advance` popped off the heap, and how many
+    /// completed instants of the present run (each within [`NO_PROGRESS_DT`]
+    /// of the one before) made no progress. Kept across `advance` calls,
+    /// since a host stepping event by event makes one instant per call.
+    /// Written only once an instant has completed, so one that fails and
+    /// rolls back neither counts nor resets it; the horizon clamp is not an
+    /// instant off the heap and leaves it alone.
+    last_instant: f64,
+    stalled: u32,
+    /// The published voltages as an instant inside the run began (taken
+    /// only for those, so a run of spaced instants copies nothing), and
+    /// each node's last move in the run: -1, 1, or 0 for none yet.
+    run_before: Vec<f64>,
+    run_moves: Vec<i8>,
+    /// Whether the instant in progress handled a live `Rail` event, and any
+    /// other event: a `Rail`-only instant progresses only if it moved the
+    /// rail ([`NO_PROGRESS_MAX`]).
+    instant_rail: bool,
+    instant_other: bool,
+    /// Whether the instant in progress applied a live waveform source edge:
+    /// scheduled input, so progress whatever it turned back.
+    instant_source: bool,
 }
 
 /// What [`Kernel::open_window`] captured for a rollback that the kernel does
@@ -503,6 +562,13 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             affected_buf: Vec::new(),
             requests_buf: Vec::new(),
             settled_buf: Vec::new(),
+            last_instant: f64::NEG_INFINITY,
+            stalled: 0,
+            run_before: Vec::new(),
+            run_moves: Vec::new(),
+            instant_rail: false,
+            instant_other: false,
+            instant_source: false,
         }
     }
 
@@ -671,26 +737,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 Some(ev) => ev,
                 None => return f64::INFINITY,
             };
-            let live = match ev.kind {
-                EventKind::Commit { driver, token, .. } => self.drivers[driver.0 as usize].token() == token,
-                // A dynamic partition's own solve epoch (events.rs's
-                // lazy-deletion contract): stale the instant a re-aim/replan
-                // bumps the version this event was scheduled under (a switch
-                // toggle, a driver commit, the horizon clamp's forced
-                // resync, or the crossing/step this event itself represents
-                // already having fired once under an older version).
-                EventKind::Crossing { partition, version } => self.solver.is_current(partition, true, version),
-                EventKind::Step { partition, version } => self.solver.is_current(partition, false, version),
-                // Nothing in W1a-W1b schedules a `Timer` yet; treat it as
-                // live rather than guess at a validation rule with no
-                // producer to test it against.
-                EventKind::Timer { .. } => true,
-                // A `Bucket` is never stale by construction (events.rs's own
-                // doc comment on the variant: the solver deduplicates so at
-                // most one is ever pending) -- always live.
-                EventKind::Bucket => true,
-            };
-            if live {
+            if self.event_live(ev.kind) {
                 let t = ev.time;
                 self.heap.push_event(ev);
                 return t;
@@ -698,6 +745,34 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // Stale: already popped, and never pushed back -- gone for good,
             // exactly as a real pop through `apply_due_commits` would drop
             // it.
+        }
+    }
+
+    /// Whether a queued event still means anything: the check each kind's
+    /// handler in [`Self::apply_due_events`] makes before acting, so a stale
+    /// one is exactly an event that handler would drop.
+    fn event_live(&self, kind: EventKind) -> bool {
+        match kind {
+            EventKind::Commit { driver, token, .. } => self.drivers[driver.0 as usize].token() == token,
+            // A dynamic partition's own solve epoch (events.rs's
+            // lazy-deletion contract): stale the instant a re-aim/replan
+            // bumps the version this event was scheduled under (a switch
+            // toggle, a driver commit, the horizon clamp's forced
+            // resync, or the crossing/step this event itself represents
+            // already having fired once under an older version).
+            EventKind::Crossing { partition, version } => self.solver.is_current(partition, true, version),
+            EventKind::Step { partition, version } => self.solver.is_current(partition, false, version),
+            // Nothing in W1a-W1b schedules a `Timer` yet; treat it as
+            // live rather than guess at a validation rule with no
+            // producer to test it against.
+            EventKind::Timer { .. } => true,
+            // A `Bucket` is never stale by construction (events.rs's own
+            // doc comment on the variant: the solver deduplicates so at
+            // most one is ever pending) -- always live.
+            EventKind::Bucket => true,
+            // W1f: the rail's and a waveform source's own versions.
+            EventKind::Rail { version } => self.solver.rail_current(version),
+            EventKind::Source { device, version } => self.solver.source_current(device, version),
         }
     }
 
@@ -869,6 +944,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
             popped += 1;
             match ev.kind {
+                EventKind::Rail { .. } => {}
+                _ => self.instant_other = true,
+            }
+            match ev.kind {
                 EventKind::Commit { driver, mode, token } => {
                     let idx = driver.0 as usize;
                     // A stale token (superseded/cancelled since this event
@@ -930,6 +1009,25 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                     let (dirty_partitions, readers) = self.solver.bucket_boundary(self.time);
                     dirty.extend(dirty_partitions);
                     directly_affected.extend(readers);
+                }
+                // W1f (Sources point 5): dispatched like `Bucket`, each a
+                // solver method returning the partitions to re-solve and the
+                // readers to evaluate; a stale version drops silently.
+                EventKind::Rail { version } => {
+                    if self.solver.rail_current(version) {
+                        self.instant_rail = true;
+                        let (dirty_partitions, readers) = self.solver.rail_event(self.time).map_err(KernelError::SolveFailed)?;
+                        dirty.extend(dirty_partitions);
+                        directly_affected.extend(readers);
+                    }
+                }
+                EventKind::Source { device, version } => {
+                    if self.solver.source_current(device, version) {
+                        self.instant_source = true;
+                        let (dirty_partitions, readers) = self.solver.source_edge(device, version, self.time).map_err(KernelError::SolveFailed)?;
+                        dirty.extend(dirty_partitions);
+                        directly_affected.extend(readers);
+                    }
                 }
             }
         }
@@ -1135,6 +1233,34 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         Ok(())
     }
 
+    /// Whether the instant just completed inside a run moved the published
+    /// voltages on from [`Self::run_before`]: at least one changed, none
+    /// against its own last move in the run, and the rail if only `Rail`
+    /// events ran (see [`NO_PROGRESS_MAX`]). Records each moved node's
+    /// direction for the next instant.
+    fn progressed(&mut self) -> bool {
+        let now = self.solver.voltages();
+        if self.run_moves.len() != now.len() {
+            self.run_moves.clear();
+            self.run_moves.resize(now.len(), 0);
+        }
+        let (mut moved, mut turned) = (false, false);
+        for ((&after, &before), last) in now.iter().zip(&self.run_before).zip(self.run_moves.iter_mut()) {
+            let step: i8 = if after > before {
+                1
+            } else if after < before {
+                -1
+            } else {
+                continue;
+            };
+            moved = true;
+            turned |= *last == -step;
+            *last = step;
+        }
+        let rail_held = self.instant_rail && !self.instant_other && self.solver.rail_node().is_some_and(|n| now.get(n) == self.run_before.get(n));
+        moved && !turned && !rail_held
+    }
+
     /// Processes every event with `t <= t_end` through [`Self::run_deltas`],
     /// then sets the clock to `t_end` (contract point 5).
     ///
@@ -1154,10 +1280,43 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// between one instant finishing and the next one's `self.time = t`).
     pub fn advance(&mut self, t_end: f64) -> Result<(), KernelError> {
         loop {
+            // A superseded event at the head is dropped here, between
+            // instants, as its handler would drop it inside one: it is no
+            // instant, so it neither runs nor counts toward the no-progress
+            // guard (V9 MEDIUM 3: a host stepping every few nanoseconds
+            // through a CC ramp re-solved the rail at each horizon, each
+            // solve superseding the pending `Rail` event with a new version
+            // for the same threshold, and some 60,000 stale versions popped
+            // within 1 ps of each other and declined with -4). The state is
+            // the last completed instant's, as a rollback leaves it, so an
+            // event stale now stays stale after any rollback. It is still
+            // popped during `advance`, so stat 4 counts it.
+            while let Some(ev) = self.heap.peek() {
+                if ev.time > t_end || self.event_live(ev.kind) {
+                    break;
+                }
+                self.heap.pop();
+                self.stats.events_processed += 1;
+            }
             let t = self.heap.peek_time();
             if t > t_end {
                 break;
             }
+
+            // Checked before the instant runs, so a decline leaves the state of
+            // the last completed instant exactly as it was, as every failed
+            // advance does, and asking again declines again.
+            let in_run = t - self.last_instant <= NO_PROGRESS_DT;
+            if in_run && self.stalled >= NO_PROGRESS_MAX {
+                return Err(KernelError::SolveFailed(crate::rails::loop_unsettled()));
+            }
+            if in_run {
+                self.run_before.clear();
+                self.run_before.extend_from_slice(self.solver.voltages());
+            }
+            self.instant_rail = false;
+            self.instant_other = false;
+            self.instant_source = false;
 
             let previous_time = self.time;
             let window = self.open_window();
@@ -1169,6 +1328,19 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 return Err(e);
             }
             self.close_window(window);
+            if !in_run {
+                self.stalled = 0;
+                self.run_moves.clear();
+            } else if self.instant_source {
+                // A source edge turns its node and, after it, whatever it
+                // drives: each node's direction starts afresh from here. The
+                // count stands, so a livelock elsewhere on the board still
+                // accumulates between edges.
+                self.run_moves.iter_mut().for_each(|m| *m = 0);
+            } else if !self.progressed() {
+                self.stalled += 1;
+            }
+            self.last_instant = t;
             // This instant reached a quiet fixed point and was NOT rolled
             // back: exactly "a completed instant" (W1c contract point 3), so
             // its digital-slot readout is published now, at ITS OWN `t`, not
@@ -1301,6 +1473,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             return Err(e);
         }
         self.close_window(window);
+        // A host's edit is new input, not the circuit chasing itself: without
+        // this, once the guard declined, every later advance would decline
+        // too, even after the edit that ends the livelock.
+        self.stalled = 0;
         // The one event this call applies reached a quiet fixed point and
         // was not rolled back: a completed instant, same as any `advance`
         // delta.
@@ -1334,6 +1510,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             return Err(SeedMemoryError::Kernel(e));
         }
         self.close_window(window);
+        // New input, as in `apply_params_as_event`.
+        self.stalled = 0;
         // This instant reached a quiet fixed point and was not rolled back:
         // a completed instant, same as any `advance` delta or
         // `apply_params_as_event`'s own event.
@@ -1417,7 +1595,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // W1c contract point 9, mirroring `run_deltas`'s own call: a hold
         // can only end as a result of the resolve just above.
         self.retry_held_commits();
-        Ok(changed)
+        // W1f (Sources point 4): a rail move over 1e-9 V or a regime change
+        // in this pass's resolve changes the fixed point too.
+        let rail_changed = self.solver.take_settle_change();
+        Ok(changed || rail_changed)
     }
 
     /// Runs [`Self::run_settle_pass`] to a fixed point (no pass changes
@@ -2682,5 +2863,184 @@ mod tests {
         // meets the condition: proves their panics come from the batch and
         // not from the harness.
         run_one_evaluation_of(vec![DriverRequest::Level { driver: DriverId(0), level: Low, delays: DelaySet::uniform(5.0) }, DriverRequest::Timer { device: DeviceId(0), at: 9.0, tag: 1 }]).unwrap();
+    }
+
+    // ---- the no-progress guard (NP1, ruling R6 (a)) ---------------------
+
+    /// A partition whose every crossing schedules the next one `step` later,
+    /// except every `jump_every`-th, which lands `jump` later; its
+    /// `fail_at`-th crossing fails once (an instant that rolls back). `done`
+    /// counts the crossings that succeeded. With `wave`, it publishes
+    /// `wave(done)` as its two node voltages after each; with `rail`, its
+    /// events are `Rail` events and node 0 is the rail.
+    struct Crawler {
+        step: f64,
+        jump: f64,
+        jump_every: u64,
+        fail_at: u64,
+        calls: u64,
+        done: u64,
+        scheduled: Vec<(f64, EventKind)>,
+        wave: Option<fn(u64) -> [f64; 2]>,
+        v: Vec<f64>,
+        rail: bool,
+    }
+    impl Crawler {
+        fn crawl(&mut self, now: f64) -> Result<Vec<DeviceId>, String> {
+            self.calls += 1;
+            if self.calls == self.fail_at {
+                return Err("the failing instant".to_string());
+            }
+            self.done += 1;
+            if let Some(wave) = self.wave {
+                self.v = wave(self.done).to_vec();
+            }
+            let dt = if self.done % self.jump_every == 0 { self.jump } else { self.step };
+            let kind = if self.rail { EventKind::Rail { version: 0 } } else { EventKind::Crossing { partition: PartitionId(0), version: 0 } };
+            self.scheduled.push((now + dt, kind));
+            Ok(Vec::new())
+        }
+    }
+    impl PartitionSolver for Crawler {
+        fn resolve_dirty(&mut self, _dirty: &[PartitionId], _now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+            Ok(Vec::new())
+        }
+        fn voltages(&self) -> &[f64] {
+            &self.v
+        }
+        fn currents(&self) -> &[f64] {
+            &[]
+        }
+        fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
+            self.v = snapshot.0;
+        }
+        fn is_current(&self, _partition: PartitionId, _is_crossing: bool, _version: Version) -> bool {
+            true
+        }
+        fn handle_dynamic_event(&mut self, _partition: PartitionId, now: f64, _is_crossing: bool) -> Result<Vec<DeviceId>, String> {
+            self.crawl(now)
+        }
+        fn rail_current(&self, _version: Version) -> bool {
+            self.rail
+        }
+        fn rail_event(&mut self, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+            self.crawl(now).map(|readers| (Vec::new(), readers))
+        }
+        fn rail_node(&self) -> Option<usize> {
+            self.rail.then_some(0)
+        }
+        fn take_scheduled(&mut self) -> Vec<(f64, EventKind)> {
+            std::mem::take(&mut self.scheduled)
+        }
+        fn param_value(&self, _device_index: usize, _param_index: usize) -> Option<f64> {
+            Some(0.0)
+        }
+    }
+
+    /// Far enough for any of these crawls to stop by itself if the guard
+    /// never fires (200,000 crossings at 5 fs), so a broken guard fails the
+    /// test instead of hanging it.
+    const T_END: f64 = 1e-3 + 1e-9;
+
+    fn crawler(step: f64, jump: f64, jump_every: u64, fail_at: u64) -> Kernel<Crawler, NoOpEvaluator> {
+        let mut k = Kernel::new(Crawler { step, jump, jump_every, fail_at, calls: 0, done: 0, scheduled: Vec::new(), wave: None, v: Vec::new(), rail: false }, NoOpEvaluator);
+        assert!(k.schedule_crossing(PartitionId(0), 0, 1e-3));
+        k
+    }
+
+    /// A crawl of 5 fs instants publishing `wave`, as `Rail` events if
+    /// `rail`.
+    fn waver(wave: fn(u64) -> [f64; 2], rail: bool) -> Kernel<Crawler, NoOpEvaluator> {
+        let mut k = Kernel::new(Crawler { step: 5e-15, jump: 5e-15, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: Some(wave), v: vec![0.0, 0.0], rail }, NoOpEvaluator);
+        if rail {
+            k.heap.push(1e-3, EventKind::Rail { version: 0 });
+        } else {
+            assert!(k.schedule_crossing(PartitionId(0), 0, 1e-3));
+        }
+        k
+    }
+
+    #[test]
+    fn a_fast_monotone_burst_runs_however_dense_and_a_cycle_of_any_length_declines() {
+        // 100,000 instants 5 fs apart, every one moving both nodes on the
+        // same way (the fast RC inrush's shape, NP2): progress, so it runs.
+        let monotone = |n: u64| [n as f64 * 1e-6, -(n as f64) * 1e-3];
+        let mut k = waver(monotone, false);
+        k.advance(1e-3 + 5e-10).unwrap();
+        assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+        // The same crawl as Rail events moving the rail (node 0): still runs.
+        let mut k = waver(monotone, true);
+        k.advance(1e-3 + 5e-10).unwrap();
+        assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+        // A three-state cycle (0, 1, 2, 0, ...) turns node 0 back at two of
+        // every three instants, and the third carries it on without
+        // resetting the count.
+        let mut k = waver(|n| [(n % 3) as f64, 0.0], false);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        let n = k.solver.done;
+        assert!((3 * NO_PROGRESS_MAX as u64 / 2..=3 * NO_PROGRESS_MAX as u64 / 2 + 3).contains(&n), "{n} instants");
+        // B1070's shape: Rail events that leave the rail still while
+        // another node creeps on its own trajectory.
+        let mut k = waver(|n| [4.99, n as f64 * 1e-11], true);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
+        // The same creep from a crossing is a trajectory's own progress.
+        let mut k = waver(|n| [4.99, n as f64 * 1e-11], false);
+        k.advance(1e-3 + 5e-10).unwrap();
+        assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+    }
+
+    #[test]
+    fn a_crawl_of_femtosecond_instants_declines_with_the_ping_pong_minus_4_and_keeps_the_last_instant() {
+        // 5 fs a crossing clears the 1e-15 s floor every time, as the rail
+        // ping-pong does: only the guard ends it. The first instant follows
+        // nothing, so NO_PROGRESS_MAX + 1 complete and the next declines.
+        let mut k = crawler(5e-15, 5e-15, u64::MAX, 0);
+        let err = k.advance(T_END).unwrap_err();
+        assert_eq!(err, KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        let n = NO_PROGRESS_MAX as u64 + 1;
+        assert_eq!(k.solver.done, n);
+        assert!((k.time() - (1e-3 + (n - 1) as f64 * 5e-15)).abs() < 1e-14, "{}", k.time());
+        assert!(k.next_event_time() > k.time(), "the declined instant is still pending");
+        // Asking again declines at once and changes nothing.
+        let (t, events) = (k.time(), k.stats().events_processed);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!((k.time(), k.stats().events_processed, k.solver.done), (t, events, n));
+        // A host's edit starts a new run: the crawl goes on until it has
+        // stalled the full count again.
+        k.apply_params_as_event(&[(0, 0, 1.0)]).unwrap();
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, 2 * n - 1);
+    }
+
+    #[test]
+    fn an_instant_that_rolls_back_neither_counts_nor_resets_the_guard() {
+        // The 500th crossing fails once and rolls back; asked again, it runs.
+        // The guard still declines after exactly NO_PROGRESS_MAX + 1
+        // completed instants: a reset would let more through, a count of the
+        // failed one fewer.
+        let mut k = crawler(5e-15, 5e-15, u64::MAX, 500);
+        let err = k.advance(T_END).unwrap_err();
+        assert_eq!(err, KernelError::SolveFailed("the failing instant".to_string()));
+        assert_eq!(k.solver.done, 499);
+        let err = k.advance(T_END).unwrap_err();
+        assert_eq!(err, KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
+    }
+
+    #[test]
+    fn a_dense_burst_that_moves_on_runs_to_the_end_and_a_burst_cut_short_by_a_step_never_accumulates() {
+        // Runs of NO_PROGRESS_MAX instants 1 fs apart (stalls, all of them
+        // but the first: nothing moves), each ended by a step past the
+        // window: never more than the cap in a run, so it runs to t_end
+        // however many there are.
+        let jump = 2.0 * NO_PROGRESS_DT;
+        let mut k = crawler(1e-15, jump, NO_PROGRESS_MAX as u64, 0);
+        k.advance(1e-3 + 3.5 * jump).unwrap();
+        assert_eq!(k.solver.done, 4 * NO_PROGRESS_MAX as u64);
+        // One instant more in the run and it declines.
+        let mut k = crawler(1e-15, jump, NO_PROGRESS_MAX as u64 + 2, 0);
+        assert_eq!(k.advance(T_END + 1e-8).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
     }
 }
