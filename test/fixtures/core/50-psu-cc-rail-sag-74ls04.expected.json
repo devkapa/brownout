@@ -1,0 +1,27 @@
+{
+  "status": "pass",
+  "durationS": 0.0386,
+  "sidecar": {
+    "kind": "psu-rail-gate",
+    "psu": "psu",
+    "capacitor": "c1",
+    "load": "rl",
+    "source": "ld",
+    "ic": "u1",
+    "outputKey": "u1/1y",
+    "traceDurationS": 0.04
+  },
+  "digital": {
+    "clockKey": "ld",
+    "projection": [
+      "ld",
+      "u1/1y"
+    ],
+    "anchor": {
+      "ld": 0
+    },
+    "offsetBoundCycles": 2,
+    "minComparedCycles": 3,
+    "traceDurationS": 0.04
+  }
+}

@@ -1,0 +1,210 @@
+{
+  "id": "core-w1f-42-pulse-ramp-1ms",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "ps",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0,
+        "tr": 0.001,
+        "tf": 0.001,
+        "pw": 0.004,
+        "per": 0.01
+      }
+    },
+    {
+      "id": "r1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "c1",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "74hc14",
+      "pins": [
+        {
+          "id": "1a"
+        },
+        {
+          "id": "1y"
+        },
+        {
+          "id": "2a"
+        },
+        {
+          "id": "2y"
+        },
+        {
+          "id": "3a"
+        },
+        {
+          "id": "3y"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "4y"
+        },
+        {
+          "id": "4a"
+        },
+        {
+          "id": "5y"
+        },
+        {
+          "id": "5a"
+        },
+        {
+          "id": "6y"
+        },
+        {
+          "id": "6a"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ps",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ps",
+      "from_pin": "pos",
+      "to_component": "r1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r1",
+      "from_pin": "b",
+      "to_component": "c1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "gnd",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ps",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "1a"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "2a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "3a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "4a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "5a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "6a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

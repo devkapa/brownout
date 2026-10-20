@@ -1,0 +1,59 @@
+{
+  "status": "pass",
+  "durationS": 0.0213,
+  "analytic": {
+    "kind": "pulse-rc",
+    "source": "ps",
+    "resistor": "r1",
+    "capacitor": "c1",
+    "instantsS": [
+      0.0001,
+      0.0002,
+      0.0003,
+      0.0004,
+      0.0005,
+      0.0006,
+      0.0007,
+      0.0008,
+      0.0009,
+      0.001,
+      0.0011,
+      0.0051,
+      0.0052,
+      0.0053,
+      0.0054,
+      0.0055,
+      0.0056,
+      0.0057,
+      0.0058,
+      0.0059,
+      0.006,
+      0.0061,
+      0.0075,
+      0.0105,
+      0.0155,
+      0.0201
+    ],
+    "sourceCurrent": true
+  },
+  "sidecar": {
+    "kind": "ramp-crossings",
+    "source": "ps",
+    "ic": "u1",
+    "outputKey": "u1/1y",
+    "vSupplyV": 5,
+    "traceDurationS": 0.03
+  },
+  "digital": {
+    "clockKey": "ps",
+    "projection": [
+      "u1/1y"
+    ],
+    "anchor": {
+      "u1/1y": 1
+    },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 2,
+    "traceDurationS": 0.03
+  }
+}

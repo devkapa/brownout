@@ -30,6 +30,8 @@ export type CorpusOrigin = "brownout-fixture" | "synthetic" | (string & {});
 export interface DigitalFixtureSpec {
   /** The digitalState key whose rising edge (0/absent -> 1) marks a clock-cycle boundary — see align.ts's findRisingEdges. */
   readonly clockKey: string;
+  /** `"falling"` samples each cycle before the clock key's falling edge instead (run-entry.ts's `onClockEdge`). Default `"rising"`. */
+  readonly clockEdge?: "rising" | "falling";
   /** digitalState keys sampled once per cycle. `undefined` means "the whole digitalState". */
   readonly projection?: readonly string[];
   /** The state (a subset of keys) that uniquely identifies "cycle zero" for alignment — align.ts's alignCycles. */
@@ -188,7 +190,57 @@ export interface AnalyticFixedPairCapacitorModel {
  * produced the raw mismatch. Every mismatch on any OTHER net/element is
  * completely unaffected by this field and still fails the entry as before.
  */
-export type AnalyticFixtureModel = AnalyticRcModel | AnalyticRcLadderModel | AnalyticFixedPairCapacitorModel;
+/**
+ * W1f (core/README.md, Sources point 3): `source.pos --resistor-- node
+ * --capacitor-- datum`, fed by a `pulse_source` or `pulse_gen`, from an
+ * uncharged capacitor. The source is piecewise linear, so the node has a
+ * closed form (w1f-sidecars.ts's `extractPulseRc`): the exact trapezoid
+ * response, ramps included. A `netV` mismatch on the node and an `elementI`
+ * mismatch on the resistor or the capacitor are judged against it (decision
+ * 3), and the core is held to it at `instantsS` whatever classic reads.
+ */
+export interface AnalyticPulseRcModel {
+  readonly kind: "pulse-rc";
+  readonly source: string;
+  readonly resistor: string;
+  readonly capacitor: string;
+  /** Instants (s) the core is compared against the exact response at, in addition to the entry's own samples. */
+  readonly instantsS: readonly number[];
+  /**
+   * Also judge the source's own `elementI`, `-(I_R + g·s)`: set only when
+   * nothing else on the source's node draws current (an IC input there is
+   * high-impedance in both engines). The always-on check holds the core to
+   * it, so a fixture that sets this wrongly fails rather than passes.
+   */
+  readonly sourceCurrent?: boolean;
+}
+
+/**
+ * W1f P9 (coordinator, P9 option (a)): a limited `bench_psu` with one rail
+ * capacitor and resistive loads to the datum, each on the rail or behind one
+ * switch the entry's phases toggle (w1f-sidecars.ts's `extractPsuRail`).
+ * Samples from a CC exit to the next CC entry compare the rail, the
+ * capacitor's, the PSU's and the loads' currents against the exact value,
+ * not classic: the capacitor relaxes through its `esr` with `esr·C`, and the
+ * classic step that straddles the exit averages the CC current into it,
+ * neither of which classic's backward Euler can follow at its step. Every
+ * other sample stays classic-against-core. The core is held to the exact
+ * value at every sample (and, on the plain flow, at `instantsS`).
+ */
+export interface AnalyticPsuRailModel {
+  readonly kind: "psu-rail";
+  readonly psu: string;
+  readonly capacitor: string;
+  readonly loads?: readonly { readonly resistor: string; readonly switch?: string }[];
+  readonly instantsS?: readonly number[];
+}
+
+export type AnalyticFixtureModel =
+  | AnalyticRcModel
+  | AnalyticRcLadderModel
+  | AnalyticFixedPairCapacitorModel
+  | AnalyticPulseRcModel
+  | AnalyticPsuRailModel;
 
 /**
  * W1e, core/README.md "Kernel semantics: NE555 (W1e)" point 13: a fixture's
@@ -295,7 +347,56 @@ export interface AnalyticLedRcModel {
   readonly instantsS: readonly number[];
 }
 
-export type SidecarModel = AnalyticLedStaticModel | AnalyticLedRcModel;
+/**
+ * W1f (Equivalence harness rules, battery drain): a `battery_pack` into one
+ * resistor. SoC, `dischargedCoulombs` and the OCV are held to the Rails point
+ * 6 ODE (w1f-sidecars.ts's `extractBatteryDrain`) at `instantsS`, with the
+ * README's integrated tolerance; classic's values are recorded beside them.
+ */
+export interface BatteryDrainModel {
+  readonly kind: "battery-drain";
+  readonly battery: string;
+  readonly load: string;
+  readonly instantsS: readonly number[];
+}
+
+/**
+ * W1f (Sources point 3, resolved ramps): a Schmitt input of `ic` on the
+ * node of pulse source `source`, its output's digital key `outputKey`. Each
+ * change of that key in the core's trace lands at the sidecar's instant
+ * (w1f-sidecars.ts's `rampCrossings`): the ramp's threshold crossing plus the
+ * part's propagation delay. `vSupplyV` is the IC's ideal supply.
+ */
+export interface RampCrossingsModel {
+  readonly kind: "ramp-crossings";
+  readonly source: string;
+  readonly ic: string;
+  readonly outputKey: string;
+  readonly vSupplyV: number;
+  /** Seconds of core trace to compare. */
+  readonly traceDurationS: number;
+}
+
+/**
+ * W1f (Rails point 4, the power window): a limited `bench_psu` with a rail
+ * capacitor, pulled into CC by a resistor from the rail to a pulse source's
+ * node, so its rail ramps below an IC's power window and back. Each change of
+ * the IC's `outputKey` in the core's trace (absent while unpowered) lands at
+ * the sidecar's exact crossing of `vccMin*0.9` (w1f-sidecars.ts's
+ * `psuRailGate`).
+ */
+export interface PsuRailGateModel {
+  readonly kind: "psu-rail-gate";
+  readonly psu: string;
+  readonly capacitor: string;
+  readonly load: string;
+  readonly source: string;
+  readonly ic: string;
+  readonly outputKey: string;
+  readonly traceDurationS: number;
+}
+
+export type SidecarModel = AnalyticLedStaticModel | AnalyticLedRcModel | BatteryDrainModel | RampCrossingsModel | PsuRailGateModel;
 
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */

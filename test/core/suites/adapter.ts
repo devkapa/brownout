@@ -52,6 +52,8 @@
  * (added for wave3-passives.test.ts as a constant `{}`, provably right while no
  * multi-channel kind was implemented) delegates to the active readout since W1e:
  * rgb_led, bicolor_led and the 7-segment displays publish channel currents.
+ * `getBatteryState` and `getIcState` (W1f, for battery-engine-physics and
+ * wave5-regulators) delegate to the runner's `CoreEngine` and to nothing else.
  * Nothing else on classic `SimEngine` (saveState/restoreState/
  * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
  * ...) is implemented: no case in classification.json currently needs any of
@@ -63,9 +65,11 @@
  */
 
 import { HeadlessRunner } from "../../../src/host/headless.js";
+import { CoreEngine } from "../../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import type { EngineReadout } from "../../../src/core/surface.js";
 import type {
+  BatteryRuntimeReadout,
   SimCircuit as RealSimCircuit,
   SimFailure,
   SimWarning,
@@ -277,6 +281,36 @@ export class SimEngine implements EngineReadout {
 
   getNetIdForPin(componentId: string, pinId: string): string | undefined {
     return this._runner.readout.getNetIdForPin(componentId, pinId);
+  }
+
+  // ---- Device state (W1f): CoreEngine only, never EngineReadout ------------
+
+  /**
+   * Classic `SimEngine.getBatteryState(id)`, for battery-engine-physics.
+   * `CoreEngine` has it and `EngineReadout` does not (core/README.md,
+   * Readouts), so this asks the runner's `CoreEngine` itself.
+   */
+  getBatteryState(componentId: string): BatteryRuntimeReadout | undefined {
+    return this._coreEngine("getBatteryState").getBatteryState(componentId);
+  }
+
+  /** Classic `SimEngine.getIcState(id)`, for wave5-regulators' `bench_psu` cases: `{ reg }` for a limited supply, as `getBatteryState` above. */
+  getIcState(componentId: string): Record<string, number> | undefined {
+    return this._coreEngine("getIcState").getIcState(componentId);
+  }
+
+  /**
+   * The runner's `CoreEngine`. Classic `SimEngine` has both device-state
+   * methods too, so reading them structurally off the active readout, as
+   * `getElementChannelI` does, would answer from classic after a fallback;
+   * this refuses instead.
+   */
+  private _coreEngine(method: string): CoreEngine {
+    const readout = this._runner.readout;
+    if (!(readout instanceof CoreEngine)) {
+      throw new Error(`core-suites adapter: ${method}() needs the core, but the runner's active engine is classic`);
+    }
+    return readout;
   }
 
   // ---- Classic solver diagnostics (no core meaning yet; see header) -------

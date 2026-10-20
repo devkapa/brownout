@@ -1,0 +1,16 @@
+{
+  "status": "pass",
+  "durationS": 2,
+  "sidecar": {
+    "kind": "battery-drain",
+    "battery": "bat",
+    "load": "rl",
+    "instantsS": [
+      0.25,
+      0.5,
+      1,
+      1.5,
+      2
+    ]
+  }
+}

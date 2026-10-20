@@ -454,8 +454,11 @@ describe("the identity.ts command line", () => {
 
   it("names the fixtures declined by design and counts them as declined, not compared", () => {
     const r = cli(WASM, WASM, "--no-sap1", "--only", "09-parallel", "--options", "default");
-    expect(r.out).toContain("declined by design (the sidecars say core-declined): 09-parallel-ideal-sources, 10-floating-source");
-    // Nothing else was selected: a run whose only circuits are declined compared nothing, and must fail.
+    // Since W1f the isolated section of 10-floating-source loads from its anchor (core/README.md, Rails point 1), so 09
+    // is the only fixture declined by design.
+    expect(r.out).toContain("declined by design (the sidecars say core-declined): 09-parallel-ideal-sources\n");
+    // Nothing else was selected: a run whose only circuits are declined compared nothing, and must fail. The two
+    // declines are 09 at its two frame rates.
     expect(r.out).toMatch(/2 declined/);
     expect(r.out).toContain("no circuit with readings was compared");
     expect(r.status).toBe(1);
@@ -494,8 +497,9 @@ describe("the identity.ts command line", () => {
     expect(fails.length).toBeGreaterThan(10);
     expect(fails[0]).toMatch(/^FAIL \S+@60Hz: candidate TRAPPED at reading \d+ \(advance to t=/);
     expect(r.out).toContain("unreachable");
-    // The by-design declines are still declines (the trap never got that far), and the summary still printed.
-    expect(r.out).toMatch(/DIFFERENT: 0 compared, 2 declined \(by design: [^)]*\), \d+ failed/);
+    // The by-design decline is still a decline (the trap never got that far), and the summary still printed. Since W1f
+    // the isolated section of 10-floating-source loads from its anchor (core/README.md, Rails point 1), so only 09 declines.
+    expect(r.out).toMatch(/DIFFERENT: 0 compared, 1 declined \(by design: 09-parallel-ideal-sources\), \d+ failed/);
     expect(r.status).toBe(1);
   });
 });

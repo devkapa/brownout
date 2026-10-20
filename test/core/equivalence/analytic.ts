@@ -744,9 +744,16 @@ interface ExtractedRcNetwork {
   readonly edges: readonly NetworkEdge[];
 }
 
+/**
+ * A `bench_psu` counts as a fixed source at its setpoint: with no limit it is
+ * one (Rails point 1), and a limited one holds its rail at `V` in CV. A caller
+ * judging a 555 on a limited PSU's rail must check that it stays in CV
+ * (run-entry.ts's `ne555Sidecars`; Equivalence harness rules, the 555 period
+ * on a moving rail).
+ */
 function fixedNodeVolts(circuit: SimCircuit, pinNode: ReadonlyMap<string, number>): Map<number, number> {
   const fixed = new Map<number, number>([[0, 0]]);
-  const sources = circuit.components.filter((c) => c.kind === "voltage_source");
+  const sources = circuit.components.filter((c) => c.kind === "voltage_source" || c.kind === "bench_psu");
   for (let changed = true; changed; ) {
     changed = false;
     for (const source of sources) {

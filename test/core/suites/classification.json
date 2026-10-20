@@ -30,7 +30,9 @@
     "",
     "W1e added suite files that mix cases of every kind. For those, only the cases that build one of the six W1e kinds (led, rgb_led,",
     "bicolor_led, seg7_cc, seg7_ca, ne555) are listed; their other cases are unlisted, so the core project never collects them, and are",
-    "classified in the wave that ports the kinds they need. The gate-1 checks above apply to what is listed."
+    "classified in the wave that ports the kinds they need. The gate-1 checks above apply to what is listed.",
+    "",
+    "W1f added battery-engine-physics.test.ts and the bench_psu cases of wave5-regulators.test.ts (its regulator cases are W3 and unlisted), reclassified the eleven not-yet cases its kinds unblocked, and added waveform-sources-supplemental.test.ts for clock_gen, pulse_gen and pulse_source, which no classic suite builds from implemented kinds alone. digital-pulse.test.ts and waveform.test.ts build no circuit (they test classic's waveform functions directly), so they have nothing to run on the core and are not wired in."
   ],
   "suites": [
     {
@@ -5089,7 +5091,7 @@
         {
           "describe": "optimization equivalence baselines",
           "name": "preserves mixed-signal oscillator voltages and exact counter states",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls161",
             "bench_psu",
@@ -5100,7 +5102,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). chaser555CounterCircuit contains a real 74ls161 (the fixture's own u2_74ls161, read by this case's clockV/count/qa..qd captures), an ne555 astable and leds, all implemented (W1d, W1e), but it is powered by a bench_psu (W1f), and HeadlessRunner declines the WHOLE circuit the moment any one kind is unsupported (no per-device split, core/README.md). It becomes portable when bench_psu lands (W1f), if the bit-exact counter states it asserts still match then."
+          "reason": "Verified by running against the core (W1f): the circuit loads and runs, every counter state (count, qa-qd) and the clock net match the baseline at all nine checkpoints, and timingV does not: the case pins classic's 555 timing-capacitor voltage at 1 ms backward-Euler steps to 10 digits (0.03378378367 at 1 ms, 2.808468191 at 1.5 s), where the core solves the timing network exactly (NE555 point 13; 0.03389817469 and 2.895748178). A bit-exact baseline of classic's step discretisation is a classic-internal detail, not part of the accuracy contract."
         }
       ]
     },
@@ -5459,7 +5461,7 @@
         {
           "describe": "breadboard fixture audit",
           "name": "advances the embedded NE555/counter hero fixture",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74ls161",
             "bench_psu",
@@ -5470,7 +5472,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+          "reason": "W1f: runs on the core and passes (bench_psu, the last kind that blocked it, is implemented since W1f). The 555 chaser fixture: an NE555 astable clocking a 74LS161 with LEDs, powered by a bench_psu; the case advances it and checks the counter and the LEDs move."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5490,7 +5492,7 @@
         {
           "describe": "breadboard fixture audit",
           "name": "loads observable datapath and memory outputs",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74ls157",
             "74ls173",
@@ -5501,13 +5503,15 @@
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:clock). clock is W1f; led is implemented and is not what blocks it."
+          "reason": "W1f: runs on the core and passes (clock, the kind that blocked it, is implemented since W1f). Fixture 05's register, bus and adder clocked by a clock source, read through digital state and net voltages after load."
         },
         {
           "describe": "breadboard fixture audit",
           "name": "keeps dense MNA solve time within the S11 interactive budget",
           "status": "not-yet",
           "kinds": [
+            "74hc165",
+            "74hc595",
             "74ls161",
             "bench_psu",
             "capacitor",
@@ -5517,7 +5521,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+          "reason": "Verified by running against the core (W1f): bench_psu and clock no longer block it, but the case also loads 04-74hc595-shift-7seg (74hc595, W1h), 07-74hc165-parallel-serial-io (74hc165, W1h) and two Arduino fixtures (MCU), and its first load falls back with unsupported-kind:74hc595. It also reads lastMatrixSize and the per-step solve CPU time, classic's dense-MNA statistics; when the kinds land it is classic-only on that ground."
         }
       ]
     },
@@ -5565,7 +5569,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core (W1f): the circuit loads, and the case fails with TypeError: engine.saveState is not a function. It compares saveState() snapshots of two engines; state save and restore through the host is W2."
         }
       ]
     },
@@ -5640,7 +5644,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core (W1f): the circuit loads, and the case fails with TypeError: engine.saveState is not a function. It sweeps runSmallSignalAc (AC, W6) between saveState() snapshots (W2)."
         },
         {
           "describe": "small-signal AC — transient isolation (Wave A5)",
@@ -5656,7 +5660,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555 and led are implemented and are not what blocks it. Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core (W1f): the circuit loads, and the case fails with TypeError: opOnly.dcOperatingPoint is not a function. It runs runSmallSignalAc and dcOperatingPoint (AC and OP, W6)."
         }
       ]
     },
@@ -5725,7 +5729,7 @@
         {
           "describe": "Wave A3 bit identity — load()+step trajectories",
           "name": "555-chaser: seed converges (rescue gate untaken) and the trajectory is bitwise reproducible",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74ls161",
             "bench_psu",
@@ -5736,7 +5740,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it."
+          "reason": "W1f: runs on the core and passes. Two fresh loads of the bench_psu-powered 555 chaser stepped alike give bit-identical node voltages (the core is deterministic); the seed's convergence is read through lastConverged."
         },
         {
           "describe": "Wave A3 dcOperatingPoint — no simTime advance",
@@ -5764,7 +5768,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it. The case also calls dcOperatingPoint(), which the adapter does not implement."
+          "reason": "Verified by running against the core (W1f): the circuit loads now (bench_psu is implemented), and the case fails with TypeError: engine.dcOperatingPoint is not a function. A DC operating point without advancing time is not part of the core's ABI or the adapter (the small-signal and OP analyses are W6)."
         },
         {
           "describe": "Wave A3 dcOperatingPoint — stamping controls fully reset",
@@ -5792,7 +5796,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu). The 555 chaser fixture is powered by a bench_psu (W1f); ne555, led and 74ls161 are implemented and are not what blocks it. The case also calls dcOperatingPoint() and saveState()/restoreState(), which the adapter does not implement."
+          "reason": "Verified by running against the core (W1f): the circuit loads, and the case fails with TypeError: engine.dcOperatingPoint is not a function; it also restores with saveState()/restoreState(). DC operating point is W6; state save and restore (rollback through the host) is W2."
         }
       ]
     },
@@ -5850,7 +5854,7 @@
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:battery_pack). battery_pack is W1f; led is implemented (W1e) and is not what blocks it."
+          "reason": "Verified by running against the core (W1f): battery_pack no longer blocks it; load() now falls back with unsupported-feature:led-thermal:led1 and led-thermal:led2. The LEDs carry a catalog identity with a thermal model, which is W1g."
         }
       ]
     },
@@ -6504,6 +6508,192 @@
             "seg7_ca"
           ],
           "reason": "Same circuit with the common lead on the wrong rail: the junction is reverse-biased, so the 330 ohm resistor holds the segment node at its far rail within 1 uV."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/battery-engine-physics.test.ts",
+      "cases": [
+        {
+          "describe": "battery chemistry integration",
+          "name": "uses CR2032 OCV and fresh resistance for terminal sag",
+          "status": "portable",
+          "kinds": [
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. A battery-coin-cr2032 (exact profile, 21 C reference) into 100 ohm: getBatteryState's profile, OCV 3.2 V and fresh 10 ohm, and the terminal sag 3.2 x 100/110, read through the adapter's getBatteryState (F3b) and the net voltages."
+        },
+        {
+          "describe": "battery chemistry integration",
+          "name": "counts delivered coulombs, lowers SoC, and rolls back exactly",
+          "status": "not-yet",
+          "kinds": [
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function. The SoC and coulomb half would run; the case then restores a saveState() snapshot and checks the battery state rolled back. Rollback through the host is W2."
+        },
+        {
+          "describe": "battery chemistry integration",
+          "name": "preserves runtime depletion across warm loads and resets on authored charge edit",
+          "status": "not-yet",
+          "kinds": [
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core (W1f): fails, expected 1 to be close to 0.7698. A warm load() of the same circuit carries classic's depleted SoC forward; the core's load starts from the authored charge (F3b2: same-id SoC carry across a reload is W2)."
+        },
+        {
+          "describe": "battery chemistry integration",
+          "name": "raises CR2032 resistance and sag at the profile's cold bound",
+          "status": "portable",
+          "kinds": [
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. The CR2032 at 21 C and at -30 C (clamped to the profile's -20 C bound): R 10 ohm and 50 ohm through getBatteryState, and the cold terminal voltage below the warm one."
+        },
+        {
+          "describe": "battery chemistry integration",
+          "name": "keeps identity-less legacy batteries on the explicit linear fallback",
+          "status": "portable",
+          "kinds": [
+            "battery_pack",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. No catalogUid, so the generic profile (Sources point 1): OCV = 5 x charge 0.5 = 2.5 V with rInternal 0, read as the terminal voltage and profileId."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/wave5-regulators.test.ts",
+      "cases": [
+        {
+          "describe": "bench_psu — CC fold: V=10, iLimit=0.5 A, 2 Ω load",
+          "name": "I ≈ 0.5 A ± 0.05 A (CC clamp = iLimit)",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. 10 V, 0.5 A limit into 2 ohm: CC (Rails point 5), the PSU publishes -iLimit exactly."
+        },
+        {
+          "describe": "bench_psu — CC fold: V=10, iLimit=0.5 A, 2 Ω load",
+          "name": "Vout ≈ 1.0 V ± 0.2 V (I×Rload = 0.5×2 = 1.0 V)",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. The CC rail iLimit x R = 1.0 V (Rails point 2)."
+        },
+        {
+          "describe": "bench_psu — same-step CC compliance recovery",
+          "name": "bounds '100 Ω recovery load' at 10 V on the first accepted step",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function. Before any assertion on the recovery it reads saveState().failureStress (classic's overload-stress map: W1g's stress state through W2's state snapshot)."
+        },
+        {
+          "describe": "bench_psu — same-step CC compliance recovery",
+          "name": "bounds 'near-open 1 GΩ load' at 10 V on the first accepted step",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function, as its '100 Ω recovery load' twin (saveState().failureStress: W1g stress, W2 snapshots)."
+        },
+        {
+          "describe": "bench_psu — same-step CC compliance recovery",
+          "name": "enters CC within the first accepted step after a 100 Ω → 2 Ω load switch",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. A reload from 100 ohm to 2 ohm enters CC at once: 1 V, 0.5 A, getIcState reg 2 (Rails point 5, the regime readout through F3b)."
+        },
+        {
+          "describe": "bench_psu — same-step CC compliance recovery",
+          "name": "holds the setpoint with negligible terminal current when an SPST opens",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor",
+            "switch"
+          ],
+          "reason": "W1f: runs on the core and passes. From CC on 2 ohm, a reload with the load behind an open switch is back in CV at 10 V with under 1 nA and reg 0."
+        },
+        {
+          "describe": "bench_psu — NO iLimit: regression (ideal source unchanged)",
+          "name": "Vout = 10 V (ideal source, no limiting)",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. No iLimit: an ideal source (Rails point 1), 10 V on 2 ohm."
+        },
+        {
+          "describe": "bench_psu — NO iLimit: regression (ideal source unchanged)",
+          "name": "I = 5.0 A ± 0.1 A (V/R = 10/2 = 5 A, no clamping)",
+          "status": "portable",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "W1f: runs on the core and passes. No iLimit: 5 A, no clamp (read before the resistor's overload, which is W1g, could act)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/waveform-sources-supplemental.test.ts",
+      "cases": [
+        {
+          "describe": "gate 1 supplemental — clock_gen",
+          "name": "a 1 kHz, 50 % clock reads vHigh in each first half-period and vLow in each second",
+          "status": "portable",
+          "kinds": [
+            "clock_gen",
+            "resistor"
+          ],
+          "reason": "New case (F4, W1f; no classic suite builds a clock_gen from implemented kinds alone). The clock's level through a 10 k / 10 k divider at instants inside each half-period against clockVoltage, and its current (Sources point 2)."
+        },
+        {
+          "describe": "gate 1 supplemental — pulse_gen",
+          "name": "the catalog pulse (1 us ramps, 0.5 ms wide, 1 ms period) reads v2 on its top and v1 between pulses",
+          "status": "portable",
+          "kinds": [
+            "pulse_gen",
+            "resistor"
+          ],
+          "reason": "New case (F4, W1f). The catalog pulse-source part (pulse_gen) through a divider against pulseVoltage on its flat segments, where its 1 us ramps are midpoint steps (Sources point 3)."
+        },
+        {
+          "describe": "gate 1 supplemental — pulse_source",
+          "name": "a 1 ms ramp on a 4 ms top is followed point by point through the rise and the fall (Sources point 3, resolved)",
+          "status": "portable",
+          "kinds": [
+            "pulse_source",
+            "resistor"
+          ],
+          "reason": "New case (F4, W1f). A resolved 1 ms ramp: the divider follows pulseVoltage inside the rise and the fall (the live boundary is linear in t, Sources point 3) and on the flats."
+        },
+        {
+          "describe": "gate 1 supplemental — pulse_source",
+          "name": "a one-shot (per = 0) returns to v1 after its fall and stays there",
+          "status": "portable",
+          "kinds": [
+            "pulse_source",
+            "resistor"
+          ],
+          "reason": "New case (F4, W1f). per = 0 is classic's one-shot (Waveform source records): v1 before td, v2 on its top, v1 after its fall and from then on."
         }
       ]
     }

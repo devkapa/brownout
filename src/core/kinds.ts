@@ -60,6 +60,15 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "seg7_cc",
   "seg7_ca",
   "ne555",
+  // W1f: the sources (codes 20-25). The compiler adds a `section_anchor`
+  // record (code 26) for each isolated section on its own; it is never a
+  // component kind.
+  "battery_pack",
+  "bench_psu",
+  "clock",
+  "clock_gen",
+  "pulse_source",
+  "pulse_gen",
 ]);
 
 /**

@@ -135,6 +135,60 @@ describe("adapter.ts SimEngine — the happy path actually runs on the core", ()
   });
 });
 
+describe("adapter.ts SimEngine — device state comes from the runner's CoreEngine (W1f)", () => {
+  const BATTERY: SimCircuit = {
+    components: [
+      part("cell", "battery_pack", ["pos", "neg"], { voltage: 5, rInternal: 0.9, capacityAh: 1e-4 }),
+      part("load", "resistor", ["a", "b"], { resistance: 100 }),
+    ],
+    wires: [wire("cell", "pos", "load", "a"), wire("load", "b", "cell", "neg")],
+  };
+
+  function psu(iLimit: number): SimCircuit {
+    return {
+      components: [
+        part("psu", "bench_psu", ["pos", "neg"], { voltage: 5, iLimit }),
+        part("load", "resistor", ["a", "b"], { resistance: 10 }),
+      ],
+      wires: [wire("psu", "pos", "load", "a"), wire("load", "b", "psu", "neg")],
+    };
+  }
+
+  it("getBatteryState() reads the core's cell: generic at load, drained by a step, undefined for another kind", () => {
+    const engine = new SimEngine();
+    engine.load(BATTERY);
+    // No time passes at a core load (owner decision 8): full, nothing counted yet.
+    expect(engine.getBatteryState("cell")).toMatchObject({
+      profileId: "generic-primary",
+      label: "Generic primary battery (fallback)",
+      soc: 1,
+      dischargedCoulombs: 0,
+    });
+    engine.step(0.1);
+    const drained = engine.getBatteryState("cell")!;
+    expect(drained.soc).toBeLessThan(1);
+    expect(drained.dischargedCoulombs).toBeGreaterThan(0);
+    expect(engine.getBatteryState("load")).toBeUndefined();
+  });
+
+  it("getIcState() reads a limited bench_psu's regime, and is undefined for an ideal one and for another kind", () => {
+    const engine = new SimEngine();
+    // 5 V into 10 ohm wants 0.5 A against a 0.1 A limit: CC from load (probe P5).
+    engine.load(psu(0.1));
+    expect(engine.getIcState("psu")).toEqual({ reg: 2 });
+    expect(engine.getIcState("load")).toBeUndefined();
+    engine.load(psu(0));
+    expect(engine.getIcState("psu")).toBeUndefined();
+  });
+
+  it("refuses to answer from classic after a fallback, though classic has both methods", () => {
+    const engine = new SimEngine();
+    expect(() => engine.load(WITH_UNSUPPORTED_KIND)).toThrow(CoreSuiteFellBackError);
+    expect(() => engine.getBatteryState("src")).toThrow(/getBatteryState\(\) needs the core/);
+    expect(() => engine.getIcState("src")).toThrow(/getIcState\(\) needs the core/);
+  });
+});
+
 describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
   it("throws CoreSuiteFellBackError instead of silently running classic when a kind is unsupported", () => {
     const engine = new SimEngine();

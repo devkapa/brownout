@@ -1,0 +1,44 @@
+{
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.08
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.03
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.06
+    }
+  ],
+  "analytic": {
+    "kind": "psu-rail",
+    "psu": "psu",
+    "capacitor": "c1",
+    "loads": [
+      {
+        "resistor": "rl"
+      },
+      {
+        "resistor": "rs",
+        "switch": "sw"
+      }
+    ]
+  }
+}

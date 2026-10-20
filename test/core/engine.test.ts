@@ -321,7 +321,36 @@ describe("unsupported topology -> CoreUnsupportedError with a topology: reason",
     expect(caught!.reasons[0]).toMatch(/^topology:/);
   });
 
-  it("a floating ideal source (neither terminal reachable from the datum)", () => {
+  it("an ideal source joined to the datum only through a resistor (still floating: core/README.md, Rails point 1)", () => {
+    const c = circuit(
+      [
+        part("vs1", "voltage_source", ["pos", "neg"], { voltage: 9 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part("vsFloat", "voltage_source", ["pos", "neg"], { voltage: 3 }),
+        part("rFloat", "resistor", ["a", "b"], { resistance: 10 }),
+        part("rJoin", "resistor", ["a", "b"], { resistance: 1000 }),
+      ],
+      [
+        wire("vs1", "pos", "r1", "a"),
+        wire("r1", "b", "vs1", "neg"),
+        wire("vsFloat", "pos", "rFloat", "a"),
+        wire("vsFloat", "neg", "rFloat", "b"),
+        wire("vsFloat", "neg", "rJoin", "a"),
+        wire("rJoin", "b", "vs1", "neg"),
+      ],
+    );
+    const core = new CoreEngine();
+    expect(() => core.load(c)).toThrow(CoreUnsupportedError);
+    try {
+      core.load(c);
+    } catch (err) {
+      expect((err as CoreUnsupportedError).reasons[0]).toMatch(/^topology:/);
+    }
+  });
+});
+
+describe("an isolated section's ideal source loads from its section anchor (core/README.md, Rails point 1)", () => {
+  it("matches classic, its anchored net at 0 V where classic's anchor leaves picovolts", () => {
     const c = circuit(
       [
         part("vs1", "voltage_source", ["pos", "neg"], { voltage: 9 }),
@@ -336,13 +365,18 @@ describe("unsupported topology -> CoreUnsupportedError with a topology: reason",
         wire("vsFloat", "neg", "rFloat", "b"),
       ],
     );
-    const core = new CoreEngine();
-    expect(() => core.load(c)).toThrow(CoreUnsupportedError);
-    try {
-      core.load(c);
-    } catch (err) {
-      expect((err as CoreUnsupportedError).reasons[0]).toMatch(/^topology:/);
+    const classic = loadClassic(c);
+    const core = loadCore(c);
+    expect(core.nets).toEqual(classic.nets);
+    const [coreV, classicV] = [core.getNetV(), classic.getNetV()];
+    expect(new Set(Object.keys(coreV))).toEqual(new Set(Object.keys(classicV)));
+    for (const net of Object.keys(classicV)) {
+      // Probe Q4: classic's anchor holds an isolated section near 0 V, the core's at exactly 0 V.
+      expect(Math.abs(coreV[net]! - classicV[net]!), net).toBeLessThan(1e-9);
     }
+    expectRecordsClose(core.getElementI(), classic.getElementI(), "elementI");
+    const floatNets = classic.nets.filter((n) => n.pins.some(([id]) => id === "vsFloat")).map((n) => n.id);
+    expect(floatNets.map((id) => coreV[id]).sort()).toEqual([0, 3]);
   });
 });
 

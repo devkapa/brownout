@@ -48,6 +48,14 @@
  * (`runSidecarChecks`); and every entry holding an LED-family kind is run a
  * second time with the solution cache off (`compareCacheOnOff`, LEDs point 7).
  * None of it touches an entry without those kinds or that field.
+ *
+ * W1f ADDS the sidecars of w1f-sidecars.ts (see "W1f sidecars" below): a
+ * pulse-fed RC and a PSU's rail through CC entries and exits as `analytic`
+ * models (the PSU's on the stimuli path too, from a CC exit to the next entry,
+ * the P9 ruling), and a battery's drain, a Schmitt input's flips on a resolved
+ * ramp and an IC's power-gate flips on a sagging rail as `sidecar` checks of
+ * the core alone; and a `digital` spec may sample each cycle on the clock's
+ * falling edge.
  */
 
 import os from "node:os";
@@ -75,6 +83,7 @@ import {
   type Ne555SidecarSpec,
 } from "./analytic.js";
 import { comparePhaseAlignedSamples, compareSamples, compareStimuliSamples } from "./compare.js";
+import { drainCoulombTolerance, extractBatteryDrain, extractPsuRail, extractPulseRc, psuRailGate, rampCrossings } from "./w1f-sidecars.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
 import { guardWindowS, requireMinQuietInstants, selectQuietInstants } from "./quiet.js";
@@ -94,6 +103,7 @@ import { collectClassicDigitalTrace, collectCoreDigitalTrace, CoreTraceUnsupport
 import type {
   AnalyticFixtureModel,
   AnalyticNodeRef,
+  BatteryDrainModel,
   CorpusEntry,
   CorpusOrigin,
   DigitalFixtureSpec,
@@ -101,6 +111,8 @@ import type {
   KnownDivergenceHit,
   Mismatch,
   Ne555FixtureSpec,
+  PsuRailGateModel,
+  RampCrossingsModel,
   SampleReadout,
 } from "./types.js";
 
@@ -543,10 +555,14 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
     }
     afterLag = still;
   }
-  const richardsonSplit = explainRichardsonMismatches(circuit, phases, afterLag);
+  // W1f P9 option (a): a PSU rail's samples from a CC exit to the next entry are judged against the exact rail, not
+  // classic, before Richardson; and the core is held to that rail at every sample it replayed.
+  const railSplit = entry.analytic?.kind === "psu-rail" ? explainAnalyticMismatches(entry, circuit, afterLag) : { explained: [], remaining: afterLag };
+  const railCore = judgeStimuliAnalyticCore(entry, circuit, coreSamples);
+  const richardsonSplit = explainRichardsonMismatches(circuit, phases, railSplit.remaining);
   const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining);
-  const unexplained = [...unexplainedRaw, ...(ne555?.extra ?? [])];
-  const knownDivergences = [...cmp.knownDivergences, ...lagKnown, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
+  const unexplained = [...unexplainedRaw, ...(ne555?.extra ?? []), ...railCore];
+  const knownDivergences = [...cmp.knownDivergences, ...lagKnown, ...railSplit.explained, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };
@@ -650,6 +666,18 @@ function runDigitalAlignment(entry: CorpusEntry, circuit: SimCircuit): DigitalAl
   return alignDigitalTraces(spec, classicTrace, coreTrace);
 }
 
+/**
+ * A spec sampling on the clock's falling edge sees the clock key inverted, so
+ * `sampleCycles` (rising edges) samples before each fall. A source whose
+ * rise is a midpoint step clocks a reader at its input threshold inside the
+ * ramp in classic and at the midpoint in the core (Sources point 3), so
+ * per-cycle state is only defined away from the rise.
+ */
+function onClockEdge(trace: readonly DigitalTraceEvent[], spec: DigitalFixtureSpec): readonly DigitalTraceEvent[] {
+  if (spec.clockEdge !== "falling") return trace;
+  return trace.map((e) => (e.key === spec.clockKey && !Number.isNaN(e.value) ? { ...e, value: e.value === 0 ? 1 : 0 } : e));
+}
+
 /** Gate 2a on two already-collected traces (`runDigitalAlignment` above collects them; an NE555 entry collects them once for its period check and reuses them here). */
 export function alignDigitalTraces(
   spec: DigitalFixtureSpec,
@@ -658,8 +686,8 @@ export function alignDigitalTraces(
 ): DigitalAlignmentOutcome {
   const eventTimes = [...new Set([...classicTrace, ...coreTrace].map((e) => e.t))].sort((a, b) => a - b);
 
-  const classicCycles = sampleCycles(classicTrace, spec.clockKey, spec.projection);
-  const coreCycles = sampleCycles(coreTrace, spec.clockKey, spec.projection);
+  const classicCycles = sampleCycles(onClockEdge(classicTrace, spec), spec.clockKey, spec.projection);
+  const coreCycles = sampleCycles(onClockEdge(coreTrace, spec), spec.clockKey, spec.projection);
   const alignment = alignCycles(classicCycles, coreCycles, spec.anchor, spec.offsetBoundCycles);
 
   if (!alignment.ok) {
@@ -731,20 +759,42 @@ function analyticNetId(built: ReturnType<typeof buildCoreNodes>, ref: AnalyticNo
   return built.netIdOfNode[node] ?? null;
 }
 
+/** An analytic value at time t, or `undefined` where the model does not judge that instant (P9's samples before the CC exit stay classic-against-core). */
+type AnalyticFn = (t: number, phase?: number) => number | undefined;
+
 interface AnalyticTargets {
   /** net id -> analytic voltage at time t. */
-  readonly netV: ReadonlyMap<string, (t: number) => number>;
+  readonly netV: ReadonlyMap<string, AnalyticFn>;
   /** component id (elementI key) -> analytic current at time t. */
-  readonly elementI: ReadonlyMap<string, (t: number) => number>;
+  readonly elementI: ReadonlyMap<string, AnalyticFn>;
+}
+
+/** How far a W1f sidecar must reach: the entry's samples, its own instants, and a digital trace. */
+function analyticHorizonS(entry: CorpusEntry, instantsS: readonly number[] = []): number {
+  return Math.max(entry.durationS ?? DEFAULT_DURATION_S, entry.digital?.traceDurationS ?? 0, ...instantsS);
 }
 
 /** Resolves one entry's declared `AnalyticFixtureModel` into ready-to-evaluate functions, keyed exactly the way `Mismatch.id` names a `netV`/`elementI` target — computed once per entry, reused across every sample time a mismatch might name. */
-function buildAnalyticTargets(circuit: SimCircuit, model: AnalyticFixtureModel): AnalyticTargets {
+function buildAnalyticTargets(entry: CorpusEntry, circuit: SimCircuit, model: AnalyticFixtureModel): AnalyticTargets {
   const built = buildCoreNodes(circuit);
-  const netV = new Map<string, (t: number) => number>();
-  const elementI = new Map<string, (t: number) => number>();
+  const netV = new Map<string, AnalyticFn>();
+  const elementI = new Map<string, AnalyticFn>();
 
-  if (model.kind === "rc") {
+  if (model.kind === "pulse-rc") {
+    const rc = extractPulseRc(circuit, model, analyticHorizonS(entry, model.instantsS));
+    netV.set(rc.node, rc.voltageAt);
+    elementI.set(rc.resistor, rc.resistorCurrentAt);
+    elementI.set(rc.capacitor, rc.capacitorCurrentAt);
+    if (model.sourceCurrent) elementI.set(rc.source, rc.sourceCurrentAt);
+  } else if (model.kind === "psu-rail") {
+    const rail = extractPsuRail(circuit, model, entry.phases);
+    // From a CC exit to the next entry only (P9 option (a): the samples inside the post-exit esr*C transient).
+    const after = (f: (t: number, phase?: number) => number): AnalyticFn => (t, phase) => (rail.afterExit(t, phase) ? f(t, phase) : undefined);
+    netV.set(rail.rail, after(rail.railAt));
+    elementI.set(rail.capacitor, after(rail.capacitorCurrentAt));
+    elementI.set(rail.psu, after(rail.psuCurrentAt));
+    for (const [id, f] of rail.loadCurrentAt) elementI.set(id, after(f));
+  } else if (model.kind === "rc") {
     const { tau, vAsymptote, v0AtUncharged } = rcTerminalThevenin({
       sourceVolts: model.sourceVolts,
       seriesOhms: model.seriesOhms,
@@ -814,7 +864,7 @@ export function explainAnalyticMismatches(
 ): { readonly explained: readonly KnownDivergenceHit[]; readonly remaining: readonly Mismatch[] } {
   if (!entry.analytic) return { explained: [], remaining: mismatches };
 
-  const targets = buildAnalyticTargets(circuit, entry.analytic);
+  const targets = buildAnalyticTargets(entry, circuit, entry.analytic);
   const explained: KnownDivergenceHit[] = [];
   const remaining: Mismatch[] = [];
 
@@ -831,7 +881,11 @@ export function explainAnalyticMismatches(
       continue;
     }
 
-    const analyticValue = analyticFn(mismatch.sampleTime);
+    const analyticValue = analyticFn(mismatch.sampleTime, mismatch.phaseIndex);
+    if (analyticValue === undefined) {
+      remaining.push(mismatch);
+      continue;
+    }
     const [absTol, relTol] = mismatch.category === "netV" ? [VOLT_ABS_TOL, VOLT_REL_TOL] : [AMP_ABS_TOL, AMP_REL_TOL];
     const result = checkAnalyticCrossing({
       coreValue: mismatch.coreValue,
@@ -1103,6 +1157,14 @@ export function ne555Sidecars(
     .map((c) => c.id);
   for (const spec of specs) {
     try {
+      const railPsu = limitedPsuOnSupply(circuit, spec.component);
+      // The moving-rail set (Equivalence harness rules, W1f): a 555 on a limited PSU's rail keeps the 1e-6
+      // sidecar only while that PSU stays in CV over the compared span.
+      if (railPsu && !psuStaysCv(circuit, railPsu, horizonS, stimuli)) {
+        if (entry.ne555) throw new Error(`ne555 sidecar: ${spec.component}'s supply ${railPsu} enters CC, so it is in the moving-rail set`);
+        unmodelled.push(spec.component);
+        continue;
+      }
       sidecars.push(extractNe555Sidecar(circuit, spec, horizonS, { stimuli }));
     } catch (err) {
       if (entry.ne555) throw err;
@@ -1110,6 +1172,41 @@ export function ne555Sidecars(
     }
   }
   return { sidecars, unmodelled };
+}
+
+/** The `bench_psu` with `iLimit > 0` whose `pos` is the 555's pin 8 or pin 1, if any. */
+function limitedPsuOnSupply(circuit: SimCircuit, ne555Id: string): string | undefined {
+  const built = buildCoreNodes(circuit);
+  const supply = ["8", "1"].map((pin) => built.pinNode.get(corePinKey(ne555Id, pin)));
+  const psu = circuit.components.find(
+    (c) => c.kind === "bench_psu" && Number(c.params.iLimit ?? 0) > 0 && supply.includes(built.pinNode.get(corePinKey(c.id, "pos"))),
+  );
+  return psu?.id;
+}
+
+/** The core's regime readout at the load and at 2,000 evenly spaced instants over the span (across every phase): CV at all of them. */
+function psuStaysCv(circuit: SimCircuit, psuId: string, horizonS: number, stimuli?: readonly StimulusPhase[]): boolean {
+  const engine = new CoreEngine();
+  try {
+    engine.load(stimuli && stimuli.length > 0 ? withPhaseSet(circuit, stimuli[0]) : circuit);
+    const phases = stimuli && stimuli.length > 0 ? stimuli : [{ durationS: horizonS }];
+    const total = phases.reduce((sum, ph) => sum + ph.durationS, 0);
+    // A discharged rail capacitor puts the PSU in CC at the load itself (Rails point 5).
+    if (engine.getIcState(psuId)?.reg !== 0) return false;
+    let t0 = 0;
+    for (const [k, phase] of phases.entries()) {
+      if (k > 0 && phase.set?.length) engine.setParams(phase.set.map((set) => ({ componentId: set.id, params: set.params })));
+      const n = Math.max(1, Math.ceil((2000 * phase.durationS) / total));
+      for (let j = 1; j <= n; j++) {
+        engine.advance(t0 + (phase.durationS * j) / n);
+        if (engine.getIcState(psuId)?.reg !== 0) return false;
+      }
+      t0 += phase.durationS;
+    }
+    return engine.getIcState(psuId)?.reg === 0;
+  } finally {
+    engine.dispose();
+  }
 }
 
 // ─── W1e: NE555 entries under scripted stimuli (gate 2d) ──────────────────────
@@ -1535,10 +1632,195 @@ function sidecarMismatch(sampleTime: number, id: string, want: number | string, 
   return { sampleTime, category: "sidecar", id, classicValue: want, coreValue: got, detail };
 }
 
+// ─── W1f sidecars (core/README.md, "Kernel semantics: rails and sources (W1f)") ──
+//
+// The core against the model's own answer (w1f-sidecars.ts), whatever classic
+// reads: a pulse-fed RC (`pulse-rc`) and a PSU's rail through CC entries
+// and exits (`psu-rail`) at the entry's samples and the model's own instants; a
+// battery's SoC, `dischargedCoulombs` and OCV against the Rails point 6 ODE
+// (`battery-drain`); and a Schmitt input's flips on a resolved ramp
+// (`ramp-crossings`). A mismatch here is category "sidecar", never explained
+// away by a divergence or by Richardson.
+
+/** The core's flip instants on a resolved ramp against the sidecar's: the README's analytic-time tolerance (W1g Q-O31, `1e-9 s + 1e-9` relative), the closest contract bound for a core instant against an exact one. */
+export const RAMP_CROSSING_ABS_S = 1e-9;
+export const RAMP_CROSSING_REL = 1e-9;
+
+/** Instants within this of a regime change are skipped by the always-on check: a sample on the change itself may read either regime (Rails point 5). */
+const REGIME_GUARD_S = 1e-9;
+
+interface AnalyticCoreCheck {
+  readonly id: string;
+  readonly category: "netV" | "elementI";
+  readonly at: (t: number, phase?: number) => number | undefined;
+}
+
+function analyticCoreChecks(entry: CorpusEntry, circuit: SimCircuit): AnalyticCoreCheck[] {
+  const model = entry.analytic;
+  const checks: AnalyticCoreCheck[] = [];
+  if (model?.kind === "pulse-rc") {
+    const rc = extractPulseRc(circuit, model, analyticHorizonS(entry, model.instantsS));
+    checks.push({ id: rc.node, category: "netV", at: rc.voltageAt });
+    checks.push({ id: rc.resistor, category: "elementI", at: rc.resistorCurrentAt });
+    checks.push({ id: rc.capacitor, category: "elementI", at: rc.capacitorCurrentAt });
+    if (model.sourceCurrent) checks.push({ id: rc.source, category: "elementI", at: rc.sourceCurrentAt });
+  } else if (model?.kind === "psu-rail") {
+    const rail = extractPsuRail(circuit, model, entry.phases);
+    const changes = rail.regimes.map((r) => r.t0);
+    const away = (f: (t: number, phase?: number) => number) => (t: number, phase?: number) =>
+      changes.some((c) => Math.abs(t - c) <= REGIME_GUARD_S) ? undefined : f(t, phase);
+    checks.push({ id: rail.rail, category: "netV", at: away(rail.railAt) });
+    checks.push({ id: rail.capacitor, category: "elementI", at: away(rail.capacitorCurrentAt) });
+    checks.push({ id: rail.psu, category: "elementI", at: away(rail.psuCurrentAt) });
+    for (const [id, f] of rail.loadCurrentAt) checks.push({ id, category: "elementI", at: away(f) });
+  }
+  return checks;
+}
+
+/** The core's readouts at one instant against every check, as "sidecar" mismatches. */
+function judgeAnalyticCore(
+  kind: string,
+  checks: readonly AnalyticCoreCheck[],
+  t: number,
+  netV: Readonly<Record<string, number>>,
+  elementI: Readonly<Record<string, number>>,
+  phase?: number,
+): Mismatch[] {
+  const out: Mismatch[] = [];
+  for (const check of checks) {
+    const want = check.at(t, phase);
+    if (want === undefined) continue;
+    const got = check.category === "netV" ? netV[check.id] : elementI[check.id];
+    const [absTol, relTol] = check.category === "netV" ? [VOLT_ABS_TOL, VOLT_REL_TOL] : [AMP_ABS_TOL, AMP_REL_TOL];
+    if (!withinTolerance(want, got ?? Number.NaN, absTol, relTol)) {
+      out.push(sidecarMismatch(t, `${kind}.${check.category}.${check.id}`, want, got, `the core reads ${got} where the exact ${kind} answer is ${want}`));
+    }
+  }
+  return out;
+}
+
+/** The plain flow's always-on check: the core at the entry's samples and the model's own instants. */
+export function runAnalyticCoreChecks(entry: CorpusEntry, circuit: SimCircuit): Mismatch[] {
+  const model = entry.analytic;
+  if (!model || (model.kind !== "pulse-rc" && model.kind !== "psu-rail")) return [];
+  const checks = analyticCoreChecks(entry, circuit);
+  const sampleTimes = sampleTimesFor(entry.durationS ?? DEFAULT_DURATION_S);
+  const times = [...new Set([...sampleTimes, ...(model.instantsS ?? [])])].sort((a, b) => a - b);
+  const mismatches: Mismatch[] = [];
+  const engine = new CoreEngine();
+  try {
+    engine.load(circuit);
+    for (const t of times) {
+      if (t > 0) engine.advance(t);
+      mismatches.push(...judgeAnalyticCore(model.kind, checks, t, engine.getNetV(), engine.getElementI()));
+    }
+  } catch (err) {
+    mismatches.push(sidecarMismatch(0, "core run", "ok", errorMessage(err), `the core could not run the fixture for the ${model.kind} check`));
+  } finally {
+    engine.dispose();
+  }
+  return mismatches;
+}
+
+/** The stimuli path's always-on check: the core's own replayed samples (every step of every phase). */
+export function judgeStimuliAnalyticCore(entry: CorpusEntry, circuit: SimCircuit, coreSamples: readonly StimulusStepSample[]): Mismatch[] {
+  const model = entry.analytic;
+  if (!model || model.kind !== "psu-rail") return [];
+  const checks = analyticCoreChecks(entry, circuit);
+  return coreSamples.flatMap((sample) => judgeAnalyticCore(model.kind, checks, sample.simTime, sample.netV, sample.elementI, sample.phaseIndex));
+}
+
+function runW1fSidecarChecks(entry: CorpusEntry, circuit: SimCircuit, model: BatteryDrainModel | RampCrossingsModel | PsuRailGateModel): Mismatch[] {
+  const mismatches: Mismatch[] = [];
+  if (model.kind === "psu-rail-gate") {
+    const want = psuRailGate(circuit, model, model.traceDurationS).flips;
+    let got: DigitalTraceEvent[];
+    try {
+      got = collectCoreDigitalTrace(circuit, model.traceDurationS).filter((e) => e.key === model.outputKey && e.t > 0);
+    } catch (err) {
+      return [sidecarMismatch(0, "core trace", "ok", errorMessage(err), "the core could not trace the fixture for the rail-gate check")];
+    }
+    if (want.length === 0) {
+      return [sidecarMismatch(0, `gate.${model.outputKey}`, "at least one flip", 0, "the sidecar's rail never crosses the power window: the check would pass vacuously")];
+    }
+    if (got.length !== want.length) {
+      mismatches.push(sidecarMismatch(0, `gate.${model.outputKey}.count`, want.length, got.length, "the core's output appears and vanishes a different number of times than the rail crosses the power window"));
+    }
+    want.forEach((w, i) => {
+      const g = got[i];
+      const tol = RAMP_CROSSING_ABS_S + RAMP_CROSSING_REL * w.t;
+      // An unpowered IC's output key is absent (NaN in the trace); a powered one reads a level.
+      if (!g || Number.isNaN(g.value) === w.powered || !(Math.abs(g.t - w.t) <= tol)) {
+        mismatches.push(
+          sidecarMismatch(w.t, `gate.${model.outputKey}[${i}]`, `${w.powered ? "powered" : "unpowered"} at ${w.t}`, g ? `${Number.isNaN(g.value) ? "unpowered" : "powered"} at ${g.t}` : undefined, `the rail crosses the power window at ${w.t}; the output must follow within ${tol.toExponential(2)} s`),
+        );
+      }
+    });
+    return mismatches;
+  }
+  if (model.kind === "battery-drain") {
+    const horizon = Math.max(...model.instantsS);
+    const drain = extractBatteryDrain(circuit, model, horizon);
+    const engine = new CoreEngine();
+    try {
+      engine.load(circuit);
+      for (const t of model.instantsS) {
+        if (t > 0) engine.advance(t);
+        const got = engine.getBatteryState(model.battery);
+        const want = drain.at(t);
+        const qTol = drainCoulombTolerance(drain.meanCurrentA(t), t);
+        const checks: [string, number, number | undefined, number][] = [
+          ["dischargedCoulombs", want.dischargedCoulombs, got?.dischargedCoulombs, qTol],
+          ["soc", want.soc, got?.soc, qTol / drain.capacityCoulombs],
+          ["openCircuitVoltageV", want.openCircuitVoltageV, got?.openCircuitVoltageV, VOLT_ABS_TOL + VOLT_REL_TOL * Math.abs(want.openCircuitVoltageV)],
+        ];
+        for (const [field, w, g, tol] of checks) {
+          if (!(Math.abs((g ?? Number.NaN) - w) <= tol)) {
+            mismatches.push(sidecarMismatch(t, `battery.${model.battery}.${field}`, w, g, `|${g} - ${w}| exceeds ${tol.toExponential(3)} against the Rails point 6 ODE`));
+          }
+        }
+      }
+    } catch (err) {
+      mismatches.push(sidecarMismatch(0, "core run", "ok", errorMessage(err), "the core could not run the fixture for the battery-drain check"));
+    } finally {
+      engine.dispose();
+    }
+    return mismatches;
+  }
+
+  const want = rampCrossings(circuit, model, model.vSupplyV, model.traceDurationS);
+  let got: DigitalTraceEvent[];
+  try {
+    got = collectCoreDigitalTrace(circuit, model.traceDurationS).filter((e) => e.key === model.outputKey && e.t > 0);
+  } catch (err) {
+    return [sidecarMismatch(0, "core trace", "ok", errorMessage(err), "the core could not trace the fixture for the ramp-crossings check")];
+  }
+  if (want.length === 0) {
+    return [sidecarMismatch(0, `ramp.${model.outputKey}`, "at least one crossing", 0, "the sidecar found no crossing inside the trace: the check would pass vacuously")];
+  }
+  if (got.length !== want.length) {
+    mismatches.push(sidecarMismatch(0, `ramp.${model.outputKey}.count`, want.length, got.length, "the core's output changes a different number of times than the ramp crosses its thresholds"));
+  }
+  want.forEach((w, i) => {
+    const g = got[i];
+    const tol = RAMP_CROSSING_ABS_S + RAMP_CROSSING_REL * w.t;
+    if (!g || g.value !== w.value || !(Math.abs(g.t - w.t) <= tol)) {
+      mismatches.push(
+        sidecarMismatch(w.t, `ramp.${model.outputKey}[${i}]`, `${w.value} at ${w.t}`, g ? `${g.value} at ${g.t}` : undefined, `the input crosses its threshold at ${w.crossingS}; the output must follow at ${w.t} within ${tol.toExponential(2)} s`),
+      );
+    }
+  });
+  return mismatches;
+}
+
 export function runSidecarChecks(entry: CorpusEntry, circuit: SimCircuit): { readonly mismatches: Mismatch[]; readonly coreWallMs: number } {
   const model = entry.sidecar;
   if (!model) return { mismatches: [], coreWallMs: 0 };
   const started = performance.now();
+  if (model.kind === "battery-drain" || model.kind === "ramp-crossings" || model.kind === "psu-rail-gate") {
+    const w1f = runW1fSidecarChecks(entry, circuit, model);
+    return { mismatches: w1f, coreWallMs: performance.now() - started };
+  }
   const mismatches: Mismatch[] = [];
   const durationS = entry.durationS ?? DEFAULT_DURATION_S;
 
@@ -1750,7 +2032,8 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   };
 
   const sidecarChecks = runSidecarChecks(entry, circuit);
-  const allMismatches = [...cmp.mismatches, ...digitalMismatches, ...sidecarChecks.mismatches, ...cacheMismatches];
+  const analyticCoreMismatches = runAnalyticCoreChecks(entry, circuit);
+  const allMismatches = [...cmp.mismatches, ...digitalMismatches, ...sidecarChecks.mismatches, ...analyticCoreMismatches, ...cacheMismatches];
   // Gate 2e / decision 3 first: re-judge a mismatch on the entry's declared
   // analytic node/current against the analytic answer before ever asking
   // known-divergences.ts's registry about it — the two are independent
