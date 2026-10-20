@@ -139,7 +139,8 @@ export interface WasmMemoryLike {
  * v2 (W1a) adds the rows below `bo_error_len`; `bo_engine_set_params` (W1b,
  * owner decision 1) is now below too. `bo_engine_seed_memory`,
  * `bo_engine_take_eeprom_updates` and `bo_engine_eeprom_updates_ptr` (W1d,
- * owner decision 2) are the table's last three rows.
+ * owner decision 2) follow, then `bo_engine_device_state` and
+ * `bo_engine_device_state_ptr` (W1f Q11).
  */
 export interface CoreExports {
   readonly memory: WasmMemoryLike;
@@ -198,6 +199,21 @@ export interface CoreExports {
    * `deviceIndex, W, word x W` (the whole image packed as the ROM blob is).
    */
   bo_engine_eeprom_updates_ptr(h: number): number;
+  /**
+   * Collect one device's runtime state into the engine's state buffer,
+   * projected to the current time without committing anything, and return
+   * its length in f64: the kind's layout length (`>= 0`; a `bench_psu` with
+   * `iLimit = 0` is `0`, a success). `-8` for a device index out of range or
+   * a kind with no device state, `-5` with no program loaded (core/README.md's
+   * C ABI v2 table and `bo_engine_device_state` layouts, W1f Q11). Read the
+   * values with {@link CoreExports.bo_engine_device_state_ptr}.
+   */
+  bo_engine_device_state(h: number, device: number): number;
+  /**
+   * The buffer from the last {@link CoreExports.bo_engine_device_state}
+   * collect, valid until the next call on this engine.
+   */
+  bo_engine_device_state_ptr(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */
@@ -232,6 +248,8 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_engine_seed_memory",
   "bo_engine_take_eeprom_updates",
   "bo_engine_eeprom_updates_ptr",
+  "bo_engine_device_state",
+  "bo_engine_device_state_ptr",
 ] as const;
 
 // ─── The runtime WebAssembly API, resolved off globalThis — no ambient type ─

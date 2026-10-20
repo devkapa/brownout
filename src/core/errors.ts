@@ -24,6 +24,11 @@ export class CoreNotInitializedError extends Error {
  * is missing a contract export. Distinct from CoreNotInitializedError
  * ("nobody has awaited initCore() yet") and from CoreLoadError ("the
  * instance is fine, but THIS PROGRAM is not").
+ *
+ * Also thrown by a device-state read (`CoreEngine.getBatteryState`,
+ * `getIcState`) whose returned length is not the layout this package reads
+ * (core/README.md, `bo_engine_device_state`): the same TS/Rust mismatch as a
+ * wrong ABI version, found at the first read instead of at init.
  */
 export class CoreInitError extends Error {
   constructor(message: string, options?: ErrorOptions) {

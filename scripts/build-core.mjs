@@ -36,9 +36,10 @@ const LLD_SYNTHESIZED_GLOBALS = ["__data_end", "__heap_base"];
 // as a literal list rather than parsed from the markdown: it changes only
 // when the ABI version bumps or a sub-wave adds exports, at which point this
 // list, `bo_abi_version`'s return value and the contract's own table change
-// together — update all three. `bo_engine_set_params` is "v2 (W1b)" and
+// together — update all three. `bo_engine_set_params` is "v2 (W1b)",
 // `bo_engine_seed_memory`/`bo_engine_take_eeprom_updates`/
-// `bo_engine_eeprom_updates_ptr` are "v2 (W1d)"; all are implemented as of
+// `bo_engine_eeprom_updates_ptr` are "v2 (W1d)" and `bo_engine_device_state`/
+// `bo_engine_device_state_ptr` are "v2 (W1f)"; all are implemented as of
 // this list.
 const EXPECTED_FUNCTION_EXPORTS = [
   "bo_abi_version",
@@ -61,6 +62,8 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_seed_memory",
   "bo_engine_take_eeprom_updates",
   "bo_engine_eeprom_updates_ptr",
+  "bo_engine_device_state",
+  "bo_engine_device_state_ptr",
   "bo_engine_next_event_time",
   "bo_engine_next_digital_due_time",
   "bo_engine_digital_slot_count",

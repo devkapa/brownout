@@ -113,7 +113,7 @@ describe("the built module itself", () => {
     expect(WA.Module.imports(module)).toEqual([]);
   });
 
-  it("exports memory and every C ABI v2 (W1a+W1b+W1d) function", () => {
+  it("exports memory and every C ABI v2 (W1a+W1b+W1d+W1f) function", () => {
     const WA = getWasmApi();
     const module = new WA.Module(readWasmBytes());
     const names = new Set(WA.Module.exports(module).map((e: { name: string }) => e.name));
@@ -153,6 +153,9 @@ describe("the built module itself", () => {
       "bo_engine_seed_memory",
       "bo_engine_take_eeprom_updates",
       "bo_engine_eeprom_updates_ptr",
+      // W1f's row (Q11): one generic device-state pair.
+      "bo_engine_device_state",
+      "bo_engine_device_state_ptr",
     ]) {
       expect(names.has(name)).toBe(true);
     }
@@ -192,6 +195,8 @@ function fakeExports(overrides: Partial<CoreExports> = {}): CoreExports {
     bo_engine_seed_memory: () => 0,
     bo_engine_take_eeprom_updates: () => 0,
     bo_engine_eeprom_updates_ptr: () => 0,
+    bo_engine_device_state: () => 0,
+    bo_engine_device_state_ptr: () => 0,
   };
   return { ...base, ...overrides };
 }
@@ -277,6 +282,37 @@ describe("bo_engine_seed_memory / bo_engine_take_eeprom_updates / bo_engine_eepr
       });
       expect(seedResult).toBe(-5);
       expect(coreCall((exports) => exports.bo_engine_take_eeprom_updates(handle))).toBe(-5);
+    } finally {
+      coreCall((exports) => exports.bo_engine_destroy(handle));
+    }
+  });
+});
+
+// W1f's ABI row (Q11). As for W1d above, this file only proves the raw pair
+// is wired through; the layouts and the facade's reader are
+// device-state.test.ts's.
+describe("bo_engine_device_state / bo_engine_device_state_ptr — wired through CoreExports (W1f)", () => {
+  afterEach(() => {
+    __resetCoreForTest();
+  });
+
+  for (const name of ["bo_engine_device_state", "bo_engine_device_state_ptr"] as const) {
+    it(`verifyCoreExports rejects a missing ${name} export, naming it`, () => {
+      const raw = asRaw(fakeExports());
+      delete raw[name];
+      expect(() => verifyCoreExports(raw)).toThrow(CoreInitError);
+      // Word boundaries, so the bare name cannot pass by matching inside `_ptr`'s.
+      expect(() => verifyCoreExports(raw)).toThrow(new RegExp(`\\b${name}\\b`));
+    });
+  }
+
+  it("against the real built module: with no program loaded, bo_engine_device_state returns -5 with a message and the pointer is null", async () => {
+    await initCore();
+    const handle = coreCall((exports) => exports.bo_engine_create());
+    try {
+      expect(coreCall((exports) => exports.bo_engine_device_state(handle, 0))).toBe(-5);
+      expect(coreCall((exports) => readCoreErrorMessage(exports))).toMatch(/no program loaded/);
+      expect(coreCall((exports) => exports.bo_engine_device_state_ptr(handle))).toBe(0);
     } finally {
       coreCall((exports) => exports.bo_engine_destroy(handle));
     }

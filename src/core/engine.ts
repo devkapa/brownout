@@ -46,6 +46,7 @@ import {
   type CoreExports,
 } from "./wasm.js";
 import {
+  CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,
   CoreNotLoadedError,
@@ -53,7 +54,7 @@ import {
   CoreUnsupportedError,
 } from "./errors.js";
 import type { EngineReadout } from "./surface.js";
-import type { SimCircuit, SimFailure, SimWarning } from "../sim/engine/sim-engine.js";
+import type { BatteryRuntimeReadout, SimCircuit, SimFailure, SimWarning } from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import type { DisplayInfo } from "../sim/messages.js";
 
@@ -134,6 +135,30 @@ function mapLoadFailure(code: number, message: string): CoreUnsupportedError | C
   // of these mean "route this circuit elsewhere".
   return new CoreLoadError(`bo_engine_load failed (code ${code}): ${message}`);
 }
+
+/**
+ * `bo_engine_device_state`'s layouts (core/README.md, C ABI): each value's
+ * name, in index order, so a reader names values and never indexes offsets.
+ * The length is the layout's version. A later wave only appends to a kind's
+ * layout, so a returned length other than this one means the wasm and this
+ * facade were built from different contracts.
+ */
+const BATTERY_STATE_LAYOUT = [
+  "soc",
+  "openCircuitVoltageV",
+  "internalResistanceOhm",
+  "remainingCapacityCoulombs",
+  "dischargedCoulombs",
+  "rejectedRechargeCoulombs",
+] as const;
+/** A `bench_psu` with `iLimit > 0`: its regime, 0 (CV) or 2 (CC). */
+const BENCH_PSU_STATE_LAYOUT = ["reg"] as const;
+/** A `bench_psu` with `iLimit = 0`, an ideal source: nothing to read, though the collect succeeds. */
+const EMPTY_STATE_LAYOUT = [] as const;
+
+type DeviceStateLayout = readonly string[];
+/** One collect, each value under its layout name. */
+type DeviceState<L extends DeviceStateLayout> = { readonly [K in L[number]]: number };
 
 export class CoreEngine implements EngineReadout {
   private readonly _handle: number;
@@ -658,6 +683,105 @@ export class CoreEngine implements EngineReadout {
         if (device) out[device.componentId] = bytes;
       }
       return out;
+    });
+  }
+
+  /**
+   * Classic's `SimEngine.getBatteryState` (core/README.md, Readouts, W1f):
+   * `undefined` unless `componentId` is a `battery_pack` in the loaded
+   * program. The six numbers are Rust's device state, projected to the
+   * current time and committed nowhere (Rails point 6), so polling this never
+   * changes the run; the profile and the two temperature fields are the
+   * compiler's, fixed per load. A fresh object each call, in classic's field
+   * order. Not on `EngineReadout`: no host reads it; gate 1 does, through
+   * test/core/suites/adapter.ts.
+   */
+  getBatteryState(componentId: string): BatteryRuntimeReadout | undefined {
+    const compiled = this._requireLoaded();
+    const info = compiled.batteries.get(componentId);
+    if (info === undefined) return undefined;
+    const state = this._readDeviceState(compiled, componentId, BATTERY_STATE_LAYOUT);
+    return {
+      profileId: info.profileId,
+      label: info.label,
+      soc: state.soc,
+      openCircuitVoltageV: state.openCircuitVoltageV,
+      internalResistanceOhm: state.internalResistanceOhm,
+      remainingCapacityCoulombs: state.remainingCapacityCoulombs,
+      dischargedCoulombs: state.dischargedCoulombs,
+      rejectedRechargeCoulombs: state.rejectedRechargeCoulombs,
+      modelTemperatureC: info.modelTemperatureC,
+      temperatureWasClamped: info.temperatureWasClamped,
+    };
+  }
+
+  /**
+   * Classic's `SimEngine.getIcState` for the one kind W1f mirrors
+   * (core/README.md, Readouts): a `bench_psu` with `iLimit > 0` reads
+   * `{ reg }`, 0 in CV and 2 in CC. The object is fresh each call, where
+   * classic hands out its live `icState` entry; mutating either was never
+   * supported. A `bench_psu` with `iLimit = 0` has no regime, so `undefined`,
+   * as classic creates no entry. Every other kind is `undefined` too: classic's
+   * IC `icState` objects are not mirrored (W1f Q11). Not on `EngineReadout`,
+   * for the same reason as `getBatteryState`.
+   */
+  getIcState(componentId: string): Record<string, number> | undefined {
+    const compiled = this._requireLoaded();
+    const iLimit = compiled.benchPsuLimits.get(componentId);
+    if (iLimit === undefined) return undefined;
+    if (!(iLimit > 0)) {
+      // Collected anyway: the empty layout is the contract's for an ideal
+      // supply, and a value there would mean the two halves disagree.
+      this._readDeviceState(compiled, componentId, EMPTY_STATE_LAYOUT);
+      return undefined;
+    }
+    const { reg } = this._readDeviceState(compiled, componentId, BENCH_PSU_STATE_LAYOUT);
+    return { reg };
+  }
+
+  /**
+   * One device's state through `bo_engine_device_state`, under the names of
+   * `layout`: the README's layout for the device's kind, picked by the caller
+   * because a `bench_psu`'s depends on its compiled `iLimit`.
+   *
+   * A length other than the layout's means the two halves were built from
+   * different contracts, so it throws `CoreInitError`, as an ABI version
+   * mismatch does, rather than hand out values under the wrong names. A
+   * negative code cannot come from a loaded program and a kind that has a
+   * layout either; it throws `CoreLoadError` with Rust's message, as
+   * `takeEepromUpdates` does.
+   */
+  private _readDeviceState<L extends DeviceStateLayout>(
+    compiled: CompiledCircuit,
+    componentId: string,
+    layout: L,
+  ): DeviceState<L> {
+    const deviceIndex = compiled.devices.findIndex((device) => device.componentId === componentId);
+    const kind = compiled.devices[deviceIndex]?.kind;
+    return coreCall((exports) => {
+      const len = exports.bo_engine_device_state(this._handle, deviceIndex);
+      if (len < 0) {
+        throw new CoreLoadError(
+          `bo_engine_device_state failed for "${componentId}" (code ${len}): ${readCoreErrorMessage(exports)}`,
+        );
+      }
+      if (len !== layout.length) {
+        throw new CoreInitError(
+          `brownout/core: bo_engine_device_state returned ${len} value(s) for ${kind} "${componentId}", ` +
+            `but this package's TS front end reads that layout as ${layout.length} (core/README.md, ` +
+            '"bo_engine_device_state"). The TS and Rust halves ship in one npm package and must be ' +
+            "rebuilt together.",
+        );
+      }
+      const state: Record<string, number> = {};
+      if (len > 0) {
+        // `>>> 0`: see load()'s bo_alloc comment.
+        const values = copyF64(exports, exports.bo_engine_device_state_ptr(this._handle) >>> 0, len);
+        layout.forEach((name, i) => {
+          state[name] = values[i]!;
+        });
+      }
+      return state as unknown as DeviceState<L>;
     });
   }
 

@@ -6,9 +6,10 @@
 //!
 //! W1a adds the exports marked "v2 (W1a)" in the contract's ABI table:
 //! `bo_engine_set_option`, `bo_engine_next_event_time`, the digital/channel
-//! slot getters, and the harness trace. `bo_engine_set_params` (W1b) and
+//! slot getters, and the harness trace. `bo_engine_set_params` (W1b),
 //! `bo_engine_seed_memory`/`bo_engine_take_eeprom_updates`/
-//! `bo_engine_eeprom_updates_ptr` (W1d) are all implemented as of this file
+//! `bo_engine_eeprom_updates_ptr` (W1d) and `bo_engine_device_state`/
+//! `bo_engine_device_state_ptr` (W1f) are all implemented as of this file
 //! — every export name here has a matching row in `scripts/build-core.mjs`'s
 //! export audit list.
 
@@ -376,6 +377,32 @@ pub extern "C" fn bo_engine_take_eeprom_updates(h: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn bo_engine_eeprom_updates_ptr(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.eeprom_updates().as_ptr())
+}
+
+/// Collects one device's runtime state into the engine's state buffer (W1f
+/// Q11; core/README.md, `bo_engine_device_state`) and returns its length in
+/// f64, which is the kind's layout length: a `bench_psu` with `iLimit = 0`
+/// returns 0, a success with nothing to read. `-8` for an index out of range
+/// or a kind with no device state, `-5` with no program loaded. The values
+/// are projected to the current time and nothing is committed, so a host may
+/// read as often as it likes without changing the run.
+#[no_mangle]
+pub extern "C" fn bo_engine_device_state(h: u32, device: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => match engine.device_state(device) {
+            Ok(values) => values.len() as i32,
+            Err(err) => fail(&err),
+        },
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_device_state`] collect. Valid until
+/// the next call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_device_state_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.device_state_buffer().as_ptr())
 }
 
 /// Time of the earliest pending event, `+Infinity` when none. `NaN` for an
@@ -910,5 +937,169 @@ mod tests {
         assert_eq!(set_params(h, &[1.0, 0.0, 0.0]), 0); // closed -> open: a real change.
         assert_eq!(set_params(h, &[1.0, 0.0, 0.0]), 0); // open -> open again: repeats a prior state.
         assert!(bo_engine_stat(h, 7) >= 1.0, "expected at least one cache hit, got {}", bo_engine_stat(h, 7));
+    }
+
+    // --- bo_engine_device_state (W1f Q11) -----------------------------------
+
+    /// A `battery_pack` record (core/README.md, "Battery record"): `e` volts
+    /// full and `r` ohm fresh, 1 Ah, full, the generic depletion shape and
+    /// table `[(0, 0), (1, e)]`. `ocv_scale` and `temp_factor` are arguments
+    /// so a test can tell the scaled OCV from the unscaled resistance.
+    fn battery_record(component_index: f64, pos: f64, neg: f64, e: f64, r: f64, ocv_scale: f64, temp_factor: f64) -> Vec<f64> {
+        use crate::kinds::battery_param::*;
+        let mut params = [0.0; COUNT];
+        params[OCV_SCALE] = ocv_scale;
+        params[R_BASE] = r;
+        params[TEMP_FACTOR] = temp_factor;
+        params[DEP_A] = 0.5;
+        params[DEP_P] = 2.0;
+        params[DEP_K] = 0.05;
+        params[CAPACITY_AH] = 1.0;
+        params[SOC0] = 1.0;
+        let table = [2.0, 0.0, 0.0, 1.0, e];
+        let mut out = vec![crate::kinds::BATTERY_PACK as f64, component_index, 2.0];
+        out.extend_from_slice(&pin(pos));
+        out.extend_from_slice(&pin(neg));
+        out.push(COUNT as f64);
+        out.extend_from_slice(&params);
+        out.push(table.len() as f64);
+        out.extend_from_slice(&table);
+        out
+    }
+
+    fn psu_record(component_index: f64, pos: f64, neg: f64, v: f64, i_limit: f64) -> Vec<f64> {
+        let mut out = vec![crate::kinds::BENCH_PSU as f64, component_index, 2.0];
+        out.extend_from_slice(&pin(pos));
+        out.extend_from_slice(&pin(neg));
+        out.push(2.0);
+        out.push(v);
+        out.push(i_limit);
+        out.push(0.0); // blobCount
+        out
+    }
+
+    /// Exact mode (`NO_RAIL_SHORTCUT`, option key 3) must return the hub's
+    /// layouts (Rails point 9), so every layout test runs in both.
+    fn rail_options(exact: bool) -> Vec<(f64, f64)> {
+        if exact {
+            vec![(3.0, 1.0)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// One collect, read back through the pointer export as a host reads it,
+    /// or the negative code.
+    fn device_state(h: u32, device: u32) -> Result<Vec<f64>, i32> {
+        let len = bo_engine_device_state(h, device);
+        if len < 0 {
+            return Err(len);
+        }
+        let ptr = bo_engine_device_state_ptr(h);
+        assert!(!ptr.is_null(), "a successful collect leaves a readable buffer, even an empty one");
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
+    }
+
+    fn last_error() -> String {
+        let bytes = unsafe { std::slice::from_raw_parts(bo_error_ptr(), bo_error_len() as usize) };
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn loaded(options: &[(f64, f64)], node_count: f64, devices: &[Vec<f64>]) -> u32 {
+        let h = bo_engine_create();
+        assert_eq!(load(h, &build_program(node_count, options, 0.0, 0.0, devices)), 0, "{}", last_error());
+        h
+    }
+
+    #[test]
+    fn device_state_returns_each_w1f_layout_in_both_rail_modes() {
+        let _guard = lock();
+        for exact in [false, true] {
+            let options = rail_options(exact);
+            // A generic {5 V, 0.9 ohm} cell into 200 ohm, read at load: no time
+            // has passed (owner decision 8), so soc 1, OCV 5, R 0.9, 3600 C
+            // left, nothing discharged or rejected (the README's six values).
+            let h = loaded(&options, 2.0, &[battery_record(0.0, 1.0, 0.0, 5.0, 0.9, 1.0, 1.0), resistor_record(1.0, 1.0, 0.0, 200.0)]);
+            assert_eq!(device_state(h, 0), Ok(vec![1.0, 5.0, 0.9, 3600.0, 0.0, 0.0]), "battery at load, exact {exact}");
+            // Drained for a second it is still six values, and a second read
+            // is the same read (a collect commits nothing).
+            assert_eq!(bo_engine_advance(h, 1.0), 0);
+            let drained = device_state(h, 0).unwrap();
+            assert_eq!(drained.len(), 6, "exact {exact}");
+            assert!(drained[0] < 1.0 && drained[4] > 0.0, "the cell drained, exact {exact}: {drained:?}");
+            assert_eq!(device_state(h, 0), Ok(drained), "exact {exact}");
+
+            // Probe P5's limited PSU, {5 V, 0.1 A} into 10 ohm: 0.5 A wanted,
+            // so CC from load, `reg` 2.
+            let h = loaded(&options, 2.0, &[psu_record(0.0, 1.0, 0.0, 5.0, 0.1), resistor_record(1.0, 1.0, 0.0, 10.0)]);
+            assert_eq!(device_state(h, 0), Ok(vec![2.0]), "limited PSU, exact {exact}");
+
+            // An unlimited PSU is an ideal source: an empty layout, which is a
+            // success (length 0), not -8.
+            let h = loaded(&options, 2.0, &[psu_record(0.0, 1.0, 0.0, 5.0, 0.0), resistor_record(1.0, 1.0, 0.0, 10.0)]);
+            assert_eq!(bo_engine_device_state(h, 0), 0, "unlimited PSU, exact {exact}");
+            assert_eq!(device_state(h, 0), Ok(Vec::new()), "unlimited PSU, exact {exact}");
+        }
+    }
+
+    #[test]
+    fn device_state_reports_the_scaled_ocv_and_the_unscaled_resistance() {
+        // ocvScale 0.8 and tempFactor 2. Index 1 is OCV(soc) * ocvScale and
+        // index 2 is R(soc) = (rBase * dep) * tempFactor, which ocvScale never
+        // touches: at soc 1, where dep is exactly 1, 5 * 0.8 = 4 V and 0.9 * 2 =
+        // 1.8 ohm. Were the two swapped or both scaled, neither would match.
+        let _guard = lock();
+        for exact in [false, true] {
+            let h = loaded(&rail_options(exact), 2.0, &[battery_record(0.0, 1.0, 0.0, 5.0, 0.9, 0.8, 2.0), resistor_record(1.0, 1.0, 0.0, 200.0)]);
+            assert_eq!(device_state(h, 0), Ok(vec![1.0, 4.0, 1.8, 3600.0, 0.0, 0.0]), "exact {exact}");
+        }
+    }
+
+    #[test]
+    fn device_state_is_minus_8_for_a_kind_with_none_or_an_index_out_of_range() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        // An ideal source and a resistor have no W1f layout (W1g adds the
+        // resistor's thermal one).
+        for device in [0, 1] {
+            assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
+            assert!(last_error().contains("has no device state"), "device {device}: {}", last_error());
+        }
+        for device in [3, u32::MAX] {
+            assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
+            assert!(last_error().contains("out of range"), "device {device}: {}", last_error());
+        }
+    }
+
+    #[test]
+    fn device_state_empties_the_buffer_on_either_minus_8() {
+        // A host that ignores the code and reads the pointer must not get the
+        // last device's values back as this call's: a full collect first, so
+        // there is something stale to leave behind.
+        let _guard = lock();
+        let h = loaded(&[], 2.0, &[battery_record(0.0, 1.0, 0.0, 5.0, 0.9, 1.0, 1.0), resistor_record(1.0, 1.0, 0.0, 200.0)]);
+        let buffer_len = |h: u32| with_engine(h, usize::MAX, |e| e.device_state_buffer().len());
+        for (device, why) in [(1, "has no device state"), (2, "out of range"), (u32::MAX, "out of range")] {
+            assert_eq!(device_state(h, 0).map(|v| v.len()), Ok(6), "device {device}");
+            assert_eq!(buffer_len(h), 6, "device {device}");
+            assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
+            assert!(last_error().contains(why), "device {device}: {}", last_error());
+            assert_eq!(buffer_len(h), 0, "device {device}: a failed collect leaves no values");
+        }
+    }
+
+    #[test]
+    fn device_state_is_minus_5_without_a_program_and_its_pointer_is_null() {
+        let _guard = lock();
+        let empty = bo_engine_create();
+        let destroyed = bo_engine_create();
+        assert_eq!(load(destroyed, &divider_program()), 0);
+        bo_engine_destroy(destroyed);
+        for h in [empty, destroyed, 999_999] {
+            assert_eq!(bo_engine_device_state(h, 0), -5, "handle {h}");
+            assert!(last_error().contains("unknown or no program loaded"), "handle {h}: {}", last_error());
+            assert!(bo_engine_device_state_ptr(h).is_null(), "handle {h}");
+        }
     }
 }
