@@ -1475,6 +1475,75 @@ export function thermalProfileForComponent(comp: SimComponent): ThermalDevicePro
   return resolved.source === "exact-catalog-uid" ? resolved.profile : undefined;
 }
 
+export interface BatteryModelResolution {
+  profile: BatteryPhysicsProfile;
+  nominalVoltageScale: number;
+  referenceInternalResistanceOhm: number | undefined;
+}
+
+// The body of `_batteryModel` below, without its per-component cache.
+// Exported for compile/sources.ts (core/README.md's Battery record: the
+// compiler reads the model classic itself builds, never a re-derived one)
+// and called by `_batteryModel`, so a change here changes both. A pure
+// function of `comp` (identity through `partFor`, then `comp.params`).
+export function batteryModelForComponent(comp: SimComponent): BatteryModelResolution {
+  // Only an explicit identity may contribute catalog defaults. Identity-less
+  // legacy/custom sources stay generic and preserve their authored ideality.
+  const defaults = comp.catalogUid ? partFor(comp)?.default_params : undefined;
+  const configuredVoltage = Math.max(
+    0,
+    Number(comp.params.voltage ?? defaults?.voltage ?? 5),
+  );
+  const rawResistance = comp.params.rInternal ?? defaults?.rInternal;
+  const configuredResistance = rawResistance === undefined
+    ? undefined
+    : Math.max(0, Number(rawResistance));
+  const resolution = resolveBatteryProfile({
+    // Missing identity intentionally stays generic; never infer chemistry
+    // from kind or catalog ordering for a legacy/custom source.
+    catalogUid: comp.catalogUid,
+    fallbackNominalVoltageV: configuredVoltage,
+    fallbackCapacityAh: Number(comp.params.capacityAh ?? 1),
+    fallbackFreshInternalResistanceOhm: configuredResistance ?? 0,
+  });
+  const capacityAh = Math.max(
+    1e-12,
+    Number(comp.params.capacityAh ?? resolution.profile.referenceCapacityAh),
+  );
+  const profile = capacityAh === resolution.profile.referenceCapacityAh
+    ? resolution.profile
+    : { ...resolution.profile, referenceCapacityAh: capacityAh };
+  return {
+    profile,
+    nominalVoltageScale: profile.nominalVoltageV > 0
+      ? configuredVoltage / profile.nominalVoltageV
+      : 1,
+    referenceInternalResistanceOhm: configuredResistance,
+  };
+}
+
+// The authored initial charge, before `createBatteryState` clamps it (a NaN
+// stays NaN here and becomes 0 there). The first line of
+// `_batteryOperatingPoint`, exported for the same compiler.
+export function authoredBatteryCharge(comp: SimComponent): number {
+  return Math.max(0, Math.min(1, Number(comp.params.charge ?? 1)));
+}
+
+// The operating-point call of `_batteryOperatingPoint` below, exported for the
+// same compiler (which needs the load's `modelTemperatureC` and
+// `temperatureWasClamped`, constant per load).
+export function batteryOperatingPointFor(
+  model: BatteryModelResolution,
+  soc: number,
+  ambientTemperatureC: number,
+) {
+  return batteryOperatingPoint(model.profile, {
+    soc,
+    ambientTemperatureC,
+    referenceInternalResistanceOhm: model.referenceInternalResistanceOhm,
+  });
+}
+
 export function thresholdsFor(specs: ElectricalSpecs | undefined, vSupply: number): LogicThresholds {
   const family = specs?.logic_family ?? "";
   // HC-CMOS and CMOS-4000 both use 30%/70% supply-ratioed thresholds.
@@ -1733,11 +1802,7 @@ export class SimEngine {
   private _openPinsByComp = new Map<string, Set<string>>();
   private _floatingNoiseCache = new Map<string, Map<string, { bucket: number; n: number }>>();
   private _thermalProfileCache = new Map<string, ThermalDeviceProfile | undefined>();
-  private _batteryModelCache = new Map<string, {
-    profile: BatteryPhysicsProfile;
-    nominalVoltageScale: number;
-    referenceInternalResistanceOhm: number | undefined;
-  }>();
+  private _batteryModelCache = new Map<string, BatteryModelResolution>();
   private _hasNe555 = false;
   private _hasHcsr04 = false;
   private _ne555Components: SimComponent[] = [];
@@ -1945,52 +2010,16 @@ export class SimEngine {
     return profile;
   }
 
-  private _batteryModel(comp: SimComponent): {
-    profile: BatteryPhysicsProfile;
-    nominalVoltageScale: number;
-    referenceInternalResistanceOhm: number | undefined;
-  } {
+  private _batteryModel(comp: SimComponent): BatteryModelResolution {
     const cached = this._batteryModelCache.get(comp.id);
     if (cached) return cached;
-    // Only an explicit identity may contribute catalog defaults. Identity-less
-    // legacy/custom sources stay generic and preserve their authored ideality.
-    const defaults = comp.catalogUid ? partFor(comp)?.default_params : undefined;
-    const configuredVoltage = Math.max(
-      0,
-      Number(comp.params.voltage ?? defaults?.voltage ?? 5),
-    );
-    const rawResistance = comp.params.rInternal ?? defaults?.rInternal;
-    const configuredResistance = rawResistance === undefined
-      ? undefined
-      : Math.max(0, Number(rawResistance));
-    const resolution = resolveBatteryProfile({
-      // Missing identity intentionally stays generic; never infer chemistry
-      // from kind or catalog ordering for a legacy/custom source.
-      catalogUid: comp.catalogUid,
-      fallbackNominalVoltageV: configuredVoltage,
-      fallbackCapacityAh: Number(comp.params.capacityAh ?? 1),
-      fallbackFreshInternalResistanceOhm: configuredResistance ?? 0,
-    });
-    const capacityAh = Math.max(
-      1e-12,
-      Number(comp.params.capacityAh ?? resolution.profile.referenceCapacityAh),
-    );
-    const profile = capacityAh === resolution.profile.referenceCapacityAh
-      ? resolution.profile
-      : { ...resolution.profile, referenceCapacityAh: capacityAh };
-    const model = {
-      profile,
-      nominalVoltageScale: profile.nominalVoltageV > 0
-        ? configuredVoltage / profile.nominalVoltageV
-        : 1,
-      referenceInternalResistanceOhm: configuredResistance,
-    };
+    const model = batteryModelForComponent(comp);
     this._batteryModelCache.set(comp.id, model);
     return model;
   }
 
   private _batteryOperatingPoint(comp: SimComponent) {
-    const authoredCharge = Math.max(0, Math.min(1, Number(comp.params.charge ?? 1)));
+    const authoredCharge = authoredBatteryCharge(comp);
     const state = this.state.batteries.get(comp.id)
       ?? {
         ...createBatteryState(authoredCharge),
@@ -1998,11 +2027,7 @@ export class SimEngine {
         catalogUid: comp.catalogUid ?? null,
       };
     const model = this._batteryModel(comp);
-    const point = batteryOperatingPoint(model.profile, {
-      soc: state.soc,
-      ambientTemperatureC: this._ambientTempC(),
-      referenceInternalResistanceOhm: model.referenceInternalResistanceOhm,
-    });
+    const point = batteryOperatingPointFor(model, state.soc, this._ambientTempC());
     return { state, ...model, point };
   }
 
@@ -2788,7 +2813,7 @@ export class SimEngine {
       }
 
       if (c.kind === "battery_pack") {
-        const authoredCharge = Math.max(0, Math.min(1, Number(c.params.charge ?? 1)));
+        const authoredCharge = authoredBatteryCharge(c);
         const catalogUid = c.catalogUid ?? null;
         const previous = prevBatteries.get(c.id);
         this.state.batteries.set(

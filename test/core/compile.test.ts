@@ -610,7 +610,11 @@ describe("compileCircuit — parameter resolution", () => {
     ]);
     const compiled = compileOk(c);
     const decoded = decodeProgram(compiled.program);
-    for (const device of decoded.devices) {
+    // The two floating resistors are isolated sections, so the program also
+    // carries section_anchor records (W1f); only the resistors' own are checked.
+    const resistors = decoded.devices.filter((device) => device.kindCode === CORE_KIND_CODE.resistor);
+    expect(resistors).toHaveLength(2);
+    for (const device of resistors) {
       expect(device.params).toEqual([1e-3]);
     }
   });
@@ -635,12 +639,16 @@ describe("compileCircuit — parameter resolution", () => {
       part("vs1", "voltage_source", ["pos", "neg"], { voltage: 5 }),
     ]);
     const compiled = compileOk(c);
-    expect(compiled.devices).toEqual([
+    // Isolated sections add section_anchor records after every component's own
+    // (W1f; compile-sources.test.ts covers them), so the component records are
+    // the ones that are not anchors.
+    expect(compiled.devices.filter((d) => d.kind !== "section_anchor")).toEqual([
       { componentId: "r1", kind: "resistor" },
       { componentId: "vs1", kind: "voltage_source" },
     ]);
     const decoded = decodeProgram(compiled.program);
-    expect(decoded.devices.map((d) => d.componentIndex)).toEqual([1, 2]); // ground is components[0]
+    const componentRecords = decoded.devices.filter((d) => d.kindCode !== CORE_KIND_CODE.section_anchor);
+    expect(componentRecords.map((d) => d.componentIndex)).toEqual([1, 2]); // ground is components[0]
   });
 });
 

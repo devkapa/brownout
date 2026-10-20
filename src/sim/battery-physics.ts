@@ -402,21 +402,31 @@ export function batteryOpenCircuitVoltageV(
   return curve[curve.length - 1].voltageV;
 }
 
-export function batteryInternalResistanceOhm(
+/**
+ * The resistance a battery starts from before depletion and temperature act
+ * on it: the authored reference when it is finite and non-negative, else the
+ * profile's fresh value. Split out of batteryInternalResistanceOhm so a
+ * compiler can read the same `rBase` the engine multiplies, not a copy.
+ */
+export function batteryBaseResistanceOhm(
   profile: BatteryPhysicsProfile,
-  socInput: number,
-  ambientTemperatureC = profile.referenceTemperatureC,
   referenceInternalResistanceOhm = profile.freshInternalResistanceOhm,
 ): number {
-  const soc = clampSoc(socInput);
-  const baseResistance = finiteNonNegative(
+  return finiteNonNegative(
     referenceInternalResistanceOhm,
     profile.freshInternalResistanceOhm,
   );
-  const { depletionScale, depletionExponent, kneeSoc } = profile.resistance;
-  const depletionFactor =
-    1 + depletionScale * Math.pow(1 - soc, depletionExponent) / (soc + kneeSoc);
+}
 
+/**
+ * The temperature multiplier of batteryInternalResistanceOhm, which is
+ * constant while the ambient is. Split out for the same reason as
+ * batteryBaseResistanceOhm.
+ */
+export function batteryTemperatureFactor(
+  profile: BatteryPhysicsProfile,
+  ambientTemperatureC = profile.referenceTemperatureC,
+): number {
   const temperature = Number.isFinite(ambientTemperatureC)
     ? clamp(
         ambientTemperatureC,
@@ -428,12 +438,25 @@ export function batteryInternalResistanceOhm(
     profile.resistance.temperatureCoefficientPerC *
       (profile.referenceTemperatureC - temperature),
   );
-  const temperatureFactor = Math.max(
+  return Math.max(
     profile.resistance.minimumTemperatureFactor,
     rawTemperatureFactor,
   );
+}
 
-  return baseResistance * depletionFactor * temperatureFactor;
+export function batteryInternalResistanceOhm(
+  profile: BatteryPhysicsProfile,
+  socInput: number,
+  ambientTemperatureC = profile.referenceTemperatureC,
+  referenceInternalResistanceOhm = profile.freshInternalResistanceOhm,
+): number {
+  const soc = clampSoc(socInput);
+  const baseResistance = batteryBaseResistanceOhm(profile, referenceInternalResistanceOhm);
+  const { depletionScale, depletionExponent, kneeSoc } = profile.resistance;
+  const depletionFactor =
+    1 + depletionScale * Math.pow(1 - soc, depletionExponent) / (soc + kneeSoc);
+
+  return baseResistance * depletionFactor * batteryTemperatureFactor(profile, ambientTemperatureC);
 }
 
 export function createBatteryState(initialSoc = 1): BatteryDynamicState {

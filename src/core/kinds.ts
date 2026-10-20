@@ -108,6 +108,8 @@ export const CORE_KIND_CODES = {
   clock_gen: 23,
   pulse_source: 24,
   pulse_gen: 25,
+  // Synthetic: emitted by the compiler for each isolated section, never a component kind (core/README.md, "Section anchor record").
+  section_anchor: 26,
   led: 30,
   rgb_led: 31,
   bicolor_led: 32,
@@ -147,8 +149,12 @@ export interface CoreRecordShape {
   /** Maximum pin count; equal to `pins` except where the count follows a param (dip_switch). */
   pinsMax: number;
   params: number;
-  /** Exact blob length, or a floor for variable-length contents. */
-  blob: { exact: number } | { atLeast: number };
+  /**
+   * Exact blob length, a floor for variable-length contents, or a table:
+   * `blob[0] = n` and the blob holds `1 + 2n` values (core/src/kinds.rs
+   * `BlobShape::Table`, the battery's OCV table).
+   */
+  blob: { exact: number } | { atLeast: number } | { table: true };
   /** Param indices `bo_engine_set_params` may change after load (owner decision 1). */
   liveParams: readonly number[];
   /** Digital readout slots a record publishes, starting at `blob[0]` (core/README.md, "Slot indices"). 0 or absent: none. */
@@ -221,6 +227,43 @@ export const CORE_BICOLOR_LED_PARAM_COUNT = 5;
 export const CORE_SEG7_PARAM = { vf: 0, iRated: 1 } as const;
 export const CORE_SEG7_PARAM_COUNT = 2;
 
+/**
+ * The battery record's params, in order (core/README.md, "Battery record"; core/src/kinds.rs `battery_param`).
+ * The blob is the OCV table `[n, soc_0, v_0, ..., soc_{n-1}, v_{n-1}]` (`BlobShape::Table`).
+ */
+export const CORE_BATTERY_PARAM = {
+  ocvScale: 0,
+  rBase: 1,
+  tempFactor: 2,
+  depA: 3,
+  depP: 4,
+  depK: 5,
+  capacityAh: 6,
+  soc0: 7,
+  profileCode: 8,
+} as const;
+export const CORE_BATTERY_PARAM_COUNT = 9;
+
+/** `profileCode` by classic's profile id (core/README.md, "Battery record" index 8). Rust ignores it; TS reads the id and label from the profile. */
+export const CORE_BATTERY_PROFILE_CODE: Readonly<Record<string, number>> = {
+  "generic-primary": 0,
+  "alkaline-aa-4s": 1,
+  "alkaline-pp3-9v": 2,
+  "lithium-cr2032": 3,
+};
+
+/** The bench PSU's params (core/README.md, "Bench PSU record"; core/src/kinds.rs). `iLimit` 0 is an ideal source. */
+export const CORE_BENCH_PSU_PARAM = { V: 0, iLimit: 1 } as const;
+export const CORE_BENCH_PSU_PARAM_COUNT = 2;
+
+/** The clock's params (core/README.md, "Waveform source records"). */
+export const CORE_CLOCK_PARAM = { freq: 0, duty: 1, vHigh: 2, vLow: 3, delay: 4 } as const;
+export const CORE_CLOCK_PARAM_COUNT = 5;
+
+/** The pulse source's params (core/README.md, "Waveform source records"). `per` 0 is a one-shot. */
+export const CORE_PULSE_PARAM = { v1: 0, v2: 1, td: 2, tr: 3, tf: 4, pw: 5, per: 6 } as const;
+export const CORE_PULSE_PARAM_COUNT = 7;
+
 /** An LED-family shape (codes 30-34): `pins` by the README's table, `params`, and `channels` slots whose base is the blob's only value. */
 function ledShape(pins: number, params: number, channels: number): CoreRecordShape {
   return { pins, pinsMax: pins, params, blob: { exact: channels > 0 ? 1 : 0 }, liveParams: [], channelSlots: channels };
@@ -250,6 +293,14 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.spdt_switch, { pins: 3, pinsMax: 3, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.dip_switch, { pins: 4, pinsMax: 16, params: 9, blob: { exact: 0 }, liveParams: [1, 2, 3, 4, 5, 6, 7, 8] }],
+  // W1f sources (core/README.md, "Source records"): positional pins except the battery's `pos`/`neg`; no live params.
+  [CORE_KIND_CODES.battery_pack, { pins: 2, pinsMax: 2, params: CORE_BATTERY_PARAM_COUNT, blob: { table: true }, liveParams: [] }],
+  [CORE_KIND_CODES.bench_psu, { pins: 2, pinsMax: 2, params: CORE_BENCH_PSU_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.clock, { pins: 2, pinsMax: 2, params: CORE_CLOCK_PARAM_COUNT, blob: { exact: 1 }, liveParams: [], digitalSlots: 1 }],
+  [CORE_KIND_CODES.clock_gen, { pins: 2, pinsMax: 2, params: CORE_CLOCK_PARAM_COUNT, blob: { exact: 1 }, liveParams: [], digitalSlots: 1 }],
+  [CORE_KIND_CODES.pulse_source, { pins: 2, pinsMax: 2, params: CORE_PULSE_PARAM_COUNT, blob: { exact: 1 }, liveParams: [], digitalSlots: 1 }],
+  [CORE_KIND_CODES.pulse_gen, { pins: 2, pinsMax: 2, params: CORE_PULSE_PARAM_COUNT, blob: { exact: 1 }, liveParams: [], digitalSlots: 1 }],
+  [CORE_KIND_CODES.section_anchor, { pins: 1, pinsMax: 1, params: 0, blob: { exact: 0 }, liveParams: [] }],
   [CORE_KIND_CODES.led, ledShape(2, CORE_LED_PARAM_COUNT, 0)],
   [CORE_KIND_CODES.rgb_led, ledShape(4, CORE_RGB_LED_PARAM_COUNT, 3)],
   [CORE_KIND_CODES.bicolor_led, ledShape(3, CORE_BICOLOR_LED_PARAM_COUNT, 2)],

@@ -32,7 +32,7 @@
  * import them from this file.
  */
 
-import { CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
+import { CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName, type CoreRecordShape } from "./kinds.js";
 
 /** "BOC1" read as one big-endian u32. Stamped at both the start and the end of every program. */
 export const CORE_FORMAT_MAGIC = 0x424f4331;
@@ -111,6 +111,33 @@ function optionValueError(key: number, value: number): string | null {
       // Unreachable once the caller's "known key" check has already run.
       return null;
   }
+}
+
+/**
+ * A blob's length against its kind's shape (core/src/kinds.rs `BlobShape`).
+ * A table (W1f's OCV table) is `[n, ...2n values]`: the length must be odd
+ * here, and `n` itself is checked against it once the values are known
+ * (`tableBlobError`).
+ */
+function blobCountOk(shape: CoreRecordShape["blob"], count: number): boolean {
+  if ("exact" in shape) return count === shape.exact;
+  if ("atLeast" in shape) return count >= shape.atLeast;
+  return count >= 1 && count % 2 === 1;
+}
+
+function blobExpectation(shape: CoreRecordShape["blob"]): string {
+  if ("exact" in shape) return `exactly ${shape.exact}`;
+  if ("atLeast" in shape) return `at least ${shape.atLeast}`;
+  return "1 + 2n (a table)";
+}
+
+/** The table shape's own rule: `blob[0] = n` is a non-negative integer and the length is `1 + 2n`. The value rules (`n >= 1`, monotone socs) are the kind's, in Rust. */
+function tableBlobError(blob: readonly number[]): string | null {
+  const n = blob[0];
+  if (n === undefined || !Number.isInteger(n) || n < 0 || blob.length !== 1 + 2 * n) {
+    return `blob[0] (n) is ${n}, expected a non-negative integer with blob length 1 + 2n = ${blob.length}`;
+  }
+  return null;
 }
 
 /** Bit 0 of a pin record's `flags` word (core/README.md's pin-record bullet). */
@@ -263,12 +290,14 @@ export class ProgramWriter {
       );
     }
     const blob = device.blob ?? [];
-    const blobOk = "exact" in shape.blob ? blob.length === shape.blob.exact : blob.length >= shape.blob.atLeast;
-    if (!blobOk) {
-      const expected = "exact" in shape.blob ? `exactly ${shape.blob.exact}` : `at least ${shape.blob.atLeast}`;
+    if (!blobCountOk(shape.blob, blob.length)) {
       throw new Error(
-        `ProgramWriter.addDevice: kind code ${device.kindCode} takes a blob of ${expected} value(s), got ${blob.length}`,
+        `ProgramWriter.addDevice: kind code ${device.kindCode} takes a blob of ${blobExpectation(shape.blob)} value(s), got ${blob.length}`,
       );
+    }
+    if ("table" in shape.blob) {
+      const tableError = tableBlobError(blob);
+      if (tableError) throw new Error(`ProgramWriter.addDevice: kind code ${device.kindCode}'s ${tableError}`);
     }
     if (shape.digitalSlots) {
       // blob[0] itself must be finite (checked below with every other blob
@@ -563,11 +592,9 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
     }
 
     const blobCount = readCount(`device[${d}].blobCount`);
-    const blobOk = "exact" in shape.blob ? blobCount === shape.blob.exact : blobCount >= shape.blob.atLeast;
-    if (!blobOk) {
-      const expected = "exact" in shape.blob ? `exactly ${shape.blob.exact}` : `at least ${shape.blob.atLeast}`;
+    if (!blobCountOk(shape.blob, blobCount)) {
       throw new Error(
-        `decodeProgram: device[${d}] (${kindName}) has blobCount ${blobCount}, expected ${expected}`,
+        `decodeProgram: device[${d}] (${kindName}) has blobCount ${blobCount}, expected ${blobExpectation(shape.blob)}`,
       );
     }
     const blob: number[] = [];
@@ -577,6 +604,10 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
         throw new Error(`decodeProgram: device[${d}].blob[${b}] must be finite, got ${value}`);
       }
       blob.push(value);
+    }
+    if ("table" in shape.blob) {
+      const tableError = tableBlobError(blob);
+      if (tableError) throw new Error(`decodeProgram: device[${d}] (${kindName}) has ${tableError}`);
     }
 
     // A kind that publishes digital readouts (W1c's combinational ICs, so

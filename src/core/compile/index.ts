@@ -22,7 +22,7 @@
 import type { Net } from "../../sim/engine/graph.js";
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { CORE_OPTION_KEYS, ProgramWriter, type ProgramOption } from "../format.js";
-import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES } from "../kinds.js";
+import { CORE_BENCH_PSU_PARAM, CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES } from "../kinds.js";
 import { buildCoreNodes, buildPinRecord, computeOpenPinKeys, corePinKey, type CoreNodeBuild } from "./topology.js";
 import {
   compileCapacitor,
@@ -37,10 +37,21 @@ import { compileRegisterIc } from "./registers.js";
 import { compileMemoryIc } from "./memories.js";
 import { compileBicolorLed, compileLed, compileRgbLed, compileSeg7 } from "./leds.js";
 import { compileNe555 } from "./ne555.js";
+import {
+  compileBatteryPack,
+  compileBenchPsu,
+  compileClock,
+  compilePulseSource,
+  duplicateComponentIds,
+  findSectionAnchors,
+  unknownComponentIds,
+  type CompiledBatteryInfo,
+} from "./sources.js";
 
 export { buildCoreNodes, corePinKey } from "./topology.js";
 export type { CoreNodeBuild } from "./topology.js";
 export type { LiveParamSpec } from "./passives.js";
+export type { CompiledBatteryInfo, SectionAnchor } from "./sources.js";
 
 /**
  * Every kind's live-param spec (owner decision 1, `bo_engine_set_params`),
@@ -158,8 +169,25 @@ export interface CompiledCircuit {
   netIdOfNode: readonly (string | null)[];
   /** Key `${componentId}\u0000${pinId}`. */
   pinNode: ReadonlyMap<string, number>;
-  /** One entry per device record, in record order (== component order, skipping `ground`). */
+  /**
+   * One entry per device record, in record order: the components in circuit
+   * order (skipping `ground`), then one `section_anchor` entry per isolated
+   * section. An anchor is no component, so its `componentId` is the synthetic
+   * `section_anchor:<node>`, which no id-keyed lookup can mistake for the
+   * component that owns its pin (the record's `componentIndex` names that
+   * one); it gets no `elementI` key (core/README.md, "Section anchor record").
+   */
   devices: ReadonlyArray<{ componentId: string; kind: string }>;
+  /** Per `battery_pack` component id: the statics `getBatteryState` adds to the device state (core/README.md, "Readouts"). */
+  batteries: ReadonlyMap<string, CompiledBatteryInfo>;
+  /**
+   * Per `bench_psu` component id: its record's `iLimit`, 0 for an ideal
+   * source. It decides which device-state layout `getIcState` expects back
+   * (core/README.md, `bo_engine_device_state`: one value, `reg`, when `> 0`;
+   * none otherwise), so the facade reads the value Rust was given rather than
+   * re-deriving it from the circuit.
+   */
+  benchPsuLimits: ReadonlyMap<string, number>;
   /** Digital slot `i` -> `digitalState` key. Empty unless the circuit contains a kind that claims one — W1c's combinational ICs are the first (compile/ics.ts). */
   digitalSlots: readonly DigitalSlotKey[];
   /** Channel slot `j` -> `(componentId, channel)`. Empty until a compiled kind claims one (none through W1c). */
@@ -194,9 +222,11 @@ export type CompileResult =
 /**
  * Compiles `circuit` into a core v2 program, or collects every reason it
  * can't be compiled and returns them instead. Never throws for a user
- * circuit — an unsupported kind, a bad parameter, or (new in v2) a
- * non-finite `circuit.environment.temperatureC` is data about the circuit,
- * not a bug in this function, so all three are reported (sorted,
+ * circuit — an unsupported kind, a bad parameter, a non-finite
+ * `circuit.environment.temperatureC`, a wire naming a component the
+ * circuit does not hold (an ownerless net, which has no component to own a
+ * section anchor), or a component id two components share is data about the
+ * circuit, not a bug in this function, so all five are reported (sorted,
  * deduplicated) rather than raised.
  *
  * `implementedKinds` defaults to CORE_IMPLEMENTED_KINDS. The parameter
@@ -223,6 +253,19 @@ export function compileCircuit(
   const built = buildCoreNodes(circuit);
   const openKeys = computeOpenPinKeys(circuit, built.nets);
 
+  // A net no existing component owns cannot take a section anchor's
+  // `componentIndex`: decline it here, where the nets are first read, so the
+  // anchor pass below never meets one (compile/sources.ts, unknownComponentIds).
+  for (const componentId of unknownComponentIds(circuit, built)) {
+    reasons.add(`malformed:${componentId}:unknown-component`);
+  }
+  // Every table below is keyed by component id, and classic's load is too: a
+  // shared id aliases pins and state, and a shared source id leaves classic's
+  // matrix singular (compile/sources.ts, duplicateComponentIds).
+  for (const componentId of duplicateComponentIds(circuit)) {
+    reasons.add(`malformed:${componentId}:duplicate-id`);
+  }
+
   const rawAmbientC = circuit.environment?.temperatureC;
   const ambientC = rawAmbientC === undefined ? AMBIENT_DEFAULT_C : rawAmbientC;
   if (!Number.isFinite(ambientC)) {
@@ -238,6 +281,8 @@ export function compileCircuit(
   const devices: { componentId: string; kind: string }[] = [];
   const digitalSlots = new SlotAllocator<DigitalSlotKey>();
   const channelSlots = new SlotAllocator<ChannelSlotKey>();
+  const batteries = new Map<string, CompiledBatteryInfo>();
+  const benchPsuLimits = new Map<string, number>();
 
   const pin = (kind: string, componentId: string, pinId: string) =>
     buildPinRecord(built, openKeys, kind, componentId, pinId);
@@ -377,6 +422,79 @@ export function compileCircuit(
           componentIndex,
           pins: result.pins,
           params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // `battery_pack` (code 20): by-id pins `pos`/`neg`, the 9 model params and
+      // the OCV table blob (compile/sources.ts). No slots, no live params.
+      case "battery_pack": {
+        const result = compileBatteryPack(
+          built,
+          openKeys,
+          component,
+          // A non-finite ambient is already a reason above; the placeholder keeps the model's own math finite.
+          Number.isFinite(ambientC) ? ambientC : AMBIENT_DEFAULT_C,
+        );
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.battery_pack,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: result.blob,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        batteries.set(component.id, result.info);
+        return;
+      }
+
+      // `bench_psu` (code 21): positional pins, `[V, iLimit]`, no blob.
+      case "bench_psu": {
+        const result = compileBenchPsu(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES.bench_psu,
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+        });
+        devices.push({ componentId: component.id, kind: component.kind });
+        benchPsuLimits.set(component.id, result.params[CORE_BENCH_PSU_PARAM.iLimit]!);
+        return;
+      }
+
+      // `clock`, `clock_gen`, `pulse_source`, `pulse_gen` (codes 22-25):
+      // positional pins and one digital slot each, keyed by the bare
+      // component id. This dispatch's own job is the slot allocation, as for
+      // the ICs above (compile/sources.ts owns the params and the declines).
+      case "clock":
+      case "clock_gen":
+      case "pulse_source":
+      case "pulse_gen": {
+        const result =
+          component.kind === "clock" || component.kind === "clock_gen"
+            ? compileClock(built, openKeys, component)
+            : compilePulseSource(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        const slotBase = digitalSlots.count;
+        for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
+        writer.addDevice({
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+          blob: [slotBase],
         });
         devices.push({ componentId: component.id, kind: component.kind });
         return;
@@ -568,6 +686,20 @@ export function compileCircuit(
     return { ok: false, reasons: [...reasons].sort() };
   }
 
+  // One `section_anchor` record per isolated section, after every component
+  // record, in ascending anchor node (core/README.md, "Section anchor
+  // record"). Reached only by a circuit that compiled: a declined one returns
+  // reasons and no program above, so it carries no anchors either.
+  for (const anchor of findSectionAnchors(circuit, built)) {
+    writer.addDevice({
+      kindCode: CORE_KIND_CODES.section_anchor,
+      componentIndex: anchor.componentIndex,
+      pins: [buildPinRecord(built, openKeys, anchor.kind, anchor.componentId, anchor.pinId)],
+      params: [],
+    });
+    devices.push({ componentId: `section_anchor:${anchor.node}`, kind: "section_anchor" });
+  }
+
   return {
     ok: true,
     compiled: {
@@ -577,6 +709,8 @@ export function compileCircuit(
       netIdOfNode: built.netIdOfNode,
       pinNode: built.pinNode,
       devices,
+      batteries,
+      benchPsuLimits,
       digitalSlots: digitalSlots.table,
       channelSlots: channelSlots.table,
       elementIKeys: classicElementIKeys(circuit, built.nodeCount),
