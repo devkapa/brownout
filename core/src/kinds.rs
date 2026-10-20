@@ -23,6 +23,9 @@ pub const CLOCK: u32 = 22;
 pub const CLOCK_GEN: u32 = 23;
 pub const PULSE_SOURCE: u32 = 24;
 pub const PULSE_GEN: u32 = 25;
+/// Synthetic: the compiler emits one per isolated section, never a component
+/// kind (core/README.md, "Section anchor record").
+pub const SECTION_ANCHOR: u32 = 26;
 
 pub const LED: u32 = 30;
 pub const RGB_LED: u32 = 31;
@@ -63,6 +66,10 @@ pub enum BlobShape {
     Exact(usize),
     /// Variable length with a floor, for contents such as ROM bytes.
     AtLeast(usize),
+    /// `blob[0] = n`, then `n` pairs: length exactly `1 + 2n` with `n >= 1`
+    /// (the battery's OCV table). The reader checks this shape; the kind's
+    /// `check` checks the values.
+    Table,
 }
 
 /// The record shape the program reader enforces for one kind.
@@ -417,6 +424,122 @@ fn ne555_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), Str
     Ok(())
 }
 
+/// `battery_pack` params (core/README.md, "Battery record"). The last is
+/// the profile code, which Rust ignores and the facade reads back.
+pub mod battery_param {
+    pub const OCV_SCALE: usize = 0;
+    pub const R_BASE: usize = 1;
+    pub const TEMP_FACTOR: usize = 2;
+    pub const DEP_A: usize = 3;
+    pub const DEP_P: usize = 4;
+    pub const DEP_K: usize = 5;
+    pub const CAPACITY_AH: usize = 6;
+    pub const SOC0: usize = 7;
+    pub const PROFILE_CODE: usize = 8;
+    pub const COUNT: usize = 9;
+}
+
+/// The smallest capacity the compiler emits (`max(1e-12, ...)`), which keeps
+/// `capacityAh * 3600` a divisor.
+pub const BATTERY_MIN_CAPACITY_AH: f64 = 1e-12;
+/// Profile codes: 0 generic, 1 alkaline-aa-4s, 2 alkaline-pp3-9v, 3
+/// lithium-cr2032.
+const BATTERY_MAX_PROFILE_CODE: u32 = 3;
+
+/// The values of a `battery_pack` record on top of the shape check (core/README.md,
+/// "Battery record", Validation). Written to stand alone: it does not lean on
+/// the reader having checked the blob's length.
+///
+/// `depP >= 0` is not in the contract's list. A negative exponent makes
+/// `(1 - soc)^depP` infinite at full charge, so `R` would be infinite; no
+/// profile has one.
+fn battery_check(_: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    use battery_param::*;
+    if !(params[OCV_SCALE] >= 0.0) {
+        return Err(format!("battery ocvScale must be >= 0, got {}", params[OCV_SCALE]));
+    }
+    if !(params[R_BASE] >= 0.0) {
+        return Err(format!("battery rBase must be >= 0, got {}", params[R_BASE]));
+    }
+    if !(params[TEMP_FACTOR] > 0.0) {
+        return Err(format!("battery tempFactor must be > 0, got {}", params[TEMP_FACTOR]));
+    }
+    if !(params[DEP_A] >= 0.0) {
+        return Err(format!("battery depA must be >= 0, got {}", params[DEP_A]));
+    }
+    if !(params[DEP_P] >= 0.0) {
+        return Err(format!("battery depP must be >= 0, got {}", params[DEP_P]));
+    }
+    if !(params[DEP_K] > 0.0) {
+        return Err(format!("battery depK must be > 0, got {}", params[DEP_K]));
+    }
+    if !(params[CAPACITY_AH] >= BATTERY_MIN_CAPACITY_AH) {
+        return Err(format!("battery capacityAh must be >= {BATTERY_MIN_CAPACITY_AH:e}, got {}", params[CAPACITY_AH]));
+    }
+    if !(0.0..=1.0).contains(&params[SOC0]) {
+        return Err(format!("battery soc0 must be in [0, 1], got {}", params[SOC0]));
+    }
+    if !is_code_in(params[PROFILE_CODE], BATTERY_MAX_PROFILE_CODE) {
+        return Err(format!("battery profileCode must be an integer in [0, {BATTERY_MAX_PROFILE_CODE}], got {}", params[PROFILE_CODE]));
+    }
+    let n = blob.first().copied().ok_or_else(|| "battery OCV table is empty".to_string())?;
+    if !(n >= 1.0 && n.fract() == 0.0) {
+        return Err(format!("battery OCV table point count must be a positive integer, got {n}"));
+    }
+    if (blob.len() - 1) as f64 != 2.0 * n {
+        return Err(format!("battery OCV table of {n} point(s) needs {} blob value(s), got {}", 1.0 + 2.0 * n, blob.len()));
+    }
+    let mut previous = 0.0;
+    for (i, pair) in blob[1..].chunks_exact(2).enumerate() {
+        let soc = pair[0];
+        if !(0.0..=1.0).contains(&soc) {
+            return Err(format!("battery OCV table soc_{i} must be in [0, 1], got {soc}"));
+        }
+        if soc < previous {
+            return Err(format!("battery OCV table soc_{i} = {soc} is below soc_{} = {previous}", i.saturating_sub(1)));
+        }
+        previous = soc;
+    }
+    Ok(())
+}
+
+/// `bench_psu` params `[V, iLimit]`. `iLimit` is 0 for an ideal source and
+/// positive for a current-limited one; the compiler emits 0 for anything
+/// that is not `> 0`, so a negative value has no encoding here.
+fn bench_psu_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    if !(params[1] >= 0.0) {
+        return Err(format!("bench_psu iLimit must be >= 0, got {}", params[1]));
+    }
+    Ok(())
+}
+
+/// `clock`, `clock_gen` params `[freq, duty, vHigh, vLow, delay]`: the
+/// compiler emits `max(1e-6, frequency)`, so the period `1 / freq` is finite.
+pub const CLOCK_MIN_FREQ: f64 = 1e-6;
+
+fn clock_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    if !(params[0] >= CLOCK_MIN_FREQ) {
+        return Err(format!("clock freq must be >= {CLOCK_MIN_FREQ:e}, got {}", params[0]));
+    }
+    Ok(())
+}
+
+/// `pulse_source`, `pulse_gen` params `[v1, v2, td, tr, tf, pw, per]`
+/// (core/README.md, "Waveform source records"): the compiler's declines,
+/// repeated. `per` is 0 for a one-shot, so a negative one has no encoding.
+fn pulse_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    let (tr, tf, pw, per) = (params[3], params[4], params[5], params[6]);
+    for (name, v) in [("tr", tr), ("tf", tf), ("pw", pw), ("per", per)] {
+        if !(v >= 0.0) {
+            return Err(format!("pulse {name} must be >= 0, got {v}"));
+        }
+    }
+    if per > 0.0 && per < tr + pw + tf {
+        return Err(format!("truncated pulse: per {per} < tr + pw + tf = {}", tr + pw + tf));
+    }
+    Ok(())
+}
+
 /// Declares one combinational IC: `logic` pins after `vcc` and `gnd`, and
 /// `outputs` of them publish a digital slot each. The 4-arg form is a plain
 /// W1c kind (13 params, no tail); the 6-arg form is a kind with a W1d
@@ -476,6 +599,13 @@ const SHAPES: &[KindShape] = &[
     KindShape { code: PUSH_BUTTON, name: "push_button", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: SPDT_SWITCH, name: "spdt_switch", pins: 3, pins_max: 3, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: DIP_SWITCH, name: "dip_switch", pins: 4, pins_max: 16, params: 9, blob: BlobShape::Exact(0), check: dip_switch_check, live_params: &[1, 2, 3, 4, 5, 6, 7, 8], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: BATTERY_PACK, name: "battery_pack", pins: 2, pins_max: 2, params: battery_param::COUNT, blob: BlobShape::Table, check: battery_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: BENCH_PSU, name: "bench_psu", pins: 2, pins_max: 2, params: 2, blob: BlobShape::Exact(0), check: bench_psu_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: CLOCK, name: "clock", pins: 2, pins_max: 2, params: 5, blob: BlobShape::Exact(1), check: clock_check, live_params: &[], digital_slots: one_slot, channel_slots: no_slots },
+    KindShape { code: CLOCK_GEN, name: "clock_gen", pins: 2, pins_max: 2, params: 5, blob: BlobShape::Exact(1), check: clock_check, live_params: &[], digital_slots: one_slot, channel_slots: no_slots },
+    KindShape { code: PULSE_SOURCE, name: "pulse_source", pins: 2, pins_max: 2, params: 7, blob: BlobShape::Exact(1), check: pulse_check, live_params: &[], digital_slots: one_slot, channel_slots: no_slots },
+    KindShape { code: PULSE_GEN, name: "pulse_gen", pins: 2, pins_max: 2, params: 7, blob: BlobShape::Exact(1), check: pulse_check, live_params: &[], digital_slots: one_slot, channel_slots: no_slots },
+    KindShape { code: SECTION_ANCHOR, name: "section_anchor", pins: 1, pins_max: 1, params: 0, blob: BlobShape::Exact(0), check: no_checks, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: LED, name: "led", pins: 2, pins_max: 2, params: led_param::COUNT, blob: BlobShape::Exact(0), check: led_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: RGB_LED, name: "rgb_led", pins: 4, pins_max: 4, params: rgb_param::COUNT, blob: BlobShape::Exact(1), check: rgb_led_check, live_params: &[], digital_slots: no_slots, channel_slots: rgb_channels },
     KindShape { code: BICOLOR_LED, name: "bicolor_led", pins: 3, pins_max: 3, params: bicolor_param::COUNT, blob: BlobShape::Exact(1), check: bicolor_led_check, live_params: &[], digital_slots: no_slots, channel_slots: bicolor_channels },
@@ -504,4 +634,330 @@ const SHAPES: &[KindShape] = &[
 /// The shape for `code`, or `None` when the code is unknown or reserved.
 pub fn shape(code: u32) -> Option<&'static KindShape> {
     SHAPES.iter().find(|s| s.code == code)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The W1f source records (codes 20-26) through the program reader: what
+    //! it accepts, and that each malformed record is refused as `-1` by the
+    //! rule it breaks, not by some other one (every rejection asserts its
+    //! message names the field).
+    use super::*;
+    use crate::error::ERR_MALFORMED;
+    use crate::program::{Program, MAGIC, VERSION};
+
+    /// `[ocvScale, rBase, tempFactor, depA, depP, depK, capacityAh, soc0,
+    /// profileCode]`: a `{5 V, 0.9 ohm}` generic battery.
+    fn battery_params() -> Vec<f64> {
+        vec![1.0, 0.9, 1.0, 0.5, 2.0, 0.05, 1.0, 1.0, 0.0]
+    }
+
+    fn generic_table() -> Vec<f64> {
+        vec![2.0, 0.0, 0.0, 1.0, 5.0]
+    }
+
+    fn record(kind: u32, nodes: &[f64], params: &[f64], blob: &[f64]) -> Vec<f64> {
+        let mut out = vec![kind as f64, 0.0, nodes.len() as f64];
+        for &n in nodes {
+            out.extend([n, 0.0, 0.0, 0.0]);
+        }
+        out.push(params.len() as f64);
+        out.extend_from_slice(params);
+        out.push(blob.len() as f64);
+        out.extend_from_slice(blob);
+        out
+    }
+
+    fn program(digital_slots: f64, devices: &[Vec<f64>]) -> Vec<f64> {
+        let mut out = vec![MAGIC, VERSION, 4.0, devices.len() as f64, 0.0, digital_slots, 0.0];
+        for d in devices {
+            out.extend_from_slice(d);
+        }
+        out.push(MAGIC);
+        out
+    }
+
+    fn parse_one(digital_slots: f64, device: Vec<f64>) -> Result<Program, crate::error::BoError> {
+        Program::parse(&program(digital_slots, &[device]))
+    }
+
+    /// Asserts the record is refused as `-1` and the message names `field`.
+    fn assert_refused(digital_slots: f64, device: Vec<f64>, field: &str) {
+        let err = parse_one(digital_slots, device).expect_err(&format!("a record with a bad {field} must be refused"));
+        assert_eq!(err.code, ERR_MALFORMED, "{field}: {}", err.message);
+        assert!(err.message.contains(field), "the message should name `{field}`: {}", err.message);
+    }
+
+    fn battery_with(edit: impl FnOnce(&mut Vec<f64>)) -> Vec<f64> {
+        let mut params = battery_params();
+        edit(&mut params);
+        record(BATTERY_PACK, &[1.0, 0.0], &params, &generic_table())
+    }
+
+    fn battery_with_table(blob: &[f64]) -> Vec<f64> {
+        record(BATTERY_PACK, &[1.0, 0.0], &battery_params(), blob)
+    }
+
+    fn psu(v: f64, i_limit: f64) -> Vec<f64> {
+        record(BENCH_PSU, &[1.0, 0.0], &[v, i_limit], &[])
+    }
+
+    fn clock_record(kind: u32, freq: f64, base: f64) -> Vec<f64> {
+        record(kind, &[1.0, 0.0], &[freq, 0.5, 5.0, 0.0, 0.0], &[base])
+    }
+
+    fn pulse_record(kind: u32, params: [f64; 7], base: f64) -> Vec<f64> {
+        record(kind, &[1.0, 0.0], &params, &[base])
+    }
+
+    const CATALOG_PULSE: [f64; 7] = [0.0, 5.0, 0.0, 1e-6, 1e-6, 5e-4, 1e-3];
+
+    // ---- what is accepted -------------------------------------------------
+
+    #[test]
+    fn every_well_formed_source_record_parses_and_claims_its_slots() {
+        let devices = [
+            record(BATTERY_PACK, &[1.0, 0.0], &battery_params(), &generic_table()),
+            psu(5.0, 0.0),
+            psu(-5.0, 0.1),
+            clock_record(CLOCK, 1000.0, 0.0),
+            clock_record(CLOCK_GEN, 1000.0, 1.0),
+            pulse_record(PULSE_SOURCE, CATALOG_PULSE, 2.0),
+            pulse_record(PULSE_GEN, CATALOG_PULSE, 3.0),
+            record(SECTION_ANCHOR, &[2.0], &[], &[]),
+        ];
+        let p = Program::parse(&program(4.0, &devices)).expect("all seven kinds parse together");
+        let kinds: Vec<u32> = p.devices.iter().map(|d| d.kind).collect();
+        assert_eq!(kinds, [BATTERY_PACK, BENCH_PSU, BENCH_PSU, CLOCK, CLOCK_GEN, PULSE_SOURCE, PULSE_GEN, SECTION_ANCHOR]);
+        assert_eq!(p.devices[0].blob, generic_table());
+        assert_eq!(p.devices[7].pins.len(), 1);
+        assert_eq!(p.devices[7].pins[0].node, 2);
+    }
+
+    #[test]
+    fn the_shapes_match_the_readme_table() {
+        for (code, name, pins, params) in [
+            (BATTERY_PACK, "battery_pack", 2, 9),
+            (BENCH_PSU, "bench_psu", 2, 2),
+            (CLOCK, "clock", 2, 5),
+            (CLOCK_GEN, "clock_gen", 2, 5),
+            (PULSE_SOURCE, "pulse_source", 2, 7),
+            (PULSE_GEN, "pulse_gen", 2, 7),
+            (SECTION_ANCHOR, "section_anchor", 1, 0),
+        ] {
+            let s = shape(code).unwrap_or_else(|| panic!("{name} has a shape"));
+            assert_eq!((s.name, s.pins, s.pins_max, s.params), (name, pins, pins, params));
+            assert!(s.live_params.is_empty(), "{name}: no live params");
+            assert_eq!((s.channel_slots)(pins), 0, "{name}: no channel slots");
+            let digital = if matches!(code, CLOCK | CLOCK_GEN | PULSE_SOURCE | PULSE_GEN) { 1 } else { 0 };
+            assert_eq!((s.digital_slots)(pins), digital, "{name}: digital slots");
+        }
+        assert_eq!(shape(BATTERY_PACK).unwrap().blob, BlobShape::Table);
+        assert_eq!(shape(BENCH_PSU).unwrap().blob, BlobShape::Exact(0));
+        assert_eq!(shape(CLOCK).unwrap().blob, BlobShape::Exact(1));
+        assert_eq!(shape(PULSE_GEN).unwrap().blob, BlobShape::Exact(1));
+        assert_eq!(shape(SECTION_ANCHOR).unwrap().blob, BlobShape::Exact(0));
+        assert_eq!(SECTION_ANCHOR, 26);
+    }
+
+    #[test]
+    fn an_unassigned_code_is_unknown_kind() {
+        // 9999 is far above every planned kind (the table runs in decade
+        // bands, 1-12, 20-26, 30-34, 40, 50-61, 70-76, 80-82), so no later
+        // wave assigns it and this check outlives them. A code a wave does
+        // assign must not be pinned here as "reserved".
+        const FAR_UNASSIGNED: u32 = 9999;
+        assert!(shape(FAR_UNASSIGNED).is_none());
+        let err = parse_one(0.0, record(FAR_UNASSIGNED, &[1.0], &[], &[])).unwrap_err();
+        assert_eq!(err.code, crate::error::ERR_UNKNOWN_KIND);
+    }
+
+    // ---- battery ---------------------------------------------------------------
+
+    #[test]
+    fn a_battery_with_every_value_at_its_bound_is_accepted() {
+        // ocvScale 0, rBase 0, depA 0, depP 0, capacity at its floor, soc0 at
+        // both ends, the last profile code, a one-point table.
+        for soc0 in [0.0, 1.0] {
+            let d = battery_with(|p| {
+                *p = vec![0.0, 0.0, f64::MIN_POSITIVE, 0.0, 0.0, f64::MIN_POSITIVE, BATTERY_MIN_CAPACITY_AH, soc0, 3.0];
+            });
+            parse_one(0.0, d).unwrap_or_else(|e| panic!("soc0 {soc0}: {}", e.message));
+        }
+        parse_one(0.0, battery_with_table(&[1.0, 0.5, 3.3])).expect("one point");
+        parse_one(0.0, battery_with_table(&[3.0, 0.0, 0.0, 0.5, 1.0, 0.5, 2.0])).expect("a repeated soc is a step, not a violation");
+        parse_one(0.0, battery_with_table(&[2.0, 0.0, -1.0, 1.0, 4.0])).expect("negative volts are the table's business");
+    }
+
+    #[test]
+    fn a_battery_refuses_each_bad_param() {
+        use battery_param::*;
+        for (index, bad, field) in [
+            (OCV_SCALE, -0.1, "ocvScale"),
+            (R_BASE, -1e-9, "rBase"),
+            (TEMP_FACTOR, 0.0, "tempFactor"),
+            (TEMP_FACTOR, -1.0, "tempFactor"),
+            (DEP_A, -0.5, "depA"),
+            (DEP_P, -2.0, "depP"),
+            (DEP_K, 0.0, "depK"),
+            (DEP_K, -0.05, "depK"),
+            (CAPACITY_AH, 0.0, "capacityAh"),
+            (CAPACITY_AH, 1e-13, "capacityAh"),
+            (SOC0, -0.01, "soc0"),
+            (SOC0, 1.01, "soc0"),
+            (PROFILE_CODE, 4.0, "profileCode"),
+            (PROFILE_CODE, -1.0, "profileCode"),
+            (PROFILE_CODE, 1.5, "profileCode"),
+        ] {
+            assert_refused(0.0, battery_with(|p| p[index] = bad), field);
+        }
+    }
+
+    #[test]
+    fn a_battery_refuses_a_non_finite_param_and_a_wrong_param_count() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_refused(0.0, battery_with(|p| p[battery_param::R_BASE] = bad), "not finite");
+        }
+        let mut short = battery_params();
+        short.pop();
+        assert_refused(0.0, record(BATTERY_PACK, &[1.0, 0.0], &short, &generic_table()), "param");
+    }
+
+    #[test]
+    fn a_battery_refuses_each_bad_table() {
+        assert_refused(0.0, battery_with_table(&[]), "blob");
+        assert_refused(0.0, battery_with_table(&[0.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[-1.0, 0.0, 0.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[1.5, 0.0, 0.0, 1.0, 5.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[2.0, 0.0, 0.0, 1.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[2.0, 0.0, 0.0, 1.0, 5.0, 9.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[3.0, 0.0, 0.0, 1.0, 5.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[1e300, 0.0, 0.0]), "n >= 1");
+        assert_refused(0.0, battery_with_table(&[1.0, 0.0, 0.0, 9.0]), "n >= 1");
+        // Values: soc outside [0, 1] and a table that goes back down.
+        assert_refused(0.0, battery_with_table(&[2.0, -0.1, 0.0, 1.0, 5.0]), "soc_0");
+        assert_refused(0.0, battery_with_table(&[2.0, 0.0, 0.0, 1.1, 5.0]), "soc_1");
+        assert_refused(0.0, battery_with_table(&[3.0, 0.0, 0.0, 0.6, 3.0, 0.5, 4.0]), "below");
+    }
+
+    #[test]
+    fn battery_check_stands_alone_on_a_table_the_reader_never_shaped() {
+        // The reader's `Table` shape check rejects these first; `check` is also
+        // reachable without it and must not index past the blob.
+        let params = battery_params();
+        for blob in [&[][..], &[0.0], &[-2.0, 0.0, 0.0], &[1.5, 0.0, 0.0, 1.0, 5.0], &[2.0, 0.0, 0.0], &[1.0, 0.0, 0.0, 1.0, 5.0], &[1e300, 0.0, 0.0]] {
+            let err = battery_check(2, &params, blob).expect_err(&format!("{blob:?}"));
+            assert!(err.contains("OCV table"), "{blob:?}: {err}");
+        }
+        assert!(battery_check(2, &params, &generic_table()).is_ok());
+    }
+
+    #[test]
+    fn a_battery_refuses_the_wrong_pin_count() {
+        assert_refused(0.0, record(BATTERY_PACK, &[1.0], &battery_params(), &generic_table()), "pin");
+        assert_refused(0.0, record(BATTERY_PACK, &[1.0, 0.0, 2.0], &battery_params(), &generic_table()), "pin");
+    }
+
+    // ---- bench psu ---------------------------------------------------------------
+
+    #[test]
+    fn a_bench_psu_accepts_both_forms_and_refuses_a_negative_limit() {
+        parse_one(0.0, psu(5.0, 0.0)).expect("ideal");
+        parse_one(0.0, psu(5.0, 2.0)).expect("limited");
+        parse_one(0.0, psu(-12.0, 0.5)).expect("a negative setpoint");
+        parse_one(0.0, psu(0.0, 0.5)).expect("a zero setpoint");
+        assert_refused(0.0, psu(5.0, -0.1), "iLimit");
+        assert_refused(0.0, psu(5.0, -f64::MIN_POSITIVE), "iLimit");
+        assert_refused(0.0, psu(f64::NAN, 0.1), "not finite");
+        assert_refused(0.0, psu(5.0, f64::INFINITY), "not finite");
+    }
+
+    #[test]
+    fn a_bench_psu_carries_no_blob_and_two_pins() {
+        assert_refused(0.0, record(BENCH_PSU, &[1.0, 0.0], &[5.0, 0.1], &[0.0]), "blob");
+        assert_refused(0.0, record(BENCH_PSU, &[1.0], &[5.0, 0.1], &[]), "pin");
+        assert_refused(0.0, record(BENCH_PSU, &[1.0, 0.0], &[5.0], &[]), "param");
+    }
+
+    // ---- clocks and pulses ---------------------------------------------------------
+
+    #[test]
+    fn a_clock_needs_a_period_the_compiler_could_have_emitted() {
+        for kind in [CLOCK, CLOCK_GEN] {
+            parse_one(1.0, clock_record(kind, 1e-6, 0.0)).expect("the compiler's floor");
+            parse_one(1.0, clock_record(kind, 1e9, 0.0)).expect("a fast clock");
+            assert_refused(1.0, clock_record(kind, 0.0, 0.0), "freq");
+            assert_refused(1.0, clock_record(kind, 9e-7, 0.0), "freq");
+            assert_refused(1.0, clock_record(kind, -1000.0, 0.0), "freq");
+        }
+        // Duty and levels are free: duty outside [0, 1] is a valid always-on
+        // or always-off source (classic's clockVoltage compares only).
+        parse_one(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, 7.0, 5.0, 0.0, -1.0], &[0.0])).expect("duty 7, negative delay");
+        parse_one(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, -2.0, 0.0, 5.0, 0.0], &[0.0])).expect("duty -2, inverted levels");
+        assert_refused(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, f64::NAN, 5.0, 0.0, 0.0], &[0.0]), "not finite");
+    }
+
+    #[test]
+    fn a_pulse_refuses_negative_ramps_widths_and_periods() {
+        for kind in [PULSE_SOURCE, PULSE_GEN] {
+            for (index, field) in [(3, "pulse tr must"), (4, "pulse tf must"), (5, "pulse pw must"), (6, "pulse per must")] {
+                let mut p = CATALOG_PULSE;
+                p[index] = -1e-6;
+                assert_refused(1.0, pulse_record(kind, p, 0.0), field);
+            }
+            let mut nan = CATALOG_PULSE;
+            nan[1] = f64::NAN;
+            assert_refused(1.0, pulse_record(kind, nan, 0.0), "not finite");
+        }
+    }
+
+    #[test]
+    fn a_pulse_refuses_a_truncated_cycle_and_accepts_every_other_period() {
+        // per < tr + pw + tf cuts the cycle short (WF:52-56).
+        for kind in [PULSE_SOURCE, PULSE_GEN] {
+            assert_refused(1.0, pulse_record(kind, [0.0, 5.0, 0.0, 1e-6, 1e-6, 5e-4, 4e-4], 0.0), "truncated");
+            assert_refused(1.0, pulse_record(kind, [0.0, 5.0, 0.0, 1e-6, 1e-6, 5e-4, 5.01e-4], 0.0), "truncated");
+            // Exactly tr + pw + tf is a full cycle with no gap, and per 0 is a
+            // one-shot whatever the widths.
+            let exact = 1e-6 + 5e-4 + 1e-6;
+            parse_one(1.0, pulse_record(kind, [0.0, 5.0, 0.0, 1e-6, 1e-6, 5e-4, exact], 0.0)).expect("no gap");
+            parse_one(1.0, pulse_record(kind, [0.0, 5.0, 0.0, 1e-6, 1e-6, 5e-4, 0.0], 0.0)).expect("one-shot");
+            parse_one(1.0, pulse_record(kind, [1.0, 1.0, -1e-3, 0.0, 0.0, 0.0, 1e-3], 0.0)).expect("a negative td, zero widths, v1 = v2");
+        }
+    }
+
+    #[test]
+    fn a_waveform_source_owns_one_digital_slot_that_must_exist() {
+        for device in [clock_record(CLOCK, 1000.0, 3.0), pulse_record(PULSE_SOURCE, CATALOG_PULSE, 3.0)] {
+            parse_one(4.0, device.clone()).expect("slot 3 of 4");
+            assert_refused(3.0, device.clone(), "outside S");
+            assert_refused(0.0, device, "outside S");
+        }
+        assert_refused(4.0, clock_record(CLOCK, 1000.0, 1.5), "outside S");
+        assert_refused(4.0, clock_record(CLOCK, 1000.0, -1.0), "outside S");
+        // Two sources cannot share a slot.
+        let err = Program::parse(&program(4.0, &[clock_record(CLOCK, 1000.0, 2.0), pulse_record(PULSE_GEN, CATALOG_PULSE, 2.0)])).unwrap_err();
+        assert_eq!(err.code, ERR_MALFORMED);
+    }
+
+    #[test]
+    fn a_waveform_source_carries_exactly_its_params_blob_and_pins() {
+        assert_refused(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, 0.5, 5.0, 0.0], &[0.0]), "param");
+        assert_refused(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, 0.5, 5.0, 0.0, 0.0], &[]), "blob");
+        assert_refused(1.0, record(CLOCK, &[1.0, 0.0], &[1000.0, 0.5, 5.0, 0.0, 0.0], &[0.0, 0.0]), "blob");
+        assert_refused(1.0, record(PULSE_SOURCE, &[1.0, 0.0], &CATALOG_PULSE[..6], &[0.0]), "param");
+        assert_refused(1.0, record(PULSE_SOURCE, &[1.0], &CATALOG_PULSE, &[0.0]), "pin");
+        assert_refused(1.0, record(CLOCK_GEN, &[1.0, 0.0, 2.0], &[1000.0, 0.5, 5.0, 0.0, 0.0], &[0.0]), "pin");
+    }
+
+    // ---- section anchor -----------------------------------------------------------------
+
+    #[test]
+    fn a_section_anchor_is_one_pin_and_nothing_else() {
+        parse_one(0.0, record(SECTION_ANCHOR, &[3.0], &[], &[])).expect("the well-formed record");
+        assert_refused(0.0, record(SECTION_ANCHOR, &[], &[], &[]), "pin");
+        assert_refused(0.0, record(SECTION_ANCHOR, &[1.0, 2.0], &[], &[]), "pin");
+        assert_refused(0.0, record(SECTION_ANCHOR, &[1.0], &[0.0], &[]), "param");
+        assert_refused(0.0, record(SECTION_ANCHOR, &[1.0], &[], &[0.0]), "blob");
+    }
 }

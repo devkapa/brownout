@@ -537,6 +537,19 @@ impl Program {
                     )));
                 }
             }
+            BlobShape::Table => {
+                // `blob[0] = n` counts the (x, y) pairs after it. `n` is
+                // compared as an f64 against what the blob can hold before it
+                // is cast, so a huge `n` cannot overflow the length sum.
+                let n = blob.first().copied().unwrap_or(0.0);
+                let holds = blob_count.saturating_sub(1) / 2;
+                if !(n >= 1.0 && n.fract() == 0.0 && n <= holds as f64 && blob_count == 1 + 2 * n as usize) {
+                    return Err(BoError::malformed(format!(
+                        "device[{index}] ({}): blob must be n, then n pairs, with n >= 1: got n = {n} and {blob_count} blob value(s)",
+                        shape.name
+                    )));
+                }
+            }
         }
 
         (shape.check)(pin_count, &params, &blob).map_err(|msg| {
