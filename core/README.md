@@ -854,8 +854,12 @@ kind:
 | `ptc_fuse` | 3 | `0 tripped` (0 or 1), `1 tripStress`, `2 recoveryTime` (W1g point 10) |
 
 - Every battery value is projected to the current time without committing
-  it (Rails point 6), so a collect never changes the simulation. So is
-  every W1g value (W1g point 16).
+  it (Rails point 6; in exact mode, the held current over the time since
+  the last committed step, Rails point 9), so a collect never changes the
+  simulation. So is every W1g value (W1g point 16).
+- Both `-8` cases, an index out of range and a kind with no device state,
+  leave the buffer empty, so `bo_engine_device_state_ptr` never hands back
+  an earlier collect's values after a failed one.
 - **Extending a layout.** The returned length is the layout's version. A
   later wave extends a kind's layout only by appending values, never by
   reordering, removing or reusing an index, and records the new length in
@@ -1034,6 +1038,22 @@ W1f adds:
   facade returns `undefined` in W1f; classic's IC `icState` objects are not
   mirrored (W1f Q11; whether to mirror them is W2's call, and no host reads
   them).
+- Each method finds its kind from the compiler's own tables on
+  `CompiledCircuit` (exported from `brownout/core`): `batteries`, per
+  `battery_pack` component id, the profile and temperature statics
+  `getBatteryState` adds, and `benchPsuLimits`, per `bench_psu` component
+  id, the record's compiled `iLimit` (0 for an ideal source), which picks
+  the layout `getIcState` expects back, so the facade reads the value Rust
+  was given rather than re-deriving it from the circuit.
+- A returned length other than the layout's means the TS and Rust halves
+  were built from different contracts: `CoreInitError`, as an ABI version
+  mismatch. A negative code cannot come from a loaded program and a kind
+  that has a layout either (a Rust/TS drift): `CoreLoadError` with Rust's
+  message.
+- A circuit with two hub candidates (two batteries, or a battery and a
+  `bench_psu` with `iLimit > 0`) is a load error, `-3` (Rails point 1),
+  which the facade raises as `CoreUnsupportedError`: the circuit falls back
+  to classic, and neither method is reached.
 - Both read device state through the typed accessors (C ABI,
   `bo_engine_device_state`), never raw offsets. Neither method is on
   `EngineReadout` (`src/core/surface.ts`); both live on `CoreEngine` for
@@ -2322,19 +2342,44 @@ lands in a free supply's partition, are W1c points 3 and 4; fixtures 38 and
 
 ## Kernel semantics: rails and sources (W1f)
 
-References are to spec chapter 8, §10.1 and the delta table; classic line
-citations are at `2b5faf1`, and "W1f Qn" is a ruling ("Kind codes and
-records"). Constants, all from P3:35-38 unless marked new:
+References are to spec chapter 8, §10.1 and the delta table (a bare `Dn`
+is that table's row); classic line citations are at `2b5faf1`, and "W1f Qn"
+is a ruling ("Kind codes and records"). R-numbers are the coordinator's W1f
+rulings (from 2026-10-15), on the owner's priority: physics as accurate as
+possible while fast enough to run a whole breadboard computer. "Ruling R3
+(b)" is option (b) of the third; R2b revisited R2's question.
+
+**Who found what.** Handles in this section and in the harness rules name
+the W1f worker that built or found a rule; each one's commit on
+`wip/w1f-int` names it (`WIP(W1f F1 round 9): ...`), and a verifier's or
+investigator's findings land in the commit of the round that took them. F1
+is the rails worker: F1 round 1 (`12c7db6`) to round 15, F1rN its round N
+(rounds 14 and 15 on `wip/w1f-r14`, merged at `95c5e7e`). Verifiers: F1v23
+(rounds 2-3), V4X (round 4, FX1 and FX2), V5 (round 5), V6 (rounds 6-7,
+exact mode, ramps, the merges), V8 (round 8), V9 (round 9), V11 (rounds
+11-12), FX45v (FX4 and FX5). FX1-FX5 and EX1 are the exact-mode fixes
+(Rails point 9); F3b the device-state exports; F4 the W1f fixtures and
+harness; F6 the resolved-ramp readers (Sources point 3); INF1 the
+investigation of an infinite published voltage (taken in round 7); INV2
+that of the SAP-1's rail-loop cycle at 2.897 s (taken in round 9); HG1 the
+ping-pong hang fix; NP1 the no-progress guard, and NP2 its redefinition by
+state. F5 is not a worker: it is the follow-up named the ping-pong hold.
+
+Constants, all from P3:35-38 unless marked new:
 
 | Name | Value | Use |
 |---|---|---|
 | `RAIL_DELTA` | `1e-6` V | the finite-difference step of the sensitivity |
-| `RAIL_RESOLVE_V` | `0.025` V | re-solve a nonlinear hub partition once the rail has moved this far since its solve |
+| `RAIL_RESOLVE_V` | `0.025` V | the cap of a curvature band, and the band of a curved hub partition without one outside CC; an affine closed-form segment's band is not capped (Rails point 3) |
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
-| `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event (Rails point 4) |
+| `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
+| `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
+| `MERGED_MAX` | `16` (new) | the most distinct rates the merged crossing search takes; a sum of more is searched by windows (Rails point 4) |
 | `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
+| `RAIL_CC_CAP_RESOLVE_V` | `1e-3` V (new) | the band of a curved hub partition without a curvature band while a PSU ramps a rail capacitor in CC (Rails point 3; none lacks one since ruling R7 (a)) |
+| `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
 | `RAIL_TAU_MAX` | `1e-4` s (new) | the largest battery rail time constant `r·C_rail` the core accepts (Rails point 7) |
 | `RAMP_STEP_RATIO` | `0.01` (new) | the longest pulse ramp, relative to the source's event timescale, that is a midpoint step (Sources point 3) |
 
@@ -2362,14 +2407,16 @@ records"). Constants, all from P3:35-38 unless marked new:
      - no ideal source (codes 2, 21 with `iLimit = 0`, 22-25) has a pin on
        the rail node (it would propagate from a moving node);
      - for a battery, `R(soc0)·C_rail < RAIL_TAU_MAX`, where `C_rail` is the
-       summed capacitance of the rail capacitors (point 7).
+       summed capacitance of the rail capacitors (point 7);
+     - no capacitor runs from the rail node to a node a waveform source
+       moves, directly or through a source stacked on it (point 7).
    - The rail node is neither fixed nor free. The union-find skips it as it
      skips fixed nodes, so a device between the rail and a free node puts
      only the free node in a partition, and an IC whose `vcc` is the rail
      joins none of its pins to it (W1c point 2): partitions stay as small as
      on an ideal supply. This is what the hub buys.
-   - In exact mode (point 9) the same rules apply, and then the rail node is
-     made free.
+   - In exact mode (point 9) the same rules apply, every `-3` above
+     included, and then the rail node is made free.
 
 2. **The rail equation.** Every **hub partition** (one with any stamp that
    reads the rail node: a conductance, an IC driver or pull whose supply is
@@ -2399,56 +2446,266 @@ records"). Constants, all from P3:35-38 unless marked new:
    restore (P3:450-460, 465).
 
 3. **Sensitivity, publication and re-solve.** After a hub partition solves
-   (static, a closed-form segment, a stepped commit), its `(I_p, g_p, s_p)`
-   come from three residual stamps and one re-solve (P3:437-448): residuals
-   `F0 = r(x, u)` and `F1 = r(x, u + RAIL_DELTA)`; `s = −A⁻¹ (F1 − F0) /
-   RAIL_DELTA` through the partition's existing factors (`lu_apply`); `I1 =
-   I(x + s·RAIL_DELTA, u + RAIL_DELTA)`; `g = (I1 − I0) / RAIL_DELTA`. For a
-   Newton partition `A` is the last iteration's Jacobian. Stat 16 counts
-   each computation.
-   - A hub node's published voltage is `x + s (u − u_p)` (P3:486-506); the
-     rail node's is `u`. A closed-form hub partition publishes its segment
-     re-aimed at `u` instead, with `s = 0` (P3:558-569).
-   - After every rail solve, a **nonlinear** hub partition (one holding a
-     stamped LED junction or a free IC supply) whose `|u − u_p|` exceeds
-     `RAIL_RESOLVE_V` (`RAIL_CC_RESOLVE_V` while the hub PSU is in CC with
-     no rail capacitor) is re-solved at the new `u`, and the rail solves
-     again. The loop runs inside one `resolve_dirty` call until no partition
-     is past its band, at most 50 passes (then `-4`, as a static Newton that
-     does not converge). A linear partition, and a partition whose draw
-     depends on `u` only through an IC driver's `R_out`, keeps its
-     first-order correction (pec3's rule; its second-order error is about
-     20 µV on the SAP-1, P3:36). CC needs the tighter band because `u` there
-     is set by the draws alone: a 25 mV linearisation error on an LED is a
-     14% current error.
-   - **The 25 mV band is measured** (W1f Q6). F1 runs an LED straight across
-     a 0.9 Ω battery, with no resistor, in default and in exact mode and
-     records the difference here. If it is outside W0's tolerance (volts
-     100 µV plus 1e-3 relative, amps 1 nA plus 1e-3 relative),
-     `RAIL_RESOLVE_V` becomes 1 mV.
+   (static, a closed-form segment, a stepped commit), it hands the rail its
+   `(I_p, g_p, s_p)` at the solve's rail `u_p`. Stat 16 counts each
+   computation.
+   - **Curved partitions** (rulings R7 (a) and R8 (a), 2026-10-15). A
+     hub partition is **curved** when it holds a stamped junction, a free IC
+     supply, or a logic pin of an IC with exactly one supply on the rail:
+     that IC's drivers stamp `R_out = vs / (4 io_max)` (a 555 its headroom
+     split), which follows the rail even into a linear network. A
+     closed-form partition is curved by the last test alone. Every other hub
+     partition is **linear**: its solution is affine in `u`, so its
+     first-order correction is exact.
+   - **The sensitivity of a curved partition** is the exact derivative of
+     its solution at `x` itself (F1r6, after V5 finding 2: the last Newton
+     iteration's Jacobian and a forward difference left `s` 4.2e-4 off, a
+     first-order error): `s = −J⁻¹ dF/du`, `J` the Jacobian of the residual
+     stamps linearised about `x` and factored afresh, `dF/du` their rail
+     column plus the IC stamps that follow the rail other than through a
+     conductance (a driver's conductance moving with its supply, a floating
+     pull aimed at the rail; with a free IC supply, the whole exact `dF/dz`
+     over every unknown and the rail), and `g = (dI/dx) s + dI/du` from the
+     same matrix. No difference is taken, so `s` is exact to rounding. A
+     closed-form segment takes it at its `vc = 0` and `vc = 1` solutions, so
+     at a given `vc` it publishes `x0 + dx vc + (s0 + s1 vc) (u − u_seg)`,
+     exact to first order in the rail at that `vc`. Its capacitor's
+     trajectory under a known rail path (point 4: a CC rail capacitor's, a
+     draining cell's) is another matter: it takes the rail's pull on the
+     capacitor's current at the aim's `vc`, and the bilinear term that leaves
+     out is bounded by the coupling band below.
+   - **The sensitivity of a linear partition** is P3:437-448's: residuals
+     `F0 = r(x, u)` and `F1 = r(x, u + RAIL_DELTA)`, `s = −A⁻¹ (F1 − F0) /
+     RAIL_DELTA` through the partition's own factors, `I1 = I(x +
+     s·RAIL_DELTA, u + RAIL_DELTA)`, `g = (I1 − I0) / RAIL_DELTA`. Each
+     difference `F(z') − F(z)` is formed as `(A' − A) z' + A (z' − z) − (b'
+     − b)` with `z' − z` the intended step, so a linear stamp contributes
+     `A (z' − z)` exactly: whole residuals left their rounding, about 1e-6 S
+     of false slope through a closed 1000 S switch on a 5 V rail.
+   - **Power at the solve's rail** (INF1, F1r7). Every sensitivity judges a
+     rail IC's power gate at the solve's `u`, whatever the rail unknown
+     reads: the residual stamps, the explicit `dF/du` terms, the closed-form
+     segments, and the direct IC draws of point 2 (`direct_at`). Power flips
+     only at rail events (point 4). A gate judged at `u + RAIL_DELTA` with
+     the rail within `RAIL_DELTA` under a floor differenced an unpowered
+     driver against a powered one (about −2.4e14 S per output) and sent a CC
+     segment to `−inf`. `R_out` and the thresholds still follow the unknown.
+   - **Publication.** A hub node's published voltage is `x + s (u − u_p)`
+     (P3:486-506); the rail node's is `u`. A closed-form hub partition
+     publishes its segment re-aimed at `u` (P3:558-569), as above.
+   - **The band** (ruling R2b (b), 2026-10-15; `solve/curvature.rs`).
+     Each curved partition sizes its own band at its solve: the widest `b <=
+     RAIL_RESOLVE_V` at which a conservative second-order bound, `sup |f''|
+     b² / 2` over the band, keeps every quantity it publishes (its node
+     voltages, its resistors' and switches' currents, its junctions'
+     currents, its draw) inside W0's tolerance (volts 100 µV plus 1e-3
+     relative, amps 1 nA plus 1e-3 relative). The suprema are taken over the
+     band, never read at the solve, so the bound holds through a junction's
+     knee from either side. Its terms:
+     - a junction `j`, the rest of the partition seen across it as a
+       driving-point resistance `R_j` and an open-circuit sensitivity `a_j`:
+       at most `a_j² φ(R_j g_j) / vtn` on any voltage, `φ(y) = y / (1 +
+       y)³` (peak `4/27` at the knee, `y = 1/2`), and `a_j² g_j / (vtn (1 +
+       R_j g_j)³)` on any current. With several junctions `|a_j|` is bounded
+       by the sensitivity network's span and `R_j` lies between its values
+       with every other junction off and at its steepest (Rayleigh);
+     - the rail-supplied drivers, grouped by node and supply: their own
+       second derivative, through the driving-point resistance at their
+       node, and their conductance's motion over the band, which moves the
+       rest's resistances (Rayleigh) (ruling R4 (a), 2026-10-15). A
+       power-window edge is no kink: the bound holds within the power state
+       of the solve, and a flip re-solves what the IC stamps into (Rail
+       moves, below);
+     - a partition holding a free IC supply takes a perturbation bound
+       instead (`supply_band`), valid while its element system contracts
+       (a Collatz-Wielandt test that the radius is below 1);
+     - a closed-form segment (ruling R8 (a)) takes the larger of the bounds
+       with its capacitor held at either end of the voltages the segment can
+       reach from `vc` (a source behind `1/esr`, or a stiff 1e6 S at `esr =
+       0`), each quantity checked at its least magnitude over that range; a
+       segment rebuilds past its band, and on a reuse from outside that
+       range. The range is the hull of `vc`, its asymptote, and the
+       asymptote the segment's own model gives a rail `RAIL_RESOLVE_V` either
+       side, which is monotone in the rail while the segment decays (F1r11,
+       V9 LOW: taken at `vc = 0`'s sensitivity, `vc` ran 0.137 V past it);
+       built under a known rail path it is widened by W0's tolerance, the
+       most the coupling band lets the published `vc` stray. A segment that
+       grows, or could stop decaying inside that reach, has only `vc` and
+       the band `RAIL_MOVE_EPS` (fail closed, below); one whose current does
+       not depend on `vc` is sized at `vc` alone;
+     - the draw by `DrawRule`, judged from the stamps the solve holds (its
+       devices, fixed at load, and its IC drivers' committed branches, each
+       change of which re-solves it), never from a value: `Zero` when no
+       stamp touches the rail (the draw is 0 at every rail), `ShuntOnly` when
+       only IC branches to the rail touch a partition in which nothing else
+       conducts (the draw is the node shunts' current, and its error
+       theirs), else `General`, bounded as a branch current.
+
+     Two exits from the bound. **Affine drivers** (F1r9; closed-form
+     segments only). A closed-form hub partition with no junction whose
+     driver groups each keep a constant conductance and far-end sum on their
+     present piece (a 555's discharge transistor, its OUT pair, whose split
+     cancels) is affine in the rail between its drivers' kinks:
+     - with no driver kinking inside its IC's power window
+       (`IcRail::affine`, checked at the segment's build), the segment keeps
+       the linear segment's terms and is a linear partition: it never
+       re-solves for the rail;
+     - otherwise it is curved, and `segment_band` returns the distance to
+       the nearest such kink, just short of it, not capped at
+       `RAIL_RESOLVE_V` (infinite if `segment_band` finds none). A segment
+       with an infinite band is exact at any rail and never re-solves for it
+       in any regime, `RAIL_CC_RESOLVE_V` included
+       (`ClosedFormSolver::hubs_past_band`); a finite one takes the regime's
+       rule below.
+
+     Without the first form corpus 07 and 08 cost 38 % and 29 % more. A
+     static or stepped partition has no such exit: its band is
+     `Bound::band`'s, bisected inside `(0, RAIL_RESOLVE_V]` and ending short
+     of any driver's kink, so at most 25 mV whatever its drivers. **Fail
+     closed** (F1r6): where the bound cannot be formed (a rest that does not
+     factor, a reach below `RAIL_MOVE_EPS`) or holds at no band, the band is
+     `RAIL_MOVE_EPS`, so the partition re-solves at every move; never the
+     flat band.
+   - **The coupling band** (F1r11, `couple_band`, after V9's MEDIUM 1;
+     generalised in rounds 14 and 15). A curved closed-form hub partition
+     driven by a known rail path (point 4: a CC rail capacitor's, a draining
+     cell's coupled path) holds its sensitivities at its aim's `vc_a`, so
+     its current leaves out `di1du δ (vc − vc_a)`, `δ = u − u_a` the rail's
+     motion since the aim. The capacitor's error obeys `C e' = (di_a +
+     di1du δ) e + di1du δ (vm − vc_a)`, `vm` the published trajectory, and
+     is bounded in closed form while the decay `|di_a| − |di1du| |δ|` stays
+     positive: the transient's share, the rail's own share `Σ |w| J(f, k,
+     τ)`, a pending crossing's landing (the scheduler holds a curved node's
+     sensitivity at `vc_a` too), and what earlier aims under the same drive
+     left, decaying. `|δ|` is at most the path's own excursion so far: its
+     largest magnitude at `τ` or at any turn before, the turns being the
+     zeros of its slope `Σ s e^(−kτ)` (`rails::path_turns`; one mode: `|s|
+     φ_k(τ)` itself; a path of more than `MERGED_MAX` rates keeps `D(τ) = Σ
+     |s| φ_k(τ)`). Each quantity the segment publishes (its nodes, its
+     stamped devices' currents, the capacitor's, the draw) is held within
+     W0's tolerance at its least magnitude over the voltages and rails it
+     can take in each interval of a geometric grid in `τ`, up to the path's
+     own first reach of the band's edge (whose rail event aims again) or a
+     pending crossing (whose landing does), or for ever where neither comes.
+     The first interval that fails sets `couple`, the excursion by then (at
+     least the rail's reach in 1 ns and 1000 reached-widths, so the events
+     keep moving), and the rail event at `u_a ± couple`, a threshold of the
+     path's watch (point 4), aims the partition again. On a path of several
+     modes, which may reach that excursion only at a turn where no passage
+     fires, the aim also expires at the time it fails (at least 1 ns after
+     the aim), and the rail schedules its next event no later than the
+     earliest expiry. There an affine segment (an infinite band) takes the
+     coupling band too (V11's B256: 2.65x W0 in a gate's transient). An aim
+     may spend `x / COUPLE_PACE` (8) of what earlier aims left, `x` its time
+     constants, so it never leaves the next aim nothing; where their error
+     alone has used a quantity's tolerance up (near its zero), it may spend
+     none and ends there, the rail aiming again until the segment's own
+     decay frees some (FIN1: 165 such grants in the 768-board sweep before
+     the fix). Two holes remain, neither seen to fire in the 768-board
+     sweep: where the bound does not close (or the segment does not decay)
+     the next aim starts afresh, dropping the inherited error, and the
+     coupling band's floor applies even when nothing is left (Known
+     follow-ups). Bounding `|δ|` by `D(τ)`,
+     as round 14 did, outgrows a path that turns back: the check stopped
+     where the rail never went and nothing guarded the aim past it (F1r14:
+     a 150 Ω gate's settled current 275x W0; then F1r15's 5 residual CC
+     boards). Measured: 818x W0 to 0.66 on one of V9's boards and 6.39x to
+     0 on its P1d (F1r11); F1r11's 768-board CC sweep and V11's boards
+     none over W0 at round 15 (V11's B162 and B256 0.13 and 0.11). A
+     draining cell's fallback drive (point 4) takes no coupling band.
+   - **Re-solve.** After every rail solve, each curved hub partition whose
+     `|u − u_p|` exceeds its band under the regime's rule is re-solved at
+     the new `u`, and the rail solves again:
+     - while the hub PSU is in CC with no rail capacitor, `RAIL_CC_RESOLVE_V`
+       for every curved partition, whatever its own band, except a
+       closed-form segment with an infinite band (affine, above), which is
+       exact at any rail: `u` there is set by the draws alone, and a 25 mV
+       linearisation error on an LED is a 14% current error;
+     - in every other regime, battery included, its own band (orchestrator,
+       on F1r5: accuracy first, the cost measured small); `RAIL_RESOLVE_V`
+       for one without a band, `RAIL_CC_CAP_RESOLVE_V` while a PSU ramps a
+       rail capacitor in CC (F1v23 finding 3, ruling R2 (a), kept as
+       the fallback by R2b (b)). Since R7 (a) every curved kind sizes a
+       band, so neither fallback is reached.
+
+     A linear partition never re-solves for the rail (except at a CC exit,
+     point 5). The loop runs inside one `resolve_dirty` call until no
+     partition is past its band, at most `RAIL_LOOP_MAX` (50) passes, then
+     `-4` ("rail: the rail loop did not settle within 50 passes").
+   - **The rail loop's cycle guard** (INV2, F1r9). A pass whose rail lands
+     within `RAIL_MOVE_EPS` of where a pass before the last one put it is a
+     cycle of cache replays: two entries on either side of a band's edge (a
+     driver's `R_out` kink), each one's correction placing the rail just
+     inside the other's band, alternate without end (the SAP-1 on its
+     battery at 4.8 V, a 74LS245's 24 mA `io_max` kink, 2.897 s). From that
+     pass on, a static hub partition past its band takes only a solve at
+     that very rail, and the loop settles as a Newton iteration does. A
+     closed-form segment past its band already builds at the very rail, and
+     a stepped partition solves afresh.
+   - **Measured.** The 25 mV cap (W1f Q6, F1 round 1): an LED straight
+     across a 0.9 Ω battery, default against exact mode, 4e-16 V and 2.5e-14
+     A; the hub-partition variant (the LED plus 1 Ω) 2.69e-6 V and 1.43e-6
+     A, inside W0's tolerance, so `RAIL_RESOLVE_V` stayed 25 mV. The bound:
+     a junction at its knee errs 0.9985 of it (a point estimate there was
+     exceeded 1.92x); V6's 176 adversarial cases reached at most 0.99995 of
+     it, and V8's 210 boards at most 0.36 of W0's tolerance. The SAP-1 on
+     its battery reads within 2.7e-5 V of a re-solve-every-move reference
+     (F1r7; 1.34e-3 V before R4 (a)).
+   - **Cost bars** (the rulings' own). Ruling R2b (b): corpus 07 and 08
+     switched on (load and the CC inrush) cost no more than classic, about
+     15 and 8 ms; measured 7.3 and 4.2 ms at round 5, about 8.6 and 5.1 ms
+     at round 9, about 8.5 and 4.9 ms at round 11, 26.4-27.1 and 17.8-18.4
+     ms at round 14 (60 % of it in the term-by-term crossing search, point
+     4), and 6.9 and 4.5 ms at round 15 with the merged-rate search. Rulings
+     R4 (a) and R7 (a): the SAP-1 run on its battery costs at most 10 % more
+     than at round 5 (`3ca4004`, the baseline each later round measured
+     against), else the coordinator is told; measured within about 1 % at
+     round 9 (+1.1 % frozen, +0.5 % running), and at round 15, on the cell's
+     coupled path (point 4), 1157 and 1345 ms of CPU per simulated second
+     against `3ca4004`'s 2092 and 2331 (45 % less). Ruling R17's condition:
+     the SAP-1 on its ideal supply within 10 % of `3ca4004` too; measured at
+     steady state (5 s of warm-up, 9 interleaved runs) at 9.86 against 9.93
+     ms per simulated second frozen (−0.7 %) and 12.81 against 12.74 running
+     (+0.5 %). A cost gate must warm up a few seconds first: V8 compiling the
+     wasm (848 KB against 814 KB) lands inside a 0.1 s warm-up window, which
+     read the same build 10 % slower.
    - **Rail moves.** A solve that changes `u` by more than `RAIL_MOVE_EPS`
      is a move (stat 14). On a move (P3:469-483):
      - every closed-form hub partition, and every closed-form partition
-       holding a watched pin of an IC whose `vcc` or `gnd` is the rail, is
-       re-aimed at the current `u` from its current `vc` (P3:570-574), which
-       reschedules its crossings;
+       holding a watched pin of an IC whose `vcc` or `gnd` is the rail or a
+       static hub partition's node (F1v23 finding 4: such a threshold moves
+       on that node's published line), is re-aimed at the current `u` from
+       its current `vc` (P3:570-574), which reschedules its crossings; under
+       a CC rail capacitor the aim is the segment's value now and the
+       segment drives it, and on a draining cell it follows the cell's path
+       or its drive (point 4). Every stepped hub partition re-publishes;
+     - an IC on the rail whose power gate the move flipped is queued, and
+       the partitions its drivers and pulls stamp into re-solve (they stamp
+       only while powered);
      - rule 2a capacitors and LED junctions across the rail and a fixed node
        re-aim (point 7);
      - when `|u − u_scan| > RAIL_SCAN_V`: `u_scan = u` (stat 17); every
-       nonlinear static hub partition past `RAIL_RESOLVE_V` is marked dirty;
-       every reader of a watched node of the other static hub partitions,
-       and every IC whose `vcc` or `gnd` is the rail, is queued for this
-       delta. A 555 whose supply is the rail is queued too. Each queued
-       reader whose logic-pin reads differ from its previous powered
+       reader of a node of a static hub partition, and every IC whose `vcc`
+       or `gnd` is the rail (a 555 included), is queued for this delta. Each
+       queued reader whose logic-pin reads differ from its previous powered
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
    - **Static cache.** A static hub partition's key includes the band
-     `round(u / RAIL_BUCKET_V)`; an entry stores `x`, `s`, `I_p`, `g_p` and
-     `u_p`, and a hit is taken only when `|u − u_p| <= RAIL_RESOLVE_V`
-     (P3:507-531). A hit replays the contribution and publishes `x + s (u −
-     u_p)`. So cache on and cache off agree within the rail-correction bound
-     on hub fixtures, as row B1's verify expects.
+     `round(u / RAIL_BUCKET_V)` and the power gate of each IC on the rail
+     that touches it (a power window can sit inside one band, and an
+     unpowered IC stamps nothing). An entry stores `x`, `s`, `I_p`, `g_p`,
+     `u_p` and the band (P3:507-531), and the same-key entries are searched
+     for one whose `|u − u_p|` is within its band under the regime's rule,
+     the rule the re-solve applies, so a hit never answers where the loop
+     would re-solve (V4X: CC with no rail capacitor took a 25 mV hit under a
+     1 µV band, cache on and off 1.09e-5 V apart). At a CC exit (point 5)
+     and once the cycle guard fires, only a solve at that very rail answers
+     (band 0). A partition holding a free IC supply is never cached. A hit
+     replays the contribution and publishes `x + s (u − u_p)`, so cache on
+     and cache off agree within the rail-correction bound on hub fixtures,
+     as row B1's verify expects (F4: at most 8.2e-10 V apart on the W1f
+     fixtures).
 
 4. **Rail events** (W1f Q1; pec3 has none). Between events the static draws
    are constant, but a closed-form hub partition's draw follows its
@@ -2459,7 +2716,10 @@ records"). Constants, all from P3:35-38 unless marked new:
    `E(t)`, `r(t)` from the held discharge (point 6). One `Rail` event is
    pending at a time, versioned; every rail solve supersedes it. It is due
    at the earliest `t > t0 + 1e-15` at which any of these is reached:
-   - **drift:** `|u*(t) − u(t0)| >= RAIL_DRIFT_V`;
+   - **drift:** `|u*(t) − u(t0)| >= RAIL_DRIFT_V` (on a draining cell's
+     coupled path, the path's own motion; a CC rail capacitor's coupled
+     path has no drift threshold, and its frozen form a bound of its own:
+     both below);
    - **power window:** `u*(t)` crosses `V(gnd) + vccMin*0.9` or `V(gnd) +
      vccMax*1.1` of an IC (555 included) whose `vcc` is the rail and whose
      `gnd` is fixed, computed as W1c point 1 computes them;
@@ -2479,8 +2739,11 @@ records"). Constants, all from P3:35-38 unless marked new:
    a log for an exponential segment (P3:580-608's form), linear for SoC
    within a table segment. The event is the earliest of these times. With
    one moving term the event lands on the threshold exactly; with several,
-   successive events close on it geometrically, and a distance below
-   `1e-12 * max(1, |value|)` counts as reached. At a `Rail` event (stat 18):
+   successive events close on it geometrically. Each threshold is aimed at
+   two reached-widths past it, on the far side, so a landing is past it
+   however the last bit rounds (a gate tested with `>=` or `>` alike), and
+   within one reached-width of that aim, `REACHED_REL * max(1, |threshold|)`,
+   it counts as reached. At a `Rail` event (stat 18):
    SoC advances to `t`, every closed-form hub contribution is refreshed at
    its `vc(t)`, the rail solves (point 2), the regime rules run (point 5),
    and a new event is scheduled. A stepped hub partition contributes afresh
@@ -2488,73 +2751,337 @@ records"). Constants, all from P3:35-38 unless marked new:
    threshold it crosses within a step is found at that step's end, as
    classic finds it (a step granularity, not an exact time).
 
+   **Superseded events** (F1r11, after V9's MEDIUM 3). A host advancing
+   every few nanoseconds through a CC ramp solves the rail at each horizon
+   clamp, and each solve supersedes the pending `Rail` event with a new
+   version due at the same threshold: about 60,000 stale versions popped
+   within 1 ps of each other at 4.32 V, each run as an instant, and the
+   no-progress guard (Equivalence harness rules) declined with `-4`. A
+   superseded event at the head of the heap is now dropped between
+   instants, as its handler would drop it inside one (W1a events point 5):
+   it is no instant, so it neither runs nor counts toward the guard. Stat 4
+   still counts it. V11 found it cannot lose a live event: the state is the
+   last completed instant's, as a rollback leaves it, so an event stale now
+   stays stale after any rollback. Pinned by
+   `a_host_stepping_nanoseconds_through_a_cc_ramp_is_not_a_stall`.
+
    So the rail is exact at events and never further than `RAIL_DRIFT_V` from
-   its implied value between them, the power gate flips at the exact
-   instant the rail crosses it (a digital fact, D1), and CC entry and exit
-   are exact state transitions (Q-O36). Cost on the SAP-1 battery variant:
-   about 75 drift events per clock half-period from the clock 555's timing
-   network (a 1 mA swing through 0.9 Ω); each re-aims three closed-form
-   partitions and solves a scalar.
+   its implied value between them (a CC rail capacitor's coupled path, below,
+   is that value), the power gate flips at the exact instant
+   the rail crosses it (a digital fact, delta D1), and CC entry and exit are
+   exact state transitions (Q-O36). Cost on the SAP-1 battery variant,
+   measured (F1r8, before the cell's coupled path below): about 132k `Rail`
+   events per simulated second, mostly
+   drift events from the 555s' timing and CV networks (closed-form hub RCs
+   through 0.9 Ω), each re-aiming the closed forms and solving a scalar,
+   about 16.8 µs of CPU apiece (W1f known follow-ups, perf round 3).
 
    **The CC rail with a rail capacitor** (W1f Q2). In CC a rail capacitance
    `C_rail` is the whole dynamics: a PSU limiting into a capacitor ramps it
    at `iLimit/C` (probe P9). So while a PSU with `C_rail > 0` is in CC, the
-   rail is a closed form of its own, `C_rail du/dt = dir·iLimit − (A0 + G
-   u)`: `u(t) = u∞ + (u(t0) − u∞) e^(−G (t − t0) / C_rail)` with `u∞ = (dir·
-   iLimit − A0) / G`, and the linear ramp `u(t0) + (dir·iLimit − A0 − G
-   u(t0)) (t − t0) / C_rail` while `G (t − t0) / C_rail < 1e-9`. It starts
-   from `u = V` at a CC entry from a load (continuous), and from the rail
-   the capacitors hold when their own charge was the demand that entered CC
-   (point 5: their charge shared at the rail, `V − dir·Σ(C_k/C_rail)·d_k`
-   over the capacitors short of `V`). It is published live, and each rail
-   capacitor carries `C·du/dt`. The rail sits a static `esr_eff·I_cap`
-   above the capacitors' C-weighted charge (manager ruling 2026-10-07, F1
-   finding C; classic shows the offset), with `I_cap = dir·iLimit − (A0 +
-   G u)` their current and `esr_eff = Σ esr_k·C_k² / C_rail²` (a lone
-   capacitor's own `esr`); the offset keeps the closed form linear. The
-   `esr·C` transient that sets it (nanoseconds) is not modelled. Its own motion adds four thresholds to the
-   rail event: `u_scan ± RAIL_SCAN_V`, the nearest nonlinear hub
-   partition's `u_p ± RAIL_RESOLVE_V` (the CC band `RAIL_CC_RESOLVE_V` does
-   not apply here: the capacitor, not the draws, sets `u`), `RAIL_DRIFT_V`
-   of motion since the last re-aim when a closed-form hub partition exists,
-   and the exit (point 5). Each is a log (or a line) on the rail's own
-   segment.
+   rail is a closed form of its own (`rails::CapSeg`). With closed-form hub
+   partitions on the rail it is their coupled path (below, ruling R15 (a));
+   the single exponential here is the form of a rail with none, and the
+   fallback:
+   - **The form.** Its state is the capacitors' C-weighted charge `q`,
+     `C_rail dq/dt = I_cap`, with `I_cap = dir·iLimit − (A0 + G u)` their
+     current, and the rail sits a static `esr_eff·I_cap` above it (manager
+     ruling 2026-10-07, F1 finding C; classic shows the offset), `esr_eff =
+     Σ esr_k·C_k² / C_rail²` (a lone capacitor's own `esr`). Both are linear
+     in `u`, so `u = α q + β` with `α = 1 / (1 + G esr_eff)` and `β = α
+     esr_eff (dir·iLimit − A0)`, and `u` is the same exponential as `q`:
+     `u(t) = u∞ + (u(t0) − u∞) e^(−k (t − t0))` with `u∞ = (dir·iLimit − A0)
+     / G` and rate `k = α G / C_rail`, not `G / C_rail` (F1r10: the core's
+     form is the exact coupled solution with esr and a resistive load, to
+     5.8e-12 V and 4e-9 relative in the capacitor's current, inside the
+     `esr·C` window too). Ruling R10 (b) (2026-10-16) asked for that exact
+     solution after F4's fixture 45 read the rail up to 8.2e-5 V above it;
+     it is recorded as a correction, not a change: the core was already
+     exact, and F4's sidecar treated the switch as ideal where both engines
+     carry a 1 mΩ contact and the node shunt. Fixed, the sidecar agrees, and
+     fixture 51 samples inside the 50 µs `esr·C` window after a CC exit
+     (Equivalence harness rules). It is evaluated as its increment from
+     `u(t0)`, `u(t0) + slope·∫0^(t−t0) e^(−k s) ds` with `slope = α
+     (dir·iLimit − A0 − G u(t0)) / C_rail` (the textbook form rounds at the
+     scale of `u∞`, which on a lightly loaded rail is `iLimit / G`,
+     megavolts), and is the straight line `u(t0) + slope (t − t0)` while `k
+     (t − t0) < RAIL_CAP_LINEAR` (1e-9). At `esr_eff = 0`, `α = 1` and `β =
+     0` exactly.
+   - **At a rail solve** the charge is continuous, and the rail solves `u =
+     q + esr_eff (dir·iLimit − draw(u))` with the direct devices exact (the
+     scalar Newton of point 2), so it steps with the draws through the
+     offset; the segment re-aims from there. The charge starts at `V` at a
+     CC entry from a load, so the rail starts `esr_eff·I_cap` from `V`
+     (short of it in the PSU's direction `dir`, the draw being past the
+     limit), and from the rail the capacitors hold when their own charge was
+     the demand that entered CC (point 5: their charge shared at the rail,
+     `V − dir·Σ(C_k/C_rail)·d_k` over the capacitors short of `V`). The
+     `esr·C` transient that sets the offset (nanoseconds) is not modelled.
+     The horizon clamp brings the segment to `t_end` with a rail solve.
+   - It is published live, and each rail capacitor carries its share
+     `C_k·dq/dt`.
+   - **Thresholds.** Its own motion replaces the drift threshold with these:
+     the power-window edges above; the rail voltages at which an IC's
+     generic thresholds kink (at a supply difference of 2.667 V for `max(0.8,
+     0.3 vs)`, 3.333 V for `max(2.0, 0.6 vs)`, 0.571 and 0.667 V for the
+     CMOS ratios' clamps), for each IC whose supply difference moves with
+     the rail along a line (F1v23 finding 4); the
+     setpoint (the exit, point 5); `u_scan ± RAIL_SCAN_V`; `u_p ± band` of
+     every curved hub partition, its band under this regime's rule (point 3;
+     `RAIL_CC_RESOLVE_V` does not apply here: the capacitor, not the draws,
+     sets `u`); and `u_a ± couple` of every driven curved closed-form
+     partition (the coupling band, point 3), whose expiry, on a path of
+     several modes, is due as well. On the single exponential each is a log
+     (or a line) on the segment alone: sharing the distance with the
+     closed-form draws made every event close on a threshold geometrically,
+     and a fast inrush ran out of time resolution short of it. On the coupled
+     path each is a first passage of the path, which may turn: the nearest
+     threshold above and the nearest below, whichever the path reaches first
+     (`RailModes::passage`). The path holds nothing frozen, so it has no
+     drift threshold.
+   - **The coupled path** (ruling R15 (a), F1r14). While a PSU ramps a rail
+     capacitor in CC with closed-form hub partitions on the rail, the rail
+     and those partitions advance together between solves, on the exact
+     solution of the linear system they form at the solve, each partition
+     linearised at the aim it takes there (`rails::coupled_modes`):
+     `C_rail q' = dir·iLimit − A0 − G u − Σ b (vc − vc_a)`, `u = α (q +
+     esr_eff (dir·iLimit − A0 − Σ b vc))`, and each `vc' = f (vc − vc_a) +
+     γ (u − u_a) + r0`, `γ = (di0/du + di1du·vc) / C`. Eliminating the
+     partitions, the rail is `u(t0 + τ) = u0 + Σ s φ_k(τ)` over the
+     system's modes `−k`, with `φ_k(τ) = ∫0^τ e^(−k r) dr`: the zeros of the
+     secular function `F(λ) = Σ w / (λ − f) − m(λ)`, `w = −b γ >= 0`, `m =
+     (λ + k_q) / (α Q(λ))`, `Q = (α + esr_eff C_rail (λ + k_q)) / C_rail`,
+     `k_q = α G / C_rail`. `W` falls between its poles and `m` rises (with a
+     pole of its own at esr > 0), so one root lies between each two
+     consecutive poles, one between the last and 0 while the rail is stable
+     (`F(0) < 0`), and at esr 0 one below the first: as many as the system
+     has states, each found from its nearer pole, so a weakly coupled
+     partition's mode keeps its distance from its own rate to the last bit.
+     Each mode's share is the residue `s = (B − r0_q / Q) / F'`, `B = Σ b r0
+     / (λ − f)`, `r0_q = q'(t0)`; a partition that moves its draw but
+     follows no rail (`w = 0`) is a forcing at its own rate. The shares sum
+     to the rail's slope, `α (r0_q − esr_eff Σ b r0)`, which is checked to
+     1e-9 relative. The capacitors' charge follows through the esr pole,
+     and each rail capacitor carries its share `C_k dq/dt`. A rail of no
+     closed-form hub partition keeps the single exponential above.
+   - **Following the path.** Every closed-form hub partition, and every
+     closed-form partition holding a watched pin of an IC on the rail or on
+     a static hub node, is aimed at the path's value now and takes it as a
+     known drive. A hub partition follows it by its own closed form, `vc =
+     inf + (vc_a − inf) e^(fτ) + Σ w J(f, k, τ)`, `w = γ s` per mode and
+     `J(f, k, τ) = ∫0^τ e^(f (τ − s)) φ_k(s) ds`, its nodes publishing
+     `x0(u_a) + (dx0/du)(u − u_a) + dx vc`. That is the coupled solution's
+     partition part, so a linear partition is exact to rounding and the
+     rail a solve finds between events is the path's own: no drift charge,
+     no owed step. What is left is second order in the rail's motion since
+     an aim: a curved partition's bilinear term, `di1du (u − u_a)(vc −
+     vc_a)`, which the coupling band bounds (point 3: its sensitivities are
+     held at the aim's `vc_a`, its nodes publish with `dx/du` at the present
+     `vc`, and the crossing scheduler holds `dx/du` at `vc_a`), and the
+     linearisation of the direct devices and static partitions at the
+     solve. A watched-pin partition (`w = 0`) sees the pin's thresholds move
+     with `u`. Every threshold the compiler emits is affine in the supply
+     between the power-window edges and the generic kinks above, so each
+     edge and kink is a rail event that aims again, and a supply on a
+     static hub node moves with the rail on that node's published line.
+     Measured (F1r14, F1r15): F1r12's 108 RC-on-rail boards and F1r11's 768
+     CC sweep none over W0 (27 and 83 over before round 12, worst 99x and
+     160x), and V11's boards (R12's hang B1070 and its 5 false `-4`s
+     included) all run, none over W0, with about 6x fewer rail events on
+     CC than under rounds 12 and 13's drift caps (below).
+   - **Crossings on the path.** Under one mode a crossing is the first root
+     of node less threshold, which has at most one extremum
+     (`rails::driven_crossing`). Under several it is the first root of a sum
+     of monotone terms that moves with the rail (each mode's line, the
+     capacitor's own exponential and its response to each mode,
+     `rails::ExpSum`), and the search takes the sum by rate (F1r15):
+     `e^(fτ) = 1 + f φ_(−f)`, `J(f, k) = (φ_(−f) − φ_k) / (f + k)`, so `g =
+     c0 + Σ d φ_λ` over distinct rates, and `g' = Σ d e^(−λτ)` is an
+     exponential sum whose zeros are at most its coefficients' sign changes
+     in order of rate (Descartes' rule), each found between the zeros of the
+     next derivative (Rolle, `exp_zeros`). The sum is monotone between its
+     turns: each piece is one evaluation at its end, and the piece holding
+     the crossing is solved by Newton kept in its bracket, to the last bit.
+     A capacitor within `1e-6` relative of resonance with a mode (a weakly
+     coupled partition beside its own mode) takes the confluent form `ψ_λ =
+     ∫0^τ s e^(−λs) ds` at their mean rate, as do two rates within `1e-6` of
+     each other, the error it leaves added to the search's rounding margin.
+     A sum of more than `MERGED_MAX` (16) rates is searched by windows: each
+     bounded term by term and skipped where its range excludes a root, as
+     round 14 searched every sum. A node and a threshold riding the same rail
+     cancel only in the sum, so those windows bisected to the narrowest, and
+     the search was 60 % of corpus 07's switch-on, 3x its bar (point 3, cost
+     bars). **The landing rule** (F1r14): a sum already at or past 0 at the
+     aim (a landed node can sit its last bits on the wrong side) must first
+     come back past 0 by more than 64 ulps of its scale before a crossing
+     counts, so the root it has just come through is never landed again.
+   - **The frozen form** (the fallback). Where the system is not one the
+     modal form takes (a partition with `w < 0`, a capacitor that does not
+     decay, a mode unstable, degenerate or failing the slope check), the
+     segment is the single exponential above and holds the closed-form
+     draws where they stood at its aim, as before ruling R15 (F1 round 3,
+     option (i), chosen over re-aiming every closed form each
+     `RAIL_RESOLVE_V`; both were measured inside the criterion):
+     - **Drift-charge payback.** The segment holds the closed-form draws'
+       `b vc` where they stood at its aim (`cf_frozen`) while their
+       capacitors move on. The charge their motion takes since is known in
+       closed form, and the next rail solve takes it off the capacitors'
+       charge (`q = charge(t) − drift`). A `DriftBound` watch solves the rail
+       again before that could move it `RAIL_DRIFT_V`: after `t` the draws
+       have moved at most `min(c_sat, c1 t) + c2 t²` amps, and an amp moves
+       the rail at most `α (esr_eff + t / C_rail)` (F1r4: 4.8e-6 V with the
+       watch, 2.2e-4 V without). What that leaves a partition's current is
+       the gap rulings R12 and R13 targeted (below).
+     - **Solve before a crossing.** The rail a driven partition is aimed
+       with trails the one a solve gives by the owed step, `α·drift + α
+       esr_eff Σ b Δvc` (the drift charge and the esr offset's share of the
+       draws' own motion, F1v23 finding 2). Landing first would put the node
+       `CROSS_NUDGE_V` (1e-9 V, the closed-form crossing's landing nudge)
+       past a threshold riding the stale rail, and the solve the crossing
+       causes would step the threshold back across it: the same crossing
+       again a moment later. So when the owed step is at least
+       `CROSS_NUDGE_V`, the rail solves first, re-aims what it drives and
+       reschedules the crossing; since every threshold and hub node moves
+       with the supply by a factor in `[0, 1]`, a crossing the solve does
+       not put back short of its threshold lands at once. A coupled path
+       owes no step and never takes this solve.
+   - **Rulings R12 and R13, backed out** (ruling R15 (a)). Round 12 bounded
+     the frozen form's drift per curved partition (`drift_width`, `drift_cap`:
+     the rail solved again before its drift could put a published current
+     past W0), and round 13 extended it to linear partitions; on F1r11's 768
+     sweep and F1r12's 108 boards both cleared W0, at 4x and 11x the rail
+     events. V11 found it unsound (a hang, B1070, a CC exit whose rail sat
+     still while `Rail` events came 1.14 ps apart; 5 false `-4`s; 21 boards
+     still over W0, 8 worse than before, the drift's premise false), and
+     ruling R15 (a) replaced both by the coupled path. Their tests stay,
+     each now asserting W0 on the coupled path.
+   - **A flip against the ramp** (F1r14). A rail IC whose own power flip
+     steps the rail back across its window's edge (its supply current
+     through the rail capacitors' esr: 17 nV against an edge landed two
+     reached-widths past, F1r14's slow inrush at esr 1 to 5 Ω) has no
+     consistent state at that instant, and the rail loop's passes
+     alternate. On the pass whose rail is back where it was two passes
+     before and whose flip runs against the CC segment's motion (an IC
+     turning off while the ramp rises, as on its way up through the
+     power-on edge), the flip is held: the partitions keep the stamps of
+     the state the ramp is heading into, and the segment, solved with them,
+     crosses the edge a moment later at the next event, where the gate
+     settles.
+   - **Not modelled** (ruling R11 (a), 2026-10-16). Rail capacitors of
+     different `esr` exchange charge in a fast mode of their own after a
+     step, a transient lasting about 5 µs for the measured pair; the
+     C-weighted form leaves it out. Measured: one capacitor's current 11.5 %
+     off 0.5 µs after the step, the rail within 8.1e-6 V. It is a W3 analog
+     backlog item (W1f known follow-ups).
+
+   **The cell's coupled path** (ruling R16 (B), F1r15; `rails::cell_modes`,
+   `CELL_COUPLED` in `solve/hub.rs`). On a battery with closed-form hub
+   partitions the rail is algebraic between solves: `u = u0 + ρ τ + κ Σ b
+   (vc − vc(t0))`, `κ = −r / (1 + r G)` (0 at `r = 0`), `ρ` the drain's line,
+   `(dE/dsoc − (dR/dsoc)·draw) / (1 + r G)` times `dsoc/dt` (the implied
+   trajectory's SoC term; `rails::CellDrive`). With each closed-form hub
+   partition linearised at the aim it takes at the solve (`vc' = f e + γ
+   (u − u0) + r0`, `e = vc − vc(t0)`), the partitions are a diagonal system
+   with a rank-one coupling, and the rail's slope transforms to `(ρ / s + κ
+   B(s)) / D(s)`, `D = 1 − Σ c / (s − f)`, `c = κ b γ`. With every `c` of
+   one sign, `D` has one zero between each two consecutive poles and one
+   beyond them (above the last for `c > 0`, stable only while `D(0) > 0`;
+   below the first for `c < 0`), each found from its nearer pole by Newton
+   kept in its bracket. Each mode's share is its residue, `s = (ρ / λ + κ
+   B(λ)) / D'(λ)`; the drain adds the line `ρ / D(0)`, and a partition that
+   follows no rail (`c = 0`) its own rate; the shares are checked against
+   the rail's slope, `ρ + κ Σ b r0`. The partitions follow that path as they
+   follow a CC rail capacitor's (above), each at its own rate with its own
+   pull on the cell inside the path: every partition is driven by every
+   other's motion, exactly to the system's first order. A curved segment
+   takes each mode's pull at its asymptote and its transient's share, `we
+   e^(fτ) χ_k(τ)`, `χ_k = ∫ φ_k` (a falling gate's settled current was 104x
+   W0 at `vc_a`'s slope, its rail barely moving, so no band's event came
+   while the transient ran), and keeps its coupling band (point 3). The
+   rail's watch is the path's first passages of the power windows, the
+   kinks, and the curved closed-form partitions' band and coupling edges,
+   capped at `RAIL_DRIFT_V`, which bounds the linearisation of the static
+   partitions' and direct devices' draws and the curvature of `E(soc)` and
+   `R(soc)`; the SoC knot is watched on its own line. A partition's
+   crossings are searched only until the path first moves `RAIL_DRIFT_V`,
+   where the rail solves and aims it again. The horizon clamp solves a
+   cell's rail whenever its closed-form partitions follow it (path or
+   drive), so the rail node published at a frame is the rail they
+   followed. The SoC integral (point 6) holds each partition's draw on its
+   own exponential between solves, leaving out its response to the path,
+   whose charge over a drift-capped interval is second order. Measured
+   (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
+   `e211c55`), and the SAP-1 on its battery 45 % faster than at `3ca4004`
+   (point 3, cost bars). Before it (round 14, ruling R15 (a)) each
+   partition was driven by its own pull and the drain's line alone, and the
+   others' motion entered only first order: 193 of the multi-partition
+   probe's 600 boards over W0, worst 118x.
+
+   **The cell's fallback drive.** Couplings of mixed sign, an unstable one,
+   or a system `cell_modes` otherwise declines keep round 14's drive: each
+   partition takes its own pull on the cell, `κ b`, into its rate and its
+   nodes at the aim, and the drain's line as a ramp drive (`J(f, 0, τ)`, a
+   curved segment adding its transient's `we τ² e^(fτ) / 2`); its
+   crossings are roots of `rails::line_crossing` searched to twice the
+   time the line takes to move `RAIL_DRIFT_V`; the rail's watch is the
+   implied trajectory with each partition's exponential and the line, its
+   rate widened by what the partitions following it add (`J <= τ / −f`),
+   capped at `RAIL_DRIFT_V`; the others' motion stays first order under
+   it, and the SoC integral takes each partition's response to the line.
+   That drive takes no coupling band.
+
+   **Known divergence** (F1r15, ruling R17 (a); `w1f-cell-multi-partition`,
+   Equivalence harness rules). Between rail solves on a battery the path
+   takes the static partitions' and direct devices' draws linearised at the
+   solve while the rail moves up to `RAIL_DRIFT_V`, and what that leaves is
+   second order in the rail's motion. On a cell with a curved and a second
+   partition it can still exceed W0's tolerance: the 600-board
+   multi-partition cell probe has 12 boards over W0 (worst 20x, a 22 Ω
+   partition's current beside a 150 Ω gate charging 145 nF on a 5 Ω cell)
+   and 10 whose rail loop does not settle at setup (point 3's `-4`),
+   against 193 and 38 on round 14's drive and 433 and 38 before it. A cap of 1 µV brings
+   the measured rows down about fivefold, but the rail loop then fails to
+   settle on some boards; a cap derived from W0 was the other option
+   offered. Recorded as a bounded
+   divergence; the proper fix comes after W1g, with F5 and perf round 3
+   (W1f known follow-ups).
 
 5. **Bench PSU regimes** (Q-O36: classic's state machine, exact; entry at a
    current crossing; the hub tolerance applies to voltages only). The state
    is `reg`: 0 (CV) or 2 (CC), starting at 0 at load. The rules run at
    every rail solve (so at load, at every instant that touches the rail,
    and at every rail event), at most one transition per PSU per solve:
-   - **CV → CC** when `|I| > iLimit`, strictly (SO:319), where `I = A0 + G V`
-     is the draw at the setpoint, unless the CC solution reaches the
+   - **CV → CC** when `|I| > iLimit`, strictly (SO:319), where `I = A0 + G
+     V` is the draw at the setpoint, unless the CC solution reaches the
      setpoint, `dir·u_cc >= |V|`, which keeps CV (the compliance clamp,
-     SE:1793-1815, with no tolerance band below `|V|` for a bench PSU since
-     `fix/psu-railcap-cc-entry`). `u_cc` is the CC solution's settled rail,
-     `(dir·iLimit − A0)/G` (point 2), with or without a rail capacitor: the
-     capacitor only sets how fast the rail gets there. For a linear rail
-     `dir·u_cc >= |V|` is the same as `dir·(A0 + G V) <= iLimit`, so the
-     clamp never vetoes an entry; it is the guard for a removed load (the
-     CC candidate far above `V`). The instant is the event where the draw
-     first exceeds the limit: a commit, a toggle, load, or a rail event at
-     the crossing. The rail then solves in CC at the same instant.
-   - **A rail capacitor below the setpoint is demand** (F1's P9; manager
-     ruling 2026-10-06). A rail capacitor is not a term of `A0` or `G`
-     (point 7), but the CV → CC test adds the draw it would take at the
-     setpoint while it holds the rail short of `V`. With the deficit
+     SE:1793-1815, with no tolerance band for a bench PSU since
+     `fix/psu-railcap-cc-entry`: a `dir·u_cc` any amount short of `|V|`
+     enters). `u_cc` is the CC solution's settled rail, `(dir·iLimit −
+     A0)/G` (point 2), with or without a rail capacitor: the capacitor only
+     sets how fast the rail gets there. For a linear rail `dir·u_cc >= |V|`
+     is the same as `dir·(A0 + G V) <= iLimit`, so the clamp never vetoes an
+     entry; it is the guard for a removed load (the CC candidate far past
+     `V` in the PSU's direction, `dir`). The instant is the event where the
+     draw first exceeds the limit: a commit, a toggle, load, or a rail event
+     at the crossing. The rail then solves in CC at the same instant.
+   - **A rail capacitor short of the setpoint is demand** (probe P9, found
+     by F1; manager ruling 2026-10-06). A rail capacitor is not a term of
+     `A0` or `G` (point 7), but the CV → CC test adds the draw it would take
+     at the setpoint while it holds the rail short of `V`. With the deficit
      `d = dir·(V − V_f − vc) > 0` (`V_f` its fixed pin's voltage, `vc` its
-     charge, both in the PSU's direction), that draw is `d / esr` for
-     `esr > 0` and unbounded for `esr = 0`. So a load's discharged capacitor
-     puts the PSU in CC at once, as in fixed classic (whose capacitor starts
-     at 0 V and whose 1 ps load seed sees the charging current), and the
-     rail ramps at the limit by point 4's closed form until the exit below.
-     The compliance clamp then reads the rail those capacitors hold, not the
-     settled CC rail, which with no load is far above `V` (`iLimit / G` at
-     the node shunt) and would keep CV.
-     A capacitor at or above the setpoint adds nothing: one carried charged
-     across a reload stays CV. In CV the deficit is zero (`esr = 0`, rule
-     2a) or decays with `esr·C`, so a supply inside its limit never
-     re-enters. Contract tests: 100 µF on a 5 V, 0.1 A PSU rises at
-     1000 V/s and reaches 5 V at about 5 ms, matching classic within the
+     charge, both in the PSU's direction), that draw is `d / esr` for `esr >
+     0` and unbounded for `esr = 0`. So a load's discharged capacitor puts
+     the PSU in CC at once, as in fixed classic (whose capacitor starts at 0
+     V and whose 1 ps load seed sees the charging current), and the rail
+     ramps at the limit by point 4's closed form until the exit below. The
+     compliance clamp then reads the rail those capacitors hold, not the
+     settled CC rail, which with no load is far past `V` (`iLimit / G` at
+     the node shunt) and would keep CV. A capacitor at or past the setpoint
+     (in `dir`) adds nothing: one carried charged across a reload stays CV.
+     In CV the deficit is zero (`esr = 0`, rule 2a) or decays with `esr·C`,
+     a moving term of the CV-entry watch (point 4), so a supply inside its
+     limit never re-enters. Contract tests: 100 µF on a 5 V, 0.1 A PSU rises
+     at 1000 V/s and reaches 5 V at about 5 ms, matching classic within the
      normal criterion; the same capacitor charged to 5 V at load stays CV.
    - **CC → CV** when the CC solution reaches the setpoint, which for a
      linear rail is the draw at the setpoint back within the limit,
@@ -2564,11 +3091,35 @@ records"). Constants, all from P3:35-38 unless marked new:
      jump to `V` would draw without bound, so the exit is the rail itself
      reaching the setpoint, `dir·u >= |V|` (probe P9: classic stays in CC,
      −0.1 A, up to 5.0 V). The rail then solves in CV at the same
-     instant, and every hub partition re-solves at the new rail there
-     instead of carrying a first-order correction from where it was last
-     solved (manager ruling 2026-10-07, F1 finding D: a linear partition
-     solved at power-on and extrapolated 0.725 V read 1.1 nA where classic
-     reads 0.01 nA).
+     instant, and every hub partition, linear or curved, static, stepped or
+     closed-form, re-solves at the new rail there instead of carrying a
+     first-order correction from where it was last solved (manager ruling
+     2026-10-07, F1 finding D: a linear partition solved at power-on and
+     extrapolated 0.725 V read 1.1 nA where classic reads 0.01 nA). A
+     static one's cache answers there only with a solve at the setpoint
+     itself (point 3): a hit within its band would be that correction again,
+     and a ramp's narrow bands store entries just below the setpoint, so
+     cache on and cache off would part by its error.
+   - **The exit's tie** (ruling R1 (a), 2026-10-15; F1v23 finding 1).
+     With a rail capacitor the supply current is continuous across the
+     exit: in CV the capacitors take what the limit leaves of the CV draw at
+     the setpoint, `I_cap = dir·iLimit − draw(V)`, each its share `C_k /
+     C_rail` as it took its share of the segment's current, held one esr
+     drop below the rail (`vc = V − V_f − esr_k·(C_k/C_rail)·I_cap`, in the
+     PSU's direction), from where it relaxes to `dV` as rule 2a's
+     exponential (at `esr = 0` its charge is the rail and its current 0,
+     rule 2a's divergence). The CV → CC test reads that charge back as
+     demand, so it sees the limit itself rather than the segment's current
+     at a rail that landed a reached-width past the setpoint. Since a charge
+     rounds at the rail's scale, which `1/esr` magnifies, each held charge
+     is stepped a last bit toward the rail, at most `TIE_STEPS` (8) times,
+     until the test reads no more than the limit, and the rail loop ties
+     again after each later pass of the instant, at the draws its re-solves
+     settle to. A capacitor's demand then enters CC only past `iLimit +
+     REACHED_REL·max(1, iLimit)`: a real change of the draws, never the
+     rounding of a re-solve. Without the tie a CC exit with `esr > 0`
+     re-entered CC at the same instant in 42 of 96 cases, leaving CC 4 to 20
+     µs late with 2 to 10 mV of overshoot.
    - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
    - The rules are pure functions (`devices/sources.rs`): `regime_step(reg,
      i_at_v, u_cc, u_rail, V, iLimit)` and `regime_step_rail_cap` with the
@@ -2610,8 +3161,11 @@ records"). Constants, all from P3:35-38 unless marked new:
      of `pos` over `[t_last, t]` is the exact integral of the implied rail
      current: static and direct terms held (exact between events), each
      closed-form hub term integrated in closed form (`(a + b·inf)·Δt +
-     b·(vc0 − inf)·(e^(FΔt) − 1)/F`, and `(a + b vc0) Δt` when `F = 0`),
-     each stepped term held from its last commit (one step, like classic).
+     b·(vc0 − inf)·(e^(FΔt) − 1)/F`, and `(a + b vc0) Δt` when `F = 0`;
+     under the cell's fallback drive plus its response to the drain's line,
+     and on the cell's coupled path without its response to the path, Rails
+     point 4), each stepped term held from its last commit (one step, like
+     classic).
      Then, exactly as `advancePrimaryBatteryState` (BP:447-482) with `Q` in
      place of `I·dt`: `requested = max(0, Q)`, `rejected += max(0, −Q)`,
      `accepted = min(requested, capacityAh·3600·soc)`, `soc' = clampSoc(soc
@@ -2660,9 +3214,12 @@ records"). Constants, all from P3:35-38 unless marked new:
      capacitance makes the rail a closed form (point 4), with the
      capacitors' `esr` entering as a static offset and its nanosecond
      transient not modelled. A rail capacitor whose far pin is a waveform
-     source's node is not handled (an edge there does not solve the rail,
-     and the CC segment ignores the far node moving), so such a load is
-     `-3` (point 1) until it is.
+     source's node, directly or through a source stacked on it, is not
+     handled (an edge there does not solve the rail, and the CC segment
+     ignores the far node moving), so such a load is `-3` (point 1) until it
+     is (a decline added with F1 round 2, the manager informed, 2026-10-07),
+     in exact mode too: the hub is classified before exact mode frees the
+     rail node.
    - **Watches.** A change re-aims every watch whose thresholds read the
      changed node, as a moving static supply does (W1c point 4,
      `add_watch_dependent_partitions`).
@@ -2683,25 +3240,83 @@ records"). Constants, all from P3:35-38 unless marked new:
    an unknown"; kept as locked, W1f Q3).
    - The rail node is a free node. Every partition that reads it, and every
      direct device, joins one partition with it, classified by the usual
-     rules (on the SAP-1 it holds nearly the whole board and is stepped).
+     rules (on the SAP-1 it holds nearly the whole board and is stepped),
+     except that it is never closed-form (the source's SoC and regime
+     advance per committed step, so it needs steps) and a battery's is
+     stepped whatever it holds: SoC is state, and `E` and `r` move with it.
+     The owner (Dev) ruled a battery partition with `r > 0` stepped
+     (2026-10-15); FX1 found that `r = 0`, where `u = E(soc)`, froze the
+     same way and extended the rule to it (`partition.rs:583-601`). A static
+     partition, solved only at events, held the rail and the draw at their
+     load values and charged SoC at that frozen current (an LED and 220 Ω on
+     the generic cell: 4.9869 V against classic's 4.7918 V at 1 s, 3 % more
+     discharged). With nothing else to step, the partition steps under the
+     stepped controller's own limits, so a host that advances in long jumps
+     sees steps up to `H_MAX` (10 ms) and their error (FX1: about 0.5 of
+     W0's tolerance at an LED's cathode).
    - The source stamps in that partition: a battery with `r > 0` as a
      Norton, `1/r` from the rail to the return plus `E/r` injected, with `E`
      and `r` held per step from the SoC at the step's start (classic's
      cadence, SO:141-156); a battery with `r = 0` and a PSU in CV replace
      the rail row by `u = E` or `u = V`; a PSU in CC keeps the KCL row and
      injects `dir·iLimit`. The source current is the Norton branch current,
-     or the replaced row's KCL residual.
+     or the replaced row's KCL residual, the network linearised about the
+     solution with the capacitor companions the solve used.
    - No sensitivity, band, scan or rail event: the partition solves the
-     rail with everything else. SoC advances per committed step with the
-     committed current; the regime rules of point 5 run per committed step
-     on the solved `u` and draw.
+     rail with everything else.
+   - **Plan after the SoC charge** (FX1, FX2). The battery partition's next
+     step is planned only once the step just committed is charged to SoC
+     and the source restamped from it: a plan made at the commit took `E`
+     and `r` a step late. A plan that reads the held partition's trial (an
+     IC it supplies) waits after it too, and the held plans run each after
+     the held ones that supply it. The supplies a held plan reads are still
+     caught up to the instant first, on the drivers in force before the
+     event (W1b rule 6), which only that call has; a held supply is not
+     caught up again. Since the per-step restamp below, this hold is
+     redundant for `E` and `r` (FX45v: 208 runs bit-identical without it);
+     it stays as the release backstop and for the order in which the
+     scheduled steps are pushed.
+   - **Restamp per step** (FX5). One call can commit several steps of the
+     battery partition (the horizon clamp, a catch-up before a
+     discontinuity). Each committed step is charged with its own charge and
+     the source restamped from the SoC it leaves, so the next step, in the
+     same call or the next, takes `E` and `r` from it (one call against one
+     step per call: 1.389 V apart before, bit-identical after).
+   - **Billing** (ruling R5, 2026-10-15, and FX4). Ruling R5 (b) chose
+     billing per solved half-step at its own end current, for charge
+     conservation. Under the trapezoid that does not conserve (FX4: −0.1 to
+     −7 %), so the orchestrator applied the integrator's own quadrature,
+     within the ruling's invariant, and informed the coordinator, who did
+     not object. SoC advances per committed step by the charge the source
+     delivered over it in the integrator's own quadrature, per solved
+     sub-step: `I_end·h_sub` under backward Euler, `(I_start + I_end)/2 ·
+     h_sub` under the trapezoid, over each half of a step-doubled step. It
+     conserves charge with the integrator (24 cases, both integrators,
+     within 1e-10; FX45v's 72 more, LED, switched and charging, within the
+     probe's own Newton tolerance), where classic's `I_end·h` per step loses
+     up to 1.9e-2 under backward Euler and 1.2e-1 under the trapezoid in an
+     inrush. A PSU's partition is not billed.
+   - **Regime rules** (EX1). Point 5's rules run on the solved rail and
+     draw (CV → CC when `|draw| > iLimit`, CC → CV when `dir·u >= |V|`) at
+     every committed step of the rail's partition, and also at its seed and
+     at any re-solve at the instant of the last commit: run only for a step
+     committed after the last, a PSU stayed CV through its seed, so its
+     first step charged a discharged rail capacitor to the setpoint (4.98 V
+     at 2.5 µs against classic's 0.0047 V), and a toggle entered CC a step
+     late. A transition re-solves the partition at once.
+   - An `r = 0` battery publishes at the load instant the 1 ps seed's
+     capacitor current, `C·E / 1e-12` (5e6 A for 1 µF), as classic does;
+     default mode publishes 0 there.
    - Cost: the merged partition is a dense Newton over the board, the same
      class of work as classic's global Newton (83-112 s CPU per simulated
      second on the SAP-1, build log 2026-09-30) or worse, since every commit
      instant lands a step. So S2 compares against it over a declared window,
      the first 20 clock cycles (Equivalence harness rules), and the rail
-     fixtures cover the rest. F1 measures its cost on that window and
-     records it here.
+     fixtures cover the rest. Measured on that window (F1 round 1, the SAP-1
+     battery variant, 41.7 ms): 8.47 s of CPU frozen and 13.07 s running,
+     against 0.14 s in default mode, about 200-300 s of CPU per simulated
+     second. The exact-mode fixes since (FX1-FX5, EX1) moved it within noise
+     (8.5-9.0 s frozen, 12.5-13.5 s running).
 
 ### Sources
 
@@ -2779,8 +3394,10 @@ records"). Constants, all from P3:35-38 unless marked new:
      differs after the ramp from its exact response by `(t_r/τ)² / 24` of
      the swing to leading order, decaying with τ: below 1e-3 of the swing
      for `τ >= 6.5 t_r`, and a faster load has settled within a few τ, long
-     before the segment's quiet instants. Classic's headless host never
-     resolves such a ramp either (`per/10` steps, HL:150-153).
+     before the segment's quiet instants. The bound rests on that, not on
+     classic: its headless host stepped over such a ramp (`per/10` steps,
+     HL:150-153) until `685179c`, and now lands a step on each corner
+     (Equivalence harness rules, source edges).
    - **Midpoint steps.** Per cycle `c` (only `c = 0` when one-shot) from
      `td + c·per`: `v1 → v2` at `+ tr/2` (`+ 0` when `tr = 0`), `v2 → v1`
      at `+ tr + pw + tf/2` (`+ tr + pw` when `tf = 0`); `v1` before `td`.
@@ -2800,12 +3417,39 @@ records"). Constants, all from P3:35-38 unless marked new:
        end) and one on its midpoint (the slot); between the corners the live
        boundary value (Rails point 7) is linear in `t`, read at the instant
        of each stamp and read;
-     - every partition that reads the node, directly or through a source
-       stacked on it, is classified stepped at load, whatever it holds
-       (membership and classification stay fixed at load). It lands a step
-       on each corner and restarts there at `POST_EVENT_H` with the BE
-       anchor, as after any discontinuity, and each step reads the boundary
-       at its own instant;
+     - a partition that reads the node, directly or through a source
+       stacked on it, is classified at load (membership and classification
+       stay fixed at load). A **linear closed-form reader** stays
+       closed-form (ruling R3 (b), 2026-10-15): one W1b point 3 and
+       LEDs point 5 classify closed-form, that is not a hub partition, and
+       that holds neither a stamp of an IC supplied from a ramping node nor
+       a watched read pin of an IC supplied from a ramping node, the rail or
+       a hub partition's node (a threshold moving between events). Its
+       network is linear, so `x0` and `i0` are affine in each ramping node
+       `v`, with `dx0/dv` and `di0/dv` solved exactly through the segment's
+       own factors, and between corners `v` is a straight line of slope
+       `b`. So from an aim at `t_a` its nodes are `x0_a + r_x τ + dx vc` and
+       `vc = inf + (vc_a − inf) e^(fτ) + (r_i / C) J(f, 0, τ)`, with `r = Σ
+       b · d/dv`: Rails point 4's drive with the line `φ_0(τ) = τ` in place
+       of the rail's exponential. Each corner of a ramp it reads aims it
+       again from its exact `vc` (the midpoint changes no slope and does
+       not), and a crossing on its nodes is the exact root of that
+       trajectory, searched up to the next corner, landing as every
+       closed-form crossing lands;
+     - every other reader (nonlinear, two or more capacitors, or excluded
+       above) is stepped, whatever it holds. It lands a step on each corner
+       and restarts there at `POST_EVENT_H` with the BE anchor, as after
+       any discontinuity, and each step reads the boundary at its own
+       instant. Ruling R3's second half: a nonlinear or multi-capacitor
+       reader stays stepped and is checked against classic under the
+       Richardson rules where classic converges (Equivalence harness
+       rules). The rail-coupled exclusion above is F6's narrowing of R3
+       (b), which the coordinator accepted (2026-10-15): the rail's drive
+       under a CC rail capacitor (Rails point 4) is an exponential, and a
+       crossing on the exponential plus the ramp's line is outside
+       `rails::driven_crossing`'s single-extremum argument. Composing the
+       two drives with a crossing solver for both is a W3 follow-up (W1f
+       known follow-ups);
      - a reader pin on the node itself gets a crossing watch on the ramp:
        the threshold crossing time is linear in `t` and exact (accepted only
        at `t > now + 1e-15`). The digital slot flips at the ramp midpoint,
@@ -2849,6 +3493,87 @@ records"). Constants, all from P3:35-38 unless marked new:
 6. **Failures and warnings.** None of these kinds fails (§8.4.3, §8.7). The
    `missing_flyback` rail-kind rule (`FLYBACK_RAIL_KINDS`, §8.7) is W1g's.
    Small-signal AC stamps are W6.
+
+### Known follow-ups (W1f)
+
+Recorded at the W1f integration. None changes a rule above until it lands.
+
+- Coupling band holes (V11, FIN1): `err_at` returns 0 where the bound
+  does not close and `CoupleAim::of` drops a segment that does not decay,
+  so the next aim starts afresh without the inherited error; the floor
+  (the larger of D(1 ns) and 1000 reached widths) applies even when the
+  tolerance is used up. Neither fired in the 768-board CC sweep after
+  FIN1; fixing either needs a decay-free bound or a floor that yields
+  without risking sub-ns rail events (a ruling).
+- **F5, the ping-pong hold** (Equivalence harness rules,
+  `w1f-power-gate-pingpong`): the kernel-to-evaluator hold channel that
+  ports classic's H8. It runs immediately after W1g, ahead of perf round 3
+  (the coordinator, 2026-10-15, with ruling R6).
+- **Perf round 3** (the coordinator, 2026-10-15, with ruling R7): the SAP-1
+  on its battery at 1x real time or better, 5x the stretch goal, a
+  first-class target. It ran at about 0.4x: 2.1-2.4 s of CPU per
+  simulated second (V6; 2.2 s in F1r8's profile), against about 20 ms on
+  the ideal supply (V6; 29 ms in F1r8's profile). Round 15's coupled cell
+  path (Rails point 4) brought it to 1.16-1.35 s (F1r15), about 0.8x; F1r8's
+  profile below predates it and has not been taken again. F1r8's profile,
+  per simulated second, battery against ideal: 311k events against 21k,
+  132k `Rail` events against none, 147k rail moves, 576k IC evaluations against 43k, 445k
+  delta passes against 22k, 4.6k hub re-solves, about 16.8 µs of CPU per
+  rail event. Two cheap structural causes:
+  - `direct_at`'s IC-draw closure (`solve/hub.rs`) is 44.5 % of self time:
+    on every call inside the rail Newton it walks every rail IC and driver
+    twice, at `u` and `u + RAIL_DELTA`, where only the drivers with both
+    ends non-free contribute, a set fixed at load that can be precomputed;
+  - the rail-event rate: an event per `RAIL_DRIFT_V` (10 µV) of drift from
+    the closed-form hub RCs (the 555 timing and CV capacitors through
+    0.9 Ω), each republishing every static hub partition (13 % of the time)
+    and re-aiming the closed forms (about 4 IC evaluations per event);
+    malloc and free take 6 %.
+- **The multi-partition cell divergence** (ruling R17 (a); Rails point 4,
+  known divergence `w1f-cell-multi-partition`): 12 of the 600
+  multi-partition cell probe's boards over W0, worst 20x, from the static
+  and direct draws linearised at the solve while a battery's rail drifts up
+  to `RAIL_DRIFT_V` between solves. The proper fix comes after W1g, with
+  F5 and perf round 3 (the coordinator, with ruling R17); a cap of 1 µV
+  needs the rail loop's settling fixed first.
+- **The `R_out` clamp-kink band** (F1r7, INV2): a curvature band ends at a
+  driver's `R_out` kink (`io_max`), so about 58 re-solves pile up at it on
+  the SAP-1 (its rail near 4.8 V). A first-order jump term across the kink
+  would widen the band (filed, not taken).
+- **The closed-form RC's CC-exit lag** (F1r10): with a rail capacitor and a
+  closed-form RC hub partition, the CC exit lands 49 ns late, inside
+  `RAIL_DRIFT_V` over the rail's slope (200 ns there), which puts the
+  capacitor's current 0.99 of W0's tolerance off at the start of the exit
+  window. It passed with no margin, by `RAIL_DRIFT_V`'s design (Rails
+  point 4); no decision has been asked. Measured on the frozen form: since
+  round 14 the rail and the RC advance on their coupled path, whose exit is
+  a first passage with no drift behind it, but the lag has not been
+  measured again, and the test
+  (`a_cc_rail_capacitor_with_esr_and_a_closed_form_rc_hub_partition_follow_their_coupled_ode`)
+  still allows `RAIL_DRIFT_V` over the slope and describes the frozen form.
+- **Exact mode's late power gate** (V6, recorded, not investigated): in
+  exact mode a rail IC's power gate turns on about 1 µs late at its floor.
+  Exact mode has no rail events (Rails point 9), so nothing lands on the
+  crossing.
+- **Corpus 06's two fixed points** (V5): its worst current moved from
+  3.4e-17 to 2.6e-13 A at round 5 because its solve has two Newton
+  fixed points 4e-12 V apart, and which one it lands on depends on the
+  cache entry the CC exit replays; not the curvature correction. It still
+  passes.
+- **psuTight's host frames** (INF1): on INF1's probe board `psuTight`
+  (a probe, in no test), the default-mode `v1` at 20 ms varies by about
+  6e-8 V with how the host frames the run. Not investigated.
+- **The reader-scan listing** (Equivalence harness rules, the reader
+  scan): `scripts/core-equivalence.ts` does not yet list the circuits whose
+  run ends with stat 20 above 0.
+- **W3 analog backlog** (from W1f): (1) compose a rail-coupled linear
+  closed-form reader of a resolved ramp, the CC segment's exponential drive
+  plus the ramp's line, with a crossing solver for both (Sources point 3;
+  until then such a reader is stepped); (2) model the fast `esr·C`
+  redistribution mode between rail capacitors of different `esr` (ruling
+  R11 (a), 2026-10-16: a transient lasting about 5 µs after a step, one
+  capacitor's current 11.5 % off 0.5 µs into it, the rail within 8.1e-6 V;
+  Rails point 4).
 
 ## Kernel semantics: thermal, failures and warnings (W1g)
 
@@ -3543,10 +4268,14 @@ Constants:
    once starts another cycle at the same instant (W1g point 14).
 4. **Crossings.** A threshold crossing is accepted only at `t > now + 1e-15`.
 5. **Advance.** Process every event with `t <= t_end`, then set time to
-   `t_end`. Stepped partitions land exactly on `t_end` (a horizon clamp), so a
-   readout at `t_end` is a solved value, not an interpolation. The readers
-   whose nodes the clamp moved are evaluated in a delta cycle at `t_end`, so
-   a digital readout at `t_end` reflects them, as if a step had landed there.
+   `t_end`. A superseded event at the head of the heap (a stale token or
+   version) is dropped between instants, as its handler would drop it
+   inside one, so it is no instant (W1f, Rails point 4's superseded
+   events); stat 4 still counts it. Stepped partitions land exactly on
+   `t_end` (a horizon clamp), so a readout at `t_end` is a solved value,
+   not an interpolation. The readers whose nodes the clamp moved are
+   evaluated in a delta cycle at `t_end`, so a digital readout at `t_end`
+   reflects them, as if a step had landed there.
    Interpolated acquisition is W2.
 6. **Load settling** (owner decision 8, and the W1-0 spike). Three steps, at
    `START_TIME`:
@@ -3632,15 +4361,24 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   `w1f-rail-scan-late-flip`: a reader whose pin moves with the rail against
   a fixed threshold (an LS input on a divider off the rail) is re-evaluated
   at the next rail scan, so it can flip up to `RAIL_SCAN_V` of rail late
-  (Rails point 3; the power window is exact, Rails point 4). It is measured,
-  not assumed:
-  - a Rust test pins the bound: on a slowly draining battery, such a reader
-    flips when the rail has moved at most `RAIL_SCAN_V` past its exact
-    crossing, plus the one rail move that crossed the band (`RAIL_DRIFT_V`
-    on a smooth drain), and never before the crossing;
-  - stat 20 counts every reader flip found at a rail scan, and
-    `scripts/core-equivalence.ts` lists by name every corpus and fixture
-    circuit whose run ends with stat 20 above 0, counted as hits of this id.
+  (Rails point 3; the power window is exact, Rails point 4). The id names
+  the divergence; it is not an entry of
+  `test/core/equivalence/known-divergences.ts`, whose entries excuse
+  classic-against-core mismatches inside a structural digital cone grown
+  from seed components, which a late flip anywhere on a rail does not fit.
+  It is measured, not assumed:
+  - the Rust test
+    `a_reader_of_a_static_hub_partition_flips_at_the_next_scan_within_the_scan_band`
+    (`solve/rail_tests.rs`) pins the bound: a {5 V, 10 Ω} battery charges
+    10 µF through 100 Ω, so its rail rises smoothly, and a Schmitt NAND
+    supplied apart reads a divider off the rail. It flips when the rail has
+    moved at most `RAIL_SCAN_V` past its exact crossing, plus the one rail
+    move that crossed the band (`RAIL_DRIFT_V` on a smooth rail), never
+    before the crossing, and stat 20 counts the flip once;
+  - stat 20 counts every reader flip found at a rail scan. Listing the
+    corpus and fixture circuits whose run ends with stat 20 above 0 in
+    `scripts/core-equivalence.ts` is NOT implemented (W1f known
+    follow-ups).
 - **The 555 period on a moving rail** (W1f Q4). NE555 point 13.2's 1e-6
   against the model-exact sidecar assumes a constant supply. The
   **moving-rail set** is exactly:
@@ -3656,6 +4394,147 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   sidecar keeps criterion 3 at 1e-6: both supply pins on fixed nodes (an
   ideal source, a `bench_psu` with `iLimit = 0`), or on a `bench_psu` hub
   that stays in CV (`u = V`) through the compared cycles.
+
+  **As implemented (F4), and OPEN.** A 555 on a limited `bench_psu`'s rail
+  keeps its 1e-6 sidecar only when the core's regime readout is CV at the
+  load and at 2,000 evenly spaced instants over the compared span, across
+  every phase (`psuStaysCv`; a discharged rail capacitor enters CC at the
+  load itself). A 555 in the moving-rail set gets no sidecar and is listed
+  as unmodelled (for a declared sidecar, a fixture error). The refined
+  classic run above is NOT implemented, so a 555 on a battery or on a PSU
+  that enters CC (corpus 07 and 08 among them) has no period check yet, and
+  S2's criterion 3 waits on it.
+- **The power-gate ping-pong** (F1; manager rulings 2026-10-06 and
+  2026-10-07). Known divergence `w1f-power-gate-pingpong`: an IC whose own
+  draw sags a weak rail back across its power window makes the rail
+  alternate, where classic chatters for one step (repro: 4.279 V, r 5 Ω, a
+  74LS00 driving 1 kΩ). The core declines with `-4` ("rail: the rail loop
+  did not settle within 50 passes"; at load the TS side falls back to
+  classic), in each form the livelock takes:
+  - **Within an instant.** Without a rail capacitor the rail jumps with
+    each flip, and the rail loop alternates to its 50 passes (Rails point
+    3).
+  - **Across instants** (HG1). With a rail capacitor the rail is
+    continuous and every instant settles: a flip turns the segment back,
+    and the next power-window event lands the rail two reached-widths past
+    the same edge the other way femtoseconds later (5.3 and 9.4 fs apart,
+    the rail within 8.6e-12 V of a 74LS00's 4.275 V floor on a {5 V, 20 mA}
+    PSU ramping 1 µF, the gate driving an LED and 330 Ω), so time crawls
+    on. `RAIL_LOOP_MAX` (50) `Rail` events in a row, each flipping the rail
+    ICs' gates back to where the one before flipped them from, decline. A
+    `Rail` event that flips nothing ends the run, and so does any other
+    event (a clock swinging a load across a floor every half period is no
+    ping-pong); the horizon clamp does not, since a host stepping event by
+    event clamps after each. Of HG1's 672 swept low-limit boards, 386 run
+    bit-identical to before and 286 decline (all previously hung).
+  - **Any other crawl** (NP1, redefined by NP2; ruling R6 (a), 2026-10-15:
+    a frozen tab is never acceptable). Completed instants each within
+    `NO_PROGRESS_DT` (1 ns) of the one before form a run, and inside a run
+    each instant is judged by what it did to the state, not by its spacing.
+    It made no progress if it moved no published node voltage, turned one
+    back (moved it against that node's own last move in the run), or ran
+    only `Rail` events and left the rail node where it was (a `Rail` event
+    exists to move the rail; the node is `PartitionSolver::rail_node()`).
+    An instant that applied a waveform source's edge (a clock's, a pulse's)
+    progressed whatever it turned, and each node's direction starts afresh
+    after it: the edges are the board's scheduled input, not the circuit
+    chasing itself, and a clock has no frequency cap. Once `NO_PROGRESS_MAX`
+    (10,000) instants of a run have made no progress, the next instant
+    inside the run declines with the same `-4` before it runs, leaving the
+    last completed instant's state. Instants that progress neither count
+    nor reset the count, so a cycle cannot hide its turns between them;
+    only an instant outside the window ends the run. A livelock repeats
+    states, and a node that returns to a value must turn back on the way,
+    so any cycle counts at least one instant a period, and a crawl that
+    moves nothing counts every one. The count is kept across `advance`
+    calls (a host stepping event by event makes one instant per call), is
+    untouched by a failed instant and by the horizon clamp, and resets at a
+    successful `set_params` or `seed_memory`. A counter, not a tolerance:
+    the sign of each change is exact, and it changes nothing in a run it
+    does not stop.
+
+    Time alone cannot tell a livelock from fast dynamics, which is why NP1's
+    rule (10,000 instants in a row each within 1 ps of the one before) was
+    replaced: a 50 ns RC inrush off a 5 Ω cell lands some 28,000 rail
+    events 0.7 ps apart, and NP1 declined each of F1r13's 36 such boards in
+    its first microsecond (a false `-4`, against R6), while V11's B1070
+    repeated a rail that did not move every 1.14 ps, just past NP1's
+    window. 1 ns is a decade under the stepped solver's smallest step
+    (`stepped::H_MIN`, 1e-8 s). The longest run of instants inside it
+    measured on a legitimate board was 82,763 (the inrush); the most
+    no-progress instants one run counted, 3 (NP2, 2026-10-16). Pins: the
+    kernel's mock tests (`kernel.rs`:
+    `a_fast_monotone_burst_runs_however_dense_and_a_cycle_of_any_length_declines`,
+    which holds B1070's shape, and the crawl tests below), and in
+    `solve/rail_tests.rs`
+    `a_fast_rc_inrush_off_a_5_ohm_cell_runs_to_the_end_on_a_coarse_host`,
+    `a_gigahertz_clock_into_an_rc_and_gates_runs_for_any_number_of_edges`
+    (1 and 10 GHz, 40,000 and 400,000 edges) and
+    `a_cc_exit_that_pinned_the_rail_now_runs_on_a_coarse_host`: B1070
+    itself runs to 250 ms on a 612 µs host and event by event, since the
+    coupled CC path (Rails point 4) leaves it no stall.
+
+  Classic's fix for an alternating gated power reading is H8
+  (`fix/power-off-stall`, released in 0.6.3): after a failed solve it holds
+  the chip powered for a probe solve and keeps it off if its supply still
+  reads unpowered. Porting it into the rail loop needs a kernel-to-evaluator
+  hold channel (the power verdict is recomputed from voltages in about 17
+  places) and amendments to W1c points 1, 4, 9 and 10, so it is the named
+  follow-up **F5, the ping-pong hold**, which runs immediately after W1g,
+  which reworks the evaluator, and ahead of perf round 3 (the coordinator,
+  2026-10-15, with ruling R6). Until then `-4` is pinned by tests with real
+  assertions that F5 flips (ruling R8 (a)); this id is deleted when F5
+  lands. No core-only damping. The id names the divergence; it is not an
+  entry of `test/core/equivalence/known-divergences.ts`, since a decline
+  leaves no mismatch to excuse (at load the run is classic's). The pins,
+  each asserting the `-4`: within an instant,
+  `an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_minus_4_today`
+  and `the_power_gate_pingpong_board_through_5_ohm_still_declines`; across
+  instants,
+  `a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_is_minus_4_today`;
+  a crawl, `a_zero_delay_reader_of_a_ping_ponging_gate_is_minus_4_not_a_hang`
+  (all `solve/rail_tests.rs`) and
+  `a_crawl_of_femtosecond_instants_declines_with_the_ping_pong_minus_4_and_keeps_the_last_instant`
+  (`kernel.rs`).
+- **Several closed-form partitions on a cell** (F1r15; ruling R17 (a)).
+  Known divergence `w1f-cell-multi-partition`: on a battery hub whose rail
+  feeds a curved closed-form partition and a second one, a published
+  current can sit past W0's tolerance of the board's own ODE between rail
+  solves, since the cell's coupled path takes the static and direct draws
+  linearised at the solve while the rail moves up to `RAIL_DRIFT_V` (Rails
+  point 4). Bounded as measured: 12 of the 600-board multi-partition cell
+  probe over W0, worst 20x. The id names the divergence; it is not an
+  entry of `test/core/equivalence/known-divergences.ts`, and the harness
+  does not yet look for it on the corpus or the fixtures. It goes when the
+  fix scheduled after W1g, with F5 and perf round 3, lands (W1f known
+  follow-ups).
+- **CC exits against the exact rail** (probe P9; the owner's ruling (a),
+  2026-10-15). On a `psu-rail` fixture (a limited PSU, a rail capacitor and
+  switched resistive loads), every sample from a CC exit to the next CC
+  entry, the post-exit `esr·C` relaxation included, compares against the
+  sidecar's exact value, not classic (an analytic sidecar, as the 555's
+  timing network has; no new tolerance); the samples before the exit stay
+  classic against core, and the core is held to the exact rail at every
+  sample it replays, on the stimuli path too. Classic's backward Euler at
+  the harness's step misses that 5 µs mode (P9 with `esr` 0.05, 5 µs after
+  the exit: the core 0.03679 A, exactly `0.1 e^-1`; classic 0.09782 A). The
+  sidecar holds the switch's 1 mΩ contact and the node shunt, as both
+  engines do (F1r10; without them it read the core's correct rail 8.2e-5 V
+  off); fixture 51 samples 0.6 to 50.6 µs after an exit, inside the window.
+- **A resolved ramp against the exact trapezoid** (ruling R3 (b),
+  2026-10-15). `pulse-ramp-1ms`'s RC is held to the sidecar's exact
+  response to the trapezoid at W0's tolerance (the core is 4.4e-15 V from
+  it). Classic is 2.6e-2 V off there, and Richardson on classic converges
+  only at 2.5e-5 (F4), so classic does not gate those samples: the sidecar
+  explains its mismatch (W1 plan decision 3).
+- **Harness choices** (ruling R9, 2026-10-16: all four of F4's
+  accepted). A Schmitt input's flip instants on a resolved ramp, and its
+  output's, compare within `1e-9 s + 1e-9` relative of the sidecar's
+  (borrowed from W1g's integrated latch times); an IC's power-gate flips on
+  a sagging PSU rail are judged against the exact sidecar's crossings
+  (classic's adaptive steps land them 39 to 148 µs late); P9's rule above
+  applies on the stimuli path too; SoC's tolerance is the coulomb tolerance
+  divided by the capacity. `optimization-equivalence` stays classic-only.
 - **S2, the SAP-1 on the battery.** The board is `gen-sap1 max battery`:
   `BAT1 {voltage: 5, rInternal: 0.9}`, no uid, so generic: `R = 0.9·dep`,
   `OCV = 5·soc`, 1 Ah, 25 °C (factor 1). Every IC's `vcc` is the rail; no
@@ -3696,21 +4575,6 @@ failures and warnings (W1g)"):
   analytic time within `1e-9 s + 1e-9` relative; classic's time is recorded
   and does not gate. `output_sag`'s `since` is the readout time and is not
   compared.
-- **The power-gate ping-pong** (F1; manager ruling 2026-10-06). Known
-  divergence `w1f-power-gate-pingpong`: an IC whose own draw sags a weak
-  rail back across its power window makes the rail loop alternate, and the
-  core returns `-4` after point 3's 50 passes (the TS side falls back to
-  classic), where classic chatters for one step (repro: 4.279 V, r 5 Ω, a
-  74LS00 driving 1 kΩ). Classic's fix for an alternating gated power
-  reading is H8 (`fix/power-off-stall`, released in 0.6.3): after a failed
-  solve it holds the chip powered for a probe solve and keeps it off if its
-  supply still reads unpowered. Porting it into the rail loop needs a
-  kernel-to-evaluator hold channel (the power verdict is recomputed from
-  voltages in about 17 places) and amendments to W1c points 1, 4, 9 and 10,
-  so it is the named follow-up **F5, the ping-pong hold**, after the W1f
-  integration and W1g, which reworks the evaluator (manager ruling
-  2026-10-07). Until then `-4` is pinned by a test; this id is deleted when
-  F5 lands. No core-only damping.
 - **Failure sets** compare `(componentId, kind, pinId)` exactly, `value` and
   `limit` within decision 6's tolerance, and `message` against classic's
   template applied to the core's own numbers (W1g point 19).
