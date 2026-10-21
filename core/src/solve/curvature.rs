@@ -70,6 +70,10 @@ pub(crate) const NARROWEST_BAND: f64 = rails::RAIL_MOVE_EPS;
 /// far below any band the bound can ask for.
 const BAND_STEPS: u32 = 40;
 
+/// The most assumed sensitivity bounds `Bound::reach` tries, each at least
+/// twice the last.
+const REACH_TRIES: u32 = 6;
+
 /// The junction law's `f'(v)`, GMIN excluded: the exponential's slope, held
 /// at `vsat` on the tangent.
 pub(crate) fn slope(law: &JunctionLaw, v: f64) -> f64 {
@@ -521,10 +525,32 @@ impl Bound {
     /// (Phi' - Gamma' x_o) / Gamma`; so every `x'` lies between the least
     /// and the greatest terminal. `rho` reads `x_o` over the band, which
     /// reads the bound: one assumed at `m0` that yields less than `m0`
-    /// holds, since `|x'|` could not first reach `m0`. Without drivers,
+    /// holds, since `|x'|` could not first reach `m0` (it starts at the
+    /// solve's `|s| <= s_max`, under every `m0` tried). Without drivers,
     /// `(1, 1)`.
+    ///
+    /// `m0` starts at twice the larger of `s_max` and 1, and where that does
+    /// not close, at twice what it yielded, a few times: a driven node held
+    /// far past its supply (a gate's output pulled to twice its rail) has
+    /// terminals past 2 at any band, so a fixed 2 failed at every `b`, and
+    /// the partition took the narrowest band, re-solving at every move of
+    /// the rail (FXH, W1gV4's frozen seed 84: on a CC capacitor ramp, an
+    /// event every femtosecond).
     fn reach(&self, b: f64, ranges: &[(f64, f64, f64, f64)]) -> Option<(f64, f64)> {
-        let m0 = 2.0 * self.s_max.max(1.0);
+        let mut m0 = 2.0 * self.s_max.max(1.0);
+        for _ in 0..REACH_TRIES {
+            match self.reach_at(b, ranges, m0) {
+                Ok(r) => return Some(r),
+                Err(m_x) if m_x.is_finite() => m0 = (2.0 * m_x).max(2.0 * m0),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// [`Self::reach`] under the assumed bound `m0`: the bound, or `Err` with
+    /// what it yielded where that is not below `m0`.
+    fn reach_at(&self, b: f64, ranges: &[(f64, f64, f64, f64)], m0: f64) -> Result<(f64, f64), f64> {
         let (mut rho_lo, mut rho_hi) = (0.0f64, 1.0f64);
         let mut seen: Vec<usize> = self.drivers.iter().map(|d| d.d.o).collect();
         seen.sort_unstable();
@@ -546,7 +572,11 @@ impl Bound {
             rho_hi = rho_hi.max(if n_hi >= 0.0 { n_hi / gam_lo } else { n_hi / gam_hi });
         }
         let m_x = rho_hi.max(-rho_lo);
-        (m_x < m0).then_some((m_x, rho_hi - rho_lo))
+        if m_x < m0 {
+            Ok((m_x, rho_hi - rho_lo))
+        } else {
+            Err(m_x)
+        }
     }
 
     /// The bound on junction `j`'s published current's error at `|u - u_p|
@@ -2116,5 +2146,46 @@ mod tests {
         let sens = RailSens { i: law.current(u - m), g, s: vec![1.0], jac: vec![g, -g, -g, g], res: Vec::new(), gross: Vec::new(), gross_s: Vec::new(), lu: None };
         let band = hub_band(&shape, &HashMap::new(), &bnd, &[m], u, &sens, &IcRail::default(), Floors::default());
         assert_eq!(band, Some(NARROWEST_BAND));
+    }
+
+    /// `block` as the `n x n` block of a Jacobian with row stride `n + 1`,
+    /// its rail row and column filled with a value no check reads.
+    fn with_rail(block: &[&[f64]]) -> Vec<f64> {
+        let n = block.len();
+        let mut jac = vec![-7.0; (n + 1) * (n + 1)];
+        for (r, row) in block.iter().enumerate() {
+            jac[r * (n + 1)..r * (n + 1) + n].copy_from_slice(row);
+        }
+        jac
+    }
+
+    #[test]
+    fn a_conductance_matrix_must_be_symmetric_with_no_positive_coupling_and_no_negative_row() {
+        // The flow floor (FXE round 2) bounds |L J^-1| through J^-1 >= 0,
+        // which holds for a symmetric matrix with off-diagonals <= 0, a
+        // positive diagonal and rows summing to >= 0 (W1gV3's seeds: dropping
+        // any one of the three checks passed every suite). Each failing
+        // matrix below breaks one condition and keeps the other two, so each
+        // check is the only one that can reject it.
+        let three = with_rail(&[&[3.0, -1.0, -2.0], &[-1.0, 1.5, -0.5], &[-2.0, -0.5, 2.5]]);
+        assert!(conductance_matrix(&three, 3), "a three-node network with every row summing to 0");
+        // Symmetric to a few ulps is symmetric: the stamps add the same
+        // conductances in different orders.
+        let g = 0.1 + 0.2;
+        let ulps = with_rail(&[&[1.0, -g], &[-0.3, 1.0]]);
+        assert!(conductance_matrix(&ulps, 2), "an off-diagonal pair an ulp apart");
+        // An IC's supply terms are not symmetric: rows summing to 2 and 1,
+        // off-diagonals negative.
+        let skew = with_rail(&[&[3.0, -1.0], &[-2.0, 3.0]]);
+        assert!(!conductance_matrix(&skew, 2), "an asymmetric pair");
+        // Symmetric, rows summing to 2.5, but coupled positively.
+        let positive = with_rail(&[&[2.0, 0.5], &[0.5, 2.0]]);
+        assert!(!conductance_matrix(&positive, 2), "a positive off-diagonal pair");
+        // Symmetric, off-diagonals negative, but row 0 sums to -1.
+        let short = with_rail(&[&[1.0, -2.0], &[-2.0, 3.0]]);
+        assert!(!conductance_matrix(&short, 2), "a row summing below 0");
+        // A row summing below 0 by rounding alone is still a network.
+        let rounding = with_rail(&[&[0.3, -g], &[-g, 0.4]]);
+        assert!(conductance_matrix(&rounding, 2), "a row 0.3 - (0.1 + 0.2) below 0 by one ulp");
     }
 }

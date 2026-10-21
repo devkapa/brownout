@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::*;
 use crate::devices::battery::BatteryModel;
-use crate::devices::sources::{direction, Clock, Pulse, Regime};
+use crate::devices::sources::{compliance_keeps_cv, direction, Clock, Pulse, Regime};
 use crate::rails::{self, CapDemand, CapSeg, CellDrive, CfTerm, Contrib, Direct, DriftBound, HubKind, Motion, RailModes, RailState, RailStats, Watch};
 use crate::solve::closed_form::HubTerm;
 use crate::solve::live::{RampEval, Schedule, WaveSource};
@@ -2076,8 +2076,20 @@ impl PartitionedSolver {
         let mut transition = false;
         if let HubKind::Psu { v, i_limit } = e.kind {
             let dir = direction(v);
+            // The entry is point 5's: over the limit, unless the CC solution
+            // reaches the setpoint (the compliance clamp). The partition
+            // holds no CC candidate, so the entry is tried: while the draw
+            // rises with the rail, the CC solution is past the setpoint
+            // exactly when the draw at it is within the limit in the PSU's
+            // own direction, so a draw past the limit against it (a source
+            // back-feeding the rail) keeps CV without a solve, as in classic
+            // and default mode (FXH, W1gV4's bug B: entering on `|draw|` held
+            // a 5 V PSU at the 9.9 V CC solution, and with a rail capacitor
+            // alternated CC and CV each step). A draw over the limit is
+            // re-solved in CC below, and kept only if that solution is short
+            // of the setpoint.
             let next = match e.reg {
-                Regime::Cv if draw.abs() > i_limit => Regime::Cc,
+                Regime::Cv if dir * draw > i_limit => Regime::Cc,
                 Regime::Cc if dir * u >= v.abs() => Regime::Cv,
                 r => r,
             };
@@ -2088,18 +2100,18 @@ impl PartitionedSolver {
         }
         self.push_exact_stamp();
         if transition {
-            let id = [PartitionId(p as u32)];
-            match self.partition_kinds[p] {
-                PartitionKind::Static => {
-                    self.static_solver.set_inputs_bounded(false);
-                    self.static_solver.resolve_dirty_into(&id, now, drivers, readers)?;
-                    self.copy_in_static();
-                }
-                _ => {
-                    self.begin_dynamic_writes_list(&[p]);
-                    let pre = Rc::clone(&self.driver_snapshot);
-                    readers.extend(self.stepped.resolve_dirty(&[p], now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
-                    self.end_dynamic_writes();
+            self.exact_resolve(p, now, drivers, readers)?;
+            // The clamp, for a draw that does not rise with the rail: an IC
+            // powers off past its window and draws nothing there, so the CC
+            // solution can be the node shunt's, far past the setpoint
+            // (W1gV4's cold seed 839: a 555 on `{6.85 V, 23 mA}`, 2.3e10 V
+            // every other step). That is no current limit: CV again, at once.
+            let e = self.exact.as_mut().unwrap();
+            if let (&HubKind::Psu { v, .. }, Regime::Cc) = (&e.kind, e.reg) {
+                if compliance_keeps_cv(self.voltages[node], v) {
+                    e.reg = Regime::Cv;
+                    self.push_exact_stamp();
+                    self.exact_resolve(p, now, drivers, readers)?;
                 }
             }
             let e = self.exact.as_mut().unwrap();
@@ -2108,6 +2120,26 @@ impl PartitionedSolver {
             self.exact.as_mut().unwrap().held = draw;
         }
         self.plan_deferred(drivers)
+    }
+
+    /// Re-solves the exact hub's partition `p` at `now` after its source's
+    /// stamp changed (a regime transition).
+    fn exact_resolve(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        let id = [PartitionId(p as u32)];
+        match self.partition_kinds[p] {
+            PartitionKind::Static => {
+                self.static_solver.set_inputs_bounded(false);
+                self.static_solver.resolve_dirty_into(&id, now, drivers, readers)?;
+                self.copy_in_static();
+            }
+            _ => {
+                self.begin_dynamic_writes_list(&[p]);
+                let pre = Rc::clone(&self.driver_snapshot);
+                readers.extend(self.stepped.resolve_dirty(&[p], now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+                self.end_dynamic_writes();
+            }
+        }
+        Ok(())
     }
 
     /// Plans the battery partition's next step from the stamp just set

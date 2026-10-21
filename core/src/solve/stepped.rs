@@ -179,7 +179,8 @@ pub(crate) struct CcRail {
 impl CcRail {
     fn step(&self, p: usize, u0: f64) -> CcStep {
         let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0 }
+        let coupled = self.own.iter().any(|o| o.0 != p);
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled }
     }
 }
 
@@ -194,6 +195,10 @@ struct CcStep {
     a_o: f64,
     g_o: f64,
     u0: f64,
+    /// Another stepped hub partition shares the rail: it holds this one's
+    /// draw where this one last committed, so the rail's move across this
+    /// step is an error it does not see ([`coupling_ratio`]).
+    coupled: bool,
 }
 
 impl CcStep {
@@ -929,11 +934,30 @@ pub struct SteppedSolver {
     /// test can hand-step a reference at the controller's own step sequence.
     #[cfg(test)]
     pub(crate) commit_log: Vec<(usize, f64)>,
+    /// Test builds record every re-solve ([`Self::resolve_dirty`]), so a
+    /// test can tell which kept their step (`reaim`) and which restarted.
+    #[cfg(test)]
+    pub(crate) resolve_log: Vec<ResolveRecord>,
     /// Test builds record each committed step of exact mode's rail
     /// partition with the solution it published and the source stamp it was
     /// solved with, so a test can work out the source's current at it.
     #[cfg(test)]
     pub(crate) exact_commit_log: Vec<ExactCommit>,
+}
+
+/// One re-solve of a stepped partition ([`SteppedSolver::resolve_log`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolveRecord {
+    pub partition: usize,
+    pub now: f64,
+    /// The published rail when the re-solve ran (0 with no rail).
+    pub u: f64,
+    /// Whether it kept its step (a re-aim) rather than restarting at
+    /// `POST_EVENT_H`.
+    pub kept: bool,
+    /// Whether it ran against a CC rail ([`CcRail`]).
+    pub cc: bool,
 }
 
 /// `(device index, series current)` per capacitor.
@@ -1018,6 +1042,8 @@ impl SteppedSolver {
             w_saved: None,
             #[cfg(test)]
             commit_log: Vec::new(),
+            #[cfg(test)]
+            resolve_log: Vec::new(),
             #[cfg(test)]
             exact_commit_log: Vec::new(),
         }
@@ -1375,9 +1401,12 @@ impl SteppedSolver {
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
                 part.has_prev = false;
                 // A re-aim keeps its step (`reaim`); a discontinuity restarts.
-                if !self.reaim.contains(&p_idx) {
+                let kept = self.reaim.contains(&p_idx);
+                if !kept {
                     part.h = POST_EVENT_H;
                 }
+                #[cfg(test)]
+                self.resolve_log.push(ResolveRecord { partition: p_idx, now, u: self.rail.map_or(0.0, |r| voltages[r]), kept, cc: self.cc.is_some() });
                 part.changing = true;
                 part.version += 1;
                 // Re-solve `x` (and seed `i_prev`) from the CURRENT
@@ -1986,7 +2015,7 @@ impl SteppedSolver {
             let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
             match attempt {
                 Ok((step, r, mid)) => {
-                    ratio = r;
+                    ratio = r.max(coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method));
                     if ratio <= 1.0 {
                         accepted = step;
                         half = mid;
@@ -2201,6 +2230,35 @@ fn attempt_step(
         }
     }
     Ok((fine, ratio, Some(mid)))
+}
+
+/// The cross-branch coupling on a CC rail (ruling R37 (a), R39 (1)), as a
+/// step-doubling ratio for [`next_step_factor`]. Each stepped hub partition
+/// on a CC rail with no capacitor steps with the rail as an unknown and every
+/// other partition's draw held where it last committed (`CcStep::a_o`), so
+/// over this step the others see this partition's draw stale, and it sees
+/// theirs: the rail they each solve parts from the true rail by the rail's
+/// move across the step, which the step-doubling comparison cannot see (both
+/// halves hold the same draws). Kept within W0 of the rail, the coupling
+/// error stays within the controller's own: on FXEFv's boards (`cc`, tpl 10
+/// and 12) the worst node went from 39 and 43 W0 off a fine reference to 6.5
+/// and 9.0, the backward-Euler controller's own floor on those boards, at
+/// up to 4.4k steps per 0.1 s (faster than real time). The move is taken as
+/// twice the second half step's, since a step's own rail at its start can
+/// differ from the published rail by a re-solve's offset (taken whole, the
+/// offset alone drove a board to 12k steps against 1.1k). The coupling
+/// error is first order in `h`, so it enters as its square for backward
+/// Euler (the cube for the trapezoid), which [`next_step_factor`] turns back
+/// into `0.9 / move`.
+fn coupling_ratio(cc: Option<CcStep>, end: &StepResult, mid: Option<&StepResult>, method: Method) -> f64 {
+    let (Some(_), Some(u_end), Some(u_mid)) = (cc.filter(|c| c.coupled), end.u, mid.and_then(|m| m.u)) else {
+        return 0.0;
+    };
+    let moved = 2.0 * (u_end - u_mid).abs() / (ABS_VOLTAGE + REL_TOL * u_end.abs().max(u_mid.abs()));
+    match method {
+        Method::Be => moved * moved,
+        Method::Trap => moved * moved * moved,
+    }
 }
 
 fn rel_error(a: f64, b: f64) -> f64 {

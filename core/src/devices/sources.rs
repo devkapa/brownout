@@ -87,9 +87,15 @@ pub fn compliance_keeps_cv(u_cc: f64, v: f64) -> bool {
 /// linear rail is the draw at the setpoint back within the limit, `dir *
 /// i_at_v <= i_limit` (fixed classic, `fix/psu-cc-exit`: its commit leaves CC
 /// exactly when the solve's own compliance clamp selected CV, so there is one
-/// threshold, not two). A voltage fraction of the setpoint would re-enter at
-/// the exit instant forever (probe P7), so `u_rail` is not read here; it is
-/// kept in the signature so both rules take the same arguments.
+/// threshold, not two). In CC the present rail `u_rail` is the CC solution,
+/// so it exits too once `u_rail` has reached the setpoint itself, the clamp
+/// the entry reads: the draw test is that clamp only while the draw rises
+/// with the rail, and an IC that powers off past its window does not (FXH,
+/// W1gV4's bug A: a 555 whose DIS loads the rail at the setpoint, solved in
+/// CC from below its window, held 2.1e11 V, iLimit over the node shunt, in
+/// CC). A voltage fraction of the setpoint would re-enter at the exit
+/// instant forever (probe P7); the whole setpoint does not, since the entry
+/// clamp then keeps CV on the same test.
 ///
 /// An `i_limit` that is not `> 0` is an ideal source: it has no regime.
 pub fn regime_step(reg: Regime, i_at_v: f64, u_cc: f64, u_rail: f64, v: f64, i_limit: f64) -> Regime {
@@ -105,8 +111,7 @@ pub fn regime_step(reg: Regime, i_at_v: f64, u_cc: f64, u_rail: f64, v: f64, i_l
             }
         }
         Regime::Cc => {
-            let _ = u_rail;
-            if direction(v) * i_at_v <= i_limit {
+            if direction(v) * i_at_v <= i_limit || compliance_keeps_cv(u_rail, v) {
                 Regime::Cv
             } else {
                 Regime::Cc
@@ -701,6 +706,19 @@ mod tests {
     }
 
     #[test]
+    fn cc_exits_once_the_cc_solution_itself_reaches_the_setpoint() {
+        // FXH (W1gV4's bug A): the draw at the setpoint over the limit while
+        // the CC rail, solved where an IC is unpowered, sits past the
+        // setpoint. No band, as at the entry.
+        assert_eq!(regime_step(Regime::Cc, 1.13, 1.0, 2.1e11, 11.2858, 0.2095), Regime::Cv, "a rail past the setpoint is no current limit");
+        assert_eq!(regime_step(Regime::Cc, 0.2, 1.0, V, V, LIMIT), Regime::Cv, "at the setpoint");
+        assert_eq!(regime_step(Regime::Cc, 0.2, 1.0, f64::from_bits(V.to_bits() - 1), V, LIMIT), Regime::Cc, "an ulp short holds CC");
+        assert_eq!(regime_step(Regime::Cc, -0.2, -1.0, -5.0, -5.0, LIMIT), Regime::Cv, "negative setpoint, at -5 V");
+        assert_eq!(regime_step(Regime::Cc, -0.2, -1.0, -4.9, -5.0, LIMIT), Regime::Cc);
+        assert_eq!(regime_step(Regime::Cc, 0.2, 1.0, f64::NAN, V, LIMIT), Regime::Cc, "a non-finite rail never clamps");
+    }
+
+    #[test]
     fn cc_exit_with_a_negative_setpoint_compares_in_its_direction() {
         // {-5 V, 0.1 A}: the draw at the setpoint is -0.1 A.
         assert_eq!(regime_step(Regime::Cc, -0.1, -5.0, -4.9, -5.0, LIMIT), Regime::Cv);
@@ -742,7 +760,8 @@ mod tests {
         }
 
         // CC -> CV never reads u_cc: without a rail capacitor it reads the
-        // draw, with one the present rail.
+        // draw and the present rail (the CC solution there), with one the
+        // present rail.
         for u_cc in [-1.0, 0.0, 4.9, V, f64::NAN] {
             assert_eq!(regime_step(Regime::Cc, 0.05, u_cc, 1.0, V, LIMIT), Regime::Cv, "u_cc {u_cc}");
             assert_eq!(regime_step(Regime::Cc, 0.2, u_cc, 4.99, V, LIMIT), Regime::Cc, "u_cc {u_cc}");

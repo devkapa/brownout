@@ -789,7 +789,8 @@ fn two_stepped_partitions_on_one_cc_rail_keep_their_steps() {
     // and the rail loop re-solves it. That re-solve restarted its step at
     // POST_EVENT_H as a discontinuity would: 2.77e6 steps and 18.8 s for
     // this 0.1 s. A re-solve for the rail's band alone keeps the step the
-    // controller chose (stepped::SteppedSolver::reaim).
+    // controller chose (stepped::SteppedSolver::reaim); the coupling step
+    // control makes 758 steps of it.
     let mut e = Engine::load(&cc_two_stepped_branches()).unwrap();
     let mut ex = Engine::load(&exact(cc_two_stepped_branches())).unwrap();
     for eng in [&mut e, &mut ex] {
@@ -802,15 +803,204 @@ fn two_stepped_partitions_on_one_cc_rail_keep_their_steps() {
         // Exact mode steps the two branches as one partition, and is itself
         // 3.4x W0 off a fine reference on this board (FXEFv's `cc`); each
         // CC step here holds the other branch's draw where it last
-        // committed, a first-order coupling error: 5.1x W0 from exact mode
-        // at worst (the second capacitor at 0.1 s), 6.4x off the reference.
+        // committed, a first-order coupling error, now kept within the
+        // rail's W0 per step (`stepped::coupling_ratio`, ruling R39 (1)):
+        // 3.44x W0 from exact mode at worst (the second capacitor at 60 ms;
+        // 5.1x before). A known divergence at its measured worst (README,
+        // Known follow-ups (W1g), R32); the backward-Euler controller's own
+        // error is R27/R31's.
         for n in 1..7 {
             let (got, x) = (e.voltages()[n], ex.voltages()[n]);
-            close(got, x, 6.0 * (1e-4 + 1e-3 * x.abs()), &format!("node {n} at {t} against exact mode"));
+            close(got, x, 3.5 * (1e-4 + 1e-3 * x.abs()), &format!("node {n} at {t} against exact mode"));
         }
     }
     let steps = e.stat(10);
     assert!(steps < 5000.0, "{steps} steps to 0.1 s (exact mode {})", ex.stat(10));
+}
+
+/// FXEFv's `cc` boards (`CC_PWR=1 cc 21 22 tpl=10` and `tpl=12`, seed 21):
+/// a {8.78 V, 21.6 mA} PSU (no rail capacitor) into two or three LED and
+/// capacitor branches, every one stepped, all on from load. The LEDs are
+/// the generator's power LEDs (rated 3 A, so W1g's overdrive latch leaves
+/// them alone).
+fn cc_seed21_branches(three: bool) -> Program {
+    let led_with = |ci: usize, a: usize, b: usize, vf: f64, n: f64| Device {
+        kind: kinds::LED,
+        component_index: ci,
+        pins: vec![pin(a), pin(b)],
+        params: vec![vf, n, 3.0, 0.0, 0.0, 0.0],
+        blob: vec![],
+    };
+    let mut devices = vec![
+        psu(0, 1, 0, 8.78053248388062, 0.02156505523783257),
+        resistor(1, 1, 2, 155.75945726224964),
+        capacitor(3, 3, 0, 9.95847677612162e-5, 0.0),
+        resistor(4, 3, 0, 23942.725056979652),
+        resistor(5, 1, 5, 10.553772652131514),
+        capacitor(7, 6, 0, 0.00020878353973358566, 0.0),
+    ];
+    if three {
+        devices.extend([
+            led_with(2, 2, 3, 1.7162410990045835, 1.500439376584047),
+            led_with(6, 5, 6, 2.2665203674115038, 2.1191992875223002),
+            resistor(8, 6, 0, 340.19526150114996),
+            resistor(9, 1, 8, 28.94286290705404),
+            led_with(10, 8, 9, 2.902616250203949, 1.684399560150239),
+            capacitor(11, 9, 0, 1.559478163216429e-5, 0.0),
+            resistor(12, 9, 0, 6402.3979397654375),
+        ]);
+    } else {
+        devices.extend([
+            led_with(2, 2, 3, 1.9567797208840794, 1.8287000353661065),
+            led_with(6, 5, 6, 1.600703002534475, 2.2410807957596885),
+            resistor(8, 6, 0, 10946.769571022789),
+        ]);
+    }
+    devices.sort_by_key(|d| d.component_index);
+    program(if three { 10 } else { 7 }, devices)
+}
+
+/// The worst node of `got` against `want`, sample by sample, in W0 units.
+fn worst_w0(got: &[Vec<f64>], want: &[Vec<f64>]) -> f64 {
+    got.iter().zip(want).flat_map(|(g, w)| g.iter().zip(w).map(|(x, y)| (x - y).abs() / (1e-4 + 1e-3 * y.abs()))).fold(0.0, f64::max)
+}
+
+/// Every node voltage of `p` at each of `samples`, the engine advanced in
+/// host slices of at most `slice` (0: straight to each sample), with the
+/// wall time and the steps taken.
+fn sampled(p: &Program, samples: &[f64], slice: f64) -> (Vec<Vec<f64>>, f64, f64) {
+    let mut e = Engine::load(p).unwrap();
+    let wall = std::time::Instant::now();
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    for &s in samples {
+        while t < s {
+            t = if slice > 0.0 { (t + slice).min(s) } else { s };
+            e.advance(t).unwrap_or_else(|err| panic!("{} at {t}: {}", err.code, err.message));
+        }
+        out.push(e.voltages().to_vec());
+    }
+    (out, wall.elapsed().as_secs_f64(), e.stat(10))
+}
+
+#[test]
+fn stepped_partitions_sharing_a_cc_rail_bound_the_rail_move_across_each_step() {
+    // Ruling R39 (1), R37 (a). With two or three stepped branches on one CC
+    // rail each CC step holds the others' draws where they last committed,
+    // and since FXF round 3 each keeps the step its controller chose: the
+    // rail moved across a step by far more than W0, an error the step
+    // doubling cannot see, 39x and 43x W0 off a fine reference on these
+    // boards (W1gV3). Each step now keeps the rail's move within W0
+    // (`stepped::coupling_ratio`), so the coupling adds at most a little to
+    // the backward-Euler controller's own error: exact mode, which steps
+    // the branches and the rail as one partition with the same controller
+    // (no coupling), is that floor here. The fine reference is exact mode
+    // under the trapezoid in 2 us host slices (scipy's Radau agrees with it
+    // to 0.00 W0 on W1gV3's board).
+    let samples: Vec<f64> = (1..=100).map(|k| k as f64 * 1e-3).collect();
+    for three in [false, true] {
+        let name = if three { "three branches" } else { "two branches" };
+        let mut fine = exact(cc_seed21_branches(three));
+        fine.options.integration = 1;
+        let (want, _, _) = sampled(&fine, &samples, 2e-6);
+        let (floor, _, _) = sampled(&exact(cc_seed21_branches(three)), &samples, 0.0);
+        let (got, secs, steps) = sampled(&cc_seed21_branches(three), &samples, 0.0);
+        let (err, floor_err) = (worst_w0(&got, &want), worst_w0(&floor, &want));
+        eprintln!("{name}: {err:.3} W0 off the fine reference (exact mode {floor_err:.3}), {steps} steps, {secs:.4} s wall");
+        assert!(err <= floor_err + 1.0, "{name}: {err} W0 off the fine reference, the controller's floor {floor_err} W0");
+        // FXF round 3's freeze (each re-solve restarting at POST_EVENT_H)
+        // took 1.1e6 steps for this 0.1 s; 3,682 and 3,024 steps run in
+        // 0.08 s alone in a release build, faster than real time. The time
+        // itself is not asserted: on the suite's parallel threads this Mac
+        // took 0.15-0.17 s of wall and of thread CPU time for the same steps
+        // (its efficiency cores), so the bound is on the steps, with 35 %
+        // headroom, and the CC sweeps (`cc`, FXEFv) measure the wall time.
+        assert!(steps < 5_000.0, "{name}: {steps} steps to 0.1 s");
+    }
+}
+
+/// A power LED (`led`'s law, rated 0.35 A so W1g's overdrive latch leaves
+/// it alone at a CC limit of tens of mA).
+fn power_led(ci: usize, anode: usize, cathode: usize) -> Device {
+    let mut d = led(ci, anode, cathode);
+    d.params[kinds::led_param::I_RATED] = 0.35;
+    d.params[kinds::led_param::IS_SET] = 1.0;
+    d.params[kinds::led_param::IS] = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0).is;
+    d
+}
+
+/// Two stepped LED and capacitor branches on one CC PSU (`{7 V, 30 mA}`, no
+/// rail capacitor): branch A from the rail, branch B from a 74LS00's `1y`
+/// (inputs grounded, so high while powered) whose supply is the rail. In CC
+/// the rail rides on A's capacitor, from 4.5 V at load (inside the gate's
+/// 4.275-5.775 V window, and 5 V with the gate off: no ping-pong at load)
+/// up through 5.775 V, where the gate powers off and B goes dark (the rail
+/// jumps 0.5 V up as A takes B's 5 mA, so it stays off), and on to the 7 V
+/// setpoint, where the PSU leaves CC.
+fn cc_two_branches_with_a_power_flip_and_an_exit() -> Program {
+    program(
+        7,
+        vec![
+            psu(0, 1, 0, 7.0, 0.03),
+            resistor(1, 1, 2, 100.0),
+            power_led(2, 2, 3),
+            capacitor(3, 3, 0, 1e-3, 0.0),
+            resistor(4, 3, 0, 1000.0),
+            ls00(5, 1, 0, [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10e-9, 0),
+            resistor(6, 4, 5, 330.0),
+            power_led(7, 5, 6),
+            capacitor(8, 6, 0, 1e-4, 0.0),
+            resistor(9, 6, 0, 1000.0),
+        ],
+    )
+}
+
+#[test]
+fn a_kept_cc_step_restarts_at_a_power_flip_and_at_the_cc_exit() {
+    // FXF round 3 keeps a stepped partition's step when the rail loop
+    // re-solves it only because the CC rail moved past its band
+    // (`SteppedSolver::reaim`). A rail IC's power flip and the CC exit are
+    // discontinuities of the partition's own stamp, so those re-solves
+    // restart at POST_EVENT_H (W1gV3's seeds: keeping the step across
+    // either passed every suite).
+    let p = cc_two_branches_with_a_power_flip_and_an_exit();
+    let mut rig = Rig::load(&p).unwrap();
+    assert_eq!(rig.hub().state.reg, Regime::Cc, "CC from load");
+    let (a, b) = (rig.s().partition_of_node(3).unwrap().0 as usize, rig.s().partition_of_node(6).unwrap().0 as usize);
+    assert_ne!(a, b, "two partitions");
+    let wall = std::time::Instant::now();
+    let mut t = 0.0;
+    while t < 0.2 {
+        t += 1e-3;
+        rig.advance(t).unwrap_or_else(|e| panic!("{e:?} at {:.9e} (asked {t:e}), rail {:.9} V", rig.k.time(), rig.u()));
+    }
+    let secs = wall.elapsed().as_secs_f64();
+    assert_eq!(rig.hub().state.reg, Regime::Cv, "CV at 0.2 s, rail {} V", rig.u());
+    let log = &rig.s().stepped.resolve_log;
+    // Both branches are re-aimed in CC: each commit of one moves the rail
+    // past the other's 1 uV band.
+    for (name, q) in [("A", a), ("B", b)] {
+        let kept = log.iter().filter(|r| r.partition == q && r.cc && r.kept).count();
+        assert!(kept > 10, "{name}: {kept} re-aims in CC");
+    }
+    // The flip: the first re-solve of B after load with the rail past the
+    // gate's 5.775 V edge is the pass that found it, and B restarts there.
+    // (The load's re-solves read the boundary before the first rail solve,
+    // the setpoint.)
+    let edge = 5.25 * 1.1;
+    let flip = log.iter().find(|r| r.partition == b && r.now > 0.0 && r.u > edge).expect("the rail passes the gate's edge in CC");
+    assert!(flip.cc, "the flip comes while the PSU is in CC");
+    assert!(log.iter().any(|r| r.partition == b && r.now == flip.now && !r.kept), "B keeps its step across its gate's power flip at {:.9} s", flip.now);
+    // The exit: the first re-solve against no CC rail after the flip, where
+    // every stepped hub partition re-solves at the setpoint, and restarts.
+    // (The rail loop's `!cc_exit` guard is implied today: the band rule is
+    // read after the regime change, and CV's is the curvature rule, which
+    // re-aims nothing. This pins the restart against either changing.)
+    let exit = log.iter().find(|r| r.now > flip.now && !r.cc).expect("a CC exit after the flip");
+    for (name, q) in [("A", a), ("B", b)] {
+        assert!(log.iter().any(|r| r.partition == q && r.now == exit.now && !r.cc && !r.kept), "{name} keeps its step across the CC exit at {:.9} s", exit.now);
+    }
+    eprintln!("flip at {:.6} s, CC exit at {:.6} s, {} steps, {secs:.3} s wall", flip.now, exit.now, rig.s().stepped.steps_taken());
 }
 
 #[test]
@@ -8484,4 +8674,169 @@ fn a_large_hub_publishes_within_its_flow_bounded_floor() {
         }
     }
     assert!(worst.0 <= 1.0, "published {} of its bound at {}", worst.0, worst.1);
+}
+
+// ---- FXH: a PSU never holds its rail past its setpoint ------------------------
+
+/// W1gV4's min2: a `{11.2858 V, 0.2095 A}` PSU, a closed switch shorting
+/// its rail, and an `ne555` on the rail (TRIG and THR grounded, OUT driving
+/// RST, DIS on the rail), plus a resistor `load` from the rail when given.
+/// The short holds the PSU in CC at load with the 555 unpowered; opened, the
+/// 555 powers up with OUT low (RST, on OUT, holds it there), so its DIS
+/// transistor loads the rail.
+fn psu_555_short(load: Option<f64>, exact_mode: bool) -> Program {
+    let mut p555 = vec![0.0; ic_param::COUNT];
+    p555[ic_param::VCC_MIN] = 2.0;
+    p555[ic_param::VCC_MAX] = 18.0;
+    p555[ic_param::NOMINAL] = 5.0;
+    let mut devices = vec![
+        psu(0, 1, 0, 11.2858, 0.2095),
+        switch(1, 1, 0, true),
+        Device { kind: kinds::NE555, component_index: 2, pins: [1usize, 0, 0, 5, 5, 3, 0, 1].map(pin).to_vec(), params: p555, blob: vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] },
+    ];
+    if let Some(r) = load {
+        devices.push(resistor(3, 1, 0, r));
+    }
+    let mut p = Program { node_count: 6, options: Options::default(), digital_slot_count: 16, channel_slot_count: 0, devices };
+    p.options.no_rail_shortcut = exact_mode;
+    p
+}
+
+/// The rail at 0.4-0.7 s after the short opens at 0.3 s.
+fn rail_after_the_short_opens(p: &Program) -> Vec<f64> {
+    let mut e = Engine::load(p).unwrap();
+    e.advance(0.3).unwrap();
+    e.set_params(&[(1, 0, 0.0)]).unwrap();
+    (1..=4)
+        .map(|k| {
+            e.advance(0.3 + 0.1 * k as f64).unwrap();
+            e.voltages()[1]
+        })
+        .collect()
+}
+
+#[test]
+fn a_cc_rail_whose_ic_powers_off_past_the_setpoint_is_no_cc_solution() {
+    // W1gV4's bug A: with the switch opened, the CC rail solved from the
+    // short's 0.2 mV, where the 555 is unpowered, so it draws nothing and the
+    // rail went to iLimit over the node shunt, 2.1e11 V (209.5 V with a 1k
+    // load), where the 555 is past its window and draws nothing still. The
+    // draw at the setpoint (the 555's DIS) stayed over the limit, so the
+    // draw test held CC there. A CC solution past the setpoint is no current
+    // limit (Rails point 5: CC exits when the CC solution reaches the
+    // setpoint), and a PSU never drives its rail past its setpoint. Exact
+    // mode, which solves the rail with the 555 as one Newton, is the
+    // reference.
+    for load in [None, Some(1000.0)] {
+        let got = rail_after_the_short_opens(&psu_555_short(load, false));
+        let want = rail_after_the_short_opens(&psu_555_short(load, true));
+        for (g, w) in got.iter().zip(&want) {
+            assert!(*g <= 11.2858, "load {load:?}: the rail at {g} V, past the 11.2858 V setpoint");
+            close(*g, *w, 1e-4 + 1e-3 * w.abs(), &format!("load {load:?}: default against exact mode"));
+        }
+    }
+}
+
+/// W1gV4's min4: a `{5 V, 0.1 A}` PSU, a 9 V ideal source behind 10 ohm and
+/// a 1k load on the rail, with a rail capacitor when given.
+fn psu_backfed(rail_cap: bool, exact_mode: bool) -> Program {
+    let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), source(1, 2, 0, 9.0), resistor(2, 1, 2, 10.0), resistor(3, 1, 0, 1000.0)];
+    if rail_cap {
+        devices.push(capacitor(4, 1, 0, 1e-6, 0.0));
+    }
+    let p = program(3, devices);
+    if exact_mode {
+        exact(p)
+    } else {
+        p
+    }
+}
+
+#[test]
+fn a_psu_sinking_past_its_limit_stays_cv_in_exact_mode_as_in_default() {
+    // W1gV4's bug B: the 9 V source pushes (9 - 5)/10 = 0.4 A into the rail
+    // and the load takes 5 mA, so the draw at the setpoint is -0.395 A, past
+    // the limit against the PSU's own direction. The CC solution, (0.1 +
+    // 0.9) / (0.1 + 0.001) = 9.901 V, is past the setpoint, so the compliance
+    // clamp keeps CV (Rails point 5), as classic and default mode do: the
+    // rail at 5 V and the PSU sinking 0.395 A (elementI = -I). Exact mode
+    // entered CC on |draw| alone and held 9.901 V; with a rail capacitor it
+    // alternated CC and CV each step, the capacitor's current growing to
+    // kiloamps.
+    for rail_cap in [false, true] {
+        for exact_mode in [false, true] {
+            let what = format!("rail capacitor {rail_cap}, exact mode {exact_mode}");
+            let mut e = Engine::load(&psu_backfed(rail_cap, exact_mode)).unwrap();
+            for t in [1e-3, 0.1, 1.0] {
+                e.advance(t).unwrap();
+                close(e.voltages()[1], 5.0, 1e-9, &format!("{what}: the rail at {t} s"));
+                close(e.currents()[0], 0.395, 1e-9, &format!("{what}: the PSU's current at {t} s"));
+                assert_eq!(e.device_state(0).unwrap(), &[Regime::Cv.code()], "{what}: CV at {t} s");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_gate_output_held_far_above_its_supply_keeps_a_band_on_a_cc_ramp() {
+    // W1gV4's frozen seed 84 (tpl 1, hub 2), reduced: a `{10 V, 0.1 A}` PSU
+    // ramps 1 uF in CC, and a 74LS00 on the rail (inputs grounded) drives
+    // 1y into a 9 V source through 10 ohm. While the gate is powered (4.275
+    // to 5.775 V) 1y sits near 8.7 V, twice its supply, so its node follows
+    // the rail at a slope bound past 2 (each driver's conductance falls with
+    // the supply, and its far end is 4.4 to 8.7 V away). The band's
+    // sensitivity bound assumed a fixed 2, failed to close, and the
+    // partition took the narrowest band, 1e-12 V: on a rail ramping at 1e5
+    // V/s every event came 1 fs after the last, and the run froze at 4.275 V
+    // (each instant moved the rail, so no guard declined it). The ramp
+    // reaches 10 V at about 0.1 ms; a host stepping event by event gets
+    // there within the instants a normal ramp takes (885 with a 5 V source).
+    let devices = vec![
+        psu(0, 1, 0, 10.0, 0.1),
+        capacitor(1, 1, 0, 1e-6, 0.0),
+        ls00(2, 1, 0, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1e-8, 0),
+        resistor(3, 2, 3, 10.0),
+        source(4, 3, 0, 9.0),
+    ];
+    let mut e = Engine::load(&program(4, devices)).unwrap();
+    let (t_end, mut instants) = (2e-4, 0);
+    while e.time() < t_end && instants < 20_000 {
+        let next = e.next_event_time().min(t_end);
+        e.advance(next).unwrap();
+        instants += 1;
+    }
+    assert!(e.time() >= t_end, "frozen at {:e} s after {instants} instants, the rail at {} V", e.time(), e.voltages()[1]);
+    close(e.voltages()[1], 10.0, 1e-9, "the rail in CV");
+}
+
+#[test]
+fn an_exact_mode_cc_solution_past_the_setpoint_keeps_cv() {
+    // W1gV4's cold seed 839 (tpl 6, hub 2, exact mode), reduced: a `{5 V,
+    // 20 mA}` PSU and a 74LS00 on the rail driving 47 ohm from 1y (inputs
+    // grounded). Powered, the gate draws 27.8 mA at the setpoint and more
+    // than 20 mA anywhere in its 4.275-5.775 V window; below it and above
+    // it it draws nothing. So the only CC solution is the node shunt's,
+    // 0.02 A / 1e-12 S = 2e10 V, where the gate is past its window: exact
+    // mode entered CC on the draw and held 2e10 V for good (static), or
+    // published it every other step (with a capacitor, stepped). That CC
+    // solution is past the setpoint, so the compliance clamp keeps CV (Rails
+    // point 5), as classic's does: the rail at 5 V, the PSU over its limit.
+    // (Default mode declines this board at load, `-4`: the power-gate
+    // ping-pong, F5's.)
+    for with_cap in [false, true] {
+        let mut devices = vec![psu(0, 1, 0, 5.0, 0.02), ls00(1, 1, 0, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1e-8, 0), resistor(2, 2, 0, 47.0)];
+        if with_cap {
+            devices.push(capacitor(3, 2, 0, 1e-6, 0.0));
+        }
+        let mut e = Engine::load(&exact(program(3, devices))).unwrap();
+        let mut t = 0.0;
+        while t < 0.01 {
+            t += 2.5e-4;
+            e.advance(t).unwrap();
+            let what = format!("capacitor {with_cap}, t {t:.4} s");
+            assert!(e.voltages()[1] <= 5.0, "{what}: the rail at {} V, past the setpoint", e.voltages()[1]);
+            assert_eq!(e.device_state(0).unwrap(), &[Regime::Cv.code()], "{what}: CV");
+            close(e.voltages()[1], 5.0, 1e-12, &what);
+        }
+    }
 }
