@@ -801,6 +801,209 @@ impl ClosedFormSolver {
         Some(x0 + part.dx()[local] * vc)
     }
 
+    /// W1g (README W1g points 3, 5 and 9): node `node`'s voltage over the
+    /// current segment as `(v_inf, v0, t0, tau)`, `V(t) = v_inf + (v0 - v_inf)
+    /// exp(-(t - t0)/tau)`, which the slow integrators close in closed form.
+    /// `x(vc) = x0 + dx vc` with `vc` the segment's exponential, so the node is
+    /// the same exponential: `v_inf = x0 + dx vc_inf` and `v0 = x0 + dx vc0`.
+    /// A segment whose `vc` does not move (`F = 0`) is the constant `v0`, an
+    /// infinite `tau`. `None` for a node this solver does not own, before the
+    /// first segment, for a growing segment (`F > 0`, no decaying exponential
+    /// to close), and for a segment that is not one exponential: one driven
+    /// by a known rail or a resolved ramp (W1f), whose trajectory carries
+    /// extra terms. The caller then holds the published value instead.
+    pub(crate) fn node_trajectory(&self, node: usize) -> Option<(f64, f64, f64, f64)> {
+        let &(p, l) = self.node_owner.get(&node)?;
+        let part = &self.parts[self.slot(p)?];
+        if part.drive.is_some() || part.ramp.is_some() {
+            return None;
+        }
+        let seg = part.seg.as_ref()?;
+        let x0 = if seg.hub.is_some() { part.aim_x0[l] } else { seg.x0[l] };
+        let dx = part.dx()[l];
+        let v0 = x0 + dx * part.seg_vc0;
+        if part.seg_f == 0.0 {
+            return Some((v0, v0, part.seg_t0, f64::INFINITY));
+        }
+        if part.seg_f < 0.0 {
+            Some((x0 + dx * part.seg_inf, v0, part.seg_t0, -1.0 / part.seg_f))
+        } else {
+            None
+        }
+    }
+
+    /// W1g, ruling R21: node `node`'s voltage on a segment a known rail
+    /// drives (which [`Self::node_trajectory`] declines), for the slow
+    /// integrators: the segment's own exponential re-anchored at `now`
+    /// through the node's exact value there, `(v_inf, v_now, tau)`, and
+    /// `Δ`, how long that stays within `tol = tol_abs + tol_rel |v_now|` of
+    /// the exact trajectory.
+    ///
+    /// The exact node is `x0 + dxdu(vc) du(τ) + dx vc(t)`, with `vc` the
+    /// segment's exponential plus the rail's share `Δvc` (`vc_of`), `τ = t -
+    /// seg_t0`; what the exponential drops is `D(τ) = dxdu(vc) du(τ) + dx
+    /// Δvc(τ)`. Re-anchored at `now` (`τn`), the error at `τn + δ` is `D(τn +
+    /// δ) - D(τn) e^(-δ/tau)`, at most `(L + |D(τn)|/tau) δ`, `L` a bound on
+    /// `|D'|` over `[τn, τn + δ]`. For modes `k >= 0` and `f <= 0`: `φ_k(τ)
+    /// <= τ`, `|du| <= S τ` and `|du'| <= S` (`S = Σ|s|`); `0 <= J <= τ²/2`
+    /// and `|J'| = |φ_k + f J| <= τ + |f| τ²/2`, and the held and cell terms
+    /// likewise (`W = Σ|w| + Σ|we| + |cell_we|`), so `|Δvc| <= W τ²/2` and
+    /// `|Δvc'| <= W (τ + |f| τ²/2)`; `|dxdu| <= a0 + a1 (Vm +
+    /// |Δvc|)` and `|vc'| <= |f| |vc0 - inf| + |Δvc'|`. So `L(τ) = a1 |vc'|
+    /// S τ + |dxdu| S + |dx| |Δvc'|`, nondecreasing in `τ`, and `Δ` is the
+    /// largest `δ` with `(L(τn + δ) + |D(τn)|/tau) δ <= tol` (infinity when
+    /// nothing is dropped). `None` for anything else: not this solver's node,
+    /// no drive, a ramp, a growing segment or a mode with `k < 0`.
+    pub(crate) fn driven_anchor(&self, node: usize, now: f64, tol_abs: f64, tol_rel: f64) -> Option<(f64, f64, f64, f64)> {
+        let &(p, l) = self.node_owner.get(&node)?;
+        let part = &self.parts[self.slot(p)?];
+        let d = part.drive.as_ref()?;
+        if part.ramp.is_some() || part.seg_f > 0.0 || d.modes.iter().any(|m| !(m.k >= 0.0)) {
+            return None;
+        }
+        let seg = part.seg.as_ref()?;
+        let x0 = if seg.hub.is_some() { part.aim_x0[l] } else { seg.x0[l] };
+        let dx = part.dx()[l];
+        let f = part.seg_f;
+        let v_now = Self::node_at(part, l, now)?;
+        let tol = tol_abs + tol_rel * v_now.abs();
+        let s_sum: f64 = d.modes.iter().map(|m| m.s.abs()).sum();
+        let w_sum: f64 = d.modes.iter().map(|m| m.w.abs()).sum();
+        let adx = dx.abs();
+        let tau_n = now - part.seg_t0;
+        let curved = seg.hub.as_ref().is_some_and(|h| h.curve.is_some()) || d.cell_we != 0.0 || (d.held && d.modes.iter().any(|m| m.we != 0.0));
+        if !curved {
+            // A linear segment: `vc' = f (vc - inf) + F(τ)`, `F = Σ w φ_k`,
+            // and the node `x0 + a du(τ) + dx vc`. The anchor freezes the rail
+            // where it stands: the asymptote is the node's with `F` and `du`
+            // held at `τn` (`vc_inf = inf - F(τn)/f`), so it tracks the rail.
+            // Its error is `a (du(τ) - du(τn)) + dx e_vc`, with `e_vc' = f
+            // e_vc + F(τ) - F(τn)`: `|du(τ) - du(τn)| <= S δ`, `|F(τ) -
+            // F(τn)| <= W δ` (`W = Σ|w|`), so `|e_vc| <= W min(δ²/2, δ/|f|)`
+            // and the bound is `|a| S δ + |dx| W min(δ²/2, δ/|f|)`: past a few
+            // `tau`, `δ = tol / (g S)`, `g` the node's rail sensitivity at DC.
+            let a = seg.hub.as_ref().map_or(0.0, |h| h.dx0du[l]);
+            let f_n: f64 = d.sum(|m| if m.w != 0.0 { m.w * rails::exp_integral(-m.k, tau_n) } else { 0.0 });
+            let (v_inf, tau) = if f < 0.0 {
+                (x0 + a * d.du(tau_n) + dx * (part.seg_inf - f_n / f), -1.0 / f)
+            } else {
+                (v_now, f64::INFINITY)
+            };
+            return Some((v_inf, v_now, tau, linear_anchor_deadline(a.abs(), s_sum, adx, w_sum, f, tol)));
+        }
+        // A curved or folded segment (the coupling moves with `vc`): the
+        // segment's own exponential re-anchored through the exact value, and
+        // the bound below on what it drops.
+        let base = |t: f64| x0 + dx * vc_at(f, part.seg_inf, part.seg_vc0, part.seg_t0, t);
+        let (v_inf, tau) = if f < 0.0 { (x0 + dx * part.seg_inf, -1.0 / f) } else { (v_now, f64::INFINITY) };
+        let d_now = v_now - base(now);
+        let held_we: f64 = if d.held { d.modes.iter().map(|m| m.we.abs()).sum() } else { 0.0 };
+        let (a0, a1) = match seg.hub.as_ref() {
+            Some(h) => (h.dx0du[l].abs(), h.curve.as_ref().map_or(0.0, |c| c.dx1du[l].abs())),
+            None => (0.0, 0.0),
+        };
+        let b = CurvedBound {
+            tau_n,
+            s_sum,
+            w_sum,
+            we: held_we + d.cell_we.abs(),
+            a0,
+            a1,
+            adx,
+            vm: part.seg_vc0.abs().max(part.seg_inf.abs()),
+            dvc: (part.seg_vc0 - part.seg_inf).abs(),
+            f,
+            d_now: d_now.abs(),
+        };
+        Some((v_inf, v_now, tau, largest_within(|delta| b.at(delta), tol)))
+    }
+
+    /// W1g, ruling R21: the rail under `partition`'s drive at `now`, `u_a +
+    /// du(now - seg_t0)`, and how long it stays within `tol = tol_abs +
+    /// tol_rel |u|` of that value: `|du'| <= S = Σ|s|` for modes `k >= 0`,
+    /// so `tol / S`. `None` where [`Self::driven_anchor`] declines.
+    pub(crate) fn driven_rail(&self, partition: usize, now: f64, tol_abs: f64, tol_rel: f64) -> Option<(f64, f64)> {
+        let part = &self.parts[self.slot(partition)?];
+        let d = part.drive.as_ref()?;
+        if part.ramp.is_some() || part.seg_f > 0.0 || d.modes.iter().any(|m| !(m.k >= 0.0)) {
+            return None;
+        }
+        let u = d.u_a + d.du(now - part.seg_t0);
+        let s_sum: f64 = d.modes.iter().map(|m| m.s.abs()).sum();
+        let tol = tol_abs + tol_rel * u.abs();
+        Some((u, if s_sum > 0.0 { tol / s_sum } else { f64::INFINITY }))
+    }
+
+    /// W1g, ruling R29: a device's own voltage `V = Σ ± pin` over a linear
+    /// segment of `partition` that a rail drives, each pin a node of the
+    /// partition, the rail, or a fixed value. `(v_inf, v_now, tau, Δ)`: the
+    /// one exponential `V` follows from `now` with the rail's motion taken as
+    /// its tangent there, and how long that stays within `tol = tol_abs +
+    /// tol_rel |v_now|`.
+    ///
+    /// With `du(τn + δ) = du_n + S_n δ` and the capacitor's forcing `F(τn +
+    /// δ) = F_n + W_n δ` (`S_n = Σ s e^(-k τn)`, `W_n = Σ w e^(-k τn)`), `vc' =
+    /// f (vc - inf) + F` has the exact solution `α + β δ + (vc_n - α) e^(fδ)`,
+    /// `β = -W_n/f`, `α = inf - F_n/f - W_n/f²`, and `V = C + A du + D vc`
+    /// (`A`, `D`, `C` summed over the pins) is `V∞ + Lδ + (V_n - V∞) e^(fδ)`
+    /// with `L = A S_n + D β`. A device that tracks the rail (a resistor from
+    /// the rail into the capacitor on a linear ramp) has `L = 0`: its voltage
+    /// is one exponential, lag included. Otherwise the anchor's asymptote is
+    /// `V∞ - L/f`, which leaves `V_n` on `V`'s slope, and it drops `L (δ -
+    /// (1 - e^(fδ))/|f|)` (at most `|L f| δ²/2`). With the rail's curvature,
+    /// `|du''| <= K_s = Σ|s| k e^(-k τn)` and `|F''| <= K_w = Σ|w| k e^(-k
+    /// τn)`, the error is at most that plus `|A| K_s δ²/2 + |D| K_w min(δ³/6,
+    /// δ²/(2|f|))`. `None` for a curved or folded segment, a ramp,
+    /// a non-decaying segment or a mode with `k < 0`.
+    pub(crate) fn driven_device(&self, partition: usize, pins: &[(DevicePin, f64)], now: f64, tol_abs: f64, tol_rel: f64) -> Option<(f64, f64, f64, f64)> {
+        let part = &self.parts[self.slot(partition)?];
+        let d = part.drive.as_ref()?;
+        let seg = part.seg.as_ref()?;
+        let f = part.seg_f;
+        let curved = seg.hub.as_ref().is_some_and(|h| h.curve.is_some()) || d.cell_we != 0.0 || (d.held && d.modes.iter().any(|m| m.we != 0.0));
+        if curved || part.ramp.is_some() || !(f < 0.0) || d.modes.iter().any(|m| !(m.k >= 0.0)) {
+            return None;
+        }
+        let (mut a, mut dd, mut c) = (0.0, 0.0, 0.0);
+        for &(pin, sign) in pins {
+            match pin {
+                DevicePin::Node(node) => {
+                    let &(q, l) = self.node_owner.get(&node)?;
+                    if q != partition {
+                        return None;
+                    }
+                    let x0 = if seg.hub.is_some() { part.aim_x0[l] } else { seg.x0[l] };
+                    a += sign * seg.hub.as_ref().map_or(0.0, |h| h.dx0du[l]);
+                    dd += sign * part.dx()[l];
+                    c += sign * x0;
+                }
+                DevicePin::Rail => {
+                    a += sign;
+                    c += sign * d.u_a;
+                }
+                DevicePin::Fixed(v) => c += sign * v,
+            }
+        }
+        let tau_n = now - part.seg_t0;
+        let s_n = d.sum(|m| m.s * (-m.k * tau_n).exp());
+        let w_n = d.sum(|m| m.w * (-m.k * tau_n).exp());
+        let f_n = d.sum(|m| if m.w != 0.0 { m.w * rails::exp_integral(-m.k, tau_n) } else { 0.0 });
+        let k_s = d.sum(|m| (m.s * m.k).abs() * (-m.k * tau_n).exp());
+        let k_w = d.sum(|m| (m.w * m.k).abs() * (-m.k * tau_n).exp());
+        let du_n = d.du(tau_n);
+        let vc_n = vc_of(part, now);
+        let v_now = c + a * du_n + dd * vc_n;
+        let alpha = part.seg_inf - f_n / f - w_n / (f * f);
+        let lin = a * s_n - dd * w_n / f;
+        // The asymptote moved by `-L/f` so the exponential leaves `V_n` on
+        // `V`'s own slope: the term it drops is then `L (δ - (1 - e^(fδ))/|f|)`,
+        // second order in `δ` until `δ ~ 1/|f|`.
+        let v_inf = c + a * du_n + dd * alpha - lin / f;
+        let tol = tol_abs + tol_rel * v_now.abs();
+        let bound = |delta: f64| lin.abs() * (delta + (-(f * delta).exp_m1()) / f) + a.abs() * k_s * delta * delta / 2.0 + dd.abs() * k_w * (delta * delta * delta / 6.0).min(delta * delta / (2.0 * -f));
+        Some((v_inf, v_now, -1.0 / f, largest_within(bound, tol)))
+    }
+
     /// Whether `partition` is aimed under a known rail (Rails point 4).
     pub(crate) fn is_driven(&self, partition: usize) -> bool {
         self.slot(partition).is_some_and(|slot| self.parts[slot].drive.is_some())
@@ -1913,6 +2116,94 @@ fn bank_drift(part: &mut Partition, now: f64) {
 
 /// `vc` at `t` on the partition's segment, driven by the rail when that is a
 /// known closed form (Rails point 4).
+/// A pin of a device for [`ClosedFormSolver::driven_device`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DevicePin {
+    /// A node of the partition.
+    Node(usize),
+    /// The rail that drives it.
+    Rail,
+    /// A fixed node's value.
+    Fixed(f64),
+}
+
+/// R21, a linear segment's re-anchor (`ClosedFormSolver::driven_anchor`):
+/// the bound on the node's error `δ` after the anchor, `|a| S δ + |dx| W
+/// min(δ²/2, δ/|f|)` (`min(...)` read as `δ²/2` when `f = 0`).
+pub(crate) fn linear_anchor_bound(a: f64, s_sum: f64, dx: f64, w_sum: f64, f: f64, delta: f64) -> f64 {
+    let lag = if f < 0.0 { (delta * delta / 2.0).min(delta / -f) } else { delta * delta / 2.0 };
+    a * s_sum * delta + dx * w_sum * lag
+}
+
+/// The largest `δ` with `linear_anchor_bound(..., δ) <= tol`, in closed
+/// form: inside `δ <= 2/|f|` the root of `(|dx| W/2) δ² + |a| S δ = tol`,
+/// past it (or when that root lies past it) `tol / (|a| S + |dx| W/|f|)`.
+pub(crate) fn linear_anchor_deadline(a: f64, s_sum: f64, dx: f64, w_sum: f64, f: f64, tol: f64) -> f64 {
+    let (lin, quad) = (a * s_sum, dx * w_sum);
+    if lin == 0.0 && quad == 0.0 {
+        return f64::INFINITY;
+    }
+    let knee = if f < 0.0 { 2.0 / -f } else { f64::INFINITY };
+    let inner = if quad > 0.0 { (2.0 * tol) / (lin + (lin * lin + 2.0 * quad * tol).sqrt()) } else { tol / lin };
+    let deadline = if inner <= knee { inner } else { tol / (lin + quad / -f) };
+    debug_assert!(linear_anchor_bound(a, s_sum, dx, w_sum, f, deadline) <= tol * (1.0 + 1e-9), "the deadline is inside its bound");
+    deadline
+}
+
+/// R21, a curved or folded segment's re-anchor: the terms of the bound
+/// `(L(τn + δ) + |D(τn)| / tau) δ` (`ClosedFormSolver::driven_anchor`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CurvedBound {
+    pub tau_n: f64,
+    pub s_sum: f64,
+    pub w_sum: f64,
+    pub we: f64,
+    pub a0: f64,
+    pub a1: f64,
+    pub adx: f64,
+    pub vm: f64,
+    pub dvc: f64,
+    pub f: f64,
+    pub d_now: f64,
+}
+
+impl CurvedBound {
+    pub(crate) fn at(&self, delta: f64) -> f64 {
+        let t = self.tau_n + delta;
+        let af = self.f.abs();
+        // `|J'| = ∫ e^(f(τ-s)) e^(-k s) ds <= min(τ, 1/|f|)`; the held and
+        // cell terms by their derivatives' `τ + |f| τ²/2`.
+        let j_rate = if af > 0.0 { t.min(1.0 / af) } else { t };
+        let dvc_rate = self.w_sum * j_rate + self.we * (t + af * t * t / 2.0);
+        let sens = self.a0 + self.a1 * (self.vm + (self.w_sum + self.we) * t * t / 2.0);
+        let l_bound = self.a1 * (af * self.dvc + dvc_rate) * self.s_sum * t + sens * self.s_sum + self.adx * dvc_rate;
+        let anchor = if self.f < 0.0 { self.d_now * af } else { 0.0 };
+        (l_bound + anchor) * delta
+    }
+}
+
+/// The largest `δ` with `bound(δ) <= tol`, `bound` nondecreasing from 0
+/// (infinity when it never gets there), to bisection's last useful bit.
+pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
+    let mut hi = 1e-12;
+    while bound(hi) <= tol {
+        hi *= 2.0;
+        if hi > 1e12 {
+            return f64::INFINITY;
+        }
+    }
+    let mut lo = 0.0;
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if bound(mid) <= tol {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 fn vc_of(part: &Partition, t: f64) -> f64 {
     let vc = vc_at(part.seg_f, part.seg_inf, part.seg_vc0, part.seg_t0, t);
     let vc = match &part.drive {

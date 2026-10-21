@@ -5,6 +5,7 @@ pub mod stress;
 pub mod thermal;
 pub mod warnings;
 
+use crate::digital::sag::{SagCell, SagState};
 use stress::{PtcEntry, PtcEvent, PtcParams, Stress};
 use thermal::{ThermalConfig, ThermalEntry};
 
@@ -25,22 +26,51 @@ pub fn is_due(t_event: f64, now: f64) -> bool {
 /// fixed node subtracts that voltage, two pins in the partition subtract their
 /// trajectories. A partition is one capacitor, so every node of a segment
 /// shares `tau` and `t_seg`.
+///
+/// **A ramp** (`ramp`, ruling R30's exact path on a CC rail capacitor): the
+/// rail climbs toward an asymptote `u0 + slope/k` that, for a slow segment
+/// (a large resistance across the rail), lies far past where CV ends it, so
+/// `a` and `b` are huge and nearly cancel (`il·R` volts for a 5 V rail). Its
+/// value at `t_seg` is then kept exactly in `v0`, and every closed form reads
+/// it as `V = v0 + b·expm1(-s/tau)`, whose terms stay the size of `V` and of
+/// its slope `b/tau`: no cancellation at any `tau` (W1gV3). Any other
+/// voltage is a physical relaxation whose `a` and `b` are the size of `V`,
+/// and keeps the `a + b·e^(-s/tau)` forms bit for bit (`v0` is `a + b`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExpVoltage {
     pub a: f64,
     pub b: f64,
     pub tau: f64,
     pub t_seg: f64,
+    /// `V(t_seg)`: exact for a ramp, `a + b` otherwise.
+    pub v0: f64,
+    pub ramp: bool,
 }
 
 impl ExpVoltage {
     pub fn new(a: f64, b: f64, tau: f64, t_seg: f64) -> Self {
-        ExpVoltage { a, b, tau, t_seg }
+        ExpVoltage { a, b, tau, t_seg, v0: a + b, ramp: false }
     }
 
     /// From a node trajectory `(v_inf, v0, t0, tau)`.
     pub fn from_trajectory(v_inf: f64, v0: f64, t_seg: f64, tau: f64) -> Self {
-        ExpVoltage { a: v_inf, b: v0 - v_inf, tau, t_seg }
+        ExpVoltage { a: v_inf, b: v0 - v_inf, tau, t_seg, v0, ramp: false }
+    }
+
+    /// A ramp (see the type): `v0` at `t_seg`, moving by `b·expm1(-s/tau)`,
+    /// so `b/tau` is its slope there.
+    pub fn ramp(v0: f64, b: f64, tau: f64, t_seg: f64) -> Self {
+        ExpVoltage { a: v0 - b, b, tau, t_seg, v0, ramp: true }
+    }
+
+    /// `V` at `s` past `t_seg`: `a + b·e^(-s/tau)`, or a ramp's `v0 +
+    /// b·expm1(-s/tau)`.
+    pub fn at_offset(&self, s: f64) -> f64 {
+        if self.ramp {
+            self.v0 + self.b * (-s / self.tau).exp_m1()
+        } else {
+            self.a + self.b * (-s / self.tau).exp()
+        }
     }
 
     /// The one value this voltage holds when it does not relax: `b == 0` (nothing
@@ -53,7 +83,7 @@ impl ExpVoltage {
         if self.b == 0.0 {
             Some(self.a)
         } else if self.tau == f64::INFINITY {
-            Some(self.a + self.b)
+            Some(if self.ramp { self.v0 } else { self.a + self.b })
         } else if self.tau == 0.0 {
             Some(self.a)
         } else {
@@ -65,27 +95,36 @@ impl ExpVoltage {
     pub fn at(&self, t: f64) -> f64 {
         match self.constant_value() {
             Some(v) => v,
-            None => self.a + self.b * (-(t - self.t_seg) / self.tau).exp(),
+            None => self.at_offset(t - self.t_seg),
         }
     }
 
     /// `V - dv`: one pin on a fixed node.
     pub fn offset(self, dv: f64) -> ExpVoltage {
-        ExpVoltage { a: self.a - dv, ..self }
+        ExpVoltage { a: self.a - dv, v0: self.v0 - dv, ..self }
+    }
+
+    /// `dv - V`: a fixed node minus a pin in the segment.
+    pub fn from_fixed(self, dv: f64) -> ExpVoltage {
+        ExpVoltage { a: dv - self.a, b: -self.b, v0: dv - self.v0, ..self }
     }
 
     /// `self - other`: two pins in the same segment.
     pub fn minus(self, other: ExpVoltage) -> ExpVoltage {
         debug_assert!(self.tau == other.tau && self.t_seg == other.t_seg, "one segment has one tau and one start");
-        ExpVoltage { a: self.a - other.a, b: self.b - other.b, ..self }
+        ExpVoltage { a: self.a - other.a, b: self.b - other.b, v0: self.v0 - other.v0, ramp: self.ramp || other.ramp, ..self }
     }
 
     /// The same function expressed from a later origin `t`, so a window that
     /// starts mid-segment reads `a + b'*exp(-u/tau)` with `u` counted from it.
     pub fn rebased(&self, t: f64) -> ExpVoltage {
         match self.constant_value() {
-            Some(v) => ExpVoltage { a: v, b: 0.0, tau: self.tau, t_seg: t },
-            None => ExpVoltage { b: self.b * (-(t - self.t_seg) / self.tau).exp(), t_seg: t, ..*self },
+            Some(v) => ExpVoltage { a: v, b: 0.0, tau: self.tau, t_seg: t, v0: v, ramp: false },
+            None => {
+                let s = t - self.t_seg;
+                let b = self.b * (-s / self.tau).exp();
+                ExpVoltage { b, t_seg: t, v0: if self.ramp { self.at_offset(s) } else { self.a + b }, ..*self }
+            }
         }
     }
 }
@@ -287,9 +326,17 @@ pub struct SlowState {
     /// One entry: the latch order and log are small and change rarely, so the
     /// whole book is the journal's unit.
     book: JournaledTable<LatchBook>,
+    /// G2a's `output_sag` window state, one cell per `(IC, output-capable
+    /// pin)` (`digital::sag`, point 9), under the same journal: a window
+    /// opened, latched or cleared by a failed instant rolls back with it.
+    sag: JournaledTable<SagCell>,
     /// Whether the open window bumped any `law_gen`. Not journaled: it is the
     /// answer `rollback_instant` gives, and each window starts it afresh.
     law_gen_bumped: bool,
+    /// Whether any failed flag has been raised since load. Never lowered (not
+    /// by a reset, not by a rollback), so `false` proves no device is failed
+    /// and the stamp paths that check every junction can skip the check.
+    ever_failed: bool,
 }
 
 impl SlowState {
@@ -303,8 +350,29 @@ impl SlowState {
             thermal: JournaledTable::new(vec![None; device_count]),
             ptc: JournaledTable::new(vec![None; device_count]),
             book: JournaledTable::new(vec![LatchBook::default()]),
+            sag: JournaledTable::new(Vec::new()),
             law_gen_bumped: false,
+            ever_failed: false,
         }
+    }
+
+    /// Registers the `output_sag` cells, all `Ok` (at load, so nothing
+    /// journals). Cell `i` keeps its index for the life of the program.
+    pub fn init_sag(&mut self, cells: Vec<SagCell>) {
+        self.sag = JournaledTable::new(cells);
+    }
+
+    pub fn sag_len(&self) -> usize {
+        self.sag.len()
+    }
+
+    pub fn sag_cell(&self, i: usize) -> &SagCell {
+        self.sag.get(i)
+    }
+
+    /// A cell's window state, journaled before the write.
+    pub fn sag_state_mut(&mut self, i: usize) -> &mut SagState {
+        &mut self.sag.get_mut(i).state
     }
 
     pub fn device_count(&self) -> usize {
@@ -345,6 +413,12 @@ impl SlowState {
     /// The failed flag every stamp path and the KCL walk read.
     pub fn is_failed(&self, dev: usize) -> bool {
         self.flags.get(dev).failed
+    }
+
+    /// Whether any device may be failed: `false` once proves none is
+    /// ([`Self::is_failed`] is `false` for every device).
+    pub fn may_have_failed(&self) -> bool {
+        self.ever_failed
     }
 
     /// The device's PTC resistance accessor: `None` for a device that is not a
@@ -429,6 +503,7 @@ impl SlowState {
         }
         if opens_device && !self.flags.get(rec.device as usize).failed {
             self.flags.get_mut(rec.device as usize).failed = true;
+            self.ever_failed = true;
         }
         true
     }
@@ -563,6 +638,7 @@ impl SlowState {
         self.thermal.begin();
         self.ptc.begin();
         self.book.begin();
+        self.sag.begin();
     }
 
     /// The instant completed.
@@ -573,6 +649,7 @@ impl SlowState {
         self.thermal.end();
         self.ptc.end();
         self.book.end();
+        self.sag.end();
     }
 
     /// The instant failed: every table back to the bit pattern `begin_instant`
@@ -585,13 +662,14 @@ impl SlowState {
         self.thermal.rollback();
         self.ptc.rollback();
         self.book.rollback();
+        self.sag.rollback();
         std::mem::take(&mut self.law_gen_bumped)
     }
 
     /// Pre-images held by the open window across every table: what the instant
     /// has paid. Zero for an instant that touched no slow entry.
     pub fn journaled(&self) -> usize {
-        self.flags.journaled() + self.stress.journaled() + self.thermal.journaled() + self.ptc.journaled() + self.book.journaled()
+        self.flags.journaled() + self.stress.journaled() + self.thermal.journaled() + self.ptc.journaled() + self.book.journaled() + self.sag.journaled()
     }
 }
 

@@ -297,6 +297,7 @@ impl Program {
             devices.push(Self::parse_device(&mut r, d, node_count, digital_slot_count, channel_slot_count, &mut claims)?);
         }
         Self::check_slot_ranges_disjoint(&mut claims)?;
+        Self::check_slow_records(&devices)?;
 
         r.expect("trailer magic", MAGIC)?;
         if r.remaining() != 0 {
@@ -441,6 +442,60 @@ impl Program {
                     a.base,
                     a.base + a.count
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The reader rules for W1g's synthetic records (core/README.md, "Reader
+    /// rules for codes 90 and 91"), the ones that span records: they come
+    /// after every other record, in ascending `device`, 90 before 91 for one
+    /// device; `device` names an earlier non-synthetic record of the right
+    /// kind (a `resistor` for 90, a `resistor` or `led` for 91); at most one of
+    /// each code per device.
+    ///
+    /// "Exactly one 90 per resistor" is enforced for a program that carries
+    /// any code 90 record. A program with none at all comes from a compiler
+    /// that predates W1g's records (the TS compiler emits them only once its
+    /// W1g records are switched on), and its resistors simply have no rating:
+    /// classic's `pMax <= 0`, which never latches.
+    fn check_slow_records(devices: &[Device]) -> Result<(), BoError> {
+        let first_synthetic = devices.iter().position(|d| kinds::is_synthetic_slow(d.kind)).unwrap_or(devices.len());
+        let mut previous: Option<(usize, u32)> = None;
+        let mut rated = vec![false; devices.len()];
+        for (index, d) in devices.iter().enumerate().skip(first_synthetic) {
+            if !kinds::is_synthetic_slow(d.kind) {
+                return Err(BoError::malformed(format!("device[{index}]: a component record after the first rating or thermal record")));
+            }
+            let target = d.params[0] as usize;
+            let what = if d.kind == kinds::RATING { "rating" } else { "thermal" };
+            if target >= first_synthetic {
+                return Err(BoError::malformed(format!("device[{index}] ({what}): device {target} is not an earlier component record")));
+            }
+            let target_kind = devices[target].kind;
+            let fits = match d.kind {
+                kinds::RATING => target_kind == kinds::RESISTOR,
+                _ => matches!(target_kind, kinds::RESISTOR | kinds::LED),
+            };
+            if !fits {
+                return Err(BoError::malformed(format!("device[{index}] ({what}): device {target} has kind code {target_kind}, which takes no {what} record")));
+            }
+            if let Some((prev_target, prev_kind)) = previous {
+                let in_order = prev_target < target || (prev_target == target && prev_kind == kinds::RATING && d.kind == kinds::THERMAL);
+                if !in_order {
+                    return Err(BoError::malformed(format!(
+                        "device[{index}] ({what}): records must be in ascending device, 90 before 91, at most one of each per device (device {target} after device {prev_target})"
+                    )));
+                }
+            }
+            if d.kind == kinds::RATING {
+                rated[target] = true;
+            }
+            previous = Some((target, d.kind));
+        }
+        if rated.iter().any(|&r| r) {
+            if let Some(index) = devices.iter().enumerate().find(|(i, d)| d.kind == kinds::RESISTOR && !rated[*i]).map(|(i, _)| i) {
+                return Err(BoError::malformed(format!("device[{index}] (resistor): no rating record, and the program carries rating records")));
             }
         }
         Ok(())
@@ -1473,5 +1528,75 @@ mod tests {
         }
         let err = Program::parse(&build_full(2.0, &[], 1.0, 0.0, &[ne555_record(NE555_PARAMS, 1.0)])).unwrap_err();
         assert!(err.message.contains("pin flags must be 0"), "{}", err.message);
+    }
+
+    // ---- W1g: codes 10, 13, 90 and 91 ------------------------------------------
+
+    fn rating_record(device: f64, p_max: f64, r_power: f64) -> Vec<f64> {
+        record(kinds::RATING, 0, &[device, p_max, r_power], &[])
+    }
+
+    fn thermal_record(device: f64, params: [f64; 5]) -> Vec<f64> {
+        let mut all = vec![device];
+        all.extend(params);
+        record(kinds::THERMAL, 0, &all, &[])
+    }
+
+    fn led_plain() -> Vec<f64> {
+        record(kinds::LED, 2, &[1.8, 2.0, 0.02, 0.0, 0.0, 0.0], &[])
+    }
+
+    fn parse_err(devices: &[Vec<f64>], needle: &str) {
+        let err = Program::parse(&build(2.0, devices)).unwrap_err();
+        assert_eq!(err.code, -1, "{needle}: {}", err.message);
+        assert!(err.message.contains(needle), "{needle}: {}", err.message);
+    }
+
+    #[test]
+    fn fuse_and_ptc_records_parse_with_their_floors() {
+        let p = Program::parse(&build(2.0, &[record(kinds::FUSE, 2, &[0.1, 0.5], &[]), record(kinds::PTC_FUSE, 2, &[0.5, 0.5], &[])])).unwrap();
+        assert_eq!(p.devices[0].kind, kinds::FUSE);
+        assert_eq!(p.devices[1].kind, kinds::PTC_FUSE);
+        Program::parse(&build(2.0, &[record(kinds::FUSE, 2, &[0.001, -1.0], &[])])).expect("iRating <= 0 is no limit");
+        Program::parse(&build(2.0, &[record(kinds::PTC_FUSE, 2, &[0.001, 1e-6], &[])])).expect("both floors");
+        parse_err(&[record(kinds::FUSE, 2, &[0.0009, 1.0], &[])], "rNormal");
+        parse_err(&[record(kinds::PTC_FUSE, 2, &[0.0009, 0.5], &[])], "rNormal");
+        parse_err(&[record(kinds::PTC_FUSE, 2, &[0.5, 0.9e-6], &[])], "iHold");
+        parse_err(&[record(kinds::FUSE, 1, &[0.1, 0.5], &[])], "pin");
+        parse_err(&[record(kinds::PTC_FUSE, 2, &[0.5], &[])], "param");
+    }
+
+    #[test]
+    fn rating_and_thermal_records_follow_the_components_in_device_order() {
+        let r = resistor_record(0.0, 0.0, 1.0, 50.0);
+        let thermal_ok = [340.0, 8.0, 0.0, 0.0, 0.0];
+        let p = Program::parse(&build(2.0, &[r.clone(), led_plain(), rating_record(0.0, 0.25, 50.0), thermal_record(0.0, thermal_ok), thermal_record(1.0, [560.0, 2.0, 0.0, 0.0, 0.0])])).unwrap();
+        assert_eq!(p.devices.iter().map(|d| d.kind).collect::<Vec<_>>(), [kinds::RESISTOR, kinds::LED, kinds::RATING, kinds::THERMAL, kinds::THERMAL]);
+        // A program without any rating record predates W1g's records.
+        Program::parse(&build(2.0, &[r.clone(), led_plain()])).expect("no rating at all");
+        // Order: after every component, ascending device, 90 before 91.
+        parse_err(&[r.clone(), rating_record(0.0, 0.25, 50.0), led_plain()], "after the first rating or thermal record");
+        parse_err(&[r.clone(), r.clone(), rating_record(1.0, 0.25, 50.0), rating_record(0.0, 0.25, 50.0)], "ascending device");
+        parse_err(&[r.clone(), thermal_record(0.0, thermal_ok), rating_record(0.0, 0.25, 50.0)], "ascending device");
+        parse_err(&[r.clone(), rating_record(0.0, 0.25, 50.0), rating_record(0.0, 0.25, 50.0)], "at most one");
+        // References: an earlier component of the right kind.
+        parse_err(&[r.clone(), rating_record(1.0, 0.25, 50.0)], "not an earlier component record");
+        parse_err(&[led_plain(), rating_record(0.0, 0.25, 50.0)], "takes no rating record");
+        parse_err(&[record(kinds::CAPACITOR, 2, &[1e-6, 0.0, 0.0], &[]), thermal_record(0.0, thermal_ok)], "takes no thermal record");
+        parse_err(&[r.clone(), rating_record(0.5, 0.25, 50.0)], "record index");
+        // Exactly one rating per resistor once any is present.
+        parse_err(&[r.clone(), r.clone(), rating_record(0.0, 0.25, 50.0)], "no rating record");
+    }
+
+    #[test]
+    fn a_thermal_record_checks_its_values() {
+        let r = resistor_record(0.0, 0.0, 1.0, 50.0);
+        let with = |params: [f64; 5]| [r.clone(), rating_record(0.0, 0.0, 50.0), thermal_record(0.0, params)];
+        Program::parse(&build(2.0, &with([340.0, 8.0, 1.0, 150.0, 130.0]))).expect("a shutdown profile");
+        parse_err(&with([0.0, 8.0, 0.0, 0.0, 0.0]), "rThetaJA");
+        parse_err(&with([340.0, 0.0, 0.0, 0.0, 0.0]), "tauS");
+        parse_err(&with([340.0, 8.0, 0.5, 0.0, 0.0]), "hasShutdown");
+        parse_err(&with([340.0, 8.0, 0.0, 150.0, 0.0]), "without a shutdown");
+        parse_err(&with([340.0, 8.0, 1.0, 130.0, 150.0]), "below tripC");
     }
 }

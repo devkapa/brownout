@@ -1252,6 +1252,12 @@ mod tests {
         kernel.solver().validate_params(&[(1, 0, 0.0)]).unwrap();
         kernel.apply_params_as_event(&[(1, 0, 0.0)]).unwrap();
         kernel.take_digital_writes();
+        // W1g: the outputs tied together on node 7 sag from load, and their
+        // `output_sag` windows run out at 1e-8 s, an instant of their own
+        // before the ring closes. Complete it first, so the doomed instant is
+        // the next one.
+        kernel.advance(19e-9).unwrap();
+        kernel.take_digital_writes();
         let time_before = kernel.time();
         let state_before = state_dump(&kernel);
 

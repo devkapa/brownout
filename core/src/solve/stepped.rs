@@ -1512,6 +1512,20 @@ impl SteppedSolver {
         self.partitions.get(&p_idx).map(|part| &part.shape)
     }
 
+    /// W1g (README W1g point 17): the one setter for partition `p_idx`'s
+    /// junctions, each with its law and only the stamped (not failed) ones,
+    /// in the order the shape was compiled in. A stepped partition owns its
+    /// `DynShape`, so this is how a held temperature after a committed step
+    /// or a failed LED reaches its stamps. It plans nothing: the next trial
+    /// stamps the new list, which is classic's one-step lag for `T_hold`
+    /// (point 4), and a latch also marks the partition dirty, whose re-seed
+    /// picks it up.
+    pub(crate) fn set_junctions(&mut self, p_idx: usize, junctions: Vec<crate::solve::DynJunction>) {
+        if let Some(part) = self.partitions.get_mut(&p_idx) {
+            part.shape.junctions = junctions;
+        }
+    }
+
     /// The instant partition `p_idx` has been committed to (tests look at it).
     #[cfg(test)]
     pub(crate) fn time_of(&self, p_idx: usize) -> Option<f64> {

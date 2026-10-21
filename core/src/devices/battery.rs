@@ -104,6 +104,18 @@ impl BatteryModel {
         self.ocv(soc) * self.ocv_scale
     }
 
+    /// The least and greatest [`Self::emf`] over every SoC: the table's
+    /// extreme knots times the scale, since the interpolation never leaves
+    /// its knots (0 for an empty table, which `ocv` reads as 0). `None` when
+    /// a knot or the scale is not finite.
+    pub fn emf_range(&self) -> Option<(f64, f64)> {
+        let mut volts = self.table.iter().map(|&(_, v)| v * self.ocv_scale);
+        let first = if self.table.is_empty() { 0.0 } else { volts.next()? };
+        let (lo, hi) = volts.fold((first, first), |(lo, hi), v| (if v < lo { v } else { lo }, if v > hi { v } else { hi }));
+        let finite = self.table.iter().all(|&(_, v)| (v * self.ocv_scale).is_finite()) && self.ocv_scale.is_finite();
+        finite.then_some((lo, hi))
+    }
+
     /// `R(soc) = (rBase * dep) * tempFactor`, `dep = 1 + depA * (1 - soc)^depP
     /// / (soc + depK)`, in classic's order (`A * pow` before the division,
     /// left to right). `depP = 2` is `x * x`, which is what V8's

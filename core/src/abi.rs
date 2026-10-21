@@ -9,7 +9,8 @@
 //! slot getters, and the harness trace. `bo_engine_set_params` (W1b),
 //! `bo_engine_seed_memory`/`bo_engine_take_eeprom_updates`/
 //! `bo_engine_eeprom_updates_ptr` (W1d) and `bo_engine_device_state`/
-//! `bo_engine_device_state_ptr` (W1f) are all implemented as of this file
+//! `bo_engine_device_state_ptr` (W1f) and `bo_engine_reset_failures`/
+//! `bo_engine_records`/`bo_engine_records_ptr` (W1g) are all implemented as of this file
 //! — every export name here has a matching row in `scripts/build-core.mjs`'s
 //! export audit list.
 
@@ -403,6 +404,46 @@ pub extern "C" fn bo_engine_device_state(h: u32, device: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn bo_engine_device_state_ptr(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.device_state_buffer().as_ptr())
+}
+
+/// Classic's `resetFailures()` (W1g; core/README.md, `bo_engine_reset_failures`),
+/// applied as ONE event at the current time: `0`; `-4` or `-7` when the
+/// re-solve at that instant fails, and then the reset rolls back and the
+/// engine is exactly as it was; `-5` with no program loaded.
+#[no_mangle]
+pub extern "C" fn bo_engine_reset_failures(h: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => match engine.reset_failures() {
+            Ok(()) => 0,
+            Err(err) => fail(&err),
+        },
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// Collects one record channel into the engine's record buffer (W1g;
+/// core/README.md, `bo_engine_records`) and returns its length in f64, a
+/// multiple of 7: channel `0` failures, `1` warnings, `2` tripped PTCs, `3`
+/// the latch log (collecting it empties it). `-8` for any other channel,
+/// `-5` with no program loaded.
+#[no_mangle]
+pub extern "C" fn bo_engine_records(h: u32, channel: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => match engine.records(channel) {
+            Ok(values) => values.len() as i32,
+            Err(err) => fail(&err),
+        },
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_records`] collect. Valid until the
+/// next call on this engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_records_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.records_buffer().as_ptr())
 }
 
 /// Time of the earliest pending event, `+Infinity` when none. `NaN` for an
@@ -1060,12 +1101,11 @@ mod tests {
         let _guard = lock();
         let h = bo_engine_create();
         assert_eq!(load(h, &divider_program()), 0);
-        // An ideal source and a resistor have no W1f layout (W1g adds the
-        // resistor's thermal one).
-        for device in [0, 1] {
-            assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
-            assert!(last_error().contains("has no device state"), "device {device}: {}", last_error());
-        }
+        // An ideal source has no layout. A resistor has W1g's thermal one,
+        // empty without a code 91 record: a success with nothing to read.
+        assert_eq!(bo_engine_device_state(h, 0), -8);
+        assert!(last_error().contains("has no device state"), "{}", last_error());
+        assert_eq!(bo_engine_device_state(h, 1), 0, "a resistor without a thermal record");
         for device in [3, u32::MAX] {
             assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
             assert!(last_error().contains("out of range"), "device {device}: {}", last_error());
@@ -1080,7 +1120,7 @@ mod tests {
         let _guard = lock();
         let h = loaded(&[], 2.0, &[battery_record(0.0, 1.0, 0.0, 5.0, 0.9, 1.0, 1.0), resistor_record(1.0, 1.0, 0.0, 200.0)]);
         let buffer_len = |h: u32| with_engine(h, usize::MAX, |e| e.device_state_buffer().len());
-        for (device, why) in [(1, "has no device state"), (2, "out of range"), (u32::MAX, "out of range")] {
+        for (device, why) in [(2, "out of range"), (u32::MAX, "out of range")] {
             assert_eq!(device_state(h, 0).map(|v| v.len()), Ok(6), "device {device}");
             assert_eq!(buffer_len(h), 6, "device {device}");
             assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
@@ -1100,6 +1140,59 @@ mod tests {
             assert_eq!(bo_engine_device_state(h, 0), -5, "handle {h}");
             assert!(last_error().contains("unknown or no program loaded"), "handle {h}: {}", last_error());
             assert!(bo_engine_device_state_ptr(h).is_null(), "handle {h}");
+        }
+    }
+
+    // --- bo_engine_records / bo_engine_reset_failures (W1g) ------------------
+
+    fn records(h: u32, channel: u32) -> Result<Vec<f64>, i32> {
+        let len = bo_engine_records(h, channel);
+        if len < 0 {
+            return Err(len);
+        }
+        let ptr = bo_engine_records_ptr(h);
+        // SAFETY: the buffer from the collect just made, `len` f64 long, valid
+        // until the next call on this engine.
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
+    }
+
+    fn rating_record(device: f64, p_max: f64, r_power: f64) -> Vec<f64> {
+        vec![crate::kinds::RATING as f64, device, 0.0, 3.0, device, p_max, r_power, 0.0]
+    }
+
+    #[test]
+    fn records_and_reset_failures_round_trip_a_latch() {
+        // 5 V across 50 ohm rated 0.25 W latches at 1 s (W1g point 6).
+        let _guard = lock();
+        let h = loaded(&[], 2.0, &[source_record(0.0, 1.0, 0.0, 5.0), resistor_record(1.0, 1.0, 0.0, 50.0), rating_record(1.0, 0.25, 50.0)]);
+        assert_eq!(records(h, 0), Ok(vec![]));
+        assert_eq!(bo_engine_advance(h, 1.5), 0);
+        let r = records(h, 0).unwrap();
+        assert_eq!(r.len(), 7);
+        assert_eq!(&r[..3], &[1.0, 1.0, -1.0]);
+        assert!((r[3] - 1.0).abs() < 1e-12);
+        assert_eq!(records(h, 1), Ok(vec![]), "no Rust warning in W1");
+        assert_eq!(records(h, 2), Ok(vec![]), "no PTC");
+        assert_eq!(records(h, 3).map(|v| v.len()), Ok(7));
+        assert_eq!(records(h, 3), Ok(vec![]), "the log was taken");
+        assert_eq!(bo_engine_reset_failures(h), 0);
+        assert_eq!(records(h, 0), Ok(vec![]), "the reset cleared the latch");
+        assert_eq!(bo_engine_time(h), 1.5, "and did not advance time");
+    }
+
+    #[test]
+    fn records_refuse_an_unknown_channel_and_both_exports_need_a_program() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_records(h, 4), -8);
+        assert!(last_error().contains("unknown channel"), "{}", last_error());
+        assert_eq!(with_engine(h, usize::MAX, |e| e.records_buffer().len()), 0, "a refused collect leaves no records");
+        let empty = bo_engine_create();
+        for h in [empty, 999_999] {
+            assert_eq!(bo_engine_records(h, 0), -5, "handle {h}");
+            assert_eq!(bo_engine_reset_failures(h), -5, "handle {h}");
+            assert!(bo_engine_records_ptr(h).is_null(), "handle {h}");
         }
     }
 }

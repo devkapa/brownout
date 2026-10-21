@@ -22,6 +22,7 @@ pub mod closed_form;
 mod curvature;
 mod hub;
 pub(crate) mod live;
+mod settle;
 pub mod newton;
 pub mod static_part;
 pub mod stepped;
@@ -32,6 +33,8 @@ mod ic_tests;
 mod led_tests;
 #[cfg(test)]
 mod rail_tests;
+#[cfg(test)]
+mod slow_tests;
 #[cfg(test)]
 mod window_tests;
 
@@ -272,6 +275,23 @@ pub trait PartitionSolver {
         let _ = idx;
     }
 
+    /// The kernel just changed the COMMITTED level of driver `idx` (a commit
+    /// that changed it, or a reset of a committed driver): unlike
+    /// [`Self::driver_changing`], only for a change that happened. W1g point
+    /// 9: a commit can flip a pin's commanded direction without moving a
+    /// node, so the settle scans its `output_sag` cell.
+    fn driver_committed(&mut self, idx: usize) {
+        let _ = idx;
+    }
+
+    /// A current `Slow` event whose token carries [`crate::events::SLOW_ANCHOR`]
+    /// (W1g ruling R21): re-drives the device's rail-driven segment from its
+    /// exact value at `now` and fires nothing.
+    fn handle_slow_anchor(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        let _ = (device, now);
+        Ok(Vec::new())
+    }
+
     /// The solver's side of the kernel's per-instant rollback window: the
     /// checkpoint a failed instant goes back to. The defaults take exactly
     /// what the kernel took before this method existed (`snapshot` plus
@@ -490,6 +510,68 @@ pub trait PartitionSolver {
     fn rail_node(&self) -> Option<usize> {
         None
     }
+
+    // ---- W1g: thermal, failures and warnings --------------------------------
+    //
+    // Default-provided like every hook above (README W1g point 17): a solver
+    // with no slow device (every mock) settles nothing, schedules no `Slow`
+    // event and has no records.
+
+    /// The settle at the end of an instant (README W1g points 2 and 14), run
+    /// by the kernel once the delta cycle has quiesced: closes and re-drives
+    /// the slow devices of every partition published this instant, runs the
+    /// `output_sag` scan, and returns the partitions a latch due at once
+    /// dirtied (another delta cycle runs at `now`, then this again). `None`
+    /// when it scheduled nothing and dirtied nothing (most instants), so the
+    /// kernel has nothing to drain.
+    fn slow_settle(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<Vec<PartitionId>>, String> {
+        let _ = (now, drivers);
+        Ok(None)
+    }
+
+    /// Whether a popped `Slow { device, token }` still names the device's
+    /// pending event (its token has not moved on).
+    fn slow_is_current(&self, device: DeviceId, token: u32) -> bool {
+        let _ = (device, token);
+        false
+    }
+
+    /// A due, current `Slow` event (README W1g point 14): closes the device to
+    /// `now` and applies the latch, re-arm, PTC trip or recovery, or marks an
+    /// `output_sag` window due for the settle. Returns the partitions dirtied.
+    fn handle_slow_event(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        let _ = (device, now);
+        Ok(Vec::new())
+    }
+
+    /// `resetFailures` (README W1g point 13), applied by the kernel as one
+    /// event at `now`: returns the partitions whose stamps returned.
+    fn reset_failures(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
+        let _ = now;
+        Ok(Vec::new())
+    }
+
+    /// One `bo_engine_records` channel at `now`, 7 f64 a record, into `out`
+    /// (cleared first). `false` for an unknown channel. Channels 0-2 project
+    /// without committing anything; channel 3 is a take.
+    fn collect_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
+        let _ = now;
+        out.clear();
+        channel <= 3
+    }
+
+    /// The W1g device state (thermal, PTC) of `device` at `now`, or `None`
+    /// for a device with no W1g layout.
+    fn slow_device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        let _ = (device, now, out);
+        None
+    }
+
+    /// Stats 21-24: slow interval closes, slow events fired, latches,
+    /// junction re-arms (README W1g point 18).
+    fn slow_stats(&self) -> [f64; 4] {
+        [0.0; 4]
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -577,6 +659,14 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).driver_changing(idx)
     }
 
+    fn driver_committed(&mut self, idx: usize) {
+        (**self).driver_committed(idx)
+    }
+
+    fn handle_slow_anchor(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        (**self).handle_slow_anchor(device, now)
+    }
+
     fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
         (**self).begin_instant()
     }
@@ -651,6 +741,34 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn rail_node(&self) -> Option<usize> {
         (**self).rail_node()
+    }
+
+    fn slow_settle(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<Vec<PartitionId>>, String> {
+        (**self).slow_settle(now, drivers)
+    }
+
+    fn slow_is_current(&self, device: DeviceId, token: u32) -> bool {
+        (**self).slow_is_current(device, token)
+    }
+
+    fn handle_slow_event(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        (**self).handle_slow_event(device, now)
+    }
+
+    fn reset_failures(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
+        (**self).reset_failures(now)
+    }
+
+    fn collect_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
+        (**self).collect_records(channel, now, out)
+    }
+
+    fn slow_device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        (**self).slow_device_state(device, now, out)
+    }
+
+    fn slow_stats(&self) -> [f64; 4] {
+        (**self).slow_stats()
     }
 }
 
@@ -952,7 +1070,9 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
             kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA => {
                 junctions.extend(led::junctions(d, device, program.options.ambient_c).iter().filter_map(|j| place_junction(j, p_idx, local_index, fixed)));
             }
-            kinds::RESISTOR | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+            // W1g: a fuse and a PTC stamp as a resistor does; their slow state
+            // reaches the stamp through `live_params` (`devices::slow_flag`).
+            kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
                 let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
                 stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone() });
             }
@@ -2451,6 +2571,18 @@ pub struct PartitionedSolver {
     /// stepped one's seed), which runs the regime rules even with no step
     /// committed since the last (Rails point 5: at load, the only solve).
     exact_solved: bool,
+
+    // ---- W1g: thermal, failures and warnings ([`settle`]) -----------------
+    /// All slow state (README W1g point 1), journaled per instant.
+    slow: crate::slow::SlowState,
+    /// The load-time tables the settle reads: which devices are slow, how
+    /// each is driven, and the `output_sag` cells.
+    slow_model: settle::SlowModel,
+    /// What happened since the last settle: the partitions published, the
+    /// drivers that changed, the devices to re-drive.
+    slow_scratch: settle::SlowScratch,
+    /// Stats 21-24. Not rolled back, as every stat.
+    slow_counts: [u64; 4],
 }
 
 impl PartitionedSolver {
@@ -2492,7 +2624,7 @@ impl PartitionedSolver {
 
         for (d, device) in program.devices.iter().enumerate() {
             match device.kind {
-                kinds::RESISTOR => {
+                kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
                     kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, owner: owner_of(device), contributions });
@@ -2690,8 +2822,13 @@ impl PartitionedSolver {
             exact: None,
             source_edges: 0,
             exact_solved: false,
+            slow: crate::slow::SlowState::new(device_count),
+            slow_model: settle::SlowModel::default(),
+            slow_scratch: settle::SlowScratch::default(),
+            slow_counts: [0; 4],
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
+        solver.wire_w1g(program, &live, &fixed);
         solver.lazy_static_ok = solver.compute_lazy_static_ok(readout_term_count);
         solver.rescan_bounds();
         // Nothing reads the static solver's own source currents: this solver
@@ -3125,6 +3262,8 @@ impl PartitionedSolver {
                     self.v_log.push((node as u32, old_bits));
                 }
                 self.voltages[node] = new;
+                // W1g point 2: what this node's move concerns the settle with.
+                settle::note_static_node(&mut self.slow_scratch, &self.slow_model, node);
             }
             fold_bound(&mut self.v_hint, new);
         }
@@ -3166,14 +3305,17 @@ impl PartitionedSolver {
             self.written.extend(self.stepped_parts.iter().map(|&p| p as u32));
         }
         self.log_written();
+        self.note_written_published(0);
     }
 
     /// [`Self::begin_dynamic_writes`] for a list of dynamic partitions, added
     /// to the ones already named in this call (the rail loop writes more
     /// after the call's own resolves, W1f).
     fn begin_dynamic_writes_list(&mut self, parts: &[usize]) {
+        let from = self.written.len();
         self.written.extend(parts.iter().map(|&p| p as u32));
         self.log_written();
+        self.note_written_published(from);
     }
 
     fn log_written(&mut self) {
@@ -3313,6 +3455,11 @@ impl PartitionedSolver {
         // to cathode, whether it sits in a partition or across two fixed
         // nodes. The datum end feeds no source (`leaving[0]` is never read).
         for j in &self.junctions {
+            // A failed LED stamps no junction at all, GMIN included (W1g
+            // point 12).
+            if self.slow.may_have_failed() && self.slow.is_failed(j.device) {
+                continue;
+            }
             let i = junction_branch_current(j, &self.voltages);
             leaving[j.anode] += i;
             leaving[j.cathode] -= i;
@@ -3417,7 +3564,9 @@ impl PartitionedSolver {
         for e in &self.led_devices {
             let mut element_i = 0.0;
             let own = &mut channels[e.channel_base..e.channel_base + e.channel_count];
-            led::readout(&e.device, &e.junctions, &self.voltages, false, &mut element_i, own);
+            // W1g point 12: the real `led_failed` flag, which takes `burnt`'s
+            // path (`elementI` 0, `NaN` channels).
+            led::readout(&e.device, &e.junctions, &self.voltages, self.slow.is_failed(e.device_index), &mut element_i, own);
             currents[e.device_index] = element_i;
         }
     }
@@ -3645,8 +3794,10 @@ impl PartitionedSolver {
         // only on a device that is absent; any other non-finite channel is a
         // failed solve.
         for e in &self.led_devices {
+            // Absent: `burnt`, or W1g's `led_failed` (README W1g point 12).
+            let absent = e.absent() || self.slow.is_failed(e.device_index);
             for (c, v) in self.channels[e.channel_base..e.channel_base + e.channel_count].iter().enumerate() {
-                if !v.is_finite() && !(v.is_nan() && e.absent()) {
+                if !v.is_finite() && !(v.is_nan() && absent) {
                     return Err(format!("device {}: published channel {c} value {v} is not finite", e.device_index));
                 }
             }
@@ -4122,6 +4273,11 @@ impl PartitionSolver for PartitionedSolver {
         }
     }
 
+    #[inline]
+    fn driver_committed(&mut self, idx: usize) {
+        self.note_driver_change(idx);
+    }
+
     /// Opens the window: nothing is copied. From here every slot of the
     /// shared arrays that the instant writes is logged first (the static
     /// solver logs its own), and each dynamic partition's state is saved
@@ -4158,6 +4314,8 @@ impl PartitionSolver for PartitionedSolver {
             self.w_driver_snapshot = Some(Rc::clone(&self.driver_snapshot));
         }
         self.w_derived = (self.derived_dirty, self.derived_now);
+        // W1g point 15: the slow state's own journal.
+        self.slow_begin_instant();
         // W1f (Rails point 8): the rail's whole state, its contribution
         // journal, the sources and the rule-2a anchors on live nodes.
         if let Some(hub) = self.hub.as_mut() {
@@ -4187,6 +4345,7 @@ impl PartitionSolver for PartitionedSolver {
         self.static_solver.end_window();
         self.closed_form.end_window();
         self.stepped.end_window();
+        self.slow_end_instant();
         if let Some(hub) = self.hub.as_mut() {
             hub.end_window();
         }
@@ -4269,6 +4428,8 @@ impl PartitionSolver for PartitionedSolver {
                 (cap.d_v, cap.vc0, cap.t0) = (d_v, vc0, t0);
             }
         }
+        // W1g point 15: the slow state, then every stamp it set this instant.
+        self.slow_rollback_instant();
         // Values from before the bounds were last exact are back.
         self.v_hint = f64::INFINITY;
         self.i_hint = f64::INFINITY;
@@ -4484,7 +4645,7 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
-        self.hub_device_state(device, now, out)
+        self.slow_device_state(device, now, out).or_else(|| self.hub_device_state(device, now, out))
     }
 
     fn take_settle_change(&mut self) -> bool {
@@ -4505,6 +4666,43 @@ impl PartitionSolver for PartitionedSolver {
 
     fn rail_node(&self) -> Option<usize> {
         self.hub.as_ref().map(|h| h.node)
+    }
+
+    fn slow_settle(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<Vec<PartitionId>>, String> {
+        let result = self.settle_slow(now, drivers);
+        self.on_error(result)
+    }
+
+    fn slow_is_current(&self, device: DeviceId, token: u32) -> bool {
+        // The top bit marks a re-anchor (R21); the rest is the device's token.
+        (device.0 as usize) < self.slow.device_count() && (self.slow.token(device.0 as usize) ^ token) & !crate::events::SLOW_ANCHOR == 0
+    }
+
+    fn handle_slow_anchor(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        let result = self.slow_anchor(device.0 as usize, now);
+        self.on_error(result)
+    }
+
+    fn handle_slow_event(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+        let result = self.slow_event(device.0 as usize, now);
+        self.on_error(result)
+    }
+
+    fn reset_failures(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
+        let result = self.reset_slow(now);
+        self.on_error(result)
+    }
+
+    fn collect_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
+        self.slow_records(channel, now, out)
+    }
+
+    fn slow_device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        self.slow_state_of(device, now, out)
+    }
+
+    fn slow_stats(&self) -> [f64; 4] {
+        self.slow_counts.map(|c| c as f64)
     }
 }
 

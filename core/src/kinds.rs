@@ -16,6 +16,7 @@ pub const TRIMMER: u32 = 9;
 pub const FUSE: u32 = 10;
 pub const LDR: u32 = 11;
 pub const THERMISTOR: u32 = 12;
+pub const PTC_FUSE: u32 = 13;
 
 pub const BATTERY_PACK: u32 = 20;
 pub const BENCH_PSU: u32 = 21;
@@ -59,6 +60,10 @@ pub const IC_CD4060: u32 = 76;
 pub const IC_74LS189: u32 = 80;
 pub const IC_28C16: u32 = 81;
 pub const IC_28C256: u32 = 82;
+// W1g's synthetic records (core/README.md, "Rating record" and "Thermal
+// record"): no pins, published nothing, read only by the slow state.
+pub const RATING: u32 = 90;
+pub const THERMAL: u32 = 91;
 
 /// How many blob values a kind's record carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,6 +429,103 @@ fn ne555_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), Str
     Ok(())
 }
 
+/// `fuse` params (core/README.md, "Fuse and PTC records"): `[rNormal,
+/// iRating]`. The compiler floors `rNormal` at 0.001, so the stamp's
+/// `1/rNormal` is finite; `iRating <= 0` is legal and means no limit.
+pub mod fuse_param {
+    pub const R_NORMAL: usize = 0;
+    pub const I_RATING: usize = 1;
+    pub const COUNT: usize = 2;
+}
+
+/// `ptc_fuse` params: `[rNormal, iHold]`, both floored by the compiler.
+pub mod ptc_param {
+    pub const R_NORMAL: usize = 0;
+    pub const I_HOLD: usize = 1;
+    pub const COUNT: usize = 2;
+}
+
+/// The compiler's floors (PA:694, 755, 774), repeated so a hand-built program
+/// cannot divide by zero in a stamp or a trip threshold.
+pub const FUSE_MIN_R_NORMAL: f64 = 0.001;
+pub const PTC_MIN_I_HOLD: f64 = 1e-6;
+
+fn fuse_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    if !(params[fuse_param::R_NORMAL] >= FUSE_MIN_R_NORMAL) {
+        return Err(format!("fuse rNormal must be >= {FUSE_MIN_R_NORMAL}, got {}", params[fuse_param::R_NORMAL]));
+    }
+    Ok(())
+}
+
+fn ptc_fuse_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    if !(params[ptc_param::R_NORMAL] >= FUSE_MIN_R_NORMAL) {
+        return Err(format!("ptc_fuse rNormal must be >= {FUSE_MIN_R_NORMAL}, got {}", params[ptc_param::R_NORMAL]));
+    }
+    if !(params[ptc_param::I_HOLD] >= PTC_MIN_I_HOLD) {
+        return Err(format!("ptc_fuse iHold must be >= {PTC_MIN_I_HOLD:e}, got {}", params[ptc_param::I_HOLD]));
+    }
+    Ok(())
+}
+
+/// `rating` params (code 90): `[device, pMax, rPower]`. `device` is checked
+/// against the other records by `program.rs` (it spans records); here only
+/// that it is an index at all.
+pub mod rating_param {
+    pub const DEVICE: usize = 0;
+    pub const P_MAX: usize = 1;
+    pub const R_POWER: usize = 2;
+    pub const COUNT: usize = 3;
+}
+
+/// `thermal` params (code 91): `[device, rThetaJA, tauS, hasShutdown, tripC,
+/// restartC]`.
+pub mod thermal_param {
+    pub const DEVICE: usize = 0;
+    pub const R_THETA: usize = 1;
+    pub const TAU_S: usize = 2;
+    pub const HAS_SHUTDOWN: usize = 3;
+    pub const TRIP_C: usize = 4;
+    pub const RESTART_C: usize = 5;
+    pub const COUNT: usize = 6;
+}
+
+fn device_ref_check(device: f64) -> Result<(), String> {
+    if device >= 0.0 && device.fract() == 0.0 && device <= u32::MAX as f64 {
+        Ok(())
+    } else {
+        Err(format!("device must be a record index, got {device}"))
+    }
+}
+
+fn rating_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    device_ref_check(params[rating_param::DEVICE])
+}
+
+fn thermal_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    use thermal_param::*;
+    device_ref_check(params[DEVICE])?;
+    if !(params[R_THETA] > 0.0) {
+        return Err(format!("thermal rThetaJA must be > 0, got {}", params[R_THETA]));
+    }
+    if !(params[TAU_S] > 0.0) {
+        return Err(format!("thermal tauS must be > 0, got {}", params[TAU_S]));
+    }
+    match params[HAS_SHUTDOWN] {
+        0.0 => {
+            if params[TRIP_C] != 0.0 || params[RESTART_C] != 0.0 {
+                return Err(format!("thermal tripC and restartC must be 0 without a shutdown, got {} and {}", params[TRIP_C], params[RESTART_C]));
+            }
+        }
+        1.0 => {
+            if !(params[RESTART_C] < params[TRIP_C]) {
+                return Err(format!("thermal restartC must be below tripC, got {} and {}", params[RESTART_C], params[TRIP_C]));
+            }
+        }
+        other => return Err(format!("thermal hasShutdown must be 0 or 1, got {other}")),
+    }
+    Ok(())
+}
+
 /// `battery_pack` params (core/README.md, "Battery record"). The last is
 /// the profile code, which Rust ignores and the facade reads back.
 pub mod battery_param {
@@ -598,6 +700,8 @@ const SHAPES: &[KindShape] = &[
     KindShape { code: SWITCH, name: "switch", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: PUSH_BUTTON, name: "push_button", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: SPDT_SWITCH, name: "spdt_switch", pins: 3, pins_max: 3, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: FUSE, name: "fuse", pins: 2, pins_max: 2, params: fuse_param::COUNT, blob: BlobShape::Exact(0), check: fuse_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: PTC_FUSE, name: "ptc_fuse", pins: 2, pins_max: 2, params: ptc_param::COUNT, blob: BlobShape::Exact(0), check: ptc_fuse_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: DIP_SWITCH, name: "dip_switch", pins: 4, pins_max: 16, params: 9, blob: BlobShape::Exact(0), check: dip_switch_check, live_params: &[1, 2, 3, 4, 5, 6, 7, 8], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: BATTERY_PACK, name: "battery_pack", pins: 2, pins_max: 2, params: battery_param::COUNT, blob: BlobShape::Table, check: battery_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: BENCH_PSU, name: "bench_psu", pins: 2, pins_max: 2, params: 2, blob: BlobShape::Exact(0), check: bench_psu_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
@@ -629,7 +733,15 @@ const SHAPES: &[KindShape] = &[
     w1d_shape!(IC_74LS189, "74ls189", 14, 23, 1 + 14, 4, seq_check),
     w1d_shape!(IC_28C16, "28c16", 22, eeprom_param::COUNT, 1 + 22 + 2048 / 4, 8, eeprom_28c16_check),
     w1d_shape!(IC_28C256, "28c256", 26, eeprom_param::COUNT, 1 + 26 + 32768 / 4, 8, eeprom_check),
+    KindShape { code: RATING, name: "rating", pins: 0, pins_max: 0, params: rating_param::COUNT, blob: BlobShape::Exact(0), check: rating_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: THERMAL, name: "thermal", pins: 0, pins_max: 0, params: thermal_param::COUNT, blob: BlobShape::Exact(0), check: thermal_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
 ];
+
+/// Whether `kind` is one of W1g's synthetic records (codes 90 and 91), which
+/// stamp and publish nothing.
+pub fn is_synthetic_slow(kind: u32) -> bool {
+    matches!(kind, RATING | THERMAL)
+}
 
 /// The shape for `code`, or `None` when the code is unknown or reserved.
 pub fn shape(code: u32) -> Option<&'static KindShape> {

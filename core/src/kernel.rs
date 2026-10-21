@@ -550,6 +550,8 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// rail ([`NO_PROGRESS_MAX`]).
     instant_rail: bool,
     instant_other: bool,
+    /// The instant ran a `Slow` event that only re-anchored a drive (R21).
+    instant_redrive: bool,
     /// Whether the instant in progress applied a live waveform source edge:
     /// scheduled input, so progress whatever it turned back.
     instant_source: bool,
@@ -593,6 +595,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             run_moves: Vec::new(),
             instant_rail: false,
             instant_other: false,
+            instant_redrive: false,
             instant_source: false,
         }
     }
@@ -776,6 +779,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// Whether a queued event still means anything: the check each kind's
     /// handler in [`Self::apply_due_events`] makes before acting, so a stale
     /// one is exactly an event that handler would drop.
+    #[inline]
     fn event_live(&self, kind: EventKind) -> bool {
         match kind {
             EventKind::Commit { driver, token, .. } => self.drivers[driver.0 as usize].token() == token,
@@ -798,6 +802,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // W1f: the rail's and a waveform source's own versions.
             EventKind::Rail { version } => self.solver.rail_current(version),
             EventKind::Source { device, version } => self.solver.source_current(device, version),
+            // W1g: a slow device's token (README W1g point 14).
+            EventKind::Slow { device, token } => self.solver.slow_is_current(device, token),
         }
     }
 
@@ -918,6 +924,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.solver.driver_changing(idx);
                 self.drivers[idx].reset();
                 if was_committed {
+                    self.solver.driver_committed(idx);
                     self.evaluator.driver_changed(driver);
                     self.driver_partition[idx]
                 } else {
@@ -969,7 +976,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
             popped += 1;
             match ev.kind {
-                EventKind::Rail { .. } => {}
+                EventKind::Rail { .. } | EventKind::Slow { .. } => {}
                 _ => self.instant_other = true,
             }
             match ev.kind {
@@ -997,6 +1004,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         self.journal_driver(idx);
                         self.solver.driver_changing(idx);
                         if self.drivers[idx].apply_commit(mode, token) {
+                            self.solver.driver_committed(idx);
                             self.evaluator.driver_changed(driver);
                             if let Some(p) = self.driver_partition[idx] {
                                 dirty.push(p);
@@ -1052,6 +1060,24 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         let (dirty_partitions, readers) = self.solver.source_edge(device, version, self.time).map_err(KernelError::SolveFailed)?;
                         dirty.extend(dirty_partitions);
                         directly_affected.extend(readers);
+                    }
+                }
+                // W1g point 14: a current slow event closes its device and
+                // applies the latch, re-arm or PTC transition (or marks an
+                // `output_sag` window due for the settle); the partitions a
+                // stamp change dirtied re-solve in this delta.
+                EventKind::Slow { device, token } => {
+                    if self.solver.slow_is_current(device, token) {
+                        // R21: a re-anchor fires nothing and moves no node.
+                        if token & crate::events::SLOW_ANCHOR != 0 {
+                            dirty.extend(self.solver.handle_slow_anchor(device, self.time).map_err(KernelError::SolveFailed)?);
+                            self.instant_redrive = true;
+                        } else {
+                            dirty.extend(self.solver.handle_slow_event(device, self.time).map_err(KernelError::SolveFailed)?);
+                            self.instant_other = true;
+                        }
+                    } else {
+                        self.instant_other = true;
                     }
                 }
             }
@@ -1223,8 +1249,22 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // lands back on the heap at exactly `self.time`, so this check
             // sees it too: "held commits ... apply in the next delta."
             if affected.is_empty() && self.heap.peek_time() > self.time {
-                settled = true;
-                break;
+                // W1g point 14: once the cycle is quiet, the slow settle closes
+                // and re-drives the devices of every partition this instant
+                // published and runs the `output_sag` scan. A latch due at once
+                // dirties partitions, and another delta cycle runs at this same
+                // instant (under the same pass cap), then this again.
+                let Some(slow_dirty) = self.solver.slow_settle(self.time, &self.drivers).map_err(KernelError::SolveFailed)? else {
+                    settled = true;
+                    break;
+                };
+                self.drain_scheduled();
+                if slow_dirty.is_empty() && self.heap.peek_time() > self.time {
+                    settled = true;
+                    break;
+                }
+                carried_dirty.extend(slow_dirty);
+                continue;
             }
 
             // Phase 4: evaluate each affected reader exactly once, in
@@ -1339,6 +1379,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             self.instant_rail = false;
             self.instant_other = false;
             self.instant_source = false;
+            self.instant_redrive = false;
 
             let previous_time = self.time;
             let window = self.open_window();
@@ -1359,7 +1400,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // count stands, so a livelock elsewhere on the board still
                 // accumulates between edges.
                 self.run_moves.iter_mut().for_each(|m| *m = 0);
-            } else if !self.progressed() {
+            } else if !self.progressed() && !(self.instant_redrive && !self.instant_other && !self.instant_rail) {
+                // An instant that only re-anchored slow drives (W1g ruling
+                // R21) moved nothing by design: it counts neither way. Each
+                // device's re-anchors are at least `2 NO_PROGRESS_DT` apart,
+                // so they cannot make a run of their own.
                 self.stalled += 1;
             }
             self.last_instant = t;
@@ -1407,7 +1452,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // before finding 1's fix.
             Ok(readers) if readers.is_empty() => {
                 self.drain_scheduled();
-                Ok(())
+                // The clamp published the dynamic partitions at `t_end`, so the
+                // slow devices settle there too (W1g point 2).
+                self.settle_slow_after(true)
             }
             Ok(readers) => self.run_deltas(Vec::new(), readers, true),
             Err(e) => Err(KernelError::SolveFailed(e)),
@@ -1484,7 +1531,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // — which does not apply here, since a live param really did just
         // change.
         let result = if dirty.is_empty() {
-            self.solver.resolve_dirty(&[], self.time, &self.drivers).map(|_| ()).map_err(KernelError::SolveFailed)
+            self.solver
+                .resolve_dirty(&[], self.time, &self.drivers)
+                .map(|_| ())
+                .map_err(KernelError::SolveFailed)
+                .and_then(|()| self.settle_slow_after(true))
         } else {
             self.run_deltas(dirty, Vec::new(), true)
         };
@@ -1502,6 +1553,56 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // The one event this call applies reached a quiet fixed point and
         // was not rolled back: a completed instant, same as any `advance`
         // delta.
+        self.publish_settled();
+        Ok(())
+    }
+
+    /// W1g's slow settle outside a delta cycle (a step [`Self::run_deltas`]
+    /// takes at quiescence): after the horizon clamp or an empty resolve,
+    /// which published without running a cycle. A latch due at once runs one.
+    fn settle_slow_after(&mut self, count_stats: bool) -> Result<(), KernelError> {
+        let Some(dirty) = self.solver.slow_settle(self.time, &self.drivers).map_err(KernelError::SolveFailed)? else {
+            return Ok(());
+        };
+        self.drain_scheduled();
+        if dirty.is_empty() && self.heap.peek_time() > self.time {
+            return Ok(());
+        }
+        self.run_deltas(dirty, Vec::new(), count_stats)
+    }
+
+    /// `bo_engine_reset_failures` (README W1g point 13) as ONE event at the
+    /// current time, the envelope of [`Self::apply_params_as_event`]: the
+    /// solver clears every latch, stress integrator, PTC and `output_sag`
+    /// window, the partitions whose stamps returned re-solve in a delta cycle
+    /// at this instant, and the slow devices settle. It does not advance time.
+    /// A failed re-solve (`-4`, `-7`) rolls the reset back with the instant:
+    /// the slow state is instant state, so the engine is exactly as it was.
+    pub fn reset_failures_as_event(&mut self) -> Result<(), KernelError> {
+        let window = self.open_window();
+        let result = match self.solver.reset_failures(self.time) {
+            Err(e) => Err(KernelError::SolveFailed(e)),
+            Ok(mut dirty) => {
+                dirty.sort_unstable();
+                dirty.dedup();
+                if dirty.is_empty() {
+                    self.solver
+                        .resolve_dirty(&[], self.time, &self.drivers)
+                        .map(|_| ())
+                        .map_err(KernelError::SolveFailed)
+                        .and_then(|()| self.settle_slow_after(true))
+                } else {
+                    self.run_deltas(dirty, Vec::new(), true)
+                }
+            }
+        };
+        if let Err(e) = result {
+            self.roll_back(window);
+            return Err(e);
+        }
+        self.close_window(window);
+        // New input, as a host's edit is (see `apply_params_as_event`).
+        self.stalled = 0;
         self.publish_settled();
         Ok(())
     }
@@ -2906,6 +3007,9 @@ mod tests {
         wave: Option<fn(u64) -> [f64; 2]>,
         v: Vec<f64>,
         rail: bool,
+        /// Crawl as `Slow` events, each a re-anchor (`Some(true)`) or a
+        /// fired event (`Some(false)`).
+        slow: Option<bool>,
     }
     impl Crawler {
         fn crawl(&mut self, now: f64) -> Result<Vec<DeviceId>, String> {
@@ -2918,7 +3022,13 @@ mod tests {
                 self.v = wave(self.done).to_vec();
             }
             let dt = if self.done % self.jump_every == 0 { self.jump } else { self.step };
-            let kind = if self.rail { EventKind::Rail { version: 0 } } else { EventKind::Crossing { partition: PartitionId(0), version: 0 } };
+            let kind = if let Some(anchor) = self.slow {
+                EventKind::Slow { device: DeviceId(0), token: if anchor { crate::events::SLOW_ANCHOR } else { 0 } }
+            } else if self.rail {
+                EventKind::Rail { version: 0 }
+            } else {
+                EventKind::Crossing { partition: PartitionId(0), version: 0 }
+            };
             self.scheduled.push((now + dt, kind));
             Ok(Vec::new())
         }
@@ -2957,6 +3067,15 @@ mod tests {
         fn param_value(&self, _device_index: usize, _param_index: usize) -> Option<f64> {
             Some(0.0)
         }
+        fn slow_is_current(&self, _device: DeviceId, _token: u32) -> bool {
+            self.slow.is_some()
+        }
+        fn handle_slow_event(&mut self, _device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+            self.crawl(now).map(|_| Vec::new())
+        }
+        fn handle_slow_anchor(&mut self, _device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
+            self.crawl(now).map(|_| Vec::new())
+        }
     }
 
     /// Far enough for any of these crawls to stop by itself if the guard
@@ -2965,7 +3084,7 @@ mod tests {
     const T_END: f64 = 1e-3 + 1e-9;
 
     fn crawler(step: f64, jump: f64, jump_every: u64, fail_at: u64) -> Kernel<Crawler, NoOpEvaluator> {
-        let mut k = Kernel::new(Crawler { step, jump, jump_every, fail_at, calls: 0, done: 0, scheduled: Vec::new(), wave: None, v: Vec::new(), rail: false }, NoOpEvaluator);
+        let mut k = Kernel::new(Crawler { step, jump, jump_every, fail_at, calls: 0, done: 0, scheduled: Vec::new(), wave: None, v: Vec::new(), rail: false, slow: None }, NoOpEvaluator);
         assert!(k.schedule_crossing(PartitionId(0), 0, 1e-3));
         k
     }
@@ -2973,13 +3092,32 @@ mod tests {
     /// A crawl of 5 fs instants publishing `wave`, as `Rail` events if
     /// `rail`.
     fn waver(wave: fn(u64) -> [f64; 2], rail: bool) -> Kernel<Crawler, NoOpEvaluator> {
-        let mut k = Kernel::new(Crawler { step: 5e-15, jump: 5e-15, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: Some(wave), v: vec![0.0, 0.0], rail }, NoOpEvaluator);
+        let mut k = Kernel::new(Crawler { step: 5e-15, jump: 5e-15, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: Some(wave), v: vec![0.0, 0.0], rail, slow: None }, NoOpEvaluator);
         if rail {
             k.heap.push(1e-3, EventKind::Rail { version: 0 });
         } else {
             assert!(k.schedule_crossing(PartitionId(0), 0, 1e-3));
         }
         k
+    }
+
+    #[test]
+    fn instants_that_only_re_anchor_slow_drives_count_neither_way_and_fired_ones_still_do() {
+        // W1g ruling R21: a re-anchor moves no node by design. A crawl of
+        // them 5 fs apart (far denser than the solver ever schedules them)
+        // runs on; the same crawl of slow events that fired and moved
+        // nothing is a stall, and declines.
+        let slow = |redrove: bool| {
+            let mut k = Kernel::new(Crawler { step: 5e-15, jump: 5e-15, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: None, v: vec![0.0], rail: false, slow: Some(redrove) }, NoOpEvaluator);
+            k.heap.push(1e-3, EventKind::Slow { device: DeviceId(0), token: if redrove { crate::events::SLOW_ANCHOR } else { 0 } });
+            k
+        };
+        let mut k = slow(true);
+        k.advance(1e-3 + 5e-10).unwrap();
+        assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+        let mut k = slow(false);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
     }
 
     #[test]

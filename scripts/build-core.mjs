@@ -39,8 +39,9 @@ const LLD_SYNTHESIZED_GLOBALS = ["__data_end", "__heap_base"];
 // together — update all three. `bo_engine_set_params` is "v2 (W1b)",
 // `bo_engine_seed_memory`/`bo_engine_take_eeprom_updates`/
 // `bo_engine_eeprom_updates_ptr` are "v2 (W1d)" and `bo_engine_device_state`/
-// `bo_engine_device_state_ptr` are "v2 (W1f)"; all are implemented as of
-// this list.
+// `bo_engine_device_state_ptr` are "v2 (W1f)" and `bo_engine_reset_failures`/
+// `bo_engine_records`/`bo_engine_records_ptr` are "v2 (W1g)"; all are
+// implemented as of this list.
 const EXPECTED_FUNCTION_EXPORTS = [
   "bo_abi_version",
   "bo_alloc",
@@ -64,6 +65,9 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_eeprom_updates_ptr",
   "bo_engine_device_state",
   "bo_engine_device_state_ptr",
+  "bo_engine_reset_failures",
+  "bo_engine_records",
+  "bo_engine_records_ptr",
   "bo_engine_next_event_time",
   "bo_engine_next_digital_due_time",
   "bo_engine_digital_slot_count",

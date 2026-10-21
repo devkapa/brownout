@@ -79,7 +79,9 @@ impl Contribution {
 /// alone and is never reached through this dispatch; see the module doc.
 pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
     match kind {
-        kinds::RESISTOR => passives::stamp(params),
+        kinds::RESISTOR => open_if_failed(passives::resistor_stamp(params, slow_flag(kind, params))),
+        kinds::FUSE => open_if_failed(passives::fuse_stamp(params, slow_flag(kind, params))),
+        kinds::PTC_FUSE => passives::ptc_stamp(params, slow_flag(kind, params)),
         kinds::CAPACITOR => passives::leakage_stamp(params),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::stamp(kind, pin_count, params),
         _ => Vec::new(),
@@ -98,8 +100,64 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
 /// walk rather than through this generic dispatch.
 pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]) -> f64 {
     match kind {
-        kinds::RESISTOR => passives::current(params, pin_voltages),
+        kinds::RESISTOR => passives::resistor_current(params, pin_voltages, slow_flag(kind, params)),
+        kinds::FUSE => passives::fuse_current(params, pin_voltages, slow_flag(kind, params)),
+        kinds::PTC_FUSE => passives::ptc_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::current(kind, pin_count, params, pin_voltages),
         _ => 0.0,
+    }
+}
+
+/// W1g's slow state as the stamp reads it (core/README.md W1g points 12 and
+/// 17: every stamp path reads the failed flags and the PTC resistance through
+/// one accessor). The solver keeps a device's stamp params as its record
+/// params plus, once a latch or a PTC trip has changed the stamp, one trailing
+/// flag at the record's own length: `1` is a failed `resistor` or `fuse`, or a
+/// tripped `ptc_fuse`. The reader never sees it (each kind's param count is
+/// exact), so the record itself always reads intact; the solver writes it in
+/// exactly one place (`solve::PartitionedSolver`'s stamp refresh) and drops it
+/// again at a reset. Every stamp path already reads a device's params through
+/// `stamp` (the static base, `stamp_linear_base` for closed-form and stepped
+/// partitions, the rail sensitivities and the KCL contributions), so they all
+/// see the same state.
+pub fn slow_flag(kind: u32, params: &[f64]) -> bool {
+    let record_len = match kind {
+        kinds::RESISTOR => 1,
+        kinds::FUSE => kinds::fuse_param::COUNT,
+        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
+        _ => return false,
+    };
+    params.get(record_len).is_some_and(|&f| f != 0.0)
+}
+
+/// `params` with the slow flag set as given: the record's own params, plus
+/// the flag only when it is set, so an intact device's params are the record
+/// bit for bit (and so is every cache or segment key built from them).
+pub fn with_slow_flag(kind: u32, record: &[f64], flag: bool) -> Vec<f64> {
+    let record_len = match kind {
+        kinds::RESISTOR => 1,
+        kinds::FUSE => kinds::fuse_param::COUNT,
+        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
+        _ => record.len(),
+    };
+    let mut out = record[..record_len.min(record.len())].to_vec();
+    if flag {
+        out.push(1.0);
+    }
+    out
+}
+
+/// A failed two-terminal device is an open (W1g point 12): it stamps nothing.
+/// It is kept as one zero-conductance contribution rather than none, as an
+/// open switch contact is, because every consumer indexes a device's
+/// contributions by position (the static solver's KCL terms, the hub's direct
+/// contacts), and a `g = 0` contribution is already "stamps nothing"
+/// everywhere a stamp is folded (`g == 0` is skipped) and adds `0` to every
+/// current sum.
+fn open_if_failed(stamp: Vec<Contribution>) -> Vec<Contribution> {
+    if stamp.is_empty() {
+        vec![Contribution::conductance(0, 1, 0.0)]
+    } else {
+        stamp
     }
 }

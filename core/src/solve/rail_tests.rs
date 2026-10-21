@@ -601,8 +601,18 @@ fn a_cc_ramp_through_a_series_capacitor_into_a_short_runs_to_the_setpoint() {
 /// The frozen tab (FXF, G2bv's seed 177 hub 2): `{9.362 V, 0.3 A}` into an
 /// LED charging 29 mF beside 10 kohm. The LED and capacitor step (a stepped
 /// hub partition); in CC the rail is the LED's drop above the capacitor.
+///
+/// The LED is rated 0.35 A, above the 0.3 A limit, with its `Is` pinned to
+/// [`led`]'s 20 mA law, so its I-V curve is that LED's but W1g's `led_failed`
+/// never latches: at 20 mA the 0.3 A drive (rate 15^2 - 1 = 224 against 24)
+/// fails the LED at 0.107 s, the circuit opens, and the CC ramp these tests
+/// follow stops there.
 fn cc_led_into_a_big_capacitor() -> Program {
-    program(3, vec![psu(0, 1, 0, 9.362, 0.3), led(1, 1, 2), capacitor(2, 2, 0, 29e-3, 0.0), resistor(3, 2, 0, 1e4)])
+    let mut power_led = led(1, 1, 2);
+    power_led.params[kinds::led_param::I_RATED] = 0.35;
+    power_led.params[kinds::led_param::IS_SET] = 1.0;
+    power_led.params[kinds::led_param::IS] = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0).is;
+    program(3, vec![psu(0, 1, 0, 9.362, 0.3), power_led, capacitor(2, 2, 0, 29e-3, 0.0), resistor(3, 2, 0, 1e4)])
 }
 
 #[test]
@@ -630,6 +640,7 @@ fn a_cc_psu_charging_a_capacitor_through_an_led_steps_at_its_own_time_constants(
             close(got, x, 1e-4 + 1e-3 * x.abs(), &format!("node {n} at {t} against exact mode"));
         }
     }
+    assert_eq!(e.records(0).unwrap(), &[] as &[f64], "the power LED stays intact, so the closed form above holds");
     let steps = e.stat(10);
     assert!(steps < 2000.0, "{steps} steps to 0.3 s");
     eprintln!("CC LED into 29 mF: {steps} steps to 0.3 s (exact mode {}), u {:.9} V, capacitor {:.9} V", ex.stat(10), e.voltages()[1], e.voltages()[2]);
@@ -638,12 +649,18 @@ fn a_cc_psu_charging_a_capacitor_through_an_led_steps_at_its_own_time_constants(
 /// G2bv's seed 396 (FXF): an 11.919 V cell of 0.872 ohm with 7.04 uF from
 /// the rail into a stepped partition of LEDs, and a switch (device 12) that
 /// closes onto a node one LED's drop below the rail at 0.128 s.
+///
+/// Each LED is a power LED with the seed's I-V law: its `Is` pinned to the
+/// law its `i_rated` gives (bit for bit at 25 C), and rated 1 kA, above the
+/// loop's 330 A. At the seed's ratings W1g's `led_failed` latched devices 10
+/// (0.143 s) and 5 (0.448 s) and opened them, so the later checkpoints
+/// compared open-LED circuits, not the loop this test is about.
 fn cell_switch_into_an_led_loop() -> Program {
     let led_with = |ci: usize, a: usize, b: usize, vf: f64, n: f64, i_rated: f64| Device {
         kind: kinds::LED,
         component_index: ci,
         pins: vec![pin(a), pin(b)],
-        params: vec![vf, n, i_rated, 0.0, 0.0, 0.0],
+        params: vec![vf, n, 1e3, 1.0, led::JunctionLaw::at(vf, i_rated, n, None, 25.0).is, 0.0],
         blob: vec![],
     };
     program(
@@ -696,6 +713,8 @@ fn a_switch_closing_an_led_loop_through_a_rail_capacitor_settles_the_cell_rail()
             close(got, x, 0.5 * (1e-4 + 1e-3 * x.abs()), &format!("node {n} at {t} against exact mode"));
         }
     }
+    assert_eq!(e.records(0).unwrap(), &[] as &[f64], "the power LEDs stay intact, so the loop above is the one compared");
+    assert_eq!(ex.records(0).unwrap(), &[] as &[f64], "and in exact mode");
     let secs = wall.elapsed().as_secs_f64();
     assert!(secs < 1.0, "{secs} s of wall time for 1 s simulated (both engines)");
     eprintln!("seed 396: {} steps to 1 s, {secs:.3} s wall with exact mode", e.stat(10));
@@ -3802,8 +3821,8 @@ fn device_state_has_the_readme_layouts_and_reading_it_changes_nothing() {
     assert_eq!(state[5], 0.0);
     assert_eq!(read.voltages().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), quiet.voltages().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "reading changed nothing");
     assert_eq!(quiet.device_state(0).unwrap(), &state[..]);
-    // A resistor has no device state (W1g adds its thermal layout).
-    assert_eq!(read.device_state(1).err().map(|e| e.code), Some(crate::error::ERR_INVALID_ARGUMENT));
+    // A resistor has W1g's thermal layout, empty without a code 91 record.
+    assert_eq!(read.device_state(1).unwrap(), &[] as &[f64]);
     assert_eq!(read.device_state(2).err().map(|e| e.code), Some(crate::error::ERR_INVALID_ARGUMENT), "out of range");
     // A limited PSU: reg; an unlimited one: an empty layout.
     let mut e = Engine::load(&program(2, vec![psu(0, 1, 0, 5.0, 0.1), resistor(1, 1, 0, 10.0)])).unwrap();

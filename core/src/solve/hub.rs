@@ -663,6 +663,11 @@ impl PartitionedSolver {
         }
         for &k in &hub.direct_junctions {
             let j = &self.junctions[k as usize];
+            // A failed LED stamps no junction at all, GMIN included (W1g
+            // point 12).
+            if self.slow.may_have_failed() && self.slow.is_failed(j.device) {
+                continue;
+            }
             if j.anode == rail {
                 let vd = u - v[j.cathode];
                 i += j.law.current(vd) + led::GMIN_D * vd;
@@ -2135,6 +2140,9 @@ impl PartitionedSolver {
             }
         }
         for j in &self.junctions {
+            if self.slow.may_have_failed() && self.slow.is_failed(j.device) {
+                continue;
+            }
             let i = junction_branch_current(j, v);
             if j.anode == node {
                 leaving += i;

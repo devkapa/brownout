@@ -106,7 +106,19 @@ pub enum EventKind {
     /// when `version` is not the source's present one
     /// (`PartitionSolver::source_current`).
     Source { device: DeviceId, version: Version },
+    /// A slow device's next event (W1g, core/README.md W1g point 14): a stress
+    /// latch, a thermal boundary, a PTC trip or recovery, or an IC's
+    /// `output_sag` window running out. Dispatched in phase 1 like `Bucket`,
+    /// and stale when the device's token has moved on since it was scheduled
+    /// (`PartitionSolver::slow_is_current`): a publish that re-drives the
+    /// device bumps the token and schedules afresh.
+    Slow { device: DeviceId, token: u32 },
 }
+
+/// Set in a `Slow` event's token when it re-anchors a rail-driven drive (W1g
+/// ruling R21) rather than standing for the device's own next event: it
+/// fires nothing, only re-drives. The rest of the token is the device's.
+pub const SLOW_ANCHOR: u32 = 1 << 31;
 
 /// One scheduled occurrence: a time and a payload. `seq` is set by
 /// `EventHeap::push`, never by the caller, so it is always consistent with

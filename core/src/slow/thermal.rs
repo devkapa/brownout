@@ -133,11 +133,74 @@ pub fn forced_temperature(cfg: &ThermalConfig, temp0: f64, gain: f64, v: &ExpVol
     }
     let rg = cfg.r_theta * gain;
     let x = u / cfg.tau_s;
+    if v.ramp && u / v.tau <= RAMP_SERIES_MAX {
+        return ramp_temperature(cfg, temp0, rg, v, u);
+    }
     let decay = (-x).exp();
     let steady = rg * v.a * v.a * -(-x).exp_m1();
     let cross = rg * (2.0 * v.a * v.b) * mode_term(1.0, cfg.tau_s, v.tau, u);
     let square = rg * (v.b * v.b) * mode_term(2.0, cfg.tau_s, v.tau, u);
     cfg.ambient_c + steady + (temp0 - cfg.ambient_c) * decay + cross + square
+}
+
+/// A ramp's forced response ([`forced_temperature`]) is summed as a series in
+/// `y = u/tau` up to this: past it the ramp has moved by at least `0.39·|b|`,
+/// so `a` and `b` are the size of `V` and the exponential forms do not
+/// cancel.
+const RAMP_SERIES_MAX: f64 = 0.5;
+
+/// [`forced_temperature`] for a ramp (`ExpVoltage`'s doc) with `u/tau` at
+/// most [`RAMP_SERIES_MAX`]: with `V(s) = v0 + b m(s)`, `m = expm1(-s/tau)`,
+/// `T = Ta + (T0 - Ta) e^(-x) + Rtheta gain (v0^2 K0 + 2 v0 b K1 + b^2 K2)`,
+/// `K_j` the one-pole's response to `m^j` (`x = u/tauS`). Expanding `m` and
+/// `m^2` in `(-y)^n / n!` (`m^2`'s coefficients `2^n - 2`) leaves the moments
+/// `M_n = x ∫_0^1 e^(-x(1-t)) t^n dt` ([`one_pole_moments`]), each in `[0,
+/// 1]`, so every term is the size of the rise it adds, however large `b`.
+fn ramp_temperature(cfg: &ThermalConfig, temp0: f64, rg: f64, v: &ExpVoltage, u: f64) -> f64 {
+    const TERMS: usize = 26;
+    let x = u / cfg.tau_s;
+    let y = u / v.tau;
+    let m = one_pole_moments(x, TERMS);
+    let (mut k1, mut k2, mut c, mut p2) = (0.0f64, 0.0f64, 1.0f64, 1.0f64);
+    for (n, &mn) in m.iter().enumerate().skip(1) {
+        c *= -y / n as f64;
+        p2 *= 2.0;
+        k1 += c * mn;
+        if n >= 2 {
+            k2 += (p2 - 2.0) * c * mn;
+        }
+    }
+    cfg.ambient_c + (temp0 - cfg.ambient_c) * (-x).exp() + rg * (v.v0 * v.v0 * m[0] + 2.0 * v.v0 * v.b * k1 + v.b * v.b * k2)
+}
+
+/// `M_n = x I_n` for `n` in `0..count`, `I_n = ∫_0^1 e^(-x w) (1 - w)^n dw`:
+/// the one-pole's response at `u` (`x = u/tauS`) to `(s/u)^n`. `I_n = (1 - n
+/// I_(n-1))/x` is stable forward while `n < x` and backward, `I_(n-1) = (1 -
+/// x I_n)/n`, otherwise; the backward run starts far enough up (`I_N` taken
+/// as `1/(N + 1)`) that its error has shrunk below an ulp by `count`.
+fn one_pole_moments(x: f64, count: usize) -> Vec<f64> {
+    let mut i = vec![0.0f64; count];
+    if !(x > 0.0) {
+        return i;
+    }
+    if x >= count as f64 {
+        i[0] = -(-x).exp_m1() / x;
+        for n in 1..count {
+            i[n] = (1.0 - n as f64 * i[n - 1]) / x;
+        }
+    } else {
+        let top = 2 * count + 64;
+        let mut next = 1.0 / (top as f64 + 1.0);
+        for n in (1..=top).rev() {
+            let prev = (1.0 - x * next) / n as f64;
+            if n <= count {
+                i[n - 1] = prev;
+            }
+            next = prev;
+        }
+        i[0] = -(-x).exp_m1() / x;
+    }
+    i.iter().map(|v| x * v).collect()
 }
 
 /// First time at or after `t0` that a one-pole response from `temp0` toward

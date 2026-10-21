@@ -63,7 +63,7 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// plan row B2's "W1b reports the count of multi-capacitor linear
 /// partitions in the corpus". The `bo_engine_stat` export list itself is
 /// unaffected either way (it already accepts any `u32` index).
-const STAT_COUNT: usize = 21;
+const STAT_COUNT: usize = 25;
 
 /// The placeholder evaluator every `Engine::load` installs a `Kernel` with
 /// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
@@ -198,6 +198,8 @@ pub struct Engine {
     /// The last `bo_engine_device_state` collect (W1f), valid until the next
     /// call on this engine.
     state_buf: Vec<f64>,
+    /// The last `bo_engine_records` collect (W1g), likewise.
+    records_buf: Vec<f64>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -258,6 +260,9 @@ impl Engine {
             13 => self.kernel.stats().driver_commits as f64,
             14 => self.kernel.solver().rail_stats()[0],
             16..=20 => self.kernel.solver().rail_stats()[i as usize - 15],
+            // W1g point 18: slow interval closes, slow events fired, latches,
+            // junction re-arms.
+            21..=24 => self.kernel.solver().slow_stats()[i as usize - 21],
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }
@@ -581,6 +586,39 @@ impl Engine {
         &self.state_buf
     }
 
+    /// `bo_engine_reset_failures` (W1g point 13): classic's `resetFailures()`
+    /// as one event at the current time (`Kernel::reset_failures_as_event`),
+    /// rolled back whole on `-4`/`-7`. Digital writes and the readout are
+    /// brought up to date whatever the outcome, as after `set_params`.
+    pub fn reset_failures(&mut self) -> Result<(), BoError> {
+        let result = self.kernel.reset_failures_as_event();
+        self.apply_digital_writes();
+        self.finish_readout();
+        result.map_err(map_kernel_error)
+    }
+
+    /// `bo_engine_records` (W1g): one channel's records at the current time
+    /// into the engine's buffer. Channels 0-2 commit nothing; collecting
+    /// channel 3 empties it. `-8` for an unknown channel, which also empties
+    /// the buffer.
+    pub fn records(&mut self, channel: u32) -> Result<&[f64], BoError> {
+        let now = self.kernel.time();
+        let mut buf = std::mem::take(&mut self.records_buf);
+        let known = self.kernel.solver_mut().collect_records(channel, now, &mut buf);
+        self.records_buf = buf;
+        if known {
+            Ok(&self.records_buf)
+        } else {
+            self.records_buf.clear();
+            Err(BoError::invalid_argument(format!("records: unknown channel {channel}")))
+        }
+    }
+
+    /// The buffer from the last [`Self::records`] collect.
+    pub fn records_buffer(&self) -> &[f64] {
+        &self.records_buf
+    }
+
     /// Loads a program from scratch: build the static topology, register
     /// every IC's output drivers (combinational, sequential and memory
     /// alike — W1d widened this from combinational-only) and install the
@@ -638,6 +676,7 @@ impl Engine {
             readout: Readout::new(program.digital_slot_count, program.channel_slot_count),
             eeprom_updates: Vec::new(),
             state_buf: Vec::new(),
+            records_buf: Vec::new(),
         };
         // The settle above already queued every IC's initial digital-slot
         // state on the kernel side (`Kernel::settle`'s own `publish_settled`

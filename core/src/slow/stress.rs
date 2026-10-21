@@ -74,6 +74,20 @@ impl StressDrive {
         }
     }
 
+    /// Whether `S` can grow at any time from `t` on: a closed-form segment
+    /// only where its voltage, monotone over the segment, still reaches the
+    /// rate's zero level after `t` (ruling R38 (a): a segment that stays under
+    /// it bleeds exactly as an idle drive does, so a visit need not store it).
+    pub fn accumulates_after(&self, t: f64) -> bool {
+        match self {
+            StressDrive::Constant { rate, .. } => *rate > 0.0,
+            StressDrive::Segment(seg) => match seg.collapsed() {
+                Some(constant) => constant.accumulates_after(t),
+                None => seg.k > 0.0 && seg.pieces(t - seg.v.t_seg, f64::INFINITY).iter().any(Option::is_some),
+            },
+        }
+    }
+
     /// `S(t)` from `s0` at `t0`, committing nothing (the readout of point 16
     /// and what `Stress::close` stores).
     pub fn value_after(&self, s0: f64, t0: f64, t: f64) -> f64 {
@@ -149,15 +163,25 @@ pub fn bleed_zero_time(s0: f64, t0: f64, rate: f64, recovery: f64) -> Option<f64
     Some(t0 + s0 / recovery)
 }
 
-/// The set `{s >= s1 : a + b*exp(-s/tau) > level}` as `(start, end)` in segment
-/// time, `end` possibly infinite. `V` is monotone in `s`, so the set is a
-/// prefix, a suffix, everything or nothing, decided by `V(s1)` and the limit
-/// `a`, and a crossing is solved once, analytically.
-fn above(a: f64, b: f64, tau: f64, level: f64, s1: f64) -> Option<(f64, f64)> {
-    let v1 = a + b * (-s1 / tau).exp();
+/// The set `{s >= s1 : sign*V(s) > level}` as `(start, end)` in segment
+/// time, `end` possibly infinite, for `V = a + b*exp(-s/tau)`. `V` is
+/// monotone in `s`, so the set is a prefix, a suffix, everything or nothing,
+/// decided by `V(s1)` and the limit `a`, and a crossing is solved once,
+/// analytically: `e^(-s/tau) = (level - a)/b`, which for a ramp
+/// (`ExpVoltage`'s doc) is `1 + (level - v0)/b`, taken with `ln_1p` so that
+/// a huge `b` keeps its digits.
+fn above(v: &ExpVoltage, sign: f64, level: f64, s1: f64) -> Option<(f64, f64)> {
+    let (a, b, tau) = (sign * v.a, sign * v.b, v.tau);
+    let v1 = sign * v.at_offset(s1);
     // `b` is nonzero whenever a crossing is needed: with `b == 0` the voltage is
     // the constant `a`, which one of the two branches below already decides.
-    let crossing = || (-tau * ((level - a) / b).ln()).max(s1);
+    let crossing = || {
+        if v.ramp {
+            (-tau * ((level - sign * v.v0) / b).ln_1p()).max(s1)
+        } else {
+            (-tau * ((level - a) / b).ln()).max(s1)
+        }
+    };
     if v1 > level {
         if a >= level {
             Some((s1, f64::INFINITY))
@@ -171,6 +195,46 @@ fn above(a: f64, b: f64, tau: f64, level: f64, s1: f64) -> Option<(f64, f64)> {
     }
 }
 
+/// `g1(z) = z + expm1(-z)`, the integral of `-expm1(-x)` over `[0, z]`, by its
+/// series below 1 (it is `z^2/2` to first order, which the direct form
+/// would lose to cancellation).
+pub(crate) fn g1(z: f64) -> f64 {
+    if !(z < 1.0) {
+        return z + (-z).exp_m1();
+    }
+    // sum over n >= 2 of (-z)^n / n!
+    let (mut term, mut sum) = (z * z / 2.0, 0.0);
+    for n in 3..40 {
+        sum += term;
+        term *= -z / n as f64;
+        if term.abs() <= 1e-18 * sum.abs() {
+            break;
+        }
+    }
+    sum + term
+}
+
+/// `g2(z) = z + 2 expm1(-z) - expm1(-2z)/2`, the integral of `expm1(-x)^2`
+/// over `[0, z]`, by its series below 1 (`z^3/3` to first order).
+pub(crate) fn g2(z: f64) -> f64 {
+    if !(z < 1.0) {
+        return z + 2.0 * (-z).exp_m1() - 0.5 * (-2.0 * z).exp_m1();
+    }
+    // sum over n >= 2 of (-1)^n (2^n - 2) z^(n+1) / ((n+1) n!)
+    let (mut sum, mut pow2, mut zn, mut fact) = (0.0f64, 4.0f64, z * z * z, 2.0f64);
+    for n in 2..48 {
+        let term = (pow2 - 2.0) * zn / ((n + 1) as f64 * fact) * if n % 2 == 0 { 1.0 } else { -1.0 };
+        sum += term;
+        if term.abs() <= 1e-18 * sum.abs() {
+            break;
+        }
+        pow2 *= 2.0;
+        zn *= z;
+        fact *= (n + 1) as f64;
+    }
+    sum
+}
+
 impl SegmentRate {
     /// The constant drive this segment is when its voltage does not relax
     /// (`ExpVoltage::constant_value`): the closed forms below divide by `tau`,
@@ -182,7 +246,7 @@ impl SegmentRate {
     }
 
     fn rate_s(&self, s: f64) -> f64 {
-        let v = self.v.a + self.v.b * (-s / self.v.tau).exp();
+        let v = self.v.at_offset(s);
         self.k * v * v - self.c
     }
 
@@ -200,15 +264,14 @@ impl SegmentRate {
             return [None, None];
         }
         let level = (self.c / self.k).sqrt();
-        let ExpVoltage { a, b, tau, .. } = self.v;
         let clip = |piece: Option<(f64, f64)>| {
             piece.and_then(|(p, q)| {
                 let q = q.min(s2);
                 (p < q).then_some((p, q))
             })
         };
-        let up = clip(above(a, b, tau, level, s1));
-        let down = clip(above(-a, -b, tau, level, s1));
+        let up = clip(above(&self.v, 1.0, level, s1));
+        let down = clip(above(&self.v, -1.0, level, s1));
         match (up, down) {
             (Some(u), Some(d)) => {
                 if u.0 <= d.0 {
@@ -227,8 +290,18 @@ impl SegmentRate {
     /// expm1(-2d/tau)` with `E = exp(-p/tau)`. The exponential terms are
     /// differences of exponentials, written with `expm1` so a short interval
     /// loses nothing to cancellation.
+    ///
+    /// A ramp (`ExpVoltage`'s doc) is integrated from its value at the piece's
+    /// start, `V(p + x) = V_p + W·expm1(-x/tau)` with `W = b e^(-p/tau)`:
+    /// `(k V_p^2 - c) d - 2 k V_p W tau g1(d/tau) + k W^2 tau g2(d/tau)`, the
+    /// `g`s the integrals of `expm1` and its square ([`g1`], [`g2`]), whose
+    /// terms are the size of the rate's own over the piece however large `b`.
     fn gain(&self, p: f64, d: f64) -> f64 {
         let ExpVoltage { a, b, tau, .. } = self.v;
+        if self.v.ramp {
+            let (v_p, w, z) = (self.v.at_offset(p), b * (-p / tau).exp(), d / tau);
+            return (self.k * v_p * v_p - self.c) * d - 2.0 * self.k * v_p * w * tau * g1(z) + self.k * w * w * tau * g2(z);
+        }
         let e = (-p / tau).exp();
         (self.k * a * a - self.c) * d
             - 2.0 * self.k * a * b * tau * e * (-d / tau).exp_m1()
@@ -445,8 +518,8 @@ impl PtcParams {
         }
         let level = self.cool_current_limit() * self.resistance(true);
         let s1 = now - v.t_seg;
-        let below = above(-v.a, -v.b, v.tau, -level, s1);
-        let over = above(v.a, v.b, v.tau, -level, s1);
+        let below = above(&v, -1.0, -level, s1);
+        let over = above(&v, 1.0, -level, s1);
         match (below, over) {
             (Some((p1, q1)), Some((p2, q2))) => {
                 let (p, q) = (p1.max(p2), q1.min(q2));

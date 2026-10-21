@@ -143,8 +143,25 @@ enum Term {
 struct JunctionMemo {
     v_anode: u64,
     v_cathode: u64,
+    /// The junction's law generation when the current was computed (W1g
+    /// point 4): a re-arm changes the law without moving either voltage, so a
+    /// memo of the old law must not be served.
+    law_gen: u32,
     current: f64,
     valid: bool,
+}
+
+/// W1g's slow state of one device as the static solver stamps it (README
+/// W1g point 12): a failed `resistor`, `fuse` or LED-family device, a tripped
+/// `ptc_fuse`, a thermal `led`'s law at its held temperature, and that law's
+/// generation, which keys the junction memo. The default is the device as
+/// loaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct StampState {
+    pub failed: bool,
+    pub tripped: bool,
+    pub law: Option<led::JunctionLaw>,
+    pub law_gen: u32,
 }
 
 /// One partition's solution cache entry. A hub partition's entry also holds
@@ -616,6 +633,29 @@ pub struct StaticPartitionSolver {
     /// Rails point 9); its partition bypasses the cache, whose key does not
     /// carry the source's state.
     exact: Option<crate::solve::ExactStamp>,
+
+    // ---- W1g: slow stamp changes ([`Self::mark_device_changed`]) -----------
+    /// node -> live boundary node, kept from the build so a partition's base
+    /// can be rebuilt after a latch.
+    live: Vec<bool>,
+    /// device index -> its index in `resistors` (a resistor, fuse or PTC this
+    /// solver owns), `u32::MAX` for any other device.
+    stamp_of_device: Vec<u32>,
+    /// partition index -> every stamped junction placed in it at load, with
+    /// its device and channel, in the order `junctions` holds them: the list
+    /// `junctions` is rebuilt from after a latch, a re-arm or a reset.
+    junction_full: Vec<Vec<led::Junction>>,
+    /// Per `kcl_junctions` entry: whether its device has not failed, and its
+    /// law generation (the memo's key).
+    kcl_active: Vec<bool>,
+    kcl_law_gen: Vec<u32>,
+    /// The slow state of every device whose stamp ever changed.
+    stamp_states: HashMap<usize, StampState>,
+    /// The caches a slow change cleared in the open window, as they were: a
+    /// rollback puts them back, so the run goes on as if the instant had
+    /// never happened (an entry is part of a junction partition's result).
+    cache_journal: Vec<(u32, PartCache)>,
+    cache_journaled: Vec<bool>,
 }
 
 impl StaticPartitionSolver {
@@ -630,11 +670,13 @@ impl StaticPartitionSolver {
         let mut live_rhs: Vec<Vec<(usize, f64, usize)>> = vec![Vec::new(); partitions_len];
 
         let mut partition_junctions: Vec<Vec<DynJunction>> = vec![Vec::new(); partitions.len()];
+        let mut junction_full: Vec<Vec<led::Junction>> = vec![Vec::new(); partitions.len()];
         let mut kcl_junctions = Vec::new();
         for j in partition::program_junctions(program).into_iter().filter(|j| j.stamped()) {
             match junction_partition(&j, &local_index) {
                 Some(p) if partition_kinds[p] == PartitionKind::Static => {
                     partition_junctions[p].push(place_junction(&j, p, &local_index, &fixed).expect("junction_partition just named this partition"));
+                    junction_full[p].push(j);
                     kcl_junctions.push(j);
                 }
                 Some(_) => {} // a dynamic partition's junction: that solver places and publishes it.
@@ -681,7 +723,9 @@ impl StaticPartitionSolver {
 
         for (d, device) in program.devices.iter().enumerate() {
             match device.kind {
-                kinds::RESISTOR if owned_by_static(device) => {
+                // W1g: a fuse and a PTC are fixed two-terminal stamps too, folded
+                // into the base with the resistors (Fuse and PTC records).
+                kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contacts = contacts_of(device.kind, &pins, &device.params);
                     for c in &contacts {
@@ -779,6 +823,11 @@ impl StaticPartitionSolver {
             })
             .collect();
         let junction_memo = vec![JunctionMemo::default(); kcl_junctions.len()];
+        let kcl_count = kcl_junctions.len();
+        let mut stamp_of_device = vec![u32::MAX; program.devices.len()];
+        for (id, stamp) in resistors.iter().enumerate() {
+            stamp_of_device[stamp.device_index] = id as u32;
+        }
         let ics_len = ics.len();
         let stamp_count = resistors.len() + switches.len();
 
@@ -889,6 +938,14 @@ impl StaticPartitionSolver {
             hub_journal: Vec::new(),
             hub_journaled: vec![false; partitions_len],
             exact: None,
+            live,
+            stamp_of_device,
+            junction_full,
+            kcl_active: vec![true; kcl_count],
+            kcl_law_gen: vec![0; kcl_count],
+            stamp_states: HashMap::new(),
+            cache_journal: Vec::new(),
+            cache_journaled: vec![false; partitions_len],
         })
     }
 
@@ -896,6 +953,159 @@ impl StaticPartitionSolver {
     pub(crate) fn set_exact(&mut self, exact: Option<crate::solve::ExactStamp>) {
         self.exact = exact;
     }
+
+    /// W1g's one entry point for a slow change to `device`'s stamp (README
+    /// W1g point 12): a latch, a junction re-arm, a PTC trip or recovery, or a
+    /// reset, given as the device's whole slow state. What `apply_params` does
+    /// for a toggle, minus the value write:
+    /// - a resistor, fuse or PTC takes its stamp params with the slow flag
+    ///   (`devices::slow_flag`), and its partition's base is rebuilt from
+    ///   scratch in the build's own order, so a reset gives back the loaded
+    ///   base bit for bit;
+    /// - an LED device's junctions are re-placed in each partition holding
+    ///   one (a failed device's dropped, a held law applied), and its source
+    ///   KCL terms follow, the memo keyed by the new law generation;
+    /// - every partition it touches has its solution cache cleared (the key
+    ///   carries no failure or law state), and `full` is set, since the
+    ///   incremental currents would miss a change that moves a current
+    ///   without moving a voltage (a device across two fixed nodes).
+    ///
+    /// Returns the partitions it touches, for the caller to mark dirty.
+    /// Calling it again with the same state changes nothing but the caches,
+    /// which is how a rollback puts the stamps back (`PartitionedSolver`).
+    pub(crate) fn mark_device_changed(&mut self, device: usize, state: StampState) -> Vec<PartitionId> {
+        self.set_device_stamp(device, state, true)
+    }
+
+    /// [`Self::mark_device_changed`]'s body. A rollback sets a device's stamp
+    /// back with `clear_caches` off, since the window's journal has already
+    /// put back the caches it found.
+    pub(crate) fn set_device_stamp(&mut self, device: usize, state: StampState, clear_caches: bool) -> Vec<PartitionId> {
+        if state == StampState::default() {
+            self.stamp_states.remove(&device);
+        } else {
+            self.stamp_states.insert(device, state);
+        }
+        let mut touched: Vec<usize> = Vec::new();
+        if let Some(&id) = self.stamp_of_device.get(device).filter(|&&id| id != u32::MAX) {
+            let flag = state.failed || state.tripped;
+            let stamp = &mut self.resistors[id as usize];
+            stamp.params = devices::with_slow_flag(stamp.kind, &stamp.params, flag);
+            stamp.contacts = contacts_of(stamp.kind, &stamp.pins, &stamp.params);
+            if flag {
+                self.switch_params.insert(device, stamp.params.clone());
+            } else {
+                self.switch_params.remove(&device);
+            }
+            self.param_dirty.push(id);
+            for &node in &self.resistors[id as usize].pins {
+                if let Some((p, _)) = self.local_index[node] {
+                    if !touched.contains(&p) {
+                        touched.push(p);
+                    }
+                }
+            }
+            for &p in &touched {
+                self.rebuild_base(p);
+            }
+        }
+        // The junctions: every partition that holds one of the device's.
+        let junction_parts: Vec<usize> = (0..self.junction_full.len()).filter(|&p| self.junction_full[p].iter().any(|j| j.device == device)).collect();
+        for p in junction_parts {
+            self.rebuild_junctions(p);
+            if !touched.contains(&p) {
+                touched.push(p);
+            }
+        }
+        for k in 0..self.kcl_junctions.len() {
+            if self.kcl_junctions[k].device != device {
+                continue;
+            }
+            self.kcl_active[k] = !state.failed;
+            self.kcl_law_gen[k] = state.law_gen;
+            if let Some(law) = state.law {
+                self.kcl_junctions[k].law = law;
+            }
+        }
+        if clear_caches {
+            for &p in &touched {
+                let old = std::mem::take(&mut self.caches[p]);
+                if self.window && !self.cache_journaled[p] {
+                    self.cache_journaled[p] = true;
+                    self.cache_journal.push((p as u32, old));
+                }
+            }
+        }
+        self.full = true;
+        touched.sort_unstable();
+        touched.into_iter().map(|p| PartitionId(p as u32)).collect()
+    }
+
+    /// Partition `p`'s pristine base, folded afresh: the shunt on every row,
+    /// then every resistor, fuse and PTC contact touching it, in the build's
+    /// device order, so an unchanged set of stamps gives back the same bits.
+    fn rebuild_base(&mut self, p: usize) {
+        let size = self.partitions[p].len();
+        self.matrix_base[p].iter_mut().for_each(|a| *a = 0.0);
+        self.rhs_base[p].iter_mut().for_each(|b| *b = 0.0);
+        self.live_rhs[p].clear();
+        for l in 0..size {
+            self.matrix_base[p][l * size + l] += NODE_RSHUNT_G;
+        }
+        let in_p = |node: usize, local_index: &[Option<(usize, usize)>]| matches!(local_index[node], Some((q, _)) if q == p);
+        for stamp in &self.resistors {
+            for c in &stamp.contacts {
+                if in_p(c.u, &self.local_index) || in_p(c.w, &self.local_index) {
+                    fold_static_stamp(&self.partitions, &self.local_index, &self.fixed, &self.live, &mut self.matrix_base, &mut self.rhs_base, &mut self.live_rhs, c.u, c.w, c.g);
+                }
+            }
+        }
+    }
+
+    /// Partition `p`'s junction list (and a hub partition's residual shape's)
+    /// from the junctions placed at load, in their load order: a failed
+    /// device's dropped, a held law applied (README W1g points 4 and 12).
+    fn rebuild_junctions(&mut self, p: usize) {
+        let placed: Vec<DynJunction> = self.junction_full[p]
+            .iter()
+            .filter_map(|j| {
+                let state = self.stamp_states.get(&j.device).copied().unwrap_or_default();
+                if state.failed {
+                    return None;
+                }
+                let mut placed = place_junction(j, p, &self.local_index, &self.fixed).expect("placed in this partition at load");
+                if let Some(law) = state.law {
+                    placed.law = law;
+                }
+                Some(placed)
+            })
+            .collect();
+        if let Some(hub) = self.hubs[p].as_mut() {
+            hub.shape.junctions = placed.clone();
+        }
+        self.junctions[p] = placed;
+    }
+
+    /// Every junction law this solver stamps or folds into the KCL, with the
+    /// KCL's active flags and law generations (tests compare them).
+    #[cfg(test)]
+    pub(crate) fn junction_laws(&self) -> String {
+        format!("{:?} {:?} {:?} {:?}", self.junctions, self.kcl_junctions, self.kcl_active, self.kcl_law_gen)
+    }
+
+    /// Each partition's cache, as its entries' solutions in bits (tests
+    /// compare them).
+    #[cfg(test)]
+    pub(crate) fn cache_bits(&self) -> Vec<Vec<Vec<u64>>> {
+        self.caches.iter().map(|c| c.entries.iter().map(|e| e.x.iter().map(|v| v.to_bits()).collect()).collect()).collect()
+    }
+
+    /// Forgets every junction memo: a rollback can restore a law generation
+    /// a memo was computed under for a different law (README W1g point 4).
+    pub(crate) fn clear_junction_memo(&mut self) {
+        self.junction_memo.iter_mut().for_each(|m| m.valid = false);
+    }
+
 
     fn apply_exact(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
         if let Some(e) = self.exact.filter(|e| e.partition == p_idx) {
@@ -953,6 +1163,13 @@ impl StaticPartitionSolver {
         for (p, _) in self.hub_journal.drain(..) {
             self.hub_journaled[p as usize] = false;
         }
+        // Almost always empty: only a slow stamp change journals a cache, and
+        // the drain's drop glue is not free on every instant.
+        if !self.cache_journal.is_empty() {
+            for (p, _) in self.cache_journal.drain(..) {
+                self.cache_journaled[p as usize] = false;
+            }
+        }
     }
 
     /// The window's instant failed: every slot it changed goes back to the
@@ -979,6 +1196,10 @@ impl StaticPartitionSolver {
             if let Some(hub) = self.hubs[p as usize].as_mut() {
                 hub.solve = solve;
             }
+        }
+        for (p, cache) in self.cache_journal.drain(..).rev() {
+            self.cache_journaled[p as usize] = false;
+            self.caches[p as usize] = cache;
         }
         // Owner requests are per call and never span a failed instant.
         self.pending_bnd.clear();
@@ -1547,6 +1768,18 @@ impl StaticPartitionSolver {
     pub(crate) fn hub_node_line(&self, node: usize) -> Option<(f64, f64)> {
         let (p, l) = self.local_index.get(node).copied().flatten()?;
         let h = self.hubs.get(p)?.as_ref()?.solve.as_ref()?;
+        Some((h.x[l] - h.s[l] * h.u_p, h.s[l]))
+    }
+
+    /// [`Self::hub_node_line`] for a linear hub partition only: its line is
+    /// then exact for any rail (W1g ruling R30).
+    pub(crate) fn hub_node_line_exact(&self, node: usize) -> Option<(f64, f64)> {
+        let (p, l) = self.local_index.get(node).copied().flatten()?;
+        let hub = self.hubs.get(p)?.as_ref()?;
+        if hub.nonlinear {
+            return None;
+        }
+        let h = hub.solve.as_ref()?;
         Some((h.x[l] - h.s[l] * h.u_p, h.s[l]))
     }
 
@@ -2202,11 +2435,16 @@ impl StaticPartitionSolver {
     /// The junction's branch current at the published voltages, from its
     /// memo when neither end's voltage bits moved since it was computed.
     fn memo_junction_current(&mut self, k: usize) -> f64 {
+        // A failed LED stamps no junction at all (W1g point 12), GMIN included.
+        if !self.kcl_active[k] {
+            return 0.0;
+        }
         let j = &self.kcl_junctions[k];
         let (va, vk) = (self.voltages[j.anode].to_bits(), self.voltages[j.cathode].to_bits());
+        let law_gen = self.kcl_law_gen[k];
         let memo = &mut self.junction_memo[k];
-        if !(memo.valid && memo.v_anode == va && memo.v_cathode == vk) {
-            *memo = JunctionMemo { v_anode: va, v_cathode: vk, current: junction_branch_current(j, &self.voltages), valid: true };
+        if !(memo.valid && memo.v_anode == va && memo.v_cathode == vk && memo.law_gen == law_gen) {
+            *memo = JunctionMemo { v_anode: va, v_cathode: vk, law_gen, current: junction_branch_current(j, &self.voltages), valid: true };
         }
         memo.current
     }
@@ -2355,7 +2593,10 @@ impl StaticPartitionSolver {
 
         // Every stamped junction's branch current, anode to cathode, GMIN
         // included (W1e, LEDs point 12).
-        for j in &self.kcl_junctions {
+        for (k, j) in self.kcl_junctions.iter().enumerate() {
+            if !self.kcl_active[k] {
+                continue;
+            }
             let i = junction_branch_current(j, &self.voltages);
             leaving[j.anode] += i;
             leaving[j.cathode] -= i;

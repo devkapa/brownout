@@ -252,7 +252,10 @@ pub fn program_junctions(program: &Program) -> Vec<Junction> {
 /// by pair the way a resistor's or capacitor's single pair is).
 fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
     match kind {
-        kinds::RESISTOR | kinds::CAPACITOR => Some((0, 1)),
+        // W1g: a fuse and a PTC are two-terminal resistances as a resistor is
+        // (W0 point 3). A latched fuse stamps nothing, but membership is fixed
+        // at load (W1g point 12), so its two ends stay joined.
+        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE => Some((0, 1)),
         _ => None,
     }
 }
@@ -707,7 +710,7 @@ fn partition_reads(program: &Program, partitions: &[Vec<usize>], local_index: &[
     let non_free = |node: usize| fixed[node].is_some();
     for device in &program.devices {
         match device.kind {
-            kinds::RESISTOR | kinds::CAPACITOR | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+            kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
                 if let Some(p) = device.pins.iter().find_map(|pin| part(pin.node)) {
                     reads[p].extend(device.pins.iter().map(|pin| pin.node).filter(|&node| non_free(node)));
                 }
