@@ -69,6 +69,11 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "clock_gen",
   "pulse_source",
   "pulse_gen",
+  // W1g: the fuses (codes 10 and 13). The compiler adds a `rating` record
+  // (code 90) per resistor and a `thermal` record (code 91) per heated part
+  // on its own (compile/thermal.ts); neither is ever a component kind.
+  "fuse",
+  "ptc_fuse",
 ]);
 
 /**
@@ -111,6 +116,7 @@ export const CORE_KIND_CODES = {
   fuse: 10,
   ldr: 11,
   thermistor: 12,
+  ptc_fuse: 13,
   battery_pack: 20,
   bench_psu: 21,
   clock: 22,
@@ -147,6 +153,9 @@ export const CORE_KIND_CODES = {
   "74ls189": 80,
   "28c16": 81,
   "28c256": 82,
+  // Synthetic: emitted by the compiler (compile/thermal.ts), never a component kind (core/README.md, "Rating record", "Thermal record").
+  rating: 90,
+  thermal: 91,
 } as const;
 
 export type CoreKindCodeName = keyof typeof CORE_KIND_CODES;
@@ -273,6 +282,22 @@ export const CORE_CLOCK_PARAM_COUNT = 5;
 export const CORE_PULSE_PARAM = { v1: 0, v2: 1, td: 2, tr: 3, tf: 4, pw: 5, per: 6 } as const;
 export const CORE_PULSE_PARAM_COUNT = 7;
 
+/** The fuse's params (core/README.md, "Fuse and PTC records"; core/src/kinds.rs). An `iRating <= 0` is no limit. */
+export const CORE_FUSE_PARAM = { rNormal: 0, iRating: 1 } as const;
+export const CORE_FUSE_PARAM_COUNT = 2;
+
+/** The PTC fuse's params (core/README.md, "Fuse and PTC records"; core/src/kinds.rs). */
+export const CORE_PTC_FUSE_PARAM = { rNormal: 0, iHold: 1 } as const;
+export const CORE_PTC_FUSE_PARAM_COUNT = 2;
+
+/** The synthetic rating record's params (code 90; core/README.md, "Rating record"). `device` is the resistor's record index. */
+export const CORE_RATING_PARAM = { device: 0, pMax: 1, rPower: 2 } as const;
+export const CORE_RATING_PARAM_COUNT = 3;
+
+/** The synthetic thermal record's params (code 91; core/README.md, "Thermal record"). `device` is the resistor's or `led`'s record index. */
+export const CORE_THERMAL_PARAM = { device: 0, rThetaJA: 1, tauS: 2, hasShutdown: 3, tripC: 4, restartC: 5 } as const;
+export const CORE_THERMAL_PARAM_COUNT = 6;
+
 /** An LED-family shape (codes 30-34): `pins` by the README's table, `params`, and `channels` slots whose base is the blob's only value. */
 function ledShape(pins: number, params: number, channels: number): CoreRecordShape {
   return { pins, pinsMax: pins, params, blob: { exact: channels > 0 ? 1 : 0 }, liveParams: [], channelSlots: channels };
@@ -302,6 +327,9 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.spdt_switch, { pins: 3, pinsMax: 3, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.dip_switch, { pins: 4, pinsMax: 16, params: 9, blob: { exact: 0 }, liveParams: [1, 2, 3, 4, 5, 6, 7, 8] }],
+  // W1g (core/README.md, "Fuse and PTC records"): positional pins, no slots, no live params.
+  [CORE_KIND_CODES.fuse, { pins: 2, pinsMax: 2, params: CORE_FUSE_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.ptc_fuse, { pins: 2, pinsMax: 2, params: CORE_PTC_FUSE_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
   // W1f sources (core/README.md, "Source records"): positional pins except the battery's `pos`/`neg`; no live params.
   [CORE_KIND_CODES.battery_pack, { pins: 2, pinsMax: 2, params: CORE_BATTERY_PARAM_COUNT, blob: { table: true }, liveParams: [] }],
   [CORE_KIND_CODES.bench_psu, { pins: 2, pinsMax: 2, params: CORE_BENCH_PSU_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
@@ -334,4 +362,8 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74ls189"], w1dShape(14, 23, 1 + 14, 4)],
   [CORE_KIND_CODES["28c16"], w1dShape(22, CORE_EEPROM_PARAM_COUNT, 1 + 22 + 2048 / 4, 8)],
   [CORE_KIND_CODES["28c256"], w1dShape(26, CORE_EEPROM_PARAM_COUNT, 1 + 26 + 32768 / 4, 8)],
+  // W1g synthetic records (core/README.md, "Rating record", "Thermal record"): no pins, no blob. Their
+  // order and `device` references span records, so compile/thermal.ts checks those (`checkSlowRecords`).
+  [CORE_KIND_CODES.rating, { pins: 0, pinsMax: 0, params: CORE_RATING_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.thermal, { pins: 0, pinsMax: 0, params: CORE_THERMAL_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
 ]);

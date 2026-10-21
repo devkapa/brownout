@@ -889,6 +889,9 @@ describe("the device-state reader checks every layout's length (a stubbed bo_eng
         return len;
       },
       bo_engine_device_state_ptr: () => STATE_ADDR,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
     };
     __installCoreForTest(exports);
     return devices;

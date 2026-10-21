@@ -640,15 +640,16 @@ describe("compileCircuit — parameter resolution", () => {
     ]);
     const compiled = compileOk(c);
     // Isolated sections add section_anchor records after every component's own
-    // (W1f; compile-sources.test.ts covers them), so the component records are
-    // the ones that are not anchors.
-    expect(compiled.devices.filter((d) => d.kind !== "section_anchor")).toEqual([
-      { componentId: "r1", kind: "resistor" },
-      { componentId: "vs1", kind: "voltage_source" },
+    // (W1f; compile-sources.test.ts covers them), and W1g a rating record per
+    // resistor after those (compile-thermal.test.ts), so the component records
+    // are the first two.
+    expect(compiled.devices.slice(0, 2)).toEqual([
+      { componentId: "r1", kind: "resistor", pinIds: ["a", "b"] },
+      { componentId: "vs1", kind: "voltage_source", pinIds: ["pos", "neg"] },
     ]);
+    expect(compiled.devices.at(-1)).toEqual({ componentId: "rating:0", kind: "rating" });
     const decoded = decodeProgram(compiled.program);
-    const componentRecords = decoded.devices.filter((d) => d.kindCode !== CORE_KIND_CODE.section_anchor);
-    expect(componentRecords.map((d) => d.componentIndex)).toEqual([1, 2]); // ground is components[0]
+    expect(decoded.devices.slice(0, 2).map((d) => d.componentIndex)).toEqual([1, 2]); // ground is components[0]
   });
 });
 

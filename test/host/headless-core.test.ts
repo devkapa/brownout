@@ -294,6 +294,9 @@ describe('engine: "core" — a non-converged advance() is reported on the result
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);

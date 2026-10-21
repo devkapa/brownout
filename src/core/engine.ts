@@ -42,9 +42,20 @@ import {
   coreReady,
   coreStatus,
   copyF64,
+  copyRecords,
   readCoreErrorMessage,
   type CoreExports,
 } from "./wasm.js";
+import {
+  CORE_RECORD_CHANNEL,
+  decodeRecords,
+  failureListFromRecords,
+  failuresFromRecords,
+  ptcTrippedFromRecords,
+  thermalReadout,
+  WarningLedger,
+  type CoreSlowRecord,
+} from "./failures.js";
 import {
   CoreInitError,
   CoreLoadError,
@@ -54,7 +65,13 @@ import {
   CoreUnsupportedError,
 } from "./errors.js";
 import type { EngineReadout } from "./surface.js";
-import type { BatteryRuntimeReadout, SimCircuit, SimFailure, SimWarning } from "../sim/engine/sim-engine.js";
+import type {
+  BatteryRuntimeReadout,
+  SimCircuit,
+  SimFailure,
+  SimWarning,
+  ThermalRuntimeReadout,
+} from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import type { DisplayInfo } from "../sim/messages.js";
 
@@ -155,6 +172,8 @@ const BATTERY_STATE_LAYOUT = [
 const BENCH_PSU_STATE_LAYOUT = ["reg"] as const;
 /** A `bench_psu` with `iLimit = 0`, an ideal source: nothing to read, though the collect succeeds. */
 const EMPTY_STATE_LAYOUT = [] as const;
+/** A `resistor` or `led` with a code 91 record (W1g point 3); `thermalShutdown` is 0 or 1. */
+const THERMAL_STATE_LAYOUT = ["temperatureC", "dissipatedPowerW", "thermalShutdown"] as const;
 
 type DeviceStateLayout = readonly string[];
 /** One collect, each value under its layout name. */
@@ -171,6 +190,10 @@ export class CoreEngine implements EngineReadout {
   private _digitalState: Record<string, number> = {};
   private _elementChannelI: Record<string, number[]> = {};
   private _lastConverged = false;
+  /** The loaded circuit, which `resetFailures` re-derives the static warnings from, as classic's `this.circuit`. */
+  private _circuit: SimCircuit | null = null;
+  /** The static warnings and the announce queue (W1g point 11). Fresh per load: W1 has no carry-forward (point 15). */
+  private _warnings = new WarningLedger();
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -341,6 +364,8 @@ export class CoreEngine implements EngineReadout {
     this._digitalState = {};
     this._elementChannelI = {};
     this._lastConverged = false;
+    this._circuit = null;
+    this._warnings = new WarningLedger();
 
     // `options`' other fields pass straight through: compileCircuit's
     // `CompileOptions` only reads integrationMethod/noSolutionCache/
@@ -385,6 +410,9 @@ export class CoreEngine implements EngineReadout {
     this._compiled = compiled;
     this._simTime = previousSimTime;
     this._lastConverged = true;
+    this._circuit = circuit;
+    // Since START_TIME, as classic's load evaluates them at its simTime.
+    this._warnings.evaluateStatic(circuit, compiled.nets, previousSimTime);
     this._publishReadouts();
   }
 
@@ -924,21 +952,163 @@ export class CoreEngine implements EngineReadout {
     return coreCall((exports) => exports.bo_engine_next_digital_due_time(this._handle));
   }
 
-  /** No W0 kind has a failure model. Always empty (a fresh object per call — see digitalState's doc comment). */
+  /**
+   * Classic's `getFailures()` (core/README.md, Readouts, W1g): channel 0 of
+   * `bo_engine_records`, projected to the current time, as a fresh object in
+   * latch order keyed by classic's `failureKey`, each failure in classic's
+   * key order with its message built from classic's template (failures.ts).
+   */
   getFailures(): Record<string, SimFailure> {
-    this._requireLoaded();
-    return {};
+    const compiled = this._requireLoaded();
+    return failuresFromRecords(this._collectRecords(CORE_RECORD_CHANNEL.failures), compiled);
   }
 
-  /** No W0 kind raises a topology/measurement warning. Always empty (a fresh object per call — see digitalState's doc comment). */
+  /**
+   * Classic's `getWarnings()`: the facade's static warnings (W1g point 11), a
+   * fresh object in latch order. Rust's channel 1 has no producer in W1
+   * (`transistor_overcurrent` is W3), so a record there means the halves
+   * were built from different contracts (`_checkRustWarnings`).
+   */
   getWarnings(): Record<string, SimWarning> {
     this._requireLoaded();
-    return {};
+    this._checkRustWarnings();
+    return this._warnings.all();
   }
 
+  /**
+   * Classic's `takeNewWarnings()`: the warnings latched since the previous
+   * call, in latch order, then an empty queue. A warning still true is not
+   * announced again; one gone before it was drained never is.
+   */
   takeNewWarnings(): SimWarning[] {
     this._requireLoaded();
-    return [];
+    this._checkRustWarnings();
+    return this._warnings.takeNew();
+  }
+
+  /**
+   * Classic's `getPtcTripped()` (W1g Q5: on `CoreEngine` only): a fresh set
+   * of the tripped `ptc_fuse` ids, channel 2. A trip is never a failure or a
+   * warning (Q-O45).
+   */
+  getPtcTripped(): ReadonlySet<string> {
+    const compiled = this._requireLoaded();
+    return ptcTrippedFromRecords(this._collectRecords(CORE_RECORD_CHANNEL.ptcTripped), compiled);
+  }
+
+  /**
+   * Classic's `getThermalState(id)` (W1g Q5: on `CoreEngine` only):
+   * `undefined` unless the component has a code 91 record. Otherwise Rust's
+   * `[T, P, shutdown]`, projected to now, composed through classic's own
+   * `stepThermalDevice` at `dt = 0` (failures.ts `thermalReadout`), so the
+   * target, the derating, the warnings and `withinContinuousLimits` are
+   * classic's by construction. A fresh object each call.
+   */
+  getThermalState(componentId: string): ThermalRuntimeReadout | undefined {
+    const compiled = this._requireLoaded();
+    const thermal = compiled.thermalDevices.get(componentId);
+    if (thermal === undefined) return undefined;
+    const state = this._readDeviceState(compiled, componentId, THERMAL_STATE_LAYOUT);
+    return thermalReadout(
+      thermal.profile,
+      thermal.catalogUid,
+      {
+        temperatureC: state.temperatureC,
+        dissipatedPowerW: state.dissipatedPowerW,
+        thermalShutdown: state.thermalShutdown === 1,
+      },
+      compiled.ambientC,
+    );
+  }
+
+  /**
+   * Classic's `getPartTemperature(id)` (W1g Q5: on `CoreEngine` only): the
+   * package temperature of a part with a code 91 record, else `undefined`.
+   * A thermistor's body temperature is W1h's.
+   */
+  getPartTemperature(componentId: string): number | undefined {
+    const compiled = this._requireLoaded();
+    if (!compiled.thermalDevices.has(componentId)) return undefined;
+    return this._readDeviceState(compiled, componentId, THERMAL_STATE_LAYOUT).temperatureC;
+  }
+
+  /**
+   * Classic's `resetFailures()` (W1g point 13; Q5: on `CoreEngine` only),
+   * through `bo_engine_reset_failures`: one event at the current time, which
+   * clears every latch and stress integrator and resets every PTC, then
+   * re-solves at that instant without advancing time.
+   *
+   * On success the warnings and the announce queue clear and the static
+   * warnings are re-derived with `since` = the current time, so one still
+   * true is announced again (SE:2407-2448). The re-solve converged, so
+   * `lastConverged` is true, as classic's seed solve sets it.
+   *
+   * On `-4` or `-7` Rust has rolled the whole reset back, so this sets
+   * `lastConverged = false` and changes nothing else: the failures, the
+   * warnings, the queue and the published readouts stay exactly as they were.
+   * Classic instead keeps its maps cleared over a non-converged seed; the
+   * divergence is registered (`w1g-reset-failures-failed-seed`, W1g Q6).
+   */
+  resetFailures(): void {
+    const compiled = this._requireLoaded();
+    const code = coreCall((exports) => exports.bo_engine_reset_failures(this._handle));
+    if (code === 0) {
+      this._warnings.clear();
+      this._warnings.evaluateStatic(this._circuit!, compiled.nets, this._simTime);
+      this._lastConverged = true;
+      this._publishReadouts();
+      return;
+    }
+    if (code === -4 || code === -7) {
+      this._lastConverged = false;
+      return;
+    }
+    const message = coreCall((exports) => readCoreErrorMessage(exports));
+    throw new CoreLoadError(`bo_engine_reset_failures failed (code ${code}): ${message}`);
+  }
+
+  /**
+   * @internal Harness instrumentation, not public API (manager ruling): kept
+   * out of the 1.0 API surface and of every changeset. Channel 3, the latch
+   * log: every failure that latched since the previous call (or the load),
+   * once each, in first-latch order, each with that latch's `since`.
+   * Collecting empties it. Classic has no counterpart; the equivalence
+   * harness reads it at every advance end so it sees every latch over a run
+   * rather than a poll of `getFailures()` (Equivalence harness rules, W1g).
+   */
+  takeLatchedFailures(): SimFailure[] {
+    const compiled = this._requireLoaded();
+    return failureListFromRecords(this._collectRecords(CORE_RECORD_CHANNEL.latchLog), compiled);
+  }
+
+  /**
+   * One record channel, collected and decoded. The decode runs outside
+   * `coreCall`: a malformed buffer is a contract drift to report, not a trap
+   * that should poison the instance.
+   */
+  private _collectRecords(channel: number): CoreSlowRecord[] {
+    const raw = coreCall((exports) => {
+      const out = copyRecords(exports, this._handle, channel);
+      if (typeof out === "number") {
+        throw new CoreLoadError(
+          `bo_engine_records failed for channel ${channel} (code ${out}): ${readCoreErrorMessage(exports)}`,
+        );
+      }
+      return out;
+    });
+    return decodeRecords(raw);
+  }
+
+  /** Channel 1 has no producer in W1 (W1g point 11): a record there means the two halves disagree. */
+  private _checkRustWarnings(): void {
+    const records = this._collectRecords(CORE_RECORD_CHANNEL.warnings);
+    if (records.length > 0) {
+      throw new CoreInitError(
+        `brownout/core: bo_engine_records returned ${records.length} warning record(s), but this package's TS ` +
+          "front end has no Rust warning producer in W1 (core/README.md, W1g point 11). The TS and Rust halves " +
+          "ship in one npm package and must be rebuilt together.",
+      );
+    }
   }
 
   /** No W0 kind drives a display (MAX7219/HD44780/micro:bit decoders arrive with the kinds that need them). Always empty (a fresh object per call — see digitalState's doc comment). */

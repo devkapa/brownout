@@ -1,6 +1,7 @@
 /**
  * Compiles the W1b switch family (`switch`, `push_button`, `spdt_switch`,
- * `dip_switch`) and the capacitor into v2 program records, exactly per
+ * `dip_switch`), the capacitor, and W1g's `fuse` and `ptc_fuse` into v2
+ * program records, exactly per
  * core/README.md's "Kind codes and records" table and spec §7.6/§7.2.6. The
  * capacitor's `[C, esr, leakage]` param resolution follows classic's
  * exact-uid `modelParam` rule (spec §7.2.6).
@@ -317,6 +318,72 @@ export function compileCapacitor(
     ],
     params: [resolved.capacitance, resolved.esr, resolved.leakage],
   };
+}
+
+// ─── Fuse and PTC fuse (codes 10 and 13, W1g) ──────────────────────────────
+
+type TwoTerminalComponent = { id: string; kind: string; pins: readonly { id: string }[]; params: Record<string, number | string> };
+
+/** Positional pins for a two-terminal kind classic reads as `pins[0]`/`pins[1]` unguarded (PA:696, 761). */
+function twoTerminalPins(
+  built: CoreNodeBuild,
+  openKeys: ReadonlySet<string>,
+  component: TwoTerminalComponent,
+): readonly ProgramPinInput[] {
+  return [
+    buildPinRecord(built, openKeys, component.kind, component.id, component.pins[0]!.id),
+    buildPinRecord(built, openKeys, component.kind, component.id, component.pins[1]!.id),
+  ];
+}
+
+/**
+ * `fuse` (code 10): positional pins, `[rNormal, iRating]` (core/README.md,
+ * "Fuse and PTC records"; `fuseModel`, devices/passives.ts). `iRating` keeps
+ * classic's `?? 1` and no floor: a value `<= 0` is emitted as is and means
+ * no limit, as classic's current ratio is 0 then. Classic reads `pins[1]`
+ * unguarded, so fewer than 2 pins declines rather than invent a stamp.
+ */
+export function compileFuse(
+  built: CoreNodeBuild,
+  openKeys: ReadonlySet<string>,
+  component: TwoTerminalComponent,
+): PassiveCompileResult {
+  if (component.pins.length < 2) {
+    return { ok: false, reason: `malformed:${component.id}:too-few-pins` };
+  }
+  const rNormal = Math.max(0.001, Number(component.params.rNormal ?? 0.1));
+  if (!Number.isFinite(rNormal)) {
+    return { ok: false, reason: `malformed:${component.id}:non-finite-rNormal` };
+  }
+  const iRating = Number(component.params.iRating ?? 1);
+  if (!Number.isFinite(iRating)) {
+    return { ok: false, reason: `malformed:${component.id}:non-finite-iRating` };
+  }
+  return { ok: true, pins: twoTerminalPins(built, openKeys, component), params: [rNormal, iRating] };
+}
+
+/**
+ * `ptc_fuse` (code 13): positional pins, `[rNormal, iHold]` (core/README.md,
+ * "Fuse and PTC records"; `ptcFuseModel`, devices/passives.ts), with
+ * classic's own floors (0.001 and 1e-6) and defaults (0.5 and 0.5).
+ */
+export function compilePtcFuse(
+  built: CoreNodeBuild,
+  openKeys: ReadonlySet<string>,
+  component: TwoTerminalComponent,
+): PassiveCompileResult {
+  if (component.pins.length < 2) {
+    return { ok: false, reason: `malformed:${component.id}:too-few-pins` };
+  }
+  const rNormal = Math.max(0.001, Number(component.params.rNormal ?? 0.5));
+  if (!Number.isFinite(rNormal)) {
+    return { ok: false, reason: `malformed:${component.id}:non-finite-rNormal` };
+  }
+  const iHold = Math.max(1e-6, Number(component.params.iHold ?? 0.5));
+  if (!Number.isFinite(iHold)) {
+    return { ok: false, reason: `malformed:${component.id}:non-finite-iHold` };
+  }
+  return { ok: true, pins: twoTerminalPins(built, openKeys, component), params: [rNormal, iHold] };
 }
 
 // ─── Live param specs (bo_engine_set_params, owner decision 1) ─────────────

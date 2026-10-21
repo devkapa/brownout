@@ -774,9 +774,10 @@ describe("pulse_source and pulse_gen records", () => {
     expect(recordOf(compileOk(loop(pls("pulse_source", whole))), "pulse_source").params[CORE_PULSE_PARAM.per]).toBe(1);
     expect(compileDeclined(loop(pls("pulse_source", { ...whole, per: 0.9 })))).toEqual(["malformed:p1:truncated-pulse"]);
     expect(compileDeclined(loop(pls("pulse_gen", { tr: 4e-4, tf: 4e-4, pw: 4e-4, per: 1e-3 })))).toEqual(["malformed:p1:truncated-pulse"]);
-    // The catalog-shaped default cycle is whole, and a one-shot has no cycle to cut.
-    expect(compileOk(loop(pls("pulse_source", {}))).devices).toHaveLength(2);
-    expect(compileOk(loop(pls("pulse_source", { tr: 1, pw: 1, tf: 1, per: 0 }))).devices).toHaveLength(2);
+    // The catalog-shaped default cycle is whole, and a one-shot has no cycle to cut
+    // (the source, its load, and the load's W1g rating record).
+    expect(compileOk(loop(pls("pulse_source", {}))).devices).toHaveLength(3);
+    expect(compileOk(loop(pls("pulse_source", { tr: 1, pw: 1, tf: 1, per: 0 }))).devices).toHaveLength(3);
   });
 
   it("the truncation test sums as classic's pulseVoltage does, (tr + pw) + tf: a period between the two groupings declines", () => {
@@ -890,7 +891,16 @@ describe("section_anchor records", () => {
 
   it("emits the anchors after every component record, and lists them in devices with a synthetic id", () => {
     const compiled = compileOk(secondBatteryBoard());
-    expect(compiled.devices.map((d) => d.kind)).toEqual(["battery_pack", "resistor", "battery_pack", "resistor", "section_anchor"]);
+    // The W1g rating records follow the anchors (compile-thermal.test.ts).
+    expect(compiled.devices.map((d) => d.kind)).toEqual([
+      "battery_pack",
+      "resistor",
+      "battery_pack",
+      "resistor",
+      "section_anchor",
+      "rating",
+      "rating",
+    ]);
     const anchorNode = compiled.pinNode.get(corePinKey("bat2", "neg"))!;
     expect(compiled.devices[4]).toEqual({ componentId: `section_anchor:${anchorNode}`, kind: "section_anchor" });
     // No component id can collide with it, so an id-keyed readout never sees the anchor as bat2.

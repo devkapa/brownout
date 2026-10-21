@@ -23,6 +23,8 @@ import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { SimEngine } from "../../src/sim/engine/sim-engine.js";
 import { compileCircuit } from "../../src/core/compile/index.js";
 import {
+  compileFuse,
+  compilePtcFuse,
   compileSpdtSwitch,
   resolveCapacitorParams,
   resolveDipSwitchClosed,
@@ -508,5 +510,88 @@ describe("compile/passives.ts pin helpers agree with computeOpenPinKeys for a de
       // pins = [com, b, c]; "c" is declared but never wired to anything.
       expect(result.pins[2]!.open).toBe(true);
     }
+  });
+});
+
+// ---- fuse / ptc_fuse (W1g, codes 10 and 13) ---------------------------------
+//
+// Not switched on yet (W1g dispatch 2 adds the compileCircuit case arms), so
+// these call the compilers directly. Expected values are classic's own
+// expressions (`fuseModel`, `ptcFuseModel`, devices/passives.ts) and a live
+// classic run of the floored resistance.
+
+describe("compileFuse / compilePtcFuse (core/README.md, \"Fuse and PTC records\")", () => {
+  function across(component: SimComponent, voltage: number): SimCircuit {
+    return circuit(
+      [part("vs", "voltage_source", ["pos", "neg"], { voltage }), component],
+      [wire("vs", "pos", component.id, component.pins[0]!.id), wire(component.id, component.pins[1]!.id, "vs", "neg")],
+    );
+  }
+  function compileTwoTerminal(component: SimComponent) {
+    const c = across(component, 1);
+    const built = buildCoreNodes(c);
+    const openKeys = computeOpenPinKeys(c, built.nets);
+    return { built, result: component.kind === "fuse" ? compileFuse(built, openKeys, component) : compilePtcFuse(built, openKeys, component) };
+  }
+
+  it("fuse: classic's defaults, rNormal 0.1 and iRating 1 (the 0.6.1 `?? 1`)", () => {
+    const { result } = compileTwoTerminal(part("f1", "fuse", ["a", "b"]));
+    expect(result).toMatchObject({ ok: true, params: [0.1, 1] });
+  });
+
+  it("fuse: authored values pass through; iRating is unfloored, and <= 0 is emitted as is (no limit)", () => {
+    expect(compileTwoTerminal(part("f1", "fuse", ["a", "b"], { rNormal: 0.25, iRating: 0.5 })).result).toMatchObject({ ok: true, params: [0.25, 0.5] });
+    expect(compileTwoTerminal(part("f1", "fuse", ["a", "b"], { iRating: 0 })).result).toMatchObject({ ok: true, params: [0.1, 0] });
+    expect(compileTwoTerminal(part("f1", "fuse", ["a", "b"], { iRating: -2 })).result).toMatchObject({ ok: true, params: [0.1, -2] });
+    expect(compileTwoTerminal(part("f1", "fuse", ["a", "b"], { iRating: "0.75" })).result).toMatchObject({ ok: true, params: [0.1, 0.75] });
+  });
+
+  it("ptc_fuse: classic's defaults, rNormal 0.5 and iHold 0.5", () => {
+    expect(compileTwoTerminal(part("p1", "ptc_fuse", ["a", "b"])).result).toMatchObject({ ok: true, params: [0.5, 0.5] });
+  });
+
+  it("floors rNormal at 0.001 for both and iHold at 1e-6", () => {
+    expect(compileTwoTerminal(part("f1", "fuse", ["a", "b"], { rNormal: 1e-6 })).result).toMatchObject({ ok: true, params: [0.001, 1] });
+    expect(compileTwoTerminal(part("p1", "ptc_fuse", ["a", "b"], { rNormal: 0, iHold: 1e-9 })).result).toMatchObject({ ok: true, params: [0.001, 1e-6] });
+    expect(compileTwoTerminal(part("p1", "ptc_fuse", ["a", "b"], { iHold: -1 })).result).toMatchObject({ ok: true, params: [0.5, 1e-6] });
+  });
+
+  it("the floored rNormal is the one classic stamps: 1 mV across reads 1 A in a live classic run", () => {
+    for (const component of [part("f1", "fuse", ["a", "b"], { rNormal: 1e-6 }), part("p1", "ptc_fuse", ["a", "b"], { rNormal: 1e-6 })]) {
+      const engine = new SimEngine();
+      engine.load(across(component, 1e-3));
+      expect(engine.getElementI()[component.id]).toBeCloseTo(1, 6);
+    }
+  });
+
+  it("pins are positional: pins[0] and pins[1], whatever their ids", () => {
+    const { built, result } = compileTwoTerminal(part("f1", "fuse", ["x", "y"]));
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.pins.map((p) => p.node)).toEqual([built.pinNode.get("f1\u0000x"), built.pinNode.get("f1\u0000y")]);
+  });
+
+  it.each([
+    ["fuse", "f1"],
+    ["ptc_fuse", "p1"],
+  ])("%s: fewer than 2 pins declines too-few-pins (classic reads pins[1] unguarded)", (kind, id) => {
+    const component = part(id, kind, ["a"]);
+    const c = circuit([component]);
+    const built = buildCoreNodes(c);
+    const openKeys = computeOpenPinKeys(c, built.nets);
+    const result = kind === "fuse" ? compileFuse(built, openKeys, component) : compilePtcFuse(built, openKeys, component);
+    expect(result).toEqual({ ok: false, reason: `malformed:${id}:too-few-pins` });
+  });
+
+  it.each([
+    ["fuse", { rNormal: "abc" }, "non-finite-rNormal"],
+    ["fuse", { rNormal: Infinity }, "non-finite-rNormal"],
+    ["fuse", { iRating: "abc" }, "non-finite-iRating"],
+    ["fuse", { iRating: Infinity }, "non-finite-iRating"],
+    ["ptc_fuse", { rNormal: "abc" }, "non-finite-rNormal"],
+    ["ptc_fuse", { iHold: "abc" }, "non-finite-iHold"],
+    ["ptc_fuse", { iHold: Infinity }, "non-finite-iHold"],
+  ])("%s %o declines malformed:<id>:%s", (kind, params, reason) => {
+    const { result } = compileTwoTerminal(part("x1", kind, ["a", "b"], params as Record<string, number | string>));
+    expect(result).toEqual({ ok: false, reason: `malformed:x1:${reason}` });
   });
 });

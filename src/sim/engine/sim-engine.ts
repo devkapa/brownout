@@ -1022,6 +1022,51 @@ function formatInductance(henries: number): string {
   return `${(henries * 1e6).toFixed(1)} uH`;
 }
 
+/** The loaded graph as `missingFlybackWarning` reads it: pin to net, net to pins, and component kinds. */
+export interface FlybackTopology {
+  netIdForPin(componentId: string, pinId: string): string | null;
+  pinsOnNet(netId: string): readonly Net["pins"][number][];
+  kindOf(componentId: string): string;
+}
+
+/**
+ * The missing_flyback warning `comp` carries on this topology, or null when it
+ * carries none. Pure, so that brownout/core's facade derives the same warning
+ * from the same graph (core/README.md, W1g point 11) rather than a copy of
+ * this rule; `_evaluateStaticWarnings` latches or drops what it returns.
+ */
+export function missingFlybackWarning(comp: SimComponent, since: number, topology: FlybackTopology): SimWarning | null {
+  const winding = inductiveWindingPins(comp);
+  if (!winding) return null;
+  let switchedBy: string | null = null;
+  const netA = topology.netIdForPin(comp.id, winding.pins[0]);
+  const netB = topology.netIdForPin(comp.id, winding.pins[1]);
+  if (netA && netB && netA !== netB) {
+    for (const netId of [netA, netB]) {
+      const pins = topology.pinsOnNet(netId);
+      if (netId === "gnd" || pins.some(([cid]) => FLYBACK_RAIL_KINDS.has(topology.kindOf(cid)))) continue;
+      const sw = pins.find(([cid]) => cid !== comp.id && FLYBACK_SWITCH_KINDS.has(topology.kindOf(cid)));
+      if (!sw) continue;
+      if (pins.some(([cid]) => FLYBACK_CLAMP_KINDS.has(topology.kindOf(cid)))) continue;
+      switchedBy = sw[0];
+      break;
+    }
+  }
+  if (!switchedBy) return null;
+  const inductance = comp.kind === "inductor"
+    ? Math.max(1e-12, Number(comp.params.inductance ?? 1e-3))
+    : undefined;
+  const label = inductance === undefined ? comp.id : `${comp.id} (${formatInductance(inductance)})`;
+  return {
+    componentId: comp.id,
+    code: "missing_flyback",
+    since,
+    ...(inductance === undefined ? {} : { value: inductance }),
+    message:
+      `${label} is switched by ${switchedBy} with no diode across its ${winding.noun}, so turning ${switchedBy} off will drive an inductive voltage spike into it.`,
+  };
+}
+
 // Gate output resistance: 50 Ω minimum → stiff enough for typical LED/resistor
 // loads while avoiding ill-conditioned MNA rows. Wave D raises this per family
 // when catalog io_max says the chip cannot source/sink much current.
@@ -5765,39 +5810,16 @@ export class SimEngine {
     const circuit = this.circuit;
     if (!circuit) return;
     const pinsByNet = new Map(this.nets.map((net) => [net.id, net.pins]));
-    const kindOf = (componentId: string): string => this._componentById.get(componentId)?.kind ?? "";
+    const topology: FlybackTopology = {
+      netIdForPin: (componentId, pinId) => this._netIdForPin(componentId, pinId),
+      pinsOnNet: (netId) => pinsByNet.get(netId) ?? [],
+      kindOf: (componentId) => this._componentById.get(componentId)?.kind ?? "",
+    };
     for (const comp of circuit.components) {
-      const winding = inductiveWindingPins(comp);
       const key = warningKey("missing_flyback", comp.id);
-      let switchedBy: string | null = null;
-      if (winding) {
-        const netA = this._netIdForPin(comp.id, winding.pins[0]);
-        const netB = this._netIdForPin(comp.id, winding.pins[1]);
-        if (netA && netB && netA !== netB) {
-          for (const netId of [netA, netB]) {
-            const pins = pinsByNet.get(netId) ?? [];
-            if (netId === "gnd" || pins.some(([cid]) => FLYBACK_RAIL_KINDS.has(kindOf(cid)))) continue;
-            const sw = pins.find(([cid]) => cid !== comp.id && FLYBACK_SWITCH_KINDS.has(kindOf(cid)));
-            if (!sw) continue;
-            if (pins.some(([cid]) => FLYBACK_CLAMP_KINDS.has(kindOf(cid)))) continue;
-            switchedBy = sw[0];
-            break;
-          }
-        }
-      }
-      if (switchedBy && winding) {
-        const inductance = comp.kind === "inductor"
-          ? Math.max(1e-12, Number(comp.params.inductance ?? 1e-3))
-          : undefined;
-        const label = inductance === undefined ? comp.id : `${comp.id} (${formatInductance(inductance)})`;
-        this._latchWarning(key, {
-          componentId: comp.id,
-          code: "missing_flyback",
-          since: this.simTime,
-          ...(inductance === undefined ? {} : { value: inductance }),
-          message:
-            `${label} is switched by ${switchedBy} with no diode across its ${winding.noun}, so turning ${switchedBy} off will drive an inductive voltage spike into it.`,
-        });
+      const warning = missingFlybackWarning(comp, this.simTime, topology);
+      if (warning) {
+        this._latchWarning(key, warning);
       } else {
         this.state.warnings.delete(key);
       }

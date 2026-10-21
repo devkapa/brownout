@@ -21,12 +21,22 @@
 
 import type { Net } from "../../sim/engine/graph.js";
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
-import { CORE_OPTION_KEYS, ProgramWriter, type ProgramOption } from "../format.js";
+import { CORE_OPTION_KEYS, ProgramWriter, type ProgramDeviceInput, type ProgramOption } from "../format.js";
 import { CORE_BENCH_PSU_PARAM, CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES } from "../kinds.js";
-import { buildCoreNodes, buildPinRecord, computeOpenPinKeys, corePinKey, type CoreNodeBuild } from "./topology.js";
+import {
+  buildCoreNodes,
+  buildPinRecord,
+  computeOpenPinKeys,
+  corePinKey,
+  deadBandHashPrefix,
+  openPinHashPrefix,
+  type CoreNodeBuild,
+} from "./topology.js";
 import {
   compileCapacitor,
   compileDipSwitch,
+  compileFuse,
+  compilePtcFuse,
   compileSpdtSwitch,
   compileSwitchOrPushButton,
   PASSIVE_LIVE_PARAM_SPECS,
@@ -37,6 +47,8 @@ import { compileRegisterIc } from "./registers.js";
 import { compileMemoryIc } from "./memories.js";
 import { compileBicolorLed, compileLed, compileRgbLed, compileSeg7 } from "./leds.js";
 import { compileNe555 } from "./ne555.js";
+import { compileSlowRecords, slowPhysicsDeclines } from "./thermal.js";
+import type { ThermalDeviceProfile } from "../../sim/thermal-physics.js";
 import {
   compileBatteryPack,
   compileBenchPsu,
@@ -160,6 +172,26 @@ function buildOptionPairs(ambientC: number, options: CompileOptions): ProgramOpt
 
 // ─── compileCircuit ─────────────────────────────────────────────────────────
 
+/**
+ * One device record as the facade names it. `pinIds` is the record's pin
+ * ids in pin-record order (for an IC, `vcc` and `gnd` first), so a
+ * `bo_engine_records` record's `pin` index names classic's `pinId`
+ * (core/README.md, Readouts, W1g). It is absent on the synthetic records,
+ * which have no pins, and on a record with a by-id pin the component does not
+ * declare, which no record ever names.
+ */
+export interface CompiledDevice {
+  readonly componentId: string;
+  readonly kind: string;
+  readonly pinIds?: readonly string[];
+}
+
+/** A component with a code 91 record: what `getThermalState` composes classic's readout from. */
+export interface CompiledThermalDevice {
+  readonly profile: ThermalDeviceProfile;
+  readonly catalogUid: string;
+}
+
 export interface CompiledCircuit {
   program: Float64Array;
   /** Exactly `buildNets(circuit)` — same ids, same order as the classic engine's `nets`. */
@@ -172,12 +204,15 @@ export interface CompiledCircuit {
   /**
    * One entry per device record, in record order: the components in circuit
    * order (skipping `ground`), then one `section_anchor` entry per isolated
-   * section. An anchor is no component, so its `componentId` is the synthetic
-   * `section_anchor:<node>`, which no id-keyed lookup can mistake for the
-   * component that owns its pin (the record's `componentIndex` names that
-   * one); it gets no `elementI` key (core/README.md, "Section anchor record").
+   * section, then the W1g `rating` and `thermal` records. None of those is a
+   * component, so each takes a synthetic `componentId` (`section_anchor:<node>`,
+   * `rating:<device>`, `thermal:<device>`, `device` the rated or heated
+   * record's index), which no id-keyed lookup (`setParams`, `elementI`, the
+   * device state) can mistake for the component that owns it; none gets an
+   * `elementI` key (core/README.md, "Section anchor record", "Reader rules for
+   * codes 90 and 91").
    */
-  devices: ReadonlyArray<{ componentId: string; kind: string }>;
+  devices: ReadonlyArray<CompiledDevice>;
   /** Per `battery_pack` component id: the statics `getBatteryState` adds to the device state (core/README.md, "Readouts"). */
   batteries: ReadonlyMap<string, CompiledBatteryInfo>;
   /**
@@ -188,6 +223,10 @@ export interface CompiledCircuit {
    * re-deriving it from the circuit.
    */
   benchPsuLimits: ReadonlyMap<string, number>;
+  /** Per component id with a code 91 record, in record order: its profile and `catalogUid` (core/README.md, Readouts, `getThermalState`). */
+  thermalDevices: ReadonlyMap<string, CompiledThermalDevice>;
+  /** `AMBIENT_C`, the option this program was written with. */
+  ambientC: number;
   /** Digital slot `i` -> `digitalState` key. Empty unless the circuit contains a kind that claims one — W1c's combinational ICs are the first (compile/ics.ts). */
   digitalSlots: readonly DigitalSlotKey[];
   /** Channel slot `j` -> `(componentId, channel)`. Empty until a compiled kind claims one (none through W1c). */
@@ -213,6 +252,36 @@ export interface CompiledCircuit {
 export function classicElementIKeys(circuit: SimCircuit, nodeCount: number): string[] {
   if (nodeCount === 1) return [];
   return circuit.components.filter((component) => component.pins.length >= 2).map((component) => component.id);
+}
+
+type SimComponent = SimCircuit["components"][number];
+
+/**
+ * The pin ids of one compiled record, in pin-record order, read back through
+ * the record's `(openHash, deadHash)` pair, a pure function of
+ * `(componentId, pinId)` (core/README.md, pin records). Only the component's
+ * declared pins are candidates: a by-id pin it does not declare reads node 0
+ * and has no id to name, so such a record gets none (no W1g record names a pin
+ * of an LED or a display, the only kinds with one). Two declared ids sharing
+ * both 32-bit prefixes would be ambiguous; that throws rather than guess.
+ */
+function pinIdsOfRecord(component: SimComponent, input: ProgramDeviceInput): string[] | undefined {
+  const idByHashes = new Map<string, string>();
+  for (const { id } of component.pins) {
+    const key = `${openPinHashPrefix(component.id, id)}:${deadBandHashPrefix(component.id, id)}`;
+    const previous = idByHashes.get(key);
+    if (previous !== undefined && previous !== id) {
+      throw new Error(`compileCircuit: pins "${previous}" and "${id}" of ${component.id} share both hash prefixes`);
+    }
+    idByHashes.set(key, id);
+  }
+  const pinIds: string[] = [];
+  for (const pin of input.pins) {
+    const id = idByHashes.get(`${pin.openHash}:${pin.deadHash}`);
+    if (id === undefined) return undefined;
+    pinIds.push(id);
+  }
+  return pinIds;
 }
 
 export type CompileResult =
@@ -278,7 +347,7 @@ export function compileCircuit(
   const optionPairs = buildOptionPairs(Number.isFinite(ambientC) ? ambientC : AMBIENT_DEFAULT_C, options);
 
   const writer = new ProgramWriter(built.nodeCount, optionPairs);
-  const devices: { componentId: string; kind: string }[] = [];
+  const devices: CompiledDevice[] = [];
   const digitalSlots = new SlotAllocator<DigitalSlotKey>();
   const channelSlots = new SlotAllocator<ChannelSlotKey>();
   const batteries = new Map<string, CompiledBatteryInfo>();
@@ -286,6 +355,23 @@ export function compileCircuit(
 
   const pin = (kind: string, componentId: string, pinId: string) =>
     buildPinRecord(built, openKeys, kind, componentId, pinId);
+
+  /**
+   * Writes a component's record and its `devices` entry, and adds the slow
+   * physics' declines for it (compile/thermal.ts). Every record's pins
+   * come from `buildPinRecord` or `pinByIdOrGround`, whose two hash prefixes
+   * are pure functions of `(componentId, pinId)`, so the pin ids are read
+   * back from the record itself rather than restated beside each kind's
+   * compiler, where a second list could drift from the first.
+   */
+  const addComponentDevice = (component: SimComponent, input: ProgramDeviceInput): void => {
+    // Asked only of a component that otherwise compiles, so a part already
+    // declined for its pins or params gets no second, derived reason.
+    for (const reason of slowPhysicsDeclines(component)) reasons.add(reason);
+    writer.addDevice(input);
+    const pinIds = pinIdsOfRecord(component, input);
+    devices.push({ componentId: component.id, kind: component.kind, ...(pinIds ? { pinIds } : {}) });
+  };
 
   circuit.components.forEach((component, componentIndex) => {
     if (!implementedKinds.has(component.kind)) return; // already recorded above
@@ -316,7 +402,7 @@ export function compileCircuit(
           reasons.add(`malformed:${component.id}:non-finite-resistance`);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.resistor,
           componentIndex,
           pins: [
@@ -325,7 +411,6 @@ export function compileCircuit(
           ],
           params: [resistance],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -342,7 +427,7 @@ export function compileCircuit(
           reasons.add(`malformed:${component.id}:non-finite-voltage`);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.voltage_source,
           componentIndex,
           pins: [
@@ -351,7 +436,6 @@ export function compileCircuit(
           ],
           params: [voltage],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -361,13 +445,12 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.capacitor,
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -385,13 +468,12 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -401,13 +483,12 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.spdt_switch,
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -417,13 +498,33 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.dip_switch,
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
+        return;
+      }
+
+      // `fuse` and `ptc_fuse` (codes 10 and 13, W1g): positional pins,
+      // `[rNormal, iRating]` and `[rNormal, iHold]`, no slots (compile/passives.ts).
+      case "fuse":
+      case "ptc_fuse": {
+        const result =
+          component.kind === "fuse"
+            ? compileFuse(built, openKeys, component)
+            : compilePtcFuse(built, openKeys, component);
+        if (!result.ok) {
+          reasons.add(result.reason);
+          return;
+        }
+        addComponentDevice(component, {
+          kindCode: CORE_KIND_CODES[component.kind],
+          componentIndex,
+          pins: result.pins,
+          params: result.params,
+        });
         return;
       }
 
@@ -441,14 +542,13 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.battery_pack,
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: result.blob,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         batteries.set(component.id, result.info);
         return;
       }
@@ -460,13 +560,12 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.bench_psu,
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         benchPsuLimits.set(component.id, result.params[CORE_BENCH_PSU_PARAM.iLimit]!);
         return;
       }
@@ -489,14 +588,13 @@ export function compileCircuit(
         }
         const slotBase = digitalSlots.count;
         for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [slotBase],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -507,13 +605,12 @@ export function compileCircuit(
           reasons.add(result.reason);
           return;
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.led,
           componentIndex,
           pins: result.pins,
           params: result.params,
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -540,14 +637,13 @@ export function compileCircuit(
         const channelCount = CORE_RECORD_SHAPES.get(CORE_KIND_CODES[component.kind])!.channelSlots ?? 0;
         const channelBase = channelSlots.count;
         for (let j = 0; j < channelCount; j++) channelSlots.allocate([component.id, j]);
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [channelBase],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -561,14 +657,13 @@ export function compileCircuit(
         }
         const slotBase = digitalSlots.count;
         for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES.ne555,
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [slotBase, ...result.pinFlags],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -602,14 +697,13 @@ export function compileCircuit(
         for (const pinId of result.outputCapablePinIds) {
           digitalSlots.allocate(`${component.id}/${pinId}`);
         }
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [slotBase, ...result.pinFlags],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -631,14 +725,13 @@ export function compileCircuit(
         }
         const slotBase = digitalSlots.count;
         for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [slotBase, ...result.pinFlags],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -658,14 +751,13 @@ export function compileCircuit(
         }
         const slotBase = digitalSlots.count;
         for (const key of result.digitalSlotKeys) digitalSlots.allocate(key);
-        writer.addDevice({
+        addComponentDevice(component, {
           kindCode: CORE_KIND_CODES[component.kind],
           componentIndex,
           pins: result.pins,
           params: result.params,
           blob: [slotBase, ...result.pinFlags, ...result.romWords],
         });
-        devices.push({ componentId: component.id, kind: component.kind });
         return;
       }
 
@@ -700,6 +792,19 @@ export function compileCircuit(
     devices.push({ componentId: `section_anchor:${anchor.node}`, kind: "section_anchor" });
   }
 
+  // The W1g rating and thermal records come after every component record and
+  // every anchor, in ascending `device` (core/README.md, "Reader rules for
+  // codes 90 and 91"); compileSlowRecords checks that order before it returns.
+  const thermalDevices = new Map<string, CompiledThermalDevice>();
+  for (const record of compileSlowRecords(circuit, devices)) {
+    writer.addDevice(record.input);
+    devices.push({ componentId: `${record.kind}:${record.device}`, kind: record.kind });
+    if (record.profile) {
+      const catalogUid = circuit.components[record.input.componentIndex]!.catalogUid!;
+      thermalDevices.set(record.componentId, { profile: record.profile, catalogUid });
+    }
+  }
+
   return {
     ok: true,
     compiled: {
@@ -711,6 +816,8 @@ export function compileCircuit(
       devices,
       batteries,
       benchPsuLimits,
+      thermalDevices,
+      ambientC,
       digitalSlots: digitalSlots.table,
       channelSlots: channelSlots.table,
       elementIKeys: classicElementIKeys(circuit, built.nodeCount),

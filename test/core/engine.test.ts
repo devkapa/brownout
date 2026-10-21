@@ -455,6 +455,9 @@ describe("load-time delta-cycle livelock (-7) -> CoreUnsupportedError with a liv
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -980,6 +983,9 @@ describe("pointer sign coercion (>>> 0) at engine.ts's own ABI call sites", () =
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1050,8 +1056,16 @@ describe("readout.ts", () => {
     const compiled = compileOkForReadoutTests();
     const currents = compiled.devices.map((_, i) => (i + 1) * 1.5);
     const elementI = buildElementI(compiled, currents);
+    // A component's own record carries its current; the synthetic W1g rating
+    // and thermal records (and section anchors) publish no elementI key.
+    const synthetic = new Set(["rating", "thermal", "section_anchor"]);
+    expect(compiled.devices.some((device) => device.kind === "rating")).toBe(true);
     compiled.devices.forEach((device, i) => {
-      expect(elementI[device.componentId]).toBe(currents[i]);
+      if (synthetic.has(device.kind)) {
+        expect(elementI).not.toHaveProperty([device.componentId]);
+      } else {
+        expect(elementI[device.componentId]).toBe(currents[i]);
+      }
     });
   });
 
@@ -1196,6 +1210,9 @@ describe("CoreEngine.load — options passthrough to compileCircuit (integration
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1334,6 +1351,9 @@ describe("advance() sends tEnd straight through to Rust — no more _loadedAt tr
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest(exports);
@@ -1432,6 +1452,9 @@ describe("CoreEngine — v2 additions (nextEventTime, getElementChannelI, digita
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: () => 0,
     };
     __installCoreForTest({ ...base, ...overrides });
@@ -1555,6 +1578,9 @@ describe("CoreEngine.setParams", () => {
       bo_engine_eeprom_updates_ptr: () => 0,
       bo_engine_device_state: () => 0,
       bo_engine_device_state_ptr: () => 0,
+      bo_engine_reset_failures: () => 0,
+      bo_engine_records: () => 0,
+      bo_engine_records_ptr: () => 0,
       bo_engine_set_params: (_h: number, ptr: number, lenF64: number) => {
         setParamsCalls++;
         captured = Array.from(new Float64Array(buffer, ptr, lenF64));

@@ -8,6 +8,7 @@ import {
   coreGeneration,
   coreReady,
   coreStatus,
+  copyRecords,
   getWasmApi,
   initCore,
   readCoreErrorMessage,
@@ -156,6 +157,10 @@ describe("the built module itself", () => {
       // W1f's row (Q11): one generic device-state pair.
       "bo_engine_device_state",
       "bo_engine_device_state_ptr",
+      // W1g's rows: the failure reset and the record channels.
+      "bo_engine_reset_failures",
+      "bo_engine_records",
+      "bo_engine_records_ptr",
     ]) {
       expect(names.has(name)).toBe(true);
     }
@@ -197,6 +202,9 @@ function fakeExports(overrides: Partial<CoreExports> = {}): CoreExports {
     bo_engine_eeprom_updates_ptr: () => 0,
     bo_engine_device_state: () => 0,
     bo_engine_device_state_ptr: () => 0,
+    bo_engine_reset_failures: () => 0,
+    bo_engine_records: () => 0,
+    bo_engine_records_ptr: () => 0,
   };
   return { ...base, ...overrides };
 }
@@ -313,6 +321,64 @@ describe("bo_engine_device_state / bo_engine_device_state_ptr — wired through 
       expect(coreCall((exports) => exports.bo_engine_device_state(handle, 0))).toBe(-5);
       expect(coreCall((exports) => readCoreErrorMessage(exports))).toMatch(/no program loaded/);
       expect(coreCall((exports) => exports.bo_engine_device_state_ptr(handle))).toBe(0);
+    } finally {
+      coreCall((exports) => exports.bo_engine_destroy(handle));
+    }
+  });
+});
+
+// W1g's ABI rows. This file proves the raw exports are wired through and the
+// record buffer is read from the memory current after the collect; the
+// decoding and the facade are failures.test.ts's and engine.test.ts's.
+describe("bo_engine_reset_failures / bo_engine_records / bo_engine_records_ptr — wired through CoreExports (W1g)", () => {
+  afterEach(() => {
+    __resetCoreForTest();
+  });
+
+  for (const name of ["bo_engine_reset_failures", "bo_engine_records", "bo_engine_records_ptr"] as const) {
+    it(`verifyCoreExports rejects a missing ${name} export, naming it`, () => {
+      const raw = asRaw(fakeExports());
+      delete raw[name];
+      expect(() => verifyCoreExports(raw)).toThrow(CoreInitError);
+      expect(() => verifyCoreExports(raw)).toThrow(new RegExp(`\\b${name}\\b`));
+    });
+  }
+
+  it("copyRecords re-derives its view from the memory as it is after the collect, never an earlier one", () => {
+    const memory = new (getWasmApi().Memory)({ initial: 1 }) as unknown as { buffer: ArrayBuffer; grow(pages: number): number };
+    const exports = fakeExports({
+      memory,
+      bo_engine_records: () => {
+        // A collect that grows memory detaches every view taken before it.
+        memory.grow(1);
+        new Float64Array(memory.buffer, 65536, 7).set([3, 1, -1, 0.5, 2, 1, 0]);
+        return 7;
+      },
+      bo_engine_records_ptr: () => 65536,
+    });
+    const stale = new Float64Array(memory.buffer);
+    const records = copyRecords(exports, 1, 0);
+    if (typeof records === "number") throw new Error(`expected a buffer, got code ${records}`);
+    expect(stale.length).toBe(0); // detached
+    expect([...records]).toEqual([3, 1, -1, 0.5, 2, 1, 0]);
+    // A copy, not a view: a later write to the buffer does not reach it.
+    new Float64Array(memory.buffer, 65536, 1)[0] = 99;
+    expect(records[0]).toBe(3);
+  });
+
+  it("copyRecords returns the negative code untouched, so the caller can name the error", () => {
+    const exports = fakeExports({ bo_engine_records: () => -8 });
+    expect(copyRecords(exports, 1, 9)).toBe(-8);
+  });
+
+  it("against the real built module: with no program loaded, both calls return -5 with a message", async () => {
+    await initCore();
+    const handle = coreCall((exports) => exports.bo_engine_create());
+    try {
+      expect(coreCall((exports) => exports.bo_engine_records(handle, 0))).toBe(-5);
+      expect(coreCall((exports) => readCoreErrorMessage(exports))).toMatch(/no program loaded/);
+      expect(coreCall((exports) => exports.bo_engine_reset_failures(handle))).toBe(-5);
+      expect(coreCall((exports) => exports.bo_engine_records_ptr(handle))).toBe(0);
     } finally {
       coreCall((exports) => exports.bo_engine_destroy(handle));
     }

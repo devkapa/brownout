@@ -140,7 +140,8 @@ export interface WasmMemoryLike {
  * owner decision 1) is now below too. `bo_engine_seed_memory`,
  * `bo_engine_take_eeprom_updates` and `bo_engine_eeprom_updates_ptr` (W1d,
  * owner decision 2) follow, then `bo_engine_device_state` and
- * `bo_engine_device_state_ptr` (W1f Q11).
+ * `bo_engine_device_state_ptr` (W1f Q11), then `bo_engine_reset_failures`,
+ * `bo_engine_records` and `bo_engine_records_ptr` (W1g).
  */
 export interface CoreExports {
   readonly memory: WasmMemoryLike;
@@ -214,6 +215,22 @@ export interface CoreExports {
    * collect, valid until the next call on this engine.
    */
   bo_engine_device_state_ptr(h: number): number;
+  /**
+   * Classic's `resetFailures()`, applied as one event at the current time:
+   * `0`; `-4` or `-7` when the re-solve at that instant fails, and then the
+   * reset rolls back; `-5` with no program loaded (core/README.md's C ABI v2
+   * table, W1g).
+   */
+  bo_engine_reset_failures(h: number): number;
+  /**
+   * Collect one record channel (`0` failures, `1` warnings, `2` tripped PTCs,
+   * `3` the latch log, which the collect empties) into the engine's record
+   * buffer and return its length in f64, a multiple of 7; `-8` for another
+   * channel, `-5` with no program loaded. Read it with {@link copyRecords}.
+   */
+  bo_engine_records(h: number, channel: number): number;
+  /** The buffer from the last {@link CoreExports.bo_engine_records} collect, valid until the next call on this engine. */
+  bo_engine_records_ptr(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */
@@ -250,6 +267,9 @@ const REQUIRED_FUNCTION_EXPORTS = [
   "bo_engine_eeprom_updates_ptr",
   "bo_engine_device_state",
   "bo_engine_device_state_ptr",
+  "bo_engine_reset_failures",
+  "bo_engine_records",
+  "bo_engine_records_ptr",
 ] as const;
 
 // ─── The runtime WebAssembly API, resolved off globalThis — no ambient type ─
@@ -465,6 +485,20 @@ export function readCoreErrorMessage(exports: CoreExports): string {
  */
 export function copyF64(exports: CoreExports, ptr: number, len: number): Float64Array {
   return Float64Array.from(new Float64Array(exports.memory.buffer, ptr, len));
+}
+
+/**
+ * @internal Collects record channel `channel` of engine `h` and copies the
+ * record buffer out, or returns `bo_engine_records`'s negative code untouched
+ * so the caller can read the error message next. The view is taken from
+ * `memory.buffer` as it stands AFTER the collect, which may have grown memory
+ * and detached every earlier view.
+ */
+export function copyRecords(exports: CoreExports, h: number, channel: number): Float64Array | number {
+  const len = exports.bo_engine_records(h, channel);
+  if (len < 0) return len;
+  if (len === 0) return new Float64Array(0);
+  return copyF64(exports, exports.bo_engine_records_ptr(h) >>> 0, len);
 }
 
 // ─── Source resolution ──────────────────────────────────────────────────────

@@ -36,12 +36,9 @@
  * DECLINES mirror core/README.md's per-param rules: a non-finite resolved
  * value is `malformed:<id>:non-finite-<param>`, and `led`'s `n <= 0` is
  * `malformed:<id>:non-positive-n` (classic then divides by `n·Vt = 0`).
- * `led` additionally declines a component whose `catalogUid` classic's own
- * `_thermalProfile` accepts (`thermalProfileForComponent`, sim-engine.ts —
- * the body of `_thermalProfile` without its cache, exported for exactly this
- * reuse): self-heating is W1g (LEDs point 3), so every `led` that reaches
- * this compiler has no thermal state, and this decline keeps the core from
- * silently running such a `led` at ambient forever.
+ * A `led` with a thermal identity compiles like any other: its heat is the
+ * code 91 record compile/thermal.ts adds (W1g lifts LEDs point 3's
+ * `led-thermal` decline).
  *
  * CHANNEL SLOTS (`rgb_led`: 3, `bicolor_led`: 2, `seg7_cc`/`seg7_ca`: 8) are
  * NOT allocated here — compile/index.ts owns slot allocation (the same split
@@ -51,7 +48,7 @@
  */
 
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
-import { specsForComponent, thermalProfileForComponent } from "../../sim/engine/sim-engine.js";
+import { specsForComponent } from "../../sim/engine/sim-engine.js";
 import type { ProgramPinInput } from "../format.js";
 import { pinByIdOrGround } from "./passives.js";
 import { buildPinRecord, type CoreNodeBuild } from "./topology.js";
@@ -75,13 +72,6 @@ export function compileLed(
   if (component.pins.length < 2) {
     return { ok: false, reason: `malformed:${component.id}:too-few-pins` };
   }
-  // LEDs point 3: self-heating is W1g. A `led` whose catalogUid classic's own
-  // `_thermalProfile` accepts has no ambient-only path in classic, so the
-  // core declines it rather than silently running it at ambient forever.
-  if (thermalProfileForComponent(component) !== undefined) {
-    return { ok: false, reason: `unsupported-feature:led-thermal:${component.id}` };
-  }
-
   const specs = specsForComponent(component);
   const p = component.params;
 

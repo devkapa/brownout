@@ -215,31 +215,26 @@ describe("compileLed — declines", () => {
     expect(compileLed(b.b, b.openKeys, comp)).toEqual({ ok: false, reason: "malformed:led1:non-finite-is" });
   });
 
-  it("unsupported-feature:led-thermal — a led whose catalogUid classic's own _thermalProfile accepts; a control with no uid still compiles", () => {
+  it("a led whose catalogUid classic's own _thermalProfile accepts compiles like any other (W1g lifts led-thermal)", () => {
     const identified = part("led1", "led", ["a", "k"], {}, "led-red");
-    const b1 = built(circuit([identified]));
-    expect(compileLed(b1.b, b1.openKeys, identified)).toEqual({
-      ok: false,
-      reason: "unsupported-feature:led-thermal:led1",
-    });
-
-    // The control: an otherwise identical led with NO catalogUid compiles
-    // fine — the decline is on the component's own EXPLICIT catalogUid
-    // (thermalProfileForComponent's own gate), not on whether specs happen
-    // to resolve.
     const control = part("led2", "led", ["a", "k"]);
+    const b1 = built(circuit([identified]));
     const b2 = built(circuit([control]));
-    expect(compileLed(b2.b, b2.openKeys, control)).toMatchObject({ ok: true });
+    const withUid = compileLed(b1.b, b1.openKeys, identified);
+    const without = compileLed(b2.b, b2.openKeys, control);
+    if (!withUid.ok || !without.ok) throw new Error("both LEDs must compile");
+    // The identity changes no LED param: heat is the code 91 record's job.
+    expect(withUid.params).toEqual(without.params);
   });
 
-  it("every catalog led part (default-parts.json) is declined once its catalogUid is authored explicitly", () => {
+  it("every catalog led part (default-parts.json) compiles, with a code 91 record, once its catalogUid is authored", () => {
     for (const p of BUNDLED_DEFAULT_PARTS.filter((p) => p.kind === "led")) {
       const comp = part("led1", "led", ["a", "k"], {}, p.uid);
-      const b = built(circuit([comp]));
-      expect(compileLed(b.b, b.openKeys, comp)).toEqual({
-        ok: false,
-        reason: "unsupported-feature:led-thermal:led1",
-      });
+      const result = compileCircuit(circuit([comp]));
+      expect(result.ok, p.uid).toBe(true);
+      if (!result.ok) continue;
+      const decoded = decodeProgram(result.compiled.program);
+      expect(decoded.devices.map((device) => device.kindCode)).toContain(CORE_KIND_CODE.thermal);
     }
   });
 });
