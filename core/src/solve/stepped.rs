@@ -145,6 +145,68 @@ struct StepResult {
     /// The factors of the step's last Newton iteration, kept for a hub
     /// partition's rail sensitivity (README, Rails point 3).
     lu: Option<LuFactorization>,
+    /// On a CC rail ([`CcStep`]), the rail the step solved at its end.
+    u: Option<f64>,
+}
+
+/// A bench PSU in CC with no rail capacitor, as the stepped hub partitions
+/// see it (README, Rails point 3, FXF): the rail is set by the draws alone,
+/// `Σ draws(u) = dir·iLimit`, so it moves with this partition's own state
+/// (an LED charging a capacitor at the limit drags the rail up with the
+/// capacitor). Held as a boundary over a step, it went stale within the step
+/// and the 1 µV CC re-solve band re-solved the partition every 1e-7 s, each
+/// time a discontinuity restarting the step at `POST_EVENT_H` (0.1 s of such
+/// a board took 27 s). So each such partition steps with the rail as an
+/// unknown: its own KCL plus the rest of the rail's draw, `a_o + g_o u`,
+/// linearised at the last rail solve, equals the limit. The rest is the
+/// running sums of every other contribution and the direct devices at the
+/// present rail; the rail loop still solves the rail exactly after each
+/// commit and re-solves past the band, so this only makes the step's own
+/// rail consistent, not the rail's answer.
+#[derive(Debug, Clone)]
+pub(crate) struct CcRail {
+    pub rail: usize,
+    /// `dir·iLimit` and the setpoint `V`, where CC ends.
+    pub dl: f64,
+    pub v: f64,
+    /// Every partition's and direct device's draw as `a + g u` at the last
+    /// rail solve, and each stepped hub partition's own share of it.
+    pub a_all: f64,
+    pub g_all: f64,
+    pub own: Vec<(usize, f64, f64)>,
+}
+
+impl CcRail {
+    fn step(&self, p: usize, u0: f64) -> CcStep {
+        let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0 }
+    }
+}
+
+/// One partition's view of a [`CcRail`]: the rest of the draw without its
+/// own share, and the rail `u0` it starts from, at which a rail IC's power
+/// gate is judged for the whole step (power flips only at rail solves).
+#[derive(Debug, Clone, Copy)]
+struct CcStep {
+    rail: usize,
+    dl: f64,
+    v: f64,
+    a_o: f64,
+    g_o: f64,
+    u0: f64,
+}
+
+impl CcStep {
+    /// How far `u` is past the setpoint in the supply's direction (the CC
+    /// exit, Rails point 5, is at 0).
+    fn beyond(&self, u: f64) -> f64 {
+        let dir = if self.v < 0.0 { -1.0 } else { 1.0 };
+        dir * u - self.v.abs()
+    }
+
+    fn past_setpoint(&self, u: f64) -> bool {
+        self.beyond(u) > 0.0
+    }
 }
 
 /// Everything [`take_step`]'s per-Newton-iterate stamp closure needs to
@@ -173,6 +235,8 @@ struct IcStampCtx<'a> {
     keep_lu: bool,
     /// Exact mode's hub source, when this is the rail's partition.
     exact: Option<ExactStamp>,
+    /// The CC rail this partition steps against ([`CcRail`]).
+    cc: Option<CcStep>,
     p_idx: usize,
     /// Whether THIS partition's stamp moves with the very voltages the step
     /// is solving for: it holds a free IC supply node (contract point 3,
@@ -221,6 +285,28 @@ fn take_step(
     ic_ctx: &IcStampCtx,
     at: f64,
 ) -> Result<StepResult, StepError> {
+    solve_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, false)
+}
+
+/// [`take_step`], with `polish` handed to the iterated Newton solve (one more
+/// iteration from the passing iterate, `newton::solve`).
+#[allow(clippy::too_many_arguments)]
+fn solve_step(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+    polish: bool,
+) -> Result<StepResult, StepError> {
+    if let Some(cc) = ic_ctx.cc {
+        return take_cc_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, cc, false);
+    }
     let n = shape.n;
     // The boundary at the step's own end, where backward Euler and the
     // trapezoid both solve the network (a running ramp moves it).
@@ -234,7 +320,7 @@ fn take_step(
     // partitions need the real convergence loop instead. No polish: classic
     // solves each step exactly like this (LEDs point 8).
     let linear = !ic_ctx.iterated;
-    let (result, factors) = newton::solve_keeping_factors(n, n, x_from, linear, false, |x, a, b| {
+    let (result, factors) = newton::solve_keeping_factors(n, n, x_from, linear, polish, |x, a, b| {
         stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, n, x, a, b);
         if let Some(e) = exact {
             e.apply(n, a, b);
@@ -263,7 +349,113 @@ fn take_step(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors) })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None })
+}
+
+/// [`take_step`] on a CC rail ([`CcRail`]): the rail is unknown `n`, its row
+/// this partition's draw (the residual stamp's rail row, as the sensitivity
+/// reads it) plus the rest's `a_o + g_o u`, equal to `dir·iLimit`. A rail
+/// that ends past the setpoint is reported as it is: the plan cuts the step
+/// at the exit (`plan_step`), and the regime rules leave CC at its commit
+/// (Rails point 5). Re-solving the whole step in CV instead put the step's
+/// end on a trajectory CV never took (the rail held at `V` from the step's
+/// start), whose draw at `V` was over the limit again: the rail loop stayed
+/// in CC 1.3e-8 V short of `V`, and the exit landed a whole step (2 ms, 16
+/// mV of capacitor) late.
+#[allow(clippy::too_many_arguments)]
+fn take_cc_step(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+    cc: CcStep,
+    cv: bool,
+) -> Result<StepResult, StepError> {
+    let n = shape.n;
+    let size = n + 1;
+    let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, at).with_ext(cc.rail, n).hold_power_at(cc.u0);
+    let linear = !ic_ctx.iterated;
+    let solve = |newton_iters: &mut u64| -> Result<(Vec<f64>, LuFactorization), StepError> {
+        let mut z0: Vec<f64> = x_from[..n].to_vec();
+        z0.push(if cv { cc.v } else { cc.u0 });
+        let stamp = |z: &[f64], a: &mut [f64], b: &mut [f64]| {
+            stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, size, z, a, b);
+            let row = n * size;
+            if cv {
+                a[row..row + size].fill(0.0);
+                a[row + n] = 1.0;
+                b[n] = cc.v;
+            } else {
+                a[row + n] += cc.g_o;
+                b[n] += cc.dl - cc.a_o;
+            }
+        };
+        let (result, mut factors) = newton::solve_keeping_factors(size, size, &z0, linear, true, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+        *newton_iters += result.iterations as u64;
+        if !linear && !result.converged {
+            return Err(StepError::NoConverge);
+        }
+        // Then on to the solution, to rounding: the rail loop solves the rail
+        // from this step's draw and compares it with the rail the step ended
+        // on, against the 1 µV CC band and against the setpoint. An iterate a
+        // Newton tolerance short re-solved the partition every few hundred
+        // µs, and one polish iteration still left the rail 1.3e-8 V off the
+        // loop's, enough to leave a cut that landed past the setpoint in CC
+        // for another step (a 5 ms late exit). Each further step is one
+        // Newton iteration about the last (a linear solve of the stamps
+        // linearised there); it stops once a step moves nothing beyond a few
+        // ulps, at most `POLISH_MORE` of them.
+        const POLISH_MORE: u32 = 4;
+        let mut z = result.x;
+        if !linear {
+            for _ in 0..POLISH_MORE {
+                let (next, f) = newton::solve_keeping_factors(size, size, &z, true, false, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+                *newton_iters += next.iterations as u64;
+                let moved = next.x.iter().zip(&z).any(|(a, b)| (a - b).abs() > 4.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0));
+                z = next.x;
+                factors = f;
+                if !moved {
+                    break;
+                }
+            }
+        }
+        Ok((z, factors))
+    };
+    let (mut z, factors) = solve(newton_iters)?;
+    let mut vc = vec![0.0; shape.capacitors.len()];
+    let mut i_new = vec![0.0; shape.capacitors.len()];
+    for (idx, cap) in shape.capacitors.iter().enumerate() {
+        let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
+        let (va, vb) = (pin_voltage(&cap.pins[0], &z, &bnd), pin_voltage(&cap.pins[1], &z, &bnd));
+        let i = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
+        i_new[idx] = i;
+        vc[idx] = match method {
+            Method::Be => vc_from[idx] + (h / cap.c) * i,
+            Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
+        };
+    }
+    // The sensitivity solves through the partition's own matrix at the rail
+    // it ended on: the node block of the last iteration's, restamped at the
+    // solution (the rail's row and column are the step's, not the
+    // partition's).
+    let lu = if ic_ctx.keep_lu {
+        let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
+        stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, size, &z, &mut a, &mut b);
+        let block: Vec<f64> = (0..n).flat_map(|r| a[r * size..r * size + n].to_vec()).collect();
+        drop(factors);
+        Some(crate::lu::lu_factor(block, n).map_err(|_| StepError::Failed("stepped: singular or non-finite pivot in a Newton iteration".to_string()))?)
+    } else {
+        None
+    };
+    let u = z[n];
+    z.truncate(n);
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u) })
 }
 
 /// One step's network, every element about `x`: the linear base, each
@@ -376,10 +568,20 @@ const SEED_H: f64 = 1e-12;
 /// warm-starts every solve from the previous accepted one), all zeros at
 /// load. It is not a step and has no smaller `h` to retry, so a Newton that
 /// does not pass there is `-4`. Its iterations are not counted in stat 11.
+///
+/// A hub partition's seed (`keep_lu`) is polished, one Newton iteration past
+/// the passing iterate (ruling R25 (a)): its draw is what the rail solves
+/// from, and through `C / SEED_H` a capacitor's current magnifies a Newton
+/// tolerance's offset into amps. On G2bv's seed 396 a switch closed an LED
+/// from the rail across a capacitor's held charge, a 330 A loop back into
+/// the rail; the passing iterate's draw was +-0.45 A off, differently at
+/// each rail, and the rail loop alternated the rail by 0.38 V until its
+/// 50-pass `-4`. Classic's seed is not polished; the polish moves the seed
+/// toward the solution of the same equations.
 fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx) -> Result<StepResult, String> {
     let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
-    take_step(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now).map_err(StepError::into_message)
+    solve_step(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu).map_err(StepError::into_message)
 }
 
 struct Partition {
@@ -704,6 +906,19 @@ pub struct SteppedSolver {
     cell: Option<(devices::battery::BatteryModel, devices::battery::BatteryState)>,
     hub_updates: Vec<(usize, Contrib)>,
     sensitivities: u64,
+    /// The CC rail the hub partitions step against while the owner's call
+    /// runs ([`CcRail`]); set by the owner before a call that may plan a
+    /// step and taken after it, so it is never stale.
+    pub(crate) cc: Option<CcRail>,
+    /// The partitions the owner's `resolve_dirty` re-solves only because
+    /// the rail moved past their band on a CC rail (no rail capacitor): a
+    /// re-aim, not a discontinuity, so each keeps the step its controller
+    /// chose. Two stepped LED and capacitor branches on one CC PSU each hold
+    /// the other's draw where it last committed, so every commit of one moved
+    /// the rail past the other's 1 µV band, and restarting it at
+    /// `POST_EVENT_H` made 2.77e6 steps of a 0.1 s board (FXEFv, FXF round
+    /// 3). Set by the owner around the call, empty otherwise.
+    pub(crate) reaim: Vec<usize>,
     /// Test builds keep every partition's state from when the window opened
     /// (keyed by partition) and check, at the window's end, that a partition
     /// the journal does not hold is unchanged, and after a rollback that all
@@ -797,6 +1012,8 @@ impl SteppedSolver {
             cell: None,
             hub_updates: Vec::new(),
             sensitivities: 0,
+            cc: None,
+            reaim: Vec::new(),
             #[cfg(test)]
             w_saved: None,
             #[cfg(test)]
@@ -976,6 +1193,7 @@ impl SteppedSolver {
             ramps,
             keep_lu: false,
             exact: None,
+            cc: None,
             p_idx: p,
             iterated: part.iterated(),
         };
@@ -1147,6 +1365,7 @@ impl SteppedSolver {
                 ramps: self.ramps.as_deref(),
                 keep_lu: hub,
                 exact: self.exact,
+                cc: None,
                 p_idx,
                 iterated,
             };
@@ -1155,7 +1374,10 @@ impl SteppedSolver {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
                 part.has_prev = false;
-                part.h = POST_EVENT_H;
+                // A re-aim keeps its step (`reaim`); a discontinuity restarts.
+                if !self.reaim.contains(&p_idx) {
+                    part.h = POST_EVENT_H;
+                }
                 part.changing = true;
                 part.version += 1;
                 // Re-solve `x` (and seed `i_prev`) from the CURRENT
@@ -1725,6 +1947,10 @@ impl SteppedSolver {
         // Only a cell's charge is billed (`commit_partition`); a PSU's never
         // is, so its trial skips the source-current solves.
         let billed = exact.filter(|e| e.partition == p_idx && self.cell.is_some());
+        let cc = match (&self.cc, self.partitions[&p_idx].hub, exact) {
+            (Some(cc), true, None) => Some(cc.step(p_idx, voltages[cc.rail])),
+            _ => None,
+        };
         let part = self.partitions.get_mut(&p_idx).unwrap();
         let shape_n = part.shape.n;
         let method = if part.be_next_step { Method::Be } else { option_method };
@@ -1732,7 +1958,7 @@ impl SteppedSolver {
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
         let keep_lu = part.hub && rail.is_some();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages), ramps, keep_lu, exact, p_idx, iterated: part.iterated() };
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated() };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);
@@ -1775,6 +2001,73 @@ impl SteppedSolver {
             part.changing = ratio * (H_MAX / h).powi(order_exp) > QUIET_FRACTION;
         }
         part.h = (h * next_step_factor(ratio, method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
+
+        // The CC exit inside the step (Rails point 5): the step is cut where
+        // its CC rail reaches the setpoint, just past it, so the regime rules
+        // leave CC at this commit, at the exit's own time
+        // rather than up to a whole step (`H_MAX`) late. Regula falsi on the
+        // rail's distance past the setpoint (near linear in `h` on a ramp),
+        // as a crossing is refined.
+        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc, accepted.u) {
+            // The bracket starts at the shortest step: a CC rail already past
+            // the setpoint there (the draws fell below the limit since the
+            // last rail solve, as when a load is switched out) is an exit at
+            // the step's start, and the whole step is solved in CV, the rail
+            // at `V` (a re-entry is found at the commit, as every regime
+            // change of a stepped partition is); cutting toward a start that
+            // is no CC solution made steps of 1e-12 s.
+            let first = if cc.past_setpoint(u_hi) && h > 2.0 * H_MIN {
+                let step = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).map_err(StepError::into_message)?;
+                Some((cc.beyond(step.u.expect("a CC step reports its rail")), step))
+            } else {
+                None
+            };
+            let first = match first {
+                Some((f, _)) if f > 0.0 => {
+                    accepted = take_cc_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + h, cc, true).map_err(StepError::into_message)?;
+                    half = None;
+                    None
+                }
+                other => other.map(|(f, _)| f),
+            };
+            if let Some(f_first) = first {
+                let (mut lo, mut f_lo) = (H_MIN, f_first);
+                let (mut hi, mut f_hi) = (h, cc.beyond(u_hi));
+                // `f_hi` and `f_lo` are the weights regula falsi uses (halved
+                // on a stuck side); `past` is the true distance at `hi`.
+                let mut past = f_hi;
+                let mut best = None;
+                let mut side = 0i8;
+                for _ in 0..CROSS_REFINE_MAX_ITERS {
+                    if past <= CROSS_TOLERANCE_V || hi - lo <= H_MIN * 1e-3 {
+                        break;
+                    }
+                    let frac = (-f_lo / (f_hi - f_lo)).clamp(1e-3, 1.0 - 1e-3);
+                    let h_try = lo + frac * (hi - lo);
+                    let step = take_step(&part.shape, live_params, h_try, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + h_try).map_err(StepError::into_message)?;
+                    let f = cc.beyond(step.u.expect("a CC step reports its rail"));
+                    if f > 0.0 {
+                        (hi, f_hi, past) = (h_try, f, f);
+                        best = Some(step);
+                        if side == 1 {
+                            f_lo *= 0.5;
+                        }
+                        side = 1;
+                    } else {
+                        (lo, f_lo) = (h_try, f);
+                        if side == -1 {
+                            f_hi *= 0.5;
+                        }
+                        side = -1;
+                    }
+                }
+                if let Some(step) = best {
+                    h = hi;
+                    accepted = step;
+                    half = None;
+                }
+            }
+        }
 
         // Iterative crossing refinement (this module's doc comment).
         if !part.watches.is_empty() {
@@ -1843,7 +2136,7 @@ impl SteppedSolver {
         part.pend_vc = accepted.vc;
         part.pend_i = accepted.i;
         part.pend_lu = accepted.lu.map(Rc::new);
-        part.pend_u = rail.map_or(0.0, |r| voltages[r]);
+        part.pend_u = accepted.u.unwrap_or_else(|| rail.map_or(0.0, |r| voltages[r]));
         part.pend_now = part.t;
         part.pend_h = h;
         part.pend_method = method;

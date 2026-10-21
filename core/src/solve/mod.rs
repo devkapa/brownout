@@ -3872,7 +3872,10 @@ impl PartitionedSolver {
         self.begin_dynamic_writes(cf_ids, false, !st_ids.is_empty());
         self.sync_rail_drive();
         readers.extend(self.closed_form.resolve_dirty(cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
-        readers.extend(self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        self.sync_stepped_cc(now);
+        let stepped = self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
+        self.stepped.cc = None;
+        readers.extend(stepped?);
         self.end_dynamic_writes();
         // W1f (Rails point 3): the rail loop runs inside this one call.
         self.rail_loop(now, drivers, readers)?;
@@ -4318,7 +4321,10 @@ impl PartitionSolver for PartitionedSolver {
         let result = if is_crossing {
             self.closed_form.handle_crossing(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)
         } else {
-            self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)
+            self.sync_stepped_cc(now);
+            let stepped = self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
+            self.stepped.cc = None;
+            stepped
         };
         readers.extend(self.on_error(result)?);
         self.end_dynamic_writes();
@@ -4349,7 +4355,9 @@ impl PartitionSolver for PartitionedSolver {
         let ramps_moved = self.refresh_ramps(t_end);
         self.begin_dynamic_writes(&[], true, true);
         self.closed_form.publish_at(t_end, &self.live_params, &mut self.voltages, &mut self.currents);
+        self.sync_stepped_cc(t_end);
         let result = self.stepped.sync_to(t_end, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
+        self.stepped.cc = None;
         let mut readers = self.on_error(result)?;
         self.end_dynamic_writes();
         // W1f: the stepped hub partitions the clamp committed contribute, and

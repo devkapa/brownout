@@ -569,6 +569,271 @@ fn a_fast_rc_inrush_off_a_5_ohm_cell_runs_to_the_end_on_a_coarse_host() {
 }
 
 #[test]
+fn a_cc_ramp_through_a_series_capacitor_into_a_short_runs_to_the_setpoint() {
+    // R6 (a), G2bv's seed 400 (FXF): {9.176 V, 0.326 A} -> 2.62 uF from the
+    // rail to a node held by 0.26 ohm (and 49301 ohm) to ground. In CC the
+    // limit flows through the capacitor into the short: the node sits at
+    // I R_p and the capacitor charges at I / C, so u = I R_p + I t / C
+    // (124 kV/s) until the setpoint, at t = (V - I R_p) C / I = 73.1 us.
+    // Its RAIL_DRIFT_V events land 0.08 ns apart while the short's node,
+    // still, turned by rounding at most of them: the no-progress guard
+    // declined it with -4 at 1.16 us.
+    let (v, i, c, r_s, r_l) = (9.176, 0.326, 2.62e-6, 0.26, 49301.0);
+    let r_p = 1.0 / (1.0 / r_s + 1.0 / r_l);
+    let p = program(3, vec![psu(0, 1, 0, v, i), capacitor(1, 1, 2, c, 0.0), resistor(2, 2, 0, r_s), resistor(3, 2, 0, r_l)]);
+    let mut rig = Rig::load(&p).unwrap();
+    assert_eq!(rig.hub().state.reg, Regime::Cc, "CC from load");
+    for t in [5e-6, 30e-6, 60e-6] {
+        rig.advance(t).unwrap_or_else(|e| panic!("{e:?} at {:.9e} (asked {t:e}), rail {:.9} V", rig.k.time(), rig.u()));
+        // Within W0: between drift events the RC charges at the rail of
+        // the last one, through 0.26 ohm, so the charge lags (3.7e-5 V at
+        // 5 us, as P7's does above).
+        let want = i * r_p + i * t / c;
+        close(rig.u(), want, 1e-4 + 1e-3 * want, &format!("u({t:e})"));
+        close(rig.v(2), i * r_p, 1e-4 + 1e-3 * i * r_p, &format!("the short's node at {t:e}"));
+    }
+    let t_set = (v - i * r_p) * c / i;
+    rig.advance(100e-6).unwrap();
+    assert_eq!(rig.hub().state.reg, Regime::Cv, "CV past the setpoint at {t_set:e}");
+    assert_eq!(rig.u(), v);
+}
+
+/// The frozen tab (FXF, G2bv's seed 177 hub 2): `{9.362 V, 0.3 A}` into an
+/// LED charging 29 mF beside 10 kohm. The LED and capacitor step (a stepped
+/// hub partition); in CC the rail is the LED's drop above the capacitor.
+fn cc_led_into_a_big_capacitor() -> Program {
+    program(3, vec![psu(0, 1, 0, 9.362, 0.3), led(1, 1, 2), capacitor(2, 2, 0, 29e-3, 0.0), resistor(3, 2, 0, 1e4)])
+}
+
+#[test]
+fn a_cc_psu_charging_a_capacitor_through_an_led_steps_at_its_own_time_constants() {
+    // A stepped hub partition stepped with the CC rail held over the step,
+    // so the 1 uV CC re-solve band (RAIL_CC_RESOLVE_V) re-solved it each
+    // time the rail rose 1 uV (10 V/s here: every 1e-7 s), each re-solve a
+    // discontinuity restarting the step at POST_EVENT_H: 2.7e6 steps and
+    // 27 s for 0.1 s of G2bv's board. Stepped with the rail as an unknown
+    // (stepped::CcRail), the capacitor's constant-current ramp sets the
+    // step. In CC the LED takes the limit less what the capacitor's 10 kohm
+    // and the shunts take, so C dv/dt = I - v / R: v = I R (1 - e^(-t/RC)).
+    let (i, r, c) = (0.3, 1e4, 29e-3);
+    let mut e = Engine::load(&cc_led_into_a_big_capacitor()).unwrap();
+    let mut ex = Engine::load(&exact(cc_led_into_a_big_capacitor())).unwrap();
+    for t in [1e-3, 0.03, 0.1, 0.3] {
+        e.advance(t).unwrap();
+        ex.advance(t).unwrap();
+        let want = i * r * (1.0 - (-t / (r * c)).exp());
+        // The node shunts (1e-12 S on two nodes, the LED's GMIN_D) take
+        // under 1e-11 A of the limit.
+        close(e.voltages()[2], want, 1e-4 + 1e-3 * want, &format!("the capacitor at {t}"));
+        for n in [1, 2] {
+            let (got, x) = (e.voltages()[n], ex.voltages()[n]);
+            close(got, x, 1e-4 + 1e-3 * x.abs(), &format!("node {n} at {t} against exact mode"));
+        }
+    }
+    let steps = e.stat(10);
+    assert!(steps < 2000.0, "{steps} steps to 0.3 s");
+    eprintln!("CC LED into 29 mF: {steps} steps to 0.3 s (exact mode {}), u {:.9} V, capacitor {:.9} V", ex.stat(10), e.voltages()[1], e.voltages()[2]);
+}
+
+/// G2bv's seed 396 (FXF): an 11.919 V cell of 0.872 ohm with 7.04 uF from
+/// the rail into a stepped partition of LEDs, and a switch (device 12) that
+/// closes onto a node one LED's drop below the rail at 0.128 s.
+fn cell_switch_into_an_led_loop() -> Program {
+    let led_with = |ci: usize, a: usize, b: usize, vf: f64, n: f64, i_rated: f64| Device {
+        kind: kinds::LED,
+        component_index: ci,
+        pins: vec![pin(a), pin(b)],
+        params: vec![vf, n, i_rated, 0.0, 0.0, 0.0],
+        blob: vec![],
+    };
+    program(
+        4,
+        vec![
+            battery(0, 1, 0, 11.919, 0.871754491687756),
+            resistor(1, 2, 0, 62781.73917223233),
+            resistor(2, 3, 0, 2114.98690486819),
+            led_with(3, 0, 1, 3.1804672682735617, 1.5309588747700547, 0.018282449928599544),
+            resistor(4, 1, 0, 568.6193329458822),
+            led_with(5, 1, 2, 2.5624835880969785, 2.457724114643147, 0.021406929309895958),
+            switch(6, 3, 2, false),
+            resistor(7, 2, 0, 93.7821532084478),
+            capacitor(8, 2, 1, 7.036846324138248e-6, 0.0),
+            resistor(9, 3, 0, 617.7597723368291),
+            led_with(10, 1, 3, 1.6963381742955792, 2.253206847498009, 0.009201902080047068),
+            resistor(11, 1, 1, 541.3846328576267),
+            switch(12, 2, 3, false),
+            resistor(13, 3, 0, 130.59505884211214),
+            resistor(14, 1, 0, 223.89969371503818),
+        ],
+    )
+}
+
+#[test]
+fn a_switch_closing_an_led_loop_through_a_rail_capacitor_settles_the_cell_rail() {
+    // Ruling R25 (a), G2bv's seed 396. Closing device 12 puts the LED from
+    // the rail to node 3 across the capacitor's held charge: a 330 A loop
+    // through the LED, the switch and the capacitor back into the rail,
+    // whose draw on the cell nets to a fraction of an amp. The stepped
+    // partition's seed (SEED_H, the capacitor as 7e6 S) stopped at Newton's
+    // tolerance there, its draw +-0.45 A off and different at each rail, so
+    // the rail loop alternated the rail by 0.38 V and declined with -4 after
+    // 50 passes. Polished, the seed's draw is the solution's and the loop
+    // settles; afterwards the board agrees with exact mode within half of
+    // W0's tolerance, and runs faster than real time.
+    let mut e = Engine::load(&cell_switch_into_an_led_loop()).unwrap();
+    let mut ex = Engine::load(&exact(cell_switch_into_an_led_loop())).unwrap();
+    let t_close = 0.12846868322174154;
+    let wall = std::time::Instant::now();
+    for eng in [&mut e, &mut ex] {
+        eng.advance(t_close).unwrap();
+        eng.set_params(&[(12, 0, 1.0)]).unwrap_or_else(|err| panic!("closing the switch: {} {}", err.code, err.message));
+    }
+    for t in [t_close + 1e-4, 0.13, 0.2, 0.5, 1.0] {
+        e.advance(t).unwrap_or_else(|err| panic!("default at {t}: {} {}", err.code, err.message));
+        ex.advance(t).unwrap();
+        for n in 1..4 {
+            let (got, x) = (e.voltages()[n], ex.voltages()[n]);
+            close(got, x, 0.5 * (1e-4 + 1e-3 * x.abs()), &format!("node {n} at {t} against exact mode"));
+        }
+    }
+    let secs = wall.elapsed().as_secs_f64();
+    assert!(secs < 1.0, "{secs} s of wall time for 1 s simulated (both engines)");
+    eprintln!("seed 396: {} steps to 1 s, {secs:.3} s wall with exact mode", e.stat(10));
+}
+
+#[test]
+fn a_cc_exit_inside_a_step_lands_within_the_crossing_tolerance() {
+    // The CC step's exit cut (Rails point 4, the CC step): the step whose
+    // CC rail passes the setpoint is cut where the rail reaches it, to
+    // CROSS_TOLERANCE_V. At the setpoint the draw is the limit, so the
+    // capacitor stands where the LED's drop at the limit puts the rail on
+    // V: I_LED(V - v) + GMIN_D (V - v) + NODE_RSHUNT_G V = I (the LED's own
+    // law, by bisection), and the exit publishes it within the tolerance of
+    // the rail cut (the LED's current is the limit's on both sides, so the
+    // capacitor moves with the rail one for one). Steps reach H_MAX on this
+    // ramp (10 V/s): a cut short of the tolerance lands mV off, and the
+    // whole step re-solved in CV landed 16 mV off.
+    let (v, i) = (9.362, 0.3);
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let f = |vc: f64| law.current(v - vc) + led::GMIN_D * (v - vc) + static_part::NODE_RSHUNT_G * v - i;
+    let (mut lo, mut hi) = (0.0, v);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let want = 0.5 * (lo + hi);
+    let mut rig = Rig::load(&cc_led_into_a_big_capacitor()).unwrap();
+    let t_exit = cc_exit(&mut rig, 2.0);
+    // The cut's rail and the rail loop's can part by the step solve's own
+    // residual (1e-8 V), and a cut a hair short exits at the next step,
+    // H_MIN later: at most one H_MIN of the 10 V/s ramp more.
+    let ramp = i / 29e-3;
+    close(rig.v(2), want, 2.0 * stepped::CROSS_TOLERANCE_V + ramp * stepped::H_MIN, &format!("the capacitor at the CC exit ({t_exit:.9} s)"));
+}
+
+/// FXEFv's frozen tab (FXF round 3, its `cc 50 tpl=9`): two stepped LED and
+/// capacitor branches on one CC PSU (no rail capacitor), the second
+/// switched on at 36.7 ms.
+fn cc_two_stepped_branches() -> Program {
+    let led_with = |ci: usize, a: usize, b: usize, vf: f64, n: f64, i_rated: f64| Device {
+        kind: kinds::LED,
+        component_index: ci,
+        pins: vec![pin(a), pin(b)],
+        params: vec![vf, n, i_rated, 0.0, 0.0, 0.0],
+        blob: vec![],
+    };
+    program(
+        7,
+        vec![
+            psu(0, 1, 0, 7.074682306731746, 0.04969714478669725),
+            resistor(1, 1, 2, 80.8610427002485),
+            led_with(2, 2, 3, 1.8308812442799438, 2.127961042214763, 0.009595530326038746),
+            capacitor(3, 3, 0, 0.0024925171639779437, 0.0),
+            resistor(4, 3, 0, 26681.76879544293),
+            switch(5, 1, 4, false),
+            resistor(6, 4, 5, 157.01184906156382),
+            led_with(7, 5, 6, 2.5360816505906425, 2.377752197542115, 0.01811977062511097),
+            capacitor(8, 6, 0, 0.0001874256015905851, 0.0),
+            resistor(9, 6, 0, 20602.80889538028),
+        ],
+    )
+}
+
+#[test]
+fn two_stepped_partitions_on_one_cc_rail_keep_their_steps() {
+    // Each stepped partition's CC step holds the other's draw where it last
+    // committed, so each commit moves the rail past the other's 1 uV band
+    // and the rail loop re-solves it. That re-solve restarted its step at
+    // POST_EVENT_H as a discontinuity would: 2.77e6 steps and 18.8 s for
+    // this 0.1 s. A re-solve for the rail's band alone keeps the step the
+    // controller chose (stepped::SteppedSolver::reaim).
+    let mut e = Engine::load(&cc_two_stepped_branches()).unwrap();
+    let mut ex = Engine::load(&exact(cc_two_stepped_branches())).unwrap();
+    for eng in [&mut e, &mut ex] {
+        eng.advance(0.036663502769636445).unwrap();
+        eng.set_params(&[(5, 0, 1.0)]).unwrap();
+    }
+    for t in [0.04, 0.06, 0.1] {
+        e.advance(t).unwrap();
+        ex.advance(t).unwrap();
+        // Exact mode steps the two branches as one partition, and is itself
+        // 3.4x W0 off a fine reference on this board (FXEFv's `cc`); each
+        // CC step here holds the other branch's draw where it last
+        // committed, a first-order coupling error: 5.1x W0 from exact mode
+        // at worst (the second capacitor at 0.1 s), 6.4x off the reference.
+        for n in 1..7 {
+            let (got, x) = (e.voltages()[n], ex.voltages()[n]);
+            close(got, x, 6.0 * (1e-4 + 1e-3 * x.abs()), &format!("node {n} at {t} against exact mode"));
+        }
+    }
+    let steps = e.stat(10);
+    assert!(steps < 5000.0, "{steps} steps to 0.1 s (exact mode {})", ex.stat(10));
+}
+
+#[test]
+fn a_cc_step_whose_load_is_switched_out_leaves_cc_at_the_step_start() {
+    // FXF's own regression (G2bv's seed 99 hub 2): {9.582 V, 2 A} held in
+    // CC by a short across the rail, with 21.8 mF and 1 mF from the rail
+    // into a stepped partition. Opening the short drops the draws far below
+    // the limit: the CC step's rail is past the setpoint however short the
+    // step, so the exit is at the step's start. Cutting the step toward a
+    // crossing that was not there made steps of 1e-12 s and hung the host.
+    let devices = || {
+        vec![
+            psu(0, 1, 0, 9.582, 1.999),
+            resistor(1, 2, 0, 4330.0),
+            resistor(2, 3, 0, 3136.0),
+            switch(3, 0, 1, true),
+            capacitor(4, 1, 2, 21.8e-3, 0.0),
+            capacitor(5, 3, 1, 1e-3, 0.0),
+            resistor(6, 2, 3, 0.39),
+        ]
+    };
+    let mut e = Engine::load(&program(4, devices())).unwrap();
+    let mut ex = Engine::load(&exact(program(4, devices()))).unwrap();
+    for eng in [&mut e, &mut ex] {
+        eng.advance(0.1).unwrap();
+        eng.set_params(&[(3, 0, 0.0)]).unwrap();
+    }
+    let steps = e.stat(10);
+    for t in [0.1 + 1e-4, 0.11, 0.2] {
+        e.advance(t).unwrap();
+        ex.advance(t).unwrap();
+        for n in 1..4 {
+            let (got, x) = (e.voltages()[n], ex.voltages()[n]);
+            close(got, x, 1e-4 + 1e-3 * x.abs(), &format!("node {n} at {t} against exact mode"));
+        }
+    }
+    let steps = e.stat(10) - steps;
+    assert!(steps < 2000.0, "{steps} steps over the 0.1 s after the short opened");
+    assert_eq!(e.voltages()[1], 9.582, "CV at the setpoint");
+}
+
+#[test]
 fn a_gigahertz_clock_into_an_rc_and_gates_runs_for_any_number_of_edges() {
     // R6 (a): a clock has no frequency cap, so one at 1 GHz or 10 GHz is a
     // legitimate board. Its half periods (0.5 and 0.05 ns) fall inside

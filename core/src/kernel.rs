@@ -52,7 +52,8 @@ pub const NO_PROGRESS_DT: f64 = 1e-9;
 /// Within a run of completed instants (see [`NO_PROGRESS_DT`]), an instant
 /// made no progress if it moved no published node voltage, turned one back
 /// (moved it against its own last move in the run), or ran only `Rail`
-/// events and left the rail node where it was (a `Rail` event exists to move
+/// events and left the rail node where it was, a move being a change of more
+/// than `RAIL_MOVE_EPS` ([`move_sign`]) (a `Rail` event exists to move
 /// the rail: B1070's other nodes crept on by their own trajectories while
 /// the rail sat still). An instant that applied a waveform source's edge
 /// progressed whatever it turned, and each node's direction starts afresh
@@ -65,11 +66,35 @@ pub const NO_PROGRESS_DT: f64 = 1e-9;
 /// any cycle counts at least one instant a period (two between source edges),
 /// and a crawl that moves nothing counts every instant. Instants that
 /// progress neither count nor reset it, so a cycle cannot hide its turns
-/// between them; only an instant outside the window ends the run. A counter,
-/// not a tolerance: the sign of each change is exact, and it changes nothing
-/// in a run it does not stop. At microseconds an instant, a livelock declines
-/// well inside a second.
+/// between them; only an instant outside the window ends the run. A counter
+/// with one floor, the rounding of a published value ([`move_sign`]): past
+/// it the sign of each change is exact, and it changes nothing in a run it
+/// does not stop. At microseconds an instant, a livelock declines well
+/// inside a second.
 pub const NO_PROGRESS_MAX: u32 = 10_000;
+
+/// The direction a published node voltage moved from `before` to `after`
+/// for the no-progress guard ([`NO_PROGRESS_MAX`]): 0 for a change of at
+/// most `RAIL_MOVE_EPS` (1e-12 V), which is no move, as it is none of the
+/// rail's (Rails point 3, P3:468). A node the circuit holds still is
+/// published from terms at the board's scale, so its value turns by their
+/// rounding (G2bv's seed 400: a CC ramp into a series capacitor and a
+/// 0.26 ohm short, the short's node at 0.0833 V turning by 1e-15 to 4e-15 V
+/// at most of its 0.08 ns `Rail` events while the rail rose 1e-5 V at
+/// each, declined at 1.16 us). Counting those as turns read a node at rest
+/// as a cycle. A livelock is still caught: a cycle within the floor moves
+/// nothing, so it counts at every instant.
+#[inline]
+fn move_sign(before: f64, after: f64) -> i8 {
+    let d = after - before;
+    if d > crate::rails::RAIL_MOVE_EPS {
+        1
+    } else if d < -crate::rails::RAIL_MOVE_EPS {
+        -1
+    } else {
+        0
+    }
+}
 
 /// The crossing-acceptance margin (contract point 4; "Hard-won rules":
 /// rounding can put a node back exactly on its threshold and re-schedule it
@@ -1246,18 +1271,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         }
         let (mut moved, mut turned) = (false, false);
         for ((&after, &before), last) in now.iter().zip(&self.run_before).zip(self.run_moves.iter_mut()) {
-            let step: i8 = if after > before {
-                1
-            } else if after < before {
-                -1
-            } else {
+            let step = move_sign(before, after);
+            if step == 0 {
                 continue;
-            };
+            }
             moved = true;
             turned |= *last == -step;
             *last = step;
         }
-        let rail_held = self.instant_rail && !self.instant_other && self.solver.rail_node().is_some_and(|n| now.get(n) == self.run_before.get(n));
+        let rail_held = self.instant_rail && !self.instant_other && self.solver.rail_node().is_some_and(|n| matches!((self.run_before.get(n), now.get(n)), (Some(&b), Some(&a)) if move_sign(b, a) == 0));
         moved && !turned && !rail_held
     }
 
@@ -2988,6 +3010,29 @@ mod tests {
         let mut k = waver(|n| [4.99, n as f64 * 1e-11], false);
         k.advance(1e-3 + 5e-10).unwrap();
         assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+    }
+
+    #[test]
+    fn a_node_at_rest_in_its_rounding_beside_a_moving_rail_is_progress_and_a_cycle_inside_the_floor_still_declines() {
+        // G2bv's seed 400 (FXF): a CC PSU ramping a series capacitor into a
+        // 0.26 ohm short moves the rail 1e-5 V a Rail event, 0.08 ns apart,
+        // while the short's node, set by the limit alone, sits at 0.0833 V
+        // and its published value turns by 1e-15 to 4e-15 V of rounding at
+        // most instants: 10,000 such turns declined it at 1.16 us.
+        let jitter = |n: u64| [n as f64 * 1e-5, 0.0833 + if n % 2 == 0 { 2e-15 } else { -2e-15 }];
+        let mut k = waver(jitter, true);
+        k.advance(1e-3 + 5e-10).unwrap();
+        assert!(k.solver.done > 9 * NO_PROGRESS_MAX as u64, "{}", k.solver.done);
+        // The same rounding with nothing moving on is no progress: a cycle
+        // within the floor moves nothing, so it counts every instant.
+        let mut k = waver(|n| [4.99 + if n % 2 == 0 { 2e-15 } else { -2e-15 }, 0.0833], false);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
+        // And a rail that moves only by its rounding is a rail held still
+        // (B1070's shape), whatever creeps beside it.
+        let mut k = waver(|n| [4.99 + if n % 2 == 0 { 2e-15 } else { -2e-15 }, n as f64 * 1e-11], true);
+        assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
+        assert_eq!(k.solver.done, NO_PROGRESS_MAX as u64 + 1);
     }
 
     #[test]

@@ -1279,6 +1279,12 @@ impl PartitionedSolver {
             let mut past_static = Vec::new();
             self.static_solver.hubs_past_band(u, rule, &mut past_static);
             let mut past_stepped = self.stepped.hubs_past_band(u, rule);
+            // On a CC rail with no capacitor (the 1 uV band) a stepped hub
+            // partition past its band only because the rail moved is re-aimed,
+            // not restarted: it keeps the step its controller chose
+            // (`SteppedSolver::reaim`). The CC exit's re-solve and a power
+            // flip's are discontinuities and restart.
+            let reaim: Vec<usize> = if !cc_exit && matches!(rule, rails::BandRule::Flat(_)) { past_stepped.clone() } else { Vec::new() };
             let mut flipped_cf = Vec::new();
             self.closed_form.hubs_past_band(u, rule, &mut flipped_cf);
             if cc_exit {
@@ -1295,6 +1301,7 @@ impl PartitionedSolver {
                 past_stepped.extend(self.stepped.hub_partitions());
                 flipped_cf.extend(self.hub.as_ref().unwrap().cf_hubs.iter().copied());
             }
+            let flipped_p = flipped.clone();
             for p in flipped {
                 match self.partition_kinds[p] {
                     PartitionKind::Static => past_static.push(PartitionId(p as u32)),
@@ -1327,7 +1334,12 @@ impl PartitionedSolver {
             if !past_stepped.is_empty() {
                 self.begin_dynamic_writes_list(&past_stepped);
                 let pre = Rc::clone(&self.driver_snapshot);
-                readers.extend(self.stepped.resolve_dirty(&past_stepped, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+                self.sync_stepped_cc(now);
+                self.stepped.reaim = reaim.into_iter().filter(|p| !flipped_p.contains(p)).collect();
+                let stepped = self.stepped.resolve_dirty(&past_stepped, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
+                self.stepped.cc = None;
+                self.stepped.reaim.clear();
+                readers.extend(stepped?);
                 self.end_dynamic_writes();
             }
             if past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() {
@@ -1341,6 +1353,32 @@ impl PartitionedSolver {
             }
         }
         Err(rails::loop_unsettled())
+    }
+
+    /// Hands the stepped solver the CC rail its hub partitions step against
+    /// (`stepped::CcRail`): a bench PSU in CC with no rail capacitor, the
+    /// draws at the present rail and each stepped hub partition's own share
+    /// of them. Every other regime sets none. The caller takes it back after
+    /// the call it is for.
+    pub(super) fn sync_stepped_cc(&mut self, now: f64) {
+        let cc = self.hub.as_ref().and_then(|hub| {
+            let (v, i_limit) = hub.psu()?;
+            if hub.state.reg != Regime::Cc || hub.c_rail > 0.0 {
+                return None;
+            }
+            let own: Vec<(usize, f64, f64)> = hub
+                .contrib
+                .iter()
+                .enumerate()
+                .filter(|&(p, c)| c.active && c.b.is_none() && self.partition_kinds[p] == PartitionKind::Stepped)
+                .map(|(p, c)| (p, c.i - c.g * c.u_p, c.g))
+                .collect();
+            let (a_p, g_p, _, _) = self.partition_totals(now);
+            let u = hub.state.u;
+            let (i_d, g_d) = self.direct_at(u);
+            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own })
+        });
+        self.stepped.cc = cc;
     }
 
     /// Keeps the static solver's hub cache band with the regime (after a
