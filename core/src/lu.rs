@@ -29,7 +29,7 @@ fn abs_or_worst(v: f64) -> f64 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LuFactorization {
     /// n x n, row-major. L's sub-diagonal multipliers and U's on/above
     /// diagonal entries, interleaved in place.

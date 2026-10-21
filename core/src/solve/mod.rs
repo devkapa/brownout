@@ -1112,6 +1112,27 @@ pub(crate) struct RailSens {
     /// as the last unknown: the curvature band reads the partition's
     /// Jacobian from it (`curvature::hub_band`).
     pub jac: Vec<f64>,
+    /// With `explicit_u` or `extra` (a partition the curvature band
+    /// covers): the residual `r(x, u)` of the partition's own rows at the
+    /// solve. Any distance left between the solve and the solution
+    /// (rounding, once polished, `static_part::polish_hub`) makes `s`, exact
+    /// at `x`, miss the solution's own slope by a first-order amount the
+    /// supply bound reads from this (`curvature::supply_band`), and sets the
+    /// solve's rounding floor (`curvature::Floors`). Empty otherwise.
+    pub res: Vec<f64>,
+    /// With `res`: each row's gross terms at the solve, `sum_j |A_kj z_j| +
+    /// |b_k|` over the partition's rows and then the rail's, which a
+    /// residual evaluation rounds by a few ulps of (`curvature::Floors`).
+    pub gross: Vec<f64>,
+    /// With `res`: each row's terms in `s`, `|F_u,k| + sum_j |J_kj s_j|`
+    /// over the partition's rows and then the rail's (`F_u` the residual's
+    /// rail derivative), which `s` and the draw's slope round by a few ulps
+    /// of (`curvature::Floors`).
+    pub gross_s: Vec<f64>,
+    /// With `res`: the factors of the exact Jacobian at the solve (`jac`'s
+    /// first `sys` rows and columns) that `s` was solved through, for the
+    /// rounding floor and the refinement (`static_part::solve_hub`).
+    pub lu: Option<crate::lu::LuFactorization>,
 }
 
 /// Three residual stamps and one re-solve (P3:437-448): `F0 = r(x, u)`,
@@ -1173,6 +1194,9 @@ pub(crate) fn rail_sensitivity(sys: usize, x: &[f64], u: f64, lu: &crate::lu::Lu
     z0.push(u);
     let mut at0 = stamp_at(&z0);
     let i0 = at0.0[sys * size..].iter().zip(&z0).map(|(a, z)| a * z).sum::<f64>() - at0.1[sys];
+    let factored = explicit_u.is_some() || extra.is_some();
+    let res: Vec<f64> = if factored { (0..sys).map(|k| at0.0[k * size..(k + 1) * size].iter().zip(&z0).map(|(a, z)| a * z).sum::<f64>() - at0.1[k]).collect() } else { Vec::new() };
+    let gross: Vec<f64> = if factored { (0..size).map(|k| at0.0[k * size..(k + 1) * size].iter().zip(&z0).map(|(a, z)| (a * z).abs()).sum::<f64>() + at0.1[k].abs()).collect() } else { Vec::new() };
     if let Some(extra) = extra {
         for (a, e) in at0.0.iter_mut().zip(extra) {
             *a += e;
@@ -1186,12 +1210,14 @@ pub(crate) fn rail_sensitivity(sys: usize, x: &[f64], u: f64, lu: &crate::lu::Lu
         }
         let singular = |_| "rail sensitivity: singular or non-finite pivot".to_string();
         let mut s: Vec<f64> = fu[..sys].iter().map(|f| -f).collect();
-        crate::lu::lu_factor(jac, sys).map_err(singular)?.solve(&mut s).map_err(singular)?;
+        let lu_j = crate::lu::lu_factor(jac, sys).map_err(singular)?;
+        lu_j.solve(&mut s).map_err(singular)?;
         let g = (0..sys).map(|k| at0.0[sys * size + k] * s[k]).sum::<f64>() + fu[sys];
+        let gross_s: Vec<f64> = (0..size).map(|k| fu[k].abs() + (0..sys).map(|j| (at0.0[k * size + j] * s[j]).abs()).sum::<f64>()).collect();
         if !(i0.is_finite() && g.is_finite() && s.iter().all(|v| v.is_finite())) {
             return Err("rail sensitivity: a non-finite draw, slope or sensitivity".to_string());
         }
-        return Ok(RailSens { i: i0, g, s, jac: at0.0 });
+        return Ok(RailSens { i: i0, g, s, jac: at0.0, res, gross, gross_s, lu: Some(lu_j) });
     }
     let mut z1 = z0.clone();
     z1[sys] = u + delta;
@@ -1210,7 +1236,7 @@ pub(crate) fn rail_sensitivity(sys: usize, x: &[f64], u: f64, lu: &crate::lu::Lu
     if !(i0.is_finite() && g.is_finite() && s.iter().all(|v| v.is_finite())) {
         return Err("rail sensitivity: a non-finite draw, slope or sensitivity".to_string());
     }
-    Ok(RailSens { i: i0, g, s, jac: at0.0 })
+    Ok(RailSens { i: i0, g, s, jac: at0.0, res, gross, gross_s: Vec::new(), lu: None })
 }
 
 /// The current flowing `pin_a -> pin_b` through a branch stamped by
@@ -1279,15 +1305,23 @@ pub(crate) fn stamp_linear_base(shape: &DynShape, size: usize, a: &mut [f64], b:
     for l in 0..shape.n {
         a[l * size + l] += static_part::NODE_RSHUNT_G;
     }
+    linear_elements(shape, live_params, |pa, pb, g| stamp_two_terminal(size, a, b, pa, pb, g, 0.0, bnd));
+}
+
+/// [`stamp_linear_base`]'s conductances (the node shunts aside), handed to
+/// `each` as `(pin_a, pin_b, g)`: the stamp itself, or a hub refinement's
+/// residual (`static_part::hub_residual_exact`), so the two walk the same
+/// branches.
+pub(crate) fn linear_elements(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, mut each: impl FnMut(&DynPin, &DynPin, f64)) {
     for s in &shape.stamped {
         let params = live_params_for(s, live_params);
         for c in devices::stamp(s.kind, s.pins.len(), params) {
-            stamp_two_terminal(size, a, b, &s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, 0.0, bnd);
+            each(&s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance);
         }
     }
     for cap in &shape.capacitors {
         if cap.leak_g != 0.0 {
-            stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], cap.leak_g, 0.0, bnd);
+            each(&cap.pins[0], &cap.pins[1], cap.leak_g);
         }
     }
 }
@@ -1683,6 +1717,17 @@ pub(crate) fn stamp_ics_into_dyn(
     p_idx: usize,
     x: &[f64],
 ) {
+    ic_elements(now, drivers, ics, node_owner, bnd, p_idx, x, |pa, pb, g, ieq| stamp_two_terminal(size, a, b, pa, pb, g, ieq, bnd));
+}
+
+/// [`stamp_ics_into_dyn`]'s walk, handing each two-terminal branch it
+/// stamps (`pin_a`, `pin_b`, `g`, `ieq`, [`stamp_two_terminal`]'s
+/// convention) to `each`: the stamp itself, or a hub refinement's residual
+/// (`static_part::hub_residual_exact`), which sums the same branches'
+/// currents element by element so the two can never disagree on what an IC
+/// stamps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ic_elements(now: f64, drivers: &[Driver], ics: &[(usize, digital::IcRecord)], node_owner: &HashMap<usize, (usize, usize)>, bnd: &Bnd, p_idx: usize, x: &[f64], mut each: impl FnMut(&DynPin, &DynPin, f64, f64)) {
     // No IC, nothing to stamp (the loop below would not run).
     if ics.is_empty() {
         return;
@@ -1783,7 +1828,7 @@ pub(crate) fn stamp_ics_into_dyn(
                 // OUT's up-to-two branches is folded independently (W1a
                 // point 2's "each caller folds every branch").
                 if in_partition(driver.node) || in_partition(target) {
-                    stamp_two_terminal(size, a, b, &resolve(driver.node), &resolve(target), g, 0.0, bnd);
+                    each(&resolve(driver.node), &resolve(target), g, 0.0);
                 }
             }
         }
@@ -1803,7 +1848,7 @@ pub(crate) fn stamp_ics_into_dyn(
                 // target*g)` (`_stampFloatingDigitalInputs`) restated as a
                 // two-terminal stamp instead of a direct matrix/RHS poke.
                 let datum = DynPin { local: None, node: 0 };
-                stamp_two_terminal(size, a, b, &resolve(pin.node), &datum, g, -g * target_v, bnd);
+                each(&resolve(pin.node), &datum, g, -g * target_v);
             }
         }
     }

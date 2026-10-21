@@ -171,7 +171,16 @@ pub(crate) mod hooks {
         /// `(solves to let through, solves to force unconverged)`.
         static FORCE_UNCONVERGED: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
         static SKIP_POLISH: Cell<bool> = const { Cell::new(false) };
+        static HUB_POLISH_CAP: Cell<Option<u32>> = const { Cell::new(None) };
         static RECORDED_GUESSES: RefCell<Option<Vec<Vec<f64>>>> = const { RefCell::new(None) };
+        static POLISH_NORMS: RefCell<Option<Vec<(f64, f64, f64)>>> = const { RefCell::new(None) };
+        static REFINED: RefCell<Option<Vec<f64>>> = const { RefCell::new(None) };
+        static POLISH_ENTRY: Cell<f64> = const { Cell::new(f64::NAN) };
+        /// `(rounding floors formed, solves through their factors)`.
+        static FLOOR_SOLVES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+        /// Solves a stalled polish's rounding floor took
+        /// (`static_part::step_rounding`).
+        static STALL_SOLVES: Cell<u64> = const { Cell::new(0) };
     }
 
     /// Disarms every hook on drop.
@@ -181,7 +190,10 @@ pub(crate) mod hooks {
         fn drop(&mut self) {
             FORCE_UNCONVERGED.with(|c| c.set((0, 0)));
             SKIP_POLISH.with(|c| c.set(false));
+            HUB_POLISH_CAP.with(|c| c.set(None));
             RECORDED_GUESSES.with(|c| *c.borrow_mut() = None);
+            POLISH_NORMS.with(|c| *c.borrow_mut() = None);
+            REFINED.with(|c| *c.borrow_mut() = None);
         }
     }
 
@@ -203,6 +215,92 @@ pub(crate) mod hooks {
     pub fn skip_polish() -> Guard {
         SKIP_POLISH.with(|c| c.set(true));
         Guard
+    }
+
+    /// An iterated hub solve's polish (`static_part::polish_hub`) runs at
+    /// most `steps` Newton steps; 0 skips it, the seeded fault its tests
+    /// must catch.
+    pub fn cap_hub_polish(steps: u32) -> Guard {
+        HUB_POLISH_CAP.with(|c| c.set(Some(steps)));
+        Guard
+    }
+
+    pub(crate) fn hub_polish_cap() -> Option<u32> {
+        HUB_POLISH_CAP.with(|c| c.get())
+    }
+
+    /// Records, for every hub polish that stalls and arrives from now on,
+    /// the size of the entering iterate's residual and of the published
+    /// one's
+    /// (`static_part::scaled_residual`, volts), and the largest voltage.
+    pub fn record_polish_norms() -> Guard {
+        POLISH_NORMS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        Guard
+    }
+
+    pub(crate) fn polish_norms_armed() -> bool {
+        POLISH_NORMS.with(|c| c.borrow().is_some())
+    }
+
+    pub(crate) fn note_polish_entry(q: f64) {
+        POLISH_ENTRY.with(|c| c.set(q));
+    }
+
+    pub(crate) fn note_polish_exit(q: f64, scale: f64) {
+        let q_in = POLISH_ENTRY.with(|c| c.get());
+        POLISH_NORMS.with(|c| {
+            if let Some(v) = c.borrow_mut().as_mut() {
+                v.push((q_in, q, scale));
+            }
+        });
+    }
+
+    /// The `(entering, published, scale)` sizes recorded since
+    /// [`record_polish_norms`].
+    pub fn polish_norms() -> Vec<(f64, f64, f64)> {
+        POLISH_NORMS.with(|c| c.borrow().clone().unwrap_or_default())
+    }
+
+    pub(crate) fn note_floor_solves(k: u64) {
+        FLOOR_SOLVES.with(|c| {
+            let (f, s) = c.get();
+            c.set((f + 1, s + k));
+        });
+    }
+
+    pub(crate) fn note_stall_solves(k: u64) {
+        STALL_SOLVES.with(|c| c.set(c.get() + k));
+    }
+
+    /// Solves stalled polishes' rounding floors took on this thread so far.
+    pub fn stall_solves() -> u64 {
+        STALL_SOLVES.with(|c| c.get())
+    }
+
+    /// `(rounding floors formed, solves through their factors)` on this
+    /// thread so far (`curvature::floors`).
+    pub fn floor_solves() -> (u64, u64) {
+        FLOOR_SOLVES.with(|c| c.get())
+    }
+
+    /// Records the rounding floor (against W0) every hub refinement leaves
+    /// from now on.
+    pub fn record_refinements() -> Guard {
+        REFINED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        Guard
+    }
+
+    pub(crate) fn note_refined(worst_w0: f64) {
+        REFINED.with(|c| {
+            if let Some(v) = c.borrow_mut().as_mut() {
+                v.push(worst_w0);
+            }
+        });
+    }
+
+    /// The floors recorded since [`record_refinements`].
+    pub fn refinements() -> Vec<f64> {
+        REFINED.with(|c| c.borrow().clone().unwrap_or_default())
     }
 
     /// Records the initial guess of every nonlinear solve from now on, so a

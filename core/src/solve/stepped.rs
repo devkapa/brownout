@@ -993,10 +993,13 @@ impl SteppedSolver {
         });
         let sens = rail_sensitivity(n, x, u_p, lu, ic.as_ref().map(|(_, e)| &e[..]), supply.as_ref().map(|(_, e)| &e[..]), |z, a, b| stamp_step(&part.shape, live_params, h, vc_from, i_prev, method, &ic_ctx, &bnd, n + 1, z, a, b))
             .map_err(|e| format!("stepped partition {p}: {e}"))?;
+        // A stepped solve is not polished to the solution (a known
+        // follow-up of R20), so no rounding floor is formed for it.
+        let floors = crate::solve::curvature::Floors::default();
         let band = match (ic, supply) {
             _ if !part.curved() => Some(rails::RAIL_RESOLVE_V),
-            (Some((ic, _)), _) => crate::solve::curvature::hub_band(&part.shape, live_params, &bnd, x, u_p, &sens, &ic),
-            (None, Some((ic, _))) => crate::solve::curvature::supply_band(&part.shape, live_params, &bnd, x, u_p, &sens, &ic),
+            (Some((ic, _)), _) => crate::solve::curvature::hub_band(&part.shape, live_params, &bnd, x, u_p, &sens, &ic, floors),
+            (None, Some((ic, _))) => crate::solve::curvature::supply_band(&part.shape, live_params, &bnd, x, u_p, &sens, &ic, floors),
             (None, None) => None,
         };
         Ok(StepSens { s: sens.s, i: sens.i, g: sens.g, u_p, band })

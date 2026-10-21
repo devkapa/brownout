@@ -303,6 +303,9 @@ pub(crate) struct Branch {
     /// tests that hold a branch's true error against its bound.
     #[cfg_attr(not(test), allow(dead_code))]
     pub device: Option<usize>,
+    /// Its share of the solve's rounding floor ([`Floors`]), `(at the
+    /// solve, per volt of rail)`.
+    pub floor: (f64, f64),
 }
 
 /// The rail drivers on one node `o` from ICs with one supply difference:
@@ -362,6 +365,9 @@ pub(crate) struct Bound {
     draw_rule: DrawRule,
     /// The widest half-width the precomputed parts hold for.
     b_max: f64,
+    /// The solve's rounding floor, added to every quantity's second-order
+    /// remainder (the branches carry theirs).
+    floor: Floors,
 }
 
 /// The bound at one half-width `b`: the node (and junction-voltage),
@@ -377,7 +383,7 @@ impl Bound {
     /// A bound with no rail drivers.
     #[cfg(test)]
     pub(crate) fn plain(ports: &[Port], nodes: &[(f64, f64)], branches: &[Branch], draw: (f64, f64)) -> Bound {
-        Bound { ports: ports.to_vec(), a_p: ports.iter().map(|p| p.alpha).collect(), groups: Vec::new(), drivers: Vec::new(), s_max: nodes.iter().map(|n| n.1.abs()).fold(0.0, f64::max), nodes: nodes.to_vec(), branches: branches.to_vec(), series: Vec::new(), draw, draw_rule: DrawRule::General, b_max: rails::RAIL_RESOLVE_V }
+        Bound { ports: ports.to_vec(), a_p: ports.iter().map(|p| p.alpha).collect(), groups: Vec::new(), drivers: Vec::new(), s_max: nodes.iter().map(|n| n.1.abs()).fold(0.0, f64::max), nodes: nodes.to_vec(), branches: branches.to_vec(), series: Vec::new(), draw, draw_rule: DrawRule::General, b_max: rails::RAIL_RESOLVE_V, floor: Floors::default() }
     }
 
     /// The curvature bounds over `|u - u_p| <= b`, or `None` where they do
@@ -561,7 +567,8 @@ impl Bound {
         let e = 0.5 * b * b;
         let by_voltage = pb.g_hi * ev.k_v * e;
         let by_current = (pb.g_hi * p.dv * p.dv / p.law.vtn + ev.k_a) * e;
-        by_voltage.min(by_current)
+        let (fv, fi) = self.floor.junction(j, b);
+        by_voltage.min(by_current) + pb.g_hi * fv + fi
     }
 
     /// The bound on a linear branch's published current's error at `|u -
@@ -588,7 +595,7 @@ impl Bound {
             }
             err = err.min(k_s * e);
         }
-        err
+        err + at_b(br.floor, b)
     }
 
     /// Whether every published quantity's bound over `|u - u_p| <= b` is
@@ -597,7 +604,10 @@ impl Bound {
         let Some(ev_b) = self.eval(b) else { return false };
         let e = 0.5 * b * b;
         let (ev, ed) = (ev_b.k_v * e, ev_b.k_d * e);
-        let ok_v = self.nodes.iter().all(|&(x, s)| ev <= V_ABS + REL * (x.abs() - s.abs() * b - ev).max(0.0));
+        let ok_v = self.nodes.iter().enumerate().all(|(l, &(x, s))| {
+            let err = ev + self.floor.node(l, b);
+            err <= V_ABS + REL * (x.abs() - s.abs() * b - err).max(0.0)
+        });
         let ok_j = ev_b.ports.iter().enumerate().all(|(j, pb)| self.junction_err(&ev_b, j, b) <= A_ABS + REL * pb.i_min);
         let ok_b = self.branches.iter().all(|br| {
             let err = self.branch_err(&ev_b, br, b);
@@ -605,8 +615,11 @@ impl Bound {
         });
         let ok_d = match self.draw_rule {
             DrawRule::Zero => true,
-            DrawRule::ShuntOnly => crate::solve::static_part::NODE_RSHUNT_G * self.nodes.len() as f64 * ev <= A_ABS,
-            DrawRule::General => ed <= A_ABS + REL * (self.draw.0.abs() - self.draw.1.abs() * b - ed).max(0.0),
+            DrawRule::ShuntOnly => crate::solve::static_part::NODE_RSHUNT_G * self.nodes.len() as f64 * ev + self.floor.draw(b) <= A_ABS,
+            DrawRule::General => {
+                let ed = ed + self.floor.draw(b);
+                ed <= A_ABS + REL * (self.draw.0.abs() - self.draw.1.abs() * b - ed).max(0.0)
+            }
         };
         ok_v && ok_j && ok_b && ok_d
     }
@@ -639,6 +652,325 @@ pub(crate) fn band(ports: &[Port], nodes: &[(f64, f64)], branches: &[Branch], dr
     Bound::plain(ports, nodes, branches, draw).band()
 }
 
+/// The ulps of a row's gross terms one residual evaluation rounds by
+/// ([`Floors`]; `static_part::step_rounding` takes the same).
+pub(crate) const ROUND_ULPS: f64 = 4.0;
+
+/// The margin on the solve's own part of a floor: it is first order in the
+/// distance, through `J^-1` as floating point factors it, which a
+/// GMIN-held cluster beside a 1e-3 ohm resistor holds to about ten percent
+/// (the cluster's 1e-12 S sits a few ulps under its diagonal's 1e3 S):
+/// k8 s1017 published 1.0003 of a floor without it.
+const SOLVE_MARGIN: f64 = 2.0;
+
+/// The part of W0's absolute tolerances below which no floor is resolved:
+/// a quantity that rounds to exactly 0 (a node every element at which
+/// carries no current in floating point) can sit 1e-62 A from the solution
+/// with no row to round, and 1e-30 of the tolerance (1e-34 V, 1e-39 A) is
+/// beyond anything a band can see.
+const FLOOR_ABS: f64 = 1e-30;
+
+/// A hub solve's rounding floor (ruling R23 (i), FXE 2026-10-21): how far
+/// each published quantity can sit from the solution's through the solve's
+/// rounding, at the solve and per volt the rail moves. The band's
+/// second-order bound measures the correction from the solution, so the
+/// solve's own distance from it is added. A solve at `x` with residual `r`
+/// (as computed) is `J^-1 r*` from the solution to first order (`J` the
+/// exact Jacobian at `x`, `r*` the true residual), and `r*` is within the
+/// residual's rounding of `r`: a few ulps of each row's gross terms (the
+/// stamp's), or, after the refinement, of each element's current (kept as
+/// a pair of rows, so that what a stiff element carries between two nodes
+/// moves them together by little); its sensitivity `s = -J^-1 F_u`,
+/// solved through the same factors, is within `|J^-1|` of a few ulps of
+/// `|F_u| + |J| |s|` (the right-hand side's rounding and the solve's
+/// backward error). So a quantity linear in the voltages through the row
+/// `L` is within `|L J^-1 r| + sum |L J^-1 e_k| rho_k` of the solution's,
+/// plus `b` times its slope's part at `|u - u_p| = b`. Each adds the
+/// rounding of its own publication: a node its value's and its
+/// correction's, a branch its contacts' conductance over both ends' and a
+/// junction its law's evaluation. Unlike the second-order bound, it does
+/// not vanish with the band, so a floor near W0's tolerance narrows the
+/// band, to the narrowest where it alone passes it. GMIN-held floating
+/// clusters (an unpowered gate behind a resistor, nodes between off LEDs
+/// and an open switch) sat up to 1.8e-6 V from the solution against a bound
+/// of 1.2e-14 V (FXDv).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Floors {
+    /// Each local node's `(at the solve, per volt of rail)`.
+    node: Vec<(f64, f64)>,
+    /// Each junction's voltage's (times the slope over the band) and its
+    /// law's own evaluation.
+    junction: Vec<((f64, f64), f64)>,
+    /// Each stamped device's current's, in `shape.stamped` order.
+    stamped: Vec<(f64, f64)>,
+    /// Each capacitor's leakage current's, in `shape.capacitors` order.
+    leak: Vec<(f64, f64)>,
+    draw: (f64, f64),
+    /// The largest floor at the solve against W0's tolerance for its
+    /// quantity (the refinement's gate, `static_part::solve_hub`).
+    pub worst_w0: f64,
+}
+
+/// A floor `(at the solve, per volt)` at half-width `b`.
+fn at_b(f: (f64, f64), b: f64) -> f64 {
+    f.0 + f.1 * b
+}
+
+impl Floors {
+    pub(crate) fn node(&self, l: usize, b: f64) -> f64 {
+        self.node.get(l).map_or(0.0, |&f| at_b(f, b))
+    }
+
+    /// Junction `j`'s voltage floor and its law's evaluation.
+    fn junction(&self, j: usize, b: f64) -> (f64, f64) {
+        self.junction.get(j).map_or((0.0, 0.0), |&(v, i)| (at_b(v, b), i))
+    }
+
+    fn draw(&self, b: f64) -> f64 {
+        at_b(self.draw, b)
+    }
+}
+
+/// [`Floors`] of a hub solve at `x` (rail `u`, sensitivity `sens`): `lu`
+/// factors the exact Jacobian at `x` (`sens.jac`'s first `n` rows and
+/// columns), `r` is the residual there (signed: `J^-1 r` is the solve's
+/// distance from the solution to first order, so a residual a pair of
+/// nodes carries equal and opposite, as a stiff resistor between two
+/// nodes whose difference floating point cannot hold does, moves them
+/// together by little), and its rounding is `rho` on each row (the stamp's
+/// gross terms) and `pairs` on each element (`(row, row, rounding)`, the
+/// element residual's, which keeps the same cancellation). The draw is the
+/// rail row's residual (`sens.gross`'s last entry the gross terms it
+/// rounds by) and its slope that row through `s` (`sens.gross_s`'s). `n +
+/// 1` solves through `lu`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn floors(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, x: &[f64], u: f64, sens: &RailSens, lu: &lu::LuFactorization, r: &[f64], rho: &[f64], pairs: &[(Option<usize>, Option<usize>, f64)]) -> Result<Floors, String> {
+    let n = shape.n;
+    let size = n + 1;
+    let eps = f64::EPSILON;
+    let ulps = ROUND_ULPS * eps;
+    // A junction's companion offset `id - gd v` rounds by ulps of `is
+    // e^(v/vtn) = gd vtn` (its exponential less one cancels near 0 V), which
+    // its own size, in the gross terms, can sit far below: each row it
+    // touches, the rail's included, takes that too.
+    let mut junction_rows = vec![0.0f64; size];
+    for j in &shape.junctions {
+        let v = pin_v(&j.anode, x, u, bnd) - pin_v(&j.cathode, x, u, bnd);
+        let (g, _) = j.law.companion(v);
+        for l in [bnd.local(&j.anode), bnd.local(&j.cathode)].into_iter().flatten() {
+            junction_rows[l] += ulps * g * (j.law.vtn + v.abs());
+        }
+    }
+    let w: Vec<f64> = rho.iter().zip(&junction_rows).map(|(a, b)| a + b).collect();
+    let w1: Vec<f64> = sens.gross_s[..n].iter().map(|g| ulps * g).collect();
+    let singular = |_| "rounding floor: singular or non-finite pivot".to_string();
+    // `dist` is `J^-1 r`, the signed distance.
+    let mut dist = r.to_vec();
+    lu.solve(&mut dist).map_err(singular)?;
+    let est = if n >= FLOW_MIN_N && conductance_matrix(&sens.jac, n) {
+        // `J` is a conductance network: a symmetric Laplacian plus a
+        // nonnegative diagonal (its conductances to fixed nodes, the rail and
+        // the node shunts), so `J^-1 >= 0` and a unit current injected
+        // anywhere flows downhill to those sinks, no branch or sink carrying
+        // more than all of it. Then `|J^-1| w = J^-1 w` exactly (one solve),
+        // and a quantity's share of the rounding injections is at most its
+        // flow multiplier times their sum. The rate's rounding takes a solve
+        // of its own: folded into the solve's at the widest band, it would
+        // hold a GMIN-held cluster beside a stiff resistor at the narrowest
+        // band at every band.
+        let mut v = w.clone();
+        let mut total: f64 = w.iter().sum();
+        for &(pa, pb, q) in pairs {
+            for k in [pa, pb].into_iter().flatten() {
+                v[k] += q;
+            }
+            total += q;
+        }
+        lu.solve(&mut v).map_err(singular)?;
+        let mut v1 = w1.clone();
+        let total1: f64 = w1.iter().sum();
+        lu.solve(&mut v1).map_err(singular)?;
+        #[cfg(test)]
+        crate::solve::newton::hooks::note_floor_solves(3);
+        Estimate::Flow { v, v1, total, total1 }
+    } else {
+        // `cols[k]` is `J^-1 e_k`.
+        let mut cols: Vec<Vec<f64>> = Vec::with_capacity(n);
+        for k in 0..n {
+            let mut c = vec![0.0; n];
+            c[k] = 1.0;
+            lu.solve(&mut c).map_err(singular)?;
+            cols.push(c);
+        }
+        #[cfg(test)]
+        crate::solve::newton::hooks::note_floor_solves(n as u64 + 1);
+        Estimate::Columns { cols }
+    };
+    // A quantity linear in the voltages through `l`, whose share of a unit
+    // injection's flow is at most `flow` (a node's is unbounded).
+    let form = |l: &[(usize, f64)], flow: f64| -> (f64, f64) {
+        let at = |c: &[f64]| l.iter().map(|&(i, g)| g * c[i]).sum::<f64>();
+        let (mut f0, mut f1) = (at(&dist).abs(), 0.0);
+        match &est {
+            Estimate::Flow { v, v1, total, total1 } => {
+                let abs_at = |c: &[f64]| l.iter().map(|&(i, g)| g.abs() * c[i].abs()).sum::<f64>();
+                f0 += abs_at(v).min(flow * total);
+                f1 += abs_at(v1).min(flow * total1);
+            }
+            Estimate::Columns { cols } => {
+                for (k, c) in cols.iter().enumerate() {
+                    let a = at(c).abs();
+                    f0 += a * w[k];
+                    f1 += a * w1[k];
+                }
+                for &(pa, pb, q) in pairs {
+                    let a = pa.map_or(0.0, |k| at(&cols[k])) - pb.map_or(0.0, |k| at(&cols[k]));
+                    f0 += a.abs() * q;
+                }
+            }
+        }
+        (SOLVE_MARGIN * f0, SOLVE_MARGIN * f1)
+    };
+    // A pin's value, rail slope and local row.
+    let pin = |p: &crate::solve::DynPin| -> (f64, f64, Option<usize>) {
+        match bnd.local(p) {
+            Some(l) if l < n => (x[l], sens.s[l], Some(l)),
+            Some(_) => (u, 1.0, None),
+            None => (bnd.get(p.node), 0.0, None),
+        }
+    };
+    let mut worst = 0.0f64;
+    let node: Vec<(f64, f64)> = (0..n)
+        .map(|l| {
+            let (f0, f1) = form(&[(l, 1.0)], f64::INFINITY);
+            (f0 + 2.0 * eps * x[l].abs() + FLOOR_ABS * V_ABS, f1 + 2.0 * eps * sens.s[l].abs())
+        })
+        .collect();
+    for (l, f) in node.iter().enumerate() {
+        worst = worst.max(f.0 / (V_ABS + REL * x[l].abs()));
+    }
+    let mut junction = Vec::with_capacity(shape.junctions.len());
+    for j in &shape.junctions {
+        let ((va, sa, la), (vk, sk, lk)) = (pin(&j.anode), pin(&j.cathode));
+        let mut l = Vec::with_capacity(2);
+        l.extend(la.map(|a| (a, 1.0)));
+        l.extend(lk.map(|k| (k, -1.0)));
+        let v = va - vk;
+        let (g, _) = j.law.companion(v);
+        let i = j.law.current(v);
+        // A flow across the junction is at most all of it, through at
+        // least its own conductance in `J`.
+        let (f0, f1) = form(&l, 1.0 / g);
+        let fv = (f0 + eps * (va.abs() + vk.abs()), f1 + eps * (sa.abs() + sk.abs()));
+        // The law's evaluation: its exponential less one cancels near 0 V,
+        // so it rounds by ulps of `is e^(v/vtn) = gd vtn` as well as of `I`.
+        let fi = ulps * (i.abs() + g * (j.law.vtn + v.abs())) + FLOOR_ABS * A_ABS;
+        worst = worst.max((g * fv.0 + fi) / (A_ABS + REL * i.abs()));
+        junction.push((fv, fi));
+    }
+    let mut branch = |contacts: &[(crate::solve::DynPin, crate::solve::DynPin, f64)]| -> (f64, f64) {
+        let mut l: Vec<(usize, f64)> = Vec::new();
+        let (mut i, mut own0, mut own1) = (0.0, 0.0, 0.0);
+        for (a, b, g) in contacts {
+            let ((va, sa, la), (vb, sb, lb)) = (pin(a), pin(b));
+            l.extend(la.map(|a| (a, *g)));
+            l.extend(lb.map(|b| (b, -*g)));
+            i += g * (va - vb);
+            own0 += 2.0 * eps * g.abs() * (va.abs() + vb.abs());
+            own1 += 2.0 * eps * g.abs() * (sa.abs() + sb.abs());
+        }
+        let (f0, f1) = form(&l, contacts.len() as f64);
+        let f0 = f0 + own0 + FLOOR_ABS * A_ABS;
+        worst = worst.max(f0 / (A_ABS + REL * i.abs()));
+        (f0, f1 + own1)
+    };
+    let mut contacts = Vec::new();
+    let stamped: Vec<(f64, f64)> = shape
+        .stamped
+        .iter()
+        .map(|st| {
+            contacts.clear();
+            contacts.extend(crate::devices::stamp(st.kind, st.pins.len(), live_params_for(st, live_params)).iter().map(|c| (st.pins[c.pin_a], st.pins[c.pin_b], c.conductance)));
+            branch(&contacts)
+        })
+        .collect();
+    let leak: Vec<(f64, f64)> = shape.capacitors.iter().map(|cap| if cap.leak_g != 0.0 { branch(&[(cap.pins[0], cap.pins[1], cap.leak_g)]) } else { (0.0, 0.0) }).collect();
+    let rail_row: Vec<(usize, f64)> = (0..n).map(|l| (l, sens.jac[n * size + l])).collect();
+    let (f0, f1) = form(&rail_row, 1.0);
+    let draw = (f0 + ulps * sens.gross[n] + junction_rows[n] + FLOOR_ABS * A_ABS, f1 + ulps * sens.gross_s[n]);
+    worst = worst.max(draw.0 / (A_ABS + REL * sens.i.abs()));
+    Ok(Floors { node, junction, stamped, leak, draw, worst_w0: worst })
+}
+
+/// The fewest nodes a hub takes its floor by flow ([`Estimate::Flow`]) at:
+/// below, every column of `J^-1` (`n + 1` solves) costs about what the
+/// partition's own solve does, and keeps each branch's own cancellation,
+/// which the flow bound gives up for its total.
+const FLOW_MIN_N: usize = 9;
+
+/// How [`floors`] takes `|L J^-1|` to the rounding.
+enum Estimate {
+    /// A conductance network's `J^-1 w` (its pairs on both rows), `J^-1
+    /// w1`, and the total rounding injected, at the solve and per volt.
+    Flow { v: Vec<f64>, v1: Vec<f64>, total: f64, total1: f64 },
+    /// Every column `J^-1 e_k`.
+    Columns { cols: Vec<Vec<f64>> },
+}
+
+/// Whether the `n x n` block of `jac` (row stride `n + 1`) is a
+/// conductance network: symmetric (to a few ulps), its off-diagonal
+/// entries at most 0 and its rows summing to at least 0 (to a few ulps of
+/// their terms). An IC whose supply is free stamps terms that follow its
+/// supply (`IcSupply::extra_jacobian`), which are neither.
+fn conductance_matrix(jac: &[f64], n: usize) -> bool {
+    let size = n + 1;
+    let tol = 8.0 * f64::EPSILON;
+    (0..n).all(|r| {
+        let row = &jac[r * size..r * size + n];
+        let (mut sum, mut gross) = (0.0f64, 0.0f64);
+        for (c, &a) in row.iter().enumerate() {
+            if c != r {
+                let t = jac[c * size + r];
+                if a > 0.0 || (a - t).abs() > tol * a.abs().max(t.abs()) {
+                    return false;
+                }
+            }
+            sum += a;
+            gross += a.abs();
+        }
+        row[r] > 0.0 && sum >= -tol * gross
+    })
+}
+
+/// A pin's voltage at the solve `x` with the rail at `u` stamped as
+/// unknown `x.len()`.
+fn pin_v(p: &crate::solve::DynPin, x: &[f64], u: f64, bnd: &Bnd) -> f64 {
+    match bnd.local(p) {
+        Some(l) if l < x.len() => x[l],
+        Some(_) => u,
+        None => bnd.get(p.node),
+    }
+}
+
+/// Each branch's floor from `floors` (by its device, which the branches
+/// list in `shape.stamped`'s order, or for a leakage by its capacitor's
+/// place).
+fn branch_floors<'a>(shape: &DynShape, floors: &Floors, branches: impl Iterator<Item = (Option<usize>, &'a mut (f64, f64))>) {
+    let mut leaks = shape.capacitors.iter().enumerate().filter(|(_, c)| c.leak_g != 0.0).map(|(k, _)| k);
+    let mut k = 0;
+    for (device, floor) in branches {
+        *floor = match device {
+            Some(d) => {
+                while k < shape.stamped.len() && shape.stamped[k].device_index != d {
+                    k += 1;
+                }
+                floors.stamped.get(k).copied().unwrap_or((0.0, 0.0))
+            }
+            None => leaks.next().and_then(|j| floors.leak.get(j)).copied().unwrap_or((0.0, 0.0)),
+        };
+    }
+}
+
 /// A curved hub partition's band at its solve (`x` at rail `u`, through
 /// `sens`, whose `jac` is the Jacobian the residual stamps gave at the
 /// solve, and its IC stamps that follow the rail `ic`): its junctions and
@@ -647,8 +979,13 @@ pub(crate) fn band(ports: &[Port], nodes: &[(f64, f64)], branches: &[Branch], dr
 /// `Some`: where the bound cannot be formed (a rest that does not factor)
 /// the band is the narrowest, never the flat one.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn hub_band(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, x: &[f64], u: f64, sens: &RailSens, ic: &IcRail) -> Option<f64> {
-    let bound = hub_bound(shape, live_params, bnd, x, u, sens, ic);
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hub_band(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, x: &[f64], u: f64, sens: &RailSens, ic: &IcRail, floors: Floors) -> Option<f64> {
+    let mut bound = hub_bound(shape, live_params, bnd, x, u, sens, ic);
+    if let Some(b) = bound.as_mut() {
+        branch_floors(shape, &floors, b.branches.iter_mut().map(|br| (br.device, &mut br.floor)));
+        b.floor = floors;
+    }
     #[cfg(test)]
     hook::record(&shape.nodes, u, bound.clone());
     Some(bound.map_or(NARROWEST_BAND, |b| b.band()))
@@ -809,7 +1146,7 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
         // (Rayleigh), and with none at its most. The widest band holds
         // unless a driver kinks inside it: then the bound is formed over the
         // widest half of it that does not.
-        let probe = Bound { ports: Vec::new(), a_p: Vec::new(), groups: Vec::new(), drivers: rail_drivers(ic, x, u), s_max: sens.s.iter().fold(0.0f64, |m, s| m.max(s.abs())), nodes: Vec::new(), branches: Vec::new(), series: Vec::new(), draw: (0.0, 0.0), draw_rule: DrawRule::General, b_max: rails::RAIL_RESOLVE_V };
+        let probe = Bound { ports: Vec::new(), a_p: Vec::new(), groups: Vec::new(), drivers: rail_drivers(ic, x, u), s_max: sens.s.iter().fold(0.0f64, |m, s| m.max(s.abs())), nodes: Vec::new(), branches: Vec::new(), series: Vec::new(), draw: (0.0, 0.0), draw_rule: DrawRule::General, b_max: rails::RAIL_RESOLVE_V, floor: Floors::default() };
         let mut reach = rails::RAIL_RESOLVE_V;
         let m_v = loop {
             if let Some((ranges, _, _)) = probe.driver_ranges(reach) {
@@ -920,7 +1257,7 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
             }
         }
         if contacts > 0.0 {
-            branches.push(Branch { i, di, g, contacts, series: in_series, device: Some(st.device_index) });
+            branches.push(Branch { i, di, g, contacts, series: in_series, device: Some(st.device_index), floor: (0.0, 0.0) });
         }
     }
     // A stepped capacitor publishes its committed series current plus its
@@ -931,7 +1268,7 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
         if cap.leak_g != 0.0 {
             let (_, sa, _) = pin(&cap.pins[0]);
             let (_, sb, _) = pin(&cap.pins[1]);
-            branches.push(Branch { i: 0.0, di: cap.leak_g * (sa - sb), g: cap.leak_g, contacts: 1.0, series: None, device: None });
+            branches.push(Branch { i: 0.0, di: cap.leak_g * (sa - sb), g: cap.leak_g, contacts: 1.0, series: None, device: None, floor: (0.0, 0.0) });
         }
     }
     let a_p = ports.iter().map(|p| p.alpha).collect();
@@ -951,7 +1288,7 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
     } else {
         DrawRule::General
     };
-    Some(Bound { ports, a_p, groups, drivers, s_max, nodes, branches, series, draw: (sens.i, sens.g), draw_rule, b_max })
+    Some(Bound { ports, a_p, groups, drivers, s_max, nodes, branches, series, draw: (sens.i, sens.g), draw_rule, b_max, floor: Floors::default() })
 }
 
 /// Which partitions hold a logic pin of an IC with one supply on the rail
@@ -1018,6 +1355,26 @@ fn rail_drivers(ic: &IcRail, x: &[f64], u: f64) -> Vec<DriverAt> {
 // supply crossing its power window's edge is no curvature (a re-solve
 // forced at the edge only lands the iterated solve on the floor, where its
 // power gate ping-pongs).
+//
+// The iterated solve passes Newton's tolerance short of the solution: a
+// driver's `R_out` is restamped at the last iterate's supply, so the
+// iteration converges linearly and stops up to ~1e-3 V short (FXB: two gates
+// on a fed supply, precharged to 4.3 V; FXBv: 9.6e-4 V on a 167 ohm feed).
+// `static_part::polish_hub` takes it on to the solution (R19 (a)),
+// since this bound measures the correction from the solution and an offset
+// at the solve would be outside its budget; what follows keeps the bound
+// true for whatever distance remains, rounding after the polish. Short of
+// the solution, `s`, exact at `x`, misses the solution's own slope
+// `x*'(u_p)` by a first-order amount, which at a small `du` is all of the
+// correction's error (before the polish: 1.25e-5 V/V, 126x a bound that was
+// second-order alone at `du = 3e-7`). So every span is measured
+// from the solve `x`, not from the solution: `d_f` bounds `|chi_f . (x* -
+// x)|`, read from the residual `r(x, u_p)` (`x* - x = -M (r + dJ (x* -
+// x))`, the same closure as `y`'s, the solution being the end of the path
+// `r(x) = (1 - theta) r` from the solve), and a form's span over the band
+// is `y b + d`. The error is then `sum_e |L M P_e| (zeta_e b^2 / 2 + z1_e
+// b)`, `z1_e = sum_t delta_et(d) y_et` the elements' Jacobian move from the
+// solve to the solution against `x*'(u_p) = s - M dJ z*'`.
 
 /// One end of an IC stamp: unknown `i` of `z` (the partition's own, then
 /// the rail at `n`), or a fixed voltage.
@@ -1149,6 +1506,8 @@ struct SupplyBranch {
     t: Vec<f64>,
     #[cfg_attr(not(test), allow(dead_code))]
     device: Option<usize>,
+    /// Its share of the solve's rounding floor ([`Floors`]).
+    floor: (f64, f64),
 }
 
 /// The perturbation bound of a partition holding a free IC supply.
@@ -1164,16 +1523,35 @@ pub(crate) struct SupplyBound {
     /// The draw: `R_x M P_e + r_e`'s parts, and `(I_p, g_p)`.
     draw_t: Vec<f64>,
     draw: (f64, f64),
+    /// Each form's distance from the solve to the solution at `u_p`, `|chi
+    /// . (x* - x)|` at most.
+    d: Vec<f64>,
+    /// The solve's rounding floor, added to every quantity's bound (the
+    /// branches carry theirs).
+    floor: Floors,
 }
 
 /// The bounds over one half-width: on each node's `|x''|`, each junction's
 /// `|v''|` with its largest slope and smallest current, each branch's
-/// `|I''|` and the draw's.
+/// `|I''|` and the draw's; and the first-order parts (`k1_*`), how far `s`
+/// may miss the solution's slope in each.
 pub(crate) struct SupplyEval {
     k_node: Vec<f64>,
     k_junction: Vec<(f64, f64, f64)>,
     k_branch: Vec<f64>,
     k_draw: f64,
+    k1_node: Vec<f64>,
+    k1_junction: Vec<f64>,
+    k1_branch: Vec<f64>,
+    k1_draw: f64,
+}
+
+impl SupplyEval {
+    /// A quantity's error bound at `|u - u_p| = b` from its second- and
+    /// first-order parts.
+    fn err(k: f64, k1: f64, b: f64) -> f64 {
+        k * 0.5 * b * b + k1 * b
+    }
 }
 
 /// A driver conductance over `vs` in `[lo, hi]` inside one piece: its
@@ -1197,56 +1575,92 @@ fn apply_q(forms: &[Form], owner: &[usize], delta: &[f64], q0: &[f64], q: &[f64]
 
 impl SupplyBound {
     /// Each form's `delta` (how far its coefficient in its element's
-    /// Jacobian moves) over `|u - u_p| <= b` with `|chi . z'| <= y`, or
-    /// `None` where a piece ends inside.
-    fn deltas(&self, b: f64, y: &[f64]) -> Option<Vec<f64>> {
+    /// Jacobian moves from the solve) while each form stays within `span`
+    /// of its value there, or `None` where a piece ends inside.
+    fn deltas(&self, span: &[f64]) -> Option<Vec<f64>> {
         let mut delta = vec![0.0; self.forms.len()];
         for el in &self.elems {
             match &el.kind {
                 ElemKind::Junction(law) => {
                     let (f, v0) = (el.forms[0], self.forms[el.forms[0]].c0);
-                    let span = y[f] * b;
                     let g0 = slope(law, v0);
-                    delta[f] = (slope(law, v0 + span) - g0).max(g0 - slope(law, v0 - span));
+                    delta[f] = (slope(law, v0 + span[f]) - g0).max(g0 - slope(law, v0 - span[f]));
                 }
                 ElemKind::Driver(curve) => {
                     let (fw, fs) = (el.forms[0], el.forms[1]);
                     let vs0 = self.forms[fs].c0;
-                    let span = y[fs] * b;
-                    let (d0, dg, dg1, _, _) = curve_range(curve, vs0, vs0 - span, vs0 + span)?;
-                    let w_span = y[fw] * b;
+                    let (d0, dg, dg1, _, _) = curve_range(curve, vs0, vs0 - span[fs], vs0 + span[fs])?;
                     delta[fw] = dg;
-                    delta[fs] = dg1 * (self.forms[fw].c0.abs() + w_span) + d0[1].abs() * w_span;
+                    delta[fs] = dg1 * (self.forms[fw].c0.abs() + span[fw]) + d0[1].abs() * span[fw];
                 }
             }
         }
         Some(delta)
     }
 
+    /// Each form's span over `|u - u_p| <= b` with `|chi . z'| <= y`: from
+    /// the solve, which is `d` from the solution.
+    fn spans(&self, b: f64, y: &[f64]) -> Vec<f64> {
+        y.iter().zip(&self.d).map(|(y, d)| y * b + d).collect()
+    }
+
+    /// Each form's element.
+    fn owner(&self) -> Vec<usize> {
+        let mut o = vec![0; self.forms.len()];
+        for (e, el) in self.elems.iter().enumerate() {
+            for &f in &el.forms {
+                o[f] = e;
+            }
+        }
+        o
+    }
+
+    /// Bounds `d`, each form's `|chi . (x* - x)|`, from `m_r = M r`, the
+    /// residual at the solve through the Jacobian there: `chi . (x* - x) =
+    /// -chi . M (r + dJ (x* - x))`, `dJ` the elements' Jacobian move over
+    /// the step. Like `y` below, one assumed `D0` whose image is below it
+    /// holds (along `r(x) = (1 - theta) r` from the solve, `d` could not
+    /// first reach it). `None` where none closes.
+    fn bound_distance(&mut self, m_r: &[f64]) -> Option<()> {
+        let d0: Vec<f64> = self.forms.iter().map(|f| f.x.iter().map(|&(i, c)| c * m_r[i]).sum::<f64>().abs()).collect();
+        if d0.iter().all(|v| *v == 0.0) {
+            self.d = d0;
+            return Some(());
+        }
+        let owner = self.owner();
+        let floor = 1e-15 * (1.0 + d0.iter().fold(0.0f64, |a, v| a.max(*v)));
+        let mut d: Vec<f64> = d0.iter().map(|v| v + floor).collect();
+        for _ in 0..4 {
+            let delta = self.deltas(&d)?;
+            d = apply_q(&self.forms, &owner, &delta, &d0, &d).iter().map(|v| v + floor).collect();
+        }
+        let big: Vec<f64> = d.iter().map(|v| 1.25 * v + floor).collect();
+        let delta = self.deltas(&big)?;
+        let image = apply_q(&self.forms, &owner, &delta, &d0, &big);
+        if !image.iter().zip(&big).all(|(a, z)| a < z) {
+            return None;
+        }
+        self.d = big;
+        Some(())
+    }
+
     pub(crate) fn eval(&self, b: f64) -> Option<SupplyEval> {
         if b > rails::RAIL_RESOLVE_V {
             return None;
         }
-        let owner: Vec<usize> = {
-            let mut o = vec![0; self.forms.len()];
-            for (e, el) in self.elems.iter().enumerate() {
-                for &f in &el.forms {
-                    o[f] = e;
-                }
-            }
-            o
-        };
+        let owner = self.owner();
         // The forms' rail slopes over the band: grown from the solve's and
         // checked.
         let y_s: Vec<f64> = self.forms.iter().map(|f| f.slope.abs()).collect();
         let floor = 1e-12 * (1.0 + y_s.iter().fold(0.0f64, |a, v| a.max(*v)));
         let mut y: Vec<f64> = y_s.iter().map(|v| v + floor).collect();
         for _ in 0..4 {
-            let delta = self.deltas(b, &y)?;
+            let delta = self.deltas(&self.spans(b, &y))?;
             y = apply_q(&self.forms, &owner, &delta, &y_s, &y).iter().map(|v| v + floor).collect();
         }
         let y0: Vec<f64> = y.iter().map(|v| 1.25 * v + floor).collect();
-        let delta = self.deltas(b, &y0)?;
+        let span0 = self.spans(b, &y0);
+        let delta = self.deltas(&span0)?;
         let y1 = apply_q(&self.forms, &owner, &delta, &y_s, &y0);
         if !y1.iter().zip(&y0).all(|(a, z)| a < z) {
             return None;
@@ -1259,7 +1673,7 @@ impl SupplyBound {
             match &el.kind {
                 ElemKind::Junction(law) => {
                     let f = el.forms[0];
-                    let (v0, span) = (self.forms[f].c0, y0[f] * b);
+                    let (v0, span) = (self.forms[f].c0, span0[f]);
                     let (lo, hi) = (v0 - span, v0 + span);
                     let g_hi = slope(law, hi);
                     eta.push(g_hi / law.vtn * y1[f] * y1[f]);
@@ -1274,9 +1688,9 @@ impl SupplyBound {
                 }
                 ElemKind::Driver(curve) => {
                     let (fw, fs) = (el.forms[0], el.forms[1]);
-                    let (vs0, span) = (self.forms[fs].c0, y0[fs] * b);
+                    let (vs0, span) = (self.forms[fs].c0, span0[fs]);
                     let (_, _, _, g1, g2) = curve_range(curve, vs0, vs0 - span, vs0 + span)?;
-                    let w_max = self.forms[fw].c0.abs() + y0[fw] * b;
+                    let w_max = self.forms[fw].c0.abs() + span0[fw];
                     eta.push(g2 * y1[fs] * y1[fs] * w_max + 2.0 * g1 * y1[fs] * y1[fw]);
                 }
             }
@@ -1303,28 +1717,45 @@ impl SupplyBound {
         // What each element injects at most, its curvature and its
         // Jacobian's move against `x''` together.
         let zeta: Vec<f64> = self.elems.iter().zip(&eta).map(|(el, h)| h + el.forms.iter().map(|&f| delta[f] * q[f]).sum::<f64>()).collect();
-        let through = |t: &[f64]| t.iter().zip(&zeta).map(|(a, z)| a.abs() * z).sum::<f64>();
-        let k_node = (0..self.x.len()).map(|l| self.elems.iter().zip(&zeta).map(|(el, z)| el.mp[l].abs() * z).sum::<f64>()).collect();
-        let k_junction = self.junctions.iter().zip(&junction_at).map(|(&j, &(g_hi, i_min))| (through(&self.forms[self.elems[j].forms[0]].t), g_hi, i_min)).collect();
-        let k_branch = self.branches.iter().map(|br| through(&br.t)).collect();
+        // What each element's Jacobian move from the solve to the solution
+        // makes `s` miss `x*'(u_p)` by, `|chi . z*'|` being at most `y1`.
+        let delta1 = self.deltas(&self.d)?;
+        let zeta1: Vec<f64> = self.elems.iter().map(|el| el.forms.iter().map(|&f| delta1[f] * y1[f]).sum::<f64>()).collect();
+        let through = |t: &[f64], zeta: &[f64]| t.iter().zip(zeta).map(|(a, z)| a.abs() * z).sum::<f64>();
+        let at_node = |zeta: &[f64]| (0..self.x.len()).map(|l| self.elems.iter().zip(zeta).map(|(el, z)| el.mp[l].abs() * z).sum::<f64>()).collect::<Vec<f64>>();
+        let at_junction = |zeta: &[f64]| self.junctions.iter().map(|&j| through(&self.forms[self.elems[j].forms[0]].t, zeta)).collect::<Vec<f64>>();
+        let at_branch = |zeta: &[f64]| self.branches.iter().map(|br| through(&br.t, zeta)).collect::<Vec<f64>>();
         // The draw is the rail's row: `R x''` and its own elements' share.
-        let k_draw = through(&self.draw_t) + self.elems.iter().zip(&zeta).map(|(el, z)| el.r.abs() * z).sum::<f64>();
-        Some(SupplyEval { k_node, k_junction, k_branch, k_draw })
+        let at_draw = |zeta: &[f64]| through(&self.draw_t, zeta) + self.elems.iter().zip(zeta).map(|(el, z)| el.r.abs() * z).sum::<f64>();
+        let k_junction = at_junction(&zeta).into_iter().zip(&junction_at).map(|(k, &(g_hi, i_min))| (k, g_hi, i_min)).collect();
+        Some(SupplyEval {
+            k_node: at_node(&zeta),
+            k_junction,
+            k_branch: at_branch(&zeta),
+            k_draw: at_draw(&zeta),
+            k1_node: at_node(&zeta1),
+            k1_junction: at_junction(&zeta1),
+            k1_branch: at_branch(&zeta1),
+            k1_draw: at_draw(&zeta1),
+        })
     }
 
     fn valid(&self, b: f64) -> bool {
         let Some(ev) = self.eval(b) else { return false };
-        let e = 0.5 * b * b;
-        let ok_v = self.x.iter().zip(&self.s).zip(&ev.k_node).all(|((x, s), k)| {
-            let err = k * e;
+        let err = SupplyEval::err;
+        let ok_v = self.x.iter().zip(&self.s).zip(ev.k_node.iter().zip(&ev.k1_node)).enumerate().all(|(l, ((x, s), (&k, &k1)))| {
+            let err = err(k, k1, b) + self.floor.node(l, b);
             err <= V_ABS + REL * (x.abs() - s.abs() * b - err).max(0.0)
         });
-        let ok_j = ev.k_junction.iter().all(|&(k, g_hi, i_min)| g_hi * k * e <= A_ABS + REL * i_min);
-        let ok_b = self.branches.iter().zip(&ev.k_branch).all(|(br, k)| {
-            let err = k * e;
+        let ok_j = ev.k_junction.iter().zip(&ev.k1_junction).enumerate().all(|(j, (&(k, g_hi, i_min), &k1))| {
+            let (fv, fi) = self.floor.junction(j, b);
+            g_hi * (err(k, k1, b) + fv) + fi <= A_ABS + REL * i_min
+        });
+        let ok_b = self.branches.iter().zip(ev.k_branch.iter().zip(&ev.k1_branch)).all(|(br, (&k, &k1))| {
+            let err = err(k, k1, b) + at_b(br.floor, b);
             err <= A_ABS + REL * (br.i.abs() - br.di.abs() * b - err).max(0.0)
         });
-        let ed = ev.k_draw * e;
+        let ed = err(ev.k_draw, ev.k1_draw, b) + self.floor.draw(b);
         let ok_d = ed <= A_ABS + REL * (self.draw.0.abs() - self.draw.1.abs() * b - ed).max(0.0);
         ok_v && ok_j && ok_b && ok_d
     }
@@ -1354,8 +1785,12 @@ impl SupplyBound {
 /// Jacobian, `ic` its IC stamps). Always `Some`: where the bound cannot be
 /// formed the band is the narrowest.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn supply_band(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, x: &[f64], u: f64, sens: &RailSens, ic: &IcSupply) -> Option<f64> {
-    let bound = supply_bound(shape, live_params, bnd, x, u, sens, ic);
+pub(crate) fn supply_band(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, x: &[f64], u: f64, sens: &RailSens, ic: &IcSupply, floors: Floors) -> Option<f64> {
+    let mut bound = supply_bound(shape, live_params, bnd, x, u, sens, ic);
+    if let Some(sb) = bound.as_mut() {
+        branch_floors(shape, &floors, sb.branches.iter_mut().map(|br| (br.device, &mut br.floor)));
+        sb.floor = floors;
+    }
     #[cfg(test)]
     hook::record_supply(&shape.nodes, u, bound.clone());
     Some(bound.map_or(NARROWEST_BAND, |b| b.band()))
@@ -1442,7 +1877,7 @@ fn supply_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &
             form.extend(la.map(|l| (l, c.conductance)));
             form.extend(lb.map(|l| (l, -c.conductance)));
         }
-        branches.push(SupplyBranch { i, di, t: read(&form, &elems), device: Some(st.device_index) });
+        branches.push(SupplyBranch { i, di, t: read(&form, &elems), device: Some(st.device_index), floor: (0.0, 0.0) });
     }
     for cap in &shape.capacitors {
         if cap.leak_g != 0.0 {
@@ -1451,12 +1886,22 @@ fn supply_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &
             let mut form = Vec::new();
             form.extend(la.map(|l| (l, cap.leak_g)));
             form.extend(lb.map(|l| (l, -cap.leak_g)));
-            branches.push(SupplyBranch { i: 0.0, di: cap.leak_g * (sa - sb), t: read(&form, &elems), device: None });
+            branches.push(SupplyBranch { i: 0.0, di: cap.leak_g * (sa - sb), t: read(&form, &elems), device: None, floor: (0.0, 0.0) });
         }
     }
     let r_form: Vec<(usize, f64)> = sens.jac[n * size..n * size + n].iter().copied().enumerate().collect();
     let draw_t = read(&r_form, &elems);
-    Some(SupplyBound { s: sens.s.clone(), x: x.to_vec(), elems, forms, junctions, branches, draw_t, draw: (sens.i, sens.g) })
+    let d = vec![0.0; forms.len()];
+    let mut bound = SupplyBound { s: sens.s.clone(), x: x.to_vec(), elems, forms, junctions, branches, draw_t, draw: (sens.i, sens.g), d, floor: Floors::default() };
+    if !sens.res.is_empty() {
+        let mut m_r = sens.res.clone();
+        lu_j.solve(&mut m_r).ok()?;
+        if !m_r.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        bound.bound_distance(&m_r)?;
+    }
+    Some(bound)
 }
 
 /// The bound the latest band was sized from, for tests that hold a
@@ -1469,6 +1914,8 @@ pub(crate) mod hook {
     #[derive(Clone)]
     pub(crate) struct Last {
         pub u_p: f64,
+        /// The partition's nodes, in local order.
+        nodes: Vec<usize>,
         bound: Option<Bound>,
         supply: Option<SupplyBound>,
     }
@@ -1496,11 +1943,11 @@ pub(crate) mod hook {
     }
 
     pub(crate) fn record(nodes: &[usize], u_p: f64, bound: Option<Bound>) {
-        put(nodes, Last { u_p, bound, supply: None });
+        put(nodes, Last { u_p, nodes: nodes.to_vec(), bound, supply: None });
     }
 
     pub(crate) fn record_supply(nodes: &[usize], u_p: f64, supply: Option<SupplyBound>) {
-        put(nodes, Last { u_p, bound: None, supply });
+        put(nodes, Last { u_p, nodes: nodes.to_vec(), bound: None, supply });
     }
 
     /// The latest bound of the partition holding `node`, on the board
@@ -1520,13 +1967,14 @@ pub(crate) mod hook {
             self.bound.is_some() || self.supply.is_some()
         }
 
-        /// The bound on a node's (and a junction voltage's) error at `|u -
-        /// u_p| = b`.
-        pub(crate) fn node(&self, b: f64) -> f64 {
+        /// The bound on node `node`'s error at `|u - u_p| = b`: its own
+        /// rounding floor, not the partition's largest.
+        pub(crate) fn node_at(&self, node: usize, b: f64) -> f64 {
+            let l = self.nodes.iter().position(|&m| m == node).expect("a node of the partition");
             if let Some(sb) = self.supply.as_ref() {
-                return sb.eval(b).map_or(f64::INFINITY, |e| e.k_node.iter().fold(0.0f64, |a, k| a.max(*k)) * 0.5 * b * b);
+                return sb.eval(b).map_or(f64::INFINITY, |e| SupplyEval::err(e.k_node[l], e.k1_node[l], b) + sb.floor.node(l, b));
             }
-            self.bound.as_ref().and_then(|bd| bd.eval(b)).map_or(f64::INFINITY, |e| e.k_v * 0.5 * b * b)
+            self.bound.as_ref().and_then(|bd| bd.eval(b).map(|e| e.k_v * 0.5 * b * b + bd.floor.node(l, b))).unwrap_or(f64::INFINITY)
         }
 
         /// The bound on device `device`'s published current's error, and
@@ -1534,7 +1982,7 @@ pub(crate) mod hook {
         pub(crate) fn branch(&self, device: usize, b: f64) -> (f64, bool) {
             if let Some(sb) = self.supply.as_ref() {
                 let k = sb.branches.iter().position(|br| br.device == Some(device)).expect("a branch of the partition");
-                return (sb.eval(b).map_or(f64::INFINITY, |e| e.k_branch[k] * 0.5 * b * b), false);
+                return (sb.eval(b).map_or(f64::INFINITY, |e| SupplyEval::err(e.k_branch[k], e.k1_branch[k], b) + at_b(sb.branches[k].floor, b)), false);
             }
             let Some(bd) = self.bound.as_ref() else { return (f64::INFINITY, false) };
             let br = bd.branches.iter().find(|br| br.device == Some(device)).expect("a branch of the partition");
@@ -1544,7 +1992,8 @@ pub(crate) mod hook {
         /// The bound on junction `j`'s published current's error.
         pub(crate) fn junction(&self, j: usize, b: f64) -> f64 {
             if let Some(sb) = self.supply.as_ref() {
-                return sb.eval(b).map_or(f64::INFINITY, |e| e.k_junction[j].1 * e.k_junction[j].0 * 0.5 * b * b);
+                let (fv, fi) = sb.floor.junction(j, b);
+                return sb.eval(b).map_or(f64::INFINITY, |e| e.k_junction[j].1 * (SupplyEval::err(e.k_junction[j].0, e.k1_junction[j], b) + fv) + fi);
             }
             self.bound.as_ref().and_then(|bd| bd.eval(b).map(|e| bd.junction_err(&e, j, b))).unwrap_or(f64::INFINITY)
         }
@@ -1552,9 +2001,9 @@ pub(crate) mod hook {
         /// The bound on the draw's error.
         pub(crate) fn draw(&self, b: f64) -> f64 {
             if let Some(sb) = self.supply.as_ref() {
-                return sb.eval(b).map_or(f64::INFINITY, |e| e.k_draw * 0.5 * b * b);
+                return sb.eval(b).map_or(f64::INFINITY, |e| SupplyEval::err(e.k_draw, e.k1_draw, b) + sb.floor.draw(b));
             }
-            self.bound.as_ref().and_then(|bd| bd.eval(b)).map_or(f64::INFINITY, |e| e.k_d * 0.5 * b * b)
+            self.bound.as_ref().and_then(|bd| bd.eval(b).map(|e| e.k_d * 0.5 * b * b + bd.floor.draw(b))).unwrap_or(f64::INFINITY)
         }
     }
 }
@@ -1616,7 +2065,7 @@ mod tests {
             let v = u_p - m;
             let alpha = (1.0 - s) * (1.0 + r * slope(&law, v));
             let port = Port::single(law, v, 1.0 - s, r, alpha);
-            let br = Branch { i, di: s / r, g: 1.0 / r, contacts: 1.0, series: None, device: None };
+            let br = Branch { i, di: s / r, g: 1.0 / r, contacts: 1.0, series: None, device: None, floor: (0.0, 0.0) };
             let b = band(&[port], &[(m, s)], &[br], (i, s / r));
             for j in 1..=20 {
                 for sign in [-1.0, 1.0] {
@@ -1664,8 +2113,8 @@ mod tests {
         let voltages = vec![0.0, u, m];
         let bnd = Bnd::new(&voltages).with_ext(1, 1);
         let g = slope(&law, u - m);
-        let sens = RailSens { i: law.current(u - m), g, s: vec![1.0], jac: vec![g, -g, -g, g] };
-        let band = hub_band(&shape, &HashMap::new(), &bnd, &[m], u, &sens, &IcRail::default());
+        let sens = RailSens { i: law.current(u - m), g, s: vec![1.0], jac: vec![g, -g, -g, g], res: Vec::new(), gross: Vec::new(), gross_s: Vec::new(), lu: None };
+        let band = hub_band(&shape, &HashMap::new(), &bnd, &[m], u, &sens, &IcRail::default(), Floors::default());
         assert_eq!(band, Some(NARROWEST_BAND));
     }
 }

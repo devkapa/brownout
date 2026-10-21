@@ -65,8 +65,13 @@ use crate::solve::newton;
 use crate::rails::{self, Contrib};
 use crate::solve::{
     collect_ics, compile_dyn_shape, ic_driver_branches, ic_pull_target, junction_branch_current, junction_partition, place_junction, rail_sensitivity,
-    stamp_ics_into_dyn, stamp_junctions, stamp_linear_base, Bnd, DynJunction, DynShape, PartitionSolver,
+    pin_voltage, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base, Bnd, DynJunction, DynPin, DynShape, PartitionSolver,
 };
+
+/// The rounding floor of a curved hub solve, against W0's tolerance for
+/// its quantity, past which the solve is refined (ruling R23 (ii), FXE
+/// 2026-10-21; `StaticPartitionSolver::refine_hub`).
+const REFINE_GATE: f64 = 0.01;
 
 /// Every node except node 0 carries this conductance to the datum (contract,
 /// "W0 kernel semantics", point 2): it keeps an isolated net solvable (reads
@@ -1648,19 +1653,342 @@ impl StaticPartitionSolver {
             let extra = ic.extra_jacobian(&z, n);
             (ic, extra)
         });
-        let sens = rail_sensitivity(n, x, u, factors, ic.as_ref().map(|(_, e)| &e[..]), supply.as_ref().map(|(_, e)| &e[..]), |z, a, b| {
-            let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
-            stamp_linear_base(&hub.shape, n + 1, a, b, &self.switch_params, &bnd);
-            stamp_ics_into_dyn(n + 1, a, b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z);
-            stamp_junctions(&hub.shape.junctions, n + 1, a, b, z, &bnd);
-        })
-        .map_err(|e| format!("partition {p}: {e}"))?;
+        let sens = rail_sensitivity(n, x, u, factors, ic.as_ref().map(|(_, e)| &e[..]), supply.as_ref().map(|(_, e)| &e[..]), |z, a, b| self.hub_residual_stamp(p, now, drivers, u, z, a, b))
+            .map_err(|e| format!("partition {p}: {e}"))?;
         let ic = match (ic, supply) {
             (Some((ic, _)), _) => HubIc::Rail(ic),
             (None, Some((ic, _))) => HubIc::Supply(ic),
             (None, None) => HubIc::Linear,
         };
         Ok((sens, ic))
+    }
+
+    /// Hub partition `p`'s own stamps with the rail as unknown `n` (`z` its
+    /// `n + 1` values), every nonlinear element linearised about `z`, so `A
+    /// z - b` is the true residual (`solve::rail_sensitivity`'s
+    /// `stamp_ext`); an IC's power is judged at rail `u`.
+    #[allow(clippy::too_many_arguments)]
+    fn hub_residual_stamp(&self, p: usize, now: f64, drivers: &[Driver], u: f64, z: &[f64], a: &mut [f64], b: &mut [f64]) {
+        let hub = self.hubs[p].as_ref().expect("a hub partition");
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let n = hub.shape.n;
+        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        stamp_linear_base(&hub.shape, n + 1, a, b, &self.switch_params, &bnd);
+        stamp_ics_into_dyn(n + 1, a, b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z);
+        stamp_junctions(&hub.shape.junctions, n + 1, a, b, z, &bnd);
+    }
+
+    /// Takes hub partition `p`'s iterated solve `x` (an iterate that passed
+    /// Newton's tolerance at rail `u`) on to the solution, to rounding: its
+    /// band bounds the correction from the solution, so an offset at the
+    /// solve is outside its budget. A free supply's iterated solve restamps
+    /// `R_out` at the last iterate's supply, so it converges linearly and
+    /// stops up to ~1e-3 V short (FXBv: 9.6e-4 V, 0.51 of W0, on a 167 ohm
+    /// feed; ruling R19 (a)); a junction's (with or without a chip on the
+    /// rail) is Newton already, but stops at its tolerance plus one polish
+    /// iteration (FXC: a 16 mA gate into 1000 ohm, an LED and 47 ohm sat
+    /// 6.3e-9 V and 2e-10 A off, 6.5e5x its band's bound; ruling R20 (a)).
+    /// These are Newton steps on the exact Jacobian, the one the
+    /// sensitivity takes for the partition's kind: the residual stamp's
+    /// matrix (junctions linearised about the iterate, so exact; a chip on
+    /// the rail stamps conductances fixed by its supply, which never moves
+    /// here) plus, with a free supply, the IC supply terms it misses
+    /// (`curvature::IcSupply::extra_jacobian`). They converge quadratically
+    /// where the stamps are smooth.
+    ///
+    /// Stop rule: after each step of largest move `m`, the solve has
+    /// arrived when `m` is within `POLISH_FLOOR` ulps of the largest
+    /// voltage (nothing smaller is representable), or when the step stops
+    /// contracting (`m` over a quarter of the step before it, which a
+    /// quadratic step far from rounding never is): the steps are then
+    /// rounding noise, and applying the last one can leave the solve
+    /// further from the solution than the iterate it was taken from (FXDv:
+    /// 5-20 % of such exits more than 2x worse). So on a stall the solve
+    /// keeps, of every iterate it evaluated and the stepped one, the one
+    /// with the smallest residual: each node's KCL imbalance over
+    /// its own conductance, in volts ([`scaled_residual`]), read off the
+    /// stamp so that every candidate is ranked alike (ruling R23, FXE
+    /// 2026-10-21; the Newton step through each one's own factors ranked a
+    /// GMIN-held cluster's iterates by its factorization's rounding). The
+    /// kept iterate has arrived when the step it asks for (`|J^-1 r|`, the
+    /// stepped one's through the stalled step's factors) is at most
+    /// `POLISH_STALL` (relative) or the residual's own rounding through the
+    /// same factors ([`step_rounding`]).
+    /// The second floor is for an ill-conditioned partition, whose solution
+    /// floating point fixes only to well above an ulp (an LED off the rail
+    /// into 330 ohm and an open switch: both nodes held by 1e-10 S, so
+    /// 1e-19 A of residual rounding moves the step 1e-8 V); the solve's
+    /// band counts that distance (`curvature::Floors`), and the refinement
+    /// takes a solve whose floor nears W0's tolerance further
+    /// ([`Self::refine_hub`]). It terminates because it runs at most
+    /// `POLISH_MAX` steps; a stall whose kept iterate is above both floors,
+    /// or the cap reached still contracting (a kink or a power edge between
+    /// the iterate and a solution, which the iterated solve's own ping-pong
+    /// declines as well), is `-4`, like an iterated solve that never passed.
+    /// Every step is counted with the partition's Newton iterations
+    /// (contract stat 11).
+    fn polish_hub(&mut self, p: usize, now: f64, drivers: &[Driver], mut x: Vec<f64>, u: f64) -> Result<Vec<f64>, String> {
+        const POLISH_MAX: u32 = 8;
+        const POLISH_FLOOR: f64 = 16.0 * f64::EPSILON;
+        const POLISH_STALL: f64 = 1e-12;
+        #[allow(unused_mut)]
+        let mut cap = POLISH_MAX;
+        #[cfg(test)]
+        if let Some(c) = newton::hooks::hub_polish_cap() {
+            if c == 0 {
+                return Ok(x);
+            }
+            cap = c;
+        }
+        let hub = self.hubs[p].as_ref().expect("a hub partition");
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let n = hub.shape.n;
+        let size = n + 1;
+        let free_supply = self.holds_free_ic_supply[p];
+        let mut z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+        let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
+        let residual_step = |a: &[f64], b: &[f64], z: &[f64]| -> Vec<f64> { (0..n).map(|k| b[k] - a[k * size..(k + 1) * size].iter().zip(z).map(|(a, z)| a * z).sum::<f64>()).collect() };
+        // The last step's `|J^-1 r|`, and of the iterates evaluated so far
+        // the one with the smallest residual ([`scaled_residual`]): `(size,
+        // |J^-1 r|, iterate)`.
+        let mut prev = f64::INFINITY;
+        let mut best: (f64, f64, Vec<f64>) = (f64::INFINITY, f64::INFINITY, Vec::new());
+        let mut steps = 0u32;
+        #[cfg(test)]
+        let mut stalled = false;
+        let verdict = loop {
+            if steps == cap {
+                break Err(format!("partition {p} ({n} node(s)): the hub polish did not reach the solution in {cap} steps"));
+            }
+            steps += 1;
+            a.fill(0.0);
+            b.fill(0.0);
+            self.hub_residual_stamp(p, now, drivers, u, &z, &mut a, &mut b);
+            let extra = free_supply.then(|| {
+                let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+                crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z).extra_jacobian(&z, n)
+            });
+            let mut step = residual_step(&a, &b, &z);
+            let q = scaled_residual(&step, &a, n);
+            #[cfg(test)]
+            if steps == 1 {
+                newton::hooks::note_polish_entry(q);
+            }
+            let mut jac = vec![0.0; n * n];
+            for r in 0..n {
+                for c in 0..n {
+                    jac[r * n + c] = a[r * size + c] + extra.as_ref().map_or(0.0, |e| e[r * size + c]);
+                }
+            }
+            let singular = || format!("partition {p} ({n} node(s)): singular or non-finite pivot in the hub polish");
+            let Ok(factors) = lu::lu_factor(jac, n) else { break Err(singular()) };
+            if factors.solve(&mut step).is_err() {
+                break Err(singular());
+            }
+            if !step.iter().all(|v| v.is_finite()) {
+                break Err(format!("partition {p} ({n} node(s)): non-finite entry in the hub polish"));
+            }
+            let m = step.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            let scale = x.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            if m <= POLISH_FLOOR * scale {
+                for (k, d) in step.iter().enumerate() {
+                    x[k] += d;
+                }
+                break Ok(());
+            }
+            if q < best.0 {
+                best.0 = q;
+                best.1 = m;
+                if best.2.is_empty() {
+                    best.2 = x.clone();
+                } else {
+                    best.2.copy_from_slice(&x);
+                }
+            }
+            if m > 0.25 * prev {
+                // Noise. The candidates: every iterate evaluated (the best
+                // of them) and the stepped one (its step through this
+                // step's factors).
+                let z_next: Vec<f64> = (0..size).map(|k| if k < n { x[k] + step[k] } else { u }).collect();
+                let (mut a_next, mut b_next) = (vec![0.0; size * size], vec![0.0; size]);
+                self.hub_residual_stamp(p, now, drivers, u, &z_next, &mut a_next, &mut b_next);
+                let mut next = residual_step(&a_next, &b_next, &z_next);
+                let q_next = scaled_residual(&next, &a_next, n);
+                if q_next < best.0 && factors.solve(&mut next).is_ok() && next.iter().all(|v| v.is_finite()) {
+                    best = (q_next, next.iter().fold(0.0f64, |acc, v| acc.max(v.abs())), z_next[..n].to_vec());
+                }
+                let kept = best.1;
+                // The rounding floor (`n` solves) only where the stall
+                // floor does not settle it.
+                if kept <= POLISH_STALL * scale || kept <= step_rounding(&factors, &a, &b, &z, n) {
+                    x = std::mem::take(&mut best.2);
+                    #[cfg(test)]
+                    {
+                        stalled = true;
+                    }
+                    break Ok(());
+                }
+                break Err(format!("partition {p} ({n} node(s)): the hub polish stalled {kept:e} V from the solution"));
+            }
+            for (k, d) in step.iter().enumerate() {
+                x[k] += d;
+                z[k] = x[k];
+            }
+            prev = m;
+        };
+        self.newton_iterations += steps as u64;
+        #[cfg(test)]
+        if stalled && newton::hooks::polish_norms_armed() {
+            // The published iterate's residual.
+            let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+            a.fill(0.0);
+            b.fill(0.0);
+            self.hub_residual_stamp(p, now, drivers, u, &z, &mut a, &mut b);
+            let scale = x.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            newton::hooks::note_polish_exit(scaled_residual(&residual_step(&a, &b, &z), &a, n), scale);
+        }
+        verdict.map(|()| x)
+    }
+
+    /// Hub partition `p`'s residual at `z` (its `n` unknowns, then the
+    /// rail), rows `0..n`, summed element by element: each branch's own
+    /// current (the node shunts, every conductance [`stamp_linear_base`]
+    /// and [`stamp_ics_into_dyn`] stamp, each junction's `I(v) + GMIN v`),
+    /// with compensated sums; and each element's rows and rounding, a few
+    /// ulps of its current. The residual [`Self::hub_residual_stamp`]'s matrix
+    /// gives, `A z - b`, rounds by ulps of the gross terms instead: a 1e-3
+    /// ohm resistor between two 5 V nodes stamps 5e3 A terms for a current
+    /// of mA, and its diagonal's sum of conductances rounds by ulps of all
+    /// of them (ruling R23 (ii), FXE 2026-10-21). For the refinement only
+    /// ([`Self::refine_hub`]).
+    #[allow(clippy::type_complexity)]
+    fn hub_residual_exact(&self, p: usize, now: f64, drivers: &[Driver], u: f64, z: &[f64]) -> (Vec<f64>, Vec<(Option<usize>, Option<usize>, f64)>) {
+        let hub = self.hubs[p].as_ref().expect("a hub partition");
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let n = hub.shape.n;
+        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        let eps = f64::EPSILON;
+        // Neumaier's sum per row, `(sum, compensation)`, and each element's
+        // rows and rounding.
+        let mut acc = vec![(0.0f64, 0.0f64); n];
+        let mut pairs = Vec::new();
+        let mut add = |l: usize, i: f64| {
+            let (s, c) = &mut acc[l];
+            let t = *s + i;
+            *c += if s.abs() >= i.abs() { (*s - t) + i } else { (i - t) + *s };
+            *s = t;
+        };
+        let mut branch = |pa: &DynPin, pb: &DynPin, i: f64, unc: f64| {
+            let (la, lb) = (bnd.local(pa).filter(|&l| l < n), bnd.local(pb).filter(|&l| l < n));
+            if let Some(l) = la {
+                add(l, i);
+            }
+            if let Some(l) = lb {
+                add(l, -i);
+            }
+            if la.is_some() || lb.is_some() {
+                pairs.push((la, lb, unc));
+            }
+        };
+        let ulps = crate::solve::curvature::ROUND_ULPS * eps;
+        let mut element = |pa: &DynPin, pb: &DynPin, g: f64, ieq: f64| {
+            let gv = g * (pin_voltage(pa, z, &bnd) - pin_voltage(pb, z, &bnd));
+            branch(pa, pb, gv + ieq, ulps * (gv.abs() + ieq.abs()));
+        };
+        crate::solve::linear_elements(&hub.shape, &self.switch_params, |pa, pb, g| element(pa, pb, g, 0.0));
+        crate::solve::ic_elements(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z, |pa, pb, g, ieq| element(pa, pb, g, ieq));
+        for j in &hub.shape.junctions {
+            let v = pin_voltage(&j.anode, z, &bnd) - pin_voltage(&j.cathode, z, &bnd);
+            let i = j.law.current(v) + led::GMIN_D * v;
+            // The law's evaluation (its exponential less one cancels near 0
+            // V, so by ulps of `is e^(v/vtn) = gd vtn` too), and its
+            // voltage's rounding through its slope.
+            let (g, _) = j.law.companion(v);
+            branch(&j.anode, &j.cathode, i, ulps * (i.abs() + g * (j.law.vtn + v.abs())));
+        }
+        for (l, &zl) in z.iter().enumerate().take(n) {
+            let i = NODE_RSHUNT_G * zl;
+            add(l, i);
+            pairs.push((Some(l), None, ulps * i.abs()));
+        }
+        (acc.into_iter().map(|(s, c)| s + c).collect(), pairs)
+    }
+
+    /// Mixed-precision iterative refinement of hub partition `p`'s solve `x`
+    /// at rail `u` (ruling R23 (ii), FXE 2026-10-21): the residual summed
+    /// element by element ([`Self::hub_residual_exact`]), the correction
+    /// solved through `lu`, the factors of the exact Jacobian at `x` the
+    /// sensitivity already holds (a chord step: the Jacobian moves only to
+    /// second order over the distance left). Extreme resistance ratios in
+    /// one partition (1e-3 to 1e10 ohm) left polished solves up to 70 W0
+    /// from the exact solution (FXDv's families): the stamp's residual
+    /// rounds by ulps of its gross terms, which `J^-1` multiplies by up to
+    /// 1e13; the element residual rounds by ulps of the currents
+    /// themselves. Run only where the rounding floor passes `REFINE_GATE` of
+    /// W0 (`solve_hub`); the band then counts the refined solve's floor.
+    ///
+    /// Each iterate's residual through `lu` is the step it asks for, `m =
+    /// |J^-1 r|`; the iterate with the least `m` is kept. The steps contract
+    /// linearly, by about the Jacobian's condition number times an ulp (a
+    /// part in five at 1e15), so the refinement goes on while `m` falls and
+    /// stops when it does not (the steps are the residual's rounding), when
+    /// `m` is within `POLISH_FLOOR` ulps of the largest voltage, or at
+    /// `REFINE_MAX` residuals. It terminates because it evaluates at most
+    /// `REFINE_MAX` residuals. It fails (`-4`) only on a singular factor:
+    /// the kept iterate is never further from the solution than the
+    /// polished one it started from, and where `f64` factors cannot place
+    /// the floor under the gate (a 1e-3 ohm resistor inside a GMIN-held
+    /// cluster: its Jacobian's entries lose the cluster's 1e-12 S to their
+    /// own rounding, so `|J^-1|` overstates the floor 1e6-fold, 58 W0 for a
+    /// solve 5e-5 W0 from the exact one) the band counts the floor and
+    /// narrows to the narrowest. Returns the kept iterate, its residual and
+    /// its elements' rounding (its floor's, `curvature::floors`). Every
+    /// residual is counted with the partition's Newton iterations (contract
+    /// stat 11).
+    #[allow(clippy::type_complexity)]
+    fn refine_hub(&mut self, p: usize, now: f64, drivers: &[Driver], mut x: Vec<f64>, u: f64, lu: &lu::LuFactorization) -> Result<(Vec<f64>, Vec<f64>, Vec<(Option<usize>, Option<usize>, f64)>), String> {
+        const REFINE_MAX: u32 = 8;
+        const POLISH_FLOOR: f64 = 16.0 * f64::EPSILON;
+        let n = x.len();
+        let mut z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+        // `(m, x, r, pairs)` of the best evaluated iterate.
+        #[allow(clippy::type_complexity)]
+        let mut best: (f64, Vec<f64>, Vec<f64>, Vec<(Option<usize>, Option<usize>, f64)>) = (f64::INFINITY, Vec::new(), Vec::new(), Vec::new());
+        let mut prev = f64::INFINITY;
+        let mut steps = 0u32;
+        let verdict = loop {
+            steps += 1;
+            let (r, pairs) = self.hub_residual_exact(p, now, drivers, u, &z);
+            let mut step: Vec<f64> = r.iter().map(|v| -v).collect();
+            if lu.solve(&mut step).is_err() || !step.iter().all(|v| v.is_finite()) {
+                break Err(format!("partition {p} ({n} node(s)): singular or non-finite pivot in the hub refinement"));
+            }
+            let m = step.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+            if m < best.0 {
+                best = (m, x.clone(), r, pairs);
+            }
+            let scale = x.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            if m <= POLISH_FLOOR * scale || m >= prev || steps == REFINE_MAX {
+                break Ok(());
+            }
+            for (k, d) in step.iter().enumerate() {
+                x[k] += d;
+                z[k] = x[k];
+            }
+            prev = m;
+        };
+        self.newton_iterations += steps as u64;
+        verdict.map(|()| (best.1, best.2, best.3))
+    }
+
+    /// [`curvature::floors`] of hub partition `p`'s solve `x` at rail `u`.
+    #[allow(clippy::too_many_arguments)]
+    fn hub_floors(&self, p: usize, x: &[f64], u: f64, sens: &crate::solve::RailSens, lu_j: &lu::LuFactorization, r: &[f64], rho: &[f64], pairs: &[(Option<usize>, Option<usize>, f64)]) -> Result<crate::solve::curvature::Floors, String> {
+        let hub = self.hubs[p].as_ref().expect("a hub partition");
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let n = hub.shape.n;
+        let bnd = Bnd::new(&self.voltages).with_ext(rail, n);
+        crate::solve::curvature::floors(&hub.shape, &self.switch_params, &bnd, x, u, sens, lu_j, r, rho, pairs).map_err(|e| format!("partition {p}: {e}"))
     }
 
     /// Solves hub partition `p` at the present rail (Rails points 2 and 3):
@@ -1684,16 +2012,46 @@ impl StaticPartitionSolver {
                 return Ok(());
             }
         }
-        let (x, factors) = if free_supply || !self.junctions[p].is_empty() { self.iterated_solve_factored(p, now, drivers)? } else { self.direct_solve_factored(p, now, drivers)? };
-        let (sens, ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
+        let iterated = free_supply || !self.junctions[p].is_empty();
+        let (mut x, factors) = if iterated { self.iterated_solve_factored(p, now, drivers)? } else { self.direct_solve_factored(p, now, drivers)? };
+        if iterated {
+            // An iterated partition is curved (`HubIc::Rail` or `Supply`),
+            // whose sensitivity solves its own exact Jacobian, not through
+            // `factors`, so they need not follow.
+            x = self.polish_hub(p, now, drivers, x, u)?;
+        }
+        let (mut sens, mut ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
         self.sensitivities += 1;
+        // A curved partition's band counts the solve's own distance from
+        // the solution (`curvature::Floors`), from its residual at `x`
+        // through the factors the sensitivity solved with; where that
+        // passes `REFINE_GATE` of W0's tolerance the solve is refined.
+        let floors = match (&ic, sens.lu.take()) {
+            (HubIc::Linear, _) | (_, None) => None,
+            (_, Some(lu_j)) => {
+                let n = x.len();
+                let rho: Vec<f64> = sens.gross[..n].iter().map(|g| crate::solve::curvature::ROUND_ULPS * f64::EPSILON * g).collect();
+                let mut floors = self.hub_floors(p, &x, u, &sens, &lu_j, &sens.res, &rho, &[])?;
+                if floors.worst_w0 > REFINE_GATE {
+                    let (refined, r, pairs) = self.refine_hub(p, now, drivers, x, u, &lu_j)?;
+                    x = refined;
+                    (sens, ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
+                    let lu_j = sens.lu.take().ok_or_else(|| format!("partition {p}: a refined hub solve without its Jacobian's factors"))?;
+                    floors = self.hub_floors(p, &x, u, &sens, &lu_j, &r, &vec![0.0; n], &pairs)?;
+                    #[cfg(test)]
+                    newton::hooks::note_refined(floors.worst_w0);
+                }
+                Some(floors)
+            }
+        };
         let band = {
             let hub = self.hubs[p].as_ref().expect("a hub partition");
             let bnd = Bnd::new(&self.voltages).with_ext(rail, hub.shape.n);
+            let floors = floors.unwrap_or_default();
             match ic {
                 HubIc::Linear => Some(rails::RAIL_RESOLVE_V),
-                HubIc::Rail(ic) => crate::solve::curvature::hub_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic),
-                HubIc::Supply(ic) => crate::solve::curvature::supply_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic),
+                HubIc::Rail(ic) => crate::solve::curvature::hub_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic, floors),
+                HubIc::Supply(ic) => crate::solve::curvature::supply_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic, floors),
             }
         };
         let solve = HubSolve { x, s: sens.s, i: sens.i, g: sens.g, u_p: u, band };
@@ -2644,4 +3002,43 @@ mod tests {
         check(&solver);
         assert_eq!(solver.voltages().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), before.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
     }
+}
+
+/// The size of a hub polish iterate's residual `r` (`b - A z` over the
+/// partition's `n` rows of the `(n + 1)`-wide residual stamp `a`), which a
+/// stalled polish keeps the least of: each row's KCL imbalance over its
+/// node's own conductance in the stamp, `max_k |r_k| / |A_kk|`, the volts
+/// the node would move to carry it alone. Read off the stamp, not through
+/// a factorization, it ranks the iterates the same whichever Jacobian is
+/// at hand; a GMIN-held cluster's, near singular, ranks them by its
+/// rounding.
+fn scaled_residual(r: &[f64], a: &[f64], n: usize) -> f64 {
+    let size = n + 1;
+    r.iter().enumerate().fold(0.0f64, |acc, (k, v)| acc.max(v.abs() / a[k * size + k].abs()))
+}
+
+/// The most a hub polish step (`StaticPartitionSolver::polish_hub`) through
+/// `factors` can move from rounding alone: each residual row, `A z - b` over
+/// the partition's `n` rows of the `(n + 1)`-wide residual stamp `a`, `b`
+/// at `z`, rounds by a few ulps of its gross terms, and the step is that
+/// through `J^-1`, so `max_i sum_k |J^-1|_ik r_k`. Solved column by column,
+/// only when a step stops contracting.
+fn step_rounding(factors: &lu::LuFactorization, a: &[f64], b: &[f64], z: &[f64], n: usize) -> f64 {
+    #[cfg(test)]
+    newton::hooks::note_stall_solves(n as u64);
+    let size = n + 1;
+    let gross: Vec<f64> = (0..n).map(|k| 4.0 * f64::EPSILON * (a[k * size..(k + 1) * size].iter().zip(z).map(|(a, z)| (a * z).abs()).sum::<f64>() + b[k].abs())).collect();
+    let mut noise = vec![0.0f64; n];
+    let mut col = vec![0.0; n];
+    for (k, &r) in gross.iter().enumerate() {
+        col.fill(0.0);
+        col[k] = 1.0;
+        if factors.solve(&mut col).is_err() {
+            return 0.0;
+        }
+        for (acc, v) in noise.iter_mut().zip(&col) {
+            *acc += v.abs() * r;
+        }
+    }
+    noise.into_iter().fold(0.0, f64::max)
 }

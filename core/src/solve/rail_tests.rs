@@ -4561,8 +4561,10 @@ fn correction_against_its_bound(rig: &mut Rig, part: usize, t_end: f64, uniform:
         let (du, b) = (u - u_p, (u - u_p).abs());
         let ((xp, _), (xu, iu)) = (exact(u_p), exact(u));
         let lin: Vec<f64> = xp.iter().zip(&s).map(|(x, s)| x + s * du).collect();
-        let (bv, bj) = (last.node(b), last.junction(0, b));
+        let bj = last.junction(0, b);
         for (l, (got, want)) in lin.iter().zip(&xu).enumerate() {
+            let node = rig.s().local_index.iter().position(|e| *e == Some((part, l))).unwrap();
+            let bv = last.node_at(node, b);
             let r = (got - want).abs() / (bv + 1e-14);
             if r > worst {
                 worst = r;
@@ -5035,8 +5037,8 @@ fn branches_in_series_with_junctions_stay_inside_their_bound() {
         let (du, b) = (u - u_p, (u - u_p).abs());
         let (xp, xu) = (exact(u_p), exact(u));
         let lin: Vec<f64> = (0..5).map(|k| xp[k] + s[local[k]] * du).collect();
-        let bv = last.node(b);
         for k in 0..5 {
+            let bv = last.node_at([2, 3, 4, 5, 6][k], b);
             let r = (lin[k] - xu[k]).abs() / (bv + 1e-14);
             if r > worst {
                 worst = r;
@@ -5156,6 +5158,12 @@ struct D7Board {
 /// bound its band was sized from (infinite where none was). `(W0 ratio, bound
 /// ratio, samples, solves, where)`.
 fn d7_published_against_exact(b: &D7Board, ramp: bool) -> (f64, f64, usize, usize, String) {
+    d7_published_against_exact_at(b, ramp, &[])
+}
+
+/// [`d7_published_against_exact`], publishing first at each of `early`,
+/// instants that fall closer to a solve than any event does.
+fn d7_published_against_exact_at(b: &D7Board, ramp: bool, early: &[f64]) -> (f64, f64, usize, usize, String) {
     let mut rig = Rig::load_carrying(&b.p, &b.carry).unwrap();
     let part = rig.s().local_index[b.nodes[0]].unwrap().0;
     let local: Vec<usize> = b.nodes.iter().map(|&n| {
@@ -5203,8 +5211,8 @@ fn d7_published_against_exact(b: &D7Board, ramp: bool) -> (f64, f64, usize, usiz
             }
             wb = wb.max((corrected - want).abs() / bound);
         };
-        let bv = last.as_ref().map_or(f64::INFINITY, |l| l.node(bw));
         for (k, &n) in b.nodes.iter().enumerate() {
+            let bv = last.as_ref().map_or(f64::INFINITY, |l| l.node_at(n, bw));
             note(format!("node {n}"), rig.v(n), lin[k], xu[k], bv + 1e-14 * (1.0 + xu[k].abs()), 1e-4 + 1e-3 * xu[k].abs());
         }
         for &(dev, na, nb, r) in &b.res {
@@ -5225,6 +5233,10 @@ fn d7_published_against_exact(b: &D7Board, ramp: bool) -> (f64, f64, usize, usiz
         seen += 1;
         true
     };
+    for &t in early {
+        rig.advance(t).unwrap();
+        look(&rig, t);
+    }
     if ramp {
         sample_between_events(&mut rig, 10e-3, |rig, t| {
             look(rig, t);
@@ -5657,49 +5669,55 @@ fn the_power_gate_pingpong_board_through_5_ohm_still_declines() {
     }
 }
 
+/// V8's probe P3: two gates share a supply fed from the rail through `rs`
+/// (node 2, a free chip supply): A's 1y (node 4) high into `r1`, B's 1y
+/// (node 5) low sinking `r2` from the rail, drives `io_a` and `io_b`, on a
+/// {5 V, 0.1 A} CC ramp whose rail capacitor starts at 4.3 V (inside both
+/// gates' window, 3-6 V).
+fn two_gates_on_a_fed_supply(rs: f64, r1: f64, r2: f64, io_a: f64, io_b: f64) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let mut devs = d7_supply(true);
+    let mut gate_b = gate_io(5, 2, 0, [2, 2, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0], io_b, 3.0, 6.0);
+    gate_b.blob[0] = 4.0;
+    devs.extend([resistor(2, 1, 2, rs), gate_io(3, 2, 0, [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], io_a, 3.0, 6.0), resistor(4, 4, 0, r1), gate_b, resistor(6, 1, 5, r2)]);
+    let exact = move |u: f64| {
+        let x = newton_fd(vec![u - 0.1, u - 0.4, 0.3], &|x: &[f64]| {
+            let (v, o, q) = (x[0], x[1], x[2]);
+            let (ga, gb) = (gate_g(v, io_a), gate_g(v, io_b));
+            vec![(v - u) / rs + ga * (v - o) + gs * v, ga * (o - v) + o / r1 + gs * o, gb * q + (q - u) / r2 + gs * q]
+        });
+        let d = (u - x[0]) / rs + (u - x[2]) / r2;
+        (x, d)
+    };
+    let mut p = no_cache(program(6, devs));
+    p.digital_slot_count = p.digital_slot_count.max(16);
+    D7Board {
+        name: format!("two gates rs {rs} r1 {r1} r2 {r2} io {io_a}/{io_b}"),
+        p,
+        nodes: vec![2, 4, 5],
+        res: vec![(2, 1, 2, rs), (4, 4, 0, r1), (6, 1, 5, r2)],
+        leds: vec![],
+        exact: Box::new(exact),
+        supply: (2, 2.7, 6.6),
+        carry: vec![(1, 4.3)],
+    }
+}
+
 #[test]
 fn two_gates_on_one_fed_supply_on_a_precharged_cc_ramp_stay_inside_their_supply_bound() {
-    // V8's medium finding (probe P3). Two gates share a supply fed from the
-    // rail through rs (node 2, a free chip supply): A's 1y (node 4) high into
-    // r1, B's 1y (node 5) low sinking r2 from the rail, on a {5 V, 0.1 A} CC
-    // ramp whose rail capacitor starts at 4.3 V (inside both gates' window,
-    // 3-6 V). The supply bound (`curvature::supply_band`) sizes the band;
-    // with its validation skipped this board ran 2.89x W0. At every
-    // published instant in CC with the supply inside its window, each
-    // published node voltage, resistor current and the draw is within W0's
-    // tolerance of the exact solution at the published rail, and the
-    // correction is within the bound its band was sized from, which every
-    // sample must have (the hook holds this board's bounds alone).
-    let gs = static_part::NODE_RSHUNT_G;
+    // V8's medium finding (probe P3, `two_gates_on_a_fed_supply`). The
+    // supply bound (`curvature::supply_band`) sizes the band; with its
+    // validation skipped this board ran 2.89x W0. At every published instant
+    // in CC with the supply inside its window, each published node voltage,
+    // resistor current and the draw is within W0's tolerance of the exact
+    // solution at the published rail, and the correction is within the
+    // bound its band was sized from, which every sample must have (the hook
+    // holds this board's bounds alone).
     let mut worst = (0.0f64, 0.0f64, String::new());
     for rs in [10.0, 47.0] {
         for (r1, r2) in [(47.0, 47.0), (220.0, 22.0), (1000.0, 100.0)] {
             for (io_a, io_b) in [(0.008, 0.008), (0.024, 0.008), (0.008, 0.024)] {
-                let mut devs = d7_supply(true);
-                let mut gate_b = gate_io(5, 2, 0, [2, 2, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0], io_b, 3.0, 6.0);
-                gate_b.blob[0] = 4.0;
-                devs.extend([resistor(2, 1, 2, rs), gate_io(3, 2, 0, [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], io_a, 3.0, 6.0), resistor(4, 4, 0, r1), gate_b, resistor(6, 1, 5, r2)]);
-                let exact = move |u: f64| {
-                    let x = newton_fd(vec![u - 0.1, u - 0.4, 0.3], &|x: &[f64]| {
-                        let (v, o, q) = (x[0], x[1], x[2]);
-                        let (ga, gb) = (gate_g(v, io_a), gate_g(v, io_b));
-                        vec![(v - u) / rs + ga * (v - o) + gs * v, ga * (o - v) + o / r1 + gs * o, gb * q + (q - u) / r2 + gs * q]
-                    });
-                    let d = (u - x[0]) / rs + (u - x[2]) / r2;
-                    (x, d)
-                };
-                let mut p = no_cache(program(6, devs));
-                p.digital_slot_count = p.digital_slot_count.max(16);
-                let b = D7Board {
-                    name: format!("two gates rs {rs} r1 {r1} r2 {r2} io {io_a}/{io_b}"),
-                    p,
-                    nodes: vec![2, 4, 5],
-                    res: vec![(2, 1, 2, rs), (4, 4, 0, r1), (6, 1, 5, r2)],
-                    leds: vec![],
-                    exact: Box::new(exact),
-                    supply: (2, 2.7, 6.6),
-                    carry: vec![(1, 4.3)],
-                };
+                let b = two_gates_on_a_fed_supply(rs, r1, r2, io_a, io_b);
                 let (w0, wb, seen, solves, at) = d7_published_against_exact(&b, true);
                 eprintln!("{}: W0 {w0:.4}, bound {wb:.4}, {seen} samples, {solves} solves; worst at {at}", b.name);
                 assert!(seen > 50, "{}: {seen} samples", b.name);
@@ -5712,6 +5730,410 @@ fn two_gates_on_one_fed_supply_on_a_precharged_cc_ramp_stay_inside_their_supply_
     eprintln!("two gates on a fed supply: worst W0 {:.4}, bound {:.4} at {}", worst.0, worst.1, worst.2);
     assert!(worst.0 <= 1.0, "{} of W0's tolerance at {}", worst.0, worst.2);
     assert!(worst.1 <= 1.0, "a correction {} of its bound at {}", worst.1, worst.2);
+}
+
+#[test]
+fn two_gates_on_one_fed_supply_stay_inside_their_supply_bound_a_small_rail_step_from_the_solve() {
+    // G2b's finding on V8's P3 board (`two_gates_on_a_fed_supply`): sampled
+    // at 1e-8 s, 3.4e-6 V up the ramp from the solve at 4.3 V, the
+    // correction's true error was 32x its bound (126x at 1e-9 s, 184x on rs
+    // 47, r1 22, r2 1000). The iterated solve that a free supply takes
+    // passed Newton's tolerance 1.0e-4 V short of the solution (`R_out` is
+    // restamped at the last iterate's supply, so it converges linearly), and
+    // `s`, exact at that iterate, missed the solution's slope by 1.25e-5
+    // V/V: a first-order error, all of it at a small step, against a bound
+    // that was second-order alone. Sampled at instants from 1e-11 s to 1e-7
+    // s after load (a rail step of about 5e-9 V to 5e-5 V), and on through
+    // the ramp, every correction is within its bound, and every published
+    // value within W0's tolerance.
+    let early = [1e-11, 1e-10, 3e-10, 1e-9, 3e-9, 1e-8, 3e-8, 1e-7];
+    let mut worst = (0.0f64, 0.0f64, String::new());
+    for rs in [5.0, 10.0, 22.0, 47.0, 100.0] {
+        for (r1, r2) in [(47.0, 47.0), (220.0, 22.0), (1000.0, 100.0), (22.0, 1000.0)] {
+            for (io_a, io_b) in [(0.008, 0.008), (0.024, 0.008), (0.008, 0.024)] {
+                // Powered, these hold the fed supply under the gates' 3 V
+                // floor (1.9-2.6 V at 4.3 V), so the load's iterated solve
+                // ping-pongs at it and declines (-4, F5's class), as on
+                // fb96acb.
+                if (rs == 47.0 && r1 == 22.0 && io_a == 0.024) || (rs == 100.0 && (r1 == 47.0 || r1 == 22.0)) {
+                    continue;
+                }
+                let b = two_gates_on_a_fed_supply(rs, r1, r2, io_a, io_b);
+                let (w0, wb, seen, solves, at) = d7_published_against_exact_at(&b, true, &early);
+                eprintln!("{}: W0 {w0:.4}, bound {wb:.4}, {seen} samples, {solves} solves; worst at {at}", b.name);
+                assert!(seen > 50, "{}: {seen} samples", b.name);
+                if wb > worst.1 {
+                    worst = (w0, wb, b.name.clone());
+                }
+                assert!(w0 <= 1.0, "{}: {w0} of W0's tolerance at {at}", b.name);
+            }
+        }
+    }
+    eprintln!("two gates on a fed supply, a small step from the solve: worst bound {:.4} at {}", worst.1, worst.2);
+    assert!(worst.1 <= 1.0, "a correction {} of its bound at {}", worst.1, worst.2);
+}
+
+/// FXBv's worst board: one gate (drive `io`, window `win`) on a supply fed
+/// from the rail through `rs` (node 2), its 1y (node 3) high into `r` to
+/// ground, on the draining battery or the CC ramp precharged to `v0`.
+fn one_gate_on_a_fed_supply(rs: f64, r: f64, io: f64, win: (f64, f64), ramp: bool, v0: f64) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let mut devs = d7_supply(ramp);
+    devs.extend([resistor(2, 1, 2, rs), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, win.0, win.1), resistor(4, 3, 0, r)]);
+    let exact = move |u: f64| {
+        let x = newton_fd(vec![u - 0.3, 0.3], &|x: &[f64]| {
+            let (v, o) = (x[0], x[1]);
+            let g = gate_g(v, io);
+            vec![(v - u) / rs + g * (v - o) + gs * v, g * (o - v) + o / r + gs * o]
+        });
+        let d = (u - x[0]) / rs;
+        (x, d)
+    };
+    let mut p = no_cache(program(5, devs));
+    p.digital_slot_count = p.digital_slot_count.max(8);
+    D7Board {
+        name: format!("one gate rs {rs} r {r} io {io} win {win:?} {}", if ramp { "ramp" } else { "battery" }),
+        p,
+        nodes: vec![2, 3],
+        res: vec![(2, 1, 2, rs), (4, 3, 0, r)],
+        leds: vec![],
+        exact: Box::new(exact),
+        supply: (2, 0.9 * win.0, 1.1 * win.1),
+        carry: if ramp { vec![(1, v0)] } else { Vec::new() },
+    }
+}
+
+/// Over every published instant of `b` (as [`d7_published_against_exact_at`]
+/// samples them), the worst distance of the solve itself from the exact
+/// solution at its rail, in volts, and the worst ratio of a PUBLISHED node
+/// voltage's, resistor or LED current's or draw's error against the exact
+/// solution to the bound its band was sized from: the band's guarantee as
+/// the reader sees it, the solve's own offset included. A solve that formed
+/// no bound (a chip's `R_out` clamp at hand: the narrowest band, which
+/// re-solves at every move of the rail) is counted, its offset checked, and
+/// its samples left out of the ratio. `(offset, ratio, samples, unbounded
+/// samples, where)`.
+fn d7_published_within_bound(b: &D7Board, ramp: bool, early: &[f64]) -> (f64, f64, usize, usize, String) {
+    let mut rig = Rig::load_carrying(&b.p, &b.carry).unwrap();
+    let part = rig.s().local_index[b.nodes[0]].unwrap().0;
+    let local: Vec<usize> = b.nodes.iter().map(|&n| rig.s().local_index[n].unwrap().1).collect();
+    let (mut offset, mut ratio, mut seen, mut unbounded, mut at) = (0.0f64, 0.0f64, 0usize, 0usize, String::new());
+    let (sup, lo, hi) = b.supply;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let mut look = |rig: &Rig, t: f64| -> bool {
+        let u = rig.v(1);
+        let v_sup = if sup == 1 { u } else { rig.v(sup) };
+        if v_sup < lo + 0.02 && !ramp {
+            return false;
+        }
+        let Some((x, _, i_p, g_p, u_p)) = rig.s().static_solver.hub_solve(part) else { return true };
+        if ramp && rig.hub().state.reg != Regime::Cc {
+            return true;
+        }
+        let (xp, _) = (b.exact)(u_p);
+        let sup_p = if sup == 1 { u_p } else { xp[b.nodes.iter().position(|&n| n == sup).unwrap()] };
+        if !(v_sup >= lo && v_sup <= hi && sup_p >= lo && sup_p <= hi) {
+            return true;
+        }
+        for (k, &l) in local.iter().enumerate() {
+            offset = offset.max((x[l] - xp[k]).abs());
+        }
+        let (du, bw) = (u - u_p, (u - u_p).abs());
+        let (xu, d_exact) = (b.exact)(u);
+        let Some(last) = curvature::hook::of(b.nodes[0]).filter(|l| l.u_p.to_bits() == u_p.to_bits()) else {
+            panic!("{}: a sample at t {t:e} without its solve's record", b.name);
+        };
+        if !last.bounded() {
+            unbounded += 1;
+            return true;
+        }
+        let at_node = |x: &[f64], uu: f64, node: usize| if node == 0 { 0.0 } else if node == 1 { uu } else { x[b.nodes.iter().position(|&n| n == node).unwrap()] };
+        let mut note = |what: String, published: f64, want: f64, bound: f64| {
+            let r = (published - want).abs() / bound;
+            if r > ratio {
+                ratio = r;
+                at = format!("{what} t {t:e} u {u:.6} u_p {u_p:.6}: published {published:e}, exact {want:e}, bound {bound:e}");
+            }
+        };
+        for (k, &n) in b.nodes.iter().enumerate() {
+            note(format!("node {n}"), rig.v(n), xu[k], last.node_at(n, bw) + 1e-14 * (1.0 + xu[k].abs()));
+        }
+        for &(dev, na, nb, r) in &b.res {
+            let want = (at_node(&xu, u, na) - at_node(&xu, u, nb)) / r;
+            note(format!("resistor {dev}"), rig.i(dev), want, last.branch(dev, bw).0 + 2e-14 * (1.0 + u.abs()) / r);
+        }
+        for (j, &(dev, na, nk)) in b.leds.iter().enumerate() {
+            let v = at_node(&xu, u, na) - at_node(&xu, u, nk);
+            // The current a rounding of the junction voltage moves.
+            let floor = 0.5 * (law.current(v + 1e-14) - law.current(v - 1e-14)).abs() + 1e-17;
+            note(format!("LED {dev}"), rig.i(dev), law.current(v), last.junction(j, bw) + floor);
+        }
+        // The draw is a sum of currents out of the rail, each the rail's
+        // value against a node's through a conductance, so the engine's and
+        // the exact solution's each round by a few ulps of `u` times every
+        // conductance on the rail, however small the sum (LEDs off: 2e-12
+        // A of 7e-3 A terms), and 2e-15 (9 ulps) covers both.
+        let rail_g: f64 = b.p.devices.iter().map(|d| match d.kind {
+            kinds::RESISTOR if d.pins.iter().any(|p| p.node == 1) && d.pins.iter().any(|p| p.node != 1) => 1.0 / d.params[0],
+            kinds::IC_74LS00 if d.pins[0].node == 1 => gate_g(u, d.params[ic_param::IO_MAX]),
+            kinds::LED if d.pins.iter().any(|p| p.node == 1) => {
+                let v = at_node(&xu, u, d.pins[0].node) - at_node(&xu, u, d.pins[1].node);
+                (law.current(v + 1e-6) - law.current(v - 1e-6)) / 2e-6 + led::GMIN_D
+            }
+            _ => 0.0,
+        }).sum();
+        note("draw".to_string(), i_p + g_p * du, d_exact, last.draw(bw) + 1e-14 * (g_p.abs() * (1.0 + u.abs()) + d_exact.abs()) + 2e-15 * u.abs() * rail_g);
+        seen += 1;
+        true
+    };
+    for &t in early {
+        rig.advance(t).unwrap();
+        look(&rig, t);
+    }
+    if ramp {
+        sample_between_events(&mut rig, 10e-3, |rig, t| {
+            look(rig, t);
+        });
+    } else {
+        for k in 1..=4000 {
+            let t = 40e-3 * k as f64 / 4000.0;
+            rig.advance(t).unwrap();
+            if !look(&rig, t) {
+                break;
+            }
+        }
+    }
+    (offset, ratio, seen, unbounded, at)
+}
+
+#[test]
+fn a_fed_supply_publishes_its_solution_so_its_band_holds_what_a_reader_sees() {
+    // FXBv's finding, ruled R19 (a). The iterated solve a free supply takes
+    // restamps `R_out` at the last iterate's supply, converging linearly, and
+    // stopped at Newton's tolerance: on its worst board (rs 167, a 37 ohm
+    // load, window 1-6 V, the battery) the published supply sat 9.6e-4 V
+    // from the solution, 0.514 of W0, an offset the band's budget never
+    // counted (its bound measures the correction from the solution). Polished
+    // to the solution, every solve is within rounding of it, and every
+    // published node voltage, resistor current and draw is within the bound
+    // its band was sized from, from 1e-11 s after load (a rail step of about
+    // 5e-9 V on the ramp) on through the run.
+    let early = [1e-11, 1e-10, 1e-9, 1e-8, 1e-7];
+    let rs_worst = 167.2799911696775;
+    let mut boards = vec![
+        (one_gate_on_a_fed_supply(rs_worst, 37.0, 0.008, (1.0, 6.0), false, 0.0), false),
+        (one_gate_on_a_fed_supply(rs_worst, 37.0, 0.008, (1.0, 6.0), true, 4.3), true),
+        (one_gate_on_a_fed_supply(126.28578229518071, 28.0, 0.004, (2.0, 6.0), true, 4.410348), true),
+    ];
+    for (rs, r1, r2) in [(47.0, 22.0, 1000.0), (10.0, 47.0, 47.0)] {
+        boards.push((two_gates_on_a_fed_supply(rs, r1, r2, 0.008, 0.008), true));
+    }
+    let mut worst = (0.0f64, 0.0f64, String::new());
+    for (b, ramp) in &boards {
+        let (offset, ratio, seen, unbounded, at) = d7_published_within_bound(b, *ramp, &early);
+        eprintln!("{}: offset {offset:e} V, published {ratio:.4} of its bound, {seen} samples; worst at {at}", b.name);
+        assert!(seen > 50 && unbounded == 0, "{}: {seen} samples, {unbounded} without a bound", b.name);
+        assert!(offset <= 1e-13, "{}: a solve {offset:e} V from the solution", b.name);
+        if ratio > worst.1 {
+            worst = (offset, ratio, format!("{}: {at}", b.name));
+        }
+    }
+    eprintln!("a fed supply's published values: worst {:.4} of the bound at {}", worst.1, worst.2);
+    assert!(worst.1 <= 1.0, "a published value {} of its bound at {}", worst.1, worst.2);
+    // The seeded fault: without the polish the worst board's solve is the
+    // passing iterate again, 9e-4 V from the solution. Its band counts that
+    // distance now (its rounding floor reads the residual, R23 (i)), so it
+    // narrows rather than breaks, and the refinement that floor sets off
+    // takes the solve to 6e-6 V: the offset is what fails.
+    let _fault = newton::hooks::cap_hub_polish(0);
+    let (offset, ratio, _, _, _) = d7_published_within_bound(&boards[0].0, false, &early);
+    assert!(offset > 1e-9, "unpolished: a solve {offset:e} V from the solution, published {ratio} of its bound");
+}
+
+#[test]
+fn a_fed_supply_polish_that_runs_out_of_steps_fails_the_solve_instead_of_publishing_short() {
+    // The polish is bounded: on the worst board the first solve needs four
+    // Newton steps (9.7e-4 V, 3.5e-7, 4.5e-14, then rounding), so capped at
+    // two it stops short, and the solve fails cleanly (-4) as an iterated
+    // solve that never passed does; capped at four it arrives.
+    let b = one_gate_on_a_fed_supply(167.2799911696775, 37.0, 0.008, (1.0, 6.0), false, 0.0);
+    {
+        let _cap = newton::hooks::cap_hub_polish(2);
+        let e = Rig::load(&b.p).err().expect("a polish cut short fails the load's solve");
+        assert_eq!(e.code, crate::error::ERR_SOLVE_FAILED, "{}", e.message);
+        assert!(e.message.contains("hub polish"), "{}", e.message);
+    }
+    let _cap = newton::hooks::cap_hub_polish(4);
+    let rig = Rig::load(&b.p).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    let (x, _, _, _, u_p) = rig.s().static_solver.hub_solve(part).unwrap();
+    let (xp, _) = (b.exact)(u_p);
+    let l = rig.s().local_index[2].unwrap().1;
+    assert!((x[l] - xp[0]).abs() <= 1e-13, "supply {:e} V from the solution", (x[l] - xp[0]).abs());
+}
+
+/// A gate on the rail (drive `io`, supply window `win`), its 1y (node 2)
+/// high into `r`, an LED (node 3) and `rl` to ground (node 4): FXC's sweep
+/// board at `io` 0.016 into 1000 and 47 ohm.
+fn rail_gate_into_an_led(io: f64, win: (f64, f64), r: f64, rl: f64, ramp: bool) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(ramp);
+    devs.extend([gate_io(2, 1, 0, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, win.0, win.1), resistor(3, 2, 3, r), led(4, 3, 4), resistor(5, 4, 0, rl)]);
+    let exact = move |u: f64| {
+        let g = gate_g(u, io);
+        let x = newton_fd(vec![u - 0.2, u - 0.4, 0.4 * u], &|x: &[f64]| {
+            let (o, a, c) = (x[0], x[1], x[2]);
+            vec![g * (o - u) + (o - a) / r + gs * o, (a - o) / r + jf(a - c) + gs * a, -jf(a - c) + c / rl + gs * c]
+        });
+        let d = g * (u - x[0]);
+        (x, d)
+    };
+    D7Board {
+        name: format!("rail gate io {io} into {r}, an LED and {rl}, {}", if ramp { "CC ramp" } else { "battery" }),
+        p: no_cache(program(5, devs)),
+        nodes: vec![2, 3, 4],
+        res: vec![(3, 2, 3, r), (5, 4, 0, rl)],
+        leds: vec![(4, 3, 4)],
+        exact: Box::new(exact),
+        supply: (1, 0.9 * win.0, 1.1 * win.1),
+        carry: Vec::new(),
+    }
+}
+
+/// A gate on the rail, its 1y (node 2) high through `r` into node 3,
+/// clamped by an LED to ground and by a reverse one to the rail (cathode on
+/// the rail), and loaded by `rl` to ground.
+fn rail_gate_clamped_by_leds(io: f64, win: (f64, f64), r: f64, rl: f64, ramp: bool) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(ramp);
+    devs.extend([gate_io(2, 1, 0, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, win.0, win.1), resistor(3, 2, 3, r), led(4, 3, 0), led(5, 3, 1), resistor(6, 3, 0, rl)]);
+    let exact = move |u: f64| {
+        let g = gate_g(u, io);
+        let x = newton_fd(vec![u - 0.2, 0.4 * u], &|x: &[f64]| {
+            let (o, m) = (x[0], x[1]);
+            vec![g * (o - u) + (o - m) / r + gs * o, (m - o) / r + jf(m) + jf(m - u) + m / rl + gs * m]
+        });
+        // The rail feeds the gate and takes the reverse clamp's current.
+        let d = g * (u - x[0]) - jf(x[1] - u);
+        (x, d)
+    };
+    D7Board {
+        name: format!("rail gate io {io} through {r} into two LED clamps and {rl}, {}", if ramp { "CC ramp" } else { "battery" }),
+        p: no_cache(program(4, devs)),
+        nodes: vec![2, 3],
+        res: vec![(3, 2, 3, r), (6, 3, 0, rl)],
+        leds: vec![(4, 3, 0), (5, 3, 1)],
+        exact: Box::new(exact),
+        supply: (1, 0.9 * win.0, 1.1 * win.1),
+        carry: Vec::new(),
+    }
+}
+
+/// Two LEDs in series from the rail through `r` (nodes 2 and 3), with no
+/// chip: a hub partition curved by its junctions alone.
+fn an_led_chain_on_the_rail(r: f64, ramp: bool) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(ramp);
+    devs.extend([resistor(2, 1, 2, r), led(3, 2, 3), led(4, 3, 0)]);
+    let exact = move |u: f64| {
+        let x = newton_fd(vec![0.8 * u, 0.4 * u], &|x: &[f64]| {
+            let (a, m) = (x[0], x[1]);
+            vec![(a - u) / r + jf(a - m) + gs * a, -jf(a - m) + jf(m) + gs * m]
+        });
+        let d = (u - x[0]) / r;
+        (x, d)
+    };
+    D7Board {
+        name: format!("two LEDs from the rail through {r}, {}", if ramp { "CC ramp" } else { "battery" }),
+        p: no_cache(program(4, devs)),
+        nodes: vec![2, 3],
+        res: vec![(2, 1, 2, r)],
+        leds: vec![(3, 2, 3), (4, 3, 0)],
+        exact: Box::new(exact),
+        supply: (1, 1.0, 6.0),
+        carry: Vec::new(),
+    }
+}
+
+/// A gate on the rail, its 1y (node 2) high through `r` into two LEDs in
+/// series (nodes 3 and 4) and `rl` to ground (node 5).
+fn rail_gate_into_an_led_chain(io: f64, win: (f64, f64), r: f64, rl: f64, ramp: bool) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(ramp);
+    devs.extend([gate_io(2, 1, 0, [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, win.0, win.1), resistor(3, 2, 3, r), led(4, 3, 4), led(5, 4, 5), resistor(6, 5, 0, rl)]);
+    let exact = move |u: f64| {
+        let g = gate_g(u, io);
+        let x = newton_fd(vec![u - 0.2, u - 0.3, 0.5 * u, 0.1 * u], &|x: &[f64]| {
+            let (o, a, m, c) = (x[0], x[1], x[2], x[3]);
+            vec![
+                g * (o - u) + (o - a) / r + gs * o,
+                (a - o) / r + jf(a - m) + gs * a,
+                -jf(a - m) + jf(m - c) + gs * m,
+                -jf(m - c) + c / rl + gs * c,
+            ]
+        });
+        let d = g * (u - x[0]);
+        (x, d)
+    };
+    D7Board {
+        name: format!("rail gate io {io} through {r} into two LEDs and {rl}, {}", if ramp { "CC ramp" } else { "battery" }),
+        p: no_cache(program(6, devs)),
+        nodes: vec![2, 3, 4, 5],
+        res: vec![(3, 2, 3, r), (6, 5, 0, rl)],
+        leds: vec![(4, 3, 4), (5, 4, 5)],
+        exact: Box::new(exact),
+        supply: (1, 0.9 * win.0, 1.1 * win.1),
+        carry: Vec::new(),
+    }
+}
+
+#[test]
+fn every_iterated_hub_solve_publishes_its_solution_so_its_band_holds_what_a_reader_sees() {
+    // R20 (a). A hub partition curved by a junction (with or without a chip
+    // on the rail) is iterated by Newton, which stopped at its tolerance
+    // plus one polish iteration: on FXC's sweep board (a 16 mA gate into
+    // 1000 ohm, an LED and 47 ohm) the published LED current sat 2.0e-10 A
+    // from the solution's, 6.5e5x the bound its band was sized from at a
+    // rail step of 3e-9 V. Polished to the solution, every solve is within
+    // rounding of it, and every published node voltage, resistor and LED
+    // current and draw is within its bound, from 1e-11 s after load on
+    // through the run, on the CC ramp and on the draining battery.
+    let early = [1e-11, 1e-10, 1e-9, 1e-8, 1e-7];
+    let mut boards = Vec::new();
+    for ramp in [true, false] {
+        boards.push((rail_gate_into_an_led(0.016, (4.0, 6.0), 1000.0, 47.0, ramp), ramp));
+        boards.push((rail_gate_into_an_led(0.008, (1.0, 6.0), 220.0, 330.0, ramp), ramp));
+        boards.push((rail_gate_clamped_by_leds(0.008, (2.0, 6.0), 100.0, 1000.0, ramp), ramp));
+        boards.push((rail_gate_into_an_led_chain(0.016, (2.0, 6.0), 22.0, 47.0, ramp), ramp));
+        boards.push((an_led_chain_on_the_rail(150.0, ramp), ramp));
+    }
+    let mut worst = (0.0f64, 0.0f64, String::new());
+    for (b, ramp) in &boards {
+        let (offset, ratio, seen, unbounded, at) = d7_published_within_bound(b, *ramp, &early);
+        eprintln!("{}: offset {offset:e} V, published {ratio:.4} of its bound, {seen} samples ({unbounded} without a bound); worst at {at}", b.name);
+        assert!(seen - unbounded > 50, "{}: {seen} samples, {unbounded} without a bound", b.name);
+        assert!(offset <= 1e-13, "{}: a solve {offset:e} V from the solution", b.name);
+        if ratio > worst.1 {
+            worst = (offset, ratio, format!("{}: {at}", b.name));
+        }
+    }
+    eprintln!("an iterated hub solve's published values: worst {:.4} of the bound at {}", worst.1, worst.2);
+    assert!(worst.1 <= 1.0, "a published value {} of its bound at {}", worst.1, worst.2);
+    // The seeded fault: without the polish FXC's board publishes the
+    // passing iterate again, 6e-9 V from the solution. Its band counts that
+    // distance now (its rounding floor reads the residual, R23 (i)), so it
+    // narrows rather than breaks: the offset is what fails.
+    let _fault = newton::hooks::cap_hub_polish(0);
+    let (offset, ratio, _, _, _) = d7_published_within_bound(&boards[0].0, true, &early);
+    assert!(offset > 1e-9, "unpolished: a solve {offset:e} V from the solution, published {ratio} of its bound");
 }
 
 #[test]
@@ -6933,3 +7355,849 @@ fn a_draining_cells_drift_leaves_its_closed_form_hub_partitions_published_quanti
     assert!(worst.0 <= 1.0, "{} of W0's tolerance at {}", worst.0, worst.1);
 }
 
+
+
+// ---- FXE (rulings R23 (i), (ii) and the keep-best stop rule) ----------------
+
+/// A double-double number, `hi + lo` with `|lo| <= ulp(hi) / 2`: about 32
+/// significant digits, enough to stand as the exact solution of a hub
+/// partition whose `f64` conditioning leaves its solve 1e-6 V off (a
+/// GMIN-held cluster) or W0 off (1e-3 and 1e10 ohm in one partition).
+#[derive(Clone, Copy, Debug)]
+struct Dd(f64, f64);
+
+fn dd_two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+fn dd_quick(a: f64, b: f64) -> Dd {
+    let s = a + b;
+    Dd(s, b - (s - a))
+}
+
+impl Dd {
+    fn of(x: f64) -> Dd {
+        Dd(x, 0.0)
+    }
+
+    fn f(self) -> f64 {
+        self.0 + self.1
+    }
+
+    fn scale(self, k: f64) -> Dd {
+        // Exact for a power of two.
+        Dd(self.0 * k, self.1 * k)
+    }
+
+    fn exp(self) -> Dd {
+        if self.0 < -700.0 {
+            return Dd(0.0, 0.0);
+        }
+        const LN2: Dd = Dd(6.931471805599452862e-1, 2.319046813846299558e-17);
+        let k = (self.0 / LN2.0).round();
+        let r = (self - LN2 * Dd::of(k)).scale(1.0 / 1024.0);
+        let (mut term, mut sum) = (Dd::of(1.0), Dd::of(1.0));
+        for i in 1..=14 {
+            term = term * r / Dd::of(i as f64);
+            sum = sum + term;
+        }
+        for _ in 0..10 {
+            sum = sum * sum;
+        }
+        sum.scale(2f64.powi(k as i32))
+    }
+
+    fn min(self, o: Dd) -> Dd {
+        if (self - o).f() <= 0.0 { self } else { o }
+    }
+}
+
+impl std::ops::Add for Dd {
+    type Output = Dd;
+    fn add(self, o: Dd) -> Dd {
+        let (s, e) = dd_two_sum(self.0, o.0);
+        let (t, f) = dd_two_sum(self.1, o.1);
+        let r = dd_quick(s, e + t);
+        dd_quick(r.0, r.1 + f)
+    }
+}
+
+impl std::ops::Neg for Dd {
+    type Output = Dd;
+    fn neg(self) -> Dd {
+        Dd(-self.0, -self.1)
+    }
+}
+
+impl std::ops::Sub for Dd {
+    type Output = Dd;
+    fn sub(self, o: Dd) -> Dd {
+        self + (-o)
+    }
+}
+
+impl std::ops::Mul for Dd {
+    type Output = Dd;
+    fn mul(self, o: Dd) -> Dd {
+        let p = self.0 * o.0;
+        let e = self.0.mul_add(o.0, -p);
+        dd_quick(p, e + (self.0 * o.1 + self.1 * o.0))
+    }
+}
+
+impl std::ops::Div for Dd {
+    type Output = Dd;
+    fn div(self, o: Dd) -> Dd {
+        let q1 = self.0 / o.0;
+        let r = self - o * Dd::of(q1);
+        let q2 = r.0 / o.0;
+        let r = r - o * Dd::of(q2);
+        let q3 = r.0 / o.0;
+        dd_quick(q1, q2) + Dd::of(q3)
+    }
+}
+
+/// The junction law of `led(..)` in double-double: `I(v)`, GMIN excluded,
+/// and its slope.
+fn dd_led(v: Dd) -> (Dd, f64) {
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let (is, vtn, vsat) = (Dd::of(law.is), Dd::of(law.vtn), Dd::of(law.vsat));
+    let c = v.min(vsat);
+    let e = (c / vtn).exp();
+    let past = if (v - vsat).f() > 0.0 { v - vsat } else { Dd::of(0.0) };
+    let i = is * (e - Dd::of(1.0)) + (is * e / vtn) * past;
+    (i, (is * e / vtn).f())
+}
+
+/// One element of an FXE board: a resistor, an LED (anode, cathode), the
+/// output (high) of a gate whose supply is the rail and whose drive is
+/// `io`, or an open switch (which stamps nothing).
+#[derive(Clone, Copy, Debug)]
+enum FxEl {
+    R(usize, usize, f64),
+    Led(usize, usize),
+    Gate(usize, f64),
+    Sw(usize, usize),
+}
+
+/// A hub board on the rail (node 1) of V6's supplies: its elements, its
+/// free nodes, the window of its gates' supply.
+struct FxBoard {
+    name: String,
+    p: Program,
+    els: Vec<FxEl>,
+    nodes: Vec<usize>,
+    win: (f64, f64),
+    ramp: bool,
+}
+
+fn fx_board(name: &str, ramp: bool, els: Vec<FxEl>, win: (f64, f64)) -> FxBoard {
+    let mut devs = d7_supply(ramp);
+    let mut top = 1;
+    for (k, e) in els.iter().enumerate() {
+        let ci = 2 + k;
+        devs.push(match *e {
+            FxEl::R(a, b, r) => resistor(ci, a, b, r),
+            FxEl::Led(a, c) => led(ci, a, c),
+            FxEl::Gate(o, io) => gate_io(ci, 1, 0, [0, 0, o, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, win.0, win.1),
+            FxEl::Sw(a, b) => switch(ci, a, b, false),
+        });
+        top = top.max(match *e {
+            FxEl::R(a, b, _) | FxEl::Led(a, b) | FxEl::Sw(a, b) => a.max(b),
+            FxEl::Gate(o, _) => o,
+        });
+    }
+    let mut p = no_cache(program(top + 1, devs));
+    p.digital_slot_count = p.digital_slot_count.max(8);
+    FxBoard { name: format!("{name}, {}", if ramp { "CC ramp" } else { "battery" }), p, els, nodes: (2..=top).collect(), win, ramp }
+}
+
+/// An FXE board's exact solution at rail `u`, rounded once from
+/// double-double: its node voltages (in `nodes` order) and each element's
+/// current (a resistor's and an LED's, GMIN excluded, `a` to `b`; a gate's
+/// out of the rail).
+struct FxExact {
+    x: Vec<f64>,
+    cur: Vec<f64>,
+    /// Each element's whole current (an LED's GMIN included), unrounded.
+    full: Vec<Dd>,
+}
+
+fn fx_exact(b: &FxBoard, u: f64) -> FxExact {
+    let n = b.nodes.len();
+    let at = |node: usize| b.nodes.iter().position(|&m| m == node);
+    let powered = u >= b.win.0 * 0.9 && u <= b.win.1 * 1.1;
+    let gate_g = |io: f64| Dd::of(1.0) / (Dd::of(u) / Dd::of(4.0 * io)).min(Dd::of(1000.0)).max_dd(Dd::of(50.0));
+    let volt = |x: &[Dd], node: usize| if node == 0 { Dd::of(0.0) } else if node == 1 { Dd::of(u) } else { x[at(node).unwrap()] };
+    // Each element's current a -> b (into the node for a gate) and its slope.
+    let current = |x: &[Dd], e: &FxEl| -> (Dd, f64) {
+        match *e {
+            FxEl::R(a, c, r) => ((volt(x, a) - volt(x, c)) / Dd::of(r), 1.0 / r),
+            FxEl::Led(a, c) => {
+                let v = volt(x, a) - volt(x, c);
+                let (i, g) = dd_led(v);
+                (i + Dd::of(led::GMIN_D) * v, g + led::GMIN_D)
+            }
+            FxEl::Gate(o, io) if powered => {
+                let g = gate_g(io);
+                (g * (Dd::of(u) - volt(x, o)), g.f())
+            }
+            _ => (Dd::of(0.0), 0.0),
+        }
+    };
+    let ends = |e: &FxEl| -> (usize, usize) {
+        match *e {
+            FxEl::R(a, c, _) | FxEl::Led(a, c) => (a, c),
+            FxEl::Gate(o, _) => (1, o),
+            FxEl::Sw(a, c) => (a, c),
+        }
+    };
+    let mut x: Vec<Dd> = vec![Dd::of(0.5 * u); n];
+    let mut small = 0;
+    for _ in 0..400 {
+        let mut f = vec![Dd::of(0.0); n];
+        let mut j = vec![0.0; n * n];
+        for k in 0..n {
+            f[k] = Dd::of(static_part::NODE_RSHUNT_G) * x[k];
+            j[k * n + k] += static_part::NODE_RSHUNT_G;
+        }
+        for e in &b.els {
+            let (i, g) = current(&x, e);
+            let (a, c) = ends(e);
+            let (la, lc) = (at(a), at(c));
+            if let Some(la) = la {
+                f[la] = f[la] + i;
+            }
+            if let Some(lc) = lc {
+                f[lc] = f[lc] - i;
+            }
+            for (p, sp) in [(la, 1.0), (lc, -1.0)] {
+                for (q, sq) in [(la, 1.0), (lc, -1.0)] {
+                    if let (Some(p), Some(q)) = (p, q) {
+                        j[p * n + q] += sp * sq * g;
+                    }
+                }
+            }
+        }
+        let mut dx: Vec<f64> = f.iter().map(|v| -v.f()).collect();
+        crate::lu::lu_factor(j, n).unwrap().solve(&mut dx).unwrap();
+        let m = dx.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let damp = if m > 0.2 { 0.2 / m } else { 1.0 };
+        for k in 0..n {
+            x[k] = x[k] + Dd::of(damp * dx[k]);
+        }
+        // Converged to double-double, give or take the conditioning: a
+        // few steps more once the step is far below any floor.
+        if m < 1e-27 * (1.0 + u) {
+            small += 1;
+            if small >= 3 {
+                break;
+            }
+        }
+    }
+    let full: Vec<Dd> = b.els.iter().map(|e| current(&x, e).0).collect();
+    let cur = b
+        .els
+        .iter()
+        .zip(&full)
+        .map(|(e, i)| {
+            match *e {
+                // The LED's published current excludes GMIN.
+                FxEl::Led(a, c) => dd_led(volt(&x, a) - volt(&x, c)).0.f(),
+                _ => i.f(),
+            }
+        })
+        .collect();
+    FxExact { x: x.iter().map(|v| v.f()).collect(), cur, full }
+}
+
+impl Dd {
+    fn max_dd(self, o: Dd) -> Dd {
+        if (self - o).f() >= 0.0 { self } else { o }
+    }
+}
+
+/// Over every published instant of `b` (the CC ramp between events, the
+/// battery's `steps` even steps over 40 ms, with `early` first), the worst
+/// ratio of a published node voltage's, resistor or LED current's or
+/// draw's distance from the exact solution's to the bound its band was
+/// sized from, with no allowance beyond the exact value's own rounding;
+/// and the worst distance
+/// of a hub solve itself (its node voltages and the currents they give,
+/// formed exactly) from the exact solution at its rail, in W0. Every hub
+/// partition of the board is read. Instants whose rail and solve sit on two
+/// sides of a gate's power edge are left out. `(bound ratio, solve W0,
+/// samples, where, solve where)`.
+fn fx_published_within_bound(b: &FxBoard, early: &[f64], steps: usize) -> (f64, f64, usize, String, String) {
+    let mut rig = Rig::load(&b.p).unwrap();
+    // Each hub partition: its free nodes (as indices into `b.nodes`) and
+    // local indices, and its elements (by index into `b.els`).
+    let mut parts: Vec<(usize, Vec<usize>, Vec<usize>, Vec<usize>)> = Vec::new();
+    for (k, &n) in b.nodes.iter().enumerate() {
+        let Some((p, l)) = rig.s().local_index[n] else { continue };
+        match parts.iter_mut().find(|e| e.0 == p) {
+            Some(e) => {
+                e.1.push(k);
+                e.2.push(l);
+            }
+            None => parts.push((p, vec![k], vec![l], Vec::new())),
+        }
+    }
+    for (k, el) in b.els.iter().enumerate() {
+        let ends = match *el {
+            FxEl::R(a, c, _) | FxEl::Led(a, c) | FxEl::Sw(a, c) => [a, c],
+            FxEl::Gate(o, _) => [o, o],
+        };
+        if let Some(e) = parts.iter_mut().find(|e| ends.iter().any(|&n| rig.s().local_index[n].is_some_and(|(p, _)| p == e.0))) {
+            e.3.push(k);
+        }
+    }
+    let (mut ratio, mut solve_w0, mut seen, mut at, mut solve_at) = (0.0f64, 0.0f64, 0usize, String::new(), String::new());
+    let mut last_up = vec![f64::NAN; parts.len()];
+    let powered = |u: f64| u >= b.win.0 * 0.9 && u <= b.win.1 * 1.1;
+    let tol_v = |v: f64| 1e-4 + 1e-3 * v.abs();
+    let tol_i = |i: f64| 1e-9 + 1e-3 * i.abs();
+    let mut look = |rig: &Rig, t: f64| {
+        let u = rig.v(1);
+        for (pi, (part, idx, local, els)) in parts.iter().enumerate() {
+            let Some((x, _, i_p, g_p, u_p)) = rig.s().static_solver.hub_solve(*part) else { continue };
+            if powered(u) != powered(u_p) {
+                continue;
+            }
+            if u_p.to_bits() != last_up[pi].to_bits() {
+                last_up[pi] = u_p;
+                // The solve itself against the exact solution at its rail.
+                let e = fx_exact(b, u_p);
+                let v_at = |node: usize| -> Dd {
+                    if node == 0 {
+                        Dd::of(0.0)
+                    } else if node == 1 {
+                        Dd::of(u_p)
+                    } else {
+                        let k = b.nodes.iter().position(|&m| m == node).unwrap();
+                        match idx.iter().position(|&q| q == k) {
+                            Some(j) => Dd::of(x[local[j]]),
+                            None => Dd::of(e.x[k]),
+                        }
+                    }
+                };
+                let mut w = |what: String, d: f64, tol: f64| {
+                    if d / tol > solve_w0 {
+                        solve_w0 = d / tol;
+                        solve_at = format!("{what} u_p {u_p:.9}: {d:e} off");
+                    }
+                };
+                for (j, &k) in idx.iter().enumerate() {
+                    w(format!("node {}", b.nodes[k]), (x[local[j]] - e.x[k]).abs(), tol_v(e.x[k]));
+                }
+                for &k in els {
+                    match b.els[k] {
+                        FxEl::R(a, c, r) => w(format!("resistor {}", k + 2), (((v_at(a) - v_at(c)) / Dd::of(r)) - Dd::of(e.cur[k])).f().abs(), tol_i(e.cur[k])),
+                        FxEl::Led(a, c) => w(format!("LED {}", k + 2), (dd_led(v_at(a) - v_at(c)).0 - Dd::of(e.cur[k])).f().abs(), tol_i(e.cur[k])),
+                        _ => {}
+                    }
+                }
+            }
+            let Some(last) = curvature::hook::of(b.nodes[idx[0]]).filter(|l| l.u_p.to_bits() == u_p.to_bits() && l.bounded()) else { continue };
+            let bw = (u - u_p).abs();
+            let e = fx_exact(b, u);
+            let mut note = |what: String, published: f64, want: f64, bound: f64| {
+                let r = ((published - want).abs() - f64::EPSILON * want.abs()).max(0.0) / bound;
+                if r > ratio {
+                    ratio = r;
+                    at = format!("{what} t {t:e} u {u:.9} u_p {u_p:.9}: published {published:e}, exact {want:e}, bound {bound:e}");
+                }
+            };
+            for &k in idx {
+                note(format!("node {}", b.nodes[k]), rig.v(b.nodes[k]), e.x[k], last.node_at(b.nodes[k], bw));
+            }
+            let mut j = 0;
+            // The exact draw: every element current leaving the rail.
+            let mut draw = Dd::of(0.0);
+            for &k in els {
+                let ends = match b.els[k] {
+                    FxEl::R(a, c, _) | FxEl::Led(a, c) | FxEl::Sw(a, c) => (a, c),
+                    FxEl::Gate(o, _) => (1, o),
+                };
+                if ends.0 == 1 {
+                    draw = draw + e.full[k];
+                }
+                if ends.1 == 1 {
+                    draw = draw - e.full[k];
+                }
+                match b.els[k] {
+                    FxEl::R(..) => note(format!("resistor {}", k + 2), rig.i(k + 2), e.cur[k], last.branch(k + 2, bw).0),
+                    FxEl::Led(..) => {
+                        note(format!("LED {}", k + 2), rig.i(k + 2), e.cur[k], last.junction(j, bw));
+                        j += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if last.draw_rule() != Some(curvature::DrawRule::Zero) {
+                note("draw".to_string(), i_p + g_p * (u - u_p), draw.f(), last.draw(bw));
+            }
+            seen += 1;
+        }
+    };
+    for &t in early {
+        rig.advance(t).unwrap();
+        look(&rig, t);
+    }
+    if b.ramp {
+        sample_between_events(&mut rig, 10e-3, |rig, t| look(rig, t));
+    } else {
+        for k in 1..=steps {
+            let t = 40e-3 * k as f64 / steps as f64;
+            if rig.advance(t).is_err() {
+                break;
+            }
+            look(&rig, t);
+        }
+    }
+    (ratio, solve_w0, seen, at, solve_at)
+}
+
+/// FXDv's GMIN-held floating clusters (ruling R23 (i)): nodes 3 and 4
+/// between an LED off node 2, an open switch, a reversed LED and an LED to
+/// ground, joined by `r34`, beside a divider off the rail (`k5`); a rail
+/// gate through `r` into an LED clamp to ground and one to the rail, which
+/// floats once the gate is unpowered (`k1`).
+fn fx_cluster(r12: f64, r20: f64, r34: f64, led24: bool, ramp: bool) -> FxBoard {
+    let mut els = vec![FxEl::R(1, 2, r12), FxEl::R(2, 0, r20), FxEl::Led(3, 2), FxEl::Sw(3, 0), FxEl::Led(0, 3), FxEl::R(3, 4, r34), FxEl::Led(4, 0)];
+    if led24 {
+        els.push(FxEl::Led(2, 4));
+    }
+    fx_board(&format!("a floating cluster: {r12} and {r20} off the rail, {r34} between two LEDs{}", if led24 { ", an LED from node 2" } else { "" }), ramp, els, (0.0, 0.0))
+}
+
+fn fx_clamped_gate(io: f64, r: f64, win: (f64, f64), ramp: bool) -> FxBoard {
+    fx_board(&format!("a rail gate io {io} through {r} into two LED clamps"), ramp, vec![FxEl::Gate(2, io), FxEl::R(2, 3, r), FxEl::Led(3, 0), FxEl::Led(3, 1)], win)
+}
+
+/// `b` (a gate on a fed supply) loaded on a PSU of `v` volts: the rail
+/// static, the hub solved at load.
+fn fx_on_psu(b: &mut D7Board, v: f64) -> Result<Rig, BoError> {
+    b.p.devices[0] = psu(0, 1, 0, v, 20.0);
+    b.p.devices[1] = resistor(1, 1, 0, 1e9);
+    Rig::load(&b.p)
+}
+
+/// The power-edge hairline of a gate on a fed supply (its supply node 2
+/// through `rs` off the rail, the rest of `b` behind its output): the PSU
+/// volts `V*` at which its exact powered solution's supply sits on the
+/// power floor, `0.9 lo`, and every load at `V* + d` over a ladder of `d`
+/// from 1e-15 to 1e-4 V either way. Returns `(loads, failed, worst solve
+/// offset in volts, where)` over the loads that published, each against
+/// the exact solution of the state that holds there: powered from `V*` up,
+/// unpowered (the supply at the rail less the shunt's share, the rest at
+/// 0 V) below, each where its supply is inside (outside) the window `[0.9
+/// lo, 1.1 hi]`, `hi` 6 V, to within 1e-6 V. Between the floor and `V*`
+/// neither holds, and a published solve is wrong whichever it is held to;
+/// `-4` is the answer there (FXDv: 49-66 % of CC-ramp fed-supply boards,
+/// ruling R23 (iii)).
+fn fx_power_hairline(b: &mut D7Board, rs: f64, lo: f64) -> (usize, usize, f64, String) {
+    let floor = 0.9 * lo;
+    let (mut a, mut z) = (floor, 20.0);
+    assert!((b.exact)(z).0[0] >= floor, "{}: no power edge below 20 V", b.name);
+    for _ in 0..200 {
+        let mid = 0.5 * (a + z);
+        if (b.exact)(mid).0[0] < floor {
+            a = mid;
+        } else {
+            z = mid;
+        }
+    }
+    let v_star = z;
+    let mut deltas = vec![0.0];
+    for j in 0..45 {
+        let d = 1e-15 * 10f64.powf(j as f64 * 0.25);
+        deltas.extend([d, -d]);
+    }
+    let (mut loads, mut failed, mut worst, mut at) = (0usize, 0usize, 0.0f64, String::new());
+    for d in deltas {
+        loads += 1;
+        match fx_on_psu(b, v_star + d) {
+            Err(e) => {
+                assert_eq!(e.code, crate::error::ERR_SOLVE_FAILED, "{}", e.message);
+                failed += 1;
+            }
+            Ok(rig) => {
+                let part = rig.s().local_index[b.nodes[0]].unwrap().0;
+                let (x, _, _, _, u_p) = rig.s().static_solver.hub_solve(part).unwrap();
+                // The states that hold here, to rounding of the floor.
+                let (powered, _) = (b.exact)(u_p);
+                let off: Vec<f64> = b.nodes.iter().map(|&n| if n == 2 { u_p / (1.0 + rs * static_part::NODE_RSHUNT_G) } else { 0.0 }).collect();
+                let mut states = Vec::new();
+                let top = 1.1 * 6.0;
+                if powered[0] >= floor - 1e-6 && powered[0] <= top + 1e-6 {
+                    states.push(powered);
+                }
+                if off[0] <= floor + 1e-6 || off[0] >= top - 1e-6 {
+                    states.push(off);
+                }
+                let published: Vec<f64> = b.nodes.iter().map(|&n| x[rig.s().local_index[n].unwrap().1]).collect();
+                let dist = states.iter().map(|xs| published.iter().zip(xs).fold(0.0f64, |a, (p, q)| a.max((p - q).abs()))).fold(f64::INFINITY, f64::min);
+                if dist > worst {
+                    worst = dist;
+                    at = format!("V* {d:+e}: {dist:e} V from the solution of every state that holds there ({})", states.len());
+                }
+            }
+        }
+    }
+    (loads, failed, worst, at)
+}
+
+/// A gate whose supply (node 2) is fed from the rail through `rs`, its 1y
+/// (node 3) high through `r` into an LED (node 4) to ground: FXDv's
+/// power-edge hairline board.
+fn fx_fed_gate_into_an_led(rs: f64, io: f64, r: f64, lo: f64) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(false);
+    devs.extend([resistor(2, 1, 2, rs), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, lo, 6.0), resistor(4, 3, 4, r), led(5, 4, 0)]);
+    let exact = move |u: f64| {
+        let x = newton_fd(vec![u - 0.1, 0.5 * u, 0.3 * u], &|x: &[f64]| {
+            let (v, o, a) = (x[0], x[1], x[2]);
+            let g = gate_g(v, io);
+            vec![(v - u) / rs + g * (v - o) + gs * v, g * (o - v) + (o - a) / r + gs * o, (a - o) / r + jf(a) + gs * a]
+        });
+        let d = (u - x[0]) / rs;
+        (x, d)
+    };
+    let mut p = no_cache(program(5, devs));
+    p.digital_slot_count = p.digital_slot_count.max(8);
+    D7Board {
+        name: format!("a gate fed through {rs} (io {io}, lo {lo}) into {r} and an LED"),
+        p,
+        nodes: vec![2, 3, 4],
+        res: vec![(2, 1, 2, rs), (4, 3, 4, r)],
+        leds: vec![(5, 4, 0)],
+        exact: Box::new(exact),
+        supply: (2, 0.9 * lo, 6.6),
+        carry: Vec::new(),
+    }
+}
+
+/// A gate whose supply (node 2) is fed from the rail through `rs`, its 1y
+/// (node 3) high into `r` to ground and into two LEDs in series to ground
+/// (node 4 between them), which stay off below 4 V: node 4 is held by
+/// their GMIN alone, so the partition's rounding floor is large.
+fn fx_fed_gate_into_r_and_an_off_chain(rs: f64, io: f64, r: f64, lo: f64) -> D7Board {
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    let mut devs = d7_supply(false);
+    devs.extend([resistor(2, 1, 2, rs), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], io, lo, 6.0), resistor(4, 3, 0, r), led(5, 3, 4), led(6, 4, 0)]);
+    let exact = move |u: f64| {
+        let x = newton_fd(vec![u - 0.1, 0.5 * u, 0.25 * u], &|x: &[f64]| {
+            let (v, o, a) = (x[0], x[1], x[2]);
+            let g = gate_g(v, io);
+            vec![(v - u) / rs + g * (v - o) + gs * v, g * (o - v) + o / r + jf(o - a) + gs * o, -jf(o - a) + jf(a) + gs * a]
+        });
+        let d = (u - x[0]) / rs;
+        (x, d)
+    };
+    let mut p = no_cache(program(5, devs));
+    p.digital_slot_count = p.digital_slot_count.max(8);
+    D7Board {
+        name: format!("a gate fed through {rs} (io {io}, lo {lo}) into {r} and two LEDs off"),
+        p,
+        nodes: vec![2, 3, 4],
+        res: vec![(2, 1, 2, rs), (4, 3, 0, r)],
+        leds: vec![(5, 3, 4), (6, 4, 0)],
+        exact: Box::new(exact),
+        supply: (2, 0.9 * lo, 6.6),
+        carry: Vec::new(),
+    }
+}
+
+/// FXDv's extreme-ratio boards (ruling R23 (ii)): resistors from 1e-3 to
+/// 1e10 ohm in one partition, with LEDs and open switches (`k8 s1017`, its
+/// polished solve 70 W0 from the exact one at bda1839, 18 W0 before the
+/// polish), and the 0.05..1e8 and 1e-3..1e9 families' worst (`k4 s1002`,
+/// 1.3 W0; `k9 s1011`, a ladder, 0.04 W0).
+fn fx_extreme(which: u32, ramp: bool) -> FxBoard {
+    use FxEl::{Led, Sw, R};
+    let (name, els) = match which {
+        0 => (
+            "k8 s1017: 1e-3 to 3e9 ohm, five LEDs, two open switches",
+            vec![
+                R(1, 2, 1.22514421094097123e1),
+                R(2, 8, 2.78324059714798633e0),
+                R(2, 4, 2.83431818593903732e9),
+                Sw(3, 8),
+                R(3, 4, 7.99657143686693071e-3),
+                R(4, 2, 6.18989618499603510e8),
+                R(4, 9, 4.52717979286214802e6),
+                Led(6, 4),
+                Led(6, 5),
+                R(6, 7, 1.03325941760135077e-3),
+                Led(0, 6),
+                R(7, 6, 6.14217350471706712e5),
+                Sw(7, 6),
+                Led(5, 7),
+                R(8, 3, 3.87057194601742958e4),
+                R(8, 3, 2.83677629330803569e1),
+                Led(8, 0),
+                R(9, 1, 4.24281797683692873e7),
+            ],
+        ),
+        1 => (
+            "k4 s1002: 0.06 to 1.4e7 ohm, six LEDs",
+            vec![
+                R(1, 2, 3.68785200933061788e4),
+                Led(2, 3),
+                R(3, 4, 1.40215703507334981e7),
+                R(3, 4, 6.10248508535342973e-2),
+                R(3, 4, 1.22722025606106827e6),
+                Led(0, 4),
+                Led(3, 4),
+                Led(4, 5),
+                Led(5, 2),
+                Led(5, 0),
+            ],
+        ),
+        _ => (
+            "k9 s1011: a ladder of 3e-3 to 4e8 ohm, three LEDs",
+            vec![
+                R(1, 2, 4.20141960479364038e8),
+                R(2, 3, 1.92077431507161127e4),
+                R(3, 4, 3.79383561545533444e-3),
+                R(4, 5, 2.88564524287502093e-3),
+                R(5, 0, 3.19467604428716600e8),
+                Led(0, 3),
+                Led(4, 0),
+                Led(5, 0),
+            ],
+        ),
+    };
+    fx_board(name, ramp, els, (0.0, 0.0))
+}
+
+#[test]
+fn a_stalled_hub_polish_keeps_the_iterate_with_the_smaller_residual() {
+    // Ruling R23 (keep-best). Where its steps stop contracting a polish's
+    // steps are rounding, and bda1839 applied the last one regardless: on
+    // GMIN-held clusters and extreme-ratio partitions 5-20 % of such exits
+    // ended more than 2x further from the solution than the iterate that
+    // entered (FXDv). Now every stalled polish publishes a residual (each
+    // node's KCL imbalance over its own conductance, volts) no larger than
+    // the entering iterate's. (A polish that arrives by a step within 16
+    // ulps of its largest voltage takes it: nothing smaller moves a value.)
+    let mut boards = Vec::new();
+    for ramp in [false, true] {
+        boards.push(fx_cluster(2.29888839893743125e2, 6.07826902542198582e1, 1.07865330249350109e1, false, ramp));
+        boards.push(fx_cluster(4.86101407852637749e3, 8.55780208410779778e3, 6.63255153855991164e0, true, ramp));
+        boards.push(fx_extreme(1, ramp));
+        boards.push(fx_extreme(2, ramp));
+    }
+    let (mut stalls, mut worst) = (0usize, (0.0f64, String::new()));
+    for b in &boards {
+        let _norms = newton::hooks::record_polish_norms();
+        let mut rig = Rig::load(&b.p).unwrap();
+        if b.ramp {
+            sample_between_events(&mut rig, 10e-3, |_, _| {});
+        } else {
+            for k in 1..=2000 {
+                if rig.advance(40e-3 * k as f64 / 2000.0).is_err() {
+                    break;
+                }
+            }
+        }
+        for (m_in, m_out, _) in newton::hooks::polish_norms() {
+            stalls += 1;
+            let over = m_out / m_in;
+            if over > worst.0 {
+                worst = (over, format!("{}: entering {m_in:e} V, published {m_out:e} V", b.name));
+            }
+        }
+    }
+    eprintln!("{stalls} stalled polishes; the published residual at worst {:.4} of the entering one's at {}", worst.0, worst.1);
+    assert!(stalls > 500, "{stalls} stalled polishes");
+    assert!(worst.0 <= 1.0, "a polish published a residual {} of the entering one's at {}", worst.0, worst.1);
+}
+
+#[test]
+fn a_published_solve_at_a_power_edge_is_a_solution_of_the_state_it_publishes() {
+    // Ruling R23 (keep-best), FXDv's seed: loosening the polish's rounding
+    // floor (`step_rounding`) a millionfold passed every test. At the power
+    // edge of a gate on a fed supply (its supply on 0.9 lo), between the
+    // floor and the rail `V*` where the powered solution's supply sits on
+    // it, no state holds: unpowered the supply would sit at the rail, so
+    // the polish ping-pongs across the edge and stalls, which only the
+    // floor turns into `-4` where no iterate it evaluated is a solution.
+    // Every load from V* - 1e-4 V to V* + 1e-4 V either fails `-4` (the
+    // power edge's own failures, ruling R23 (iii), F5's) or publishes a
+    // solution of a state that holds there: within 1e-12 V on a gate into a
+    // load and two LEDs held off (a node held by GMIN alone, so the
+    // rounding floor is large: loosened, it publishes stalled iterates up to
+    // 1.6e-9 V off), and within 1e-6 V (0.01 W0) where the gate drives an
+    // LED alone (the iterate a stall keeps sits up to 7e-9 V off, inside the
+    // polish's rounding floor of 2.2e-7 V there).
+    let mut boards = vec![
+        (fx_fed_gate_into_r_and_an_off_chain(150.0, 0.004, 1000.0, 1.0), 150.0, 1.0, 1e-12),
+        (fx_fed_gate_into_r_and_an_off_chain(60.0, 0.004, 200.0, 3.0), 60.0, 3.0, 1e-12),
+        (fx_fed_gate_into_r_and_an_off_chain(20.0, 0.004, 200.0, 2.0), 20.0, 2.0, 1e-12),
+        (fx_fed_gate_into_an_led(40.94005929443432, 0.016, 72.39521148039215, 1.0), 40.94005929443432, 1.0, 1e-6),
+        (fx_fed_gate_into_an_led(260.10858729957744, 0.004, 56.385405604028385, 1.0), 260.10858729957744, 1.0, 1e-6),
+        (one_gate_on_a_fed_supply(5.632455568787591, 60.754768860798805, 0.004, (2.0, 6.0), false, 0.0), 5.632455568787591, 2.0, 1e-12),
+    ];
+    for (b, rs, lo, tol) in boards.iter_mut() {
+        let (loads, failed, worst, at) = fx_power_hairline(b, *rs, *lo);
+        eprintln!("{}: {failed} of {loads} loads failed -4; the published worst {worst:e} V from a solution ({at})", b.name);
+        assert!(loads - failed >= 30, "{}: {failed} of {loads} failed", b.name);
+        assert!(worst <= *tol, "{}: {at}", b.name);
+    }
+}
+
+#[test]
+fn a_floating_cluster_publishes_within_its_bound_its_rounding_floor_included() {
+    // Ruling R23 (i). A GMIN-held cluster (nodes between off LEDs and an
+    // open switch; a gate's output once it is unpowered) is held by 1e-12
+    // S, so the residual's rounding moves its solve by up to 1e-6 V (7e-3
+    // W0), which no band counted: published 1.8e-6 V from the solution
+    // against a bound of 1e-14 V and less (FXDv; bda1839: published values
+    // off a bound of exactly 0). Every published node voltage, resistor and
+    // LED current and draw is now within its bound against the exact
+    // (double-double) solution, with no allowance beyond the exact value's
+    // own rounding, the rounding floor added (`curvature::Floors`).
+    let early = [1e-11, 1e-10, 1e-9, 1e-8, 1e-7];
+    let mut worst = (0.0f64, String::new());
+    for ramp in [false, true] {
+        for b in [
+            fx_cluster(2.29888839893743125e2, 6.07826902542198582e1, 1.07865330249350109e1, false, ramp),
+            fx_cluster(4.86101407852637749e3, 8.55780208410779778e3, 6.63255153855991164e0, true, ramp),
+            fx_clamped_gate(8e-3, 2.19160003795985254e1, (4.0, 6.0), ramp),
+        ] {
+            let (ratio, w0, seen, at, sat) = fx_published_within_bound(&b, &early, 2000);
+            eprintln!("{}: published {ratio:.4} of its bound over {seen} samples (at {at}); solve {w0:.2e} of W0 ({sat})", b.name);
+            assert!(seen > 50, "{}: {seen} samples", b.name);
+            if ratio > worst.0 {
+                worst = (ratio, format!("{}: {at}", b.name));
+            }
+        }
+    }
+    assert!(worst.0 <= 1.0, "published {} of its bound at {}", worst.0, worst.1);
+}
+
+#[test]
+fn extreme_resistance_ratios_are_refined_to_a_hundredth_of_w0() {
+    // Ruling R23 (ii). With 1e-3 and 1e10 ohm in one partition the stamp's
+    // residual rounds by ulps of 1e3 A terms, which a GMIN-held cluster's
+    // 1e-12 S multiply into volts: k8 s1017's solve sat 70 W0 from the
+    // exact solution at bda1839. Where the rounding floor passes 0.01 of
+    // W0 the solve is refined with the residual summed element by element:
+    // every hub solve of these boards is within 0.01 W0 of the exact
+    // (double-double) solution, and every published value within its
+    // bound. The refinement runs only there.
+    let early = [1e-11, 1e-10, 1e-9, 1e-8, 1e-7];
+    let (mut worst_w0, mut worst_ratio) = ((0.0f64, String::new()), (0.0f64, String::new()));
+    // The draining battery only: k8 s1017's every solve is refined, and the
+    // CC ramp's samples between events run to 1e5.
+    for ramp in [false] {
+        for which in 0..3 {
+            let b = fx_extreme(which, ramp);
+            let _refined = newton::hooks::record_refinements();
+            let (ratio, w0, seen, at, sat) = fx_published_within_bound(&b, &early, 400);
+            let refined = newton::hooks::refinements().len();
+            eprintln!("{}: solve {w0:.2e} of W0 ({sat}); published {ratio:.4} of its bound over {seen} samples (at {at}); {refined} refinements", b.name);
+            assert!(seen > 50, "{}: {seen} samples", b.name);
+            if which == 0 {
+                assert!(refined > 0, "{}: never refined", b.name);
+            }
+            if w0 > worst_w0.0 {
+                worst_w0 = (w0, format!("{}: {sat}", b.name));
+            }
+            if ratio > worst_ratio.0 {
+                worst_ratio = (ratio, format!("{}: {at}", b.name));
+            }
+        }
+    }
+    assert!(worst_w0.0 <= 0.01, "a solve {} of W0 from the exact one at {}", worst_w0.0, worst_w0.1);
+    assert!(worst_ratio.0 <= 1.0, "published {} of its bound at {}", worst_ratio.0, worst_ratio.1);
+}
+
+/// A ladder of `n` nodes off the rail: `r` from the rail to node 2, `r`
+/// between each node and the next, an LED from each to ground. One hub
+/// partition of `n` nodes, curved by its `n` junctions.
+fn fx_led_ladder(n: usize, r: f64, ramp: bool) -> Program {
+    let mut devs = d7_supply(ramp);
+    let mut ci = 2;
+    for k in 0..n {
+        devs.push(resistor(ci, if k == 0 { 1 } else { 1 + k }, 2 + k, r));
+        devs.push(led(ci + 1, 2 + k, 0));
+        ci += 2;
+    }
+    program(2 + n, devs)
+}
+
+#[test]
+fn a_hub_solves_rounding_floor_costs_three_solves_not_a_column_each() {
+    // FXEFv: every curved hub solve formed its rounding floor (R23 (i)) from
+    // every column of `J^-1`, `n + 1` solves through its factors, O(n^3): a
+    // 128-node hub on a CC ramp ran 3.3x bda1839's wall time on the same
+    // solves. A conductance network's floor takes three (the distance,
+    // `J^-1` of the rounding at the solve and of its rate), O(n^2), and
+    // stays an upper bound (`curvature::conductance_matrix`).
+    let p = fx_led_ladder(64, 47.0, true);
+    let (before, stall_before) = (newton::hooks::floor_solves(), newton::hooks::stall_solves());
+    let mut rig = Rig::load(&p).unwrap();
+    for k in 1..=200 {
+        rig.advance(4e-3 * k as f64 / 200.0).unwrap();
+    }
+    let (floors, solves) = newton::hooks::floor_solves();
+    let (floors, solves) = (floors - before.0, solves - before.1);
+    let stall = newton::hooks::stall_solves() - stall_before;
+    let part = rig.s().local_index[2].unwrap().0;
+    assert_eq!(rig.s().static_solver.hub_solve(part).unwrap().0.len(), 64, "one 64-node hub");
+    eprintln!("{floors} floors, {solves} solves through their factors; {stall} for stalled polishes' rounding");
+    assert!(floors > 20, "{floors} floors");
+    // A stalled polish forms its own rounding floor (`n` solves) only where
+    // its step is above the relative stall floor; FXE round 1 formed it at
+    // every stall.
+    assert!(stall <= floors, "{stall} solves for stalled polishes' rounding over {floors} hub solves");
+    assert!(solves <= 3 * floors, "{solves} solves for {floors} floors: {:.1} each", solves as f64 / floors as f64);
+}
+
+#[test]
+fn a_large_hub_publishes_within_its_flow_bounded_floor() {
+    // FXE round 2. A hub of at least `FLOW_MIN_N` nodes forms its rounding
+    // floor by flow (three solves, `curvature::floors`), which bounds a
+    // branch's share of the rounding by all of it rather than by its own
+    // column: an upper bound still. On a 12-node LED ladder and a
+    // 10-node GMIN-held cluster beside a divider, every published node
+    // voltage, resistor and LED current and draw is within its bound
+    // against the exact (double-double) solution, node by node.
+    use FxEl::{Led, Sw, R};
+    let mut ladder = vec![R(1, 2, 47.0)];
+    for k in 2..=13 {
+        if k < 13 {
+            ladder.push(R(k, k + 1, 47.0 + k as f64));
+        }
+        ladder.push(Led(k, 0));
+    }
+    let mut cluster = vec![R(1, 2, 229.9), R(2, 0, 60.8), Led(3, 2), Sw(3, 0), Led(0, 3)];
+    for k in 3..11 {
+        cluster.push(R(k, k + 1, 10.8 + k as f64));
+    }
+    cluster.push(Led(11, 0));
+    let early = [1e-11, 1e-10, 1e-9, 1e-8, 1e-7];
+    let mut worst = (0.0f64, String::new());
+    for (name, els) in [("a 12-node LED ladder", ladder), ("a 10-node floating cluster", cluster)] {
+        let b = fx_board(name, false, els, (0.0, 0.0));
+        let before = newton::hooks::floor_solves();
+        let (ratio, w0, seen, at, sat) = fx_published_within_bound(&b, &early, 200);
+        let (floors, solves) = newton::hooks::floor_solves();
+        eprintln!("{}: published {ratio:.4} of its bound over {seen} samples (at {at}); solve {w0:.2e} of W0 ({sat}); {} solves for {} floors", b.name, solves - before.1, floors - before.0);
+        assert!(seen > 50, "{}: {seen} samples", b.name);
+        assert!(solves - before.1 <= 3 * (floors - before.0), "{}: not taken by flow", b.name);
+        if ratio > worst.0 {
+            worst = (ratio, format!("{}: {at}", b.name));
+        }
+    }
+    assert!(worst.0 <= 1.0, "published {} of its bound at {}", worst.0, worst.1);
+}

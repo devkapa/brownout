@@ -2663,8 +2663,8 @@ impl SegFit<'_> {
             stamp_linear_base(self.shape, size, &mut a, &mut rhs, self.live_params, &ext);
             stamp_ics_into_dyn(size, &mut a, &mut rhs, self.now, self.drivers, self.ics, self.node_owner, &ext, self.p_idx, &z);
             crate::solve::stamp_two_terminal(size, &mut a, &mut rhs, &self.cap.pins[0], &self.cap.pins[1], g_cap, 0.0, &ext);
-            let sens = crate::solve::RailSens { i: s0.i + b * vc, g: s0.g + g1 * vc, s, jac: a };
-            let cap = curvature::Branch { i: i0 + di * vc, di: di0du + di1du * vc, g: g_cap, contacts: 1.0, series: None, device: Some(self.cap.device_index) };
+            let sens = crate::solve::RailSens { i: s0.i + b * vc, g: s0.g + g1 * vc, s, jac: a, res: Vec::new(), gross: Vec::new(), gross_s: Vec::new(), lu: None };
+            let cap = curvature::Branch { i: i0 + di * vc, di: di0du + di1du * vc, g: g_cap, contacts: 1.0, series: None, device: Some(self.cap.device_index), floor: (0.0, 0.0) };
             curvature::SegmentEnd { x, sens, cap }
         };
         let ends = [end(vcs[0]), end(vcs[1])];
