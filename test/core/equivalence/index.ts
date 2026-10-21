@@ -126,3 +126,9 @@ export type { StimulusPhase, StimulusPhaseSet, StimulusStepSample, StimulusSched
 
 export { KNOWN_DIVERGENCES, classifyMismatches, computeDivergenceCone, digitalOutputPins } from "./known-divergences.js";
 export type { KnownDivergence, DivergenceSeed, DivergenceCone, DivergenceMatch, ClassifiedMismatches } from "./known-divergences.js";
+
+export { W1G_RESET_FAILED_SEED, W1G_SAG_COMMITTED_TARGET, explainCommittedTarget, explainFailedResetSeed } from "./known-divergences.js";
+export type { KnownTimedDivergence, PendingDelayWindow } from "./known-divergences.js";
+
+export { compareFailureSets, classicFailureMessage } from "./w1g-failures.js";
+export { runSlowChecks, slowEvents } from "./w1g-sidecars.js";

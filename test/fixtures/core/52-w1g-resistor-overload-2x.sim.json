@@ -1,0 +1,13 @@
+{
+  "id": "core-w1g-resistor-overload-2x",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 50 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "r1", "to_pin": "a" },
+    { "from_component": "r1", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

@@ -53,7 +53,9 @@
  * multi-channel kind was implemented) delegates to the active readout since W1e:
  * rgb_led, bicolor_led and the 7-segment displays publish channel currents.
  * `getBatteryState` and `getIcState` (W1f, for battery-engine-physics and
- * wave5-regulators) delegate to the runner's `CoreEngine` and to nothing else.
+ * wave5-regulators) delegate to the runner's `CoreEngine` and to nothing else,
+ * as do W1g's `getPtcTripped`, `getThermalState`, `getPartTemperature` and
+ * `resetFailures` (W1g Q5: on `CoreEngine` only, never `EngineReadout`).
  * Nothing else on classic `SimEngine` (saveState/restoreState/
  * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
  * ...) is implemented: no case in classification.json currently needs any of
@@ -74,6 +76,7 @@ import type {
   SimFailure,
   SimWarning,
   SolverDiagnosticsSnapshot,
+  ThermalRuntimeReadout,
 } from "../../../src/sim/engine/sim-engine.js";
 import type { Net } from "../../../src/sim/engine/graph.js";
 import type { DisplayInfo } from "../../../src/sim/messages.js";
@@ -297,6 +300,33 @@ export class SimEngine implements EngineReadout {
   /** Classic `SimEngine.getIcState(id)`, for wave5-regulators' `bench_psu` cases: `{ reg }` for a limited supply, as `getBatteryState` above. */
   getIcState(componentId: string): Record<string, number> | undefined {
     return this._coreEngine("getIcState").getIcState(componentId);
+  }
+
+  // ---- Thermal, failures and PTCs (W1g): CoreEngine only (W1g Q5) ---------
+
+  /** Classic `SimEngine.getPtcTripped()`, for wave3-protection's `ptc_fuse` cases. */
+  getPtcTripped(): ReadonlySet<string> {
+    return this._coreEngine("getPtcTripped").getPtcTripped();
+  }
+
+  /** Classic `SimEngine.getThermalState(id)`, for thermal-engine-physics and thermal-cold-start-warnings. */
+  getThermalState(componentId: string): ThermalRuntimeReadout | undefined {
+    return this._coreEngine("getThermalState").getThermalState(componentId);
+  }
+
+  /** Classic `SimEngine.getPartTemperature(id)`, for thermal-engine-physics' identity-less case. */
+  getPartTemperature(componentId: string): number | undefined {
+    return this._coreEngine("getPartTemperature").getPartTemperature(componentId);
+  }
+
+  /**
+   * Classic `SimEngine.resetFailures()`, for failure-states and
+   * wave3-protection. The runner has no reset of its own: the call goes
+   * straight to its `CoreEngine`, which re-solves at the current time
+   * without advancing it (W1g point 13), so the runner's clock stays right.
+   */
+  resetFailures(): void {
+    this._coreEngine("resetFailures").resetFailures();
   }
 
   /**

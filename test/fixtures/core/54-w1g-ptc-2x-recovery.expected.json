@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "durationS": 2.25,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 2.25,
+    "checks": [
+      {
+        "check": "ptc",
+        "ptc": "p1"
+      }
+    ],
+    "classicS": [
+      0.10179648250000002,
+      2.1017964924999775,
+      2.2035929649999755
+    ]
+  }
+}

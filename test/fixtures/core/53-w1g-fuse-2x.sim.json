@@ -1,0 +1,13 @@
+{
+  "id": "core-w1g-fuse-2x",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 0.1 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "f1", "kind": "fuse", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "rNormal": 0.1, "iRating": 0.5 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "f1", "to_pin": "a" },
+    { "from_component": "f1", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

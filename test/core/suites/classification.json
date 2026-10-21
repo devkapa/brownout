@@ -32,7 +32,9 @@
     "bicolor_led, seg7_cc, seg7_ca, ne555) are listed; their other cases are unlisted, so the core project never collects them, and are",
     "classified in the wave that ports the kinds they need. The gate-1 checks above apply to what is listed.",
     "",
-    "W1f added battery-engine-physics.test.ts and the bench_psu cases of wave5-regulators.test.ts (its regulator cases are W3 and unlisted), reclassified the eleven not-yet cases its kinds unblocked, and added waveform-sources-supplemental.test.ts for clock_gen, pulse_gen and pulse_source, which no classic suite builds from implemented kinds alone. digital-pulse.test.ts and waveform.test.ts build no circuit (they test classic's waveform functions directly), so they have nothing to run on the core and are not wired in."
+    "W1f added battery-engine-physics.test.ts and the bench_psu cases of wave5-regulators.test.ts (its regulator cases are W3 and unlisted), reclassified the eleven not-yet cases its kinds unblocked, and added waveform-sources-supplemental.test.ts for clock_gen, pulse_gen and pulse_source, which no classic suite builds from implemented kinds alone. digital-pulse.test.ts and waveform.test.ts build no circuit (they test classic's waveform functions directly), so they have nothing to run on the core and are not wired in.",
+    "",
+    "W1g (G4) wired in led-damage-limit-irated, wave3-protection's ptc_fuse cases, the 0.6.1 fixes' own tests (output-sag-direction, resistor-default-overload, thermal-cold-start-warnings, ls47-released-segment-sag) and engine-warnings, reclassified failure-states, thermal-engine-physics and catalog-identity (W1g point 19.3), and moved the four rows that cited the removed led-thermal decline. A case that reloads mid-failure, or needs saveState, is W2 (W1g point 15, Q8); the op-amp, 7805, lm393 and transistor cases are W3; missing_flyback moves to W3 (W1g round 2 ruling): every case switches its winding with a W3 transistor."
   ],
   "suites": [
     {
@@ -2642,12 +2644,12 @@
         {
           "describe": "session-only failure states",
           "name": "opens an overloaded resistor and reset restores runtime conduction",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor"
           ],
-          "reason": "resistor_overload failure detection is W1g (slow/failures.rs); not implemented by the core yet. Also calls engine.resetFailures(), a surface the core-suites adapter does not implement (not needed by any currently-portable case)."
+          "reason": "W1g: runs on the core and passes. 10 ohm across 5 V (2.5 W against the 0.25 W default rating) latches resistor_overload (W1g point 6), the failed resistor reads 0 A (point 12), and the adapter's resetFailures (CoreEngine, point 13) restores conduction at once."
         },
         {
           "describe": "session-only failure states",
@@ -2657,7 +2659,7 @@
             "voltage_source",
             "resistor"
           ],
-          "reason": "Same resistor_overload dependency as the case above; also reloads mid-failure and re-checks failureKinds(), which needs the same not-yet-implemented failure machinery."
+          "reason": "W2. Verified by running against the core (W1g): the latch and the open hold, then the case reloads the circuit mid-failure and fails with 'expected [] to deeply equal [ resistor_overload ]': a reload carries classic's failure, stress, PTC and thermal state forward by id and kind (SE:2690-2733, 2829-2850); the core's load starts every slow device fresh (W1g point 15, Q8), so this is W2's carry-forward (D25)."
         },
         {
           "describe": "session-only failure states",
@@ -2683,33 +2685,33 @@
         {
           "describe": "session-only failure states",
           "name": "trips a fuse open and clears it with resetFailures",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "fuse"
           ],
-          "reason": "fuse is W1h and fuse_tripped failure detection is W1g; neither is implemented by the core yet. Also calls engine.resetFailures(), unimplemented on the adapter."
+          "reason": "W1g: runs on the core and passes. 0.1 ohm across 5 V is 50 A through a 0.5 A fuse: fuse_tripped latches (W1g point 8), the open fuse reads 0 A, and resetFailures clears the set."
         },
         {
           "describe": "session-only failure states",
           "name": "uses a magnitude-dependent fuse I-squared-t curve",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "fuse"
           ],
-          "reason": "Same fuse/W1g dependency as the case above."
+          "reason": "W1g: runs on the core and passes. At 1.05x the rate (1.05^2 - 1 = 0.1025/s) never reaches 0.3 in 2 s; at 10x it trips before 2x (W1g point 8's analytic latch times)."
         },
         {
           "describe": "session-only failure states",
           "name": "fails an overcurrent LED without persisting burnt params",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "led"
           ],
-          "reason": "Verified by running against the core: the led (no catalogUid) loads and runs on the core, and the case FAILS with 'expected [] to deeply equal [ led_failed ]': the core reports no failure, because led_failed detection is W1g (slow/failures.rs). Also calls engine.resetFailures(), unimplemented on the adapter."
+          "reason": "W1g: runs on the core and passes. A red LED (no uid) on 25 ohm from 5 V latches led_failed (W1g point 7), reads 0 A afterwards, never writes params.burnt, and resetFailures clears it."
         },
         {
           "describe": "session-only failure states",
@@ -2724,24 +2726,24 @@
         {
           "describe": "session-only failure states",
           "name": "reports loaded digital-output sag as a reversible warning without degrading the driver",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "74ls00",
             "resistor"
           ],
-          "reason": "output_sag failure detection is W1g (slow/failures.rs, the output-sag target lists in digital/*); not implemented by the core yet, even though 74ls00 itself is. This is the suite section.4.1's own gate-1 table cites ('failure-states (74ls00 output_sag)') — it becomes portable once W1g lands, not in W1c."
+          "reason": "W1g: runs on the core and passes. 1Y into 100 ohm latches output_sag on 1y (W1g point 9) without touching the stamp; the reload with 10 kohm starts fresh on the core (point 15) and the pin is back above 4 V."
         },
         {
           "describe": "session-only failure states",
           "name": "debounces output sag so a single-step switching transient never surfaces",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "74ls00",
             "resistor"
           ],
-          "reason": "Same output_sag/W1g dependency as the case above."
+          "reason": "W1g: runs on the core and passes. At load the sag is Pending from START_TIME and unpublished; it latches 1e-8 s later (OUTPUT_SAG_WINDOW, W1g point 9), inside the case's first 1 ms step."
         }
       ]
     },
@@ -5059,7 +5061,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError on the FIRST circuit in the loop (01-passive-sensor-transistor-lab.json), reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer. Its led, rgb_led and bicolor_led are implemented since W1e; what blocks it is the transistor, inductor and sensor kinds (W1h and W3). The loop's second circuit (chaser555CounterCircuit) contains the 74ls161 this case's `kinds` list documents, but it never loads: it is powered by a bench_psu (W1f) and the loop fails on its first iteration regardless."
+          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError on the FIRST circuit in the loop (01-passive-sensor-transistor-lab.json), reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer. Its led, rgb_led and bicolor_led are implemented since W1e; what blocks it is the transistor, inductor and sensor kinds (W1h and W3). The loop's second circuit (chaser555CounterCircuit) contains the 74ls161 this case's `kinds` list documents, but it never loads: it is powered by a bench_psu (W1f) and the loop fails on its first iteration regardless. Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "optimization equivalence baselines",
@@ -5086,7 +5088,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer) -- 01-passive-sensor-transistor-lab.json is a transistor/inductor/sensor lab; its LEDs (led, rgb_led, bicolor_led) are implemented since W1e and are not what blocks it."
+          "reason": "Verified by running against the core: FAILS with CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer) -- 01-passive-sensor-transistor-lab.json is a transistor/inductor/sensor lab; its LEDs (led, rgb_led, bicolor_led) are implemented since W1e and are not what blocks it. Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "optimization equivalence baselines",
@@ -5333,7 +5335,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5360,7 +5362,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5387,7 +5389,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5414,7 +5416,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5441,7 +5443,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) is a transistor, inductor and sensor lab; its led, rgb_led and bicolor_led are implemented (W1e), the others are bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "breadboard fixture audit",
@@ -5553,7 +5555,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also reads saveState() snapshots, which the adapter does not implement. Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "corpus isolation — pre-A6 fixtures stay bitwise deterministic (Wave A6)",
@@ -5601,7 +5603,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement. Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "small-signal AC — transient isolation (Wave A5)",
@@ -5628,7 +5630,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The passive lab fixture (01) needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs are implemented (W1e). Also runs runSmallSignalAc (AC, W6) and reads saveState() snapshots, which the adapter does not implement. Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "small-signal AC — transient isolation (Wave A5)",
@@ -5701,13 +5703,23 @@
         {
           "describe": "engine catalog model identity",
           "name": "keeps same-kind red and blue LED forward-voltage models distinct",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "led",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:indicator). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class."
+          "reason": "W1g: runs on the core and passes. The led-thermal decline that held it back is gone (G3 dispatch 2): led-red and led-blue load with their own catalog vf and their thermal identity, and the forward voltages differ by more than 0.8 V."
+        },
+        {
+          "describe": "engine catalog model identity",
+          "name": "does not borrow package quiescent current from a kind-mismatched UID",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "voltage_source"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg)."
         }
       ]
     },
@@ -5847,14 +5859,14 @@
         {
           "describe": "electrically isolated sections",
           "name": "gives a second battery's LED loop a potential the linear solver's rounding cannot move",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "battery_pack",
             "led",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core (W1f): battery_pack no longer blocks it; load() now falls back with unsupported-feature:led-thermal:led1 and led-thermal:led2. The LEDs carry a catalog identity with a thermal model, which is W1g."
+          "reason": "Verified by running against the core (W1g): the led-thermal decline is gone and the board now loads and steps on the core, then fails with TypeError: engine.isolatedSectionAnchorRows is not a function. The case pins classic's anchor rows and its dense and sparse linear backends (setLinearSystemBackendForTests), classic internals with no core counterpart."
         }
       ]
     },
@@ -5886,7 +5898,7 @@
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The loop's first circuit is fixture 01, the passive lab, which needs bjt_npn, bjt_pnp, fuse, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs (led, rgb_led, bicolor_led) are implemented (W1e)."
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The loop's first circuit is fixture 01, the passive lab, which needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs (led, rgb_led, bicolor_led) are implemented (W1e). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it."
         },
         {
           "describe": "getElementChannelI — rgb_led",
@@ -5973,24 +5985,24 @@
         {
           "describe": "Q-O24: LED damage limit reads iRated before if_max, like the stamp",
           "name": "fails open on a 10 mA iRated LED driven at ~15.9 mA, under its 20 mA catalog if_max",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "led",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: the led (no catalogUid) loads and runs, and the case FAILS with 'expected undefined to be defined' (stepUntilFailure never latches): the damage limit and led_failed are W1g (slow/failures.rs). Classic latches at about 15.8 s."
+          "reason": "W1g: runs on the core and passes. ifMax reads iRated first (W1g point 7, Q-O24): rate (15.9/10)^2 - 1 latches led_failed at about 15.8 s with limit 0.01, and the open LED reads 0 A on the next step."
         },
         {
           "describe": "Q-O24: LED damage limit reads iRated before if_max, like the stamp",
           "name": "control: with no iRated param, the limit stays the catalog's 20 mA if_max",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "led",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Passes on the core, but only vacuously: it asserts getFailures() stays empty for 18 s of a 15.9 mA drive, which a core with no failure detection (W1g) satisfies whatever the LED's damage limit is (a 1 mA limit would pass it too). Not counted as portable coverage until W1g lands led_failed."
+          "reason": "W1g: runs on the core and passes, no longer vacuously: the core now latches led_failed (its sibling case latches on the same circuit at a 10 mA limit), so an empty set over 18 s pins the 20 mA catalog limit."
         }
       ]
     },
@@ -6397,23 +6409,104 @@
         {
           "describe": "engine package thermal coupling",
           "name": "feeds an identified LED's package self-heating back into its junction law",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "led",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:led). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class. The case also asserts thermal state (junction temperature, package heating) that the core does not hold."
+          "reason": "W1g: runs on the core and passes. The led-thermal decline is gone (G3 dispatch 2): an led-red on 180 ohm heats past 38 C in 10 s and its held junction temperature re-arms the law (W1g point 4), so the hot current exceeds the cold one."
         },
         {
           "describe": "engine package thermal coupling",
           "name": "cools a failed-open LED instead of heating the intact junction law across its open voltage",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "led",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-feature:led-thermal:led). The led carries a catalogUid that classic's thermal profile accepts, so the compiler declines it (core/README.md, LEDs point 3) until W1g ports self-heating; every catalog led part is in this class. The case also asserts thermal state (junction temperature, package heating) that the core does not hold."
+          "reason": "W1g: runs on the core and passes. An led-red across 2 V latches led_failed before 20 ms; its power is 0 from the latch (W1g point 3), the target is ambient, and T returns to 25 C within 1e-3 after 20 s."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "derives lm358 quiescent heat and output units from catalog metadata",
+          "status": "not-yet",
+          "kinds": [
+            "lm358",
+            "voltage_source"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm358). The op-amps are W3 (W1g point 19.3)."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "derives mcp6002 quiescent heat and output units from catalog metadata",
+          "status": "not-yet",
+          "kinds": [
+            "mcp6002",
+            "voltage_source"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:mcp6002). The op-amps are W3 (W1g point 19.3)."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "derives lm386 quiescent heat and output units from catalog metadata",
+          "status": "not-yet",
+          "kinds": [
+            "lm386",
+            "voltage_source"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm386). The op-amps are W3 (W1g point 19.3)."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "advances an identified resistor with the analytical one-pole solution",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "W1g: runs on the core and passes. 0.25 W through a catalog resistor: T(4 s) = 110 - 85 e^-0.5 (W1g point 3), read through the adapter's getThermalState (classic's stepThermalDevice at dt = 0, Readouts W1g)."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "does not silently assign a package profile to an identity-less legacy part",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "W1g: runs on the core and passes. No catalogUid, no code 91 record (W1g point 1): getThermalState and getPartTemperature are undefined."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "rejects a kind-mismatched thermal UID instead of borrowing its package model",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "W1g: runs on the core and passes. A resistor carrying reg-7805's uid gets no code 91 record (thermalProfileForComponent rejects the kind), so getThermalState is undefined."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "restores thermal energy exactly across a rejected/adaptive trial",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "W2. Verified by running against the core (W1g): fails with TypeError: engine.saveState is not a function. Snapshots through the host are W2 (W1g point 19.3)."
+        },
+        {
+          "describe": "engine package thermal coupling",
+          "name": "shuts an overheated 7805 down, cools with hysteresis, and restarts",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). The 7805 is W3 (W1g point 19.3)."
         }
       ]
     },
@@ -6694,6 +6787,375 @@
             "resistor"
           ],
           "reason": "New case (F4, W1f). per = 0 is classic's one-shot (Waveform source records): v1 before td, v2 on its top, v1 after its fall and from then on."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/wave3-protection.test.ts",
+      "cases": [
+        {
+          "describe": "ptc_fuse — normal conduction below hold current",
+          "name": "carries 0.4A (< iHold=0.5A) without tripping after 200ms",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. 0.4 A under the 0.5 A hold bleeds (W1g point 10): 0.4 A through rNormal and getPtcTripped (channel 2) empty."
+        },
+        {
+          "describe": "ptc_fuse — trip under 3A overcurrent",
+          "name": "trips within 50ms sim-time and raises resistance 200x",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. 3 A trips at S = 0.075 (W1g point 10) and the tripped PTC conducts through 200 rNormal: 15 mA."
+        },
+        {
+          "describe": "ptc_fuse — trip under 3A overcurrent",
+          "name": "resistance ratio is approximately 200x after trip",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. As its sibling: V/I after the trip is 100 ohm."
+        },
+        {
+          "describe": "ptc_fuse — recovery after 2s below iHold/2",
+          "name": "stays tripped after 1s at low current, recovers after 2.5s",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W2. Verified by running against the core (W1g): fails with 'expected false to be true' at 'still tripped at load time': the case reloads to carry the trip, and a reload carries classic's failure, stress, PTC and thermal state forward by id and kind (SE:2690-2733, 2829-2850); the core's load starts every slow device fresh (W1g point 15, Q8), so this is W2's carry-forward (D25). The recovery itself is gate 2c's PTC fixture."
+        },
+        {
+          "describe": "ptc_fuse — resetFailures clears PTC trip state",
+          "name": "clears tripped flag and stress accumulator",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. resetFailures resets every PTC (W1g point 13); 10 us later it conducts 3 A again."
+        },
+        {
+          "describe": "diagnostics: ptc-tripped finding",
+          "name": "fires when ptcTripped set contains the PTC component id",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. The tripped set from the core's getPtcTripped drives the ptc-tripped diagnostics finding."
+        },
+        {
+          "describe": "diagnostics: ptc-tripped finding",
+          "name": "does NOT fire when PTC is not tripped",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "ptc_fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. 0.4 A for 120 ms: the set stays empty and no finding fires."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/output-sag-direction.test.ts",
+      "cases": [
+        {
+          "describe": "output_sag debounce direction",
+          "name": "a ripple-counter decoder glitch on a lit digit line latches no output_sag",
+          "status": "classic-only",
+          "kinds": [
+            "voltage_source",
+            "ne555",
+            "capacitor",
+            "resistor",
+            "74hc74",
+            "74hc138",
+            "28c16",
+            "seg7_cc"
+          ],
+          "reason": "Builds its own HeadlessRunner() with the default engine, classic, and reads runner.engine, so the alias never reaches it: listed as portable it would pass on classic. It pins classic's direction-aware count against classic's one-solve lag (W1g point 9, Direction), which the core does not have (it stamps what it commits); the core's side of the same board is S1 criterion 5 (core-accept-sap1)."
+        },
+        {
+          "describe": "output_sag debounce direction",
+          "name": "still latches a sustained HIGH output dragged low",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "74ls00",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes. 1Y commanded HIGH into 100 ohm to ground latches output_sag with the HIGH message and value under vih (W1g point 9)."
+        },
+        {
+          "describe": "output_sag debounce direction",
+          "name": "still latches a sustained LOW output dragged high",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "74ls00",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes. 1Y commanded LOW into 100 ohm to the rail latches output_sag with the LOW message and value over vil."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/resistor-default-overload.test.ts",
+      "cases": [
+        {
+          "describe": "default resistance and fuse rating reach the failure path",
+          "name": "latches resistor_overload on a resistor with no resistance param at 2.5 W",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes. rPower is classic's resistance ?? 1000 (Q-O27, W1g point 6): 50 V is 2.5 W and latches."
+        },
+        {
+          "describe": "default resistance and fuse rating reach the failure path",
+          "name": "leaves a resistor with no resistance param alone inside its rating",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes, not vacuously: its sibling latches on the same default at 50 V."
+        },
+        {
+          "describe": "default resistance and fuse rating reach the failure path",
+          "name": "trips a fuse with no iRating param at the catalog's 1 A default",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "fuse"
+          ],
+          "reason": "W1g: runs on the core and passes. An absent iRating is 1 A (Fuse and PTC records): 50 A trips."
+        },
+        {
+          "describe": "default resistance and fuse rating reach the failure path",
+          "name": "leaves a fuse with no iRating param alone below 1 A",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "fuse"
+          ],
+          "reason": "W1g: runs on the core and passes, not vacuously: its sibling trips on the same default."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/thermal-cold-start-warnings.test.ts",
+      "cases": [
+        {
+          "describe": "thermal cold start",
+          "name": "publishes the profile's warnings when the seed solve is rejected",
+          "status": "classic-only",
+          "kinds": [
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: topology: voltage_source (component 2): both terminals already fixed, a loop of ideal sources). The case needs a rejected seed solve, which it gets from two contradicting ideal sources; the core declines that topology at compile (W0), so the circuit always runs on classic."
+        },
+        {
+          "describe": "thermal cold start",
+          "name": "publishes the same profile warnings once the seed converges",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes. At load T = Ta and getThermalState's warnings include the profile's (Q-O42, Readouts W1g)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ls47-released-segment-sag.test.ts",
+      "cases": [
+        {
+          "describe": "74LS47 released segment",
+          "name": "clears the output_sag it latched while sinking",
+          "status": "portable",
+          "kinds": [
+            "74ls47",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W1g: runs on the core and passes. A sinking segment into 20 ohm latches output_sag on a_out (W1g point 9). After the reload the released segment reports nothing; on the core that half also holds because a load starts every slow device fresh (point 15), so only the sinking half is distinct coverage."
+        },
+        {
+          "describe": "74LS47 released segment",
+          "name": "does the same for an LM393 output, the other open-collector part the scan covers",
+          "status": "not-yet",
+          "kinds": [
+            "lm393",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W3. Verified by running against the core (W1g): load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm393)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/engine-warnings.test.ts",
+      "cases": [
+        {
+          "describe": "transistor_overcurrent",
+          "name": "latches once for a BJT carrying more than its catalog i_c_max and reports value against limit",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "stays silent for a BJT at ~90% of its rating",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "latches for a MOSFET carrying more than its catalog i_c_max",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "nmos"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "stays silent for a MOSFET at ~90% of its rating",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "nmos"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "needs the over-rating to dwell: the load seed and a single step do not announce",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "does not change the solved trajectory",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "rolls back with restoreState and clears with resetFailures, re-latching afterwards",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "transistor_overcurrent",
+          "name": "carries across a reload of the same component without re-announcing",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3: transistor_overcurrent and its transistors (bjt_npn, nmos) are W3 (W1g points 11 and 19.3); the core has no Rust warning producer in W1."
+        },
+        {
+          "describe": "missing_flyback",
+          "name": "latches at load for an inductor switched by a transistor with no diode across it",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "inductor",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
+        },
+        {
+          "describe": "missing_flyback",
+          "name": "stays silent when a diode clamps the coil, and clears once one is added",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "inductor",
+            "resistor",
+            "bjt_npn",
+            "diode"
+          ],
+          "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
+        },
+        {
+          "describe": "missing_flyback",
+          "name": "stays silent for an inductor that nothing switches, or whose switch node carries a freewheeling diode",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "inductor",
+            "resistor",
+            "nmos",
+            "diode"
+          ],
+          "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
+        },
+        {
+          "describe": "missing_flyback",
+          "name": "covers a relay coil and a motor winding switched the same way",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "relay",
+            "dc_motor",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
+        },
+        {
+          "describe": "missing_flyback",
+          "name": "is re-derived and re-announced by resetFailures while the topology still holds",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "inductor",
+            "resistor",
+            "bjt_npn"
+          ],
+          "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
         }
       ]
     }

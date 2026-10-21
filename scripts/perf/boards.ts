@@ -1,11 +1,13 @@
 /**
- * The two SAP-1 boards the perf tools run, shared by identity.ts and frames.ts.
+ * The two SAP-1 boards the perf tools run, shared by identity.ts, frames.ts and
+ * sap1-cost.ts.
  *
  * Decision 12 keeps the generator outside both repos, read by path. The boards
- * are the "max" clock, ideal supply variants: "frozen" (FREEZE_DISPLAY=1, the
- * display 555 held in reset) and "running" (the display multiplexes), named
- * exactly as scripts/core-accept-sap1.ts's generateBoard names them, so a work
- * directory that script filled can be passed straight to --boards.
+ * are the "max" clock variants: "frozen" (FREEZE_DISPLAY=1, the display 555
+ * held in reset) and "running" (the display multiplexes), on the ideal supply
+ * unless a caller asks for the battery (sap1-cost.ts), named exactly as
+ * scripts/core-accept-sap1.ts's generateBoard names them, so a work directory
+ * that script filled can be passed straight to --boards.
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -17,6 +19,9 @@ import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 export const DEFAULT_GENERATOR = "/Users/dev/Documents/DEVOLTProject/brownout-core-prototype/bench/gen-sap1.mjs";
 
 export type Sap1Variant = "frozen" | "running";
+
+/** The generator's supply: an ideal 5 V source, or a battery pack on the rail. */
+export type Sap1Power = "ideal" | "battery";
 
 export interface Sap1Bench {
   readonly program: Readonly<Record<string, number>>;
@@ -32,6 +37,8 @@ export interface BoardOptions {
   /** Explicit board files, overriding boardsDir for that variant. */
   files?: Partial<Record<Sap1Variant, string>>;
   generator?: string;
+  /** The supply (default ideal), in the file name as `sap1-max-<power>-<variant>.sim.json`. */
+  power?: Sap1Power;
 }
 
 export function defaultBoardsDir(): string {
@@ -42,10 +49,11 @@ export function defaultBoardsDir(): string {
 export function sap1BoardFiles(options: BoardOptions = {}): { name: string; variant: Sap1Variant; file: string }[] {
   const dir = options.boardsDir ?? defaultBoardsDir();
   const generator = options.generator ?? DEFAULT_GENERATOR;
+  const power = options.power ?? "ideal";
   const out: { name: string; variant: Sap1Variant; file: string }[] = [];
   for (const variant of ["frozen", "running"] as const) {
     const explicit = options.files?.[variant];
-    const file = explicit ?? path.join(dir, `sap1-max-ideal-${variant}.sim.json`);
+    const file = explicit ?? path.join(dir, `sap1-max-${power}-${variant}.sim.json`);
     if (!fs.existsSync(file)) {
       if (explicit) throw new Error(`${file} does not exist`);
       if (!fs.existsSync(generator)) {
@@ -55,7 +63,7 @@ export function sap1BoardFiles(options: BoardOptions = {}): { name: string; vari
       const env = { ...process.env };
       delete env.FREEZE_DISPLAY;
       if (variant === "frozen") env.FREEZE_DISPLAY = "1";
-      const result = spawnSync(process.execPath, [generator, "max", "ideal", file], { env, encoding: "utf8" });
+      const result = spawnSync(process.execPath, [generator, "max", power, file], { env, encoding: "utf8" });
       if (result.error || result.status !== 0) {
         throw new Error(`gen-sap1 failed: ${result.error?.message ?? `exit ${String(result.status)}`}\n${result.stderr}`);
       }

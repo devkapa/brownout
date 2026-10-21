@@ -396,7 +396,91 @@ export interface PsuRailGateModel {
   readonly traceDurationS: number;
 }
 
-export type SidecarModel = AnalyticLedStaticModel | AnalyticLedRcModel | BatteryDrainModel | RampCrossingsModel | PsuRailGateModel;
+/**
+ * W1g (core/README.md point 19.1, gate 2c): slow physics held to the model's
+ * own answer (w1g-sidecars.ts). Each check names its parts; the sidecar
+ * generator computes the analytic latch, trip and recovery times, values and
+ * temperatures from the circuit and classic's catalog, never from core code.
+ * Both engines run the fixture: classic must fire every event (the
+ * classic-fires proof) and its times are reported against `classicS`, the
+ * fixture's record of them (Q-O31: recorded, never held to the analytic
+ * answer); the core is held to the analytic times within `1e-9 s + 1e-9`
+ * relative.
+ */
+export type SlowCheck =
+  | { readonly check: "resistor-overload"; readonly resistor: string }
+  | { readonly check: "fuse"; readonly fuse: string }
+  | { readonly check: "ptc"; readonly ptc: string }
+  | { readonly check: "led-overdrive"; readonly led: string; readonly resistor: string; readonly source: string }
+  | { readonly check: "output-sag"; readonly ic: string; readonly pin: string; readonly load: string }
+  | { readonly check: "resistor-heat"; readonly resistor: string; readonly atS: readonly number[] }
+  | { readonly check: "led-heat"; readonly led: string; readonly resistor: string; readonly source: string; readonly atS: readonly number[]; readonly currentAtS: readonly number[] }
+  | {
+      /**
+       * Ruling R35 (a): an output enabled by a pulse source on its `/oe`, its
+       * data input held HIGH, into a load to the datum that sags. The core is
+       * held to the analytic latch: the enable read at the pulse's modelled
+       * step (Sources point 3), the datasheet `tPZH` (W1d), then
+       * `OUTPUT_SAG_WINDOW`. Classic's later latch (its two-step debounce on
+       * growing steps) is recorded in `classicS` as a classic accuracy
+       * shortfall, never excused.
+       */
+      readonly check: "enable-sag";
+      readonly ic: string;
+      readonly pin: string;
+      readonly enable: string;
+      readonly load: string;
+    }
+  | {
+      /**
+       * W1g Q12 (point 9, "Committed, not live, targets"): an output whose
+       * enable a pulse source toggles, into a load that sags. Both engines'
+       * sets are compared at every classic accepted step; a difference is
+       * excused (`w1g-sag-committed-target`) only inside the pin's pending
+       * delay, from the enable's ramp start to the core's commit.
+       */
+      readonly check: "committed-target";
+      readonly ic: string;
+      readonly pin: string;
+      readonly enable: string;
+    }
+  | {
+      /**
+       * A gate output into a capacitor to the datum, its input a pulse source
+       * (probe C, W1g point 9 "Why W = 10 ns"): every edge leaves the band for
+       * `R_out·C·ln(...)`, and it latches exactly when that exceeds
+       * `OUTPUT_SAG_WINDOW`. Judged by the count of latches per direction.
+       */
+      readonly check: "sag-edges";
+      readonly ic: string;
+      readonly pin: string;
+      readonly capacitor: string;
+      readonly source: string;
+    }
+  | {
+      /** An output commanded LOW, pulled up by `pullup` to `pullSource`, on an IC whose supply is a moving rail: the sag clears when the rail leaves the power window and returns `OUTPUT_SAG_WINDOW` after it is back. */
+      readonly check: "rail-sag";
+      readonly rail: { readonly kind: "psu"; readonly psu: string; readonly capacitor: string } | { readonly kind: "battery"; readonly battery: string };
+      readonly load: string;
+      readonly source: string;
+      readonly ic: string;
+      readonly pin: string;
+      readonly pullup: string;
+      readonly pullSource: string;
+    };
+
+export interface SlowSidecarModel {
+  readonly kind: "slow";
+  /** Seconds both engines run. */
+  readonly horizonS: number;
+  /** Instants at which both engines call `resetFailures()`. */
+  readonly resetsS?: readonly number[];
+  readonly checks: readonly SlowCheck[];
+  /** Classic's measured event times, in the order the generator lists the events (`slowEvents`): the fixture's record. */
+  readonly classicS: readonly number[];
+}
+
+export type SidecarModel = AnalyticLedStaticModel | AnalyticLedRcModel | BatteryDrainModel | RampCrossingsModel | PsuRailGateModel | SlowSidecarModel;
 
 export interface CorpusEntry {
   /** Stable id for reporting: "<origin>/<name>[@variant]". Never a filesystem path. */

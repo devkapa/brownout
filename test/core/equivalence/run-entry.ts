@@ -83,6 +83,7 @@ import {
   type Ne555SidecarSpec,
 } from "./analytic.js";
 import { comparePhaseAlignedSamples, compareSamples, compareStimuliSamples } from "./compare.js";
+import { runSlowChecks } from "./w1g-sidecars.js";
 import { drainCoulombTolerance, extractBatteryDrain, extractPsuRail, extractPulseRc, psuRailGate, rampCrossings } from "./w1f-sidecars.js";
 import { classifyMismatches } from "./known-divergences.js";
 import { missingCoreKinds } from "./kinds-of.js";
@@ -1813,10 +1814,22 @@ function runW1fSidecarChecks(entry: CorpusEntry, circuit: SimCircuit, model: Bat
   return mismatches;
 }
 
-export function runSidecarChecks(entry: CorpusEntry, circuit: SimCircuit): { readonly mismatches: Mismatch[]; readonly coreWallMs: number } {
+export function runSidecarChecks(
+  entry: CorpusEntry,
+  circuit: SimCircuit,
+): { readonly mismatches: Mismatch[]; readonly coreWallMs: number; readonly recorded?: readonly KnownDivergenceHit[] } {
   const model = entry.sidecar;
   if (!model) return { mismatches: [], coreWallMs: 0 };
   const started = performance.now();
+  if (model.kind === "slow") {
+    // W1g gate 2c (w1g-sidecars.ts): both engines run inside; classic's times come back as recorded hits.
+    try {
+      const slow = runSlowChecks(circuit, model);
+      return { mismatches: slow.mismatches, recorded: slow.recorded, coreWallMs: performance.now() - started };
+    } catch (err) {
+      return { mismatches: [sidecarMismatch(0, "slow run", "ok", errorMessage(err), "the slow checks could not run the fixture")], coreWallMs: performance.now() - started };
+    }
+  }
   if (model.kind === "battery-drain" || model.kind === "ramp-crossings" || model.kind === "psu-rail-gate") {
     const w1f = runW1fSidecarChecks(entry, circuit, model);
     return { mismatches: w1f, coreWallMs: performance.now() - started };
@@ -2040,7 +2053,7 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   // explanations for the SAME mismatch list, so both are tried and merged.
   const analyticSplit = explainAnalyticMismatches(entry, circuit, allMismatches);
   const { known, unexplained } = classifyMismatches(circuit, analyticSplit.remaining);
-  const knownDivergences = [...analyticSplit.explained, ...known.map(toKnownDivergenceHit)];
+  const knownDivergences = [...analyticSplit.explained, ...known.map(toKnownDivergenceHit), ...(sidecarChecks.recorded ?? [])];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };

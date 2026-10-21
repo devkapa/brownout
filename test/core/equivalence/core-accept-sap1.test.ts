@@ -17,12 +17,18 @@ import {
   isQuietAt,
   litMask,
   lowSegment,
+  noteCoreLatches,
   outValue,
   phaseFraction,
   pickTargetEdges,
   romSegmentMask,
   SEGMENTS,
+  type CoreLatchSource,
+  type FailureSets,
 } from "../../../scripts/core-accept-sap1.js";
+import { CoreEngine } from "../../../src/core/engine.js";
+import { initCore } from "../../../src/core/wasm.js";
+import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { findRisingEdges, sampleCycles, type CycleSample } from "./align.js";
 import { levelChanges } from "./run-entry.js";
 import type { DigitalTraceEvent } from "./trace.js";
@@ -229,5 +235,72 @@ describe("the quiet-instant test", () => {
     expect(isQuietAt([], 1, 1)).toBe(true);
     expect(isQuietAt(events, 0.0005, 1e-4)).toBe(true); // before the first event
     expect(isQuietAt(events, 0.01, 1e-4)).toBe(true); // after the last
+  });
+});
+
+describe("criterion 5's core side", () => {
+  // A 74LS00 whose inputs a pulse source holds HIGH except for 2 ms: inside the pulse 1Y is commanded HIGH into
+  // 100 ohm to ground and sags (W1g point 9), outside it 1Y is LOW and nothing sags. One advance from 0 to 5 ms
+  // covers the whole latch, so at the advance end getFailures() is empty and only the latch log has it.
+  function pulsedSag(): SimCircuit {
+    const nand = ["vcc", "gnd", "1a", "1b", "1y", "2a", "2b", "2y", "3a", "3b", "3y", "4a", "4b", "4y"].map((id) => ({ id }));
+    return {
+      components: [
+        { id: "vcc", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
+        { id: "in", kind: "pulse_source", pins: [{ id: "pos" }, { id: "neg" }], params: { v1: 5, v2: 0, td: 1e-3, tr: 1e-6, tf: 1e-6, pw: 2e-3, per: 1 } },
+        { id: "u1", kind: "74ls00", pins: nand, params: {} },
+        { id: "load", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 100 } },
+      ],
+      wires: [
+        { from_component: "vcc", from_pin: "pos", to_component: "u1", to_pin: "vcc" },
+        { from_component: "vcc", from_pin: "neg", to_component: "u1", to_pin: "gnd" },
+        { from_component: "in", from_pin: "neg", to_component: "vcc", to_pin: "neg" },
+        { from_component: "in", from_pin: "pos", to_component: "u1", to_pin: "1a" },
+        { from_component: "in", from_pin: "pos", to_component: "u1", to_pin: "1b" },
+        { from_component: "u1", from_pin: "1y", to_component: "load", to_pin: "a" },
+        { from_component: "load", from_pin: "b", to_component: "vcc", to_pin: "neg" },
+      ],
+    } as SimCircuit;
+  }
+  const SAG_KEY = "output_sag\x00u1\x001y";
+
+  function seenOver(stripLog: boolean): { seen: FailureSets; endFailures: number } {
+    const engine = new CoreEngine();
+    try {
+      engine.load(pulsedSag());
+      const source: CoreLatchSource = stripLog
+        ? {
+            getFailures: () => engine.getFailures(),
+            getWarnings: () => engine.getWarnings(),
+            takeLatchedFailures: () => (engine.takeLatchedFailures(), []),
+            takeNewWarnings: () => engine.takeNewWarnings(),
+          }
+        : engine;
+      const seen: FailureSets = { failures: {}, warnings: {} };
+      noteCoreLatches(seen, source);
+      engine.advance(5e-3);
+      expect(engine.lastConverged).toBe(true);
+      const endFailures = Object.keys(engine.getFailures()).length;
+      noteCoreLatches(seen, source);
+      return { seen, endFailures };
+    } finally {
+      engine.dispose();
+    }
+  }
+
+  it("sees a latch that clears inside one advance, from the latch log", async () => {
+    await initCore();
+    const { seen, endFailures } = seenOver(false);
+    // The premise: the sag is gone by the advance end, so a getFailures() poll there cannot see it.
+    expect(endFailures).toBe(0);
+    expect(Object.keys(seen.failures)).toEqual([SAG_KEY]);
+    expect(seen.failures[SAG_KEY]).toBe("output_sag");
+  });
+
+  it("misses it once the latch is removed from the log, so the criterion would fail", async () => {
+    await initCore();
+    const { seen, endFailures } = seenOver(true);
+    expect(endFailures).toBe(0);
+    expect(seen.failures).toEqual({});
   });
 });

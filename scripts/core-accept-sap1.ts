@@ -47,6 +47,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS, CoreEngine, unsupportedCoreKinds } from "../src/core.js";
+import { failureKey, warningKey } from "../src/core/failures.js";
 import { initCore } from "../src/core/wasm.js";
 import { HeadlessRunner } from "../src/host/headless.js";
 import { getPartLibrary } from "../src/parts/part-library.js";
@@ -518,7 +519,7 @@ function newCore(board: Board, options: CoreOptions): CoreEngine {
 
 const codeMap = (record: Record<string, { code: string }>): Record<string, string> => Object.fromEntries(Object.entries(record).map(([k, v]) => [k, v.code]));
 
-interface FailureSets {
+export interface FailureSets {
   failures: Record<string, string>;
   warnings: Record<string, string>;
 }
@@ -526,6 +527,24 @@ interface FailureSets {
 function noteFailures(seen: FailureSets, failures: Record<string, SimFailure>, warnings: Record<string, SimWarning>): void {
   for (const [key, failure] of Object.entries(failures)) seen.failures[key] ??= String((failure as { kind?: string }).kind ?? "failure");
   Object.assign(seen.warnings, codeMap(warnings));
+}
+
+/** What criterion 5 reads from the core at an advance end. */
+export type CoreLatchSource = Pick<CoreEngine, "getFailures" | "getWarnings" | "takeLatchedFailures" | "takeNewWarnings">;
+
+/**
+ * Criterion 5's core side (core/README.md, Equivalence harness rules, W1g): the latch log
+ * (`takeLatchedFailures`) and the warnings announced since the last call (`takeNewWarnings`), unioned with
+ * `getFailures()`/`getWarnings()`. Called at EVERY advance end: a latch that clears inside one advance is in the
+ * log and in no `getFailures()` read, so a poll alone sees it only by chance. Both take calls drain, which is why
+ * nothing else in this script may call them.
+ */
+export function noteCoreLatches(seen: FailureSets, engine: CoreLatchSource): void {
+  const latched: Record<string, SimFailure> = {};
+  for (const failure of engine.takeLatchedFailures()) latched[failureKey(failure.kind, failure.componentId, failure.pinId)] = failure;
+  const announced: Record<string, SimWarning> = {};
+  for (const warning of engine.takeNewWarnings()) announced[warningKey(warning.code, warning.componentId, warning.pinId)] = warning;
+  noteFailures(seen, { ...latched, ...engine.getFailures() }, { ...announced, ...engine.getWarnings() });
 }
 
 interface CoreTraceRun {
@@ -549,7 +568,7 @@ function runCoreTrace(board: Board, options: CoreOptions, seconds: number): Core
       if (!engine.lastConverged) throw new Error(`the core did not converge at t=${engine.simTime} s.`);
       events.push(...engine.readTrace());
       engine.clearTrace();
-      noteFailures(seen, engine.getFailures(), engine.getWarnings());
+      noteCoreLatches(seen, engine);
       if (t >= seconds) break;
     }
     const cpu = process.cpuUsage(cpu0);
@@ -634,16 +653,16 @@ function runCoreSampled(board: Board, options: CoreOptions, sampleTimes: readonl
       } else {
         pushProbe(board, probes, engine.simTime, engine.digitalState, engine.getElementChannelI());
       }
+      noteCoreLatches(seen, engine);
       if (t - lastPolled >= 0.25) {
         lastPolled = t;
         events.push(...engine.readTrace());
         engine.clearTrace();
-        noteFailures(seen, engine.getFailures(), engine.getWarnings());
       }
     }
     events.push(...engine.readTrace());
     engine.clearTrace();
-    noteFailures(seen, engine.getFailures(), engine.getWarnings());
+    noteCoreLatches(seen, engine);
     const cpu = process.cpuUsage(cpu0);
     return { samples, probes, events, seen, cpuMs: (cpu.user + cpu.system) / 1000 };
   } finally {

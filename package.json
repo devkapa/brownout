@@ -101,6 +101,7 @@
     "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
     "bench": "tsx scripts/benchmark-linear-scale.ts",
     "bench:core": "node scripts/bench-core.mjs",
+    "bench:sap1-cost": "tsx scripts/perf/sap1-cost.ts",
     "check:package": "publint && attw --pack . --profile esm-only --exclude-entrypoints ./core.wasm",
     "release": "changeset publish",
     "example:rc": "tsx examples/rc-transient.ts",

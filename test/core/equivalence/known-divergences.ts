@@ -608,3 +608,80 @@ export function classifyMismatches(
 
   return { known, unexplained };
 }
+
+// ─── W1g: divergences in time, not in a cone ────────────────────────────────
+//
+// The two W1g registrations (core/README.md, Equivalence harness rules, W1g)
+// are not structural: what they excuse is a failure or warning set that
+// differs for a while after a specific runtime event, so a cone of
+// components cannot express them. Each is a detector over the run's own
+// facts, which the gate 2c check that drives the run supplies, and each
+// refuses everything outside its own window.
+
+/** One W1g registration: its id, citations and the rule it applies. */
+export interface KnownTimedDivergence {
+  readonly id: string;
+  readonly decisionRef: string;
+  readonly reason: string;
+}
+
+export const W1G_RESET_FAILED_SEED: KnownTimedDivergence = {
+  id: "w1g-reset-failures-failed-seed",
+  decisionRef: "core/README.md W1g point 13 (W1g Q6) and Equivalence harness rules, W1g",
+  reason:
+    "When the re-solve after resetFailures() fails, the core rolls the reset back (its failures stay latched) where " +
+    "classic keeps its maps cleared over a non-converged seed. Only the failure and warning sets after that call " +
+    "differ; both engines must report lastConverged = false, which this id never excuses.",
+};
+
+export const W1G_SAG_COMMITTED_TARGET: KnownTimedDivergence = {
+  id: "w1g-sag-committed-target",
+  decisionRef: "core/README.md W1g point 9 (Committed, not live, targets; W1g Q12) and Equivalence harness rules, W1g",
+  reason:
+    "Inside a pending enable or disable delay classic lists output_sag targets from the live evaluation and the " +
+    "core from the committed drivers, so the two sets can differ until the delay expires. A difference outside " +
+    "the driver's pending delay is not excused, and the sets must agree once it has expired.",
+};
+
+/**
+ * `w1g-reset-failures-failed-seed`: excuses a `failures` or `warnings`
+ * mismatch at or after an instant where BOTH engines' `resetFailures()`
+ * re-solve failed (`failedResetsS`), and before the next successful reset
+ * (`laterResetsS`, the instants of the successful ones). It never excuses any
+ * other category, so a `lastConverged` difference (reported by the gate 2c
+ * check as category `sidecar`, id `lastConverged`) always fails.
+ */
+export function explainFailedResetSeed(mismatch: Mismatch, failedResetsS: readonly number[], laterResetsS: readonly number[] = []): boolean {
+  if (mismatch.category !== "failures" && mismatch.category !== "warnings") return false;
+  return failedResetsS.some((t) => mismatch.sampleTime >= t && !laterResetsS.some((r) => r > t && r <= mismatch.sampleTime));
+}
+
+/**
+ * A driver's pending delay for one output pin: from the instant its enable
+ * (or disable) was commanded to the instant the core committed the new
+ * output state, in seconds. `[fromS, untilS)`.
+ */
+export interface PendingDelayWindow {
+  readonly componentId: string;
+  readonly pinId: string;
+  readonly fromS: number;
+  readonly untilS: number;
+}
+
+/** The `output_sag` key (`failureKey`, `src/core/failures.ts`) this window's pin would latch under. */
+function sagKey(window: Pick<PendingDelayWindow, "componentId" | "pinId">): string {
+  return `output_sag\x00${window.componentId}\x00${window.pinId}`;
+}
+
+/**
+ * `w1g-sag-committed-target`: excuses a `failures` mismatch on an
+ * `output_sag` key only when its instant lies inside that pin's pending
+ * delay, `[fromS, untilS)`. A hit outside every window, a key of any other
+ * kind, or a non-`failures` mismatch is not excused, so the sets must agree
+ * once each delay has expired.
+ */
+export function explainCommittedTarget(mismatch: Mismatch, windows: readonly PendingDelayWindow[]): boolean {
+  if (mismatch.category !== "failures") return false;
+  const key = mismatch.id.split("#")[0]!;
+  return windows.some((w) => sagKey(w) === key && mismatch.sampleTime >= w.fromS && mismatch.sampleTime < w.untilS);
+}

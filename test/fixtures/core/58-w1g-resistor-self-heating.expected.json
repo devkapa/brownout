@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "durationS": 4,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 4,
+    "checks": [
+      {
+        "check": "resistor-heat",
+        "resistor": "load",
+        "atS": [
+          1,
+          4
+        ]
+      }
+    ],
+    "classicS": []
+  }
+}

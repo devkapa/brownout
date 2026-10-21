@@ -1,0 +1,202 @@
+/**
+ * The rated SAP-1 cost run (core/README.md, "W1g cost"; ruling R38 (a)): CPU
+ * ms per simulated second of the Rust/WASM core on the SAP-1, ideal and
+ * battery, display frozen and running, for several builds side by side.
+ *
+ * Usage (from a worktree, after `pnpm run build:core` in every tree named):
+ *   pnpm run bench:sap1-cost -- [options] <label>=<tree> [<label>=<tree> ...]
+ *   pnpm exec tsx scripts/perf/sap1-cost.ts 3ca4004=/tmp/tree-3ca4004 cand=.
+ *
+ * Each <tree> is a checkout (or an extracted `git archive`) holding src/ and
+ * its built src/core/brownout-core.wasm; it is imported from there, its own
+ * TypeScript compiler included. The first label is the baseline: every other
+ * is reported as a change against it. The ceiling the README states (+11 %
+ * over 3ca4004, ideal and battery, frozen and running) is read off that.
+ *
+ * THROUGH THE COMPILER, RATINGS INCLUDED. A board is loaded from its
+ * .sim.json with the tree's CoreEngine.load, so the program measured is what
+ * a host runs: since W1g every resistor carries a `rating` record (115 on the
+ * SAP-1), and the slow physics they switch on is part of the cost. W1g's
+ * earlier runs timed .prog files dumped before those records existed, and
+ * missed +21 % (frozen) and +29 % (running) on the ideal board (W1gV3). So
+ * each run also compiles the board with the tree's compileCircuit and prints
+ * how many rating records it carries; a tree whose compiler knows the
+ * `rating` kind but emits none is refused (the measurement would not be the
+ * workload).
+ *
+ * PROTOCOL. Per rep, per supply, per tree, a fresh process (no JIT or heap
+ * state carried between builds): load, seed the two RAM chips with the
+ * board's program, --warmup s of 1/60 s frames (default 5: past the power-on
+ * transient and the first program loop), then --measure s (default 1) of
+ * frames, timed with process.cpuUsage; frozen, then running. Reps interleave
+ * the trees, so a load change on the machine hits them alike. The report is
+ * the median over reps (and the minimum), and each change the median of the
+ * per-rep ratios to the baseline (runs back to back, so a load that comes
+ * and goes cancels), with the 1-minute load average at every run: on a busy
+ * machine treat the numbers as suspect and re-run.
+ *
+ * OPTIONS
+ *   --reps=<n>          repetitions (default 9)
+ *   --power=<list>      ideal,battery (the default) or one of them
+ *   --boards=<dir>      where sap1-max-<power>-<variant>.sim.json live; missing
+ *                       ones are generated (scripts/perf/boards.ts)
+ *   --generator=<path>  the SAP-1 generator (decision 12)
+ *   --warmup=<s>        simulated warm-up seconds (default 5)
+ *   --measure=<s>       simulated measured seconds (default 1)
+ */
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { DEFAULT_GENERATOR, defaultBoardsDir, programNibbles, sap1BoardFiles, type Sap1Bench, type Sap1Power } from "./boards.js";
+
+const FRAME_S = 1 / 60;
+const thisFile = fileURLToPath(import.meta.url);
+const repoRoot = path.resolve(path.dirname(thisFile), "..", "..");
+
+interface ChildResult {
+  ratings: number;
+  ratingKind: boolean;
+  frozen: number;
+  running: number;
+}
+
+/** One tree on one supply's two boards, in this (child) process. */
+async function child(tree: string, frozenFile: string, runningFile: string, warmupS: number, measureS: number): Promise<ChildResult> {
+  const src = (rel: string) => pathToFileURL(path.join(tree, "src", rel)).href;
+  const core = (await import(src("core.js"))) as { CoreEngine: new () => ChildEngine };
+  const wasm = (await import(src("core/wasm.js"))) as { initCore: () => Promise<void> };
+  const compile = (await import(src("core/compile/index.js"))) as {
+    compileCircuit: (c: unknown, kinds: unknown, o: { startTimeS: number }) => { ok: boolean; reasons?: unknown; compiled?: { devices: { kind: string }[] } };
+  };
+  const kinds = (await import(src("core/kinds.js"))) as { CORE_IMPLEMENTED_KINDS: unknown; CORE_KIND_CODES: Record<string, number> };
+  await wasm.initCore();
+  const cpu = () => {
+    const u = process.cpuUsage();
+    return (u.user + u.system) / 1000;
+  };
+  const out: ChildResult = { ratings: 0, ratingKind: "rating" in kinds.CORE_KIND_CODES, frozen: NaN, running: NaN };
+  for (const [variant, file] of [["frozen", frozenFile], ["running", runningFile]] as const) {
+    const circuit = JSON.parse(fs.readFileSync(file, "utf8")) as { bench: Sap1Bench };
+    const compiled = compile.compileCircuit(circuit, kinds.CORE_IMPLEMENTED_KINDS, { startTimeS: 0 });
+    if (!compiled.ok || !compiled.compiled) throw new Error(`${tree}: the compiler declines ${file}: ${JSON.stringify(compiled.reasons)}`);
+    out.ratings = compiled.compiled.devices.filter((d) => d.kind === "rating").length;
+    const e = new core.CoreEngine();
+    try {
+      e.load(circuit);
+      e.setMemoryContents(circuit.bench.ramLo, programNibbles(circuit.bench.program, 0));
+      e.setMemoryContents(circuit.bench.ramHi, programNibbles(circuit.bench.program, 4));
+      for (let f = 0; f < Math.round(warmupS / FRAME_S); f++) e.advance(e.simTime + FRAME_S);
+      const s0 = e.simTime;
+      const c0 = cpu();
+      for (let f = 0; f < Math.round(measureS / FRAME_S); f++) e.advance(e.simTime + FRAME_S);
+      if (!e.lastConverged) throw new Error(`${tree}: ${variant} did not converge`);
+      out[variant] = (cpu() - c0) / (e.simTime - s0);
+    } finally {
+      e.dispose();
+    }
+  }
+  return out;
+}
+
+interface ChildEngine {
+  load(c: unknown): void;
+  setMemoryContents(id: string, nibbles: number[]): void;
+  advance(t: number): void;
+  readonly simTime: number;
+  readonly lastConverged: boolean;
+  dispose(): void;
+}
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+function pct(x: number, base: number): string {
+  const p = (x / base - 1) * 100;
+  return `${p >= 0 ? "+" : ""}${p.toFixed(1)} %`;
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "--child") {
+    const [, tree, frozen, running, warmup, measure] = argv;
+    process.stdout.write(JSON.stringify(await child(tree!, frozen!, running!, Number(warmup), Number(measure))) + "\n");
+    return;
+  }
+  let reps = 9;
+  let powers: Sap1Power[] = ["ideal", "battery"];
+  let boardsDir = defaultBoardsDir();
+  let generator = DEFAULT_GENERATOR;
+  let warmupS = 5;
+  let measureS = 1;
+  const trees: { label: string; tree: string }[] = [];
+  for (const arg of argv) {
+    // `pnpm run bench:sap1-cost -- ...` can pass the separator through.
+    if (arg === "--") continue;
+    const [flag, value] = arg.split("=", 2) as [string, string | undefined];
+    if (flag === "--reps") reps = Number(value);
+    else if (flag === "--power") powers = (value ?? "").split(",") as Sap1Power[];
+    else if (flag === "--boards") boardsDir = path.resolve(value ?? "");
+    else if (flag === "--generator") generator = path.resolve(value ?? "");
+    else if (flag === "--warmup") warmupS = Number(value);
+    else if (flag === "--measure") measureS = Number(value);
+    else if (flag.startsWith("--")) throw new Error(`sap1-cost: unknown flag ${arg}`);
+    else if (value !== undefined) trees.push({ label: flag, tree: path.resolve(value) });
+    else throw new Error(`sap1-cost: expected <label>=<tree>, got ${arg}`);
+  }
+  if (trees.length === 0) throw new Error("sap1-cost: name at least one <label>=<tree>");
+  for (const p of powers) if (p !== "ideal" && p !== "battery") throw new Error(`sap1-cost: unknown supply ${p}`);
+  for (const { tree } of trees) {
+    if (!fs.existsSync(path.join(tree, "src", "core", "brownout-core.wasm"))) throw new Error(`sap1-cost: ${tree} has no built src/core/brownout-core.wasm (pnpm run build:core there)`);
+  }
+  const boards = new Map(powers.map((power) => [power, sap1BoardFiles({ boardsDir, generator, power })]));
+  const tsx = path.join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+  const results = new Map<string, { frozen: number[]; running: number[]; ratings: number }>();
+  for (let rep = 1; rep <= reps; rep++) {
+    for (const power of powers) {
+      const files = boards.get(power)!;
+      const file = (v: string) => files.find((b) => b.variant === v)!.file;
+      for (const { label, tree } of trees) {
+        const r = spawnSync(tsx, [thisFile, "--child", tree, file("frozen"), file("running"), String(warmupS), String(measureS)], { cwd: repoRoot, encoding: "utf8" });
+        if (r.status !== 0) throw new Error(`sap1-cost: ${label} (${power}) failed:\n${r.stderr}`);
+        const res = JSON.parse(r.stdout.trim().split("\n").pop()!) as ChildResult;
+        if (res.ratingKind && res.ratings === 0) throw new Error(`sap1-cost: ${label}'s compiler knows the rating record but its SAP-1 compile carries none: not the workload`);
+        const key = `${power} ${label}`;
+        const acc = results.get(key) ?? { frozen: [], running: [], ratings: res.ratings };
+        acc.frozen.push(res.frozen);
+        acc.running.push(res.running);
+        results.set(key, acc);
+        console.log(`rep ${String(rep)} ${power} ${label}: frozen ${res.frozen.toFixed(2)} running ${res.running.toFixed(2)} ms/sim-s (ratings ${String(res.ratings)}) | load ${os.loadavg()[0]!.toFixed(2)}`);
+      }
+    }
+  }
+  // The change is the median over reps of each rep's ratio to the baseline's
+  // run in the same rep: those ran back to back, so a load that comes and
+  // goes over the session cancels from it, where it would not from a ratio
+  // of the two medians (printed too).
+  console.log(`\nmedian (min) CPU ms per simulated second over ${String(reps)} reps, ${String(warmupS)} s warm-up, ${String(measureS)} s measured;`);
+  console.log(`change against ${trees[0]!.label}: the median of the paired per-rep ratios [the ratio of the medians]`);
+  for (const power of powers) {
+    const base = results.get(`${power} ${trees[0]!.label}`)!;
+    const [bf, br] = [median(base.frozen), median(base.running)];
+    for (const { label } of trees) {
+      const r = results.get(`${power} ${label}`)!;
+      const [f, g] = [median(r.frozen), median(r.running)];
+      const paired = (xs: number[], ys: number[]) => median(xs.map((x, i) => x / ys[i]!));
+      console.log(
+        `  ${power.padEnd(8)}${label.padEnd(12)} frozen ${f.toFixed(2)} (${Math.min(...r.frozen).toFixed(2)}) ${pct(paired(r.frozen, base.frozen), 1).padStart(9)} [${pct(f, bf)}]` +
+          `   running ${g.toFixed(2)} (${Math.min(...r.running).toFixed(2)}) ${pct(paired(r.running, base.running), 1).padStart(9)} [${pct(g, br)}]   ratings ${String(r.ratings)}`,
+      );
+    }
+  }
+}
+
+main().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exitCode = 1;
+});

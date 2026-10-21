@@ -1,0 +1,26 @@
+{
+  "status": "pass",
+  "durationS": 10,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 10,
+    "checks": [
+      {
+        "check": "led-heat",
+        "led": "led",
+        "resistor": "r1",
+        "source": "vcc",
+        "atS": [
+          0.001,
+          1,
+          10
+        ],
+        "currentAtS": [
+          0.001,
+          10
+        ]
+      }
+    ],
+    "classicS": []
+  }
+}

@@ -263,16 +263,10 @@ describe("detector self-test — a clean sweep proves nothing unless the detecto
     expect(simTimeMismatch, "expected a simTime mismatch").toBeDefined();
   });
 
-  // W1c: compare.ts's compareFailureKeys() exemption ("the core reports NO
-  // failures at all yet, W1g hasn't landed" — see that function's own header)
-  // is new and narrow by construction. These two prove BOTH halves of that
-  // claim on the SAME fabricated pair: the exemption suppresses a failure
-  // classic alone reports (the expected, common case while W1g is unbuilt),
-  // but the instant the core reports EVEN ONE failure of its own, a
-  // DIFFERENT failure set is caught exactly as before — the exemption can
-  // never launder "the core detected the wrong thing", only "the core
-  // detected nothing at all".
-  it("does NOT fire on a failures-presence difference when the core's failures side is completely empty (W1g not landed)", () => {
+  // W1g: the W1c exemption is gone (compare.ts's compareFailureKeys,
+  // w1g-failures.ts). An empty core set is an answer and is held to
+  // classic's, and a set the core reports that disagrees is caught as before.
+  it("fires on a failure classic alone reports even when the core's failures side is completely empty (W1g has landed)", () => {
     const times = sampleTimesFor(DEFAULT_DURATION_S);
     const base = dividerWithR1(1000);
     const classicSamples = collectClassicSamples(base, times);
@@ -286,10 +280,7 @@ describe("detector self-test — a clean sweep proves nothing unless the detecto
 
     const result = compareSamples(tampered, coreSamples);
     const failureMismatch = result.mismatches.find((m) => m.category === "failures");
-    expect(
-      failureMismatch,
-      "a failure classic alone reports, with the core's side completely empty, must be exempted (W1g is not built yet) — see compare.ts's compareFailureKeys header",
-    ).toBeUndefined();
+    expect(failureMismatch, "an empty core failure set is an answer since W1g (Equivalence harness rules, W1g)").toBeDefined();
   });
 
   it("still fires on a failures-presence difference when the core ALSO reports something (of its own) that disagrees with classic — the exemption never masks a real mismatch", () => {
