@@ -1083,8 +1083,9 @@ export class CoreEngine implements EngineReadout {
    * On `-4` or `-7` Rust has rolled the whole reset back, so this sets
    * `lastConverged = false` and changes nothing else: the failures, the
    * warnings, the queue and the published readouts stay exactly as they were.
-   * Classic instead keeps its maps cleared over a non-converged seed; the
-   * divergence is registered (`w1g-reset-failures-failed-seed`, W1g Q6).
+   * Classic instead keeps its maps cleared over a non-converged seed; no
+   * circuit is known to fail that re-solve on both engines (W1g Q6; ruling
+   * D7 (b)).
    */
   resetFailures(): void {
     const compiled = this._requireLoaded();

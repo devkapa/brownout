@@ -624,18 +624,24 @@ describe("a real zero-delay combinational ring genuinely livelocks the Rust kern
   });
 });
 
-describe("a real IC-supply fixed point that never converges at load (-4) falls back like -7 (finding 11)", () => {
+describe("a solve that fails at load (-4) falls back like -7 (finding 11)", () => {
   /**
-   * Review finding 11's own reproduction: a 74LS04 fed vcc through a 100 ohm
-   * resistor from a 5V source, 1a tied to gnd (so 1y is HIGH), and 1y driving
-   * 100 ohm to gnd. When powered, 1y's own output load (in series with the
-   * 100 ohm supply feed) sags vcc below 0.9*vccMin, which unpowers the IC;
-   * unpowered, vcc recovers to 5V and the IC re-powers — the IC-supply fixed
-   * point (README's digital-core point 3) never settles within its 50-
-   * iteration cap, so `bo_engine_load` returns a genuine -4. Unlike the -7
-   * ring above, this is reachable through the ordinary compiled path — no
-   * program patching needed.
+   * Review finding 11: a -4 from `bo_engine_load` (a failed t=0 settle) must
+   * reach HeadlessRunner as CoreUnsupportedError, so it falls back to classic
+   * (owner decision 8), not escape as the generic CoreLoadError. Its
+   * reproduction was this board: a 74LS04 fed vcc through 100 ohm from 5 V,
+   * 1y HIGH into 100 ohm, whose own draw sags vcc under its power floor, so
+   * the IC-supply fixed point (README, W1c point 3) alternated to its cap.
+   * Since F5 the core holds that chip off instead (W1c point 1a, classic's
+   * H8) and the board loads, so no circuit is kept here as the way to reach
+   * a load -4: the real module is installed with only `bo_engine_load`
+   * answering -4 (and the error buffer carrying its message), as the failed
+   * reset's facade test does (engine-failures.test.ts). This holds the TS
+   * fallback path, whatever circuit the core one day fails to load.
    */
+  const mode = { fail: false };
+  const MESSAGE = "solve: the partition's Newton iteration did not converge within 50 iterations";
+
   function saggingSupplyCircuit(): SimCircuit {
     return circuit(
       [
@@ -660,7 +666,46 @@ describe("a real IC-supply fixed point that never converges at load (-4) falls b
     );
   }
 
-  it("CoreEngine.load() throws CoreUnsupportedError with a solve-failed: reason (bo_engine_load's real -4, not the generic CoreLoadError)", () => {
+  beforeAll(async () => {
+    __resetCoreForTest();
+    await initCore();
+    const real = coreCall((exports) => exports);
+    // The message lives in the real module's memory, where readCoreErrorMessage
+    // reads it; written at each failing load, since a call may grow memory.
+    let messagePtr = 0;
+    const bytes = new TextEncoder().encode(MESSAGE);
+    const wrapped: CoreExports = {
+      ...real,
+      bo_engine_load: (h: number, ptr: number, len: number) => {
+        if (!mode.fail) return real.bo_engine_load(h, ptr, len);
+        if (messagePtr === 0) messagePtr = real.bo_alloc(Math.ceil(bytes.length / 8)) >>> 0;
+        new Uint8Array(real.memory.buffer, messagePtr, bytes.length).set(bytes);
+        return -4;
+      },
+      bo_error_ptr: () => (mode.fail ? messagePtr : real.bo_error_ptr()),
+      bo_error_len: () => (mode.fail ? bytes.length : real.bo_error_len()),
+    };
+    __installCoreForTest(wrapped);
+  });
+
+  afterEach(() => {
+    mode.fail = false;
+  });
+
+  afterAll(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  it("the real core loads finding 11's board with the starving chip held off (W1c point 1a)", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    runner.load(saggingSupplyCircuit());
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+
+  it("CoreEngine.load() throws CoreUnsupportedError with a solve-failed: reason (bo_engine_load's -4, not the generic CoreLoadError)", () => {
+    mode.fail = true;
     const core = new CoreEngine();
     let caught: CoreUnsupportedError | undefined;
     try {
@@ -669,21 +714,19 @@ describe("a real IC-supply fixed point that never converges at load (-4) falls b
       caught = err as CoreUnsupportedError;
     }
     expect(caught).toBeInstanceOf(CoreUnsupportedError);
-    expect(caught!.reasons).toHaveLength(1);
-    expect(caught!.reasons[0]).toMatch(/^solve-failed:/);
-    expect(caught!.reasons[0]).toMatch(/converge/i);
+    expect(caught!.reasons).toEqual([`solve-failed:${MESSAGE}`]);
   });
 
   it("HeadlessRunner falls back to classic instead of throwing an uncaught error (finding 11's exact reported bug)", () => {
+    mode.fail = true;
     const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
-    // Before this fix, this call threw an uncaught CoreLoadError straight out
-    // of HeadlessRunner.load(): -4 fell through mapLoadFailure's generic
-    // branch, which _tryLoadCore does not catch (only CoreUnsupportedError
-    // triggers the classic fallback).
+    // Before finding 11's fix, this call threw an uncaught CoreLoadError
+    // straight out of HeadlessRunner.load(): -4 fell through mapLoadFailure's
+    // generic branch, which _tryLoadCore does not catch (only
+    // CoreUnsupportedError triggers the classic fallback).
     expect(() => runner.load(saggingSupplyCircuit())).not.toThrow();
     expect(runner.activeEngine).toBe("classic");
-    expect(runner.engineFallbackReasons).toHaveLength(1);
-    expect(runner.engineFallbackReasons[0]).toMatch(/^solve-failed:/);
+    expect(runner.engineFallbackReasons).toEqual([`solve-failed:${MESSAGE}`]);
     // Classic itself loads this circuit without throwing (decision 8: no
     // rescue ladder, lastConverged can end up false, but load() itself must
     // not throw) — the fallback is not a dead end for the caller.

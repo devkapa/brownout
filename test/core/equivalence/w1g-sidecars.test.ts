@@ -1,17 +1,13 @@
 /**
  * Detector self-tests for W1g's gate 2c comparisons (w1g-failures.ts,
- * w1g-sidecars.ts, and the two timed registrations in known-divergences.ts).
+ * w1g-sidecars.ts, and the timed registration in known-divergences.ts).
  * Each feeds the judgement a deliberately wrong input and requires it to
  * fail, so a clean sweep over the fixtures means something. The fixtures
  * themselves run through equivalence.test.ts's assertion (a).
  */
 import { describe, expect, it } from "vitest";
 import type { SimFailure } from "../../../src/sim/engine/sim-engine.js";
-import {
-  explainCommittedTarget,
-  explainFailedResetSeed,
-  type PendingDelayWindow,
-} from "./known-divergences.js";
+import { explainCommittedTarget, type PendingDelayWindow } from "./known-divergences.js";
 import type { Mismatch, SlowSidecarModel } from "./types.js";
 import { classicFailureMessage, compareFailureSets } from "./w1g-failures.js";
 import { judgeSlow, slowTimeTolerance, type SlowExpectation } from "./w1g-sidecars.js";
@@ -103,21 +99,5 @@ describe("w1g-sag-committed-target", () => {
   it("fails a hit on another pin, or of another kind", () => {
     expect(explainCommittedTarget(hit(0.001 + 1e-8, "output_sag\x00u1\x00b2"), [window])).toBe(false);
     expect(explainCommittedTarget(hit(0.001 + 1e-8, "resistor_overload\x00u1\x00"), [window])).toBe(false);
-  });
-});
-
-describe("w1g-reset-failures-failed-seed", () => {
-  const at = (t: number, category: Mismatch["category"], id = "x"): Mismatch => ({ sampleTime: t, category, id, classicValue: 1, coreValue: 0, detail: "" });
-
-  it("excuses the failure and warning sets after a failed reset", () => {
-    expect(explainFailedResetSeed(at(1.5, "failures"), [1.2])).toBe(true);
-    expect(explainFailedResetSeed(at(1.2, "warnings"), [1.2])).toBe(true);
-  });
-
-  it("never excuses lastConverged, nor anything before the reset or after a later successful one", () => {
-    expect(explainFailedResetSeed(at(1.5, "sidecar", "lastConverged"), [1.2])).toBe(false);
-    expect(explainFailedResetSeed(at(1.1, "failures"), [1.2])).toBe(false);
-    expect(explainFailedResetSeed(at(2.5, "failures"), [1.2], [2.0])).toBe(false);
-    expect(explainFailedResetSeed(at(1.5, "netV"), [1.2])).toBe(false);
   });
 });

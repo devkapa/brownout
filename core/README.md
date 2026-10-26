@@ -906,8 +906,8 @@ since, value, limit, aux`.
 **`bo_engine_reset_failures`** (W1g, W1g point 13). No argument. It applies
 as one event at the current time, like `bo_engine_set_params`: it does not
 advance time, and there is no 1 ps seed. A failed re-solve (`-4`, `-7`)
-rolls the whole reset back, which is a recorded divergence from classic
-(W1g Q6; Equivalence harness rules, W1g). `-5` before a successful load.
+rolls the whole reset back, where classic keeps its failures cleared over a
+non-converged seed (W1g Q6; W1g point 13). `-5` before a successful load.
 
 **`bo_engine_set_params`** (W1b, owner decision 1). The buffer holds
 `(deviceIndex, paramIndex, value)` triples.
@@ -933,7 +933,8 @@ capacitors (decision 14's count; `FORCE_STEPPED` does not change it), `16`
 rail sensitivity computations (pec3's `railSens`), `17` rail scans (pec3's
 `railScans`), `18` rail events processed, `19` source edges processed, `20`
 reader flips found at a rail scan, `21` slow interval closes, `22` slow
-events fired, `23` latches, `24` junction re-arms. Stat 11 counts every Newton iteration of
+events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
+`26` power holds released. Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
 LEDs point 6, the polish included, and W1c's static fixed point, which W1c
@@ -941,7 +942,10 @@ did not count. Stat 14 was reserved from W1a and counts from W1f (Rails
 point 3); stats 16-20 are W1f's (Rails points 3 and 4, Sources points 2 and
 3, and for 20 the reader-scan divergence under Equivalence harness rules).
 Stats 16-18 and 20 stay 0 in exact mode. Stats 21-24 are W1g's (W1g point
-18).
+18). Stats 25 and 26 are F5's (W1c point 1a; ruling D8): a hold counts when
+an IC goes to held unpowered and a release when it comes back free; the
+probes count nothing, and neither does dropping every hold at `set_params`,
+`seed_memory` or `resetFailures`.
 
 **Error codes:** `-1` malformed program; `-2` unknown kind code; `-3`
 unsupported topology, which from W1f includes the hub classification cases
@@ -1285,7 +1289,68 @@ their own, and the source KCL does with W1a point 2's branch fold.
    clamp(vS / (4*ioMax), 50, 1000) : 50`. Thresholds follow `thresholdsFor`
    at `vS`: with `CMOS_RATIO`, `vil = max(0.2, 0.3 vS)` and
    `vih = max(0.4, 0.7 vS)`; otherwise the fixed value when its flag is set,
-   else `max(0.8, 0.3 vS)` and `max(2.0, 0.6 vS)`.
+   else `max(0.8, 0.3 vS)` and `max(2.0, 0.6 vS)`. An IC under a power hold
+   (point 1a) is unpowered whatever its supply reads; `powered` above is its
+   verdict only while it is free. In code every site that judges power goes
+   through `digital::power::verdict` with the solver's hold table.
+1a. **The power hold** (F5; classic's H8, `fix/power-off-stall`, 0.6.3;
+   rulings D1-D4, D8, R44 (a), R45 (a)). An IC whose own draw pulls its
+   supply out of its power window, while its absence lets the supply
+   recover, has no consistent power state, and a solve that iterates over it
+   alternates. Each such solve counts every gated IC's verdict flips between
+   its iterations: the rail loop's passes, the rail Newton's iterates, an
+   iterated static partition's Newton iterates (point 3) and, across
+   instants, `Rail` events in a row (Rails point 3). When the solve fails, or
+   the rail loop cycles, with an IC flipped at least twice, the solve runs
+   again in place (no rollback, no 1 ps step: an instant is classic's 1 ps
+   probe already):
+   1. the alternating ICs held powered, every other gated IC of that hub or
+      partition at its last reading (one already held off stays so);
+   2. those reading unpowered there starve themselves; on a CC rail
+      capacitor's segment every alternating IC does when, powered, its draw
+      turns the segment down, whatever its supply reads (ruling R44 (a): the
+      capacitors hold the rail through both probes, and what the draw
+      changes is the segment's slope);
+   3. those are probed again held unpowered, which gives the drop their own
+      draw causes;
+   4. the solve runs with them held unpowered and the rest as they were;
+      that is the instant's solution. An instant has no length, so a part
+      whose supply reads low either way is held too (ruling D2 (a)); classic
+      holds that one only at its host's floor step.
+
+   No starving IC at step 2: on the rail, a probe in which every rail IC's
+   free verdict is the one it was probed at is a consistent state, and the
+   instant's solution, provided it passes the ordinary convergence check: the
+   partitions that read the alternating ICs solve again from it with the
+   holds as they were, each within Newton's tolerance (ruling R45 (a); the
+   free passes alternated only on the way to it, as on G2bv's bc_ic seed 97,
+   a rail landed at the power edge and re-solved a drift width under it).
+   Classic rejects that step instead (its `partsHold`). Otherwise, and in an
+   iterated static partition, no starving IC is `-4`, as is a probe, a check
+   or a held solve that fails. A stepped partition's Newton runs no
+   procedure: its failures stay its own (`-4` at `H_MIN`).
+
+   **Release** (ruling D1 (a)). A hold ends when the supply, the IC still
+   off, passes the window edge it starved at, moved inward by the drop (the
+   supply held unpowered less held powered) and two reached widths `η` of
+   that edge (Rails point 4): for a rail IC a `Rail` event threshold located
+   like a power-window edge (Rails point 4, with ruling R44 (a)'s draw
+   threshold on a CC rail capacitor's segment), taken only once the rail
+   loop has settled; in an iterated static partition a check after each of
+   its solves. A released IC is free and reads at once (point 9); starving
+   again, it is held again with a fresh drop. Every hold is dropped,
+   uncounted, at a successful `set_params`, `seed_memory` or
+   `resetFailures`, where the circuit itself changes: a ping-pong still there
+   re-holds at once. Stats 25 and 26 count holds taken and released (C ABI;
+   classic's `_holdOffCounts.accepted` counts the first). The table and each
+   hold's release roll back with a failed instant (Rails point 8). Nothing
+   is paid while no IC is held: the table is empty and every verdict site
+   takes one branch. Pins: the plumbing in `digital/power.rs`
+   (`the_verdict_is_the_holds_and_the_window_tests_only_while_free`) and
+   `devices/ics.rs`
+   (`a_held_off_ic_on_an_ideal_supply_stamps_reads_and_commits_nothing_and_its_hold_rolls_back`),
+   the procedure in `solve/rail_tests.rs`, listed under Equivalence harness
+   rules, the power-gate ping-pong.
 2. **Partitions.** An IC's driver stamps couple each output-capable pin to its
    own supply nodes, and a floating pull's target follows both supply
    voltages (point 6). So the
@@ -1341,7 +1406,9 @@ their own, and the source KCL does with W1a point 2's branch fold.
      reads the floating model with the dead key.
 
    A reader evaluation is classic's `commit = true`, so it may write Schmitt
-   state. An unpowered IC reads nothing. An IC reads its supply nodes and
+   state. An unpowered IC reads nothing. An IC held unpowered (point 1a)
+   reads nothing either, and a rail IC held so watches its release level
+   instead of its power window (Rails point 4). An IC reads its supply nodes and
    every logic pin's node. A reader whose pin sits on a closed-form or stepped
    partition registers that pin's live thresholds (`vil`/`vih`, or the scaled
    `vtMinus`/`vtPlus`, and the power window on the supply) with the
@@ -1451,11 +1518,13 @@ their own, and the source KCL does with W1a point 2's branch fold.
    commit that comes due meanwhile is held, not applied. On the first powered
    evaluation the partition is solved with the pre-outage committed levels,
    and any held transition whose due time has passed commits in the next
-   delta, as classic's first powered pass does.
+   delta, as classic's first powered pass does. A power hold (point 1a) is
+   an outage: its release is the first powered evaluation.
 10. **Readouts** (codes 50-61). A digital slot holds the pin's committed level
     (electrical: HIGH, or released for open-collector, is 1) while the pin is
-    driven, and `NaN` (an absent key) while the IC is unpowered, or the pin is
-    committed HIZ or has never committed. Code 40 (NE555 point 12) and codes
+    driven, and `NaN` (an absent key) while the IC is unpowered (held
+    unpowered included, point 1a), or the pin is committed HIZ or has never
+    committed. Code 40 (NE555 point 12) and codes
     70-82 (W1d) publish evaluator state instead.
 
 ## Kernel semantics: datasheet delays and enables (W1d)
@@ -2382,7 +2451,10 @@ harness; F6 the resolved-ramp readers (Sources point 3); INF1 the
 investigation of an infinite published voltage (taken in round 7); INV2
 that of the SAP-1's rail-loop cycle at 2.897 s (taken in round 9); HG1 the
 ping-pong hang fix; NP1 the no-progress guard, and NP2 its redefinition by
-state. F5 is not a worker: it is the follow-up named the ping-pong hold.
+state. F5 is the ping-pong hold (W1c point 1a), on `wip/f5`: F5a the hold
+table and its verdict, F5b the procedure, its triggers and releases (rounds
+2 and 3: R44, R45), F5c the CC seed's charge balance (R28), F5d the contract
+and the harness.
 
 Constants, all from P3:35-38 unless marked new:
 
@@ -2701,6 +2773,20 @@ Constants, all from P3:35-38 unless marked new:
      that very rail, and the loop settles as a Newton iteration does. A
      closed-form segment past its band already builds at the very rail, and
      a stepped partition solves afresh.
+   - **The power hold's trigger** (F5, W1c point 1a). The passes count each
+     rail IC's power-verdict flips, and the rail Newton keeps its last three
+     iterates. W1c point 1a's procedure runs in place when the passes reach
+     `RAIL_LOOP_MAX` with a rail IC flipped at least twice, when a pass that
+     moved the rail lands it where it was two passes before with a flip on
+     this pass and the one before (an IC whose own flip steps the rail back
+     across its edge; F1r14's slow inrush, its supply current through the
+     rail capacitors' esr, 17 nV against an edge landed two reached widths
+     past, is one), or when the rail Newton fails with a rail IC's verdict
+     (`direct_at` judges a direct IC at each iterate) flipped at both of its
+     last two steps. Across instants HG1's count runs it (Equivalence
+     harness rules, the power-gate ping-pong). With no flip the loop's own
+     `-4` stands: a cycle of cache replays at an `R_out` kink flips no gate
+     and is the cycle guard's.
    - **Measured.** The 25 mV cap (W1f Q6, F1 round 1): an LED straight
      across a 0.9 Ω battery, default against exact mode, 4e-16 V and 2.5e-14
      A; the hub-partition variant (the LED plus 1 Ω) 2.69e-6 V and 1.43e-6
@@ -2826,6 +2912,31 @@ Constants, all from P3:35-38 unless marked new:
    classic finds it (a step granularity, not an exact time). The CC exit of
    a PSU with no rail capacitor is the exception (point 3, the CC step): a
    step whose rail passes the setpoint is cut where it reaches it.
+
+   **The CC seed** (F5c, ruling R28 (a)). A stepped hub partition's seed
+   (`SEED_H`, BE at 1 ps) stamps each capacitor as `C / SEED_H` siemens (up
+   to 2e10 S), and a draw read through that conductance carries the solve's
+   rounding magnified the same way: `eps C / (SEED_H g)` on the rail, 2e-6 V
+   for G2bv's 213 uF behind 0.03 S, past the 1 µV CC band, so the rail loop
+   re-seeded to the same rails without settling (11 of G2bv's 9,000 runs and
+   2 of the cold fuzz's sample, all `-4`). So a seed whose partition holds a
+   capacitor with a pin on the rail takes its draw from a charge balance, in
+   every regime: every branch at the rail but its capacitors, plus each rail
+   capacitor's current read from KCL at its far node (over the whole cluster
+   the rail reaches through capacitors when the far node holds more); summed,
+   the rail row and the cluster's node rows are the same equation with the
+   capacitors' terms cancelled exactly (`stepped::ChargeBalance`). A cluster
+   with a capacitor to a fixed node has no KCL there and keeps the
+   linearised draw. On a CC rail with no rail capacitor the seed also solves
+   the rail as an unknown with its partition, as the CC step below does,
+   with that balance as its rail row: held at the rail the loop last solved,
+   a seed whose stamps curve in the rail (cold fuzz 456 tpl 0: a gate's
+   output on it, 13 Ω and an LED off it) re-solved to the same three rails
+   in turn. Pins in `solve/rail_tests.rs`, G2bv's bc 453 hub 2 (an advance
+   `-4` at 0.95 ms) and bc_ic 345 hub 2 (a load `-4`), each now run to 3 s:
+   `a_g2bv_capacitor_on_a_cc_rail_seeds_at_the_rail_it_solves_with` and
+   `a_g2bv_capacitor_on_a_cc_rail_loads_at_the_rail_it_solves_with`. A CC
+   rail with capacitors (ruling R42) is not covered: Known follow-ups (W1g).
 
    **The CC step** (FXF, after G2bv's frozen tab). While a bench PSU with
    no rail capacitor is in CC, the rail is set by the draws alone, so it
@@ -3088,18 +3199,12 @@ Constants, all from P3:35-38 unless marked new:
      still over W0, 8 worse than before, the drift's premise false), and
      ruling R15 (a) replaced both by the coupled path. Their tests stay,
      each now asserting W0 on the coupled path.
-   - **A flip against the ramp** (F1r14). A rail IC whose own power flip
-     steps the rail back across its window's edge (its supply current
-     through the rail capacitors' esr: 17 nV against an edge landed two
-     reached-widths past, F1r14's slow inrush at esr 1 to 5 Ω) has no
-     consistent state at that instant, and the rail loop's passes
-     alternate. On the pass whose rail is back where it was two passes
-     before and whose flip runs against the CC segment's motion (an IC
-     turning off while the ramp rises, as on its way up through the
-     power-on edge), the flip is held: the partitions keep the stamps of
-     the state the ramp is heading into, and the segment, solved with them,
-     crosses the edge a moment later at the next event, where the gate
-     settles.
+   - **A flip against the ramp** (F1r14; replaced by W1c point 1a, ruling
+     D4 (a)). A rail IC whose own power flip steps the rail back across its
+     window's edge has no consistent state at that instant. F1r14 held the
+     flip that ran against the CC segment's motion; since F5 the passes'
+     alternation triggers the power hold (point 3), which holds the IC off
+     until its supply carries it. F1r14's pins pass unchanged.
    - **Not modelled** (ruling R11 (a), 2026-10-16). Rail capacitors of
      different `esr` exchange charge in a fast mode of their own after a
      step, a transient lasting about 5 µs for the measured pair; the
@@ -3176,8 +3281,8 @@ Constants, all from P3:35-38 unless marked new:
    the measured rows down about fivefold, but the rail loop then fails to
    settle on some boards; a cap derived from W0 was the other option
    offered. Recorded as a bounded
-   divergence; the proper fix comes after W1g, with F5 and perf round 3
-   (W1f known follow-ups).
+   divergence; the proper fix is perf round 3's (W1f known follow-ups; F5
+   did not take it).
 
 5. **Bench PSU regimes** (Q-O36: classic's state machine, exact; entry at a
    current crossing; the hub tolerance applies to voltages only). The state
@@ -3402,7 +3507,10 @@ Constants, all from P3:35-38 unless marked new:
    `reg`, the battery state (`soc`, `t_last`, the held discharge,
    `discharged`, `rejected`), the live boundary array, each waveform
    source's edge counter and level, the pending `Rail` and `Source` events,
-   and the device-state buffer.
+   and the device-state buffer; from F5, the power-hold table and each
+   hold's release (W1c point 1a), and with the hub's state its held draws
+   (ruling R44 (a)) and HG1's count. A hold the static solver took in the
+   failed instant is undone with it.
 
 9. **Exact mode** (`NO_RAIL_SHORTCUT = 1`, load-time only, W1f Q10;
    orchestrator lock: "merges hub-coupled partitions with the rail node as
@@ -3694,10 +3802,6 @@ Recorded at the W1f integration. None changes a rule above until it lands.
   tolerance is used up. Neither fired in the 768-board CC sweep after
   FIN1; fixing either needs a decay-free bound or a floor that yields
   without risking sub-ns rail events (a ruling).
-- **F5, the ping-pong hold** (Equivalence harness rules,
-  `w1f-power-gate-pingpong`): the kernel-to-evaluator hold channel that
-  ports classic's H8. It runs immediately after W1g, ahead of perf round 3
-  (the coordinator, 2026-10-15, with ruling R6).
 - **Perf round 3** (the coordinator, 2026-10-15, with ruling R7): the SAP-1
   on its battery at 1x real time or better, 5x the stretch goal, a
   first-class target. It ran at about 0.4x: 2.1-2.4 s of CPU per
@@ -3722,9 +3826,9 @@ Recorded at the W1f integration. None changes a rule above until it lands.
   known divergence `w1f-cell-multi-partition`): 12 of the 600
   multi-partition cell probe's boards over W0, worst 20x, from the static
   and direct draws linearised at the solve while a battery's rail drifts up
-  to `RAIL_DRIFT_V` between solves. The proper fix comes after W1g, with
-  F5 and perf round 3 (the coordinator, with ruling R17); a cap of 1 µV
-  needs the rail loop's settling fixed first.
+  to `RAIL_DRIFT_V` between solves. The proper fix is perf round 3's (the
+  coordinator, with ruling R17; F5 did not take it); a cap of 1 µV needs
+  the rail loop's settling fixed first.
 - **Stepped hub partitions on a rail they move** (FXF, after G2bv's
   sweep; not fixed, options to the coordinator). (1) A cell: a stepped
   partition holding a capacitor to the rail on a battery with `r > 0`
@@ -3733,16 +3837,11 @@ Recorded at the W1f integration. None changes a rule above until it lands.
   restarts at `POST_EVENT_H` (G2bv's sweep: 6 battery boards at under 0.01x
   real time); the CC step's rail row with the cell's Norton, `(E - u) / r`,
   runs one at 136x but 967x W0 off a fine reference in a cap current
-  early on (exact mode 39x), the other stepped partition held. (2) A
-  seed's draw on a CC rail cancels capacitor currents through
-  `C / SEED_H`, and its rounding (draws quantised to 1e-8..1e-6 A) moves
-  the rail by 1e-6 to 2e-4 V, past the 1 µV band, so the rail loop declines
-  (10 of the sweep's 9,000 runs, all `-4` at `bda1839` too). The seed
-  polish (R25 (a)) clears the Newton-tolerance case (seed 396) only, not
-  these. (3) 24 more rail-loop `-4`s, all on boards with a 74LS00 on the
-  rail, alternate the rail by 4e-3 to 4.8 V, mostly near its power window
-  and `R_out` kinks (18 re-solving static hub partitions, 6 stepped): a
-  cycle the INV2 guard does not catch, not seed rounding.
+  early on (exact mode 39x), the other stepped partition held. Items (2)
+  and (3) of FXF's list were F5's and are fixed: the CC seed's rounding
+  (Rails point 4, the CC seed; ruling R28 (a)) and the 24 rail-loop cycles
+  on boards with a 74LS00 on the rail, which F5D traced to power-verdict
+  flips (W1c point 1a), not `R_out` kinks.
 - **Coupled stepped partitions on one CC rail** (FXF round 3, FXEFv).
   Each stepped hub partition's CC step holds the other partitions' draws
   where they last committed, a first-order coupling error between them
@@ -4462,10 +4561,20 @@ Constants:
       the instant, as `set_params` rolls back: the engine is exactly as it
       was before the call. Classic instead keeps its maps cleared and marks
       the seed non-converged (the comment at SE:2421-2431; the seed at
-      SE:2439). This is a recorded divergence
-      (`w1g-reset-failures-failed-seed`), reachable only when un-failing a
-      part makes the circuit unsolvable. A test reaches it and asserts that
-      BOTH engines report non-convergence (`lastConverged = false`).
+      SE:2439). Both report `lastConverged = false`. It is reachable only
+      when un-failing a part makes the circuit unsolvable, and no circuit
+      is known to make both engines' re-solves fail (ruling D7 (b), F5): a
+      reset only closes paths (a failed part comes back), and since F5 the
+      core holds a self-starving chip off as classic's H8 does (W1c point
+      1a), so G4's candidate, a restored shunt pulling a resistor-fed
+      74LS00's supply onto its floor, converges on both. The registered
+      divergence `w1g-reset-failures-failed-seed` and its detector were
+      deleted as unreachable (Equivalence harness rules, the failed reset).
+      The rollback is pinned by the core's own tests through a seeded
+      failure: `a_reset_whose_re_solve_fails_leaves_the_engine_exactly_as_it_was`
+      (`solve/slow_tests.rs`, a fuse closing a zero-delay ring, `-7`) and,
+      for the facade, `CoreEngine.resetFailures when the re-solve fails
+      (-4)` (`test/core/engine-failures.test.ts`).
 
 14. **Order within an instant** (amends events point 3).
     1. The delta cycle runs to quiescence as before: commits, re-solves,
@@ -4666,33 +4775,75 @@ brackets the median of the per-rep ratios to `3ca4004`.
 Cold LEDs take 2 to 5 points of it: with cold resistors alone the same
 protocol measured +13.9 % frozen and +11.2 % running on the ideal board.
 
-The gate is the rated cost run, `pnpm run bench:sap1-cost -- <label>=<tree>
-...` (`scripts/perf/sap1-cost.ts`): each tree loads the generator's boards
-through its own compiler, as a host does, so the program timed carries the
-rating records; a tree whose compiler knows the record but emits none is
-refused. Ideal and battery, frozen and running, interleaved reps (9 by
-default), 5 s warm-up, 1 s measured, the 1-minute load logged; a change is
-the median of each rep's ratio to the baseline's run beside it. A cost in
-this README is that run's, never a native `.prog`'s.
+The gate is the rated cost run, `pnpm run bench:sap1-cost -- --gate
+<label>=<tree> ...` (`scripts/perf/sap1-cost.ts`): each tree loads the
+generator's boards through its own compiler, as a host does, so the program
+timed carries the rating records; a tree whose compiler knows the record but
+emits none is refused. Ideal and battery, frozen and running, interleaved
+reps (9 by default), each tree in a fresh process, 1 s measured, the
+1-minute load logged; a change is the median of each rep's ratio to the
+baseline's run beside it. A cost in this README is that run's, never a
+native `.prog`'s.
+
+Ruling R43 (b), 2026-10-26: R22's ceiling is judged at **steady state**,
+30 s of warm-up on every side (`--gate`, which is `--warmup=30`), 9
+interleaved reps, the paired median. At the earlier 5 s warm-up the wasm is
+still tiering up: F5a's build read 1.5-2 % slower than its head at 5 s and
+0.7 % at 30 s, with a CPU profile 0.2 % apart and no hot spot. The **5 s
+start-up** figure is always reported beside the gate, since start-up is what
+a user feels opening a circuit: the same process measures 1 s after 5 s of
+warm-up (`--startup`, default 5) on its way to 30 s, so both figures come
+from one load. F5's landing proposes a start-up budget with its `3ca4004`
+baseline. Every figure above was taken at 5 s of warm-up, the protocol of
+its time; the next gate run takes both.
 
 ### Known follow-ups (W1g)
 
 Recorded at the W1g integration. None changes a rule above until it lands.
 
-- **F5, the ping-pong hold** (W1f's follow-up, widened): besides classic's
-  H8 hold it owns the power-edge `-4`s (ruling R23 (iii), FXB's extra board
-  `k6 s39`'s ramp included), the 10 CC seed-rounding rail-loop `-4`s and
-  the 24 rail cycles on boards with a 74LS00 on the rail (ruling R28 (a)).
-  Its exit gate: no `-4` on the fuzz sweep (G2bv's generators, 9,000 runs)
-  except the stepped-Newton cases, which get their own diagnosis. The seed
-  fix prefers the draw from the charge balance to a wider band unless that
-  costs measurably on the SAP-1. The failed-reset gate 2c fixture (point
-  19.1, W1g Q6) is F5's too (ruling R34 (a)): G4's candidate, a restored
-  shunt that pulls a resistor-fed 74LS00's supply onto its power floor, is
-  `-4` on the core while classic converges with H8 holding the chip off, so
-  no circuit yet fails on both engines. Until F5 lands,
-  `w1g-reset-failures-failed-seed` and its detector are covered by
-  self-tests only (`test/core/equivalence/w1g-sidecars.test.ts`).
+- **What F5 leaves** (W1f's follow-up, widened; rulings R23 (iii), R28 (a),
+  R34 (a), D5 (b), R46 (a), R47 (a)). F5 ported classic's H8 (W1c point
+  1a), took the CC seed's rounding (Rails point 4, the CC seed) and the
+  power-edge `-4`s (FXB's `k6 s39` and FXDv's edge board among them). Its
+  exit gate is no `-4` on the fuzz sweep (G2bv's generators, 9,000 runs)
+  except the stepped-Newton cases, which get their own diagnosis. Left:
+  - the exact-mode 555 astable on a CC PSU that NP2's guard declines (cold
+    fuzz tpl 6) and the CC rail with only its node shunt that solves to
+    3.1e10 V (cold fuzz seed 22 tpl 4): F5's still (ruling D5 (b)), as F5e
+    and F5f;
+  - the waveform-coupled CC rail (R42): known divergence
+    `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
+    perf round 3 right after the integrator change (ruling R47 (a));
+  - **seed 226's LED path** (ruling R47 (a)), its own diagnosis, outside
+    F5: W1gV4's cold fuzz seed 226 tpl 4 (a `{8.99 V, 91 mA}` PSU in CC with
+    a 0.16 µF rail capacitor of esr 0.14 Ω, a -2.0 to 7.3 V pulse on node 3,
+    an LED from that node to the rail, 0.92 mF from node 5 to it, 18 Ω and
+    341 Ω from the rail to node 5) runs 19 W0 off its fine reference at 5
+    ms and 720-860 W0 at 27-33 ms in default mode (the rail at 5.12 V
+    against 2.78 V at 28.2 ms), and R42's prototype does not move it. The
+    suspect is the LED carrying the pulse's edges onto the CC rail. Pinned
+    by the ignored test
+    `seed_226_default_mode_stays_within_w0_of_a_fine_reference`
+    (`solve/rail_tests.rs`), which fails today and is the target;
+  - **a gate that rings at its own delay** (ruling R46 (a)): a gate wired
+    to its own input oscillates at its propagation delay, which is the
+    physics, and the core takes every edge as an event, so such a board
+    runs slower than real time: G2bv's bc_ic seed 97 rings at 81 ns and
+    runs at 0.03x, fz_ic seed 401 at 27 ns and 0.02x
+    (`a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay`).
+    A recorded performance limit, not a crawl: its instants lie a delay
+    apart, far past NP2's `NO_PROGRESS_DT`. A steady-ring fast-forward (a
+    periodic orbit recognised and advanced whole) is a perf round 3
+    candidate;
+  - three of the cold fuzz's 42 partition-Newton `-4`s in F5D's sample
+    still fail on the F5 core, each with a 555 on a resistor-fed supply:
+    seed 790 tpl 0 now a `-7` (a delta-cycle livelock at 40.3 µs), 1120 tpl
+    2 a `-4` at 13.4 µs and 1325 tpl 0 a `-4` at a switch toggle (0.613 s),
+    each "partition N: Newton did not converge within 50 iterations" or the
+    livelock; not yet diagnosed (the verifier's cold-fuzz breakdown);
+  - the failed-reset fixture (W1g Q6, ruling R34 (a)) has no circuit, and
+    `w1g-reset-failures-failed-seed` is deleted as unreachable (ruling D7
+    (b); Equivalence harness rules, the failed reset).
 - **Battery boards with a stepped hub partition** (ruling R26 (a); W1f's
   "Stepped hub partitions on a rail they move", item 1): still slower than
   real time. A follow-up in the perf round 3 window, after F5, with the
@@ -4701,7 +4852,7 @@ Recorded at the W1g integration. None changes a rule above until it lands.
 - **Stepped junction currents** (ruling R27 (a)): 10x to 22x W0 off a
   small-step reference (the step controller's 1 mV against an LED's
   exponential; pre-existing; exact mode 16x). Current-aware error control
-  in perf round 3, with F5; numbers to the coordinator before a commit
+  in perf round 3; numbers to the coordinator before a commit
   that costs the SAP-1 noticeably.
 - **Multi-capacitor stepped hub partitions** (ruling R31 (a); W1gV2):
   step-control error of 14x to 21x W0 in thermal readings and 17x in
@@ -4954,9 +5105,13 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     `a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once` (G2bv's bc_ic
     97) and
     `a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay`
-    (fz_ic 401). A probe in which every alternating IC carries itself and
+    (fz_ic 401, which then rings at its own delay: Known follow-ups (W1g),
+    ruling R46 (a)). A probe in which every alternating IC carries itself and
     every rail IC reads as probed is the instant's solution (the free
-    passes alternated only on the way to it).
+    passes alternated only on the way to it), provided its state passes the
+    ordinary convergence check (ruling R45 (a); W1c point 1a):
+    `a_probe_every_alternating_gate_carries_itself_in_is_accepted_when_its_state_passes_the_residual_check`
+    and, through a seeded fault, `a_probe_whose_state_fails_the_residual_check_is_not_accepted`.
     F1r14's flip-against-the-ramp hold (Rails point 4) is replaced by it
     (ruling D4 (a)); its pins pass unchanged.
   - **Across instants** (HG1; F5, ruling R44 (a)). With a rail capacitor of
@@ -5047,8 +5202,34 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   probe over W0, worst 20x. The id names the divergence; it is not an
   entry of `test/core/equivalence/known-divergences.ts`, and the harness
   does not yet look for it on the corpus or the fixtures. It goes when the
-  fix scheduled after W1g, with F5 and perf round 3, lands (W1f known
-  follow-ups).
+  fix scheduled for perf round 3 lands (W1f known follow-ups).
+- **The waveform-coupled CC rail** (R42, F5c; ruling R47 (a)). Known
+  divergence `w1f-cc-rail-waveform-coupling`: a bench PSU in CC with a rail
+  capacitor (0.16 to 0.9 µF), and a waveform edge reaching the rail
+  through a dynamic hub partition (W1gV4's cold fuzz, hub 2: seeds 226 tpl
+  4, 245, 1084, 1429 and 1359), runs off a fine reference (exact mode,
+  horizon clamp at most 1 µs; ruling D6 (a)). With a rail capacitor the CC
+  step's rail-as-unknown is off (`sync_stepped_cc`), so a stepped
+  partition rides the frozen form with its draw linearised, and the rail's
+  own fast mode (`R C_rail`, 0.5 to 3 µs) is integrated at whatever the host
+  and the rail events sample. Worst node off the reference at a 0.1 ms
+  host, in W0: 1429 5845, 1084 5.5e4, 226 819, 245 12, 1359 21; exact mode
+  itself is host-dependent there (1084's sampled rail minimum -3.88, -1.47
+  and -0.003 V at 0.1, 3 and 50 ms hosts). F5c's prototype extended the CC
+  step to rail capacitors and promoted to stepped any closed-form hub
+  partition holding a capacitor on the rail (it also needed the hub's
+  running sums re-summed and the load's CC rail-capacitor charge in
+  parity; kept out of the tree, in devolt's
+  `memory/progress/brownout-core-w1e-drafts/f5c-r28-r42-prototype.patch`):
+  1429 went to 15-25 W0 across 0.1 ms, 3 ms and 50 ms hosts (exact mode
+  10-18), 1084 to 1.7e4 (exact 64), 226 stayed near 800, and 245 and 1359
+  stayed at 12-25 W0 in every mode, the integrator's own floor. So R42's
+  gate moves to perf round 3, judged right after the integrator change,
+  against D6's reference (default mode within W0 of it). The id names the
+  divergence; it is not an entry of
+  `test/core/equivalence/known-divergences.ts`, and the harness does not
+  look for it on the corpus or the fixtures. Seed 226 has a diagnosis of
+  its own (Known follow-ups (W1g)).
 - **CC exits against the exact rail** (probe P9; the owner's ruling (a),
   2026-10-15). On a `psu-rail` fixture (a limited PSU, a rail capacitor and
   switched resistive loads), every sample from a CC exit to the next CC
@@ -5131,13 +5312,28 @@ failures and warnings (W1g)"):
   tolerance of `1 nA` plus `1e-3` relative. If a small-current case ever
   passes only because of the absolute floor, revisit it with the power-law
   bound `|dP| <= |V|·dI + |I|·dV`.
-- **The failed reset** (W1g Q6). Known divergence
-  `w1g-reset-failures-failed-seed`: when the re-solve after
+- **The failed reset** (W1g Q6; ruling D7 (b), F5). When the re-solve after
   `resetFailures()` fails, the core rolls the reset back, where classic
-  keeps its failures cleared over a non-converged seed (W1g point 13). Both
-  engines report `lastConverged = false`, and a gate 2c fixture asserts it;
-  the id excuses only the failure and warning sets after that call, never
-  the convergence flag.
+  keeps its failures cleared over a non-converged seed (W1g point 13). It
+  was registered as `w1g-reset-failures-failed-seed`, with a detector that
+  excused only the failure and warning sets after that call, never the
+  convergence flag, waiting for a gate 2c fixture on which both engines
+  fail the re-solve (ruling R34 (a)). F5d's bounded search found none: the
+  cold fuzz's 42 partition-Newton `-4`s (F5D's sample) re-run on the F5
+  core, 39 to the end and none at a reset (two `-4`s and one `-7` left, all
+  on boards with a 555 on a fed supply, one at a switch toggle, which opens
+  a path where a reset can only close one); 720 boards of G4's shape (a
+  74LS00, a 555 or two 74LS00s on a resistor-fed node, a shunt failing at
+  6 V and restored at 4.5 to 5.2 V, resistor or LED loads) and 56,020
+  random boards of mixed families (74LS00, 74LS04, 74HC14 and 555 on one or
+  two fed nodes, an LED on the supply, a shunt failing at 6-8 V and
+  restored at 2.5-5.7 V; 20,596 of them with the shunt failed before the
+  reset): no reset whose re-solve failed on either engine. One board failed
+  on both before any reset (the core at load, classic in its run, both at
+  6.5 V with the shunt in place), and driven so that the shunt was the
+  part restored, both resets converged. So the id and its detector are deleted as unreachable; a
+  mismatch after a failed reset now fails the gate, which is where a
+  circuit that reaches it should surface.
 - **Committed against live sag targets** (W1g Q12). Known divergence
   `w1g-sag-committed-target`: inside a pending enable or disable delay,
   classic's `output_sag` targets follow the live evaluation and the core's

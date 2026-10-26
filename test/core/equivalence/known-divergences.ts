@@ -611,12 +611,15 @@ export function classifyMismatches(
 
 // ─── W1g: divergences in time, not in a cone ────────────────────────────────
 //
-// The two W1g registrations (core/README.md, Equivalence harness rules, W1g)
-// are not structural: what they excuse is a failure or warning set that
-// differs for a while after a specific runtime event, so a cone of
-// components cannot express them. Each is a detector over the run's own
-// facts, which the gate 2c check that drives the run supplies, and each
-// refuses everything outside its own window.
+// The W1g registration below (core/README.md, Equivalence harness rules, W1g)
+// is not structural: what it excuses is a failure set that differs for a
+// while after a specific runtime event, so a cone of components cannot
+// express it. It is a detector over the run's own facts, which the gate 2c
+// check that drives the run supplies, and it refuses everything outside its
+// own window. W1g's second, `w1g-reset-failures-failed-seed` (a reset whose
+// re-solve fails on both engines), was deleted as unreachable at F5 (ruling
+// D7 (b)): no circuit was found that fails that re-solve on both engines
+// once the core holds a starving chip off as classic's H8 does.
 
 /** One W1g registration: its id, citations and the rule it applies. */
 export interface KnownTimedDivergence {
@@ -624,15 +627,6 @@ export interface KnownTimedDivergence {
   readonly decisionRef: string;
   readonly reason: string;
 }
-
-export const W1G_RESET_FAILED_SEED: KnownTimedDivergence = {
-  id: "w1g-reset-failures-failed-seed",
-  decisionRef: "core/README.md W1g point 13 (W1g Q6) and Equivalence harness rules, W1g",
-  reason:
-    "When the re-solve after resetFailures() fails, the core rolls the reset back (its failures stay latched) where " +
-    "classic keeps its maps cleared over a non-converged seed. Only the failure and warning sets after that call " +
-    "differ; both engines must report lastConverged = false, which this id never excuses.",
-};
 
 export const W1G_SAG_COMMITTED_TARGET: KnownTimedDivergence = {
   id: "w1g-sag-committed-target",
@@ -642,19 +636,6 @@ export const W1G_SAG_COMMITTED_TARGET: KnownTimedDivergence = {
     "core from the committed drivers, so the two sets can differ until the delay expires. A difference outside " +
     "the driver's pending delay is not excused, and the sets must agree once it has expired.",
 };
-
-/**
- * `w1g-reset-failures-failed-seed`: excuses a `failures` or `warnings`
- * mismatch at or after an instant where BOTH engines' `resetFailures()`
- * re-solve failed (`failedResetsS`), and before the next successful reset
- * (`laterResetsS`, the instants of the successful ones). It never excuses any
- * other category, so a `lastConverged` difference (reported by the gate 2c
- * check as category `sidecar`, id `lastConverged`) always fails.
- */
-export function explainFailedResetSeed(mismatch: Mismatch, failedResetsS: readonly number[], laterResetsS: readonly number[] = []): boolean {
-  if (mismatch.category !== "failures" && mismatch.category !== "warnings") return false;
-  return failedResetsS.some((t) => mismatch.sampleTime >= t && !laterResetsS.some((r) => r > t && r <= mismatch.sampleTime));
-}
 
 /**
  * A driver's pending delay for one output pin: from the instant its enable
