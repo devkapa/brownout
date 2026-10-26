@@ -10081,3 +10081,54 @@ fn seed_226_default_mode_stays_within_w0_of_a_fine_reference() {
         assert!(offs[k] <= 1.0, "seed 226 at {t} s: {:.1} W0 off the fine reference (rail {:.4} V against {:.4} V)", offs[k], got[k][1], want[k][1]);
     }
 }
+
+#[test]
+fn a_cc_rail_whose_load_opens_leaves_cc_for_the_setpoint() {
+    // The cold fuzz's seed 22 tpl 4 (F5D: "rail at 3.1e10 V"; ruling D5 (b),
+    // F5f): a {6.32 V, 63 mA} PSU in CC into a 0.1 V pulse source through a
+    // 0.26 ohm fuse rated 10.5 mA, the rail's only other load a reverse LED.
+    // The fuse trips some 6 ms in; with its load gone the CC rail heads for
+    // iLimit over the node shunt, 63 mA / 2e-12 S = 3.1e10 V, where the
+    // LED's 3e-16 A rounds a different way at each iterate and the rail
+    // Newton, one ulp (3.8e-6 V) apart, cannot meet its 1e-12 V tolerance:
+    // the advance declined with `-4`. The supply holds its setpoint there:
+    // CV at 6.32 V from the trip on, the rail never past it.
+    let p = { let mut p = program(8, cold_22_tpl4()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    let v = 6.322361965212574;
+    let stops = [0.006272879633087429, 0.013345117839129006, 0.015494695988619472, 0.024315328917644118, 0.05064003930122574, 0.05490012932844035, 0.09847041802644906, 0.11261489541743265];
+    let mut e = Engine::load(&p).unwrap();
+    for &t in &stops {
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} at {}: {}", er.code, e.time(), er.message));
+        let u = e.voltages()[1];
+        assert!(u <= v + 1e-9, "the rail {u} V at {t}, past the setpoint {v}");
+    }
+    assert_eq!(e.currents()[10], 0.0, "the fuse tripped");
+    assert_eq!(e.voltages()[1], v, "CV at the setpoint once the load opened");
+}
+
+/// tpl=4 hub=2 e=6.322 psu ilim=0.063 V2=2.81 PULSE3 0.1..8.4 tr=2e-4 R4-5=10291.7 C3-6=8.9e-5 LED0-1 F1-3=0.26/0.01 R6-2=20.1 LED5-4 SW5-3(1)+R3-0=17 exact=false span=8.4
+/// options: Options { integration: 1, .. } digital_slot_count 32 node_count 8
+/// toggles [(0.42852457705507285, 13), (0.7194396106642458, 13), (1.0510772579537433, 13)]
+/// ERR advance to 0.013345117839129006 at t 6.272879633087429e-3: rail: the rail Newton did not converge within 50 iterations
+fn cold_22_tpl4() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![6.322361965212574, 0.06299239375166817], vec![]),
+        fz(2, 1, &[2, 0], vec![2.8141896380534313], vec![]),
+        fz(24, 2, &[3, 0], vec![0.10461017875902145, 8.392659606829216, 0.012172834348593155, 0.00019498313165868688, 0.00019498313165868688, 0.027646839705626, 0.0684597476858559], vec![8.0]),
+        fz(1, 3, &[4, 0], vec![136212.16444055017], vec![]),
+        fz(1, 4, &[5, 0], vec![3433.651644971659], vec![]),
+        fz(1, 5, &[6, 0], vec![6515.598989611513], vec![]),
+        fz(1, 6, &[7, 0], vec![335473.78092745814], vec![]),
+        fz(1, 7, &[4, 5], vec![10291.662113429844], vec![]),
+        fz(3, 8, &[3, 6], vec![8.898602240469258e-5, 0.0, 0.0], vec![]),
+        fz(30, 9, &[0, 1], vec![1.9728609744022425, 2.4020290663757944, 0.024963565203299995, 0.0, 0.0, 0.0], vec![]),
+        fz(10, 10, &[1, 3], vec![0.2621076353578133, 0.010493551323249091], vec![]),
+        fz(1, 11, &[6, 2], vec![20.062657159606093], vec![]),
+        fz(30, 12, &[5, 4], vec![2.1676349986528507, 2.3452118466706255, 0.01761062464588532, 0.0, 0.0, 0.0], vec![]),
+        fz(4, 13, &[5, 3], vec![1.0], vec![]),
+        fz(1, 14, &[3, 0], vec![17.021970939781387], vec![]),
+        fz(90, 7, &[], vec![7.0, 1.4460096379689398e-5, 10291.662113429844], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.942324895972889, 20.062657159606093], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.011706195361967153, 17.021970939781387], vec![]),
+    ]
+}

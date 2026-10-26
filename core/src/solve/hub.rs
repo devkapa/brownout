@@ -929,7 +929,7 @@ impl PartitionedSolver {
                         });
                         Ok(u)
                     } else {
-                        rails::solve_cc(dl, a_p, g_p, &direct, u_from)
+                        rails::solve_cc(*v, dl, a_p, g_p, &direct, u_from)
                     }
                 }
             }

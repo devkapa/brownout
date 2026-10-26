@@ -3352,7 +3352,11 @@ Constants, all from P3:35-38 unless marked new:
      solved from a short's 0.2 mV with the 555 unpowered, went to `iLimit`
      over the node shunt, 2.1e11 V, where the 555 is past its window, and
      the draw test held it there; now it leaves for CV and re-enters at the
-     powered CC rail, 2.047 V, exact mode's). With a rail capacitor, a
+     powered CC rail, 2.047 V, exact mode's). A CC Newton that cannot
+     settle past the setpoint, with the draw there within the limit, gives
+     the setpoint (F5f: cold fuzz seed 22 tpl 4, a fuse tripping in CC sent
+     the iterates to 3.1e10 V over the node shunt, one ulp apart, and the
+     advance declined with `-4`). With a rail capacitor, a
      jump to `V` would draw without bound, so the exit is the rail itself
      reaching the setpoint, `dir·u >= |V|` (probe P9: classic stays in CC,
      −0.1 A, up to 5.0 V). The rail then solves in CV at the same
@@ -4828,8 +4832,6 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     instant re-plans a crossing at its start and NP2's guard declines the
     crawl with `-4`. 66 of tpl 6's 1,500 hub-2 boards (22 exact `-4`, 6
     exact and 38 default `-7`);
-  - the CC rail with only its node shunt that solves to 3.1e10 V (cold
-    fuzz seed 22 tpl 4): F5's still (ruling D5 (b)), as F5f;
   - the waveform-coupled CC rail (R42): known divergence
     `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
     perf round 3 right after the integrator change (ruling R47 (a));

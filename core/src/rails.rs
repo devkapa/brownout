@@ -14,7 +14,7 @@
 use std::rc::Rc;
 
 use crate::devices::battery::{exp_term_charge, BatteryModel, BatteryState};
-use crate::devices::sources::{direction, regime_step, regime_step_rail_cap, Regime};
+use crate::devices::sources::{compliance_keeps_cv, direction, regime_step, regime_step_rail_cap, Regime};
 
 /// The finite-difference step of the sensitivity (Rails point 3).
 pub const RAIL_DELTA: f64 = 1e-6;
@@ -1546,9 +1546,29 @@ pub fn solve_battery(e: f64, r: f64, a_p: f64, g_p: f64, direct: &dyn Direct, u0
     newton(u0, a_p, g_p, direct, |a0, g| (e - r * a0) / (1.0 + r * g))
 }
 
-/// The settled CC rail, `u = (dir iLimit - A0) / G`.
-pub fn solve_cc(dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct, u0: f64) -> Result<f64, String> {
-    newton(u0, a_p, g_p, direct, |a0, g| (dir_limit - a0) / g)
+/// The settled CC rail of a PSU of setpoint `v`, `u = (dir iLimit - A0) /
+/// G`.
+///
+/// A Newton that cannot settle past the setpoint, with the draw at the
+/// setpoint within the limit, gives the setpoint: the CC solution lies at or
+/// past it, where the supply's compliance holds the rail, and the regime
+/// rules leave CC (or keep CV) there. A load that opens in CC sends the
+/// iterates to iLimit over whatever conductance is left, the node shunt's
+/// 2e-12 S, where one ulp is millions of times `RAIL_NEWTON_TOL` and a draw
+/// that rounds differently at each iterate never settles (F5f: cold fuzz
+/// seed 22 tpl 4, a fuse tripping in CC, 3.1e10 V; FXH's bug A is the same
+/// CC solve past the setpoint, there converged and left by the exit's
+/// compliance test). A Newton that settles is returned as it is, wherever it
+/// lands, and one that fails short of the setpoint fails as before, without
+/// a look at the setpoint: the direct devices' last iterates are what the
+/// power-gate hold's trigger reads (W1c point 1a).
+pub fn solve_cc(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct, u0: f64) -> Result<f64, String> {
+    let last = std::cell::Cell::new(u0);
+    newton(u0, a_p, g_p, direct, |a0, g| {
+        last.set((dir_limit - a0) / g);
+        last.get()
+    })
+    .or_else(|err| if compliance_keeps_cv(last.get(), v) && direction(v) * draw_at(a_p, g_p, direct, v) <= dir_limit.abs() { Ok(v) } else { Err(err) })
 }
 
 /// The CC rail over rail capacitors of charge `q` (Rails point 4): `u = q +
@@ -1637,7 +1657,7 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         (i, demand.held)
     } else {
         // The CC candidate's settled rail is only read by the CV -> CC clamp.
-        let u_cc = if reg == Regime::Cv && i_at_v.abs() > i_limit { solve_cc(direction(v) * i_limit, a_p, g_p, direct, v)? } else { u_rail };
+        let u_cc = if reg == Regime::Cv && i_at_v.abs() > i_limit { solve_cc(v, direction(v) * i_limit, a_p, g_p, direct, v)? } else { u_rail };
         (i_at_v, u_cc)
     };
     Ok(if rail_cap { regime_step_rail_cap(reg, i_at_v, u_cc, u_rail, v, i_limit) } else { regime_step(reg, i_at_v, u_cc, u_rail, v, i_limit) })
@@ -2112,8 +2132,21 @@ mod tests {
     #[test]
     fn the_cc_rail_solves_the_draw_to_the_limit() {
         // 0.1 A into 10 ohm: 1 V.
-        let u = solve_cc(0.1, 0.0, 0.1, &none, 5.0).unwrap();
+        let u = solve_cc(5.0, 0.1, 0.0, 0.1, &none, 5.0).unwrap();
         assert!((u - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn a_cc_rail_newton_past_the_setpoint_that_cannot_settle_gives_the_setpoint() {
+        // 63 mA into the node shunt alone, a reverse LED's 3e-16 A rounding
+        // one way or the other with the iterate's last bit: the iterates sit
+        // one ulp apart at 3.1e10 V (F5f). With the draw at the setpoint
+        // within the limit, the setpoint.
+        let leak = |u: f64| (if u.to_bits() & 1 == 0 { 3.330669e-16 } else { 3.191891e-16 }, 0.0);
+        assert_eq!(solve_cc(6.32, 0.063, 0.0, 2e-12, &leak, 0.12), Ok(6.32));
+        // A draw past the limit at the setpoint keeps the Newton's failure.
+        let past = |u: f64| if u == 6.32 { (1.0, 0.0) } else { leak(u) };
+        assert!(solve_cc(6.32, 0.063, 0.0, 2e-12, &past, 0.12).is_err());
     }
 
     #[test]
