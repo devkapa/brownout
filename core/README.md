@@ -1365,8 +1365,18 @@ their own, and the source KCL does with W1a point 2's branch fold.
    iterated static partition: one that holds a free IC supply node or (W1e)
    a stamped LED junction. It re-stamps from the latest iterate until
    classic's Newton test passes (`|dx| <= 1e-6 + 1e-3 * max(|x_new|,
-   |x_old|)` per node, classic's own form, at most 50 iterations; failure is
-   `-4`). One holding a junction then runs one polish iteration (LEDs point
+   |x_old|)` per node, classic's own form, at most 50 iterations). One
+   holding a free IC supply that fails so runs once more from the same
+   start, its Jacobian taking the supply terms restamping misses (each
+   driver conductance's slope in its supply, each pull's target), as the
+   hub polish does (point 9 of LEDs); a stepped partition's step does the
+   same. Frozen, a 555's OUT at a low supply contracted the iteration by
+   only 0.89 a step, and another board 2-cycled across the power gate (cold
+   fuzz seeds 1120 tpl 2 and 1325 tpl 0, F5e). Not at the first try: the
+   full step can overshoot a solution just inside the power window out of
+   it, where the frozen one creeps up to it (FXBv's fed gates). The power
+   hold (point 1a) reads the first try's verdicts. Failure of both is `-4`.
+   One holding a junction then runs one polish iteration (LEDs point
    6.4); one holding a free IC supply and no junction does not. Static and
    stepped partitions share one loop: `static_part` calls `newton::solve`,
    which gains a non-finite-iterate check and a `polish` argument, and
@@ -4807,10 +4817,19 @@ Recorded at the W1g integration. None changes a rule above until it lands.
   power-edge `-4`s (FXB's `k6 s39` and FXDv's edge board among them). Its
   exit gate is no `-4` on the fuzz sweep (G2bv's generators, 9,000 runs)
   except the stepped-Newton cases, which get their own diagnosis. Left:
-  - the exact-mode 555 astable on a CC PSU that NP2's guard declines (cold
-    fuzz tpl 6) and the CC rail with only its node shunt that solves to
-    3.1e10 V (cold fuzz seed 22 tpl 4): F5's still (ruling D5 (b)), as F5e
-    and F5f;
+  - the 555 astable on a CC PSU (cold fuzz tpl 6), F5's still (ruling D5
+    (b)), its physics awaiting a ruling (F5e): when the output's load pulls
+    the CC rail below half the setpoint, no latch state is consistent while
+    the capacitor sits between 2/3 of the CC rail and 1/3 of the setpoint
+    (high, the threshold resets it; low, the rail leaves CC for the
+    setpoint and the trigger sets it). Default mode reports the zero-delay
+    loop as `-7` (NE555 point 11); in exact mode the stepped trial's CC rail
+    and the instant's re-solve differ by 5.5e-5 V, within W0, so each
+    instant re-plans a crossing at its start and NP2's guard declines the
+    crawl with `-4`. 66 of tpl 6's 1,500 hub-2 boards (22 exact `-4`, 6
+    exact and 38 default `-7`);
+  - the CC rail with only its node shunt that solves to 3.1e10 V (cold
+    fuzz seed 22 tpl 4): F5's still (ruling D5 (b)), as F5f;
   - the waveform-coupled CC rail (R42): known divergence
     `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
     perf round 3 right after the integrator change (ruling R47 (a));
@@ -4835,12 +4854,13 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     apart, far past NP2's `NO_PROGRESS_DT`. A steady-ring fast-forward (a
     periodic orbit recognised and advanced whole) is a perf round 3
     candidate;
-  - three of the cold fuzz's 42 partition-Newton `-4`s in F5D's sample
-    still fail on the F5 core, each with a 555 on a resistor-fed supply:
-    seed 790 tpl 0 now a `-7` (a delta-cycle livelock at 40.3 µs), 1120 tpl
-    2 a `-4` at 13.4 µs and 1325 tpl 0 a `-4` at a switch toggle (0.613 s),
-    each "partition N: Newton did not converge within 50 iterations" or the
-    livelock; not yet diagnosed (the verifier's cold-fuzz breakdown);
+  - of three of the cold fuzz's partition-Newton `-4`s in F5D's sample
+    that F5 left, 1120 tpl 2 and 1325 tpl 0 pass since F5e (W1c point 3's
+    second try); seed 790 tpl 0's `-7` at 40.3 µs is a zero-delay loop
+    through its 555 (DIS on TRIG with no timing capacitor, THR on a rail
+    above 2/3 of its supply: DIS low sets the latch, released it resets),
+    the `-7` of NE555 point 11, which the F5 core is the first to reach:
+    c5b1a13's partition-Newton `-4` stopped it at 32.5 µs;
   - the failed-reset fixture (W1g Q6, ruling R34 (a)) has no circuit, and
     `w1g-reset-failures-failed-seed` is deleted as unreachable (ruling D7
     (b); Equivalence harness rules, the failed reset).

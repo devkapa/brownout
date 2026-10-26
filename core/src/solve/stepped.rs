@@ -253,6 +253,9 @@ struct IcStampCtx<'a> {
     /// Newton iteration (`linear = false`) instead of the one-shot linear
     /// solve every other partition needs.
     iterated: bool,
+    /// Whether it holds a free IC supply node, whose stamps' slopes in that
+    /// supply [`solve_step`]'s Newton takes into its Jacobian.
+    free_supply: bool,
 }
 
 /// Why a step's solve produced no result.
@@ -328,21 +331,50 @@ fn solve_step(
     // partitions need the real convergence loop instead. No polish: classic
     // solves each step exactly like this (LEDs point 8).
     let linear = !ic_ctx.iterated;
-    let (result, factors) = newton::solve_keeping_factors(n, n, x_from, linear, polish, |x, a, b| {
-        stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, n, x, a, b);
-        if let Some(e) = exact {
-            e.apply(n, a, b);
+    // Classic's loop restamps each IC stamp at the iterate's supply, its
+    // slope in that supply left out. Where a partition holding a free IC
+    // supply does not converge so at a step with no smaller one to retry
+    // (the seed's, or `H_MIN`), the step is solved once more with the
+    // slopes in the Jacobian, as the hub polish takes them (W1c point 3;
+    // `StaticPartitionSolver::newton_in`'s second try, for the same reasons:
+    // cold fuzz 1325 tpl 0's seed declined in exact mode at its switch
+    // toggle). Only there: a longer step retries smaller anyway, and a
+    // second try at each doubled cold fuzz 238 tpl 3's run.
+    let mut result = None;
+    for slopes in [false, true] {
+        if slopes && (linear || !ic_ctx.free_supply || h > H_MIN * 1.01) {
+            break;
         }
-    })
-    .map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
-    // Counted before the verdict: a rejected step's iterations were run.
-    *newton_iters += result.iterations as u64;
-    if !linear && !result.converged {
-        // `newton::solve` never turns "hit the iteration cap unconverged"
-        // into an `Err`; what that means is the caller's call (retry
-        // smaller, end a refinement, or fail).
-        return Err(StepError::NoConverge);
+        let (r, factors) = newton::solve_keeping_factors(n, n, x_from, linear, polish, |x, a, b| {
+            stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, n, x, a, b);
+            if slopes {
+                let extra = crate::solve::ic_supply_terms(ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, &bnd, ic_ctx.p_idx, x).extra_jacobian(x, n);
+                for row in 0..n {
+                    for col in 0..n {
+                        let j = extra[row * (n + 1) + col];
+                        if j != 0.0 && j.is_finite() {
+                            a[row * n + col] += j;
+                            b[row] += j * x[col];
+                        }
+                    }
+                }
+            }
+            if let Some(e) = exact {
+                e.apply(n, a, b);
+            }
+        })
+        .map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+        // Counted before the verdict: a rejected step's iterations were run.
+        *newton_iters += r.iterations as u64;
+        if linear || r.converged {
+            result = Some((r, factors));
+            break;
+        }
     }
+    // `newton::solve` never turns "hit the iteration cap unconverged" into
+    // an `Err`; what that means is the caller's call (retry smaller, end a
+    // refinement, or fail).
+    let Some((result, factors)) = result else { return Err(StepError::NoConverge) };
 
     let x = result.x;
     let mut vc = vec![0.0; shape.capacitors.len()];
@@ -1344,6 +1376,7 @@ impl SteppedSolver {
             cc: None,
             p_idx: p,
             iterated: part.iterated(),
+            free_supply: part.holds_free_ic_supply,
         };
         let bnd = Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }).at_time(ramps, at).with_ext(rail, n).hold_power_at(u_p);
         let z: Vec<f64> = if part.curved() { x.iter().copied().chain(std::iter::once(u_p)).collect() } else { Vec::new() };
@@ -1525,6 +1558,7 @@ impl SteppedSolver {
                 cc,
                 p_idx,
                 iterated,
+                free_supply: self.partitions[&p_idx].holds_free_ic_supply,
             };
             let seed_sens;
             let seed_u;
@@ -2144,7 +2178,7 @@ impl SteppedSolver {
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
         let keep_lu = part.hub && rail.is_some();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated() };
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated(), free_supply: part.holds_free_ic_supply };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);

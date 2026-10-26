@@ -9278,6 +9278,84 @@ fn an_iterated_partition_alternating_a_555s_power_gate_holds_it_off() {
     assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
 }
 
+/// A fuzz board as its sweep ran it, through the engine: an `advance` to
+/// each of `stops`, then each switch of `toggles` due by then toggled
+/// (param 0 between 0 and 1). The first error, with the time it left.
+fn sweep_run(p: &Program, toggles: &[(f64, usize)], stops: &[f64]) -> Result<Engine, (BoError, f64)> {
+    let mut e = Engine::load(p).map_err(|er| (er, 0.0))?;
+    let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
+    let mut ev = 0;
+    for &stop in stops {
+        e.advance(stop).map_err(|er| (er, e.time()))?;
+        while ev < toggles.len() && toggles[ev].0 <= stop {
+            let d = toggles[ev].1;
+            state[d] = 1.0 - state[d];
+            e.set_params(&[(d as u32, 0, state[d])]).map_err(|er| (er, e.time()))?;
+            ev += 1;
+        }
+    }
+    Ok(e)
+}
+
+#[test]
+fn a_555_whose_output_feeds_its_own_supply_converges_at_a_low_supply() {
+    // The cold fuzz's seed 1120 tpl 2 (F5d's D7 search), declined `-4` at
+    // 13.4 us: a 555 fed through 30.9 kohm from a CC rail its own OUT pin
+    // sits on, DIS on its vcc. Its OUT stage's conductance to vcc is `f(vs)
+    // / 20` (NE555 point 7), steep at a low supply; solved with that
+    // conductance frozen at each iterate, the partition's iteration only
+    // contracted by 0.89 a step (vs 1.80, 0.10, ..., then 0.77, 0.24, 0.67,
+    // ... toward 0.41 V) and hit its 50-iteration cap. Newton with the
+    // conductance's derivative in the Jacobian converges, as the hub
+    // polish's does, and the power hold then holds the 555 off (W1c point
+    // 1a): powered it pulls its supply to 0.41 V through DIS.
+    let board = |exact_mode: bool| { let mut p = program(6, cold_1120_tpl2()); p.digital_slot_count = 32; p.options.integration = 1; p.options.no_rail_shortcut = exact_mode; p };
+    let toggles = [(0.41324546951082397, 14), (0.601000495581227, 14), (0.6806880874994053, 14)];
+    let stops = [1.35e-5, 0.1, 0.41324546951082397, 0.601000495581227, 0.6806880874994053, 1.2];
+    match sweep_run(&board(false), &toggles, &stops) {
+        Ok(e) => assert!(e.stat(25) >= 1.0, "held off at least once"),
+        Err((er, t)) => panic!("{} at {t}: {}", er.code, er.message),
+    }
+    // Exact mode's stepped seed alternates the same gate (powered at a 2.31 V
+    // supply, 0.16 V after), and a stepped partition's Newton runs no hold
+    // (W1c point 1a): its `-4` stands, at the same instant as before.
+    let Err((er, t)) = sweep_run(&board(true), &toggles, &stops) else { panic!("exact mode's stepped H8 now passes: update this pin") };
+    assert_eq!(er.code, -4);
+    assert!((t - 1.023e-5).abs() < 1e-8 && er.message.starts_with("stepped: Newton did not converge"), "{t} {}", er.message);
+}
+
+#[test]
+fn a_555_whose_supply_switch_opens_converges_without_a_hold() {
+    // The cold fuzz's seed 1325 tpl 0 (F5d's D7 search), declined `-4` at
+    // the switch toggle at 0.613 s: opening it leaves the 555's vcc (node 6)
+    // fed through 510 ohm from DIS's node. Solved with the OUT and DIS
+    // conductances frozen at each iterate, the partition 2-cycled between a
+    // powered iterate (vs 2.56 V) and an unpowered one (1.75 V), so the power
+    // hold ran; its powered probe converged at 1.98 V, inside the window,
+    // and with no IC starving there the procedure declined. That probe is a
+    // solution of the free partition: Newton with the conductances'
+    // derivatives finds it directly. Exact mode's step declined there too.
+    let board = |exact_mode: bool| { let mut p = program(8, cold_1325_tpl0()); p.digital_slot_count = 32; p.options.no_rail_shortcut = exact_mode; p };
+    let toggles = [(0.6132293487216949, 7)];
+    let stops = [
+        0.006272876767779332, 0.006480661829038629, 0.03440297140027209, 0.0380641329025449, 0.044002088431166535, 0.06665239476678818, 0.10654709267762458, 0.11408661311212073, 0.12116016198788658, 0.12564713556801815, 0.14598381797610285, 0.14664850923070183,
+        0.1468188098690709, 0.16056491591787245, 0.1646468664631822, 0.2066528843471837, 0.20724479979408952, 0.20747836626119665, 0.2564271719827684, 0.2976674142574927, 0.2979597497153942, 0.2990134639035969, 0.32152737436969925, 0.32193917016753537, 0.3222475190937351,
+        0.37084977750817055, 0.4134040971516132, 0.41438822960946525, 0.46138471825377536, 0.46595783237299987, 0.4661448109338016, 0.46647074150173456, 0.4689111511755701, 0.4861494398218669, 0.4866372989934134, 0.488466984380709, 0.491985592965016, 0.5373769607134146,
+        0.553044905348276, 0.5579314518689056, 0.5610904955350021, 0.5843675623509273, 0.5992511162198577, 0.6132293487216949, 0.7,
+    ];
+    for exact_mode in [false, true] {
+        let p = board(exact_mode);
+        let stats = |e: &Engine| [e.stat(25), e.stat(26)];
+        let before = sweep_run(&p, &toggles, &stops[..stops.len() - 2]).map(|e| stats(&e)).unwrap_or_else(|(er, t)| panic!("exact={exact_mode}: {} at {t}: {}", er.code, er.message));
+        match sweep_run(&p, &toggles, &stops) {
+            // No hold taken at the toggle (default mode holds and releases
+            // once earlier, as at the head).
+            Ok(e) => assert_eq!(stats(&e), before, "exact={exact_mode}"),
+            Err((er, t)) => panic!("exact={exact_mode}: {} at {t}: {}", er.code, er.message),
+        }
+    }
+}
+
 #[test]
 fn the_fed_gate_on_a_cc_ramp_is_held_at_its_floor_and_released_at_the_next_re_solve() {
     // FXB's extra board, FXDv's "k6 s39 ramp" (declined at step 226 of
@@ -9435,6 +9513,76 @@ fn cold_12_tpl4() -> Vec<Device> {
         fz(90, 19, &[], vec![19.0, 2.5035405037013048, 51.36602119409897], vec![]),
         fz(90, 21, &[], vec![21.0, 0.2751832854536309, 30.73890448554215], vec![]),
         fz(90, 22, &[], vec![22.0, 0.2396166905698217, 717.3374325430739], vec![]),
+    ]
+}
+
+/// tpl=2 hub=2 e=4.920 psu ilim=0.064 555 vcc4 gnd0 [2, 1, 3, 5, 1, 4] LED3-4 C0-0=1.5e-7 SW0-2(0)+R2-0=97 R4-3=83100.5 R1-5=9.7 span=12
+/// options: trapezoid; digital_slot_count 32 node_count 6
+/// toggles [(0.41324546951082397, 14), (0.601000495581227, 14), (0.6806880874994053, 14)]
+fn cold_1120_tpl2() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![4.919813081257697, 0.06422823184384589], vec![]),
+        fz(1, 1, &[2, 0], vec![1621.2718893138422], vec![]),
+        fz(1, 2, &[3, 0], vec![2397.397399638335], vec![]),
+        fz(1, 3, &[4, 0], vec![40121.13778668658], vec![]),
+        fz(1, 4, &[5, 0], vec![35238.55077529291], vec![]),
+        fz(40, 5, &[4, 0, 2, 1, 3, 5, 1, 4], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 6, &[4, 4], vec![5279.234468491432], vec![]),
+        fz(1, 7, &[4, 1], vec![30886.293024395007], vec![]),
+        fz(3, 8, &[1, 0], vec![2.2158174428755075e-7, 0.0, 0.0], vec![]),
+        fz(1, 9, &[1, 1], vec![85.97288883696424], vec![]),
+        fz(1, 10, &[0, 1], vec![2922.2966863273396], vec![]),
+        fz(30, 11, &[3, 4], vec![3.005352562049808, 1.742146566268996, 0.005953065042841878, 0.0, 0.0, 0.0], vec![]),
+        fz(3, 12, &[0, 0], vec![1.4567680570576984e-7, 0.12685877358451655, 0.0], vec![]),
+        fz(1, 13, &[2, 0], vec![549.3706091249462], vec![]),
+        fz(4, 14, &[0, 2], vec![0.0], vec![]),
+        fz(1, 15, &[2, 0], vec![96.61088950213237], vec![]),
+        fz(1, 16, &[4, 3], vec![83100.47188631297], vec![]),
+        fz(1, 17, &[1, 5], vec![9.71640748808111], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.0017731272930075598, 5279.234468491432], vec![]),
+        fz(90, 7, &[], vec![7.0, 1.3214763198567896e-5, 30886.293024395007], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.05402837727657123, 85.97288883696424], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.013157392561162534, 96.61088950213237], vec![]),
+        fz(90, 16, &[], vec![16.0, 1.1561470750484285e-5, 83100.47188631297], vec![]),
+        fz(90, 17, &[], vec![17.0, 7.204855684324213, 9.71640748808111], vec![]),
+    ]
+}
+
+/// tpl=0 hub=2 e=7.270 psu ilim=0.069 V2=-3.95 SW3-6(1)+R6-0=43 555 vcc6 gnd0 [3, 2, 4, 6, 1, 4] R4-1=60363.7 F2-5=4.44/0.28 LED1-5+R1-1=1565 C1-0=5.9e-4 LED3-2+R1-3=57 span=12
+/// options: default; digital_slot_count 32 node_count 8
+/// toggles [(0.6132293487216949, 7)]
+fn cold_1325_tpl0() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![7.270217999288251, 0.06853528685274506], vec![]),
+        fz(2, 1, &[0, 2], vec![-3.9480110144696248], vec![]),
+        fz(1, 2, &[3, 0], vec![17927.736465463717], vec![]),
+        fz(1, 3, &[4, 0], vec![425942.82621893083], vec![]),
+        fz(1, 4, &[5, 0], vec![68876.33381574621], vec![]),
+        fz(1, 5, &[6, 0], vec![1155.6332825473146], vec![]),
+        fz(1, 6, &[7, 0], vec![8183.941804003441], vec![]),
+        fz(4, 7, &[3, 6], vec![1.0], vec![]),
+        fz(1, 8, &[6, 0], vec![42.83384507667242], vec![]),
+        fz(40, 9, &[6, 0, 3, 2, 4, 6, 1, 4], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 10, &[6, 4], vec![509.96405976607474], vec![]),
+        fz(1, 11, &[4, 1], vec![804.4665292582611], vec![]),
+        fz(3, 12, &[1, 0], vec![2.6185663685936847e-6, 0.0, 0.0], vec![]),
+        fz(1, 13, &[2, 4], vec![119.80128517249696], vec![]),
+        fz(1, 14, &[4, 1], vec![60363.744445343604], vec![]),
+        fz(1, 15, &[1, 5], vec![19387.009125813216], vec![]),
+        fz(10, 16, &[2, 5], vec![4.43695307462206, 0.282002451222728], vec![]),
+        fz(30, 17, &[1, 5], vec![1.6193140140033933, 2.208334563638683, 0.03897740944372803, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 18, &[1, 1], vec![1565.1938432065601], vec![]),
+        fz(3, 19, &[1, 0], vec![0.0005940317553685062, 0.0, 0.0], vec![]),
+        fz(30, 20, &[3, 2], vec![3.3237763170220314, 1.6464963983528853, 0.02467490927476345, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 21, &[1, 3], vec![56.76867957123571], vec![]),
+        fz(1, 22, &[3, 2], vec![1301.909184654966], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.00672371243155751, 42.83384507667242], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.031154085664473176, 509.96405976607474], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.011559379280864642, 804.4665292582611], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.5558929144002336, 119.80128517249696], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.0020163745295198555, 60363.744445343604], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.03917389377034387, 1565.1938432065601], vec![]),
+        fz(90, 21, &[], vec![21.0, 0.33842795881290666, 56.76867957123571], vec![]),
     ]
 }
 

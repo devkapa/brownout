@@ -1507,6 +1507,33 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Folds the supply slope of an IC driver branch from `u` into `w` into
+    /// partition `p_idx`'s Newton matrix (W1c point 3): `k (vs - vs0)` more
+    /// current, `k = G'(vs0) (v_u - v_w)` at the iterate, `vs` the IC's
+    /// supply difference. Rows and columns not free here are skipped or go
+    /// to the right-hand side at their fixed voltage, as in
+    /// [`Self::fold_local`].
+    #[allow(clippy::too_many_arguments)]
+    fn fold_supply_slope(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], u: usize, w: usize, ic: &digital::IcRecord, k: f64, vs0: f64) {
+        if k == 0.0 || !k.is_finite() {
+            return;
+        }
+        for (row, sign) in [(u, 1.0), (w, -1.0)] {
+            let Some((pr, lr)) = self.local_index.get(row).copied().flatten() else { continue };
+            if pr != p_idx {
+                continue;
+            }
+            let mut rhs = k * vs0;
+            for (col, s) in [(ic.vcc.node, 1.0), (ic.gnd.node, -1.0)] {
+                match self.local_index.get(col).copied().flatten() {
+                    Some((pc, lc)) if pc == p_idx => a[lr * size + lc] += sign * s * k,
+                    _ => rhs -= s * k * self.voltages[col],
+                }
+            }
+            b[lr] += sign * rhs;
+        }
+    }
+
     /// Folds an open `FLOATING_INPUT` pin's Norton pull into partition
     /// `p_idx`'s local scratch matrix/rhs (`ic_pull_target`'s own doc
     /// comment: `g` from `pin_node` to the DATUM, plus the injection `g *
@@ -1620,7 +1647,8 @@ impl StaticPartitionSolver {
     /// every IC touching it has both supply nodes fixed by definition
     /// (`self.holds_free_ic_supply[p_idx]` is exactly that fact) — so `x`
     /// is never actually indexed in that case, and an empty slice is safe.
-    fn stamp_ics_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) {
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_ics_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64], slopes: bool) {
         for &ic_index in &self.part_ics[p_idx] {
             let (_, ic) = &self.ics[ic_index as usize];
             let driver_ids = &self.ic_drivers[ic_index as usize];
@@ -1645,6 +1673,14 @@ impl StaticPartitionSolver {
             if !power.powered {
                 continue;
             }
+            // `slopes` (an iterated solve's second try, `Self::newton_in`):
+            // with this IC's supply free here, its stamps move with the
+            // iterate, and the Jacobian takes their slopes in the supply
+            // too, as the hub polish's does
+            // (`curvature::IcSupply::extra_jacobian`). A held-powered probe
+            // can read a reversed supply, which the stamps clamp to 0 V:
+            // flat there.
+            let free_supply = slopes && v_vcc > v_gnd && (self.in_partition(ic.vcc.node, p_idx) || self.in_partition(ic.gnd.node, p_idx));
             for &id in driver_ids {
                 let driver = &drivers[id as usize];
                 // No `in_partition(driver.node, p_idx)` guard here (findings
@@ -1655,9 +1691,14 @@ impl StaticPartitionSolver {
                 // the "driver fixed, target free-in-`p_idx`" case entirely.
                 // Every branch folds (W1a point 2): a 555's OUT stamps up to
                 // two, to its own vcc and gnd nodes.
-                for branch in ic_driver_branches(&power, driver, ic) {
+                let curves = if free_supply { crate::solve::ic_driver_curves(driver, ic) } else { [None, None] };
+                for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
                     if let Some((target, g)) = branch {
                         self.fold_local(p_idx, size, a, b, driver.node, target, g);
+                        if let Some(curve) = curve {
+                            let w = self.read_node(driver.node, p_idx, x) - self.read_node(target, p_idx, x);
+                            self.fold_supply_slope(p_idx, size, a, b, driver.node, target, ic, curve.derivs(power.vs)[1] * w, power.vs);
+                        }
                     }
                 }
             }
@@ -1667,6 +1708,17 @@ impl StaticPartitionSolver {
                 }
                 if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, now) {
                     self.fold_pull(p_idx, size, a, b, pin.node, g, target_v);
+                    // The pull's target is its supply pin's voltage: free
+                    // here, it moves with the iterate (`extra_jacobian`'s
+                    // pulls).
+                    let target = if digital::floating::floating_high(pin.open_hash, now, ic.ttl) { ic.vcc.node } else { ic.gnd.node };
+                    if let (true, Some((pt, lt))) = (free_supply, self.local_index.get(target).copied().flatten()) {
+                        if pt == p_idx {
+                            let (_, lp) = self.local_index[pin.node].expect("checked in the partition above");
+                            a[lp * size + lt] -= g;
+                            b[lp] -= g * x[lt];
+                        }
+                    }
                 }
             }
         }
@@ -1686,7 +1738,7 @@ impl StaticPartitionSolver {
         self.stamp_live_rhs(p_idx, &mut b);
         self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
         self.stamp_switches_into(p_idx, size, &mut a, &mut b);
-        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[]);
+        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[], false);
         self.apply_exact(p_idx, size, &mut a, &mut b);
         lu::solve(a, size, b).map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))
     }
@@ -1701,7 +1753,7 @@ impl StaticPartitionSolver {
         self.stamp_live_rhs(p_idx, &mut b);
         self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
         self.stamp_switches_into(p_idx, size, &mut a, &mut b);
-        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[]);
+        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[], false);
         let fail = |_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot");
         let factors = lu::lu_factor(a, size).map_err(fail)?;
         factors.solve(&mut b).map_err(fail)?;
@@ -1722,13 +1774,14 @@ impl StaticPartitionSolver {
     /// the iterate, W1e LEDs point 2). Classic restamps all of these from the
     /// latest iterate with one Newton loop; this is that loop restricted to
     /// one partition (LEDs points 9 and 11).
-    fn stamp_iterate(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_iterate(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64], slopes: bool) -> Result<(), String> {
         a.copy_from_slice(&self.matrix_base[p_idx]);
         b.copy_from_slice(&self.rhs_base[p_idx]);
         self.stamp_live_rhs(p_idx, b);
         self.stamp_non_ic_drivers_into(p_idx, size, a, b, drivers)?;
         self.stamp_switches_into(p_idx, size, a, b);
-        self.stamp_ics_into(p_idx, size, a, b, now, drivers, x);
+        self.stamp_ics_into(p_idx, size, a, b, now, drivers, x, slopes);
         stamp_junctions(&self.junctions[p_idx], size, a, b, x, &Bnd::new(&self.voltages));
         self.apply_exact(p_idx, size, a, b);
         Ok(())
@@ -1918,37 +1971,60 @@ impl StaticPartitionSolver {
         let size = self.partitions[p_idx].len();
         let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
         let polish = !self.junctions[p_idx].is_empty();
-        // A closure cannot return the stamp's own error (`Newton` wants
-        // `()`), so it parks the first one here and leaves the matrix zero,
-        // which fails the solve at once instead of iterating on garbage.
-        let mut stamp_error: Option<String> = None;
-        let result = newton::solve_keeping_factors(size, size, &x0, false, polish, |x, a, b| {
-            if stamp_error.is_some() {
-                return;
+        // Classic's loop restamps each IC stamp at the iterate's supply, its
+        // slope in that supply left out. Where that does not converge, the
+        // solve runs once more from the same start with the slopes in the
+        // Jacobian (`Self::stamp_ics_into`'s `slopes`): frozen, a 555's OUT
+        // at a low supply contracted the iteration by only 0.89 a step, and
+        // another 2-cycled across the power gate (cold fuzz 1120 tpl 2,
+        // 1325 tpl 0). Not at the first try: the full step can overshoot a
+        // solution just inside the power window out of it, where the frozen
+        // one creeps up to it (FXBv's fed gates). The power hold reads the
+        // first try's verdicts only, as before.
+        let slopes_too = self.holds_free_ic_supply[p_idx];
+        let mut first_err: Option<String> = None;
+        for slopes in [false, true] {
+            if slopes && !slopes_too {
+                break;
             }
-            if let Some(flips) = flips.as_deref_mut() {
-                for (k, &ic_index) in gated.iter().enumerate() {
-                    let (device, ic) = &self.ics[ic_index as usize];
-                    let hold = digital::power::hold_of(self.holds_slice(), *device);
-                    flips.note(k, digital::power::verdict(ic, self.read_node(ic.vcc.node, p_idx, x), self.read_node(ic.gnd.node, p_idx, x), hold));
+            // A closure cannot return the stamp's own error (`Newton` wants
+            // `()`), so it parks the first one here and leaves the matrix
+            // zero, which fails the solve at once instead of iterating on
+            // garbage.
+            let mut stamp_error: Option<String> = None;
+            let mut noted = if slopes { None } else { flips.as_deref_mut() };
+            let result = newton::solve_keeping_factors(size, size, &x0, false, polish, |x, a, b| {
+                if stamp_error.is_some() {
+                    return;
                 }
+                if let Some(flips) = noted.as_deref_mut() {
+                    for (k, &ic_index) in gated.iter().enumerate() {
+                        let (device, ic) = &self.ics[ic_index as usize];
+                        let hold = digital::power::hold_of(self.holds_slice(), *device);
+                        flips.note(k, digital::power::verdict(ic, self.read_node(ic.vcc.node, p_idx, x), self.read_node(ic.gnd.node, p_idx, x), hold));
+                    }
+                }
+                if let Err(e) = self.stamp_iterate(p_idx, size, a, b, now, drivers, x, slopes) {
+                    a.fill(0.0);
+                    b.fill(0.0);
+                    stamp_error = Some(e);
+                }
+            });
+            if let Some(e) = stamp_error {
+                return Err(first_err.unwrap_or(e));
             }
-            if let Err(e) = self.stamp_iterate(p_idx, size, a, b, now, drivers, x) {
-                a.fill(0.0);
-                b.fill(0.0);
-                stamp_error = Some(e);
+            let (result, factors) = match result {
+                Ok(r) => r,
+                Err(e) => return Err(first_err.unwrap_or_else(|| format!("partition {p_idx} ({size} node(s)): {e}"))),
+            };
+            // Counted before the verdict, like every stat: a failed attempt ran.
+            self.newton_iterations += result.iterations as u64;
+            if result.converged {
+                return Ok((result.x, factors));
             }
-        });
-        if let Some(e) = stamp_error {
-            return Err(e);
+            first_err.get_or_insert_with(|| format!("partition {p_idx} ({size} node(s)): Newton did not converge within {} iterations", newton::NEWTON_MAX));
         }
-        let (result, factors) = result.map_err(|e| format!("partition {p_idx} ({size} node(s)): {e}"))?;
-        // Counted before the verdict, like every stat: a failed attempt ran.
-        self.newton_iterations += result.iterations as u64;
-        if !result.converged {
-            return Err(format!("partition {p_idx} ({size} node(s)): Newton did not converge within {} iterations", newton::NEWTON_MAX));
-        }
-        Ok((result.x, factors))
+        Err(first_err.expect("the first try failed"))
     }
 
     // ---- W1f: the live boundary and the hub rail ------------------------
