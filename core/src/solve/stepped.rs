@@ -77,7 +77,7 @@ use crate::rails::{self, Contrib};
 use crate::solve::live::RampEval;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, rail_sensitivity, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base,
-    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynShape, ExactKind, ExactStamp, LiveTopology, ThresholdFn,
+    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -180,7 +180,7 @@ impl CcRail {
     fn step(&self, p: usize, u0: f64) -> CcStep {
         let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
         let coupled = self.own.iter().any(|o| o.0 != p);
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled }
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false }
     }
 }
 
@@ -199,6 +199,9 @@ struct CcStep {
     /// draw where this one last committed, so the rail's move across this
     /// step is an error it does not see ([`coupling_ratio`]).
     coupled: bool,
+    /// A seed (`SEED_H`): its rail row is the charge balance
+    /// ([`ChargeBalance`]) when a capacitor has a pin on the rail.
+    seed: bool,
 }
 
 impl CcStep {
@@ -386,6 +389,7 @@ fn take_cc_step(
     let size = n + 1;
     let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, at).with_ext(cc.rail, n).hold_power_at(cc.u0);
     let linear = !ic_ctx.iterated;
+    let balance = (cc.seed && !cv).then(|| rail_capacitors(shape, &bnd)).flatten().map(|(caps, nodes)| ChargeBalance { caps, nodes });
     let solve = |newton_iters: &mut u64| -> Result<(Vec<f64>, LuFactorization), StepError> {
         let mut z0: Vec<f64> = x_from[..n].to_vec();
         z0.push(if cv { cc.v } else { cc.u0 });
@@ -397,6 +401,9 @@ fn take_cc_step(
                 a[row + n] = 1.0;
                 b[n] = cc.v;
             } else {
+                if let Some(balance) = &balance {
+                    b[n] = balance.row(shape, live_params, h, vc_from, ic_ctx, &bnd, z, &mut a[row..row + size]);
+                }
                 a[row + n] += cc.g_o;
                 b[n] += cc.dl - cc.a_o;
             }
@@ -488,6 +495,109 @@ fn stamp_step(
     }
     stamp_ics_into_dyn(size, a, b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
     stamp_junctions(&shape.junctions, size, a, b, x, bnd);
+}
+
+/// The rail's capacitor cluster in a partition: the local nodes the rail
+/// (the `ext` unknown `shape.n` of `bnd`) reaches through capacitors alone,
+/// and the capacitors among them and the rail ([`ChargeBalance`]). `None`
+/// when no capacitor has a pin on the rail, or when one in the cluster has
+/// its other pin off the partition (a capacitor to a fixed node: no KCL there
+/// to read its current from).
+fn rail_capacitors(shape: &DynShape, bnd: &Bnd) -> Option<(Vec<usize>, Vec<usize>)> {
+    let n = shape.n;
+    // Local index, the rail as `n`, or `None` for a fixed node.
+    let end = |pin: &DynPin| bnd.local(pin);
+    let mut cluster = vec![false; n + 1];
+    cluster[n] = true;
+    loop {
+        let mut grew = false;
+        for cap in &shape.capacitors {
+            let (a, b) = (end(&cap.pins[0]), end(&cap.pins[1]));
+            for (this, other) in [(a, b), (b, a)] {
+                if this.is_some_and(|l| cluster[l]) {
+                    match other {
+                        Some(l) if !cluster[l] => {
+                            cluster[l] = true;
+                            grew = true;
+                        }
+                        Some(_) => {}
+                        None => return None,
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let caps: Vec<usize> = shape.capacitors.iter().enumerate().filter(|(_, c)| end(&c.pins[0]).is_some_and(|l| cluster[l])).map(|(i, _)| i).collect();
+    if caps.is_empty() {
+        return None;
+    }
+    let nodes = (0..n).filter(|&l| cluster[l]).collect();
+    Some((caps, nodes))
+}
+
+/// A hub seed's draw by charge balance (README, Rails point 4, R28), and on
+/// a CC rail the seed's rail row: the
+/// current into the partition from the rail as every branch at the rail but
+/// its capacitors, plus each rail capacitor's current read from KCL at its
+/// far node, the rest of that node's branches; when the far node holds more
+/// capacitors, KCL over the whole cluster the rail reaches through
+/// capacitors (cold fuzz 953: 0.71 mF to node 3, 18 mF on to node 2, whose
+/// 1.8e10 S read the rounding into node 3's KCL). At `SEED_H` a capacitor is
+/// `C / SEED_H` siemens (up to 2e10 S), so in the rail row its companion
+/// magnified the solve's rounding: the rail solved with it was off by
+/// `eps C / (SEED_H g)`, 2e-6 V for G2bv's 213 uF behind 0.03 S, and a draw
+/// read from it moved by 1e-14 V of node times 2e8 S. Held at the rail
+/// the loop last solved, such a seed's draw kept the rail loop moving 1e-6
+/// to 2e-3 V a pass without settling (G2bv's seed rounding). The sum of the
+/// rail row and the cluster's node rows is the same equation with the
+/// capacitors' terms cancelled exactly; stamped without them it holds only
+/// ordinary conductances.
+struct ChargeBalance {
+    caps: Vec<usize>,
+    nodes: Vec<usize>,
+}
+
+impl ChargeBalance {
+    /// The rail row of the stamp at `z` without the cluster's capacitors,
+    /// plus the cluster's node rows, into `row` and `rhs` (size `shape.n +
+    /// 1`): each capacitor's current enters two of them and cancels.
+    #[allow(clippy::too_many_arguments)]
+    fn row(&self, shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], ic_ctx: &IcStampCtx, bnd: &Bnd, z: &[f64], row: &mut [f64]) -> f64 {
+        let n = shape.n;
+        let size = n + 1;
+        let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
+        stamp_linear_base(shape, size, &mut a, &mut b, live_params, bnd);
+        for (i, cap) in shape.capacitors.iter().enumerate() {
+            if self.caps.contains(&i) {
+                continue;
+            }
+            // A seed is backward Euler, which reads no previous current.
+            let contrib = companion(cap, h, vc_from[i], 0.0, Method::Be);
+            stamp_two_terminal(size, &mut a, &mut b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection, bnd);
+        }
+        stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, z);
+        stamp_junctions(&shape.junctions, size, &mut a, &mut b, z, bnd);
+        row.copy_from_slice(&a[n * size..(n + 1) * size]);
+        let mut rhs = b[n];
+        for &l in &self.nodes {
+            for (r, x) in row.iter_mut().zip(&a[l * size..(l + 1) * size]) {
+                *r += x;
+            }
+            rhs += b[l];
+        }
+        rhs
+    }
+
+    /// The draw at `z`: the row's residual.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(&self, shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], ic_ctx: &IcStampCtx, bnd: &Bnd, z: &[f64]) -> f64 {
+        let mut row = vec![0.0; shape.n + 1];
+        let rhs = self.row(shape, live_params, h, vc_from, ic_ctx, bnd, z, &mut row);
+        row.iter().zip(z).map(|(a, z)| a * z).sum::<f64>() - rhs
+    }
 }
 
 /// Exact mode's source current at a solution `x` of the rail's partition
@@ -1394,6 +1504,15 @@ impl SteppedSolver {
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
             let iterated = self.partitions[&p_idx].iterated();
             let hub = self.partitions[&p_idx].hub && self.rail.is_some();
+            // On a CC rail the seed solves the rail with the partition, as
+            // its steps do (`take_cc_step`; README, Rails point 4, R28): held
+            // at the rail the loop last solved, a seed whose stamps curve in
+            // the rail (cold fuzz 456: a gate's output on it, 13 ohm and an
+            // LED off it) re-solved to the same three rails in turn.
+            let cc = match (&self.cc, hub, self.exact) {
+                (Some(cc), true, None) => Some(CcStep { seed: true, ..cc.step(p_idx, voltages[cc.rail]) }),
+                _ => None,
+            };
             let ic_ctx = IcStampCtx {
                 now,
                 drivers,
@@ -1403,11 +1522,12 @@ impl SteppedSolver {
                 ramps: self.ramps.as_deref(),
                 keep_lu: hub,
                 exact: self.exact,
-                cc: None,
+                cc,
                 p_idx,
                 iterated,
             };
             let seed_sens;
+            let seed_u;
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
@@ -1435,15 +1555,25 @@ impl SteppedSolver {
                 part.x = seed.x;
                 part.i_prev = seed.i;
                 seed_sens = seed.lu;
+                seed_u = seed.u;
             }
             // A hub partition's seed is a solve too: its sensitivity at the
-            // seed's own system (Rails point 3).
+            // seed's own system (Rails point 3), at the rail it solved on a
+            // CC rail. Its draw is the charge balance ([`ChargeBalance`]) in
+            // every regime: a magnified draw misjudged the CV -> CC test too
+            // (G2bv's bc 453 hub 2 at 17.8 ms, 2.8e-7 A off, CC and CV in
+            // turn for 50 passes).
             if let (Some(lu), Some(rail)) = (seed_sens, self.rail.filter(|_| hub)) {
                 let part = &self.partitions[&p_idx];
                 let (x, vc_from) = (part.x.clone(), part.vc.clone());
                 let zeros = vec![0.0; vc_from.len()];
-                let u = voltages[rail];
-                let sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, &lu)?;
+                let u = seed_u.unwrap_or(voltages[rail]);
+                let mut sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, &lu)?;
+                let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, now).with_ext(rail, x.len()).hold_power_at(voltages[rail]);
+                if let Some((caps, nodes)) = rail_capacitors(&part.shape, &bnd) {
+                    let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+                    sens.i = ChargeBalance { caps, nodes }.draw(&part.shape, live_params, SEED_H, &vc_from, &ic_ctx, &bnd, &z);
+                }
                 self.sensitivities += 1;
                 self.hub_updates.push((p_idx, Contrib { active: true, i: sens.i, g: sens.g, u_p: u, b: None }));
                 self.partitions.get_mut(&p_idx).unwrap().sens = Some(Rc::new(sens));
