@@ -9826,3 +9826,110 @@ fn g2bv_bc_ic_345_hub2() -> Vec<Device> {
         fz(1, 18, &[4, 0], vec![30.259984384557136], vec![]),
     ]
 }
+
+// ---- F5b round 3: R45 ------------------------------------------------------
+
+/// A 5 V / 0.5 A bench PSU (CV) with a 74LS00 on the rail (dev 1) whose 1y
+/// drives an LED through 330 ohm, so the probe's re-solve of the gate's
+/// partition iterates (an LED is nonlinear).
+fn psu_with_a_gate_driving_an_led() -> Program {
+    let devs = vec![psu(0, 1, 0, 5.0, 0.5), ls00(1, 1, 0, [0, 0, 2, 1, 1, 3, 1, 1, 4, 1, 1, 5], 10e-9, 0), resistor(2, 2, 6, 330.0), led(3, 6, 0)];
+    no_cache(program(7, devs))
+}
+
+/// Runs the hold procedure on the loaded board for its gate (dev 1) as the
+/// rail loop would after it alternated, with nothing starving: returns its
+/// result, the voltages before and after, and the rig.
+fn hold_on_a_self_carrying_gate(p: &Program) -> (Result<(), String>, Vec<f64>, Rig) {
+    let mut rig = Rig::load(p).unwrap();
+    let before = rig.k.solver().voltages().to_vec();
+    let drivers = Rc::clone(&rig.s().driver_snapshot);
+    let now = rig.k.time();
+    let mut readers = Vec::new();
+    let result = rig.k.solver_mut().hold_on_rail(now, &drivers, &mut readers, &[1], rails::loop_unsettled());
+    (result, before, rig)
+}
+
+#[test]
+fn a_probe_every_alternating_gate_carries_itself_in_is_accepted_when_its_state_passes_the_residual_check() {
+    // Ruling R45 (a), the accepting half. The gate carries itself in the
+    // probe (nothing starves) and every rail IC's free verdict is the one
+    // it was probed at: the probe's state is the instant's solution, and it
+    // is accepted only after the ordinary convergence check passes on it,
+    // the partitions re-solved from it with the holds as they were moving
+    // by less than Newton's tolerance. No hold is taken and nothing moves.
+    let (result, before, rig) = hold_on_a_self_carrying_gate(&psu_with_a_gate_driving_an_led());
+    assert_eq!(result, Ok(()), "accepted");
+    assert!(rig.s().power_hold(1).is_free(), "the gate is not held");
+    assert_eq!(rig.s().hold_counts(), [0.0, 0.0]);
+    for (n, (&got, &want)) in rig.k.solver().voltages().iter().zip(&before).enumerate() {
+        close(got, want, 1e-4 + 1e-3 * want.abs(), &format!("node {n} after the accepted probe"));
+    }
+    assert!(rig.v(6) > 1.5 && rig.v(6) < 2.5, "the LED conducts: {} V", rig.v(6));
+}
+
+#[test]
+fn a_probe_whose_state_fails_the_residual_check_is_not_accepted() {
+    // Ruling R45 (a), the rejecting half: the same board, with the check's
+    // re-solve forced unconverged (`hold::FailProbeResidual`, the way the
+    // seeded faults of `newton::hooks` are). The procedure fails as before
+    // the acceptance existed (`-4`, the loop's own message), not with a
+    // state nothing checked.
+    let _fault = hold::FailProbeResidual::arm();
+    let (result, _, _) = hold_on_a_self_carrying_gate(&psu_with_a_gate_driving_an_led());
+    assert_eq!(result, Err(rails::loop_unsettled()), "rejected");
+}
+
+// ---- F5b round 3: R47 ------------------------------------------------------
+
+/// W1gV4's cold fuzz seed 226 (tpl 4, hub 2), as the R42 probe ran it: a
+/// `{8.99 V, 91 mA}` PSU in CC with a 0.16 uF rail capacitor (esr 0.14 ohm), a
+/// -2.0 to 7.3 V pulse source on node 3, a 0.92 mF capacitor (dev 5) from
+/// node 5 to it, 18 and 341 ohm from the rail to node 5, and an LED (dev 9)
+/// from the pulse node to the rail, with two more from node 5.
+fn fuzz_board_226(exact_mode: bool) -> Program {
+    let devices = vec![
+        raw(21, 0, &[1, 0], &[8.99034184622614, 0.09111661676821328], &[]),
+        raw(24, 1, &[3, 0], &[-1.9527258264000453, 7.308766396980163, 0.01893220528935032, 0.0, 0.0, 0.009305650872797054, 0.19921641172523472], &[8.0]),
+        raw(1, 2, &[2, 0], &[122506.80201624568], &[]),
+        raw(1, 3, &[4, 0], &[1093.219335695193], &[]),
+        raw(1, 4, &[5, 0], &[4380.848127479292], &[]),
+        raw(3, 5, &[5, 3], &[0.0009175201504092653, 0.0, 0.0], &[]),
+        raw(1, 6, &[0, 3], &[8.202037322025507], &[]),
+        raw(30, 7, &[5, 2], &[3.079375955633612, 1.8422305628842202, 0.019754226651359424, 0.0, 0.0, 0.0], &[]),
+        raw(1, 8, &[1, 5], &[18.17514619869535], &[]),
+        raw(30, 9, &[3, 1], &[2.0789318408039135, 1.7000933281455102, 0.009481792577495464, 0.0, 0.0, 0.0], &[]),
+        raw(1, 10, &[3, 3], &[16.73431368060318], &[]),
+        raw(3, 11, &[0, 0], &[1.2990481818868812e-5, 0.0, 0.0], &[]),
+        raw(3, 12, &[1, 0], &[1.5999164502748763e-7, 0.1412537798088652, 0.0], &[]),
+        raw(30, 13, &[5, 3], &[1.931350470642555, 1.860095725987525, 0.01572824136645284, 0.0, 0.0, 0.0], &[]),
+        raw(1, 14, &[1, 5], &[341.19836764024944], &[]),
+        raw(3, 15, &[5, 0], &[0.0144928188878566, 3.4588400262396184, 0.0], &[]),
+    ];
+    let mut p = Program { node_count: 6, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    p.options.no_rail_shortcut = exact_mode;
+    p
+}
+
+#[test]
+#[ignore = "R47: seed 226's LED from a pulse node to a CC rail; diagnosis pending (perf round 3)"]
+fn seed_226_default_mode_stays_within_w0_of_a_fine_reference() {
+    // Ruling R47: not fixed in F5. Default mode is 19 W0 off a fine
+    // reference at 5 ms and 720-860 W0 at 27-33 ms (the rail at 5.12 V against
+    // 2.78 V at 28.2 ms); exact mode with a horizon of 1 us, the reference,
+    // is the board's physics. The suspect is the LED from the pulse node to
+    // the CC rail (the pulse's edge reaches the rail through it); the
+    // diagnosis is perf round 3's. This pins the target.
+    let samples = [0.005, 0.01, 0.0272, 0.0282, 0.0327];
+    let mut fine = exact(fuzz_board_226(true));
+    fine.options.integration = 1;
+    let (want, _, _) = sampled(&fine, &samples, 1e-6);
+    let (got, _, _) = sampled(&fuzz_board_226(false), &samples, 0.0);
+    let offs: Vec<f64> = (0..samples.len()).map(|k| worst_w0(&got[k..=k], &want[k..=k])).collect();
+    for (k, &t) in samples.iter().enumerate() {
+        eprintln!("seed 226 at {t} s: {:.1} W0 off the fine reference; rail {:.4} V against {:.4} V", offs[k], got[k][1], want[k][1]);
+    }
+    for (k, &t) in samples.iter().enumerate() {
+        assert!(offs[k] <= 1.0, "seed 226 at {t} s: {:.1} W0 off the fine reference (rail {:.4} V against {:.4} V)", offs[k], got[k][1], want[k][1]);
+    }
+}

@@ -30,6 +30,32 @@ use super::*;
 use crate::digital::power::{HoldKind, PowerHold, Release};
 use crate::rails;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_PROBE_RESIDUAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam (ruling R45 (a)): while the guard lives, the re-solve that
+/// checks an accepted probe's residual reports its partitions unconverged,
+/// the fault the acceptance must reject.
+#[cfg(test)]
+pub(super) struct FailProbeResidual;
+
+#[cfg(test)]
+impl FailProbeResidual {
+    pub(super) fn arm() -> FailProbeResidual {
+        FAIL_PROBE_RESIDUAL.with(|c| c.set(true));
+        FailProbeResidual
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailProbeResidual {
+    fn drop(&mut self) {
+        FAIL_PROBE_RESIDUAL.with(|c| c.set(false));
+    }
+}
+
 /// An IC's raw supply difference over `v`.
 #[inline]
 pub(crate) fn supply(ic: &digital::IcRecord, v: &[f64]) -> f64 {
@@ -172,9 +198,9 @@ impl PartitionedSolver {
             // state is consistent and is the instant's solution: the free
             // passes alternated only on the way to it (a rail landed at the
             // power edge, re-solved a drift width under it: G2bv's bc_ic 97).
-            // The holds go back as they were; stamped as before, nothing
-            // re-solves, but the rail's events are scheduled again with the
-            // power windows the probe set aside.
+            // The holds go back as they were (checked below, ruling R45 (a))
+            // and the rail's events are scheduled again with the power
+            // windows the probe set aside.
             let consistent = rail_ics.iter().all(|&d| {
                 let ic = &self.ics[self.ic_position[d] as usize].1;
                 let free = digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
@@ -183,8 +209,24 @@ impl PartitionedSolver {
             if !consistent {
                 return Err(err);
             }
+            // Accepted only if that state passes the ordinary convergence
+            // check (ruling R45 (a)): the partitions that read these ICs are
+            // solved again from it with the holds as they were, and each
+            // must settle within Newton's tolerance, as any converged solve
+            // does. Anything less is rejected as before.
+            let mut seed = Vec::new();
             for (k, &d) in rail_ics.iter().enumerate() {
-                let _ = self.set_power_hold(d, before[k]);
+                seed.extend(self.set_power_hold(d, before[k]).into_iter().map(|p| p.0 as usize));
+            }
+            for k in 0..rail_ics.len() {
+                if a.contains(&rail_ics[k]) {
+                    seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
+                }
+            }
+            #[cfg(test)]
+            let _fault = FAIL_PROBE_RESIDUAL.with(|c| c.get()).then(|| crate::solve::newton::hooks::force_unconverged(u32::MAX));
+            if self.rail_settle(now, drivers, readers, seed, &err).is_err() {
+                return Err(err);
             }
             readers.extend(a.iter().map(|&d| DeviceId(d as u32)));
             self.schedule_rail_event(now);
