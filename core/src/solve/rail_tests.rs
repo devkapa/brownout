@@ -8840,3 +8840,200 @@ fn an_exact_mode_cc_solution_past_the_setpoint_keeps_cv() {
         }
     }
 }
+
+// ---- FXI: a back-driven CC exit keeps the rail capacitors' charge (bug D) ----
+
+/// A `{5 V, 0.1 A}` PSU ramping a 1 mF rail capacitor (esr 5 ohm) in CC
+/// against a 2.2 ohm load to a pulse source at 0 V, which rises to 8 V at 5
+/// ms for 0.2 ms; with `rc_load`, a 1k + 1 uF RC on the rail too (a hub
+/// partition, so the exit's re-solves take a second pass of the rail loop).
+fn back_driven_rail_cap(rc_load: bool, exact_mode: bool) -> Program {
+    let mut devices = vec![
+        psu(0, 1, 0, 5.0, 0.1),
+        capacitor(1, 1, 0, 1e-3, 5.0),
+        pulse(2, 2, 0, [0.0, 8.0, 5e-3, 0.0, 0.0, 2e-4, 20e-3], 0),
+        resistor(3, 2, 1, 2.2),
+    ];
+    if rc_load {
+        devices.push(resistor(4, 1, 3, 1000.0));
+        devices.push(capacitor(5, 3, 0, 1e-6, 0.0));
+    }
+    let p = program(4, devices);
+    if exact_mode {
+        exact(p)
+    } else {
+        p
+    }
+}
+
+/// The PSU's rail (node 1) every `dt` to `t_end`; stops at the first error,
+/// which it returns with the time it was met.
+fn rail_samples(p: &Program, dt: f64, t_end: f64) -> (Vec<(f64, f64)>, Option<(f64, BoError)>) {
+    let mut e = Engine::load(p).unwrap();
+    let (mut out, mut t) = (Vec::new(), 0.0);
+    while t < t_end {
+        t = (t + dt).min(t_end);
+        if let Err(err) = e.advance(t) {
+            return (out, Some((t, err)));
+        }
+        out.push((t, e.voltages()[1]));
+    }
+    (out, None)
+}
+
+#[test]
+fn a_cc_exit_a_back_driven_edge_forces_keeps_the_rail_capacitors_charge() {
+    // FXI, bug D, reduced. In CC the capacitor charges from 0 V at the limit
+    // against the 2.2 ohm load and holds the rail near 0.19 V by 5 ms. The
+    // pulse's rising edge back-drives the rail by (8 - 5) / 2.2 = 1.36 A at
+    // the setpoint, so the CC solution at the instant (the capacitor's 0.11 V
+    // charge plus the drop its current takes across 5 ohm) is 5.73 V, past
+    // the setpoint: CV, the PSU sinking (ruling R40). The exit's tie held
+    // the capacitor at V - esr (iLimit - draw(V)) = -2.29 V, as if the rail
+    // had ramped to the setpoint with the supply current continuous; the
+    // pulse's fall then entered CC from that charge and published -0.47 V. A
+    // capacitor's charge is continuous: it keeps the 0.11 V and charges
+    // toward 5 V through its esr while the pulse is high, as in classic and
+    // exact mode (classic: the rail at 5.000000 V at 5.1 ms and 0.244587 V at
+    // 5.2 ms, its minimum 0.153484 V; this probe's TS script is the
+    // reviewer's, at 1e-4 s steps). With the RC load the exit's re-solve
+    // took a second pass, whose CV -> CC test read the capacitor's 0.98 A
+    // demand against the 1.36 A back-drive, entered CC on |I| = 0.38 A past
+    // the limit, and tied the capacitor at -2.29 V again on the exit that
+    // followed: a back-driven total keeps CV (Rails point 5's clamp).
+    for rc_load in [false, true] {
+        let (got, err) = rail_samples(&back_driven_rail_cap(rc_load, false), 1e-4, 0.06);
+        let (want, err_exact) = rail_samples(&back_driven_rail_cap(rc_load, true), 1e-4, 0.06);
+        assert!(err.is_none() && err_exact.is_none(), "RC load {rc_load}: {err:?} {err_exact:?}");
+        for (&(t, g), &(_, w)) in got.iter().zip(&want) {
+            let what = format!("RC load {rc_load}, t {t:.4} s");
+            assert!((0.0..=5.0).contains(&g), "{what}: the rail at {g} V, outside [0, 5]");
+            close(g, w, 5e-4, &format!("{what}: default against exact mode"));
+        }
+        let at = |t: f64| got.iter().find(|s| (s.0 - t).abs() < 1e-9).unwrap().1;
+        close(at(5.1e-3), 5.0, 1e-12, &format!("RC load {rc_load}: CV while the pulse back-drives the rail"));
+        close(at(5.2e-3), 0.2446, 3e-3, &format!("RC load {rc_load}: CC again from the capacitor's own charge after the fall"));
+    }
+}
+
+fn raw(kind: u32, ci: usize, pins: &[usize], params: &[f64], blob: &[f64]) -> Device {
+    Device { kind, component_index: ci, pins: pins.iter().map(|&n| pin(n)).collect(), params: params.to_vec(), blob: blob.to_vec() }
+}
+
+/// W1gV4's cold fuzz seed 704 (tpl 0, hub 2), without its ratings: a `{5.058
+/// V, 0.164 A}` PSU with a 2.8 mF rail capacitor (esr 1.44 ohm), a -1.6 to
+/// 8.8 V pulse source on node 3 (and a 2.8 V source stacked on it) whose
+/// rising edge at 7.17 ms back-drives the rail by 19.8 A through an LED
+/// (dev 21) and a 0.07 ohm fuse (dev 9), and a 74LS00 with two outputs on the
+/// rail.
+fn fuzz_board_704(exact_mode: bool) -> Program {
+    let devices = vec![
+        raw(21, 0, &[1, 0], &[5.057803645242242, 0.1643490365417486], &[]),
+        raw(24, 1, &[3, 0], &[-1.6482243571471615, 8.772181009178164, 0.007167128715436583, 0.0, 0.0, 0.0010967034831029113, 0.3489404885979338], &[8.0]),
+        raw(2, 2, &[4, 3], &[2.8207735079366767], &[]),
+        raw(1, 3, &[2, 0], &[105987.3367292531], &[]),
+        raw(1, 4, &[5, 0], &[15142.52266554762], &[]),
+        raw(1, 5, &[6, 0], &[4193.48134804897], &[]),
+        raw(50, 6, &[1, 0, 1, 1, 5, 0, 0, 1, 0, 0, 1, 0, 0, 5], &[4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.6100802728800438e-7], &[0.0; 13]),
+        raw(1, 7, &[5, 0], &[196.50994043032895], &[]),
+        raw(1, 8, &[1, 1], &[94.33945966859177], &[]),
+        raw(10, 9, &[1, 6], &[0.07141015036884849, 0.6918195233027702], &[]),
+        raw(30, 10, &[1, 5], &[1.6479173590043614, 1.9660987089501443, 0.020233545639578816, 0.0, 0.0, 0.0], &[]),
+        raw(1, 11, &[1, 1], &[29.490278448878296], &[]),
+        raw(30, 12, &[5, 2], &[3.0244475548048952, 2.3743550561623117, 0.01149533899561269, 0.0, 0.0, 0.0], &[]),
+        raw(1, 13, &[1, 5], &[1545.7703692649864], &[]),
+        raw(1, 14, &[3, 2], &[2.1906054679620595], &[]),
+        raw(1, 15, &[2, 1], &[102.37750757175063], &[]),
+        raw(3, 16, &[1, 0], &[0.002777433066412672, 1.4425789352517004, 0.0], &[]),
+        raw(30, 17, &[4, 2], &[3.2314399819533524, 1.7346332886951767, 0.004606310734245304, 0.0, 0.0, 0.0], &[]),
+        raw(1, 18, &[4, 4], &[155.42080789087976], &[]),
+        raw(1, 19, &[2, 5], &[29644.923607048462], &[]),
+        raw(30, 20, &[0, 6], &[2.393607971456686, 2.3129841578257255, 0.038234714867376965, 0.0, 0.0, 0.0], &[]),
+        raw(30, 21, &[3, 6], &[1.9229336677436781, 2.2647670741600114, 0.030417092569347222, 0.0, 0.0, 0.0], &[]),
+        raw(1, 22, &[3, 3], &[159.27187461695368], &[]),
+        raw(1, 23, &[3, 0], &[1.2529850049883364], &[]),
+    ];
+    let mut p = Program { node_count: 7, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    p.options.no_rail_shortcut = exact_mode;
+    p
+}
+
+/// W1gV4's cold fuzz seed 985 (tpl 4, hub 2), without its ratings: a `{4.230
+/// V, 82 mA}` PSU with a 98 uF rail capacitor (esr 3.73 ohm), a 0 to 5.87 V
+/// clock on node 3 tied to the rail by a closed switch (dev 14, toggled at
+/// 0.458 s), and an ne555 on the rail.
+fn fuzz_board_985(exact_mode: bool) -> Program {
+    let devices = vec![
+        raw(21, 0, &[1, 0], &[4.229565420957204, 0.08204819285851947], &[]),
+        raw(22, 1, &[3, 0], &[4.5523553977778155, 0.2456431034458153, 5.866016623637785, 0.0, 0.0], &[8.0]),
+        raw(1, 2, &[2, 0], &[36287.47800787177], &[]),
+        raw(1, 3, &[4, 0], &[81539.85296266287], &[]),
+        raw(1, 4, &[5, 0], &[499069.779500247], &[]),
+        raw(1, 5, &[6, 0], &[26481.85738586337], &[]),
+        raw(1, 6, &[7, 0], &[106623.31252877027], &[]),
+        raw(3, 7, &[1, 0], &[9.815673390615174e-5, 3.7267111161942257, 0.0], &[]),
+        raw(40, 8, &[1, 0, 4, 7, 7, 6, 0, 1], &[2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], &[9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        raw(1, 9, &[1, 1], &[81341.97342773926], &[]),
+        raw(1, 10, &[1, 0], &[22012.613787986375], &[]),
+        raw(3, 11, &[0, 0], &[4.6712382127812963e-7, 0.0, 0.0], &[]),
+        raw(1, 12, &[7, 3], &[299.07270451094774], &[]),
+        raw(1, 13, &[0, 3], &[2053.7398377339387], &[]),
+        raw(4, 14, &[1, 3], &[1.0], &[]),
+        raw(1, 15, &[3, 0], &[208.7922685096376], &[]),
+        raw(1, 16, &[1, 2], &[14.53887732518689], &[]),
+        raw(1, 17, &[7, 5], &[52339.41310490844], &[]),
+        raw(1, 18, &[0, 3], &[55103.10480804695], &[]),
+        raw(1, 19, &[0, 6], &[16833.06131455854], &[]),
+        raw(1, 20, &[7, 1], &[16735.44716992589], &[]),
+        raw(4, 21, &[7, 2], &[0.0], &[]),
+        raw(1, 22, &[2, 0], &[3660.6313878993333], &[]),
+        raw(1, 23, &[2, 3], &[162.05324192171082], &[]),
+        raw(1, 24, &[1, 5], &[18.918788164939212], &[]),
+    ];
+    let mut p = Program { node_count: 8, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    p.options.no_rail_shortcut = exact_mode;
+    p
+}
+
+#[test]
+fn the_fuzz_boards_whose_back_driven_exit_published_a_negative_rail_stay_within_the_supply() {
+    // FXI, bug D, as the fuzz found it. Seed 704: the pulse's rising edge
+    // back-drives the rail by 19.8 A at the setpoint while the PSU ramps its
+    // capacitor in CC at 0.57 V; the exit's tie held the capacitor at -23.7
+    // V, and 56 us later, when the LED on the path burnt open, CC re-entered
+    // from that charge and published -22.4 V (and an LED from the return to
+    // the fuse's far end burnt, forward-biased by the negative rail). Seed 985: a clock tied
+    // to the rail by a closed switch back-drives it by 1636 A on each rising
+    // edge; the tie held the capacitor at -6093 V and the rail published as
+    // low as -5960 V. A PSU's rail lies between 0 and its setpoint unless a
+    // source back-drives it (and then the CV supply sinks, ruling R40):
+    // sampled at 0.1 ms the rail stays in [0, V] and follows exact mode.
+    // Seed 704 ends at 0.37 s: at 0.3845 s its 74LS00's power gate
+    // ping-pongs on the CC rail (`-4`, F5's class; exact mode declines at
+    // 0.381 s too). Its rail differs from exact mode by a few mV because the
+    // modes part on the 0.07 ohm fuse: exact mode trips it at the edge, on a
+    // step's end current, where default mode integrates the 19.8 A for the
+    // 56 us the LED lasts (0.05 of the 0.3 latch). Seed 985 ends at 0.45 s:
+    // the switch opening at 0.458 s is `-4` (the CV -> CC clamp's CC
+    // candidate, a rail Newton across the 555's power window, does not
+    // converge: the class the board met at 1.0068 s before the fix).
+    let v_704 = 5.057803645242242;
+    let (got, err) = rail_samples(&fuzz_board_704(false), 1e-4, 0.37);
+    assert!(err.is_none(), "seed 704: {err:?}");
+    for &(t, u) in &got {
+        assert!((0.0..=v_704).contains(&u), "seed 704: the rail at {u} V at {t:.4} s, outside [0, V]");
+    }
+    let (want, _) = rail_samples(&fuzz_board_704(true), 1e-4, 0.37);
+    for t in [0.1, 0.2, 0.3] {
+        let at = |s: &[(f64, f64)]| s.iter().find(|x| (x.0 - t).abs() < 1e-9).unwrap().1;
+        close(at(&got), at(&want), 5e-3, &format!("seed 704: default against exact mode at {t} s"));
+    }
+    let v_985 = 4.229565420957204;
+    let (got, err) = rail_samples(&fuzz_board_985(false), 1e-4, 0.45);
+    let (want, err_exact) = rail_samples(&fuzz_board_985(true), 1e-4, 0.45);
+    assert!(err.is_none() && err_exact.is_none(), "seed 985: {err:?} {err_exact:?}");
+    for (&(t, g), &(_, w)) in got.iter().zip(&want) {
+        assert!((0.0..=v_985).contains(&g), "seed 985: the rail at {g} V at {t:.4} s, outside [0, V]");
+        close(g, w, 1e-4, &format!("seed 985 at {t:.4} s: default against exact mode"));
+    }
+}

@@ -1614,7 +1614,14 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         // limit (the exit's tie, Rails point 5), so only a draw past it by
         // more than the reached-width the exit itself lands within re-enters:
         // never the rounding of a re-solve at the same draws.
-        if reg == Regime::Cv && i.abs() <= i_limit + REACHED_REL * i_limit.max(1.0) {
+        // A total past the limit against the PSU's direction is a source
+        // back-driving the rail, which the CV supply sinks (ruling R40): the
+        // CC solution at the instant, the capacitors' charge plus their
+        // current's drop across their esr, is past the setpoint there, so
+        // the clamp keeps CV (FXI, bug D: a pulse's edge through 2.2 ohm
+        // back-drove the rail by 16.6 A net of a capacitor's 3.2 A demand,
+        // and the clamp, reading the charge alone, entered CC at 6.2 V).
+        if reg == Regime::Cv && direction(v) * i <= i_limit + REACHED_REL * i_limit.max(1.0) {
             return Ok(Regime::Cv);
         }
         // A capacitor below the setpoint holds the CC solution short of it at
@@ -2123,6 +2130,28 @@ mod tests {
     fn two_terms_take_half_the_distance_each() {
         let w = Watch { value: 0.0, thresholds: vec![], cap: Some(1e-5), terms: vec![Motion::Line { rate: 1.0 }, Motion::Line { rate: 2.0 }] };
         assert!((w.next() - 0.25e-5).abs() < 1e-18);
+    }
+
+    #[test]
+    fn a_capacitors_demand_against_a_back_feed_keeps_cv() {
+        // FXI, bug D: {5 V, 0.1 A}, a 1 mF capacitor (esr 5 ohm) at 0.11 V,
+        // so 0.978 A of demand at the setpoint, and a 2.2 ohm path to an 8 V
+        // source, -1.36 A at the setpoint. The total, -0.38 A, is past the
+        // limit against the PSU's direction: the CC solution at the instant,
+        // `u = 0.11 + 5 (0.1 - (u - 8) / 2.2)`, is 5.74 V, past the
+        // setpoint, so the clamp keeps CV. The same
+        // capacitor with the source at 0 V (2.27 A + 0.978 A) enters CC. A
+        // negative setpoint mirrors both.
+        let d = CapDemand::of(5.0, 1e-3, [(1e-3, 5.0, 5.0 - 0.11)]);
+        let fed = |u: f64| ((u - 8.0) / 2.2, 1.0 / 2.2);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &fed, 5.0, d).unwrap(), Regime::Cv);
+        let grounded = |u: f64| (u / 2.2, 1.0 / 2.2);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &grounded, 5.0, d).unwrap(), Regime::Cc);
+        let d = CapDemand::of(-5.0, 1e-3, [(1e-3, 5.0, 5.0 - 0.11)]);
+        let fed = |u: f64| ((u + 8.0) / 2.2, 1.0 / 2.2);
+        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &fed, -5.0, d).unwrap(), Regime::Cv);
+        let grounded = |u: f64| (u / 2.2, 1.0 / 2.2);
+        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &grounded, -5.0, d).unwrap(), Regime::Cc);
     }
 
     #[test]

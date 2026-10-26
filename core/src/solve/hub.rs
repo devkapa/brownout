@@ -808,8 +808,10 @@ impl PartitionedSolver {
     /// One rail solve at `now` (Rails points 2, 5 and 6): advances SoC, solves
     /// the rail in the present regime, runs the regime rules (at most one
     /// transition) and holds the draws for the next interval. Returns the
-    /// rail before it and whether the regime changed.
-    fn solve_rail(&mut self, now: f64) -> Result<(f64, bool), String> {
+    /// rail before it, whether the regime changed, and at a CC exit with a
+    /// rail capacitor whose rail had not reached the setpoint, the charge
+    /// the capacitors keep (`tie_exit`).
+    fn solve_rail(&mut self, now: f64) -> Result<(f64, bool, Option<f64>), String> {
         // SoC first, from the draws held at the last solve.
         {
             let hub = self.hub.as_mut().expect("a hub");
@@ -833,6 +835,9 @@ impl PartitionedSolver {
         let mut reg = hub.state.reg;
         let mut cap_seg = hub.state.cap_seg.clone();
         let has_cap = hub.c_rail > 0.0;
+        // The CC segment's rail and charge as this solve finds them, before
+        // it re-aims the segment: what a CC exit compares and keeps.
+        let seg_found = cap_seg.as_ref().map(|s| (s.at(now), s.charge_at(now) - cf_drift));
         let solve_in = |reg: Regime, cap_seg: &mut Option<CapSeg>, u_from: f64| -> Result<f64, String> {
             match (&hub.kind, reg) {
                 (HubKind::Battery(m), _) => {
@@ -896,6 +901,7 @@ impl PartitionedSolver {
         };
         let mut u = solve_in(reg, &mut cap_seg, old_u)?;
         let mut changed = false;
+        let mut keep = None;
         if let Some((v, i_limit)) = hub.psu() {
             let demand = if reg == Regime::Cv && has_cap { self.rail_cap_demand(now, v) } else { CapDemand::none(v) };
             let next = rails::next_regime(reg, v, i_limit, has_cap, a_p, g_p, &direct, u, demand)?;
@@ -911,6 +917,14 @@ impl PartitionedSolver {
                 } else {
                     u
                 };
+                // A CC exit whose segment had not brought the rail to the
+                // setpoint was carried past it by a step of the draws at this
+                // instant (a source edge back-driving the rail through the
+                // capacitors' esr): the supply current steps there, as in
+                // classic, and the capacitors keep their charge (FXI, bug D).
+                if reg == Regime::Cv {
+                    keep = seg_found.filter(|&(u_seg, _)| direction(v) * u_seg < v.abs()).map(|(_, q)| q);
+                }
                 u = solve_in(reg, &mut cap_seg, from)?;
             }
         }
@@ -972,7 +986,7 @@ impl PartitionedSolver {
         if settle {
             hub.state.settle_changed = true;
         }
-        Ok((old_u, changed))
+        Ok((old_u, changed, keep))
     }
 
     /// What a rail move does at once (Rails point 3): publish `u`, re-aim the
@@ -1223,13 +1237,13 @@ impl PartitionedSolver {
             }
             self.hub.as_mut().unwrap().dirty = false;
             if tie && self.hub.as_ref().unwrap().state.reg == Regime::Cv {
-                self.tie_exit(now);
+                self.tie_exit(now, None);
             }
             let (seg_before, cell_before) = {
                 let state = &self.hub.as_ref().unwrap().state;
                 (state.cap_seg.clone().or_else(|| state.cell_path.clone()), state.cell)
             };
-            let (old_u, regime_changed) = self.solve_rail(now)?;
+            let (old_u, regime_changed, keep) = self.solve_rail(now)?;
             self.sync_hub_cache_band();
             self.sync_rail_drive();
             self.reset_cf_drift(now);
@@ -1277,8 +1291,11 @@ impl PartitionedSolver {
             };
             let cc_exit = regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv;
             if regime_changed {
-                self.on_regime_change(now);
-                tie |= cc_exit;
+                self.on_regime_change(now, keep);
+                // An exit that kept the charge has nothing to tie again.
+                if cc_exit {
+                    tie = keep.is_none();
+                }
             }
             let rule = self.hub.as_ref().unwrap().resolve_band();
             let mut past_static = Vec::new();
@@ -1401,10 +1418,10 @@ impl PartitionedSolver {
     /// After a regime change: the rail capacitors follow the new regime
     /// (Rails points 4 and 7). In CC nothing reads them: the rail's segment
     /// carries each capacitor's current.
-    fn on_regime_change(&mut self, now: f64) {
+    fn on_regime_change(&mut self, now: f64, keep: Option<f64>) {
         let hub = self.hub.as_ref().unwrap();
         if hub.state.reg == Regime::Cv && hub.c_rail > 0.0 {
-            self.tie_exit(now);
+            self.tie_exit(now, keep);
         }
     }
 
@@ -1421,7 +1438,16 @@ impl PartitionedSolver {
     /// each); and since a charge rounds at the rail's scale, which `1 / esr`
     /// magnifies, it is stepped toward the rail until the test reads no more
     /// than the limit. Only a real change of the draws re-enters.
-    fn tie_exit(&mut self, now: f64) {
+    ///
+    /// That continuity holds only where the segment brought the rail to the
+    /// setpoint. With `keep`, the segment's charge (as a rail voltage) at an
+    /// exit the draws' step at the instant carried past the setpoint, each
+    /// capacitor with an esr keeps that charge instead: the tie would place
+    /// it the whole step's current times its esr below the rail (FXI, bug D:
+    /// a pulse's rising edge through 2.2 ohm back-drove a 5 V rail by 20 A,
+    /// and its 1.44 ohm capacitor, charged to 0.57 V, was held at -23.7 V,
+    /// from where the next CC entry published a rail of -22 V).
+    fn tie_exit(&mut self, now: f64, keep: Option<f64>) {
         let (a_p, g_p, _, _) = self.partition_totals(now);
         let hub = self.hub.as_ref().unwrap();
         let Some((v, i_limit)) = hub.psu() else { return };
@@ -1434,8 +1460,15 @@ impl PartitionedSolver {
             let d_v = self.voltages[a] - self.voltages[b];
             let v_far = self.voltages[far];
             let cap = &mut self.fixed_pair_capacitors[k];
-            let vc = if cap.esr > 0.0 { sign * ((v - v_far) - cap.esr * (cap.c / c_rail) * i_cap) } else { d_v };
+            let vc = match keep {
+                _ if !(cap.esr > 0.0) => d_v,
+                Some(q) => sign * (q - v_far),
+                None => sign * ((v - v_far) - cap.esr * (cap.c / c_rail) * i_cap),
+            };
             cap.hold_at(now, d_v, vc);
+        }
+        if keep.is_some() {
+            return;
         }
         for _ in 0..TIE_STEPS {
             let demand = self.rail_cap_demand(now, v);

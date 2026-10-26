@@ -3198,9 +3198,17 @@ Constants, all from P3:35-38 unless marked new:
      (in `dir`) adds nothing: one carried charged across a reload stays CV.
      In CV the deficit is zero (`esr = 0`, rule 2a) or decays with `esr·C`,
      a moving term of the CV-entry watch (point 4), so a supply inside its
-     limit never re-enters. Contract tests: 100 µF on a 5 V, 0.1 A PSU rises
-     at 1000 V/s and reaches 5 V at about 5 ms, matching classic within the
-     normal criterion; the same capacitor charged to 5 V at load stays CV.
+     limit never re-enters. A total past the limit against the PSU's
+     direction (`dir·I < −iLimit`) is a source back-driving the rail, which
+     the CV supply sinks (ruling R40): the CC solution at the instant, the
+     charge plus its current's drop across the esr, is past the setpoint
+     there, so the clamp keeps CV without reading the charge (FXI, bug D: a
+     pulse's edge through 2.2 Ω back-drove the rail by 16.6 A net of a
+     capacitor's 3.2 A demand, and the clamp, reading the 0.37 V charge,
+     entered CC at a 6.2 V CC rail). Contract tests: 100 µF on a 5 V, 0.1 A
+     PSU rises at 1000 V/s and reaches 5 V at about 5 ms, matching classic
+     within the normal criterion; the same capacitor charged to 5 V at load
+     stays CV.
    - **CC → CV** when the CC solution reaches the setpoint, which for a
      linear rail is the draw at the setpoint back within the limit,
      `dir·(A0 + G V) <= iLimit` (classic since `fix/psu-cc-exit`: its
@@ -3247,6 +3255,24 @@ Constants, all from P3:35-38 unless marked new:
      rounding of a re-solve. Without the tie a CC exit with `esr > 0`
      re-entered CC at the same instant in 42 of 96 cases, leaving CC 4 to 20
      µs late with 2 to 10 mV of overshoot.
+   - **An exit the instant forces keeps the charge** (FXI, bug D). The
+     supply current is continuous only where the segment brought the rail to
+     the setpoint. A CC solution carried past it by a step of the draws at
+     the instant (a source edge or toggle back-driving the rail through the
+     capacitors' esr), with the segment's rail still short of the setpoint
+     there (`dir·u_seg < |V|`, read before the solve re-aims it), is no ramp
+     reaching its end: the supply current steps, as in classic, and each
+     capacitor with `esr > 0` keeps the segment's charge (`vc = q − V_f` in
+     the PSU's direction), from where it relaxes to `dV` as rule 2a's
+     exponential; no tie follows at that instant. The tie would hold it the
+     whole step's current times its esr below the rail: on W1gV4's cold seed
+     704 a pulse edge back-drove a 5.06 V rail by 19.8 A and the 1.44 Ω
+     capacitor, charged to 0.57 V, was held at −23.7 V, from which the next
+     CC entry published −22.4 V (seed 985: a clock tied to the rail by a
+     switch, −6093 V held, −5960 V published). Classic, exact mode and the
+     core now agree on seed 985's linear parts (rail minimum 82 µV) and on a
+     reduced board within 2 mV
+     (`a_cc_exit_a_back_driven_edge_forces_keeps_the_rail_capacitors_charge`).
    - In CC the PSU publishes `elementI = −dir·iLimit` exactly; in CV, `−I`.
    - The rules are pure functions (`devices/sources.rs`): `regime_step(reg,
      i_at_v, u_cc, u_rail, V, iLimit)` and `regime_step_rail_cap` with the
