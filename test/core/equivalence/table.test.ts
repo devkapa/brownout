@@ -52,6 +52,28 @@ describe("buildKindTable", () => {
     expect(row!.status).toBe("pass");
   });
 
+  it("counts a phase-missing-id entry in its own column, never as a pass, and keeps the kind's status off pass", () => {
+    const flagged: EntryResult = {
+      status: "phase-missing-id",
+      kinds: ["resistor"],
+      classicWallMs: null,
+      coreWallMs: null,
+      phaseCount: 2,
+      missing: [{ phaseIndex: 1, id: "btn" }],
+    };
+    const outcomes = [
+      { entry: entry("a", null), result: passResult() },
+      { entry: { ...entry("b", "verify-script"), phases: [{ durationS: 1 }, { set: [{ id: "btn", params: { closed: 1 } }], durationS: 1 }] }, result: flagged },
+    ];
+
+    const row = buildKindTable(outcomes).find((r) => r.kind === "resistor")!;
+
+    expect(row.phaseMissingId).toBe(1);
+    expect(row.pass).toBe(1);
+    expect(row.ran).toBe(1);
+    expect(row.status).toBe("fail");
+  });
+
   it("reports unstimulated as 0 when no entry for that kind uses scripted stimuli", () => {
     const outcomes = [{ entry: entry("a", null), result: passResult() }];
     const table = buildKindTable(outcomes);

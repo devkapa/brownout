@@ -20,10 +20,12 @@ import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { initCore } from "../../../src/core/wasm.js";
 import { compareStimuliSamples } from "./compare.js";
 import {
+  findPhaseMissingIds,
   replayStimuliOnClassic,
   replayStimuliOnCore,
   STIMULUS_FIXED_STEP_S,
   StimuliNotYetSupportedOnCoreError,
+  StimulusPhaseMissingIdError,
   type StimulusPhase,
 } from "./stimuli.js";
 
@@ -245,18 +247,44 @@ describe("replayStimuliOnCore", () => {
     }
   });
 
-  it("a phase naming a component absent from the loaded program fails clearly, not silently", () => {
-    // Same reasoning as above: phase 0's `set` is folded into the initial
-    // load (`applyPhaseOverrides`, which silently no-ops an unknown
-    // component id, mirroring classic's own reload path) — this check is
-    // specifically about `CoreEngine.setParams`'s own unknown-component
-    // check, reached only by a phase AFTER the first.
+  // Ruling R41 (3): CoreEngine.setParams now skips an unknown id and returns
+  // false, and classic's reload ignores one too, so without this check a
+  // phase aimed at a missing component would run as a no-op on both engines
+  // and compare clean. The replay refuses it instead, naming every such id.
+  it("a phase naming a component absent from the loaded program throws StimulusPhaseMissingIdError, naming it", () => {
     const phases: StimulusPhase[] = [
       { durationS: STIMULUS_FIXED_STEP_S },
       { set: [{ id: "no-such-component", params: { closed: 1 } }], durationS: STIMULUS_FIXED_STEP_S },
     ];
     const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
-    expect(() => replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH)).toThrow(/no device for component/);
+    try {
+      replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(StimulusPhaseMissingIdError);
+      expect((err as StimulusPhaseMissingIdError).missing).toEqual([{ phaseIndex: 1, id: "no-such-component" }]);
+    }
+  });
+
+  it("phase 0's set is checked too, though it is folded into the load rather than sent through setParams", () => {
+    const phases: StimulusPhase[] = [{ set: [{ id: "btn", params: { closed: 0 } }], durationS: STIMULUS_FIXED_STEP_S }];
+    const classicSamples = replayStimuliOnClassic(switchedDivider(1), phases);
+    expect(() => replayStimuliOnCore(switchedDivider(1), phases, classicSamples, WITH_SWITCH)).toThrow(StimulusPhaseMissingIdError);
+  });
+
+  it("findPhaseMissingIds lists each (phase, id) a set names that the circuit lacks, and nothing for a clean script", () => {
+    const circuit = switchedDivider(0);
+    expect(
+      findPhaseMissingIds(circuit, [
+        { set: [{ id: "btn", params: { closed: 0 } }], durationS: 1 },
+        { set: [{ id: "sw", params: { closed: 1 } }, { id: "btn", params: { closed: 1 } }], durationS: 1 },
+        { durationS: 1 },
+      ]),
+    ).toEqual([
+      { phaseIndex: 0, id: "btn" },
+      { phaseIndex: 1, id: "btn" },
+    ]);
+    expect(findPhaseMissingIds(circuit, [{ set: [{ id: "sw", params: { closed: 1 } }], durationS: 1 }])).toEqual([]);
   });
 
   it("throws (does not swallow) when the circuit cannot even be loaded — a source shorted to itself, mirroring replayStimuliOnClassic's own load-failure check", () => {

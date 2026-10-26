@@ -1032,6 +1032,138 @@ describe("W1e sidecar: the shunt-inclusive Thevenin and the NE555 phases (NE555 
   });
 });
 
+// ─── The lossy timing capacitor (the "555 LED Chaser" corpus FAIL) ───────────
+//
+// The chaser's timing capacitor carries `catalogUid: "capacitor"` on the
+// COMPONENT, which classic and the core both resolve to ESR 1 ohm and 10 Mohm
+// leakage. The numbers are FXJ's model2 (ESR in series with C, leakage across
+// the terminals, the 1e-12 S shunts on DIS and the capacitor node), its 2x2
+// nodal solve redone in exact rationals for more digits; the core reproduces
+// them to 1e-9 and classic at a fine fixed trapezoidal step agrees.
+
+/** Fixture 31 rewired as the chaser's timing network: RA 4.7 k, RB 10 k straight to the capacitor (no RPOT), C 10 uF. `capacitor` overrides the timing capacitor's catalogUid and params. */
+function chaserTiming(capacitor: { catalogUid?: string; params?: Record<string, number> } = { catalogUid: "capacitor" }): SimCircuit {
+  const base = loadFixtureCircuit("31-ne555-astable-led");
+  const components = base.components
+    .filter((c) => c.id !== "rpot")
+    .map((c) => {
+      if (c.id === "ra") return { ...c, params: { resistance: 4700 } };
+      if (c.id === "rb") return { ...c, params: { resistance: 10000 } };
+      if (c.id !== "ct") return c;
+      const ct = { ...c, params: { capacitance: 9.999999999999999e-6, ...capacitor.params } };
+      return capacitor.catalogUid === undefined ? ct : { ...ct, catalogUid: capacitor.catalogUid };
+    });
+  const wires = base.wires
+    .filter((w) => w.from_component !== "rpot" && w.to_component !== "rpot")
+    .concat([{ from_component: "rb", from_pin: "b", to_component: "ct", to_pin: "a" }]);
+  return { ...base, components, wires };
+}
+
+const CHASER_SPEC = { component: "u1", mode: "astable", capacitor: "ct" } as const;
+
+function firstThree(phases: readonly { t0: number; t1: number }[]): number[] {
+  return phases.slice(0, 3).map((p) => p.t1 - p.t0);
+}
+
+function expectRelative(actual: readonly number[], want: readonly number[], rel: number): void {
+  want.forEach((w, i) => expect(Math.abs(actual[i]! - w) / w, `phase ${i}: ${actual[i]} against ${w}`).toBeLessThan(rel));
+}
+
+describe("the NE555 sidecar on a lossy timing capacitor (the chaser's catalogUid \"capacitor\")", () => {
+  const LOSSY = [161.6921553387e-3, 69.62773935e-3, 102.0569749489e-3];
+  const IDEAL = [161.4960095211e-3, 69.704204502e-3, 101.8926381691e-3];
+
+  it("reads catalogUid from the component, resolves ESR 1 ohm and 10 Mohm leakage, and times the phases as FXJ's model2: 161.6921553 / 69.6277394 / 102.0569749 ms", () => {
+    const sidecar = extractNe555Sidecar(chaserTiming(), CHASER_SPEC, 1);
+    expect(sidecar.model.esrOhms).toBe(1);
+    expectRelative(firstThree(sidecar.phases), LOSSY, 1e-9);
+  });
+
+  it("authored esr and leakageResistance params model the same capacitor (an authored param wins, as in classic's modelParam)", () => {
+    const sidecar = extractNe555Sidecar(chaserTiming({ params: { esr: 1, leakageResistance: 1e7 } }), CHASER_SPEC, 1);
+    expectRelative(firstThree(sidecar.phases), LOSSY, 1e-9);
+  });
+
+  it("a capacitor with no catalog identity and no loss params stays ideal: 161.4960095 / 69.7042045 / 101.8926382 ms", () => {
+    const sidecar = extractNe555Sidecar(chaserTiming({}), CHASER_SPEC, 1);
+    expect(sidecar.model.esrOhms ?? 0).toBe(0);
+    expectRelative(firstThree(sidecar.phases), IDEAL, 1e-9);
+  });
+
+  it("a uid the catalog does not hold falls back to ideal, as resolveCapacitorParams does", () => {
+    const sidecar = extractNe555Sidecar(chaserTiming({ catalogUid: "not-a-real-uid" }), CHASER_SPEC, 1);
+    expectRelative(firstThree(sidecar.phases), IDEAL, 1e-9);
+  });
+
+  it("the seed: the same sidecar with its leakage term dropped (161.4969953 ms) is off the true first HIGH by 1.2e-3", () => {
+    const seeded = extractNe555Sidecar(chaserTiming(), CHASER_SPEC, 1, { dropCapacitorLeakage: true });
+    expectRelative(firstThree(seeded.phases), [161.4969953043e-3, 69.6977514425e-3, 101.8822727192e-3], 1e-9);
+    expect(Math.abs(seeded.phases[0]!.t1 - LOSSY[0]!) / LOSSY[0]!).toBeGreaterThan(1e-3);
+  });
+
+  it("at(t): the capacitor node reads the terminal (vc + ESR i), and the capacitor's current is the series current plus the leakage", () => {
+    const sidecar = extractNe555Sidecar(chaserTiming(), CHASER_SPEC, 1);
+    const mid = sidecar.phases[2]!;
+    const t = (mid.t0 + mid.t1) / 2;
+    const vc = rcVoltageAt(mid.v0, mid.vInf, mid.tauS, t - mid.t0);
+    const series = (mid.vInf - vc) / (mid.tauS / 9.999999999999999e-6);
+    const terminal = vc + 1 * series;
+    const at = sidecar.at(t);
+    const capNet = Object.entries(at.netV).find(([, v]) => Math.abs(v - terminal) < 1e-12);
+    expect(capNet, "a timing net reads the terminal voltage").toBeDefined();
+    expect(at.elementI.ct).toBeCloseTo(series + terminal / 1e7, 15);
+    expect(at.elementI["ct#leakage"]).toBeUndefined();
+    expect(sidecar.resistors.map((r) => r.id).sort()).toEqual(["ra", "rb"]);
+  });
+
+  it("a lossy RST capacitor moves the release to where its terminal crosses 0.5 V through ESR and leakage", () => {
+    const base = loadFixtureCircuit("33-ne555-rst-delay-74hc74");
+    const circuit: SimCircuit = { ...base, components: base.components.map((c) => (c.id === "cr" ? { ...c, catalogUid: "capacitor" } : c)) };
+    const sidecar = extractNe555Sidecar(circuit, { component: "u1", mode: "astable", capacitor: "ct", rstCapacitor: "cr" }, 0.03);
+    // RR 100 k from 5 V, leakage 10 M across C 1 uF, ESR 1 ohm: the Thevenin (shunt included) seen by the series ESR-C branch.
+    const net: ResistiveNetwork = { fixed: { VCC: 5, GND: 0 }, free: ["X"], edges: [{ id: "rr", a: "VCC", b: "X", ohms: 1e5 }, { id: "leak", a: "X", b: "GND", ohms: 1e7 }] };
+    const { vth, rth } = theveninAt(net, "X");
+    const vcAtRelease = (0.5 * (rth + 1) - 1 * vth) / rth;
+    expect(sidecar.phases[0]!.t1).toBeCloseTo(rcCrossingTime(0, vcAtRelease, vth, (rth + 1) * 1e-6), 12);
+    expect(Math.abs(sidecar.phases[0]!.t1 - 10.5360516e-3)).toBeGreaterThan(1e-6);
+  });
+});
+
+describe("the LED sidecars' catalog guards read the component's catalogUid", () => {
+  it("evaluateLedStatic refuses a device whose catalogUid sits on the component (where the corpus puts it), not in params", () => {
+    const circuit: SimCircuit = {
+      components: [
+        { id: "vcc", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
+        { id: "gnd", kind: "ground", pins: [{ id: "gnd" }], params: {} },
+        { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 220 } },
+        { id: "d1", kind: "led", catalogUid: "led-red", pins: [{ id: "a" }, { id: "k" }], params: { vf: 1.8, iRated: 0.02 } },
+      ],
+      wires: [
+        { from_component: "vcc", from_pin: "neg", to_component: "gnd", to_pin: "gnd" },
+        { from_component: "vcc", from_pin: "pos", to_component: "r1", to_pin: "a" },
+        { from_component: "r1", from_pin: "b", to_component: "d1", to_pin: "a" },
+        { from_component: "d1", from_pin: "k", to_component: "gnd", to_pin: "gnd" },
+      ],
+    };
+    const model = {
+      kind: "led-static" as const,
+      cells: [{ device: "d1", pin: "a", resistor: "r1", source: "vcc", orientation: "anode-node" as const, vfParam: "vf", vfDefault: 1.8 }],
+      devices: [{ device: "d1" }],
+    };
+    expect(() => evaluateLedStatic(circuit, model)).toThrow(/catalogUid/);
+    const plain: SimCircuit = { ...circuit, components: circuit.components.map(({ catalogUid: _drop, ...c }) => c) };
+    expect(() => evaluateLedStatic(plain, model)).not.toThrow();
+  });
+
+  it("ledRcVoltages refuses a capacitor whose catalog identity makes it lossy, and keeps an ideal one", () => {
+    const base = loadFixtureCircuit("35-led-rc-stepped");
+    const model = { kind: "led-rc" as const, source: "vcc", resistor: "r1", capacitor: "c1", device: "d1", instantsS: [] };
+    const lossy: SimCircuit = { ...base, components: base.components.map((c) => (c.id === "c1" ? { ...c, catalogUid: "capacitor" } : c)) };
+    expect(() => ledRcVoltages(lossy, model, [1e-3])).toThrow(/ideal/);
+    expect(() => ledRcVoltages(base, model, [1e-3])).not.toThrow();
+  });
+});
+
 // ─── W1e: the LED junction sidecars (LEDs point 2, 8 and 13) ──────────────────
 //
 // The numbers are from `drled-sidecars.mjs` (bisection on the node's KCL with

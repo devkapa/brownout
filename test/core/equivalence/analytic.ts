@@ -15,6 +15,7 @@
  * hand-derived copies drifting apart.
  */
 
+import { resolveCapacitorParams } from "../../../src/core/compile/passives.js";
 import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import type { StimulusPhase } from "./stimuli.js";
@@ -599,9 +600,16 @@ export interface Ne555TimingModel {
   readonly startVolts?: number;
   /** RST held below 0.5 V until this time: the latch is 0 and DIS active until then, and the first HIGH starts here (point 9). */
   readonly releaseS?: number;
+  /**
+   * The timing capacitor's ESR, in series with its ideal C (default 0). The
+   * comparators see the capacitor's NODE, which with ESR is the terminal
+   * `vc + esr i`, not `vc`; leakage needs no field here because it sits
+   * across the terminals and is already one of the network's resistors.
+   */
+  readonly esrOhms?: number;
 }
 
-/** One HIGH or LOW stretch of the model: the capacitor node follows `v0 -> thevenin.vInf` with `tauS` from `t0` to `t1` (`Infinity` for a monostable's last). */
+/** One HIGH or LOW stretch of the model: the capacitor's own voltage (its node's when ESR is 0) follows `v0 -> thevenin.vInf` with `tauS` (`(R_th + esr) C`) from `t0` to `t1` (`Infinity` for a monostable's last). */
 export interface Ne555Phase {
   readonly high: boolean;
   readonly t0: number;
@@ -633,13 +641,24 @@ export interface Ne555Trigger {
  * a pull low while HIGH changes nothing, except that a TRIG still low when the
  * threshold is crossed holds OUT HIGH (SET beats RESET, point 3) until it is
  * released, when THR is still above `vU` and the latch RESETs at once.
+ *
+ * With `esrOhms` (r) the phases track the ideal C's own voltage `vc`, which is
+ * continuous across a switch, while the comparators read the terminal
+ * `vc + r (V∞ - vc) / (R + r)`: each side's time constant is `(R + r) C` and
+ * each threshold is mapped to the `vc` at which the terminal reaches it.
+ * At r = 0 every expression below reduces to the ideal one exactly.
  */
 export function ne555Phases(model: Ne555TimingModel, horizonS: number, triggers: readonly Ne555Trigger[] = []): Ne555Phase[] {
   const vL = model.vGnd + model.vS / 3;
   const vU = model.vGnd + (2 * model.vS) / 3;
   const c = model.capacitanceF;
-  const tauC = model.charge.rOhms * c;
-  const tauD = model.discharge.rOhms * c;
+  const r = model.esrOhms ?? 0;
+  const tauC = (model.charge.rOhms + r) * c;
+  const tauD = (model.discharge.rOhms + r) * c;
+  // Kept branch-free of r when it is 0 so an ideal capacitor's phases stay bit-identical to before ESR was modelled.
+  const vcAtTerminal = (side: Ne555Thevenin, terminal: number): number =>
+    r === 0 ? terminal : (terminal * (side.rOhms + r) - r * side.vInf) / side.rOhms;
+  const terminalAt = (side: Ne555Thevenin, vc: number): number => (r === 0 ? vc : vc + (r * (side.vInf - vc)) / (side.rOhms + r));
   const phases: Ne555Phase[] = [];
   let t = 0;
   let v = model.startVolts ?? 0;
@@ -649,14 +668,14 @@ export function ne555Phases(model: Ne555TimingModel, horizonS: number, triggers:
     phases.push({ high: false, t0: 0, t1: model.releaseS, v0: v, tauS: tauD, vInf: model.discharge.vInf });
     v = rcVoltageAt(v, model.discharge.vInf, tauD, model.releaseS);
     t = model.releaseS;
-    if (!(v < vL)) {
+    if (!(terminalAt(model.discharge, v) < vL)) {
       throw new Error(`ne555Phases: the capacitor is at ${v} V when RST releases, not below vL=${vL}: the latch would hold, which this model does not cover.`);
     }
   }
 
   const trigLowAt = (time: number): boolean => triggers.reduce((low, e) => (e.t <= time ? e.low : low), false);
   for (;;) {
-    const natural = t + rcCrossingTime(v, vU, model.charge.vInf, tauC);
+    const natural = t + rcCrossingTime(v, vcAtTerminal(model.charge, vU), model.charge.vInf, tauC);
     let end = natural;
     if (trigLowAt(natural)) {
       const release = triggers.find((e) => !e.low && e.t > natural);
@@ -679,10 +698,10 @@ export function ne555Phases(model: Ne555TimingModel, horizonS: number, triggers:
       if (t > horizonS) return phases;
       continue;
     }
-    const low = rcCrossingTime(vU, vL, model.discharge.vInf, tauD);
+    const low = rcCrossingTime(vcAtTerminal(model.charge, vU), vcAtTerminal(model.discharge, vL), model.discharge.vInf, tauD);
     phases.push({ high: false, t0: t, t1: t + low, v0: v, tauS: tauD, vInf: model.discharge.vInf });
     t += low;
-    v = vL;
+    v = vcAtTerminal(model.discharge, vL);
     if (t > horizonS) return phases;
   }
 }
@@ -697,7 +716,7 @@ export function ne555PhaseAt(phases: readonly Ne555Phase[], t: number): Ne555Pha
   return phases.find((p) => t > p.t0 && t <= p.t1) ?? (t <= 0 ? phases[0]! : phases[phases.length - 1]!);
 }
 
-/** The capacitor node's exact voltage at `t`. */
+/** The timing capacitor's own (ideal C) voltage at `t`: its node's when ESR is 0. */
 export function ne555CapVoltageAt(phases: readonly Ne555Phase[], t: number): number {
   const p = ne555PhaseAt(phases, t);
   return rcVoltageAt(p.v0, p.vInf, p.tauS, t - p.t0);
@@ -734,13 +753,18 @@ export interface Ne555Sidecar {
 }
 
 interface ExtractedRcNetwork {
-  /** Node names are `n<node number>`. */
+  /** Node names are `n<node number>`. Holds the capacitor's leakage as an edge (`<id>#leakage`) besides the resistors, so every Thevenin includes it. */
   readonly network: ResistiveNetwork;
   readonly capNode: string;
   /** Sign of the capacitor's current into its pin `a` (+1 when `a` is on the free node). */
   readonly capSign: 1 | -1;
   readonly capOtherVolts: number;
   readonly capacitanceF: number;
+  /** The capacitor's resolved ESR, in series with C (0 for an ideal one). */
+  readonly esrOhms: number;
+  /** The capacitor's resolved leakage across its terminals, 0 meaning none (resolveCapacitorParams's own sentinel). */
+  readonly leakageOhms: number;
+  /** The resistors only (never the leakage edge): what the sidecar predicts a current for and the supply residual removes. */
   readonly edges: readonly NetworkEdge[];
 }
 
@@ -786,6 +810,8 @@ function extractRcNetwork(
   fixed: ReadonlyMap<number, number>,
   capacitorId: string,
   allowed555: { readonly component: string; readonly pins: readonly string[] },
+  /** Detector self-test only: model the capacitor without its leakage. */
+  dropLeakage = false,
 ): ExtractedRcNetwork {
   const cap = circuit.components.find((c) => c.id === capacitorId && c.kind === "capacitor");
   if (!cap) throw new Error(`ne555 sidecar: capacitor "${capacitorId}" is not in the circuit.`);
@@ -844,17 +870,24 @@ function extractRcNetwork(
 
   const fixedRecord: Record<string, number> = {};
   for (const [node, volts] of fixed) fixedRecord[name(node)] = volts;
-  const capacitanceF = Number(cap.params.capacitance);
-  if (!(capacitanceF > 0)) throw new Error(`ne555 sidecar: capacitor "${capacitorId}" has no positive capacitance param.`);
-  if (Number(cap.params.esr ?? 0) !== 0 || cap.params.leakage !== undefined || cap.params.catalogUid !== undefined) {
-    throw new Error(`ne555 sidecar: capacitor "${capacitorId}" carries ESR, leakage or a catalog part; the model assumes an ideal capacitor (ESR is 0 without a catalogUid).`);
-  }
+  if (!(Number(cap.params.capacitance) > 0)) throw new Error(`ne555 sidecar: capacitor "${capacitorId}" has no positive capacitance param.`);
+  // The losses come from the resolver the compiler itself uses: a catalogUid
+  // sits on the COMPONENT (not in params), and the catalog's leakage param is
+  // `leakageResistance`, so reading params directly built an ideal model for
+  // the 555 LED Chaser's lossy capacitor (ESR 1 ohm, leakage 10 Mohm).
+  const resolved = resolveCapacitorParams(cap);
+  const leakageOhms = dropLeakage ? 0 : resolved.leakage;
+  const capNodeName = name(capNode);
+  const otherName = name(capAFixed ? capA : capB);
+  const networkEdges = leakageOhms > 0 ? [...edges, { id: `${capacitorId}#leakage`, a: capNodeName, b: otherName, ohms: leakageOhms }] : edges;
   return {
-    network: { fixed: fixedRecord, free: [...free].map(name), edges },
-    capNode: name(capNode),
+    network: { fixed: fixedRecord, free: [...free].map(name), edges: networkEdges },
+    capNode: capNodeName,
     capSign: capAFixed ? -1 : 1,
     capOtherVolts,
-    capacitanceF,
+    capacitanceF: resolved.capacitance,
+    esrOhms: resolved.esr,
+    leakageOhms,
     edges,
   };
 }
@@ -924,6 +957,13 @@ function ne555Triggers(
  * `options.dischargeDropsResistor` exists for the detector self-test only: it
  * removes the named resistor from the DISCHARGE network (a seeded wrong
  * sidecar; dropping RA gives the SAP-1 clock 2.086373 ms).
+ * `options.dropCapacitorLeakage` is the same kind of seed: every capacitor is
+ * modelled without its resolved leakage.
+ *
+ * A lossy capacitor (resolveCapacitorParams: a catalog part or authored
+ * `esr`/`leakageResistance`) is modelled as the core models it: ESR in series
+ * with C and the leakage across the terminals (core/README.md's capacitor
+ * currents: series plus leakage, `pins[0]` to `pins[1]`).
  */
 export function extractNe555Sidecar(
   circuit: SimCircuit,
@@ -934,6 +974,8 @@ export function extractNe555Sidecar(
     readonly dischargeDropsResistor?: string;
     /** A scripted stimulus (stimuli.ts): its button presses on TRIG are the monostable's triggers. */
     readonly stimuli?: readonly StimulusPhase[];
+    /** Detector self-test only: model every capacitor without its leakage. */
+    readonly dropCapacitorLeakage?: boolean;
   } = {},
 ): Ne555Sidecar {
   const fault = options.dischargeDropsResistor === undefined ? undefined : { dischargeDropsResistor: options.dischargeDropsResistor };
@@ -969,7 +1011,8 @@ export function extractNe555Sidecar(
     }
   }
 
-  const timing = extractRcNetwork(circuit, built, fixed, spec.capacitor, { component: spec.component, pins: NE555_TIMING_PINS.timing! });
+  const dropLeakage = options.dropCapacitorLeakage === true;
+  const timing = extractRcNetwork(circuit, built, fixed, spec.capacitor, { component: spec.component, pins: NE555_TIMING_PINS.timing! }, dropLeakage);
   const disName = name(nodeOf(spec.component, "7"));
   if (!timing.network.free.includes(disName)) {
     throw new Error("ne555 sidecar: pin 7 (DIS) must sit on the timing network.");
@@ -977,7 +1020,7 @@ export function extractNe555Sidecar(
   const gndName = name(nodeOf(spec.component, "1"));
   const chargeNet = timing.network;
   const dischargeEdges: NetworkEdge[] = [
-    ...timing.edges.filter((e) => e.id !== fault?.dischargeDropsResistor),
+    ...timing.network.edges.filter((e) => e.id !== fault?.dischargeDropsResistor),
     { id: "dis", a: disName, b: gndName, ohms: NE555_DIS_OHMS },
   ];
   const dischargeNet: ResistiveNetwork = { ...timing.network, edges: dischargeEdges };
@@ -995,11 +1038,14 @@ export function extractNe555Sidecar(
   let rst: ExtractedRcNetwork | undefined;
   let rstThevenin: { vth: number; rth: number } | undefined;
   if (spec.rstCapacitor) {
-    rst = extractRcNetwork(circuit, built, fixed, spec.rstCapacitor, { component: spec.component, pins: NE555_TIMING_PINS.rst! });
+    rst = extractRcNetwork(circuit, built, fixed, spec.rstCapacitor, { component: spec.component, pins: NE555_TIMING_PINS.rst! }, dropLeakage);
     if (name(nodeOf(spec.component, "4")) !== rst.capNode) throw new Error("ne555 sidecar: pin 4 (RST) must sit on the RST capacitor's node.");
     rstThevenin = theveninAt(rst.network, rst.capNode);
+    // RST reads the terminal: with ESR r it crosses 0.5 V when the ideal C is at (target (R + r) - r V∞) / R.
     const target = gnd + NE555_RST_VOLTS;
-    releaseS = rcCrossingTime(rst.capOtherVolts, target, rstThevenin.vth, rstThevenin.rth * rst.capacitanceF);
+    const r = rst.esrOhms;
+    const vcTarget = r === 0 ? target : (target * (rstThevenin.rth + r) - r * rstThevenin.vth) / rstThevenin.rth;
+    releaseS = rcCrossingTime(rst.capOtherVolts, vcTarget, rstThevenin.vth, (rstThevenin.rth + r) * rst.capacitanceF);
   }
 
   const model: Ne555TimingModel = {
@@ -1011,6 +1057,7 @@ export function extractNe555Sidecar(
     discharge: { vInf: discharge.vth, rOhms: discharge.rth },
     startVolts: timing.capOtherVolts,
     releaseS,
+    esrOhms: timing.esrOhms,
   };
   const triggers = options.stimuli ? ne555Triggers(circuit, spec, built, options.stimuli) : [];
   const phases = ne555Phases(model, horizonS, triggers);
@@ -1032,11 +1079,14 @@ export function extractNe555Sidecar(
   const at = (t: number): Ne555SidecarValues => {
     const netV: Record<string, number> = {};
     const elementI: Record<string, number> = {};
-    const fill = (extracted: ExtractedRcNetwork, capacitorId: string, net: ResistiveNetwork, x: number, capAmps: number): void => {
-      const solved = solveResistiveNetwork(withNodeFixed(net, extracted.capNode, x));
+    // `vc` is the ideal C's voltage and `seriesAmps` the current through ESR and C; the node holds the terminal.
+    const fill = (extracted: ExtractedRcNetwork, capacitorId: string, net: ResistiveNetwork, vc: number, seriesAmps: number): void => {
+      const terminal = extracted.esrOhms === 0 ? vc : vc + extracted.esrOhms * seriesAmps;
+      const solved = solveResistiveNetwork(withNodeFixed(net, extracted.capNode, terminal));
       for (const nodeName of extracted.network.free) netV[netIdOf(nodeName)] = solved[nodeName]!;
       for (const edge of extracted.edges) elementI[edge.id] = (solved[edge.a]! - solved[edge.b]!) / edge.ohms;
-      elementI[capacitorId] = extracted.capSign * capAmps;
+      const leakAmps = extracted.leakageOhms > 0 ? (terminal - extracted.capOtherVolts) / extracted.leakageOhms : 0;
+      elementI[capacitorId] = extracted.capSign * (seriesAmps + leakAmps);
     };
 
     const phase = ne555PhaseAt(phases, t);
@@ -1044,9 +1094,9 @@ export function extractNe555Sidecar(
     fill(timing, spec.capacitor, phase.high ? chargeNet : dischargeNet, x, (phase.vInf - x) / (phase.tauS / timing.capacitanceF));
 
     if (rst && rstThevenin && spec.rstCapacitor) {
-      const rstTau = rstThevenin.rth * rst.capacitanceF;
-      const xr = rcVoltageAt(rst.capOtherVolts, rstThevenin.vth, rstTau, t);
-      fill(rst, spec.rstCapacitor, rst.network, xr, (rstThevenin.vth - xr) / rstThevenin.rth);
+      const rstSeriesOhms = rstThevenin.rth + rst.esrOhms;
+      const xr = rcVoltageAt(rst.capOtherVolts, rstThevenin.vth, rstSeriesOhms * rst.capacitanceF, t);
+      fill(rst, spec.rstCapacitor, rst.network, xr, (rstThevenin.vth - xr) / rstSeriesOhms);
     }
     return { netV, elementI };
   };
@@ -1229,7 +1279,8 @@ function paramNumber(params: Readonly<Record<string, unknown>>, key: string, fal
  * only its aggregate is unclamped.
  * Params come from the circuit (`vf`, `iRated`, `n`, resistances, source
  * volts) and the temperature from `circuit.environment.temperatureC`
- * (default 25); a fixture with a `catalogUid` is refused, since a catalog part
+ * (default 25); a component with a `catalogUid` (on the component, where a
+ * circuit carries it, never in params) is refused, since a catalog part
  * changes the resolved params (and a `led` one is declined in W1e).
  */
 export function evaluateLedStatic(circuit: SimCircuit, model: AnalyticLedStaticModel): LedStaticValues {
@@ -1243,7 +1294,7 @@ export function evaluateLedStatic(circuit: SimCircuit, model: AnalyticLedStaticM
   const component = (id: string) => {
     const c = circuit.components.find((x) => x.id === id);
     if (!c) throw new Error(`led sidecar: component "${id}" is not in the circuit.`);
-    if (c.params.catalogUid !== undefined) throw new Error(`led sidecar: "${id}" carries a catalogUid, so its params are not the ones the sidecar reads.`);
+    if (c.catalogUid !== undefined) throw new Error(`led sidecar: "${id}" carries a catalogUid, so its params are not the ones the sidecar reads.`);
     return c;
   };
   const tempC = Number((circuit as { environment?: { temperatureC?: number } }).environment?.temperatureC ?? 25);
@@ -1352,7 +1403,11 @@ export function ledRcVoltages(circuit: SimCircuit, model: AnalyticLedRcModel, ti
   const rOhms = Number(component(model.resistor).params.resistance);
   const cap = component(model.capacitor);
   const capacitanceF = Number(cap.params.capacitance);
-  if (Number(cap.params.esr ?? 0) !== 0 || cap.params.leakage !== undefined) throw new Error("led-rc sidecar: the capacitor must be ideal.");
+  // Resolved as the compiler resolves it, so a catalog part's losses (catalogUid on the component) are seen.
+  const losses = resolveCapacitorParams(cap);
+  if (losses.esr !== 0 || losses.leakage !== 0) {
+    throw new Error(`led-rc sidecar: the capacitor must be ideal; "${model.capacitor}" resolves ESR ${losses.esr} ohm and leakage ${losses.leakage} ohm.`);
+  }
   const device = component(model.device);
   const tempC = Number((circuit as { environment?: { temperatureC?: number } }).environment?.temperatureC ?? 25);
   const law = ledLaw({

@@ -262,6 +262,44 @@ describe("runCorpusEntry — gate 2d stimuli priority", () => {
   });
 });
 
+describe("runCorpusEntry — a phase that names a component the circuit lacks (ruling R41 (3))", () => {
+  // The learn One-Shot starter's shape: the script presses "btn", which only
+  // the student's finished circuit has. Both engines would treat the press as
+  // a no-op, so the comparison would pass while checking nothing.
+  it("reports phase-missing-id naming every (phase, id), never a pass, even though both engines could replay it", () => {
+    const entry = baseEntry({
+      kinds: ["ground", "resistor", "switch", "voltage_source"],
+      phases: [
+        { set: [{ id: "btn", params: { closed: 0 } }], durationS: 2e-3 },
+        { set: [{ id: "btn", params: { closed: 1 } }], durationS: 2e-3 },
+        { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2e-3 },
+      ],
+    });
+
+    const result = runCorpusEntry(entry, switchedDivider(0));
+
+    expect(result.status).toBe("phase-missing-id");
+    if (result.status === "phase-missing-id") {
+      expect(result.missing).toEqual([
+        { phaseIndex: 0, id: "btn" },
+        { phaseIndex: 1, id: "btn" },
+      ]);
+      expect(result.phaseCount).toBe(3);
+    }
+  });
+
+  it("the same script with every id present still runs the real comparison", () => {
+    const entry = baseEntry({
+      kinds: ["ground", "resistor", "switch", "voltage_source"],
+      phases: [
+        { set: [{ id: "sw", params: { closed: 0 } }], durationS: 2e-3 },
+        { set: [{ id: "sw", params: { closed: 1 } }], durationS: 2e-3 },
+      ],
+    });
+    expect(runCorpusEntry(entry, switchedDivider(0)).status).toBe("pass");
+  });
+});
+
 /** vsrc -> r1 -> gnd. Every kind here is in CORE_IMPLEMENTED_KINDS (kinds.ts), so this reaches the plain pass/fail flow instead of "not-ported". */
 function simpleDivider(): SimCircuit {
   return {
@@ -814,6 +852,63 @@ describe("NE555 point 13.4 — the timing network against the sidecar, and the s
     expect(out.vcc).toBeCloseTo(-0.0136953, 7);
     expect(out.ra).toBe(0.0011785); // the resistor's own current is left for the sidecar
     expect(adjust({ ra: 1 }).vcc).toBeUndefined();
+  });
+});
+
+// The "555 LED Chaser" corpus FAIL was the sidecar's: its timing capacitor
+// carries catalogUid "capacitor" (ESR 1 ohm, leakage 10 Mohm) and the guard
+// read params.catalogUid / params.leakage, so it timed an ideal capacitor.
+describe("NE555 on a lossy catalog timing capacitor: the core against the sidecar (the 555 LED Chaser)", () => {
+  const base = syntheticEntry("31-ne555-astable-led").circuit;
+  // Fixture 31 rewired as the chaser's network: RA 4.7 k, RB 10 k to the capacitor, C 10 uF with the catalog's losses.
+  const circuit: SimCircuit = {
+    ...base,
+    components: base.components
+      .filter((c) => c.id !== "rpot")
+      .map((c) =>
+        c.id === "ra"
+          ? { ...c, params: { resistance: 4700 } }
+          : c.id === "rb"
+            ? { ...c, params: { resistance: 10000 } }
+            : c.id === "ct"
+              ? { ...c, catalogUid: "capacitor", params: { capacitance: 9.999999999999999e-6 } }
+              : c,
+      ),
+    wires: base.wires
+      .filter((w) => w.from_component !== "rpot" && w.to_component !== "rpot")
+      .concat([{ from_component: "rb", from_pin: "b", to_component: "ct", to_pin: "a" }]),
+  };
+  const spec = { component: "u1", mode: "astable", capacitor: "ct" } as const;
+  const durationS = 0.8;
+  // Collected once, on first use: the core is only initialised by this file's beforeAll.
+  let traced: ReturnType<typeof levelChanges> | undefined;
+  const coreChanges = () => (traced ??= levelChanges(collectCoreDigitalTrace(circuit, durationS), "u1"));
+
+  it("the core's trace passes against the lossy sidecar, every phase and period to 1e-6", () => {
+    const sidecar = extractNe555Sidecar(circuit, spec, durationS);
+    expect(checkNe555Periods({ key: "u1", changes: coreChanges(), phases: sidecar.phases, minPhases: 5 })).toEqual([]);
+  });
+
+  it("the detector: the sidecar with its leakage dropped fails against the same core trace", () => {
+    const seeded = extractNe555Sidecar(circuit, spec, durationS, { dropCapacitorLeakage: true });
+    const mismatches = checkNe555Periods({ key: "u1", changes: coreChanges(), phases: seeded.phases, minPhases: 5 });
+    expect(mismatches.length).toBeGreaterThan(0);
+    expect(mismatches.some((m) => /first HIGH/.test(m.id))).toBe(true);
+  });
+
+  it("the detector: the ideal model the old guard built (no catalog identity) fails against the same core trace", () => {
+    const idealCircuit: SimCircuit = {
+      ...circuit,
+      components: circuit.components.map((c) => (c.id === "ct" ? { ...c, catalogUid: undefined } : c)),
+    };
+    const ideal = extractNe555Sidecar(idealCircuit, spec, durationS);
+    expect(checkNe555Periods({ key: "u1", changes: coreChanges(), phases: ideal.phases, minPhases: 5 }).length).toBeGreaterThan(0);
+  });
+
+  it("at a mid-HIGH instant the core's readout matches the sidecar's terminal voltage and the capacitor's series-plus-leakage current", () => {
+    const sidecar = extractNe555Sidecar(circuit, spec, durationS);
+    const mid = sidecar.phases[2]!;
+    expect(compareNe555Sidecar(sidecar, collectCoreSamples(circuit, [(mid.t0 + mid.t1) / 2]))).toEqual([]);
   });
 });
 

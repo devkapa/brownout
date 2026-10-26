@@ -92,6 +92,7 @@ import { classicIdentityHash, createFileReferenceCache, getOrCompute, fixtureHas
 import { collectClassicSamples, collectCoreSamples, DEFAULT_DURATION_S, sampleTimesFor } from "./sample.js";
 import { denseAnalogSchedule } from "./schedule.js";
 import {
+  findPhaseMissingIds,
   replayStimuliOnClassic,
   replayStimuliOnCore,
   STIMULUS_FIXED_STEP_S,
@@ -423,6 +424,8 @@ export function explainRichardsonMismatches(
  * core comparison, not just a bookkeeping gesture toward one.
  *
  * Results:
+ *   - "phase-missing-id" when a phase sets a component id the circuit does
+ *     not contain (ruling R41 (3)); checked first, and neither engine runs.
  *   - "core-stimuli-pending" when the core cannot even LOAD the circuit
  *     (`StimuliNotYetSupportedOnCoreError` — some kind isn't
  *     `CORE_IMPLEMENTED_KINDS` yet, or the core otherwise declines the
@@ -449,6 +452,14 @@ export function explainRichardsonMismatches(
  */
 function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   const phases = entry.phases!;
+
+  // Ruling R41 (3): a phase aimed at a component the circuit lacks would run
+  // as a no-op on both engines (classic's reload ignores it, setParams skips
+  // it), so whatever the comparison said, that phase checked nothing.
+  const missing = findPhaseMissingIds(circuit, phases);
+  if (missing.length > 0) {
+    return { status: "phase-missing-id", kinds: entry.kinds, classicWallMs: null, coreWallMs: null, phaseCount: phases.length, missing };
+  }
 
   let classicSamples: StimulusStepSample[];
   let classicWallMs: number;
@@ -481,7 +492,7 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
       return { status: "core-stimuli-pending", kinds: entry.kinds, classicWallMs, coreWallMs: null, phaseCount: phases.length };
     }
     // Any other throw — non-convergence, or CoreEngine.setParams rejecting a
-    // phase's override (an unknown component, or a param that exists but is
+    // phase's override (an unknown param, or a param that exists but is
     // not live) — is a genuine failure to surface, never a silent skip and
     // never folded into "not yet supported" (that status is reserved for
     // StimuliNotYetSupportedOnCoreError alone, above).
@@ -1196,7 +1207,10 @@ function psuStaysCv(circuit: SimCircuit, psuId: string, horizonS: number, stimul
     if (engine.getIcState(psuId)?.reg !== 0) return false;
     let t0 = 0;
     for (const [k, phase] of phases.entries()) {
-      if (k > 0 && phase.set?.length) engine.setParams(phase.set.map((set) => ({ componentId: set.id, params: set.params })));
+      // Ruling R41: setParams skips an unknown id, which would judge the rail under a stimulus that never happened.
+      if (k > 0 && phase.set?.length && !engine.setParams(phase.set.map((set) => ({ componentId: set.id, params: set.params })))) {
+        throw new Error(`psuStaysCv: phase ${k} sets a component the loaded program does not hold.`);
+      }
       const n = Math.max(1, Math.ceil((2000 * phase.durationS) / total));
       for (let j = 1; j <= n; j++) {
         engine.advance(t0 + (phase.durationS * j) / n);
@@ -1242,7 +1256,10 @@ export function collectCoreDigitalTraceWithPhases(circuit: SimCircuit, phases: r
     let end = engine.simTime;
     phases.forEach((phase, index) => {
       if (index > 0 && phase.set && phase.set.length > 0) {
-        engine.setParams(phase.set.map((o) => ({ componentId: o.id, params: o.params })));
+        // Ruling R41: setParams skips an unknown id; a trace that silently lost a press would time the wrong pulse.
+        if (!engine.setParams(phase.set.map((o) => ({ componentId: o.id, params: o.params })))) {
+          throw new Error(`collectCoreDigitalTraceWithPhases: phase ${index} sets a component the loaded program does not hold.`);
+        }
       }
       end += phase.durationS;
       engine.advance(end);

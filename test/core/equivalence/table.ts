@@ -36,6 +36,7 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
     let declined = 0;
     let notPorted = 0;
     let errored = 0;
+    let phaseMissingId = 0;
     let unstimulated = 0;
 
     for (const { entry, result } of outcomes) {
@@ -63,6 +64,12 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
           // core did not attempt a real comparison here".
           declined += 1;
           break;
+        case "phase-missing-id":
+          // A phase that sets a component the circuit lacks would have run as
+          // a no-op on both engines (ruling R41 (3)): a harness finding,
+          // counted on its own so it can never be read as a pass or a decline.
+          phaseMissingId += 1;
+          break;
         case "pass":
           pass += 1;
           break;
@@ -87,10 +94,10 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
     let status: KindRow["status"];
     if (!implemented) {
       status = "not-ported";
-    } else if (fail > 0 || errored > 0) {
-      // An errored entry means equivalence was never actually demonstrated
-      // for this kind on that circuit — that must not read as "pass" any
-      // more than an outright mismatch would.
+    } else if (fail > 0 || errored > 0 || phaseMissingId > 0) {
+      // An errored or phase-missing-id entry means equivalence was never
+      // actually demonstrated for this kind on that circuit — that must not
+      // read as "pass" any more than an outright mismatch would.
       status = "fail";
     } else if (ran > 0) {
       status = "pass";
@@ -98,7 +105,7 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
       status = "untested";
     }
 
-    rows.push({ kind, implemented, supported, fixtures, ran, pass, fail, declined, notPorted, errored, unstimulated, status });
+    rows.push({ kind, implemented, supported, fixtures, ran, pass, fail, declined, notPorted, errored, phaseMissingId, unstimulated, status });
   }
   return rows;
 }

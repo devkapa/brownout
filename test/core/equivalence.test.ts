@@ -141,6 +141,7 @@ describe("the gate (assertion b)", () => {
       declined: 0,
       notPorted: 0,
       errored: 0,
+      phaseMissingId: 0,
       unstimulated: 0,
       status: "pass",
     };
@@ -163,6 +164,7 @@ describe("the gate (assertion b)", () => {
       declined: 1,
       notPorted: 0,
       errored: 0,
+      phaseMissingId: 0,
       unstimulated: 0,
       status: "untested",
     };
@@ -185,6 +187,7 @@ describe("the gate (assertion b)", () => {
       declined: 0,
       notPorted: 0,
       errored: 0,
+      phaseMissingId: 0,
       unstimulated: 0,
       status: "pass",
     };

@@ -173,6 +173,16 @@ function printKnownHitSummary(summary: KnownHitSummary): void {
   }
 }
 
+/** Ruling R41 (3): each phase-missing-id flag is a corpus-producer bug, so every one is named here, not only counted. */
+function printPhaseMissingIds(outcomes: readonly HarnessEntryOutcome[]): void {
+  const flagged = outcomes.filter((o) => o.result.status === "phase-missing-id");
+  console.log(`phase-missing-id flags: ${flagged.length === 0 ? "none" : flagged.length}`);
+  for (const { entry, result } of flagged) {
+    if (result.status !== "phase-missing-id") continue;
+    console.log(`  ${entry.id}: ${result.missing.map((m) => `phase ${m.phaseIndex} sets "${m.id}"`).join(", ")}`);
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -201,6 +211,7 @@ async function main(): Promise<void> {
   console.log(`${run.outcomes.length} corpus entr${run.outcomes.length === 1 ? "y" : "ies"} evaluated.`);
   const summary = summarizeKnownHits(run.outcomes);
   printKnownHitSummary(summary);
+  printPhaseMissingIds(run.outcomes);
 
   if (args.jsonPath) {
     // `summary` rides beside the report's own fields rather than inside toJsonReport (report.ts is shared with the gate test).

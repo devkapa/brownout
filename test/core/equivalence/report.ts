@@ -16,11 +16,11 @@ function yesNo(value: boolean): string {
 
 export function renderMarkdownTable(rows: readonly KindRow[]): string {
   const header =
-    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | unstimulated | status |";
-  const sep = "|---|---|---|---|---|---|---|---|---|---|---|";
+    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | phase-missing-id | unstimulated | status |";
+  const sep = "|---|---|---|---|---|---|---|---|---|---|---|---|";
   const lines = rows.map(
     (r) =>
-      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.unstimulated} | ${r.status} |`,
+      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.phaseMissingId} | ${r.unstimulated} | ${r.status} |`,
   );
   return [header, sep, ...lines].join("\n");
 }
@@ -85,6 +85,12 @@ function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult)
       return (
         `${head} (classic replayed ${result.phaseCount} phase(s) in ${fmtMs(result.classicWallMs)}; ` +
         "core stimuli pending — owner decision 1's parameter-update event is W1b, not yet landed)"
+      );
+    case "phase-missing-id":
+      return (
+        `${head} (harness finding, neither engine run: ` +
+        result.missing.map((m) => `phase ${m.phaseIndex} sets "${m.id}"`).join(", ") +
+        ` of ${result.phaseCount} phase(s), which the circuit does not contain)`
       );
     case "pass":
       return (

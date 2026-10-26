@@ -46,6 +46,13 @@
  * (this file's own tests, ahead of the orchestrator's table) can exercise a
  * kind before it lands there.
  *
+ * A phase's `set` naming a component the circuit does not contain is refused
+ * on the core side (`StimulusPhaseMissingIdError`, ruling R41 (3)): classic's
+ * reload ignores such an override, and since R41 `CoreEngine.setParams` skips
+ * an unknown id too, so the phase would otherwise run as a no-op on both
+ * engines and compare clean while checking nothing. `findPhaseMissingIds`
+ * lists them up front; run-entry.ts reports the entry as "phase-missing-id".
+ *
  * A phase's `set` naming a param that exists but is not live
  * (`CoreEngine.setParams`'s own check, per `CORE_RECORD_SHAPES.liveParams`)
  * is NEVER folded into "not yet supported" — it propagates as-is (a plain
@@ -79,6 +86,38 @@ export interface StimulusStepSample {
   readonly netV: Readonly<Record<string, number>>;
   readonly elementI: Readonly<Record<string, number>>;
   readonly digitalState: Readonly<Record<string, number>>;
+}
+
+/** One `set` entry naming a component id the circuit does not contain. */
+export interface PhaseMissingId {
+  readonly phaseIndex: number;
+  readonly id: string;
+}
+
+/** Every (phase, id) pair whose `set` names a component `circuit` lacks, in phase order then `set` order. */
+export function findPhaseMissingIds(circuit: SimCircuit, phases: readonly StimulusPhase[]): PhaseMissingId[] {
+  const ids = new Set(circuit.components.map((c) => c.id));
+  const missing: PhaseMissingId[] = [];
+  phases.forEach((phase, phaseIndex) => {
+    for (const override of phase.set ?? []) {
+      if (!ids.has(override.id)) missing.push({ phaseIndex, id: override.id });
+    }
+  });
+  return missing;
+}
+
+/** Thrown by `replayStimuliOnCore` when a phase names a component the circuit lacks: see this file's header. */
+export class StimulusPhaseMissingIdError extends Error {
+  readonly missing: readonly PhaseMissingId[];
+  constructor(missing: readonly PhaseMissingId[]) {
+    super(
+      "replayStimuliOnCore: " +
+        missing.map((m) => `phase ${m.phaseIndex} sets component "${m.id}"`).join(", ") +
+        ", which the circuit does not contain; both engines would skip it, so the phase would check nothing.",
+    );
+    this.name = "StimulusPhaseMissingIdError";
+    this.missing = missing;
+  }
 }
 
 function applyPhaseOverrides(circuit: SimCircuit, phase: StimulusPhase): SimCircuit {
@@ -243,8 +282,10 @@ export interface StimulusScheduleSample {
  * schedule passed in is truncated or was not actually built from this same
  * `phases` array — never silently compared as if the phase ran to
  * completion), or when `CoreEngine.setParams` itself rejects a change (an
- * unknown component/param, or a param that exists but is not live) — a
- * stimulus the caller asked for must fail loudly, never be silently skipped.
+ * unknown param, or a param that exists but is not live) — a stimulus the
+ * caller asked for must fail loudly, never be silently skipped. Throws
+ * `StimulusPhaseMissingIdError` before loading anything when a phase names a
+ * component the circuit lacks (this file's header).
  */
 export function replayStimuliOnCore(
   circuit: SimCircuit,
@@ -252,6 +293,11 @@ export function replayStimuliOnCore(
   schedule: readonly StimulusScheduleSample[],
   implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
 ): StimulusStepSample[] {
+  // Checked up front rather than from setParams's `false`: phase 0's `set`
+  // never reaches setParams (it is folded into the load below).
+  const missing = findPhaseMissingIds(circuit, phases);
+  if (missing.length > 0) throw new StimulusPhaseMissingIdError(missing);
+
   const engine = new CoreEngine();
   try {
     try {
@@ -291,7 +337,15 @@ export function replayStimuliOnCore(
           componentId: override.id,
           params: override.params,
         }));
-        engine.setParams(changes);
+        // findPhaseMissingIds above already refused an absent id, so a
+        // `false` here means the circuit and the compiled program disagree
+        // about which components exist: a harness bug, never a quiet skip.
+        if (!engine.setParams(changes)) {
+          throw new Error(
+            `replayStimuliOnCore: phase ${phaseIndex}'s set names a component the circuit holds but the loaded ` +
+              "program does not; setParams skipped it.",
+          );
+        }
       }
 
       const phaseStartTime = engine.simTime;

@@ -601,7 +601,7 @@ export interface CompareResult {
   readonly maxRelErrorAmps: number;
 }
 
-export type EntryStatus = "not-ported" | "core-declined" | "core-stimuli-pending" | "pass" | "fail" | "error";
+export type EntryStatus = "not-ported" | "core-declined" | "core-stimuli-pending" | "phase-missing-id" | "pass" | "fail" | "error";
 
 interface EntryResultBase {
   readonly kinds: readonly string[];
@@ -634,6 +634,21 @@ export interface CoreStimuliPendingResult extends EntryResultBase {
   readonly status: "core-stimuli-pending";
   /** `entry.phases.length` — how many phases classic actually replayed. */
   readonly phaseCount: number;
+}
+
+/**
+ * A harness finding, not a circuit verdict (ruling R41 (3)): at least one of
+ * `entry.phases` sets a component id the circuit does not contain. Classic's
+ * reload ignores such an override and `CoreEngine.setParams` skips it, so the
+ * phase would run as a no-op on both engines and compare clean while checking
+ * nothing; neither engine is run. The fix belongs to the corpus producer.
+ */
+export interface PhaseMissingIdResult extends EntryResultBase {
+  readonly status: "phase-missing-id";
+  /** `entry.phases.length`. */
+  readonly phaseCount: number;
+  /** Every (phase, id) the circuit lacks, in phase order (stimuli.ts's `findPhaseMissingIds`). */
+  readonly missing: readonly { readonly phaseIndex: number; readonly id: string }[];
 }
 
 /**
@@ -693,7 +708,14 @@ export interface ErrorResult extends EntryResultBase {
   readonly message: string;
 }
 
-export type EntryResult = NotPortedResult | CoreDeclinedResult | CoreStimuliPendingResult | PassResult | FailResult | ErrorResult;
+export type EntryResult =
+  | NotPortedResult
+  | CoreDeclinedResult
+  | CoreStimuliPendingResult
+  | PhaseMissingIdResult
+  | PassResult
+  | FailResult
+  | ErrorResult;
 
 /** One kind's row in the per-kind pass table (kinds.ts's CORE_IMPLEMENTED_KINDS/CORE_SUPPORTED_KINDS gate on this). */
 export interface KindRow {
@@ -710,6 +732,8 @@ export interface KindRow {
   readonly notPorted: number;
   /** Entries containing this kind that ended in "error" — not one of the table's required columns, kept here so nothing is silently dropped (table.ts's rendered markdown omits it when zero everywhere). */
   readonly errored: number;
+  /** Entries containing this kind flagged "phase-missing-id" (a phase sets a component the circuit lacks): never run, never a pass, and the kind's status cannot read "pass" while any remain. */
+  readonly phaseMissingId: number;
   /** Entries containing this kind whose `stimulus` is "verify-script" AND that carry no exported `phases` (CorpusEntry's own doc) — counted here so a pass count that is mostly unstimulated entries doesn't read as parity with devolt's own scripted check. An entry WITH phases was actually replayed (gate 2d; status "core-stimuli-pending" or, once W1b lands, a real pass/fail) and is not counted here even though the core side is still pending. */
   readonly unstimulated: number;
   readonly status: "pass" | "fail" | "untested" | "not-ported";
