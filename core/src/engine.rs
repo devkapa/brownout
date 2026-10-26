@@ -30,6 +30,7 @@
 #[cfg(test)]
 use crate::drivers::Driver;
 use crate::devices::ics;
+use crate::digital::power::PowerHold;
 use crate::error::BoError;
 use crate::events::{DeviceId, PartitionId};
 use crate::kernel::{DeviceEvaluator, DriverRequest, Kernel, KernelError, SeedMemoryError};
@@ -55,7 +56,9 @@ pub const STAT_FIXED_NODES: u32 = 3;
 // (`kernel::DeviceEvaluator::ic_evaluations`, W1c) — see `Engine::stat`. 14
 // and 16-20 (rail moves, rail sensitivity computations, rail scans, rail
 // events, source edges, reader flips at a scan) come live from the partition
-// solver (W1f). An index past the table (>= `STAT_COUNT`) is `NaN`.
+// solver (W1f). 25 and 26 (power holds taken, released: F5's D8, classic's
+// `_holdOffCounts.accepted`) come live from the partition solver. An index
+// past the table (>= `STAT_COUNT`) is `NaN`.
 pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// W1b's report to the orchestrator: index 15 is NOT in core/README.md's
 /// "Stat indices" table yet (that file is off limits to this worker) — it is
@@ -63,7 +66,7 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// plan row B2's "W1b reports the count of multi-capacitor linear
 /// partitions in the corpus". The `bo_engine_stat` export list itself is
 /// unaffected either way (it already accepts any `u32` index).
-const STAT_COUNT: usize = 25;
+const STAT_COUNT: usize = 27;
 
 /// The placeholder evaluator every `Engine::load` installs a `Kernel` with
 /// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
@@ -96,8 +99,12 @@ impl DeviceEvaluator for WithSources {
         self.inner.evaluate(reader, now, acting_on_edges, voltages)
     }
 
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[crate::drivers::Driver], out: &mut Vec<DriverRequest>) {
-        self.inner.evaluate_into(reader, now, acting_on_edges, voltages, drivers, out)
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[crate::drivers::Driver], out: &mut Vec<DriverRequest>) {
+        self.inner.evaluate_into(reader, now, acting_on_edges, voltages, holds, drivers, out)
+    }
+
+    fn evaluate_held(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold]) -> Vec<DriverRequest> {
+        self.inner.evaluate_held(reader, now, acting_on_edges, voltages, holds)
     }
 
     fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
@@ -126,8 +133,8 @@ impl DeviceEvaluator for WithSources {
         out
     }
 
-    fn on_settled_into(&mut self, now: f64, drivers: &[crate::drivers::Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
-        self.inner.on_settled_into(now, drivers, solver, out);
+    fn on_settled_into(&mut self, now: f64, drivers: &[crate::drivers::Driver], solver: &dyn PartitionSolver, holds: &[PowerHold], out: &mut Vec<(usize, f64)>) {
+        self.inner.on_settled_into(now, drivers, solver, holds, out);
         solver.source_slots(out);
     }
 
@@ -263,6 +270,8 @@ impl Engine {
             // W1g point 18: slow interval closes, slow events fired, latches,
             // junction re-arms.
             21..=24 => self.kernel.solver().slow_stats()[i as usize - 21],
+            // W1c point 1a (F5, D8): power holds taken and released.
+            25..=26 => self.kernel.solver().hold_stats()[i as usize - 25],
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }

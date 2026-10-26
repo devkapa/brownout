@@ -542,6 +542,10 @@ pub struct ClosedFormSolver {
     /// The running ramps, set by the owner whenever one starts or ends (and
     /// after a rollback), as for the stepped solver.
     ramps: Option<Rc<RampEval>>,
+    /// F5: the owner's device-indexed power-hold table (W1c point 1a) and
+    /// whether any entry is not free; the owner journals it.
+    holds: Rc<Vec<digital::power::PowerHold>>,
+    holds_on: bool,
     /// Test builds keep every partition's state from when the window opened
     /// and check, at the window's end, that a partition the journal does not
     /// hold is unchanged, and after a rollback that all of them are back: a
@@ -664,12 +668,20 @@ impl ClosedFormSolver {
             rail_until: f64::INFINITY,
             rail_follow: Vec::new(),
             ramps: None,
+            holds: Rc::new(Vec::new()),
+            holds_on: false,
             #[cfg(test)]
             w_saved: None,
         }
     }
 
     /// The running resolved ramps, or none (Sources point 3, R3 (b)).
+    /// The owner's power-hold table, after every change to it.
+    pub(crate) fn set_power_holds(&mut self, holds: Rc<Vec<digital::power::PowerHold>>, on: bool) {
+        self.holds = holds;
+        self.holds_on = on;
+    }
+
     pub(crate) fn set_ramps(&mut self, ramps: Option<Rc<RampEval>>) {
         self.ramps = ramps;
     }
@@ -1041,7 +1053,7 @@ impl ClosedFormSolver {
             };
             Self::note_bits(part, voltages);
             let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
-            Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &Bnd::new(voltages), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, 0.0)?;
+            Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, 0.0)?;
             Self::publish(part, live_params, voltages, currents);
             readers.extend_from_slice(&part.watch_ids);
             Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
@@ -1109,7 +1121,7 @@ impl ClosedFormSolver {
         };
         Self::note_bits(part, voltages);
         let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
-        Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &Bnd::new(voltages), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, jump)?;
+        Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, jump)?;
         Self::publish(part, live_params, voltages, currents);
         let mut readers: Vec<DeviceId> = part.watch_ids.clone();
         Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
@@ -1137,7 +1149,7 @@ impl ClosedFormSolver {
         let vc_now = vc_of(part, now);
         bank_drift(part, now);
         let on = OnRail { rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
-        Self::aim(part, now, vc_now, &Bnd::new(voltages), on, self.ramps.as_deref(), 0.0);
+        Self::aim(part, now, vc_now, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), on, self.ramps.as_deref(), 0.0);
         Self::publish(part, live_params, voltages, currents);
         let crossing = Self::schedule_crossing(part, now, voltages, rail, &self.rail_edges, &self.rail_follow, self.rail_until);
         Self::set_couple(part, now, crossing, voltages, rail, live_params);

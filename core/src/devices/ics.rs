@@ -27,7 +27,7 @@
 //! module's; this file only creates the `Driver`s and answers what they
 //! should request each delta.
 
-use crate::digital::power::IcPower;
+use crate::digital::power::{IcPower, PowerHold};
 use crate::digital::{self, IcRecord};
 use crate::drivers::{DelaySet, Driver, DriverStage};
 use crate::events::{DeviceId, DriverId, Mode};
@@ -295,6 +295,10 @@ pub struct IcEvaluator {
     driver_owner: Vec<u32>,
     /// Every distinct supply node of every IC; see [`SupplyNode`].
     supplies: Vec<SupplyNode>,
+    /// The solver's power-hold table as the last `on_settled` saw it (empty
+    /// while nothing was held): an IC whose hold changed is re-checked, as
+    /// one whose supply moved is.
+    seen_holds: Vec<PowerHold>,
     /// How many ICs `on_settled_into`'s incremental path has looked at, for
     /// the tests that pin its cost to what changed.
     #[cfg(test)]
@@ -340,6 +344,7 @@ impl IcEvaluator {
             dirty: Vec::new(),
             driver_owner,
             supplies,
+            seen_holds: Vec::new(),
             #[cfg(test)]
             visited: 0,
         }
@@ -393,7 +398,10 @@ impl IcEvaluator {
     /// is left out of `out` instead of built, and (kernel-side) never
     /// journaled, applied or counted. Without it every request is kept, which
     /// is what load settling's `evaluate` wants.
-    fn evaluate_impl(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], live: Option<&[Driver]>, out: &mut Vec<DriverRequest>) {
+    ///
+    /// `holds` is the solver's power-hold table: a held-off IC reads and
+    /// requests nothing (W1c point 1a), exactly as an unpowered one.
+    fn evaluate_impl(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], live: Option<&[Driver]>, out: &mut Vec<DriverRequest>) {
         self.evaluations += 1;
         let at = self.position(reader.0 as usize).unwrap_or_else(|| panic!("IcEvaluator: no IC registered for reader {reader:?}"));
         if self.journaling {
@@ -401,6 +409,8 @@ impl IcEvaluator {
         }
         let entry = &mut self.ics[at];
         let ic = &entry.record;
+        // Read only when some IC is held: this runs at every evaluation.
+        let hold = if holds.is_empty() { PowerHold::FREE } else { digital::power::hold_of(holds, entry.device_index) };
         // A combinational IC's readout comes from its drivers' committed
         // levels and its power (`on_settled`), neither of which an evaluation
         // writes; the other families keep theirs in `family_slots`. Whether an
@@ -415,7 +425,7 @@ impl IcEvaluator {
         // already re-derives power itself (`None` while unpowered), so this
         // branch does its own power gate rather than sharing the one below.
         if let Family::Ne555(state) = &mut entry.family {
-            match digital::ne555::evaluate(ic, state, voltages, acting_on_edges) {
+            match digital::ne555::evaluate(ic, state, voltages, acting_on_edges, hold) {
                 None => {
                     // Point 10: unpowered -- the slot goes NaN and nothing is
                     // requested (drivers keep their frozen committed level
@@ -451,7 +461,12 @@ impl IcEvaluator {
             entry.power = digital::power::ic_power(ic, v_vcc, v_gnd);
             entry.power_key = Some(key);
         }
-        let power = entry.power;
+        // The cache holds the free verdict; a hold overrides it (W1c point
+        // 1a).
+        let mut power = entry.power;
+        if !hold.is_free() {
+            power.powered = digital::power::verdict(ic, v_vcc, v_gnd, hold);
+        }
         if !power.powered {
             // W1c contract point 9 / W1d sequential point 3 ("an unpowered
             // device reads, writes and requests nothing, so its state and
@@ -531,10 +546,10 @@ impl IcEvaluator {
     /// What [`DeviceEvaluator::on_settled_into`] would append if it looked at
     /// every IC: the reference its incremental form is asserted against.
     #[cfg(test)]
-    fn full_scan(&self, drivers: &[Driver], voltages: &[f64]) -> Vec<(usize, f64)> {
+    fn full_scan(&self, drivers: &[Driver], voltages: &[f64], holds: &[PowerHold]) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
         for entry in &self.ics {
-            let powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+            let powered = entry_verdict(entry, voltages, holds);
             let mut published = entry.published.clone();
             slot_writes(&entry.family, &entry.output_drivers, &entry.family_slots, entry.record.slot_base, &mut published, powered, drivers, false, &mut out);
         }
@@ -605,6 +620,14 @@ fn rom_words(device: &Device, kind: u32, logic_len: usize) -> Vec<u32> {
     device.blob[words_from..words_from + words_count].iter().map(|&w| w as u32).collect()
 }
 
+/// IC `entry`'s power verdict at `voltages` under `holds` (W1c points 1
+/// and 1a).
+#[inline]
+fn entry_verdict(entry: &IcEntry, voltages: &[f64], holds: &[PowerHold]) -> bool {
+    let ic = &entry.record;
+    digital::power::verdict(ic, voltages[ic.vcc.node], voltages[ic.gnd.node], digital::power::hold_of(holds, entry.device_index))
+}
+
 impl DeviceEvaluator for IcEvaluator {
     /// Contract point 4 ("An unpowered IC reads nothing") and point 7
     /// (evaluate the truth table, map the result onto driver requests) for
@@ -615,8 +638,13 @@ impl DeviceEvaluator for IcEvaluator {
     /// `digital::sequential`/`digital::memory` — no digital logic lives in
     /// this function itself.
     fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64]) -> Vec<DriverRequest> {
+        self.evaluate_held(reader, now, acting_on_edges, voltages, &[])
+    }
+
+    /// [`Self::evaluate`] under the solver's hold table (load settling).
+    fn evaluate_held(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold]) -> Vec<DriverRequest> {
         let mut out = Vec::new();
-        self.evaluate_impl(reader, now, acting_on_edges, voltages, None, &mut out);
+        self.evaluate_impl(reader, now, acting_on_edges, voltages, holds, None, &mut out);
         out
     }
 
@@ -626,8 +654,8 @@ impl DeviceEvaluator for IcEvaluator {
     /// reads, the previous reads' storage, the truth-table and family
     /// results) is reused rather than allocated: this runs tens of thousands
     /// of times per simulated second.
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
-        self.evaluate_impl(reader, now, acting_on_edges, voltages, Some(drivers), out);
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+        self.evaluate_impl(reader, now, acting_on_edges, voltages, holds, Some(drivers), out);
     }
 
     /// Every piece of per-device mutable state `evaluate` (or `seed_memory`)
@@ -719,7 +747,7 @@ impl DeviceEvaluator for IcEvaluator {
     /// and replaying every IC's every slot at every completed instant.
     fn on_settled(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
-        self.on_settled_into(now, drivers, solver, &mut out);
+        self.on_settled_into(now, drivers, solver, solver.power_holds(), &mut out);
         out
     }
 
@@ -737,24 +765,48 @@ impl DeviceEvaluator for IcEvaluator {
     /// produced them. Under `cfg(test)` every call also runs the scan over
     /// every IC and asserts the two agree, so a missed mark fails whichever
     /// test hits it.
-    fn on_settled_into(&mut self, _now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
+    fn on_settled_into(&mut self, _now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, holds: &[PowerHold], out: &mut Vec<(usize, f64)>) {
         let voltages = solver.voltages();
         if !self.published_once {
             self.published_once = true;
             for supply in &mut self.supplies {
                 supply.bits = voltages[supply.node].to_bits();
             }
+            self.seen_holds.clear();
+            self.seen_holds.extend_from_slice(holds);
             self.dirty.clear();
             for entry in &mut self.ics {
                 entry.dirty = false;
-                entry.powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+                entry.powered = entry_verdict(entry, voltages, holds);
                 entry.publish(drivers, true, out);
             }
             return;
         }
 
         #[cfg(test)]
-        let (first_write, expected) = (out.len(), self.full_scan(drivers, voltages));
+        let (first_write, expected) = (out.len(), self.full_scan(drivers, voltages, holds));
+
+        // A hold changes the verdict with no supply moving (W1c point 1a):
+        // the ICs whose hold changed since the last call are re-checked. Both
+        // tables are empty whenever nothing is or was held.
+        if holds != self.seen_holds.as_slice() {
+            for (at, entry) in self.ics.iter_mut().enumerate() {
+                let d = entry.device_index;
+                if digital::power::hold_of(holds, d) == digital::power::hold_of(&self.seen_holds, d) {
+                    continue;
+                }
+                let powered = entry_verdict(entry, voltages, holds);
+                if powered != entry.powered {
+                    entry.powered = powered;
+                    if !entry.dirty {
+                        entry.dirty = true;
+                        self.dirty.push(at as u32);
+                    }
+                }
+            }
+            self.seen_holds.clear();
+            self.seen_holds.extend_from_slice(holds);
+        }
 
         // The power verdict only depends on the two supply voltages, so an IC
         // is re-checked only when one of its supply nodes moved, and joins
@@ -767,7 +819,7 @@ impl DeviceEvaluator for IcEvaluator {
             supply.bits = bits;
             for &at in &supply.ics {
                 let entry = &mut self.ics[at as usize];
-                let powered = digital::power::powered(&entry.record, voltages[entry.record.vcc.node], voltages[entry.record.gnd.node]);
+                let powered = entry_verdict(entry, voltages, holds);
                 if powered != entry.powered {
                     entry.powered = powered;
                     if !entry.dirty {
@@ -1841,7 +1893,7 @@ mod tests {
                 *now += 1e-6;
                 for &reader in &readers {
                     requests.clear();
-                    evaluator.evaluate_impl(reader, *now, true, volts, None, &mut requests);
+                    evaluator.evaluate_impl(reader, *now, true, volts, &[], None, &mut requests);
                 }
             }
         };
@@ -1938,7 +1990,7 @@ mod tests {
             let now = 1e-6;
             let asked = levels_of(&kernel.evaluator_mut().evaluate(reader, now, true, &volts));
             let mut filtered = Vec::new();
-            kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &drivers, &mut filtered);
+            kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &[], &drivers, &mut filtered);
             assert!(levels_of(&filtered).is_empty(), "{reader:?}: at a settled state nothing is worth asking, got {filtered:?}");
 
             for &(driver, level) in &asked {
@@ -1946,7 +1998,7 @@ mod tests {
                 let opposite = if level == Mode::High { Mode::Low } else { Mode::High };
                 perturbed[driver.0 as usize].request(opposite, now, &DelaySet::uniform(1e-9));
                 filtered.clear();
-                kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &perturbed, &mut filtered);
+                kernel.evaluator_mut().evaluate_into(reader, now, true, &volts, &[], &perturbed, &mut filtered);
                 assert_eq!(levels_of(&filtered), vec![(driver, level)], "{reader:?}: only the disturbed driver's request survives");
                 levels_checked += 1;
             }
@@ -1979,7 +2031,7 @@ mod tests {
             now += 1e-6;
             for &reader in &readers {
                 out.clear();
-                evaluator.evaluate_impl(reader, now, true, &volts, None, &mut out);
+                evaluator.evaluate_impl(reader, now, true, &volts, &[], None, &mut out);
                 let at = evaluator.position(reader.0 as usize).unwrap();
                 let entry = &evaluator.ics[at];
                 if matches!(entry.family, Family::Ne555(_)) {
@@ -1993,5 +2045,101 @@ mod tests {
         }
         assert!(unpowered > 0, "an unpowered verdict was cached and checked");
         assert!(distinct.len() > 8, "the supplies changed what was derived: {} distinct states", distinct.len());
+    }
+
+    // ---- F5a: the power hold (W1c point 1a) -----------------------------
+
+    /// A `74ls00`: `pins[i]` names logic pin `i` (`1a 1b 1y 2a 2b 2y ...`).
+    fn ls00(ci: usize, vcc: usize, gnd: usize, pins: [usize; 12], delay: f64) -> Device {
+        let mut device_pins = vec![pin(vcc), pin(gnd)];
+        device_pins.extend(pins.iter().map(|&n| pin(n)));
+        let mut blob = vec![0.0];
+        blob.extend((0..12).map(|i| if i % 3 != 2 { kinds::PIN_FLOATING_INPUT as f64 } else { 0.0 }));
+        Device { kind: kinds::IC_74LS00, component_index: ci, pins: device_pins, params: ls_ttl_params(0.008, delay), blob }
+    }
+
+    #[test]
+    fn a_held_off_ic_on_an_ideal_supply_stamps_reads_and_commits_nothing_and_its_hold_rolls_back() {
+        use crate::digital::power::PowerHold;
+        // A hold makes an IC unpowered whatever its supply reads (W1c point
+        // 1a), here on an ideal 5 V supply the procedure itself never holds
+        // (its draw cannot move it), so only the hold can be what changes.
+        //
+        // 0=gnd, 1=vcc, 2=1a=1b (spdt: sel 0 to gnd, 1 to vcc), 3=1y between
+        // two 10k (2.5 V with nothing stamped), 4=dump.
+        let ic = 4usize;
+        let p = program(5, 4, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            resistor(2, 1, 3, 10_000.0),
+            resistor(3, 3, 0, 10_000.0),
+            ls00(4, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 4, 0, 0, 4], 20e-9),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        let mut slots = [f64::NAN; 4];
+        let drain = |kernel: &mut Kernel<PartitionedSolver, IcEvaluator>, slots: &mut [f64; 4]| {
+            for (_, slot, v) in kernel.take_digital_writes() {
+                slots[slot] = v;
+            }
+        };
+        drain(&mut kernel, &mut slots);
+        assert!(kernel.solver().voltages()[3] > 4.5, "1a LOW: 1y driven HIGH, {}", kernel.solver().voltages()[3]);
+        assert_eq!(slots[0], 1.0);
+
+        // Inputs HIGH: 1y LOW is requested, due 20 ns on.
+        kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+        drain(&mut kernel, &mut slots);
+        let y = kernel.evaluator().ics[0].output_drivers[0];
+        assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "the LOW is still in flight");
+        let reads = ic_state(kernel.evaluator(), 0);
+
+        // Held off at this instant: no stamp (the divider alone, which a
+        // cached powered solution would not give), no read, NaN slots.
+        let hits = kernel.solver().cache_hits();
+        kernel.hold_power_as_event(ic, PowerHold::off()).unwrap();
+        drain(&mut kernel, &mut slots);
+        assert!(!kernel.solver().ic_powered(ic));
+        // The divider and the node shunt alone: 2.5 V less 12.5 nV.
+        let divider = kernel.solver().voltages()[3];
+        assert!((divider - 2.5).abs() < 1e-7, "a held IC stamps nothing: {divider}");
+        assert_eq!(kernel.solver().cache_hits(), hits, "the powered solution must not answer for a held IC");
+        assert!(slots.iter().all(|s| s.is_nan()), "every slot of a held IC is NaN: {slots:?}");
+
+        // The LOW falls due while held: held, not applied (point 9).
+        kernel.advance(1e-6).unwrap();
+        drain(&mut kernel, &mut slots);
+        assert_eq!(kernel.driver(y).committed(), Some(Mode::High), "a held IC's commit is held");
+        assert_eq!(kernel.solver().voltages()[3], divider);
+        assert_eq!(ic_state(kernel.evaluator(), 0), reads, "a held IC reads nothing");
+        assert!(slots.iter().all(|s| s.is_nan()));
+
+        // The table rolls back with a failed instant and with a snapshot.
+        let solver = kernel.solver_mut();
+        let window = solver.begin_instant();
+        solver.set_power_hold(ic, PowerHold::FREE);
+        assert_eq!(solver.power_hold(ic), PowerHold::FREE);
+        solver.rollback_instant(window);
+        assert_eq!(solver.power_hold(ic), PowerHold::off(), "rollback restores the hold");
+        let snap = solver.dynamic_snapshot();
+        solver.set_power_hold(ic, PowerHold::FREE);
+        solver.dynamic_restore(snap);
+        assert_eq!(solver.power_hold(ic), PowerHold::off(), "a restored snapshot carries the hold");
+        assert!(!solver.ic_powered(ic));
+
+        // `resetFailures` drops every hold: the IC reads at once and the held
+        // LOW applies.
+        kernel.reset_failures_as_event().unwrap();
+        drain(&mut kernel, &mut slots);
+        assert_eq!(kernel.solver().power_hold(ic), PowerHold::FREE);
+        assert!(kernel.solver().ic_powered(ic));
+        kernel.advance(2e-6).unwrap();
+        drain(&mut kernel, &mut slots);
+        assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "the held commit applied once released");
+        assert!(kernel.solver().voltages()[3] < 0.3, "1y driven LOW, {}", kernel.solver().voltages()[3]);
+        assert_eq!(slots[0], 0.0);
+        // One hold taken; the two releases are the rolled-back ones above
+        // (stats keep a failed attempt's counts); the drop is not a release.
+        assert_eq!(kernel.solver().hold_stats(), [1.0, 2.0]);
     }
 }

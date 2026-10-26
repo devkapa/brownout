@@ -656,6 +656,13 @@ pub struct StaticPartitionSolver {
     /// never happened (an entry is part of a junction partition's result).
     cache_journal: Vec<(u32, PartCache)>,
     cache_journaled: Vec<bool>,
+
+    // ---- F5: the power holds (W1c point 1a) -------------------------------
+    /// The owner's device-indexed hold table, and whether any entry is not
+    /// free. The owner journals it and hands it back after a rollback, so
+    /// this solver only reads it.
+    holds: std::rc::Rc<Vec<digital::power::PowerHold>>,
+    holds_on: bool,
 }
 
 impl StaticPartitionSolver {
@@ -946,10 +953,29 @@ impl StaticPartitionSolver {
             stamp_states: HashMap::new(),
             cache_journal: Vec::new(),
             cache_journaled: vec![false; partitions_len],
+            holds: std::rc::Rc::new(Vec::new()),
+            holds_on: false,
         })
     }
 
     /// Exact mode's hub source for the calls that follow.
+    /// The owner's hold table ([`crate::solve::PartitionedSolver`]'s), after
+    /// every change to it.
+    pub(crate) fn set_power_holds(&mut self, holds: std::rc::Rc<Vec<digital::power::PowerHold>>, on: bool) {
+        self.holds = holds;
+        self.holds_on = on;
+    }
+
+    /// The hold table as a verdict reads it: empty while nothing is held.
+    #[inline]
+    fn holds_slice(&self) -> &[digital::power::PowerHold] {
+        if self.holds_on {
+            &self.holds
+        } else {
+            &[]
+        }
+    }
+
     pub(crate) fn set_exact(&mut self, exact: Option<crate::solve::ExactStamp>) {
         self.exact = exact;
     }
@@ -1365,14 +1391,29 @@ impl StaticPartitionSolver {
             // A power window can sit inside a band, and an unpowered IC
             // stamps nothing: the gate of every IC on the rail is part of
             // the stamp, as a committed mode is.
-            for (_, ic) in &hub.touch_ics {
+            for (device, ic) in &hub.touch_ics {
                 if ic.vcc.node == rail || ic.gnd.node == rail {
-                    key.push(digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]) as u8);
+                    key.push(digital::power::verdict(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], digital::power::hold_of(if self.holds_on { &self.holds } else { &[] }, *device)) as u8);
                 }
             }
         }
         for &w in &self.part_waves[p_idx] {
             key.push(self.wave_levels[w as usize]);
+        }
+        // F5: a held IC stamps nothing, so its hold is part of the stamp of
+        // every partition it touches (a hub's `touch_ics` are these same
+        // ICs); a powered entry must not answer for it. Only the ICs not
+        // free are named (position and kind), so a key with no hold is the
+        // key it always was.
+        if self.holds_on {
+            let holds: &[digital::power::PowerHold] = &self.holds;
+            for &ic_index in &self.part_ics[p_idx] {
+                let hold = digital::power::hold_of(holds, self.ics[ic_index as usize].0);
+                if !hold.is_free() {
+                    key.extend_from_slice(&ic_index.to_le_bytes());
+                    key.push(hold.kind.tag());
+                }
+            }
         }
     }
 
@@ -1572,7 +1613,8 @@ impl StaticPartitionSolver {
             }
             let v_vcc = self.read_node(ic.vcc.node, p_idx, x);
             let v_gnd = self.read_node(ic.gnd.node, p_idx, x);
-            let power = digital::power::ic_power(ic, v_vcc, v_gnd);
+            let hold = if self.holds_on { digital::power::hold_of(&self.holds, self.ics[ic_index as usize].0) } else { digital::power::PowerHold::FREE };
+            let power = digital::power::ic_power_held(ic, v_vcc, v_gnd, hold);
             if !power.powered {
                 continue;
             }
@@ -1875,7 +1917,7 @@ impl StaticPartitionSolver {
         let rail = self.rail.expect("a hub partition implies a rail");
         let n = hub.shape.n;
         let z: Vec<f64> = if hub.nonlinear { x.iter().copied().chain(std::iter::once(u)).collect() } else { Vec::new() };
-        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
         let ic = (hub.nonlinear && !self.holds_free_ic_supply[p]).then(|| {
             let ic = crate::solve::ic_rail_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z, n);
             let explicit = ic.explicit_u(&z, n);
@@ -1905,7 +1947,7 @@ impl StaticPartitionSolver {
         let hub = self.hubs[p].as_ref().expect("a hub partition");
         let rail = self.rail.expect("a hub partition implies a rail");
         let n = hub.shape.n;
-        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
         stamp_linear_base(&hub.shape, n + 1, a, b, &self.switch_params, &bnd);
         stamp_ics_into_dyn(n + 1, a, b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z);
         stamp_junctions(&hub.shape.junctions, n + 1, a, b, z, &bnd);
@@ -1998,7 +2040,7 @@ impl StaticPartitionSolver {
             b.fill(0.0);
             self.hub_residual_stamp(p, now, drivers, u, &z, &mut a, &mut b);
             let extra = free_supply.then(|| {
-                let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+                let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
                 crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z).extra_jacobian(&z, n)
             });
             let mut step = residual_step(&a, &b, &z);
@@ -2099,7 +2141,7 @@ impl StaticPartitionSolver {
         let hub = self.hubs[p].as_ref().expect("a hub partition");
         let rail = self.rail.expect("a hub partition implies a rail");
         let n = hub.shape.n;
-        let bnd = Bnd::new(&self.voltages).with_ext(rail, n).hold_power_at(u);
+        let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
         let eps = f64::EPSILON;
         // Neumaier's sum per row, `(sum, compensation)`, and each element's
         // rows and rounding.
@@ -2220,7 +2262,7 @@ impl StaticPartitionSolver {
         let hub = self.hubs[p].as_ref().expect("a hub partition");
         let rail = self.rail.expect("a hub partition implies a rail");
         let n = hub.shape.n;
-        let bnd = Bnd::new(&self.voltages).with_ext(rail, n);
+        let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n);
         crate::solve::curvature::floors(&hub.shape, &self.switch_params, &bnd, x, u, sens, lu_j, r, rho, pairs).map_err(|e| format!("partition {p}: {e}"))
     }
 
@@ -2279,7 +2321,7 @@ impl StaticPartitionSolver {
         };
         let band = {
             let hub = self.hubs[p].as_ref().expect("a hub partition");
-            let bnd = Bnd::new(&self.voltages).with_ext(rail, hub.shape.n);
+            let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, hub.shape.n);
             let floors = floors.unwrap_or_default();
             match ic {
                 HubIc::Linear => Some(rails::RAIL_RESOLVE_V),

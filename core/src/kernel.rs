@@ -25,6 +25,7 @@
 
 use crate::drivers::{DelaySet, Driver};
 use crate::events::{DeviceId, DriverId, Event, EventHeap, EventKind, Mode, PartitionId, Seq, Token, Version};
+use crate::digital::power::PowerHold;
 use crate::solve::PartitionSolver;
 
 /// The per-instant delta-pass cap (contract point 3: "More than 1000 deltas
@@ -237,9 +238,22 @@ pub trait DeviceEvaluator {
     /// per output-capable pin, each pin its own driver; a 555's OUT and DIS
     /// are two drivers), and the kernel asserts it in debug builds
     /// ([`Kernel::run_deltas`]).
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+    ///
+    /// `holds` is the solver's power-hold table
+    /// ([`crate::solve::PartitionSolver::power_holds`], W1c point 1a): an IC
+    /// held unpowered reads and requests nothing whatever its supply reads.
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
         let _ = drivers;
-        out.extend(self.evaluate(reader, now, acting_on_edges, voltages));
+        out.extend(self.evaluate_held(reader, now, acting_on_edges, voltages, holds));
+    }
+
+    /// [`Self::evaluate`] under the solver's power-hold table, the form the
+    /// kernel calls where it keeps every request (load settling). The
+    /// default ignores the table, which every evaluator with no IC (every
+    /// test mock) may.
+    fn evaluate_held(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold]) -> Vec<DriverRequest> {
+        let _ = holds;
+        self.evaluate(reader, now, acting_on_edges, voltages)
     }
 
     /// Opens the rollback window for one instant (core/README.md, "A failed
@@ -318,8 +332,11 @@ pub trait DeviceEvaluator {
     /// the kernel calls this once per completed instant, so an evaluator that
     /// can fill it directly saves an allocation per instant. The default
     /// forwards to `on_settled`, so an implementation that only defines that
-    /// (every test mock) behaves exactly as before.
-    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
+    /// (every test mock) behaves exactly as before. `holds` is the solver's
+    /// power-hold table, as for [`Self::evaluate_into`]: a held IC's slots
+    /// read `NaN`.
+    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, holds: &[PowerHold], out: &mut Vec<(usize, f64)>) {
+        let _ = holds;
         out.extend(self.on_settled(now, drivers, solver));
     }
 
@@ -381,8 +398,12 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).evaluate(reader, now, acting_on_edges, voltages)
     }
 
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
-        (**self).evaluate_into(reader, now, acting_on_edges, voltages, drivers, out)
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+        (**self).evaluate_into(reader, now, acting_on_edges, voltages, holds, drivers, out)
+    }
+
+    fn evaluate_held(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold]) -> Vec<DriverRequest> {
+        (**self).evaluate_held(reader, now, acting_on_edges, voltages, holds)
     }
 
     fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
@@ -409,8 +430,8 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).on_settled(now, drivers, solver)
     }
 
-    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, out: &mut Vec<(usize, f64)>) {
-        (**self).on_settled_into(now, drivers, solver, out)
+    fn on_settled_into(&mut self, now: f64, drivers: &[Driver], solver: &dyn PartitionSolver, holds: &[PowerHold], out: &mut Vec<(usize, f64)>) {
+        (**self).on_settled_into(now, drivers, solver, holds, out)
     }
 
     fn driver_changed(&mut self, driver: DriverId) {
@@ -1121,7 +1142,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let now = self.time;
         let mut writes = std::mem::take(&mut self.settled_buf);
         writes.clear();
-        self.evaluator.on_settled_into(now, &self.drivers, &self.solver, &mut writes);
+        self.evaluator.on_settled_into(now, &self.drivers, &self.solver, self.solver.power_holds(), &mut writes);
         self.pending_digital_writes.extend(writes.iter().map(|&(slot, value)| (now, slot, value)));
         self.settled_buf = writes;
     }
@@ -1271,9 +1292,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // ascending device order.
             affected.sort_unstable();
             affected.dedup();
+            // Nothing in this loop sets a hold, and the solver is a trait
+            // object: one call per pass says whether there is a table to
+            // fetch per reader, rather than one per reader (the SAP-1 never
+            // holds).
+            let held = !self.solver.power_holds().is_empty();
             for &reader in &affected {
                 requests.clear();
-                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), &self.drivers, &mut requests);
+                let holds = if held { self.solver.power_holds() } else { &[] };
+                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), holds, &self.drivers, &mut requests);
                 debug_assert!(
                     one_request_per_level_driver(&requests),
                     "evaluator returned a batch in which a driver is named by a Level and by another Level or Reset: {requests:?} (see DeviceEvaluator::evaluate_into)"
@@ -1517,6 +1544,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             .collect();
 
         let mut dirty: Vec<PartitionId> = self.solver.apply_params(triples);
+        // W1c point 1a: the circuit changed, so every power hold goes (a
+        // ping-pong still there re-holds at once), inside the window; a
+        // released IC reads at once.
+        let (released, readers) = self.solver.drop_power_holds();
+        dirty.extend(released);
         dirty.sort_unstable();
         dirty.dedup();
 
@@ -1530,14 +1562,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // for `advance` skipping a resolve when nothing is actually pending
         // — which does not apply here, since a live param really did just
         // change.
-        let result = if dirty.is_empty() {
+        let result = if dirty.is_empty() && readers.is_empty() {
             self.solver
                 .resolve_dirty(&[], self.time, &self.drivers)
                 .map(|_| ())
                 .map_err(KernelError::SolveFailed)
                 .and_then(|()| self.settle_slow_after(true))
         } else {
-            self.run_deltas(dirty, Vec::new(), true)
+            self.run_deltas(dirty, readers, true)
         };
 
         if let Err(e) = result {
@@ -1583,16 +1615,19 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let result = match self.solver.reset_failures(self.time) {
             Err(e) => Err(KernelError::SolveFailed(e)),
             Ok(mut dirty) => {
+                // W1c point 1a, as at `set_params`.
+                let (released, readers) = self.solver.drop_power_holds();
+                dirty.extend(released);
                 dirty.sort_unstable();
                 dirty.dedup();
-                if dirty.is_empty() {
+                if dirty.is_empty() && readers.is_empty() {
                     self.solver
                         .resolve_dirty(&[], self.time, &self.drivers)
                         .map(|_| ())
                         .map_err(KernelError::SolveFailed)
                         .and_then(|()| self.settle_slow_after(true))
                 } else {
-                    self.run_deltas(dirty, Vec::new(), true)
+                    self.run_deltas(dirty, readers, true)
                 }
             }
         };
@@ -1603,6 +1638,24 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         self.close_window(window);
         // New input, as a host's edit is (see `apply_params_as_event`).
         self.stalled = 0;
+        self.publish_settled();
+        Ok(())
+    }
+
+    /// Test builds: sets one IC's power hold as ONE event at the current time,
+    /// the envelope of [`Self::reset_failures_as_event`]: the partitions its
+    /// stamps touch re-solve and the IC is evaluated, in a delta cycle at
+    /// this instant. The hold procedure (F5b) sets holds inside a failing
+    /// solve instead; this is how a test reaches a held IC without one.
+    #[cfg(test)]
+    pub(crate) fn hold_power_as_event(&mut self, device: usize, hold: PowerHold) -> Result<(), KernelError> {
+        let window = self.open_window();
+        let dirty = self.solver.hold_power(device, hold);
+        if let Err(e) = self.run_deltas(dirty, vec![DeviceId(device as u32)], true) {
+            self.roll_back(window);
+            return Err(e);
+        }
+        self.close_window(window);
         self.publish_settled();
         Ok(())
     }
@@ -1628,7 +1681,13 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             return Err(SeedMemoryError::Rejected(msg));
         }
 
-        if let Err(e) = self.run_deltas(Vec::new(), vec![device], true) {
+        // W1c point 1a, as at `set_params`: an accepted seed drops every
+        // power hold, inside the window.
+        let (dirty, mut readers) = self.solver.drop_power_holds();
+        readers.push(device);
+        readers.sort_unstable();
+        readers.dedup();
+        if let Err(e) = self.run_deltas(dirty, readers, true) {
             self.roll_back(window);
             return Err(SeedMemoryError::Kernel(e));
         }
@@ -1675,7 +1734,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // mistaken for a fixed point).
         let mut reset_dirty: Vec<PartitionId> = Vec::new();
         for &reader in all_readers {
-            let requests = self.evaluator.evaluate(reader, self.time, acting_on_edges, self.solver.voltages());
+            let requests = self.evaluator.evaluate_held(reader, self.time, acting_on_edges, self.solver.voltages(), self.solver.power_holds());
             for req in requests {
                 if let Some(p) = self.apply_request(req, self.time, true) {
                     reset_dirty.push(p);
@@ -1786,7 +1845,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
         let mut edge_pass_dirty: Vec<PartitionId> = Vec::new();
         for &reader in all_readers {
-            let requests = self.evaluator.evaluate(reader, now, true, self.solver.voltages());
+            let requests = self.evaluator.evaluate_held(reader, now, true, self.solver.voltages(), self.solver.power_holds());
             for req in requests {
                 if let Some(p) = self.apply_request(req, now, false) {
                     edge_pass_dirty.push(p);

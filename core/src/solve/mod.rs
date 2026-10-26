@@ -409,8 +409,8 @@ pub trait PartitionSolver {
     }
 
     /// Whether the IC at device index `device` is currently powered
-    /// (`digital::power::ic_power(..).powered`), read from the latest
-    /// PUBLISHED voltages — the kernel's power-loss hold (contract point 9)
+    /// (`digital::power::verdict`: its power hold's, else the window test on
+    /// the latest PUBLISHED voltages) — the kernel's power-loss hold (contract point 9)
     /// calls this to decide whether a due `Commit` for one of that IC's
     /// drivers applies now or is held. Default `true`: "true for a
     /// non-IC" — every driver through W1b has `Driver::device ==
@@ -571,6 +571,36 @@ pub trait PartitionSolver {
     /// junction re-arms (README W1g point 18).
     fn slow_stats(&self) -> [f64; 4] {
         [0.0; 4]
+    }
+
+    /// The power-hold table (W1c point 1a), device-indexed, as the evaluator
+    /// judges an IC's power by it ([`crate::kernel::DeviceEvaluator`]'s
+    /// `holds` argument): empty while no IC is held. Default empty, a solver
+    /// with no holds.
+    fn power_holds(&self) -> &[digital::power::PowerHold] {
+        &[]
+    }
+
+    /// Drops every power hold, at a successful `set_params`, `seed_memory`
+    /// or `resetFailures` (the circuit itself changed), returning the
+    /// partitions whose stamps change and the ICs released, which read at
+    /// once. Called by the kernel inside the event's window, so a failed
+    /// event rolls the drop back.
+    fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        (Vec::new(), Vec::new())
+    }
+
+    /// Power holds taken and released (D8).
+    fn hold_stats(&self) -> [f64; 2] {
+        [0.0; 2]
+    }
+
+    /// Test builds: sets one IC's hold as the hold procedure would, returning
+    /// the partitions to re-solve ([`crate::kernel::Kernel::hold_power_as_event`]).
+    #[cfg(test)]
+    fn hold_power(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
+        let _ = (device, hold);
+        unimplemented!("this solver takes no power hold")
     }
 }
 
@@ -770,6 +800,23 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
     fn slow_stats(&self) -> [f64; 4] {
         (**self).slow_stats()
     }
+
+    fn power_holds(&self) -> &[digital::power::PowerHold] {
+        (**self).power_holds()
+    }
+
+    fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        (**self).drop_power_holds()
+    }
+
+    fn hold_stats(&self) -> [f64; 2] {
+        (**self).hold_stats()
+    }
+
+    #[cfg(test)]
+    fn hold_power(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
+        (**self).hold_power(device, hold)
+    }
 }
 
 // ============================================================================
@@ -861,11 +908,26 @@ pub(crate) struct Bnd<'a> {
     ext: Option<(usize, usize)>,
     ramps: Option<(&'a live::RampEval, f64)>,
     power_u: Option<f64>,
+    /// The solver's hold table (device-indexed; empty while nothing is
+    /// held), which every IC stamp's power verdict consults (W1c point 1a).
+    holds: &'a [digital::power::PowerHold],
 }
 
 impl<'a> Bnd<'a> {
     pub(crate) fn new(values: &'a [f64]) -> Self {
-        Bnd { values, ext: None, ramps: None, power_u: None }
+        Bnd { values, ext: None, ramps: None, power_u: None, holds: &[] }
+    }
+
+    /// Judges every IC's power under `holds` (the solver's table).
+    pub(crate) fn with_holds(mut self, holds: &'a [digital::power::PowerHold]) -> Self {
+        self.holds = holds;
+        self
+    }
+
+    /// The hold of the IC at device index `device`.
+    #[inline]
+    pub(crate) fn hold(&self, device: usize) -> digital::power::PowerHold {
+        digital::power::hold_of(self.holds, device)
     }
 
     pub(crate) fn with_ext(mut self, node: usize, local: usize) -> Self {
@@ -1614,7 +1676,7 @@ pub(crate) fn ic_rail_terms(now: f64, drivers: &[Driver], ics: &[(usize, digital
         // Judged as the stamp judges it (`Bnd::hold_power_at`): the terms
         // are the derivative within the present power state.
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
+        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
@@ -1685,7 +1747,7 @@ pub(crate) fn ic_supply_terms(now: f64, drivers: &[Driver], ics: &[(usize, digit
         let (vcc_pin, gnd_pin) = (resolve(ic.vcc.node), resolve(ic.gnd.node));
         let (vcc, gnd) = (end(&vcc_pin), end(&gnd_pin));
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
+        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
@@ -1750,8 +1812,8 @@ pub(crate) fn ic_pull_target(ic: &digital::IcRecord, power: &digital::power::IcP
 /// "in between" case holds `*schmitt_state` instead (`digital::levels::read`'s
 /// own doc comment), never touching the floating model, so it never needs a
 /// bucket watch.
-pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord)], voltages: &[f64]) -> bool {
-    for (_, ic) in ics {
+pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord)], voltages: &[f64], holds: &[digital::power::PowerHold]) -> bool {
+    for (device_index, ic) in ics {
         // C8: a 555 takes no part in the floating model at all (it holds no
         // `FLOATING_INPUT` pin and reads nothing through it), so it must
         // never be considered here — its own TRIG/THR sit inside the
@@ -1761,7 +1823,7 @@ pub(crate) fn any_powered_ic_needs_bucket_watch(ics: &[(usize, digital::IcRecord
         if digital::is_ne555(ic.kind) {
             continue;
         }
-        let power = digital::power::ic_power(ic, voltages[ic.vcc.node], voltages[ic.gnd.node]);
+        let power = digital::power::ic_power_held(ic, voltages[ic.vcc.node], voltages[ic.gnd.node], digital::power::hold_of(holds, *device_index));
         if !power.powered {
             continue;
         }
@@ -1919,7 +1981,7 @@ pub(crate) fn ic_elements(now: f64, drivers: &[Driver], ics: &[(usize, digital::
         let vcc_pin = resolve(ic.vcc.node);
         let gnd_pin = resolve(ic.gnd.node);
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::powered(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x));
+        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
@@ -2583,6 +2645,23 @@ pub struct PartitionedSolver {
     slow_scratch: settle::SlowScratch,
     /// Stats 21-24. Not rolled back, as every stat.
     slow_counts: [u64; 4],
+
+    // ---- F5: the power-hold table (W1c point 1a) --------------------------
+    /// One [`digital::power::PowerHold`] per device index (an IC's only
+    /// meaningful), empty until the first hold: device-indexed rather than
+    /// by position in `ics`, because the stamps judge power over the
+    /// partition solvers' own IC lists, which are subsets. Shared with the
+    /// static solver; a change replaces it (`Rc::make_mut`), so a window
+    /// holds the table it found as the driver table's `Rc` is held.
+    holds: Rc<Vec<digital::power::PowerHold>>,
+    /// The entries not free: while 0, every verdict is the window test and
+    /// every hot path pays one branch (the SAP-1 never holds).
+    holds_active: u32,
+    w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32)>,
+    /// Holds taken and released (D8, classic's `_holdOffCounts.accepted`).
+    /// Not rolled back, as every stat; a drop at `set_params`,
+    /// `seed_memory` or `resetFailures` is not a release.
+    hold_counts: [u64; 2],
 }
 
 impl PartitionedSolver {
@@ -2826,6 +2905,10 @@ impl PartitionedSolver {
             slow_model: settle::SlowModel::default(),
             slow_scratch: settle::SlowScratch::default(),
             slow_counts: [0; 4],
+            holds: Rc::new(Vec::new()),
+            holds_active: 0,
+            w_holds: None,
+            hold_counts: [0; 2],
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.wire_w1g(program, &live, &fixed);
@@ -3464,8 +3547,8 @@ impl PartitionedSolver {
             leaving[j.anode] += i;
             leaving[j.cathode] -= i;
         }
-        for (pos, (_, ic)) in self.ics.iter().enumerate() {
-            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+        for (pos, (device_index, ic)) in self.ics.iter().enumerate() {
+            let power = digital::power::ic_power_held(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(*device_index));
             if !power.powered {
                 continue;
             }
@@ -3538,7 +3621,7 @@ impl PartitionedSolver {
             if !digital::is_ne555(ic.kind) {
                 continue;
             }
-            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            let power = digital::power::ic_power_held(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(*device_index));
             let committed = self.ic_driver_ids[pos].iter().map(|&id| &drivers[id as usize]).find(|d| d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
             currents[*device_index] = match (power.powered, committed) {
                 (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(
@@ -3755,7 +3838,7 @@ impl PartitionedSolver {
         if self.next_bucket.is_some() {
             return;
         }
-        if !any_powered_ic_needs_bucket_watch(&self.ics, &self.voltages) {
+        if !any_powered_ic_needs_bucket_watch(&self.ics, &self.voltages, self.power_holds_slice()) {
             return;
         }
         let boundary = digital::floating::next_bucket_boundary(now);
@@ -3925,8 +4008,107 @@ impl PartitionedSolver {
     }
 
     /// Drops the solver-level window state (the sub-solvers close their own).
+    /// The hold table as the verdict reads it: empty while nothing is held.
+    #[inline]
+    pub(crate) fn power_holds_slice(&self) -> &[digital::power::PowerHold] {
+        if self.holds_active == 0 {
+            &[]
+        } else {
+            &self.holds
+        }
+    }
+
+    /// The hold of the IC at device index `device` (free for any other).
+    #[inline]
+    pub(crate) fn power_hold(&self, device: usize) -> digital::power::PowerHold {
+        digital::power::hold_of(self.power_holds_slice(), device)
+    }
+
+    /// Sets the hold of the IC at device index `device`, journaled in an
+    /// open window, and returns the partitions its stamps touch (its supply,
+    /// pin and driver nodes'), which the caller re-solves: the hold changes
+    /// what they stamp. A transition to `Off` counts a hold, `Off` to free a
+    /// release.
+    #[cfg_attr(not(test), allow(dead_code, reason = "the hold procedure (F5b) is the first caller outside the tests"))]
+    pub(crate) fn set_power_hold(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
+        use digital::power::HoldKind;
+        let old = self.power_hold(device);
+        if old.kind == HoldKind::Off && hold.is_free() {
+            self.hold_counts[1] += 1;
+        } else if hold.kind == HoldKind::Off && old.kind != HoldKind::Off {
+            self.hold_counts[0] += 1;
+        }
+        self.write_power_hold(device, hold)
+    }
+
+    /// Drops every hold, uncounted (the circuit itself changed: W1c point
+    /// 1a), returning the partitions to re-solve.
+    fn release_every_hold(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        let (mut dirty, mut readers) = (Vec::new(), Vec::new());
+        if self.holds_active == 0 {
+            return (dirty, readers);
+        }
+        for device in 0..self.holds.len() {
+            if !self.holds[device].is_free() {
+                dirty.extend(self.write_power_hold(device, digital::power::PowerHold::FREE));
+                readers.push(DeviceId(device as u32));
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        (dirty, readers)
+    }
+
+    fn write_power_hold(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
+        let pos = self.ic_position.get(device).copied().filter(|&i| i != u32::MAX);
+        let Some(pos) = pos else {
+            debug_assert!(hold.is_free(), "only an IC takes a power hold");
+            return Vec::new();
+        };
+        let old = self.power_hold(device);
+        if old == hold {
+            return Vec::new();
+        }
+        if self.window && self.w_holds.is_none() {
+            self.w_holds = Some((Rc::clone(&self.holds), self.holds_active));
+        }
+        let n = self.device_kinds.len();
+        let table = Rc::make_mut(&mut self.holds);
+        if table.len() < n {
+            table.resize(n, digital::power::PowerHold::FREE);
+        }
+        table[device] = hold;
+        match (old.is_free(), hold.is_free()) {
+            (true, false) => self.holds_active += 1,
+            (false, true) => self.holds_active -= 1,
+            _ => {}
+        }
+        self.sync_power_holds();
+        let ic = &self.ics[pos as usize].1;
+        let mut dirty: Vec<PartitionId> = [ic.vcc.node, ic.gnd.node].into_iter().chain(ic.logic.iter().map(|p| p.node)).filter_map(|n| self.partition_of_node(n)).collect();
+        dirty.sort_unstable();
+        dirty.dedup();
+        dirty
+    }
+
+    /// Hands the partition solvers the table they judge their stamps (and
+    /// the static one its cache keys) by.
+    fn sync_power_holds(&mut self) {
+        let on = self.holds_active > 0;
+        self.static_solver.set_power_holds(Rc::clone(&self.holds), on);
+        self.closed_form.set_power_holds(Rc::clone(&self.holds), on);
+        self.stepped.set_power_holds(Rc::clone(&self.holds), on);
+    }
+
+    /// Holds taken and released (D8).
+    #[cfg_attr(not(test), allow(dead_code, reason = "read through `PartitionSolver::hold_stats`"))]
+    pub(crate) fn hold_counts(&self) -> [f64; 2] {
+        [self.hold_counts[0] as f64, self.hold_counts[1] as f64]
+    }
+
     fn close_window(&mut self) {
         self.window = false;
+        self.w_holds = None;
         self.v_log.clear();
         self.i_log.clear();
         for p in self.dyn_logged_list.drain(..) {
@@ -4215,7 +4397,7 @@ impl PartitionSolver for PartitionedSolver {
     /// earlier delta of a doomed instant has already changed it by the time a
     /// later one fails.
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
-        Box::new((
+        let base = (
             (
                 self.static_solver.snapshot(),
                 self.closed_form.snapshot(),
@@ -4228,11 +4410,32 @@ impl PartitionSolver for PartitionedSolver {
                 self.derived_now,
             ),
             self.w1f_snapshot(),
-        ))
+        );
+        // F5: the hold table rides along only while an IC is held, so a
+        // snapshot with none keeps the shape it always had; restoring that
+        // shape means no hold.
+        if self.holds_active == 0 {
+            Box::new(base)
+        } else {
+            Box::new((base, (Rc::clone(&self.holds), self.holds_active)))
+        }
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         type Base = ((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64);
+        type Holds = (Rc<Vec<digital::power::PowerHold>>, u32);
+        let snapshot = match snapshot.downcast::<((Base, hub::W1fSnapshot), Holds)>() {
+            Ok(boxed) => {
+                let (inner, (holds, holds_active)) = *boxed;
+                (self.holds, self.holds_active) = (holds, holds_active);
+                Box::new(inner) as Box<dyn std::any::Any>
+            }
+            Err(other) => {
+                (self.holds, self.holds_active) = (Rc::new(Vec::new()), 0);
+                other
+            }
+        };
+        self.sync_power_holds();
         if let Ok(boxed) = snapshot.downcast::<(Base, hub::W1fSnapshot)>() {
             let (base, w1f) = *boxed;
             self.w1f_restore(w1f);
@@ -4430,6 +4633,12 @@ impl PartitionSolver for PartitionedSolver {
         }
         // W1g point 15: the slow state, then every stamp it set this instant.
         self.slow_rollback_instant();
+        // F5 (Rails point 8): the hold table the window found.
+        if let Some((holds, active)) = self.w_holds.take() {
+            self.holds = holds;
+            self.holds_active = active;
+            self.sync_power_holds();
+        }
         // Values from before the bounds were last exact are back.
         self.v_hint = f64::INFINITY;
         self.i_hint = f64::INFINITY;
@@ -4554,7 +4763,7 @@ impl PartitionSolver for PartitionedSolver {
 
     fn ic_powered(&self, device: usize) -> bool {
         match self.ic_position.get(device).filter(|&&i| i != u32::MAX).map(|&i| &self.ics[i as usize]) {
-            Some((_, ic)) => digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]).powered,
+            Some(&(device_index, ref ic)) => digital::power::verdict(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(device_index)),
             // Not a tracked IC at all (a non-IC driver, `Driver::device ==
             // usize::MAX`, or an out-of-range index): "true for a non-IC"
             // (the trait default's own doc comment) — the kernel only ever
@@ -4586,7 +4795,7 @@ impl PartitionSolver for PartitionedSolver {
             if digital::is_ne555(ic.kind) {
                 continue;
             }
-            let power = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            let power = digital::power::ic_power_held(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(*device_index));
             if !power.powered {
                 continue;
             }
@@ -4703,6 +4912,23 @@ impl PartitionSolver for PartitionedSolver {
 
     fn slow_stats(&self) -> [f64; 4] {
         self.slow_counts.map(|c| c as f64)
+    }
+
+    fn power_holds(&self) -> &[digital::power::PowerHold] {
+        self.power_holds_slice()
+    }
+
+    fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
+        self.release_every_hold()
+    }
+
+    fn hold_stats(&self) -> [f64; 2] {
+        self.hold_counts()
+    }
+
+    #[cfg(test)]
+    fn hold_power(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
+        self.set_power_hold(device, hold)
     }
 }
 

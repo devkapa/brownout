@@ -913,6 +913,9 @@ impl PartitionedSolver {
                 }
             }
             let constant = |n: usize| self.local_index[n].is_none() && !live[n];
+            // The constant power below is the free verdict: tables are built
+            // at load, before any hold exists.
+            debug_assert_eq!(self.holds_active, 0, "no power hold exists at load");
             let const_power = (constant(ic.vcc.node) && constant(ic.gnd.node)).then(|| digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]));
             let (power, v_gnd, vih, vil) = match const_power {
                 Some(p) => (if p.powered { POWER_ON } else { POWER_OFF }, p.v_gnd, p.vih, p.vil),
@@ -1959,11 +1962,15 @@ impl PartitionedSolver {
     /// supplies are constant.
     fn sag_power(&self, k: usize, now: f64) -> IcPower {
         let e = &self.slow_model.sag_ics[k];
+        let (device, ic) = &self.ics[e.pos];
+        // A hold overrides even a constant supply's power (W1c point 1a): the
+        // hold procedure never holds such an IC, but a hold is a verdict, not
+        // a supply reading.
+        let hold = self.power_hold(*device);
         if let Some(p) = e.const_power {
-            return p;
+            return if hold.is_free() { p } else { IcPower { powered: digital::power::verdict(ic, f64::NAN, f64::NAN, hold), ..p } };
         }
-        let ic = &self.ics[e.pos].1;
-        digital::power::ic_power(ic, self.slow_voltage(ic.vcc.node, now), self.slow_voltage(ic.gnd.node, now))
+        digital::power::ic_power_held(ic, self.slow_voltage(ic.vcc.node, now), self.slow_voltage(ic.gnd.node, now), hold)
     }
 
     /// Cell `cell`'s commanded direction, if a target, and its pin's voltage
@@ -2051,7 +2058,9 @@ impl PartitionedSolver {
                     return;
                 }
             };
-            if !info.cf && info.power != POWER_LIVE {
+            // A held IC's constant power is not its verdict: the slow path
+            // below judges it (`sag_power`).
+            if !info.cf && info.power != POWER_LIVE && self.holds_active == 0 {
                 let v = self.voltages[info.node as usize];
                 debug_assert_eq!(info.power == POWER_ON && sags(&info, dir, v), self.slow_model.sag_ics[k].const_power.is_some_and(|p| sag::read(dir, v, &p).is_some()));
                 if info.power == POWER_OFF {

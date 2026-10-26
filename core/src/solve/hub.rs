@@ -688,11 +688,11 @@ impl PartitionedSolver {
         let ic_draw = |uu: f64| -> f64 {
             let mut total = 0.0;
             for &pos in &hub.rail_ics {
-                let (_, ic) = &self.ics[pos as usize];
+                let (d, ic) = &self.ics[pos as usize];
                 let at = |node: usize| if node == rail { uu } else { v[node] };
                 let held = |node: usize| if node == rail { u } else { v[node] };
                 let mut power = digital::power::ic_power(ic, at(ic.vcc.node), at(ic.gnd.node));
-                power.powered = digital::power::powered(ic, held(ic.vcc.node), held(ic.gnd.node));
+                power.powered = digital::power::verdict(ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d));
                 if !power.powered {
                     continue;
                 }
@@ -1020,8 +1020,8 @@ impl PartitionedSolver {
             for (k, &pos) in hub.rail_ics.iter().enumerate() {
                 let (d, ic) = &self.ics[pos as usize];
                 let at = |uu: f64, node: usize| if node == rail { uu } else { self.voltages[node] };
-                let before = digital::power::powered(ic, at(old_u, ic.vcc.node), at(old_u, ic.gnd.node));
-                let after = digital::power::powered(ic, at(u, ic.vcc.node), at(u, ic.gnd.node));
+                let before = digital::power::verdict(ic, at(old_u, ic.vcc.node), at(old_u, ic.gnd.node), self.power_hold(*d));
+                let after = digital::power::verdict(ic, at(u, ic.vcc.node), at(u, ic.gnd.node), self.power_hold(*d));
                 if before != after && !hold_power {
                     readers.push(DeviceId(*d as u32));
                     flipped_parts.extend(&hub.ic_parts[k]);
@@ -1061,9 +1061,9 @@ impl PartitionedSolver {
         let rail = hub.node;
         let on = |uu: f64| {
             hub.rail_ics.iter().filter(|&&pos| {
-                let ic = &self.ics[pos as usize].1;
+                let (d, ic) = &self.ics[pos as usize];
                 let at = |node: usize| if node == rail { uu } else { self.voltages[node] };
-                digital::power::powered(ic, at(ic.vcc.node), at(ic.gnd.node))
+                digital::power::verdict(ic, at(ic.vcc.node), at(ic.gnd.node), self.power_hold(*d))
             }).count()
         };
         let (before, after) = (on(old_u), on(u));
@@ -1166,7 +1166,7 @@ impl PartitionedSolver {
         let Some(&pos) = self.ic_position.get(device).filter(|&&p| p != u32::MAX) else { return Vec::new() };
         let ic = &self.ics[pos as usize].1;
         let v = &self.voltages;
-        let power = digital::power::ic_power(ic, v[ic.vcc.node], v[ic.gnd.node]);
+        let power = digital::power::ic_power_held(ic, v[ic.vcc.node], v[ic.gnd.node], self.power_hold(device));
         if !power.powered || digital::is_ne555(ic.kind) {
             return Vec::new();
         }
@@ -1762,8 +1762,8 @@ impl PartitionedSolver {
         let hub = self.hub.as_ref().unwrap();
         let at = |node: usize| if node == hub.node { hub.state.u } else { self.voltages[node] };
         hub.rail_ics.iter().map(|&pos| {
-            let ic = &self.ics[pos as usize].1;
-            digital::power::powered(ic, at(ic.vcc.node), at(ic.gnd.node))
+            let (d, ic) = &self.ics[pos as usize];
+            digital::power::verdict(ic, at(ic.vcc.node), at(ic.gnd.node), self.power_hold(*d))
         }).collect()
     }
 
@@ -2215,8 +2215,8 @@ impl PartitionedSolver {
                 leaving -= i;
             }
         }
-        for (pos, (_, ic)) in self.ics.iter().enumerate() {
-            let power = digital::power::ic_power(ic, v[ic.vcc.node], v[ic.gnd.node]);
+        for (pos, (d, ic)) in self.ics.iter().enumerate() {
+            let power = digital::power::ic_power_held(ic, v[ic.vcc.node], v[ic.gnd.node], self.power_hold(*d));
             if !power.powered {
                 continue;
             }

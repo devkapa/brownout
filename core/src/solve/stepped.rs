@@ -891,6 +891,10 @@ pub struct SteppedSolver {
     rail: Option<usize>,
     ramps: Option<Rc<RampEval>>,
     exact: Option<ExactStamp>,
+    /// F5: the owner's device-indexed power-hold table (W1c point 1a) and
+    /// whether any entry is not free; the owner journals it.
+    holds: Rc<Vec<digital::power::PowerHold>>,
+    holds_on: bool,
     /// Exact mode's battery partition, whose next step is planned only
     /// after the owner has advanced SoC with the step just committed, and
     /// the partitions whose plans are so held back (Rails point 9: E and r
@@ -1030,6 +1034,8 @@ impl SteppedSolver {
             rail: topo.rail,
             ramps: None,
             exact: None,
+            holds: Rc::new(Vec::new()),
+            holds_on: false,
             defer: None,
             deferred: Vec::new(),
             bills: Vec::new(),
@@ -1047,6 +1053,12 @@ impl SteppedSolver {
             #[cfg(test)]
             exact_commit_log: Vec::new(),
         }
+    }
+
+    /// The owner's power-hold table, after every change to it.
+    pub(crate) fn set_power_holds(&mut self, holds: Rc<Vec<digital::power::PowerHold>>, on: bool) {
+        self.holds = holds;
+        self.holds_on = on;
     }
 
     /// The running ramps every step reads its boundary through (Sources
@@ -1215,7 +1227,7 @@ impl SteppedSolver {
             drivers,
             ics: &self.ics,
             node_owner: &self.node_owner,
-            bnd: Bnd::new(voltages),
+            bnd: Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }),
             ramps,
             keep_lu: false,
             exact: None,
@@ -1223,7 +1235,7 @@ impl SteppedSolver {
             p_idx: p,
             iterated: part.iterated(),
         };
-        let bnd = Bnd::new(voltages).at_time(ramps, at).with_ext(rail, n).hold_power_at(u_p);
+        let bnd = Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }).at_time(ramps, at).with_ext(rail, n).hold_power_at(u_p);
         let z: Vec<f64> = if part.curved() { x.iter().copied().chain(std::iter::once(u_p)).collect() } else { Vec::new() };
         let ic = (part.curved() && !part.holds_free_ic_supply).then(|| {
             let ic = crate::solve::ic_rail_terms(stamp_now, drivers, &self.ics, &self.node_owner, &bnd, p, &z, n);
@@ -1387,7 +1399,7 @@ impl SteppedSolver {
                 drivers,
                 ics: &self.ics,
                 node_owner: &self.node_owner,
-                bnd: Bnd::new(voltages),
+                bnd: Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }),
                 ramps: self.ramps.as_deref(),
                 keep_lu: hub,
                 exact: self.exact,
@@ -1986,6 +1998,7 @@ impl SteppedSolver {
         let scratch = &mut self.threshold_scratch;
         let rail = self.rail;
         let ramps = self.ramps.as_deref();
+        let holds: &[digital::power::PowerHold] = if self.holds_on { &self.holds } else { &[] };
         let exact = self.exact;
         // Only a cell's charge is billed (`commit_partition`); a PSU's never
         // is, so its trial skips the source-current solves.
@@ -2001,7 +2014,7 @@ impl SteppedSolver {
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
         let keep_lu = part.hub && rail.is_some();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated() };
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated() };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);

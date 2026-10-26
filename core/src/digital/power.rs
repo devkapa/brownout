@@ -49,10 +49,94 @@ pub fn powered(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> bool {
     !ic.vcc.open && !ic.gnd.open && v_supply_raw >= ic.vcc_min * 0.9 && v_supply_raw <= ic.vcc_max * 1.1
 }
 
+/// What a power hold (W1c point 1a, classic's H8) makes of an IC's verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HoldKind {
+    /// No hold: the verdict is the window test ([`powered`]).
+    #[default]
+    Free,
+    /// Held unpowered: the IC starves its own supply when powered.
+    Off,
+    /// A probe solve's fixed verdict (the hold procedure's steps 1 and 3).
+    Probe(bool),
+}
+
+impl HoldKind {
+    /// A byte naming the kind, for a cache key or a memo.
+    pub fn tag(self) -> u8 {
+        match self {
+            HoldKind::Free => 0,
+            HoldKind::Off => 1,
+            HoldKind::Probe(false) => 2,
+            HoldKind::Probe(true) => 3,
+        }
+    }
+}
+
+/// Where a hold ends (W1c point 1a): when the supply difference, the IC
+/// still off, passes `level` in the direction `rising` names (inward of the
+/// window edge it starved at, by its own drop plus two reached widths).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Release {
+    pub level: f64,
+    pub rising: bool,
+}
+
+/// One IC's entry in the solver's hold table. `Default` is free.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PowerHold {
+    pub kind: HoldKind,
+    pub release: Option<Release>,
+}
+
+impl PowerHold {
+    pub const FREE: PowerHold = PowerHold { kind: HoldKind::Free, release: None };
+
+    pub fn off() -> PowerHold {
+        PowerHold { kind: HoldKind::Off, release: None }
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.kind == HoldKind::Free
+    }
+}
+
+/// The hold of the IC at device index `device` in a device-indexed table.
+/// The solver hands out an empty table while no IC is held, so the common
+/// case is one bounds check.
+#[inline]
+pub fn hold_of(holds: &[PowerHold], device: usize) -> PowerHold {
+    holds.get(device).copied().unwrap_or(PowerHold::FREE)
+}
+
+/// The power verdict, the one function every site that decides whether an
+/// IC is powered goes through: the hold's when there is one, else the
+/// window test.
+#[inline]
+pub fn verdict(ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) -> bool {
+    match hold.kind {
+        HoldKind::Free => powered(ic, v_vcc, v_gnd),
+        HoldKind::Off | HoldKind::Probe(false) => false,
+        HoldKind::Probe(true) => true,
+    }
+}
+
+/// [`ic_power`] with `powered` from [`verdict`]: a held-off IC is unpowered
+/// for every purpose, its thresholds and output resistance unused.
+#[inline]
+pub fn ic_power_held(ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) -> IcPower {
+    let mut power = ic_power(ic, v_vcc, v_gnd);
+    if !hold.is_free() {
+        power.powered = verdict(ic, v_vcc, v_gnd, hold);
+    }
+    power
+}
+
 /// `_icPowerInfo`, normal path (spec §1.3). `v_vcc` and `v_gnd` are the raw
 /// solved (or Newton-iterate) node voltages at the IC's `vcc`/`gnd` pins —
 /// callers read them off whatever voltage vector the pins' nodes sit in;
-/// this function does no node lookups of its own.
+/// this function does no node lookups of its own. This is the free verdict:
+/// a site that can see the hold table calls [`ic_power_held`].
 pub fn ic_power(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> IcPower {
     // The gate is tested on the raw, unclamped difference (sim-engine.ts
     // :5001, :5005-5008): a reversed supply simply reads as unpowered, with
@@ -357,6 +441,22 @@ mod tests {
         let s = 3.3 / 5.0;
         assert!((at3v3.0 - 1.6 * s).abs() < 1e-12);
         assert!((at3v3.1 - 2.7 * s).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_verdict_is_the_holds_and_the_window_tests_only_while_free() {
+        let ic = base_ic();
+        let probe = |b| PowerHold { kind: HoldKind::Probe(b), release: None };
+        for (v, inside) in [(5.0, true), (4.0, false), (6.0, false)] {
+            assert_eq!(verdict(&ic, v, 0.0, PowerHold::FREE), inside);
+            assert!(!verdict(&ic, v, 0.0, PowerHold::off()));
+            assert!(!verdict(&ic, v, 0.0, probe(false)));
+            assert!(verdict(&ic, v, 0.0, probe(true)));
+            assert_eq!(ic_power_held(&ic, v, 0.0, PowerHold::FREE), ic_power(&ic, v, 0.0));
+            assert!(!ic_power_held(&ic, v, 0.0, PowerHold::off()).powered);
+        }
+        assert_eq!(hold_of(&[], 3), PowerHold::FREE, "an empty table holds nothing");
+        assert_eq!(hold_of(&[PowerHold::FREE, PowerHold::off()], 1), PowerHold::off());
     }
 
     #[test]

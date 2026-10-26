@@ -6,7 +6,7 @@
 //! E1 lands (the underscores go with them): nothing in the dispatcher or the
 //! solver calls them yet.
 
-use super::power::{ic_power, IcPower};
+use super::power::{ic_power_held, IcPower, PowerHold};
 use super::IcRecord;
 use crate::drivers::{Driver, DriverStage};
 use crate::events::Mode;
@@ -64,9 +64,10 @@ pub fn resolve(stored: bool, v_rst: f64, v_trig: f64, v_thr: f64, vs: f64) -> bo
 /// result, written into `state` only when `acting_on_edges` (point 9.1: a
 /// frozen settling pass drives the comparator result without touching the
 /// latch, so a transient glitch during settling can never set or reset it).
-pub fn evaluate(ic: &IcRecord, state: &mut Ne555State, voltages: &[f64], acting_on_edges: bool) -> Option<bool> {
+pub fn evaluate(ic: &IcRecord, state: &mut Ne555State, voltages: &[f64], acting_on_edges: bool, hold: PowerHold) -> Option<bool> {
     let v1 = voltages[ic.gnd.node];
-    let power = ic_power(ic, voltages[ic.vcc.node], v1);
+    // A held-off 555 is unpowered whatever its supply reads (W1c point 1a).
+    let power = ic_power_held(ic, voltages[ic.vcc.node], v1, hold);
     if !power.powered {
         return None;
     }
@@ -195,6 +196,7 @@ pub fn watch_thresholds(logic_index: usize, v_vcc: f64, v_gnd: f64) -> Vec<Thres
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::digital::power::ic_power;
     use crate::digital::IcPin;
     use crate::engine::Engine;
     use crate::kinds::{self, ic_param};
@@ -258,14 +260,14 @@ mod tests {
         // vS = 5, vLower = 1.667 (relative to pin 1 = 0V here). TRIG at 1.5V
         // is below vLower: SET.
         let voltages_a = [0.0, 5.0, 1.5, 0.0, 5.0, 0.0, 0.0, 0.0];
-        let out_a = evaluate(&ic, &mut state_a, &voltages_a, true).unwrap();
+        let out_a = evaluate(&ic, &mut state_a, &voltages_a, true, PowerHold::FREE).unwrap();
         assert!(out_a, "TRIG 1.5V < vLower 1.667V (pin1=0V): SET");
 
         let mut state_b = Ne555State { out_high: false };
         // Pin 1 (gnd) shifted to +1V, and every node with it: every voltage
         // RELATIVE to pin 1 is identical, so the verdict must be identical.
         let voltages_b = [1.0, 6.0, 2.5, 0.0, 6.0, 0.0, 1.0, 0.0];
-        let out_b = evaluate(&ic, &mut state_b, &voltages_b, true).unwrap();
+        let out_b = evaluate(&ic, &mut state_b, &voltages_b, true, PowerHold::FREE).unwrap();
         assert_eq!(out_a, out_b, "shifting pin 1 (and every node with it) by +1V must not change the comparator result");
     }
 
@@ -278,8 +280,8 @@ mod tests {
         let mut vb = va;
         va[CV] = 0.0;
         vb[CV] = 123.456; // CV (pin 5) at an arbitrary voltage.
-        let out_a = evaluate(&ic, &mut state_a, &va, true);
-        let out_b = evaluate(&ic, &mut state_b, &vb, true);
+        let out_a = evaluate(&ic, &mut state_a, &va, true, PowerHold::FREE);
+        let out_b = evaluate(&ic, &mut state_b, &vb, true, PowerHold::FREE);
         assert_eq!(out_a, out_b, "CV is never read (NE555 point 2)");
     }
 
@@ -289,7 +291,7 @@ mod tests {
         let mut state = Ne555State { out_high: true };
         // vS well under the 2.0*0.9 = 1.8V floor: unpowered.
         let voltages = [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-        assert_eq!(evaluate(&ic, &mut state, &voltages, true), None);
+        assert_eq!(evaluate(&ic, &mut state, &voltages, true, PowerHold::FREE), None);
         assert!(state.out_high, "an unpowered evaluation reads, writes and requests nothing: the latch is untouched");
     }
 
@@ -302,7 +304,7 @@ mod tests {
         let ic = test_ic();
         let mut state = Ne555State { out_high: false };
         let voltages = [0.0, 5.0, 0.0, 5.0, 5.0, 0.0, 0.0, 0.0];
-        let result = evaluate(&ic, &mut state, &voltages, false).unwrap();
+        let result = evaluate(&ic, &mut state, &voltages, false, PowerHold::FREE).unwrap();
         assert!(result, "the frozen pass's own requested result reflects the live comparators");
         assert!(!state.out_high, "...but the stored latch must not have been written");
     }

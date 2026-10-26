@@ -1393,7 +1393,7 @@ fn stats_21_to_24_move() {
     let mut r = Engine::load(&resistor_2x()).unwrap();
     r.advance(1.5).unwrap();
     assert_eq!(r.stat(23), 1.0, "one latch");
-    assert!(e.stat(25).is_nan(), "past the table");
+    assert!(e.stat(27).is_nan(), "past the table");
 }
 
 // ---- rollback ------------------------------------------------------------------
