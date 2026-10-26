@@ -175,6 +175,22 @@ const EMPTY_STATE_LAYOUT = [] as const;
 /** A `resistor` or `led` with a code 91 record (W1g point 3); `thermalShutdown` is 0 or 1. */
 const THERMAL_STATE_LAYOUT = ["temperatureC", "dissipatedPowerW", "thermalShutdown"] as const;
 
+/**
+ * Whether this is a development build, for diagnostics a production host must
+ * never pay for or print. Bundlers (webpack, vite, Next) replace the literal
+ * `process.env.NODE_ENV` with a string at build time, so this reads correctly
+ * inside a browser worker too; where nothing defines `process` at all (an
+ * unbundled browser), the ReferenceError lands in the catch and counts as
+ * production, the side that stays silent.
+ */
+function isDevBuild(): boolean {
+  try {
+    return process.env.NODE_ENV !== "production";
+  } catch {
+    return false;
+  }
+}
+
 type DeviceStateLayout = readonly string[];
 /** One collect, each value under its layout name. */
 type DeviceState<L extends DeviceStateLayout> = { readonly [K in L[number]]: number };
@@ -194,6 +210,8 @@ export class CoreEngine implements EngineReadout {
   private _circuit: SimCircuit | null = null;
   /** The static warnings and the announce queue (W1g point 11). Fresh per load: W1 has no carry-forward (point 15). */
   private _warnings = new WarningLedger();
+  /** Component ids `setParams` has already reported as unknown, so a host retrying the same stale id every frame logs it once (ruling R41). Per engine, kept across loads. */
+  private _reportedUnknownParamIds = new Set<string>();
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -491,15 +509,21 @@ export class CoreEngine implements EngineReadout {
    * before any ABI call — belt and braces, mirroring `ProgramWriter
    * .addDevice`'s own "validate, but the reader is still the real source of
    * truth" stance:
-   * - an unknown `componentId` (no device compiled for it), an unknown param
-   *   name for that device's kind, or a param that exists but is NOT live
-   *   (`CORE_RECORD_SHAPES.get(kindCode).liveParams`) each throw a plain
-   *   `RangeError` naming exactly what was wrong — a caller/corpus-data bug,
-   *   not a circuit fact, so (like `load()`'s `options.simTime` check) this
-   *   is refused before anything else runs and never wrapped in
-   *   `CoreUnsupportedError`/`CoreLoadError`. This is what makes a stimulus
-   *   phase that sets a non-live param fail clearly instead of being
-   *   silently skipped.
+   * - an unknown `componentId` (no device compiled for it) is skipped, and
+   *   the call returns `false` (ruling R41, 2026-10-21). A host edits the
+   *   circuit while param changes are in flight, so an id the loaded program
+   *   no longer holds is routine; classic has no runtime param call at all
+   *   and its reload path ignores an override for an absent component the
+   *   same way. Outside production the id is logged once per engine
+   *   (`isDevBuild`); the rest of the batch is still validated and applied.
+   * - an unknown param name for a known device's kind, or a param that
+   *   exists but is NOT live (`CORE_RECORD_SHAPES.get(kindCode).liveParams`)
+   *   each throw a plain `RangeError` naming exactly what was wrong — a
+   *   caller/corpus-data bug, not a circuit fact, so (like `load()`'s
+   *   `options.simTime` check) this is refused before anything else runs and
+   *   never wrapped in `CoreUnsupportedError`/`CoreLoadError`. This is what
+   *   makes a stimulus phase that sets a non-live param fail clearly instead
+   *   of being silently skipped.
    * - every change's every triple is collected FIRST; only once all of them
    *   validate are they sent to `bo_engine_set_params` in ONE call ("applied
    *   as ONE event at the current time", the contract's own wording), and
@@ -511,20 +535,31 @@ export class CoreEngine implements EngineReadout {
    *   validation is the same rules already enforced here, but the ABI
    *   remains the authority) throws `CoreLoadError`, exactly like a
    *   `bo_engine_load`/`bo_engine_advance` failure.
+   *
+   * Returns `true` when every change named a component the loaded program
+   * holds (an empty `changes` included), `false` when at least one was
+   * skipped as unknown.
    */
-  setParams(changes: readonly CoreParamChange[]): void {
+  setParams(changes: readonly CoreParamChange[]): boolean {
     const compiled = this._requireLoaded();
 
     const deviceIndexByComponentId = new Map<string, number>();
     compiled.devices.forEach((device, index) => deviceIndexByComponentId.set(device.componentId, index));
 
     const triples: number[] = [];
+    let allKnown = true;
     for (const change of changes) {
       const deviceIndex = deviceIndexByComponentId.get(change.componentId);
       if (deviceIndex === undefined) {
-        throw new RangeError(
-          `CoreEngine.setParams: no device for component "${change.componentId}" in the loaded program.`,
-        );
+        allKnown = false;
+        if (isDevBuild() && !this._reportedUnknownParamIds.has(change.componentId)) {
+          this._reportedUnknownParamIds.add(change.componentId);
+          console.warn(
+            `CoreEngine.setParams: no device for component "${change.componentId}" in the loaded program; ` +
+              "the change was skipped.",
+          );
+        }
+        continue;
       }
       const kind = compiled.devices[deviceIndex]!.kind;
       const spec = LIVE_PARAM_SPECS.get(kind);
@@ -554,9 +589,9 @@ export class CoreEngine implements EngineReadout {
       }
     }
 
-    // Nothing to apply — no ABI call, no republish. (`changes` empty, or
-    // every change's own `params` empty.)
-    if (triples.length === 0) return;
+    // Nothing to apply — no ABI call, no republish. (`changes` empty, every
+    // change's own `params` empty, or every change skipped as unknown.)
+    if (triples.length === 0) return allKnown;
 
     coreCall((exports) => {
       // `>>> 0`: see load()'s bo_alloc comment — same i32 sign issue for
@@ -574,6 +609,7 @@ export class CoreEngine implements EngineReadout {
     });
 
     this._publishReadouts();
+    return allKnown;
   }
 
   /**
@@ -594,7 +630,8 @@ export class CoreEngine implements EngineReadout {
    * - an unknown `componentId` (no device compiled for it), or one whose
    *   compiled kind is not `74ls189`, throws a plain `RangeError` — a
    *   caller/corpus-data bug, not a circuit fact, so (like `setParams`'s own
-   *   unknown-component/unknown-param checks) this is refused before
+   *   unknown-param checks; ruling R41 made only `setParams`'s unknown
+   *   component a skip) this is refused before
    *   anything else runs and never wrapped in `CoreUnsupportedError`/
    *   `CoreLoadError`;
    * - `nibbles.length !== 16`, or any value that is not an integer in

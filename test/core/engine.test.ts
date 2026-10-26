@@ -1641,12 +1641,101 @@ describe("CoreEngine.setParams", () => {
     expect(voltagesReadCalls()).toBe(afterLoad);
   });
 
-  it("throws for an unknown componentId, without making any ABI call", () => {
-    const { setParamsCalls } = installFakeCore();
+  it("returns true when every change was applied", () => {
+    installFakeCore();
     const core = new CoreEngine();
     core.load(passivesCircuit(), WITH_PASSIVES);
-    expect(() => core.setParams([{ componentId: "no-such-component", params: { closed: 1 } }])).toThrow(RangeError);
-    expect(setParamsCalls()).toBe(0);
+    expect(core.setParams([{ componentId: "sw", params: { closed: 1 } }])).toBe(true);
+    expect(core.setParams([])).toBe(true);
+  });
+
+  // Ruling R41 (1): a host keeps editing the circuit while a param change is
+  // in flight, so an id the loaded program no longer has is routine, not a bug
+  // worth killing the sim over. The `false` is how the caller can still tell.
+  it("an unknown componentId is a no-op that returns false, without making any ABI call or republishing", () => {
+    const { setParamsCalls, voltagesReadCalls } = installFakeCore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const core = new CoreEngine();
+      core.load(passivesCircuit(), WITH_PASSIVES);
+      const afterLoad = voltagesReadCalls();
+      expect(core.setParams([{ componentId: "no-such-component", params: { closed: 1 } }])).toBe(false);
+      expect(setParamsCalls()).toBe(0);
+      expect(voltagesReadCalls()).toBe(afterLoad);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a batch mixing a known and an unknown componentId applies the known one and returns false", () => {
+    const { capturedTriples, setParamsCalls } = installFakeCore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const core = new CoreEngine();
+      core.load(passivesCircuit(), WITH_PASSIVES);
+      expect(
+        core.setParams([
+          { componentId: "gone", params: { closed: 1 } },
+          { componentId: "sw", params: { closed: 1 } },
+        ]),
+      ).toBe(false);
+      expect(setParamsCalls()).toBe(1);
+      expect(capturedTriples()).toEqual([1, 0, 1]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("an unknown id still validates the rest of the batch: a bad param on a known id throws before anything is applied", () => {
+    const { setParamsCalls } = installFakeCore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const core = new CoreEngine();
+      core.load(passivesCircuit(), WITH_PASSIVES);
+      expect(() =>
+        core.setParams([
+          { componentId: "gone", params: { closed: 1 } },
+          { componentId: "sw", params: { not_a_real_param: 1 } },
+        ]),
+      ).toThrow(RangeError);
+      expect(setParamsCalls()).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("logs an unknown id once per id per engine outside production, and never in production", () => {
+    installFakeCore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const savedEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "development";
+      const core = new CoreEngine();
+      core.load(passivesCircuit(), WITH_PASSIVES);
+      core.setParams([{ componentId: "gone", params: { closed: 1 } }]);
+      core.setParams([{ componentId: "gone", params: { closed: 0 } }]);
+      core.setParams([{ componentId: "also-gone", params: { closed: 1 } }]);
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[0]![0])).toMatch(/"gone"/);
+      expect(String(warn.mock.calls[1]![0])).toMatch(/"also-gone"/);
+
+      // A second engine has its own once-per-id memory.
+      const other = new CoreEngine();
+      other.load(passivesCircuit(), WITH_PASSIVES);
+      other.setParams([{ componentId: "gone", params: { closed: 1 } }]);
+      expect(warn).toHaveBeenCalledTimes(3);
+
+      warn.mockClear();
+      process.env.NODE_ENV = "production";
+      const prod = new CoreEngine();
+      prod.load(passivesCircuit(), WITH_PASSIVES);
+      expect(prod.setParams([{ componentId: "gone", params: { closed: 1 } }])).toBe(false);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      if (savedEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedEnv;
+      warn.mockRestore();
+    }
   });
 
   it("throws for an unknown param name on a real device's kind, without making any ABI call", () => {
