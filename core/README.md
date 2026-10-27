@@ -4893,6 +4893,28 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     capacitance). Any left then go to A2 (a candidate that fails enters CC)
     and B (R45's check from the accepted rail), whose prototypes are in
     devolt's `memory/progress/brownout-core-w1e-drafts/f5g-logs/`;
+  - named exceptions to F5's exit gate (ruling R52 (a), F5j): four
+    default-mode rail-loop `-4`s on the cold fuzz with no IC flip, each
+    the same at c5b1a13. A CV <-> CC 2-cycle: the partition's tangent,
+    taken at one regime's rail, is carried to the other regime's decision
+    across a strongly nonlinear draw:
+    - seed 479 tpl 2: the tangent at the setpoint puts the CC rail at
+      1.06 V; re-solved there it reads the draw at the setpoint as 11.8 mA,
+      under the 35.2 mA limit, so CV, where the exact draw is 76.6 mA;
+    - seed 679 tpl 1: an LED directly on the rail; CC from the tangent at
+      2.11 V finds a spurious root at 137 V, past the setpoint, where the
+      555 is over-voltage;
+    - seed 78 tpl 4: inrush into uncharged capacitors at load, the tangent
+      17 A, CC at 2.97 V, then CV;
+    - seed 509 tpl 3: a CC rail-capacitor tangent 2-cycle (1.7996 <->
+      1.8863 V) about a kink in the draw (exact mode `-4` too).
+
+    A bracketed CC root on draws re-solved at each iterate (a rail-loop
+    safeguard on the failing path) is perf round 3's (ruling R52 (b)), as
+    are exact mode's CV over the limit on seed 479 (CV at 5.152 V drawing
+    76.6 mA for at least 60 ms, reported ok; that round's first fix) and
+    the rail loop's two-back test, which compares bits and so misses a
+    2-cycle whose CC-capacitor charge moves by ulps;
   - the waveform-coupled CC rail (R42): known divergence
     `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
     perf round 3 right after the integrator change (ruling R47 (a));
