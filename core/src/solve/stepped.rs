@@ -249,7 +249,8 @@ struct IcStampCtx<'a> {
     /// Whether THIS partition's stamp moves with the very voltages the step
     /// is solving for: it holds a free IC supply node (contract point 3,
     /// R_out follows the iterate) or a stamped LED junction (W1e, whose
-    /// companion is re-linearised about it). [`take_step`] then runs a real
+    /// companion is re-linearised about it), or, on a CC rail, a pin of an
+    /// IC the rail supplies (`Partition::iterated_on`). [`take_step`] then runs a real
     /// Newton iteration (`linear = false`) instead of the one-shot linear
     /// solve every other partition needs.
     iterated: bool,
@@ -831,6 +832,19 @@ impl Partition {
     /// Whether the stamp depends on the iterate (`IcStampCtx::iterated`).
     fn iterated(&self) -> bool {
         self.holds_free_ic_supply || !self.shape.junctions.is_empty()
+    }
+
+    /// Whether a step solving it on a CC rail (`cc`, the rail one of the
+    /// step's unknowns, [`CcRail`]) must iterate: iterated, or holding a
+    /// rail-supplied IC pin, whose driver's `R_out` (`vS / 4 ioMax`) and
+    /// targets move with that rail. Solved in one linear pass about the
+    /// step's start, a seed from 5.29 V landed G2bv's bc_ic 425 hub 2 rail
+    /// 8.5 mV over the one its gate's stamps hold there (5.8 mA left at the
+    /// gate's output node): the retry freed the gate 0.22 s before classic
+    /// does, and every step after it drew the rail under the gate's floor,
+    /// flipped it twice and restarted (10 ns steps, F5l).
+    fn iterated_on(&self, cc: bool) -> bool {
+        self.iterated() || cc && self.rail_ic
     }
 
     /// Whether its response to the rail is curved, so it solves again past
@@ -1538,7 +1552,6 @@ impl SteppedSolver {
             self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages)?;
 
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
-            let iterated = self.partitions[&p_idx].iterated();
             let hub = self.partitions[&p_idx].hub && self.rail.is_some();
             // On a CC rail the seed solves the rail with the partition, as
             // its steps do (`take_cc_step`; README, Rails point 4, R28): held
@@ -1560,7 +1573,7 @@ impl SteppedSolver {
                 exact: self.exact,
                 cc,
                 p_idx,
-                iterated,
+                iterated: self.partitions[&p_idx].iterated_on(cc.is_some()),
                 free_supply: self.partitions[&p_idx].holds_free_ic_supply,
             };
             let seed_sens;
@@ -2202,7 +2215,7 @@ impl SteppedSolver {
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
         let keep_lu = part.hub && rail.is_some();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated(), free_supply: part.holds_free_ic_supply };
+        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);

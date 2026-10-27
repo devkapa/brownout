@@ -2660,7 +2660,7 @@ pub struct PartitionedSolver {
     holds_active: u32,
     /// The window's journal of the table, `holds_active` and `episodes`,
     /// taken at the first touch of either (Rails point 8).
-    w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>)>,
+    w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>, bool)>,
     /// Holds taken and released (D8, classic's `_holdOffCounts.accepted`).
     /// Not rolled back, as every stat; a drop at `set_params`,
     /// `seed_memory` or `resetFailures` is not a release.
@@ -2669,6 +2669,15 @@ pub struct PartitionedSolver {
     /// (ruling R51, the hold-episode guard: [`hold::Episode`]). Rolled back
     /// with the table; dropped with every hold where the circuit changes.
     episodes: Rc<Vec<hold::Episode>>,
+    /// Whether this host step's retry of the rail's ICs held off is still to
+    /// come (ruling R51 (b), classic's H8 cadence: [`Self::retry_on_rail`]):
+    /// set at load and at each horizon clamp, the end of a host step
+    /// (`advance`), taken by the first retry after it. Journaled with the
+    /// table (Rails point 8).
+    retry_armed: bool,
+    /// Set only inside the horizon clamp: the rail loop retries there even
+    /// when no pass solved.
+    at_clamp: bool,
 }
 
 impl PartitionedSolver {
@@ -2917,6 +2926,8 @@ impl PartitionedSolver {
             w_holds: None,
             hold_counts: [0; 2],
             episodes: Rc::new(Vec::new()),
+            retry_armed: true,
+            at_clamp: false,
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.wire_w1g(program, &live, &fixed);
@@ -4075,11 +4086,46 @@ impl PartitionedSolver {
         (dirty, readers)
     }
 
-    /// Journals the hold table, `holds_active` and the episodes at their
-    /// first touch in an open window (Rails point 8).
+    /// Journals the hold table, `holds_active`, the episodes and the retry's
+    /// arming at their first touch in an open window (Rails point 8).
     fn journal_holds(&mut self) {
         if self.window && self.w_holds.is_none() {
-            self.w_holds = Some((Rc::clone(&self.holds), self.holds_active, Rc::clone(&self.episodes)));
+            self.w_holds = Some((Rc::clone(&self.holds), self.holds_active, Rc::clone(&self.episodes), self.retry_armed));
+        }
+    }
+
+    /// The horizon clamp's static retry (ruling R51 (b)): the iterated
+    /// partitions holding an IC held off solve again, each retrying it,
+    /// unless this host step retried already.
+    fn retry_static_holds(&mut self, t_end: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        if !self.at_clamp {
+            return Ok(());
+        }
+        // The static solver numbers every partition, its own and the rest.
+        let mut held = self.static_solver.held_partitions(t_end);
+        held.retain(|p| self.partition_kinds[p.0 as usize] == PartitionKind::Static);
+        if held.is_empty() {
+            return Ok(());
+        }
+        self.static_solver.set_inputs_bounded(false);
+        self.static_solver.resolve_dirty_into(&held, t_end, drivers, readers)?;
+        self.copy_in_static()
+    }
+
+    /// Arms the next host step's rail retry (the horizon clamp ended this
+    /// one), journaled.
+    fn arm_retry(&mut self) {
+        if !self.retry_armed {
+            self.journal_holds();
+            self.retry_armed = true;
+        }
+    }
+
+    /// Takes this host step's rail retry, journaled.
+    pub(super) fn take_retry(&mut self) {
+        if self.retry_armed {
+            self.journal_holds();
+            self.retry_armed = false;
         }
     }
 
@@ -4676,10 +4722,11 @@ impl PartitionSolver for PartitionedSolver {
         // W1g point 15: the slow state, then every stamp it set this instant.
         self.slow_rollback_instant();
         // F5 (Rails point 8): the hold table the window found.
-        if let Some((holds, active, episodes)) = self.w_holds.take() {
+        if let Some((holds, active, episodes, armed)) = self.w_holds.take() {
             self.holds = holds;
             self.holds_active = active;
             self.episodes = episodes;
+            self.retry_armed = armed;
             self.sync_power_holds();
         }
         // Values from before the bounds were last exact are back.
@@ -4774,10 +4821,18 @@ impl PartitionSolver for PartitionedSolver {
         let mut readers = self.on_error(result)?;
         self.end_dynamic_writes();
         // W1f: the stepped hub partitions the clamp committed contribute, and
-        // a CC rail capacitor is published live (Rails point 4).
+        // a CC rail capacitor is published live (Rails point 4). The clamp
+        // ends the host's step: every IC held off is retried powered there,
+        // as classic's H8 retries a held chip at its next host step (ruling
+        // R51 (b)), the static ones first, so the rail sees their draws.
         let drivers = Rc::clone(&self.driver_snapshot);
-        let rail = self.rail_at_clamp(t_end, &drivers, &mut readers);
+        self.at_clamp = self.holds_active > 0;
+        let rail = self.retry_static_holds(t_end, &drivers, &mut readers).and_then(|()| self.rail_at_clamp(t_end, &drivers, &mut readers));
+        self.at_clamp = false;
         self.on_error(rail)?;
+        // The next host step retries again.
+        self.arm_retry();
+        self.static_solver.arm_retry();
         // A running ramp's nodes moved to `t_end`: the static solver publishes
         // what they feed, and their readers read them there (Sources point 3).
         if ramps_moved {

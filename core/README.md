@@ -1331,19 +1331,37 @@ their own, and the source KCL does with W1a point 2's branch fold.
    procedure: its failures stay its own (`-4` at `H_MIN`).
 
    **Release** (rulings D1 (a), R51 (b)). Classic's H8 holds a chip for one
-   host step and retries it powered at the next; so does the core, at every
-   event re-solve. In an iterated static partition each solve with an IC
-   held off probes it held powered, the rest as they were; on the rail,
-   each rail loop whose passes solved (something the rail sees changed)
-   probes every held rail IC so, once the loop has settled. One that
+   host step and retries it powered at the next; so does the core, once
+   per host step (an `advance` call): at the first re-solve after the last
+   call's end that reaches a held IC (on the rail, a rail loop whose passes
+   solved, once it has settled; in an iterated static partition, its
+   solve), or else at the horizon clamp ending the call, every IC held off
+   is probed held powered, the rest as they were. At any other re-solve
+   only one whose supply, held off, passed its release level is (below).
+   Probed at every event re-solve instead, cold fuzz 34 tpl 0's 555, held
+   while the rail it starves climbs 10 uV a `Rail` event (one each 20 ns to
+   70 us), took 79,000 failed retries, each two rail passes more: 0.6 s for
+   the sweep's 1.2 s, 0.16 s once per host step (pin
+   `a_held_chip_is_retried_once_per_host_step`). The flag that arms the
+   retry is set at load and at each clamp and journaled with the table. One that
    carries itself there (its free verdict powered), or whose supply reads
    unpowered both probed powered and held off (its own draw no longer
-   decides), is free again and reads at once (point 9); starving again, it
-   is held again with a fresh drop. The others stay held, and the probe
+   decides), is free again and reads at once (point 9); starving again at
+   a later instant, it is held again with a fresh drop. The others stay held, and the probe
    leaves no trace: the static probe publishes nothing, and a rail probe
    that frees nothing puts the solver's state back bit for bit (re-solved
    back instead, a stepped partition re-seeded at each of its steps
-   restarted its step each time, G2bv's bc_ic 178 hub 2 at 20 ns). So a
+   restarted its step each time, G2bv's bc_ic 178 hub 2 at 20 ns). On the
+   rail, one freed that alternates again within the instant has its draw
+   still deciding: the retry found no release, and it stays held, the
+   solver put back as by a retry that frees nothing. Freed and held again
+   at each retry, FXH's cold 830 tpl 3 (freed only because its supply read
+   unpowered both ways; its PSU in CC with the gate held and CV without)
+   and cold 696 tpl 2 and 677 tpl 3 (carrying themselves in the probe, but
+   turning a CC rail capacitor's segment down once free, ruling R44 (a))
+   chained their holds one sliding episode a host step, to the guard's
+   `-4` (pin
+   `the_host_steps_retry_reaches_only_static_partitions_and_a_release_that_alternates_at_once_is_none`). So a
    hold ends once its cause is gone, whatever the supply did (F5V's stale
    hold: a 74LS04 whose load vanished stayed dark because its supply,
    unpowered, could never pass the level its old drop set). The level stays
@@ -1389,7 +1407,11 @@ their own, and the source KCL does with W1a point 2's branch fold.
    (drafts/f5k-logs): the sliding boards chain 119 to 110,000 holds by that
    rule; G2bv's 9,000 runs and every other cold board chain at most 8
    (bc_ic 426 hub 1), and a relaxation at the edge (fz_ic 487 hub 2: 10 ns
-   held, 150 us powered, 44 holds) chains 1. Pins:
+   held, 150 us powered, 44 holds) chains 1. Retried once per host step
+   (F5l, drafts/f5l-logs) the rule stands: the cold fuzz 1-800's guard
+   declines are 32 of F5k's 36 and no other (the 4 left were releases held
+   again within their instant, now kept held), and no board that runs takes
+   more than 29 holds in all. Pins:
    `a_gate_sliding_along_its_power_edge_declines_after_fifty_holds_in_one_episode`
    and `an_episode_chains_holds_that_come_back_within_a_hundred_holds_lengths`
    (`solve/rail_tests.rs`).
@@ -2963,12 +2985,13 @@ Constants, all from P3:35-38 unless marked new:
      plus what its being powered adds (the probes' difference) reaching
      `iLimit`, located like the CC exit's draw test. Either event is a
      trigger, not the release itself (ruling R51 (b), W1c point 1a): the
-     settled rail loop it brings retries every held rail IC (a pass in
-     passing does not), and on a segment only one past its draw threshold;
-     the one that carries itself reads at once, the passes go on with its
-     stamps, and if it starves again it is held again with a fresh drop. A
-     retry that still starves past the level moves the level (a fresh drop,
-     twice the margin).
+     settled rail loop it brings retries the held rail ICs past their level
+     (a pass in passing does not), and on a segment only one past its draw
+     threshold; the one that carries itself reads at once, the passes go on
+     with its stamps, and if it starves again it is held again with a fresh
+     drop. A retry that still starves past the level moves the level (a
+     fresh drop, twice the margin). Besides, once per host step every held
+     rail IC is retried (W1c point 1a).
 
    **Locating the time.** Each threshold is a level of one scalar function
    of `t`: `u*(t)` in volts, or the draw `I*(t)` in amps (CV entry, the
@@ -3047,8 +3070,17 @@ Constants, all from P3:35-38 unless marked new:
    the solution to rounding (at most 4 more Newton iterations): the rail
    loop solves the rail from the step's draw and compares it with the
    step's own against the band and the setpoint, and an iterate one polish
-   short still left them 1.3e-8 V apart. A rail IC's power gate is judged
-   at the step's starting rail. A step whose CC rail ends past the setpoint
+   short still left them 1.3e-8 V apart. A partition holding a pin of a
+   rail-supplied IC iterates its CC step (and its CC seed) even where it
+   would solve a step in one linear pass off a CC rail: the IC's `R_out`
+   (`vS / 4 ioMax`) and targets move with the rail, now an unknown, and
+   one pass about a seed's 5.29 V start landed G2bv's bc_ic 425 hub 2
+   rail 8.5 mV over the one its gate's stamps hold there (F5l: the power
+   hold's retry freed the gate 0.22 s before classic, and every step after
+   it drew the rail under the floor, flipped the gate twice and restarted,
+   10 ns steps; pin `a_cc_step_solves_the_rail_its_gates_stamps_move_with`
+   in `solve/rail_tests.rs`, classic's values within W0). A rail IC's
+   power gate is judged at the step's starting rail. A step whose CC rail ends past the setpoint
    is cut, by regula falsi on the rail's distance past it from the shortest
    step (`H_MIN`), to land within `CROSS_TOLERANCE_V` past it, so the
    regime rules leave CC at that commit (re-solving the whole step in CV
@@ -5237,8 +5269,8 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   74LS00 driving 1 kΩ). Classic resolves it with H8 (`fix/power-off-stall`,
   0.6.3); the core ports H8 as W1c point 1a (F5): the solve that alternates
   probes the IC held powered and held unpowered and holds off one that
-  starves itself, retrying it at each event re-solve as classic retries it
-  at each host step (ruling R51 (b)), and declines `-4` past 50 holds in
+  starves itself, retrying it once per host step as classic does (ruling
+  R51 (b)), and declines `-4` past 50 holds in
   one sliding episode (R51's guard; W1c point 1a). Its forms:
   - **Within an instant** (no rail capacitor, or one whose esr steps the
     rail with the IC's draw): the rail loop's passes, the rail Newton's

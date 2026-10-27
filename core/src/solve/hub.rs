@@ -1240,10 +1240,13 @@ impl PartitionedSolver {
         let passes = self.rail_passes(now, drivers, readers, Vec::new());
         self.hub.as_mut().unwrap().chase_end = false;
         match passes? {
-            // Ruling R51 (b): a pass that solved is an event re-solve, where
-            // classic's H8 would retry a held chip at its next host step.
-            hold::Passes::Settled(true) => self.retry_on_rail(now, drivers, readers),
-            hold::Passes::Settled(false) => Ok(()),
+            // Ruling R51 (b): a held chip is retried once per host step, as
+            // classic's H8 retries it at its next, at the first event
+            // re-solve (a pass that solved) or else at the horizon clamp; at
+            // any other re-solve only one whose supply passed its release
+            // level.
+            hold::Passes::Settled(solved) if solved || self.at_clamp => self.retry_on_rail(now, drivers, readers),
+            hold::Passes::Settled(_) => Ok(()),
             // W1c point 1a: rail ICs whose own draw flips their power each
             // pass (or each rail Newton iterate) are probed, and held off if
             // they starve themselves.

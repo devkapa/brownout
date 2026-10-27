@@ -669,7 +669,12 @@ pub struct StaticPartitionSolver {
     hold_requests: Vec<(usize, digital::power::PowerHold, f64)>,
     /// The copy as the open window found it before this solver first changed
     /// it, which a rollback restores.
-    w_holds: Option<(std::rc::Rc<Vec<digital::power::PowerHold>>, bool)>,
+    w_holds: Option<(std::rc::Rc<Vec<digital::power::PowerHold>>, bool, bool)>,
+    /// Whether this host step's retry of the ICs held off is still to come
+    /// (ruling R51 (b), `Self::release_in`): set at load and at each horizon
+    /// clamp, the end of a host step, taken by the first retry after it.
+    /// Journaled with the copy.
+    retry_armed: bool,
 }
 
 impl StaticPartitionSolver {
@@ -964,6 +969,7 @@ impl StaticPartitionSolver {
             holds_on: false,
             hold_requests: Vec::new(),
             w_holds: None,
+            retry_armed: true,
         })
     }
 
@@ -973,6 +979,34 @@ impl StaticPartitionSolver {
     pub(crate) fn set_power_holds(&mut self, holds: std::rc::Rc<Vec<digital::power::PowerHold>>, on: bool) {
         self.holds = holds;
         self.holds_on = on;
+    }
+
+    /// Arms the next host step's retry (the horizon clamp ended this one).
+    pub(crate) fn arm_retry(&mut self) {
+        if !self.retry_armed {
+            self.journal_local_holds();
+            self.retry_armed = true;
+        }
+    }
+
+    /// The iterated partitions holding an IC held off before `now`, while
+    /// this host step's retry is still to come: the ones the horizon clamp
+    /// re-solves to retry it.
+    pub(crate) fn held_partitions(&self, now: f64) -> Vec<PartitionId> {
+        let holds = self.holds_slice();
+        if holds.is_empty() || !self.retry_armed {
+            return Vec::new();
+        }
+        (0..self.partitions.len())
+            .filter(|&p| {
+                self.holds_free_ic_supply[p]
+                    && self.gated_ics(p).iter().any(|&k| {
+                        let hold = digital::power::hold_of(holds, self.ics[k as usize].0);
+                        hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| r.since < now)
+                    })
+            })
+            .map(|p| PartitionId(p as u32))
+            .collect()
     }
 
     /// The holds and releases this solver's resolves took since the last
@@ -1249,9 +1283,10 @@ impl StaticPartitionSolver {
             self.caches[p as usize] = cache;
         }
         // A hold this solver took in the failed instant is undone with it.
-        if let Some((holds, on)) = self.w_holds.take() {
+        if let Some((holds, on, armed)) = self.w_holds.take() {
             self.holds = holds;
             self.holds_on = on;
+            self.retry_armed = armed;
         }
         self.hold_requests.clear();
         // Owner requests are per call and never span a failed instant.
@@ -1873,15 +1908,21 @@ impl StaticPartitionSolver {
     /// Sets this solver's copy of the hold of IC `device` (device index),
     /// saving the copy the window found first.
     fn set_local_hold(&mut self, device: usize, hold: digital::power::PowerHold) {
-        if self.window && self.w_holds.is_none() {
-            self.w_holds = Some((std::rc::Rc::clone(&self.holds), self.holds_on));
-        }
+        self.journal_local_holds();
         let table = std::rc::Rc::make_mut(&mut self.holds);
         if table.len() <= device {
             table.resize(device + 1, digital::power::PowerHold::FREE);
         }
         table[device] = hold;
         self.holds_on = table.iter().any(|h| !h.is_free());
+    }
+
+    /// Saves the copy and the retry's arming as the window found them, at
+    /// their first change in it.
+    fn journal_local_holds(&mut self) {
+        if self.window && self.w_holds.is_none() {
+            self.w_holds = Some((std::rc::Rc::clone(&self.holds), self.holds_on, self.retry_armed));
+        }
     }
 
     /// W1c point 1a in an iterated partition, after its Newton failed with
@@ -1946,7 +1987,10 @@ impl StaticPartitionSolver {
 
     /// The retry at an iterated partition's solve (W1c point 1a, ruling R51
     /// (b)): every IC held off is probed powered, the rest as they were, as
-    /// classic's H8 retries a held chip at its next host step. One that
+    /// classic's H8 retries a held chip at its next host step: once per
+    /// host step (`retry_armed`), at the first such solve or else at the
+    /// horizon clamp, and at any other only one whose supply, held off,
+    /// passed its release level. One that
     /// carries itself there, or whose supply reads unpowered both probed
     /// powered and held off (its own draw no longer decides), is free
     /// again, and the partition solves once more with it, holding it again
@@ -1956,17 +2000,22 @@ impl StaticPartitionSolver {
         let held: Vec<(u32, usize)> = gated
             .iter()
             .map(|&k| (k, self.ics[k as usize].0))
-            .filter(|&(_, d)| {
+            .filter(|&(k, d)| {
                 // Not at the instant it was held: the next retry comes at a
                 // later one (the rail loop's passes re-solve this partition
                 // within the instant; retried in them, cold fuzz 240 tpl 4
                 // was freed and held again at each pass of its load).
                 let hold = digital::power::hold_of(self.holds_slice(), d);
-                hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| r.since < now)
+                hold.kind == digital::power::HoldKind::Off
+                    && hold.release.is_some_and(|r| r.since < now && (self.retry_armed || crate::solve::hold::passed(r, self.supply_at(k, p_idx, &solved.0))))
             })
             .collect();
         if held.is_empty() {
             return Ok(solved);
+        }
+        if self.retry_armed {
+            self.journal_local_holds();
+            self.retry_armed = false;
         }
         let saved = (std::rc::Rc::clone(&self.holds), self.holds_on);
         for &(_, d) in &held {

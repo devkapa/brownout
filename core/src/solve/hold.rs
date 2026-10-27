@@ -17,9 +17,10 @@
 //!    reads low either way is held too: ruling D2 (a)).
 //!
 //! A probe or the held solve that fails is `-4` as before. A held IC is
-//! retried at every event re-solve, as classic's H8 retries it at each host
-//! step (ruling R51 (b)): probed powered, it is free again once it carries
-//! itself. On the rail the release level (ruling D1 (a): the window edge
+//! retried once per host step (an `advance` call), as classic's H8 retries
+//! it at each of its own (ruling R51 (b)), and at any re-solve once its
+//! supply passes its release level: probed powered, it is free again once
+//! it carries itself. On the rail the release level (ruling D1 (a): the window edge
 //! inward by that drop and a margin) is the `Rail` event that brings a retry
 //! when nothing else does (Rails point 4). An IC held more than
 //! [`EPISODE_MAX`] times in one sliding episode declines `-4` (R51's guard).
@@ -353,16 +354,18 @@ impl PartitionedSolver {
         self.rail_settle(now, drivers, readers, seed, &err)
     }
 
-    /// Ruling R51 (b), after rail passes that solved (an event re-solve):
-    /// every rail IC held off is probed powered, the rest as they are, as
-    /// classic's H8 retries a held chip at its next host step. One that
+    /// Ruling R51 (b), after rail passes that solved (an event re-solve) or
+    /// at the horizon clamp: once per host step every rail IC held off, at
+    /// any other re-solve one whose supply passed its release level, is
+    /// probed powered, the rest as they are, as classic's H8 retries a held
+    /// chip at its next host step. One that
     /// carries itself there (its free verdict powered), or whose supply
     /// reads unpowered both probed powered and held off (its own draw no
     /// longer decides), is free again; the rest go back to their holds, and
     /// the rail settles with that; one still starving past its release
     /// level (the `Rail` event that brought the retry) takes a further level
-    /// ([`refreshed`]). A release that alternates again is held again by
-    /// the procedure (a fresh drop). A chip held on a CC rail capacitor's
+    /// ([`refreshed`]). A release that alternates again within the instant
+    /// was none: its draw still decides, and it stays held as it was. A chip held on a CC rail capacitor's
     /// segment is retried only once ruling R44 (a)'s draw threshold passes
     /// (`Self::r44_draw_fits`): within an instant the capacitors carry it
     /// whatever its draw, and what its draw changes is the segment's slope.
@@ -384,13 +387,20 @@ impl PartitionedSolver {
                     // them, a chip held at one pass and freed at the next
                     // cycled within the instant).
                     let later = hold.release.is_some_and(|r| r.since < now);
-                    (hold.kind == HoldKind::Off && later && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, supply(ic, &self.voltages)))
+                    // Once per host step every one is retried, otherwise only
+                    // one past its release level: a probe at each re-solve
+                    // made cold 34 tpl 0's held 555 79,000 failed retries,
+                    // 20 times its run's cost.
+                    let s_off = supply(ic, &self.voltages);
+                    let due = self.retry_armed || hold.release.is_some_and(|r| passed(r, s_off));
+                    (hold.kind == HoldKind::Off && later && due && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, s_off))
                 })
                 .collect()
         };
         if held.is_empty() {
             return Ok(());
         }
+        self.take_retry();
         // The probe only asks: a retry that frees nothing puts every piece of
         // state back as it was, bit for bit, rather than solving its way
         // back (a stepped partition re-seeded twice at each of its steps
@@ -403,6 +413,7 @@ impl PartitionedSolver {
             seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
         }
         let carried = self.rail_settle(now, drivers, readers, seed, &err).is_ok();
+        // Each one's verdict and its hold after the retry.
         let verdicts: Vec<(bool, PowerHold)> = held
             .iter()
             .map(|&(_, d, hold, s_off)| {
@@ -422,24 +433,9 @@ impl PartitionedSolver {
             })
             .collect();
         if verdicts.iter().all(|&(free, _)| !free) {
-            let (snapshot, dynamic) = checkpoint;
-            self.restore(snapshot);
-            self.dynamic_restore(dynamic);
-            let mut moved = false;
-            for (&(_, d, hold, _), &(_, after)) in held.iter().zip(&verdicts) {
-                if after != hold {
-                    // Off to Off at a new level: the stamps are the same.
-                    self.write_power_hold(d, after);
-                    let episode = self.episode(d).refreshed();
-                    self.set_episode(d, episode)?;
-                    moved = true;
-                }
-            }
-            if moved {
-                self.schedule_rail_event(now);
-            }
-            return Ok(());
+            return self.keep_held(now, checkpoint, &held, &verdicts);
         }
+        let counts = self.hold_counts;
         let mut seed = Vec::new();
         for (&(k, d, hold, _), &(free, after)) in held.iter().zip(&verdicts) {
             // Back to its hold first, uncounted (stat 25 counts holds taken);
@@ -463,8 +459,44 @@ impl PartitionedSolver {
         seed.dedup();
         match self.rail_passes(now, drivers, readers, seed)? {
             Passes::Settled(_) => Ok(()),
+            // Freed, and at once alternating again: its draw still decides,
+            // so the retry asked and found no release, and it stays held as
+            // it was. Freed only because its supply read low both ways, FXH's
+            // cold 830 tpl 3 (its PSU CC with the gate held, CV without), and
+            // carrying itself in the probe but turning a CC rail capacitor's
+            // segment down once free, cold 696 tpl 2 and 677 tpl 3 (ruling
+            // R44 (a)), were released and held again at each retry, the holds
+            // chaining one sliding episode a host step to the guard's `-4`.
+            Passes::Alternating(a, _) if held.iter().zip(&verdicts).any(|(h, v)| v.0 && a.contains(&h.1)) => {
+                self.hold_counts = counts;
+                let kept: Vec<(bool, PowerHold)> = verdicts.iter().map(|&(_, after)| (false, after)).collect();
+                self.keep_held(now, checkpoint, &held, &kept)
+            }
             Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
         }
+    }
+
+    /// A retry that frees nothing: the solver back at `checkpoint`, bit for
+    /// bit, and each held IC at its hold, a further level where the retry
+    /// moved it (`refreshed`).
+    fn keep_held(&mut self, now: f64, checkpoint: ((Vec<f64>, Vec<f64>), Box<dyn std::any::Any>), held: &[(usize, usize, PowerHold, f64)], verdicts: &[(bool, PowerHold)]) -> Result<(), String> {
+        let (snapshot, dynamic) = checkpoint;
+        self.restore(snapshot);
+        self.dynamic_restore(dynamic);
+        let mut moved = false;
+        for (&(_, d, hold, _), &(_, after)) in held.iter().zip(verdicts) {
+            if after != hold {
+                // Off to Off at a new level: the stamps are the same.
+                self.write_power_hold(d, after);
+                let episode = self.episode(d).refreshed();
+                self.set_episode(d, episode)?;
+                moved = true;
+            }
+        }
+        if moved {
+            self.schedule_rail_event(now);
+        }
+        Ok(())
     }
 
     /// The rail loop's passes with `seed` re-solved first, as a probe or the
