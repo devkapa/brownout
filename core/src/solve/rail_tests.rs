@@ -9248,8 +9248,12 @@ fn a_rail_newton_alternating_a_555s_power_gate_holds_it_off_until_the_rail_passe
     assert!(t_held > 4.7e-5 && t_held < 4.9e-5, "{t_held}");
     assert!(t_freed > t_held && t_freed - t_held < 1e-8, "released {:e} s later", t_freed - t_held);
     // Powered at the release, the supply sits the drop under it: inside the
-    // window by a few reached widths.
-    assert!(s_freed >= 1.8 && s_freed - 1.8 < 5.0 * eta, "the supply {:e} V past the edge once powered", s_freed - 1.8);
+    // window by a few reached widths, the release's own two (D1 (a)) on top
+    // of the one or two its `Rail` event lands past the level by. Without
+    // them it would sit only that landing past the edge (3.6e-12 V, two
+    // widths, against 7.2e-12 V), one rail Newton tolerance from starving
+    // again.
+    assert!(s_freed - 1.8 >= 3.0 * eta && s_freed - 1.8 < 5.0 * eta, "the supply {:e} V past the edge once powered", s_freed - 1.8);
     assert_eq!(rig.s().hold_counts(), [1.0, 1.0]);
 }
 
@@ -10322,4 +10326,179 @@ fn cold_603_tpl3() -> Vec<Device> {
         fz(90, 12, &[], vec![12.0, 2.010485616448936e-5, 3502.567887094168], vec![]),
         fz(90, 14, &[], vec![14.0, 0.009383917249005861, 60.55583149229431], vec![]),
     ]
+}
+
+#[test]
+fn a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint() {
+    // The cold fuzz's seed 654 tpl 5 (F5V, F5h): a {5.00 V, 1.12 A} PSU with
+    // 12 uF straight across the rail (no esr) beside 4.6 mF through 0.27 ohm.
+    // At a CC exit the setpoint was within RAIL_MOVE_EPS of the CC rail, so
+    // the rail node was never published at it; the exit's tie then set the
+    // esr-free capacitor to that stale node difference, below the setpoint,
+    // and the CV->CC test read the gap as unbounded demand: the next instants
+    // crawled one ulp apart between CC and CV until the rail loop's cap (-4
+    // at 1.19933 s). A capacitor with no esr is tied where the setpoint puts
+    // it, as the rail is.
+    let p = { let mut p = program(6, cold_654_tpl5()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    let stops: [f64; 148] = [0.006272881060637559, 0.006591874094186496, 0.006738369798626037, 0.01140702575290447, 0.01426541570164304, 0.014494664955489392, 0.015845785419983334, 0.01604297253667917, 0.016438762835408082, 0.01694575147421005, 0.022649428698003057, 0.02878348869319501, 0.029723295666523927, 0.03362152774810005, 0.056120405102267845, 0.056229037375842415, 0.0725332780157821, 0.09744006763523005, 0.10000702248153023, 0.10247727226228409, 0.11400881604452087, 0.11420789527825603, 0.11456675316695472, 0.132036707462793, 0.13215333428541956, 0.13314856946508996, 0.1735960941288972, 0.17880237000823784, 0.20233255736292138, 0.20273060554438915, 0.20650303005521584, 0.210097432859445, 0.21125785297540947, 0.21194824409116625, 0.21236037913567732, 0.21257167696074925, 0.2143008803746772, 0.21515195493065617, 0.238197387178014, 0.2417489640715959, 0.24263016337478488, 0.27519041846173053, 0.27583175012136746, 0.3041944321362515, 0.3472853045887351, 0.3710382925502926, 0.3771699428146706, 0.37755157586408883, 0.3776649625939152, 0.37805049052767786, 0.37869952414921493, 0.38881824909745627, 0.3921186165874907, 0.3922430325869847, 0.4318378140798058, 0.43313208309999685, 0.43502070768173773, 0.4665922437066058, 0.49696122820564226, 0.4975049592904818, 0.5036637225410135, 0.5100107018458228, 0.5103263405428516, 0.5104448958744789, 0.5322078830317314, 0.5729954376478771, 0.573366169926861, 0.5735434152973795, 0.5744108985185017, 0.5756527434944542, 0.5762016580713385, 0.5775099789975596, 0.5780666419508907, 0.5812528912830027, 0.5813559918570157, 0.6186440865366273, 0.6191726812478239, 0.6621121374575532, 0.662219553428663, 0.6625228128919308, 0.704541274882496, 0.7191587413915297, 0.721870295683001, 0.7249738548269464, 0.7256339553455277, 0.7258714122915849, 0.7423166736650905, 0.7823511441505642, 0.7837148653368945, 0.7838555159946443, 0.7888559199629311, 0.7934599011306834, 0.7935851828807118, 0.8228386668695195, 0.8251574881177077, 0.8263666049622582, 0.8265915033646667, 0.8331405956540121, 0.8364759942627226, 0.8366736377837456, 0.8371085617969939, 0.845293952886047, 0.8454543233568703, 0.8456046153517915, 0.8458809980289612, 0.8461208104394647, 0.8667772615602513, 0.8671529799111006, 0.8986848692310039, 0.8991467326488936, 0.8992668336881126, 0.9003791469536602, 0.9052156567779707, 0.9370791712584148, 0.9382189336827093, 0.9402973673020084, 0.9405623311214611, 0.9466822120630486, 0.9851200944072771, 0.985380388540387, 0.9860332004496556, 0.9916966594641506, 1.00032869057813, 1.0016847447306398, 1.0047930604974566, 1.0049483954954213, 1.0052015709959516, 1.0069855087633708, 1.051445293858752, 1.0518333304858911, 1.0523505618884832, 1.053516825650964, 1.1017904675290167, 1.1024345712071053, 1.1124746686117384, 1.1131820655242126, 1.1132921477607274, 1.113597025878502, 1.1137810135798154, 1.116083225369127, 1.1185253280794436, 1.1190815339648412, 1.122016569423452, 1.161203305333806, 1.1875671808278914, 1.1880933144367918, 1.1883124925563644, 1.2];
+    let (rig, err) = run_stops(&p, &[(0.4665922437066058, 10), (1.1875671808278914, 10)], &stops);
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(rig.k.time(), 1.2);
+}
+
+/// tpl=5 hub=2 e=5.003 psu ilim=1.122 PULSE3 2.7..11.0 tr=0e0 74LS00 vcc1 gnd0 in5,4 out3,4 C1-5=4.6e-3 C0-1=6.1e-6 SW3-5(1)+R5-0=2249 R1-5=2391.0 R2-4=233.2 C5-4=1.4e-6 C0-3=5.3e-3 C1-0=1.2e-5 span=11.043285499156779
+/// options: Options { integration: 1, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 6
+/// toggles [(0.4665922437066058, 10), (1.1875671808278914, 10)]
+fn cold_654_tpl5() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![5.0030280621067735, 1.1215150954150948], vec![]),
+        fz(24, 1, &[3, 0], vec![2.687812442540313, 11.043285499156779, 0.04914266660941855, 0.0, 0.0, 0.0066869289288260594, 0.08215597281589736], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![377705.1222457586], vec![]),
+        fz(1, 3, &[4, 0], vec![108375.60843446481], vec![]),
+        fz(1, 4, &[5, 0], vec![600595.7940900992], vec![]),
+        fz(50, 5, &[1, 0, 5, 4, 3, 0, 0, 4, 0, 0, 4, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 6.670854528022206e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 6, &[3, 4], vec![571.8550058333984], vec![]),
+        fz(1, 7, &[4, 1], vec![2539.2299008753234], vec![]),
+        fz(3, 8, &[1, 5], vec![0.004618898311568497, 0.2747588372699416, 0.0], vec![]),
+        fz(3, 9, &[0, 1], vec![6.113218162272266e-6, 0.0, 0.0], vec![]),
+        fz(4, 10, &[3, 5], vec![1.0], vec![]),
+        fz(1, 11, &[5, 0], vec![2249.1060683524665], vec![]),
+        fz(1, 12, &[1, 5], vec![2391.020671754964], vec![]),
+        fz(1, 13, &[2, 4], vec![233.23941796291263], vec![]),
+        fz(1, 14, &[3, 2], vec![27936.19868708654], vec![]),
+        fz(3, 15, &[5, 4], vec![1.422830139860396e-6, 0.0, 0.0], vec![]),
+        fz(3, 16, &[0, 3], vec![0.005261793936319887, 0.0, 0.0], vec![]),
+        fz(1, 17, &[1, 2], vec![8173.766803621111], vec![]),
+        fz(3, 18, &[1, 0], vec![1.204128509750762e-5, 0.0, 0.0], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.002568762397785921, 571.8550058333984], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0001526007875003483, 2539.2299008753234], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.0030463309179397276, 2249.1060683524665], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.01343277287240647, 2391.020671754964], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.008476157452195739, 233.23941796291263], vec![]),
+    ]
+}
+
+// ---- F5i: a hold taken or released in a failing instant ------------------
+
+/// Advances `rig` event by event up to `until`, stopping at the first
+/// instant where IC `d`'s hold changes: that instant's time, or `None`.
+fn advance_to_hold_change(rig: &mut Rig, until: f64, d: usize) -> Option<f64> {
+    let from = rig.s().power_hold(d);
+    while rig.k.time() < until {
+        let t = rig.k.next_event_time().min(until);
+        rig.advance(t).unwrap_or_else(|e| panic!("{e:?} at {}", rig.k.time()));
+        if rig.s().power_hold(d) != from {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Rule 8's journal for the hold table (W1c point 1a; Rails point 8): the
+/// instant where IC `d` of `p` first takes or drops a hold after its load
+/// (found event by event up to `until`) is failed at each of its nonlinear
+/// solves in turn (`newton::hooks`), from the first on. Every failure
+/// leaves `d`'s hold as it was before the instant, and the instant run
+/// again changes it as an unfailed run does. Returns how many of the
+/// instant's solves failed it.
+fn a_failed_hold_instant_rolls_back(p: &Program, until: f64, d: usize) -> u32 {
+    let mut rig = Rig::load(p).unwrap();
+    let t_change = advance_to_hold_change(&mut rig, until, d).expect("the board changes the hold");
+    let changed = rig.s().power_hold(d);
+    let mut failed = 0;
+    for skip in 0.. {
+        let mut rig = Rig::load(p).unwrap();
+        while rig.k.next_event_time() < t_change {
+            let t = rig.k.next_event_time();
+            rig.advance(t).unwrap();
+        }
+        let (before, hold) = (rig.k.time(), rig.s().power_hold(d));
+        let result = {
+            let _fault = newton::hooks::force_unconverged_after(skip, u32::MAX);
+            rig.advance(t_change)
+        };
+        if result.is_ok() {
+            break;
+        }
+        failed += 1;
+        assert_eq!(rig.k.time(), before, "the failed instant left no time");
+        assert_eq!(rig.s().power_hold(d), hold, "skip {skip}: the failed instant's change undone");
+        rig.advance(t_change).unwrap_or_else(|e| panic!("skip {skip}: the instant run again: {e:?}"));
+        assert_eq!(rig.s().power_hold(d), changed, "skip {skip}: the instant run again changes the hold as unfailed");
+    }
+    failed
+}
+
+#[test]
+fn a_rail_hold_taken_in_an_instant_that_then_fails_is_undone_with_it() {
+    // The owner's table (`PartitionedSolver::set_power_hold`), journaled at
+    // first touch in the instant's window: cold 237 tpl 3's 555, held off by
+    // the rail loop at 47.4 us. A later solve of the same instant failing
+    // rolls the hold back with everything else; left in place, the chip
+    // would stay held through an instant that never happened.
+    let p = { let mut p = program(7, cold_237_tpl3()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    let failed = a_failed_hold_instant_rolls_back(&p, 0.07, 11);
+    assert!(failed >= 3, "the hold's instant has the probes' solves and more: {failed}");
+}
+
+#[test]
+fn a_static_release_in_an_instant_that_then_fails_is_undone_with_it() {
+    // The static solver's own copy (`StaticPartitionSolver::set_local_hold`),
+    // journaled in its window. A 74LS00 fed from a pulse source through 30
+    // ohm, 1y high into 60 ohm: at the pulse's 4.5 V its draw takes its
+    // supply under the 4.275 V floor and it loads held off; at 5.5 V (1 ms)
+    // its iterated partition passes the release and solves it powered
+    // (`release_in`). That solve failing undoes the release in the copy as
+    // well as in the owner's table: left freed in the copy alone, the run
+    // again would solve the gate powered while the owner holds it off.
+    let logic = [0, 0, 3, 4, 4, 5, 0, 0, 6, 0, 0, 7];
+    let devs = vec![
+        pulse(0, 2, 0, [4.5, 5.5, 1e-3, 1e-6, 1e-6, 4e-3, 1e-2], 0),
+        source(1, 4, 0, 5.0),
+        resistor(2, 2, 1, 30.0),
+        ls00(3, 1, 0, logic, 10e-9, 1),
+        resistor(4, 3, 0, 60.0),
+        resistor(5, 4, 5, 1000.0),
+    ];
+    let p = program(8, devs);
+    assert_eq!(Rig::load(&p).unwrap().s().power_hold(3).kind, digital::power::HoldKind::Off, "held at the load");
+    let failed = a_failed_hold_instant_rolls_back(&p, 2e-3, 3);
+    assert!(failed >= 1, "{failed}");
+}
+
+/// A 4.6 V cell of `r` ohm with two 74LS00s on its rail: dev 1 (floor
+/// 4.275 V) with 1y high into 60 ohm, and dev 2, unloaded, its floor raised
+/// to 4.41 V (`VCC_MIN` 4.9 V).
+fn a_cell_with_a_loaded_gate_and_a_higher_floor(r: f64) -> Program {
+    let mut high = ls00(2, 1, 0, [0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0, 7], 10e-9, 4);
+    high.params[ic_param::VCC_MIN] = 4.9;
+    let devs = vec![battery(0, 1, 0, 4.6, r), ls00(1, 1, 0, [0, 0, 2, 0, 0, 8, 0, 0, 8, 0, 0, 8], 10e-9, 0), high, resistor(3, 2, 0, 60.0)];
+    no_cache(program(9, devs))
+}
+
+#[test]
+fn a_probe_that_moves_another_rail_ic_across_its_floor_is_not_accepted() {
+    // Ruling R45 (a), the consistency half: a probe in which every
+    // alternating IC carries itself is the instant's solution only if every
+    // other rail IC's free verdict there is the reading it was probed at.
+    // Dev 1 held off, the rail sits at the cell's 4.6 V and dev 2 (floor
+    // 4.41 V) reads powered. Probed powered, dev 1 carries itself, but its
+    // draw takes the rail to about 4.35 V, under dev 2's floor, where dev 2
+    // was probed powered: not a solution of the free circuit, so it is
+    // rejected (`-4`, the loop's message) whatever the residual re-solve
+    // from it would find.
+    let p = a_cell_with_a_loaded_gate_and_a_higher_floor(11.0);
+    let mut rig = Rig::load(&p).unwrap();
+    let drivers = Rc::clone(&rig.s().driver_snapshot);
+    let now = rig.k.time();
+    let mut readers = Vec::new();
+    let held = digital::power::PowerHold { kind: digital::power::HoldKind::Off, release: Some(digital::power::Release { level: 10.0, rising: true }) };
+    let seed: Vec<usize> = rig.k.solver_mut().set_power_hold(1, held).into_iter().map(|p| p.0 as usize).collect();
+    assert!(matches!(rig.k.solver_mut().rail_passes(now, &drivers, &mut readers, seed), Ok(hold::Passes::Settled)));
+    assert!(rig.u() > 4.59 && rig.s().ic_powered(2), "dev 1 held off: the rail {} V, dev 2 powered", rig.u());
+    // The rail dev 1 would leave, powered: between the two floors.
+    let on = Rig::load(&p).unwrap();
+    assert!(on.u() > 4.275 && on.u() < 4.41 && on.s().ic_powered(1) && !on.s().ic_powered(2), "free: the rail {} V, dev 1 powered, dev 2 not", on.u());
+    let result = rig.k.solver_mut().hold_on_rail(now, &drivers, &mut readers, &[1], rails::loop_unsettled());
+    assert_eq!(result, Err(rails::loop_unsettled()), "rejected");
 }

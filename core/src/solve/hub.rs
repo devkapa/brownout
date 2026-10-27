@@ -1543,8 +1543,8 @@ impl PartitionedSolver {
     /// take in CV what the limit leaves of the CV solve's own draw at the
     /// setpoint, each its share `C_k / C_rail` as it took its share of the
     /// segment's current, one esr drop below the rail, from where it relaxes
-    /// to `dV` as rule 2a's exponential (at esr 0 the charge is the rail and
-    /// the current 0, rule 2a's divergence). The CV -> CC test reads that
+    /// to `dV` as rule 2a's exponential (at esr 0 the charge is the rail, the
+    /// setpoint, and the current 0, rule 2a's divergence). The CV -> CC test reads that
     /// charge back, so it sees the limit itself rather than the segment's
     /// current at a rail that landed a reached-width past the setpoint, or
     /// the draws before the exit's re-solves (the rail loop ties again after
@@ -1573,8 +1573,13 @@ impl PartitionedSolver {
             let d_v = self.voltages[a] - self.voltages[b];
             let v_far = self.voltages[far];
             let cap = &mut self.fixed_pair_capacitors[k];
+            // A capacitor with no esr is the rail itself, so it is tied at
+            // the setpoint: the rail node can still hold the CC rail when the
+            // exit landed within RAIL_MOVE_EPS of it (never published), and a
+            // charge that far below the setpoint reads to the CV -> CC test
+            // as unbounded demand (cold 654 tpl 5's one-ulp crawl).
             let vc = match keep {
-                _ if !(cap.esr > 0.0) => d_v,
+                _ if !(cap.esr > 0.0) => sign * (v - v_far),
                 Some(q) => sign * (q - v_far),
                 None => sign * ((v - v_far) - cap.esr * (cap.c / c_rail) * i_cap),
             };
