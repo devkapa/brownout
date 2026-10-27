@@ -110,7 +110,9 @@ pub const CROSSING_ACCEPT_EPS: f64 = 1e-15;
 pub enum KernelError {
     /// [`DELTA_CAP`] (or, during [`Kernel::settle`], the same cap applied to
     /// settle passes) was exceeded without reaching a quiet state: a
-    /// zero-delay loop that never settles. `at` is the simulation time this
+    /// zero-delay loop that never settles; or, sooner, an evaluator's latch
+    /// flipped back within the instant ([`DeviceEvaluator::zero_delay_loop`]),
+    /// the same loop's own evidence. `at` is the simulation time this
     /// happened at. Never returned silently — pec3.mjs's `delta < 1000` loop
     /// (`:766`) simply exits and carries on as if converged; this is the
     /// mistake the contract calls out by name and this type exists to make
@@ -281,6 +283,28 @@ pub trait DeviceEvaluator {
         self.restore(checkpoint)
     }
 
+    /// Whether an evaluation inside the open window found a latch with no
+    /// consistent state (NE555 point 11): it flipped and then flipped back
+    /// within the instant with no other device's driver changing between,
+    /// so its own output moved its inputs across both of its thresholds.
+    /// With the instant's solves deterministic the state it returned to is
+    /// the one that flipped it, so the cycle never ends (a flip back after
+    /// another device changed, a delta-cycle hazard, is no evidence), and the kernel declines the instant as the zero-delay loop it
+    /// is (`-7`, W1c's rule) without waiting for [`DELTA_CAP`]. That holds
+    /// even where the second state's solve differs from the first's within
+    /// tolerance and lets the cycle quiet (exact mode's stepped CC rail),
+    /// which would otherwise re-open the loop at each step after it. The
+    /// default (no latch) never finds one.
+    fn zero_delay_loop(&self) -> bool {
+        false
+    }
+
+    /// A latch due at once (a slow device's, W1g point 14) changed the
+    /// circuit inside the instant: a latch that flips back after it answers
+    /// a new circuit, not its own output, so the evidence of
+    /// [`Self::zero_delay_loop`] starts afresh. Default: nothing kept.
+    fn new_latch_baseline(&mut self) {}
+
     /// An owned copy of every piece of state this evaluator would need to
     /// undo a failed instant (core/README.md, "A failed advance") — Schmitt
     /// per-pin hysteresis state, register contents, anything else an
@@ -416,6 +440,14 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
         (**self).rollback_instant(checkpoint)
+    }
+
+    fn zero_delay_loop(&self) -> bool {
+        (**self).zero_delay_loop()
+    }
+
+    fn new_latch_baseline(&mut self) {
+        (**self).new_latch_baseline()
     }
 
     fn snapshot(&self) -> Box<dyn std::any::Any> {
@@ -1285,6 +1317,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                     break;
                 }
                 carried_dirty.extend(slow_dirty);
+                self.evaluator.new_latch_baseline();
                 continue;
             }
 
@@ -1310,6 +1343,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         carried_dirty.push(p);
                     }
                 }
+            }
+            // A latch that flipped back within this instant has no
+            // consistent state (NE555 point 11): the loop would run to the
+            // cap, so it is declined now, as the livelock it is.
+            if self.evaluator.zero_delay_loop() {
+                break;
             }
         }
         self.dirty_buf = dirty;

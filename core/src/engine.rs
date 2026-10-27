@@ -119,6 +119,14 @@ impl DeviceEvaluator for WithSources {
         self.inner.rollback_instant(checkpoint)
     }
 
+    fn zero_delay_loop(&self) -> bool {
+        self.inner.zero_delay_loop()
+    }
+
+    fn new_latch_baseline(&mut self) {
+        self.inner.new_latch_baseline()
+    }
+
     fn snapshot(&self) -> Box<dyn std::any::Any> {
         self.inner.snapshot()
     }

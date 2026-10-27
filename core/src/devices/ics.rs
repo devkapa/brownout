@@ -276,6 +276,19 @@ pub struct IcEvaluator {
     /// The positions in `ics` of the ICs written in the open window, one
     /// each, whose pre-images are in `IcEntry::saved` (`IcEntry::journaled`).
     journal: Vec<u32>,
+    /// The 555s whose latch flipped once in the open window (since its last
+    /// latch baseline, [`DeviceEvaluator::new_latch_baseline`]), by position
+    /// in `ics`, each with whether another device's driver has changed since
+    /// that flip. A second flip with none between returns the latch to the
+    /// state that flipped it, its own output the only cause: the zero-delay
+    /// loop of NE555 point 11 ([`DeviceEvaluator::zero_delay_loop`]). A
+    /// second flip after another device changed answers that change (a
+    /// delta-cycle hazard into TRIG or RST) and counts as a first flip
+    /// again. Empty outside a window: load settling keeps the pass cap
+    /// alone.
+    latch_flips: Vec<(u32, bool)>,
+    /// Whether a 555 in the open window flipped back.
+    latch_loop: bool,
     /// Scratch for one evaluation's pin reads.
     levels: Vec<bool>,
     /// Scratch for a combinational evaluation's truth-table result.
@@ -337,6 +350,8 @@ impl IcEvaluator {
             position_of_device,
             journaling: false,
             journal: Vec::new(),
+            latch_flips: Vec::new(),
+            latch_loop: false,
             levels: Vec::new(),
             results: Vec::new(),
             family_out: digital::FamilyOutput::default(),
@@ -391,6 +406,8 @@ impl IcEvaluator {
         }
         self.journal.clear();
         self.journaling = false;
+        self.latch_flips.clear();
+        self.latch_loop = false;
     }
 
     /// [`DeviceEvaluator::evaluate`]'s body. `live`, when given, is the
@@ -425,7 +442,18 @@ impl IcEvaluator {
         // already re-derives power itself (`None` while unpowered), so this
         // branch does its own power gate rather than sharing the one below.
         if let Family::Ne555(state) = &mut entry.family {
-            match digital::ne555::evaluate(ic, state, voltages, acting_on_edges, hold) {
+            let stored = state.out_high;
+            let result = digital::ne555::evaluate(ic, state, voltages, acting_on_edges, hold);
+            // NE555 point 11: a latch written back to the value it already
+            // left in this window has no consistent state here.
+            if self.journaling && state.out_high != stored {
+                match self.latch_flips.iter_mut().find(|f| f.0 == at as u32) {
+                    Some((_, false)) => self.latch_loop = true,
+                    Some(entry) => entry.1 = false,
+                    None => self.latch_flips.push((at as u32, false)),
+                }
+            }
+            match result {
                 None => {
                     // Point 10: unpowered -- the slot goes NaN and nothing is
                     // requested (drivers keep their frozen committed level
@@ -715,6 +743,16 @@ impl DeviceEvaluator for IcEvaluator {
         }
         self.journal.clear();
         self.journaling = false;
+        self.latch_flips.clear();
+        self.latch_loop = false;
+    }
+
+    fn zero_delay_loop(&self) -> bool {
+        self.latch_loop
+    }
+
+    fn new_latch_baseline(&mut self) {
+        self.latch_flips.clear();
     }
 
     /// Contract point 10 ("Readouts") for the combinational family: a
@@ -854,10 +892,14 @@ impl DeviceEvaluator for IcEvaluator {
     /// A driver's committed level moved: the IC that owns it has a slot to
     /// re-derive (`on_settled_into`). A driver no IC owns is ignored.
     fn driver_changed(&mut self, driver: DriverId) {
-        if let Some(&at) = self.driver_owner.get(driver.0 as usize) {
-            if at != u32::MAX {
-                self.mark_dirty(at as usize);
-            }
+        let owner = self.driver_owner.get(driver.0 as usize).copied().unwrap_or(u32::MAX);
+        if owner != u32::MAX {
+            self.mark_dirty(owner as usize);
+        }
+        // Another device's change between a 555's two flips is a cause of
+        // its own (NE555 point 11); the 555's OUT and DIS are not.
+        for flip in self.latch_flips.iter_mut().filter(|f| f.0 != owner) {
+            flip.1 = true;
         }
     }
 
@@ -1630,6 +1672,80 @@ mod tests {
         let mut pins = vec![pin(vcc), pin(gnd)];
         pins.extend(logic.map(pin));
         Device { kind: kinds::NE555, component_index: ci, pins, params, blob: vec![0.0; 7] }
+    }
+
+    #[test]
+    fn a_555_latch_that_flips_back_within_one_window_is_a_zero_delay_loop() {
+        // NE555 point 11's evidence (ruling R49 (d)): reset, then set, inside
+        // one rollback window. Not across windows, not after a latch due at
+        // once (`new_latch_baseline`), and not outside a window (load
+        // settling keeps the delta cap alone). 0=gnd, 1=vcc (5 V), 2=TRIG,
+        // 3=THR, 4=OUT, 5=DIS.
+        let p = program(6, 1, vec![source(0, 1, 0, 5.0), ne555_dev(1, 1, 0, [2, 4, 1, 0, 3, 5])]);
+        let solver = PartitionedSolver::build(&p).expect("program must load");
+        let mut kernel = Kernel::new(solver, IcEvaluator::new(Vec::new()));
+        let mut ev = register(&mut kernel, &p);
+        let reader = DeviceId(1);
+        // THR past 2/3 resets; TRIG under 1/3 sets (TRIG beats THR).
+        let reset = [0.0, 5.0, 2.0, 4.0, 0.0, 0.0];
+        let set = [0.0, 5.0, 1.0, 4.0, 0.0, 0.0];
+        let flip_back = |ev: &mut IcEvaluator, baseline: bool| {
+            let w = ev.begin_instant();
+            ev.evaluate(reader, 0.0, true, &reset);
+            if baseline {
+                ev.new_latch_baseline();
+            }
+            ev.evaluate(reader, 0.0, true, &set);
+            let found = ev.zero_delay_loop();
+            ev.end_instant(w);
+            assert!(!ev.zero_delay_loop(), "the evidence ends with its window");
+            found
+        };
+        assert!(flip_back(&mut ev, false), "reset then set in one window");
+        assert!(!flip_back(&mut ev, true), "a latch due at once between them starts the evidence afresh");
+        // One flip per window, back and forth: an astable's two thresholds.
+        for v in [&reset, &set, &reset] {
+            let w = ev.begin_instant();
+            ev.evaluate(reader, 0.0, true, v);
+            assert!(!ev.zero_delay_loop());
+            ev.end_instant(w);
+        }
+        // A frozen pass writes no latch; outside a window nothing is kept.
+        let w = ev.begin_instant();
+        ev.evaluate(reader, 0.0, false, &set);
+        ev.evaluate(reader, 0.0, true, &set);
+        assert!(!ev.zero_delay_loop(), "a frozen pass is no flip");
+        ev.rollback_instant(w);
+        ev.evaluate(reader, 0.0, true, &set);
+        ev.evaluate(reader, 0.0, true, &reset);
+        assert!(!ev.zero_delay_loop(), "no window, no evidence");
+    }
+
+    #[test]
+    fn a_zero_delay_hazard_into_a_555_settles_its_instant_rather_than_declining() {
+        // A delta-cycle hazard, not a loop: one edge reaches a zero-delay
+        // NAND by two paths of unequal depth (directly, and through a NAND
+        // wired as an inverter), so its output glitches low for one delta.
+        // The glitch is the 555's TRIG: the latch sets on it, and once the
+        // glitch ends THR (on the supply) takes it back. The latch flips and
+        // flips back within one instant, but another device (the NAND)
+        // changed between the two flips, so its own output did not cause
+        // them: the instant settles with the latch low, as classic's does.
+        // 0=gnd, 1=vcc (5 V), 2=A (spdt: sel 0 gnd, 1 vcc), 3=inverted A,
+        // 4=NAND(A, !A) = TRIG, 5=OUT, 6=DIS, 7 and 8 dump unused outputs.
+        let mut gates = ls00(2, 1, 0, [2, 2, 3, 2, 3, 4, 0, 0, 7, 0, 0, 8], 0.0);
+        gates.blob[0] = 1.0;
+        let p = program(9, 5, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            gates,
+            ne555_dev(3, 1, 0, [4, 5, 1, 0, 1, 6]),
+        ]);
+        let mut engine = Engine::load(&p).unwrap();
+        assert_eq!(engine.digital_slots()[0], 0.0, "THR on the supply resets the latch at load, TRIG high");
+        engine.set_params(&[(1, 0, 1.0)]).unwrap_or_else(|e| panic!("the hazard's instant declined: {} {}", e.code, e.message));
+        assert_eq!(engine.digital_slots()[0], 0.0, "the glitch's set is taken back by THR at the same instant");
+        assert!(engine.voltages()[4] > 5.0 / 3.0, "the NAND's output is high again: {}", engine.voltages()[4]);
     }
 
     #[test]

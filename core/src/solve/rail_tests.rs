@@ -10132,3 +10132,57 @@ fn cold_22_tpl4() -> Vec<Device> {
         fz(90, 14, &[], vec![14.0, 0.011706195361967153, 17.021970939781387], vec![]),
     ]
 }
+
+#[test]
+fn a_555_with_no_consistent_latch_on_a_cc_rail_declines_with_minus_7_in_both_modes() {
+    // The cold fuzz's seed 1356 tpl 6 (F5e; ruling R49 (d)): a 555 astable
+    // on a {13.5 V, 43 mA} PSU whose output load (47 ohm and an LED) drags
+    // the CC rail to 5.1 V while OUT is high. The capacitor at 3.40 V sits
+    // in the band where no latch state is consistent: high, THR passes 2/3
+    // of the dragged rail and resets it; low, the rail returns to CV at
+    // 13.5 V and TRIG is under a third of that, which sets it. Default mode
+    // reports the zero-delay loop as `-7` (NE555 point 11). Exact mode's
+    // instant reset and set the latch and then held it high on a rail its
+    // re-solve put 5.5e-5 V above the step's, within W0, so each step
+    // re-planned the reset at its start and NP2's guard declined the crawl
+    // with `-4`. The latch's own evidence is the same in both modes: it
+    // returned, within one instant, to the value it opened the instant with.
+    for exact in [false, true] {
+        let p = {
+            let mut p = program(7, cold_1356_tpl6());
+            p.options.integration = 1;
+            p.options.no_rail_shortcut = exact;
+            p.digital_slot_count = 32;
+            p
+        };
+        let mut e = Engine::load(&p).unwrap();
+        let er = e.advance(0.006272876838681287).unwrap_err();
+        assert_eq!(er.code, -7, "exact {exact}: {} at {}: {}", er.code, e.time(), er.message);
+        // The instant in the band, declined whole: the engine stays at the
+        // last one it completed.
+        let at: f64 = er.message.rsplit("t = ").next().unwrap().parse().unwrap();
+        assert!((0.003535..0.003539).contains(&at) && e.time() < at, "exact {exact}: declined at {at}, left at {}", e.time());
+    }
+}
+
+/// tpl=6 hub=2 e=13.524 psu ilim=0.043 555-astable R1=5162 R2=15471 C=1.6e-7 Rl=47 exact=true span=13.52
+/// options: Options { integration: 1, no_rail_shortcut: true, .. } digital_slot_count 32 node_count 7
+/// ERR (27ea36c) exact advance -4 at 3.535969 ms: the rail loop did not settle within 50 passes (NP2);
+/// default advance -7 at 3.538572 ms
+fn cold_1356_tpl6() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![13.52366996898624, 0.043183751760289955], vec![]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![5161.817727538946], vec![]),
+        fz(1, 3, &[2, 3], vec![15471.35201144846], vec![]),
+        fz(3, 4, &[3, 0], vec![1.5590167310697523e-7, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![47.433374949121045], vec![]),
+        fz(30, 7, &[5, 0], vec![2.42780965809063, 2.098288374276283, 0.026192850590442324, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 8, &[4, 0], vec![2704.4036600522195], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.0024330930088748894, 5161.817727538946], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.0002900081775833328, 15471.35201144846], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.6260429703218926, 47.433374949121045], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.010885009222683432, 2704.4036600522195], vec![]),
+    ]
+}

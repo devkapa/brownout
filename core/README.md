@@ -2341,7 +2341,32 @@ records").
     IC. `bo_engine_set_params` keeps `outHigh`, and a load rebuilds every 555
     at `outHigh = 1`. A zero-delay loop through the 555 (OUT feeding TRIG and
     THR through resistors only, which classic oscillates at its step rate)
-    is `-7`, W1c's rule, and the circuit falls back to classic.
+    is `-7`, W1c's rule, and the circuit falls back to classic. The
+    evidence is the latch's own, the same in every mode (ruling R49 (d),
+    F5g): a latch that flips and then flips back within one rollback window
+    (an instant, a parameter change, a memory seed), with no other device's
+    driver changing between the two flips, has no consistent state there,
+    since the window's solves are deterministic and the state it returns to
+    is the one that flipped it, so the window is declined at once rather
+    than at the delta cap. A flip back after another device changed answers
+    that change, not the latch's own output: a delta-cycle hazard (one edge
+    reaching a zero-delay NAND by paths of unequal depth, its one-delta
+    glitch on TRIG setting the latch and THR taking it back) settles, and
+    that flip counts as a first one
+    (`a_zero_delay_hazard_into_a_555_settles_its_instant_rather_than_declining`). This holds where the second solve
+    differs from the first within W0 and lets the cycle quiet: in exact
+    mode a 555 astable whose OUT load drags a CC rail below half its
+    setpoint (Known follow-ups (W1g), "What F5 leaves") reset and set within
+    an instant and held high on a rail its re-solve put 5.5e-5 V above the
+    step's, and each step after it re-planned the reset at its start until
+    NP2's guard declined the crawl with `-4`. A latch due at once (a slow
+    device's, W1g point 14) starts the evidence afresh: a flip back after
+    it answers a changed circuit, not the 555's own output. Load settling
+    has no window and keeps the cap alone. A latch that flips once per
+    instant, its input held on a threshold by its own output across
+    instants (DIS on TRIG through a capacitor, THR above its threshold:
+    cold fuzz seed 145 tpl 4, instants 5 to 70 fs apart), is not this
+    evidence and still declines with NP2's `-4` in both modes.
 12. **Readouts** (§5.2; §10.9).
     - Classic publishes `digitalState[id] = outHigh ? 1 : 0` after every
       accepted solve while powered, the load seed's included, and drops the
@@ -4821,17 +4846,40 @@ Recorded at the W1g integration. None changes a rule above until it lands.
   power-edge `-4`s (FXB's `k6 s39` and FXDv's edge board among them). Its
   exit gate is no `-4` on the fuzz sweep (G2bv's generators, 9,000 runs)
   except the stepped-Newton cases, which get their own diagnosis. Left:
-  - the 555 astable on a CC PSU (cold fuzz tpl 6), F5's still (ruling D5
-    (b)), its physics awaiting a ruling (F5e): when the output's load pulls
-    the CC rail below half the setpoint, no latch state is consistent while
-    the capacitor sits between 2/3 of the CC rail and 1/3 of the setpoint
-    (high, the threshold resets it; low, the rail leaves CC for the
-    setpoint and the trigger sets it). Default mode reports the zero-delay
-    loop as `-7` (NE555 point 11); in exact mode the stepped trial's CC rail
-    and the instant's re-solve differ by 5.5e-5 V, within W0, so each
-    instant re-plans a crossing at its start and NP2's guard declines the
-    crawl with `-4`. 66 of tpl 6's 1,500 hub-2 boards (22 exact `-4`, 6
-    exact and 38 default `-7`);
+  - the 555 astable on a CC PSU (cold fuzz tpl 6; rulings D5 (b), R49):
+    when the output's load pulls the CC rail below half the setpoint, no
+    latch state is consistent while the capacitor sits between 2/3 of the
+    CC rail and 1/3 of the setpoint (high, the threshold resets it; low,
+    the rail leaves CC for the setpoint and the trigger sets it). Both modes
+    now report the zero-delay loop as `-7` by the latch's own evidence
+    (NE555 point 11; R49 (d), F5g) and the board falls back to classic: of
+    tpl 6's 1,500 hub-2 boards, exact mode's 23 `-4` and 6 `-7` became 1
+    and 28 (the `-4` left is seed 95's load-time stepped Newton), default
+    mode's 38 `-7` are unchanged, and tpl 4 and tpl 0 moved in neither
+    mode. Known divergence `w1f-ne555-cc-latch-band` (Equivalence harness
+    rules) until R49 (a), a bench PSU output capacitance, gives the rail a
+    state to hold;
+  - named exceptions to F5's exit gate (ruling R50 (C), F5g): five
+    default-mode rail-Newton `-4`s on the cold fuzz's tpl 4, each a
+    `bench_psu` with a rail capacitor:
+    - seeds 542, 722, 889 and 985: `rails::next_regime`'s CV -> CC
+      compliance candidate (Rails point 5), the CC rail solved without its
+      capacitor, 2-cycles on a direct chip's power (a 555 with DIS on its
+      own rail in 542, 889, 985; a 74LS00 in 722), each iterate judging it
+      afresh (G 0.006 against 0.156 S on 542). F5b's hold probes the chip,
+      but held off it returns the PSU to CV, so no draw condition is kept
+      (ruling R44 (a) applies on a CC segment only), and the CV rail,
+      already past the release level inside the window, frees it within
+      the same loop;
+    - seed 49: R45 (a)'s check re-solves the CC rail capacitor's rail from
+      its charge `q`, not from the accepted rail (held powered, 1.2e-11 V
+      above the 74LS00's 4.275 V edge), and the free Newton 2-cycles across
+      the edge.
+
+    Re-measuring them is R49 (a)'s first gate (a bench PSU output
+    capacitance). Any left then go to A2 (a candidate that fails enters CC)
+    and B (R45's check from the accepted rail), whose prototypes are in
+    devolt's `memory/progress/brownout-core-w1e-drafts/f5g-logs/`;
   - the waveform-coupled CC rail (R42): known divergence
     `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
     perf round 3 right after the integrator change (ruling R47 (a));
@@ -4862,7 +4910,11 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     through its 555 (DIS on TRIG with no timing capacitor, THR on a rail
     above 2/3 of its supply: DIS low sets the latch, released it resets),
     the `-7` of NE555 point 11, which the F5 core is the first to reach:
-    c5b1a13's partition-Newton `-4` stopped it at 32.5 µs;
+    c5b1a13's partition-Newton `-4` stopped it at 32.5 µs. Forced to exact
+    mode the board stops earlier, at the first reset (31.3 µs), with a
+    stepped-Newton `-4`, its 555's supply 1.82 V there (fed through 786 Ω)
+    against the 1.8 V power edge: the stepped-Newton class F5 leaves to its
+    own diagnosis, not the latch loop;
   - the failed-reset fixture (W1g Q6, ruling R34 (a)) has no circuit, and
     `w1g-reset-failures-failed-seed` is deleted as unreachable (ruling D7
     (b); Equivalence harness rules, the failed reset).
@@ -5252,6 +5304,19 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   `test/core/equivalence/known-divergences.ts`, and the harness does not
   look for it on the corpus or the fixtures. Seed 226 has a diagnosis of
   its own (Known follow-ups (W1g)).
+- **The 555's latch band on a CC rail** (ruling R49 (d), F5g). Known
+  divergence `w1f-ne555-cc-latch-band`: a 555 astable on a bench PSU whose
+  OUT load drags the CC rail below half the setpoint has no consistent
+  latch state while its capacitor sits between 2/3 of the dragged rail and
+  1/3 of the setpoint (NE555 point 11; Known follow-ups (W1g)). Classic
+  oscillates the latch at its step rate there; the core declines the
+  instant with `-7` in every mode and the board falls back to classic, so
+  no core reading of such a board is compared (cold fuzz tpl 6: 28 exact
+  and 38 default boards of 1,500). The id names the divergence; it is not
+  an entry of `test/core/equivalence/known-divergences.ts`, and the
+  harness does not look for it on the corpus or the fixtures. It goes when
+  R49 (a), a bench PSU output capacitance, lands after F5: the rail then
+  has a state to hold through the latch's switch.
 - **CC exits against the exact rail** (probe P9; the owner's ruling (a),
   2026-10-15). On a `psu-rail` fixture (a limited PSU, a rail capacitor and
   switched resistive loads), every sample from a CC exit to the next CC
