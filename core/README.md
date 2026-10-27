@@ -2967,11 +2967,24 @@ Constants, all from P3:35-38 unless marked new:
    with that balance as its rail row: held at the rail the loop last solved,
    a seed whose stamps curve in the rail (cold fuzz 456 tpl 0: a gate's
    output on it, 13 Ω and an LED off it) re-solved to the same three rails
-   in turn. Pins in `solve/rail_tests.rs`, G2bv's bc 453 hub 2 (an advance
+   in turn. Such a seed hands the loop the rail it solved and the draw its
+   rail row held there (`dir iLimit` less the rest's draw), so the loop
+   finds that rail again; its slope judges a rail IC's power at the loop's
+   rail, as the solve did (F5h). Published at its own rail instead, a seed
+   whose gate was powered in the solve and off there (G2bv's bc_ic 178 hub
+   2: 1.69 V powered, 4.94 V not), or whose draw was read through 1e9 S of
+   `C / SEED_H` on a path from the rail to a fixed node (cold fuzz 603 tpl
+   3, 5.2e-7 A), left the loop's rail where it was, past the 1 µV band, and
+   the seed re-solved to the same rail for 50 passes. Pins in
+   `solve/rail_tests.rs`, G2bv's bc 453 hub 2 (an advance
    `-4` at 0.95 ms) and bc_ic 345 hub 2 (a load `-4`), each now run to 3 s:
    `a_g2bv_capacitor_on_a_cc_rail_seeds_at_the_rail_it_solves_with` and
-   `a_g2bv_capacitor_on_a_cc_rail_loads_at_the_rail_it_solves_with`. A CC
-   rail with capacitors (ruling R42) is not covered: Known follow-ups (W1g).
+   `a_g2bv_capacitor_on_a_cc_rail_loads_at_the_rail_it_solves_with`; F5h's
+   `a_cc_hub_seed_publishes_its_draw_at_the_power_its_solve_held` (178),
+   `a_cc_hub_seed_near_a_power_edge_lets_the_rail_move` (bc_ic 6 hub 2) and
+   `a_cc_hub_seed_with_a_capacitor_path_off_the_rail_publishes_the_draw_its_rail_row_holds`
+   (603). A CC rail with capacitors (ruling R42) is not covered: Known
+   follow-ups (W1g).
 
    **The CC step** (FXF, after G2bv's frozen tab). While a bench PSU with
    no rail capacitor is in CC, the rail is set by the draws alone, so it

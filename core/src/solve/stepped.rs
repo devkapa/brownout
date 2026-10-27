@@ -1342,7 +1342,9 @@ impl SteppedSolver {
 
     /// The sensitivity of hub partition `p` at state `x`, solved with the
     /// step `(h, method)` from `(vc_from, i_prev)` at rail `u_p` and instant
-    /// `stamp_now`, through `lu` (README, Rails point 3).
+    /// `stamp_now`, through `lu` (README, Rails point 3), its rail ICs'
+    /// power judged at `power_u` (`Bnd::hold_power_at`): the rail the solve
+    /// it linearises judged them at.
     #[allow(clippy::too_many_arguments)]
     fn step_sens(
         &self,
@@ -1358,6 +1360,7 @@ impl SteppedSolver {
         stamp_now: f64,
         at: f64,
         u_p: f64,
+        power_u: f64,
         lu: &LuFactorization,
     ) -> Result<StepSens, String> {
         let rail = self.rail.expect("a hub partition implies a rail");
@@ -1378,7 +1381,7 @@ impl SteppedSolver {
             iterated: part.iterated(),
             free_supply: part.holds_free_ic_supply,
         };
-        let bnd = Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }).at_time(ramps, at).with_ext(rail, n).hold_power_at(u_p);
+        let bnd = Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }).at_time(ramps, at).with_ext(rail, n).hold_power_at(power_u);
         let z: Vec<f64> = if part.curved() { x.iter().copied().chain(std::iter::once(u_p)).collect() } else { Vec::new() };
         let ic = (part.curved() && !part.holds_free_ic_supply).then(|| {
             let ic = crate::solve::ic_rail_terms(stamp_now, drivers, &self.ics, &self.node_owner, &bnd, p, &z, n);
@@ -1412,7 +1415,7 @@ impl SteppedSolver {
         if part.hub && self.rail.is_some() {
             if let Some(lu) = part.pend_lu.clone() {
                 let (x, vc_from, i_prev) = (part.pend_x.clone(), part.vc.clone(), part.i_prev.clone());
-                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, &lu)?;
+                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu)?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
                 self.partitions.get_mut(&p).unwrap().sens = Some(Rc::new(sens));
@@ -1593,8 +1596,9 @@ impl SteppedSolver {
             }
             // A hub partition's seed is a solve too: its sensitivity at the
             // seed's own system (Rails point 3), at the rail it solved on a
-            // CC rail. Its draw is the charge balance ([`ChargeBalance`]) in
-            // every regime: a magnified draw misjudged the CV -> CC test too
+            // CC rail. Its draw is its rail row's on a CC rail, else the
+            // charge balance ([`ChargeBalance`]): a magnified draw misjudged
+            // the CV -> CC test too
             // (G2bv's bc 453 hub 2 at 17.8 ms, 2.8e-7 A off, CC and CV in
             // turn for 50 passes).
             if let (Some(lu), Some(rail)) = (seed_sens, self.rail.filter(|_| hub)) {
@@ -1602,9 +1606,29 @@ impl SteppedSolver {
                 let (x, vc_from) = (part.x.clone(), part.vc.clone());
                 let zeros = vec![0.0; vc_from.len()];
                 let u = seed_u.unwrap_or(voltages[rail]);
-                let mut sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, &lu)?;
+                // Its rail ICs' power as the seed's solve judged it, at the
+                // loop's rail (`take_cc_step`): judged at its own rail, a
+                // gate powered in the solve and off at `u` (G2bv's bc_ic 178
+                // hub 2: 1.69 V powered, 4.94 V not) published a draw the
+                // solve never met, the loop solved its old rail again, no
+                // verdict flipped, and the seed re-solved to the same rail
+                // for 50 passes. Judged as solved, the draw meets the rail
+                // row at `u`, the loop moves the rail there, and the flip
+                // re-seeds it as any other (H8).
+                let mut sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, voltages[rail], &lu)?;
                 let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, now).with_ext(rail, x.len()).hold_power_at(voltages[rail]);
-                if let Some((caps, nodes)) = rail_capacitors(&part.shape, &bnd) {
+                if let (Some(cc), Some(_)) = (ic_ctx.cc, seed_u) {
+                    // On a CC rail, the draw its rail row held at `u`: the
+                    // loop solves the rail from it and the rest's draw, and
+                    // so finds `u` again. Read from the stamp instead, its
+                    // Newton's last rounding comes in through `C / SEED_H`
+                    // where a capacitor path runs from the rail to a fixed
+                    // node, which no charge balance reaches (cold fuzz 603
+                    // tpl 3: 1.33 mF from the rail to a node 5.5 uF holds,
+                    // 5.2e-7 A over the row's draw, the loop's rail 1.4 uV
+                    // under the seed's for 50 passes).
+                    sens.i = cc.dl - cc.a_o - cc.g_o * u;
+                } else if let Some((caps, nodes)) = rail_capacitors(&part.shape, &bnd) {
                     let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
                     sens.i = ChargeBalance { caps, nodes }.draw(&part.shape, live_params, SEED_H, &vc_from, &ic_ctx, &bnd, &z);
                 }
