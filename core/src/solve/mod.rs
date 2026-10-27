@@ -285,6 +285,12 @@ pub trait PartitionSolver {
         let _ = idx;
     }
 
+    /// An `advance` call is about to run the host step `[t_start, t_end]`:
+    /// its length is the hold-episode guard's yardstick (ruling R54 (a)).
+    fn begin_host_step(&mut self, t_start: f64, t_end: f64) {
+        let _ = (t_start, t_end);
+    }
+
     /// A current `Slow` event whose token carries [`crate::events::SLOW_ANCHOR`]
     /// (W1g ruling R21): re-drives the device's rail-driven segment from its
     /// exact value at `now` and fires nothing.
@@ -692,6 +698,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn driver_committed(&mut self, idx: usize) {
         (**self).driver_committed(idx)
+    }
+
+    fn begin_host_step(&mut self, t_start: f64, t_end: f64) {
+        (**self).begin_host_step(t_start, t_end)
     }
 
     fn handle_slow_anchor(&mut self, device: DeviceId, now: f64) -> Result<Vec<PartitionId>, String> {
@@ -2678,6 +2688,14 @@ pub struct PartitionedSolver {
     /// Set only inside the horizon clamp: the rail loop retries there even
     /// when no pass solved.
     at_clamp: bool,
+    /// The length of the host step (`advance` call) running, the guard's
+    /// yardstick for a short hold (ruling R54 (a)); set by the kernel at
+    /// each call, infinite before the first.
+    host_step: f64,
+    /// The open instant's foreign driver changes (ruling R54 (a)): a release
+    /// one of them caused ends its IC's episode. Cleared as each instant
+    /// opens, so nothing rolls it back.
+    changes: hold::Changes,
 }
 
 impl PartitionedSolver {
@@ -2928,6 +2946,8 @@ impl PartitionedSolver {
             episodes: Rc::new(Vec::new()),
             retry_armed: true,
             at_clamp: false,
+            host_step: f64::INFINITY,
+            changes: hold::Changes::None,
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.wire_w1g(program, &live, &fixed);
@@ -4101,9 +4121,16 @@ impl PartitionedSolver {
         if !self.at_clamp {
             return Ok(());
         }
+        #[cfg(test)]
+        if hold::RetrySeam::get() == hold::RetrySeam::NoRetry {
+            return Ok(());
+        }
         // The static solver numbers every partition, its own and the rest.
         let mut held = self.static_solver.held_partitions(t_end);
         held.retain(|p| self.partition_kinds[p.0 as usize] == PartitionKind::Static);
+        // Re-solved only where the retry changes something: a forced re-solve
+        // that frees nothing moved the partition by ulps (F5V2 finding 5).
+        held.retain(|p| self.static_solver.clamp_retry_changes(p.0 as usize, t_end, drivers));
         if held.is_empty() {
             return Ok(());
         }
@@ -4116,6 +4143,12 @@ impl PartitionedSolver {
     /// one), journaled.
     fn arm_retry(&mut self) {
         if !self.retry_armed {
+            // The clamp arms after its own retries, so the journal matters
+            // only when the clamp then fails (its ramp re-solve or delta
+            // pass): rolled back, the flag must read as the step left it, or
+            // asking again would retry at the clamp where the declined call
+            // did not. No board in the tests reaches a clamp failing after
+            // a retry was taken in its step (F5V2 finding 6, mutation 8).
             self.journal_holds();
             self.retry_armed = true;
         }
@@ -4137,6 +4170,11 @@ impl PartitionedSolver {
     /// Sets IC `device`'s episode, journaled; `Err` (the instant declines,
     /// `-4`) once it passes [`hold::EPISODE_MAX`] holds.
     pub(crate) fn set_episode(&mut self, device: usize, episode: hold::Episode) -> Result<(), String> {
+        // Never the window's first touch today: every episode change follows
+        // a write of the same IC's hold in the same instant (a probe, the
+        // held solve or the release), which journals the episodes with the
+        // table, so no test can see this call (F5V2 finding 6, mutation 6).
+        // Kept so an episode change can never escape the journal.
         self.journal_holds();
         let n = self.device_kinds.len();
         let table = Rc::make_mut(&mut self.episodes);
@@ -4567,6 +4605,14 @@ impl PartitionSolver for PartitionedSolver {
     #[inline]
     fn driver_committed(&mut self, idx: usize) {
         self.note_driver_change(idx);
+        // Ruling R54 (a): a commit is a foreign change to every IC but the
+        // one that owns the driver.
+        let owner = self.driver_snapshot.get(idx).map_or(u32::MAX, |d| if d.device == usize::MAX { u32::MAX } else { d.device as u32 });
+        self.changes = self.changes.note(owner);
+    }
+
+    fn begin_host_step(&mut self, t_start: f64, t_end: f64) {
+        self.host_step = t_end - t_start;
     }
 
     /// Opens the window: nothing is copied. From here every slot of the
@@ -4581,6 +4627,7 @@ impl PartitionSolver for PartitionedSolver {
     fn begin_instant(&mut self) -> Box<dyn std::any::Any> {
         assert!(!self.window, "rollback windows do not nest");
         self.window = true;
+        self.changes = hold::Changes::None;
         self.v_log.clear();
         self.i_log.clear();
         self.static_solver.begin_window();
@@ -4755,7 +4802,20 @@ impl PartitionSolver for PartitionedSolver {
 
     fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
         let p = partition.0 as usize;
-        self.end_gate_chase();
+        // A hub partition's own step or crossing moves the rail as a `Rail`
+        // event does: a rail IC whose gate it flips back at the next is
+        // chasing its own draw across instants, HG1's ping-pong (W1c point
+        // 1a), and is counted as `Rail` events are (a stepped partition at
+        // H_MIN on a CC rail flipped a gate every 10 ns step: G2bv's fz_ic 6
+        // hub 2, cold 204 tpl 5, 301 tpl 2). Any other partition's event
+        // changed what the rail sees, and ends the count. A PSU in CV holds
+        // its rail at the setpoint, which no partition moves: there the
+        // count costs nothing (the SAP-1's case).
+        let counted = |h: &hub::Hub| !h.rail_ics.is_empty() && h.contrib.get(p).is_some_and(|c| c.active) && (h.psu().is_none() || h.state.reg == crate::devices::sources::Regime::Cc);
+        let gates = self.hub.as_ref().filter(|h| counted(h)).map(|_| self.rail_gates());
+        if gates.is_none() {
+            self.end_gate_chase();
+        }
         if self.exact.is_some() {
             self.push_exact_stamp();
         }
@@ -4793,6 +4853,11 @@ impl PartitionSolver for PartitionedSolver {
         let drivers = Rc::clone(&self.driver_snapshot);
         let rail = self.rail_loop(now, &drivers, &mut readers);
         self.on_error(rail)?;
+        if let Some(a) = gates.and_then(|g| self.count_gate_flip(g)) {
+            let result = self.hold_on_rail(now, &drivers, &mut readers, &a, crate::rails::loop_unsettled());
+            self.on_error(result)?;
+            self.hub.as_mut().unwrap().state.gate_flips = 0;
+        }
         // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
         // now touch a dynamic partition: `handle_crossing`/`handle_step`
         // above already restamped its driver/pull contribution correctly
@@ -4948,6 +5013,8 @@ impl PartitionSolver for PartitionedSolver {
         if version & live::WATCH_BIT != 0 {
             self.ramp_crossing_at(device.0 as usize, now)
         } else {
+            // A waveform edge is a foreign change to every IC (ruling R54 (a)).
+            self.changes = hold::Changes::Many;
             self.source_edge_at(device.0 as usize, now)
         }
     }

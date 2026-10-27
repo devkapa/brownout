@@ -22,8 +22,9 @@
 //! supply passes its release level: probed powered, it is free again once
 //! it carries itself. On the rail the release level (ruling D1 (a): the window edge
 //! inward by that drop and a margin) is the `Rail` event that brings a retry
-//! when nothing else does (Rails point 4). An IC held more than
-//! [`EPISODE_MAX`] times in one sliding episode declines `-4` (R51's guard).
+//! when nothing else does (Rails point 4). An IC held and released more than
+//! [`EPISODE_MAX`] times in one sliding episode, each hold shorter than a
+//! host step, declines `-4` (the guard of rulings R51, R54 (a): [`Episode`]).
 //!
 //! This module holds the procedure's pieces both owners share and the rail's
 //! own steps; the static partition's run inside
@@ -57,6 +58,40 @@ impl FailProbeResidual {
 impl Drop for FailProbeResidual {
     fn drop(&mut self) {
         FAIL_PROBE_RESIDUAL.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RETRY_SEAM: std::cell::Cell<RetrySeam> = const { std::cell::Cell::new(RetrySeam::Normal) };
+}
+
+/// Test seam for F5V2 finding 5: runs a board with no retry at all, or with
+/// every retry probing but freeing nothing; the two must agree bit for bit.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum RetrySeam {
+    Normal,
+    NoRetry,
+    AsksOnly,
+}
+
+#[cfg(test)]
+impl RetrySeam {
+    pub(super) fn get() -> RetrySeam {
+        RETRY_SEAM.with(|c| c.get())
+    }
+
+    /// Sets the seam until the guard drops.
+    pub(super) fn arm(self) -> impl Drop {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                RETRY_SEAM.with(|c| c.set(RetrySeam::Normal));
+            }
+        }
+        RETRY_SEAM.with(|c| c.set(self));
+        Reset
     }
 }
 
@@ -133,64 +168,92 @@ pub(crate) fn probe(on: bool) -> PowerHold {
     PowerHold { kind: HoldKind::Probe(on), release: None }
 }
 
-/// Ruling R51's hold-episode guard: the holds an IC may take in one sliding
-/// episode before the instant declines (`-4`, classic's fallback). An IC
-/// that slides along its power edge (powered, its draw takes its supply out
-/// of its window; held off, the supply comes back) is held, freed and held
-/// again at the pace of its own edge: on the cold fuzz's 13 boards that
-/// pace ran from femtoseconds to milliseconds and from 119 to 110,000
-/// holds, the run crawling or frozen, where G2bv's 9,000 runs and the cold
-/// fuzz's legitimate holds chain at most 8 (drafts/f5k-logs). Classic's H8
-/// holds such a chip one host step at a time; the core declines it.
+/// The hold-episode guard (rulings R51, R54 (a)): the short holds an IC
+/// may take in one sliding episode before the instant declines (`-4`,
+/// classic's fallback). An IC that slides along its power edge (powered,
+/// its draw takes its supply out of its window; held off, the supply comes
+/// back) is held, freed and held again at the pace of its own edge, femto-
+/// to microseconds a hold, the run crawling or frozen; classic's H8 holds
+/// such a chip one host step at a time, the core declines it.
 pub(crate) const EPISODE_MAX: u32 = 50;
 
-/// An IC's next hold continues its episode when it comes within this many
-/// times its last hold's length after that hold's release: the chip got no
-/// further from its edge, powered, than it stayed held. A chip that runs
-/// powered for longer (a relaxation at the edge, G2bv's fz_ic 487 hub 2:
-/// 10 ns held, 150 us powered) starts a new episode at its next hold.
-pub(crate) const EPISODE_RATIO: f64 = 100.0;
-
-/// One IC's sliding episode: its holds in a row, each within
-/// [`EPISODE_RATIO`] of the last one's length after its release; a retry that
-/// still starves past its release level counts as one more.
+/// One IC's sliding episode (ruling R54 (a)): a hold counts toward it, at
+/// its release, only if it lasted less than one host step (the `advance`
+/// call it ends in) and its release was the chip's own, not one a foreign
+/// driver change caused; either of those ends the episode instead. A hold
+/// as long as a host step is classic's H8 cadence, and a release that
+/// answers a waveform edge, another device's output or a switch answers
+/// the circuit, not the chip's own draw (the evidence ruling R49 (d)'s
+/// latch test uses), so a supply fed from a pulse that holds the chip at
+/// every low phase starts afresh at each high one.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Episode {
+    /// The short holds counted so far.
     pub(crate) count: u32,
+    /// When the hold in place was taken.
     held_at: f64,
-    /// `None` while held.
-    released_at: Option<f64>,
-    held_for: f64,
+    held: bool,
 }
 
 impl Episode {
-    /// After a hold taken at `now`.
+    /// After a hold taken at `now`; one already in place (the procedure
+    /// re-running over a chip it holds, a retry moving its level) is the
+    /// same hold.
     pub(crate) fn held(self, now: f64) -> Episode {
-        // Held again with no release since (the procedure re-running over a
-        // chip it already holds): the same hold.
-        if self.count > 0 && self.released_at.is_none() {
+        if self.held {
             return self;
         }
-        let chained = self.count > 0 && self.released_at.is_some_and(|r| now - r <= EPISODE_RATIO * self.held_for);
-        Episode { count: if chained { self.count + 1 } else { 1 }, held_at: now, released_at: None, held_for: self.held_for }
+        Episode { held_at: now, held: true, ..self }
     }
 
-    /// After a retry that still starves past the release level.
-    pub(crate) fn refreshed(self) -> Episode {
-        Episode { count: self.count + 1, ..self }
+    /// After the release at `now`, in a host step `host_step` long, with
+    /// `foreign` true when a foreign driver change in the instant caused it.
+    pub(crate) fn released(self, now: f64, host_step: f64, foreign: bool) -> Episode {
+        if !self.held {
+            return self;
+        }
+        let short = now - self.held_at < host_step;
+        Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false }
     }
 
-    /// After the release at `now`.
-    pub(crate) fn released(self, now: f64) -> Episode {
-        Episode { released_at: Some(now), held_for: now - self.held_at, ..self }
-    }
-
-    /// `Err` with the decline's message past [`EPISODE_MAX`] holds.
+    /// `Err` with the decline's message past [`EPISODE_MAX`] short holds.
     pub(crate) fn check(self, device: usize) -> Result<(), String> {
         if self.count > EPISODE_MAX {
-            Err(format!("power hold: IC (device {device}) held {} times in one sliding episode at its power edge (W1c point 1a, ruling R51)", self.count))
+            Err(format!("power hold: IC (device {device}) held {} times in one sliding episode at its power edge, each shorter than a host step (W1c point 1a, rulings R51, R54)", self.count))
         } else {
             Ok(())
+        }
+    }
+}
+
+/// The foreign driver changes of the open instant (ruling R54 (a)), as the
+/// latch evidence of ruling R49 (d) reads them: a driver commit, by the
+/// device that owns it (`u32::MAX` for none), or a waveform source's edge.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) enum Changes {
+    #[default]
+    None,
+    /// Commits by this one device only.
+    One(u32),
+    /// A source edge, or commits by more than one device.
+    Many,
+}
+
+impl Changes {
+    pub(crate) fn note(self, owner: u32) -> Changes {
+        match self {
+            Changes::None => Changes::One(owner),
+            Changes::One(o) if o == owner => self,
+            _ => Changes::Many,
+        }
+    }
+
+    /// Whether a change other than IC `device`'s own was made.
+    pub(crate) fn foreign_to(self, device: usize) -> bool {
+        match self {
+            Changes::None => false,
+            Changes::One(o) => o as usize != device,
+            Changes::Many => true,
         }
     }
 }
@@ -232,6 +295,14 @@ impl Flips {
     pub(crate) fn alternating(&self) -> Vec<usize> {
         self.count.iter().enumerate().filter(|&(_, &c)| c >= 2).map(|(k, _)| k).collect()
     }
+}
+
+/// What a rail retry puts back when it frees nothing ([`PartitionedSolver::retry_on_rail`]):
+/// the published arrays, the dynamic snapshot and the hub's running sums.
+pub(super) struct Checkpoint {
+    published: (Vec<f64>, Vec<f64>),
+    dynamic: Box<dyn std::any::Any>,
+    sums: Option<(f64, f64)>,
 }
 
 /// How the rail loop's passes ended.
@@ -373,6 +444,10 @@ impl PartitionedSolver {
         if self.holds_active == 0 {
             return Ok(());
         }
+        #[cfg(test)]
+        if RetrySeam::get() == RetrySeam::NoRetry {
+            return Ok(());
+        }
         let held: Vec<(usize, usize, PowerHold, f64)> = {
             let hub = self.hub.as_ref().expect("a hub");
             hub.rail_ics
@@ -405,7 +480,7 @@ impl PartitionedSolver {
         // state back as it was, bit for bit, rather than solving its way
         // back (a stepped partition re-seeded twice at each of its steps
         // restarted its step each time: bc_ic 178 at 20 ns steps).
-        let checkpoint = (self.snapshot(), self.dynamic_snapshot());
+        let checkpoint = Checkpoint { published: self.snapshot(), dynamic: self.dynamic_snapshot(), sums: self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)) };
         let err = rails::loop_unsettled();
         let mut seed = Vec::new();
         for &(k, d, _, _) in &held {
@@ -432,22 +507,20 @@ impl PartitionedSolver {
                 (free, after)
             })
             .collect();
+        #[cfg(test)]
+        let verdicts: Vec<(bool, PowerHold)> = if RetrySeam::get() == RetrySeam::AsksOnly { held.iter().map(|&(_, _, hold, _)| (false, hold)).collect() } else { verdicts };
         if verdicts.iter().all(|&(free, _)| !free) {
-            return self.keep_held(now, checkpoint, &held, &verdicts);
+            self.keep_held(now, checkpoint, &held, &verdicts);
+            return Ok(());
         }
         let counts = self.hold_counts;
         let mut seed = Vec::new();
-        for (&(k, d, hold, _), &(free, after)) in held.iter().zip(&verdicts) {
+        for (&(k, d, _, _), &(free, after)) in held.iter().zip(&verdicts) {
             // Back to its hold first, uncounted (stat 25 counts holds taken);
             // freeing it from there counts a release (stat 26).
             let mut parts = self.write_power_hold(d, after);
-            let episode = self.episode(d);
             if free {
-                self.set_episode(d, episode.released(now))?;
-            } else if after != hold {
-                self.set_episode(d, episode.refreshed())?;
-            }
-            if free {
+                self.release_episode(d, now)?;
                 readers.push(DeviceId(d as u32));
                 self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
                 parts.extend(self.set_power_hold(d, PowerHold::FREE));
@@ -470,7 +543,8 @@ impl PartitionedSolver {
             Passes::Alternating(a, _) if held.iter().zip(&verdicts).any(|(h, v)| v.0 && a.contains(&h.1)) => {
                 self.hold_counts = counts;
                 let kept: Vec<(bool, PowerHold)> = verdicts.iter().map(|&(_, after)| (false, after)).collect();
-                self.keep_held(now, checkpoint, &held, &kept)
+                self.keep_held(now, checkpoint, &held, &kept);
+                Ok(())
             }
             Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
         }
@@ -479,24 +553,35 @@ impl PartitionedSolver {
     /// A retry that frees nothing: the solver back at `checkpoint`, bit for
     /// bit, and each held IC at its hold, a further level where the retry
     /// moved it (`refreshed`).
-    fn keep_held(&mut self, now: f64, checkpoint: ((Vec<f64>, Vec<f64>), Box<dyn std::any::Any>), held: &[(usize, usize, PowerHold, f64)], verdicts: &[(bool, PowerHold)]) -> Result<(), String> {
-        let (snapshot, dynamic) = checkpoint;
-        self.restore(snapshot);
-        self.dynamic_restore(dynamic);
+    fn keep_held(&mut self, now: f64, checkpoint: Checkpoint, held: &[(usize, usize, PowerHold, f64)], verdicts: &[(bool, PowerHold)]) {
+        self.restore(checkpoint.published);
+        self.dynamic_restore(checkpoint.dynamic);
+        // A whole restore re-sums the hub's running sums (Rails point 2), which
+        // differ from the incremental ones by ulps; the probe only asked, so
+        // they go back as they were.
+        if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), checkpoint.sums) {
+            (hub.state.a_run, hub.state.g_run) = (a, g);
+        }
         let mut moved = false;
         for (&(_, d, hold, _), &(_, after)) in held.iter().zip(verdicts) {
             if after != hold {
-                // Off to Off at a new level: the stamps are the same.
+                // Off to Off at a new level: the stamps are the same, and the
+                // hold the same one (its episode unchanged).
                 self.write_power_hold(d, after);
-                let episode = self.episode(d).refreshed();
-                self.set_episode(d, episode)?;
                 moved = true;
             }
         }
         if moved {
             self.schedule_rail_event(now);
         }
-        Ok(())
+    }
+
+    /// IC `d`'s episode after its release at `now` (ruling R54 (a)): counted
+    /// when its hold was shorter than this host step and no foreign driver
+    /// change in the instant caused it; `Err` past the guard.
+    pub(super) fn release_episode(&mut self, d: usize, now: f64) -> Result<(), String> {
+        let episode = self.episode(d).released(now, self.host_step, self.changes.foreign_to(d));
+        self.set_episode(d, episode)
     }
 
     /// The rail loop's passes with `seed` re-solved first, as a probe or the
@@ -566,16 +651,16 @@ impl PartitionedSolver {
         }
         let mut result = Ok(());
         for (d, hold, now) in self.static_solver.take_hold_requests() {
-            let (old, episode) = (self.power_hold(d), self.episode(d));
-            let episode = match (old.kind, hold.kind) {
-                (HoldKind::Off, HoldKind::Off) => episode.refreshed(),
-                (HoldKind::Off, _) => episode.released(now),
-                (_, HoldKind::Off) => episode.held(now),
-                _ => episode,
-            };
+            let old = self.power_hold(d);
             let _ = self.set_power_hold(d, hold);
-            if old.kind == HoldKind::Off || hold.kind == HoldKind::Off {
-                result = result.and(self.set_episode(d, episode));
+            match (old.kind, hold.kind) {
+                (HoldKind::Off, HoldKind::Off) => {}
+                (HoldKind::Off, _) => result = result.and(self.release_episode(d, now)),
+                (_, HoldKind::Off) => {
+                    let episode = self.episode(d).held(now);
+                    result = result.and(self.set_episode(d, episode));
+                }
+                _ => {}
             }
         }
         result

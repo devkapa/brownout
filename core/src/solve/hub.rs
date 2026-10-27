@@ -138,7 +138,7 @@ impl Hub {
         }
     }
 
-    fn psu(&self) -> Option<(f64, f64)> {
+    pub(super) fn psu(&self) -> Option<(f64, f64)> {
         match self.kind {
             HubKind::Psu { v, i_limit } => Some((v, i_limit)),
             HubKind::Battery(_) => None,
@@ -1885,7 +1885,7 @@ impl PartitionedSolver {
     }
 
     /// Whether each IC on the rail is powered, at the rail's `u`.
-    fn rail_gates(&self) -> Vec<bool> {
+    pub(super) fn rail_gates(&self) -> Vec<bool> {
         let hub = self.hub.as_ref().unwrap();
         let at = |node: usize| if node == hub.node { hub.state.u } else { self.voltages[node] };
         hub.rail_ics.iter().map(|&pos| {
@@ -1905,7 +1905,7 @@ impl PartitionedSolver {
     /// event that flips nothing ends the run, and so does any other event
     /// (see [`Self::end_gate_chase`]); the horizon clamp does not, since a
     /// caller stepping event by event clamps after each one.
-    fn count_gate_flip(&mut self, before: Vec<bool>) -> Option<Vec<usize>> {
+    pub(super) fn count_gate_flip(&mut self, before: Vec<bool>) -> Option<Vec<usize>> {
         let after = self.rail_gates();
         let state = &mut self.hub.as_mut().unwrap().state;
         if after == before {

@@ -984,6 +984,9 @@ impl StaticPartitionSolver {
     /// Arms the next host step's retry (the horizon clamp ended this one).
     pub(crate) fn arm_retry(&mut self) {
         if !self.retry_armed {
+            // As the owner's (`PartitionedSolver::arm_retry`): observable only
+            // through a clamp that fails after arming (F5V2 finding 6,
+            // mutation 9).
             self.journal_local_holds();
             self.retry_armed = true;
         }
@@ -1985,6 +1988,53 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Whether the horizon clamp's retry (ruling R51 (b)) of partition
+    /// `p_idx` would change anything: a held IC freed (it carries itself
+    /// probed powered, or reads unpowered both ways) or given a further
+    /// level, judged as [`Self::release_in`] judges them, from the
+    /// partition's published solution. The clamp re-solves only such a
+    /// partition, so a retry that frees nothing leaves the partition's
+    /// published state as it was, bit for bit (F5V2 finding 5: the forced
+    /// re-solve itself moved it by ulps). The probe writes nothing but this
+    /// solver's Newton count.
+    pub(crate) fn clamp_retry_changes(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> bool {
+        let gated = self.gated_ics(p_idx);
+        let x: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
+        let held: Vec<(u32, usize)> = gated
+            .iter()
+            .map(|&k| (k, self.ics[k as usize].0))
+            .filter(|&(_, d)| {
+                let hold = digital::power::hold_of(self.holds_slice(), d);
+                hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| r.since < now)
+            })
+            .collect();
+        if held.is_empty() {
+            return false;
+        }
+        let polish_at = self.hubs[p_idx].as_ref().and(self.rail).map(|rail| self.voltages[rail]);
+        let saved = (std::rc::Rc::clone(&self.holds), self.holds_on);
+        for &(_, d) in &held {
+            self.set_local_hold(d, crate::solve::hold::probe(true));
+        }
+        let probed = self.solve_once(p_idx, now, drivers, &gated, None, polish_at);
+        (self.holds, self.holds_on) = saved;
+        // A probe that fails asks nothing of the re-solve either, which
+        // keeps `solved` there too.
+        let Ok((xp, _)) = probed else { return false };
+        #[cfg(test)]
+        if crate::solve::hold::RetrySeam::get() == crate::solve::hold::RetrySeam::AsksOnly {
+            return false;
+        }
+        held.iter().any(|&(k, d)| {
+            let ic = &self.ics[k as usize].1;
+            let on = |v: &[f64]| digital::power::powered(ic, self.read_node(ic.vcc.node, p_idx, v), self.read_node(ic.gnd.node, p_idx, v));
+            let (s_on, s_off) = (self.supply_at(k, p_idx, &xp), self.supply_at(k, p_idx, &x));
+            let hold = digital::power::hold_of(self.holds_slice(), d);
+            let refresh = !digital::power::powered(ic, s_on, 0.0) && digital::power::powered(ic, s_off, 0.0) && hold.release.is_some_and(|r| crate::solve::hold::passed(r, s_off));
+            on(&xp) || !on(&x) || refresh
+        })
+    }
+
     /// The retry at an iterated partition's solve (W1c point 1a, ruling R51
     /// (b)): every IC held off is probed powered, the rest as they were, as
     /// classic's H8 retries a held chip at its next host step: once per
@@ -2013,6 +2063,10 @@ impl StaticPartitionSolver {
         if held.is_empty() {
             return Ok(solved);
         }
+        #[cfg(test)]
+        if crate::solve::hold::RetrySeam::get() == crate::solve::hold::RetrySeam::NoRetry {
+            return Ok(solved);
+        }
         if self.retry_armed {
             self.journal_local_holds();
             self.retry_armed = false;
@@ -2024,6 +2078,10 @@ impl StaticPartitionSolver {
         let probed = self.solve_once(p_idx, now, drivers, gated, None, polish_at);
         (self.holds, self.holds_on) = saved;
         let Ok((x, factors)) = probed else { return Ok(solved) };
+        #[cfg(test)]
+        if crate::solve::hold::RetrySeam::get() == crate::solve::hold::RetrySeam::AsksOnly {
+            return Ok(solved);
+        }
         // One still starving though its supply passed its release level is
         // held again with the fresh drop (D1 (a)), as on the rail.
         for &(k, d) in &held {

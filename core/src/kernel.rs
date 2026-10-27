@@ -1407,6 +1407,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// the state as of the previous instant's completion (nothing runs
     /// between one instant finishing and the next one's `self.time = t`).
     pub fn advance(&mut self, t_end: f64) -> Result<(), KernelError> {
+        if t_end > self.time {
+            self.solver.begin_host_step(self.time, t_end);
+        }
         loop {
             // A superseded event at the head is dropped here, between
             // instants, as its handler would drop it inside one: it is no

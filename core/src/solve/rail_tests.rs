@@ -10478,6 +10478,70 @@ fn a_static_release_in_an_instant_that_then_fails_is_undone_with_it() {
     assert!(failed >= 1, "{failed}");
 }
 
+#[test]
+fn a_retry_taken_in_an_instant_that_then_fails_is_armed_again() {
+    // F5V2 finding 6: the retry's arming (ruling R51 (b)) is journaled where
+    // the retry takes it, in the owner (`take_retry`, the rail) and in the
+    // static solver (`release_in`), and rolled back with the instant. F5V's
+    // stale-hold boards are released only through it (their release level
+    // lies past what the supply reaches unpowered): `s1`'s gate on an
+    // iterated static partition, `s1b`'s on a cell's rail. Each solve of
+    // the release's instant failed in turn leaves the hold, and the instant
+    // run again releases it; an arming left taken by the failed instant
+    // would leave the gate dark until the next host step.
+    // An LED and 1 k from P to ground give the release's instant (P's ramp
+    // end) a Newton solve after the retry's, in a partition of its own,
+    // for the failure to land on.
+    // Each solve on from one is failed in turn (a failed probe asks nothing, so
+    // the instant can pass with the hold kept); every instant that fails
+    // must leave the hold and be released when run again.
+    for cell in [false, true] {
+        let mut p = stale_hold_board(cell);
+        p.node_count = 9;
+        p.devices.extend([led(6, 4, 8), resistor(7, 8, 0, 1e3)]);
+        let mut rig = Rig::load(&p).unwrap();
+        let t_change = advance_to_hold_change(&mut rig, 2e-3, 2).expect("released at the pulse's edge");
+        let mut failed = 0;
+        for skip in 0..40 {
+            let mut rig = Rig::load(&p).unwrap();
+            while rig.k.next_event_time() < t_change {
+                let t = rig.k.next_event_time();
+                rig.advance(t).unwrap();
+            }
+            let result = {
+                let _fault = newton::hooks::force_unconverged_after(skip, u32::MAX);
+                rig.advance(t_change)
+            };
+            if result.is_ok() {
+                continue;
+            }
+            failed += 1;
+            assert_eq!(rig.s().power_hold(2).kind, digital::power::HoldKind::Off, "cell {cell} skip {skip}: the failed instant left the hold");
+            rig.advance(t_change).unwrap_or_else(|e| panic!("cell {cell} skip {skip}: the instant run again: {e:?}"));
+            assert!(rig.s().power_hold(2).is_free(), "cell {cell} skip {skip}: the instant run again releases the gate");
+        }
+        assert!(failed >= 1, "cell {cell}: no solve of the release's instant failed it");
+    }
+}
+
+#[test]
+fn the_dynamic_snapshot_carries_each_ics_episode() {
+    // F5V2 finding 6: a rail retry that frees nothing puts the solver back
+    // at its checkpoint (`keep_held`), and a chip freed there that at once
+    // alternated again had its release counted toward its episode (ruling
+    // R54 (a)) before the passes showed it was none. The checkpoint's
+    // dynamic snapshot carries the episodes, so that release is undone with
+    // the rest.
+    let mut rig = Rig::load(&stale_hold_board(true)).unwrap();
+    assert_eq!(rig.s().power_hold(2).kind, digital::power::HoldKind::Off, "held at the load");
+    let before = rig.s().episode(2);
+    let snapshot = rig.s().dynamic_snapshot();
+    rig.k.solver_mut().release_episode(2, 1e-9).unwrap();
+    assert_ne!(rig.s().episode(2), before, "a release counted");
+    rig.k.solver_mut().dynamic_restore(snapshot);
+    assert_eq!(rig.s().episode(2), before, "and undone with the snapshot");
+}
+
 /// A 4.6 V cell of `r` ohm with two 74LS00s on its rail: dev 1 (floor
 /// 4.275 V) with 1y high into 60 ohm, and dev 2, unloaded, its floor raised
 /// to 4.41 V (`VCC_MIN` 4.9 V).
@@ -10608,43 +10672,371 @@ fn cold_552_tpl2() -> Program {
 }
 
 #[test]
-fn a_gate_sliding_along_its_power_edge_declines_after_fifty_holds_in_one_episode() {
-    // Ruling R51, the permanent safety net. Cold 552 tpl 2's gate slides at
-    // its 4.275 V floor: powered, its outputs into node 6 take the CC rail
-    // under it; held off, the rail comes back over it, and the next step's
+fn a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode() {
+    // Rulings R51, R54 (a), the permanent safety net. Cold 552 tpl 2's gate
+    // slides at its 4.275 V floor: powered, its outputs into node 6 take the
+    // CC rail under it; held off, the rail comes back over it, and the
     // retry finds it carrying itself again, 70 ns powered for every 10 ns
     // held. Each hold is H8's, and right, but the chip has no state of its
     // own to settle in: 76,652 holds and releases in the sweep's first 6.3
-    // ms, a 16 s advance (a frozen tab). Within one sliding episode (each
-    // hold within 100 times the last hold's length after its release) the
-    // 51st hold declines `-4`, the board's classic fallback as at c5b1a13.
+    // ms, a 16 s advance (a frozen tab). Each hold is far shorter than the
+    // 6.3 ms host step and each release the chip's own (no other driver
+    // changes), so all count toward one episode, and the 51st release
+    // declines `-4`, the board's classic fallback as at c5b1a13.
     let mut e = Engine::load(&cold_552_tpl2()).unwrap_or_else(|er| panic!("load: {}", er.message));
     let err = e.advance(0.00627288085463002).expect_err("declined, not crawled through");
     assert_eq!(err.code, -4, "{}", err.message);
     assert!(err.message.contains("held 51 times in one sliding episode"), "{}", err.message);
     assert!(e.time() < 7e-4, "declined within the first episode, at {} s", e.time());
-    assert_eq!(e.stat(25), hold::EPISODE_MAX as f64, "the holds the instants before it kept");
+    assert_eq!((e.stat(25), e.stat(26)), (hold::EPISODE_MAX as f64 + 1.0, hold::EPISODE_MAX as f64), "the 51st hold kept, its release the declined instant");
 }
 
 #[test]
-fn an_episode_chains_holds_that_come_back_within_a_hundred_holds_lengths() {
-    // The guard's own rule (hold::Episode): a hold within 100 times the last
-    // hold's length after that hold's release continues the episode; a
-    // longer powered stretch (a relaxation at the edge: G2bv's fz_ic 487 hub
-    // 2, 10 ns held and 150 us powered) starts a new one, and a retry still
-    // starving past its level counts one more.
-    let e = hold::Episode::default().held(1.0);
-    assert_eq!(e.count, 1);
-    let e = e.released(1.0 + 10e-9).held(1.0 + 10e-9 + 0.9e-6);
-    assert_eq!(e.count, 2, "back within 100 x 10 ns");
-    assert_eq!(e.held(2.0).count, 2, "held again with no release between: the same hold");
-    let e = e.released(1.0 + 20e-9 + 0.9e-6).held(1.0 + 1.0e-3);
-    assert_eq!(e.count, 1, "powered for 1 ms after a 10 ns hold: a new episode");
-    assert_eq!(e.refreshed().count, 2);
+fn an_episode_counts_only_short_holds_its_chip_released_itself() {
+    // Ruling R54 (a), the guard's own rule (hold::Episode): a hold counts at
+    // its release when it lasted less than the host step and no foreign
+    // driver change caused the release; a hold of a host step or more, or a
+    // foreign-caused release, ends the episode. A retry moving a held
+    // chip's level is the same hold, and so is the procedure re-running
+    // over a chip it holds.
+    let step = 1e-3;
+    let e = hold::Episode::default().held(1.0).released(1.0 + 10e-9, step, false);
+    assert_eq!(e.count, 1, "10 ns held in a 1 ms host step");
+    let e = e.held(1.0 + 1e-6).held(1.5).released(1.0 + 2e-6, step, false);
+    assert_eq!(e.count, 2, "held again with no release between: the same hold, from 1 us");
+    assert_eq!(e.held(2.0).released(2.0 + 1.5 * step, step, false).count, 0, "held over a host step: classic's cadence, a new episode");
+    assert_eq!(e.held(2.0).released(2.0 + 10e-9, step, true).count, 0, "released by a foreign change: a new episode");
+    assert_eq!(e.released(3.0, step, false), e, "a release with no hold in place changes nothing");
     let mut e = hold::Episode::default();
     for k in 0..=hold::EPISODE_MAX {
-        e = e.held(k as f64).released(k as f64 + 0.5);
+        e = e.held(k as f64).released(k as f64 + 0.5, step * 1e3, false);
         assert_eq!(e.check(3).is_err(), k + 1 > hold::EPISODE_MAX, "{k}");
+    }
+    // The foreign test is ruling R49 (d)'s: a commit by another device or a
+    // waveform edge, never the chip's own.
+    let own = hold::Changes::None.note(7);
+    assert!(!own.foreign_to(7) && own.foreign_to(3));
+    assert!(own.note(7).note(2).foreign_to(7), "a second device's commit");
+    assert!(!hold::Changes::None.foreign_to(7));
+}
+
+/// F5V2's pulse-fed gate: a 4.5 <-> 5.5 V pulse (1 us edges, 4 ms high
+/// from 1 ms, 10 ms period) through 30 ohm to a 74LS00's vcc, its 1y (inputs
+/// low, so high) into 60 ohm to ground. Nodes: 1 vcc, 2 the feed, 3 1y,
+/// 4 a 5 V source pulling 2y through 1 k at 5.
+fn pulse_fed_gate() -> Program {
+    let logic = [0, 0, 3, 4, 4, 5, 0, 0, 6, 0, 0, 7];
+    program(8, vec![
+        pulse(0, 2, 0, [4.5, 5.5, 1e-3, 1e-6, 1e-6, 4e-3, 1e-2], 0),
+        source(1, 4, 0, 5.0),
+        resistor(2, 2, 1, 30.0),
+        ls00(3, 1, 0, logic, 10e-9, 1),
+        resistor(4, 3, 0, 60.0),
+        resistor(5, 4, 5, 1000.0),
+    ])
+}
+
+#[test]
+fn a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs() {
+    // Ruling R54 (a), F5V2 finding 1. At 4.5 V through 30 ohm the gate's
+    // draw takes its supply under 4.275 V: held off each low phase, 6 ms,
+    // and freed by the pulse's rising edge, a foreign change, so every
+    // phase is an episode of its own. R51's ratio rule chained them (each
+    // back within 100 holds' lengths) and declined at the 51st, 0.4955 s.
+    // At 0.5 ms host steps each hold is also longer than a host step; at
+    // 20 ms only the foreign edge ends the episode.
+    for step in [5e-4f64, 2e-2] {
+        let mut e = Engine::load(&pulse_fed_gate()).unwrap_or_else(|er| panic!("load: {}", er.message));
+        let n = (1.0 / step).round() as usize;
+        for k in 1..=n {
+            let t = k as f64 * step;
+            e.advance(t).unwrap_or_else(|er| panic!("step {step}: {} at {} after {} holds", er.message, e.time(), e.stat(25)));
+        }
+        // Held at load and at each of the 100 falling edges to 0.995 s, and
+        // freed at each of the 100 rising edges.
+        assert_eq!((e.stat(25), e.stat(26)), (101.0, 100.0), "step {step}: a hold each low phase, each released");
+    }
+}
+
+#[test]
+fn the_stale_hold_boards_run_a_second_of_pulses() {
+    // Ruling R54 (a), F5V2 finding 1 on F5V's stale-hold boards: the gate is
+    // held each time P falls to 0 V and freed when it rises, a foreign
+    // change, so each hold is an episode of its own; R51's ratio rule
+    // declined both at 0.4955 s.
+    for cell in [false, true] {
+        let mut e = Engine::load(&stale_hold_board(cell)).unwrap_or_else(|er| panic!("load: {}", er.message));
+        for k in 1..=2000 {
+            let t = k as f64 * 5e-4;
+            e.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {} at {}", er.message, e.time()));
+        }
+        assert_eq!((e.stat(25), e.stat(26)), (101.0, 100.0), "cell {cell}: a hold each low phase, each released");
+    }
+}
+
+/// Cold 577 tpl 5 (default mode): a {12.2 V, 47 mA} PSU, a 555 on the
+/// rail, capacitors from the rail to nodes 2 and 7.
+fn cold_577_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![12.229934285445824, 0.04701034017161009], vec![]),
+        fz(1, 1, &[2, 0], vec![8867.255616775888], vec![]),
+        fz(1, 2, &[3, 0], vec![94901.52053035072], vec![]),
+        fz(1, 3, &[4, 0], vec![7888.674607743629], vec![]),
+        fz(1, 4, &[5, 0], vec![600276.8690632748], vec![]),
+        fz(1, 5, &[6, 0], vec![884237.6824883647], vec![]),
+        fz(1, 6, &[7, 0], vec![30951.67166504169], vec![]),
+        fz(40, 7, &[1, 0, 1, 1, 5, 3, 4, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 8, &[1, 2], vec![240.32709970848802], vec![]),
+        fz(1, 9, &[2, 4], vec![1151.491575093083], vec![]),
+        fz(3, 10, &[4, 0], vec![5.365225726517978e-7, 0.0, 0.0], vec![]),
+        fz(1, 11, &[1, 0], vec![58.27272691211567], vec![]),
+        fz(3, 12, &[3, 5], vec![1.229036906705404e-6, 0.0, 0.0], vec![]),
+        fz(3, 13, &[4, 6], vec![0.00015552971733438634, 1.345026098002157, 0.0], vec![]),
+        fz(4, 14, &[4, 1], vec![1.0], vec![]),
+        fz(1, 15, &[1, 0], vec![590.94922733906], vec![]),
+        fz(3, 16, &[2, 1], vec![0.013370194859060885, 0.0, 0.0], vec![]),
+        fz(3, 17, &[1, 7], vec![0.0008042963679718378, 0.0, 0.0], vec![]),
+        fz(1, 18, &[3, 6], vec![7636.565386312634], vec![]),
+        fz(3, 19, &[1, 2], vec![6.306011191925995e-7, 0.0, 0.0], vec![]),
+        fz(1, 20, &[6, 2], vec![1221.9898456979784], vec![]),
+        fz(3, 21, &[7, 6], vec![0.0013550115520314285, 0.4070283063693921, 0.0], vec![]),
+        fz(1, 22, &[4, 7], vec![2.6895533828654035], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.007496503973939393, 240.32709970848802], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.1127859043451141, 1151.491575093083], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.5756742027176894, 58.27272691211567], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.0006952367891127764, 590.94922733906], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.0007437938566566663, 7636.565386312634], vec![]),
+        fz(90, 22, &[], vec![22.0, 27.221379455186806, 2.6895533828654035], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+/// Cold 670 tpl 2, forced to default mode: a {4.72 V, 32 mA} PSU, 1.26 mF
+/// from the rail to node 5, a 74LS00 on the rail whose 1y and 4y are the
+/// rail itself.
+fn cold_670_tpl2_default() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.720394607974314, 0.032309252292146054], vec![]),
+        fz(1, 1, &[2, 0], vec![88473.26199596563], vec![]),
+        fz(1, 2, &[3, 0], vec![34768.670387193124], vec![]),
+        fz(1, 3, &[4, 0], vec![10182.76491880738], vec![]),
+        fz(1, 4, &[5, 0], vec![126779.54890656004], vec![]),
+        fz(1, 5, &[3, 4], vec![4.61151881030905], vec![]),
+        fz(3, 6, &[1, 5], vec![0.0012594497438993583, 0.0, 0.0], vec![]),
+        fz(3, 7, &[5, 0], vec![1.2837342652815031e-6, 0.2042274790789823, 0.0], vec![]),
+        fz(30, 8, &[1, 0], vec![3.106996054717552, 1.7477641650620048, 0.03827393492257751, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 9, &[1, 1], vec![595.6878122216177], vec![]),
+        fz(50, 10, &[1, 0, 5, 2, 1, 0, 0, 3, 0, 0, 3, 0, 0, 1], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 2.070409865862511e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 11, &[1, 3], vec![308.1867248609299], vec![]),
+        fz(1, 12, &[3, 1], vec![1816.2982678747258], vec![]),
+        fz(1, 13, &[5, 4], vec![10023.706993073263], vec![]),
+        fz(1, 14, &[3, 2], vec![160.20876539445462], vec![]),
+        fz(30, 15, &[2, 5], vec![2.702427208103991, 2.2004357739998106, 0.02971469951400689, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 2], vec![174.88927436568574], vec![]),
+        fz(1, 17, &[4, 5], vec![4732.936116204729], vec![]),
+        fz(1, 18, &[4, 2], vec![20195.27416812104], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.3140951715350074, 4.61151881030905], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.04520187842907025, 595.6878122216177], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.05141360438304322, 308.1867248609299], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.007608179221505972, 1816.2982678747258], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.010627700053332191, 174.88927436568574], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_chip_chattering_at_its_edge_in_ten_nanosecond_holds_declines_within_its_first_episode() {
+    // Ruling R54 (a), F5V2 finding 2. Each of these chips is held 10 ns and
+    // runs about 1 us powered before its draw takes its supply out again:
+    // R51's ratio rule (back within 100 holds' lengths) saw a new episode
+    // at each hold, and the boards took 10,000 to 13,000 holds and 3 to 4.5
+    // s to hit the sweep's wall cap. Every hold is far shorter than the host
+    // step and released by the chip's own supply, so the 51st release
+    // declines `-4`, within the first host step.
+    for (name, p, first) in [("577 tpl 5", cold_577_tpl5(), 0.006272880912080727), ("670 tpl 2", cold_670_tpl2_default(), 0.006272881096655422)] {
+        let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
+        let err = e.advance(first).expect_err("declined, not crawled through");
+        assert_eq!(err.code, -4, "{name}: {}", err.message);
+        assert!(err.message.contains("held 51 times in one sliding episode"), "{name}: {}", err.message);
+        // Stat 25 counts holds taken, a probe re-holding a chip already held
+        // too; the episode counts each hold once.
+        assert!(e.stat(25) <= 2.0 * (hold::EPISODE_MAX as f64 + 1.0), "{name}: declined at the first episode's end, {} holds", e.stat(25));
+    }
+}
+
+// ---- F5m: HG1 across a hub partition's own steps ----------------------------
+
+/// Cold 301 tpl 2: a {4.70 V, 136 mA} PSU, a 555 on the rail (its window
+/// from 1.8 V), the rail switched onto node 2 (2.4 mF from node 3, 1.5 uF
+/// to ground), so a stepped hub partition steps with the rail on CC.
+fn cold_301_tpl2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.699251780737138, 0.1360561939952043], vec![]),
+        fz(1, 1, &[2, 0], vec![2517.771189205941], vec![]),
+        fz(1, 2, &[3, 0], vec![378548.0920676974], vec![]),
+        fz(1, 3, &[4, 0], vec![49481.381163273276], vec![]),
+        fz(1, 4, &[2, 1], vec![15032.654471028625], vec![]),
+        fz(40, 5, &[1, 0, 2, 2, 4, 2, 2, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 6, &[1, 2], vec![3252.1449925274337], vec![]),
+        fz(1, 7, &[2, 2], vec![1617.2471390535895], vec![]),
+        fz(3, 8, &[2, 0], vec![1.522762840475241e-6, 0.0, 0.0], vec![]),
+        fz(1, 9, &[2, 2], vec![288.4053834275334], vec![]),
+        fz(1, 10, &[0, 3], vec![339.07432549069006], vec![]),
+        fz(30, 11, &[1, 4], vec![3.063767807001338, 2.254233334874512, 0.03165390111805066, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 12, &[1, 1], vec![251.55074129441036], vec![]),
+        fz(30, 13, &[2, 0], vec![3.197788212742436, 1.8806789593259228, 0.03784577826860894, 0.0, 0.0, 0.0], vec![]),
+        fz(3, 14, &[0, 4], vec![0.0033197818229961924, 0.4040618106713327, 0.0], vec![]),
+        fz(4, 15, &[1, 2], vec![1.0], vec![]),
+        fz(1, 16, &[2, 0], vec![31.855583707434604], vec![]),
+        fz(3, 17, &[3, 0], vec![0.0023980142451702035, 0.0, 0.0], vec![]),
+        fz(1, 18, &[2, 3], vec![1230.7387074428268], vec![]),
+        fz(1, 19, &[1, 2], vec![2934.0465005261735], vec![]),
+        fz(1, 20, &[1, 2], vec![18023.107279949378], vec![]),
+        fz(90, 4, &[], vec![4.0, 9.549272217678113e-5, 15032.654471028625], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00538895572266153, 3252.1449925274337], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0037770571531698196, 1617.2471390535895], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.006887733917138283, 288.4053834275334], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.010738374913095827, 251.55074129441036], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.05023120368993972, 31.855583707434604], vec![]),
+    ];
+    let mut p = program(5, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_chip_flipped_at_each_step_of_the_hub_partition_it_draws_from_is_held() {
+    // W1c point 1a across instants (HG1), F5V2 finding 3. The 555 sits at
+    // its 1.8 V floor on a CC rail that a stepped hub partition carries:
+    // a step that starts with the rail over 1.8 V powers it and ends under
+    // (its draw), the next starts unpowered and ends over, at 10 ns steps.
+    // Only `Rail` events counted toward HG1, so that ping-pong ran free
+    // between the holds the rail loop took: 49 holds and an 11.5 s first
+    // advance (6.3 ms), each hold followed by 0.24 s of 10 ns steps. Each
+    // hub step now counts as a `Rail` event does; the chip is held at the
+    // second flip back, and its 10 ns holds decline within the first
+    // episode (ruling R54 (a)), the board's classic fallback as at c5b1a13
+    // (-4 at 66 us).
+    let mut e = Engine::load(&cold_301_tpl2()).unwrap_or_else(|er| panic!("load: {}", er.message));
+    let err = e.advance(0.006272879).expect_err("declined, not stepped through at 10 ns");
+    assert_eq!(err.code, -4, "{}", err.message);
+    assert!(err.message.contains("held 51 times in one sliding episode"), "{}", err.message);
+    assert!(e.time() < 1e-4, "declined within the first episode, at {} s", e.time());
+}
+
+// ---- F5m: a retry that frees nothing restores bit for bit -----------------
+
+/// Cold 182 tpl 0: a {4.82 V, 145 mA} PSU, a 555 on the rail held off from 0.17 s on and never
+/// released (its switch, device 13, toggles at 0.17 and 0.26 s).
+fn cold_182_tpl0() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.82391955261206, 0.14470139061705575], vec![]),
+        fz(1, 1, &[2, 0], vec![21341.10759536071], vec![]),
+        fz(1, 2, &[3, 0], vec![84910.1743357632], vec![]),
+        fz(1, 3, &[4, 0], vec![225501.70521977055], vec![]),
+        fz(1, 4, &[5, 0], vec![28806.865083234894], vec![]),
+        fz(1, 5, &[1, 2], vec![1.747283555018954], vec![]),
+        fz(40, 6, &[1, 0, 5, 5, 5, 3, 0, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[1, 2], vec![5974.4736388104975], vec![]),
+        fz(1, 8, &[2, 0], vec![12904.332650180246], vec![]),
+        fz(3, 9, &[0, 0], vec![6.532160081325276e-7, 0.0, 0.0], vec![]),
+        fz(1, 10, &[5, 0], vec![61.371320562763586], vec![]),
+        fz(1, 11, &[0, 3], vec![103.82029707728188], vec![]),
+        fz(1, 12, &[3, 4], vec![67.615697881173], vec![]),
+        fz(4, 13, &[2, 3], vec![1.0], vec![]),
+        fz(1, 14, &[3, 0], vec![12.194728986041477], vec![]),
+        fz(30, 15, &[3, 0], vec![2.7297057141689, 1.683199681331419, 0.007639621518160501, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 3], vec![24.954636662482386], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.026636099111645904, 1.747283555018954], vec![]),
+        fz(90, 7, &[], vec![7.0, 2.1705399257336346e-5, 5974.4736388104975], vec![]),
+        fz(90, 8, &[], vec![8.0, 8.270780028369148e-5, 12904.332650180246], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.0009525140276869148, 61.371320562763586], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.07335863992493184, 67.615697881173], vec![]),
+        fz(90, 14, &[], vec![14.0, 2.68345986476719, 12.194728986041477], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.2396639661486624, 24.954636662482386], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.options.integration = 0;
+    p.digital_slot_count = 32;
+    p
+}
+
+/// Cold 196 tpl 1: a {8.34 V, 132 mA} PSU, a clock, and a 555 whose supply, node
+/// 6, hangs 32.7 ohm off a static partition: held off there, never released.
+fn cold_196_tpl1() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![8.335302951158798, 0.13150633326105143], vec![]),
+        fz(22, 1, &[3, 0], vec![2.6008084627826156, 0.8205630059042611, 10.880874921096378, 0.0, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![114878.18238656467], vec![]),
+        fz(1, 3, &[4, 0], vec![7799.633539194564], vec![]),
+        fz(1, 4, &[5, 0], vec![442076.2244467679], vec![]),
+        fz(1, 5, &[6, 0], vec![53065.50262844789], vec![]),
+        fz(1, 6, &[6, 5], vec![32.68097190528945], vec![]),
+        fz(1, 7, &[3, 0], vec![194.00547260509674], vec![]),
+        fz(40, 8, &[6, 0, 1, 5, 6, 6, 3, 0], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 9, &[6, 0], vec![105.99001801685802], vec![]),
+        fz(1, 10, &[0, 3], vec![25165.620198424596], vec![]),
+        fz(3, 11, &[3, 0], vec![3.721079953434243e-8, 0.0, 0.0], vec![]),
+        fz(1, 12, &[5, 3], vec![1903.7707655920356], vec![]),
+        fz(1, 13, &[0, 5], vec![503.547643512332], vec![]),
+        fz(1, 14, &[5, 0], vec![70344.81805455378], vec![]),
+        fz(30, 15, &[4, 5], vec![3.230533522708651, 1.759887150160364, 0.012980736768439189, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 4], vec![64.4640751352851], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.041306886082873015, 32.68097190528945], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.00305128671037237, 194.00547260509674], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.02479140635094927, 105.99001801685802], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.00042131993818982864, 25165.620198424596], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.05096307531833872, 1903.7707655920356], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.0023506586257629318, 503.547643512332], vec![]),
+        fz(90, 14, &[], vec![14.0, 5.903766542545458e-6, 70344.81805455378], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.2788284246193524, 64.4640751352851], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_retry_that_frees_nothing_leaves_the_run_bit_for_bit_as_it_was() {
+    // F5V2 finding 5 (ruling R51 (b): the retry only asks). Each board runs
+    // twice, with no retry at all and with every retry probing a held chip
+    // and freeing nothing; the published voltages must agree to the bit at
+    // every host step. The rail's retry put the hub's running sums back
+    // re-summed (Rails point 2's recompute after a whole restore, ulps from
+    // the incremental ones: 182 tpl 0 off by 1e-13 V from 0.26 s), and the
+    // clamp re-solved a static partition holding a held chip only to probe
+    // it (196 tpl 1 off by 1e-15 V from the first host step).
+    let toggles: &[(f64, usize)] = &[(0.16964862719279233, 13), (0.2595604491700335, 13)];
+    for (name, p, stops, toggles) in [("182 tpl 0", cold_182_tpl0(), vec![0.006272879998957345, 0.013318265673895324, 0.013519568466705188, 0.014317009684649685, 0.040378550111770425, 0.07057049561482419, 0.09297134995164474, 0.09315771753629373, 0.09565666438180485, 0.10153405682478835, 0.10202583796940948, 0.10220933460419031, 0.12443019075624726, 0.13250932588946368, 0.1327202125679568, 0.13501474161943483, 0.13578591735295228, 0.13615201829900628, 0.1401459363269185, 0.14910358004921206, 0.1500050127261678, 0.15063784184044718, 0.15162406913993892, 0.16266398231785245, 0.16964862719279233, 0.19049156196271452, 0.20392892161124826, 0.22540840453808006, 0.22591006094867933, 0.2262459710478473, 0.22804201127754886, 0.23074629780535588, 0.23598804876616586, 0.2398857751954551, 0.2595604491700335, 0.3], toggles), ("196 tpl 1", cold_196_tpl1(), vec![0.006272880040702927, 0.009518924590976103, 0.009902844739601756, 0.010256506809549005, 0.010737349902114918, 0.02], &[][..])] {
+        let run = |seam: hold::RetrySeam| -> Vec<Vec<u64>> {
+            let _seam = seam.arm();
+            let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
+            let mut state = 1.0;
+            let mut out = Vec::new();
+            for &t in &stops {
+                e.advance(t).unwrap_or_else(|er| panic!("{name} {seam:?}: {} at {}", er.message, e.time()));
+                for &(at, d) in toggles {
+                    if at == t {
+                        state = 1.0 - state;
+                        e.set_params(&[(d as u32, 0, state)]).unwrap_or_else(|er| panic!("{name}: toggle: {}", er.message));
+                    }
+                }
+                out.push(e.voltages().iter().map(|v| v.to_bits()).collect());
+            }
+            assert!(e.stat(25) >= 1.0 && e.stat(26) == 0.0, "{name} {seam:?}: a hold never released ({}, {})", e.stat(25), e.stat(26));
+            out
+        };
+        let (none, asks) = (run(hold::RetrySeam::NoRetry), run(hold::RetrySeam::AsksOnly));
+        for (k, (a, b)) in none.iter().zip(&asks).enumerate() {
+            assert_eq!(a, b, "{name}: the run with retries that free nothing left the run without them at host step {k} (t = {})", stops[k]);
+        }
     }
 }
 

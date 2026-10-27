@@ -1294,13 +1294,14 @@ their own, and the source KCL does with W1a point 2's branch fold.
    verdict only while it is free. In code every site that judges power goes
    through `digital::power::verdict` with the solver's hold table.
 1a. **The power hold** (F5; classic's H8, `fix/power-off-stall`, 0.6.3;
-   rulings D1-D4, D8, R44 (a), R45 (a), R51). An IC whose own draw pulls its
+   rulings D1-D4, D8, R44 (a), R45 (a), R51, R54 (a)). An IC whose own draw pulls its
    supply out of its power window, while its absence lets the supply
    recover, has no consistent power state, and a solve that iterates over it
    alternates. Each such solve counts every gated IC's verdict flips between
    its iterations: the rail loop's passes, the rail Newton's iterates, an
    iterated static partition's Newton iterates (point 3) and, across
-   instants, `Rail` events in a row (Rails point 3). When the solve fails, or
+   instants, `Rail` events and a hub partition's own steps and crossings in
+   a row (Rails point 3). When the solve fails, or
    the rail loop cycles, with an IC flipped at least twice, the solve runs
    again in place (no rollback, no 1 ps step: an instant is classic's 1 ps
    probe already):
@@ -1348,10 +1349,18 @@ their own, and the source KCL does with W1a point 2's branch fold.
    unpowered both probed powered and held off (its own draw no longer
    decides), is free again and reads at once (point 9); starving again at
    a later instant, it is held again with a fresh drop. The others stay held, and the probe
-   leaves no trace: the static probe publishes nothing, and a rail probe
-   that frees nothing puts the solver's state back bit for bit (re-solved
+   leaves no trace, bit for bit: the static probe publishes nothing (the
+   clamp re-solves a static partition holding a held IC only when its probe,
+   from the published solution, frees or moves a hold; re-solved only to be
+   probed, the partition moved by ulps), and a rail probe that frees nothing
+   puts the solver's state back as it was, the hub's running sums included
+   (not re-summed, as a whole restore re-sums them, Rails point 2: ulps on
+   12 of the cold fuzz's 83 boards whose hold is never released). Re-solved
    back instead, a stepped partition re-seeded at each of its steps
-   restarted its step each time, G2bv's bc_ic 178 hub 2 at 20 ns). On the
+   restarted its step each time, G2bv's bc_ic 178 hub 2 at 20 ns. Pin:
+   `a_retry_that_frees_nothing_leaves_the_run_bit_for_bit_as_it_was` (a
+   run whose every retry frees nothing against one with no retry, to the
+   bit at every host step). On the
    rail, one freed that alternates again within the instant has its draw
    still deciding: the retry found no release, and it stays held, the
    solver put back as by a retry that frees nothing. Freed and held again
@@ -1390,30 +1399,44 @@ their own, and the source KCL does with W1a point 2's branch fold.
    the procedure in `solve/rail_tests.rs`, listed under Equivalence harness
    rules, the power-gate ping-pong.
 
-   **The hold-episode guard** (ruling R51, permanent). A chip whose supply
-   slides along its power edge (powered, its draw takes the supply out of
-   its window; held off, the supply comes back) is held, freed and held
-   again at the pace of its own edge, each hold right and none settling:
-   on the cold fuzz's 14 sliding boards (default mode, hub 2) that pace ran
-   from femtoseconds to milliseconds, 119 to 110,000 holds in the sweep's
-   1.5 s, the run crawling or one advance frozen for 16 s. An IC's
-   **episode** is its holds in a row, each taken within 100 times the
-   previous hold's length after that hold's release (the chip got no
-   further from its edge, powered, than it stayed held); a retry that still
-   starves past its level counts one more, a hold taken again with no
-   release between does not, and a longer powered stretch starts a new
-   episode. The hold that would be the 51st of one episode declines `-4`
-   (the board falls back to classic, as all 14 did before F5). Measured
-   (drafts/f5k-logs): the sliding boards chain 119 to 110,000 holds by that
-   rule; G2bv's 9,000 runs and every other cold board chain at most 8
-   (bc_ic 426 hub 1), and a relaxation at the edge (fz_ic 487 hub 2: 10 ns
-   held, 150 us powered, 44 holds) chains 1. Retried once per host step
-   (F5l, drafts/f5l-logs) the rule stands: the cold fuzz 1-800's guard
-   declines are 32 of F5k's 36 and no other (the 4 left were releases held
-   again within their instant, now kept held), and no board that runs takes
-   more than 29 holds in all. Pins:
-   `a_gate_sliding_along_its_power_edge_declines_after_fifty_holds_in_one_episode`
-   and `an_episode_chains_holds_that_come_back_within_a_hundred_holds_lengths`
+   **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
+   whose supply slides along its power edge (powered, its draw takes the
+   supply out of its window; held off, the supply comes back) is held,
+   freed and held again at the pace of its own edge, each hold right and
+   none settling: on the cold fuzz that pace ran from femtoseconds to
+   milliseconds, up to 110,000 holds in the sweep's 1.5 s, the run crawling
+   or one advance frozen for 16 s. An IC's **episode** counts its holds as
+   each is released: a hold counts when it lasted less than one host step
+   (the `advance` call it ends in) and its release was the chip's own; a
+   hold that lasted a host step or more (classic's H8 cadence) ends the
+   episode, as does a release that a foreign driver change in the instant
+   caused (a waveform source's edge, a commit by another device; a switch
+   is a `set_params`, which drops every hold: the evidence NE555 point 11's
+   latch test reads, ruling R49 (d)). A hold taken again with no release
+   between, or a retry that moves a held chip's level, is the same hold. The
+   release that counts the 51st short hold of one episode declines `-4`
+   (the board falls back to classic). R51's first rule (each hold within
+   100 times the last one's length) both fired on a legitimate run and
+   missed a fast chatter (F5V2): a 4.5 <-> 5.5 V pulse feeding a 74LS00
+   through 30 ohm holds it each 6 ms low phase and the edge frees it, and
+   was declined at its 51st phase, 0.4955 s (now each phase is an episode
+   of its own: 1 s run, 101 holds, 100 releases); cold 577 tpl 5 and 670
+   tpl 2 (10 ns held, about 1 us powered) took 10,000 to 13,000 holds and
+   3 to 4.5 s to the wall cap (now `-4` at their 51st release, within the
+   first host step). Measured at F5m's tree (drafts/f5m-logs): the cold
+   fuzz 1-800's 5,600 runs have 33 guard declines, every one a `-4` at
+   c5b1a13 (22 rail loop, 11 rail Newton), none of them a board that ran at
+   c5b1a13 or 1a84f72, and the slowest 1.7 s (482 tpl 0, as at 1a84f72);
+   206 runs that complete take holds, at most 108 (527 tpl 5, where 66 of
+   the 107 released lasted a host step or more, so no episode passed 4). Cold 24 tpl 0 and 248
+   tpl 5, which ran at bcbce27 with one hold, decline: their chips relax at
+   the edge (24: 40 us held, 11 us powered; 248: 49 and 29 us), each hold
+   far shorter than the sweep's host steps and released by the chip's own
+   supply. Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
+   `an_episode_counts_only_short_holds_its_chip_released_itself`,
+   `a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs`,
+   `the_stale_hold_boards_run_a_second_of_pulses` and
+   `a_chip_chattering_at_its_edge_in_ten_nanosecond_holds_declines_within_its_first_episode`
    (`solve/rail_tests.rs`).
 2. **Partitions.** An IC's driver stamps couple each output-capable pin to its
    own supply nodes, and a floating pull's target follows both supply
@@ -3639,7 +3662,12 @@ Constants, all from P3:35-38 unless marked new:
    and the device-state buffer; from F5, the power-hold table and each
    hold's release (W1c point 1a), and with the hub's state its held draws
    (ruling R44 (a)) and HG1's count. A hold the static solver took in the
-   failed instant is undone with it.
+   failed instant is undone with it, and so is the retry's arming, in the
+   owner and in the static solver (pin
+   `a_retry_taken_in_an_instant_that_then_fails_is_armed_again`). The
+   guard's yardsticks are not state: the host step's length is set at each
+   `advance` call and the instant's foreign changes are cleared as each
+   instant opens.
 
 9. **Exact mode** (`NO_RAIL_SHORTCUT = 1`, load-time only, W1f Q10;
    orchestrator lock: "merges hub-coupled partitions with the rail node as
@@ -4951,7 +4979,11 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     state to hold;
   - named exceptions to F5's exit gate (ruling R50 (C), F5g): five
     default-mode rail-Newton `-4`s on the cold fuzz's tpl 4, each a
-    `bench_psu` with a rail capacitor:
+    `bench_psu` with a rail capacitor. Since then (F5m's tree): 542, 889 and
+    49 run their 1.2 s; 722 declines at 1.34 ms through the hold-episode
+    guard (W1c point 1a, ruling R54 (a): its compliance 2-cycle below holds
+    and frees the 74LS00 every few microseconds, 51 short holds); 985 is
+    still the rail Newton's `-4` at 0.47 s. As ruled:
     - seeds 542, 722, 889 and 985: `rails::next_regime`'s CV -> CC
       compliance candidate (Rails point 5), the CC rail solved without its
       capacitor, 2-cycles on a direct chip's power (a 555 with DIS on its
@@ -4970,6 +5002,19 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     capacitance). Any left then go to A2 (a candidate that fails enters CC)
     and B (R45's check from the accepted rail), whose prototypes are in
     devolt's `memory/progress/brownout-core-w1e-drafts/f5g-logs/`;
+  - named exceptions to F5's exit gate (ruling R54, F5m): two default-mode
+    declines on the cold fuzz that fail under the fine reference too (exact
+    mode, 1 us host steps), each since f2d93ae:
+    - seed 12 tpl 4: `-7` at 23.4 ms. A 555 (vcc 144 ohm off a CC rail,
+      DIS on the rail itself, TRIG and THR fed from a clock's node through
+      resistors), held off from 14.7 ms, is freed by the clock's edge at
+      23.4 ms, and that instant's delta cycle does not settle within
+      `DELTA_CAP` (a livelock, `-7`);
+    - seed 654 tpl 3: stepped `-4` at `H_MIN` at 0.135 s. A 74LS00 whose
+      ground pin is a 2.8 mF capacitor's node (a stepped partition holding
+      its free supply), held off at load and freed at 6.6 ms; at 0.135 s
+      that partition's step does not converge at 10 ns, and a stepped
+      partition's Newton runs no hold procedure (W1c point 1a).
   - named exceptions to F5's exit gate (ruling R52 (a), F5j): four
     default-mode rail-loop `-4`s on the cold fuzz with no IC flip, each
     the same at c5b1a13. A CV <-> CC 2-cycle: the partition's tangent,
@@ -4992,6 +5037,26 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     76.6 mA for at least 60 ms, reported ok; that round's first fix) and
     the rail loop's two-back test, which compares bits and so misses a
     2-cycle whose CC-capacitor charge moves by ulps;
+  - **the CC drift crawl** (F5m, F5V2 finding 3; options to the
+    coordinator): a PSU in CC with no rail capacitor whose rail a
+    closed-form hub partition's capacitor carries through a small
+    resistance (742 tpl 3: 5.8 uF through a 75 mohm PTC fuse) ramps by
+    `RAIL_DRIFT_V` (10 uV) a `Rail` event, each re-aiming the closed forms
+    (Rails point 4's drift cap): 853,000 events and 13 s for 50 us of
+    ramp. At c5b1a13 these boards met their chip's power edge part-way up
+    and declined there, after the same crawl (742: 3.6 s to 17 us); held
+    off and freed there since F5, they crawl on to the ramp's end. 16 of
+    F5V2's 22 cold boards (and 503 tpl 3 and 304 tpl 4, a stepped
+    partition restarted at `H_MIN` by those events and by a 555's
+    crossings) still hit the sweep's wall cap, single advances up to 13
+    s;
+  - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
+    tree): 9 runs publish a rail more than 0.1 mV outside their sources'
+    range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13
+    (seeds 34/3, 45/5, 226/4, 245/5, 259/5, 570/3, 594/4, 781/4 exact);
+    the ninth, 654 tpl 5 (a `-4` at c5b1a13), runs with its rail 2.9 V
+    under ground, the bench PSU that cannot sink (its fine reference -2.96
+    V; the PSU sink model is R40's backlog);
   - the waveform-coupled CC rail (R42): known divergence
     `w1f-cc-rail-waveform-coupling` (Equivalence harness rules), its gate in
     perf round 3 right after the integrator change (ruling R47 (a));
@@ -5270,8 +5335,9 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   0.6.3); the core ports H8 as W1c point 1a (F5): the solve that alternates
   probes the IC held powered and held unpowered and holds off one that
   starves itself, retrying it once per host step as classic does (ruling
-  R51 (b)), and declines `-4` past 50 holds in
-  one sliding episode (R51's guard; W1c point 1a). Its forms:
+  R51 (b)), and declines `-4` past 50 holds shorter than a host step in
+  one sliding episode (the guard of rulings R51, R54 (a); W1c point 1a).
+  Its forms:
   - **Within an instant** (no rail capacitor, or one whose esr steps the
     rail with the IC's draw): the rail loop's passes, the rail Newton's
     iterates or an iterated static partition's Newton iterates alternate.
@@ -5311,18 +5377,28 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     where the one before flipped them from, run W1c point 1a's procedure at
     that instant; on a segment a chip that, powered, turns the segment down
     starves itself whatever its supply reads, and its release waits for the
-    draw threshold (Rails point 4). A `Rail` event that flips nothing ends
-    the count, and so do a source edge and a dynamic partition's event when
-    the rail solves again in that call (a clock swinging a load across a
-    floor every half period is no ping-pong); a commit does not (the gate's
-    own outputs and a zero-delay reader of them answer the ping-pong), nor
-    does the horizon clamp. The repro is held at the floor crossing,
+    draw threshold (Rails point 4). On a rail its partitions move (a PSU in
+    CC, a cell) a hub partition's own step or crossing moves the rail as a
+    `Rail` event does and counts as one (F5m; a PSU in CV pins its rail, and
+    there the count costs nothing): a stepped
+    hub partition on a CC rail at a gate's floor flipped the gate at each
+    10 ns step, the step starting powered ending under the floor and the
+    next over it, and ran free between the holds its rail loops took (cold
+    301 tpl 2: 49 holds and an 11.5 s first advance of 6.3 ms; 204 tpl 5,
+    279 tpl 5, G2bv's fz_ic 6 hub 2 alike). A `Rail` event or hub step that
+    flips nothing ends the count, and so do a source edge and another
+    partition's event when the rail solves again in that call (a clock
+    swinging a load across a floor every half period is no ping-pong); a
+    commit does not (the gate's own outputs and a zero-delay reader of them
+    answer the ping-pong), nor does the horizon clamp. The repro is held at the floor crossing,
     1.4421592 ms, and freed at 1.62047 ms when the PSU leaves CC, 472 events
     to 3 ms (it declined at 424 before F5). Pins:
     `a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_off_until_the_supply_carries_it`,
     `a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_held_off_then_powered`
     and G2bv's fz_ic seed 275,
     `the_hg1_fuzz_board_holds_its_gate_until_the_ramp_carries_it`
+    and cold 301 tpl 2,
+    `a_chip_flipped_at_each_step_of_the_hub_partition_it_draws_from_is_held`
     (`solve/rail_tests.rs`). `w1f-power-gate-pingpong` is deleted.
   - **Any other crawl** (NP1, redefined by NP2; ruling R6 (a), 2026-10-15:
     a frozen tab is never acceptable). Completed instants each within
