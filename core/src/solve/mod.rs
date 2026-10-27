@@ -2658,11 +2658,17 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
-    w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32)>,
+    /// The window's journal of the table, `holds_active` and `episodes`,
+    /// taken at the first touch of either (Rails point 8).
+    w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>)>,
     /// Holds taken and released (D8, classic's `_holdOffCounts.accepted`).
     /// Not rolled back, as every stat; a drop at `set_params`,
     /// `seed_memory` or `resetFailures` is not a release.
     hold_counts: [u64; 2],
+    /// Each IC's sliding episode, device-indexed, empty until the first hold
+    /// (ruling R51, the hold-episode guard: [`hold::Episode`]). Rolled back
+    /// with the table; dropped with every hold where the circuit changes.
+    episodes: Rc<Vec<hold::Episode>>,
 }
 
 impl PartitionedSolver {
@@ -2910,6 +2916,7 @@ impl PartitionedSolver {
             holds_active: 0,
             w_holds: None,
             hold_counts: [0; 2],
+            episodes: Rc::new(Vec::new()),
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.wire_w1g(program, &live, &fixed);
@@ -3336,9 +3343,10 @@ impl PartitionedSolver {
     /// the shared arrays hold after every publish (they start equal, and both
     /// are rolled back together), so a slot the resolve did not change
     /// already agrees. The debug build checks that claim on every call.
-    fn copy_in_static(&mut self) {
-        // F5b: a hold the static solver took or released (W1c point 1a).
-        self.take_static_holds();
+    fn copy_in_static(&mut self) -> Result<(), String> {
+        // F5b: a hold the static solver took or released (W1c point 1a);
+        // past ruling R51's guard the call fails once all is copied.
+        let held = self.take_static_holds();
         let static_voltages = self.static_solver.voltages();
         for &node in self.static_solver.changed_nodes() {
             let new = static_voltages[node];
@@ -3373,6 +3381,7 @@ impl PartitionedSolver {
                 debug_assert_eq!(self.currents[d].to_bits(), static_currents[d].to_bits(), "device {d}: the shared current drifted from the static solver's");
             }
         }
+        held
     }
 
     /// Names the dynamic partitions the coming call may write: `cf` (global indices) or every closed-form
@@ -4048,6 +4057,10 @@ impl PartitionedSolver {
     /// 1a), returning the partitions to re-solve.
     fn release_every_hold(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
         let (mut dirty, mut readers) = (Vec::new(), Vec::new());
+        if !self.episodes.is_empty() {
+            self.journal_holds();
+            self.episodes = Rc::new(Vec::new());
+        }
         if self.holds_active == 0 {
             return (dirty, readers);
         }
@@ -4062,6 +4075,32 @@ impl PartitionedSolver {
         (dirty, readers)
     }
 
+    /// Journals the hold table, `holds_active` and the episodes at their
+    /// first touch in an open window (Rails point 8).
+    fn journal_holds(&mut self) {
+        if self.window && self.w_holds.is_none() {
+            self.w_holds = Some((Rc::clone(&self.holds), self.holds_active, Rc::clone(&self.episodes)));
+        }
+    }
+
+    /// IC `device`'s sliding episode (ruling R51's guard).
+    pub(crate) fn episode(&self, device: usize) -> hold::Episode {
+        self.episodes.get(device).copied().unwrap_or_default()
+    }
+
+    /// Sets IC `device`'s episode, journaled; `Err` (the instant declines,
+    /// `-4`) once it passes [`hold::EPISODE_MAX`] holds.
+    pub(crate) fn set_episode(&mut self, device: usize, episode: hold::Episode) -> Result<(), String> {
+        self.journal_holds();
+        let n = self.device_kinds.len();
+        let table = Rc::make_mut(&mut self.episodes);
+        if table.len() < n {
+            table.resize(n, hold::Episode::default());
+        }
+        table[device] = episode;
+        episode.check(device)
+    }
+
     fn write_power_hold(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
         let pos = self.ic_position.get(device).copied().filter(|&i| i != u32::MAX);
         let Some(pos) = pos else {
@@ -4072,9 +4111,7 @@ impl PartitionedSolver {
         if old == hold {
             return Vec::new();
         }
-        if self.window && self.w_holds.is_none() {
-            self.w_holds = Some((Rc::clone(&self.holds), self.holds_active));
-        }
+        self.journal_holds();
         let n = self.device_kinds.len();
         let table = Rc::make_mut(&mut self.holds);
         if table.len() < n {
@@ -4191,7 +4228,7 @@ impl PartitionedSolver {
             self.exact_solved = static_ids.iter().any(|pid| pid.0 as usize == e.partition) || st_ids.contains(&e.partition);
         }
         self.static_solver.resolve_dirty_into(static_ids, now, drivers, readers)?;
-        self.copy_in_static();
+        self.copy_in_static()?;
         // Finding 2/6: a watched IC's supply can sit in a `Static`
         // partition, which only just moved (if it is among `static_ids`) —
         // force a re-aim of every closed-form/stepped partition that
@@ -4419,24 +4456,24 @@ impl PartitionSolver for PartitionedSolver {
         // F5: the hold table rides along only while an IC is held, so a
         // snapshot with none keeps the shape it always had; restoring that
         // shape means no hold.
-        if self.holds_active == 0 {
+        if self.holds_active == 0 && self.episodes.is_empty() {
             Box::new(base)
         } else {
-            Box::new((base, (Rc::clone(&self.holds), self.holds_active)))
+            Box::new((base, (Rc::clone(&self.holds), self.holds_active, Rc::clone(&self.episodes))))
         }
     }
 
     fn dynamic_restore(&mut self, snapshot: Box<dyn std::any::Any>) {
         type Base = ((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64);
-        type Holds = (Rc<Vec<digital::power::PowerHold>>, u32);
+        type Holds = (Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>);
         let snapshot = match snapshot.downcast::<((Base, hub::W1fSnapshot), Holds)>() {
             Ok(boxed) => {
-                let (inner, (holds, holds_active)) = *boxed;
-                (self.holds, self.holds_active) = (holds, holds_active);
+                let (inner, (holds, holds_active, episodes)) = *boxed;
+                (self.holds, self.holds_active, self.episodes) = (holds, holds_active, episodes);
                 Box::new(inner) as Box<dyn std::any::Any>
             }
             Err(other) => {
-                (self.holds, self.holds_active) = (Rc::new(Vec::new()), 0);
+                (self.holds, self.holds_active, self.episodes) = (Rc::new(Vec::new()), 0, Rc::new(Vec::new()));
                 other
             }
         };
@@ -4639,9 +4676,10 @@ impl PartitionSolver for PartitionedSolver {
         // W1g point 15: the slow state, then every stamp it set this instant.
         self.slow_rollback_instant();
         // F5 (Rails point 8): the hold table the window found.
-        if let Some((holds, active)) = self.w_holds.take() {
+        if let Some((holds, active, episodes)) = self.w_holds.take() {
             self.holds = holds;
             self.holds_active = active;
+            self.episodes = episodes;
             self.sync_power_holds();
         }
         // Values from before the bounds were last exact are back.
@@ -4751,7 +4789,8 @@ impl PartitionSolver for PartitionedSolver {
             self.static_solver.set_inputs_bounded(false);
             let result = self.static_solver.resolve_dirty_into(&[], t_end, &drivers, &mut readers);
             self.on_error(result)?;
-            self.copy_in_static();
+            let held = self.copy_in_static();
+            self.on_error(held)?;
         }
         // Same reasoning as `handle_dynamic_event` above: the horizon clamp
         // re-publishes a dynamic partition's exact state at `t_end`, and a

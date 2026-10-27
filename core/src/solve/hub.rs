@@ -1240,7 +1240,10 @@ impl PartitionedSolver {
         let passes = self.rail_passes(now, drivers, readers, Vec::new());
         self.hub.as_mut().unwrap().chase_end = false;
         match passes? {
-            hold::Passes::Settled => Ok(()),
+            // Ruling R51 (b): a pass that solved is an event re-solve, where
+            // classic's H8 would retry a held chip at its next host step.
+            hold::Passes::Settled(true) => self.retry_on_rail(now, drivers, readers),
+            hold::Passes::Settled(false) => Ok(()),
             // W1c point 1a: rail ICs whose own draw flips their power each
             // pass (or each rail Newton iterate) are probed, and held off if
             // they starve themselves.
@@ -1273,18 +1276,11 @@ impl PartitionedSolver {
         for _pass in 0..rails::RAIL_LOOP_MAX {
             self.drain_contributions();
             if !self.hub.as_ref().unwrap().dirty {
-                // Settled: a held rail IC whose supply now passes its release
-                // is freed, and the passes go on with its stamps.
-                if let Some(parts) = self.release_settled(now, readers, &mut flips) {
-                    seed = Some(parts);
-                    flipped_now = true;
-                    continue;
-                }
                 if solved {
                     self.finish_scan();
                     self.schedule_rail_event(now);
                 }
-                return Ok(hold::Passes::Settled);
+                return Ok(hold::Passes::Settled(solved));
             }
             {
                 // An event other than `Rail` changed what the rail sees.
@@ -1421,7 +1417,7 @@ impl PartitionedSolver {
             if moved || !past_static.is_empty() {
                 self.static_solver.set_inputs_bounded(false);
                 self.static_solver.resolve_dirty_into(&past_static, now, drivers, readers)?;
-                self.copy_in_static();
+                self.copy_in_static()?;
             }
             if cc_exit || fresh {
                 self.sync_hub_cache_band();
@@ -1441,14 +1437,9 @@ impl PartitionedSolver {
                 self.drain_contributions();
                 // A move alone changes no contribution: the rail is solved.
                 self.hub.as_mut().unwrap().dirty = false;
-                if let Some(parts) = self.release_settled(now, readers, &mut flips) {
-                    seed = Some(parts);
-                    flipped_now = true;
-                    continue;
-                }
                 self.finish_scan();
                 self.schedule_rail_event(now);
-                return Ok(hold::Passes::Settled);
+                return Ok(hold::Passes::Settled(true));
             }
         }
         let a = self.rail_ic_devices(&flips.alternating());
@@ -2023,7 +2014,8 @@ impl PartitionedSolver {
         self.static_solver.set_inputs_bounded(false);
         let result = self.static_solver.resolve_dirty_into(&[], now, &drivers, &mut readers);
         self.on_error(result)?;
-        self.copy_in_static();
+        let held = self.copy_in_static();
+        self.on_error(held)?;
         let result = self.rail_loop(now, &drivers, &mut readers);
         self.on_error(result)?;
         let published = self.finish_publish(now);
@@ -2140,7 +2132,8 @@ impl PartitionedSolver {
         self.static_solver.set_inputs_bounded(false);
         let result = self.static_solver.resolve_dirty_into(&[], now, &drivers, &mut readers);
         self.on_error(result)?;
-        self.copy_in_static();
+        let held = self.copy_in_static();
+        self.on_error(held)?;
         let published = self.finish_publish(now);
         self.on_error(published)?;
         Ok((Vec::new(), readers))
@@ -2299,7 +2292,7 @@ impl PartitionedSolver {
             PartitionKind::Static => {
                 self.static_solver.set_inputs_bounded(false);
                 self.static_solver.resolve_dirty_into(&id, now, drivers, readers)?;
-                self.copy_in_static();
+                self.copy_in_static()?;
             }
             _ => {
                 self.begin_dynamic_writes_list(&[p]);

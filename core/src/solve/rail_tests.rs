@@ -9183,7 +9183,10 @@ fn holds_and_releases(trace: &[(f64, digital::power::PowerHold, f64)]) -> (Vec<(
     let (mut held, mut freed) = (Vec::new(), Vec::new());
     for w in trace.windows(2) {
         let ((_, before, _), (t, hold, supply)) = (w[0], w[1]);
-        if hold.kind == digital::power::HoldKind::Off {
+        // Off to Off is the same hold at a new level or instant (a retry
+        // that moved it, ruling R51 (b); a hold dropped and taken again
+        // within one instant), not another.
+        if hold.kind == digital::power::HoldKind::Off && before.kind != digital::power::HoldKind::Off {
             held.push((t, hold.release.expect("a release level").level, supply));
         } else if before.kind == digital::power::HoldKind::Off && hold.is_free() {
             freed.push((t, supply));
@@ -9258,28 +9261,36 @@ fn a_rail_newton_alternating_a_555s_power_gate_holds_it_off_until_the_rail_passe
 }
 
 #[test]
-fn an_iterated_partition_alternating_a_555s_power_gate_holds_it_off() {
+fn an_iterated_partition_alternating_a_555s_power_gate_holds_it_off_while_its_load_is_there() {
     // The cold fuzz's seed 12 tpl 4 (F5D: "probably 1a, iterated static
     // partition with a resistor-fed IC supply"), which declined at 14.7 ms:
     // a 555 whose vcc (node 2) is fed from a {12.43 V, 0.46 A} PSU through
-    // 144 ohm, its output driving 270 uF (node 3). Powered, its output's
-    // inrush into the capacitor collapses its own supply under its 1.8 V
-    // floor; unpowered, the supply is the rail's. The partition's Newton
-    // flips the gate each iterate; held off, the drop is 11 V and the
-    // release level, 12.87 V, past the PSU: it stays off, as classic's H8
-    // keeps it off step after step.
+    // 144 ohm, its OUT on node 3, which a 42.6 Hz clock (7.07 V for 14.7 ms,
+    // then -0.29 V to 23.4 ms) holds, with 270 uF. When the clock falls,
+    // OUT high into it collapses the 555's own supply under its 1.8 V floor;
+    // unpowered, the supply is the rail's. The partition's Newton flips the
+    // gate each iterate; held off, the drop is 11 V and the release level,
+    // 12.87 V, past the PSU. Ruling R51 (b): each re-solve retries it, as
+    // classic's H8 does at each host step, and the clock's rise at 23.4 ms
+    // takes the load away, so it powers there (until F5k it stayed dark to
+    // the end). Powered, its latch meets NE555 point 11's zero-delay loop,
+    // which declines `-7` at that instant (ruling R49 (d), classic's
+    // fallback), as it would have at the load had it powered then.
     let p = { let mut p = program(8, cold_12_tpl4()); p.digital_slot_count = 32; p };
     let stops = [0.006272879619865001, 0.006418236135522505, 0.006653719691401212, 0.04368244956136634, 0.043851961234653535, 0.06987367313960807, 0.07058263333052203, 0.096299810615255, 0.11091739978284508, 0.13294549546641507, 0.15];
     let (rig, trace, err) = hold_trace(&p, &[], &stops, 15);
-    assert!(err.is_none(), "{err:?}");
     let (held, freed) = holds_and_releases(&trace);
-    eprintln!("cold 12: held {held:?}, freed {freed:?}");
-    assert_eq!((held.len(), freed.len()), (1, 0), "{trace:?}");
+    eprintln!("cold 12: held {held:?}, freed {freed:?}, {err:?}");
+    assert_eq!(held.len(), 1, "{trace:?}");
     let (t_held, level, s_held) = held[0];
     assert!(t_held > 0.0146 && t_held < 0.0148, "{t_held}");
-    assert!(level > 12.434588688285583 && s_held < level, "never released: supply {s_held}, release {level}");
-    assert!(rig.v(2) > 12.0, "the supply at the rail's: {}", rig.v(2));
-    assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
+    assert!(level > 12.434588688285583 && s_held < level, "a release level past the PSU: supply {s_held}, release {level}");
+    let period = 1.0 / 42.647402311824166;
+    match err {
+        Some((KernelError::Livelock { at }, _)) => assert!((at - period).abs() < 1e-6, "declined at the clock's rise, {at} s"),
+        other => panic!("the latch loop's -7 at the clock's rise: {other:?}"),
+    }
+    assert_eq!(rig.s().hold_counts(), [1.0, 1.0], "released at the retry");
 }
 
 /// A fuzz board as its sweep ran it, through the engine: an `advance` to
@@ -10412,7 +10423,7 @@ fn a_failed_hold_instant_rolls_back(p: &Program, until: f64, d: usize) -> u32 {
             let t = rig.k.next_event_time();
             rig.advance(t).unwrap();
         }
-        let (before, hold) = (rig.k.time(), rig.s().power_hold(d));
+        let (before, hold, episode) = (rig.k.time(), rig.s().power_hold(d), rig.s().episode(d));
         let result = {
             let _fault = newton::hooks::force_unconverged_after(skip, u32::MAX);
             rig.advance(t_change)
@@ -10423,6 +10434,7 @@ fn a_failed_hold_instant_rolls_back(p: &Program, until: f64, d: usize) -> u32 {
         failed += 1;
         assert_eq!(rig.k.time(), before, "the failed instant left no time");
         assert_eq!(rig.s().power_hold(d), hold, "skip {skip}: the failed instant's change undone");
+        assert_eq!(rig.s().episode(d), episode, "skip {skip}: the episode (ruling R51's guard) undone with it");
         rig.advance(t_change).unwrap_or_else(|e| panic!("skip {skip}: the instant run again: {e:?}"));
         assert_eq!(rig.s().power_hold(d), changed, "skip {skip}: the instant run again changes the hold as unfailed");
     }
@@ -10492,13 +10504,146 @@ fn a_probe_that_moves_another_rail_ic_across_its_floor_is_not_accepted() {
     let drivers = Rc::clone(&rig.s().driver_snapshot);
     let now = rig.k.time();
     let mut readers = Vec::new();
-    let held = digital::power::PowerHold { kind: digital::power::HoldKind::Off, release: Some(digital::power::Release { level: 10.0, rising: true }) };
+    let held = digital::power::PowerHold { kind: digital::power::HoldKind::Off, release: Some(digital::power::Release { level: 10.0, rising: true, margin: 0.0, since: 0.0 }) };
     let seed: Vec<usize> = rig.k.solver_mut().set_power_hold(1, held).into_iter().map(|p| p.0 as usize).collect();
-    assert!(matches!(rig.k.solver_mut().rail_passes(now, &drivers, &mut readers, seed), Ok(hold::Passes::Settled)));
+    assert!(matches!(rig.k.solver_mut().rail_passes(now, &drivers, &mut readers, seed), Ok(hold::Passes::Settled(_))));
     assert!(rig.u() > 4.59 && rig.s().ic_powered(2), "dev 1 held off: the rail {} V, dev 2 powered", rig.u());
     // The rail dev 1 would leave, powered: between the two floors.
     let on = Rig::load(&p).unwrap();
     assert!(on.u() > 4.275 && on.u() < 4.41 && on.s().ic_powered(1) && !on.s().ic_powered(2), "free: the rail {} V, dev 1 powered, dev 2 not", on.u());
     let result = rig.k.solver_mut().hold_on_rail(now, &drivers, &mut readers, &[1], rails::loop_unsettled());
     assert_eq!(result, Err(rails::loop_unsettled()), "rejected");
+}
+
+// ---- F5k: ruling R51 (b), the classic-style retry ---------------------------
+
+/// The verifier's stale-hold board (F5V finding 3): a 74LS00 whose 1y
+/// (inputs low, so high) drives 60 ohm to a pulse source P, its 2a and 2b
+/// on P and its 2y pulled to 5 V through 1 k. P is 0 V to 1 ms, then 5 V
+/// for 4 ms (10 ms period). Its supply: `s1` a 5 V source through 100 ohm
+/// (an iterated static partition), `s1b` a 4.6 V cell of 20 ohm (the rail).
+/// Nodes: 1 vcc, 2 the 5 V source, 3 1y, 4 P, 5 2y.
+fn stale_hold_board(cell: bool) -> Program {
+    let logic = [0, 0, 3, 4, 4, 5, 0, 0, 6, 0, 0, 7];
+    let mut devs = if cell {
+        vec![battery(0, 1, 0, 4.6, 20.0), source(1, 2, 0, 5.0)]
+    } else {
+        vec![source(0, 2, 0, 5.0), resistor(1, 2, 1, 100.0)]
+    };
+    devs.extend([ls00(2, 1, 0, logic, 10e-9, 0), resistor(3, 3, 4, 60.0), resistor(4, 2, 5, 1000.0), pulse(5, 4, 0, [0.0, 5.0, 1e-3, 1e-6, 1e-6, 4e-3, 1e-2], 4)]);
+    program(8, devs)
+}
+
+#[test]
+fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
+    // Ruling R51 (b). At the load 1y's draw into P at 0 V takes the
+    // gate's supply under its 4.275 V floor and its absence lets it
+    // recover: it loads held off. At 1 ms P rises to 5 V and the draw is
+    // gone, but the release level D1 (a) set from the load's drop (the
+    // supply held unpowered less held powered, 1.4 V on `s1`) lies past
+    // what the supply can ever reach unpowered (the source's 5 V): F5V's
+    // stale hold, the gate dark for good. Classic's H8 holds a chip for one
+    // host step and retries it powered at the next, so it powers as soon
+    // as it can carry itself. Each re-solve retries a held chip the same
+    // way. Classic (drafts/f5k-logs/s1r.mts, the board in classic's terms,
+    // the cell as its Thevenin pair) at 1.5 and 3 ms: `s1` vcc 5 V, 2y
+    // 0.675676 V; `s1b` vcc 4.635577 V, 1y 4.893268 V, 2y 0.632661 V.
+    for (cell, vcc, y, y2) in [(false, 5.0, 5.0, 0.675676), (true, 4.635577, 4.893268, 0.632661)] {
+        let p = stale_hold_board(cell);
+        let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("load: {}", er.message));
+        assert_eq!(e.stat(25), 1.0, "cell {cell}: held off at the load");
+        for t in [1.5e-3, 3e-3] {
+            e.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {} at {}", er.message, e.time()));
+            let v = e.voltages();
+            eprintln!("cell {cell} t={t}: vcc {} 1y {} P {} 2y {} holds {} released {}", v[1], v[3], v[4], v[5], e.stat(25), e.stat(26));
+            w0_volts(v[1], vcc, "vcc");
+            w0_volts(v[3], y, "1y");
+            w0_volts(v[5], y2, "2y, the gate powered");
+        }
+        assert_eq!((e.stat(25), e.stat(26)), (1.0, 1.0), "cell {cell}: one hold, released at the edge");
+    }
+}
+
+// ---- F5k: ruling R51, the hold-episode guard --------------------------------
+
+/// The cold fuzz's seed 552 tpl 2: a {4.83 V, 38 mA} PSU in CC with no rail
+/// capacitor, a 74LS00 on the rail (1a, 1b on it, 1y and 4y on node 6, 13.8
+/// ohm off the rail with an LED and 4.1 uF to ground).
+/// tpl=2 hub=2 e=4.826 psu ilim=0.038 74LS00 vcc1 gnd0 in1,1 out6,4 LED6-2+R1-6=14 R4-6=1662.9 LED5-0 R1-2=49.8 R4-1=51.0 LED5-3+R1-5=734 C6-0=4.1e-6 R4-5=6754.6
+fn cold_552_tpl2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.826259699151881, 0.03804516202394984], vec![]),
+        fz(1, 1, &[2, 0], vec![77574.53515198552], vec![]),
+        fz(1, 2, &[3, 0], vec![4011.1312235366486], vec![]),
+        fz(1, 3, &[4, 0], vec![450538.84788693767], vec![]),
+        fz(1, 4, &[5, 0], vec![73300.64670255948], vec![]),
+        fz(1, 5, &[6, 0], vec![95939.07719910401], vec![]),
+        fz(50, 6, &[1, 0, 1, 1, 6, 0, 0, 4, 0, 0, 4, 0, 0, 6], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 2.074484901825081e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[6, 6], vec![1429.2778309284438], vec![]),
+        fz(1, 8, &[4, 3], vec![1375.492622534435], vec![]),
+        fz(30, 9, &[6, 2], vec![1.7958977390178201, 2.0602008419730833, 0.004565304048337132, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 10, &[1, 6], vec![13.781715670965971], vec![]),
+        fz(1, 11, &[4, 6], vec![1662.8715674848859], vec![]),
+        fz(30, 12, &[5, 0], vec![3.176398841094245, 2.055626278765814, 0.026599384648517813, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 13, &[1, 2], vec![49.84731026432964], vec![]),
+        fz(1, 14, &[4, 1], vec![50.97499049956404], vec![]),
+        fz(30, 15, &[5, 3], vec![1.852115415644077, 2.328633659650766, 0.022184204205591848, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 5], vec![733.5129340211519], vec![]),
+        fz(3, 17, &[6, 0], vec![4.056872790221788e-6, 0.0, 0.0], vec![]),
+        fz(1, 18, &[4, 0], vec![403.57527016552956], vec![]),
+        fz(1, 19, &[4, 5], vec![6754.598768588724], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0010593839059236617, 1429.2778309284438], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0015414086696669824, 1375.492622534435], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.03149230942183751, 13.781715670965971], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.0005093002689384947, 1662.8715674848859], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.0663473987017302, 49.84731026432964], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.0009810704368777255, 50.97499049956404], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.00023034065864443334, 733.5129340211519], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.0007796107412845672, 6754.598768588724], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_gate_sliding_along_its_power_edge_declines_after_fifty_holds_in_one_episode() {
+    // Ruling R51, the permanent safety net. Cold 552 tpl 2's gate slides at
+    // its 4.275 V floor: powered, its outputs into node 6 take the CC rail
+    // under it; held off, the rail comes back over it, and the next step's
+    // retry finds it carrying itself again, 70 ns powered for every 10 ns
+    // held. Each hold is H8's, and right, but the chip has no state of its
+    // own to settle in: 76,652 holds and releases in the sweep's first 6.3
+    // ms, a 16 s advance (a frozen tab). Within one sliding episode (each
+    // hold within 100 times the last hold's length after its release) the
+    // 51st hold declines `-4`, the board's classic fallback as at c5b1a13.
+    let mut e = Engine::load(&cold_552_tpl2()).unwrap_or_else(|er| panic!("load: {}", er.message));
+    let err = e.advance(0.00627288085463002).expect_err("declined, not crawled through");
+    assert_eq!(err.code, -4, "{}", err.message);
+    assert!(err.message.contains("held 51 times in one sliding episode"), "{}", err.message);
+    assert!(e.time() < 7e-4, "declined within the first episode, at {} s", e.time());
+    assert_eq!(e.stat(25), hold::EPISODE_MAX as f64, "the holds the instants before it kept");
+}
+
+#[test]
+fn an_episode_chains_holds_that_come_back_within_a_hundred_holds_lengths() {
+    // The guard's own rule (hold::Episode): a hold within 100 times the last
+    // hold's length after that hold's release continues the episode; a
+    // longer powered stretch (a relaxation at the edge: G2bv's fz_ic 487 hub
+    // 2, 10 ns held and 150 us powered) starts a new one, and a retry still
+    // starving past its level counts one more.
+    let e = hold::Episode::default().held(1.0);
+    assert_eq!(e.count, 1);
+    let e = e.released(1.0 + 10e-9).held(1.0 + 10e-9 + 0.9e-6);
+    assert_eq!(e.count, 2, "back within 100 x 10 ns");
+    assert_eq!(e.held(2.0).count, 2, "held again with no release between: the same hold");
+    let e = e.released(1.0 + 20e-9 + 0.9e-6).held(1.0 + 1.0e-3);
+    assert_eq!(e.count, 1, "powered for 1 ms after a 10 ns hold: a new episode");
+    assert_eq!(e.refreshed().count, 2);
+    let mut e = hold::Episode::default();
+    for k in 0..=hold::EPISODE_MAX {
+        e = e.held(k as f64).released(k as f64 + 0.5);
+        assert_eq!(e.check(3).is_err(), k + 1 > hold::EPISODE_MAX, "{k}");
+    }
 }

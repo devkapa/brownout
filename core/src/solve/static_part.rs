@@ -666,7 +666,7 @@ pub struct StaticPartitionSolver {
     holds_on: bool,
     /// Holds taken and released by the last resolves, for the owner to enter
     /// in its table (`PartitionedSolver::take_static_holds`).
-    hold_requests: Vec<(usize, digital::power::PowerHold)>,
+    hold_requests: Vec<(usize, digital::power::PowerHold, f64)>,
     /// The copy as the open window found it before this solver first changed
     /// it, which a rollback restores.
     w_holds: Option<(std::rc::Rc<Vec<digital::power::PowerHold>>, bool)>,
@@ -982,7 +982,7 @@ impl StaticPartitionSolver {
         !self.hold_requests.is_empty()
     }
 
-    pub(crate) fn take_hold_requests(&mut self) -> Vec<(usize, digital::power::PowerHold)> {
+    pub(crate) fn take_hold_requests(&mut self) -> Vec<(usize, digital::power::PowerHold, f64)> {
         std::mem::take(&mut self.hold_requests)
     }
 
@@ -1927,12 +1927,12 @@ impl StaticPartitionSolver {
         let mut taken = Vec::new();
         for (k, &d) in devices.iter().enumerate() {
             let held = match starving.iter().find(|&&(s, _)| s == k) {
-                Some(&(_, v_on)) => hold::held_off(&self.ics[gated[k] as usize].1, v_on, self.supply_at(gated[k], p_idx, &x)),
+                Some(&(_, v_on)) => hold::held_off(&self.ics[gated[k] as usize].1, v_on, self.supply_at(gated[k], p_idx, &x), now),
                 None => before[k],
             };
             self.set_local_hold(d, held);
             if held != before[k] {
-                taken.push((d, held));
+                taken.push((d, held, now));
             }
         }
         match self.solve_once(p_idx, now, drivers, gated, None, polish_at) {
@@ -1944,27 +1944,77 @@ impl StaticPartitionSolver {
         }
     }
 
-    /// The release check at an iterated partition's solve (W1c point 1a):
-    /// an IC held off whose supply at `solved` passed its release is free
+    /// The retry at an iterated partition's solve (W1c point 1a, ruling R51
+    /// (b)): every IC held off is probed powered, the rest as they were, as
+    /// classic's H8 retries a held chip at its next host step. One that
+    /// carries itself there, or whose supply reads unpowered both probed
+    /// powered and held off (its own draw no longer decides), is free
     /// again, and the partition solves once more with it, holding it again
-    /// (with a fresh drop) if it still starves itself.
+    /// (with a fresh drop) if it still starves itself. The others stay held
+    /// and `solved` stands: the probe only asked.
     fn release_in(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], solved: (Vec<f64>, lu::LuFactorization), polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
-        let due: Vec<usize> = gated
+        let held: Vec<(u32, usize)> = gated
             .iter()
-            .map(|&k| self.ics[k as usize].0)
-            .zip(gated)
-            .filter(|&(d, &k)| {
+            .map(|&k| (k, self.ics[k as usize].0))
+            .filter(|&(_, d)| {
+                // Not at the instant it was held: the next retry comes at a
+                // later one (the rail loop's passes re-solve this partition
+                // within the instant; retried in them, cold fuzz 240 tpl 4
+                // was freed and held again at each pass of its load).
                 let hold = digital::power::hold_of(self.holds_slice(), d);
-                hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| crate::solve::hold::passed(r, self.supply_at(k, p_idx, &solved.0)))
+                hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| r.since < now)
             })
-            .map(|(d, _)| d)
+            .collect();
+        if held.is_empty() {
+            return Ok(solved);
+        }
+        let saved = (std::rc::Rc::clone(&self.holds), self.holds_on);
+        for &(_, d) in &held {
+            self.set_local_hold(d, crate::solve::hold::probe(true));
+        }
+        let probed = self.solve_once(p_idx, now, drivers, gated, None, polish_at);
+        (self.holds, self.holds_on) = saved;
+        let Ok((x, factors)) = probed else { return Ok(solved) };
+        // One still starving though its supply passed its release level is
+        // held again with the fresh drop (D1 (a)), as on the rail.
+        for &(k, d) in &held {
+            let ic = &self.ics[k as usize].1;
+            let (s_on, s_off) = (self.supply_at(k, p_idx, &x), self.supply_at(k, p_idx, &solved.0));
+            let hold = digital::power::hold_of(self.holds_slice(), d);
+            if !digital::power::powered(ic, s_on, 0.0) && digital::power::powered(ic, s_off, 0.0) && hold.release.is_some_and(|r| crate::solve::hold::passed(r, s_off)) {
+                let fresh = crate::solve::hold::refreshed(ic, hold.release.expect("checked above"), s_on, s_off, now);
+                self.set_local_hold(d, fresh);
+                self.hold_requests.push((d, fresh, now));
+            }
+        }
+        let due: Vec<usize> = held
+            .iter()
+            .filter(|&&(k, _)| {
+                let ic = &self.ics[k as usize].1;
+                let on = |v: &[f64]| digital::power::powered(ic, self.read_node(ic.vcc.node, p_idx, v), self.read_node(ic.gnd.node, p_idx, v));
+                on(&x) || !on(&solved.0)
+            })
+            .map(|&(_, d)| d)
             .collect();
         if due.is_empty() {
             return Ok(solved);
         }
+        // Every held IC carries itself in the probe: its verdict there is the
+        // one it was probed at, so the probe solves the free partition, and
+        // is its solution (as ruling R45 (a) accepts a consistent probe on
+        // the rail). A fresh Newton from the held state could 2-cycle across
+        // the edge it no longer needs to cross.
+        let all_carried = due.len() == held.len()
+            && held.iter().all(|&(k, _)| {
+                let ic = &self.ics[k as usize].1;
+                digital::power::powered(ic, self.read_node(ic.vcc.node, p_idx, &x), self.read_node(ic.gnd.node, p_idx, &x))
+            });
         for d in due {
             self.set_local_hold(d, digital::power::PowerHold::FREE);
-            self.hold_requests.push((d, digital::power::PowerHold::FREE));
+            self.hold_requests.push((d, digital::power::PowerHold::FREE, now));
+        }
+        if all_carried {
+            return Ok((x, factors));
         }
         let mut flips = crate::solve::hold::Flips::new(gated.len());
         match self.solve_once(p_idx, now, drivers, gated, Some(&mut flips), polish_at) {

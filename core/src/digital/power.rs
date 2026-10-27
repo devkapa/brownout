@@ -75,11 +75,16 @@ impl HoldKind {
 
 /// Where a hold ends (W1c point 1a): when the supply difference, the IC
 /// still off, passes `level` in the direction `rising` names (inward of the
-/// window edge it starved at, by its own drop plus two reached widths).
+/// window edge it starved at, by its own drop plus `margin`: two reached
+/// widths, doubled at each retry that still starves past it, ruling R51
+/// (b)). `since` is the instant the hold was taken or last moved: the next
+/// retry comes at a later one, as classic's comes at its next host step.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Release {
     pub level: f64,
     pub rising: bool,
+    pub margin: f64,
+    pub since: f64,
 }
 
 /// One IC's entry in the solver's hold table. `Default` is free.
