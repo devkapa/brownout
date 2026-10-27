@@ -1647,8 +1647,14 @@ impl StaticPartitionSolver {
     /// every IC touching it has both supply nodes fixed by definition
     /// (`self.holds_free_ic_supply[p_idx]` is exactly that fact) — so `x`
     /// is never actually indexed in that case, and an empty slice is safe.
+    ///
+    /// `SLOPES` is a const parameter, not a runtime flag, so that every stamp
+    /// but a second try's compiles to the loop without the slope terms and
+    /// asks for no curve or pull target: as a flag, that code alone cost the
+    /// exact-mode SAP-1 boards about 40 % more CPU, every second try aside
+    /// (F5j: this function's own time 206 -> 668 ms in a profile).
     #[allow(clippy::too_many_arguments)]
-    fn stamp_ics_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64], slopes: bool) {
+    fn stamp_ics_into<const SLOPES: bool>(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64], now: f64, drivers: &[Driver], x: &[f64]) {
         for &ic_index in &self.part_ics[p_idx] {
             let (_, ic) = &self.ics[ic_index as usize];
             let driver_ids = &self.ic_drivers[ic_index as usize];
@@ -1673,14 +1679,14 @@ impl StaticPartitionSolver {
             if !power.powered {
                 continue;
             }
-            // `slopes` (an iterated solve's second try, `Self::newton_in`):
+            // `SLOPES` (an iterated solve's second try, `Self::newton_in`):
             // with this IC's supply free here, its stamps move with the
             // iterate, and the Jacobian takes their slopes in the supply
             // too, as the hub polish's does
             // (`curvature::IcSupply::extra_jacobian`). A held-powered probe
             // can read a reversed supply, which the stamps clamp to 0 V:
             // flat there.
-            let free_supply = slopes && v_vcc > v_gnd && (self.in_partition(ic.vcc.node, p_idx) || self.in_partition(ic.gnd.node, p_idx));
+            let free_supply = SLOPES && v_vcc > v_gnd && (self.in_partition(ic.vcc.node, p_idx) || self.in_partition(ic.gnd.node, p_idx));
             for &id in driver_ids {
                 let driver = &drivers[id as usize];
                 // No `in_partition(driver.node, p_idx)` guard here (findings
@@ -1691,11 +1697,13 @@ impl StaticPartitionSolver {
                 // the "driver fixed, target free-in-`p_idx`" case entirely.
                 // Every branch folds (W1a point 2): a 555's OUT stamps up to
                 // two, to its own vcc and gnd nodes.
-                let curves = if free_supply { crate::solve::ic_driver_curves(driver, ic) } else { [None, None] };
-                for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
+                for (slot, branch) in ic_driver_branches(&power, driver, ic).into_iter().enumerate() {
                     if let Some((target, g)) = branch {
                         self.fold_local(p_idx, size, a, b, driver.node, target, g);
-                        if let Some(curve) = curve {
+                        if !free_supply {
+                            continue;
+                        }
+                        if let Some(curve) = crate::solve::ic_driver_curves(driver, ic)[slot] {
                             let w = self.read_node(driver.node, p_idx, x) - self.read_node(target, p_idx, x);
                             self.fold_supply_slope(p_idx, size, a, b, driver.node, target, ic, curve.derivs(power.vs)[1] * w, power.vs);
                         }
@@ -1711,8 +1719,11 @@ impl StaticPartitionSolver {
                     // The pull's target is its supply pin's voltage: free
                     // here, it moves with the iterate (`extra_jacobian`'s
                     // pulls).
+                    if !free_supply {
+                        continue;
+                    }
                     let target = if digital::floating::floating_high(pin.open_hash, now, ic.ttl) { ic.vcc.node } else { ic.gnd.node };
-                    if let (true, Some((pt, lt))) = (free_supply, self.local_index.get(target).copied().flatten()) {
+                    if let Some((pt, lt)) = self.local_index.get(target).copied().flatten() {
                         if pt == p_idx {
                             let (_, lp) = self.local_index[pin.node].expect("checked in the partition above");
                             a[lp * size + lt] -= g;
@@ -1738,7 +1749,7 @@ impl StaticPartitionSolver {
         self.stamp_live_rhs(p_idx, &mut b);
         self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
         self.stamp_switches_into(p_idx, size, &mut a, &mut b);
-        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[], false);
+        self.stamp_ics_into::<false>(p_idx, size, &mut a, &mut b, now, drivers, &[]);
         self.apply_exact(p_idx, size, &mut a, &mut b);
         lu::solve(a, size, b).map_err(|_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot"))
     }
@@ -1753,7 +1764,7 @@ impl StaticPartitionSolver {
         self.stamp_live_rhs(p_idx, &mut b);
         self.stamp_non_ic_drivers_into(p_idx, size, &mut a, &mut b, drivers)?;
         self.stamp_switches_into(p_idx, size, &mut a, &mut b);
-        self.stamp_ics_into(p_idx, size, &mut a, &mut b, now, drivers, &[], false);
+        self.stamp_ics_into::<false>(p_idx, size, &mut a, &mut b, now, drivers, &[]);
         let fail = |_| format!("partition {p_idx} ({size} node(s)): singular or non-finite pivot");
         let factors = lu::lu_factor(a, size).map_err(fail)?;
         factors.solve(&mut b).map_err(fail)?;
@@ -1781,7 +1792,11 @@ impl StaticPartitionSolver {
         self.stamp_live_rhs(p_idx, b);
         self.stamp_non_ic_drivers_into(p_idx, size, a, b, drivers)?;
         self.stamp_switches_into(p_idx, size, a, b);
-        self.stamp_ics_into(p_idx, size, a, b, now, drivers, x, slopes);
+        if slopes {
+            self.stamp_ics_into::<true>(p_idx, size, a, b, now, drivers, x);
+        } else {
+            self.stamp_ics_into::<false>(p_idx, size, a, b, now, drivers, x);
+        }
         stamp_junctions(&self.junctions[p_idx], size, a, b, x, &Bnd::new(&self.voltages));
         self.apply_exact(p_idx, size, a, b);
         Ok(())
@@ -1974,7 +1989,7 @@ impl StaticPartitionSolver {
         // Classic's loop restamps each IC stamp at the iterate's supply, its
         // slope in that supply left out. Where that does not converge, the
         // solve runs once more from the same start with the slopes in the
-        // Jacobian (`Self::stamp_ics_into`'s `slopes`): frozen, a 555's OUT
+        // Jacobian (`Self::stamp_ics_into`'s `SLOPES`): frozen, a 555's OUT
         // at a low supply contracted the iteration by only 0.89 a step, and
         // another 2-cycled across the power gate (cold fuzz 1120 tpl 2,
         // 1325 tpl 0). Not at the first try: the full step can overshoot a
