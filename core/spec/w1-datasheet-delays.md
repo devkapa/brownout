@@ -533,3 +533,8 @@ being modelled as a 28C16.
    datasheet figure (the AT28C16 write-cycle table, typical 0.5 ms), in both
    engines as a classic fix, in the next wave that touches the memories. The
    28C256 keeps 10 ms.
+   **Done (W2f):** `EEPROM_T_WC` in `src/sim/engine/devices/digital-ics.ts`
+   (28c16 0.5 ms, 28c256 10 ms) replaces the single `T_WC`; the core compiler
+   (`compile/memories.ts`) reads the same table, so `ic.extra[0]` carries 0.5
+   ms / 10 ms and the Rust side needed no change. Classic DATA polling moved
+   to once per read cycle in the same change.

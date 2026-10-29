@@ -170,8 +170,8 @@ describe.each(MEMORY_KINDS)("%s — every default-parts.json part", (kind) => {
       });
 
       if (isEeprom) {
-        it("tWC is classic's T_WC (10e-3) always", () => {
-          expect(dev.params[CORE_EEPROM_PARAM.tWC]).toBe(10e-3);
+        it("tWC is the part's own datasheet write cycle: the AT28C16's typical 0.5 ms, the AT28C256's 10 ms maximum", () => {
+          expect(dev.params[CORE_EEPROM_PARAM.tWC]).toBe(kind === "28c16" ? 0.5e-3 : 10e-3);
         });
       }
 
