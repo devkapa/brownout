@@ -11497,7 +11497,7 @@ fn a_cc_entry_hands_the_closed_forms_charge_to_the_stepped_copy() {
     // the switch. Started from the copy's own parked state it read 0 V there
     // (the copy never ran), a 1.97 V jump. (The trigger at 0: promoted at
     // the CC entry, R60 (3)'s crawl aside.)
-    hub::crawl_hook::set(Some(0));
+    let _k = hub::crawl_hook::set(Some(0));
     let mut rig = Rig::load(&cc_switch_board(vec![])).unwrap();
     let part = rig.s().local_index[2].unwrap().0;
     assert_eq!(rig.s().cc_switch, vec![part]);
@@ -11563,7 +11563,7 @@ fn a_rolled_back_cc_entry_or_exit_restores_the_kind_and_the_state() {
     // event closes (then opens) the switch, which enters (leaves) CC, and
     // enables a zero-delay oscillator on a fixed 5 V, which livelocks.
     // The trigger at 0: the kind switches at the CC entry (R60 (3) aside).
-    hub::crawl_hook::set(Some(0));
+    let _k = hub::crawl_hook::set(Some(0));
     let p = cc_switch_board(vec![source(5, 4, 0, 5.0), oscillator(6, 4, 5, 6, [7, 8, 9]), switch(7, 4, 6, false), resistor(8, 6, 0, 1e3)]);
     let (mut failed, mut twin) = (Rig::load(&p).unwrap(), Rig::load(&p).unwrap());
     let part = failed.s().local_index[2].unwrap().0;
@@ -11903,15 +11903,132 @@ fn a_closed_form_on_a_cc_rail_another_partition_moves_steps_with_it() {
     // steps. Within W0 of the stepped run at the sweep's host stops.
     let stops = [0.006272879757094588, 0.006961352915624008, 0.009458814460263459, 0.01153130615462656, 0.05808507802599983, 0.058830097853103336, 0.0595741505624736, 0.05967846412462022, 0.06266170036641795, 0.07953558078788245, 0.07978378149045819, 0.08023133162152682, 0.08310892147936291, 0.08479671467796533, 0.08490146648731667, 0.09560781787769408, 0.09792275902071916, 0.0980450874315556, 0.09825769978442092, 0.1];
     let run = |k: Option<u32>| {
-        hub::crawl_hook::set(k);
+        let _k = hub::crawl_hook::set(k);
         let mut e = Engine::load(&cold_72_tpl4()).unwrap();
-        let out: Vec<Vec<f64>> = stops.iter().map(|&t| { e.advance(t).unwrap_or_else(|er| panic!("{} at {t}: {}", er.code, er.message)); e.voltages().to_vec() }).collect();
-        hub::crawl_hook::set(None);
-        out
+        stops.iter().map(|&t| { e.advance(t).unwrap_or_else(|er| panic!("{} at {t}: {}", er.code, er.message)); e.voltages().to_vec() }).collect::<Vec<Vec<f64>>>()
     };
     let (lazy, stepped) = (run(None), run(Some(0)));
     for k in 0..stops.len() {
         let off = worst_w0(&lazy[k..=k], &stepped[k..=k]);
         assert!(off <= 1.0, "at {} s: {off:.2} W0 off the stepped run: {:?} against {:?}", stops[k], lazy[k], stepped[k]);
     }
+}
+
+/// {5 V, 0.1 A} with no rail capacitor: 100 ohm from the rail to node 2,
+/// 10 uF from node 2 to ground (a `cc_switch` hub partition), 20 ohm from
+/// the rail to node 3, where a one-shot pulse holds 5 V but for 0 V from
+/// 1 ms for 30.0371 ms: CC through the low phase (the capacitor settles at
+/// 2 V), CV from its end, an internal event.
+fn cc_pulse_board(force_stepped: bool) -> Program {
+    let mut p = program(4, vec![psu(0, 1, 0, 5.0, 0.1), resistor(1, 1, 2, 100.0), capacitor(2, 2, 0, 1e-5, 0.0), resistor(3, 1, 3, 20.0), pulse(4, 3, 0, [5.0, 0.0, 1e-3, 0.0, 0.0, 0.0300371, 1.0], 0)]);
+    p.options.force_stepped = force_stepped;
+    p
+}
+
+#[test]
+fn a_cc_exit_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_cc_rail_it_was_on() {
+    // F5pV: the pulse's end (31.0371 ms) leaves CC. Node 2's stepped copy
+    // (promoted in the stint; stepped from load under FORCE_STEPPED) last
+    // committed 3 ms before it, settled at 2 V, and was brought to the edge
+    // after the rail moved: demoted (`SteppedSolver::demote`) or re-solved
+    // at the exit, it stepped those 3 ms at the 5 V setpoint and read
+    // 4.834 V just after the edge against the fine reference's 2.003 (1346
+    // W0). On the CC rail its pending step was planned on it stays at 2 V
+    // to the edge. Within W0 of the fine reference (exact mode, 1 us host
+    // slices), or of exact mode's own error at the same host stops. (Under
+    // FORCE_STEPPED the CC entry at the pulse's start is the mirror case,
+    // brought to the edge on the CC rail after the rail left the setpoint:
+    // 41 W0 at 1.5 ms, as at da167d2; not this exit's, and not sampled.)
+    let samples = [1.5e-3, 0.0280371, 0.0310381, 0.0310471, 0.0311371, 0.0330371];
+    let (want, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 1e-6);
+    let (floor, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 0.0);
+    for force_stepped in [false, true] {
+        let (got, _, _) = sampled(&cc_pulse_board(force_stepped), &samples, 0.0);
+        for k in usize::from(force_stepped)..samples.len() {
+            let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
+            eprintln!("cc pulse board (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
+            assert!(off <= 1.0 || off <= floor_off + 1.0, "force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+        }
+    }
+}
+
+#[test]
+fn a_demoted_partition_draws_on_the_rail_as_its_closed_form_alone() {
+    // R59 (1) (B): a demotion that brings the stepped copy to `now` commits
+    // steps, each queueing its draw for the rail; drained after the closed
+    // form's own (`drain_contributions` takes the stepped queue last), the
+    // last of them stood as the closed-form partition's contribution, a
+    // stepped line `i + g (u - u_p)` counted beside the closed form's own
+    // term: the cc pulse board's rail read 12 mA more draw than its devices
+    // at 5 V from the pulse's end on. The rail's draw is its devices'.
+    let mut rig = Rig::load(&cc_pulse_board(false)).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    for t in [0.0280371, 0.0310381, 0.0330371] {
+        rig.advance(t).unwrap();
+        let u = rig.u();
+        let draw = (u - rig.v(2)) / 100.0 + (u - rig.v(3)) / 20.0;
+        let seen = rig.s().rail_draw_at(t, u);
+        eprintln!("at {t} s ({:?}, {:?}): the rail sees {seen:.9} A against the devices' {draw:.9}", rig.s().partition_kinds[part], rig.hub().state.reg);
+        close(seen, draw, 1e-9 + 1e-6 * draw.abs(), "the rail's draw");
+    }
+    assert_eq!(rig.s().partition_kinds[part], PartitionKind::ClosedForm, "demoted at the pulse's end");
+}
+
+#[test]
+fn a_rolled_back_cc_exit_at_an_internal_event_restores_the_partition_it_brought_there() {
+    // Rails point 8: the cc pulse board, and a second pulse that enables a
+    // zero-delay oscillator at the very instant the first one's end leaves
+    // CC, which livelocks. Node 2's stepped copy (promoted in the stint, or
+    // stepped from load under FORCE_STEPPED), brought to the exit on its CC
+    // rail (`catch_up_on_cc_rail`), then demoted or re-solved in CV, is put
+    // back with everything else as the twin that never took the instant
+    // left it.
+    let t_end = 1e-3 + (0.0 + 0.0300371);
+    for force_stepped in [false, true] {
+        let mut p = program(10, vec![
+            psu(0, 1, 0, 5.0, 0.1),
+            resistor(1, 1, 2, 100.0),
+            capacitor(2, 2, 0, 1e-5, 0.0),
+            resistor(3, 1, 3, 20.0),
+            pulse(4, 3, 0, [5.0, 0.0, 1e-3, 0.0, 0.0, 0.0300371, 1.0], 0),
+            source(5, 4, 0, 5.0),
+            pulse(6, 5, 0, [0.0, 5.0, t_end, 0.0, 0.0, 1.0, 2.0], 1),
+            ls00(7, 4, 0, [6, 5, 6, 0, 0, 7, 0, 0, 8, 0, 0, 9], 0.0, 2),
+        ]);
+        p.options.force_stepped = force_stepped;
+        let (mut failed, twin) = (Rig::load(&p).unwrap(), Rig::load(&p).unwrap());
+        let mut twin = twin;
+        let part = failed.s().local_index[2].unwrap().0;
+        failed.advance(0.0280371).unwrap();
+        twin.advance(0.0280371).unwrap();
+        let before = state_digest(failed.s());
+        assert_eq!(before, state_digest(twin.s()), "force_stepped {force_stepped}: the twins agree before");
+        assert_eq!((failed.hub().state.reg, failed.s().partition_kinds[part]), (Regime::Cc, PartitionKind::Stepped));
+        let r = failed.advance(t_end + 1e-6);
+        assert!(matches!(r, Err(KernelError::Livelock { at }) if at == t_end), "force_stepped {force_stepped}: the pulse's end livelocks: {r:?}");
+        assert_eq!(failed.s().partition_kinds[part], PartitionKind::Stepped, "force_stepped {force_stepped}: the kind the instant found");
+        assert_eq!(state_digest(failed.s()), before, "force_stepped {force_stepped}: every piece of state");
+        assert_eq!(failed.k.next_event_time().to_bits(), twin.k.next_event_time().to_bits(), "force_stepped {force_stepped}: the next event");
+    }
+}
+
+#[test]
+fn the_crawl_hook_is_restored_when_its_guard_drops() {
+    // A test that sets the trigger leaves it as it found it for the next
+    // test on the same thread (`--test-threads=1`), even when it panics.
+    {
+        let _k = hub::crawl_hook::set(Some(0));
+        assert_eq!(hub::crawl_hook::events(), 0);
+        {
+            let _inner = hub::crawl_hook::set(Some(7));
+            assert_eq!(hub::crawl_hook::events(), 7);
+        }
+        assert_eq!(hub::crawl_hook::events(), 0, "the inner guard restores the outer setting");
+    }
+    assert_eq!(hub::crawl_hook::events(), hub::CC_CRAWL_EVENTS, "the default once the guard is gone");
+    let _ = std::panic::catch_unwind(|| {
+        let _k = hub::crawl_hook::set(Some(0));
+        panic!("a failing test");
+    });
+    assert_eq!(hub::crawl_hook::events(), hub::CC_CRAWL_EVENTS, "restored through a panic");
 }

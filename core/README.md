@@ -5020,8 +5020,11 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     ramp reaches the 555's 1.8 V floor at 11.8 ms. The CC step aimed at its
     own rail lands at 1.78 V, the next crosses 1.80 V, and the chip's draw
     pulls the rail back under its floor: it slides there in 51 holds of
-    10-40 ns and declines `-4` at 11.909 ms. Before, a crossing misaimed at
-    the published rail let one 2 ms step jump the floor unheld. Exact mode
+    10-40 ns and declines `-4` at 11.909 ms, as it did at da167d2, before
+    R59's promotion: the decline came with da167d2's aim of a crossing
+    inside a CC step at the step's own rail, before which a crossing
+    misaimed at the published rail let one 2 ms step jump the floor
+    unheld (R59 (2)). Exact mode
     at the sweep's host runs it with no hold; the fine reference (exact
     mode, 1 us host steps) fails Newton at 11.791 ms, at the same edge;
   - and cold seed 482 tpl 0 (ruling R64 (3)) until R51 (c): its gate on a
@@ -5073,22 +5076,58 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     76.6 mA for at least 60 ms, reported ok; that round's first fix) and
     the rail loop's two-back test, which compares bits and so misses a
     2-cycle whose CC-capacitor charge moves by ulps;
-  - **the CC drift crawl** (F5m, F5V2 finding 3; ruling R55): a PSU in
-    CC with no rail capacitor whose rail a closed-form hub partition's
-    capacitor carries through a small resistance (742 tpl 3: 5.8 uF
-    through a 0.45 ohm PTC fuse) ramps by `RAIL_DRIFT_V` (10 uV) a `Rail`
-    event, each re-aiming the closed forms (Rails point 4's drift cap):
-    2.2M events and 13 s for 50 us of ramp. At c5b1a13 these boards met
-    their chip's power edge part-way up and declined there, after the same
-    crawl (742: 3.6 s to 17 us); held off and freed there since F5, they
-    crawl on to the ramp's end. R55 (A2), stepping such a partition with
-    the rail as an unknown (`stepped::CcRail`), is prototyped (F5n: 742
-    runs its 1.2 s in 0.06 s, within W0 of the fine reference through the
-    ramp) but waits on which partitions qualify: promoted at load, a
-    closed form that never sees CC loses its exact crossings (F5o, cold
-    1-800 hub 2: 38 crawls fixed, but 190 tpl 4 and 466 tpl 4 run 11-13x
-    slower, 35 CV boards about 10x, and 230 tpl 2, 527 tpl 5 and 597 tpl
-    5 decline). A coupled
+  - **the CC drift crawl** (F5m, F5V2 finding 3), fixed by promotion
+    (rulings R55 (A2), R59 (1) (B), R60 (3) and (4), R63 (2), R64, R65;
+    F5n-F5p, F5r). A PSU in CC with no rail capacitor whose rail a
+    closed-form hub partition's capacitor carries through a small
+    resistance (742 tpl 3: 5.8 uF through a 0.45 ohm PTC fuse) ramped by
+    `RAIL_DRIFT_V` (10 uV) a `Rail` event, each re-aiming the closed forms
+    (Rails point 4's drift cap): 2.2M events and 13 s for 50 us of ramp.
+    Such a partition (`PartitionBuild::cc_switch`: closed-form, on a
+    bench PSU's rail with no rail capacitor, outside exact mode) loads
+    closed-form and is also compiled stepped, the idle copy parked
+    (nothing steps, publishes or schedules it, its events stale). In CC it
+    steps with the rail as an unknown (`stepped::CcRail`) once its rail
+    crawls, and is a closed form again once the PSU is back in CV
+    (`hub::sync_cc_kinds`, after each rail solve). Promoted at load, a
+    closed form that never sees CC lost its exact crossings and CC boards
+    whose rail barely moves ran up to 100x slower (F5o, R59 prototype), so
+    it promotes lazily, at the next rail solve after either trigger:
+    `CC_CRAWL_EVENTS` (16) `Rail` events within one closed-form time
+    constant (the slowest, `-1 / F`; R60 (3), K measured over 59 boards
+    from 0 to 1024), or the rail's pace: a move at a new instant over the
+    interval since the last, times that time constant, past W0 (R63 (2);
+    cold 72 tpl 4, whose rail another partition moves at its commits a
+    millisecond apart with no `Rail` event between, read 95 W0 off the
+    fine reference closed-form and is now within W0 of the always-stepped
+    run). Each switch hands the charge across at `now` (the stepped copy
+    starts from the closed form's `vc(now)`, the closed form resumes from
+    the stepped copy's), the kinds and the trigger's state are journaled
+    with the window and carried in the snapshot. Hysteresis within an
+    instant: a partition promoted at an instant stays stepped through it
+    (a CC exit there is the stepped copy's charge balance against the
+    closed form's linearised draw; handed back and forth, cold 794 tpl 3
+    switched 51 times at 13.04 us and the rail loop gave up), and the
+    next rail solve still in CV demotes it. A CC exit at an internal
+    event brings the stepped copy to it on the CC rail its pending step
+    was solved on (`SteppedSolver::catch_up_on_cc_rail`, F5r); brought
+    there after the rail moved, it had stepped its whole uncommitted gap
+    at the setpoint (F5pV: 3 ms of a capacitor settled at 2 V charged at
+    5 V, 1346 W0; FORCE_STEPPED too). A promoted partition's CC steps hold
+    their error `CC_STEP_TOL_SCALE` (8) times under the controller's
+    tolerance (R60 (4): G2bv's bc_ic 97 hub 2 crept 1.48 W0 off the fine
+    reference at the sweep's host stops, exact mode 1.50 there, the host
+    cadence's floor; 0.70 W0 at 8 times, while 16 slid cold 482 tpl 0 to
+    the hold guard); a partition stepped from load keeps the controller's
+    own. The cold 1-800 hub 2 sweep fixed 44 crawls (742 runs its 1.2 s
+    in 0.08 s, within W0 of the fine reference through the ramp), and 230
+    tpl 2 and 527 tpl 5, which declined under the R59 prototype, run:
+    230/2's CC seed judged a held 74LS00 at a rail where its supply
+    difference reads 0, and `SupplyCurve::derivs` now gives a constant
+    piece's slope as 0 there, not 0 / 0; lazy promotion keeps 527/5
+    closed-form, where stepping from the CC entry declines at 10.4 ms
+    (R64). R64 and R65 name what it leaves: cold 482 tpl 0, 271 tpl 4 and
+    597 tpl 5, exit-gate exceptions above. A coupled
     closed-form path for this case (A1) stays perf round 3's exact
     upgrade. Two boards F5m filed beside it are other mechanisms: 304 tpl
     4's 555 drives its own trigger and oscillates at 6.1 us (a ring at

@@ -219,12 +219,22 @@ impl ExactHub {
 pub(super) const CC_CRAWL_EVENTS: u32 = 16;
 
 /// Tests of the switch's own mechanics (its seeds, its journal) set the
-/// trigger to 0: the partitions then step from the CC entry itself.
+/// trigger to 0: the partitions then step from the CC entry itself. The
+/// setting is the thread's, held by the guard `set` returns, which puts
+/// back what it found when it drops (a panic too): a test that set it left
+/// it set for the next test on its thread under `--test-threads=1`.
 #[cfg(test)]
 pub(super) mod crawl_hook {
     thread_local!(static EVENTS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) });
-    pub fn set(k: Option<u32>) {
-        EVENTS.with(|c| c.set(k));
+    #[must_use = "the setting lasts only while the guard lives"]
+    pub struct Guard(Option<u32>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            EVENTS.with(|c| c.set(self.0));
+        }
+    }
+    pub fn set(k: Option<u32>) -> Guard {
+        Guard(EVENTS.with(|c| c.replace(k)))
     }
     pub fn events() -> u32 {
         EVENTS.with(|c| c.get()).unwrap_or(super::CC_CRAWL_EVENTS)
@@ -1487,6 +1497,17 @@ impl PartitionedSolver {
                     return if a.is_empty() { Err(err) } else { Ok(hold::Passes::Alternating(a, err)) };
                 }
             };
+            // A CC exit: a stepped hub partition short of `now` is brought to
+            // it on the CC rail its pending step was solved on, before the
+            // demotion or the re-solve below would bring it there at the
+            // setpoint the rail just moved to.
+            if regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv {
+                let ids = self.stepped.hub_partitions();
+                if !ids.is_empty() {
+                    let pre = Rc::clone(&self.driver_snapshot);
+                    self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
+                }
+            }
             self.sync_hub_cache_band();
             self.sync_rail_drive();
             self.reset_cf_drift(now);

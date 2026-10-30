@@ -814,6 +814,10 @@ struct Partition {
     pend_now: f64,
     pend_h: f64,
     pend_method: Method,
+    /// The CC rail the pending trial was solved on (`None` off one): a CC
+    /// exit at an internal event brings the partition to it on this rail
+    /// (`SteppedSolver::catch_up_on_cc_rail`).
+    pend_cc: Option<CcStep>,
     /// Exact mode's rail partition: the charge the hub source delivers over
     /// the pending trial, from the trial's own solves, so a battery's SoC is
     /// charged with it when the trial commits (Rails point 9).
@@ -926,6 +930,7 @@ impl Partition {
             pend_now: t0,
             pend_h: 0.0,
             pend_method: Method::Be,
+            pend_cc: None,
             pend_charge: 0.0,
             i_src: 0.0,
             pend_i_src: 0.0,
@@ -982,6 +987,7 @@ struct PartitionSnapshot {
     pend_now: f64,
     pend_h: f64,
     pend_method: Option<Method>,
+    pend_cc: Option<CcStep>,
     pend_charge: f64,
     i_src: f64,
     pend_i_src: f64,
@@ -1014,6 +1020,7 @@ impl PartitionSnapshot {
         self.pend_now = part.pend_now;
         self.pend_h = part.pend_h;
         self.pend_method = Some(part.pend_method);
+        self.pend_cc = part.pend_cc;
         self.pend_charge = part.pend_charge;
         self.i_src = part.i_src;
         self.pend_i_src = part.pend_i_src;
@@ -1029,6 +1036,7 @@ impl PartitionSnapshot {
         part.pend_now = self.pend_now;
         part.pend_h = self.pend_h;
         part.pend_method = self.pend_method.unwrap_or(Method::Be);
+        part.pend_cc = self.pend_cc;
         part.pend_charge = self.pend_charge;
         part.i_src = self.i_src;
         part.pend_i_src = self.pend_i_src;
@@ -1105,6 +1113,9 @@ pub struct SteppedSolver {
     /// runs ([`CcRail`]); set by the owner before a call that may plan a
     /// step and taken after it, so it is never stale.
     pub(crate) cc: Option<CcRail>,
+    /// Set while `catch_up_on_cc_rail` brings a partition to a CC exit: the
+    /// CC rail its steps take in place of `cc`'s.
+    cc_held: Option<CcStep>,
     /// Set while `sync_partition` steps a partition to its horizon.
     clamp: bool,
     /// The partitions the owner's `resolve_dirty` re-solves only because
@@ -1231,6 +1242,7 @@ impl SteppedSolver {
             hub_updates: Vec::new(),
             sensitivities: 0,
             cc: None,
+            cc_held: None,
             clamp: false,
             reaim: Vec::new(),
             #[cfg(test)]
@@ -1394,6 +1406,27 @@ impl SteppedSolver {
         Ok(())
     }
 
+    /// A CC exit at an internal event (the PSU left CC at a rail solve at
+    /// `now` that an event other than this partition's own step brought
+    /// about): each of `ids` still short of `now` whose pending trial was
+    /// solved on a CC rail is brought to `now` on that rail, as a waveform
+    /// edge brings a partition to it on the boundary it had (W1b rule 6).
+    /// Brought there after the rail moved, it stepped the whole gap at the
+    /// setpoint (F5pV: 3 ms at 5 V for a capacitor settled at 2 V on the CC
+    /// rail, 1346 W0). Commits the steps and publishes nothing; the re-solve
+    /// or the demotion that follows starts from them.
+    pub(crate) fn catch_up_on_cc_rail(&mut self, ids: &[usize], now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+        for &p in ids {
+            let Some(cc) = self.partitions.get(&p).filter(|part| !part.parked && part.has_pend && part.t < now).and_then(|part| part.pend_cc) else { continue };
+            self.journal(p);
+            self.cc_held = Some(cc);
+            let result = self.sync_partition(p, now, drivers, live_params, voltages);
+            self.cc_held = None;
+            result?;
+        }
+        Ok(())
+    }
+
     /// The committed state of partition `p`: its time and its own node
     /// voltages (exact mode reads the rail's partition through it).
     pub(crate) fn committed(&self, p: usize) -> Option<(f64, &[f64])> {
@@ -1442,6 +1475,11 @@ impl SteppedSolver {
     pub(crate) fn demote(&mut self, p: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<Vec<f64>, String> {
         self.catch_up(&[p], now, drivers, live_params, voltages)?;
         self.journal(p);
+        // The draws its catch-up queued for the rail are a stepped copy's
+        // the closed form now replaces: the owner drains this queue after the
+        // closed form's, so one left here would stand as the partition's
+        // contribution beside the closed form's own term.
+        self.hub_updates.retain(|&(q, _)| q != p);
         let part = self.partitions.get_mut(&p).expect("a partition the stepped solver compiled");
         part.parked = true;
         Ok(part.vc.clone())
@@ -1996,6 +2034,7 @@ impl SteppedSolver {
                             pend_now: part.pend_now,
                             pend_h: part.pend_h,
                             pend_method: Some(part.pend_method),
+                            pend_cc: part.pend_cc,
                             pend_charge: part.pend_charge,
                             i_src: part.i_src,
                             pend_i_src: part.pend_i_src,
@@ -2037,6 +2076,7 @@ impl SteppedSolver {
                 part.pend_now = s.pend_now;
                 part.pend_h = s.pend_h;
                 part.pend_method = s.pend_method.unwrap_or(Method::Be);
+                part.pend_cc = s.pend_cc;
                 part.pend_charge = s.pend_charge;
                 part.i_src = s.i_src;
                 part.pend_i_src = s.pend_i_src;
@@ -2307,8 +2347,9 @@ impl SteppedSolver {
         // Only a cell's charge is billed (`commit_partition`); a PSU's never
         // is, so its trial skips the source-current solves.
         let billed = exact.filter(|e| e.partition == p_idx && self.cell.is_some());
-        let cc = match (&self.cc, self.partitions[&p_idx].hub, exact) {
-            (Some(cc), true, None) => Some(cc.step(p_idx, voltages[cc.rail])),
+        let cc = match (self.cc_held, &self.cc, self.partitions[&p_idx].hub, exact) {
+            (Some(held), _, true, None) => Some(held),
+            (None, Some(cc), true, None) => Some(cc.step(p_idx, voltages[cc.rail])),
             _ => None,
         };
         let clamp = self.clamp;
@@ -2514,6 +2555,7 @@ impl SteppedSolver {
         part.pend_now = part.t;
         part.pend_h = h;
         part.pend_method = method;
+        part.pend_cc = ic_ctx.cc;
         part.pend_t = part.t + h;
         part.has_pend = true;
         part.version += 1;
