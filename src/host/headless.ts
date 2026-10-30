@@ -406,7 +406,9 @@ export interface HeadlessRunOptions {
    * worker's manualStepH path: no controller overrides the caller's step,
    * but the source step ceiling still caps it, and steps still land on
    * source and device events, so the samples around an event are not
-   * evenly spaced (see HeadlessSample.h).
+   * evenly spaced (see HeadlessSample.h). On the core this is a uniform grid
+   * of `fixedStepS` (never coarser than the source step ceiling) with one
+   * sample per grid point; `adaptive: true` there is one advance, one sample.
    */
   adaptive?: boolean;
   /** Step size (s) when `adaptive` is false. Required in that mode; clamped to [H_MIN, H_MAX]. */
@@ -895,9 +897,9 @@ export class HeadlessRunner {
     if (options.integrationMethod) this.applyIntegrationMethod(options.integrationMethod, circuit);
 
     if (this._activeEngine === "core") {
-      // adaptive/fixedStepS/maxSteps have no effect on the core (see
-      // HeadlessRunnerOptions.engine's doc comment) but a caller's misuse
-      // must still be caught the same way — this is the SAME check the
+      // adaptive:true ignores fixedStepS/maxSteps on the core (one advance,
+      // one sample); adaptive:false samples a fixed grid (_runCoreGrid). A
+      // caller's misuse must still be caught the same way — this is the SAME check the
       // classic path below runs, duplicated rather than factored out, so the
       // classic block stays byte-for-byte what it was before "core" mode
       // existed (diff it against `git show HEAD:src/host/headless.ts`).
@@ -909,6 +911,17 @@ export class HeadlessRunner {
             "controller off there is nothing to choose a step size.",
           );
         }
+      }
+      if (!(options.adaptive ?? true)) {
+        // Fixed-grid sampling (W2, D15 (a)): the grid classic would step on,
+        // advanced to point by point on the core.
+        return this._runCoreGrid(
+          this._coreEngine as CoreEngine,
+          durationS,
+          Math.min(Math.max(H_MIN, Math.min(H_MAX, options.fixedStepS!)), sourceStepLimit(circuit)),
+          options.maxSteps ?? DEFAULT_MAX_STEPS,
+          onSample,
+        );
       }
       return this._runCore(this._coreEngine as CoreEngine, durationS, onSample);
     }
@@ -1075,6 +1088,81 @@ export class HeadlessRunner {
   }
 
   /**
+   * run()'s core-mode path for `adaptive: false` (W2 design 2.7, D15 (a)):
+   * Learn's fixed-`dt` sampling. The grid spacing `gridH` is what classic's
+   * fixed-step loop steps at away from events (`min(fixedStepS, H_MAX, the
+   * source step ceiling)`, computed by the caller), so the core is never
+   * sampled coarser than classic is stepped. The core advances to each grid
+   * point and `onSample` fires after each, with the solved values at that
+   * point (not interpolated from a later one). Classic's extra steps that land
+   * on source edges are a step-size artifact and are not reproduced: the core
+   * handles those instants inside its own advance.
+   *
+   * The grid is anchored at the run's start time and each point is computed as
+   * `start + k * gridH`, not by accumulating, so it does not drift; the last
+   * point is exactly `start + durationS` and may be a short step. `maxSteps`
+   * bounds the number of grid points as it bounds classic's attempted steps.
+   *
+   * Each advance is a clamp on the core's trajectory (D6); the corpus gate at
+   * 1/60 s, 1 ms and 10 ms frames is what keeps that within W0.
+   *
+   * A failed advance stops the run there: the failed point gets no sample
+   * (the readouts are still the last trusted instant), `failedSteps` is 1 and
+   * `hitMinStep` is set, the same honest-failure signal `_runCore` uses.
+   */
+  private _runCoreGrid(
+    engine: CoreEngine,
+    durationS: number,
+    gridH: number,
+    maxSteps: number,
+    onSample: ((sample: HeadlessSample) => void) | undefined,
+  ): HeadlessRunResult {
+    const startTime = engine.simTime;
+    // Same float slack as the classic loop, so an exact multiple of the step
+    // does not grow one extra ~1e-16 s point.
+    const tolerance = Math.max(1e-15, durationS * 1e-12);
+    const wanted = Math.max(1, Math.ceil((durationS - tolerance) / gridH));
+    const points = Math.min(wanted, maxSteps);
+    const hitStepCap = wanted > maxSteps;
+
+    let accepted = 0;
+    let failed = false;
+    let previous = startTime;
+    for (let k = 1; k <= points; k++) {
+      const target = k === wanted ? startTime + durationS : startTime + k * gridH;
+      engine.advance(target);
+      if (!engine.lastConverged) {
+        failed = true;
+        break;
+      }
+      accepted += 1;
+      if (onSample) {
+        onSample({
+          simTime: engine.simTime,
+          h: engine.simTime - previous,
+          netV: { ...engine.getNetV() },
+          elementI: { ...engine.getElementI() },
+        });
+      }
+      previous = engine.simTime;
+    }
+
+    const simulatedS = !failed && !hitStepCap ? durationS : engine.simTime - startTime;
+    return {
+      simTime: engine.simTime,
+      simulatedS,
+      acceptedSteps: accepted,
+      rejectedSteps: 0,
+      failedSteps: failed ? 1 : 0,
+      maxLocalErrorRatio: 0,
+      finalH: gridH,
+      errorControlled: false,
+      hitMinStep: failed,
+      hitStepCap,
+    };
+  }
+
+  /**
    * run()'s core-mode path. The core has no step loop in W0/W1a —
    * bo_engine_advance jumps straight to tEnd (core/README.md, "W0 kernel
    * semantics" #6: "Everything in W0 is static, so advancing only moves
@@ -1082,7 +1170,7 @@ export class HeadlessRunner {
    * control, and integrationMethod has already been validated/recorded (not
    * applied — the core has no dynamics to seed) by run() before this is
    * called; run() validates all of them (misuse is still caught) but this
-   * method ignores every one of them.
+   * method ignores every one of them. (`adaptive: false` is `_runCoreGrid`'s.)
    *
    * NON-CONVERGENCE. `CoreEngine.advance` does not throw for a -4/-7 result
    * (core/README.md, "A failed advance") — it sets `lastConverged = false`

@@ -17,7 +17,16 @@
  * the two engines are driven identically.
  */
 
-import type { SimFailure, SimWarning } from "../sim/engine/sim-engine.js";
+import type {
+  BatteryRuntimeReadout,
+  Hcsr04EngineState,
+  MotorEngineState,
+  ServoEngineState,
+  SimFailure,
+  SimWarning,
+  StepperEngineState,
+  ThermalRuntimeReadout,
+} from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import type { DisplayInfo } from "../sim/messages.js";
 
@@ -52,4 +61,30 @@ export interface EngineReadout {
 
   /** Resolve a component pin to its current deterministic net id, or undefined if the pin is unwired/unknown. */
   getNetIdForPin(componentId: string, pinId: string): string | undefined;
+}
+
+/**
+ * What `buildPhysicsTelemetry` (sim/physics-telemetry.ts) reads: the shared
+ * readout surface plus the per-part state getters telemetry samples. Both
+ * engines satisfy it, and test/core/telemetry.test.ts checks that at compile
+ * time for each, the way engine.test.ts does for `EngineReadout`.
+ *
+ * The first five getters exist on `CoreEngine` for the kinds it implements
+ * (batteries, thermal and PTC parts, the bench supply's regime). The motor,
+ * servo, stepper and HC-SR04 states are optional because the core models none
+ * of those parts (D17: a counter or state the core cannot give with classic's
+ * meaning is absent, not faked); a reader must skip a part whose getter is
+ * missing rather than treat that as zero.
+ */
+export interface TelemetryEngine extends EngineReadout {
+  getPtcTripped(): ReadonlySet<string>;
+  getThermalState(componentId: string): ThermalRuntimeReadout | undefined;
+  getPartTemperature(componentId: string): number | undefined;
+  getBatteryState(componentId: string): BatteryRuntimeReadout | undefined;
+  getIcState(componentId: string): Record<string, number> | undefined;
+
+  getMotorState?(componentId: string): MotorEngineState | undefined;
+  getServoState?(componentId: string): ServoEngineState | undefined;
+  getStepperState?(componentId: string): StepperEngineState | undefined;
+  getHcsr04State?(componentId: string): Hcsr04EngineState | undefined;
 }

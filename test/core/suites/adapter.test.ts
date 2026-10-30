@@ -11,9 +11,10 @@
  * circuit using a kind the adapter's coreSupportedKinds does not cover must
  * make `load()` throw, not quietly succeed on classic.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
-import { CoreSuiteFellBackError, SimEngine, type SimCircuit } from "./adapter.js";
+import { BUNDLED_DEFAULT_PARTS, resetPartLibrary } from "../../../src/parts/part-library.js";
+import { CoreSuiteEditNotDeliverableError, CoreSuiteFellBackError, SimEngine, type SimCircuit } from "./adapter.js";
 
 type SimComponent = SimCircuit["components"][number];
 
@@ -221,5 +222,184 @@ describe("adapter.ts SimEngine — the no-silent-fallback detector", () => {
     // outside gate 1's own load()-throws contract is a caller bug the adapter
     // does not otherwise police.
     expect(Object.keys(engine.getNetV()).length).toBeGreaterThan(0);
+  });
+});
+
+afterAll(() => resetPartLibrary());
+
+// ---- Live edits and EEPROM updates (W2d) ----------------------------------
+//
+// A classic suite file mutates the circuit object it already passed to
+// load() and calls step() again; classic re-reads the live reference. The
+// adapter diffs that object against what it last delivered and sends the
+// live-param part to the core as setParams; it never silently drops an edit
+// it cannot deliver.
+
+describe("adapter.ts SimEngine — live switch params reach the core without a reload", () => {
+  /** 5 V, a switch, 1k and 1k to ground: the midpoint reads 0 V open and 2.5 V closed. */
+  function switched(): SimCircuit {
+    return {
+      components: [
+        part("v", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("sw", "switch", ["a", "b"], { closed: 0 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
+        part("r2", "resistor", ["a", "b"], { resistance: 1000 }),
+      ],
+      wires: [
+        wire("v", "pos", "sw", "a"),
+        wire("sw", "b", "r1", "a"),
+        wire("r1", "b", "r2", "a"),
+        wire("r2", "b", "v", "neg"),
+      ],
+    };
+  }
+  const mid = (engine: SimEngine): number => engine.getNetV()[engine.getNetIdForPin("r1", "b")!]!;
+
+  it("mutating params.closed on the loaded object and stepping toggles the core", () => {
+    const circuit = switched();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    engine.step(1e-4);
+    expect(mid(engine)).toBeCloseTo(0, 6);
+
+    circuit.components.find((c) => c.id === "sw")!.params.closed = 1;
+    engine.step(1e-4);
+    expect(mid(engine)).toBeCloseTo(2.5, 4);
+
+    circuit.components.find((c) => c.id === "sw")!.params.closed = 0;
+    engine.step(1e-4);
+    expect(mid(engine)).toBeCloseTo(0, 6);
+  });
+
+  it("an unchanged circuit steps with no edit (and a repeated edit is delivered once)", () => {
+    const circuit = switched();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    circuit.components.find((c) => c.id === "sw")!.params.closed = 1;
+    engine.step(1e-4);
+    engine.step(1e-4);
+    engine.step(1e-4);
+    expect(mid(engine)).toBeCloseTo(2.5, 4);
+    expect(engine.simTime).toBeCloseTo(3e-4, 12);
+  });
+
+  it("a fresh load() of the mutated object takes it as the new baseline", () => {
+    const circuit = switched();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    circuit.components.find((c) => c.id === "sw")!.params.closed = 1;
+    engine.load(circuit);
+    engine.step(1e-4);
+    expect(mid(engine)).toBeCloseTo(2.5, 4);
+  });
+});
+
+describe("adapter.ts SimEngine — an edit it cannot deliver is refused, not dropped", () => {
+  function pair(): SimCircuit {
+    return {
+      components: [
+        part("v", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r", "resistor", ["a", "b"], { resistance: 1000 }),
+      ],
+      wires: [wire("v", "pos", "r", "a"), wire("r", "b", "v", "neg")],
+    };
+  }
+
+  it("a changed voltage_source V says it needs live V (W2c) and names the component", () => {
+    const circuit = pair();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    circuit.components[0]!.params.voltage = 3;
+    let thrown: unknown;
+    try {
+      engine.step(1e-4);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CoreSuiteEditNotDeliverableError);
+    expect((thrown as CoreSuiteEditNotDeliverableError).reason).toBe("live-v-pending");
+    expect((thrown as Error).message).toMatch(/voltage_source/);
+  });
+
+  it("a changed non-live param or a rewire says it needs a reload with carry (W2c)", () => {
+    const circuit = pair();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    circuit.components[1]!.params.resistance = 2000;
+    let thrown: unknown;
+    try {
+      engine.step(1e-4);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CoreSuiteEditNotDeliverableError);
+    expect((thrown as CoreSuiteEditNotDeliverableError).reason).toBe("needs-carry");
+
+    const rewired = pair();
+    const engine2 = new SimEngine();
+    engine2.load(rewired);
+    rewired.components.push(part("r2", "resistor", ["a", "b"], { resistance: 10 }));
+    expect(() => engine2.step(1e-4)).toThrow(CoreSuiteEditNotDeliverableError);
+  });
+
+  it("the refused edit does not advance time", () => {
+    const circuit = pair();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    engine.step(1e-4);
+    circuit.components[1]!.params.resistance = 2000;
+    expect(() => engine.step(1e-4)).toThrow(CoreSuiteEditNotDeliverableError);
+    expect(engine.simTime).toBeCloseTo(1e-4, 12);
+  });
+});
+
+describe("adapter.ts SimEngine — takeEepromUpdates (classic's shape, from the core)", () => {
+  function eeprom28c16WriteCircuit(): SimCircuit {
+    const def = BUNDLED_DEFAULT_PARTS.find((p) => p.kind === "28c16");
+    if (!def) throw new Error("test bug: no bundled 28c16");
+    const ic: SimComponent = { id: "u1", kind: def.kind, catalogUid: def.uid, pins: def.pin_layout.map((p) => ({ id: p.id })), params: {} };
+    const bits = Array.from({ length: 8 }, (_, i) => (0x5a >> i) & 1);
+    return {
+      components: [
+        part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("we_sw", "spdt_switch", ["com", "b", "c"], { position: 0 }),
+        ic,
+      ],
+      wires: [
+        wire("vsrc", "pos", "u1", "vcc"),
+        wire("vsrc", "neg", "u1", "gnd"),
+        wire("vsrc", "neg", "u1", "/ce"),
+        wire("vsrc", "pos", "u1", "/oe"),
+        wire("vsrc", "neg", "we_sw", "b"),
+        wire("vsrc", "pos", "we_sw", "c"),
+        wire("we_sw", "com", "u1", "/we"),
+        ...Array.from({ length: 11 }, (_, i) => wire("vsrc", "neg", "u1", `a${i}`)),
+        ...bits.map((bit, i) => wire("vsrc", bit ? "pos" : "neg", "u1", `io${i}`)),
+      ],
+    };
+  }
+
+  it("is empty until a write completes, then returns the whole image once", () => {
+    const circuit = eeprom28c16WriteCircuit();
+    const engine = new SimEngine();
+    engine.load(circuit);
+    engine.step(1e-3);
+    expect(engine.takeEepromUpdates()).toEqual({});
+
+    // /we LOW -> HIGH through the live switch, as the eeprom-write suite drives it.
+    circuit.components.find((c) => c.id === "we_sw")!.params.position = 1;
+    engine.step(1e-3);
+    for (let i = 0; i < 12; i++) engine.step(1e-3); // past tWC
+    const updates = engine.takeEepromUpdates();
+    expect(Object.keys(updates)).toEqual(["u1"]);
+    expect(updates.u1).toHaveLength(2048);
+    expect(updates.u1![0]).toBe(0x5a);
+    expect(engine.takeEepromUpdates()).toEqual({});
+  });
+
+  it("refuses to answer from classic after a fallback", () => {
+    const engine = new SimEngine();
+    expect(() => engine.load(WITH_UNSUPPORTED_KIND)).toThrow(CoreSuiteFellBackError);
+    expect(() => engine.takeEepromUpdates()).toThrow(/takeEepromUpdates\(\) needs the core/);
   });
 });
