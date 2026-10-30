@@ -1432,7 +1432,7 @@ their own, and the source KCL does with W1a point 2's branch fold.
    tpl 5, which ran at bcbce27 with one hold, decline: their chips relax at
    the edge (24: 40 us held, 11 us powered; 248: 49 and 29 us), each hold
    far shorter than the sweep's host steps and released by the chip's own
-   supply. Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
+   supply (named exit-gate exceptions, ruling R55 2; "What F5 leaves"). Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
    `an_episode_counts_only_short_holds_its_chip_released_itself`,
    `a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs`,
    `the_stale_hold_boards_run_a_second_of_pulses` and
@@ -5002,6 +5002,13 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     capacitance). Any left then go to A2 (a candidate that fails enters CC)
     and B (R45's check from the accepted rail), whose prototypes are in
     devolt's `memory/progress/brownout-core-w1e-drafts/f5g-logs/`;
+  - named exceptions to F5's exit gate (ruling R55 2): cold seeds 24 tpl
+    0 and 248 tpl 5, chips relaxing at their power edge (24: 40 us held,
+    11 us powered; 248: 49 and 29 us) under the sweep's 7 ms host step,
+    each release their own supply's, so ruling R54 (a)'s guard counts every
+    hold and declines `-4` at the 51st: they fall back to classic until R51
+    (c)'s sliding hold. Seed 24 also fails under the fine reference (exact
+    mode, 1 us host steps) at 0.208 s;
   - named exceptions to F5's exit gate (ruling R54, F5m): two default-mode
     declines on the cold fuzz that fail under the fine reference too (exact
     mode, 1 us host steps), each since f2d93ae:
@@ -5037,19 +5044,46 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     76.6 mA for at least 60 ms, reported ok; that round's first fix) and
     the rail loop's two-back test, which compares bits and so misses a
     2-cycle whose CC-capacitor charge moves by ulps;
-  - **the CC drift crawl** (F5m, F5V2 finding 3; options to the
-    coordinator): a PSU in CC with no rail capacitor whose rail a
-    closed-form hub partition's capacitor carries through a small
-    resistance (742 tpl 3: 5.8 uF through a 75 mohm PTC fuse) ramps by
-    `RAIL_DRIFT_V` (10 uV) a `Rail` event, each re-aiming the closed forms
-    (Rails point 4's drift cap): 853,000 events and 13 s for 50 us of
-    ramp. At c5b1a13 these boards met their chip's power edge part-way up
-    and declined there, after the same crawl (742: 3.6 s to 17 us); held
-    off and freed there since F5, they crawl on to the ramp's end. 16 of
-    F5V2's 22 cold boards (and 503 tpl 3 and 304 tpl 4, a stepped
-    partition restarted at `H_MIN` by those events and by a 555's
-    crossings) still hit the sweep's wall cap, single advances up to 13
-    s;
+  - **the CC drift crawl** (F5m, F5V2 finding 3; ruling R55): a PSU in
+    CC with no rail capacitor whose rail a closed-form hub partition's
+    capacitor carries through a small resistance (742 tpl 3: 5.8 uF
+    through a 0.45 ohm PTC fuse) ramps by `RAIL_DRIFT_V` (10 uV) a `Rail`
+    event, each re-aiming the closed forms (Rails point 4's drift cap):
+    2.2M events and 13 s for 50 us of ramp. At c5b1a13 these boards met
+    their chip's power edge part-way up and declined there, after the same
+    crawl (742: 3.6 s to 17 us); held off and freed there since F5, they
+    crawl on to the ramp's end. R55 (A2), stepping such a partition with
+    the rail as an unknown (`stepped::CcRail`), is prototyped (F5n: 742
+    runs its 1.2 s in 0.06 s, within W0 of the fine reference through the
+    ramp) but waits on which partitions qualify: promoted at load, a
+    closed form that never sees CC loses its exact crossings (F5o, cold
+    1-800 hub 2: 38 crawls fixed, but 190 tpl 4 and 466 tpl 4 run 11-13x
+    slower, 35 CV boards about 10x, and 230 tpl 2, 527 tpl 5 and 597 tpl
+    5 decline). A coupled
+    closed-form path for this case (A1) stays perf round 3's exact
+    upgrade. Two boards F5m filed beside it are other mechanisms: 304 tpl
+    4's 555 drives its own trigger and oscillates at 6.1 us (a ring at
+    its own speed, ruling R46's kind; since F5n a crossing inside a CC
+    step is refined against the step's own rail, 26 -> 20 steps a period),
+    and 503 tpl 3's stepped hub partition rides a CC rail capacitor's
+    segment with its draw frozen (R42's shape, ruling R47): each 9 uV
+    band pass restarts it at `H_MIN`, and keeping its step instead (a
+    prototype) left the rail 947 W0 off the fine reference, so the
+    restarts are what keep it coupled until R42 (b);
+  - **sliding at a power edge** (ruling R51 (c), R53): G2bv's bc_ic 426
+    hub 1 (a cell's rail climbing through a 74LS00's 4.275 V floor, from
+    1.14 s) and fz_ic 6 hub 2 (a CC rail held at the same floor for its
+    first 70 ms) chatter there: each instant powers the chip for a pass
+    and settles, on and off in turn, a rail-loop re-solve restarting the
+    stepped hub partitions at `H_MIN` at each flip (0.10x and 0.13x real
+    time). Exact mode slides through both at 1.3x and 14x real time.
+    Holding the chip off at the flip (a trigger prototyped in F5n) left
+    426 190 W0 off exact mode, which keeps the chip partly powered on
+    average, and the powered side chattered on: R53's Duty(x) hold is
+    their fix. Cold 617 tpl 5 is a relaxation of the same kind (its 555's
+    output on its own rail collapses it, about 400 holds a second) whose
+    falls at 1 kV/s re-anchor its two rated rail resistors every 172 ns
+    (ruling R30's tolerance), 7M slow events a second of fall;
   - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
     tree): 9 runs publish a rail more than 0.1 mV outside their sources'
     range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13

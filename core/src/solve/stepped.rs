@@ -2329,7 +2329,7 @@ impl SteppedSolver {
         // Iterative crossing refinement (this module's doc comment).
         if !part.watches.is_empty() {
             let t0 = part.t;
-            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch);
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch, ic_ctx.cc);
             if let Some(crossing) = find_crossing(&part.watches, &x0, t0, &accepted.x, t0 + h, &mut env) {
                 let refined_h = refine_crossing_h(
                     &part.shape,
@@ -2538,20 +2538,32 @@ impl SupplyTrace {
 /// reading them from the array as last published (the start of the step, and
 /// for another partition possibly older still) puts the crossing where the
 /// threshold WAS, not where it is when the node arrives.
+///
+/// On a CC rail ([`CcStep`]) the rail is the step's own unknown too, and a
+/// threshold of an IC on the rail moves with it: the crossing found against
+/// the published rail is refined against each trial's own solved rail
+/// (`rail`, with the rail the step starts from; `refine_crossing_h`). Refined
+/// against the published rail, a 555 on a CC rail (cold 304 tpl 4) had each
+/// step land where its threshold had been, and the next commit's rail solve
+/// moved the threshold on: eight steps, each a fifth or less of the last,
+/// closed on every crossing.
 struct ThresholdEnv<'a> {
     nodes: &'a [usize],
     traces: &'a [SupplyTrace],
     scratch: &'a mut Vec<f64>,
+    rail: Option<(usize, f64)>,
 }
 
 impl<'a> ThresholdEnv<'a> {
-    fn new(nodes: &'a [usize], traces: &'a [SupplyTrace], published: &[f64], scratch: &'a mut Vec<f64>) -> Self {
+    fn new(nodes: &'a [usize], traces: &'a [SupplyTrace], published: &[f64], scratch: &'a mut Vec<f64>, cc: Option<CcStep>) -> Self {
         scratch.clear();
         scratch.extend_from_slice(published);
-        ThresholdEnv { nodes, traces, scratch }
+        ThresholdEnv { nodes, traces, scratch, rail: cc.map(|cc| (cc.rail, cc.u0)) }
     }
 
-    fn at(&mut self, x: &[f64], t: f64) -> &[f64] {
+    /// The array at instant `t` with this partition at `x`, and on a CC rail
+    /// the rail at `u` (a trial's own), or where the step started.
+    fn at(&mut self, x: &[f64], t: f64, u: Option<f64>) -> &[f64] {
         for (l, &node) in self.nodes.iter().enumerate() {
             if let Some(slot) = self.scratch.get_mut(node) {
                 *slot = x[l];
@@ -2559,6 +2571,9 @@ impl<'a> ThresholdEnv<'a> {
         }
         for trace in self.traces {
             trace.write(self.scratch, t);
+        }
+        if let Some((rail, u0)) = self.rail {
+            self.scratch[rail] = u.unwrap_or(u0);
         }
         self.scratch
     }
@@ -2586,8 +2601,8 @@ fn find_crossing(watches: &HashMap<usize, Vec<(DeviceId, ThresholdFn)>>, x0: &[f
     let mut best: Option<(f64, Crossing)> = None;
     for (&local, watchers) in watches {
         for (w, (_, thresholds)) in watchers.iter().enumerate() {
-            let at_start = thresholds(env.at(x0, t0));
-            let at_end = thresholds(env.at(x1, t1));
+            let at_start = thresholds(env.at(x0, t0, None));
+            let at_end = thresholds(env.at(x1, t1, None));
             for (k, (th0, th1)) in at_start.iter().zip(&at_end).enumerate() {
                 let (d0, d1) = (x0[local] - th0.value, x1[local] - th1.value);
                 let ok = if th0.rising { d0 < 0.0 && d1 > 0.0 } else { d0 > 0.0 && d1 < 0.0 };
@@ -2628,31 +2643,44 @@ fn refine_crossing_h(
 ) -> Result<f64, String> {
     let thresholds = &watches[&crossing.local][crossing.watcher].1;
     let nudge = if crossing.rising { CROSS_TOLERANCE_V } else { -CROSS_TOLERANCE_V };
-    let (mut lo, mut hi) = (0.0f64, h);
-    let mut best_h = hi;
-    for _ in 0..CROSS_REFINE_MAX_ITERS {
-        let mid = 0.5 * (lo + hi);
-        let trial = match take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + mid) {
-            Ok(trial) => trial,
-            // A trial that does not converge ends the refinement at the best
-            // `h` found so far (README, LEDs point 8).
-            Err(StepError::NoConverge) => return Ok(best_h),
-            Err(StepError::Failed(message)) => return Err(message),
-        };
-        let Some(threshold) = thresholds(env.at(&trial.x, t0 + mid)).get(crossing.index).copied() else {
-            return Ok(best_h);
-        };
-        let target = threshold.value + nudge;
-        let v = trial.x[crossing.local];
-        let past = if crossing.rising { v >= target } else { v <= target };
-        if past {
-            hi = mid;
-            best_h = mid;
-        } else {
-            lo = mid;
+    // On a CC rail each trial's own rail first; a start the published rail
+    // does not describe (an edge moved it, and the step's own rail at `h ->
+    // 0` lies elsewhere: cold 674 tpl 4, 7.8 V published against a CC
+    // solution near 0 V) reads as past at every trial, and bisected that
+    // to `h / 2^40` the steps never reached the horizon. Then the published
+    // rail is the threshold's, as before.
+    let passes: &[bool] = if env.rail.is_some() { &[true, false] } else { &[false] };
+    let mut best_h = h;
+    for &trial_rail in passes {
+        let (mut lo, mut hi) = (0.0f64, h);
+        best_h = hi;
+        for _ in 0..CROSS_REFINE_MAX_ITERS {
+            let mid = 0.5 * (lo + hi);
+            let trial = match take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + mid) {
+                Ok(trial) => trial,
+                // A trial that does not converge ends the refinement at the
+                // best `h` found so far (README, LEDs point 8).
+                Err(StepError::NoConverge) => return Ok(best_h),
+                Err(StepError::Failed(message)) => return Err(message),
+            };
+            let Some(threshold) = thresholds(env.at(&trial.x, t0 + mid, trial.u.filter(|_| trial_rail))).get(crossing.index).copied() else {
+                return Ok(best_h);
+            };
+            let target = threshold.value + nudge;
+            let v = trial.x[crossing.local];
+            let past = if crossing.rising { v >= target } else { v <= target };
+            if past {
+                hi = mid;
+                best_h = mid;
+            } else {
+                lo = mid;
+            }
+            if (v - target).abs() < CROSS_TOLERANCE_V {
+                return Ok(mid);
+            }
         }
-        if (v - target).abs() < CROSS_TOLERANCE_V {
-            return Ok(mid);
+        if lo > 0.0 {
+            break;
         }
     }
     Ok(best_h)

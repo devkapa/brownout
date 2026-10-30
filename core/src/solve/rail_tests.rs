@@ -11242,3 +11242,137 @@ fn the_host_steps_retry_reaches_only_static_partitions_and_a_release_that_altern
         assert!(e.stat(25) <= 2.0, "{name}: {} holds", e.stat(25));
     }
 }
+
+// ---- F5n: a 555's crossing against its CC rail ------------------------------
+
+/// Cold 304 tpl 4 with its 4-6 switch open from the load, as the sweep's
+/// toggle at 0.568 s leaves it: a `{5.27 V, 0.213 A}` PSU with no rail
+/// capacitor, a 555 on the rail whose output is its own trigger (node 6,
+/// 0.7 uF and 58 ohm to ground), its threshold on node 4 above two thirds
+/// of the rail: it oscillates at 6.1 us from 4 ms, its output's load
+/// taking the PSU into CC each low phase.
+fn cold_304_tpl4_switch_open() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.2655128000042835, 0.21345953892981578], vec![]),
+        fz(24, 1, &[3, 0], vec![-0.6549675638365855, 7.126998315260018, 0.004341408137726716, 0.0, 0.0, 0.017687053568537208, 0.13881918572510682], vec![8.0]),
+        fz(2, 2, &[4, 3], vec![4.564892363720713], vec![]),
+        fz(1, 3, &[2, 0], vec![460739.3073719522], vec![]),
+        fz(1, 4, &[5, 0], vec![3271.1903360417946], vec![]),
+        fz(1, 5, &[6, 0], vec![13184.966403064442], vec![]),
+        fz(40, 6, &[1, 0, 6, 6, 2, 5, 4, 1], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[1, 1], vec![404.11405318823387], vec![]),
+        fz(1, 8, &[1, 4], vec![149.767769862216], vec![]),
+        fz(3, 9, &[4, 0], vec![2.775711698661513e-8, 0.0, 0.0], vec![]),
+        fz(1, 10, &[6, 2], vec![121.32768347328833], vec![]),
+        fz(3, 11, &[4, 0], vec![0.002507519258645126, 0.0, 0.0], vec![]),
+        fz(30, 12, &[1, 4], vec![2.509748773473368, 2.256251739010313, 0.037513405458630994, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 13, &[1, 1], vec![26.531694208442694], vec![]),
+        fz(1, 14, &[5, 6], vec![1090.9876182680619], vec![]),
+        fz(30, 15, &[2, 6], vec![1.8912337219092163, 2.0362011275480176, 0.03775881780216939, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 2], vec![404.1263633350451], vec![]),
+        fz(1, 17, &[3, 5], vec![4.552762642533429], vec![]),
+        fz(13, 18, &[3, 1], vec![0.15525272900742773, 0.047158656164903376], vec![]),
+        fz(3, 19, &[6, 0], vec![6.999023568767726e-7, 0.21915706333178064, 0.0], vec![]),
+        fz(4, 20, &[4, 6], vec![0.0], vec![]),
+        fz(1, 21, &[6, 0], vec![58.08042003295962], vec![]),
+        fz(30, 22, &[1, 2], vec![2.00045951467954, 1.558250344975702, 0.02547802372840287, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 23, &[1, 1], vec![774.2791402353771], vec![]),
+        fz(1, 24, &[4, 5], vec![6.128352554157261], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0007970148407519956, 404.11405318823387], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.6527049610425459, 149.767769862216], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.013235839817347543, 121.32768347328833], vec![]),
+        fz(90, 13, &[], vec![13.0, 5.509775652361266, 26.531694208442694], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.14997575343365246, 1090.9876182680619], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.15715389918262151, 404.1263633350451], vec![]),
+        fz(90, 17, &[], vec![17.0, 2.7052012112395736, 4.552762642533429], vec![]),
+        fz(90, 21, &[], vec![21.0, 0.7340592066517114, 58.08042003295962], vec![]),
+        fz(90, 23, &[], vec![23.0, 0.0007707332494949089, 774.2791402353771], vec![]),
+        fz(90, 24, &[], vec![24.0, 23.68191074150624, 6.128352554157261], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_crossing_inside_a_cc_step_is_aimed_at_the_threshold_on_the_steps_own_rail() {
+    // On a CC rail the stepped partition solves the rail as an unknown
+    // (`stepped::CcRail`), and the 555's thresholds are fractions of it.
+    // The crossing was found and refined against the rail as published at
+    // the step's start: each refined step landed where the threshold had
+    // been, the commit's rail solve moved it on, and eight steps, each a
+    // fifth or less of the last, closed on every crossing of the low phase
+    // (2,120 steps in 0.5 ms, 26 a period). Aimed at each trial's own rail,
+    // one step lands it (20 a period); the period is unchanged (6.142 us
+    // both ways; the fine reference's 6.125 us).
+    let mut e = Engine::load(&cold_304_tpl4_switch_open()).unwrap();
+    e.advance(0.005).unwrap();
+    let (s0, c0) = (e.stat(10), e.stat(13));
+    for k in 1..=2 {
+        e.advance(0.005 + k as f64 * 5e-4).unwrap();
+    }
+    let (steps, commits) = (e.stat(10) - s0, e.stat(13) - c0);
+    let periods = commits / 4.0;
+    eprintln!("5-6 ms: {steps} steps, {commits} commits, {:.1} steps a period", steps / periods);
+    assert!(periods > 150.0, "oscillating: {commits} commits");
+    assert!(steps / periods < 22.0, "{steps} steps over {periods} periods");
+}
+
+/// Cold 674 tpl 4: a `{10.58 V, 44 mA}` PSU with no rail capacitor, a
+/// -2.2..7.9 V clock on node 3 through an LED to the rail, a 555 on the
+/// rail whose THR and DIS sit in a stepped hub partition; trapezoid.
+fn cold_674_tpl4() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![10.57768299388643, 0.04407705384523474], vec![]),
+        fz(2, 1, &[0, 2], vec![-6.718705375382749], vec![]),
+        fz(22, 2, &[3, 0], vec![82.24619002585541, 0.3079502701145943, 7.868261040906934, -2.2259392050102225, 0.0], vec![8.0]),
+        fz(1, 3, &[4, 0], vec![146192.33403225866], vec![]),
+        fz(1, 4, &[5, 0], vec![328070.9272781424], vec![]),
+        fz(1, 5, &[6, 0], vec![469851.8818275567], vec![]),
+        fz(1, 6, &[7, 0], vec![20521.342287454077], vec![]),
+        fz(1, 7, &[1, 7], vec![7.023796218757453], vec![]),
+        fz(3, 8, &[2, 5], vec![1.157721812433039e-6, 0.0, 0.0], vec![]),
+        fz(4, 9, &[7, 4], vec![0.0], vec![]),
+        fz(1, 10, &[4, 0], vec![118.77857406962261], vec![]),
+        fz(1, 11, &[2, 7], vec![35.97411733858808], vec![]),
+        fz(4, 12, &[6, 7], vec![0.0], vec![]),
+        fz(1, 13, &[7, 0], vec![420.8333564702835], vec![]),
+        fz(30, 14, &[1, 3], vec![2.0672682044045088, 2.4177662280284267, 0.025276962645213532, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 15, &[1, 1], vec![2695.6276078238393], vec![]),
+        fz(1, 16, &[7, 2], vec![1958.1035547537406], vec![]),
+        fz(30, 17, &[6, 5], vec![1.6462258209947083, 2.108257630935631, 0.025000573006314596, 0.0, 0.0, 0.0], vec![]),
+        fz(40, 18, &[1, 0, 4, 5, 1, 6, 7, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 19, &[1, 2], vec![757.5560158810392], vec![]),
+        fz(1, 20, &[2, 7], vec![982.9792177338045], vec![]),
+        fz(3, 21, &[7, 0], vec![1.3932123167885662e-7, 0.0, 0.0], vec![]),
+        fz(1, 22, &[5, 2], vec![436.51226727439683], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.049311835363249304, 7.023796218757453], vec![]),
+        fz(90, 10, &[], vec![10.0, 2.064556550123816, 118.77857406962261], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.9534821766778961, 35.97411733858808], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.5653571923610491, 420.8333564702835], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.00034811013162001556, 2695.6276078238393], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.004042912580414882, 1958.1035547537406], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.046999492775666875, 757.5560158810392], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.007628582468226875, 982.9792177338045], vec![]),
+        fz(90, 22, &[], vec![22.0, 0.0013739525041225659, 436.51226727439683], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.digital_slot_count = 32;
+    p.options.integration = 1;
+    p
+}
+
+#[test]
+fn a_crossing_whose_step_starts_off_its_published_rail_is_refined_on_that_rail() {
+    // The clock's edge at 12.2 ms moves the published CC rail from -0.03 to
+    // 7.8 V before the stepped partition's own CC solution, which at `h -> 0`
+    // lies elsewhere: against each trial's own rail the 555's threshold read
+    // as passed at every trial, the bisection took the step to `h / 2^40`,
+    // and the advance never reached its horizon. Such a refinement falls
+    // back to the published rail.
+    let mut e = Engine::load(&cold_674_tpl4()).unwrap();
+    for t in [0.0062728811248002015, 0.03998576024840161, 0.05] {
+        e.advance(t).unwrap_or_else(|er| panic!("{} at {}", er.message, e.time()));
+    }
+    assert!(e.stat(10) < 5_000.0, "{} steps to 50 ms", e.stat(10));
+}
