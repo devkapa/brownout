@@ -5108,12 +5108,19 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     (a CC exit there is the stepped copy's charge balance against the
     closed form's linearised draw; handed back and forth, cold 794 tpl 3
     switched 51 times at 13.04 us and the rail loop gave up), and the
-    next rail solve still in CV demotes it. A CC exit at an internal
-    event brings the stepped copy to it on the CC rail its pending step
-    was solved on (`SteppedSolver::catch_up_on_cc_rail`, F5r); brought
-    there after the rail moved, it had stepped its whole uncommitted gap
-    at the setpoint (F5pV: 3 ms of a capacitor settled at 2 V charged at
-    5 V, 1346 W0; FORCE_STEPPED too). A promoted partition's CC steps hold
+    next rail solve still in CV demotes it. A regime change at an
+    internal event brings every stepped hub partition short of it there
+    on the rail it was on, before the re-solves (and a demotion) take the
+    new one: leaving CC, the CC rail its pending step was solved on
+    (`SteppedSolver::catch_up_on_cc_rail`, F5r); entering CC, the rail
+    before the solve, as a boundary, each partition so brought there
+    restarting at the entry as all do at an exit (ruling R66 (1); its
+    trial spent, cold 574 tpl 5's `Step` event committed an empty one).
+    Brought there after
+    the rail moved, a partition had stepped its whole uncommitted gap on
+    the new rail (F5pV: 3 ms of a capacitor settled at 2 V charged at 5
+    V, 1346 W0; at the entry, 41.3 W0 under FORCE_STEPPED, both as at
+    da167d2). A promoted partition's CC steps hold
     their error `CC_STEP_TOL_SCALE` (8) times under the controller's
     tolerance (R60 (4): G2bv's bc_ic 97 hub 2 crept 1.48 W0 off the fine
     reference at the sweep's host stops, exact mode 1.50 there, the host
@@ -5138,6 +5145,17 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     band pass restarts it at `H_MIN`, and keeping its step instead (a
     prototype) left the rail 947 W0 off the fine reference, so the
     restarts are what keep it coupled until R42 (b);
+  - **cold 34 tpl 3 at the stepped solver's floor** (ruling R66 (2), R39):
+    at 0.4185 s a switch lets its CC rail climb from 0 to the 12.98 V
+    setpoint in 11 us inside one host advance, and the clamp's steps after
+    the exit cut are solved in CV (`CcStep::cv`, cold 75 tpl 3's fix) at
+    the controller's backward-Euler tolerance, up to 1.7 ms on node 2's 28
+    ms decay: 0.4598 V at 0.452 s against the fine reference's 0.4522, up
+    to 13.5 W0 worse than da167d2 to 0.54 s. Exact mode at the same host
+    stops reads 0.45973 there and agrees within 0.07 W0 at every instant
+    to 1.2 s; da167d2 began each clamp step in CC again and crawled the
+    clamp in nanosecond steps (0.59 s against 0.007 s), exact by accident.
+    Narrowing it is a tighter stepped tolerance, not this case's;
   - **sliding at a power edge** (ruling R51 (c), R53): G2bv's bc_ic 426
     hub 1 (a cell's rail climbing through a 74LS00's 4.275 V floor, from
     1.14 s) and fz_ic 6 hub 2 (a CC rail held at the same floor for its

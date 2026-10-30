@@ -11935,19 +11935,52 @@ fn a_cc_exit_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_cc_rai
     // 4.834 V just after the edge against the fine reference's 2.003 (1346
     // W0). On the CC rail its pending step was planned on it stays at 2 V
     // to the edge. Within W0 of the fine reference (exact mode, 1 us host
-    // slices), or of exact mode's own error at the same host stops. (Under
-    // FORCE_STEPPED the CC entry at the pulse's start is the mirror case,
-    // brought to the edge on the CC rail after the rail left the setpoint:
-    // 41 W0 at 1.5 ms, as at da167d2; not this exit's, and not sampled.)
+    // slices), or of exact mode's own error at the same host stops.
     let samples = [1.5e-3, 0.0280371, 0.0310381, 0.0310471, 0.0311371, 0.0330371];
     let (want, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 1e-6);
     let (floor, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 0.0);
     for force_stepped in [false, true] {
         let (got, _, _) = sampled(&cc_pulse_board(force_stepped), &samples, 0.0);
-        for k in usize::from(force_stepped)..samples.len() {
+        for k in 0..samples.len() {
             let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
             eprintln!("cc pulse board (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
             assert!(off <= 1.0 || off <= floor_off + 1.0, "force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+        }
+    }
+}
+
+/// The cc pulse board with a second capacitor behind node 2 (1 uF, 1 kohm
+/// to ground), which makes node 2's partition stepped in default mode too.
+fn cc_pulse_board_two_caps(force_stepped: bool) -> Program {
+    let mut p = cc_pulse_board(force_stepped);
+    p.devices.extend([capacitor(5, 2, 4, 1e-6, 0.0), resistor(6, 4, 0, 1000.0)]);
+    p.node_count = 5;
+    p
+}
+
+#[test]
+fn a_cc_entry_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_rail_it_was_on() {
+    // Ruling R66 (1), the exit's mirror. The pulse's start (1 ms) puts the
+    // PSU in CC. Node 2's stepped partition (stepped from load under
+    // FORCE_STEPPED, or for its two capacitors) last committed before the
+    // edge and was brought to it after the rail had left the 5 V setpoint
+    // for the CC rail: it stepped its gap at the CC rail and read 2.883 V at
+    // 1.5 ms against the fine reference's 2.765 (41.3 W0, as at da167d2).
+    // On the setpoint it stood at to the edge, within W0 of the fine
+    // reference (exact mode, 1 us host slices), or of exact mode's own error
+    // at the same host stops.
+    let samples = [1.001e-3, 1.01e-3, 1.1e-3, 1.5e-3, 3e-3, 0.0280371];
+    for (name, board) in [("two capacitors", cc_pulse_board_two_caps as fn(bool) -> Program), ("one capacitor", cc_pulse_board)] {
+        let (want, _, _) = sampled(&exact(board(false)), &samples, 1e-6);
+        let (floor, _, _) = sampled(&exact(board(false)), &samples, 0.0);
+        for force_stepped in [false, true] {
+            let p = board(force_stepped);
+            let (got, _, _) = sampled(&p, &samples, 0.0);
+            for k in 0..samples.len() {
+                let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
+                eprintln!("{name} (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
+                assert!(off <= 1.0 || off <= floor_off + 1.0, "{name}, force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+            }
         }
     }
 }
@@ -12031,4 +12064,83 @@ fn the_crawl_hook_is_restored_when_its_guard_drops() {
         panic!("a failing test");
     });
     assert_eq!(hub::crawl_hook::events(), hub::CC_CRAWL_EVENTS, "restored through a panic");
+}
+
+#[test]
+fn a_rolled_back_cc_entry_at_an_internal_event_restores_the_partition_it_brought_there() {
+    // Rails point 8, ruling R66 (1): the two-capacitor cc pulse board, and a
+    // second pulse that enables a zero-delay oscillator at the very instant
+    // the first one's start enters CC, which livelocks. Node 2's stepped
+    // partition, brought to the entry on the setpoint it stood at
+    // (`SteppedSolver::catch_up`), is put back with everything else as the
+    // twin that never took the instant left it.
+    for force_stepped in [false, true] {
+        let mut p = cc_pulse_board_two_caps(force_stepped);
+        p.devices.extend([source(7, 5, 0, 5.0), pulse(8, 6, 0, [0.0, 5.0, 1e-3, 0.0, 0.0, 1.0, 2.0], 1), ls00(9, 5, 0, [7, 6, 7, 0, 0, 8, 0, 0, 9, 0, 0, 10], 0.0, 2)]);
+        p.node_count = 11;
+        p.digital_slot_count = 6;
+        let (mut failed, mut twin) = (Rig::load(&p).unwrap(), Rig::load(&p).unwrap());
+        let part = failed.s().local_index[2].unwrap().0;
+        // Both to the last event before the edge, so the instant that fails
+        // is the edge's own.
+        for rig in [&mut failed, &mut twin] {
+            while rig.k.next_event_time() < 1e-3 {
+                let t = rig.k.next_event_time();
+                rig.advance(t).unwrap();
+            }
+        }
+        assert!(failed.s().stepped.committed(part).unwrap().0 < 1e-3, "force_stepped {force_stepped}: the partition is short of the edge");
+        let before = state_digest(failed.s());
+        assert_eq!(before, state_digest(twin.s()), "force_stepped {force_stepped}: the twins agree before");
+        assert_eq!((failed.hub().state.reg, failed.s().partition_kinds[part]), (Regime::Cv, PartitionKind::Stepped));
+        let r = failed.advance(1e-3 + 1e-6);
+        assert!(matches!(r, Err(KernelError::Livelock { at }) if at == 1e-3), "force_stepped {force_stepped}: the pulse's start livelocks: {r:?}");
+        assert_eq!(state_digest(failed.s()), before, "force_stepped {force_stepped}: every piece of state");
+        assert_eq!(failed.k.next_event_time().to_bits(), twin.k.next_event_time().to_bits(), "force_stepped {force_stepped}: the next event");
+    }
+}
+
+/// tpl=5 hub=2 e=12.603 psu ilim=1.883 V2=6.64 CLK3 0.0..10.1 stacked4-3 1.2 C2-4=5.1e-3 P7-6 C2-3=1.1e-6 C3-2=1.4e-3 C7-1=1.8e-6 C0-5=1.5e-3 C1-5=7.5e-7 SW0-3(1)+R3-0=38 R1-6=15080.0 R1-3=2472.8 C5-4=2.0e-6 C1-6=1.2e-3
+fn cold_574_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![12.602831553761094, 1.8827872565849404], vec![]),
+        fz(2, 1, &[2, 0], vec![6.6375304609725205], vec![]),
+        fz(22, 2, &[3, 0], vec![17.297159248234106, 0.3534570618442351, 10.05567971675732, 0.0, 0.0], vec![8.0]),
+        fz(2, 3, &[4, 3], vec![1.1503919030790386], vec![]),
+        fz(1, 4, &[5, 0], vec![4711.643635044132], vec![]),
+        fz(1, 5, &[6, 0], vec![15728.301741998961], vec![]),
+        fz(1, 6, &[7, 0], vec![131284.945047971], vec![]),
+        fz(3, 7, &[2, 4], vec![0.005127116066070482, 0.0, 0.0], vec![]),
+        fz(13, 8, &[7, 6], vec![0.6712406185574047, 0.05017157453116978], vec![]),
+        fz(3, 9, &[2, 3], vec![1.0868224423893482e-6, 0.015691113787803947, 0.0], vec![]),
+        fz(3, 10, &[3, 2], vec![0.0013537362227502058, 0.0, 0.0], vec![]),
+        fz(3, 11, &[7, 1], vec![1.8110415021511686e-6, 0.0, 0.0], vec![]),
+        fz(3, 12, &[0, 5], vec![0.001499178943121283, 0.10317948135208961, 0.0], vec![]),
+        fz(3, 13, &[1, 5], vec![7.519945258799222e-7, 0.0, 0.0], vec![]),
+        fz(4, 14, &[0, 3], vec![1.0], vec![]),
+        fz(1, 15, &[3, 0], vec![37.55344887494819], vec![]),
+        fz(1, 16, &[1, 6], vec![15079.971435248293], vec![]),
+        fz(1, 17, &[1, 3], vec![2472.761810397683], vec![]),
+        fz(3, 18, &[5, 4], vec![2.025703910926431e-6, 0.0, 0.0], vec![]),
+        fz(3, 19, &[1, 6], vec![0.0011840960047857835, 0.266342515322754, 0.0], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.05094478304263869, 37.55344887494819], vec![]),
+        fz(90, 16, &[], vec![16.0, 3.336716843859078e-5, 15079.971435248293], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.012878156008332309, 2472.761810397683], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_partition_the_cc_entrys_catch_up_brings_to_the_entry_restarts_there() {
+    // Ruling R66 (1). Cold 574 tpl 5: a CC entry at an internal event finds
+    // a stepped hub partition whose pending trial ends at or before it; the
+    // entry's catch-up commits that trial, and nothing planned the next, so
+    // its `Step` event, still current, committed an empty trial (an index
+    // panic in `step_sens`). Each partition the catch-up brings there
+    // restarts at the entry, as at the exit.
+    let stops = [0.006272880877141529, 0.0065927161668331785, 0.028976581614620318, 0.03553340541767844, 0.03698489478563283, 0.03901939250962618, 0.03991764293395217, 0.041271473887937844, 0.04335513173190618, 0.044337405090577084, 0.06947386681851733, 0.07123793317893146, 0.08841718232174085, 0.09182557291355894, 0.0943951507204556, 0.10422962131724346, 0.10530899188220319, 0.10542614807069964, 0.11049686736026144, 0.1445664128049566, 0.1842653151444662, 0.21422145514361743, 0.21506580900902345, 0.22663140602920362, 0.22940150856396527, 0.24083371462914918, 0.24284869237573473, 0.24320594023225206, 0.2433738608765407, 0.2530618018968624, 0.25385456921175353, 0.2547089514806105, 0.2551795896448584, 0.2553390498729086, 0.26390885075550385, 0.26597085831493583, 0.2662632641543127, 0.2690951199292167, 0.2707020403282692, 0.2724425605181134, 0.2739380883344346, 0.275636267511459, 0.2757441057945907, 0.27676400762637865, 0.27738983890471747, 0.3048682492823358, 0.3064496119541417, 0.30670732184507626, 0.30767511906567774, 0.307923329563767, 0.31650227610470705, 0.3179876336303704, 0.3180902253015938, 0.31861989438403127, 0.31880642021693695, 0.3191112189930113, 0.31923664034197746, 0.3207268780167979, 0.3455119958016315, 0.35122919965398564, 0.3527034963396514, 0.35285492273389735, 0.35387789812656595, 0.35525155709773204, 0.38344468100401163, 0.4046108419665314, 0.40531640259070945, 0.4054878471693596, 0.4055899122397323, 0.4061745636644941, 0.4160692768379551, 0.46267071196050097, 0.4638372242823546, 0.4642640595365132, 0.47179999070178674, 0.48642219398730163, 0.4907815468142124, 0.49092615333946227, 0.49108483026962063, 0.5016999107930417, 0.5018611399360423, 0.5197543654853523, 0.5357903717294508, 0.5360605955246178, 0.5361768450784467, 0.5374347983618939, 0.539529357865102, 0.5399507992463187, 0.5424389689694512, 0.5899005863701755, 0.5904900934336084, 0.5963172167538294, 0.5967046337295367, 0.6007206096537955, 0.6092686846920152, 0.644748978957318, 0.6545745069012455, 0.6604988803807474, 0.6615036525512134, 0.6616141477039709, 0.6903372916550937, 0.6904485983445836, 0.7124508598300596, 0.7128151912990386, 0.718733127888563, 0.7225306552600174, 0.7387556677500934, 0.7490736139561662, 0.7522313486629078, 0.7609420801660539, 0.7826603174339363, 0.782848177020686, 0.7829643667580773, 0.7839798744580058, 0.7864731833839732, 0.7936907989124025, 0.8019890682418442, 0.8372500697186027, 0.8819703444207859, 0.9137239136359017, 0.9155254298193632, 0.9160121321096205, 0.9162579300052882, 0.916454087304285, 0.9223516595771097, 0.934667936701408, 0.9362609527798573, 0.9452662925429353, 0.9517241413110135, 0.9522569372398517, 0.9613659576270696, 0.9617674415130101, 0.9643792673522906, 0.9951309845208647, 0.9979132929832992, 1.000725363113518, 1.0058396498610622, 1.0227008536519822, 1.0279231071210482, 1.0626795627680892, 1.0637386614818067, 1.070420631368488, 1.0705472363376314, 1.0875917492522307, 1.1187719175213746, 1.122083995447408, 1.122439804105945, 1.149227026869476, 1.149946253280575, 1.1506086266511395, 1.1510427584929321, 1.1514469826527027, 1.1873760094238954, 1.19688749429246, 1.2];
+    run_cold(&cold_574_tpl5(), &[(0.10422962131724346, 14), (0.24083371462914918, 14), (0.9643792673522906, 14)], &stops).unwrap_or_else(|e| panic!("574 tpl 5: {e}"));
 }

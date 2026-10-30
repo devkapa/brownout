@@ -1497,15 +1497,29 @@ impl PartitionedSolver {
                     return if a.is_empty() { Err(err) } else { Ok(hold::Passes::Alternating(a, err)) };
                 }
             };
-            // A CC exit: a stepped hub partition short of `now` is brought to
-            // it on the CC rail its pending step was solved on, before the
-            // demotion or the re-solve below would bring it there at the
-            // setpoint the rail just moved to.
-            if regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv {
+            // A regime change: a stepped hub partition short of `now` is
+            // brought to it on the rail it was on, before the re-solves below
+            // (and a demotion) would bring it there on the rail the solve just
+            // moved to. Leaving CC, that is the CC rail its pending step was
+            // solved on; entering CC (ruling R66 (1)), the rail before the
+            // solve, which the published rail still holds until the move is
+            // published (`on_rail_move`), as a boundary (W1b rule 6).
+            // Each partition the entry's catch-up brought to `now` restarts
+            // there below, as the exit's all do: its pending trial is spent
+            // (a `Step` event for it would commit nothing) and the rail it
+            // steps against has jumped.
+            let mut entered: Vec<usize> = Vec::new();
+            if regime_changed {
                 let ids = self.stepped.hub_partitions();
                 if !ids.is_empty() {
                     let pre = Rc::clone(&self.driver_snapshot);
-                    self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
+                    if self.hub.as_ref().unwrap().state.reg == Regime::Cv {
+                        self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
+                    } else {
+                        debug_assert_eq!(self.voltages[self.hub.as_ref().unwrap().node].to_bits(), old_u.to_bits(), "the entry's catch-up reads the rail before the solve");
+                        entered = ids.into_iter().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t < now)).collect();
+                        self.stepped.catch_up(&entered, now, &pre, &self.live_params, &self.voltages)?;
+                    }
                 }
             }
             self.sync_hub_cache_band();
@@ -1603,8 +1617,9 @@ impl PartitionedSolver {
             }
             // A switched partition starts afresh in its new kind.
             past_stepped.extend(&promoted);
+            past_stepped.extend(&entered);
             flipped_cf.extend(&demoted);
-            let flipped_p: Vec<usize> = flipped.iter().chain(&promoted).copied().collect();
+            let flipped_p: Vec<usize> = flipped.iter().chain(&promoted).chain(&entered).copied().collect();
             for p in flipped {
                 match self.partition_kinds[p] {
                     PartitionKind::Static => past_static.push(PartitionId(p as u32)),
