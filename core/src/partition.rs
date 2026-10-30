@@ -177,6 +177,12 @@ pub struct PartitionBuild {
     /// Per partition: whether it reads the rail node (a hub partition, Rails
     /// point 2). Always false in exact mode, where the rail is free.
     pub hub: Vec<bool>,
+    /// Per partition: whether it is a closed-form hub partition on a bench
+    /// PSU's rail with no rail capacitor, which steps with the rail as an
+    /// unknown while the PSU is in CC and is a closed form again in CV
+    /// (ruling R59 (1) (B), `solve::PartitionedSolver::sync_cc_kinds`). Its
+    /// `kinds` entry is `ClosedForm`, the kind it loads in.
+    pub cc_switch: Vec<bool>,
 }
 
 /// The hub rail's topology (README, Rails point 1).
@@ -636,6 +642,28 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
     }
 
+    // Ruling R59 (1) (B): with no rail capacitor a bench PSU in CC sets its
+    // rail from the draws alone, so a closed-form hub partition's capacitor
+    // carries the rail with it, and its segment, aimed at a rail it holds
+    // fixed, goes stale as soon as the rail follows the capacitor: re-aimed
+    // every `RAIL_DRIFT_V` of the rail's own motion, a 5.8 uF capacitor 0.45
+    // ohm from a 1.3 A rail took 2.2M rail events for 6.3 ms (cold 742 tpl
+    // 3). Such a partition is stepped with the rail as an unknown
+    // (`stepped::CcRail`) while the PSU is in CC, and a closed form in CV,
+    // where the rail is its fixed boundary (stepped at load in CV too, 35 CV
+    // boards ran ~10x slower). A rail capacitor makes the rail a segment of
+    // its own (Rails point 4), and a battery has no CC.
+    let cc_switch: Vec<bool> = match rail {
+        Some(t) if !t.exact && program.devices[t.device].kind == kinds::BENCH_PSU => {
+            let rail_capacitor = program.devices.iter().filter(|d| d.kind == kinds::CAPACITOR).any(|d| {
+                let (a, b) = (d.pins[0].node, d.pins[1].node);
+                a != b && (a == t.rail || b == t.rail) && fixed[a].is_some() && fixed[b].is_some()
+            });
+            (0..partitions.len()).map(|p| !rail_capacitor && hub[p] && kinds_by_partition[p] == PartitionKind::ClosedForm).collect()
+        }
+        _ => vec![false; partitions.len()],
+    };
+
     // W1c step 2b (this worker's own scope, README's "Kernel semantics: the
     // digital core (W1c)" contract point 2's stamping half): an IC driver or
     // floating pull landing in a non-`Static` partition used to be declined
@@ -658,6 +686,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         ramp_node,
         reads,
         hub,
+        cc_switch,
     })
 }
 

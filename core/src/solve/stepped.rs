@@ -92,6 +92,19 @@ pub const ABS_VOLTAGE: f64 = 100e-6;
 /// re-discovers the right scale within a couple of passes rather than
 /// starting from `H_MAX` and immediately over-stepping a fast transient.
 pub const POST_EVENT_H: f64 = 1e-8;
+/// Ruling R60 (4): a `cc_switch` partition's step on a CC rail (`CcRail`)
+/// holds its error this many times under `REL_TOL`/`ABS_VOLTAGE`. It stands
+/// in for a closed form, exact to the rounding, whose capacitor carries the
+/// rail, and the host cadence lets its steps grow: a creep at the
+/// capacitor's pace accumulated 1.48 W0 of backward-Euler error over 5 ms
+/// (G2bv's bc_ic 97 hub 2, 40 steps; exact mode at the same host stops
+/// 1.50); at 8 times it is 0.70 W0 in 64 steps (4 times left 0.96; at 16,
+/// 0.50, cold 482 tpl 0's aim landed its gate on its floor, where it slid
+/// to the hold guard's `-4`, R51 (c)'s class). A
+/// partition stepped from load keeps the controller's own tolerance (every
+/// CC step tightened, two branches on one CC rail took 14,270 steps to 0.1
+/// s against 3,682).
+pub const CC_STEP_TOL_SCALE: f64 = 8.0;
 /// How closely a refined crossing must land on its threshold (matches
 /// `closed_form::CROSS_NUDGE_V`, so a stepped and a closed-form partition
 /// under `FORCE_STEPPED` land a crossing to the same precision).
@@ -180,7 +193,7 @@ impl CcRail {
     fn step(&self, p: usize, u0: f64) -> CcStep {
         let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
         let coupled = self.own.iter().any(|o| o.0 != p);
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false }
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false }
     }
 }
 
@@ -202,6 +215,9 @@ struct CcStep {
     /// A seed (`SEED_H`): its rail row is the charge balance
     /// ([`ChargeBalance`]) when a capacitor has a pin on the rail.
     seed: bool,
+    /// Solved in CV, the rail at `v` (`take_cc_step`'s `cv`): a horizon
+    /// clamp's steps after one that left CC (`Partition::cc_exited`).
+    cv: bool,
 }
 
 impl CcStep {
@@ -317,7 +333,7 @@ fn solve_step(
     polish: bool,
 ) -> Result<StepResult, StepError> {
     if let Some(cc) = ic_ctx.cc {
-        return take_cc_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, cc, false);
+        return take_cc_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, cc, cc.cv);
     }
     let n = shape.n;
     // The boundary at the step's own end, where backward Euler and the
@@ -808,6 +824,17 @@ struct Partition {
     /// trial's end.
     i_src: f64,
     pend_i_src: f64,
+    /// Ruling R59 (1) (B): a closed-form hub partition that steps only while
+    /// its PSU is in CC (`PartitionBuild::cc_switch`) is parked here in CV:
+    /// nothing steps, publishes or schedules it, and its events are stale.
+    /// The owner sets it (`SteppedSolver::promote`/`demote`) and journals it.
+    parked: bool,
+    /// Within a horizon clamp (`sync_partition`): a step of it left CC at
+    /// its cut, and the clamp's later steps are solved in CV.
+    cc_exited: bool,
+    /// Whether it is a `cc_switch` partition (set at its first promotion):
+    /// its CC steps take `CC_STEP_TOL_SCALE`.
+    cc_switch: bool,
     /// Test builds keep the pending trial's first half step, `(its end, x,
     /// capacitor currents)`, for [`ExactCommit`].
     #[cfg(test)]
@@ -902,6 +929,9 @@ impl Partition {
             pend_charge: 0.0,
             i_src: 0.0,
             pend_i_src: 0.0,
+            parked: false,
+            cc_exited: false,
+            cc_switch: false,
             #[cfg(test)]
             pend_mid: None,
         }
@@ -1075,6 +1105,8 @@ pub struct SteppedSolver {
     /// runs ([`CcRail`]); set by the owner before a call that may plan a
     /// step and taken after it, so it is never stale.
     pub(crate) cc: Option<CcRail>,
+    /// Set while `sync_partition` steps a partition to its horizon.
+    clamp: bool,
     /// The partitions the owner's `resolve_dirty` re-solves only because
     /// the rail moved past their band on a CC rail (no rail capacitor): a
     /// re-aim, not a discontinuity, so each keeps the step its controller
@@ -1199,6 +1231,7 @@ impl SteppedSolver {
             hub_updates: Vec::new(),
             sensitivities: 0,
             cc: None,
+            clamp: false,
             reaim: Vec::new(),
             #[cfg(test)]
             w_saved: None,
@@ -1302,18 +1335,31 @@ impl SteppedSolver {
 
     /// The hub partitions, ascending.
     pub(crate) fn hub_partitions(&self) -> Vec<usize> {
-        let mut out: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub).map(|(&p, _)| p).collect();
+        let mut out: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub && !p.parked).map(|(&p, _)| p).collect();
         out.sort_unstable();
         out
     }
 
     /// The curved hub partitions whose last committed step is more than
     /// its band under `rule` from `u` (Rails point 3), ascending.
-    pub(crate) fn hubs_past_band(&self, u: f64, rule: rails::BandRule) -> Vec<usize> {
+    ///
+    /// With `linear_too` (a CC rail with no rail capacitor) a linear one
+    /// counts as well: its committed draw line is its step's, the
+    /// capacitors as their companions `C / h`, and a rail moved within the
+    /// step by another partition's change meets the capacitors as they hold
+    /// their charge, not as that line has them. Cold 677 tpl 5: a switch
+    /// took a CC load off the rail, and 2.2 uF from the rail to 1.1 kohm,
+    /// its line `C / h` = 0.09 S from a 24 us step, read 243 mA at the
+    /// setpoint where it draws 4 mA: the PSU stayed in CC, the rail 0.86 V
+    /// short, until that step's end. Only a promoted `cc_switch` partition
+    /// (which stands in for a closed form re-aimed at every move): every
+    /// stepped hub partition re-solved so slid cold 61 tpl 5's gate along
+    /// its floor to the hold guard's `-4`.
+    pub(crate) fn hubs_past_band(&self, u: f64, rule: rails::BandRule, linear_too: bool) -> Vec<usize> {
         let mut out: Vec<usize> = self
             .partitions
             .iter()
-            .filter(|(_, p)| p.hub && p.curved() && p.sens.as_ref().is_some_and(|s| (u - s.u_p).abs() > rule.band(s.band)))
+            .filter(|(_, p)| p.hub && !p.parked && (linear_too && p.cc_switch || p.curved()) && p.sens.as_ref().is_some_and(|s| (u - s.u_p).abs() > rule.band(s.band)))
             .map(|(&p, _)| p)
             .collect();
         out.sort_unstable();
@@ -1322,12 +1368,12 @@ impl SteppedSolver {
 
     /// The `u_p` of every curved hub partition and its band under `rule`.
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.partitions.values().filter(|p| p.hub && p.curved()).filter_map(|p| p.sens.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        out.extend(self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()).filter_map(|p| p.sens.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
     }
 
     /// Re-publishes every hub partition at the present rail (a rail move).
     pub(crate) fn republish_hubs(&self, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) {
-        let mut ids: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub && p.sens.is_some()).map(|(&p, _)| p).collect();
+        let mut ids: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub && !p.parked && p.sens.is_some()).map(|(&p, _)| p).collect();
         ids.sort_unstable();
         for p in ids {
             Self::publish(&self.partitions[&p], self.rail, live_params, voltages, currents);
@@ -1339,7 +1385,7 @@ impl SteppedSolver {
     /// and publishing nothing; the re-solve that follows publishes.
     pub(crate) fn catch_up(&mut self, ids: &[usize], now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         for &p in ids {
-            if !self.partitions.contains_key(&p) {
+            if !self.partitions.get(&p).is_some_and(|part| !part.parked) {
                 continue;
             }
             self.journal(p);
@@ -1352,6 +1398,53 @@ impl SteppedSolver {
     /// voltages (exact mode reads the rail's partition through it).
     pub(crate) fn committed(&self, p: usize) -> Option<(f64, &[f64])> {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
+    }
+
+    /// Ruling R59 (1) (B): parks or unparks partition `p` with no change to
+    /// its state (the owner's load and its rollback of a switch).
+    pub(crate) fn set_parked(&mut self, p: usize, parked: bool) {
+        if let Some(part) = self.partitions.get_mut(&p) {
+            part.parked = parked;
+        }
+    }
+
+    /// Ruling R59 (1) (B): partition `p`'s PSU entered CC. It starts stepping
+    /// at `now` from its capacitors' voltages `vc` (the closed form's charge
+    /// there, so the switch moves no charge): a discontinuity, whose
+    /// re-solve, which the owner runs next, seeds `x` from `vc` against the
+    /// CC rail. Journaled as any change in a window.
+    pub(crate) fn promote(&mut self, p: usize, now: f64, vc: &[f64]) {
+        self.journal(p);
+        let part = self.partitions.get_mut(&p).expect("a partition the stepped solver compiled");
+        debug_assert_eq!(part.vc.len(), vc.len());
+        part.parked = false;
+        part.cc_switch = true;
+        part.vc.copy_from_slice(vc);
+        part.t = now;
+        part.prev_t = now;
+        part.has_prev = false;
+        part.has_pend = false;
+        part.be_next_step = true;
+        part.h = POST_EVENT_H;
+        part.changing = true;
+        // Its steps from the last time it stepped are stale.
+        part.version += 1;
+        part.sens = None;
+        part.pend_lu = None;
+        part.i_src = 0.0;
+        part.pend_i_src = 0.0;
+    }
+
+    /// Ruling R59 (1) (B): partition `p`'s PSU left CC. It is brought to `now`
+    /// on the boundary it has (as a waveform edge brings one, W1b rule 6),
+    /// parked, and its capacitors' voltages there returned to seed the closed
+    /// form with.
+    pub(crate) fn demote(&mut self, p: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<Vec<f64>, String> {
+        self.catch_up(&[p], now, drivers, live_params, voltages)?;
+        self.journal(p);
+        let part = self.partitions.get_mut(&p).expect("a partition the stepped solver compiled");
+        part.parked = true;
+        Ok(part.vc.clone())
     }
 
     /// The sensitivity of hub partition `p` at state `x`, solved with the
@@ -1498,7 +1591,7 @@ impl SteppedSolver {
     }
 
     pub fn is_current(&self, partition: usize, version: u64) -> bool {
-        self.partitions.get(&partition).is_some_and(|p| p.version == version)
+        self.partitions.get(&partition).is_some_and(|p| p.version == version && !p.parked)
     }
 
     /// Whether `partition`'s NEXT planned step is forced to BE by the
@@ -1545,7 +1638,7 @@ impl SteppedSolver {
     ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
         for p_idx in self.suppliers_first(dirty) {
-            if !self.partitions.contains_key(&p_idx) {
+            if !self.partitions.get(&p_idx).is_some_and(|part| !part.parked) {
                 continue;
             }
             self.journal(p_idx);
@@ -1699,7 +1792,7 @@ impl SteppedSolver {
     /// fast-forwards every partition still behind `t_end`, publishes it, and
     /// re-plans from there so the next `advance` has a live pending step.
     pub fn sync_to(&mut self, t_end: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Result<Vec<DeviceId>, String> {
-        let mut ids: Vec<usize> = self.partitions.keys().copied().collect();
+        let mut ids: Vec<usize> = self.partitions.iter().filter(|(_, part)| !part.parked).map(|(&p, _)| p).collect();
         // A map's order is arbitrary, and a partition's plan now reads the
         // ones that supply it (`sync_supplies`): fix the order so a run does
         // not depend on it.
@@ -2030,6 +2123,16 @@ impl SteppedSolver {
     /// bring `part.t` up to `horizon`, using a pending trial outright when it
     /// already lands within `horizon`.
     fn sync_partition(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+        self.clamp = true;
+        let result = self.sync_partition_steps(p_idx, horizon, drivers, live_params, voltages);
+        self.clamp = false;
+        if let Some(part) = self.partitions.get_mut(&p_idx) {
+            part.cc_exited = false;
+        }
+        result
+    }
+
+    fn sync_partition_steps(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         loop {
             let (t, has_pend, pend_t) = {
                 let part = &self.partitions[&p_idx];
@@ -2208,7 +2311,16 @@ impl SteppedSolver {
             (Some(cc), true, None) => Some(cc.step(p_idx, voltages[cc.rail])),
             _ => None,
         };
+        let clamp = self.clamp;
         let part = self.partitions.get_mut(&p_idx).unwrap();
+        // Within one horizon clamp (`sync_partition`) the CC rail it was
+        // handed stays until the rail loop after it, so a step after one cut
+        // at the exit, or solved in CV, is solved in CV too (`CcStep::cv`).
+        // Cut again at each start, cold 75 tpl 3's steps had cut the clamp's
+        // 1.9 ms into 19,393 steps of 20-40 ns: its CC solution sat at 24 V
+        // a few ns into each, past a 5 V setpoint, and a CC trial of more
+        // failed Newton, a quarter of the step each time.
+        let cc = cc.map(|c| CcStep { cv: part.cc_exited, ..c });
         let shape_n = part.shape.n;
         let method = if part.be_next_step { Method::Be } else { option_method };
         let vc0 = part.vc.clone();
@@ -2230,6 +2342,9 @@ impl SteppedSolver {
             match attempt {
                 Ok((step, r, mid)) => {
                     ratio = r.max(coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method));
+                    if ic_ctx.cc.is_some() && part.cc_switch {
+                        ratio *= CC_STEP_TOL_SCALE;
+                    }
                     if ratio <= 1.0 {
                         accepted = step;
                         half = mid;
@@ -2283,6 +2398,7 @@ impl SteppedSolver {
                 Some((f, _)) if f > 0.0 => {
                     accepted = take_cc_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + h, cc, true).map_err(StepError::into_message)?;
                     half = None;
+                    part.cc_exited = clamp;
                     None
                 }
                 other => other.map(|(f, _)| f),
@@ -2322,6 +2438,7 @@ impl SteppedSolver {
                     h = hi;
                     accepted = step;
                     half = None;
+                    part.cc_exited = clamp;
                 }
             }
         }

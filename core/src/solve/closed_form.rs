@@ -360,6 +360,11 @@ struct Partition {
     /// its own trajectory changes (Rails point 4's charge correction).
     drift_q: f64,
     drift_from: f64,
+    /// Ruling R59 (1) (B): a hub partition that steps while its PSU is in CC
+    /// (`PartitionBuild::cc_switch`) is parked here meanwhile: `slot` does
+    /// not find it, so nothing aims, publishes or schedules it, and its
+    /// crossings are stale. The owner sets it and journals it.
+    parked: bool,
 }
 
 impl Partition {
@@ -619,6 +624,7 @@ impl ClosedFormSolver {
                 folded: false,
                 drift_q: 0.0,
                 drift_from: 0.0,
+                parked: false,
             });
         }
         let ics = collect_ics(program);
@@ -1047,9 +1053,11 @@ impl ClosedFormSolver {
             let Some(slot) = self.slot(p_idx) else { continue };
             self.journal(slot);
             let part = &mut self.parts[slot];
+            // With no segment yet, the charge it loads with (0), or the one
+            // a CC exit resumed it at (`resume`).
             let vc_now = match &part.seg {
                 Some(_) => vc_of(part, now),
-                None => 0.0,
+                None => part.seg_vc0,
             };
             Self::note_bits(part, voltages);
             let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
@@ -1233,14 +1241,14 @@ impl ClosedFormSolver {
     /// The earliest instant a driven partition's coupling band runs out in
     /// time (`couple_band`), when the rail must solve and aim it again.
     pub(crate) fn couple_expiry(&self) -> f64 {
-        self.parts.iter().filter_map(|p| p.drive.as_ref().map(|d| d.expiry)).fold(f64::INFINITY, f64::min)
+        self.parts.iter().filter(|p| !p.parked).filter_map(|p| p.drive.as_ref().map(|d| d.expiry)).fold(f64::INFINITY, f64::min)
     }
 
     /// The curved hub partitions whose segment was built more than its band
     /// under `rule` from `u` (ruling R8 (a), Rails point 3): each builds again
     /// at the present rail, `vc` carried exactly.
     pub(crate) fn hubs_past_band(&self, u: f64, rule: rails::BandRule, out: &mut Vec<usize>) {
-        for part in &self.parts {
+        for part in self.parts.iter().filter(|p| !p.parked) {
             if let (Some(h), Some(c)) = (part.seg.as_ref().and_then(|s| s.hub.as_ref()), part.curve()) {
                 // An affine segment (an infinite band) is exact at any rail,
                 // in every regime, as a linear partition is.
@@ -1257,7 +1265,7 @@ impl ClosedFormSolver {
     /// rail and coupling width (`couple_band`): the rail event there aims it
     /// again.
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        for part in &self.parts {
+        for part in self.parts.iter().filter(|p| !p.parked) {
             if let (Some(h), Some(c)) = (part.seg.as_ref().and_then(|s| s.hub.as_ref()), part.curve()) {
                 if c.band.is_finite() {
                     out.push((h.u_seg, rule.band(Some(c.band))));
@@ -1334,8 +1342,8 @@ impl ClosedFormSolver {
     /// wherever it was last aimed; only the PUBLISHED reading moves).
     pub fn publish_at(&self, t_end: f64, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) {
         for part in &self.parts {
-            if part.seg.is_none() {
-                continue; // load not settled yet; nothing to publish.
+            if part.seg.is_none() || part.parked {
+                continue; // load not settled yet, or stepping: nothing to publish.
             }
             let vc = vc_of(part, t_end);
             let du = part.drive.as_ref().map(|d| d.du(t_end - part.seg_t0));
@@ -1463,9 +1471,56 @@ impl ClosedFormSolver {
     /// owns it.
     fn slot(&self, p_idx: usize) -> Option<usize> {
         match self.slot_of.get(p_idx) {
-            Some(&slot) if slot != u32::MAX => Some(slot as usize),
+            Some(&slot) if slot != u32::MAX && !self.parts[slot as usize].parked => Some(slot as usize),
             _ => None,
         }
+    }
+
+    /// Ruling R59 (1) (B): parks or unparks partition `p` with no change to
+    /// its state (the owner's load, its rollback of a switch, and the CC
+    /// entry, whose stepped copy takes the charge `vc_now` reads).
+    pub(crate) fn set_parked(&mut self, p: usize, parked: bool) {
+        if let Some(&slot) = self.slot_of.get(p).filter(|&&s| s != u32::MAX) {
+            self.parts[slot as usize].parked = parked;
+        }
+    }
+
+    /// Partition `p`'s segment rate `F` (`vc` relaxes as `e^(F t)`), parked
+    /// or not; `None` before its first segment.
+    pub(crate) fn rate(&self, p: usize) -> Option<f64> {
+        let &slot = self.slot_of.get(p).filter(|&&s| s != u32::MAX)?;
+        let part = &self.parts[slot as usize];
+        part.seg.as_ref().map(|_| part.seg_f)
+    }
+
+    /// Partition `p`'s capacitor voltage at `t` on its present segment (the
+    /// charge a CC entry hands the stepped copy), parked or not.
+    pub(crate) fn vc_now(&self, p: usize, t: f64) -> Option<f64> {
+        let &slot = self.slot_of.get(p).filter(|&&s| s != u32::MAX)?;
+        let part = &self.parts[slot as usize];
+        Some(if part.seg.is_some() { vc_of(part, t) } else { part.seg_vc0 })
+    }
+
+    /// Ruling R59 (1) (B): partition `p`'s PSU left CC and its stepped copy
+    /// stopped at `now` with its capacitor at `vc`. The closed form resumes
+    /// from there: a held segment (no motion) anchored at `(now, vc)`, which
+    /// the re-solve the owner runs next aims afresh; its old crossing and
+    /// drive are stale. Journaled as any change in a window.
+    pub(crate) fn resume(&mut self, p: usize, now: f64, vc: f64) {
+        let Some(&slot) = self.slot_of.get(p).filter(|&&s| s != u32::MAX) else { return };
+        let slot = slot as usize;
+        self.journal(slot);
+        let part = &mut self.parts[slot];
+        part.parked = false;
+        part.seg_t0 = now;
+        part.seg_vc0 = vc;
+        part.seg_f = 0.0;
+        part.seg_inf = vc;
+        part.drive = None;
+        part.ramp = None;
+        part.drift_q = 0.0;
+        part.drift_from = now;
+        part.version += 1;
     }
 
     // ---- internals ---------------------------------------------------

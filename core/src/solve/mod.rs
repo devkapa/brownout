@@ -2638,6 +2638,16 @@ pub struct PartitionedSolver {
     /// The hub rail outside exact mode, and exact mode's hub.
     hub: Option<Box<hub::Hub>>,
     exact: Option<Box<hub::ExactHub>>,
+    /// Ruling R59 (1) (B): the closed-form hub partitions that step while the
+    /// PSU is in CC (`partition::PartitionBuild::cc_switch`), ascending, and
+    /// the window's log of their kind switches, `(partition, kind before)`
+    /// in order (a rollback undoes them newest first).
+    cc_switch: Vec<usize>,
+    kind_log: Vec<(u32, PartitionKind)>,
+    /// The switch's own state (`hub::CcCrawl`), and its value when the
+    /// window opened.
+    cc_crawl: hub::CcCrawl,
+    w_cc_crawl: hub::CcCrawl,
     /// Stat 19.
     source_edges: u64,
     /// Whether this call re-solved exact mode's rail partition (static, or a
@@ -2705,7 +2715,19 @@ impl PartitionedSolver {
         let pb = partition::build(program)?;
         // The dynamic solvers read W1f's topology as they build.
         let closed_form = closed_form::ClosedFormSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
-        let stepped = stepped::SteppedSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
+        // Ruling R59 (1) (B): a `cc_switch` partition is compiled by both
+        // dynamic solvers and runs in the one its kind names, the other
+        // copy parked (`sync_cc_kinds`). It loads closed-form.
+        let cc_switch: Vec<usize> = (0..pb.kinds.len()).filter(|&p| pb.cc_switch[p]).collect();
+        let mut stepped = if cc_switch.is_empty() {
+            stepped::SteppedSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb))
+        } else {
+            let kinds: Vec<PartitionKind> = pb.kinds.iter().zip(&pb.cc_switch).map(|(&k, &sw)| if sw { PartitionKind::Stepped } else { k }).collect();
+            stepped::SteppedSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &kinds, LiveTopology::of(&pb))
+        };
+        for &p in &cc_switch {
+            stepped.set_parked(p, true);
+        }
         let partition::PartitionBuild { partitions, local_index, fixed, resolved, kinds: partition_kinds, multi_capacitor_partitions, rail, live, reads, hub, .. } = pb;
 
         let node_count = program.node_count;
@@ -2832,6 +2854,10 @@ impl PartitionedSolver {
                 PartitionKind::ClosedForm => {
                     dyn_out[p] = DynOut::of(closed_form.shape(p).expect("a closed-form partition has a compiled shape"));
                     cf_parts.push(p);
+                    // Either solver may write it.
+                    if cc_switch.contains(&p) {
+                        stepped_parts.push(p);
+                    }
                 }
                 PartitionKind::Stepped => {
                     dyn_out[p] = DynOut::of(stepped.shape(p).expect("a stepped partition has a compiled shape"));
@@ -2948,6 +2974,10 @@ impl PartitionedSolver {
             at_clamp: false,
             host_step: f64::INFINITY,
             changes: hold::Changes::None,
+            cc_switch,
+            kind_log: Vec::new(),
+            cc_crawl: hub::CcCrawl::default(),
+            w_cc_crawl: hub::CcCrawl::default(),
         };
         solver.wire_w1f(program, rail, &live, &reads, &hub, &partitions);
         solver.wire_w1g(program, &live, &fixed);
@@ -3085,12 +3115,13 @@ impl PartitionedSolver {
                     continue;
                 }
                 let kind = self.local_index.get(pin.node).copied().flatten().and_then(|(p, _)| self.partition_kinds.get(p).copied());
+                let switch = self.local_index[pin.node].is_some_and(|(p, _)| self.cc_switch.contains(&p));
                 let eligible = match kind {
                     Some(PartitionKind::Stepped) => true,
                     Some(PartitionKind::ClosedForm) => supply_stable,
                     _ => false,
                 };
-                if !eligible {
+                if !eligible && !switch {
                     continue;
                 }
                 let thresholds = digital::levels::watch_thresholds(&ic, &power, pin);
@@ -3111,22 +3142,30 @@ impl PartitionedSolver {
                 // a fixed-supply IC's never move, so recomputing costs one
                 // redundant `ic_power` call and produces the identical
                 // answer every time.
-                let ic_for_watch = ic.clone();
                 let pin_for_watch = *pin;
                 let vcc_node = ic.vcc.node;
                 let gnd_node = ic.gnd.node;
-                self.watch_node(
-                    node,
-                    reader,
+                let make = || -> ThresholdFn {
+                    let ic_for_watch = ic.clone();
                     Box::new(move |voltages: &[f64]| {
                         let power = digital::power::ic_power(&ic_for_watch, voltages[vcc_node], voltages[gnd_node]);
                         digital::levels::watch_thresholds(&ic_for_watch, &power, &pin_for_watch)
                             .iter()
                             .flat_map(|&value| [Threshold { value, rising: true }, Threshold { value, rising: false }])
                             .collect()
-                    }),
-                );
+                    })
+                };
+                if eligible {
+                    self.watch_node(node, reader, make());
+                }
                 if kind == Some(PartitionKind::Stepped) {
+                    self.stepped.add_supply_dependency(node, ic.vcc.node);
+                    self.stepped.add_supply_dependency(node, ic.gnd.node);
+                }
+                // Its stepped copy watches the pin too (eligible there
+                // whatever the supply), for while it steps (R59 (1) (B)).
+                if switch {
+                    self.stepped.watch_node(node, reader, make());
                     self.stepped.add_supply_dependency(node, ic.vcc.node);
                     self.stepped.add_supply_dependency(node, ic.gnd.node);
                 }
@@ -3165,22 +3204,25 @@ impl PartitionedSolver {
         for &logic_index in &[digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
             let node = ic.logic[logic_index].node;
             let kind = self.local_index.get(node).copied().flatten().and_then(|(p, _)| self.partition_kinds.get(p).copied());
+            let switch = self.local_index[node].is_some_and(|(p, _)| self.cc_switch.contains(&p));
             let eligible = match kind {
                 Some(PartitionKind::Stepped) => true,
                 Some(PartitionKind::ClosedForm) => supply_stable,
                 _ => false,
             };
-            if !eligible {
-                continue;
-            }
             let reader = DeviceId(device_index as u32);
             let (vcc_node, gnd_node) = (ic.vcc.node, ic.gnd.node);
-            self.watch_node(
-                node,
-                reader,
-                Box::new(move |voltages: &[f64]| digital::ne555::watch_thresholds(logic_index, voltages[vcc_node], voltages[gnd_node])),
-            );
+            let make = || -> ThresholdFn { Box::new(move |voltages: &[f64]| digital::ne555::watch_thresholds(logic_index, voltages[vcc_node], voltages[gnd_node])) };
+            if eligible {
+                self.watch_node(node, reader, make());
+            }
             if kind == Some(PartitionKind::Stepped) {
+                self.stepped.add_supply_dependency(node, vcc_node);
+                self.stepped.add_supply_dependency(node, gnd_node);
+            }
+            // Its stepped copy's watch (R59 (1) (B)), as for any IC.
+            if switch {
+                self.stepped.watch_node(node, reader, make());
                 self.stepped.add_supply_dependency(node, vcc_node);
                 self.stepped.add_supply_dependency(node, gnd_node);
             }
@@ -3244,8 +3286,9 @@ impl PartitionedSolver {
                 if !(supply_touched(ic.vcc.node, st_ids) || supply_touched(ic.gnd.node, st_ids)) {
                     continue;
                 }
-                for &(is_closed_form, p) in deps {
-                    if is_closed_form {
+                for &(_, p) in deps {
+                    // A `cc_switch` partition's kind is the present one.
+                    if self.partition_kinds[p] == PartitionKind::ClosedForm {
                         if !cf_ids.contains(&p) {
                             cf_ids.push(p);
                         }
@@ -4633,6 +4676,8 @@ impl PartitionSolver for PartitionedSolver {
         self.static_solver.begin_window();
         self.closed_form.begin_window();
         self.stepped.begin_window();
+        self.kind_log.clear();
+        self.w_cc_crawl = self.cc_crawl;
         self.w_pending_schedule.clone_from(&self.pending_schedule);
         self.w_next_bucket = self.next_bucket;
         // No `activate_mirror_if_seen` here: a window that opens on a solver
@@ -4683,6 +4728,7 @@ impl PartitionSolver for PartitionedSolver {
         self.static_solver.end_window();
         self.closed_form.end_window();
         self.stepped.end_window();
+        self.kind_log.clear();
         self.slow_end_instant();
         if let Some(hub) = self.hub.as_mut() {
             hub.end_window();
@@ -4712,6 +4758,12 @@ impl PartitionSolver for PartitionedSolver {
         self.static_solver.rollback_window();
         self.closed_form.rollback_window();
         self.stepped.rollback_window();
+        // R59 (1) (B): the kinds the window found (each solver's journal put
+        // the state back; this puts back which copy runs).
+        while let Some((p, kind)) = self.kind_log.pop() {
+            self.set_kind(p as usize, kind);
+        }
+        self.cc_crawl = self.w_cc_crawl;
         self.pending_schedule.clone_from(&self.w_pending_schedule);
         self.next_bucket = self.w_next_bucket;
         if self.window_mirror {

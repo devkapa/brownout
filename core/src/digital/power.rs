@@ -204,9 +204,18 @@ impl SupplyCurve {
         }
     }
 
-    /// The conductance and its first three derivatives in `vs`.
+    /// The conductance and its first three derivatives in `vs`. A constant
+    /// piece's are 0 at any supply: written `-b / vs^2` and so on, they were
+    /// 0 / 0 at `vs = 0`, where a gate whose power is judged at the loop's
+    /// rail (`Bnd::hold_power_at`) stamps its constant `R_out` piece while a
+    /// CC seed solving the rail below the gate's ground reads its supply
+    /// difference as 0 (cold 230 tpl 2: a NaN rail sensitivity, `-4`).
+    /// Elsewhere the bits are the formula's.
     pub fn derivs(&self, vs: f64) -> [f64; 4] {
         let (a, b) = self.piece(vs);
+        if b == 0.0 && vs == 0.0 {
+            return [a, -0.0, 0.0, -0.0];
+        }
         [a + b / vs, -b / (vs * vs), 2.0 * b / (vs * vs * vs), -6.0 * b / (vs * vs * vs * vs)]
     }
 }

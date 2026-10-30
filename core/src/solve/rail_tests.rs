@@ -9758,7 +9758,10 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     // partition's segment key did not carry the hold, so a probe re-used the
     // segment stamped the other way and saw no drop, and a release was taken
     // on the rail loop's passes in passing rather than on the settled rail.
-    // Now it is held once, 34.7 to 39.1 ms, and freed when the rail carries it.
+    // Now it is held once and freed when the rail carries it: 35.0 to 39.5 ms
+    // since its partition steps with the CC rail (rulings R59 (1) (B), R63
+    // (2); 34.7 to 39.1 on the closed form's crawl, whose rail the fine
+    // reference puts at the floor at 34.7 ms, where exact mode stops).
     // (Its 1a, 1b and 1y share a node: powered, the gate rings at its own 81
     // ns delay, some 12,000 events a millisecond, which no hold touches.)
     let p = { let mut p = program(6, g2bv_bc_ic_97_hub2()); p.digital_slot_count = 16; p };
@@ -9769,7 +9772,7 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     assert!(err.is_none(), "{err:?}");
     assert_eq!(rig.s().hold_counts(), [1.0, 1.0]);
     assert_eq!(spans.len(), 1);
-    assert!(spans[0].0 > 0.0346 && spans[0].0 < 0.0348 && spans[0].1 > 0.039 && spans[0].1 < 0.0393, "{spans:?}");
+    assert!(spans[0].0 > 0.0349 && spans[0].0 < 0.0351 && spans[0].1 > 0.0394 && spans[0].1 < 0.0396, "{spans:?}");
     assert!(rig.u() > 0.9 * 4.75, "rail {} V", rig.u());
 }
 
@@ -11142,7 +11145,9 @@ fn a_held_chip_is_retried_once_per_host_step() {
     // 20 ns to 70 us. Its supply never reaches the window again within the
     // run. Retried at each of those re-solves, the probe paid two more rail
     // passes per event (79,000 failed retries, the board 0.12 s -> 0.6 s);
-    // once per host step it pays two per `advance`.
+    // once per host step it pays two per `advance`. (Since R59 (1) (B) the
+    // climbing partition steps with the CC rail: no `Rail` events, the rail
+    // moved once per committed step, and the retries' passes on top.)
     let mut e = Engine::load(&cold_34_tpl0()).unwrap_or_else(|er| panic!("load: {}", er.message));
     let stops = [0.006272879661111714, 0.027755330060653026, 0.03946023509167783, 0.03975728524363152, 0.03987809344734865, 0.041087485294586786, 0.044213706364126304, 0.05088267414388208];
     for &t in &stops {
@@ -11151,10 +11156,10 @@ fn a_held_chip_is_retried_once_per_host_step() {
             e.set_params(&[(13, 0, 1.0)]).unwrap_or_else(|er| panic!("toggle: {}", er.message));
         }
     }
-    let (rail_events, moves) = (e.stat(18), e.stat(14));
+    let (rail_events, moves, steps) = (e.stat(18), e.stat(14), e.stat(10));
     assert_eq!((e.stat(25), e.stat(26)), (1.0, 0.0), "held from the toggle on");
-    assert!(rail_events > 1000.0, "the held rail's climb: {rail_events} rail events");
-    assert!(moves <= rail_events + 4.0 * stops.len() as f64, "a retry's rail passes at each event: {moves} moves for {rail_events} rail events");
+    assert!(rail_events + steps > 50.0, "the held rail's climb: {rail_events} rail events, {steps} steps");
+    assert!(moves <= rail_events + steps + 4.0 * stops.len() as f64, "a retry's rail passes at each event: {moves} moves for {rail_events} rail events and {steps} steps");
 }
 
 /// Cold 348 tpl 2: a {4.72 V, 52 mA} PSU, a 74LS00 from the rail to node 5
@@ -11375,4 +11380,538 @@ fn a_crossing_whose_step_starts_off_its_published_rail_is_refined_on_that_rail()
         e.advance(t).unwrap_or_else(|er| panic!("{} at {}", er.message, e.time()));
     }
     assert!(e.stat(10) < 5_000.0, "{} steps to 50 ms", e.stat(10));
+}
+
+// ---- F5p: ruling R59 (1) (B), the CC kind switch -----------------------------
+
+/// tpl=3 hub=2 e=11.610 psu ilim=1.311 P4-1 C5-0=1.5e-2 R1-0=7031.6 C3-0=2.0e-6 R0-3=81.3 C4-0=5.8e-6 R0-3=41.8 74LS00 vcc1 gnd0 in0,5 out4,5 LED3-5+R1-3=35 R3-5=1.2 span=11.609561585688706
+/// options: default, digital_slot_count 32 node_count 6; no toggles.
+fn cold_742_tpl3() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![11.609561585688706, 1.3111584852033025], vec![]),
+        fz(1, 1, &[2, 0], vec![664458.1190985516], vec![]),
+        fz(1, 2, &[3, 0], vec![302924.36781416985], vec![]),
+        fz(1, 3, &[4, 0], vec![1843.766479283641], vec![]),
+        fz(1, 4, &[5, 0], vec![2813.098491588092], vec![]),
+        fz(13, 5, &[4, 1], vec![0.4544463363598449, 0.07493446948293848], vec![]),
+        fz(3, 6, &[5, 0], vec![0.015287114460682977, 0.0, 0.0], vec![]),
+        fz(1, 7, &[1, 0], vec![7031.58752937688], vec![]),
+        fz(3, 8, &[3, 0], vec![2.0028330936510225e-6, 0.0, 0.0], vec![]),
+        fz(1, 9, &[0, 3], vec![81.2607746004466], vec![]),
+        fz(3, 10, &[4, 0], vec![5.755342862865539e-6, 0.0, 0.0], vec![]),
+        fz(1, 11, &[0, 3], vec![41.78674247287521], vec![]),
+        fz(50, 12, &[1, 0, 0, 5, 4, 0, 0, 5, 0, 0, 5, 0, 0, 4], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 3.8617551054817935e-8], vec![0.0; 13]),
+        fz(1, 13, &[4, 1], vec![559.6562593015271], vec![]),
+        fz(1, 14, &[5, 2], vec![91.22972745062744], vec![]),
+        fz(30, 15, &[3, 5], vec![3.0818388961845447, 2.2580775218765092, 0.0050046726686661155, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[1, 3], vec![34.74947927162091], vec![]),
+        fz(1, 17, &[3, 5], vec![1.16432390070543], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.007103669718218067, 7031.58752937688], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.0240178024952031, 81.2607746004466], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.013101351844056908, 41.78674247287521], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.09582043795568322, 559.6562593015271], vec![]),
+        fz(90, 14, &[], vec![14.0, 1.7725998004659973, 91.22972745062744], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.2816914522937691, 34.74947927162091], vec![]),
+        fz(90, 17, &[], vec![17.0, 135.59641780709114, 1.16432390070543], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_closed_form_partition_carrying_a_cc_rail_with_no_rail_capacitor_steps_with_it_in_cc() {
+    // Ruling R59 (1) (B), family A. Cold 742 tpl 3: a `{11.6 V, 1.31 A}` PSU
+    // with no rail capacitor, in CC from the load, and node 4's 5.8 uF
+    // capacitor 0.45 ohm (a PTC) from the rail, a closed-form hub partition.
+    // In CC the rail is the capacitor plus 0.45 ohm of the limit, so it
+    // ramps at I / C, 0.23 V/us, for 50 us; the closed form held the rail
+    // it was aimed at and the rail re-solved every RAIL_DRIFT_V of its own
+    // motion: 2.2M events, 13 s for the sweep's first 6.3 ms advance. In CC
+    // the partition steps with the rail as an unknown (`stepped::CcRail`) at
+    // its own RC scale. Within W0 of the fine reference (exact mode, 1 us
+    // host slices) through the ramp; at the sweep's later stops the 15 mF
+    // stepped partition's own backward-Euler error is 1.1-1.5 W0 in either
+    // mode, so there, as in R39's test, within W0 of exact mode's floor at
+    // the same host stops.
+    let p = cold_742_tpl3();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.006272881262171642).unwrap();
+    assert!(e.stat(4) < 20_000.0, "{} events to the sweep's first stop", e.stat(4));
+    let mut rig = Rig::load(&p).unwrap();
+    let (part, _) = rig.s().local_index[4].unwrap();
+    assert!(rig.s().cc_switch.contains(&part), "node 4's partition switches with the regime");
+    assert_eq!(rig.hub().state.reg, Regime::Cc);
+    rig.advance(1e-5).unwrap();
+    assert_eq!(rig.s().partition_kinds[part], PartitionKind::Stepped, "stepped once the CC rail crawls (R60 (3))");
+    let samples = [1e-5, 3e-5, 6e-5, 0.006272881262171642, 0.013412616779032716, 0.05];
+    let (want, _, _) = sampled(&exact(cold_742_tpl3()), &samples, 1e-6);
+    let (got, _, _) = sampled(&p, &samples, 0.0);
+    let (floor, _, _) = sampled(&exact(cold_742_tpl3()), &samples, 0.0);
+    for k in 0..samples.len() {
+        let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
+        eprintln!("742 tpl 3 at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3})", samples[k]);
+        assert!(off <= 1.0 || off <= floor_off + 1.0, "at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+    }
+    assert!(worst_w0(&got[..3], &want[..3]) <= 1.0, "the ramp itself within W0");
+}
+
+/// {5 V, 0.1 A} with no rail capacitor: 100 ohm from the rail to node 2,
+/// 10 uF from node 2 to ground (a closed-form hub partition, `cc_switch`),
+/// and switch 3 (open) from the rail to node 3, 20 ohm from there to
+/// ground. CV while it is open (50 mA at most); closed it draws 250 mA, CC,
+/// where the rail is `(0.1 + vc / 100) / 0.06` and `vc` rises toward 2 V
+/// with `tau` 1.2 ms. `extra` joins it.
+fn cc_switch_board(extra: Vec<Device>) -> Program {
+    let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), resistor(1, 1, 2, 100.0), capacitor(2, 2, 0, 1e-5, 0.0), switch(3, 1, 3, false), resistor(4, 3, 0, 20.0)];
+    devices.extend(extra);
+    let nodes = devices.iter().flat_map(|d| d.pins.iter().map(|p| p.node)).max().unwrap() + 1;
+    program(nodes, devices)
+}
+
+/// The board's node 2 from a host that toggles switch 3 at each of
+/// `toggles` and reads every node at each of `samples`, advancing in
+/// slices of at most `slice` (0: straight to each stop).
+fn cc_switch_samples(p: &Program, toggles: &[(f64, bool)], samples: &[f64], slice: f64) -> Vec<Vec<f64>> {
+    let mut e = Engine::load(p).unwrap();
+    let mut stops: Vec<(f64, Option<bool>)> = toggles.iter().map(|&(t, c)| (t, Some(c))).chain(samples.iter().map(|&t| (t, None))).collect();
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut t, mut out) = (0.0, Vec::new());
+    for (s, toggle) in stops {
+        while t < s {
+            t = if slice > 0.0 { (t + slice).min(s) } else { s };
+            e.advance(t).unwrap_or_else(|err| panic!("{} at {t}: {}", err.code, err.message));
+        }
+        match toggle {
+            Some(c) => e.set_params(&[(3, 0, if c { 1.0 } else { 0.0 })]).unwrap_or_else(|err| panic!("{} toggling at {t}: {}", err.code, err.message)),
+            None => out.push(e.voltages().to_vec()),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_cc_entry_hands_the_closed_forms_charge_to_the_stepped_copy() {
+    // R59 (1) (B): at the CC entry the stepped copy starts from the closed
+    // form's `vc(now)`, so node 2 (the capacitor, no esr) does not move at
+    // the switch. Started from the copy's own parked state it read 0 V there
+    // (the copy never ran), a 1.97 V jump. (The trigger at 0: promoted at
+    // the CC entry, R60 (3)'s crawl aside.)
+    hub::crawl_hook::set(Some(0));
+    let mut rig = Rig::load(&cc_switch_board(vec![])).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    assert_eq!(rig.s().cc_switch, vec![part]);
+    rig.advance(5e-4).unwrap();
+    assert_eq!((rig.hub().state.reg, rig.s().partition_kinds[part]), (Regime::Cv, PartitionKind::ClosedForm));
+    let vc = rig.v(2);
+    close(vc, 5.0 * (1.0 - (-0.5f64).exp()), 1e-6, "vc(0.5 ms), CV");
+    toggle(&mut rig, 3, true).unwrap();
+    assert_eq!((rig.hub().state.reg, rig.s().partition_kinds[part]), (Regime::Cc, PartitionKind::Stepped), "the closed switch puts the PSU in CC");
+    close(rig.v(2), vc, 1e-9, "node 2 across the switch");
+    // The rail meets the limit with the capacitor where it was.
+    close((rig.u() - vc) / 100.0 + rig.v(3) / 20.0, 0.1, 1e-8, "the draw at the entry's rail");
+}
+
+#[test]
+fn a_cc_exit_hands_the_stepped_charge_back_to_the_closed_form() {
+    // R59 (1) (B): at the CC exit the closed form resumes from the stepped
+    // copy's `vc(now)`. Resumed on its own segment from the entry (aimed
+    // there, 1.5 ms earlier, at the CC rail the entry solved) it read
+    // 1.98855 V there against 1.98981, 12 W0.
+    let mut rig = Rig::load(&cc_switch_board(vec![])).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    rig.advance(5e-4).unwrap();
+    toggle(&mut rig, 3, true).unwrap();
+    rig.advance(2e-3).unwrap();
+    assert_eq!(rig.s().partition_kinds[part], PartitionKind::Stepped);
+    let vc = rig.v(2);
+    toggle(&mut rig, 3, false).unwrap();
+    assert_eq!((rig.hub().state.reg, rig.s().partition_kinds[part]), (Regime::Cv, PartitionKind::ClosedForm), "the opened switch leaves CC");
+    close(rig.v(2), vc, 1e-9, "node 2 across the switch");
+    close(rig.u(), 5.0, 1e-12, "the CV rail");
+}
+
+#[test]
+fn a_cc_switch_board_runs_within_w0_of_the_fine_reference_through_both_switches() {
+    // The board switched into CC and out, against exact mode in 1 us host
+    // slices: within W0 at every sample on both sides of each switch and
+    // through the CC stint, or, as in R39's test, within W0 of exact mode's
+    // own error at the same host stops. (A second stint entered at 3 ms
+    // from vc = 3.89 V, the capacitor discharging into the CC rail, ends
+    // 4.1 W0 off at 3.99 ms against exact mode's 1.1: the CC step's own
+    // backward-Euler error at its controller's steps, 46 against exact
+    // mode's 135 over the run, which `stepped::CcRail` already had for a
+    // stepped hub partition; not this switch's.)
+    let toggles = [(5e-4, true), (2e-3, false)];
+    let samples = [4e-4, 5.1e-4, 1e-3, 1.9e-3, 2.001e-3, 2.01e-3, 2.5e-3, 4e-3];
+    let p = cc_switch_board(vec![]);
+    let want = cc_switch_samples(&exact(cc_switch_board(vec![])), &toggles, &samples, 1e-6);
+    let floor = cc_switch_samples(&exact(cc_switch_board(vec![])), &toggles, &samples, 0.0);
+    let got = cc_switch_samples(&p, &toggles, &samples, 0.0);
+    for k in 0..samples.len() {
+        let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
+        eprintln!("cc switch board at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3})", samples[k]);
+        assert!(off <= 1.0 || off <= floor_off + 1.0, "at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+    }
+}
+
+#[test]
+fn a_rolled_back_cc_entry_or_exit_restores_the_kind_and_the_state() {
+    // R59 (1) (B), Rails point 8: an instant that switched the partition's
+    // kind and then failed leaves it as the twin that never took the
+    // instant: its kind, both copies' state and the pending events. The
+    // event closes (then opens) the switch, which enters (leaves) CC, and
+    // enables a zero-delay oscillator on a fixed 5 V, which livelocks.
+    // The trigger at 0: the kind switches at the CC entry (R60 (3) aside).
+    hub::crawl_hook::set(Some(0));
+    let p = cc_switch_board(vec![source(5, 4, 0, 5.0), oscillator(6, 4, 5, 6, [7, 8, 9]), switch(7, 4, 6, false), resistor(8, 6, 0, 1e3)]);
+    let (mut failed, mut twin) = (Rig::load(&p).unwrap(), Rig::load(&p).unwrap());
+    let part = failed.s().local_index[2].unwrap().0;
+    for (t, closed, kind) in [(5e-4, true, PartitionKind::ClosedForm), (2e-3, false, PartitionKind::Stepped)] {
+        failed.advance(t).unwrap();
+        twin.advance(t).unwrap();
+        let before = state_digest(failed.s());
+        assert_eq!(before, state_digest(twin.s()), "the twins agree before");
+        assert_eq!(failed.s().partition_kinds[part], kind);
+        let r = failed.k.apply_params_as_event(&[(3, 0, if closed { 1.0 } else { 0.0 }), (7, 0, 1.0)]);
+        failed.k.solver_mut().prepare_readout();
+        assert!(matches!(r, Err(KernelError::Livelock { .. })), "the instant livelocks: {r:?}");
+        assert_eq!(failed.s().partition_kinds[part], kind, "the kind the instant found");
+        assert_eq!(state_digest(failed.s()), before, "every piece of state");
+        assert_eq!(failed.k.next_event_time().to_bits(), twin.k.next_event_time().to_bits(), "the next event");
+        // Both take the switch alone, and go on alike.
+        toggle(&mut failed, 3, closed).unwrap();
+        toggle(&mut twin, 3, closed).unwrap();
+        assert_ne!(failed.s().partition_kinds[part], kind, "the switch alone switches the kind");
+        failed.advance(t + 2e-4).unwrap();
+        twin.advance(t + 2e-4).unwrap();
+        assert_eq!(state_digest(failed.s()), state_digest(twin.s()), "it goes on like the twin");
+    }
+}
+
+
+/// tpl=3 hub=2 e=11.017 psu ilim=0.097 V2=-1.91 74LS00 vcc4 gnd0 in5,0 out1,0 C6-3=1.9e-7 SW1-6(1)+R6-0=2893 span=11.017203710490474
+fn cold_794_tpl3() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![11.017203710490474, 0.09731248418656985], vec![]),
+        fz(2, 1, &[0, 2], vec![-1.9130032647655177], vec![]),
+        fz(1, 2, &[3, 0], vec![1241.7956231301166], vec![]),
+        fz(1, 3, &[4, 0], vec![4000.3546919888026], vec![]),
+        fz(1, 4, &[5, 0], vec![262116.5738109504], vec![]),
+        fz(1, 5, &[6, 0], vec![2078.7962621837546], vec![]),
+        fz(50, 6, &[4, 0, 5, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 2.4806769510188443e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[1, 4], vec![116.17373165447268], vec![]),
+        fz(1, 8, &[0, 3], vec![62.305324706115236], vec![]),
+        fz(3, 9, &[6, 3], vec![1.9372546992087074e-7, 0.0, 0.0], vec![]),
+        fz(4, 10, &[1, 6], vec![1.0], vec![]),
+        fz(1, 11, &[6, 0], vec![2893.31809477976], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.38720362085734644, 116.17373165447268], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.15765786712810706, 62.305324706115236], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.013024491059154694, 2893.31809477976], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+/// tpl=2 hub=2 e=4.790 psu ilim=0.058 V2=9.69 74LS00 vcc1 gnd0 in3,4 out0,4 LED0-1+R0-0=116 R0-2=22626.8 R0-1=1630.6 C4-0=1.2e-5 C6-3=4.9e-3 span=9.686918810827134
+fn cold_230_tpl2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.7895928406358665, 0.057946407746576306], vec![]),
+        fz(2, 1, &[2, 0], vec![9.686918810827134], vec![]),
+        fz(1, 2, &[3, 0], vec![5410.252982843795], vec![]),
+        fz(1, 3, &[4, 0], vec![1504.6424698142757], vec![]),
+        fz(1, 4, &[5, 0], vec![190307.6763461144], vec![]),
+        fz(1, 5, &[6, 0], vec![12210.48184730575], vec![]),
+        fz(50, 6, &[1, 0, 3, 4, 0, 0, 0, 4, 0, 0, 4, 0, 0, 0], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 3.81459829974826e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[0, 2], vec![325.06946353944704], vec![]),
+        fz(1, 8, &[4, 5], vec![1381.0276419239983], vec![]),
+        fz(30, 9, &[0, 1], vec![1.946727242733705, 2.220559434300754, 0.022183122057487726, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 10, &[0, 0], vec![116.20810406270883], vec![]),
+        fz(1, 11, &[0, 2], vec![22626.834415103014], vec![]),
+        fz(1, 12, &[0, 1], vec![1630.5836327744385], vec![]),
+        fz(3, 13, &[4, 0], vec![1.2327988001576903e-5, 0.0, 0.0], vec![]),
+        fz(1, 14, &[1, 5], vec![2149.561908510973], vec![]),
+        fz(3, 15, &[6, 3], vec![0.004940783759334168, 0.0, 0.0], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.018764788533395884, 325.06946353944704], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.002629977616967989, 1381.0276419239983], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.0016796939546747593, 116.20810406270883], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.00013522289582969471, 22626.834415103014], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0010275453326120548, 1630.5836327744385], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+/// tpl=5 hub=2 e=5.326 psu ilim=0.085 V2=-3.54 C2-3=1.1e-6 C3-0=7.4e-5 74LS00 vcc1 gnd0 in5,3 out3,4 R5-0=164.1 C2-4=1.0e-6 span=8.862602086217157
+fn cold_527_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.326123393256066, 0.08520110182928953], vec![]),
+        fz(2, 1, &[2, 0], vec![-3.536478692961091], vec![]),
+        fz(1, 2, &[3, 0], vec![7468.046982501495], vec![]),
+        fz(1, 3, &[4, 0], vec![399106.7266990096], vec![]),
+        fz(1, 4, &[5, 0], vec![1171.738260236386], vec![]),
+        fz(3, 5, &[2, 3], vec![1.105046700596323e-6, 0.01325885827059807, 0.0], vec![]),
+        fz(3, 6, &[3, 0], vec![7.439781567682745e-5, 0.0, 0.0], vec![]),
+        fz(50, 7, &[1, 0, 5, 3, 3, 0, 0, 4, 0, 0, 4, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 3.343813056587388e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 8, &[3, 2], vec![124.8537036911802], vec![]),
+        fz(1, 9, &[4, 4], vec![69.62253856221633], vec![]),
+        fz(1, 10, &[5, 0], vec![164.11374515863153], vec![]),
+        fz(3, 11, &[2, 4], vec![1.0148448311073916e-6, 0.0, 0.0], vec![]),
+        fz(1, 12, &[0, 4], vec![2104.728126043158], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.007577646760766647, 124.8537036911802], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.0023199660085589918, 69.62253856221633], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.49965919186909724, 164.11374515863153], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+/// Runs `p` on the sweep's host `stops`, toggling switch `d` (param 0) at
+/// each of `toggles` once the host reaches it; the first error, with the
+/// time it left the engine at.
+fn run_cold(p: &Program, toggles: &[(f64, usize)], stops: &[f64]) -> Result<Engine, String> {
+    let mut e = Engine::load(p).map_err(|er| format!("load {} {}", er.code, er.message))?;
+    let mut state: Vec<(usize, f64)> = Vec::new();
+    let mut k = 0;
+    for &t in stops {
+        e.advance(t).map_err(|er| format!("advance {} at {}: {}", er.code, e.time(), er.message))?;
+        while k < toggles.len() && toggles[k].0 <= t {
+            let d = toggles[k].1;
+            let v = match state.iter_mut().find(|s| s.0 == d) {
+                Some(s) => { s.1 = 1.0 - s.1; s.1 }
+                None => { let v = 1.0 - p.devices[d].params[0]; state.push((d, v)); v }
+            };
+            e.set_params(&[(d as u32, 0, v)]).map_err(|er| format!("set_params {} at {t}: {}", er.code, er.message))?;
+            k += 1;
+        }
+    }
+    Ok(e)
+}
+
+#[test]
+fn a_cc_seed_at_a_rail_where_a_held_gate_has_no_supply_has_a_finite_sensitivity() {
+    // Cold 230 tpl 2 (527 tpl 5 too, at 10.7 ms): a 74LS00 on a CC rail with no rail
+    // capacitor, its output in a stepped hub partition. The CC seed solves
+    // the rail with the partition, and its draw pulled it below the gate's
+    // ground (u = -0.68 V in 230's seed), where the supply difference reads
+    // 0; the gate's power is judged at the loop's rail (`hold_power_at`), so
+    // it still stamps its 25 ohm output, whose conductance is the constant
+    // piece of its supply curve. That piece's rail derivative, `-b / vs^2`
+    // with `b = 0`, was evaluated as 0 / 0: a NaN sensitivity, `-4` at load.
+    // The derivative of a constant piece is 0 at any supply.
+    run_cold(&cold_230_tpl2(), &[], &[0.006272880109317727, 0.013326498829160302, 0.014475158088294663, 0.05]).unwrap_or_else(|e| panic!("230 tpl 2: {e}"));
+}
+
+#[test]
+fn a_cc_exit_in_the_instant_that_entered_cc_leaves_the_partition_stepped_until_a_later_event() {
+    // Cold 794 tpl 3: {11.0 V, 97 mA}, no rail capacitor, 0.19 uF across
+    // nodes 6 and 3 (a closed-form hub partition, `cc_switch`). At 13.04 us
+    // the stepped copy's CC solve puts the rail at the setpoint, CV, and the
+    // closed form resumed there drew past the limit, CC: the kind switched
+    // 51 times in the one instant and the rail loop gave up (`-4`). A
+    // partition promoted in an instant stays stepped through it; the next
+    // event demotes it if the PSU is still in CV (R59 (1) (B) hysteresis).
+    let e = run_cold(&cold_794_tpl3(), &[(0.015596114684644283, 10)], &[0.0062728802366896095, 0.007777438227485965, 0.015596114684644283, 0.016132343116063375, 0.03796558824037464, 0.05]);
+    if let Err(e) = e {
+        panic!("794 tpl 3: {e}");
+    }
+}
+
+#[test]
+fn a_cc_closed_form_steps_only_once_its_rail_crawls() {
+    // Rulings R60 (3), R63 (2). The switch board closed at 0.5 ms: CC, the
+    // capacitor carrying the rail 33 mV toward 2 V with `tau` 1.2 ms, a
+    // `Rail` event every 10 uV of it. It is closed-form at the entry and
+    // steps from the first rail event, whose move over its interval puts the
+    // rail's pace past W0 per time constant (the crawl count, at most
+    // `CC_CRAWL_EVENTS`, would have come later), the charge handed across.
+    let mut rig = Rig::load(&cc_switch_board(vec![])).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    rig.advance(5e-4).unwrap();
+    toggle(&mut rig, 3, true).unwrap();
+    assert_eq!((rig.hub().state.reg, rig.s().partition_kinds[part]), (Regime::Cc, PartitionKind::ClosedForm), "closed-form at the CC entry");
+    let e0 = rig.hub().stats.events;
+    while rig.s().partition_kinds[part] == PartitionKind::ClosedForm {
+        let t = rig.k.next_event_time();
+        assert!(t < 1e-3, "no crawl found by 1 ms");
+        rig.advance(t).unwrap();
+    }
+    let t = rig.k.time();
+    let events = rig.hub().stats.events - e0;
+    assert_eq!(events, 1, "promoted at the crawl's first rail event");
+    close(rig.v(2), rig.s().closed_form.vc_now(part, t).unwrap(), 1e-9, "node 2 across the promotion");
+    // A CC rail its closed form barely moves: 100 kohm to 10 uF behind a
+    // 20 ohm load in CC (`tau` 1 s). Its rail moves R_load / R times the
+    // capacitor's 0.2 V over 0.2 s, 40 uV, four events: it stays closed-form
+    // (the R59 prototype stepped it from the entry).
+    let p = program(4, vec![psu(0, 1, 0, 5.0, 0.1), resistor(1, 1, 2, 1e5), capacitor(2, 2, 0, 1e-5, 0.0), switch(3, 1, 3, true), resistor(4, 3, 0, 20.0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    let part = rig.s().local_index[2].unwrap().0;
+    assert!(rig.s().cc_switch.contains(&part));
+    rig.advance(0.2).unwrap();
+    eprintln!("slow CC board: {} rail events, kind {:?}, steps {}", rig.hub().stats.events, rig.s().partition_kinds[part], rig.s().stepped_steps());
+    assert_eq!((rig.hub().state.reg, rig.s().partition_kinds[part]), (Regime::Cc, PartitionKind::ClosedForm), "never crawled");
+    assert!(rig.hub().stats.events < hub::CC_CRAWL_EVENTS as u64);
+}
+
+#[test]
+fn a_cc_rail_crawling_under_a_stepped_partition_stays_within_w0_of_the_fine_reference() {
+    // Ruling R60 (4), G2bv's bc_ic seed 97 hub 2 (family A): 3.16 mF from a
+    // CC rail with no rail capacitor, the rail creeping at the capacitor's
+    // pace toward a 74LS00's floor. Stepped with the rail (R59 (1) (B)), its
+    // steps at the stepped solver's own tolerance ran 1.48 W0 off the fine
+    // reference (exact mode, 1 us host steps) over 30-34.7 ms, the rail 4 mV
+    // low; exact mode at the same host stops is 1.50 off and 0.09 at 100 us
+    // host steps, so the host cadence lets the steps grow (D6). A promoted
+    // partition's CC step error is held `CC_STEP_TOL_SCALE` times tighter:
+    // 0.70 W0, 64 steps against 40.
+    let b = || { let mut p = program(6, g2bv_bc_ic_97_hub2()); p.digital_slot_count = 16; p };
+    let samples: Vec<f64> = (0..=9).map(|k| 0.030 + 0.0005 * k as f64).chain([0.0347]).collect();
+    let (want, _, _) = sampled(&exact(b()), &samples, 1e-6);
+    let stops = [0.00010054129372012221, 0.0003467103846392178, 0.0004605220067872004];
+    let mut e = Engine::load(&b()).unwrap();
+    let mut worst: f64 = 0.0;
+    for &s in &stops {
+        e.advance(s).unwrap();
+    }
+    for (k, &s) in samples.iter().enumerate() {
+        e.advance(s).unwrap();
+        worst = worst.max(worst_w0(&[e.voltages().to_vec()], &want[k..=k]));
+    }
+    eprintln!("bc_ic 97: {worst:.3} W0 off the fine reference over 30-34.7 ms, {} steps", e.stat(10));
+    assert!(worst <= 1.0, "{worst:.3} W0 off the fine reference");
+}
+/// tpl=5 hub=2 e=7.565 psu ilim=0.165 R2-0=1122.5 C0-5=2.4e-3 C2-1=2.2e-6 SW1-5(1)+R5-0=189 span=7.564565524781408
+fn cold_677_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![7.564565524781408, 0.16481947944548236], vec![]),
+        fz(1, 1, &[2, 0], vec![1774.3603103610976], vec![]),
+        fz(1, 2, &[3, 0], vec![570141.1479501962], vec![]),
+        fz(1, 3, &[4, 0], vec![988861.5535183402], vec![]),
+        fz(1, 4, &[5, 0], vec![26239.84588231391], vec![]),
+        fz(1, 5, &[2, 0], vec![1122.4846265053593], vec![]),
+        fz(3, 6, &[0, 5], vec![0.0024211253084653866, 0.0, 0.0], vec![]),
+        fz(3, 7, &[2, 1], vec![2.1930046168815875e-6, 0.0, 0.0], vec![]),
+        fz(4, 8, &[1, 5], vec![1.0], vec![]),
+        fz(1, 9, &[5, 0], vec![189.17100109376014], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.0006140458982237856, 1122.4846265053593], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.04683206193458161, 189.17100109376014], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_load_switched_off_a_cc_rail_leaves_cc_at_the_switch() {
+    // Cold 677 tpl 5: {7.56 V, 165 mA}, no rail capacitor; the switch from
+    // the rail charges 2.4 mF (node 5, 189 ohm across it) in CC, and 2.2 uF
+    // from the rail to node 2 (1.12 kohm to ground) carries the rail. At
+    // 78.94 ms the switch opens: the rest draws a few mA at the setpoint, so
+    // the PSU leaves CC at the switch (the fine reference: 7.5646 V there).
+    let stops = [0.0062728811181171394, 0.011106993384281238, 0.011322953395826995, 0.011834470099438776, 0.01233693176553175, 0.013194973258403004, 0.014036283416555679, 0.014710983240353128, 0.03775409661270685, 0.0389724476464377, 0.04462674479283428, 0.04742245189835752, 0.04791251210039341, 0.04893083427134086, 0.0525974462585554, 0.05528146562750171, 0.05823269777715527, 0.058356311835162024, 0.07893848215151009];
+    let e = run_cold(&cold_677_tpl5(), &[(0.07893848215151009, 8)], &stops).unwrap_or_else(|e| panic!("677 tpl 5: {e}"));
+    close(e.voltages()[1], 7.564565524781408, 1e-4 + 1e-3 * 7.564565524781408, "the rail at the switch");
+}
+/// tpl=3 hub=2 e=5.024 psu ilim=0.026 V2=-6.32 C4-3=8.0e-7 R3-4=4.1 C2-0=1.6e-4 SW1-3(1)+R3-0=216 span=6.317608046450156
+fn cold_75_tpl3() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.024009637607736, 0.026496295412856984], vec![]),
+        fz(2, 1, &[0, 2], vec![-6.317608046450156], vec![]),
+        fz(1, 2, &[3, 0], vec![8616.47032068873], vec![]),
+        fz(1, 3, &[4, 0], vec![1013.5623103799135], vec![]),
+        fz(1, 4, &[5, 0], vec![1286.1594095452047], vec![]),
+        fz(3, 5, &[4, 3], vec![7.964078236822556e-7, 0.01141208585422171, 0.0], vec![]),
+        fz(1, 6, &[3, 4], vec![4.138926041343154], vec![]),
+        fz(3, 7, &[2, 0], vec![0.00016087837200354314, 0.0, 0.0], vec![]),
+        fz(4, 8, &[1, 3], vec![1.0], vec![]),
+        fz(1, 9, &[3, 0], vec![216.2909858301283], vec![]),
+        fz(90, 6, &[], vec![6.0, 3.5737332998716207, 4.138926041343154], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.02351636225530671, 216.2909858301283], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_cc_exit_inside_a_horizon_clamp_steps_on_in_cv() {
+    // Cold 75 tpl 3: {5.02 V, 26 mA}, no rail capacitor; 0.8 uF and 4.1 ohm
+    // and 160 uF behind the switch (a `cc_switch` partition, stepped once its
+    // rail crawls). At 0.3105 s its CC rail reaches the setpoint inside one
+    // host advance. The horizon clamp steps it to the host's time with the
+    // CC rail it was handed: each step was cut at the setpoint, the next
+    // began in CC again, 19,393 steps of 20-40 ns in one 1.9 ms advance.
+    // Once a step of the clamp leaves CC at its cut, the rest of the clamp
+    // steps on in CV; the rail loop after it judges the regime.
+    let stops = [0.006272879754842847, 0.00848064914786476, 0.008755727396472172, 0.045373527410157155, 0.06274331074818437, 0.0930288786114757, 0.09391230397663634, 0.09613978254352885, 0.11521889268836158, 0.1169227172556522, 0.11892304169877559, 0.11915944412089538, 0.16806931209804682, 0.20853725478047835, 0.20924457038396038, 0.22750630001394725, 0.22765838628755417, 0.22800180733389527, 0.22900689682185624, 0.2472591254663561, 0.24818096928705943, 0.28755792577392003, 0.2879162427112212, 0.29544673278915945, 0.29635115942674856, 0.2979422710021157, 0.31049165447559385, 0.3124182183801322, 0.3125];
+    let mut e = Engine::load(&cold_75_tpl3()).unwrap();
+    for &t in &stops {
+        let before = e.stat(10);
+        e.advance(t).unwrap_or_else(|er| panic!("{} at {}: {}", er.code, e.time(), er.message));
+        assert!(e.stat(10) - before < 2_000.0, "{} steps in the advance to {t}", e.stat(10) - before);
+    }
+}
+/// tpl=4 hub=2 e=5.368 psu ilim=1.164 PULSE3 -2.7..9.8 tr=0e0 555 vcc2 gnd0 [3, 1, 1, 5, 2, 0] R4-3=1.9 F4-2=0.74/0.62 R0-2=4.6 C3-5=1.0e-7 C2-1=1.3e-2 span=12.45842047380064
+fn cold_72_tpl4() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.368197763625233, 1.1643787092961784], vec![]),
+        fz(24, 1, &[3, 0], vec![-2.6576602934370257, 9.800760180363614, 0.0063877126823550295, 0.0, 0.0, 0.005346738495807022, 0.22941104323127617], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![5771.555035399707], vec![]),
+        fz(1, 3, &[4, 0], vec![19983.665856854375], vec![]),
+        fz(1, 4, &[5, 0], vec![35214.23416671305], vec![]),
+        fz(40, 5, &[2, 0, 3, 1, 1, 5, 2, 0], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 6, &[2, 0], vec![1780.910847002465], vec![]),
+        fz(1, 7, &[0, 2], vec![3275.3061127125998], vec![]),
+        fz(3, 8, &[2, 0], vec![4.12971922334916e-8, 0.0, 0.0], vec![]),
+        fz(1, 9, &[1, 5], vec![340.00159473362675], vec![]),
+        fz(1, 10, &[3, 1], vec![537.5038819845298], vec![]),
+        fz(1, 11, &[4, 3], vec![1.856955189027227], vec![]),
+        fz(10, 12, &[4, 2], vec![0.7392063015686207, 0.6186105546830768], vec![]),
+        fz(1, 13, &[0, 2], vec![4.556055974881248], vec![]),
+        fz(1, 14, &[1, 2], vec![149.57406315428537], vec![]),
+        fz(3, 15, &[3, 5], vec![1.0280941045132062e-7, 0.0, 0.0], vec![]),
+        fz(3, 16, &[2, 1], vec![0.012985384227155158, 0.0, 0.0], vec![]),
+        fz(1, 17, &[0, 2], vec![23518.995172271967], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00018413708421505297, 1780.910847002465], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0009526717996846093, 3275.3061127125998], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.7009222735005726, 340.00159473362675], vec![]),
+        fz(90, 11, &[], vec![11.0, 21.093375225983795, 1.856955189027227], vec![]),
+        fz(90, 13, &[], vec![13.0, 40.733271535141725, 4.556055974881248], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+
+#[test]
+fn a_closed_form_on_a_cc_rail_another_partition_moves_steps_with_it() {
+    // Ruling R63 (2). Cold 72 tpl 4: {5.37 V, 1.16 A}, no rail capacitor,
+    // 13 mF from the rail to node 2 (a stepped partition) moving the CC rail
+    // 90 mV/ms; node 5 (0.1 uF to a pulse's node, 340 ohm to the rail, a
+    // `cc_switch` closed form, `tau` 34 us) follows the rail. The rail moves
+    // only at the stepped partition's commits, about a millisecond apart, and
+    // no `Rail` event re-aims node 5 between them: no crawl, but node 5 was
+    // aimed at a rail a commit old, 0.083 V low at 6.27 ms (95 W0 off the
+    // fine reference; stepped with the rail from the entry, 5.5). A closed
+    // form whose rail moves more than W0 within one of its time constants
+    // steps. Within W0 of the stepped run at the sweep's host stops.
+    let stops = [0.006272879757094588, 0.006961352915624008, 0.009458814460263459, 0.01153130615462656, 0.05808507802599983, 0.058830097853103336, 0.0595741505624736, 0.05967846412462022, 0.06266170036641795, 0.07953558078788245, 0.07978378149045819, 0.08023133162152682, 0.08310892147936291, 0.08479671467796533, 0.08490146648731667, 0.09560781787769408, 0.09792275902071916, 0.0980450874315556, 0.09825769978442092, 0.1];
+    let run = |k: Option<u32>| {
+        hub::crawl_hook::set(k);
+        let mut e = Engine::load(&cold_72_tpl4()).unwrap();
+        let out: Vec<Vec<f64>> = stops.iter().map(|&t| { e.advance(t).unwrap_or_else(|er| panic!("{} at {t}: {}", er.code, er.message)); e.voltages().to_vec() }).collect();
+        hub::crawl_hook::set(None);
+        out
+    };
+    let (lazy, stepped) = (run(None), run(Some(0)));
+    for k in 0..stops.len() {
+        let off = worst_w0(&lazy[k..=k], &stepped[k..=k]);
+        assert!(off <= 1.0, "at {} s: {off:.2} W0 off the stepped run: {:?} against {:?}", stops[k], lazy[k], stepped[k]);
+    }
 }

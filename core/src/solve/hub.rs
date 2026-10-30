@@ -97,7 +97,10 @@ impl Hub {
             self.journal.push((p as u32, old));
         }
         self.contrib[p] = c;
-        if c.b.is_none() {
+        // A `cc_switch` partition's contribution changes form at a kind
+        // switch (R59 (1) (B)): a stepped one's leaves the sums as the closed
+        // form's replaces it, and the other way round.
+        if c.b.is_none() || (old.active && old.b.is_none()) {
             let term = |c: &Contrib| if c.active && c.b.is_none() { (c.i - c.g * c.u_p, c.g) } else { (0.0, 0.0) };
             let (a_old, g_old) = term(&old);
             let (a_new, g_new) = term(&c);
@@ -211,6 +214,51 @@ impl ExactHub {
     }
 }
 
+/// Ruling R60 (3): how many `Rail` events within one time constant of a
+/// `cc_switch` partition mark the CC drift crawl, from which it steps.
+pub(super) const CC_CRAWL_EVENTS: u32 = 16;
+
+/// Tests of the switch's own mechanics (its seeds, its journal) set the
+/// trigger to 0: the partitions then step from the CC entry itself.
+#[cfg(test)]
+pub(super) mod crawl_hook {
+    thread_local!(static EVENTS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) });
+    pub fn set(k: Option<u32>) {
+        EVENTS.with(|c| c.set(k));
+    }
+    pub fn events() -> u32 {
+        EVENTS.with(|c| c.get()).unwrap_or(super::CC_CRAWL_EVENTS)
+    }
+}
+
+fn crawl_events() -> u32 {
+    #[cfg(test)]
+    return crawl_hook::events();
+    #[cfg(not(test))]
+    CC_CRAWL_EVENTS
+}
+
+/// The `cc_switch` partitions' switch state (rulings R59 (1) (B), R60 (3),
+/// R63 (2)): when they were last promoted (NaN before the first); the `Rail`
+/// events of the present CC stint, counted from `since` while they come
+/// within one time constant of it; when the rail last moved in this stint;
+/// and `crawling` once they promote.
+/// Journaled with the window and in the snapshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct CcCrawl {
+    pub promoted_at: f64,
+    pub since: f64,
+    pub events: u32,
+    pub moved_t: f64,
+    pub crawling: bool,
+}
+
+impl Default for CcCrawl {
+    fn default() -> Self {
+        CcCrawl { promoted_at: f64::NAN, since: f64::NEG_INFINITY, events: 0, moved_t: f64::NAN, crawling: false }
+    }
+}
+
 /// Everything of W1f a whole snapshot carries (Rails point 8).
 pub(super) struct W1fSnapshot {
     hub: Option<(RailState, Vec<Contrib>, bool)>,
@@ -218,6 +266,10 @@ pub(super) struct W1fSnapshot {
     wave: Rc<RampEval>,
     caps: Vec<(f64, f64, f64)>,
     static_hubs: Vec<Option<static_part::HubSolveSnapshot>>,
+    /// R59 (1) (B): each `cc_switch` partition's kind, and the switch's
+    /// state.
+    kinds: Vec<PartitionKind>,
+    crawl: CcCrawl,
 }
 
 impl W1fSnapshot {
@@ -226,7 +278,7 @@ impl W1fSnapshot {
     #[cfg(test)]
     pub(super) fn digest(&self) -> String {
         let sources: Vec<String> = self.wave.sources.iter().map(|w| format!("{:?}", (w.value.to_bits(), w.slot_value.to_bits(), w.level_index, w.ramp, w.next, w.version))).collect();
-        format!("{:?} {:?} {sources:?} {:?} {:?}", self.hub, self.exact, self.caps, self.static_hubs)
+        format!("{:?} {:?} {sources:?} {:?} {:?} {:?} {:?}", self.hub, self.exact, self.caps, self.static_hubs, self.kinds, self.crawl)
     }
 }
 
@@ -238,6 +290,8 @@ impl PartitionedSolver {
             wave: Rc::clone(&self.wave),
             caps: self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)).collect(),
             static_hubs: self.static_solver.hub_snapshot(),
+            kinds: self.cc_switch.iter().map(|&p| self.partition_kinds[p]).collect(),
+            crawl: self.cc_crawl,
         }
     }
 
@@ -264,6 +318,132 @@ impl PartitionedSolver {
             (cap.d_v, cap.vc0, cap.t0) = (d_v, vc0, t0);
         }
         self.static_solver.hub_restore(snap.static_hubs);
+        for (k, kind) in snap.kinds.into_iter().enumerate() {
+            self.set_kind(self.cc_switch[k], kind);
+        }
+        self.cc_crawl = snap.crawl;
+    }
+
+    /// Which copy of `cc_switch` partition `p` runs (R59 (1) (B)), with no
+    /// change to either copy's state: a rollback's and a restore's half of a
+    /// switch.
+    pub(super) fn set_kind(&mut self, p: usize, kind: PartitionKind) {
+        self.partition_kinds[p] = kind;
+        self.closed_form.set_parked(p, kind != PartitionKind::ClosedForm);
+        self.stepped.set_parked(p, kind != PartitionKind::Stepped);
+    }
+
+    /// Ruling R60 (3): a `Rail` event in CC with the `cc_switch` partitions
+    /// closed-form. The CC drift crawl re-aims them every `RAIL_DRIFT_V` of
+    /// the rail's motion, which a closed-form capacitor carrying the rail
+    /// makes at its own pace: `CC_CRAWL_EVENTS` of them within one of their
+    /// time constants (the slowest, `-1 / F`) mark it, and the next rail
+    /// solve promotes them.
+    fn note_cc_rail_event(&mut self, now: f64) {
+        let Some(&first) = self.cc_switch.first() else { return };
+        if self.partition_kinds[first] != PartitionKind::ClosedForm || self.cc_crawl.crawling {
+            return;
+        }
+        if !self.hub.as_ref().is_some_and(|h| h.state.reg == Regime::Cc && h.c_rail == 0.0 && h.psu().is_some()) {
+            return;
+        }
+        let tau = self.cc_switch.iter().filter_map(|&p| self.closed_form.rate(p)).map(|f| if f < 0.0 { -1.0 / f } else { f64::INFINITY }).fold(0.0, f64::max);
+        let c = &mut self.cc_crawl;
+        if !(now - c.since <= tau) {
+            c.since = now;
+            c.events = 0;
+        }
+        c.events += 1;
+        if c.events >= crawl_events() {
+            c.crawling = true;
+        }
+    }
+
+    /// Ruling R63 (2): the rail moved from `old_u` to `u` at a rail solve in
+    /// CC with the `cc_switch` partitions closed-form. A closed form holds
+    /// the rail it was aimed at until the next move; one whose rail moves by
+    /// more than W0 within one of its time constants (the slowest) lags it by
+    /// more than that, and the next rail solve promotes them. A move within
+    /// one instant (a load switched) is a step of the rail, not its pace.
+    fn note_cc_rail_move(&mut self, now: f64, old_u: f64, u: f64) {
+        let Some(&first) = self.cc_switch.first() else { return };
+        if self.partition_kinds[first] != PartitionKind::ClosedForm || self.cc_crawl.crawling {
+            return;
+        }
+        if !self.hub.as_ref().is_some_and(|h| h.state.reg == Regime::Cc && h.c_rail == 0.0 && h.psu().is_some()) {
+            return;
+        }
+        let tau = self.cc_switch.iter().filter_map(|&p| self.closed_form.rate(p)).map(|f| if f < 0.0 { -1.0 / f } else { f64::INFINITY }).fold(0.0, f64::max);
+        // The rail held `old_u` since its last move, the closed forms aimed at
+        // it, while the draws carried it to `u`: its pace over the interval.
+        let c = &mut self.cc_crawl;
+        if c.moved_t < now {
+            let rate = (u - old_u).abs() / (now - c.moved_t);
+            if rate * tau > 1e-4 + 1e-3 * u.abs() {
+                c.crawling = true;
+            }
+        }
+        c.moved_t = now;
+    }
+
+    /// Ruling R59 (1) (B): the `cc_switch` partitions step, with the rail as
+    /// an unknown (`stepped::CcRail`), while the PSU is in CC with no rail
+    /// capacitor, and are closed forms otherwise. After each rail solve the
+    /// kind follows the regime; each switch hands the charge across at `now`
+    /// (the stepped copy starts from the closed form's `vc(now)`, the closed
+    /// form resumes from the stepped copy's), and is journaled. Returns the
+    /// partitions promoted and demoted, for the caller to re-solve.
+    fn sync_cc_kinds(&mut self, now: f64, drivers: &[Driver]) -> Result<(Vec<usize>, Vec<usize>), String> {
+        let (mut promoted, mut demoted) = (Vec::new(), Vec::new());
+        let Some(&first) = self.cc_switch.first() else { return Ok((promoted, demoted)) };
+        let in_cc = self.hub.as_ref().is_some_and(|h| h.state.reg == Regime::Cc && h.c_rail == 0.0 && h.psu().is_some());
+        if !in_cc && self.partition_kinds[first] == PartitionKind::ClosedForm {
+            // Out of CC the crawl count starts again.
+            let promoted_at = self.cc_crawl.promoted_at;
+            self.cc_crawl = CcCrawl { promoted_at, ..CcCrawl::default() };
+        }
+        // Ruling R60 (3): in CC a closed form stays one until its rail crawls
+        // (`note_cc_rail_event`); a rail it barely moves costs a few events,
+        // where stepping cost cold 75 tpl 3 a hundred times its wall.
+        let cc = in_cc && (self.cc_crawl.crawling || crawl_events() == 0 || self.partition_kinds[first] == PartitionKind::Stepped);
+        if (self.partition_kinds[first] == PartitionKind::Stepped) == cc {
+            return Ok((promoted, demoted));
+        }
+        // Hysteresis: a partition promoted at this instant stays stepped
+        // through it. Its CC steps cut at the setpoint themselves (the exit
+        // cut in `plan_step`); a CC exit within the promoting instant is the
+        // stepped copy's charge-balance draw against the closed form's
+        // linearised one, and handing the rail back and forth between them
+        // re-entered CC at once (cold 794 tpl 3: 51 switches at 13.04 us,
+        // the rail loop's `-4`). A later rail solve still in CV demotes it.
+        if !cc && self.cc_crawl.promoted_at.to_bits() == now.to_bits() {
+            return Ok((promoted, demoted));
+        }
+        for k in 0..self.cc_switch.len() {
+            let p = self.cc_switch[k];
+            let was = self.partition_kinds[p];
+            if self.window {
+                self.kind_log.push((p as u32, was));
+            }
+            if cc {
+                self.cc_crawl.promoted_at = now;
+                let vc = self.closed_form.vc_now(p, now).expect("a cc_switch partition is closed-form compiled");
+                self.closed_form.set_parked(p, true);
+                self.stepped.promote(p, now, &[vc]);
+                self.partition_kinds[p] = PartitionKind::Stepped;
+                promoted.push(p);
+            } else {
+                let vc = self.stepped.demote(p, now, drivers, &self.live_params, &self.voltages)?;
+                self.closed_form.resume(p, now, vc[0]);
+                self.partition_kinds[p] = PartitionKind::ClosedForm;
+                demoted.push(p);
+            }
+        }
+        if !demoted.is_empty() {
+            let promoted_at = self.cc_crawl.promoted_at;
+            self.cc_crawl = CcCrawl { promoted_at, ..CcCrawl::default() };
+        }
+        Ok((promoted, demoted))
     }
 
     /// Wires W1f at build: the waveform sources and the live boundary, and the
@@ -1329,6 +1509,9 @@ impl PartitionedSolver {
             let two_back = seen.len() >= 2 && seen[seen.len() - 2].to_bits() == u.to_bits();
             seen.push(u);
             let flipped_before = std::mem::replace(&mut flipped_now, false);
+            if moved {
+                self.note_cc_rail_move(now, old_u, u);
+            }
             let mut flipped = if moved {
                 let before = flips.total();
                 let flipped = self.on_rail_move(now, old_u, readers, &mut flips);
@@ -1369,10 +1552,12 @@ impl PartitionedSolver {
                     tie = keep.is_none();
                 }
             }
+            let (promoted, demoted) = self.sync_cc_kinds(now, drivers)?;
             let rule = self.hub.as_ref().unwrap().resolve_band();
             let mut past_static = Vec::new();
             self.static_solver.hubs_past_band(u, rule, &mut past_static);
-            let mut past_stepped = self.stepped.hubs_past_band(u, rule);
+            let cc_bare = self.hub.as_ref().is_some_and(|h| h.state.reg == Regime::Cc && h.c_rail == 0.0);
+            let mut past_stepped = self.stepped.hubs_past_band(u, rule, cc_bare);
             // On a CC rail with no capacitor (the 1 uV band) a stepped hub
             // partition past its band only because the rail moved is re-aimed,
             // not restarted: it keeps the step its controller chose
@@ -1395,7 +1580,10 @@ impl PartitionedSolver {
                 past_stepped.extend(self.stepped.hub_partitions());
                 flipped_cf.extend(self.hub.as_ref().unwrap().cf_hubs.iter().copied());
             }
-            let flipped_p = flipped.clone();
+            // A switched partition starts afresh in its new kind.
+            past_stepped.extend(&promoted);
+            flipped_cf.extend(&demoted);
+            let flipped_p: Vec<usize> = flipped.iter().chain(&promoted).copied().collect();
             for p in flipped {
                 match self.partition_kinds[p] {
                     PartitionKind::Static => past_static.push(PartitionId(p as u32)),
@@ -1867,6 +2055,7 @@ impl PartitionedSolver {
             hub.stats.events += 1;
             hub.dirty = true;
         }
+        self.note_cc_rail_event(now);
         let drivers = Rc::clone(&self.driver_snapshot);
         let gates = self.rail_gates();
         let result = self.rail_loop(now, &drivers, &mut readers);

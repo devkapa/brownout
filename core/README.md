@@ -1432,7 +1432,9 @@ their own, and the source KCL does with W1a point 2's branch fold.
    tpl 5, which ran at bcbce27 with one hold, decline: their chips relax at
    the edge (24: 40 us held, 11 us powered; 248: 49 and 29 us), each hold
    far shorter than the sweep's host steps and released by the chip's own
-   supply (named exit-gate exceptions, ruling R55 2; "What F5 leaves"). Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
+   supply (named exit-gate exceptions, ruling R55 2; "What F5 leaves"; cold
+   688 tpl 5 joins them, R59 (2), sliding at a 555's floor in 51 holds, and
+   482 tpl 0, R64 (3), sliding at its gate's floor to 0.104 s). Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
    `an_episode_counts_only_short_holds_its_chip_released_itself`,
    `a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs`,
    `the_stale_hold_boards_run_a_second_of_pulses` and
@@ -5009,6 +5011,20 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     hold and declines `-4` at the 51st: they fall back to classic until R51
     (c)'s sliding hold. Seed 24 also fails under the fine reference (exact
     mode, 1 us host steps) at 0.208 s;
+  - and cold seed 688 tpl 5 (ruling R59 (2)) until R51 (c): a {8.64 V,
+    0.107 A} PSU with no rail capacitor and a 555 on the rail, whose CC
+    ramp reaches the 555's 1.8 V floor at 11.8 ms. The CC step aimed at its
+    own rail lands at 1.78 V, the next crosses 1.80 V, and the chip's draw
+    pulls the rail back under its floor: it slides there in 51 holds of
+    10-40 ns and declines `-4` at 11.909 ms. Before, a crossing misaimed at
+    the published rail let one 2 ms step jump the floor unheld. Exact mode
+    at the sweep's host runs it with no hold; the fine reference (exact
+    mode, 1 us host steps) fails Newton at 11.791 ms, at the same edge;
+  - and cold seed 482 tpl 0 (ruling R64 (3)) until R51 (c): its gate on a
+    CC rail with no rail capacitor slides along its power floor once the
+    stepped hub partitions re-solve at each move of the CC rail (R59 (1)
+    (B)), 51 short holds, `-4` at 0.104 s (at da167d2 the same guard at
+    0.068 s);
   - named exceptions to F5's exit gate (ruling R54, F5m): two default-mode
     declines on the cold fuzz that fail under the fine reference too (exact
     mode, 1 us host steps), each since f2d93ae:
