@@ -132,11 +132,13 @@ export class CoreSuiteFellBackError extends Error {
  * - `needs-carry`: a topology or non-live param change. Delivering it means a
  *   reload that carries state across (W2c, `src/core/carry.ts`); a cold reload
  *   would drop the capacitor charge and latches the case is checking.
+ * - `not-applied`: `setParams` returned false (it skipped a change for a
+ *   component the loaded program does not hold), so the edit did not land.
  */
 export class CoreSuiteEditNotDeliverableError extends Error {
-  readonly reason: "live-v-pending" | "needs-carry";
+  readonly reason: "live-v-pending" | "needs-carry" | "not-applied";
 
-  constructor(reason: "live-v-pending" | "needs-carry", detail: string) {
+  constructor(reason: "live-v-pending" | "needs-carry" | "not-applied", detail: string) {
     super(
       `core-suites adapter: the suite edited the loaded circuit in a way the core cannot take yet (${reason}): ` +
         `${detail}. A gate-1 case must not run a circuit the core was never given; classify it "not-yet" ` +
@@ -211,7 +213,12 @@ export class SimEngine implements EngineReadout {
         "a topology change or a param that is not live changed (liveParamDiff returned null)",
       );
     }
-    if (diff.length > 0) this._coreEngine("setParams").setParams(diff);
+    if (diff.length > 0 && !this._coreEngine("setParams").setParams(diff)) {
+      throw new CoreSuiteEditNotDeliverableError(
+        "not-applied",
+        `setParams skipped a change for ${diff.map((change) => change.componentId).join(", ")}`,
+      );
+    }
     this._delivered = structuredClone(live);
   }
 

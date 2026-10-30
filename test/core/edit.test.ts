@@ -78,21 +78,25 @@ describe("liveParamDiff: no change", () => {
     expect(liveParamDiff(base(), c)).toEqual([]);
   });
 
-  it("a reordered component list that is otherwise identical is an empty list when the nets come out the same", () => {
+  it("any change in component order is null, even when every net id stays put (device and driver ids follow the order)", () => {
     const next = clone(base());
-    // c1 and b1 are both off the source-return path, so ground selection and
-    // every net id are unchanged by the swap of two floating-pin parts' order
-    // only when their floating pins keep their numbering: use two parts that
-    // are fully wired so no floating-pin numbering moves.
     const r1 = next.components.splice(2, 1)[0]!;
-    next.components.splice(1, 0, r1);
-    expect(liveParamDiff(base(), next)).toEqual([]);
+    next.components.splice(1, 0, r1); // r1 is fully wired: no net id moves
+    expect(liveParamDiff(base(), next)).toBeNull();
+    expect(liveParamDiff(next, base())).toBeNull();
   });
 
-  it("a reorder that renumbers a floating pin's net id is null (the loaded program's net ids would be stale)", () => {
+  it("a reorder that also renumbers a floating pin's net id is null", () => {
     const next = clone(base());
     const c1 = next.components.pop()!;
     next.components.splice(0, 0, c1);
+    expect(liveParamDiff(base(), next)).toBeNull();
+  });
+
+  it("a reorder alongside a live change is still null", () => {
+    const next = clone(base());
+    comp(next, "s1").params.closed = 1;
+    next.components.reverse();
     expect(liveParamDiff(base(), next)).toBeNull();
   });
 });

@@ -8,9 +8,12 @@
  *
  * A host reads the counters before and after one batch and passes both here;
  * the counters are cumulative since load, so the batch is the difference.
- * Counters whose meaning differs from a similarly named classic field
- * (events processed, the Newton mean, a failed advance) are published under
- * `core` with their own names, not as `steps`, `lastIters` or `failedSteps`.
+ * Every counter is published under `core` with its own name: none of them
+ * means what a similarly named classic field means (events processed is not
+ * `steps`, solution-cache hits are not LU reuse, IC evaluations are not
+ * truth-table cache misses, the largest partition is not the MNA size, a
+ * failed advance is not a rejected step). The record outside `core` carries
+ * only `engine` and the host's batch timing.
  *
  * Pure data shaping, like readout.ts: no ABI calls except `readCoreStats`.
  */
@@ -83,21 +86,21 @@ export function coreSolverDiagnostics(
     return Number.isFinite(now) ? now : 0;
   };
 
+  // Stat 1 (static solves) is a load-time constant, so a batch delta of it is
+  // always 0: it is not published. Stat 2 is a level (the largest partition,
+  // in nodes), published as `largestPartitionNodes`, not classic's MNA size.
   const core: Record<string, number | boolean> = {};
   for (const key of Object.keys(STAT) as (keyof typeof STAT)[]) {
     if (key === "staticSolves" || key === "largestPartition") continue;
     core[key] = key === "maxDeltaDepth" ? level(STAT[key]) : delta(STAT[key]);
   }
+  core.largestPartitionNodes = level(STAT.largestPartition);
 
   const steppedSteps = delta(STAT.steppedSteps);
   const newtonIterations = delta(STAT.newtonIterations);
 
   const diagnostics: CoreSolverDiagnostics = {
     engine: "core",
-    electricalSolves: delta(STAT.staticSolves) + steppedSteps,
-    matrixFactorizationReuses: delta(STAT.solutionCacheHits),
-    digitalEvaluations: delta(STAT.icEvaluations),
-    matrixSize: level(STAT.largestPartition),
     core: core as unknown as CoreStatDeltas,
   };
   diagnostics.core.advanceFailed = !info.converged;

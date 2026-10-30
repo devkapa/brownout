@@ -130,6 +130,18 @@ describe("core fixed-grid sampling", () => {
     expect(result.simulatedS).toBeCloseTo(7e-8, 15);
   });
 
+  it("a non-finite maxSteps is uncapped, as classic's `stepCount >= maxSteps` loop treats NaN", () => {
+    for (const maxSteps of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const runner = coreRunner(RC);
+      const samples: HeadlessSample[] = [];
+      const result = runner.run({ durationS: 1e-3, adaptive: false, fixedStepS: 1e-4, maxSteps, onSample: (s) => samples.push(s) });
+      expect(samples, String(maxSteps)).toHaveLength(10);
+      expect(result.acceptedSteps).toBe(10);
+      expect(result.hitStepCap).toBe(false);
+      expect(result.simulatedS).toBe(1e-3);
+    }
+  });
+
   it("a duration that is not a multiple of the step ends on the duration with a shorter last sample", () => {
     const runner = coreRunner(RC);
     const samples: HeadlessSample[] = [];

@@ -1122,8 +1122,10 @@ export class HeadlessRunner {
     // does not grow one extra ~1e-16 s point.
     const tolerance = Math.max(1e-15, durationS * 1e-12);
     const wanted = Math.max(1, Math.ceil((durationS - tolerance) / gridH));
-    const points = Math.min(wanted, maxSteps);
-    const hitStepCap = wanted > maxSteps;
+    // A NaN cap never trips classic's `stepCount >= maxSteps`, so it is no cap.
+    const cap = Number.isNaN(maxSteps) ? Number.POSITIVE_INFINITY : maxSteps;
+    const points = Math.min(wanted, cap);
+    const hitStepCap = wanted > cap;
 
     let accepted = 0;
     let failed = false;

@@ -90,6 +90,8 @@ export interface CoreStatDeltas {
   junctionRearms: number;
   powerHoldsTaken: number;
   powerHoldsReleased: number;
+  /** Stat 2, a level: nodes in the largest partition. Not classic's whole-circuit MNA `matrixSize`. */
+  largestPartitionNodes: number;
   /** The batch's advance failed (-4 solve failed, which includes a singular solve, or -7). Not a rejected or minimum-size step. */
   advanceFailed: boolean;
   /** Stat 11 over stat 10: Newton iterations per stepped step over the batch (a mean, not the last solve's count). Absent when no stepped step ran. */
@@ -100,14 +102,14 @@ export interface CoreStatDeltas {
  * One worker batch's solver health on the core (D17: only counters whose
  * meaning matches classic's; every other classic field is absent, not
  * faked). The mapping (src/core/diagnostics.ts):
- * - `electricalSolves`: static solves plus stepped steps (stats 1 and 10);
- * - `matrixFactorizationReuses`: solution-cache hits (stat 7);
- * - `digitalEvaluations`: IC evaluations (stat 12);
- * - `matrixSize`: the largest partition (stat 2).
- * Counters that carry something different from classic's field of a similar
- * name (events processed against `steps`, a mean Newton count against
- * `lastIters`, a failed advance against `failedSteps`/`hitMinStep`) live under
- * `core` with their own names, and the classic names are absent.
+ * Only `engine` and the host's batch timing sit outside `core`. Every counter
+ * is published under `core` with its own name, because none means what a
+ * similarly named classic field means: events processed is not `steps`,
+ * solution-cache hits are not LU reuse after a restamp, IC evaluations are
+ * not truth-table cache misses, the largest partition is not the MNA size,
+ * the Newton mean is not `lastIters`, and a failed advance is not a rejected
+ * or minimum-size step. Stat 1 (static solves) is a load-time constant and is
+ * not published.
  * `hitWallBudget` arrives with the advance wall budget (W2b).
  */
 export interface CoreSolverDiagnostics {
@@ -119,10 +121,6 @@ export interface CoreSolverDiagnostics {
   batchWallUs?: number;
   /** Fraction of the requested real-time rate achieved while computing this batch (host-measured). */
   realtimeRatio?: number;
-  electricalSolves: number;
-  matrixFactorizationReuses: number;
-  digitalEvaluations: number;
-  matrixSize: number;
   /** The counters with no classic equivalent, and those whose classic name would mislead. */
   core: CoreStatDeltas;
 }

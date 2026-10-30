@@ -59,16 +59,16 @@ describe("the SolverDiagnostics union", () => {
 });
 
 describe("coreSolverDiagnostics: the stat mapping", () => {
-  it("maps each design-2.5 counter to its classic field, as a delta over the batch", () => {
+  it("publishes each counter under its own name, as a delta over the batch (levels as levels)", () => {
     const before = snapshot({ 1: 5, 4: 100, 7: 10, 10: 20, 11: 40, 12: 3 });
     const after = snapshot({ 1: 8, 2: 6, 4: 130, 7: 25, 10: 50, 11: 100, 12: 9 });
     const d = coreSolverDiagnostics(before, after, { converged: true });
     expect(d.engine).toBe("core");
     expect(d.core.eventsProcessed).toBe(30); // stat 4, under its own name
-    expect(d.electricalSolves).toBe(3 + 30); // stat 1 + stat 10
-    expect(d.matrixFactorizationReuses).toBe(15); // stat 7
-    expect(d.digitalEvaluations).toBe(6); // stat 12
-    expect(d.matrixSize).toBe(6); // stat 2, not a delta: the largest partition now
+    expect(d.core.steppedSteps).toBe(30); // stat 10
+    expect(d.core.solutionCacheHits).toBe(15); // stat 7, not a factorization reuse
+    expect(d.core.icEvaluations).toBe(6); // stat 12, not a truth-table cache miss count
+    expect(d.core.largestPartitionNodes).toBe(6); // stat 2, a level: not the MNA size
     expect(d.core.meanNewtonItersPerSteppedStep).toBe(2); // stat 11 over stat 10: 60 / 30
     expect(d.core.advanceFailed).toBe(false);
   });
@@ -84,6 +84,10 @@ describe("coreSolverDiagnostics: the stat mapping", () => {
       "matrixSingular",
       "matrixIllConditioned",
       "relativeResidual",
+      "electricalSolves",
+      "matrixSize",
+      "matrixFactorizationReuses",
+      "digitalEvaluations",
       "steps",
       "lastIters",
       "failedSteps",
@@ -110,6 +114,12 @@ describe("coreSolverDiagnostics: the stat mapping", () => {
     expect(d.core.eventsProcessed).toBe(2);
   });
 
+  it("stat 1 (a load-time constant) is not published at all, as a delta or a level", () => {
+    const d = coreSolverDiagnostics(snapshot({ 1: 5 }), snapshot({ 1: 9 }), { converged: true });
+    expect(JSON.stringify(d)).not.toMatch(/staticSolves|electricalSolves/);
+    expect("staticSolves" in d.core).toBe(false);
+  });
+
   it("host-measured fields ride along when given", () => {
     const d = coreSolverDiagnostics(snapshot(), snapshot(), {
       converged: true,
@@ -127,7 +137,7 @@ describe("coreSolverDiagnostics: the stat mapping", () => {
   it("a counter that went backwards (a reload between the snapshots) reads as the new count", () => {
     const d = coreSolverDiagnostics(snapshot({ 4: 500, 12: 50 }), snapshot({ 4: 20, 12: 5 }), { converged: true });
     expect(d.core.eventsProcessed).toBe(20);
-    expect(d.digitalEvaluations).toBe(5);
+    expect(d.core.icEvaluations).toBe(5);
   });
 
   it("carries the core-only counters in `core`, with the max delta depth as a level", () => {
@@ -181,8 +191,8 @@ describe("readCoreStats on a real CoreEngine", () => {
     core.advance(1e-3);
     const d = coreSolverDiagnostics(before, readCoreStats(core), { converged: true });
     expect(d.core.eventsProcessed).toBe(0);
-    expect(d.electricalSolves).toBe(0);
-    expect(d.digitalEvaluations).toBe(0);
+    expect(d.core.steppedSteps).toBe(0);
+    expect(d.core.icEvaluations).toBe(0);
   });
 
   it("reads every stat index once and a batch of work shows up in the mapped fields", () => {
@@ -198,7 +208,7 @@ describe("readCoreStats on a real CoreEngine", () => {
     expect(d.core.eventsProcessed).toBe(10); // the clock's ten edges in 5 ms
     expect(d.core.sourceEdges).toBe(10);
     expect(d.core.closedFormSegments).toBe(10);
-    expect(d.matrixSize).toBeGreaterThan(0);
+    expect(d.core.largestPartitionNodes).toBeGreaterThan(0);
     expect(d.core.advanceFailed).toBe(false);
   });
 
@@ -211,6 +221,6 @@ describe("readCoreStats on a real CoreEngine", () => {
     expect(b).toEqual(a);
     const d = coreSolverDiagnostics(a, b, { converged: true });
     expect(d.core.eventsProcessed).toBe(0);
-    expect(d.electricalSolves).toBe(0);
+    expect(d.core.steppedSteps).toBe(0);
   });
 });

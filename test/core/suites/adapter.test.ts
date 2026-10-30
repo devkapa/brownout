@@ -11,8 +11,9 @@
  * circuit using a kind the adapter's coreSupportedKinds does not cover must
  * make `load()` throw, not quietly succeed on classic.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
+import { CoreEngine } from "../../../src/core/engine.js";
 import { BUNDLED_DEFAULT_PARTS, resetPartLibrary } from "../../../src/parts/part-library.js";
 import { CoreSuiteEditNotDeliverableError, CoreSuiteFellBackError, SimEngine, type SimCircuit } from "./adapter.js";
 
@@ -340,6 +341,37 @@ describe("adapter.ts SimEngine — an edit it cannot deliver is refused, not dro
     engine2.load(rewired);
     rewired.components.push(part("r2", "resistor", ["a", "b"], { resistance: 10 }));
     expect(() => engine2.step(1e-4)).toThrow(CoreSuiteEditNotDeliverableError);
+  });
+
+  it("a setParams that skipped a change (it returns false) is refused, not recorded as delivered", () => {
+    const circuit: SimCircuit = {
+      components: [
+        part("v", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("sw", "switch", ["a", "b"], { closed: 0 }),
+        part("r", "resistor", ["a", "b"], { resistance: 1000 }),
+      ],
+      wires: [wire("v", "pos", "sw", "a"), wire("sw", "b", "r", "a"), wire("r", "b", "v", "neg")],
+    };
+    const engine = new SimEngine();
+    engine.load(circuit);
+    circuit.components[1]!.params.closed = 1;
+    const spy = vi.spyOn(CoreEngine.prototype, "setParams").mockReturnValueOnce(false);
+    try {
+      let thrown: unknown;
+      try {
+        engine.step(1e-4);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(CoreSuiteEditNotDeliverableError);
+      expect((thrown as CoreSuiteEditNotDeliverableError).reason).toBe("not-applied");
+      expect(engine.simTime).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    // Still undelivered: the next step tries the same edit again, and now it lands.
+    engine.step(1e-4);
+    expect(engine.getNetV()[engine.getNetIdForPin("r", "a")!]!).toBeCloseTo(5, 3);
   });
 
   it("the refused edit does not advance time", () => {

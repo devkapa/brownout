@@ -12,13 +12,12 @@
  * the safe answer: it only ever costs a reload, while a wrong list would drop
  * an edit on the floor. So every comparison below errs toward `null`.
  *
- * Why the net ids are compared, not just the wire list: `buildNets` numbers
- * nets by the order of the wires and, for floating pins, of the components,
- * and picks the ground net from the first source return. A reordered
- * component list can therefore renumber nets (the readouts are keyed by net
- * id, and a fresh classic load would publish the new ids) even though no
- * wire changed. A pure reorder that leaves every id where it was is delivered
- * live; one that moves an id is a reload.
+ * Why component order and net ids are compared: the compiled device list, and
+ * the driver ids derived from it, follow component order, so any reorder is a
+ * different program and returns `null` even when no wire or net id moved.
+ * `buildNets` also numbers nets by wire order and, for floating pins, by
+ * component order, and picks ground from the first source return; readouts
+ * are keyed by net id, so the same net id must name the same pins.
  */
 
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
@@ -139,6 +138,13 @@ export function liveParamDiff(
   for (const component of prev.components) {
     if (prevById.has(component.id)) return null; // a duplicate id has no stable meaning: reload
     prevById.set(component.id, component);
+  }
+
+  // The compiled device list (and the driver ids derived from it) follows
+  // component order, so a reorder is a different program even when every
+  // component, wire and net id is unchanged.
+  for (let i = 0; i < next.components.length; i++) {
+    if (prev.components[i]!.id !== next.components[i]!.id) return null;
   }
 
   const changes: CoreParamChange[] = [];
