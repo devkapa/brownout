@@ -85,6 +85,16 @@ pub trait PartitionSolver {
     /// electrical fields itself.
     fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String>;
 
+    /// [`Self::resolve_dirty`], appending the readers to `out` (the kernel's
+    /// reused buffer) instead of returning a fresh vector: the kernel calls
+    /// this at every delta pass, and the allocation and growth of a vector
+    /// per call was a measurable share of the SAP-1's cost (F5q). `out` is
+    /// untouched on `Err`. The default forwards to `resolve_dirty`.
+    fn resolve_dirty_into(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], out: &mut Vec<DeviceId>) -> Result<(), String> {
+        out.extend(self.resolve_dirty(dirty, now, drivers)?);
+        Ok(())
+    }
+
     /// Every node's currently published voltage, node 0 = 0
     /// (`bo_engine_node_voltages`'s contract). Whatever the solve method
     /// (static, closed-form, stepped), this is the one array `Engine`
@@ -367,6 +377,14 @@ pub trait PartitionSolver {
         Ok(Vec::new())
     }
 
+    /// [`Self::handle_dynamic_event`], appending the readers to `out`, as
+    /// [`Self::resolve_dirty_into`] (a crossing is the SAP-1's most frequent
+    /// event). `out` is untouched on `Err`.
+    fn handle_dynamic_event_into(&mut self, partition: PartitionId, now: f64, is_crossing: bool, out: &mut Vec<DeviceId>) -> Result<(), String> {
+        out.extend(self.handle_dynamic_event(partition, now, is_crossing)?);
+        Ok(())
+    }
+
     /// The horizon clamp (core/README.md, "Kernel semantics: events", point
     /// 5): brings every dynamic partition's PUBLISHED `voltages()`/`currents()`
     /// entries exactly to `t_end`, so a readout right after `bo_engine_advance`
@@ -588,6 +606,15 @@ pub trait PartitionSolver {
         &[]
     }
 
+    /// A flag that reads `true` exactly while [`Self::power_holds`] is not
+    /// empty, shared with the kernel at its construction: the kernel reads
+    /// it instead of calling through the trait object at every delta pass
+    /// and instant (the SAP-1 never holds; F5q). `None`, the default, has
+    /// the kernel call [`Self::power_holds`] every time.
+    fn holds_flag(&self) -> Option<Rc<std::cell::Cell<bool>>> {
+        None
+    }
+
     /// Drops every power hold, at a successful `set_params`, `seed_memory`
     /// or `resetFailures` (the circuit itself changed), returning the
     /// partitions whose stamps change and the ICs released, which read at
@@ -619,6 +646,10 @@ pub trait PartitionSolver {
 impl PartitionSolver for Box<dyn PartitionSolver> {
     fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
         (**self).resolve_dirty(dirty, now, drivers)
+    }
+
+    fn resolve_dirty_into(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], out: &mut Vec<DeviceId>) -> Result<(), String> {
+        (**self).resolve_dirty_into(dirty, now, drivers, out)
     }
 
     fn voltages(&self) -> &[f64] {
@@ -732,6 +763,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).handle_dynamic_event(partition, now, is_crossing)
     }
 
+    fn handle_dynamic_event_into(&mut self, partition: PartitionId, now: f64, is_crossing: bool, out: &mut Vec<DeviceId>) -> Result<(), String> {
+        (**self).handle_dynamic_event_into(partition, now, is_crossing, out)
+    }
+
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
         (**self).sync_dynamic_to(t_end)
     }
@@ -814,6 +849,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn power_holds(&self) -> &[digital::power::PowerHold] {
         (**self).power_holds()
+    }
+
+    fn holds_flag(&self) -> Option<Rc<std::cell::Cell<bool>>> {
+        (**self).holds_flag()
     }
 
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
@@ -2543,6 +2582,9 @@ pub struct PartitionedSolver {
     written: Vec<u32>,
     /// The classified dirty ids of one `resolve_dirty` call, reused.
     static_ids: Vec<PartitionId>,
+    /// The readers `resolve_dirty_into` and `handle_dynamic_event_into`
+    /// collect before handing them on, reused across calls (F5q).
+    readers_buf: Vec<DeviceId>,
     cf_ids: Vec<usize>,
     st_ids: Vec<usize>,
     /// Per IC (position in `ics`): the ids of its drivers, ascending, and the
@@ -2678,6 +2720,11 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
+    /// `holds_active > 0`, as the kernel reads it
+    /// ([`PartitionSolver::holds_flag`]); set with the sub-solvers' copies
+    /// ([`Self::sync_power_holds`]), so it follows every change, rollback
+    /// and restore of the table. Derived, so not journaled itself.
+    holds_flag: Rc<std::cell::Cell<bool>>,
     /// The window's journal of the table, `holds_active` and `episodes`,
     /// taken at the first touch of either (Rails point 8).
     w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>, bool)>,
@@ -2916,6 +2963,7 @@ impl PartitionedSolver {
             stepped_parts,
             written: Vec::new(),
             static_ids: Vec::new(),
+            readers_buf: Vec::new(),
             cf_ids: Vec::new(),
             st_ids: Vec::new(),
             ic_driver_ids: vec![Vec::new(); ic_count],
@@ -2967,6 +3015,7 @@ impl PartitionedSolver {
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
             holds_active: 0,
+            holds_flag: Rc::new(std::cell::Cell::new(false)),
             w_holds: None,
             hold_counts: [0; 2],
             episodes: Rc::new(Vec::new()),
@@ -4262,6 +4311,7 @@ impl PartitionedSolver {
     /// the static one its cache keys) by.
     fn sync_power_holds(&mut self) {
         let on = self.holds_active > 0;
+        self.holds_flag.set(on);
         self.static_solver.set_power_holds(Rc::clone(&self.holds), on);
         self.closed_form.set_power_holds(Rc::clone(&self.holds), on);
         self.stepped.set_power_holds(Rc::clone(&self.holds), on);
@@ -4371,7 +4421,7 @@ impl PartitionedSolver {
         }
         self.begin_dynamic_writes(cf_ids, false, !st_ids.is_empty());
         self.sync_rail_drive();
-        readers.extend(self.closed_form.resolve_dirty(cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
+        self.closed_form.resolve_dirty_into(cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers)?;
         self.sync_stepped_cc(now);
         let stepped = self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
         self.stepped.cc = None;
@@ -4383,8 +4433,93 @@ impl PartitionedSolver {
     }
 }
 
+impl PartitionedSolver {
+    /// [`PartitionSolver::handle_dynamic_event_into`]'s body, collecting
+    /// the readers in `readers`.
+    fn handle_dynamic_event_with(&mut self, partition: PartitionId, now: f64, is_crossing: bool, readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        let p = partition.0 as usize;
+        // A hub partition's own step or crossing moves the rail as a `Rail`
+        // event does: a rail IC whose gate it flips back at the next is
+        // chasing its own draw across instants, HG1's ping-pong (W1c point
+        // 1a), and is counted as `Rail` events are (a stepped partition at
+        // H_MIN on a CC rail flipped a gate every 10 ns step: G2bv's fz_ic 6
+        // hub 2, cold 204 tpl 5, 301 tpl 2). Any other partition's event
+        // changed what the rail sees, and ends the count. A PSU in CV holds
+        // its rail at the setpoint, which no partition moves: there the
+        // count costs nothing (the SAP-1's case).
+        let counted = |h: &hub::Hub| !h.rail_ics.is_empty() && h.contrib.get(p).is_some_and(|c| c.active) && (h.psu().is_none() || h.state.reg == crate::devices::sources::Regime::Cc);
+        let gates = self.hub.as_ref().filter(|h| counted(h)).map(|_| self.rail_gates());
+        if gates.is_none() {
+            self.end_gate_chase();
+        }
+        if self.exact.is_some() {
+            self.push_exact_stamp();
+        }
+        self.refresh_ramps(now);
+        // A crossing under a known rail lands against the solved rail; if
+        // that solve re-aimed the partition, the crossing is rescheduled
+        // under it and nothing lands here.
+        if is_crossing {
+            let early = self.solve_rail_before_crossing(p, now, readers);
+            if self.on_error(early)? {
+                let published = self.finish_publish(now);
+                self.on_error(published)?;
+                return Ok(());
+            }
+        }
+        if is_crossing {
+            self.begin_dynamic_writes(&[p], false, false);
+        } else {
+            self.begin_dynamic_writes(&[], false, true);
+        }
+        self.sync_rail_drive();
+        if is_crossing {
+            let result = self.closed_form.handle_crossing_into(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents, readers);
+            self.on_error(result)?;
+        } else {
+            self.sync_stepped_cc(now);
+            let stepped = self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
+            self.stepped.cc = None;
+            readers.extend(self.on_error(stepped)?);
+        }
+        self.end_dynamic_writes();
+        // W1f: a closed-form crossing or a stepped commit of a hub partition
+        // changes its contribution, so the rail solves at it (Rails point 4).
+        let drivers = Rc::clone(&self.driver_snapshot);
+        let rail = self.rail_loop(now, &drivers, readers);
+        self.on_error(rail)?;
+        if let Some(a) = gates.and_then(|g| self.count_gate_flip(g)) {
+            let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());
+            self.on_error(result)?;
+            self.hub.as_mut().unwrap().state.gate_flips = 0;
+        }
+        // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
+        // now touch a dynamic partition: `handle_crossing`/`handle_step`
+        // above already restamped its driver/pull contribution correctly
+        // (using `self.driver_snapshot` — that field's own doc comment on
+        // why it, not a fresh `drivers` slice, is what's available here).
+        // What this call still needs to do is exactly the KCL fold for a
+        // driver/pull pin whose OWN node is FIXED (contract point 4's last
+        // bullet: the rail's published current keeps moving continuously as
+        // a dynamic partition's own free-node voltage evolves, even between
+        // driver commits) — `self.driver_snapshot` is the right table for
+        // that too, not `&[]`: an empty slice would silently stop
+        // republishing every IC driver's contribution to a fixed rail's own
+        // current on every crossing/step in between actual commits.
+        let published = self.finish_publish(now);
+        self.on_error(published)?;
+        Ok(())
+    }
+}
+
 impl PartitionSolver for PartitionedSolver {
     fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+        let mut out = Vec::new();
+        self.resolve_dirty_into(dirty, now, drivers, &mut out)?;
+        Ok(out)
+    }
+
+    fn resolve_dirty_into(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], out: &mut Vec<DeviceId>) -> Result<(), String> {
         let mut static_ids = std::mem::take(&mut self.static_ids);
         let mut cf_ids = std::mem::take(&mut self.cf_ids);
         let mut st_ids = std::mem::take(&mut self.st_ids);
@@ -4403,13 +4538,17 @@ impl PartitionSolver for PartitionedSolver {
         // F5b: a commit does not end HG1's count (`end_gate_chase`): the
         // drivers that commit while a rail gate ping-pongs answer it (its own
         // outputs, a zero-delay reader), they do not drive the rail.
-        let mut readers = Vec::new();
+        let mut readers = std::mem::take(&mut self.readers_buf);
+        readers.clear();
         let result = self.resolve_dirty_with(&static_ids, &mut cf_ids, &mut st_ids, now, drivers, &mut readers);
         self.static_ids = static_ids;
         self.cf_ids = cf_ids;
         self.st_ids = st_ids;
-        self.on_error(result)?;
-        Ok(readers)
+        if result.is_ok() {
+            out.extend_from_slice(&readers);
+        }
+        self.readers_buf = readers;
+        self.on_error(result)
     }
 
     fn voltages(&self) -> &[f64] {
@@ -4853,79 +4992,20 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn handle_dynamic_event(&mut self, partition: PartitionId, now: f64, is_crossing: bool) -> Result<Vec<DeviceId>, String> {
-        let p = partition.0 as usize;
-        // A hub partition's own step or crossing moves the rail as a `Rail`
-        // event does: a rail IC whose gate it flips back at the next is
-        // chasing its own draw across instants, HG1's ping-pong (W1c point
-        // 1a), and is counted as `Rail` events are (a stepped partition at
-        // H_MIN on a CC rail flipped a gate every 10 ns step: G2bv's fz_ic 6
-        // hub 2, cold 204 tpl 5, 301 tpl 2). Any other partition's event
-        // changed what the rail sees, and ends the count. A PSU in CV holds
-        // its rail at the setpoint, which no partition moves: there the
-        // count costs nothing (the SAP-1's case).
-        let counted = |h: &hub::Hub| !h.rail_ics.is_empty() && h.contrib.get(p).is_some_and(|c| c.active) && (h.psu().is_none() || h.state.reg == crate::devices::sources::Regime::Cc);
-        let gates = self.hub.as_ref().filter(|h| counted(h)).map(|_| self.rail_gates());
-        if gates.is_none() {
-            self.end_gate_chase();
+        let mut out = Vec::new();
+        self.handle_dynamic_event_into(partition, now, is_crossing, &mut out)?;
+        Ok(out)
+    }
+
+    fn handle_dynamic_event_into(&mut self, partition: PartitionId, now: f64, is_crossing: bool, out: &mut Vec<DeviceId>) -> Result<(), String> {
+        let mut readers = std::mem::take(&mut self.readers_buf);
+        readers.clear();
+        let result = self.handle_dynamic_event_with(partition, now, is_crossing, &mut readers);
+        if result.is_ok() {
+            out.extend_from_slice(&readers);
         }
-        if self.exact.is_some() {
-            self.push_exact_stamp();
-        }
-        self.refresh_ramps(now);
-        // A crossing under a known rail lands against the solved rail; if
-        // that solve re-aimed the partition, the crossing is rescheduled
-        // under it and nothing lands here.
-        let mut readers = Vec::new();
-        if is_crossing {
-            let early = self.solve_rail_before_crossing(p, now, &mut readers);
-            if self.on_error(early)? {
-                let published = self.finish_publish(now);
-                self.on_error(published)?;
-                return Ok(readers);
-            }
-        }
-        if is_crossing {
-            self.begin_dynamic_writes(&[p], false, false);
-        } else {
-            self.begin_dynamic_writes(&[], false, true);
-        }
-        self.sync_rail_drive();
-        let result = if is_crossing {
-            self.closed_form.handle_crossing(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents)
-        } else {
-            self.sync_stepped_cc(now);
-            let stepped = self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
-            self.stepped.cc = None;
-            stepped
-        };
-        readers.extend(self.on_error(result)?);
-        self.end_dynamic_writes();
-        // W1f: a closed-form crossing or a stepped commit of a hub partition
-        // changes its contribution, so the rail solves at it (Rails point 4).
-        let drivers = Rc::clone(&self.driver_snapshot);
-        let rail = self.rail_loop(now, &drivers, &mut readers);
-        self.on_error(rail)?;
-        if let Some(a) = gates.and_then(|g| self.count_gate_flip(g)) {
-            let result = self.hold_on_rail(now, &drivers, &mut readers, &a, crate::rails::loop_unsettled());
-            self.on_error(result)?;
-            self.hub.as_mut().unwrap().state.gate_flips = 0;
-        }
-        // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
-        // now touch a dynamic partition: `handle_crossing`/`handle_step`
-        // above already restamped its driver/pull contribution correctly
-        // (using `self.driver_snapshot` — that field's own doc comment on
-        // why it, not a fresh `drivers` slice, is what's available here).
-        // What this call still needs to do is exactly the KCL fold for a
-        // driver/pull pin whose OWN node is FIXED (contract point 4's last
-        // bullet: the rail's published current keeps moving continuously as
-        // a dynamic partition's own free-node voltage evolves, even between
-        // driver commits) — `self.driver_snapshot` is the right table for
-        // that too, not `&[]`: an empty slice would silently stop
-        // republishing every IC driver's contribution to a fixed rail's own
-        // current on every crossing/step in between actual commits.
-        let published = self.finish_publish(now);
-        self.on_error(published)?;
-        Ok(readers)
+        self.readers_buf = readers;
+        result
     }
 
     fn sync_dynamic_to(&mut self, t_end: f64) -> Result<Vec<DeviceId>, String> {
@@ -5134,6 +5214,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn power_holds(&self) -> &[digital::power::PowerHold] {
         self.power_holds_slice()
+    }
+
+    fn holds_flag(&self) -> Option<Rc<std::cell::Cell<bool>>> {
+        Some(Rc::clone(&self.holds_flag))
     }
 
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {

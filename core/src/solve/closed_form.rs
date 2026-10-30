@@ -1049,6 +1049,25 @@ impl ClosedFormSolver {
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
         let mut readers = Vec::new();
+        self.resolve_dirty_into(dirty, now, drivers, live_params, voltages, currents, &mut readers)?;
+        Ok(readers)
+    }
+
+    /// [`Self::resolve_dirty`], appending its readers to `readers` (the
+    /// owner's reused buffer: a fresh vector per call, grown reader by
+    /// reader, was a measurable share of the SAP-1's allocator time, F5q).
+    /// On `Err`, what it appended is the caller's to drop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_dirty_into(
+        &mut self,
+        dirty: &[usize],
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+        readers: &mut Vec<DeviceId>,
+    ) -> Result<(), String> {
         for &p_idx in dirty {
             let Some(slot) = self.slot(p_idx) else { continue };
             self.journal(slot);
@@ -1064,14 +1083,14 @@ impl ClosedFormSolver {
             Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, 0.0)?;
             Self::publish(part, live_params, voltages, currents);
             readers.extend_from_slice(&part.watch_ids);
-            Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
+            Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, readers);
             let crossing = Self::schedule_crossing(part, now, voltages, self.rail, &self.rail_edges, &self.rail_follow, self.rail_until);
             Self::set_couple(part, now, crossing, voltages, self.rail, live_params);
             if let Some(t) = crossing {
                 self.scheduled.push((t, p_idx, part.version));
             }
         }
-        Ok(readers)
+        Ok(())
     }
 
     /// Applies a due, still-current `Crossing` at `now` (pec3's
@@ -1087,6 +1106,24 @@ impl ClosedFormSolver {
         voltages: &mut [f64],
         currents: &mut [f64],
     ) -> Result<Vec<DeviceId>, String> {
+        let mut readers = Vec::new();
+        self.handle_crossing_into(partition, now, drivers, live_params, voltages, currents, &mut readers)?;
+        Ok(readers)
+    }
+
+    /// [`Self::handle_crossing`], appending its readers to `readers` (as
+    /// [`Self::resolve_dirty_into`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_crossing_into(
+        &mut self,
+        partition: usize,
+        now: f64,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &mut [f64],
+        currents: &mut [f64],
+        readers: &mut Vec<DeviceId>,
+    ) -> Result<(), String> {
         let slot = self.slot(partition).ok_or_else(|| format!("closed-form: unknown partition {partition}"))?;
         self.journal(slot);
         let part = &mut self.parts[slot];
@@ -1131,14 +1168,14 @@ impl ClosedFormSolver {
         let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
         Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, jump)?;
         Self::publish(part, live_params, voltages, currents);
-        let mut readers: Vec<DeviceId> = part.watch_ids.clone();
-        Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, &mut readers);
+        readers.extend_from_slice(&part.watch_ids);
+        Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, readers);
         let crossing = Self::schedule_crossing(part, now, voltages, self.rail, &self.rail_edges, &self.rail_follow, self.rail_until);
         Self::set_couple(part, now, crossing, voltages, self.rail, live_params);
         if let Some(t) = crossing {
             self.scheduled.push((t, partition, part.version));
         }
-        Ok(readers)
+        Ok(())
     }
 
     /// Re-anchors partition `p` at `(now, vc(now))` and aims it at the present

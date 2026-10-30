@@ -244,9 +244,14 @@ pub trait DeviceEvaluator {
     /// `holds` is the solver's power-hold table
     /// ([`crate::solve::PartitionSolver::power_holds`], W1c point 1a): an IC
     /// held unpowered reads and requests nothing whatever its supply reads.
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+    ///
+    /// Returns [`Self::zero_delay_loop`] as it stands after the call: the
+    /// kernel reads the latch evidence off its evaluations rather than with
+    /// a call through the trait object per delta pass (F5q).
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) -> bool {
         let _ = drivers;
         out.extend(self.evaluate_held(reader, now, acting_on_edges, voltages, holds));
+        self.zero_delay_loop()
     }
 
     /// [`Self::evaluate`] under the solver's power-hold table, the form the
@@ -422,7 +427,7 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
         (**self).evaluate(reader, now, acting_on_edges, voltages)
     }
 
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) -> bool {
         (**self).evaluate_into(reader, now, acting_on_edges, voltages, holds, drivers, out)
     }
 
@@ -531,6 +536,9 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     driver_partition: Vec<Option<PartitionId>>,
     time: f64,
     solver: S,
+    /// The solver's [`PartitionSolver::holds_flag`], taken at construction:
+    /// `Some(false)` says the hold table is empty without a call.
+    holds_flag: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     evaluator: E,
     stats: KernelStats,
     /// A `Commit` popped for a driver whose IC is currently unpowered (W1c
@@ -625,6 +633,7 @@ struct Window {
 impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     pub fn new(solver: S, evaluator: E) -> Self {
         Kernel {
+            holds_flag: solver.holds_flag(),
             heap: EventHeap::new(),
             drivers: Vec::new(),
             driver_partition: Vec::new(),
@@ -1068,14 +1077,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 }
                 EventKind::Crossing { partition, version } => {
                     if self.solver.is_current(partition, true, version) {
-                        let readers = self.solver.handle_dynamic_event(partition, self.time, true).map_err(KernelError::SolveFailed)?;
-                        directly_affected.extend(readers);
+                        self.solver.handle_dynamic_event_into(partition, self.time, true, directly_affected).map_err(KernelError::SolveFailed)?;
                     }
                 }
                 EventKind::Step { partition, version } => {
                     if self.solver.is_current(partition, false, version) {
-                        let readers = self.solver.handle_dynamic_event(partition, self.time, false).map_err(KernelError::SolveFailed)?;
-                        directly_affected.extend(readers);
+                        self.solver.handle_dynamic_event_into(partition, self.time, false, directly_affected).map_err(KernelError::SolveFailed)?;
                     }
                 }
                 EventKind::Timer { device, .. } => {
@@ -1174,7 +1181,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let now = self.time;
         let mut writes = std::mem::take(&mut self.settled_buf);
         writes.clear();
-        self.evaluator.on_settled_into(now, &self.drivers, &self.solver, self.solver.power_holds(), &mut writes);
+        let holds = if self.holds_flag.as_ref().is_none_or(|f| f.get()) { self.solver.power_holds() } else { &[] };
+        self.evaluator.on_settled_into(now, &self.drivers, &self.solver, holds, &mut writes);
         self.pending_digital_writes.extend(writes.iter().map(|&(slot, value)| (now, slot, value)));
         self.settled_buf = writes;
     }
@@ -1285,7 +1293,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             if !dirty.is_empty() || changed > 0 {
                 dirty.sort_unstable();
                 dirty.dedup();
-                affected.extend(self.solver.resolve_dirty(&dirty, self.time, &self.drivers).map_err(KernelError::SolveFailed)?);
+                self.solver.resolve_dirty_into(&dirty, self.time, &self.drivers, &mut affected).map_err(KernelError::SolveFailed)?;
             }
             self.drain_scheduled();
             // W1c contract point 9: a hold can only end as a result of the
@@ -1326,14 +1334,16 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             affected.sort_unstable();
             affected.dedup();
             // Nothing in this loop sets a hold, and the solver is a trait
-            // object: one call per pass says whether there is a table to
-            // fetch per reader, rather than one per reader (the SAP-1 never
-            // holds).
-            let held = !self.solver.power_holds().is_empty();
+            // object: the shared flag says once per pass whether there is a
+            // table to fetch per reader, with no call at all (the SAP-1
+            // never holds). The latch evidence below comes back with each
+            // evaluation.
+            let held = self.holds_flag.as_ref().is_none_or(|f| f.get());
+            let mut latch_loop = false;
             for &reader in &affected {
                 requests.clear();
                 let holds = if held { self.solver.power_holds() } else { &[] };
-                self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), holds, &self.drivers, &mut requests);
+                latch_loop |= self.evaluator.evaluate_into(reader, self.time, true, self.solver.voltages(), holds, &self.drivers, &mut requests);
                 debug_assert!(
                     one_request_per_level_driver(&requests),
                     "evaluator returned a batch in which a driver is named by a Level and by another Level or Reset: {requests:?} (see DeviceEvaluator::evaluate_into)"
@@ -1346,8 +1356,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             }
             // A latch that flipped back within this instant has no
             // consistent state (NE555 point 11): the loop would run to the
-            // cap, so it is declined now, as the livelock it is.
-            if self.evaluator.zero_delay_loop() {
+            // cap, so it is declined now, as the livelock it is. A pass with
+            // no reader asks the evaluator itself.
+            if latch_loop || (affected.is_empty() && self.evaluator.zero_delay_loop()) {
                 break;
             }
         }

@@ -1434,7 +1434,11 @@ their own, and the source KCL does with W1a point 2's branch fold.
    far shorter than the sweep's host steps and released by the chip's own
    supply (named exit-gate exceptions, ruling R55 2; "What F5 leaves"; cold
    688 tpl 5 joins them, R59 (2), sliding at a 555's floor in 51 holds, and
-   482 tpl 0, R64 (3), sliding at its gate's floor to 0.104 s). Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
+   482 tpl 0, R64 (3), sliding at its gate's floor to 0.104 s; and,
+   R65 (a), cold 271 tpl 4 and 597 tpl 5, which R63 (2)'s pace trigger
+   promotes to the stepped path and which then meet a 74LS00's power
+   floor: 271/4's CC rail Newton fails, 597/5 slides in 47 holds to
+   1.36 s). Pins: `a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_episode`,
    `an_episode_counts_only_short_holds_its_chip_released_itself`,
    `a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs`,
    `the_stale_hold_boards_run_a_second_of_pulses` and
@@ -5025,6 +5029,15 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     stepped hub partitions re-solve at each move of the CC rail (R59 (1)
     (B)), 51 short holds, `-4` at 0.104 s (at da167d2 the same guard at
     0.068 s);
+  - and cold seeds 271 tpl 4 and 597 tpl 5 (ruling R65 (a)) until R51
+    (c): R63 (2)'s pace trigger promotes each to the stepped path, as it
+    should (597/5 at 6.27 ms, where the closed form reads 3.7 W0 off the
+    fine reference and the stepped path 0.145), and the stepped path then
+    meets a 74LS00's power floor. On 271/4 the CC rail Newton fails: the
+    chip's edge verdict reads off, on, on across the iterates. 597/5
+    slides along the floor in 47 holds, 1.36 s. The fine reference (exact
+    mode, 1 us host steps) fails Newton on both, at 175 ms (271/4) and
+    35.3 ms (597/5);
   - named exceptions to F5's exit gate (ruling R54, F5m): two default-mode
     declines on the cold fuzz that fail under the fine reference too (exact
     mode, 1 us host steps), each since f2d93ae:

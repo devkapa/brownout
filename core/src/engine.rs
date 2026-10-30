@@ -99,7 +99,7 @@ impl DeviceEvaluator for WithSources {
         self.inner.evaluate(reader, now, acting_on_edges, voltages)
     }
 
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[crate::drivers::Driver], out: &mut Vec<DriverRequest>) {
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[crate::drivers::Driver], out: &mut Vec<DriverRequest>) -> bool {
         self.inner.evaluate_into(reader, now, acting_on_edges, voltages, holds, drivers, out)
     }
 

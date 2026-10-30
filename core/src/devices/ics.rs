@@ -682,8 +682,9 @@ impl DeviceEvaluator for IcEvaluator {
     /// reads, the previous reads' storage, the truth-table and family
     /// results) is reused rather than allocated: this runs tens of thousands
     /// of times per simulated second.
-    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) {
+    fn evaluate_into(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, voltages: &[f64], holds: &[PowerHold], drivers: &[Driver], out: &mut Vec<DriverRequest>) -> bool {
         self.evaluate_impl(reader, now, acting_on_edges, voltages, holds, Some(drivers), out);
+        self.latch_loop
     }
 
     /// Every piece of per-device mutable state `evaluate` (or `seed_memory`)
@@ -2257,5 +2258,41 @@ mod tests {
         // One hold taken; the two releases are the rolled-back ones above
         // (stats keep a failed attempt's counts); the drop is not a release.
         assert_eq!(kernel.solver().hold_stats(), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn the_kernels_hold_flag_reads_the_table_through_every_change_rollback_and_restore() {
+        // F5q: the kernel skips the hold table on this flag, so a stale
+        // `false` would evaluate a held IC as a free one.
+        use crate::digital::power::PowerHold;
+        use crate::solve::PartitionSolver;
+        let ic = 4usize;
+        let p = program(5, 4, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            resistor(2, 1, 3, 10_000.0),
+            resistor(3, 3, 0, 10_000.0),
+            ls00(4, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 4, 0, 0, 4], 20e-9),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        let flag = kernel.solver().holds_flag().expect("the partitioned solver shares its flag");
+        let agrees = |solver: &PartitionedSolver| flag.get() == !solver.power_holds().is_empty();
+        assert!(!flag.get() && agrees(kernel.solver()));
+        kernel.hold_power_as_event(ic, PowerHold::off()).unwrap();
+        assert!(flag.get() && agrees(kernel.solver()), "a hold sets it");
+        let solver = kernel.solver_mut();
+        let window = solver.begin_instant();
+        solver.set_power_hold(ic, PowerHold::FREE);
+        assert!(!flag.get() && agrees(solver), "a release clears it");
+        solver.rollback_instant(window);
+        assert!(flag.get() && agrees(solver), "a rollback sets it back");
+        let snap = solver.dynamic_snapshot();
+        solver.set_power_hold(ic, PowerHold::FREE);
+        assert!(!flag.get());
+        solver.dynamic_restore(snap);
+        assert!(flag.get() && agrees(solver), "a restored snapshot sets it back");
+        kernel.reset_failures_as_event().unwrap();
+        assert!(!flag.get() && agrees(kernel.solver()), "dropping every hold clears it");
     }
 }
