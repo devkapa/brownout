@@ -26,11 +26,14 @@
  *   (the ripple is filtered by tail averaging over whole cycles).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runSweep as runSweepImpl, runSweepAsync as runSweepAsyncImpl, type SweepHooks } from "../../src/analysis/run-sweep.js";
 import { validateJobSpec, type DcSweepSpec, type TempSweepSpec } from "../../src/analysis/jobs.js";
 import { ANALYSIS_STEP_S } from "../../src/analysis/run-sweep.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { CoreEngine } from "../../src/core/engine.js";
+import { CoreLoadError, CorePoisonedError, CoreTrapError } from "../../src/core/errors.js";
+import { AnalysisConvergenceError } from "../../src/analysis/checked-step.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { initCore } from "../../src/core/wasm.js";
 import { ENGINE_MODES, expectedEngine, matrixOptions } from "../helpers/analysis-engine-matrix.js";
@@ -678,5 +681,116 @@ describe("engine report", () => {
     const spec = dividerSpec({ engine: "gpu" as unknown as "core" });
     expect(validateJobSpec(spec, voltageDividerCircuit())).toMatch(/engine must be/);
     expect(validateJobSpec(dividerSpec({ engine: "core" }), voltageDividerCircuit())).toBeNull();
+  });
+});
+
+// ─── A core failure that is not a decline ──────────────────────────────────────
+//
+// A trap, a poisoned instance or a malformed-program load code (-1/-2/-5) is
+// the core failing, not the circuit being declined. Under auto the whole run is
+// replayed on classic (a poisoned core is never reused) and the reason is
+// recorded; under an explicit core it throws; a non-converged core advance is a
+// circuit fact and is NOT retried. Injected by patching CoreEngine, as the real
+// failures need a wasm trap.
+
+describe("a core failure under auto replays the run on classic", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const sweepSpec = (extra: Partial<DcSweepSpec> = {}): DcSweepSpec => ({
+    kind: "dc-sweep",
+    componentId: "psu1",
+    param: "voltage",
+    from: 1,
+    to: 5,
+    points: 5,
+    settleTimeS: 0.01,
+    outputs: [{ netId: "n0" }],
+    ...extra,
+  });
+  const widened = { coreSupportedKinds: CORE_IMPLEMENTED_KINDS } as const;
+
+  /** Throws `make()` from the n-th call (1-based) of a CoreEngine method; every other call is the real one. */
+  function failOnCall(method: "load" | "advance", n: number, make: () => Error): void {
+    const original = CoreEngine.prototype[method] as (...args: unknown[]) => unknown;
+    let calls = 0;
+    vi.spyOn(CoreEngine.prototype, method as "load").mockImplementation(function (this: CoreEngine, ...args: unknown[]) {
+      calls += 1;
+      if (calls === n) throw make();
+      return original.apply(this, args);
+    } as never);
+  }
+
+  const classicMeans = (): number[] =>
+    runSweepImpl(sweepSpec(), voltageDividerCircuit(), { engine: "classic" }).outputs[0]!.mean;
+
+  const failures: [string, "load" | "advance", number, () => Error, string][] = [
+    // Call 1 of load is the planner's first-point probe; call 4 is point 2.
+    ["a trap in a load", "load", 4, () => new CoreTrapError("wasm trap"), "core-trap"],
+    ["a poisoned instance in a load", "load", 4, () => new CorePoisonedError("poisoned"), "core-poisoned"],
+    ["a malformed-program load code (-5)", "load", 4, () => new CoreLoadError("bo_engine_load failed (code -5): bad blob"), "core-load-error:"],
+    ["a trap in an advance", "advance", 700, () => new CoreTrapError("wasm trap"), "core-trap"],
+    ["a poisoned instance in an advance", "advance", 700, () => new CorePoisonedError("poisoned"), "core-poisoned"],
+  ];
+
+  it.each(failures)("%s: onRestart once with the reason, then the whole run on classic, same numbers", (_name, method, n, make, reason) => {
+    failOnCall(method, n, make);
+    const points: number[] = [];
+    const restarts: (readonly string[])[] = [];
+    const result = runSweepImpl(sweepSpec(), voltageDividerCircuit(), {
+      ...widened,
+      onPoint: (i) => points.push(i),
+      onRestart: (reasons) => {
+        restarts.push(reasons);
+        points.push(-1);
+      },
+    });
+    vi.restoreAllMocks();
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0]!.some((r) => r.startsWith(reason))).toBe(true);
+    // Progress ran on the core, restarted once, then ran 0..4 on classic.
+    expect(points.indexOf(-1)).toBeGreaterThan(0);
+    expect(points.slice(points.indexOf(-1) + 1)).toEqual([0, 1, 2, 3, 4]);
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons.some((r) => r.startsWith(reason))).toBe(true);
+    expect(result.outputs[0]!.mean).toEqual(classicMeans());
+  });
+
+  it("the planner's own probe load failing is a fallback too, before any point runs", () => {
+    failOnCall("load", 1, () => new CoreTrapError("wasm trap"));
+    const points: number[] = [];
+    const result = runSweepImpl(sweepSpec(), voltageDividerCircuit(), { ...widened, onPoint: (i) => points.push(i) });
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["core-trap"]);
+    expect(points).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("under an explicit core a trap throws, naming the reason", () => {
+    failOnCall("load", 4, () => new CoreTrapError("wasm trap"));
+    expect(() => runSweepImpl(sweepSpec({ engine: "core" }), voltageDividerCircuit(), widened)).toThrow(/core-trap/);
+  });
+
+  it("the async runner replays too", async () => {
+    failOnCall("load", 4, () => new CoreTrapError("wasm trap"));
+    let restarts = 0;
+    const result = await runSweepAsyncImpl(sweepSpec(), voltageDividerCircuit(), { ...widened, onRestart: () => restarts++ });
+    expect(restarts).toBe(1);
+    expect(result.engine).toBe("classic");
+  });
+
+  it("a mid-run non-converged core advance is rejected with the core's message and is NOT retried on classic", () => {
+    // `lastConverged` is read once per advance; report the 3rd advance as failed.
+    let reads = 0;
+    vi.spyOn(CoreEngine.prototype, "lastConverged", "get").mockImplementation(() => ++reads !== 3);
+    let restarts = 0;
+    const attempt = (): unknown =>
+      runSweepImpl(sweepSpec(), voltageDividerCircuit(), { ...widened, onRestart: () => restarts++ });
+    expect(attempt).toThrow(AnalysisConvergenceError);
+    reads = 0;
+    expect(attempt).toThrow(
+      /runSweep point 0 \(x=1\) did not converge at 0\.0001 s\. The core kept its last completed instant \(.*\), this analysis point was rejected/,
+    );
+    expect(restarts).toBe(0);
   });
 });

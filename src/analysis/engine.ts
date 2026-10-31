@@ -43,7 +43,13 @@
 import type { SimCircuit, SimFailure } from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import { CoreEngine } from "../core/engine.js";
-import { CoreUnsupportedError } from "../core/errors.js";
+import {
+  CoreLoadError,
+  CorePoisonedError,
+  CoreStaleInstanceError,
+  CoreTrapError,
+  CoreUnsupportedError,
+} from "../core/errors.js";
 import { compileCircuit } from "../core/compile/index.js";
 import { CORE_SUPPORTED_KINDS } from "../core/kinds.js";
 import { unsupportedCoreKindReasons } from "../core/select.js";
@@ -66,6 +72,26 @@ export * from "./engine-base.js";
 
 // ─── Core ────────────────────────────────────────────────────────────────────
 
+/**
+ * The reasons a core failure maps to, or null for an error that is not the
+ * core's to answer for (a caller bug such as a RangeError, which must surface).
+ *
+ * A decline (`CoreUnsupportedError`) is the circuit; a trap, a poisoned or
+ * stale instance and a load code for a malformed program (-1/-2/-5/-8) are the
+ * CORE failing. None of them says anything about the circuit, so under `auto`
+ * they all replay the run on classic. A poisoned instance is never reused:
+ * the planner reads `core-poisoned` from the wasm status on the next run, and
+ * the failed run's engine is disposed and not opened again.
+ */
+function coreFailureReasons(err: unknown): readonly string[] | null {
+  if (err instanceof CoreUnsupportedError) return err.reasons;
+  if (err instanceof CoreTrapError) return ["core-trap"];
+  if (err instanceof CorePoisonedError) return ["core-poisoned"];
+  if (err instanceof CoreStaleInstanceError) return ["core-stale-instance"];
+  if (err instanceof CoreLoadError) return [`core-load-error:${err.message}`];
+  return null;
+}
+
 class CoreAnalysisEngine implements AnalysisEngine {
   readonly kind = "core" as const;
   private readonly _core = new CoreEngine();
@@ -86,14 +112,22 @@ class CoreAnalysisEngine implements AnalysisEngine {
       // core carries nothing else across a load without a CARRY block.
       this._core.load(circuit, undefined, { simTime: 0 });
     } catch (err) {
-      if (err instanceof CoreUnsupportedError) throw new AnalysisCoreRejectedError(err.reasons);
+      const reasons = coreFailureReasons(err);
+      if (reasons !== null) throw new AnalysisCoreRejectedError(reasons);
       throw err;
     }
   }
 
   advanceTo(t: number, options?: AdvanceOptions): void {
     const startTime = this._core.simTime;
-    this._core.advance(t);
+    try {
+      this._core.advance(t);
+    } catch (err) {
+      // A trap or a poisoned instance mid-run: the core is gone, not the circuit.
+      const reasons = coreFailureReasons(err);
+      if (reasons !== null) throw new AnalysisCoreRejectedError(reasons);
+      throw err;
+    }
     if (this._core.lastConverged) return;
     const context = options?.context ?? "analysis step";
     throw new AnalysisConvergenceError(
@@ -142,7 +176,8 @@ function probeCoreLoad(circuit: SimCircuit): readonly string[] {
     probe.load(circuit, undefined, { simTime: 0 });
     return [];
   } catch (err) {
-    if (err instanceof CoreUnsupportedError) return err.reasons;
+    const reasons = coreFailureReasons(err);
+    if (reasons !== null) return reasons;
     throw err;
   } finally {
     try {

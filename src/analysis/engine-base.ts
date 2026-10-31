@@ -102,14 +102,17 @@ export interface AnalysisEngine {
 }
 
 /**
- * The core declined a circuit in its Rust load (a topology it does not take,
- * a load-time livelock or solve failure) after every point had compiled.
- * `runOnPlan` turns it into a whole-run rerun on classic under `auto`.
+ * The core could not run a circuit after every point had compiled: its Rust
+ * load declined it (a topology it does not take, a load-time livelock or solve
+ * failure), or the core itself failed (a trap, a poisoned instance, a load code
+ * for a malformed program). `runOnPlan` turns it into a whole-run rerun on
+ * classic under `auto`. A non-converged advance is NOT this: that is the
+ * circuit, and it throws AnalysisConvergenceError.
  */
 export class AnalysisCoreRejectedError extends Error {
   readonly reasons: readonly string[];
   constructor(reasons: readonly string[]) {
-    super(`the core declined the circuit: ${reasons.join(", ")}`);
+    super(`the core could not run the circuit: ${reasons.join(", ")}`);
     this.name = "AnalysisCoreRejectedError";
     this.reasons = reasons;
   }
@@ -253,7 +256,7 @@ export function planOptionsFor(
 
 function explicitCoreRejection(reasons: readonly string[]): Error {
   return new Error(
-    `analysis engine "core" was requested but the core declined the circuit: ${reasons.join(", ")}`,
+    `analysis engine "core" was requested but the core could not run it: ${reasons.join(", ")}`,
   );
 }
 
