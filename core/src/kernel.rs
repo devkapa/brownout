@@ -1300,7 +1300,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // `driver_snapshot`) exactly one commit stale until some
             // unrelated event happened to dirty a partition.
             // A reset of a fixed-node driver (`fixed_reset`) is the same case.
-            if !dirty.is_empty() || changed > 0 || std::mem::take(&mut self.fixed_reset) {
+            // The flag is taken before the test, as the settle pass takes it:
+            // inside the `||` chain a commit or a dirty partition left it set
+            // for the next instant.
+            let fixed_reset = std::mem::take(&mut self.fixed_reset);
+            if !dirty.is_empty() || changed > 0 || fixed_reset {
                 dirty.sort_unstable();
                 dirty.dedup();
                 self.solver.resolve_dirty_into(&dirty, self.time, &self.drivers, &mut affected).map_err(KernelError::SolveFailed)?;
@@ -2407,6 +2411,48 @@ mod tests {
             assert_eq!(k.driver(d0).committed(), None, "the reset at t = 1 applied");
             assert!(k.solver.seen[before..].iter().any(|(t, _)| *t == 1.0), "a resolve at the reset's instant: {:?}", &k.solver.seen[before..]);
         }
+    }
+
+    struct ResetAndCommit {
+        fixed: DriverId,
+        other: DriverId,
+        calls: u32,
+    }
+    impl DeviceEvaluator for ResetAndCommit {
+        fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, _v: &[f64]) -> Vec<DriverRequest> {
+            let _ = reader;
+            if now == 0.0 && !acting_on_edges {
+                return vec![DriverRequest::Level { driver: self.fixed, level: High, delays: DelaySet::uniform(0.0) }];
+            }
+            if now == 0.0 {
+                return vec![DriverRequest::Timer { device: reader, at: 1.0, tag: 0 }];
+            }
+            if now == 1.0 && self.calls == 0 {
+                self.calls += 1;
+                return vec![DriverRequest::Reset { driver: self.fixed }, DriverRequest::Level { driver: self.other, level: High, delays: DelaySet::uniform(0.0) }, DriverRequest::Timer { device: reader, at: 3.0, tag: 1 }];
+            }
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_fixed_node_reset_beside_a_commit_resolves_at_its_own_instant_only() {
+        // A fixed-node driver's reset in the same pass as another driver's
+        // commit: the commit already brings the resolve, and the reset's flag
+        // must be spent there too, not left for the next instant (a timer
+        // alone at t = 3), where it ran a resolve nothing asked for and made
+        // a rolled-back instant differ from one never attempted.
+        let d0 = DriverId(0);
+        let d1 = DriverId(1);
+        let mut k = Kernel::new(ResolveLog { seen: Vec::new() }, ResetAndCommit { fixed: d0, other: d1, calls: 0 });
+        k.add_driver(driver(1), None);
+        k.add_driver(driver(2), Some(PartitionId(0)));
+        k.settle(0.0, &[PartitionId(0)], &[DeviceId(0)]).unwrap();
+        k.advance(2.0).unwrap();
+        assert_eq!(k.driver(d0).committed(), None);
+        k.advance(4.0).unwrap();
+        assert!(!k.solver.seen.iter().any(|(t, _)| *t == 3.0), "resolve at the timer-only instant 3.0");
+        assert!(!k.fixed_reset, "fixed_reset leaked past the instant");
     }
 
     // ---- decision 8: settle -----------------------------------------------
