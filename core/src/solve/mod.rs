@@ -4238,6 +4238,17 @@ impl PartitionedSolver {
             return Ok(());
         }
         self.static_solver.set_inputs_bounded(false);
+        // In exact mode the rail sits in a static partition: a retry that
+        // re-solves it is a solve of the rail's partition, so the regime rules
+        // run on it (`exact_after_publish`, from the clamp's rail loop). Without
+        // them a chip freed in a CV probe, where the rail cannot move, stayed
+        // free with the PSU past its limit (cold 621 tpl 2: 126 mA against
+        // 99.1 mA for 60 ms of the fine reference).
+        if let Some(e) = self.exact.as_ref() {
+            if held.iter().any(|p| p.0 as usize == e.partition) {
+                self.exact_solved = true;
+            }
+        }
         self.static_solver.resolve_dirty_into(&held, t_end, drivers, readers)?;
         self.copy_in_static()
     }

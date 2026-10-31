@@ -12169,3 +12169,55 @@ fn a_partition_caught_up_before_the_rail_loops_early_return_restarts_there() {
     assert!(!seen.is_empty() && seen.iter().all(|&planned| planned), "each partition the catch-up brought to the entry has a trial planned when the early return leaves: {seen:?}");
     assert_eq!(rig.hub().state.reg, Regime::Cc);
 }
+
+// ---- ACC-E: a retry at the clamp frees a chip only under the regime rules ----
+
+/// Cold 621 tpl 2 (hub 2): a 4.963 V PSU limited to 99.1 mA, 94.3 mA of it
+/// in a 52.6 ohm resistor on the rail, and a 74ls00 on the rail whose 2y and
+/// 3y drive node 3 (73 ohm from the rail) and whose 1y, LOW, sits on the rail.
+/// Powered, the chip's draw puts the PSU in CC under its window; off, the PSU
+/// is in CV: it starves itself and is held off at load (W1c point 1a).
+fn cold_621_2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.963186548120814, 0.09913892461723416], vec![]),
+        fz(1, 1, &[2, 0], vec![179806.30875360098], vec![]),
+        fz(1, 2, &[3, 0], vec![224557.2294754236], vec![]),
+        fz(1, 3, &[4, 0], vec![288252.56747104926], vec![]),
+        fz(50, 4, &[1, 0, 3, 4, 1, 0, 0, 3, 0, 0, 3, 0, 0, 1], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.1709540611253739e-8], vec![0.0; 13]),
+        fz(1, 5, &[1, 0], vec![52.62785413717453], vec![]),
+        fz(1, 6, &[3, 1], vec![125.89334044307894], vec![]),
+        fz(1, 7, &[4, 2], vec![788.5087169483519], vec![]),
+        fz(1, 8, &[1, 3], vec![214.47346987669798], vec![]),
+        fz(1, 9, &[3, 4], vec![173.22569930665583], vec![]),
+        fz(1, 10, &[0, 1], vec![54934.23864874996], vec![]),
+        fz(30, 11, &[3, 4], vec![2.3804250756327083, 2.269744551659818, 0.02453319387718482, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 12, &[1, 3], vec![894.6488234871266], vec![]),
+    ];
+    Program { node_count: 5, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes() {
+    // The fine reference (exact mode, 1 us steps): the clamp's static retry
+    // probed the chip powered with the PSU in CV, where the rail cannot
+    // move, found it carried itself and freed it, and nothing ran the regime
+    // rules on that solve, so the PSU delivered 126 mA in CV against its
+    // 99.1 mA limit until the circuit changed; default mode keeps it held.
+    let i_limit = 0.09913892461723416;
+    let mut published = Vec::new();
+    for p in [cold_621_2(), exact(cold_621_2())] {
+        let mode = if p.options.no_rail_shortcut { "exact" } else { "default" };
+        let mut rig = Rig::load(&p).unwrap();
+        assert!(!rig.s().power_hold(4).is_free(), "{mode}: held off at load");
+        for k in 1..=5 {
+            rig.advance(k as f64 * 1e-6).unwrap();
+            assert!(rig.i(0).abs() <= i_limit, "{mode}: the PSU past its limit at {k} us: {} A", rig.i(0));
+            assert!(!rig.s().power_hold(4).is_free(), "{mode}: held off at {k} us");
+        }
+        published.push((rig.s().voltages().to_vec(), rig.i(0)));
+    }
+    for (n, (a, b)) in published[0].0.iter().zip(&published[1].0).enumerate() {
+        close(*b, *a, 1e-4 + 1e-3 * a.abs(), &format!("node {n}, exact against default"));
+    }
+    close(published[1].1, published[0].1, 1e-9 + 1e-3 * published[0].1.abs(), "the PSU's current, exact against default");
+}

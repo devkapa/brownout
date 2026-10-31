@@ -2169,3 +2169,19 @@ fn a_fixed_pair_republish_leaves_a_commit_the_solver_has_not_resolved_for_the_ne
     assert_eq!(rig.k.driver(crate::events::DriverId(0)).committed(), Some(crate::events::Mode::High), "1A is grounded, 1Y is HIGH");
     assert_eq!(lagging_entries(&rig), Vec::<usize>::new(), "the solver's table after the toggle");
 }
+
+#[test]
+fn a_fixed_node_driver_the_load_settle_commits_last_is_in_the_solvers_table_and_its_kcl() {
+    // The settle's last pass commits 1Y LOW and dirties no partition (its
+    // node is fixed): without a resolve after it, the published currents and
+    // the solver's table kept 1Y HIGH until some later event resolved
+    // (32 mA on the 2.5 V source here).
+    let p = an_inverter_beside_a_latching_resistor();
+    let rig = Rig::load(&p);
+    assert_eq!(lagging_entries(&rig), Vec::<usize>::new(), "the solver's table after load");
+    let mut twin = Rig::load(&p);
+    let table: Vec<crate::drivers::Driver> = (0..twin.s().driver_snapshot.len()).map(|i| *twin.k.driver(crate::events::DriverId(i as u32))).collect();
+    twin.k.solver_mut().resolve_dirty(&[], 0.0, &table).unwrap();
+    twin.k.solver_mut().prepare_readout();
+    assert_eq!(rig.i(6).to_bits(), twin.i(6).to_bits(), "the 2.5 V source's current at load: {} against {}", rig.i(6), twin.i(6));
+}

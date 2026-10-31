@@ -1344,7 +1344,12 @@ their own, and the source KCL does with W1a point 2's branch fold.
    70 us), took 79,000 failed retries, each two rail passes more: 0.6 s for
    the sweep's 1.2 s, 0.16 s once per host step (pin
    `a_held_chip_is_retried_once_per_host_step`). The flag that arms the
-   retry is set at load and at each clamp and journaled with the table. One that
+   retry is set at load and at each clamp and journaled with the table. In
+   exact mode the rail sits in a static partition, and a clamp retry that
+   re-solves it is a solve of the rail's partition: the regime rules run on
+   it, so a chip freed in a CV probe whose draw takes the PSU past its limit
+   enters CC and starves again (cold 621 tpl 2, whose fine reference held
+   126 mA in CV against 99.1 mA). One that
    carries itself there (its free verdict powered), or whose supply reads
    unpowered both probed powered and held off (its own draw no longer
    decides), is free again and reads at once (point 9); starving again at
@@ -5329,7 +5334,10 @@ Recorded at the W1g integration. None changes a rule above until it lands.
       74hc74's `/pre` and `/clr`, a 161's ENT to RCO, a 173's M/N) change the
       outputs, as classic's seed stamp does, but never the register state;
       the edge pass does the state writes. Delays do not apply while settling; this
-      is finding the consistent initial state, not simulating time. A 555's
+      is finding the consistent initial state, not simulating time. A pass
+      whose commits or resets land only on drivers on fixed nodes still
+      re-solves, as a delta pass does, so the source currents and the
+      solver's driver table take them. A 555's
       latch is not edge history: in a frozen pass a powered 555 drives its
       comparator result without writing the latch (NE555 point 9). Unlike
       the other level-sensitive inputs named here, this departs from

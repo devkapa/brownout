@@ -580,6 +580,12 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// every instant, when an instant writes a handful of them.
     driver_journal: Vec<(u32, Driver)>,
     driver_journaled: Vec<bool>,
+    /// A committed driver on a fixed node was reset since the delta cycle
+    /// last resolved: like a commit there (finding 7), it dirties no
+    /// partition, yet the next pass must resolve so the source KCL and the
+    /// solver's driver table take it. Set and taken within one instant; a
+    /// rollback clears it.
+    fixed_reset: bool,
     /// Scratch buffers the delta cycle reuses so it allocates nothing per
     /// pass once they have grown to size: the partitions to re-solve, the
     /// readers to evaluate (each kept sorted and duplicate-free, which is the
@@ -647,6 +653,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             heap_popped: Vec::new(),
             driver_journal: Vec::new(),
             driver_journaled: Vec::new(),
+            fixed_reset: false,
             dirty_buf: Vec::new(),
             affected_buf: Vec::new(),
             requests_buf: Vec::new(),
@@ -702,6 +709,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             self.drivers[idx as usize] = driver;
             self.driver_journaled[idx as usize] = false;
         }
+        self.fixed_reset = false;
         self.heap_popped.clear();
         self.windowed = false;
         self.solver.rollback_instant(window.solver);
@@ -988,6 +996,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 if was_committed {
                     self.solver.driver_committed(idx);
                     self.evaluator.driver_changed(driver);
+                    self.fixed_reset |= self.driver_partition[idx].is_none();
                     self.driver_partition[idx]
                 } else {
                     None
@@ -1290,7 +1299,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // driver's commit left the published source current (and
             // `driver_snapshot`) exactly one commit stale until some
             // unrelated event happened to dirty a partition.
-            if !dirty.is_empty() || changed > 0 {
+            // A reset of a fixed-node driver (`fixed_reset`) is the same case.
+            if !dirty.is_empty() || changed > 0 || std::mem::take(&mut self.fixed_reset) {
                 dirty.sort_unstable();
                 dirty.dedup();
                 self.solver.resolve_dirty_into(&dirty, self.time, &self.drivers, &mut affected).map_err(KernelError::SolveFailed)?;
@@ -1797,7 +1807,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let mut dirty = Vec::new();
         let mut directly_affected = Vec::new();
         let (_popped, commits_changed) = self.apply_due_events(&mut dirty, &mut directly_affected)?;
-        let changed = commits_changed > 0 || !reset_dirty.is_empty() || !directly_affected.is_empty();
+        let fixed_reset = std::mem::take(&mut self.fixed_reset);
+        let changed = commits_changed > 0 || fixed_reset || !reset_dirty.is_empty() || !directly_affected.is_empty();
         dirty.append(&mut reset_dirty);
         let is_first_pass = *resolve_all_once;
         let to_resolve: Vec<PartitionId> = if is_first_pass {
@@ -1808,7 +1819,13 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             dirty.dedup();
             dirty
         };
-        if is_first_pass || !to_resolve.is_empty() {
+        // `|| commits_changed > 0`: finding 7's rule in `run_deltas`, here for
+        // the settle. A commit that lands only on fixed-node drivers dirties
+        // no partition, yet the source KCL and the solver's driver table must
+        // take it; without the resolve a load whose last settle pass flips
+        // such a driver published its old level until some later event
+        // resolved (cold 64 tpl 5, hub 2). A reset of one is the same case.
+        if is_first_pass || !to_resolve.is_empty() || commits_changed > 0 || fixed_reset {
             // The returned reader list is intentionally unused here: this
             // pass already re-evaluates every reader unconditionally, the
             // same way pec3's `init()` calls `ic.eval()` over every IC each
@@ -2315,6 +2332,81 @@ mod tests {
             "the reset's partition must be re-solved, not skipped as a false fixed point: {:?}",
             k.solver.seen
         );
+    }
+
+    /// Records each resolve's instant and dirty set.
+    struct ResolveLog {
+        seen: Vec<(f64, Vec<PartitionId>)>,
+    }
+    impl PartitionSolver for ResolveLog {
+        fn resolve_dirty(&mut self, dirty: &[PartitionId], now: f64, _drivers: &[Driver]) -> Result<Vec<DeviceId>, String> {
+            self.seen.push((now, dirty.to_vec()));
+            Ok(Vec::new())
+        }
+        fn voltages(&self) -> &[f64] {
+            &[]
+        }
+        fn currents(&self) -> &[f64] {
+            &[]
+        }
+        fn restore(&mut self, _snapshot: (Vec<f64>, Vec<f64>)) {
+            // No state to restore.
+        }
+    }
+
+    /// Drives a fixed-node driver HIGH while settling, schedules itself at
+    /// t = 1 from the edge pass, and resets the driver there; with
+    /// `reset_in_settle` the reset comes in the settle's second pass instead.
+    struct FixedNodeReset {
+        driver: DriverId,
+        reset_in_settle: bool,
+        calls: u32,
+    }
+    impl DeviceEvaluator for FixedNodeReset {
+        fn evaluate(&mut self, reader: DeviceId, now: f64, acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
+            self.calls += 1;
+            if self.reset_in_settle {
+                return match self.calls {
+                    1 => vec![DriverRequest::Level { driver: self.driver, level: High, delays: DelaySet::uniform(0.0) }],
+                    2 => vec![DriverRequest::Reset { driver: self.driver }],
+                    _ => Vec::new(),
+                };
+            }
+            if now == 0.0 && !acting_on_edges {
+                vec![DriverRequest::Level { driver: self.driver, level: High, delays: DelaySet::uniform(0.0) }]
+            } else if now == 0.0 {
+                vec![DriverRequest::Timer { device: reader, at: 1.0, tag: 0 }]
+            } else if now == 1.0 {
+                vec![DriverRequest::Reset { driver: self.driver }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_of_a_committed_fixed_node_driver_is_resolved_in_a_delta_and_in_the_settle() {
+        // Finding 7's rule for a `Reset`: a driver whose own node is fixed
+        // dirties no partition, but the source KCL and the solver's driver
+        // table must take its reset, so a resolve follows it at its instant.
+        for reset_in_settle in [true, false] {
+            let d0 = DriverId(0);
+            let mut k = Kernel::new(ResolveLog { seen: Vec::new() }, FixedNodeReset { driver: d0, reset_in_settle, calls: 0 });
+            assert_eq!(k.add_driver(driver(1), None), d0);
+            k.settle(0.0, &[], &[DeviceId(0)]).unwrap();
+            if reset_in_settle {
+                assert_eq!(k.driver(d0).committed(), None, "the settle's reset applied");
+                // The first pass resolves everything and commits; the second
+                // resets, and must resolve after it.
+                assert!(k.solver.seen.len() >= 2, "a resolve after the settle's reset: {:?}", k.solver.seen);
+                continue;
+            }
+            assert_eq!(k.driver(d0).committed(), Some(High));
+            let before = k.solver.seen.len();
+            k.advance(2.0).unwrap();
+            assert_eq!(k.driver(d0).committed(), None, "the reset at t = 1 applied");
+            assert!(k.solver.seen[before..].iter().any(|(t, _)| *t == 1.0), "a resolve at the reset's instant: {:?}", &k.solver.seen[before..]);
+        }
     }
 
     // ---- decision 8: settle -----------------------------------------------
