@@ -3085,8 +3085,11 @@ Constants, all from P3:35-38 unless marked new:
    `a_cc_hub_seed_publishes_its_draw_at_the_power_its_solve_held` (178),
    `a_cc_hub_seed_near_a_power_edge_lets_the_rail_move` (bc_ic 6 hub 2) and
    `a_cc_hub_seed_with_a_capacitor_path_off_the_rail_publishes_the_draw_its_rail_row_holds`
-   (603). A CC rail with capacitors (ruling R42) is not covered: Known
-   follow-ups (W1g).
+   (603). On a CC rail with capacitors (ruling R68) the seed's rail row
+   also holds their current at the seed, `(u - q) / esr_eff` from the
+   charge `q` they hold, and its draw is the row's less that current; at
+   `esr_eff = 0` the rail is the charge itself and the draw is read as off
+   a CC rail (the CC step with a rail capacitor, below).
 
    **The CC step** (FXF, after G2bv's frozen tab). While a bench PSU with
    no rail capacitor is in CC, the rail is set by the draws alone, so it
@@ -3153,6 +3156,50 @@ Constants, all from P3:35-38 unless marked new:
    base build is (21.9x) and exact mode against the reference (16.2x): a
    1 mV step-controller error on the capacitor through the LED's
    exponential.
+
+   **The CC step with a rail capacitor** (ruling R68, superseding R47 (a)
+   for this case; F5c's R42 prototype, ported). With rail capacitors the
+   CC rail was the capacitors' segment, a boundary over each step, and a
+   stepped hub partition's draw was held on it linearised (the frozen
+   form): a partition coupled to the rail through microfarads of small esr
+   took the rail's microsecond motion as a draw it could not follow. The
+   cold fuzz's 347 tpl 5 (a {3.08 V, 332 mA} PSU, 1.75 uF of rail capacitor
+   behind 4.74 Ω, 562 uF on a switch contact to the rail and 12.6 mF from
+   a second node to it, 0.67 uF of 19 mΩ to a third) ran 2824 W0 off its
+   fine reference in the start-up inrush and 239 W0 after a switch's CC
+   entry, where exact mode at the same host stops is within 3.6. So while
+   no closed-form hub partition is active on the rail (their coupled path
+   is the segment then, which a step holding them frozen would not keep),
+   the CC step also carries the capacitors (`stepped::RailCap`): from
+   their C-weighted charge `q` and current `i` at the step's start, `u =
+   q' + esr_eff i'` with `C_rail q' = C_rail q + h i'` (backward Euler) or
+   `+ h (i + i') / 2` (the trapezoid), a companion of `1 / (esr_eff + h /
+   C_rail)` (or `h / 2 C_rail`) on the rail row; the step doubling compares
+   the two charges as it compares a capacitor's, and the second half starts
+   from the charge the first left. A step starts from its partition's own
+   last committed charge when it starts there, else from the segment's
+   charge at its start. Each commit keeps its charge, and the latest hands
+   it to the rail solve after it in place of the segment's, once
+   (`SteppedSolver::take_rail_charge`); the step's other terms are summed
+   afresh from the contributions, not read from the running sums (F5c: a
+   step cut inside an inrush handed the rail 5e15 S, whose removal left
+   0.4 A of rounding in them). At a CC entry a hub partition already
+   standing at the instant plans its pending trial again on the CC rail
+   (`SteppedSolver::replan`): solved against the rail before the entry as a
+   boundary, and past no band when linear, it went on to commit that trial
+   in CC (347 tpl 5's load stepped 10 ns at the setpoint, 30 uC into 562
+   uF through a 332 mA limit). It keeps its state and sensitivity: a
+   re-seed changes the draw's rounding, which solves the rail again, and a
+   rail capacitor of no esr entered at the setpoint, the rail its charge,
+   leaves CC at once there (CC and CV in turn for the loop's 50 passes on
+   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). One stepped
+   partition on such a rail now steps with it as exact mode does (within
+   0.4 W0 of the fine reference where the frozen form was 650 W0 off,
+   `a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it`); with two,
+   each holds the other's draw where it last committed, the coupling error
+   of two stepped partitions on one CC rail above (rulings R32, R37, R39),
+   up to 21 W0 on R68's two-partition board against 3632 before
+   (`two_stepped_hub_partitions_on_a_cc_rail_capacitor_keep_near_the_fine_reference`).
 
    **Superseded events** (F1r11, after V9's MEDIUM 3). A host advancing
    every few nanoseconds through a CC ramp solves the rail at each horizon
@@ -3755,7 +3802,10 @@ Constants, all from P3:35-38 unless marked new:
    source's edge counter and level, the pending `Rail` and `Source` events,
    and the device-state buffer; from F5, the power-hold table and each
    hold's release (W1c point 1a), and with the hub's state its held draws
-   (ruling R44 (a)) and HG1's count. A hold the static solver took in the
+   (ruling R44 (a)) and HG1's count; from R68, each stepped hub
+   partition's committed rail-capacitor charge and its pending trial's, and
+   the charge the latest commit hands the rail solve (pin
+   `a_rolled_back_instant_restores_the_cc_rail_capacitors_charge_a_stepped_commit_hands_over`). A hold the static solver took in the
    failed instant is undone with it, and so is the retry's arming, in the
    owner and in the static solver (pin
    `a_retry_taken_in_an_instant_that_then_fails_is_armed_again`). The

@@ -160,6 +160,9 @@ struct StepResult {
     lu: Option<LuFactorization>,
     /// On a CC rail ([`CcStep`]), the rail the step solved at its end.
     u: Option<f64>,
+    /// On a CC rail with capacitors ([`CapStep`]), their C-weighted charge
+    /// (as a rail voltage) and current at the step's end.
+    rail_q: Option<(f64, f64)>,
 }
 
 /// A bench PSU in CC with no rail capacitor, as the stepped hub partitions
@@ -187,13 +190,93 @@ pub(crate) struct CcRail {
     pub a_all: f64,
     pub g_all: f64,
     pub own: Vec<(usize, f64, f64)>,
+    /// The rail capacitors, when there are any (ruling R68): stepped with
+    /// the partition as a companion on its rail row ([`CapStep`]).
+    pub cap: Option<RailCap>,
+}
+
+/// A CC rail's capacitors as a stepped hub partition steps against them
+/// (README, Rails point 4, ruling R68): their summed capacitance and
+/// `esr_eff`, and the segment their C-weighted charge `q` follows between
+/// rail solves, from which a step that does not start at a commit of its
+/// own reads it. Held as the segment's frozen form instead, a partition
+/// coupled to the rail through microfarads of small esr took the rail's
+/// microsecond motion as a linearised draw: the cold fuzz's 347 tpl 5 ran
+/// 2824 W0 off a fine reference in its start-up inrush and 239 W0 after a
+/// CC entry, where exact mode is within 3.6.
+#[derive(Debug, Clone)]
+pub(crate) struct RailCap {
+    pub c: f64,
+    pub esr: f64,
+    pub seg: crate::rails::CapSeg,
+}
+
+/// [`RailCap`] at a step's start: the charge `q` (as a rail voltage) and
+/// the capacitors' current `i` there (the trapezoid's), with `C` and
+/// `esr_eff`. Over the step `u = q' + esr i'` and `C q' = C q + h i'`
+/// (backward Euler) or `+ h (i + i') / 2` (trapezoid): a companion of
+/// conductance `1 / (esr + h / C)` (or `h / 2C`) on the rail row. A seed
+/// holds the charge, `u = q + esr i'`, the rail `q` itself at `esr = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CapStep {
+    c: f64,
+    esr: f64,
+    q: f64,
+    i: f64,
+}
+
+impl CapStep {
+    /// The companion `(g, q_eff)` of the capacitors over `h` (a seed's at
+    /// `None`): their current is `g (u - q_eff)`. `None` at a seed with
+    /// `esr = 0`, where `u = q`.
+    fn companion(&self, h: Option<f64>, method: Method) -> Option<(f64, f64)> {
+        match h {
+            None => (self.esr > 0.0).then(|| (1.0 / self.esr, self.q)),
+            Some(h) => Some(match method {
+                Method::Be => (1.0 / (self.esr + h / self.c), self.q),
+                Method::Trap => (1.0 / (self.esr + h / (2.0 * self.c)), self.q + h * self.i / (2.0 * self.c)),
+            }),
+        }
+    }
+
+    /// The charge and current at the end of a step over `h` to rail `u`.
+    fn end(&self, h: f64, method: Method, u: f64) -> (f64, f64) {
+        let (g, q_eff) = self.companion(Some(h), method).expect("a step has a companion");
+        let i = g * (u - q_eff);
+        let q = match method {
+            Method::Be => self.q + h * i / self.c,
+            Method::Trap => self.q + h * (i + self.i) / (2.0 * self.c),
+        };
+        (q, i)
+    }
 }
 
 impl CcRail {
-    fn step(&self, p: usize, u0: f64) -> CcStep {
+    /// Partition `p`'s view at its step's start `t`, the rail at `u0`;
+    /// `committed` the rail charge `(t, q, i)` where it last stood (its last
+    /// commit or seed on such a rail). The charge at `t` is the segment's
+    /// when the segment was aimed by then: the rail the loop solved holds
+    /// it, while a partition's own commit at that instant may have been
+    /// superseded by another's (cold 517 tpl 5: two seeded at a rail each
+    /// solved from its own charge, 0.02 V and 0.64 V, and one re-solved past
+    /// its band for the loop's 50 passes). Otherwise the partition's own
+    /// charge there is the one it stands at: a segment aimed before `t` is
+    /// the frozen form's estimate since, which its own commit at `t`
+    /// replaces, and one aimed after `t` no longer knows `t`.
+    fn step(&self, p: usize, u0: f64, t: f64, committed: Option<(f64, f64, f64)>) -> CcStep {
         let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
         let coupled = self.own.iter().any(|o| o.0 != p);
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false }
+        let cap = self.cap.as_ref().map(|rc| {
+            let (q, i) = match committed {
+                Some((tc, q, i)) if tc == t && t != rc.seg.t0 => (q, i),
+                _ => {
+                    let at = t.max(rc.seg.t0);
+                    (rc.seg.charge_at(at), rc.c * rc.seg.charge_slope_at(at))
+                }
+            };
+            CapStep { c: rc.c, esr: rc.esr, q, i }
+        });
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false, cap }
     }
 }
 
@@ -218,6 +301,8 @@ struct CcStep {
     /// Solved in CV, the rail at `v` (`take_cc_step`'s `cv`): a horizon
     /// clamp's steps after one that left CC (`Partition::cc_exited`).
     cv: bool,
+    /// The rail capacitors at the step's start (ruling R68).
+    cap: Option<CapStep>,
 }
 
 impl CcStep {
@@ -406,7 +491,7 @@ fn solve_step(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None })
 }
 
 /// [`take_step`] on a CC rail ([`CcRail`]): the rail is unknown `n`, its row
@@ -439,6 +524,7 @@ fn take_cc_step(
     let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, at).with_ext(cc.rail, n).hold_power_at(cc.u0);
     let linear = !ic_ctx.iterated;
     let balance = (cc.seed && !cv).then(|| rail_capacitors(shape, &bnd)).flatten().map(|(caps, nodes)| ChargeBalance { caps, nodes });
+    let cap = cc.cap.filter(|_| !cv);
     let solve = |newton_iters: &mut u64| -> Result<(Vec<f64>, LuFactorization), StepError> {
         let mut z0: Vec<f64> = x_from[..n].to_vec();
         z0.push(if cv { cc.v } else { cc.u0 });
@@ -453,8 +539,23 @@ fn take_cc_step(
                 if let Some(balance) = &balance {
                     b[n] = balance.row(shape, live_params, h, vc_from, ic_ctx, &bnd, z, &mut a[row..row + size]);
                 }
-                a[row + n] += cc.g_o;
-                b[n] += cc.dl - cc.a_o;
+                match cap {
+                    // A seed on an esr-0 rail capacitor: the rail is its
+                    // charge, which an instant does not move.
+                    Some(c) if cc.seed && c.companion(None, method).is_none() => {
+                        a[row..row + size].fill(0.0);
+                        a[row + n] = 1.0;
+                        b[n] = c.q;
+                    }
+                    _ => {
+                        a[row + n] += cc.g_o;
+                        b[n] += cc.dl - cc.a_o;
+                        if let Some((g, q)) = cap.and_then(|c| c.companion((!cc.seed).then_some(h), method)) {
+                            a[row + n] += g;
+                            b[n] += g * q;
+                        }
+                    }
+                }
             }
         };
         let (result, mut factors) = newton::solve_keeping_factors(size, size, &z0, linear, true, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
@@ -516,7 +617,8 @@ fn take_cc_step(
     };
     let u = z[n];
     z.truncate(n);
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u) })
+    let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q })
 }
 
 /// One step's network, every element about `x`: the linear base, each
@@ -828,6 +930,11 @@ struct Partition {
     /// trial's end.
     i_src: f64,
     pend_i_src: f64,
+    /// On a CC rail with capacitors (ruling R68): their charge and current
+    /// at the pending trial's end, and at the last commit `(t, q, i)`, from
+    /// which the partition's next step starts when it starts there.
+    pend_rail_q: Option<(f64, f64)>,
+    rail_q: Option<(f64, f64, f64)>,
     /// Ruling R59 (1) (B): a closed-form hub partition that steps only while
     /// its PSU is in CC (`PartitionBuild::cc_switch`) is parked here in CV:
     /// nothing steps, publishes or schedules it, and its events are stale.
@@ -934,6 +1041,8 @@ impl Partition {
             pend_charge: 0.0,
             i_src: 0.0,
             pend_i_src: 0.0,
+            pend_rail_q: None,
+            rail_q: None,
             parked: false,
             cc_exited: false,
             cc_switch: false,
@@ -951,6 +1060,7 @@ impl Partition {
 pub struct Snapshot {
     partitions: HashMap<usize, PartitionSnapshot>,
     scheduled: Vec<(f64, usize, u64)>,
+    rail_charge: Option<(f64, f64)>,
 }
 
 impl Snapshot {
@@ -959,7 +1069,7 @@ impl Snapshot {
     #[cfg(test)]
     pub(crate) fn digest(&self) -> String {
         let ordered: std::collections::BTreeMap<_, _> = self.partitions.iter().collect();
-        format!("{ordered:?} {:?}", self.scheduled)
+        format!("{ordered:?} {:?} {:?}", self.scheduled, self.rail_charge)
     }
 }
 
@@ -991,6 +1101,8 @@ struct PartitionSnapshot {
     pend_charge: f64,
     i_src: f64,
     pend_i_src: f64,
+    pend_rail_q: Option<(f64, f64)>,
+    rail_q: Option<(f64, f64, f64)>,
     #[cfg(test)]
     pend_mid: MidHalf,
 }
@@ -1024,6 +1136,8 @@ impl PartitionSnapshot {
         self.pend_charge = part.pend_charge;
         self.i_src = part.i_src;
         self.pend_i_src = part.pend_i_src;
+        self.pend_rail_q = part.pend_rail_q;
+        self.rail_q = part.rail_q;
         #[cfg(test)]
         self.pend_mid.clone_from(&part.pend_mid);
     }
@@ -1040,6 +1154,8 @@ impl PartitionSnapshot {
         part.pend_charge = self.pend_charge;
         part.i_src = self.i_src;
         part.pend_i_src = self.pend_i_src;
+        part.pend_rail_q = self.pend_rail_q;
+        part.rail_q = self.rail_q;
         #[cfg(test)]
         part.pend_mid.clone_from(&self.pend_mid);
     }
@@ -1116,6 +1232,13 @@ pub struct SteppedSolver {
     /// Set while `catch_up_on_cc_rail` brings a partition to a CC exit: the
     /// CC rail its steps take in place of `cc`'s.
     cc_held: Option<CcStep>,
+    /// The rail capacitors' charge `(t, q)` the latest commit of a stepped
+    /// hub partition on a CC rail with capacitors stepped them to (ruling
+    /// R68), for the rail solve after it in place of the segment's, which
+    /// held that partition's draw linearised over the step. Taken by that
+    /// solve; saved at the window's start for a rollback.
+    rail_charge: Option<(f64, f64)>,
+    window_rail_charge: Option<(f64, f64)>,
     /// Set while `sync_partition` steps a partition to its horizon.
     clamp: bool,
     /// The partitions the owner's `resolve_dirty` re-solves only because
@@ -1230,6 +1353,8 @@ impl SteppedSolver {
             journal: Vec::new(),
             spare: Vec::new(),
             window_scheduled: Vec::new(),
+            rail_charge: None,
+            window_rail_charge: None,
             rail: topo.rail,
             ramps: None,
             exact: None,
@@ -1406,6 +1531,36 @@ impl SteppedSolver {
         Ok(())
     }
 
+    /// Ruling R68: each of `ids` committed at `now` with a trial pending is
+    /// planned again from `now` against the rail the owner handed (`cc`),
+    /// its state, sensitivity and step kept. A CC entry at an instant where
+    /// a hub partition already stands left its trial as it was solved
+    /// against the rail before the entry as a boundary, and a linear one is
+    /// past no band, so it went on to commit that trial in CC: cold 347 tpl
+    /// 5's load stepped 10 ns at the 3.08 V setpoint, 30 uC into 562 uF
+    /// through a 332 mA limit. A re-seed instead changes the draw's rounding,
+    /// which solves the rail again, and a rail capacitor of no esr entered
+    /// at the setpoint leaves CC at once there (the rail is its charge):
+    /// CC and CV in turn for the loop's 50 passes. Returns the partitions
+    /// planned again.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replan(&mut self, ids: &[usize], now: f64, catchup_drivers: &[Driver], drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64], readers: &mut Vec<DeviceId>) -> Result<Vec<usize>, String> {
+        let mut planned = Vec::new();
+        for &p in ids {
+            if !self.partitions.get(&p).is_some_and(|part| !part.parked && part.has_pend && part.t == now) {
+                continue;
+            }
+            self.journal(p);
+            let part = self.partitions.get_mut(&p).unwrap();
+            // The trial's `Step` event goes stale with it.
+            part.has_pend = false;
+            part.version += 1;
+            self.plan_and_schedule(p, now, catchup_drivers, drivers, live_params, voltages, currents, readers)?;
+            planned.push(p);
+        }
+        Ok(planned)
+    }
+
     /// A CC exit at an internal event (the PSU left CC at a rail solve at
     /// `now` that an event other than this partition's own step brought
     /// about): each of `ids` still short of `now` whose pending trial was
@@ -1428,6 +1583,13 @@ impl SteppedSolver {
             moved.push(p);
         }
         Ok(moved)
+    }
+
+    /// The rail capacitors' charge the latest stepped commit handed the rail
+    /// solve at `now` ([`Self::rail_charge`]), taken once; one handed at an
+    /// earlier instant is stale and dropped.
+    pub(crate) fn take_rail_charge(&mut self, now: f64) -> Option<f64> {
+        self.rail_charge.take().filter(|&(t, _)| t == now).map(|(_, q)| q)
     }
 
     /// The committed state of partition `p`: its time and its own node
@@ -1574,6 +1736,9 @@ impl SteppedSolver {
             self.bills.push((self.partitions[&p].pend_t, charge));
         }
         Self::commit(self.partitions.get_mut(&p).unwrap());
+        if let Some((t, q, _)) = self.partitions[&p].rail_q {
+            self.rail_charge = Some((t, q));
+        }
         #[cfg(test)]
         self.commit_log.push((p, self.partitions[&p].t));
         #[cfg(test)]
@@ -1641,6 +1806,13 @@ impl SteppedSolver {
     /// used, only that its NUMBERS came out right.
     /// Whether `partition` has a pending trial (test-only introspection).
     #[cfg(test)]
+    /// The rail charge handed to the rail solve, and partition `p`'s own
+    /// last committed one (ruling R68).
+    #[cfg(test)]
+    pub(crate) fn debug_rail_charge(&self, p: usize) -> (Option<(f64, f64)>, Option<(f64, f64, f64)>) {
+        (self.rail_charge, self.partitions.get(&p).and_then(|part| part.rail_q))
+    }
+
     pub(crate) fn debug_has_pend(&self, partition: usize) -> bool {
         self.partitions.get(&partition).is_some_and(|p| p.has_pend)
     }
@@ -1699,7 +1871,10 @@ impl SteppedSolver {
             // the rail (cold fuzz 456: a gate's output on it, 13 ohm and an
             // LED off it) re-solved to the same three rails in turn.
             let cc = match (&self.cc, hub, self.exact) {
-                (Some(cc), true, None) => Some(CcStep { seed: true, ..cc.step(p_idx, voltages[cc.rail]) }),
+                (Some(cc), true, None) => {
+                    let part = &self.partitions[&p_idx];
+                    Some(CcStep { seed: true, ..cc.step(p_idx, voltages[cc.rail], now, part.rail_q) })
+                }
                 _ => None,
             };
             let ic_ctx = IcStampCtx {
@@ -1744,6 +1919,15 @@ impl SteppedSolver {
                 // Euler, whose bill reads only its end current (`plan_step`).
                 part.x = seed.x;
                 part.i_prev = seed.i;
+                // A seed holds the rail capacitors' charge where it stands
+                // (ruling R68): the next step starts from it. Read from the
+                // segment at a later step's start instead, a step from before
+                // the segment's aim took a charge from after it (the cold
+                // fuzz's 517 tpl 5 at load: 0.025 V against 0, a step of 20 fs
+                // carried the rail to 0.65 V and the loop did not settle).
+                if let Some(c) = cc.and_then(|c| c.cap) {
+                    part.rail_q = Some((now, c.q, c.i));
+                }
                 seed_sens = seed.lu;
                 seed_u = seed.u;
             }
@@ -1770,7 +1954,11 @@ impl SteppedSolver {
                 // re-seeds it as any other (H8).
                 let mut sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, voltages[rail], &lu)?;
                 let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, now).with_ext(rail, x.len()).hold_power_at(voltages[rail]);
-                if let (Some(cc), Some(_)) = (ic_ctx.cc, seed_u) {
+                // With rail capacitors (ruling R68) the row also holds their
+                // current at the seed, `(u - q) / esr`; at `esr = 0` the row
+                // is the charge alone and the draw is read as off a CC rail.
+                let seed_cap = ic_ctx.cc.and_then(|cc| cc.cap).map(|c| c.companion(None, Method::Be).map(|(g, q)| g * (u - q)));
+                if let (Some(cc), Some(_), None | Some(Some(_))) = (ic_ctx.cc, seed_u, seed_cap) {
                     // On a CC rail, the draw its rail row held at `u`: the
                     // loop solves the rail from it and the rest's draw, and
                     // so finds `u` again. Read from the stamp instead, its
@@ -1780,7 +1968,7 @@ impl SteppedSolver {
                     // tpl 3: 1.33 mF from the rail to a node 5.5 uF holds,
                     // 5.2e-7 A over the row's draw, the loop's rail 1.4 uV
                     // under the seed's for 50 passes).
-                    sens.i = cc.dl - cc.a_o - cc.g_o * u;
+                    sens.i = cc.dl - cc.a_o - cc.g_o * u - seed_cap.flatten().unwrap_or(0.0);
                 } else if let Some((caps, nodes)) = rail_capacitors(&part.shape, &bnd) {
                     let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
                     sens.i = ChargeBalance { caps, nodes }.draw(&part.shape, live_params, SEED_H, &vc_from, &ic_ctx, &bnd, &z);
@@ -1918,6 +2106,7 @@ impl SteppedSolver {
     pub(crate) fn begin_window(&mut self) {
         self.window = true;
         self.window_scheduled.clone_from(&self.scheduled);
+        self.window_rail_charge = self.rail_charge;
         #[cfg(test)]
         {
             self.w_saved = Some(self.partitions.iter().map(|(&p, part)| (p, Self::state_digest(part))).collect());
@@ -1975,6 +2164,7 @@ impl SteppedSolver {
     /// of steps to schedule, go back to what the window found.
     pub(crate) fn rollback_window(&mut self) {
         self.scheduled.clone_from(&self.window_scheduled);
+        self.rail_charge = self.window_rail_charge;
         self.deferred.clear();
         self.bills.clear();
         self.window = false;
@@ -2047,6 +2237,8 @@ impl SteppedSolver {
                             pend_charge: part.pend_charge,
                             i_src: part.i_src,
                             pend_i_src: part.pend_i_src,
+                            pend_rail_q: part.pend_rail_q,
+                            rail_q: part.rail_q,
                             #[cfg(test)]
                             pend_mid: part.pend_mid.clone(),
                         },
@@ -2054,11 +2246,13 @@ impl SteppedSolver {
                 })
                 .collect(),
             scheduled: self.scheduled.clone(),
+            rail_charge: self.rail_charge,
         }
     }
 
     pub fn restore(&mut self, snapshot: Snapshot) {
         self.scheduled = snapshot.scheduled;
+        self.rail_charge = snapshot.rail_charge;
         self.deferred.clear();
         self.bills.clear();
         for (p, s) in snapshot.partitions {
@@ -2089,6 +2283,8 @@ impl SteppedSolver {
                 part.pend_charge = s.pend_charge;
                 part.i_src = s.i_src;
                 part.pend_i_src = s.pend_i_src;
+                part.pend_rail_q = s.pend_rail_q;
+                part.rail_q = s.rail_q;
                 #[cfg(test)]
                 {
                     part.pend_mid = s.pend_mid;
@@ -2163,6 +2359,7 @@ impl SteppedSolver {
         part.vc = std::mem::take(&mut part.pend_vc);
         part.i_prev = std::mem::take(&mut part.pend_i);
         part.i_src = part.pend_i_src;
+        part.rail_q = part.pend_rail_q.map(|(q, i)| (part.t, q, i));
         part.be_next_step = false;
         part.steps_taken += 1;
     }
@@ -2358,7 +2555,10 @@ impl SteppedSolver {
         let billed = exact.filter(|e| e.partition == p_idx && self.cell.is_some());
         let cc = match (self.cc_held, &self.cc, self.partitions[&p_idx].hub, exact) {
             (Some(held), _, true, None) => Some(held),
-            (None, Some(cc), true, None) => Some(cc.step(p_idx, voltages[cc.rail])),
+            (None, Some(cc), true, None) => {
+                let part = &self.partitions[&p_idx];
+                Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q))
+            }
             _ => None,
         };
         let clamp = self.clamp;
@@ -2565,6 +2765,7 @@ impl SteppedSolver {
         part.pend_h = h;
         part.pend_method = method;
         part.pend_cc = ic_ctx.cc;
+        part.pend_rail_q = accepted.rail_q;
         part.pend_t = part.t + h;
         part.has_pend = true;
         part.version += 1;
@@ -2596,7 +2797,10 @@ fn attempt_step(
     }
     let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
     let mid = take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0)?;
-    let fine = take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, ic_ctx, t0 + h)?;
+    // The second half starts from the rail capacitors' charge the first
+    // left (ruling R68).
+    let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(mid.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
+    let fine = take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, &second, t0 + h)?;
 
     let mut ratio = 0.0f64;
     for k in 0..shape_n {
@@ -2610,6 +2814,9 @@ fn attempt_step(
         if r > ratio {
             ratio = r;
         }
+    }
+    if let (Some((qc, _)), Some((qf, _))) = (coarse.rail_q, fine.rail_q) {
+        ratio = ratio.max(rel_error(qc, qf));
     }
     Ok((fine, ratio, Some(mid)))
 }

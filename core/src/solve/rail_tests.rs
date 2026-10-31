@@ -12535,3 +12535,143 @@ fn a_power_edge_at_the_setpoint_is_a_landing() {
         }
     }
 }
+
+// ---- R68: stepped hub partitions on a CC rail with a rail capacitor ------
+
+/// Every node voltage of `p` at each of `samples`, the host advancing in
+/// slices of at most `slice` (0: straight to each sample) and setting each
+/// `(t, device, value)` of `toggles` once it reaches `t` (each toggle time
+/// is a host stop).
+fn sampled_toggling(p: &Program, samples: &[f64], slice: f64, toggles: &[(f64, u32, f64)]) -> Vec<Vec<f64>> {
+    let mut e = Engine::load(p).unwrap_or_else(|err| panic!("load: {} {}", err.code, err.message));
+    let mut out = Vec::new();
+    let (mut t, mut ev) = (0.0f64, 0usize);
+    for &s in samples {
+        while t < s {
+            let mut next = if slice > 0.0 { (t + slice).min(s) } else { s };
+            if ev < toggles.len() && toggles[ev].0 <= next {
+                next = toggles[ev].0;
+            }
+            e.advance(next).unwrap_or_else(|err| panic!("{} at {next}: {}", err.code, err.message));
+            t = next;
+            while ev < toggles.len() && toggles[ev].0 <= t {
+                e.set_params(&[(toggles[ev].1, 0, toggles[ev].2)]).unwrap_or_else(|err| panic!("toggle at {t}: {} {}", err.code, err.message));
+                ev += 1;
+            }
+        }
+        out.push(e.voltages().to_vec());
+    }
+    out
+}
+
+/// Ruling R68's board, after the cold fuzz's seed 347 tpl 5: a {3.08 V,
+/// 332 mA} PSU with a 1.75 uF rail capacitor (esr 4.74 ohm); one stepped hub
+/// partition of 562 uF on node 3 (switch 7 to the rail, switch 8 to ground)
+/// and 12.6 mF from node 4 to the rail, a second of 0.67 uF (esr 19 mohm)
+/// and 1.59 uF from node 6 to the rail, with 2.7 kohm to ground.
+fn railcap_two_stepped() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![3.082145317580972, 0.3322620969472558], vec![]),
+        fz(3, 1, &[0, 1], vec![1.7542530827047273e-6, 4.737497116656414, 0.0], vec![]),
+        fz(3, 2, &[0, 3], vec![0.0005624182743411655, 0.0, 0.0], vec![]),
+        fz(1, 3, &[3, 0], vec![11.623632299319503], vec![]),
+        fz(3, 4, &[4, 1], vec![0.012643318391908064, 0.2512880456384814, 0.0], vec![]),
+        fz(1, 5, &[3, 4], vec![3.756401430443622], vec![]),
+        fz(1, 6, &[4, 0], vec![437778.79028702184], vec![]),
+        fz(4, 7, &[1, 3], vec![1.0], vec![]),
+        fz(4, 8, &[0, 3], vec![0.0], vec![]),
+        fz(3, 9, &[6, 1], vec![6.653681533285178e-7, 0.01866792533169424, 0.0], vec![]),
+        fz(3, 10, &[6, 1], vec![1.5923609781871292e-6, 4.227183789546719, 0.0], vec![]),
+        fz(1, 11, &[6, 0], vec![2685.7512596001907], vec![]),
+    ]
+}
+
+/// [`railcap_two_stepped`] under the trapezoid, with `one`: node 6's
+/// capacitors to ground, so one stepped hub partition is on the rail.
+fn railcap_board(one: bool) -> Program {
+    let mut devices = railcap_two_stepped();
+    if one {
+        devices[9].pins[1] = pin(0);
+        devices[10].pins[1] = pin(0);
+    }
+    let mut p = program(7, devices);
+    p.options.integration = 1;
+    p
+}
+
+/// [`railcap_board`]'s host: the start-up inrush in CC, switch 7 opening at
+/// 25 ms, and switch 8 shorting node 3's 562 uF at 30.0001 ms, which drags
+/// the rail into CC through the 12.6 mF.
+const RAILCAP_SAMPLES: [f64; 14] = [0.002, 0.004, 0.006, 0.01, 0.02, 0.03, 0.0300004, 0.030001, 0.03001, 0.0301, 0.031, 0.035, 0.04, 0.05];
+const RAILCAP_TOGGLES: [(f64, u32, f64); 2] = [(0.025, 7, 0.0), (0.0300001, 8, 1.0)];
+
+/// The worst node's distance from the fine reference (exact mode in 1 us
+/// host slices) at each of [`RAILCAP_SAMPLES`], default mode advanced
+/// straight to each.
+fn railcap_offsets(one: bool) -> Vec<f64> {
+    let want = sampled_toggling(&exact(railcap_board(one)), &RAILCAP_SAMPLES, 1e-6, &RAILCAP_TOGGLES);
+    let got = sampled_toggling(&railcap_board(one), &RAILCAP_SAMPLES, 0.0, &RAILCAP_TOGGLES);
+    (0..RAILCAP_SAMPLES.len()).map(|k| worst_w0(&got[k..=k], &want[k..=k])).collect()
+}
+
+#[test]
+fn a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it() {
+    // Ruling R68 (Rails point 4, the CC step). With a rail capacitor the CC
+    // step's rail was a boundary, the capacitors' segment, and the stepped
+    // partition's draw was held on it linearised: 562 uF on a 1 mohm contact
+    // and 12.6 mF from the rail stepped against a rail that moved with them.
+    // Stepping the capacitors with the partition, the rail one of its
+    // unknowns, default mode keeps to the fine reference as exact mode does
+    // (within 0.4 W0 at every sample).
+    let offs = railcap_offsets(true);
+    for (k, &t) in RAILCAP_SAMPLES.iter().enumerate() {
+        assert!(offs[k] <= 1.0, "at {t} s: {:.2} W0 off the fine reference (all: {offs:.2?})", offs[k]);
+    }
+}
+
+#[test]
+fn two_stepped_hub_partitions_on_a_cc_rail_capacitor_keep_near_the_fine_reference() {
+    // Ruling R68: cold 347 tpl 5's shape, both stepped partitions on a CC
+    // rail with a capacitor. Each held the other's and its own draw
+    // linearised on the capacitors' segment: thousands of W0 off the fine
+    // reference in the start-up inrush and hundreds after the switch's CC
+    // entry. Each now steps the capacitors with it, the other's draw held
+    // where it last committed, which is the coupling error of two stepped
+    // partitions on one CC rail (rulings R32, R37, R39; perf round 3), up to
+    // 21 W0 a microsecond after the short, where exact mode is within 0.8.
+    let offs = railcap_offsets(false);
+    for (k, &t) in RAILCAP_SAMPLES.iter().enumerate() {
+        let bound = if t < 0.03 { 5.0 } else { 25.0 };
+        assert!(offs[k] <= bound, "at {t} s: {:.2} W0 off the fine reference, over {bound} (all: {offs:.2?})", offs[k]);
+    }
+}
+
+#[test]
+fn a_rolled_back_instant_restores_the_cc_rail_capacitors_charge_a_stepped_commit_hands_over() {
+    // Ruling R68, Rails point 8. In the start-up inrush in CC, a horizon
+    // clamp brings node 3's stepped partition through steps that carry the
+    // rail capacitors with it, each commit keeping their charge and handing
+    // the latest to the rail solve. A rollback puts each partition's
+    // committed charge and the hand-off back with everything else, and the
+    // run goes on as a twin's that never took the window.
+    let p = railcap_board(false);
+    let (mut rig, mut twin) = (Rig::load(&p).unwrap(), Rig::load(&p).unwrap());
+    let part = rig.s().local_index[3].unwrap().0;
+    rig.advance(2e-3).unwrap();
+    twin.advance(2e-3).unwrap();
+    assert_eq!(rig.hub().state.reg, Regime::Cc, "the inrush is in CC");
+    let before = state_digest(rig.s());
+    let charge_before = rig.s().stepped.debug_rail_charge(part);
+    let s = rig.k.solver_mut();
+    let token = s.begin_instant();
+    s.sync_dynamic_to(2.5e-3).unwrap();
+    let during = s.stepped.debug_rail_charge(part);
+    assert!(during.1.is_some_and(|(t, _, _)| t == 2.5e-3), "the clamp's last commit keeps the charge: {during:?}");
+    assert_ne!(during, charge_before, "the window moved the charges");
+    s.rollback_instant(token);
+    assert_eq!(rig.s().stepped.debug_rail_charge(part), charge_before, "the charges");
+    assert_eq!(state_digest(rig.s()), before, "every piece of state");
+    rig.advance(4e-3).unwrap();
+    twin.advance(4e-3).unwrap();
+    assert_eq!(state_digest(rig.s()), state_digest(twin.s()), "it goes on like the twin");
+}
