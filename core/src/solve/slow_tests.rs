@@ -2111,3 +2111,61 @@ fn a_kind_the_bound_does_not_cover_gets_no_bound() {
     let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 2, 0, 1e3), pot]);
     assert_eq!(span_of(&p), None, "an unknown kind must decline the bound");
 }
+
+// ---- ACC-E: the driver mirror across a fixed-pair republish ----------------
+
+/// A 5 V source (node 1), a resistor at twice its rating on the fixed pair
+/// 1-0 (it latches open at t = 1 s and its slow event republishes the fixed
+/// devices), and a 74LS04 whose 1A (node 2) is pulled up to the rail through
+/// 1 kohm and whose 1Y sits on node 3, held at 2.5 V by a second source: a
+/// driver on a fixed node, so no partition re-solves when it commits, and the
+/// one reading that shows its level is that source's current. (The other five
+/// gates read HIGH and pull ground LOW, which draws nothing.) The load
+/// settle's first pass finds 1A LOW (nothing has solved yet) and commits 1Y
+/// HIGH; its re-solve pulls 1A up, and the second pass commits 1Y LOW. The
+/// switch (2-0, open) is what makes a later kernel resolve.
+fn an_inverter_beside_a_latching_resistor() -> Program {
+    program(
+        4,
+        vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 0, 50.0),
+            rating(1, 0.25, 50.0),
+            ic(kinds::IC_74LS04, 3, 1, 0, [2, 3, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], 1e-8, 0),
+            resistor(4, 1, 2, 1e3),
+            switch(5, 2, 0, 0.0),
+            source(6, 3, 0, 2.5),
+        ],
+    )
+}
+
+/// The entries in which the solver's copy of the driver table differs from
+/// the kernel's.
+fn lagging_entries(rig: &Rig) -> Vec<usize> {
+    let s = rig.s();
+    (0..s.driver_snapshot.len()).filter(|&i| !same_driver(&s.driver_snapshot[i], rig.k.driver(crate::events::DriverId(i as u32)))).collect()
+}
+
+#[test]
+fn a_fixed_pair_republish_leaves_a_commit_the_solver_has_not_resolved_for_the_next_resolve() {
+    // Cold 64 tpl 5 (hub 2) in a debug build: "driver 0 changed without
+    // `driver_changing`". The settle's last commit lands on a fixed-node
+    // driver and no resolve follows it, so the kernel's notice for 1Y waits.
+    // The latch's republish resolved with the solver's own (older) table,
+    // which used the notice up; the next kernel resolve then found 1Y
+    // changed behind its back, and a release build kept 1Y HIGH for good.
+    let p = an_inverter_beside_a_latching_resistor();
+    let mut rig = Rig::load(&p);
+    assert_eq!(rig.k.driver(crate::events::DriverId(0)).committed(), Some(crate::events::Mode::Low), "1A is pulled up, 1Y is LOW");
+    let behind = lagging_entries(&rig);
+    assert!(behind.iter().all(|i| rig.s().stale.contains(&(*i as u32))), "every entry the solver's table lags in is noted: {behind:?}");
+    // Past the latch (a republish), then a resolve the kernel makes.
+    rig.advance(1.5);
+    assert!(rig.records(0).iter().any(|r| r[0] == 1.0 && r[1] == 1.0), "the resistor latched");
+    let behind = lagging_entries(&rig);
+    assert!(behind.iter().all(|i| rig.s().stale.contains(&(*i as u32))), "the republish kept every notice it could not deliver: {behind:?}");
+    rig.k.apply_params_as_event(&[(5, 0, 1.0)]).unwrap();
+    rig.advance(1.6);
+    assert_eq!(rig.k.driver(crate::events::DriverId(0)).committed(), Some(crate::events::Mode::High), "1A is grounded, 1Y is HIGH");
+    assert_eq!(lagging_entries(&rig), Vec::<usize>::new(), "the solver's table after the toggle");
+}

@@ -937,6 +937,37 @@ fn a_committed_level_the_kernel_changed_without_saying_so_is_caught_in_a_debug_b
 }
 
 #[test]
+fn a_resolve_handed_the_solvers_own_table_leaves_the_kernels_notices_for_the_next() {
+    // The slow republish (`settle.rs`'s `republish_fixed`) resolves with the
+    // solver's own `driver_snapshot`, the table as of the last resolve. A
+    // commit the kernel announced since is not in that table: the refresh
+    // must not count it as delivered, or the next real resolve finds the
+    // entry changed behind its back (cold 64 tpl 5, hub 2) and, in a release
+    // build, the solver keeps the old level for good.
+    let p = composite(a_floating_hash());
+    let (mut told, mut copying) = (Wired::new(&p, composite_drivers(), true), Wired::new(&p, composite_drivers(), false));
+    for w in [&mut told, &mut copying] {
+        w.resolve_all(0.0);
+        w.commit(0, High, 1e-5);
+        w.resolve_all(1e-5);
+    }
+    assert!(told.s.mirror_live && told.s.mirror_valid);
+    for w in [&mut told, &mut copying] {
+        let token = w.s.begin_instant();
+        w.commit(1, High, 2e-5);
+        let own = Rc::clone(&w.s.driver_snapshot);
+        w.s.resolve_dirty(&[], 2e-5, &own).unwrap();
+        w.s.end_instant(token);
+    }
+    assert_eq!(told.s.stale, vec![1], "the notice waits for a resolve with the kernel's table");
+    for w in [&mut told, &mut copying] {
+        w.resolve_all(3e-5);
+        assert!(w.s.driver_snapshot.iter().zip(&w.table).all(|(a, b)| same_driver(a, b)), "the solver's table is the kernel's");
+    }
+    assert_same(&told.s, &copying.s, "after the next resolve");
+}
+
+#[test]
 fn a_stepped_partitions_catch_up_sees_the_table_from_before_the_commit_when_the_mirror_refreshes_in_place() {
     let (p, table) = a_driver_on_a_stepped_ladder();
     let (mut told, mut copying) = (Wired::new(&p, table.clone(), true), Wired::new(&p, table, false));

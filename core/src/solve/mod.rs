@@ -2337,8 +2337,8 @@ fn fold_bound(bound: &mut f64, x: f64) {
 /// Whether two driver entries are the same in every field the solver reads (a
 /// debug build's check that the mirror agrees with the kernel's table: the
 /// pending transition and the token, which only a request changes, are not
-/// among them).
-#[cfg(debug_assertions)]
+/// among them), and the tests' check of the same in either build.
+#[cfg(any(debug_assertions, test))]
 fn same_driver(a: &Driver, b: &Driver) -> bool {
     a.node == b.node
         && a.hi_node == b.hi_node
@@ -4082,6 +4082,17 @@ impl PartitionedSolver {
     fn refresh_driver_snapshot(&mut self, drivers: &[Driver]) -> bool {
         self.activate_mirror_if_seen();
         self.call_patches.clear();
+        // A resolve handed this solver's own table (the slow republish,
+        // `settle.rs`'s `republish_fixed`) has nothing to refresh from: it is
+        // the table as of the last resolve, without the commits the kernel
+        // announced since. Draining `stale` against it would mark those as
+        // delivered, and the solver would keep their old levels until each
+        // changed again (cold 64 tpl 5, hub 2). In place with no patches,
+        // so a stepped catch-up in this call sees this same table as the
+        // one in force before it.
+        if std::ptr::eq(drivers.as_ptr(), self.driver_snapshot.as_ptr()) && drivers.len() == self.driver_snapshot.len() {
+            return true;
+        }
         let in_place = self.mirror_live
             && self.mirror_valid
             && self.driver_snapshot.len() == drivers.len()
