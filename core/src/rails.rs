@@ -69,7 +69,8 @@ pub const RAIL_NEWTON_MAX: u32 = 50;
 pub const RAIL_LOOP_MAX: u32 = 50;
 
 /// The error of a rail loop that did not settle within `RAIL_LOOP_MAX`
-/// passes, within one instant or (a rail capacitor's ping-pong) across them.
+/// passes (and could not hold a starving IC off, W1c point 1a), and of the
+/// no-progress guard's crawl across instants.
 pub fn loop_unsettled() -> String {
     format!("rail: the rail loop did not settle within {RAIL_LOOP_MAX} passes")
 }
@@ -1478,12 +1479,17 @@ pub struct RailState {
     pub updates: u64,
     /// A settle pass reads and clears this (Sources point 4).
     pub settle_changed: bool,
-    /// The power-gate ping-pong across instants (`w1f-power-gate-pingpong`):
-    /// how many `Rail` events in a row flipped the rail ICs' power gates, each
-    /// back to the gates the one before it flipped from, and the gates before
-    /// the last of them.
+    /// The power-gate ping-pong across instants (HG1): how many `Rail`
+    /// events in a row flipped the rail ICs' power gates, each back to the
+    /// gates the one before it flipped from (at the second, W1c point 1a's
+    /// hold procedure runs), and the gates before the last of them.
     pub gate_flips: u32,
     pub gates_before: Vec<bool>,
+    /// The rail ICs (device indices) held off on a CC rail capacitor's
+    /// segment, each with the draw its being powered adds, `dir` signed, from
+    /// the hold's probes (ruling R44 (a)): such a chip is released only where,
+    /// powered at its edge, it would still let the segment rise.
+    pub held_draw: Vec<(usize, f64)>,
 }
 
 /// The rail's counters (stats 14, 16-18, 20). Never rolled back.

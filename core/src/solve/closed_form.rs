@@ -1535,6 +1535,16 @@ impl ClosedFormSolver {
         for &node in &part.live_nodes {
             key.push(u8::from(ramps.is_some_and(|r| r.ramping[node])));
         }
+        // F5b: a held IC stamps nothing (W1c point 1a), so its hold is part
+        // of the stamp; only ICs not free are named, so a key with no hold is
+        // the key it always was.
+        for (k, (device, _)) in part.touch_ics.iter().enumerate() {
+            let hold = bnd.hold(*device);
+            if !hold.is_free() {
+                key.extend_from_slice(&(k as u32).to_le_bytes());
+                key.push(hold.kind.tag());
+            }
+        }
     }
 
     /// Builds this partition's segment for the current stamp — or reuses the

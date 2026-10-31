@@ -20,6 +20,7 @@
 
 pub mod closed_form;
 mod curvature;
+mod hold;
 mod hub;
 pub(crate) mod live;
 mod settle;
@@ -3336,6 +3337,8 @@ impl PartitionedSolver {
     /// are rolled back together), so a slot the resolve did not change
     /// already agrees. The debug build checks that claim on every call.
     fn copy_in_static(&mut self) {
+        // F5b: a hold the static solver took or released (W1c point 1a).
+        self.take_static_holds();
         let static_voltages = self.static_solver.voltages();
         for &node in self.static_solver.changed_nodes() {
             let new = static_voltages[node];
@@ -4233,7 +4236,9 @@ impl PartitionSolver for PartitionedSolver {
                 None => {}
             }
         }
-        self.end_gate_chase();
+        // F5b: a commit does not end HG1's count (`end_gate_chase`): the
+        // drivers that commit while a rail gate ping-pongs answer it (its own
+        // outputs, a zero-delay reader), they do not drive the rail.
         let mut readers = Vec::new();
         let result = self.resolve_dirty_with(&static_ids, &mut cf_ids, &mut st_ids, now, drivers, &mut readers);
         self.static_ids = static_ids;

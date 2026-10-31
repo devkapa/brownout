@@ -3233,10 +3233,12 @@ mod tests {
     }
 
     #[test]
-    fn a_crawl_of_femtosecond_instants_declines_with_the_ping_pong_minus_4_and_keeps_the_last_instant() {
+    fn a_crawl_of_femtosecond_instants_declines_with_the_guards_minus_4_and_keeps_the_last_instant() {
         // 5 fs a crossing clears the 1e-15 s floor every time, as the rail
-        // ping-pong does: only the guard ends it. The first instant follows
-        // nothing, so NO_PROGRESS_MAX + 1 complete and the next declines.
+        // ping-pong's crossings did before W1c point 1a held a starving IC
+        // off (F5): only the guard ends such a crawl. The first instant
+        // follows nothing, so NO_PROGRESS_MAX + 1 complete and the next
+        // declines.
         let mut k = crawler(5e-15, 5e-15, u64::MAX, 0);
         let err = k.advance(T_END).unwrap_err();
         assert_eq!(err, KernelError::SolveFailed(crate::rails::loop_unsettled()));

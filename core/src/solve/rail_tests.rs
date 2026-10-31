@@ -334,26 +334,53 @@ fn the_power_gate_flips_at_the_rail_event_that_puts_u_on_the_threshold() {
     assert!(rig.v(3) < 0.5, "1y low once powered: {}", rig.v(3));
 }
 
+/// A 74LS00's powered rail on a cell of EMF `e` and 5 ohm with 1y loaded by
+/// `r_load` (every output HIGH, inputs on the datum): `u = e - 5 u / (R_out +
+/// r_load)` with `R_out = u / (4 ioMax)` (W1c point 1), solved by fixed point.
+fn ls00_rail_powered(e: f64, r_load: f64) -> f64 {
+    let mut u = e;
+    for _ in 0..200 {
+        u = e - 5.0 * u / (u / (4.0 * 0.008) + r_load);
+    }
+    u
+}
+
 #[test]
-fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_minus_4_today() {
-    // Known divergence `w1f-power-gate-pingpong` (Equivalence harness rules,
-    // W1g's list): E 4.279, r 5, a 74LS00 on the rail with its inputs on the
-    // datum, so every output drives HIGH, and 1y into 1 kohm. Unpowered it
-    // draws nothing and the rail is E, above 0.9 * 4.75 = 4.275 V; powered,
-    // 1y's draw (about 3.8 mA through R_out and 1 kohm) sags the rail to
-    // about 4.26 V, below it. No power state is consistent, so the rail loop
-    // alternates until its 50 passes and the load fails with -4 (the TS side
-    // falls back to classic, which resolves it with H8's rule). This pins
-    // today's result until that rule is ported into the rail loop.
+fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_held_off() {
+    // Formerly `w1f-power-gate-pingpong`'s first pin (F5, W1c point 1a):
+    // E 4.279, r 5, a 74LS00 on the rail with its inputs on the datum, so
+    // every output drives HIGH, and 1y into 1 kohm. Unpowered it draws
+    // nothing and the rail is E, above 0.9 * 4.75 = 4.275 V; powered, 1y's
+    // draw sags the rail to about 4.2602 V, below it. No power state is
+    // consistent, so the rail loop's passes alternate (which declined the
+    // load at its 50th pass before F5). The probes find the gate starving
+    // itself: held powered its supply reads 4.2602 V, unpowered; held
+    // unpowered, E. So it is held off with the rail at E, and its release
+    // is the floor plus the drop its draw caused plus two reached widths,
+    // 4.2938 V: past E, so it stays off for good on this cell.
     let p = program(6, vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0), resistor(2, 2, 0, 1000.0)]);
-    let e = Engine::load(&p).err().expect("no consistent power state: the load fails");
-    assert_eq!(e.code, crate::error::ERR_SOLVE_FAILED, "{}", e.message);
-    assert!(e.message.contains(&format!("the rail loop did not settle within {} passes", rails::RAIL_LOOP_MAX)), "{}", e.message);
-    // The control: with 1y unloaded the gate holds its supply, and loads.
+    let mut rig = Rig::load(&p).unwrap();
+    let hold = rig.s().power_hold(1);
+    assert_eq!(hold.kind, digital::power::HoldKind::Off, "{hold:?}");
+    let floor = 0.9 * 4.75;
+    let u_on = ls00_rail_powered(4.279, 1000.0);
+    close(u_on, 4.2602, 1e-4, "the probed powered rail");
+    let release = hold.release.expect("a release level");
+    assert!(release.rising);
+    close(release.level, floor + (rig.u() - u_on) + 2.0 * rails::REACHED_REL * floor, 1e-9, "the release level");
+    assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
+    rig.advance(1e-3).unwrap();
+    close(rig.u(), 4.279, 1e-9, "the rail at E, the gate off");
+    assert!(rig.v(2).abs() < 1e-6, "1y unpowered, pulled to the datum by 1 kohm: {}", rig.v(2));
+    assert_eq!(rig.s().power_hold(1).kind, digital::power::HoldKind::Off);
+    assert_eq!(rig.s().hold_counts(), [1.0, 0.0], "never released: E is short of the release level");
+    // The control: with 1y unloaded the gate holds its supply, and loads
+    // powered with no hold.
     let p = program(6, vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0), resistor(2, 2, 0, 1e9)]);
     let mut e = Engine::load(&p).unwrap();
     e.advance(1e-6).unwrap();
     assert!(e.voltages()[2] > 4.0, "1y HIGH: {}", e.voltages()[2]);
+    assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0));
 }
 
 /// The ping-pong's CC start-up form (HG1): a {5 V, 20 mA} PSU ramps a 1 uF
@@ -388,34 +415,61 @@ fn run_events(p: &Program, t_end: f64, cap: u32) -> (Option<BoError>, u32, f64, 
     panic!("no -4 and no progress within {cap} events: stuck at t = {:.15e}, rail {:.12} V", e.time(), e.voltages()[1]);
 }
 
+/// Runs `p` event by event to `t_end` under the real kernel, at most `cap`
+/// events: the error it ends on, the events taken, and IC `d`'s holds as
+/// `(held, freed)` intervals (an open one ends at `t_end`).
+fn hold_intervals(p: &Program, t_end: f64, cap: u32, d: usize) -> (Option<KernelError>, u32, Vec<(f64, f64)>, Rig) {
+    let mut rig = Rig::load(p).unwrap();
+    let (mut spans, mut since) = (Vec::new(), (rig.s().power_hold(d).kind == digital::power::HoldKind::Off).then_some(0.0));
+    for n in 1..=cap {
+        let t = rig.k.next_event_time().min(t_end);
+        if let Err(err) = rig.advance(t) {
+            return (Some(err), n, spans, rig);
+        }
+        let held = rig.s().power_hold(d).kind == digital::power::HoldKind::Off;
+        match (since, held) {
+            (None, true) => since = Some(t),
+            (Some(t0), false) => {
+                spans.push((t0, t));
+                since = None;
+            }
+            _ => {}
+        }
+        if t >= t_end {
+            spans.extend(since.map(|t0| (t0, t_end)));
+            return (None, n, spans, rig);
+        }
+    }
+    panic!("no progress within {cap} events: stuck at t = {:.15e}", rig.k.time());
+}
+
 #[test]
-fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_is_minus_4_today() {
-    // Known divergence `w1f-power-gate-pingpong` again, across instants: with
-    // a rail capacitor the rail cannot jump, so each power flip turns the
-    // segment's slope (+1,818 V/s unpowered, -3,241 V/s powered: the LED's
-    // 5.06 mA against the 1.82 mA the rail capacitor gets), and the next
-    // power-window event lands the rail two reached widths (8.55e-12 V) past
-    // the floor the other way, 5.3 and 9.4 fs later. Without the count below
-    // that alternated from event 2,081 on, at 1.4421620096 ms, every event a
-    // `Rail` event, 15 fs a pair: 3 ms lay about 2e11 events away, a hang in
-    // the browser's worker. Now it fails as the capacitor-less ping-pong does.
-    // Up to the floor the gate draws nothing and the board is linear: the
-    // rail reaches 4.275 V at 1.4421592086 ms (the exact solution of its two
-    // capacitors from 0 V). Since round 14 the rail and the 100 ohm RC
-    // advance on their coupled path (ruling R15 (a)), so the crossing lands
-    // there; with the RC's draw frozen between solves it landed 2.8 ns late
-    // (R13's drift width put it there at about 26,700 events).
+fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_off_until_the_supply_carries_it() {
+    // Formerly `w1f-power-gate-pingpong`'s across-instant pin (HG1): a {5 V,
+    // 20 mA} PSU ramps a 1 uF rail capacitor (esr 0) with 100 ohm into 10 uF
+    // beside it, and a 74LS00's 1y drives an LED and 330 ohm. The rail cannot
+    // jump, so each power flip turns the segment's slope (+1,818 V/s
+    // unpowered, -3,241 V/s powered: the LED's 5.06 mA against the 1.82 mA
+    // the rail capacitor gets), and the power-window events crossed the
+    // floor 5.3 and 9.4 fs apart, declining at 424 events before F5 (HG1's
+    // count) and, with the drop rule alone, at 10,377 (the drop is 0 on such
+    // a rail: ruling R44's case). Now (ruling R44 (a)) the gate, held off at
+    // the floor crossing, is released only where powered at its edge it
+    // would still let the segment rise: on this board when the rail leaves
+    // CC, the RC's draw never falling far enough first. It powers once, on
+    // a rail that carries it, and the run reaches 3 ms.
     let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
-    let (err, n, t, _) = run_events(&p, 3e-3, 50_000);
-    let err = err.expect("the ping-pong fails");
-    assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{}", err.message);
-    assert!(err.message.contains(&format!("the rail loop did not settle within {} passes", rails::RAIL_LOOP_MAX)), "{}", err.message);
-    close(t, 1.4421592086e-3, 1e-9, "the floor crossing");
-    eprintln!("ping-pong on a CC ramp: -4 after {n} events at {t:.12e}: {}", err.message);
+    let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
+    eprintln!("CC ramp into the floor: {err:?} after {n} events; holds {spans:?}; counts {:?}", rig.s().hold_counts());
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(spans.len(), 1, "one hold, no cycle: {spans:?}");
+    close(spans[0].0, 1.4421592086e-3, 1e-9, "held at the floor crossing");
+    assert!(spans[0].1 - spans[0].0 > 1e-5, "held until the supply carries it: {spans:?}");
+    assert!(n < 2_000, "{n} events");
+    assert!(rig.u() > 0.9 * 4.75 && rig.v(2) > 3.0, "powered by 3 ms: rail {} V, 1y {} V", rig.u(), rig.v(2));
     // One advance, as a frame asks for it, ends the same way.
     let mut e = Engine::load(&p).unwrap();
-    let err = e.advance(3e-3).expect_err("the ping-pong fails");
-    assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{}", err.message);
+    e.advance(3e-3).unwrap();
     // The controls: the rail capacitor takes about i / 11 of the limit on
     // the ramp, 1.8 mA at 20 mA, which outruns 10 kohm on 1y, and at 60 mA
     // outruns the LED.
@@ -474,34 +528,28 @@ fn cc_floor_with_a_reader(delay: f64, i_limit: f64) -> Program {
 }
 
 #[test]
-fn a_zero_delay_reader_of_a_ping_ponging_gate_is_minus_4_not_a_hang() {
-    // The ping-pong above, but each power flip swings 1y across the second
+fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_held_off_then_powered() {
+    // The ping-pong above, but each power flip swings 1y across a second
     // gate's threshold, and with no delay its output commits in that same
-    // instant. That re-solve ends the gate-flip count (end_gate_chase, which
-    // a clocked load needs), so on 076be49 the Rail events alternated 5.3
-    // and 9.4 fs apart from 1.442162 ms on, past any event cap, and one
-    // advance to 3 ms never returned. The no-progress guard ends it with the
-    // ping-pong's own -4, at the exact floor crossing (the test above), within
-    // the event count R13's drift width took to reach it (26,700).
+    // instant (which ends HG1's count, `end_gate_chase`): on 076be49 the
+    // `Rail` events alternated 5.3 and 9.4 fs apart past any event cap, and
+    // until F5 the no-progress guard declined it with -4. Now the first gate
+    // is held off as above and the reader follows it: 1y low, its own 1y
+    // high while the gate is held, then the reverse once it powers, by 3 ms.
     let p = cc_floor_with_a_reader(0.0, 0.02);
-    let (err, n, t, _) = run_events(&p, 3e-3, 26_700 + crate::kernel::NO_PROGRESS_MAX + 10);
-    let err = err.expect("the ping-pong fails");
-    assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{}", err.message);
-    assert_eq!(err.message, rails::loop_unsettled());
-    close(t, 1.4421592086e-3, 1e-9, "the floor crossing");
-    eprintln!("zero-delay reader: -4 after {n} events at {t:.12e}");
+    let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
+    eprintln!("zero-delay reader: {err:?} after {n} events; holds {spans:?}");
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    close(spans[0].0, 1.4421592086e-3, 1e-9, "held at the floor crossing");
+    assert!(rig.v(2) > 3.0 && rig.v(6) < 0.5, "1y HIGH, the reader's 1y LOW: {} V, {} V", rig.v(2), rig.v(6));
     let mut e = Engine::load(&p).unwrap();
-    let err = e.advance(3e-3).expect_err("one advance ends the same way");
-    assert_eq!(err.message, rails::loop_unsettled());
-    close(e.time(), 1.4421592086e-3, 1e-9, "time stays at the last completed instant");
-    // A second advance declines again rather than hanging or resuming.
-    let err = e.advance(3e-3).expect_err("still stuck");
-    assert_eq!(err.message, rails::loop_unsettled());
-    // The controls: with the reader's own 10 ns delay the flips cancel its
-    // transitions, nothing commits, and HG1's count declines; at 60 mA the
-    // rail outruns the LED and the run completes.
-    let (err, _, _, _) = run_events(&cc_floor_with_a_reader(10e-9, 0.02), 3e-3, 50_000);
-    assert_eq!(err.expect("HG1's count").message, rails::loop_unsettled());
+    e.advance(3e-3).unwrap();
+    // The controls: with the reader's own 10 ns delay (HG1's count runs,
+    // nothing commits) the gate is held the same way; at 60 mA the rail
+    // outruns the LED and nothing is held.
+    let (err, _, spans, _) = hold_intervals(&cc_floor_with_a_reader(10e-9, 0.02), 3e-3, 50_000, 1);
+    assert!(err.is_none() && spans.len() == 1, "{err:?} {spans:?}");
     let (err, n, t, v) = run_events(&cc_floor_with_a_reader(0.0, 0.06), 3e-3, 50_000);
     assert!(err.is_none(), "{err:?}");
     assert_eq!(t, 3e-3);
@@ -6120,26 +6168,52 @@ fn a_closed_form_hub_partition_holding_a_rail_supplied_gate_follows_the_rail_wit
 }
 
 #[test]
-fn the_power_gate_pingpong_board_through_5_ohm_still_declines() {
+fn the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carries_it() {
     // The original board of `a_power_flip_inside_one_band_never_replays_the_
     // other_power_state` (a 4.06 V cell with 5 ohm, 1 kohm into 1 uF, a gate
-    // whose 4.05 V power threshold the rail crosses inside one cache band),
-    // kept here so the change stays visible: it passed on 076be49 only via a
-    // cache hit, and with the cache on or off the rail now ping-pongs at the
-    // threshold (the powered gate's own draw through 5 ohm pulls the rail
-    // back under it) and the run declines with -4. This is
-    // w1f-power-gate-pingpong, F5's class (the power-gate hold channel): F5
-    // must flip this assertion to a run that reaches 10 ms powered with its
-    // outputs high.
+    // whose 4.05 V power threshold the rail crosses as the capacitor
+    // charges), which declined with -4 from 076be49 to F5
+    // (`w1f-power-gate-pingpong`): powered, the gate's four HIGH outputs
+    // draw 4.05 V through their node shunts (1.6e-11 A), whose 8e-11 V
+    // across 5 ohm puts the rail back under a threshold the event landed
+    // two reached widths (8.1e-12 V) past. Now (W1c point 1a) the probes
+    // find it starving itself there, so it is held off until the rail
+    // passes the threshold by that drop and two reached widths, which the
+    // charging capacitor brings about 9 ps later; it then powers and drives
+    // its outputs high to 10 ms, cache on or off.
     let mut gate = ls00(3, 1, 0, [0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0, 7], 10e-9, 0);
     gate.params[ic_param::VCC_MIN] = 4.5;
     let (e, r, big_r, c) = (4.06, 5.0, 1000.0, 1e-6);
+    let floor = 0.9 * 4.5;
+    let tau = (big_r + r) * c;
+    // The rail with the gate off, `E - r (E - vc) / (R + r)`, reaches `u` at
+    // this time (the shunts' 1e-12 relative aside).
+    let rail_at = |u: f64| tau * (e / (e - (e - (e - u) * (big_r + r) / r))).ln();
     for cache in [true, false] {
         let mut p = program(8, vec![battery(0, 1, 0, e, r), resistor(1, 1, 2, big_r), capacitor(2, 2, 0, c, 0.0), gate.clone()]);
         p.options.no_solution_cache = !cache;
         let mut rig = Rig::load(&p).unwrap();
-        let err = rig.advance(10e-3).expect_err("the power gate ping-pongs at its threshold (F5)");
-        assert!(matches!(&err, KernelError::SolveFailed(m) if *m == rails::loop_unsettled()), "cache {cache}: {err:?}");
+        let (mut held, mut freed) = (None, None);
+        while rig.k.time() < 10e-3 {
+            let t = rig.k.next_event_time().min(10e-3);
+            rig.advance(t).unwrap_or_else(|err| panic!("cache {cache} at {t:e}: {err:?}"));
+            let hold = rig.s().power_hold(3);
+            if held.is_none() && hold.kind == digital::power::HoldKind::Off {
+                held = Some((t, hold.release.expect("a release level")));
+            }
+            if held.is_some() && freed.is_none() && hold.is_free() {
+                freed = Some(t);
+            }
+        }
+        let (t_held, release) = held.expect("held off at the threshold");
+        let t_freed = freed.expect("released");
+        close(t_held, rail_at(floor), 1e-9, "held where the rail reaches the threshold");
+        assert!(release.rising && release.level > floor + 2.0 * rails::REACHED_REL * floor && release.level < floor + 1e-9, "{release:?}");
+        close(t_freed, rail_at(release.level), 1e-9, "released where the rail reaches its release level");
+        eprintln!("cache {cache}: held at {t_held:.12e}, release {:.6e} V past the threshold, freed {:.3e} s later", release.level - floor, t_freed - t_held);
+        assert!(t_freed - t_held > 5e-12 && t_freed - t_held < 2e-11, "cache {cache}: {:e} s", t_freed - t_held);
+        assert_eq!(rig.s().hold_counts(), [1.0, 1.0], "cache {cache}");
+        assert!(rig.u() > floor && (rig.v(4) - rig.u()).abs() < 1e-6, "cache {cache}: powered, 1y HIGH at 10 ms: rail {} V, 1y {} V", rig.u(), rig.v(4));
     }
 }
 
@@ -7999,10 +8073,12 @@ struct FxExact {
     full: Vec<Dd>,
 }
 
-fn fx_exact(b: &FxBoard, u: f64) -> FxExact {
+/// The exact solution of `b` at rail `u`, its gate unpowered when `held`
+/// (W1c point 1a) or outside its window.
+fn fx_exact(b: &FxBoard, u: f64, held: bool) -> FxExact {
     let n = b.nodes.len();
     let at = |node: usize| b.nodes.iter().position(|&m| m == node);
-    let powered = u >= b.win.0 * 0.9 && u <= b.win.1 * 1.1;
+    let powered = !held && u >= b.win.0 * 0.9 && u <= b.win.1 * 1.1;
     let gate_g = |io: f64| Dd::of(1.0) / (Dd::of(u) / Dd::of(4.0 * io)).min(Dd::of(1000.0)).max_dd(Dd::of(50.0));
     let volt = |x: &[Dd], node: usize| if node == 0 { Dd::of(0.0) } else if node == 1 { Dd::of(u) } else { x[at(node).unwrap()] };
     // Each element's current a -> b (into the node for a gate) and its slope.
@@ -8135,6 +8211,12 @@ fn fx_published_within_bound(b: &FxBoard, early: &[f64], steps: usize) -> (f64, 
     let tol_i = |i: f64| 1e-9 + 1e-3 * i.abs();
     let mut look = |rig: &Rig, t: f64| {
         let u = rig.v(1);
+        // A gate held off (W1c point 1a: on a draining cell, at its floor,
+        // its own draw would take the rail under it) is unpowered whatever
+        // the rail reads, and so is its exact solution. Device `2 + k` is
+        // element `k` (`fx_board`).
+        let held = b.els.iter().enumerate().any(|(k, e)| matches!(e, FxEl::Gate(..)) && rig.s().power_hold(2 + k).kind == digital::power::HoldKind::Off);
+        let powered = |u: f64| !held && powered(u);
         for (pi, (part, idx, local, els)) in parts.iter().enumerate() {
             let Some((x, _, i_p, g_p, u_p)) = rig.s().static_solver.hub_solve(*part) else { continue };
             if powered(u) != powered(u_p) {
@@ -8143,7 +8225,7 @@ fn fx_published_within_bound(b: &FxBoard, early: &[f64], steps: usize) -> (f64, 
             if u_p.to_bits() != last_up[pi].to_bits() {
                 last_up[pi] = u_p;
                 // The solve itself against the exact solution at its rail.
-                let e = fx_exact(b, u_p);
+                let e = fx_exact(b, u_p, held);
                 let v_at = |node: usize| -> Dd {
                     if node == 0 {
                         Dd::of(0.0)
@@ -8176,7 +8258,7 @@ fn fx_published_within_bound(b: &FxBoard, early: &[f64], steps: usize) -> (f64, 
             }
             let Some(last) = curvature::hook::of(b.nodes[idx[0]]).filter(|l| l.u_p.to_bits() == u_p.to_bits() && l.bounded()) else { continue };
             let bw = (u - u_p).abs();
-            let e = fx_exact(b, u);
+            let e = fx_exact(b, u, held);
             let mut note = |what: String, published: f64, want: f64, bound: f64| {
                 let r = ((published - want).abs() - f64::EPSILON * want.abs()).max(0.0) / bound;
                 if r > ratio {
@@ -8309,7 +8391,12 @@ fn fx_power_hairline(b: &mut D7Board, rs: f64, lo: f64) -> (usize, usize, f64, S
                 if powered[0] >= floor - 1e-6 && powered[0] <= top + 1e-6 {
                     states.push(powered);
                 }
-                if off[0] <= floor + 1e-6 || off[0] >= top - 1e-6 {
+                // A gate held off (W1c point 1a: between the floor and V*,
+                // powered it starves its own supply) holds the unpowered state
+                // wherever its supply sits.
+                let gate = b.p.devices.iter().position(|d| d.kind == kinds::IC_74LS00 && d.pins[0].node == b.nodes[0]).expect("the fed gate");
+                let held = rig.s().power_hold(gate).kind == digital::power::HoldKind::Off;
+                if held || off[0] <= floor + 1e-6 || off[0] >= top - 1e-6 {
                     states.push(off);
                 }
                 let published: Vec<f64> = b.nodes.iter().map(|&n| x[rig.s().local_index[n].unwrap().1]).collect();
@@ -9036,4 +9123,588 @@ fn the_fuzz_boards_whose_back_driven_exit_published_a_negative_rail_stay_within_
         assert!((0.0..=v_985).contains(&g), "seed 985: the rail at {g} V at {t:.4} s, outside [0, V]");
         close(g, w, 1e-4, &format!("seed 985 at {t:.4} s: default against exact mode"));
     }
+}
+
+// ---- F5b: W1c point 1a on the fuzz boards ----------------------------------
+
+/// A fuzz board's device: plain pins (no flags, no hashes).
+fn fz(kind: u32, ci: usize, pins: &[usize], params: Vec<f64>, blob: Vec<f64>) -> Device {
+    Device { kind, component_index: ci, pins: pins.iter().map(|&n| pin(n)).collect(), params, blob }
+}
+
+/// A fuzz board as its sweep ran it, event by event: a host advancing to
+/// each of `stops`, toggling each
+/// switch of `toggles` (param 0 between 0 and 1) once it reaches its time.
+/// Returns the rig, every change of IC `d`'s power hold with the time and
+/// its supply then, `(t, hold, supply)`, and the first error with the time
+/// it left the engine at.
+fn hold_trace(p: &Program, toggles: &[(f64, usize)], stops: &[f64], d: usize) -> (Rig, Vec<(f64, digital::power::PowerHold, f64)>, Option<(KernelError, f64)>) {
+    let mut rig = Rig::load(p).unwrap_or_else(|e| panic!("load: {}", e.message));
+    let supply = |rig: &Rig| {
+        let dev = &p.devices[d];
+        rig.v(dev.pins[0].node) - rig.v(dev.pins[1].node)
+    };
+    let mut trace = vec![(0.0, rig.s().power_hold(d), supply(&rig))];
+    // Event by event between the stops, so each hold and release is seen at
+    // its own instant.
+    let mut err = None;
+    let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
+    let mut ev = 0;
+    'run: for &stop in stops {
+        while rig.k.time() < stop {
+            let t = rig.k.next_event_time().min(stop);
+            if let Err(e) = rig.advance(t) {
+                err = Some((e, rig.k.time()));
+                break 'run;
+            }
+            let hold = rig.s().power_hold(d);
+            if hold != trace.last().unwrap().1 {
+                trace.push((t, hold, supply(&rig)));
+            }
+        }
+        while ev < toggles.len() && toggles[ev].0 <= stop {
+            let dv = toggles[ev].1;
+            state[dv] = 1.0 - state[dv];
+            let result = rig.k.apply_params_as_event(&[(dv, 0, state[dv])]);
+            rig.k.solver_mut().prepare_readout();
+            if let Err(e) = result {
+                err = Some((e, rig.k.time()));
+                break 'run;
+            }
+            ev += 1;
+        }
+    }
+    (rig, trace, err)
+}
+
+/// The trace's holds `(time, release level, supply)` and releases `(time,
+/// supply)`, in order.
+fn holds_and_releases(trace: &[(f64, digital::power::PowerHold, f64)]) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64)>) {
+    let (mut held, mut freed) = (Vec::new(), Vec::new());
+    for w in trace.windows(2) {
+        let ((_, before, _), (t, hold, supply)) = (w[0], w[1]);
+        if hold.kind == digital::power::HoldKind::Off {
+            held.push((t, hold.release.expect("a release level").level, supply));
+        } else if before.kind == digital::power::HoldKind::Off && hold.is_free() {
+            freed.push((t, supply));
+        }
+    }
+    if trace[0].1.kind == digital::power::HoldKind::Off {
+        held.insert(0, (0.0, trace[0].1.release.expect("a release level").level, trace[0].2));
+    }
+    (held, freed)
+}
+
+#[test]
+fn a_g2bv_gate_starving_its_cell_at_load_is_held_off_and_again_after_a_toggle() {
+    // G2bv's bc_ic seed 20 hub 1 (F5D: "1a, within an instant"), which
+    // declined its load: a 74LS00 on a 4.2774 V cell of 0.236 ohm, 2y and
+    // 3y (node 6) high into 1588 and 4703 ohm, 4y (node 3) high against 309
+    // ohm to the rail. Powered, its draw takes the rail under its 4.275 V
+    // floor; held off, the cell's EMF is above it. So it loads held off,
+    // its release the floor plus that drop and two reached widths: above
+    // the EMF, never reached. A toggle (`set_params`) drops the hold, and
+    // the same instant takes it again (W1c point 1a).
+    let p = { let mut p = program(7, g2bv_bc_ic_20_hub1()); p.digital_slot_count = 16; p };
+    let stops = [0.00010054129745299623, 0.001267074627819937, 0.19185406847861228, 0.44552757564924855, 0.44644865932111427, 0.5];
+    let (rig, trace, err) = hold_trace(&p, &[(0.44552757564924855, 9)], &stops, 6);
+    assert!(err.is_none(), "{err:?}");
+    let (held, freed) = holds_and_releases(&trace);
+    eprintln!("bc_ic 20: held {held:?}, freed {freed:?}");
+    let e = 4.277440234153144;
+    assert_eq!(held.len(), 1, "{trace:?}");
+    assert_eq!(held[0].0, 0.0, "held at the load");
+    assert!(held[0].1 > e && held[0].1 < e + 0.01, "the release level past the EMF: {}", held[0].1);
+    assert!(freed.is_empty());
+    assert_eq!(rig.s().power_hold(6).kind, digital::power::HoldKind::Off);
+    assert_eq!(rig.s().hold_counts(), [2.0, 0.0], "the load's hold and the toggle's");
+    assert!(rig.u() > 0.9 * 4.75 && rig.v(6).abs() < 1e-6, "rail {} V above the floor, the gate's outputs dark: {} V", rig.u(), rig.v(6));
+}
+
+#[test]
+fn a_rail_newton_alternating_a_555s_power_gate_holds_it_off_until_the_rail_passes_its_release() {
+    // The cold fuzz's seed 237 tpl 3 (F5D: "1a in the rail Newton"), which
+    // declined at 47.4 us: a {5.03 V, 62 mA} PSU ramping 1.6 uF (esr 24
+    // mohm), a 555 on the rail with its output (node 6) driving an LED to
+    // a -3.35 V source. Its 1.8 V power-on edge sits where the 555's draw
+    // takes the rail Newton's iterates back under it (1.79988 <-> 1.80000
+    // V). The rail Newton's flip holds it off at the edge, its drop 1.19e-4
+    // V; the rail, rising at about 37,000 V/s with it off, reaches the
+    // release level as a `Rail` event (Rails point 4's release threshold)
+    // some 3.2 ns later, where it powers: its draw through the capacitor's
+    // esr takes the rail back down by the drop, to within a few reached
+    // widths of the edge, still inside, and the ramp carries it.
+    let p = { let mut p = program(7, cold_237_tpl3()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    let stops = [0.006272880129900816, 0.006486738525025257, 0.006639124636807362, 0.010253136567057732, 0.010513169565513698, 0.03044452364163602, 0.034443802061474564, 0.04971881825306094, 0.049992873499283136, 0.06374826736193694, 0.06994028776299031, 0.07];
+    let (rig, trace, err) = hold_trace(&p, &[], &stops, 11);
+    assert!(err.is_none(), "{err:?}");
+    let (held, freed) = holds_and_releases(&trace);
+    eprintln!("cold 237: held {held:?}, freed {freed:?}");
+    assert_eq!((held.len(), freed.len()), (1, 1), "{trace:?}");
+    let (t_held, level, s_held) = held[0];
+    let (t_freed, s_freed) = freed[0];
+    let eta = rails::REACHED_REL * 1.8;
+    assert!((s_held - 1.8).abs() < 1e-6 && level > 1.8 + 2.0 * eta && level < 1.8 + 1e-3, "held at the edge: supply {s_held}, release {level}");
+    assert!(t_held > 4.7e-5 && t_held < 4.9e-5, "{t_held}");
+    assert!(t_freed > t_held && t_freed - t_held < 1e-8, "released {:e} s later", t_freed - t_held);
+    // Powered at the release, the supply sits the drop under it: inside the
+    // window by a few reached widths.
+    assert!(s_freed >= 1.8 && s_freed - 1.8 < 5.0 * eta, "the supply {:e} V past the edge once powered", s_freed - 1.8);
+    assert_eq!(rig.s().hold_counts(), [1.0, 1.0]);
+}
+
+#[test]
+fn an_iterated_partition_alternating_a_555s_power_gate_holds_it_off() {
+    // The cold fuzz's seed 12 tpl 4 (F5D: "probably 1a, iterated static
+    // partition with a resistor-fed IC supply"), which declined at 14.7 ms:
+    // a 555 whose vcc (node 2) is fed from a {12.43 V, 0.46 A} PSU through
+    // 144 ohm, its output driving 270 uF (node 3). Powered, its output's
+    // inrush into the capacitor collapses its own supply under its 1.8 V
+    // floor; unpowered, the supply is the rail's. The partition's Newton
+    // flips the gate each iterate; held off, the drop is 11 V and the
+    // release level, 12.87 V, past the PSU: it stays off, as classic's H8
+    // keeps it off step after step.
+    let p = { let mut p = program(8, cold_12_tpl4()); p.digital_slot_count = 32; p };
+    let stops = [0.006272879619865001, 0.006418236135522505, 0.006653719691401212, 0.04368244956136634, 0.043851961234653535, 0.06987367313960807, 0.07058263333052203, 0.096299810615255, 0.11091739978284508, 0.13294549546641507, 0.15];
+    let (rig, trace, err) = hold_trace(&p, &[], &stops, 15);
+    assert!(err.is_none(), "{err:?}");
+    let (held, freed) = holds_and_releases(&trace);
+    eprintln!("cold 12: held {held:?}, freed {freed:?}");
+    assert_eq!((held.len(), freed.len()), (1, 0), "{trace:?}");
+    let (t_held, level, s_held) = held[0];
+    assert!(t_held > 0.0146 && t_held < 0.0148, "{t_held}");
+    assert!(level > 12.434588688285583 && s_held < level, "never released: supply {s_held}, release {level}");
+    assert!(rig.v(2) > 12.0, "the supply at the rail's: {}", rig.v(2));
+    assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
+}
+
+#[test]
+fn the_fed_gate_on_a_cc_ramp_is_held_at_its_floor_and_released_at_the_next_re_solve() {
+    // FXB's extra board, FXDv's "k6 s39 ramp" (declined at step 226 of
+    // 3,000, 0.9 ms): a gate fed from a {5 V, 0.1 A} ramp into 100 uF
+    // through 8.43 ohm (node 2), its 1y into 791 ohm and an LED. At its 0.9 V
+    // floor the polish of its supply's partition ping-pongs across the edge.
+    // Held off there (W1c point 1a), it is released at the partition's
+    // first re-solve past its release level (on a static partition, the
+    // release is checked at each re-solve): the rail band's 25 mV later,
+    // 25 us on this ramp.
+    let mut devs = d7_supply(true);
+    devs.extend([resistor(2, 1, 2, 8.433658904889839), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.004, 1.0, 6.0), resistor(4, 3, 4, 791.0671698769225), led(5, 4, 0)]);
+    let mut p = no_cache(program(5, devs));
+    p.digital_slot_count = p.digital_slot_count.max(8);
+    let stops: Vec<f64> = (1..=3000).map(|k| 12e-3 * k as f64 / 3000.0).collect();
+    let (rig, trace, err) = hold_trace(&p, &[], &stops, 3);
+    assert!(err.is_none(), "{err:?}");
+    let (held, freed) = holds_and_releases(&trace);
+    eprintln!("k6 s39: held {held:?}, freed {freed:?}");
+    assert_eq!((held.len(), freed.len()), (1, 1), "{trace:?}");
+    let ((t_held, level, s_held), (t_freed, s_freed)) = (held[0], freed[0]);
+    assert!((s_held - 0.9).abs() < 1e-6 && level > 0.9 && level < 0.9 + 1e-6, "held at the floor: supply {s_held}, release {level}");
+    assert!((t_held - 0.9e-3).abs() < 1e-6, "{t_held}");
+    assert!(s_freed >= level && t_freed > t_held && t_freed - t_held < 3e-5, "released at {t_freed} (supply {s_freed})");
+    assert!(rig.v(2) > 4.0 && rig.v(3) > 2.0, "powered and high at 12 ms: supply {} V, 1y {} V", rig.v(2), rig.v(3));
+}
+
+#[test]
+fn the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off() {
+    // FXH's new declines (cold seeds 785 tpl 0 and 830 tpl 3, both `{V,
+    // iLimit}` PSUs): a 74LS00 on the rail whose power flip each rail-loop
+    // pass flips the PSU's regime too (CC <-> CV, the rail between -10.05
+    // and 4.70 V on 785, 2.11 and 5.03 V on 830), so the load declined.
+    // Held powered, its supply collapses in CC: it starves itself, and
+    // loads held off. 785's PSU then sits in CV at its setpoint, 4.699 V;
+    // 830's limits at 3.26 V with the gate off, under its floor (a part
+    // whose supply reads low either way is held too, ruling D2 (a)). Each
+    // release level is past the setpoint, so neither is released over 50
+    // ms; 785's toggle at 18 ms drops the hold, and the toggle's instant
+    // takes it again.
+    for (name, p, toggles, stops, d, v) in [
+        ("785 tpl 0", { let mut p = program(8, cold_785_tpl0()); p.digital_slot_count = 32; p }, vec![(0.01840803191451679, 16)], vec![0.006272880216392937, 0.01840803191451679, 0.02495905461262398, 0.05], 12, 4.698635237910),
+        ("830 tpl 3", { let mut p = program(7, cold_830_tpl3()); p.digital_slot_count = 32; p }, vec![], vec![0.0062728803007134695, 0.006590779933999605, 0.02225723242285205, 0.05], 8, 5.032450386993),
+    ] {
+        let (rig, trace, err) = hold_trace(&p, &toggles, &stops, d);
+        assert!(err.is_none(), "{name}: {err:?}");
+        let (held, freed) = holds_and_releases(&trace);
+        eprintln!("{name}: held {held:?}, freed {freed:?}, counts {:?}", rig.s().hold_counts());
+        assert_eq!(held[0].0, 0.0, "{name}: held at the load");
+        assert!(freed.is_empty() && held.iter().all(|h| h.1 > v), "{name}: release levels past the setpoint {v}: {held:?}");
+        assert_eq!(rig.s().hold_counts(), [toggles.len() as f64 + 1.0, 0.0], "{name}");
+        assert!(rig.u() <= v + 1e-9, "{name}: the rail {} V", rig.u());
+    }
+}
+
+#[test]
+fn the_fxdv_edge_board_loads_held_off_between_its_floor_and_its_carrying_rail() {
+    // FXDv's power-edge sweep (`fxdv_edgeband` k2): a gate (window 3-6 V,
+    // ioMax 16 mA) whose supply (node 2) hangs off a stiff PSU through 5.36
+    // ohm, its 1y into 48.7 ohm. Every load from 2.7001 V to 2.8467 V
+    // declined: powered its 1y draw takes its supply under the 2.7 V floor.
+    // Each now loads with the gate held off, its supply at the rail (less
+    // the node shunt's share), and its release level the floor plus that
+    // drop and two reached widths, past the rail: never reached. Above
+    // 2.8467 V it carries itself and loads powered with no hold.
+    let board = |v: f64| {
+        let mut p = no_cache(program(4, vec![psu(0, 1, 0, v, 20.0), resistor(1, 1, 0, 1e9), resistor(2, 1, 2, 5.36), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.016, 3.0, 6.0), resistor(4, 3, 0, 48.7)]));
+        p.digital_slot_count = p.digital_slot_count.max(8);
+        p
+    };
+    for v in [2.7001, 2.75, 2.84] {
+        let rig = Rig::load(&board(v)).unwrap_or_else(|e| panic!("{v} V: {}", e.message));
+        let hold = rig.s().power_hold(3);
+        assert_eq!(hold.kind, digital::power::HoldKind::Off, "{v} V");
+        close(rig.v(2), v, 1e-9, &format!("{v} V: the supply at the rail"));
+        assert!(rig.v(3).abs() < 1e-6, "{v} V: 1y dark");
+        assert!(hold.release.unwrap().level > v, "{v} V: {hold:?}");
+    }
+    let rig = Rig::load(&board(2.86)).unwrap();
+    assert!(rig.s().power_hold(3).is_free() && rig.v(2) > 2.7 && rig.v(3) > 1.0, "2.86 V: powered, supply {} V, 1y {} V", rig.v(2), rig.v(3));
+    assert_eq!(rig.s().hold_counts(), [0.0, 0.0]);
+}
+
+/// tpl=3 hub=2 e=5.032 psu ilim=0.062 V2=-3.35 SW4-5(0)+R5-0=266 LED6-2+R1-6=2596 C1-0=1.6e-6 555 vcc1 gnd0 [6, 1, 1, 6, 0, 0] SW6-4(1)+R4-0=36 R4-5=30.8 exact=false span=1.2e1
+/// options: Options { integration: 1, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 7
+/// toggles [(0.2538321494839014, 6), (0.7156499115983714, 17), (0.77843404319527, 6)]
+/// ERR advance to 0.006272880129900816 at t 4.744769960698e-5: rail: the rail Newton did not converge within 50 iterations
+fn cold_237_tpl3() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![5.032283712497381, 0.0624090419716193], vec![]),
+        fz(2, 1, &[2, 0], vec![-3.3526961194572937], vec![]),
+        fz(1, 2, &[3, 0], vec![70272.8000456936], vec![]),
+        fz(1, 3, &[4, 0], vec![13354.719005664909], vec![]),
+        fz(1, 4, &[5, 0], vec![271665.5368311562], vec![]),
+        fz(1, 5, &[6, 0], vec![172932.70075604186], vec![]),
+        fz(4, 6, &[4, 5], vec![0.0], vec![]),
+        fz(1, 7, &[5, 0], vec![265.7078397145019], vec![]),
+        fz(30, 8, &[6, 2], vec![2.393827904419805, 2.269320847980911, 0.018193723652586924, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 9, &[1, 6], vec![2595.698870452701], vec![]),
+        fz(3, 10, &[1, 0], vec![1.6387355562614893e-6, 0.02374653780097165, 0.0], vec![]),
+        fz(40, 11, &[1, 0, 6, 1, 1, 6, 0, 0], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 12, &[1, 0], vec![43553.62314192138], vec![]),
+        fz(1, 13, &[0, 0], vec![5058.019598667813], vec![]),
+        fz(3, 14, &[0, 0], vec![1.8680443805564595e-7, 0.0, 0.0], vec![]),
+        fz(1, 15, &[1, 3], vec![834.9825057226262], vec![]),
+        fz(1, 16, &[3, 4], vec![8344.683954650249], vec![]),
+        fz(4, 17, &[6, 4], vec![1.0], vec![]),
+        fz(1, 18, &[4, 0], vec![36.16031100042536], vec![]),
+        fz(1, 19, &[4, 5], vec![30.788119774492785], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.2008457024821117, 265.7078397145019], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.09404392727682356, 2595.698870452701], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.00014427389762369818, 43553.62314192138], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.026110869025297915, 5058.019598667813], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.0006229133837456091, 834.9825057226262], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.00944959256290787, 36.16031100042536], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.14999542647824116, 30.788119774492785], vec![]),
+    ]
+}
+
+/// tpl=4 hub=2 e=12.435 psu ilim=0.458 CLK3 -0.3..7.1 C3-0=2.6e-7 R3-4=1229.3 LED4-0+R1-4=152 C3-0=2.7e-4 R6-7=16794.5 SW5-6(1)+R6-0=30 555 vcc2 gnd0 [6, 3, 2, 4, 4, 1] LED4-5+R1-4=31 R4-3=717.3 exact=false span=1.2e1
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 8
+/// toggles [(0.726518064166707, 13), (0.8039048447848541, 13)]
+/// ERR advance to 0.04368244956136634 at t 1.469704221435e-2: partition 0 (1 node(s)): Newton did not converge within 50 iterations
+fn cold_12_tpl4() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![12.434588688285583, 0.4575726818390958], vec![]),
+        fz(22, 1, &[3, 0], vec![42.647402311824166, 0.6282912521373276, 7.069653443862801, -0.29054133390678727, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![586250.4385286777], vec![]),
+        fz(1, 3, &[4, 0], vec![14181.802531581461], vec![]),
+        fz(1, 4, &[5, 0], vec![1296.6007360361198], vec![]),
+        fz(1, 5, &[6, 0], vec![6009.607747559662], vec![]),
+        fz(1, 6, &[7, 0], vec![5487.11251627804], vec![]),
+        fz(3, 7, &[3, 0], vec![2.6017239069042806e-7, 0.0, 0.0], vec![]),
+        fz(1, 8, &[3, 4], vec![1229.2795190953807], vec![]),
+        fz(30, 9, &[4, 0], vec![2.0391708025181674, 1.9530375831782436, 0.01034668892259119, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 10, &[1, 4], vec![151.56499619749388], vec![]),
+        fz(3, 11, &[3, 0], vec![0.00027193837893659114, 0.0, 0.0], vec![]),
+        fz(1, 12, &[6, 7], vec![16794.5036047125], vec![]),
+        fz(4, 13, &[5, 6], vec![1.0], vec![]),
+        fz(1, 14, &[6, 0], vec![29.960765255159092], vec![]),
+        fz(40, 15, &[2, 0, 6, 3, 2, 4, 4, 1], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 16, &[2, 1], vec![144.42399433878745], vec![]),
+        fz(1, 17, &[1, 4], vec![1831.4031043148443], vec![]),
+        fz(3, 18, &[4, 0], vec![2.1821725802011662e-7, 0.0, 0.0], vec![]),
+        fz(1, 19, &[3, 5], vec![51.36602119409897], vec![]),
+        fz(30, 20, &[4, 5], vec![1.8151462559678644, 2.1494323498494436, 0.021354434014062573, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 21, &[1, 4], vec![30.73890448554215], vec![]),
+        fz(1, 22, &[4, 3], vec![717.3374325430739], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0002474966530743104, 1229.2795190953807], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.003402518897282526, 151.56499619749388], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.00015670410762658456, 16794.5036047125], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.048806308419276856, 29.960765255159092], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.0022432594918316653, 144.42399433878745], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.004689202167196722, 1831.4031043148443], vec![]),
+        fz(90, 19, &[], vec![19.0, 2.5035405037013048, 51.36602119409897], vec![]),
+        fz(90, 21, &[], vec![21.0, 0.2751832854536309, 30.73890448554215], vec![]),
+        fz(90, 22, &[], vec![22.0, 0.2396166905698217, 717.3374325430739], vec![]),
+    ]
+}
+
+/// seed 20 hub=1 e=4.277 r=0.236 IC SW5-4(0)+R4-0=125 C0-4=1.17e-4 R4-5=29.7
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 16 node_count 7
+/// toggles [(0.44552757564924855, 9)] resets []
+fn g2bv_bc_ic_20_hub1() -> Vec<Device> {
+    vec![
+        fz(20, 0, &[1, 0], vec![1.0, 0.2359746390621206, 1.0, 0.0, 2.0, 0.05, 1.0, 1.0, 0.0], vec![1.0, 0.5, 4.277440234153144]),
+        fz(1, 1, &[2, 0], vec![8169.826763026575], vec![]),
+        fz(1, 2, &[3, 0], vec![4978.782842137732], vec![]),
+        fz(1, 3, &[4, 0], vec![40295.55222654737], vec![]),
+        fz(1, 4, &[5, 0], vec![170385.8384458016], vec![]),
+        fz(1, 5, &[6, 0], vec![4703.109940985932], vec![]),
+        fz(50, 6, &[1, 0, 3, 1, 6, 0, 0, 3, 0, 0, 3, 0, 0, 6], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.3641153272136766e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[6, 0], vec![1587.8675069059157], vec![]),
+        fz(1, 8, &[3, 1], vec![308.7042287061871], vec![]),
+        fz(4, 9, &[5, 4], vec![0.0], vec![]),
+        fz(1, 10, &[4, 0], vec![125.39044642469158], vec![]),
+        fz(3, 11, &[0, 4], vec![0.00011719543557716233, 0.0, 0.0], vec![]),
+        fz(1, 12, &[4, 5], vec![29.7326372318558], vec![]),
+    ]
+}
+
+
+/// tpl=0 hub=2 e=4.699 psu ilim=0.022 V2=-0.65 CLK3 0.0..2.7 R6-4=2477.2 SW2-3(1)+R3-0=50 C0-6=2.1e-4 R3-1=306.4 74LS00 vcc1 gnd0 in5,7 out3,5 R7-0=113639.4 SW0-5(1)+R5-0=359 LED3-2+R3-3=1763 C3-0=3.2e-5 P7-5 exact=false span=1.2e1
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 8
+/// toggles [(0.01840803191451679, 16), (0.4294995383338517, 8), (0.8515432372531131, 16), (0.9361844041441881, 8), (0.984110775576708, 16)]
+/// ERR load: rail: the rail loop did not settle within 50 passes
+fn cold_785_tpl0() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![4.6986352379097385, 0.0224080962134651], vec![]),
+        fz(2, 1, &[2, 0], vec![-0.6472895151846014], vec![]),
+        fz(22, 2, &[3, 0], vec![2.2225169323243628, 0.3302223480133346, 2.6923237130559348, 0.0, 0.0], vec![8.0]),
+        fz(1, 3, &[4, 0], vec![38725.28183211784], vec![]),
+        fz(1, 4, &[5, 0], vec![33010.78201015608], vec![]),
+        fz(1, 5, &[6, 0], vec![2940.791478302445], vec![]),
+        fz(1, 6, &[7, 0], vec![236828.43574410884], vec![]),
+        fz(1, 7, &[6, 4], vec![2477.1901409763395], vec![]),
+        fz(4, 8, &[2, 3], vec![1.0], vec![]),
+        fz(1, 9, &[3, 0], vec![49.86313691266805], vec![]),
+        fz(3, 10, &[0, 6], vec![0.00020739826170311886, 0.0, 0.0], vec![]),
+        fz(1, 11, &[3, 1], vec![306.39624757098414], vec![]),
+        fz(50, 12, &[1, 0, 5, 7, 3, 0, 0, 5, 0, 0, 5, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 4.0997027213537435e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 13, &[3, 6], vec![256.4019899053665], vec![]),
+        fz(1, 14, &[5, 0], vec![70.37765453290346], vec![]),
+        fz(1, 15, &[7, 0], vec![113639.36908703843], vec![]),
+        fz(4, 16, &[0, 5], vec![1.0], vec![]),
+        fz(1, 17, &[5, 0], vec![359.2485883074942], vec![]),
+        fz(30, 18, &[3, 2], vec![2.918255369660087, 2.0356134343839525, 0.020741351040892617, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 19, &[3, 3], vec![1762.7684407704048], vec![]),
+        fz(3, 20, &[3, 0], vec![3.1662513665532644e-5, 0.0, 0.0], vec![]),
+        fz(1, 21, &[2, 3], vec![230.3495713460602], vec![]),
+        fz(13, 22, &[7, 5], vec![0.13436614554678622, 0.07246446569779841], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.00011626177295752732, 2477.1901409763395], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.05733803209954079, 49.86313691266805], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.1887874285982294, 306.39624757098414], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.029933484890954754, 256.4019899053665], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.004980589081934987, 70.37765453290346], vec![]),
+        fz(90, 15, &[], vec![15.0, 1.956317982121651e-5, 113639.36908703843], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.004824604075116485, 359.2485883074942], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.003944198862336364, 1762.7684407704048], vec![]),
+    ]
+}
+
+/// tpl=3 hub=2 e=5.032 psu ilim=0.061 V2=3.43 LED4-3+R1-4=1796 74LS00 vcc1 gnd0 in2,0 out2,3 SW0-5(1)+R5-0=71 R3-1=110.7 LED6-0 SW1-2(0)+R2-0=46 R6-4=4989.0 R1-4=21.8 SW3-5(1)+R5-0=94 LED0-2+R0-0=31 exact=false span=1.2e1
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 7
+/// toggles [(0.10061352023320264, 20), (0.19698806894745943, 11), (0.45088136135248097, 20), (1.039448424072327, 16), (1.1051088564106837, 16)]
+/// ERR load: rail: the rail loop did not settle within 50 passes
+fn cold_830_tpl3() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![5.032450386993319, 0.06091321705131145], vec![]),
+        fz(2, 1, &[2, 0], vec![3.433591124553459], vec![]),
+        fz(1, 2, &[3, 0], vec![1498.6166111379346], vec![]),
+        fz(1, 3, &[4, 0], vec![1197.7689637237856], vec![]),
+        fz(1, 4, &[5, 0], vec![3228.904742582944], vec![]),
+        fz(1, 5, &[6, 0], vec![7714.894472290962], vec![]),
+        fz(30, 6, &[4, 3], vec![2.5835970637091763, 1.7963230902191438, 0.02760832503000144, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 7, &[1, 4], vec![1795.65980870523], vec![]),
+        fz(50, 8, &[1, 0, 2, 0, 2, 0, 0, 3, 0, 0, 3, 0, 0, 2], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.3117093235179186e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 9, &[2, 3], vec![2193.9018993128116], vec![]),
+        fz(1, 10, &[3, 3], vec![2431.2047826609914], vec![]),
+        fz(4, 11, &[0, 5], vec![1.0], vec![]),
+        fz(1, 12, &[5, 0], vec![70.74845246806566], vec![]),
+        fz(1, 13, &[3, 1], vec![110.74331156557903], vec![]),
+        fz(30, 14, &[6, 0], vec![1.6725954721020677, 2.0817777066683005, 0.025021474381575665, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 15, &[3, 5], vec![414.6610334109262], vec![]),
+        fz(4, 16, &[1, 2], vec![0.0], vec![]),
+        fz(1, 17, &[2, 0], vec![46.039152458289756], vec![]),
+        fz(1, 18, &[6, 4], vec![4988.952275821875], vec![]),
+        fz(1, 19, &[1, 4], vec![21.791530100445204], vec![]),
+        fz(4, 20, &[3, 5], vec![1.0], vec![]),
+        fz(1, 21, &[5, 0], vec![93.53702483711008], vec![]),
+        fz(30, 22, &[0, 2], vec![2.7881303560890545, 2.1180573610353983, 0.0292305309118783, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 23, &[0, 0], vec![31.069654400738116], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.029719603785865387, 1795.65980870523], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.029898455171604717, 2193.9018993128116], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.014966827633910763, 2431.2047826609914], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.12419952316098057, 70.74845246806566], vec![]),
+        fz(90, 13, &[], vec![13.0, 1.4234479635167772, 110.74331156557903], vec![]),
+        fz(90, 17, &[], vec![17.0, 5.499791863284933, 46.039152458289756], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.0045201447093539465, 4988.952275821875], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.37763298873628515, 21.791530100445204], vec![]),
+        fz(90, 21, &[], vec![21.0, 1.5118164053726753, 93.53702483711008], vec![]),
+        fz(90, 23, &[], vec![23.0, 0.16679804321612787, 31.069654400738116], vec![]),
+    ]
+}
+
+/// The hold intervals `(held, freed)` of a [`hold_trace`] (an open one ends
+/// at `t_end`).
+fn trace_spans(trace: &[(f64, digital::power::PowerHold, f64)], t_end: f64) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    let mut since = (trace[0].1.kind == digital::power::HoldKind::Off).then_some(trace[0].0);
+    for &(t, hold, _) in &trace[1..] {
+        match (since, hold.kind == digital::power::HoldKind::Off) {
+            (None, true) => since = Some(t),
+            (Some(t0), false) => {
+                spans.push((t0, t));
+                since = None;
+            }
+            _ => {}
+        }
+    }
+    spans.extend(since.map(|t0| (t0, t_end)));
+    spans
+}
+
+#[test]
+fn the_hg1_fuzz_board_holds_its_gate_until_the_ramp_carries_it() {
+    // G2bv's fz_ic seed 275 hub 2 (HG1, `gate_flips` at 4.275 V), which
+    // declined at 1.3905 s: a {8.10 V, 0.385 A} PSU with 32.9 and 55.7 uF on
+    // its rail (esr 0), a 74LS00 on it. After the switch toggle at 1.3901 s
+    // the rail ramps back up through the gate's floor, where its draw turns
+    // the segment back. Held off there (ruling R44 (a)), it would be released
+    // only where powered at its edge the segment still rose; on this board
+    // the limit never leaves it that, so each toggle's `set_params` drops the
+    // hold and the next pass through the floor takes it again: five holds,
+    // no hold/release cycle, 538 events to 3 s.
+    let p = { let mut p = program(7, g2bv_fz_ic_275_hub2()); p.digital_slot_count = 16; p };
+    let (rig, trace, err) = hold_trace(&p, &[(1.272630061902458, 10), (1.3901187325138928, 14), (2.219621774815895, 10), (2.3726728547854523, 8), (2.6198704533388346, 8), (2.823733970122995, 14), (2.9515980361023977, 14)], &[0.0001005412851729187, 0.0007895698576060186, 0.0011385180074891042, 0.0014955531390017994, 0.008742282512901723, 0.013441818616058119, 0.3413522952387019, 0.595897902723136, 0.7729237222644616, 0.7816529562171904, 0.8251142608707076, 1.1997709379672226, 1.2003926080936536, 1.2221591591911647, 1.226424894467912, 1.2287976179283164, 1.2351929048652155, 1.272630061902458, 1.2857769401881944, 1.2898492890622748, 1.312196653998578, 1.3153038609479852, 1.328313890403436, 1.331078503270592, 1.3323320647144672, 1.3345495519770676, 1.3901187325138928, 1.3925843080284819, 1.3942702516817582, 1.4834704479059608, 1.4926798949992932, 1.4928734885816275, 1.493177198700087, 1.5182004589425633, 1.5229088092535445, 1.5519882497027657, 1.5524312072936755, 1.7500867347305875, 1.760391847602593, 1.7983773057493389, 1.8107357089873901, 1.8223739406882635, 1.8224747068836138, 1.8235109916715213, 1.8293589937154362, 1.829553975160383, 1.8615065468379255, 1.9460438563176246, 1.9518525475748025, 1.9683703530087338, 2.1239814218603263, 2.219621774815895, 2.2825722453041997, 2.2829780089207383, 2.284419254508861, 2.353792547939792, 2.3540727176891734, 2.3726728547854523, 2.392317791298873, 2.392769084983172, 2.394320023634597, 2.395411812003443, 2.4012839152440377, 2.513954423886269, 2.5155071842455685, 2.515668254446695, 2.515857553201643, 2.6198704533388346, 2.6202214605827883, 2.6468979977732436, 2.6551294244338224, 2.6567981652860904, 2.823733970122995, 2.8317468303723583, 2.8430228246571843, 2.8575313428409324, 2.9515980361023977, 2.956319361438573, 2.986799039331321, 2.9872506284843294, 3.0], 4);
+    let spans = trace_spans(&trace, 3.0);
+    eprintln!("fz_ic 275: {err:?}; holds {spans:?}; counts {:?}; events {}", rig.s().hold_counts(), rig.k.stats().events_processed);
+    assert!(err.is_none(), "{err:?}");
+    assert!(spans.iter().all(|&(a, b)| b - a > 1e-3), "no hold shorter than the rail's own time constants: {spans:?}");
+    // Each toggle drops the hold (`set_params`), and the ramp's next pass
+    // through the floor takes it again: no hold/release cycle.
+    assert!(rig.s().hold_counts()[0] <= 8.0, "{:?}", rig.s().hold_counts());
+}
+
+#[test]
+fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
+    // G2bv's bc_ic seed 97 hub 2: a {11.2 V, 0.421 A} PSU in CC with no rail
+    // capacitor, 3.16 mF from the rail to a node with 15.6 ohm to ground, and
+    // a 74LS00 on the rail whose 1y drives that node through 49 ohm. The rail
+    // creeps up through the gate's 4.275 V floor at the capacitor's pace, and
+    // powered the gate takes it 0.11 V back. Two faults made that a cycle of
+    // 11,195 holds and releases in 6 ms (0.02x real time): the closed-form
+    // partition's segment key did not carry the hold, so a probe re-used the
+    // segment stamped the other way and saw no drop, and a release was taken
+    // on the rail loop's passes in passing rather than on the settled rail.
+    // Now it is held once, 34.7 to 39.1 ms, and freed when the rail carries it.
+    // (Its 1a, 1b and 1y share a node: powered, the gate rings at its own 81
+    // ns delay, some 12,000 events a millisecond, which no hold touches.)
+    let p = { let mut p = program(6, g2bv_bc_ic_97_hub2()); p.digital_slot_count = 16; p };
+    let stops = [0.00010054129372012221, 0.0003467103846392178, 0.0004605220067872004, 0.05];
+    let (rig, trace, err) = hold_trace(&p, &[], &stops, 10);
+    let spans = trace_spans(&trace, 0.05);
+    eprintln!("bc_ic 97: {err:?}; holds {spans:?}; counts {:?}; events {}", rig.s().hold_counts(), rig.k.stats().events_processed);
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(rig.s().hold_counts(), [1.0, 1.0]);
+    assert_eq!(spans.len(), 1);
+    assert!(spans[0].0 > 0.0346 && spans[0].0 < 0.0348 && spans[0].1 > 0.039 && spans[0].1 < 0.0393, "{spans:?}");
+    assert!(rig.u() > 0.9 * 4.75, "rail {} V", rig.u());
+}
+
+#[test]
+fn a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay() {
+    // G2bv's fz_ic seed 401 hub 2, which declined at its load: a {5.83 V,
+    // 0.44 A} PSU in CC, a 74LS00 whose 1b and 1y share node 5. It loads held
+    // off (its draw takes the rail under its floor) and stays so until the
+    // switch toggle at 0.44 s drops the hold; powered then with 1a high, 1y
+    // feeds its own input and rings at the gate's 27 ns delay, 18 MHz, two
+    // events an edge: the run is slower than real time from there by the
+    // circuit's own doing, not the hold's.
+    let p = { let mut p = program(7, g2bv_fz_ic_401_hub2()); p.digital_slot_count = 16; p };
+    let (rig, trace, err) = hold_trace(&p, &[(0.44015570685572775, 13)], &[0.00010054129153157535, 0.0003458489221323154, 0.0005618221415494645, 0.0007140772565774002, 0.004709368587030973, 0.016874565396198055, 0.018490089942201665, 0.026414640575132733, 0.027084402744392, 0.2382891458762392, 0.2393829186074303, 0.33486761095951917, 0.33498479477918414, 0.3353630577252437, 0.44015570685572775], 10);
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(trace_spans(&trace, 0.44)[0].0, 0.0, "held at the load");
+    assert_eq!(rig.s().hold_counts(), [1.0, 0.0], "dropped by the toggle, never cycled");
+    let mut rig = rig;
+    let (t0, mut edges, mut last) = (rig.k.time(), 0, rig.v(5) > 3.0);
+    for k in 1..=200 {
+        rig.advance(t0 + k as f64 * 1e-9).unwrap();
+        if (rig.v(5) > 3.0) != last {
+            last = !last;
+            edges += 1;
+        }
+    }
+    eprintln!("fz_ic 401: {edges} edges of 1y in 200 ns");
+    assert!((6..=9).contains(&edges), "1y rings at about 2 x 27 ns a period: {edges} edges in 200 ns");
+}
+
+/// seed 97 hub=2 e=11.214 ilim=0.421 R5-4=81.7 SW5-0(0)+R0-0=104 R1-0=16.2 R3-4=31.4 IC R5-2=49.0 C1-2=3.16e-3 R0-2=15.6
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 16 node_count 6
+/// toggles [(1.3393742423690518, 6), (2.7978206249650617, 6)] resets []
+fn g2bv_bc_ic_97_hub2() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![11.213895031120575, 0.42055500594646733], vec![]),
+        fz(1, 1, &[2, 0], vec![33881.81866815495], vec![]),
+        fz(1, 2, &[3, 0], vec![2755.9469043071645], vec![]),
+        fz(1, 3, &[4, 0], vec![6341.763697887451], vec![]),
+        fz(1, 4, &[5, 0], vec![2017.279549842803], vec![]),
+        fz(1, 5, &[5, 4], vec![81.67779194855792], vec![]),
+        fz(4, 6, &[5, 0], vec![0.0], vec![]),
+        fz(1, 7, &[0, 0], vec![104.02083318002894], vec![]),
+        fz(1, 8, &[1, 0], vec![16.24375077320078], vec![]),
+        fz(1, 9, &[3, 4], vec![31.438742186261308], vec![]),
+        fz(50, 10, &[1, 0, 5, 5, 5, 0, 0, 2, 0, 0, 2, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 8.111414590724573e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 11, &[5, 0], vec![120.27494562243916], vec![]),
+        fz(1, 12, &[2, 1], vec![496.47046284123473], vec![]),
+        fz(1, 13, &[5, 2], vec![49.03908580255002], vec![]),
+        fz(3, 14, &[1, 2], vec![0.003163696267321141, 0.0, 0.0], vec![]),
+        fz(1, 15, &[0, 2], vec![15.553145840323737], vec![]),
+    ]
+}
+
+/// seed 401 hub=2 e=5.834 ilim=0.442 SW3-1(1)+R1-0=12 P4-5=0.91 P4-2=1.72 IC SW2-3(1)+R3-0=98 C3-1=2.06e-3
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 16 node_count 7
+/// toggles [(0.44015570685572775, 13), (0.4872017451092161, 6), (1.28231178430037, 13), (2.3066926693934438, 13)] resets []
+fn g2bv_fz_ic_401_hub2() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![5.833680415864328, 0.4416205865116221], vec![]),
+        fz(1, 1, &[2, 0], vec![17622.05456493839], vec![]),
+        fz(1, 2, &[3, 0], vec![5377.263519243568], vec![]),
+        fz(1, 3, &[4, 0], vec![9253.40703554229], vec![]),
+        fz(1, 4, &[5, 0], vec![109291.70698686843], vec![]),
+        fz(1, 5, &[6, 0], vec![2199.8560622387677], vec![]),
+        fz(4, 6, &[3, 1], vec![1.0], vec![]),
+        fz(1, 7, &[1, 0], vec![11.931721114368015], vec![]),
+        fz(1, 8, &[4, 5], vec![0.9133364283707476], vec![]),
+        fz(1, 9, &[4, 2], vec![1.7156985347279319], vec![]),
+        fz(50, 10, &[1, 0, 3, 5, 5, 0, 0, 6, 0, 0, 6, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 2.717393732964803e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 11, &[5, 0], vec![630.4651796322628], vec![]),
+        fz(1, 12, &[6, 1], vec![103.73493073749172], vec![]),
+        fz(4, 13, &[2, 3], vec![1.0], vec![]),
+        fz(1, 14, &[3, 0], vec![97.61422778082371], vec![]),
+        fz(3, 15, &[3, 1], vec![0.00205894450326118, 0.0, 0.0], vec![]),
+    ]
+}
+/// seed 275 hub=2 e=8.095 ilim=0.385 IC C1-0=3.29e-5 SW4-0(1)+R0-0=22 SW2-3(1)+R3-0=184 R1-2=3970 F4-0=0.44 SW3-1(1)+R1-0=12 C0-1=5.57e-5
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 16 node_count 5
+/// toggles [(1.272630061902458, 10), (1.3901187325138928, 14), (2.219621774815895, 10), (2.3726728547854523, 8), (2.6198704533388346, 8), (2.823733970122995, 14), (2.9515980361023977, 14)] resets []
+fn g2bv_fz_ic_275_hub2() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![8.094717445814506, 0.3845712863130265], vec![]),
+        fz(1, 1, &[2, 0], vec![173574.86251306813], vec![]),
+        fz(1, 2, &[3, 0], vec![112520.54007451961], vec![]),
+        fz(1, 3, &[4, 0], vec![7418.156349028272], vec![]),
+        fz(50, 4, &[1, 0, 1, 1, 3, 0, 0, 3, 0, 0, 3, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 6.859798610844554e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 5, &[3, 0], vec![353.2943086646341], vec![]),
+        fz(1, 6, &[3, 1], vec![157.94274935630074], vec![]),
+        fz(3, 7, &[1, 0], vec![3.294723434183485e-5, 0.0, 0.0], vec![]),
+        fz(4, 8, &[4, 0], vec![1.0], vec![]),
+        fz(1, 9, &[0, 0], vec![21.86126716827705], vec![]),
+        fz(4, 10, &[2, 3], vec![1.0], vec![]),
+        fz(1, 11, &[3, 0], vec![183.91515164101776], vec![]),
+        fz(1, 12, &[1, 2], vec![3970.1407174723504], vec![]),
+        fz(1, 13, &[4, 0], vec![0.43973610276635844], vec![]),
+        fz(4, 14, &[3, 1], vec![1.0], vec![]),
+        fz(1, 15, &[1, 0], vec![12.042350635818496], vec![]),
+        fz(3, 16, &[0, 1], vec![5.57000337370709e-5, 0.0, 0.0], vec![]),
+    ]
 }

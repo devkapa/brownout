@@ -74,6 +74,16 @@ pub(super) struct Hub {
     /// A scan's readers and their reads before the move, compared once the
     /// move is published (stat 20).
     scan_pre: Vec<(DeviceId, Vec<bool>)>,
+    /// The last three distinct iterates of the latest rail Newton, oldest
+    /// first: when it fails, the rail ICs whose verdict alternated across
+    /// them trigger the power hold (W1c point 1a). Scratch, reset by every
+    /// rail solve.
+    newton_trace: std::cell::Cell<[f64; 3]>,
+    /// Set by an event other than `Rail` (`end_gate_chase`): HG1's count ends
+    /// only if the rail then actually solves again in that call, so a commit
+    /// that changes nothing the rail sees (a zero-delay reader of a rail
+    /// gate's output on a supply of its own) does not hide the ping-pong.
+    chase_end: bool,
 }
 
 impl Hub {
@@ -133,6 +143,11 @@ impl Hub {
             HubKind::Psu { v, i_limit } => Some((v, i_limit)),
             HubKind::Battery(_) => None,
         }
+    }
+
+    /// A bench PSU's `(v, iLimit)`, `None` on a cell.
+    pub(super) fn psu_setpoint(&self) -> Option<(f64, f64)> {
+        self.psu()
     }
 
     fn battery(&self) -> Option<&BatteryModel> {
@@ -520,6 +535,7 @@ impl PartitionedSolver {
             settle_changed: false,
             gate_flips: 0,
             gates_before: Vec::new(),
+            held_draw: Vec::new(),
         };
         let parts = self.partition_kinds.len();
         self.hub = Some(Box::new(Hub {
@@ -548,6 +564,8 @@ impl PartitionedSolver {
             dirty: true,
             w_dirty: true,
             scan_pre: Vec::new(),
+            newton_trace: std::cell::Cell::new([f64::NAN; 3]),
+            chase_end: false,
         }));
     }
 
@@ -782,6 +800,13 @@ impl PartitionedSolver {
         }
     }
 
+    /// The rail's whole draw at `now` were the rail at `u`: the partitions'
+    /// linearised terms and the direct devices exact there.
+    pub(super) fn rail_draw_at(&self, now: f64, u: f64) -> f64 {
+        let (a_p, g_p, _, _) = self.partition_totals(now);
+        a_p + g_p * u + self.direct_at(u).0
+    }
+
     /// `(A0, G)` of the partitions at `t`: the running sums of the static and
     /// stepped terms, and every closed-form term at its `vc(t)`, with the
     /// closed-form partitions those terms are, in the same order.
@@ -830,7 +855,17 @@ impl PartitionedSolver {
         let cf_drift = self.cf_drift_charge(now, &cf_parts);
         let cf_frozen: f64 = terms.iter().map(|t| t.b_at(self.hub.as_ref().unwrap().state.u) * t.vc).sum();
         let hub = self.hub.as_ref().expect("a hub");
-        let direct = |u: f64| self.direct_at(u);
+        // Each call is at the rail Newton's next iterate (or again at its
+        // last): the last three are kept for the hold's trigger.
+        hub.newton_trace.set([f64::NAN; 3]);
+        let direct = |u: f64| {
+            let mut t = hub.newton_trace.get();
+            if t[2].to_bits() != u.to_bits() {
+                t = [t[1], t[2], u];
+                hub.newton_trace.set(t);
+            }
+            self.direct_at(u)
+        };
         let old_u = hub.state.u;
         let mut reg = hub.state.reg;
         let mut cap_seg = hub.state.cap_seg.clone();
@@ -991,10 +1026,11 @@ impl PartitionedSolver {
 
     /// What a rail move does at once (Rails point 3): publish `u`, re-aim the
     /// closed forms that read it, re-publish the stepped hub partitions, move
-    /// the rail capacitors, wake the ICs whose power flipped, and run a scan
-    /// past `RAIL_SCAN_V`. The static hub partitions follow in the next static
-    /// pass (queued here).
-    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, hold_power: bool) -> Vec<usize> {
+    /// the rail capacitors, wake the ICs whose power flipped (each counted in
+    /// `flips`, by position in `rail_ics`: W1c point 1a's trigger), and run a
+    /// scan past `RAIL_SCAN_V`. The static hub partitions follow in the next
+    /// static pass (queued here).
+    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, flips: &mut hold::Flips) -> Vec<usize> {
         let (rail, u) = {
             let hub = self.hub.as_ref().expect("a hub");
             (hub.node, hub.state.u)
@@ -1022,7 +1058,8 @@ impl PartitionedSolver {
                 let at = |uu: f64, node: usize| if node == rail { uu } else { self.voltages[node] };
                 let before = digital::power::verdict(ic, at(old_u, ic.vcc.node), at(old_u, ic.gnd.node), self.power_hold(*d));
                 let after = digital::power::verdict(ic, at(u, ic.vcc.node), at(u, ic.gnd.node), self.power_hold(*d));
-                if before != after && !hold_power {
+                flips.note(k, before);
+                if flips.note(k, after) {
                     readers.push(DeviceId(*d as u32));
                     flipped_parts.extend(&hub.ic_parts[k]);
                 }
@@ -1050,24 +1087,6 @@ impl PartitionedSolver {
         flipped_parts.sort_unstable();
         flipped_parts.dedup();
         flipped_parts
-    }
-
-    /// Whether a move of the rail from `old_u` to `u` flips rail ICs' power
-    /// against the CC segment's motion at `now`: off while it rises, on while
-    /// it falls.
-    fn flip_runs_against_the_ramp(&self, now: f64, old_u: f64, u: f64) -> bool {
-        let hub = self.hub.as_ref().unwrap();
-        let Some(slope) = hub.state.cap_seg.as_ref().map(|s| s.slope_at(now)) else { return false };
-        let rail = hub.node;
-        let on = |uu: f64| {
-            hub.rail_ics.iter().filter(|&&pos| {
-                let (d, ic) = &self.ics[pos as usize];
-                let at = |node: usize| if node == rail { uu } else { self.voltages[node] };
-                digital::power::verdict(ic, at(ic.vcc.node), at(ic.gnd.node), self.power_hold(*d))
-            }).count()
-        };
-        let (before, after) = (on(old_u), on(u));
-        (slope > 0.0 && after < before) || (slope < 0.0 && after > before)
     }
 
     /// The rail's closed form changed with no move (a CC rail capacitor's
@@ -1218,6 +1237,31 @@ impl PartitionedSolver {
             self.drain_contributions();
             return Ok(());
         }
+        let passes = self.rail_passes(now, drivers, readers, Vec::new());
+        self.hub.as_mut().unwrap().chase_end = false;
+        match passes? {
+            hold::Passes::Settled => Ok(()),
+            // W1c point 1a: rail ICs whose own draw flips their power each
+            // pass (or each rail Newton iterate) are probed, and held off if
+            // they starve themselves.
+            hold::Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
+        }
+    }
+
+    /// The rail loop's passes, with the partitions `seed` re-solved on the
+    /// first (a power hold changed their stamps). Counts each rail IC's
+    /// verdict flips and ends with the ones that alternated when the passes
+    /// cannot settle: at the pass cap, at the 2-cycle test below with a flip
+    /// on both passes, or at a rail Newton whose iterates flip them.
+    pub(super) fn rail_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<hold::Passes, String> {
+        let mut flips = hold::Flips::new(self.hub.as_ref().unwrap().rail_ics.len());
+        // Whether this pass flipped a rail IC's verdict (and, below, the one
+        // before it).
+        let mut flipped_now = false;
+        let mut seed = Some(seed).filter(|s| !s.is_empty());
+        if seed.is_some() {
+            self.hub.as_mut().unwrap().dirty = true;
+        }
         let mut solved = false;
         // Set by a CC exit with a rail capacitor: the passes after it tie the
         // capacitors again at the draws the exit's re-solves settle to.
@@ -1229,13 +1273,27 @@ impl PartitionedSolver {
         for _pass in 0..rails::RAIL_LOOP_MAX {
             self.drain_contributions();
             if !self.hub.as_ref().unwrap().dirty {
+                // Settled: a held rail IC whose supply now passes its release
+                // is freed, and the passes go on with its stamps.
+                if let Some(parts) = self.release_settled(now, readers, &mut flips) {
+                    seed = Some(parts);
+                    flipped_now = true;
+                    continue;
+                }
                 if solved {
                     self.finish_scan();
                     self.schedule_rail_event(now);
                 }
-                return Ok(());
+                return Ok(hold::Passes::Settled);
             }
-            self.hub.as_mut().unwrap().dirty = false;
+            {
+                // An event other than `Rail` changed what the rail sees.
+                let hub = self.hub.as_mut().unwrap();
+                hub.dirty = false;
+                if std::mem::take(&mut hub.chase_end) {
+                    hub.state.gate_flips = 0;
+                }
+            }
             if tie && self.hub.as_ref().unwrap().state.reg == Regime::Cv {
                 self.tie_exit(now, None);
             }
@@ -1243,7 +1301,13 @@ impl PartitionedSolver {
                 let state = &self.hub.as_ref().unwrap().state;
                 (state.cap_seg.clone().or_else(|| state.cell_path.clone()), state.cell)
             };
-            let (old_u, regime_changed, keep) = self.solve_rail(now)?;
+            let (old_u, regime_changed, keep) = match self.solve_rail(now) {
+                Ok(solved) => solved,
+                Err(err) => {
+                    let a = self.newton_alternating();
+                    return if a.is_empty() { Err(err) } else { Ok(hold::Passes::Alternating(a, err)) };
+                }
+            };
             self.sync_hub_cache_band();
             self.sync_rail_drive();
             self.reset_cf_drift(now);
@@ -1263,20 +1327,14 @@ impl PartitionedSolver {
             if !fresh && seen.len() >= 2 && seen[..seen.len() - 1].iter().any(|&v| (v - u).abs() <= rails::RAIL_MOVE_EPS) {
                 fresh = true;
             }
-            // A rail IC whose own power flip steps the rail back across its
-            // window's edge (its supply current through the rail capacitors'
-            // esr, F1r14's slow inrush at esr 1-5 ohm: 17 nV against an edge
-            // landed two reached-widths past) has no consistent state at this
-            // instant: the passes alternate. On the pass whose flip runs
-            // against the CC segment's motion (an IC turning off while the
-            // ramp rises), the flip is held: the partitions keep the stamps
-            // of the state the ramp is heading into, and the segment, solved
-            // with them, crosses the edge a moment later at the next event,
-            // where the gate settles.
-            let hold = moved && seen.len() >= 2 && seen[seen.len() - 2].to_bits() == u.to_bits() && self.flip_runs_against_the_ramp(now, old_u, u);
+            let two_back = seen.len() >= 2 && seen[seen.len() - 2].to_bits() == u.to_bits();
             seen.push(u);
-            let flipped = if moved {
-                self.on_rail_move(now, old_u, readers, hold)
+            let flipped_before = std::mem::replace(&mut flipped_now, false);
+            let mut flipped = if moved {
+                let before = flips.total();
+                let flipped = self.on_rail_move(now, old_u, readers, &mut flips);
+                flipped_now = flips.total() > before;
+                flipped
             } else {
                 // The segment changed with no move of `u`: re-aimed at new
                 // draws within one instant, or ended by a CC exit within
@@ -1289,6 +1347,21 @@ impl PartitionedSolver {
                 }
                 Vec::new()
             };
+            if let Some(seed) = seed.take() {
+                flipped.extend(seed);
+            }
+            // A rail IC whose own power flip steps the rail back across its
+            // window's edge has no consistent state at this instant: the
+            // passes alternate, the rail back where it was two passes before
+            // with a flip on each (W1c point 1a; F1r14's slow inrush, its
+            // supply current through the rail capacitors' esr, 17 nV against
+            // an edge landed two reached-widths past, is one).
+            if moved && two_back && flipped_now && flipped_before {
+                let a = self.rail_ic_devices(&flips.alternating());
+                if !a.is_empty() {
+                    return Ok(hold::Passes::Alternating(a, rails::loop_unsettled()));
+                }
+            }
             let cc_exit = regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv;
             if regime_changed {
                 self.on_regime_change(now, keep);
@@ -1366,15 +1439,55 @@ impl PartitionedSolver {
             }
             if past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() {
                 self.drain_contributions();
-                let hub = self.hub.as_mut().unwrap();
                 // A move alone changes no contribution: the rail is solved.
-                hub.dirty = false;
+                self.hub.as_mut().unwrap().dirty = false;
+                if let Some(parts) = self.release_settled(now, readers, &mut flips) {
+                    seed = Some(parts);
+                    flipped_now = true;
+                    continue;
+                }
                 self.finish_scan();
                 self.schedule_rail_event(now);
-                return Ok(());
+                return Ok(hold::Passes::Settled);
             }
         }
-        Err(rails::loop_unsettled())
+        let a = self.rail_ic_devices(&flips.alternating());
+        if a.is_empty() {
+            Err(rails::loop_unsettled())
+        } else {
+            Ok(hold::Passes::Alternating(a, rails::loop_unsettled()))
+        }
+    }
+
+    /// The device indices of the rail ICs at positions `ks` in `rail_ics`.
+    fn rail_ic_devices(&self, ks: &[usize]) -> Vec<usize> {
+        let hub = self.hub.as_ref().unwrap();
+        ks.iter().map(|&k| self.ics[hub.rail_ics[k] as usize].0).collect()
+    }
+
+    /// The rail ICs (device indices) whose verdict flipped at both of the
+    /// last two steps of the latest rail Newton (W1c point 1a's trigger in
+    /// the rail Newton: `direct_at` judges a direct IC at each iterate).
+    fn newton_alternating(&self) -> Vec<usize> {
+        let hub = self.hub.as_ref().unwrap();
+        let t = hub.newton_trace.get();
+        if t.iter().any(|u| u.is_nan()) {
+            return Vec::new();
+        }
+        let rail = hub.node;
+        hub.rail_ics
+            .iter()
+            .filter_map(|&pos| {
+                let (d, ic) = &self.ics[pos as usize];
+                let hold = self.power_hold(*d);
+                let on = |u: f64| {
+                    let at = |node: usize| if node == rail { u } else { self.voltages[node] };
+                    digital::power::verdict(ic, at(ic.vcc.node), at(ic.gnd.node), hold)
+                };
+                let (a, b, c) = (on(t[0]), on(t[1]), on(t[2]));
+                (a != b && b != c).then_some(*d)
+            })
+            .collect()
     }
 
     /// Hands the stepped solver the CC rail its hub partitions step against
@@ -1488,7 +1601,7 @@ impl PartitionedSolver {
 
     /// Schedules the next `Rail` event from the implied trajectory at `now`
     /// (Rails point 4), superseding the pending one.
-    fn schedule_rail_event(&mut self, now: f64) {
+    pub(super) fn schedule_rail_event(&mut self, now: f64) {
         let watches = self.rail_watches(now);
         let mut t = rails::next_event(now, &watches);
         // A driven partition on a rail of several modes holds its coupling
@@ -1509,15 +1622,21 @@ impl PartitionedSolver {
     }
 
     /// The rail voltages at which an IC whose vcc is the rail and gnd fixed
-    /// turns on or off (its power window, W1c point 1), ascending.
+    /// turns on or off (its power window, W1c point 1), ascending. An IC
+    /// held off watches its release level instead (W1c points 1a and 4).
     fn rail_power_edges(&self) -> Vec<f64> {
         let hub = self.hub.as_ref().unwrap();
         let mut windows = Vec::new();
         for &pos in &hub.rail_ics {
-            let ic = &self.ics[pos as usize].1;
+            let (d, ic) = &self.ics[pos as usize];
             if ic.vcc.node == hub.node && self.fixed_node[ic.gnd.node] && ic.gnd.node != hub.node {
-                let (lo, hi) = digital::levels::power_window(ic);
                 let vg = self.voltages[ic.gnd.node];
+                let hold = self.power_hold(*d);
+                if !hold.is_free() {
+                    windows.extend(hold.release.map(|r| vg + r.level));
+                    continue;
+                }
+                let (lo, hi) = digital::levels::power_window(ic);
                 windows.push(vg + lo);
                 windows.push(vg + hi);
             }
@@ -1619,6 +1738,9 @@ impl PartitionedSolver {
                 let dir = direction(*v);
                 match &hub.state.cap_seg {
                     Some(seg) => {
+                        // A chip held off here waits for the draw threshold
+                        // too (ruling R44 (a)).
+                        watches.extend(self.held_draw_watches(now, *v, *i_limit, &cf_motion));
                         let mut th = windows;
                         th.extend(self.rail_kinks());
                         th.push(*v);
@@ -1750,8 +1872,14 @@ impl PartitionedSolver {
         let gates = self.rail_gates();
         let result = self.rail_loop(now, &drivers, &mut readers);
         self.on_error(result)?;
-        let result = self.count_gate_flip(gates);
-        self.on_error(result)?;
+        if let Some(a) = self.count_gate_flip(gates) {
+            // W1c point 1a across instants: the gates flipped back at the
+            // second event in a row, so the rail ICs that flipped are probed
+            // at this one.
+            let result = self.hold_on_rail(now, &drivers, &mut readers, &a, rails::loop_unsettled());
+            self.on_error(result)?;
+            self.hub.as_mut().unwrap().state.gate_flips = 0;
+        }
         let published = self.finish_publish(now);
         self.on_error(published)?;
         Ok((Vec::new(), readers))
@@ -1767,40 +1895,39 @@ impl PartitionedSolver {
         }).collect()
     }
 
-    /// The power-gate ping-pong across instants (`w1f-power-gate-pingpong`).
-    /// Without a rail capacitor the rail jumps with each flip and the rail
-    /// loop alternates within one instant, to its pass cap. With one the rail
-    /// is continuous: a flip turns the segment back, and the next power-window
-    /// event lands the rail two reached widths past the same edge the other
-    /// way femtoseconds later, so every instant settles and time crawls on
-    /// forever. Counted here as passes of that loop: `Rail` events in a row
-    /// that each flipped the gates back where the one before flipped them
-    /// from. A `Rail` event that flips nothing ends the run, and so does any
-    /// other event (see [`Self::end_gate_chase`]); the horizon clamp does not,
-    /// since a caller stepping event by event clamps after each one.
-    fn count_gate_flip(&mut self, before: Vec<bool>) -> Result<(), String> {
+    /// The power-gate ping-pong across instants (HG1; W1c point 1a). With a
+    /// rail capacitor the rail is continuous: a flip turns the segment back,
+    /// and the next power-window event lands the rail two reached widths
+    /// past the same edge the other way femtoseconds later, so every instant
+    /// settles and time crawls on. Counted here as passes of that loop:
+    /// `Rail` events in a row that each flipped the gates back where the one
+    /// before flipped them from; at the second, the rail ICs (device
+    /// indices) that flipped are returned for the hold procedure. A `Rail`
+    /// event that flips nothing ends the run, and so does any other event
+    /// (see [`Self::end_gate_chase`]); the horizon clamp does not, since a
+    /// caller stepping event by event clamps after each one.
+    fn count_gate_flip(&mut self, before: Vec<bool>) -> Option<Vec<usize>> {
         let after = self.rail_gates();
         let state = &mut self.hub.as_mut().unwrap().state;
         if after == before {
             state.gate_flips = 0;
-            return Ok(());
+            return None;
         }
         state.gate_flips = if state.gate_flips > 0 && after == state.gates_before { state.gate_flips + 1 } else { 1 };
+        let flipped: Vec<usize> = before.iter().zip(&after).enumerate().filter(|(_, (b, a))| b != a).map(|(k, _)| k).collect();
         state.gates_before = before;
-        if state.gate_flips >= rails::RAIL_LOOP_MAX {
-            return Err(rails::loop_unsettled());
-        }
-        Ok(())
+        (state.gate_flips >= 2).then(|| self.rail_ic_devices(&flipped))
     }
 
     /// An event other than `Rail` changed what the rail sees: a rail that
     /// crosses a power edge again after it is answering that, not chasing its
     /// own gate, as a clock swinging a load across an IC's floor does every
     /// half period. Counting those flips too declined such a rail after 50
-    /// of them.
+    /// of them. The count ends at this call's first rail solve (`chase_end`):
+    /// an event that never reaches the rail changed nothing it sees.
     pub(super) fn end_gate_chase(&mut self) {
         if let Some(hub) = self.hub.as_mut() {
-            hub.state.gate_flips = 0;
+            hub.chase_end = true;
         }
     }
 
@@ -1948,12 +2075,16 @@ impl PartitionedSolver {
                 let Some(&pos) = self.ic_position.get(d as usize).filter(|&&p| p != u32::MAX) else { continue };
                 let ic = &self.ics[pos as usize].1;
                 let (vv, vg) = (self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+                // An IC held off watches its release level instead of its
+                // power window (W1c points 1a and 4).
+                let hold = self.power_hold(d as usize);
                 let (lo, hi) = digital::levels::power_window(ic);
+                let edges: Vec<f64> = if hold.is_free() { vec![lo, hi] } else { hold.release.map(|r| r.level).into_iter().collect() };
                 if ic.vcc.node == node {
-                    thresholds.extend([vg + lo, vg + hi]);
+                    thresholds.extend(edges.iter().map(|e| vg + e));
                 }
                 if ic.gnd.node == node {
-                    thresholds.extend([vv - lo, vv - hi]);
+                    thresholds.extend(edges.iter().map(|e| vv - e));
                 }
                 if digital::is_ne555(ic.kind) {
                     for li in [digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {

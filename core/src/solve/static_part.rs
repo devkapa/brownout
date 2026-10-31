@@ -659,10 +659,17 @@ pub struct StaticPartitionSolver {
 
     // ---- F5: the power holds (W1c point 1a) -------------------------------
     /// The owner's device-indexed hold table, and whether any entry is not
-    /// free. The owner journals it and hands it back after a rollback, so
-    /// this solver only reads it.
+    /// free. The owner journals it and hands it back after a rollback; the
+    /// hold procedure in an iterated partition (`Self::hold_in`) changes
+    /// this copy and queues the change for the owner in `hold_requests`.
     holds: std::rc::Rc<Vec<digital::power::PowerHold>>,
     holds_on: bool,
+    /// Holds taken and released by the last resolves, for the owner to enter
+    /// in its table (`PartitionedSolver::take_static_holds`).
+    hold_requests: Vec<(usize, digital::power::PowerHold)>,
+    /// The copy as the open window found it before this solver first changed
+    /// it, which a rollback restores.
+    w_holds: Option<(std::rc::Rc<Vec<digital::power::PowerHold>>, bool)>,
 }
 
 impl StaticPartitionSolver {
@@ -955,6 +962,8 @@ impl StaticPartitionSolver {
             cache_journaled: vec![false; partitions_len],
             holds: std::rc::Rc::new(Vec::new()),
             holds_on: false,
+            hold_requests: Vec::new(),
+            w_holds: None,
         })
     }
 
@@ -964,6 +973,17 @@ impl StaticPartitionSolver {
     pub(crate) fn set_power_holds(&mut self, holds: std::rc::Rc<Vec<digital::power::PowerHold>>, on: bool) {
         self.holds = holds;
         self.holds_on = on;
+    }
+
+    /// The holds and releases this solver's resolves took since the last
+    /// call, in order.
+    #[inline]
+    pub(crate) fn has_hold_requests(&self) -> bool {
+        !self.hold_requests.is_empty()
+    }
+
+    pub(crate) fn take_hold_requests(&mut self) -> Vec<(usize, digital::power::PowerHold)> {
+        std::mem::take(&mut self.hold_requests)
     }
 
     /// The hold table as a verdict reads it: empty while nothing is held.
@@ -1184,6 +1204,7 @@ impl StaticPartitionSolver {
         #[cfg(test)]
         self.check_log_reproduces_the_window_start();
         self.window = false;
+        self.w_holds = None;
         self.v_log.clear();
         self.i_log.clear();
         for (p, _) in self.hub_journal.drain(..) {
@@ -1227,6 +1248,12 @@ impl StaticPartitionSolver {
             self.cache_journaled[p as usize] = false;
             self.caches[p as usize] = cache;
         }
+        // A hold this solver took in the failed instant is undone with it.
+        if let Some((holds, on)) = self.w_holds.take() {
+            self.holds = holds;
+            self.holds_on = on;
+        }
+        self.hold_requests.clear();
         // Owner requests are per call and never span a failed instant.
         self.pending_bnd.clear();
         self.republish_hubs = false;
@@ -1718,8 +1745,176 @@ impl StaticPartitionSolver {
         self.iterated_solve_factored(p_idx, now, drivers).map(|(x, _)| x)
     }
 
-    /// [`Self::iterated_solve`] with the factors of its last iteration.
+    /// [`Self::iterated_solve`] with the factors of its last iteration. A
+    /// partition holding a free IC supply counts each such IC's power
+    /// verdict flips across the iterates: when the Newton fails with one
+    /// flipped twice, the hold procedure runs here (W1c point 1a,
+    /// `Self::hold_in`); when it passes with an IC held off, its release is
+    /// checked at the solution (`Self::release_in`).
     fn iterated_solve_factored(&mut self, p_idx: usize, now: f64, drivers: &[Driver]) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        if !self.holds_free_ic_supply[p_idx] {
+            return self.newton_in(p_idx, now, drivers, &[], None);
+        }
+        self.free_supply_solve(p_idx, now, drivers, None)
+    }
+
+    /// The solve of a partition holding a free IC supply: the Newton and,
+    /// for a hub partition (`polish_at`, its rail), the exact-Jacobian
+    /// polish, with W1c point 1a around them.
+    fn free_supply_solve(&mut self, p_idx: usize, now: f64, drivers: &[Driver], polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        let gated = self.gated_ics(p_idx);
+        let mut flips = crate::solve::hold::Flips::new(gated.len());
+        match self.solve_once(p_idx, now, drivers, &gated, Some(&mut flips), polish_at) {
+            Ok(solved) if self.holds_on => self.release_in(p_idx, now, drivers, &gated, solved, polish_at),
+            Ok(solved) => Ok(solved),
+            Err(err) => {
+                let a = flips.alternating();
+                if a.is_empty() {
+                    return Err(err);
+                }
+                self.hold_in(p_idx, now, drivers, &gated, &flips, &a, err, polish_at)
+            }
+        }
+    }
+
+    /// One solve of a free-supply partition: the Newton, then the polish at
+    /// `polish_at` when given, each noting `gated`'s verdicts in `flips`.
+    fn solve_once(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], mut flips: Option<&mut crate::solve::hold::Flips>, polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        let (x, factors) = self.newton_in(p_idx, now, drivers, gated, flips.as_deref_mut())?;
+        match polish_at {
+            Some(u) => Ok((self.polish_hub(p_idx, now, drivers, x, u, gated, flips)?, factors)),
+            None => Ok((x, factors)),
+        }
+    }
+
+    /// The ICs (indices into `ics`) with a supply node free in `p_idx`: the
+    /// ones whose power the partition's own solve decides.
+    fn gated_ics(&self, p_idx: usize) -> Vec<u32> {
+        self.part_ics[p_idx].iter().copied().filter(|&k| {
+            let ic = &self.ics[k as usize].1;
+            self.in_partition(ic.vcc.node, p_idx) || self.in_partition(ic.gnd.node, p_idx)
+        }).collect()
+    }
+
+    /// The supply difference of IC `k` (index into `ics`) at `x`.
+    fn supply_at(&self, k: u32, p_idx: usize, x: &[f64]) -> f64 {
+        let ic = &self.ics[k as usize].1;
+        self.read_node(ic.vcc.node, p_idx, x) - self.read_node(ic.gnd.node, p_idx, x)
+    }
+
+    /// Sets this solver's copy of the hold of IC `device` (device index),
+    /// saving the copy the window found first.
+    fn set_local_hold(&mut self, device: usize, hold: digital::power::PowerHold) {
+        if self.window && self.w_holds.is_none() {
+            self.w_holds = Some((std::rc::Rc::clone(&self.holds), self.holds_on));
+        }
+        let table = std::rc::Rc::make_mut(&mut self.holds);
+        if table.len() <= device {
+            table.resize(device + 1, digital::power::PowerHold::FREE);
+        }
+        table[device] = hold;
+        self.holds_on = table.iter().any(|h| !h.is_free());
+    }
+
+    /// W1c point 1a in an iterated partition, after its Newton failed with
+    /// the gated ICs at positions `a` of `gated` alternating: probed held
+    /// powered (the rest at their last iterate's reading), the ones reading
+    /// unpowered probed again held unpowered, and the partition solved with
+    /// them held off and the rest as they were. Any failing step is `err`,
+    /// with this solver's copy as it was.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_in(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], flips: &crate::solve::hold::Flips, a: &[usize], err: String, polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        use crate::solve::hold;
+        let saved = (std::rc::Rc::clone(&self.holds), self.holds_on);
+        let device = |k: usize| self.ics[gated[k] as usize].0;
+        let devices: Vec<usize> = (0..gated.len()).map(device).collect();
+        let before: Vec<digital::power::PowerHold> = devices.iter().map(|&d| digital::power::hold_of(self.holds_slice(), d)).collect();
+        let fail = |this: &mut Self| {
+            (this.holds, this.holds_on) = (std::rc::Rc::clone(&saved.0), saved.1);
+            Err(err.clone())
+        };
+        for (k, &d) in devices.iter().enumerate() {
+            // One already held off stays so: a probe is no release.
+            if before[k].kind == digital::power::HoldKind::Off && !a.contains(&k) {
+                continue;
+            }
+            self.set_local_hold(d, hold::probe(a.contains(&k) || flips.last(k).unwrap_or(false)));
+        }
+        let Ok((x, _)) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) else { return fail(self) };
+        let starving: Vec<(usize, f64)> = a
+            .iter()
+            .filter_map(|&k| {
+                let ic = &self.ics[gated[k] as usize].1;
+                let (vv, vg) = (self.read_node(ic.vcc.node, p_idx, &x), self.read_node(ic.gnd.node, p_idx, &x));
+                (!digital::power::powered(ic, vv, vg)).then_some((k, vv - vg))
+            })
+            .collect();
+        if starving.is_empty() {
+            return fail(self);
+        }
+        for &(k, _) in &starving {
+            self.set_local_hold(devices[k], hold::probe(false));
+        }
+        let Ok((x, _)) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) else { return fail(self) };
+        let mut taken = Vec::new();
+        for (k, &d) in devices.iter().enumerate() {
+            let held = match starving.iter().find(|&&(s, _)| s == k) {
+                Some(&(_, v_on)) => hold::held_off(&self.ics[gated[k] as usize].1, v_on, self.supply_at(gated[k], p_idx, &x)),
+                None => before[k],
+            };
+            self.set_local_hold(d, held);
+            if held != before[k] {
+                taken.push((d, held));
+            }
+        }
+        match self.solve_once(p_idx, now, drivers, gated, None, polish_at) {
+            Ok(solved) => {
+                self.hold_requests.extend(taken);
+                Ok(solved)
+            }
+            Err(_) => fail(self),
+        }
+    }
+
+    /// The release check at an iterated partition's solve (W1c point 1a):
+    /// an IC held off whose supply at `solved` passed its release is free
+    /// again, and the partition solves once more with it, holding it again
+    /// (with a fresh drop) if it still starves itself.
+    fn release_in(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], solved: (Vec<f64>, lu::LuFactorization), polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
+        let due: Vec<usize> = gated
+            .iter()
+            .map(|&k| self.ics[k as usize].0)
+            .zip(gated)
+            .filter(|&(d, &k)| {
+                let hold = digital::power::hold_of(self.holds_slice(), d);
+                hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| crate::solve::hold::passed(r, self.supply_at(k, p_idx, &solved.0)))
+            })
+            .map(|(d, _)| d)
+            .collect();
+        if due.is_empty() {
+            return Ok(solved);
+        }
+        for d in due {
+            self.set_local_hold(d, digital::power::PowerHold::FREE);
+            self.hold_requests.push((d, digital::power::PowerHold::FREE));
+        }
+        let mut flips = crate::solve::hold::Flips::new(gated.len());
+        match self.solve_once(p_idx, now, drivers, gated, Some(&mut flips), polish_at) {
+            Ok(solved) => Ok(solved),
+            Err(err) => {
+                let a = flips.alternating();
+                if a.is_empty() {
+                    return Err(err);
+                }
+                self.hold_in(p_idx, now, drivers, gated, &flips, &a, err, polish_at)
+            }
+        }
+    }
+
+    /// One Newton solve of an iterated partition from its published
+    /// voltages, noting each of `gated`'s verdicts at every iterate in
+    /// `flips` when given.
+    fn newton_in(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], mut flips: Option<&mut crate::solve::hold::Flips>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
         let size = self.partitions[p_idx].len();
         let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
         let polish = !self.junctions[p_idx].is_empty();
@@ -1730,6 +1925,13 @@ impl StaticPartitionSolver {
         let result = newton::solve_keeping_factors(size, size, &x0, false, polish, |x, a, b| {
             if stamp_error.is_some() {
                 return;
+            }
+            if let Some(flips) = flips.as_deref_mut() {
+                for (k, &ic_index) in gated.iter().enumerate() {
+                    let (device, ic) = &self.ics[ic_index as usize];
+                    let hold = digital::power::hold_of(self.holds_slice(), *device);
+                    flips.note(k, digital::power::verdict(ic, self.read_node(ic.vcc.node, p_idx, x), self.read_node(ic.gnd.node, p_idx, x), hold));
+                }
             }
             if let Err(e) = self.stamp_iterate(p_idx, size, a, b, now, drivers, x) {
                 a.fill(0.0);
@@ -2002,7 +2204,7 @@ impl StaticPartitionSolver {
     /// declines as well), is `-4`, like an iterated solve that never passed.
     /// Every step is counted with the partition's Newton iterations
     /// (contract stat 11).
-    fn polish_hub(&mut self, p: usize, now: f64, drivers: &[Driver], mut x: Vec<f64>, u: f64) -> Result<Vec<f64>, String> {
+    fn polish_hub(&mut self, p: usize, now: f64, drivers: &[Driver], mut x: Vec<f64>, u: f64, gated: &[u32], mut flips: Option<&mut crate::solve::hold::Flips>) -> Result<Vec<f64>, String> {
         const POLISH_MAX: u32 = 8;
         const POLISH_FLOOR: f64 = 16.0 * f64::EPSILON;
         const POLISH_STALL: f64 = 1e-12;
@@ -2036,6 +2238,14 @@ impl StaticPartitionSolver {
                 break Err(format!("partition {p} ({n} node(s)): the hub polish did not reach the solution in {cap} steps"));
             }
             steps += 1;
+            // W1c point 1a's trigger: each gated IC's verdict at this iterate.
+            if let Some(flips) = flips.as_deref_mut() {
+                for (k, &ic_index) in gated.iter().enumerate() {
+                    let (device, ic) = &self.ics[ic_index as usize];
+                    let hold = digital::power::hold_of(self.holds_slice(), *device);
+                    flips.note(k, digital::power::verdict(ic, self.read_node(ic.vcc.node, p, &x), self.read_node(ic.gnd.node, p, &x), hold));
+                }
+            }
             a.fill(0.0);
             b.fill(0.0);
             self.hub_residual_stamp(p, now, drivers, u, &z, &mut a, &mut b);
@@ -2288,13 +2498,18 @@ impl StaticPartitionSolver {
             }
         }
         let iterated = free_supply || !self.junctions[p].is_empty();
-        let (mut x, factors) = if iterated { self.iterated_solve_factored(p, now, drivers)? } else { self.direct_solve_factored(p, now, drivers)? };
-        if iterated {
-            // An iterated partition is curved (`HubIc::Rail` or `Supply`),
-            // whose sensitivity solves its own exact Jacobian, not through
-            // `factors`, so they need not follow.
-            x = self.polish_hub(p, now, drivers, x, u)?;
-        }
+        // An iterated partition is curved (`HubIc::Rail` or `Supply`), whose
+        // sensitivity solves its own exact Jacobian, not through `factors`,
+        // so they need not follow the polish. A free IC supply's polish is
+        // inside W1c point 1a's procedure.
+        let (mut x, factors) = if free_supply {
+            self.free_supply_solve(p, now, drivers, Some(u))?
+        } else if iterated {
+            let (x, factors) = self.iterated_solve_factored(p, now, drivers)?;
+            (self.polish_hub(p, now, drivers, x, u, &[], None)?, factors)
+        } else {
+            self.direct_solve_factored(p, now, drivers)?
+        };
         let (mut sens, mut ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
         self.sensitivities += 1;
         // A curved partition's band counts the solve's own distance from
@@ -2692,6 +2907,8 @@ impl PartitionSolver for StaticPartitionSolver {
     fn restore(&mut self, snapshot: (Vec<f64>, Vec<f64>)) {
         self.voltages = snapshot.0;
         self.currents = snapshot.1;
+        // The owner hands its own hold table back after a restore.
+        self.hold_requests.clear();
         // The published arrays just jumped to another state: the next resolve
         // recomputes and checks everything rather than trusting which nodes
         // it sees change.

@@ -2787,7 +2787,22 @@ Constants, all from P3:35-38 unless marked new:
    - **CC exit** (PSU in CC): `dir·(A0(t) + G V) <= iLimit`, the draw at
      the setpoint back within the limit; with a rail capacitor, `dir·u*(t)
      >= |V|` (point 5);
-   - **SoC:** `soc` reaches the next OCV-table knot below it, or 0.
+   - **SoC:** `soc` reaches the next OCV-table knot below it, or 0;
+   - **power hold release** (F5, W1c point 1a): an IC held unpowered whose
+     `vcc` is the rail and `gnd` fixed watches, in place of its power
+     window, `V(gnd)` plus its release level: the window edge it starved
+     at, moved inward by the drop its own draw caused (its supply held
+     unpowered less held powered, from the probes) and two reached widths
+     of that edge. A chip held while a PSU with a rail capacitor is in CC
+     (on a segment, where the capacitors hold the rail through both probes,
+     so the drop is 0 bar the esr) also waits for a **draw threshold**
+     (ruling R44 (a)): the draw at its edge `V(gnd) + level`, `dir` signed,
+     plus what its being powered adds (the probes' difference) reaching
+     `iLimit`, located like the CC exit's draw test; off the segment the
+     level alone decides. Only the settled rail loop frees a held rail IC
+     whose release is due (a pass in passing does not); it reads at once,
+     the passes go on with its stamps, and if it starves again it is held
+     again with a fresh drop.
 
    **Locating the time.** Each threshold is a level of one scalar function
    of `t`: `u*(t)` in volts, or the draw `I*(t)` in amps (CV entry, the
@@ -4912,28 +4927,61 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
   that enters CC (corpus 07 and 08 among them) has no period check yet, and
   S2's criterion 3 waits on it.
 - **The power-gate ping-pong** (F1; manager rulings 2026-10-06 and
-  2026-10-07). Known divergence `w1f-power-gate-pingpong`: an IC whose own
-  draw sags a weak rail back across its power window makes the rail
-  alternate, where classic chatters for one step (repro: 4.279 V, r 5 Ω, a
-  74LS00 driving 1 kΩ). The core declines with `-4` ("rail: the rail loop
-  did not settle within 50 passes"; at load the TS side falls back to
-  classic), in each form the livelock takes:
-  - **Within an instant.** Without a rail capacitor the rail jumps with
-    each flip, and the rail loop alternates to its 50 passes (Rails point
-    3).
-  - **Across instants** (HG1). With a rail capacitor the rail is
-    continuous and every instant settles: a flip turns the segment back,
-    and the next power-window event lands the rail two reached-widths past
-    the same edge the other way femtoseconds later (5.3 and 9.4 fs apart,
-    the rail within 8.6e-12 V of a 74LS00's 4.275 V floor on a {5 V, 20 mA}
-    PSU ramping 1 µF, the gate driving an LED and 330 Ω), so time crawls
-    on. `RAIL_LOOP_MAX` (50) `Rail` events in a row, each flipping the rail
-    ICs' gates back to where the one before flipped them from, decline. A
-    `Rail` event that flips nothing ends the run, and so does any other
-    event (a clock swinging a load across a floor every half period is no
-    ping-pong); the horizon clamp does not, since a host stepping event by
-    event clamps after each. Of HG1's 672 swept low-limit boards, 386 run
-    bit-identical to before and 286 decline (all previously hung).
+  2026-10-07; F5). An IC whose own draw sags a weak supply back across its
+  power window has no consistent power state (repro: 4.279 V, r 5 Ω, a
+  74LS00 driving 1 kΩ). Classic resolves it with H8 (`fix/power-off-stall`,
+  0.6.3); the core ports H8 as W1c point 1a (F5): the solve that alternates
+  probes the IC held powered and held unpowered and holds off one that
+  starves itself, until its supply passes its release level (Rails point
+  4). Its forms:
+  - **Within an instant** (no rail capacitor, or one whose esr steps the
+    rail with the IC's draw): the rail loop's passes, the rail Newton's
+    iterates or an iterated static partition's Newton iterates alternate.
+    Since F5 these settle with the IC held off; they declined with `-4`
+    before. Pins,
+    each now asserting the hold and its release, in `solve/rail_tests.rs`:
+    `an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_held_off`,
+    `the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carries_it`,
+    and the fuzz boards that declined (G2bv's bc_ic seed 20 hub 1, the cold
+    fuzz's seeds 237 tpl 3, 12 tpl 4, 785 tpl 0 and 830 tpl 3, FXB's k6 s39
+    and FXDv's edge board):
+    `a_g2bv_gate_starving_its_cell_at_load_is_held_off_and_again_after_a_toggle`,
+    `a_rail_newton_alternating_a_555s_power_gate_holds_it_off_until_the_rail_passes_its_release`,
+    `an_iterated_partition_alternating_a_555s_power_gate_holds_it_off`,
+    `the_fed_gate_on_a_cc_ramp_is_held_at_its_floor_and_released_at_the_next_re_solve`,
+    `the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off`,
+    `the_fxdv_edge_board_loads_held_off_between_its_floor_and_its_carrying_rail`,
+    `a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once` (G2bv's bc_ic
+    97) and
+    `a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay`
+    (fz_ic 401). A probe in which every alternating IC carries itself and
+    every rail IC reads as probed is the instant's solution (the free
+    passes alternated only on the way to it).
+    F1r14's flip-against-the-ramp hold (Rails point 4) is replaced by it
+    (ruling D4 (a)); its pins pass unchanged.
+  - **Across instants** (HG1; F5, ruling R44 (a)). With a rail capacitor of
+    esr 0 the rail is continuous and every instant settles: a flip turns the
+    segment back, and the next power-window event lands the rail two
+    reached-widths past the same edge the other way femtoseconds later (5.3
+    and 9.4 fs apart, the rail within 8.6e-12 V of a 74LS00's 4.275 V floor
+    on a {5 V, 20 mA} PSU ramping 1 µF, the gate driving an LED and 330 Ω).
+    Two `Rail` events in a row, each flipping the rail ICs' gates back to
+    where the one before flipped them from, run W1c point 1a's procedure at
+    that instant; on a segment a chip that, powered, turns the segment down
+    starves itself whatever its supply reads, and its release waits for the
+    draw threshold (Rails point 4). A `Rail` event that flips nothing ends
+    the count, and so do a source edge and a dynamic partition's event when
+    the rail solves again in that call (a clock swinging a load across a
+    floor every half period is no ping-pong); a commit does not (the gate's
+    own outputs and a zero-delay reader of them answer the ping-pong), nor
+    does the horizon clamp. The repro is held at the floor crossing,
+    1.4421592 ms, and freed at 1.62047 ms when the PSU leaves CC, 472 events
+    to 3 ms (it declined at 424 before F5). Pins:
+    `a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_off_until_the_supply_carries_it`,
+    `a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_held_off_then_powered`
+    and G2bv's fz_ic seed 275,
+    `the_hg1_fuzz_board_holds_its_gate_until_the_ramp_carries_it`
+    (`solve/rail_tests.rs`). `w1f-power-gate-pingpong` is deleted.
   - **Any other crawl** (NP1, redefined by NP2; ruling R6 (a), 2026-10-15:
     a frozen tab is never acceptable). Completed instants each within
     `NO_PROGRESS_DT` (1 ns) of the one before form a run, and inside a run
@@ -4979,7 +5027,8 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     no-progress instants one run counted, 3 (NP2, 2026-10-16). Pins: the
     kernel's mock tests (`kernel.rs`:
     `a_fast_monotone_burst_runs_however_dense_and_a_cycle_of_any_length_declines`,
-    which holds B1070's shape, and the crawl tests below), and in
+    which holds B1070's shape, and
+    `a_crawl_of_femtosecond_instants_declines_with_the_guards_minus_4_and_keeps_the_last_instant`), and in
     `solve/rail_tests.rs`
     `a_fast_rc_inrush_off_a_5_ohm_cell_runs_to_the_end_on_a_coarse_host`,
     `a_gigahertz_clock_into_an_rc_and_gates_runs_for_any_number_of_edges`
@@ -4988,28 +5037,6 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     itself runs to 250 ms on a 612 µs host and event by event, since the
     coupled CC path (Rails point 4) leaves it no stall.
 
-  Classic's fix for an alternating gated power reading is H8
-  (`fix/power-off-stall`, released in 0.6.3): after a failed solve it holds
-  the chip powered for a probe solve and keeps it off if its supply still
-  reads unpowered. Porting it into the rail loop needs a kernel-to-evaluator
-  hold channel (the power verdict is recomputed from voltages in about 17
-  places) and amendments to W1c points 1, 4, 9 and 10, so it is the named
-  follow-up **F5, the ping-pong hold**, which runs immediately after W1g,
-  which reworks the evaluator, and ahead of perf round 3 (the coordinator,
-  2026-10-15, with ruling R6). Until then `-4` is pinned by tests with real
-  assertions that F5 flips (ruling R8 (a)); this id is deleted when F5
-  lands. No core-only damping. The id names the divergence; it is not an
-  entry of `test/core/equivalence/known-divergences.ts`, since a decline
-  leaves no mismatch to excuse (at load the run is classic's). The pins,
-  each asserting the `-4`: within an instant,
-  `an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_minus_4_today`
-  and `the_power_gate_pingpong_board_through_5_ohm_still_declines`; across
-  instants,
-  `a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_is_minus_4_today`;
-  a crawl, `a_zero_delay_reader_of_a_ping_ponging_gate_is_minus_4_not_a_hang`
-  (all `solve/rail_tests.rs`) and
-  `a_crawl_of_femtosecond_instants_declines_with_the_ping_pong_minus_4_and_keeps_the_last_instant`
-  (`kernel.rs`).
 - **Several closed-form partitions on a cell** (F1r15; ruling R17 (a)).
   Known divergence `w1f-cell-multi-partition`: on a battery hub whose rail
   feeds a curved closed-form partition and a second one, a published
