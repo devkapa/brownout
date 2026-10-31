@@ -23,11 +23,20 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { runAcSweep, runAcSweepAsync } from "../../src/analysis/run-ac-sweep.js";
+import { runAcSweep as runAcSweepImpl, runAcSweepAsync as runAcSweepAsyncImpl, type AcSweepHooks } from "../../src/analysis/run-ac-sweep.js";
 import { validateJobSpec } from "../../src/analysis/jobs.js";
 import type { AcSweepSpec } from "../../src/analysis/jobs.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { SimEngine } from "../../src/sim/engine/sim-engine.js";
+import { initCore } from "../../src/core/wasm.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { ENGINE_MODES, expectedEngine, matrixOptions } from "../helpers/analysis-engine-matrix.js";
+
+// The core must be up before the "auto" column runs: a core that was never
+// initialised makes `auto` fall back to classic, which would pass these
+// tests while proving nothing. expectedEngine() below fails that loudly.
+await initCore();
+
 
 // ─── Helper: find net id after cold-loading ───────────────────────────────────
 
@@ -176,385 +185,197 @@ function nearestPointIndex(fHz: number[], target: number): number {
 
 // ─── Test a: RC low-pass magnitude and phase ──────────────────────────────────
 
-describe("rc low-pass: magnitude and phase at corner frequency", () => {
-  it("magnitude near fc is within +-1.5 dB of -3 dB", () => {
-    const circuit = rcLowPassCircuit();
-    // Probe at the capacitor node (after the resistor).
-    const probeNet = findNetId(circuit, "c1", "a");
-
-    // Use 21 log-spaced points from 10 Hz to 10*fc so we have good coverage.
-    const toHz = Math.round(FC * 10);
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 10,
-      toHz,
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    expect(result.cancelled).toBe(false);
-
-    const fcIdx = nearestPointIndex(result.fHz, FC);
-    const magDb = result.outputs[0]!.magnitudeDb[fcIdx]!;
-
-    // Ideal -3 dB at fc; allow +-1.5 dB for DFT approximation error.
-    expect(magDb).toBeGreaterThan(-3 - 1.5);
-    expect(magDb).toBeLessThan(-3 + 1.5);
-  });
-
-  it("magnitude at ~10*fc is <= -15 dB (well into stopband)", () => {
-    const circuit = rcLowPassCircuit();
-    const probeNet = findNetId(circuit, "c1", "a");
-
-    const tenFc = FC * 10;
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: Math.max(10, Math.round(FC * 2)),
-      toHz: Math.min(100000, Math.round(tenFc * 1.5)),
-      points: 11,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    const tenFcIdx = nearestPointIndex(result.fHz, tenFc);
-    expect(result.outputs[0]!.magnitudeDb[tenFcIdx]!).toBeLessThan(-15);
-  });
-
-  it("phase at fc is within +-8 deg of -45 deg", () => {
-    const circuit = rcLowPassCircuit();
-    const probeNet = findNetId(circuit, "c1", "a");
-
-    const toHz = Math.round(FC * 10);
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 10,
-      toHz,
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    const fcIdx = nearestPointIndex(result.fHz, FC);
-    const phaseDeg = result.outputs[0]!.phaseDeg[fcIdx]!;
-
-    // Ideal phase at fc = -45 deg; allow +-8 deg.
-    expect(phaseDeg).toBeGreaterThan(-45 - 8);
-    expect(phaseDeg).toBeLessThan(-45 + 8);
-  });
-});
-
-// ─── Test b: RC high-pass magnitude ──────────────────────────────────────────
-
-describe("rc high-pass: magnitude at corner and below", () => {
-  it("magnitude at fc is within +-1.5 dB of -3 dB", () => {
-    const circuit = rcHighPassCircuit();
-    // Probe at r1.a = the node between the capacitor and the resistor.
-    const probeNet = findNetId(circuit, "r1", "a");
-
-    const toHz = Math.round(FC * 10);
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 10,
-      toHz,
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    const fcIdx = nearestPointIndex(result.fHz, FC);
-    const magDb = result.outputs[0]!.magnitudeDb[fcIdx]!;
-
-    expect(magDb).toBeGreaterThan(-3 - 1.5);
-    expect(magDb).toBeLessThan(-3 + 1.5);
-  });
-
-  it("magnitude at fc/10 is <= -15 dB (well into stopband)", () => {
-    const circuit = rcHighPassCircuit();
-    const probeNet = findNetId(circuit, "r1", "a");
-
-    const tenthFc = FC / 10; // ~15.9 Hz
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 10,
-      toHz: Math.round(FC * 2),
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    const tenthFcIdx = nearestPointIndex(result.fHz, tenthFc);
-    expect(result.outputs[0]!.magnitudeDb[tenthFcIdx]!).toBeLessThan(-15);
-  });
-});
-
-// ─── Test c: resistive divider (flat response) ────────────────────────────────
-
-describe("resistive divider: flat magnitude, near-zero phase", () => {
-  it("magnitude is 20*log10(0.5) ± 0.5 dB across the sweep", () => {
-    const circuit = resistiveDividerCircuit();
-    const probeNet = findNetId(circuit, "r_bot", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 10000,
-      points: 11,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    expect(result.cancelled).toBe(false);
-
-    const expectedDb = 20 * Math.log10(0.5); // ≈ -6.02 dB
-    for (let i = 0; i < result.fHz.length; i++) {
-      expect(result.outputs[0]!.magnitudeDb[i]!).toBeGreaterThan(expectedDb - 0.5);
-      expect(result.outputs[0]!.magnitudeDb[i]!).toBeLessThan(expectedDb + 0.5);
-    }
-  });
-
-  it("phase is within +-3 deg of 0 across the sweep", () => {
-    const circuit = resistiveDividerCircuit();
-    const probeNet = findNetId(circuit, "r_bot", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 10000,
-      points: 11,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    for (let i = 0; i < result.fHz.length; i++) {
-      expect(Math.abs(result.outputs[0]!.phaseDeg[i]!)).toBeLessThan(3);
-    }
-  });
-});
-
-// ─── Test c2: high-Q resonance settle detection ───────────────────────────────
-
-/**
- * Series RLC band-pass: signal_gen → L → C → R to gnd, probe across R.
- *   At resonance f0 = 1/(2π√(LC)) the L and C impedances cancel, so |H| → 1
- *   (V across R ≈ V source).  Q = (1/R)·√(L/C).
- *   With L≈25.3 mH, C=1µF, R=5Ω: f0 ≈ 1000 Hz, Q ≈ 32 — high enough that the
- *   resonance builds up over many cycles, so the fixed 5-cycle settle under-
- *   reports the peak.  The runner must flag those points notSettled.
- */
-function seriesRlcBandpass(L = 0.02533, C = 1e-6, Rohm = 5): SimCircuit {
-  return {
-    components: [
-      {
-        id: "sg1",
-        kind: "signal_gen",
-        pins: [{ id: "pos" }, { id: "neg" }],
-        params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 0, enabled: 1 },
-      },
-      { id: "l1", kind: "inductor", pins: [{ id: "a" }, { id: "b" }], params: { inductance: L } },
-      { id: "c1", kind: "capacitor", pins: [{ id: "a" }, { id: "b" }], params: { capacitance: C } },
-      { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: Rohm } },
-    ],
-    wires: [
-      { from_component: "sg1", from_pin: "pos", to_component: "l1", to_pin: "a" },
-      { from_component: "l1", from_pin: "b", to_component: "c1", to_pin: "a" },
-      { from_component: "c1", from_pin: "b", to_component: "r1", to_pin: "a" }, // probe node
-      { from_component: "r1", from_pin: "b", to_component: "sg1", to_pin: "neg" },
-    ],
+// Every test below runs twice: engine pinned to classic, and `auto` with the
+// core's gate widened. The AC sweep drives a signal_gen, which the core does
+// not have until W1h Phase B, so BOTH columns are classic today; `auto` must
+// say why (see the "engine report" block).
+describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
+  const runAcSweep = (spec: AcSweepSpec, circuit: SimCircuit, hooks?: AcSweepHooks) => {
+    const result = runAcSweepImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
+    expect(result.engine).toBe(expectedEngine(mode, circuit));
+    return result;
   };
-}
+  const runAcSweepAsync = async (spec: AcSweepSpec, circuit: SimCircuit, hooks?: AcSweepHooks) => {
+    const result = await runAcSweepAsyncImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
+    expect(result.engine).toBe(expectedEngine(mode, circuit));
+    return result;
+  };
 
-describe("high-Q resonance: settle detection", () => {
-  it("flags not-settled points near the resonant peak", () => {
-    const circuit = seriesRlcBandpass();
-    const probeNet = findNetId(circuit, "r1", "a");
+  describe("rc low-pass: magnitude and phase at corner frequency", () => {
+    it("magnitude near fc is within +-1.5 dB of -3 dB", () => {
+      const circuit = rcLowPassCircuit();
+      // Probe at the capacitor node (after the resistor).
+      const probeNet = findNetId(circuit, "c1", "a");
 
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 300,
-      toHz: 3000,
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
+      // Use 21 log-spaced points from 10 Hz to 10*fc so we have good coverage.
+      const toHz = Math.round(FC * 10);
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 10,
+        toHz,
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
 
-    const result = runAcSweep(spec, circuit);
-    expect(result.cancelled).toBe(false);
-    expect(result.notSettled).toHaveLength(result.fHz.length);
+      const result = runAcSweep(spec, circuit);
+      expect(result.cancelled).toBe(false);
 
-    // The resonance builds over more cycles than the fixed settle, so at least
-    // one point (near f0 ≈ 1 kHz) is flagged as not fully settled.
-    expect(result.notSettled.some(Boolean)).toBe(true);
+      const fcIdx = nearestPointIndex(result.fHz, FC);
+      const magDb = result.outputs[0]!.magnitudeDb[fcIdx]!;
 
-    // The under-report manifests as the band-pass peak reading below the ideal
-    // 0 dB it would reach if fully settled.
-    const peakDb = Math.max(...result.outputs[0]!.magnitudeDb);
-    expect(peakDb).toBeLessThan(0);
-  });
-
-  it("does not flag a settled first-order RC filter (no false positives)", () => {
-    const circuit = rcLowPassCircuit();
-    const probeNet = findNetId(circuit, "c1", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 10,
-      toHz: Math.round(FC * 10),
-      points: 21,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    expect(result.notSettled.every((s) => s === false)).toBe(true);
-  });
-
-  it("does not flag a resistive divider (no false positives)", () => {
-    const circuit = resistiveDividerCircuit();
-    const probeNet = findNetId(circuit, "r_bot", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 10000,
-      points: 11,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const result = runAcSweep(spec, circuit);
-    expect(result.notSettled.every((s) => s === false)).toBe(true);
-  });
-});
-
-// ─── Test d: determinism ──────────────────────────────────────────────────────
-
-describe("determinism", () => {
-  it("two identical runs produce identical output arrays", () => {
-    const circuit = rcLowPassCircuit();
-    const probeNet = findNetId(circuit, "c1", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 50,
-      toHz: 2000,
-      points: 7,
-      outputs: [{ netId: probeNet }],
-    };
-
-    const r1 = runAcSweep(spec, circuit);
-    const r2 = runAcSweep(spec, circuit);
-
-    expect(r1.fHz).toEqual(r2.fHz);
-    expect(r1.outputs[0]!.magnitudeDb).toEqual(r2.outputs[0]!.magnitudeDb);
-    expect(r1.outputs[0]!.phaseDeg).toEqual(r2.outputs[0]!.phaseDeg);
-  });
-});
-
-// ─── Test e: cancellation ─────────────────────────────────────────────────────
-
-describe("cancellation", () => {
-  it("shouldCancel after k points truncates the result to k points", () => {
-    const circuit = resistiveDividerCircuit();
-    const probeNet = findNetId(circuit, "r_bot", "a");
-
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 10000,
-      points: 9,
-      outputs: [{ netId: probeNet }],
-    };
-
-    let pointCount = 0;
-    const result = runAcSweep(spec, circuit, {
-      onPoint() { pointCount++; },
-      shouldCancel() { return pointCount >= 3; },
+      // Ideal -3 dB at fc; allow +-1.5 dB for DFT approximation error.
+      expect(magDb).toBeGreaterThan(-3 - 1.5);
+      expect(magDb).toBeLessThan(-3 + 1.5);
     });
 
-    expect(result.cancelled).toBe(true);
-    expect(result.fHz).toHaveLength(3);
-    expect(result.outputs[0]!.magnitudeDb).toHaveLength(3);
-    expect(result.outputs[0]!.phaseDeg).toHaveLength(3);
-    expect(result.pointFailures).toHaveLength(3);
-  });
+    it("magnitude at ~10*fc is <= -15 dB (well into stopband)", () => {
+      const circuit = rcLowPassCircuit();
+      const probeNet = findNetId(circuit, "c1", "a");
 
-  it("runAcSweepAsync: an external timer can flip the cancel flag mid-run", async () => {
-    const circuit = resistiveDividerCircuit();
-    const probeNet = findNetId(circuit, "r_bot", "a");
+      const tenFc = FC * 10;
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: Math.max(10, Math.round(FC * 2)),
+        toHz: Math.min(100000, Math.round(tenFc * 1.5)),
+        points: 11,
+        outputs: [{ netId: probeNet }],
+      };
 
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 10000,
-      points: 31,
-      outputs: [{ netId: probeNet }],
-    };
-
-    let cancel = false;
-    const promise = runAcSweepAsync(spec, circuit, {
-      shouldCancel: () => cancel,
+      const result = runAcSweep(spec, circuit);
+      const tenFcIdx = nearestPointIndex(result.fHz, tenFc);
+      expect(result.outputs[0]!.magnitudeDb[tenFcIdx]!).toBeLessThan(-15);
     });
-    setTimeout(() => { cancel = true; }, 30);
 
-    const result = await promise;
-    expect(result.cancelled).toBe(true);
-    expect(result.fHz.length).toBeGreaterThan(0);
-    expect(result.fHz.length).toBeLessThan(31);
+    it("phase at fc is within +-8 deg of -45 deg", () => {
+      const circuit = rcLowPassCircuit();
+      const probeNet = findNetId(circuit, "c1", "a");
+
+      const toHz = Math.round(FC * 10);
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 10,
+        toHz,
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      const fcIdx = nearestPointIndex(result.fHz, FC);
+      const phaseDeg = result.outputs[0]!.phaseDeg[fcIdx]!;
+
+      // Ideal phase at fc = -45 deg; allow +-8 deg.
+      expect(phaseDeg).toBeGreaterThan(-45 - 8);
+      expect(phaseDeg).toBeLessThan(-45 + 8);
+    });
   });
-});
 
-// ─── Test f: dead source (validation path) ────────────────────────────────────
+  // ─── Test b: RC high-pass magnitude ──────────────────────────────────────────
 
-describe("dead source", () => {
-  it("validateJobSpec rejects a signal_gen with enabled=0", () => {
-    const circuit: SimCircuit = {
-      components: [
-        {
-          id: "sg1",
-          kind: "signal_gen",
-          pins: [{ id: "pos" }, { id: "neg" }],
-          params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 50, enabled: 0 },
-        },
-        {
-          id: "r1",
-          kind: "resistor",
-          pins: [{ id: "a" }, { id: "b" }],
-          params: { resistance: 1000 },
-        },
-      ],
-      wires: [
-        { from_component: "sg1", from_pin: "pos", to_component: "r1", to_pin: "a" },
-        { from_component: "r1", from_pin: "b", to_component: "sg1", to_pin: "neg" },
-      ],
-    };
-    const spec: AcSweepSpec = {
-      kind: "ac-sweep",
-      componentId: "sg1",
-      fromHz: 100,
-      toHz: 1000,
-      points: 5,
-      outputs: [{ netId: "n0" }],
-    };
-    const err = validateJobSpec(spec, circuit);
-    expect(err).toBeTruthy();
-    expect(err).toMatch(/disabled/i);
+  describe("rc high-pass: magnitude at corner and below", () => {
+    it("magnitude at fc is within +-1.5 dB of -3 dB", () => {
+      const circuit = rcHighPassCircuit();
+      // Probe at r1.a = the node between the capacitor and the resistor.
+      const probeNet = findNetId(circuit, "r1", "a");
+
+      const toHz = Math.round(FC * 10);
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 10,
+        toHz,
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      const fcIdx = nearestPointIndex(result.fHz, FC);
+      const magDb = result.outputs[0]!.magnitudeDb[fcIdx]!;
+
+      expect(magDb).toBeGreaterThan(-3 - 1.5);
+      expect(magDb).toBeLessThan(-3 + 1.5);
+    });
+
+    it("magnitude at fc/10 is <= -15 dB (well into stopband)", () => {
+      const circuit = rcHighPassCircuit();
+      const probeNet = findNetId(circuit, "r1", "a");
+
+      const tenthFc = FC / 10; // ~15.9 Hz
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 10,
+        toHz: Math.round(FC * 2),
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      const tenthFcIdx = nearestPointIndex(result.fHz, tenthFc);
+      expect(result.outputs[0]!.magnitudeDb[tenthFcIdx]!).toBeLessThan(-15);
+    });
   });
-});
 
-describe("AC sweep convergence safety", () => {
-  it("rejects a frequency point instead of transforming a failed iterate", () => {
-    const circuit: SimCircuit = {
+  // ─── Test c: resistive divider (flat response) ────────────────────────────────
+
+  describe("resistive divider: flat magnitude, near-zero phase", () => {
+    it("magnitude is 20*log10(0.5) ± 0.5 dB across the sweep", () => {
+      const circuit = resistiveDividerCircuit();
+      const probeNet = findNetId(circuit, "r_bot", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 10000,
+        points: 11,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      expect(result.cancelled).toBe(false);
+
+      const expectedDb = 20 * Math.log10(0.5); // ≈ -6.02 dB
+      for (let i = 0; i < result.fHz.length; i++) {
+        expect(result.outputs[0]!.magnitudeDb[i]!).toBeGreaterThan(expectedDb - 0.5);
+        expect(result.outputs[0]!.magnitudeDb[i]!).toBeLessThan(expectedDb + 0.5);
+      }
+    });
+
+    it("phase is within +-3 deg of 0 across the sweep", () => {
+      const circuit = resistiveDividerCircuit();
+      const probeNet = findNetId(circuit, "r_bot", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 10000,
+        points: 11,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      for (let i = 0; i < result.fHz.length; i++) {
+        expect(Math.abs(result.outputs[0]!.phaseDeg[i]!)).toBeLessThan(3);
+      }
+    });
+  });
+
+  // ─── Test c2: high-Q resonance settle detection ───────────────────────────────
+
+  /**
+   * Series RLC band-pass: signal_gen → L → C → R to gnd, probe across R.
+   *   At resonance f0 = 1/(2π√(LC)) the L and C impedances cancel, so |H| → 1
+   *   (V across R ≈ V source).  Q = (1/R)·√(L/C).
+   *   With L≈25.3 mH, C=1µF, R=5Ω: f0 ≈ 1000 Hz, Q ≈ 32 — high enough that the
+   *   resonance builds up over many cycles, so the fixed 5-cycle settle under-
+   *   reports the peak.  The runner must flag those points notSettled.
+   */
+  function seriesRlcBandpass(L = 0.02533, C = 1e-6, Rohm = 5): SimCircuit {
+    return {
       components: [
         {
           id: "sg1",
@@ -562,26 +383,278 @@ describe("AC sweep convergence safety", () => {
           pins: [{ id: "pos" }, { id: "neg" }],
           params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 0, enabled: 1 },
         },
-        { id: "fixed", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 2 } },
-        { id: "load", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
+        { id: "l1", kind: "inductor", pins: [{ id: "a" }, { id: "b" }], params: { inductance: L } },
+        { id: "c1", kind: "capacitor", pins: [{ id: "a" }, { id: "b" }], params: { capacitance: C } },
+        { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: Rohm } },
       ],
       wires: [
-        { from_component: "sg1", from_pin: "pos", to_component: "fixed", to_pin: "pos" },
-        { from_component: "sg1", from_pin: "neg", to_component: "fixed", to_pin: "neg" },
-        { from_component: "sg1", from_pin: "pos", to_component: "load", to_pin: "a" },
-        { from_component: "load", from_pin: "b", to_component: "sg1", to_pin: "neg" },
+        { from_component: "sg1", from_pin: "pos", to_component: "l1", to_pin: "a" },
+        { from_component: "l1", from_pin: "b", to_component: "c1", to_pin: "a" },
+        { from_component: "c1", from_pin: "b", to_component: "r1", to_pin: "a" }, // probe node
+        { from_component: "r1", from_pin: "b", to_component: "sg1", to_pin: "neg" },
       ],
     };
-    const outputNet = findNetId(circuit, "load", "a");
-    const spec: AcSweepSpec = {
+  }
+
+  describe("high-Q resonance: settle detection", () => {
+    it("flags not-settled points near the resonant peak", () => {
+      const circuit = seriesRlcBandpass();
+      const probeNet = findNetId(circuit, "r1", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 300,
+        toHz: 3000,
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      expect(result.cancelled).toBe(false);
+      expect(result.notSettled).toHaveLength(result.fHz.length);
+
+      // The resonance builds over more cycles than the fixed settle, so at least
+      // one point (near f0 ≈ 1 kHz) is flagged as not fully settled.
+      expect(result.notSettled.some(Boolean)).toBe(true);
+
+      // The under-report manifests as the band-pass peak reading below the ideal
+      // 0 dB it would reach if fully settled.
+      const peakDb = Math.max(...result.outputs[0]!.magnitudeDb);
+      expect(peakDb).toBeLessThan(0);
+    });
+
+    it("does not flag a settled first-order RC filter (no false positives)", () => {
+      const circuit = rcLowPassCircuit();
+      const probeNet = findNetId(circuit, "c1", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 10,
+        toHz: Math.round(FC * 10),
+        points: 21,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      expect(result.notSettled.every((s) => s === false)).toBe(true);
+    });
+
+    it("does not flag a resistive divider (no false positives)", () => {
+      const circuit = resistiveDividerCircuit();
+      const probeNet = findNetId(circuit, "r_bot", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 10000,
+        points: 11,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const result = runAcSweep(spec, circuit);
+      expect(result.notSettled.every((s) => s === false)).toBe(true);
+    });
+  });
+
+  // ─── Test d: determinism ──────────────────────────────────────────────────────
+
+  describe("determinism", () => {
+    it("two identical runs produce identical output arrays", () => {
+      const circuit = rcLowPassCircuit();
+      const probeNet = findNetId(circuit, "c1", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 50,
+        toHz: 2000,
+        points: 7,
+        outputs: [{ netId: probeNet }],
+      };
+
+      const r1 = runAcSweep(spec, circuit);
+      const r2 = runAcSweep(spec, circuit);
+
+      expect(r1.fHz).toEqual(r2.fHz);
+      expect(r1.outputs[0]!.magnitudeDb).toEqual(r2.outputs[0]!.magnitudeDb);
+      expect(r1.outputs[0]!.phaseDeg).toEqual(r2.outputs[0]!.phaseDeg);
+    });
+  });
+
+  // ─── Test e: cancellation ─────────────────────────────────────────────────────
+
+  describe("cancellation", () => {
+    it("shouldCancel after k points truncates the result to k points", () => {
+      const circuit = resistiveDividerCircuit();
+      const probeNet = findNetId(circuit, "r_bot", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 10000,
+        points: 9,
+        outputs: [{ netId: probeNet }],
+      };
+
+      let pointCount = 0;
+      const result = runAcSweep(spec, circuit, {
+        onPoint() { pointCount++; },
+        shouldCancel() { return pointCount >= 3; },
+      });
+
+      expect(result.cancelled).toBe(true);
+      expect(result.fHz).toHaveLength(3);
+      expect(result.outputs[0]!.magnitudeDb).toHaveLength(3);
+      expect(result.outputs[0]!.phaseDeg).toHaveLength(3);
+      expect(result.pointFailures).toHaveLength(3);
+    });
+
+    it("runAcSweepAsync: an external timer can flip the cancel flag mid-run", async () => {
+      const circuit = resistiveDividerCircuit();
+      const probeNet = findNetId(circuit, "r_bot", "a");
+
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 10000,
+        points: 31,
+        outputs: [{ netId: probeNet }],
+      };
+
+      let cancel = false;
+      const promise = runAcSweepAsync(spec, circuit, {
+        shouldCancel: () => cancel,
+      });
+      setTimeout(() => { cancel = true; }, 30);
+
+      const result = await promise;
+      expect(result.cancelled).toBe(true);
+      expect(result.fHz.length).toBeGreaterThan(0);
+      expect(result.fHz.length).toBeLessThan(31);
+    });
+  });
+
+  // ─── Test f: dead source (validation path) ────────────────────────────────────
+
+  describe("dead source", () => {
+    it("validateJobSpec rejects a signal_gen with enabled=0", () => {
+      const circuit: SimCircuit = {
+        components: [
+          {
+            id: "sg1",
+            kind: "signal_gen",
+            pins: [{ id: "pos" }, { id: "neg" }],
+            params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 50, enabled: 0 },
+          },
+          {
+            id: "r1",
+            kind: "resistor",
+            pins: [{ id: "a" }, { id: "b" }],
+            params: { resistance: 1000 },
+          },
+        ],
+        wires: [
+          { from_component: "sg1", from_pin: "pos", to_component: "r1", to_pin: "a" },
+          { from_component: "r1", from_pin: "b", to_component: "sg1", to_pin: "neg" },
+        ],
+      };
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 100,
+        toHz: 1000,
+        points: 5,
+        outputs: [{ netId: "n0" }],
+      };
+      const err = validateJobSpec(spec, circuit);
+      expect(err).toBeTruthy();
+      expect(err).toMatch(/disabled/i);
+    });
+  });
+
+  describe("AC sweep convergence safety", () => {
+    it("rejects a frequency point instead of transforming a failed iterate", () => {
+      const circuit: SimCircuit = {
+        components: [
+          {
+            id: "sg1",
+            kind: "signal_gen",
+            pins: [{ id: "pos" }, { id: "neg" }],
+            params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 0, enabled: 1 },
+          },
+          { id: "fixed", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 2 } },
+          { id: "load", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
+        ],
+        wires: [
+          { from_component: "sg1", from_pin: "pos", to_component: "fixed", to_pin: "pos" },
+          { from_component: "sg1", from_pin: "neg", to_component: "fixed", to_pin: "neg" },
+          { from_component: "sg1", from_pin: "pos", to_component: "load", to_pin: "a" },
+          { from_component: "load", from_pin: "b", to_component: "sg1", to_pin: "neg" },
+        ],
+      };
+      const outputNet = findNetId(circuit, "load", "a");
+      const spec: AcSweepSpec = {
+        kind: "ac-sweep",
+        componentId: "sg1",
+        fromHz: 1000,
+        toHz: 1000,
+        points: 2,
+        outputs: [{ netId: outputNet }],
+      };
+
+      expect(() => runAcSweep(spec, circuit)).toThrow(/did not converge.*rolled back.*rejected/i);
+    });
+  });
+});
+
+// ─── The engine report ─────────────────────────────────────────────────────────
+//
+// The sine-sweep drives a signal_gen, which the core does not have until W1h
+// Phase B, so every AC run is classic today and `auto` records why. The reason
+// is a runner-forced one (it holds even if the part were supported), so that
+// deleting it is the whole switch-over.
+
+describe("engine report", () => {
+  const acSpec = (extra: Partial<AcSweepSpec> = {}): AcSweepSpec => {
+    const circuit = rcLowPassCircuit();
+    return {
       kind: "ac-sweep",
       componentId: "sg1",
-      fromHz: 1000,
-      toHz: 1000,
+      fromHz: 100,
+      toHz: 400,
       points: 2,
-      outputs: [{ netId: outputNet }],
+      outputs: [{ netId: findNetId(circuit, "c1", "a") }],
+      ...extra,
     };
+  };
 
-    expect(() => runAcSweep(spec, circuit)).toThrow(/did not converge.*rolled back.*rejected/i);
+  it("auto is classic with the forced reason, the shipped gate or widened", () => {
+    for (const options of [{}, { coreSupportedKinds: CORE_IMPLEMENTED_KINDS }]) {
+      const result = runAcSweepImpl(acSpec(), rcLowPassCircuit(), options);
+      expect(result.engine).toBe("classic");
+      expect(result.fallbackReasons).toEqual(["ac-sweep-needs-signal-gen-on-core"]);
+    }
+  });
+
+  it("an explicit classic records nothing: nothing fell back", () => {
+    const result = runAcSweepImpl(acSpec({ engine: "classic" }), rcLowPassCircuit());
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual([]);
+  });
+
+  it("an explicit core is an error naming the reason, not a silent classic run", () => {
+    expect(() => runAcSweepImpl(acSpec({ engine: "core" }), rcLowPassCircuit(), { coreSupportedKinds: CORE_IMPLEMENTED_KINDS })).toThrow(
+      /ac-sweep-needs-signal-gen-on-core/,
+    );
+  });
+
+  it("the async runner reports it too", async () => {
+    const result = await runAcSweepAsyncImpl(acSpec(), rcLowPassCircuit());
+    expect(result.fallbackReasons).toEqual(["ac-sweep-needs-signal-gen-on-core"]);
   });
 });
