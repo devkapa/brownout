@@ -258,25 +258,36 @@ impl CapStep {
 impl CcRail {
     /// Partition `p`'s view at its step's start `t`, the rail at `u0`;
     /// `committed` the rail charge `(t, q, i)` where it last stood (its last
-    /// commit or seed on such a rail). The charge at `t` is the segment's
-    /// when the segment was aimed by then: the rail the loop solved holds
-    /// it, while a partition's own commit at that instant may have been
-    /// superseded by another's (cold 517 tpl 5: two seeded at a rail each
-    /// solved from its own charge, 0.02 V and 0.64 V, and one re-solved past
-    /// its band for the loop's 50 passes). Otherwise the partition's own
-    /// charge there is the one it stands at: a segment aimed before `t` is
-    /// the frozen form's estimate since, which its own commit at `t`
-    /// replaces, and one aimed after `t` no longer knows `t`.
-    fn step(&self, p: usize, u0: f64, t: f64, committed: Option<(f64, f64, f64)>) -> CcStep {
+    /// commit or seed on such a rail), and `pending` the charge the latest
+    /// commit handed the rail solve that has not yet taken it
+    /// ([`SteppedSolver::take_rail_charge`]). The charge at `t` is the latest
+    /// one there: a pending hand-off at `t`, else the segment's when it was
+    /// aimed at `t` (the rail the loop solved after that commit; a
+    /// partition's own commit there may have been superseded by another's:
+    /// cold 517 tpl 5, two seeded at a rail each solved from its own charge,
+    /// 0.02 V and 0.64 V, and one re-solved past its band for the loop's 50
+    /// passes), else the partition's own (a segment aimed before `t` is the
+    /// frozen form's estimate since, which a commit replaces, and one aimed
+    /// after `t` no longer knows `t`). A segment aimed at `t` before a commit
+    /// there is that estimate too: cold 581 tpl 5's seed after a 555 event,
+    /// whose rail solve came before the catch-up's commit, held the rail
+    /// 6 uV off the partition's capacitors, which a capacitor loop through
+    /// the rail (7.6 mF to a node 1.8 uF holds to ground) turned into 4.5 A
+    /// that the trapezoid then reflected undamped at every step. The current
+    /// a trapezoid starts from is the partition's own last step's whenever it
+    /// stands there: the segment's slope at its aim is the frozen form's, the
+    /// draws' imbalance at the instant.
+    fn step(&self, p: usize, u0: f64, t: f64, committed: Option<(f64, f64, f64)>, pending: Option<(f64, f64)>) -> CcStep {
         let (a, g) = self.own.iter().find(|o| o.0 == p).map_or((0.0, 0.0), |o| (o.1, o.2));
         let coupled = self.own.iter().any(|o| o.0 != p);
         let cap = self.cap.as_ref().map(|rc| {
-            let (q, i) = match committed {
-                Some((tc, q, i)) if tc == t && t != rc.seg.t0 => (q, i),
-                _ => {
-                    let at = t.max(rc.seg.t0);
-                    (rc.seg.charge_at(at), rc.c * rc.seg.charge_slope_at(at))
-                }
+            let at = t.max(rc.seg.t0);
+            let own_i = committed.filter(|c| c.0 == t).map(|c| c.2);
+            let i_seg = || rc.c * rc.seg.charge_slope_at(at);
+            let (q, i) = match (pending.filter(|p| p.0 == t), committed) {
+                (Some((_, q)), _) => (q, own_i.unwrap_or_else(i_seg)),
+                (None, Some((tc, q, i))) if tc == t && t != rc.seg.t0 => (q, i),
+                _ => (rc.seg.charge_at(at), own_i.unwrap_or_else(i_seg)),
             };
             CapStep { c: rc.c, esr: rc.esr, q, i }
         });
@@ -1901,7 +1912,7 @@ impl SteppedSolver {
             let cc = match (&self.cc, hub, self.exact) {
                 (Some(cc), true, None) => {
                     let part = &self.partitions[&p_idx];
-                    Some(CcStep { seed: true, ..cc.step(p_idx, voltages[cc.rail], now, part.rail_q) })
+                    Some(CcStep { seed: true, ..cc.step(p_idx, voltages[cc.rail], now, part.rail_q, self.rail_charge) })
                 }
                 _ => None,
             };
@@ -2594,7 +2605,7 @@ impl SteppedSolver {
             }
             (None, Some(cc), true, None) => {
                 let part = &self.partitions[&p_idx];
-                Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q))
+                Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q, self.rail_charge))
             }
             _ => None,
         };

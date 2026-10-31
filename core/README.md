@@ -3206,7 +3206,16 @@ Constants, all from P3:35-38 unless marked new:
    the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
    carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
    it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
-   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). One stepped
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). A
+   step starts from the latest charge at its start: a hand-off not yet
+   taken, else the segment's if aimed there, else the partition's own; and
+   a trapezoid from the partition's own last current, never the segment's
+   slope. Cold 581 tpl 5 re-seeded on a segment its rail solve had aimed
+   before the catch-up's commit, 6 uV off the partition's capacitors, which
+   a capacitor loop through the rail turned into 4.5 A, reflected by the
+   trapezoid at every step: the rail sat up to 2.35 mV below the node a 1
+   mohm switch holds it at
+   (`a_rail_capacitor_loop_through_a_stepped_partition_keeps_the_rail_on_its_switch`). One stepped
    partition on such a rail now steps with it as exact mode does (within
    0.4 W0 of the fine reference where the frozen form was 650 W0 off,
    `a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it`); with two,
