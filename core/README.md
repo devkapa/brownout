@@ -3192,7 +3192,21 @@ Constants, all from P3:35-38 unless marked new:
    re-seed changes the draw's rounding, which solves the rail again, and a
    rail capacitor of no esr entered at the setpoint, the rail its charge,
    leaves CC at once there (CC and CV in turn for the loop's 50 passes on
-   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). One stepped
+   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). Two
+   rules keep a rail IC's power on such a step's rail. A re-solve's
+   catch-up steps on the CC rail its pending trial was solved on, as a CC
+   exit's does: judged at the rail published after the change, cold 216
+   tpl 5's 74LS00, powered over the step, was judged off at the falling
+   edge that ended it, the step carried the rail back over the edge, and
+   the chip flipped at every instant 1e-14 s apart, never twice within one,
+   so the power hold never triggered (3.2M steps for 7 ms;
+   `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment`).
+   And a step whose rail reaches a rail IC's power edge (its window's
+   edges, a held one's release level) is cut there, by regula falsi from
+   the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
+   carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
+   it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). One stepped
    partition on such a rail now steps with it as exact mode does (within
    0.4 W0 of the fine reference where the frozen form was 650 W0 off,
    `a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it`); with two,

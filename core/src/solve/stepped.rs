@@ -193,6 +193,10 @@ pub(crate) struct CcRail {
     /// The rail capacitors, when there are any (ruling R68): stepped with
     /// the partition as a companion on its rail row ([`CapStep`]).
     pub cap: Option<RailCap>,
+    /// With them, the rails at which a rail IC's power flips (its window's
+    /// edges, a held one's release level), ascending: a step is cut where
+    /// its rail reaches one ([`CcStep::edge_past`]).
+    pub edges: Vec<f64>,
 }
 
 /// A CC rail's capacitors as a stepped hub partition steps against them
@@ -276,7 +280,9 @@ impl CcRail {
             };
             CapStep { c: rc.c, esr: rc.esr, q, i }
         });
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false, cap }
+        let edge_up = self.edges.iter().copied().find(|&e| e > u0).unwrap_or(f64::INFINITY);
+        let edge_dn = self.edges.iter().rev().copied().find(|&e| e < u0).unwrap_or(f64::NEG_INFINITY);
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false, cap, edge_up, edge_dn }
     }
 }
 
@@ -303,6 +309,9 @@ struct CcStep {
     cv: bool,
     /// The rail capacitors at the step's start (ruling R68).
     cap: Option<CapStep>,
+    /// The nearest power edges above and below `u0` (`CcRail::edges`).
+    edge_up: f64,
+    edge_dn: f64,
 }
 
 impl CcStep {
@@ -315,6 +324,12 @@ impl CcStep {
 
     fn past_setpoint(&self, u: f64) -> bool {
         self.beyond(u) > 0.0
+    }
+
+    /// How far `u` is past the nearest rail IC power edge either side of the
+    /// step's start (ruling R68); negative while between them.
+    fn edge_past(&self, u: f64) -> f64 {
+        (u - self.edge_up).max(self.edge_dn - u)
     }
 }
 
@@ -1861,7 +1876,20 @@ impl SteppedSolver {
                 continue;
             }
             self.journal(p_idx);
-            self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages)?;
+            // On a CC rail with capacitors (ruling R68) the catch-up steps on
+            // the rail its pending trial was solved on, as a CC exit's does
+            // (`catch_up_on_cc_rail`): the rail is the capacitors' charge,
+            // which those steps carry, and judged at the rail published now
+            // they took a rail IC's power from after the change that brought
+            // the re-solve. Cold 216 tpl 5: a 74LS00 powered over the step
+            // was judged off at the falling edge that ended it, the step
+            // carried the rail back over the edge, and the chip flipped at
+            // every instant, 1e-14 s apart, never alternating within one.
+            let held = self.partitions.get(&p_idx).filter(|part| part.has_pend && part.t < now).and_then(|part| part.pend_cc).filter(|cc| cc.cap.is_some());
+            self.cc_held = held;
+            let synced = self.sync_partition(p_idx, now, catchup_drivers, live_params, voltages);
+            self.cc_held = None;
+            synced?;
 
             let old_bits: Vec<u64> = self.partitions[&p_idx].shape.nodes.iter().map(|&n| voltages[n].to_bits()).collect();
             let hub = self.partitions[&p_idx].hub && self.rail.is_some();
@@ -2554,7 +2582,16 @@ impl SteppedSolver {
         // is, so its trial skips the source-current solves.
         let billed = exact.filter(|e| e.partition == p_idx && self.cell.is_some());
         let cc = match (self.cc_held, &self.cc, self.partitions[&p_idx].hub, exact) {
-            (Some(held), _, true, None) => Some(held),
+            // A held rail's capacitors go on from where this partition's own
+            // last step left them (ruling R68).
+            (Some(held), _, true, None) => {
+                let part = &self.partitions[&p_idx];
+                let cap = held.cap.map(|c| match part.rail_q {
+                    Some((tc, q, i)) if tc == part.t => CapStep { q, i, ..c },
+                    _ => c,
+                });
+                Some(CcStep { cap, ..held })
+            }
             (None, Some(cc), true, None) => {
                 let part = &self.partitions[&p_idx];
                 Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q))
@@ -2689,6 +2726,66 @@ impl SteppedSolver {
                     accepted = step;
                     half = None;
                     part.cc_exited = clamp;
+                }
+            }
+        }
+
+        // A rail IC's power edge inside a CC step on rail capacitors (ruling
+        // R68): the step is cut where its rail reaches the edge, just past
+        // it, as at the setpoint above, so the IC's power flips at that
+        // commit's rail solve. The step's rail is the capacitors' charge,
+        // which a solve at the instant cannot move back; its gate judged at
+        // the step's start for the whole step, cold 505 tpl 5's stepped
+        // partition carried the rail 0.47 V past a 74LS00's 4.275 V floor
+        // in one 2.6 ms step, and the powered chip's draw then pulled the
+        // rail back at 3e5 V/s through a floor the rail Newton could not
+        // straddle (`-4`).
+        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc.filter(|c| !c.cv && c.cap.is_some()), accepted.u) {
+            let f_hi0 = cc.edge_past(u_hi);
+            // The bracket starts at the shortest step, as the setpoint's: the
+            // step's own rail at its start is the capacitors' charge, which
+            // can stand apart from the published `u0` (cold 769 tpl 5: a CC
+            // rail at 0.36 mV beside a published setpoint), and a rail past
+            // the edge already there is no crossing inside the step.
+            let first = if f_hi0 > 0.0 && !cc.past_setpoint(u_hi) && h > 2.0 * H_MIN {
+                let step = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).map_err(StepError::into_message)?;
+                Some(cc.edge_past(step.u.expect("a CC step reports its rail")))
+            } else {
+                None
+            };
+            if let Some(f_first) = first.filter(|&f| f < 0.0) {
+                let (mut lo, mut f_lo) = (H_MIN, f_first);
+                let (mut hi, mut f_hi) = (h, f_hi0);
+                let mut past = f_hi;
+                let mut best = None;
+                let mut side = 0i8;
+                for _ in 0..CROSS_REFINE_MAX_ITERS {
+                    if past <= CROSS_TOLERANCE_V || hi - lo <= H_MIN * 1e-3 {
+                        break;
+                    }
+                    let frac = (-f_lo / (f_hi - f_lo)).clamp(1e-3, 1.0 - 1e-3);
+                    let h_try = lo + frac * (hi - lo);
+                    let step = take_step(&part.shape, live_params, h_try, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + h_try).map_err(StepError::into_message)?;
+                    let f = cc.edge_past(step.u.expect("a CC step reports its rail"));
+                    if f > 0.0 {
+                        (hi, f_hi, past) = (h_try, f, f);
+                        best = Some(step);
+                        if side == 1 {
+                            f_lo *= 0.5;
+                        }
+                        side = 1;
+                    } else {
+                        (lo, f_lo) = (h_try, f);
+                        if side == -1 {
+                            f_hi *= 0.5;
+                        }
+                        side = -1;
+                    }
+                }
+                if let Some(step) = best {
+                    h = hi;
+                    accepted = step;
+                    half = None;
                 }
             }
         }

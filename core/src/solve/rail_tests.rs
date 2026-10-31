@@ -12675,3 +12675,115 @@ fn a_rolled_back_instant_restores_the_cc_rail_capacitors_charge_a_stepped_commit
     twin.advance(4e-3).unwrap();
     assert_eq!(state_digest(rig.s()), state_digest(twin.s()), "it goes on like the twin");
 }
+
+#[test]
+fn a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment() {
+    // Ruling R68, the cold fuzz's 216 tpl 5: a {13.0 V, 27 mA} PSU in CC
+    // ramps 30 uF (esr 0) toward a 74LS00's 4.275 V floor; the chip's output
+    // node, 1.7 mF, is a stepped hub partition stepping the rail capacitor
+    // with it. At the floor the chip, powered, pulls the rail back under it.
+    // A re-solve's catch-up judged the chip's power at the rail published
+    // after the falling edge that ended its step, so the step carried the
+    // rail back over the edge, and the chip flipped at every instant 1e-14 s
+    // apart, never twice within one: 3.2M steps for 7 ms, no hold. Caught up
+    // on the rail its trial was solved on, the passes alternate at the edge
+    // and the chip is held off there, as on the segment before R68 (base:
+    // one hold at 5.32 ms, 2,040 steps to 6.3 ms).
+    let mut p = program(8, cold_216_tpl5());
+    p.digital_slot_count = 32;
+    let mut e = Engine::load(&p).unwrap();
+    let mut t = 0.0f64;
+    while t < 7.3e-3 {
+        t = (t + 1e-4).min(7.3e-3);
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} {}", er.code, er.message));
+        assert!(e.stat(10) < 20_000.0, "{} steps by {t} s: the chip chatters at its floor", e.stat(10));
+    }
+    assert!(e.stat(25) >= 1.0, "the chip held off at its floor");
+}
+
+#[test]
+fn a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge() {
+    // Ruling R68, the cold fuzz's 505 tpl 5: a {13.4 V, 311 mA} PSU in CC
+    // with 0.4 uF of rail capacitor (esr 0.145 ohm) and a 74LS00 on the rail;
+    // a stepped LED and capacitor partition steps the capacitor with it.
+    // Its gate judged at the step's start rail, one 2.6 ms step carried the
+    // rail from 3.94 V to 4.41 V, 0.13 V past the chip's 4.275 V floor; the
+    // powered chip then pulled the rail back at 3e5 V/s, and the rail Newton
+    // failed at the floor with no verdict alternating (`-4` at 0.3919 s).
+    // The step is cut at the floor, as at the setpoint, so the chip's power
+    // flips at that commit's rail solve, and the run goes on.
+    let p = { let mut p = program(5, cold_505_tpl5()); p.digital_slot_count = 32; p };
+    let stops: [f64; STOPS_505.len()] = STOPS_505;
+    let mut e = Engine::load(&p).unwrap();
+    for &t in &stops {
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} at {}: {}", er.code, e.time(), er.message));
+    }
+}
+
+const STOPS_505: [f64; 60] = [0.006272879571408905, 0.0072785054032582005, 0.017876457538686583, 0.018062886736138067, 0.018340502711687582, 0.02336229275905534, 0.03731104997307824, 0.037618554404920436, 0.038439311441490744, 0.03908783214516494, 0.039386454964519674, 0.04715109307293887, 0.056699242152804606, 0.056824490802280254, 0.05888527331802057, 0.059124089362100486, 0.05928655907634512, 0.0987567251478853, 0.11209473731118556, 0.1566669504946821, 0.1575207447526295, 0.18580802788194342, 0.18951967976761797, 0.19077110226964777, 0.1916870068860743, 0.20621913239321335, 0.20691562034439767, 0.20727761824740132, 0.20741492218813548, 0.20752859482385222, 0.20779185173384274, 0.22299673055917238, 0.2236406810111467, 0.22947657715238745, 0.23198271164301645, 0.23341168368260118, 0.2343051786433487, 0.2516176401706743, 0.25616393068783705, 0.2933665858089527, 0.3276966916619526, 0.3278697129857167, 0.32808620367788355, 0.3284254096619142, 0.33115954603093894, 0.33949753737674004, 0.37231679693597775, 0.37399489161947114, 0.3741727172839677, 0.3761215318740903, 0.3773743730054749, 0.37767444041233944, 0.4172932478090943, 0.4278969012092656, 0.42841611805988244, 0.42883785451457257, 0.43275199815425797, 0.43332230116377113, 0.43353983556620085, 0.44447736049582365];
+
+/// tpl=5 hub=2 e=13.022 psu ilim=0.027 V2=-7.43 PULSE3 -3.0..4.2 tr=2e-3 stacked4-3 2.5 R5-2=6113.5 R0-3=1.2 C0-5=1.7e-3 C1-0=3.0e-5 74LS00 vcc1 gnd0 in5,3 out5,0 R1-6=33.5 R3-4=28.8 R6-2=39578.2 SW4-5(1)+R5-0=140 span=20.455439953003236
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 8
+/// toggles [(0.8599502792753119, 20)]
+fn cold_216_tpl5() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![13.022448609674765, 0.026969676605768433], vec![]),
+        fz(2, 1, &[2, 0], vec![-7.432991343328469], vec![]),
+        fz(24, 2, &[3, 0], vec![-2.968349505555712, 4.228886889594543, 0.02847267005934285, 0.0017746688539685936, 0.0017746688539685936, 0.036700583859148636, 0.06301243758242027], vec![8.0]),
+        fz(2, 3, &[4, 3], vec![2.5210816149320805], vec![]),
+        fz(1, 4, &[5, 0], vec![10422.235275104867], vec![]),
+        fz(1, 5, &[6, 0], vec![5089.06296809635], vec![]),
+        fz(1, 6, &[7, 0], vec![105125.12983996692], vec![]),
+        fz(1, 7, &[5, 2], vec![6113.542508018208], vec![]),
+        fz(1, 8, &[0, 3], vec![1.2175029497422107], vec![]),
+        fz(3, 9, &[0, 5], vec![0.001675603874519194, 0.0, 0.0], vec![]),
+        fz(3, 10, &[1, 0], vec![3.0143493907957308e-5, 0.0, 0.0], vec![]),
+        fz(50, 11, &[1, 0, 5, 3, 5, 0, 0, 0, 0, 0, 0, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 2.472812137154975e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 12, &[5, 1], vec![2938.006353196718], vec![]),
+        fz(1, 13, &[0, 6], vec![1988.358426732496], vec![]),
+        fz(1, 14, &[0, 1], vec![37327.46685158523], vec![]),
+        fz(1, 15, &[1, 6], vec![33.50806366250361], vec![]),
+        fz(1, 16, &[3, 4], vec![28.75253917551141], vec![]),
+        fz(1, 17, &[7, 1], vec![358.9163713879824], vec![]),
+        fz(1, 18, &[4, 3], vec![1049.0389364685514], vec![]),
+        fz(1, 19, &[6, 2], vec![39578.18287361168], vec![]),
+        fz(4, 20, &[4, 5], vec![1.0], vec![]),
+        fz(1, 21, &[5, 0], vec![139.64008852306267], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0008244001389211244, 6113.542508018208], vec![]),
+        fz(90, 8, &[], vec![8.0, 14.775985163116061, 1.2175029497422107], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0017929403182408447, 2938.006353196718], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.14420072311943027, 1988.358426732496], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.8942729157353687, 33.50806366250361], vec![]),
+        fz(90, 16, &[], vec![16.0, 1.0757562946313903, 28.75253917551141], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.0009110801375696161, 39578.18287361168], vec![]),
+        fz(90, 21, &[], vec![21.0, 0.17020571822982822, 139.64008852306267], vec![]),
+    ]
+}
+
+/// tpl=5 hub=2 e=13.403 psu ilim=0.311 V2=7.97 C1-0=4.0e-7 R3-0=1.2 74LS00 vcc1 gnd0 in1,2 out3,2 LED4-0+R1-4=43 C4-1=2.8e-7 P1-4 C4-0=1.7e-3 C1-4=1.6e-6 C0-2=2.4e-7 span=21.36939837303977
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 5
+/// toggles []
+fn cold_505_tpl5() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![13.402957769250968, 0.31102727029811983], vec![]),
+        fz(2, 1, &[0, 2], vec![7.966440603788801], vec![]),
+        fz(1, 2, &[3, 0], vec![45603.34004136992], vec![]),
+        fz(1, 3, &[4, 0], vec![671357.3964771514], vec![]),
+        fz(3, 4, &[1, 0], vec![4.031401863880018e-7, 0.1448226438041977, 0.0], vec![]),
+        fz(1, 5, &[3, 0], vec![1.1529353501851427], vec![]),
+        fz(50, 6, &[1, 0, 1, 2, 3, 0, 0, 2, 0, 0, 2, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 6.292790469859957e-8], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[3, 2], vec![829.6892202896048], vec![]),
+        fz(1, 8, &[2, 3], vec![1101.1836187547399], vec![]),
+        fz(30, 9, &[4, 0], vec![3.3292130156609434, 1.7720828664490131, 0.03807182756102721, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 10, &[1, 4], vec![43.49417018480507], vec![]),
+        fz(3, 11, &[4, 1], vec![2.7883493113459534e-7, 0.0, 0.0], vec![]),
+        fz(13, 12, &[1, 4], vec![0.1498781000777963, 0.7618258418259335], vec![]),
+        fz(3, 13, &[4, 0], vec![0.0017422766538027425, 0.0, 0.0], vec![]),
+        fz(3, 14, &[1, 4], vec![1.6422396677494e-6, 0.0, 0.0], vec![]),
+        fz(3, 15, &[0, 2], vec![2.3732978532103394e-7, 0.0, 0.0], vec![]),
+        fz(90, 5, &[], vec![5.0, 4.770819857641739, 1.1529353501851427], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.015483497912294173, 829.6892202896048], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.10740117494282157, 1101.1836187547399], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.08348089265895527, 43.49417018480507], vec![]),
+    ]
+}

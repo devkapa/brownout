@@ -1881,7 +1881,8 @@ impl PartitionedSolver {
             };
             let u = hub.state.u;
             let (i_d, g_d) = self.direct_at(u);
-            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own, cap })
+            let edges = if cap.is_some() { self.rail_power_edges() } else { Vec::new() };
+            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own, cap, edges })
         });
         self.stepped.cc = cc;
     }
