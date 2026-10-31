@@ -1413,9 +1413,11 @@ impl SteppedSolver {
     /// edge brings a partition to it on the boundary it had (W1b rule 6).
     /// Brought there after the rail moved, it stepped the whole gap at the
     /// setpoint (F5pV: 3 ms at 5 V for a capacitor settled at 2 V on the CC
-    /// rail, 1346 W0). Commits the steps and publishes nothing; the re-solve
-    /// or the demotion that follows starts from them.
-    pub(crate) fn catch_up_on_cc_rail(&mut self, ids: &[usize], now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+    /// rail, 1346 W0). Commits the steps and publishes nothing, and returns
+    /// the partitions it moved; the re-solve or the demotion that follows
+    /// starts from them.
+    pub(crate) fn catch_up_on_cc_rail(&mut self, ids: &[usize], now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<Vec<usize>, String> {
+        let mut moved = Vec::new();
         for &p in ids {
             let Some(cc) = self.partitions.get(&p).filter(|part| !part.parked && part.has_pend && part.t < now).and_then(|part| part.pend_cc) else { continue };
             self.journal(p);
@@ -1423,8 +1425,9 @@ impl SteppedSolver {
             let result = self.sync_partition(p, now, drivers, live_params, voltages);
             self.cc_held = None;
             result?;
+            moved.push(p);
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// The committed state of partition `p`: its time and its own node
@@ -1636,6 +1639,12 @@ impl SteppedSolver {
     /// discontinuity anchor (spec §7.2.3) — test-only introspection, since
     /// nothing outside this module needs to know the method a specific step
     /// used, only that its NUMBERS came out right.
+    /// Whether `partition` has a pending trial (test-only introspection).
+    #[cfg(test)]
+    pub(crate) fn debug_has_pend(&self, partition: usize) -> bool {
+        self.partitions.get(&partition).is_some_and(|p| p.has_pend)
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_be_next_step(&self, partition: usize) -> Option<bool> {
         self.partitions.get(&partition).map(|p| p.be_next_step)

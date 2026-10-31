@@ -241,6 +241,29 @@ pub(super) mod crawl_hook {
     }
 }
 
+/// A test that must reach the rail loop's early return for an alternating
+/// rail IC right after a CC entry's catch-up, a path the cold fuzz takes but
+/// never with a stepped hub partition short of `now`, arms it once.
+#[cfg(test)]
+pub(super) mod alternation_hook {
+    thread_local!(static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    pub fn arm() {
+        ARMED.with(|c| c.set(true));
+    }
+    thread_local!(static SEEN: std::cell::RefCell<Option<Vec<bool>>> = const { std::cell::RefCell::new(None) });
+    pub fn take() -> bool {
+        ARMED.with(|c| c.replace(false))
+    }
+    /// Whether each partition the catch-up brought to `now` has a trial
+    /// planned when the early return leaves the rail loop.
+    pub fn record(planned: Vec<bool>) {
+        SEEN.with(|c| *c.borrow_mut() = Some(planned));
+    }
+    pub fn seen() -> Option<Vec<bool>> {
+        SEEN.with(|c| c.borrow_mut().take())
+    }
+}
+
 fn crawl_events() -> u32 {
     #[cfg(test)]
     return crawl_hook::events();
@@ -1509,16 +1532,20 @@ impl PartitionedSolver {
             // (a `Step` event for it would commit nothing) and the rail it
             // steps against has jumped.
             let mut entered: Vec<usize> = Vec::new();
+            // Every partition either catch-up brought to `now`: an early
+            // return below restarts them first.
+            let mut caught: Vec<usize> = Vec::new();
             if regime_changed {
                 let ids = self.stepped.hub_partitions();
                 if !ids.is_empty() {
                     let pre = Rc::clone(&self.driver_snapshot);
                     if self.hub.as_ref().unwrap().state.reg == Regime::Cv {
-                        self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
+                        caught = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
                     } else {
                         debug_assert_eq!(self.voltages[self.hub.as_ref().unwrap().node].to_bits(), old_u.to_bits(), "the entry's catch-up reads the rail before the solve");
                         entered = ids.into_iter().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t < now)).collect();
                         self.stepped.catch_up(&entered, now, &pre, &self.live_params, &self.voltages)?;
+                        caught.clone_from(&entered);
                     }
                 }
             }
@@ -1573,9 +1600,24 @@ impl PartitionedSolver {
             // with a flip on each (W1c point 1a; F1r14's slow inrush, its
             // supply current through the rail capacitors' esr, 17 nV against
             // an edge landed two reached-widths past, is one).
-            if moved && two_back && flipped_now && flipped_before {
-                let a = self.rail_ic_devices(&flips.alternating());
+            #[cfg(test)]
+            let forced = !entered.is_empty() && alternation_hook::take();
+            #[cfg(not(test))]
+            let forced = false;
+            if (moved && two_back && flipped_now && flipped_before) || forced {
+                let ks: Vec<usize> = if forced { (0..self.hub.as_ref().unwrap().rail_ics.len()).collect() } else { flips.alternating() };
+                let a = self.rail_ic_devices(&ks);
                 if !a.is_empty() {
+                    // Not past the re-solves below: a partition left at `now`
+                    // with its spent trial's `Step` event still current
+                    // would commit an empty trial there.
+                    if !caught.is_empty() {
+                        self.restart_stepped(now, drivers, readers, &caught)?;
+                    }
+                    #[cfg(test)]
+                    if forced {
+                        alternation_hook::record(entered.iter().map(|&p| self.stepped.debug_has_pend(p)).collect());
+                    }
                     return Ok(hold::Passes::Alternating(a, rails::loop_unsettled()));
                 }
             }
@@ -1675,6 +1717,20 @@ impl PartitionedSolver {
         } else {
             Ok(hold::Passes::Alternating(a, rails::loop_unsettled()))
         }
+    }
+
+    /// Re-solves stepped partitions `ids` at `now` as discontinuities, each
+    /// restarting there, on the CC rail when the PSU is in CC with no rail
+    /// capacitor.
+    fn restart_stepped(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, ids: &[usize]) -> Result<(), String> {
+        self.begin_dynamic_writes_list(ids);
+        let pre = Rc::clone(&self.driver_snapshot);
+        self.sync_stepped_cc(now);
+        let stepped = self.stepped.resolve_dirty(ids, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
+        self.stepped.cc = None;
+        readers.extend(stepped?);
+        self.end_dynamic_writes();
+        Ok(())
     }
 
     /// The device indices of the rail ICs at positions `ks` in `rail_ics`.
