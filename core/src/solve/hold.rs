@@ -530,7 +530,7 @@ impl PartitionedSolver {
         }
         seed.sort_unstable();
         seed.dedup();
-        match self.rail_passes(now, drivers, readers, seed)? {
+        match self.hold_passes(now, drivers, readers, seed)? {
             Passes::Settled(_) => Ok(()),
             // Freed, and at once alternating again: its draw still decides,
             // so the retry asked and found no release, and it stays held as
@@ -589,10 +589,25 @@ impl PartitionedSolver {
     fn rail_settle(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, mut seed: Vec<usize>, err: &str) -> Result<(), String> {
         seed.sort_unstable();
         seed.dedup();
-        match self.rail_passes(now, drivers, readers, seed)? {
+        match self.hold_passes(now, drivers, readers, seed)? {
             Passes::Settled(_) => Ok(()),
             Passes::Alternating(..) => Err(err.to_string()),
         }
+    }
+
+    /// The rail loop's passes after a hold changed (a probe, a held solve, a
+    /// release): the rail itself is solved again whatever partitions `seed`
+    /// names. A rail IC's direct draw (a driver between the rail and a fixed
+    /// node) reads its hold, but such a chip with every other pin on the
+    /// rail or a fixed node dirties no partition, and a pass that finds the
+    /// rail clean solves nothing: the probes then judged it at the rail as
+    /// it was, and the held solve published a rail its hold no longer
+    /// matched (the verifier's DC repro, a 74LS00 sinking 64 mA from a 45 mA
+    /// PSU through outputs on the rail itself, left CV at 64 mA; on a clock,
+    /// a CC rail of 2.25 V reported 45 mA with 55 mA fed in).
+    fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
+        self.hub.as_mut().expect("a hub").dirty = true;
+        self.rail_passes(now, drivers, readers, seed)
     }
 
     /// The rail's draw at its published `u`, `dir` signed, while a PSU with

@@ -2717,7 +2717,7 @@ impl PartitionedSolver {
                 (false, true) => [self.voltages[ic.vcc.node] - hi, self.voltages[ic.vcc.node] - lo],
                 _ => continue,
             };
-            edges.extend(rails.iter().map(|&u| (dir * u, *d)).filter(|&(w, _)| w < top && w > floor));
+            edges.extend(rails.iter().map(|&u| (dir * u, *d)).filter(|&(w, _)| w <= top && w > floor));
         }
         if edges.is_empty() && floor > f64::NEG_INFINITY {
             return Ok(());
@@ -2767,6 +2767,11 @@ impl PartitionedSolver {
                         break;
                     }
                 }
+            }
+            // The CC solution within the edge's own band, under it: its
+            // root is what `dn` reads, and nothing above it is one.
+            if dn <= floor {
+                break;
             }
             match excess(self, dn, &mut moved) {
                 Some(x) if x <= 0.0 => {

@@ -12413,3 +12413,125 @@ fn a_cc_exit_whose_cv_draw_is_past_the_limit_enters_again_at_once() {
         assert!(low >= 4 && high >= 4, "{mode}: both phases sampled");
     }
 }
+
+#[test]
+fn a_landing_holds_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
+    // The verifier's repros of ruling G's landing (2026-11-01). Each chip's
+    // pins are all on the rail or a fixed node, so its hold dirties no
+    // partition. By hand, as in the probe: powered, inside [4.275, 5.775]
+    // V, each LOW output on the rail sinks u / R_out = 4 ioMax = 32 mA.
+    // (a) PSU 5 V, 50 mA, 125 ohm on the rail, 1A and 1B on the rail, 1Y on
+    // it: 40 + 32 = 72 mA at the setpoint, at least 66.2 mA through the
+    // window, at most 34.2 mA under it: the landing, the chip held off, CV
+    // at 5 V delivering 5/125 = 40 mA. (b) The same with 1A and 1B on a 5 V
+    // source. (c) PSU 5 V, 45 mA, 50 ohm from the rail to a 5 V source, 1A,
+    // 1B, 1Y, 2A, 2B, 2Y on the rail: 64 mA at the setpoint, (u - 5)/50 +
+    // 64 mA >= 49.5 mA through the window, below it (u - 5)/50 < 0: held
+    // off, CV at 5 V, nothing delivered (the node shunt's 5 pA). Before the
+    // fix default mode stayed CV at 72, 72 and 64 mA, its chip free.
+    let boards: [(&str, fn() -> Program, f64); 3] = [
+        ("(a)", || window_chip_rail(5.0, 0.05, 125.0, 0, [1, 1], 1, vec![]), 5.0 / 125.0),
+        ("(b)", || window_chip_rail(5.0, 0.05, 125.0, 0, [3, 3], 1, vec![source(3, 3, 0, 5.0)]), 5.0 / 125.0),
+        ("(c)", || window_chip_rail(5.0, 0.045, 50.0, 2, [1, 1], 1, vec![source(3, 2, 0, 5.0)]), 0.0),
+    ];
+    for (name, board, want) in boards {
+        // (c) has 2A, 2B, 2Y on the rail too.
+        let board = || {
+            let mut p = board();
+            if name == "(c)" {
+                p.devices[2] = ls00(2, 1, 0, [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], 1e-8, 0);
+            }
+            p
+        };
+        for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+            let mut rig = Rig::load(&p).unwrap();
+            for k in 0..=3 {
+                if k > 0 {
+                    rig.advance(k as f64 * 1e-3).unwrap();
+                }
+                let at = format!("{name} {mode} at {k} ms");
+                close(rig.v(1), 5.0, 1e-12, &format!("{at}: the rail at the setpoint"));
+                close(rig.i(0), -want, 1e-10, &format!("{at}: the PSU's current"));
+                assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+                assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cc_exit_that_lands_on_a_power_edge_solves_the_rail_with_the_chip_held() {
+    // The verifier's clock repro. PSU 5 V, 45 mA; 50 ohm from the rail to a
+    // 0 / 5 V clock (node 2); a 74LS00 with 1A, 1B, 1Y, 2A, 2B, 2Y on the
+    // rail (two LOW outputs sinking 32 mA each while powered, inside [4.275,
+    // 5.775] V). By hand, clock low: 100 + 64 mA at the setpoint: CC;
+    // powered u/50 + 64 mA is past the limit through the window, unpowered
+    // 85.5 mA at its floor, so the root is the unpowered 0.045 * 50 = 2.25
+    // V, the chip off. Clock high: unpowered, the CC rail (u - 5)/50 = 0.045
+    // is 7.25 V, past the setpoint; at the setpoint the powered chip draws
+    // 64 mA, past the limit; coming down, (u - 5)/50 + 64 mA >= 49.5 mA
+    // through the window and (u - 5)/50 < 0 under it: a landing, the chip
+    // held off, CV at 5 V with nothing delivered. Before the fix default
+    // mode published the CC rail at 2.25 V with 45 mA from the PSU while
+    // the resistor fed 55 mA into the rail.
+    // The chip takes digital slots 0-3, the clock 4.
+    let mut ck = clock(3, 2, 0, 1000.0, 0.5, 4);
+    ck.params[2] = 5.0;
+    let board = || program(3, vec![psu(0, 1, 0, 5.0, 0.045), resistor(1, 1, 2, 50.0), ls00(2, 1, 0, [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], 1e-8, 0), ck.clone()]);
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        let (mut low, mut high) = (0, 0);
+        for k in 1..=12 {
+            let t = k as f64 * 0.25e-3 + 0.1e-3;
+            rig.advance(t).unwrap();
+            let at = format!("{mode} at {:.2} ms, clock {}", t * 1e3, rig.v(2));
+            // The rail's KCL: what the PSU delivers is what the resistor
+            // takes, the chip off either way (the node shunt aside).
+            close(-rig.i(0), rig.i(1), 1e-10, &format!("{at}: KCL at the rail"));
+            assert!(!digital::power::powered(&rig.s().ics[0].1, rig.v(1), rig.v(0)) || !rig.s().power_hold(2).is_free(), "{at}: the chip off or held");
+            if rig.v(2) < 1.0 {
+                low += 1;
+                close(rig.v(1), 2.25, 1e-9, &format!("{at}: the unpowered CC root"));
+                close(rig.i(0), -0.045, 1e-10, &format!("{at}: the PSU at its limit"));
+                assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+            } else {
+                high += 1;
+                close(rig.v(1), 5.0, 1e-12, &format!("{at}: CV at the setpoint"));
+                close(rig.i(0), 0.0, 1e-10, &format!("{at}: nothing delivered"));
+                assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+                assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip held off");
+            }
+        }
+        assert!(low >= 4 && high >= 4, "{mode}: both phases sampled");
+    }
+}
+
+#[test]
+fn a_power_edge_at_the_setpoint_is_a_landing() {
+    // A PSU whose setpoint is the 74LS00's window floor, 0.9 * 4.75 V (the
+    // edge computed as the window test computes it), 50 mA; 125 ohm on the
+    // rail; 1A, 1B pulled up (1k, 100k), 1Y on the rail. By hand: at the
+    // setpoint the chip is powered (the floor is inside the window), u/125
+    // + 32 mA = 66.2 mA, past the limit; any rail below it is under the
+    // floor, the chip off, u/125 <= 34.2 mA: the draw crosses the limit at
+    // the setpoint itself, a landing: the chip held off, CV at the setpoint
+    // delivering v/125 + v/(1e9 + 1e3). Before the fix the edge at the
+    // setpoint was dropped and default mode settled in CC a few 1e-13 V
+    // under it.
+    let v = 4.75 * 0.9;
+    let board = || window_chip_rail(v, 0.05, 125.0, 0, [3, 4], 1, vec![resistor(3, 1, 3, 1e3), resistor(4, 1, 4, 1e5), resistor(5, 3, 0, 1e9)]);
+    let want = v / 125.0 + v / (1e9 + 1e3);
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        for k in 0..=2 {
+            if k > 0 {
+                rig.advance(k as f64 * 1e-3).unwrap();
+            }
+            let at = format!("{mode} at {k} ms");
+            close(rig.v(1), v, 1e-12, &format!("{at}: the rail at the setpoint"));
+            close(rig.i(0), -want, 1e-10, &format!("{at}: the PSU's current"));
+            assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+            assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+        }
+    }
+}

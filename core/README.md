@@ -3485,7 +3485,17 @@ Constants, all from P3:35-38 unless marked new:
      which is the power hold's case (W1c point 1a): the search fails with
      its last evaluations either side of the edge, which the hold's trigger
      reads as the chip alternating. In the probe the chip is held off and
-     the PSU is CV at 5 V, 40 mA. A PSU with a rail capacitor keeps the
+     the PSU is CV at 5 V, 40 mA. The hold's probes, its held solve and a
+     release solve the rail again whatever partitions they dirty: a chip
+     whose pins are all on the rail or fixed nodes dirties none, its direct
+     draw alone reading the hold, and a pass that found the rail clean
+     solved nothing (the verifier's repros: CV past the limit with the chip
+     free, and a CC rail published at 2.25 V with 45 mA delivered against
+     55 mA fed in). An edge at the setpoint itself counts (just under it the
+     draw can be another power state's); an edge whose lower band reaches
+     the Newton's root down to it is no landing (the draw within the limit
+     there is that root's); and a landing's last three evaluations are
+     `up`, `dn`, `up` whether or not the walk read `up` first. A PSU with a rail capacitor keeps the
      Newton's candidate, as before: its rail lands nowhere at the instant
      (CC starts from the capacitors' charge and ramps down), and what an
      edge landing means there is not ruled (entered at the landing, a 555
