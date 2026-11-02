@@ -1574,6 +1574,12 @@ pub fn solve_cc(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct,
 /// How [`cc_entry_rail`]'s error for a landing on a power edge begins.
 pub const EDGE_LANDING: &str = "rail: the CC operating point lands on a power edge";
 
+/// The rail of a landing on a power edge, from [`cc_entry_rail`]'s error;
+/// `None` for any other error.
+pub fn landing_edge(err: &str) -> Option<f64> {
+    err.strip_prefix(EDGE_LANDING)?.strip_prefix(" at ")?.parse().ok()
+}
+
 /// The CC operating point the CV -> CC clamp reads (Rails point 5, ruling
 /// G): the highest rail at or below the setpoint, in the PSU's direction,
 /// where the draw meets the limit, the first one reached coming down from
@@ -1847,7 +1853,20 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         let u_cc = if reg != Regime::Cv || !(i_at_v.abs() > i_limit) {
             u_rail
         } else if rail_cap {
-            solve_cc(v, direction(v) * i_limit, a_p, g_p, direct, v)?
+            // With a rail capacitor the rail lands nowhere at the instant: CC
+            // starts from the capacitors' charge and moves with the draws, so
+            // a draw past the limit at the setpoint enters CC wherever the
+            // operating point lies, a landing on a power edge included (the
+            // capacitors carry the rail down to that edge, where the power
+            // hold meets it as on any CC ramp). The Newton's candidate alone
+            // could settle past the setpoint on another power state's draw
+            // and keep CV past the limit (ruling R68 after G: a 74LS00
+            // powered only inside its window on 10 uF held CV at 72 mA from
+            // a 50 mA supply).
+            match cc_entry_rail(v, direction(v) * i_limit, a_p, g_p, direct, i_at_v, &edges()) {
+                Ok(u) => u,
+                Err(err) => landing_edge(&err).ok_or(err)?,
+            }
         } else {
             cc_entry_rail(v, direction(v) * i_limit, a_p, g_p, direct, i_at_v, &edges())?
         };

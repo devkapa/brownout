@@ -124,8 +124,9 @@ pub fn regime_step(reg: Regime, i_at_v: f64, u_cc: f64, u_rail: f64, v: f64, i_l
 /// Entering CC is the same (`u_cc` against the clamp). The exit is different:
 /// a jump to `V` would draw without bound into the capacitor, so CC exits
 /// only once the present rail has reached the setpoint, `dir * u_rail >=
-/// |V|`, and the draw at the setpoint is not read (probe P9: classic stays in
-/// CC, -0.1 A, up to 5.0 V).
+/// |V|` (probe P9: classic stays in CC, -0.1 A, up to 5.0 V), and the draw
+/// at the setpoint is read only to keep CC where it is past the limit (ruling
+/// R68 after G: CC just entered at the setpoint).
 pub fn regime_step_rail_cap(reg: Regime, i_at_v: f64, u_cc: f64, u_rail: f64, v: f64, i_limit: f64) -> Regime {
     if !(i_limit > 0.0) {
         return Regime::Cv;
@@ -133,7 +134,14 @@ pub fn regime_step_rail_cap(reg: Regime, i_at_v: f64, u_cc: f64, u_rail: f64, v:
     match reg {
         Regime::Cv => regime_step(reg, i_at_v, u_cc, u_rail, v, i_limit),
         Regime::Cc => {
-            if u_rail.is_finite() && v.is_finite() && direction(v) * u_rail >= v.abs() {
+            // A rail at the setpoint whose draw there is past the limit is
+            // one CC has just entered at it (the capacitors charged to `V`),
+            // which the draws pull down at once: CV there would deliver past
+            // the limit (ruling R68 after G; a chip powered only inside its
+            // window on 10 uF, entered at its retry, flipped back to CV at
+            // 72 mA from a 50 mA supply). A rail that reached the setpoint
+            // climbing had its draw within the limit, and leaves.
+            if u_rail.is_finite() && v.is_finite() && direction(v) * u_rail >= v.abs() && !(direction(v) * i_at_v > i_limit) {
                 Regime::Cv
             } else {
                 Regime::Cc
@@ -735,7 +743,12 @@ mod tests {
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, V, 5.0 - 5e-6, V, LIMIT), Regime::Cc, "no band below the setpoint");
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, V, f64::from_bits(5.0f64.to_bits() - 1), V, LIMIT), Regime::Cc);
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, 1.0, 5.0, V, LIMIT), Regime::Cv, "exit at u = 5");
-        assert_eq!(regime_step_rail_cap(Regime::Cc, 5.0, 1.0, 5.0, V, LIMIT), Regime::Cv, "the draw at the setpoint is not read");
+        // The draw at the setpoint is read only past the limit (ruling R68
+        // after G): CC entered at the setpoint, where the draws pull the rail
+        // down at once, does not leave there; a rail that climbed to it had
+        // its draw within the limit.
+        assert_eq!(regime_step_rail_cap(Regime::Cc, 0.05, 1.0, 5.0, V, LIMIT), Regime::Cv, "a draw within the limit at the setpoint leaves");
+        assert_eq!(regime_step_rail_cap(Regime::Cc, 5.0, 1.0, 5.0, V, LIMIT), Regime::Cc, "a draw past the limit at the setpoint stays in CC");
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, 1.0, -5.0, -5.0, LIMIT), Regime::Cv, "negative setpoint, at -5 V");
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, 1.0, -4.9, -5.0, LIMIT), Regime::Cc);
         assert_eq!(regime_step_rail_cap(Regime::Cc, 0.0, 1.0, f64::NAN, V, LIMIT), Regime::Cc);

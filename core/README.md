@@ -3565,14 +3565,26 @@ Constants, all from P3:35-38 unless marked new:
      draw can be another power state's); an edge whose lower band reaches
      the Newton's root down to it is no landing (the draw within the limit
      there is that root's); and a landing's last three evaluations are
-     `up`, `dn`, `up` whether or not the walk read `up` first. A PSU with a rail capacitor keeps the
-     Newton's candidate, as before: its rail lands nowhere at the instant
-     (CC starts from the capacitors' charge and ramps down), and what an
-     edge landing means there is not ruled (entered at the landing, a 555
-     slid along its 1.8 V floor to the hold-episode guard, cold 175 tpl 2
-     and 696 tpl 2; held at the instant, the hold's powered probe found the
-     capacitors holding the rail at the setpoint and declined, cold 627 tpl
-     4). Exact mode searches no stepped rail partition either (Rails point
+     `up`, `dn`, `up` whether or not the walk read `up` first.
+     A PSU with a rail capacitor (ruling R68)
+     takes the same search, an edge landing included as a CC candidate
+     below the setpoint: its rail lands nowhere at the instant (CC starts
+     from the capacitors' charge, at the setpoint, and the draws carry it
+     down to the edge, where the hold meets it as on any CC ramp), and the
+     Newton's candidate kept CV past the limit (G's probe on 10 uF: 72 mA
+     from a 50 mA supply). So that entry holds, CC with a rail capacitor
+     leaves at the setpoint only with the draw there within the limit (point
+     4; a rail that climbed to it had it so). And a chip held there is
+     retried, at its release level or the host step, only while its powered
+     draw would fit: R44 (a)'s draw threshold, at its edge on a CC
+     segment and at the setpoint in CV, where a release passed on the way up
+     re-entered CC at once (cold 696 tpl 2's 555, held 51 times within a host
+     step, the hold-episode guard's `-4`; 175 tpl 2 and 627 tpl 4 alike). G's
+     probe on 10 uF ends as without the capacitor, the chip held off and CV
+     at 5 V, 40 mA
+     (`a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_without_one`,
+     `a_555_at_its_floor_on_a_cc_rail_capacitor_is_held_once_and_the_runs_complete`).
+     Exact mode searches no stepped rail partition either (Rails point
      9). Within a segment the draw is
      taken to rise with the rail. Below every edge, a Newton that cannot
      reach the lowest segment's root from its top has it bracketed by steps
