@@ -667,6 +667,15 @@ pub struct StaticPartitionSolver {
     /// Holds taken and released by the last resolves, for the owner to enter
     /// in its table (`PartitionedSolver::take_static_holds`).
     hold_requests: Vec<(usize, digital::power::PowerHold, f64)>,
+    /// Exact mode's CC entry (ruling G, `PartitionedSolver::exact_cc_entry`):
+    /// while set, a free-supply solve is a trial at a fixed rail, which runs
+    /// no hold procedure and no release, so it takes and frees nothing.
+    pub(crate) trial: bool,
+    /// The ICs (device indices) whose power edge the exact rail's CC
+    /// operating point landed on: the next free-supply solve of a partition
+    /// gating them runs the hold procedure on them, as on ICs its Newton saw
+    /// alternate (W1c point 1a), and clears the list.
+    pub(crate) edge_hold: Vec<usize>,
     /// The copy as the open window found it before this solver first changed
     /// it, which a rollback restores.
     w_holds: Option<(std::rc::Rc<Vec<digital::power::PowerHold>>, bool, bool)>,
@@ -968,6 +977,8 @@ impl StaticPartitionSolver {
             holds: std::rc::Rc::new(Vec::new()),
             holds_on: false,
             hold_requests: Vec::new(),
+            trial: false,
+            edge_hold: Vec::new(),
             w_holds: None,
             retry_armed: true,
         })
@@ -1869,8 +1880,20 @@ impl StaticPartitionSolver {
     /// polish, with W1c point 1a around them.
     fn free_supply_solve(&mut self, p_idx: usize, now: f64, drivers: &[Driver], polish_at: Option<f64>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
         let gated = self.gated_ics(p_idx);
+        if self.trial {
+            return self.solve_once(p_idx, now, drivers, &gated, None, polish_at);
+        }
         let mut flips = crate::solve::hold::Flips::new(gated.len());
-        match self.solve_once(p_idx, now, drivers, &gated, Some(&mut flips), polish_at) {
+        let first = self.solve_once(p_idx, now, drivers, &gated, Some(&mut flips), polish_at);
+        if !self.edge_hold.is_empty() {
+            let a: Vec<usize> = (0..gated.len()).filter(|&k| self.edge_hold.contains(&self.ics[gated[k] as usize].0)).collect();
+            if !a.is_empty() {
+                self.edge_hold.clear();
+                let err = first.err().unwrap_or_else(|| "rail: the CC operating point lands on a power edge".to_string());
+                return self.hold_in(p_idx, now, drivers, &gated, &flips, &a, err, polish_at);
+            }
+        }
+        match first {
             Ok(solved) if self.holds_on => self.release_in(p_idx, now, drivers, &gated, solved, polish_at),
             Ok(solved) => Ok(solved),
             Err(err) => {

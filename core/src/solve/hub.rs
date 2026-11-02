@@ -1013,6 +1013,36 @@ impl PartitionedSolver {
         }
     }
 
+    /// The rails at which a free rail IC's power window flips (`rails::
+    /// cc_entry_rail`): each window edge of a rail IC with one supply pin on
+    /// the rail, the other read where it stands, as `direct_at` judges it. A
+    /// held IC's verdict does not move with the rail, and one with both
+    /// supply pins on it is never powered.
+    pub(super) fn power_edges(&self) -> Vec<f64> {
+        let Some(hub) = self.hub.as_ref() else { return Vec::new() };
+        let rail = hub.node;
+        let mut out = Vec::new();
+        for &pos in &hub.rail_ics {
+            let (d, ic) = &self.ics[pos as usize];
+            if ic.vcc.open || ic.gnd.open || !self.power_hold(*d).is_free() {
+                continue;
+            }
+            let (lo, hi) = (ic.vcc_min * 0.9, ic.vcc_max * 1.1);
+            match (ic.vcc.node == rail, ic.gnd.node == rail) {
+                (true, false) => {
+                    let g = self.voltages[ic.gnd.node];
+                    out.extend([g + lo, g + hi]);
+                }
+                (false, true) => {
+                    let c = self.voltages[ic.vcc.node];
+                    out.extend([c - hi, c - lo]);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// The rail's whole draw at `now` were the rail at `u`: the partitions'
     /// linearised terms and the direct devices exact there.
     pub(super) fn rail_draw_at(&self, now: f64, u: f64) -> f64 {
@@ -1142,7 +1172,23 @@ impl PartitionedSolver {
                         });
                         Ok(u)
                     } else {
-                        rails::solve_cc(*v, dl, a_p, g_p, &direct, u_from)
+                        // A continuation that fails takes the entry's operating
+                        // point, coming down from the setpoint (ruling G), as
+                        // an exit and a re-entry would: a HIGH stage into a
+                        // node below ground draws less as the rail rises, and
+                        // a pass whose partitions moved can leave the Newton
+                        // from the last rail nowhere to settle (cold 536 tpl
+                        // 2). Failing that too other than by an edge landing,
+                        // the continuation's own failure stands, solved again
+                        // so its iterates are the hold's trigger's.
+                        rails::solve_cc(*v, dl, a_p, g_p, &direct, u_from).or_else(|_| {
+                            let i_at_v = rails::draw_at(a_p, g_p, &direct, *v);
+                            match rails::cc_entry_rail(*v, dl, a_p, g_p, &direct, i_at_v, &self.power_edges()) {
+                                Ok(u) => Ok(u),
+                                Err(err) if err.starts_with(rails::EDGE_LANDING) => Err(err),
+                                Err(_) => rails::solve_cc(*v, dl, a_p, g_p, &direct, u_from),
+                            }
+                        })
                     }
                 }
             }
@@ -1152,7 +1198,7 @@ impl PartitionedSolver {
         let mut keep = None;
         if let Some((v, i_limit)) = hub.psu() {
             let demand = if reg == Regime::Cv && has_cap { self.rail_cap_demand(now, v) } else { CapDemand::none(v) };
-            let next = rails::next_regime(reg, v, i_limit, has_cap, a_p, g_p, &direct, u, demand)?;
+            let (next, u_cc) = rails::next_regime(reg, v, i_limit, has_cap, a_p, g_p, &direct, u, demand, &|| self.power_edges())?;
             if next != reg {
                 reg = next;
                 changed = true;
@@ -1173,7 +1219,15 @@ impl PartitionedSolver {
                 if reg == Regime::Cv {
                     keep = seg_found.filter(|&(u_seg, _)| direction(v) * u_seg < v.abs()).map(|(_, q)| q);
                 }
-                u = solve_in(reg, &mut cap_seg, from)?;
+                // Entering CC with no rail capacitor, the CC rail is the
+                // operating point the clamp found (ruling G): the highest at
+                // or below the setpoint, which a Newton from the setpoint
+                // need not find again.
+                u = if reg == Regime::Cc && !has_cap { u_cc } else { solve_in(reg, &mut cap_seg, from)? };
+            } else if reg == Regime::Cc && !has_cap && u_cc.to_bits() != u.to_bits() {
+                // CC kept at the operating point below the setpoint, its
+                // continuation having passed it (`rails::next_regime`).
+                u = u_cc;
             }
         }
         // The draws held over the next interval (Rails point 6).
@@ -2520,6 +2574,7 @@ impl PartitionedSolver {
         e.t_last = at;
         e.held = draw;
         let mut transition = false;
+        let mut entered = None;
         if let HubKind::Psu { v, i_limit } = e.kind {
             let dir = direction(v);
             // The entry is point 5's: over the limit, unless the CC solution
@@ -2540,6 +2595,9 @@ impl PartitionedSolver {
                 r => r,
             };
             if next != e.reg {
+                if next == Regime::Cc {
+                    entered = Some((v, i_limit));
+                }
                 e.reg = next;
                 transition = true;
             }
@@ -2547,6 +2605,33 @@ impl PartitionedSolver {
         self.push_exact_stamp();
         if transition {
             self.exact_resolve(p, now, drivers, readers)?;
+            // A CC exit whose CV draw is past the limit was no exit: the CC
+            // solution passed the setpoint only on another power state's
+            // draw (a chip powered only inside its window draws nothing past
+            // it), and CV there delivers past the limit. It re-enters at once
+            // (ruling G's operating point), as default mode's rail loop does
+            // at its next pass; left in CV, nothing re-solved the rail's
+            // partition (cold 267 tpl 2: a 74LS00 sinking 114.8 mA from a
+            // 62.7 mA PSU through every clock-low phase).
+            // A static rail partition only, as the search: a stepped one's
+            // CV draw just after its exit is its rail capacitors' current at
+            // the step (the EX1 fixtures re-entered CC for a step on it).
+            let entered = entered.or_else(|| {
+                let e = self.exact.as_ref().unwrap();
+                match (&e.kind, e.reg) {
+                    (&HubKind::Psu { v, i_limit }, Regime::Cv) if self.partition_kinds[p] == PartitionKind::Static && direction(v) * -self.exact_hub_current() > i_limit => Some((v, i_limit)),
+                    _ => None,
+                }
+            });
+            if let Some((v, i_limit)) = entered {
+                let e = self.exact.as_mut().unwrap();
+                if e.reg == Regime::Cv {
+                    e.reg = Regime::Cc;
+                    self.push_exact_stamp();
+                    self.exact_resolve(p, now, drivers, readers)?;
+                }
+                self.exact_cc_entry(p, now, drivers, readers, v, i_limit)?;
+            }
             // The clamp, for a draw that does not rise with the rail: an IC
             // powers off past its window and draws nothing there, so the CC
             // solution can be the node shunt's, far past the setpoint
@@ -2588,6 +2673,192 @@ impl PartitionedSolver {
         Ok(())
     }
 
+    /// Exact mode's CC entry (Rails point 5, ruling G), right after the
+    /// entry's CC solve: the operating point is the highest at or below the
+    /// setpoint, in the PSU's direction, where the draw meets the limit, as
+    /// `rails::cc_entry_rail` finds it on the rail's scalar draw. The CC
+    /// Newton from the CV solution can settle past the setpoint on a chip's
+    /// unpowered draw, or below a higher root across a power edge (defect
+    /// G: exact mode, the fine reference, held CV at 72 mA against a 50 mA
+    /// limit too). So its solution stands only when no free rail IC's power
+    /// edge lies between it and the setpoint; otherwise the draw curve is
+    /// read by trial solves of the rail's partition with the rail held at a
+    /// trial voltage (the CV stamp there), walked down from the setpoint one
+    /// segment between edges at a time as `cc_entry_rail` walks it: the
+    /// segment holding the root is solved there, the CC solve then seeded
+    /// from the trial at it; an edge where the draw falls within the limit
+    /// only across it puts its ICs to the hold procedure (W1c point 1a) in
+    /// the CC solve. A search that keeps the Newton's root puts every piece
+    /// of state back as it was, bit for bit. Only a static rail partition is
+    /// searched: a stepped one restarts its step at each re-solve, and holds
+    /// no hold procedure.
+    fn exact_cc_entry(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, v: f64, i_limit: f64) -> Result<(), String> {
+        if self.partition_kinds[p] != PartitionKind::Static {
+            return Ok(());
+        }
+        let (node, local) = {
+            let e = self.exact.as_ref().unwrap();
+            (e.node, e.local)
+        };
+        let dir = direction(v);
+        let top = v.abs();
+        let w_cc = dir * self.voltages[node];
+        let floor = if w_cc <= top { w_cc } else { f64::NEG_INFINITY };
+        // Each free IC with one supply pin on the rail: its window's edges as
+        // rails, the other pin read where it stands.
+        let mut edges: Vec<(f64, usize)> = Vec::new();
+        for (d, ic) in &self.ics {
+            if ic.vcc.open || ic.gnd.open || !self.power_hold(*d).is_free() {
+                continue;
+            }
+            let (lo, hi) = (ic.vcc_min * 0.9, ic.vcc_max * 1.1);
+            let rails = match (ic.vcc.node == node, ic.gnd.node == node) {
+                (true, false) => [self.voltages[ic.gnd.node] + lo, self.voltages[ic.gnd.node] + hi],
+                (false, true) => [self.voltages[ic.vcc.node] - hi, self.voltages[ic.vcc.node] - lo],
+                _ => continue,
+            };
+            edges.extend(rails.iter().map(|&u| (dir * u, *d)).filter(|&(w, _)| w < top && w > floor));
+        }
+        if edges.is_empty() && floor > f64::NEG_INFINITY {
+            return Ok(());
+        }
+        edges.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        let checkpoint = (self.snapshot(), self.dynamic_snapshot());
+        // The draw's excess over the limit, in the PSU's direction, with the
+        // rail held at `dir w`; `None` when the trial fails to solve. Each
+        // trial publishes, so the devices reading what any trial moved are
+        // collected: a search that keeps a trial's solution as its seed
+        // hands them all on, the final solve moving them only from there.
+        let mut moved = Vec::new();
+        let excess = |this: &mut Self, w: f64, moved: &mut Vec<DeviceId>| -> Option<f64> {
+            this.static_solver.set_exact(Some(ExactStamp { partition: p, local, kind: ExactKind::Row { value: dir * w } }));
+            this.static_solver.trial = true;
+            let solved = this.exact_resolve(p, now, drivers, moved);
+            this.static_solver.trial = false;
+            solved.ok().map(|()| dir * this.exact_rail_draw() - i_limit)
+        };
+        enum Found {
+            Root(f64, f64),
+            Edge(Vec<usize>),
+            Below(f64),
+        }
+        let mut hi = top;
+        let mut found = None;
+        let mut failed = false;
+        let mut k = 0;
+        while k < edges.len() {
+            let e = edges[k].0;
+            let mut devices = Vec::new();
+            while k < edges.len() && edges[k].0 == e {
+                devices.push(edges[k].1);
+                k += 1;
+            }
+            let d = 2.0 * rails::REACHED_REL * e.abs().max(1.0);
+            let (up, dn) = (e + d, e - d);
+            if up < hi {
+                match excess(self, up, &mut moved) {
+                    Some(x) if x <= 0.0 => {
+                        found = Some(Found::Root(up, hi));
+                        break;
+                    }
+                    Some(_) => {}
+                    None => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            match excess(self, dn, &mut moved) {
+                Some(x) if x <= 0.0 => {
+                    found = Some(Found::Edge(devices));
+                    break;
+                }
+                Some(_) => hi = dn,
+                None => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            return self.exact_restore(checkpoint);
+        }
+        if found.is_none() && floor == f64::NEG_INFINITY {
+            found = Some(Found::Below(hi));
+        }
+        match found {
+            Some(Found::Root(w_in, w_out)) => {
+                // The segment's root by the Illinois method on the trials'
+                // excess; the CC solve from the last trial polishes it.
+                let (mut a, mut b) = (w_in, w_out);
+                let (Some(mut fa), Some(mut fb)) = (excess(self, a, &mut moved), excess(self, b, &mut moved)) else { return self.exact_restore(checkpoint) };
+                let mut side = 0;
+                for _ in 0..100 {
+                    if (b - a).abs() <= rails::RAIL_NEWTON_TOL * a.abs().max(1.0) || fa == 0.0 {
+                        break;
+                    }
+                    let c = if fb != fa { b - fb * (b - a) / (fb - fa) } else { 0.5 * (a + b) };
+                    let c = if c > a.min(b) && c < a.max(b) { c } else { 0.5 * (a + b) };
+                    let Some(fc) = excess(self, c, &mut moved) else { return self.exact_restore(checkpoint) };
+                    if fc <= 0.0 {
+                        (a, fa) = (c, fc);
+                        if side == -1 {
+                            fb *= 0.5;
+                        }
+                        side = -1;
+                    } else {
+                        (b, fb) = (c, fc);
+                        if side == 1 {
+                            fa *= 0.5;
+                        }
+                        side = 1;
+                    }
+                }
+                excess(self, a, &mut moved);
+                readers.extend(moved);
+                self.push_exact_stamp();
+                self.exact_resolve(p, now, drivers, readers)
+            }
+            Some(Found::Edge(devices)) => {
+                // A hold procedure that cannot take the landing (a probe that
+                // fails to solve) leaves the CC solution as the search found
+                // it, as before the search: no instant declines for it (cold
+                // 794 tpl 4 did, `-4`, where default mode runs).
+                self.exact_restore(checkpoint)?;
+                let before = (self.snapshot(), self.dynamic_snapshot());
+                let mut held_readers = Vec::new();
+                self.static_solver.edge_hold = devices;
+                let held = self.exact_resolve(p, now, drivers, &mut held_readers);
+                self.static_solver.edge_hold.clear();
+                match held {
+                    Ok(()) => {
+                        readers.extend(held_readers);
+                        Ok(())
+                    }
+                    Err(_) => self.exact_restore(before),
+                }
+            }
+            Some(Found::Below(w)) => {
+                // Below every edge with the Newton's root past the setpoint:
+                // the lowest segment's root, the CC solve seeded just under
+                // its top (where the last trial already holds the rail).
+                let _ = w;
+                readers.extend(moved);
+                self.push_exact_stamp();
+                self.exact_resolve(p, now, drivers, readers)
+            }
+            None => self.exact_restore(checkpoint),
+        }
+    }
+
+    /// Puts the solver back at `checkpoint` and the exact stamp at the hub's.
+    fn exact_restore(&mut self, checkpoint: ((Vec<f64>, Vec<f64>), Box<dyn std::any::Any>)) -> Result<(), String> {
+        self.restore(checkpoint.0);
+        self.dynamic_restore(checkpoint.1);
+        self.push_exact_stamp();
+        Ok(())
+    }
+
     /// Plans the battery partition's next step from the stamp just set
     /// (`SteppedSolver::set_defer`).
     fn plan_deferred(&mut self, drivers: &[Driver]) -> Result<(), String> {
@@ -2597,6 +2868,16 @@ impl PartitionedSolver {
     /// The exact hub's current into its `pos` from the circuit: the rail's
     /// KCL over every other element, at the published voltages.
     fn exact_hub_current(&self) -> f64 {
+        let e = self.exact.as_ref().unwrap();
+        match (&e.kind, e.reg) {
+            (HubKind::Psu { v: vs, i_limit }, Regime::Cc) => -direction(*vs) * i_limit,
+            _ => -self.exact_rail_draw(),
+        }
+    }
+
+    /// The current leaving the exact rail into every other element at the
+    /// published voltages: the draw, whatever the source's stamp.
+    fn exact_rail_draw(&self) -> f64 {
         let e = self.exact.as_ref().unwrap();
         let node = e.node;
         let v = &self.voltages;
@@ -2645,9 +2926,6 @@ impl PartitionedSolver {
                 }
             }
         }
-        match (&e.kind, e.reg) {
-            (HubKind::Psu { v: vs, i_limit }, Regime::Cc) => -direction(*vs) * i_limit,
-            _ => -leaving,
-        }
+        leaving
     }
 }

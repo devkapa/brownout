@@ -12221,3 +12221,195 @@ fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes
     }
     close(published[1].1, published[0].1, 1e-9 + 1e-3 * published[0].1.abs(), "the PSU's current, exact against default");
 }
+
+
+// ---- Rails point 5: the CC operating point on a non-monotone draw (ruling G) --
+
+/// A 74LS00 (device 2) on the rail (node 1) of a PSU `{v, i_limit}` with
+/// `r_rail` from the rail to node `r_to`, its inputs `a` (1A, 1B) and 1Y on
+/// node `y`, every other pin on ground (a driver on ground stamps nothing).
+fn window_chip_rail(v: f64, i_limit: f64, r_rail: f64, r_to: usize, a: [usize; 2], y: usize, extra: Vec<Device>) -> Program {
+    let mut devices = vec![psu(0, 1, 0, v, i_limit), resistor(1, 1, r_to, r_rail), ls00(2, 1, 0, [a[0], a[1], y, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1e-8, 0)];
+    devices.extend(extra);
+    program(5, devices)
+}
+
+fn exact_regime(rig: &Rig) -> Regime {
+    rig.s().exact.as_ref().map_or_else(|| rig.hub().state.reg, |e| e.reg)
+}
+
+#[test]
+fn a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_held_off_at_its_power_edge() {
+    // Defect G (ruled 2026-10-31; ACC-EV's probe). PSU 5 V, 50 mA; 125 ohm
+    // on the rail; a 74LS00 on the rail with 1A and 1B pulled up through 1k
+    // and 100k (node 3, 4), so 1Y LOW, and 1Y on the rail itself. The draw
+    // curve by hand: unpowered, u/125 and the pull-ups' 5 nA (1k into 1e9);
+    // powered, inside [0.9 * 4.75, 1.1 * 5.25] = [4.275, 5.775] V, 1Y LOW
+    // sinks u / R_out with R_out = u / (4 ioMax), 4 * 8 mA = 32 mA more. At
+    // the setpoint 40 + 32 = 72 mA, past the limit: CC. Coming down from 5 V
+    // the powered draw u/125 + 32 mA stays above 66.2 mA to the window's
+    // floor, and under it the unpowered draw is at most 34.2 mA: there is
+    // no CC operating point at or below the setpoint, the draw crossing the
+    // limit only across the chip's power edge, which is the power hold's
+    // case. The chip held off, the PSU is in CV at 5 V delivering 5/125 +
+    // 5/(1e9 + 1e3) = 40.000005 mA (the node shunts' 15 pA aside). The CC
+    // Newton's root past the setpoint, unpowered at 6.25 V above the
+    // window, is no operating point of a supply coming down from its
+    // setpoint: before the fix both modes held CV there at 72 mA.
+    let board = || window_chip_rail(5.0, 0.05, 125.0, 0, [3, 4], 1, vec![resistor(3, 1, 3, 1e3), resistor(4, 1, 4, 1e5), resistor(5, 3, 0, 1e9)]);
+    let want = 5.0 / 125.0 + 5.0 / (1e9 + 1e3);
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        for k in 0..=3 {
+            if k > 0 {
+                rig.advance(k as f64 * 1e-3).unwrap();
+            }
+            let at = format!("{mode} at {k} ms");
+            close(rig.v(1), 5.0, 1e-12, &format!("{at}: the rail at the setpoint"));
+            close(rig.i(0), -want, 1e-10, &format!("{at}: the PSU's current"));
+            assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+            assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+        }
+    }
+}
+
+#[test]
+fn a_cc_entry_takes_the_highest_operating_point_at_or_below_the_setpoint() {
+    // Ruling G's two-root case. PSU 5.7 V, 80 mA; 50 ohm from the rail to a
+    // 0 / 5.7 V clock (node 3); a 74LS00 on the rail with 1A and 1B on
+    // ground, so 1Y HIGH, and 1Y held at Vs = 5.10625 V by an ideal source
+    // (node 2). 1Y's HIGH stage, R_out = u / (4 ioMax) = u / 0.032, draws
+    // 0.032 (u - Vs) / u from the rail while the chip is powered, inside
+    // [4.275, 5.775] V. Clock high, the 50 ohm carries nothing at the
+    // setpoint and the stage 3.3 mA: CV, the chip powered and 1Y HIGH.
+    // Clock low, by hand: 114 + 3.3 mA at the setpoint, past the limit: CC.
+    // Coming down from 5.7 V, powered, u/50 + 0.032 - 0.1634/u = 0.08
+    // gives u^2 - 2.4 u - 8.17 = 0, u = 1.2 + sqrt(9.61) = 4.3 V, inside
+    // the window: the first root reached, the operating point. Unpowered
+    // under the window the draw is u/50, a second root at 0.08 * 50 = 4 V,
+    // consistent too. The powered draw is concave, so the CC Newton from
+    // the setpoint steps past its root, to 4.208 V, under the window, and
+    // from there reaches 4 V: before the fix both modes settled there.
+    // Clock high again, the CC solution is past the setpoint: CV.
+    // The chip takes digital slots 0-3, the clock 4.
+    let mut ck = clock(4, 3, 0, 1000.0, 0.5, 4);
+    ck.params[2] = 5.7;
+    let board = || window_chip_rail(5.7, 0.08, 50.0, 3, [0, 0], 2, vec![source(3, 2, 0, 5.10625), ck.clone()]);
+    let want = 4.3;
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        let (mut low, mut high) = (0, 0);
+        for k in 1..=12 {
+            let t = k as f64 * 0.25e-3 + 0.1e-3;
+            rig.advance(t).unwrap();
+            let at = format!("{mode} at {:.2} ms, clock {}", t * 1e3, rig.v(3));
+            if rig.v(3) < 1.0 {
+                low += 1;
+                close(rig.v(1), want, 1e-9, &format!("{at}: the rail at the highest root"));
+                close(rig.i(0), -0.08, 1e-10, &format!("{at}: the PSU at its limit"));
+                assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+                assert!(digital::power::powered(&rig.s().ics[0].1, rig.v(1), rig.v(0)), "{at}: the chip is powered there");
+            } else {
+                high += 1;
+                close(rig.v(1), 5.7, 1e-12, &format!("{at}: CV at the setpoint"));
+                assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+            }
+        }
+        assert!(low >= 4 && high >= 4, "{mode}: both phases sampled");
+    }
+}
+
+#[test]
+fn a_cc_rail_below_a_chips_window_stays_in_cc_when_the_chip_would_feed_it_at_the_setpoint() {
+    // Defect C (cold 364 tpl 2). PSU 5 V, 40 mA; 100 ohm on the rail; a
+    // 74LS00 on the rail with 1A and 1B on ground, so 1Y HIGH, and 1Y on a
+    // 0 / 10 V clock. By hand, clock low: powered at the setpoint 1Y's HIGH
+    // stage sinks u / R_out = 4 ioMax = 32 mA into the clock, 82 mA in all:
+    // CC. Coming down, the powered draw u/100 + 32 mA is past the limit
+    // through the window and the unpowered 42.75 mA still is at its floor
+    // (4.275 V); the unpowered root is 0.04 * 100 = 4 V, under the window:
+    // CC at 4 V, the chip off. Clock high, from there: the unpowered draw
+    // is unchanged, so the CC rail stays at 4 V, the chip off. A CV state
+    // exists too (at 5 V, powered, 1Y feeds the rail 0.032 (10 - 5)/5 = 32
+    // mA, an 18 mA draw within the limit), but the CC rail never reaches
+    // the window to power the chip: the CC solution is short of the
+    // setpoint. Before the fix the default exit read the draw at the
+    // setpoint, the powered chip's 18 mA, and left CC at each clock-high
+    // phase; exact mode, the rail test alone, stayed.
+    // The chip takes digital slots 0-3, the clock 4.
+    let mut ck = clock(3, 2, 0, 1000.0, 0.5, 4);
+    ck.params[2] = 10.0;
+    let board = || window_chip_rail(5.0, 0.04, 100.0, 0, [0, 0], 2, vec![ck.clone()]);
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        let (mut low_seen, mut high_after_low) = (false, 0);
+        for k in 1..=16 {
+            rig.advance(k as f64 * 0.25e-3 + 0.1e-3).unwrap();
+            let at = format!("{mode} at {:.2} ms, clock {}", (k as f64 * 0.25e-3 + 0.1e-3) * 1e3, rig.v(2));
+            if rig.v(2) < 1.0 {
+                low_seen = true;
+            }
+            if !low_seen {
+                continue;
+            }
+            if rig.v(2) > 9.0 {
+                high_after_low += 1;
+            }
+            close(rig.v(1), 4.0, 1e-9, &format!("{at}: the CC rail at the unpowered root"));
+            close(rig.i(0), -0.04, 1e-10, &format!("{at}: the PSU at its limit"));
+            assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+        }
+        assert!(low_seen && high_after_low >= 4, "{mode}: both phases sampled ({high_after_low} high after a low)");
+    }
+}
+
+#[test]
+fn a_cc_exit_whose_cv_draw_is_past_the_limit_enters_again_at_once() {
+    // Cold 267 tpl 2's exit, minimal. PSU 5 V, 50 mA; 50 ohm from the rail
+    // to a 0 / 5 V clock (node 2); a 74LS00 on the rail with 1A, 1B, 2A, 2B
+    // on the rail, so 1Y and 2Y LOW, both on the rail: powered, inside
+    // [4.275, 5.775] V, each sinks u / R_out = 4 ioMax = 32 mA. By hand,
+    // clock low: 100 + 64 mA at the setpoint: CC; coming down, the powered
+    // draw u/50 + 64 mA is past the limit through the window and the
+    // unpowered u/50 still is at its floor (85.5 mA), so the root is the
+    // unpowered 0.05 * 50 = 2.5 V: CC there, the chip off. Clock high, from
+    // there: unpowered, (u - 5)/50 = 0.05 puts the CC rail at 7.5 V, past
+    // the setpoint: CV, where the powered chip draws 64 mA, past the limit,
+    // so CC again at the same instant, coming down from 5 V: powered,
+    // (u - 5)/50 + 0.064 = 0.05 at u = 4.3 V, inside the window: CC at
+    // 4.3 V, the chip powered. Before the fix exact mode stayed in CV at
+    // 64 mA through the clock-high phase (nothing re-solved its rail), and
+    // default mode, its loop settled after the exit, did too. Exact mode
+    // lands 1.55 mV high (a LOW stage sinking from its own supply, its
+    // R_out moving with the iterate), within W0, which is the tolerance.
+    // The chip takes digital slots 0-3, the clock 4.
+    let w0 = |v: f64| 1e-4 + 1e-3 * v;
+    let mut ck = clock(3, 2, 0, 1000.0, 0.5, 4);
+    ck.params[2] = 5.0;
+    let board = || {
+        let devices = vec![psu(0, 1, 0, 5.0, 0.05), resistor(1, 1, 2, 50.0), ls00(2, 1, 0, [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], 1e-8, 0), ck.clone()];
+        program(3, devices)
+    };
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        let (mut low, mut high) = (0, 0);
+        for k in 1..=12 {
+            let t = k as f64 * 0.25e-3 + 0.1e-3;
+            rig.advance(t).unwrap();
+            let at = format!("{mode} at {:.2} ms, clock {}", t * 1e3, rig.v(2));
+            let on = digital::power::powered(&rig.s().ics[0].1, rig.v(1), rig.v(0));
+            if rig.v(2) < 1.0 {
+                low += 1;
+                close(rig.v(1), 2.5, w0(2.5), &format!("{at}: the unpowered CC root"));
+                assert!(!on, "{at}: the chip off");
+            } else {
+                high += 1;
+                close(rig.v(1), 4.3, w0(4.3), &format!("{at}: the powered CC root"));
+                assert!(on, "{at}: the chip powered");
+            }
+            close(rig.i(0), -0.05, 1e-10, &format!("{at}: the PSU at its limit"));
+            assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+        }
+        assert!(low >= 4 && high >= 4, "{mode}: both phases sampled");
+    }
+}

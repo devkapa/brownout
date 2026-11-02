@@ -1571,6 +1571,133 @@ pub fn solve_cc(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct,
     .or_else(|err| if compliance_keeps_cv(last.get(), v) && direction(v) * draw_at(a_p, g_p, direct, v) <= dir_limit.abs() { Ok(v) } else { Err(err) })
 }
 
+/// How [`cc_entry_rail`]'s error for a landing on a power edge begins.
+pub const EDGE_LANDING: &str = "rail: the CC operating point lands on a power edge";
+
+/// The CC operating point the CV -> CC clamp reads (Rails point 5, ruling
+/// G): the highest rail at or below the setpoint, in the PSU's direction,
+/// where the draw meets the limit, the first one reached coming down from
+/// the setpoint. `i_at_v` is the draw at the setpoint and `edges` the rails
+/// at which a free rail IC's power window flips (`power_edges`).
+///
+/// The draw is monotone between edges (each direct device's current rises
+/// with the rail) but not across one: a chip powered only inside its window
+/// draws there and not past it, so the CC Newton from the setpoint can
+/// settle past the setpoint on the chip-off draw, where the clamp would keep
+/// CV however far the draw at the setpoint is past the limit (defect G: a
+/// 74LS00 sinking 32 mA from a 5 V, 50 mA rail held CV at 72 mA, its CC
+/// Newton at the chip-off 6.25 V), or step over the segment holding the
+/// highest root to a lower one. So the Newton's root stands only when no
+/// edge lies between it and the setpoint; otherwise the segments are walked
+/// down from the setpoint, each read just inside its lower edge: the first
+/// whose draw there is within the limit holds the root, solved there, and an
+/// edge whose draw falls within the limit only across it is no operating
+/// point at all: the rail lands on that chip's power edge, which is the
+/// power hold's case (W1c point 1a). That is an error whose last direct
+/// evaluations straddle the edge, so the hold's trigger
+/// (`newton_alternating`) reads the chip there flipping at each.
+///
+/// A draw at the setpoint within the limit in the PSU's direction (a rail
+/// back-fed past the limit) has its CC solution past the setpoint, as
+/// before: the Newton's, which the clamp keeps CV on.
+pub fn cc_entry_rail(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct, i_at_v: f64, edges: &[f64]) -> Result<f64, String> {
+    let dir = direction(v);
+    let (top, limit) = (v.abs(), dir_limit.abs());
+    let first = solve_cc(v, dir_limit, a_p, g_p, direct, v);
+    if !(dir * i_at_v > limit) {
+        return first;
+    }
+    // Rails in the PSU's direction (`w = dir u`), where "down" is lower.
+    let floor = match first {
+        Ok(u) if dir * u <= top => dir * u,
+        _ => f64::NEG_INFINITY,
+    };
+    let mut below: Vec<f64> = edges.iter().map(|&e| dir * e).filter(|&w| w < top && w > floor).collect();
+    if below.is_empty() && floor > f64::NEG_INFINITY {
+        return first;
+    }
+    below.sort_unstable_by(|a, b| b.total_cmp(a));
+    below.dedup();
+    let excess = |w: f64| dir * draw_at(a_p, g_p, direct, dir * w) - limit;
+    let mut hi = top;
+    for e in below {
+        // Two reached widths either side, as a rail event lands past a power
+        // edge (Rails point 4).
+        let d = 2.0 * REACHED_REL * e.abs().max(1.0);
+        let (up, dn) = (e + d, e - d);
+        if up < hi && excess(up) <= 0.0 {
+            return cc_in_segment(dir, dir_limit, a_p, g_p, direct, dir * up, dir * hi);
+        }
+        if excess(dn) <= 0.0 {
+            excess(up);
+            return Err(format!("{EDGE_LANDING} at {}", dir * e));
+        }
+        hi = dn;
+    }
+    // Below every edge: the Newton's root when it lies there, else the root
+    // of the lowest segment, solved from its top. A draw that does not
+    // reach the limit there either is one this scalar curve cannot place: a
+    // chip whose drivers sit in a hub partition is linearised in `A0` and
+    // `G` at its present power, so its edge moves nothing here, and a HIGH
+    // stage into a node below ground draws less as the rail rises (cold 461
+    // tpl 2). The Newton from the setpoint then stands as before, re-solved
+    // so that a failure leaves its own iterates for the hold's trigger, and
+    // the rail loop's passes judge the partitions' chips at the rail it
+    // moves to.
+    // A Newton that cannot reach the lowest segment's root from its top
+    // (a HIGH stage into a node below ground draws more as the rail falls,
+    // down to its R_out floor: cold 247 tpl 2's chip held powered by the
+    // hold's probe has its one root at -2.68 V) has the root bracketed by
+    // steps doubling down from the top, and solved in the bracket.
+    match first {
+        Ok(u) if dir * u <= hi => Ok(u),
+        _ => match newton(dir * hi, a_p, g_p, direct, |a0, g| (dir_limit - a0) / g) {
+            Ok(u) if dir * u <= hi => Ok(u),
+            _ => {
+                let (mut above, mut step) = (hi, 1e-3 * hi.abs().max(1.0));
+                while step < 1e6 {
+                    let w = hi - step;
+                    if excess(w) <= 0.0 {
+                        return cc_in_segment(dir, dir_limit, a_p, g_p, direct, dir * w, dir * above);
+                    }
+                    above = w;
+                    step *= 2.0;
+                }
+                solve_cc(v, dir_limit, a_p, g_p, direct, v)
+            }
+        },
+    }
+}
+
+/// The root of the draw at the limit between `u_in`, where the draw (in the
+/// PSU's direction `dir`) is within it, and `u_out`, where it is past it,
+/// with no power edge between (`cc_entry_rail`): the rail Newton from
+/// `u_out`, a bisection wherever an iterate leaves the bracket.
+fn cc_in_segment(dir: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct, u_in: f64, u_out: f64) -> Result<f64, String> {
+    let (mut u_in, mut u_out) = (u_in, u_out);
+    let mut u = u_out;
+    // A bisection halves a bracket of volts to the tolerance in about 45
+    // steps; the Newton's own cap on top.
+    for _ in 0..(RAIL_NEWTON_MAX + 64) {
+        let (a0, g) = totals(a_p, g_p, direct, u);
+        if dir * (a0 + g * u) <= dir_limit.abs() {
+            u_in = u;
+        } else {
+            u_out = u;
+        }
+        let mut un = (dir_limit - a0) / g;
+        let (lo, hi) = (u_in.min(u_out), u_in.max(u_out));
+        if !(un > lo && un < hi) {
+            un = 0.5 * (u_in + u_out);
+        }
+        if (un - u).abs() <= RAIL_NEWTON_TOL || (u_in - u_out).abs() <= RAIL_NEWTON_TOL {
+            return Ok(un);
+        }
+        u = un;
+    }
+    Err(format!("rail: the CC operating point did not converge between {u_in} and {u_out}"))
+}
+
 /// The CC rail over rail capacitors of charge `q` (Rails point 4): `u = q +
 /// esr_eff (dir iLimit - draw(u))`, the direct devices exact at `u`.
 pub fn solve_cc_cap(q: f64, esr_eff: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct) -> Result<f64, String> {
@@ -1630,10 +1757,48 @@ impl CapDemand {
 
 /// One regime transition, at most, for a PSU (Rails point 5). `u_rail` is the
 /// present rail; `demand` is the rail capacitors' (`CapDemand::none` in CC,
-/// where it is not read).
+/// where it is not read); `edges` gives the rails where a free rail IC's
+/// power flips (`cc_entry_rail`), asked only by the CV -> CC clamp and the
+/// CC exit with no rail capacitor. Returns the regime and the CC candidate
+/// the clamp read (`u_rail` where none was solved): entering CC with no rail
+/// capacitor, that is the CC rail.
 #[allow(clippy::too_many_arguments)]
-pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, g_p: f64, direct: &dyn Direct, u_rail: f64, demand: CapDemand) -> Result<Regime, String> {
+pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, g_p: f64, direct: &dyn Direct, u_rail: f64, demand: CapDemand, edges: &dyn Fn() -> Vec<f64>) -> Result<(Regime, f64), String> {
     let i_at_v = draw_at(a_p, g_p, direct, v);
+    // The CC exit with no rail capacitor reads the draw at the setpoint as
+    // the CC solution reaching it, which holds only while the draw rises
+    // with the rail between the two. Across a free rail IC's power edge it
+    // does not: the draw at the setpoint is another power state's (defect
+    // C, cold 364 tpl 2: a 74LS00 off on a 3.43 V CC rail, back-feeding its
+    // rail through a clock-high output once powered at the 4.881 V setpoint,
+    // where its draw is within the limit; the CC solution, chip off, stays
+    // below its window). There the rail itself is the test, the clamp the
+    // entry reads, as in exact mode.
+    if reg == Regime::Cc && !rail_cap && i_limit > 0.0 {
+        let dir = direction(v);
+        // A CC solution past the setpoint with the draw at the setpoint past
+        // the limit is the twin case: the continuation passed the setpoint
+        // on another power state's draw (a chip off past its window), and
+        // CV there would deliver past the limit. The operating point is the
+        // entry's, coming down from the setpoint (ruling G): CC moves
+        // there, or CV only when that too reaches the setpoint. Left in CV,
+        // a loop pass that re-solved no partition settled there (cold 267
+        // tpl 2: 114.8 mA from a 62.7 mA PSU).
+        // A search that fails other than by landing on an edge (the hold's
+        // case) leaves the exit as it was: a HIGH stage into a node below
+        // ground draws less as the rail rises, and the rail Newton from the
+        // setpoint can fail on it (cold 536 tpl 2).
+        if compliance_keeps_cv(u_rail, v) && dir * i_at_v > i_limit {
+            return match cc_entry_rail(v, dir * i_limit, a_p, g_p, direct, i_at_v, &edges()) {
+                Ok(u) if !compliance_keeps_cv(u, v) => Ok((Regime::Cc, u)),
+                Err(err) if err.starts_with(EDGE_LANDING) => Err(err),
+                _ => Ok((Regime::Cv, u_rail)),
+            };
+        }
+        if edges().iter().any(|&e| dir * e > dir * u_rail && dir * e < v.abs()) {
+            return Ok((if compliance_keeps_cv(u_rail, v) { Regime::Cv } else { Regime::Cc }, u_rail));
+        }
+    }
     let (i_at_v, u_cc) = if demand.draw > 0.0 {
         let i = i_at_v + direction(v) * demand.draw;
         // A PSU that left CC holds its capacitors' demand at exactly the
@@ -1648,7 +1813,7 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         // back-drove the rail by 16.6 A net of a capacitor's 3.2 A demand,
         // and the clamp, reading the charge alone, entered CC at 6.2 V).
         if reg == Regime::Cv && direction(v) * i <= i_limit + REACHED_REL * i_limit.max(1.0) {
-            return Ok(Regime::Cv);
+            return Ok((Regime::Cv, u_rail));
         }
         // A capacitor below the setpoint holds the CC solution short of it at
         // the instant, so the compliance clamp, which keeps CV only for a CC
@@ -1657,10 +1822,25 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         (i, demand.held)
     } else {
         // The CC candidate's settled rail is only read by the CV -> CC clamp.
-        let u_cc = if reg == Regime::Cv && i_at_v.abs() > i_limit { solve_cc(v, direction(v) * i_limit, a_p, g_p, direct, v)? } else { u_rail };
+        // With a rail capacitor the rail lands nowhere at the instant (CC
+        // starts from the capacitors' charge and ramps), so ruling G's
+        // operating point, an edge landing above all, has no meaning there
+        // yet: the Newton's candidate, as before (an open item: entered at a
+        // landing, a 555 slid along its floor to the hold-episode guard on
+        // cold 175 tpl 2 and 696 tpl 2; held at the instant, the hold's
+        // powered probe found the capacitors holding the rail at the
+        // setpoint and declined on cold 627 tpl 4).
+        let u_cc = if reg != Regime::Cv || !(i_at_v.abs() > i_limit) {
+            u_rail
+        } else if rail_cap {
+            solve_cc(v, direction(v) * i_limit, a_p, g_p, direct, v)?
+        } else {
+            cc_entry_rail(v, direction(v) * i_limit, a_p, g_p, direct, i_at_v, &edges())?
+        };
         (i_at_v, u_cc)
     };
-    Ok(if rail_cap { regime_step_rail_cap(reg, i_at_v, u_cc, u_rail, v, i_limit) } else { regime_step(reg, i_at_v, u_cc, u_rail, v, i_limit) })
+    let next = if rail_cap { regime_step_rail_cap(reg, i_at_v, u_cc, u_rail, v, i_limit) } else { regime_step(reg, i_at_v, u_cc, u_rail, v, i_limit) };
+    Ok((next, u_cc))
 }
 
 /// Advances the battery from `t_last` to `t` with the charge the implied rail
@@ -2150,6 +2330,54 @@ mod tests {
     }
 
     #[test]
+    fn the_cc_entry_takes_the_highest_root_at_or_below_the_setpoint_and_lands_on_a_power_edge_as_an_error() {
+        // Ruling G on the scalar draw, mirrored for a negative setpoint. A
+        // chip inside [4.275, 5.775] V sinking 32 mA beside 125 ohm, on a 5 V
+        // 50 mA PSU: 72 mA at the setpoint, at least 66.2 mA through the
+        // window, at most 34.2 mA under it: no root at or below the
+        // setpoint, the draw crossing the limit at the window's floor. The
+        // Newton from the setpoint settles past it (6.25 V, unpowered).
+        for dir in [1.0, -1.0] {
+            let window = |u: f64| (4.275..=5.775).contains(&(dir * u));
+            let edges = [dir * 4.275, dir * 5.775];
+            let sink = move |u: f64| (u / 125.0 + if window(u) { dir * 0.032 } else { 0.0 }, 1.0 / 125.0);
+            let i_at_v = sink(dir * 5.0).0;
+            assert!((solve_cc(dir * 5.0, dir * 0.05, 0.0, 0.0, &sink, dir * 5.0).unwrap() - dir * 6.25).abs() < 1e-12, "the Newton's root past the setpoint");
+            let landed = cc_entry_rail(dir * 5.0, dir * 0.05, 0.0, 0.0, &sink, i_at_v, &edges);
+            assert!(landed.as_ref().is_err_and(|e| e.starts_with(EDGE_LANDING)), "dir {dir}: {landed:?}");
+            // The last three evaluations straddle the edge: the hold's trigger
+            // reads the chip flipping at each.
+            let trace = std::cell::RefCell::new(Vec::new());
+            let traced = |u: f64| {
+                trace.borrow_mut().push(u);
+                sink(u)
+            };
+            let _ = cc_entry_rail(dir * 5.0, dir * 0.05, 0.0, 0.0, &traced, i_at_v, &edges);
+            let t = trace.borrow();
+            let on: Vec<bool> = t[t.len() - 3..].iter().map(|&u| window(u)).collect();
+            assert_eq!(on, [true, false, true], "dir {dir}");
+            // Two roots: 50 ohm and a chip feeding 0.1634 / u - 0.032 inside the
+            // window, on 5.7 V 80 mA. Powered, u^2 - 2.4 u - 8.17 = 0 at 4.3 V;
+            // unpowered, 4 V. The concave powered draw sends the Newton from
+            // the setpoint under the window, to the lower root.
+            let feed = move |u: f64| {
+                let w = dir * u;
+                let (i, g) = if window(u) { (w / 50.0 + 0.032 - 0.1634 / w, 1.0 / 50.0 + 0.1634 / (w * w)) } else { (w / 50.0, 1.0 / 50.0) };
+                (dir * i, g)
+            };
+            let i_at_v = feed(dir * 5.7).0;
+            assert!((solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &feed, dir * 5.7).unwrap() - dir * 4.0).abs() < 1e-12, "the Newton's lower root");
+            let u = cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &feed, i_at_v, &edges).unwrap();
+            assert!((u - dir * 4.3).abs() < 1e-12, "dir {dir}: the highest root, got {u}");
+            // With no edge between its root and the setpoint, the Newton's root
+            // itself, to the bit.
+            let linear = |u: f64| (u / 50.0, 1.0 / 50.0);
+            let newton_root = solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, dir * 5.7).unwrap();
+            assert_eq!(cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, linear(dir * 5.7).0, &[dir * 3.0, dir * 6.0]).unwrap().to_bits(), newton_root.to_bits());
+        }
+    }
+
+    #[test]
     fn a_single_exponential_term_lands_on_its_threshold() {
         // vc from 0 toward 5 at rate -1000/s, f = 2 vc: the threshold 4 is
         // reached at vc = 2, t = ln(5/3)/1000.
@@ -2183,21 +2411,21 @@ mod tests {
         // negative setpoint mirrors both.
         let d = CapDemand::of(5.0, 1e-3, [(1e-3, 5.0, 5.0 - 0.11)]);
         let fed = |u: f64| ((u - 8.0) / 2.2, 1.0 / 2.2);
-        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &fed, 5.0, d).unwrap(), Regime::Cv);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &fed, 5.0, d, &Vec::new).unwrap().0, Regime::Cv);
         let grounded = |u: f64| (u / 2.2, 1.0 / 2.2);
-        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &grounded, 5.0, d).unwrap(), Regime::Cc);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &grounded, 5.0, d, &Vec::new).unwrap().0, Regime::Cc);
         let d = CapDemand::of(-5.0, 1e-3, [(1e-3, 5.0, 5.0 - 0.11)]);
         let fed = |u: f64| ((u + 8.0) / 2.2, 1.0 / 2.2);
-        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &fed, -5.0, d).unwrap(), Regime::Cv);
+        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &fed, -5.0, d, &Vec::new).unwrap().0, Regime::Cv);
         let grounded = |u: f64| (u / 2.2, 1.0 / 2.2);
-        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &grounded, -5.0, d).unwrap(), Regime::Cc);
+        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &grounded, -5.0, d, &Vec::new).unwrap().0, Regime::Cc);
     }
 
     #[test]
     fn a_rail_capacitor_below_the_setpoint_is_demand_and_one_at_it_adds_nothing() {
         // {5 V, 0.1 A} with only the rail node's shunt: 5e-12 A at V.
         let shunt = |u: f64| (1e-12 * u, 1e-12);
-        let step = |demand: CapDemand| next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &shunt, 5.0, demand).unwrap();
+        let step = |demand: CapDemand| next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &shunt, 5.0, demand, &Vec::new).unwrap().0;
         // Discharged, esr 0: unbounded, and the rail it holds is 0 V. The CC
         // candidate without it is 1e11 V, which the clamp alone would keep CV.
         let d = CapDemand::of(5.0, 1e-4, [(1e-4, 0.0, 5.0)]);
@@ -2219,8 +2447,8 @@ mod tests {
         // ...and over it with 60 ohm (83.3 mA) beside it, although the load
         // alone is inside it.
         let load = |u: f64| (u / 60.0, 1.0 / 60.0);
-        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &load, 5.0, CapDemand::none(5.0)).unwrap(), Regime::Cv);
-        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &load, 5.0, d).unwrap(), Regime::Cc);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &load, 5.0, CapDemand::none(5.0), &Vec::new).unwrap().0, Regime::Cv);
+        assert_eq!(next_regime(Regime::Cv, 5.0, 0.1, true, 0.0, 0.0, &load, 5.0, d, &Vec::new).unwrap().0, Regime::Cc);
         // Two capacitors share their charge at the rail; one above the setpoint
         // counts at V: 1 uF short by 4 V and 3 uF at it hold 5 - 1 = 4 V.
         let d = CapDemand::of(5.0, 4e-6, [(1e-6, 0.0, 4.0), (3e-6, 0.0, -2.0)]);
@@ -2229,7 +2457,7 @@ mod tests {
         // rail it holds.
         let d = CapDemand::of(-5.0, 1e-4, [(1e-4, 0.0, 5.0)]);
         assert_eq!(d.held, 0.0);
-        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &shunt, -5.0, d).unwrap(), Regime::Cc);
+        assert_eq!(next_regime(Regime::Cv, -5.0, 0.1, true, 0.0, 0.0, &shunt, -5.0, d, &Vec::new).unwrap().0, Regime::Cc);
     }
 
     #[test]

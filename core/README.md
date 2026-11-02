@@ -3461,6 +3461,53 @@ Constants, all from P3:35-38 unless marked new:
      `V` in the PSU's direction, `dir`). The instant is the event where the
      draw first exceeds the limit: a commit, a toggle, load, or a rail event
      at the crossing. The rail then solves in CC at the same instant.
+   - **The CC operating point on a non-monotone draw** (defect G, ruled
+     2026-10-31). A chip powered only inside its window draws there and not
+     past it, so the draw need not rise with the rail across a window edge,
+     and the CC Newton from the setpoint can settle past the setpoint on the
+     chip's unpowered draw, where the clamp kept CV however far the draw at
+     the setpoint was past the limit (ACC-EV's probe: a 74LS00 sinking 32 mA
+     through 1Y on its own `{5 V, 50 mA}` rail beside 125 Ω held CV at 72
+     mA, its CC Newton at the unpowered 6.25 V), or step over the segment
+     holding the first root to a lower one. The clamp's `u_cc` is therefore
+     the highest rail at or below the setpoint, in `dir`, where the draw
+     meets the limit: the first one reached coming down from the setpoint
+     (`rails::cc_entry_rail`). The Newton's root stands when no free rail
+     IC's window edge lies between it and the setpoint (`power_edges`: each
+     edge of a rail IC with one supply pin on the rail, the other pin read
+     where it stands; a held IC's verdict does not move with the rail);
+     otherwise the segments between edges are walked down from the setpoint,
+     each read two reached widths inside its lower edge: the first whose
+     draw there is within the limit holds the root, solved there by the rail
+     Newton bracketed to the segment, and that root is the CC rail the entry
+     starts from. An edge where the draw falls within the limit only across
+     it is no operating point: the rail lands on that chip's power edge,
+     which is the power hold's case (W1c point 1a): the search fails with
+     its last evaluations either side of the edge, which the hold's trigger
+     reads as the chip alternating. In the probe the chip is held off and
+     the PSU is CV at 5 V, 40 mA. A PSU with a rail capacitor keeps the
+     Newton's candidate, as before: its rail lands nowhere at the instant
+     (CC starts from the capacitors' charge and ramps down), and what an
+     edge landing means there is not ruled (entered at the landing, a 555
+     slid along its 1.8 V floor to the hold-episode guard, cold 175 tpl 2
+     and 696 tpl 2; held at the instant, the hold's powered probe found the
+     capacitors holding the rail at the setpoint and declined, cold 627 tpl
+     4). Exact mode searches no stepped rail partition either (Rails point
+     9). Within a segment the draw is
+     taken to rise with the rail. Below every edge, a Newton that cannot
+     reach the lowest segment's root from its top has it bracketed by steps
+     doubling down (a HIGH stage into a node below ground draws more as the
+     rail falls, to its `R_out` floor: cold 247 tpl 2's chip held powered by
+     the hold's probe has its one root at -2.68 V), and a draw that reaches
+     the limit nowhere below leaves the Newton from the setpoint as it was:
+     a chip whose drivers sit in a hub partition is linearised in `A0` and
+     `G` at its present power, so its edge moves nothing in the scalar draw,
+     and the rail loop's passes judge it at the rail they move to (cold 461
+     tpl 2). Pins:
+     `rails::tests::the_cc_entry_takes_the_highest_root_at_or_below_the_setpoint_and_lands_on_a_power_edge_as_an_error`,
+     `a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_held_off_at_its_power_edge`
+     and `a_cc_entry_takes_the_highest_operating_point_at_or_below_the_setpoint`
+     (`solve/rail_tests.rs`, both modes).
    - **A rail capacitor short of the setpoint is demand** (probe P9, found
      by F1; manager ruling 2026-10-06). A rail capacitor is not a term of
      `A0` or `G` (point 7), but the CV → CC test adds the draw it would take
@@ -3505,7 +3552,33 @@ Constants, all from P3:35-38 unless marked new:
      settle past the setpoint, with the draw there within the limit, gives
      the setpoint (F5f: cold fuzz seed 22 tpl 4, a fuse tripping in CC sent
      the iterates to 3.1e10 V over the node shunt, one ulp apart, and the
-     advance declined with `-4`). With a rail capacitor, a
+     advance declined with `-4`). With a free rail IC's window edge between
+     the CC rail and the setpoint the draw test is no test of the CC
+     solution at all, the draw at the setpoint being another power state's:
+     there the rail itself is the exit, `dir·u >= |V|`, as in exact mode
+     (defect C, cold 364 tpl 2: a 74LS00 off on a 3.43 V CC rail, which once
+     powered at the 4.881 V setpoint back-feeds the rail through its
+     clock-high outputs, its draw there within the limit; the default exit
+     read that and left CC at each clock-high phase, 472.9 W0 against the
+     fine reference, which stays CC with the chip off; pin
+     `a_cc_rail_below_a_chips_window_stays_in_cc_when_the_chip_would_feed_it_at_the_setpoint`).
+     Its twin: a CC solution past the setpoint while the draw at the
+     setpoint is past the limit passed the setpoint only on another power
+     state's draw (a chip off past its window), and CV there would deliver
+     past the limit, so CC takes the entry's operating point instead, coming
+     down from the setpoint (ruling G), and leaves for CV only when that too
+     reaches the setpoint (cold 267 tpl 2: exited to CV, the loop settled
+     with no partition to re-solve, 114.8 mA from a 62.7 mA PSU through each
+     clock-low phase; pin
+     `a_cc_exit_whose_cv_draw_is_past_the_limit_enters_again_at_once`, both
+     modes). A search there that fails other than by an edge landing leaves
+     the exit as it was, and a CC continuation Newton that fails takes the
+     entry's operating point instead, its own failure standing (solved
+     again, so its iterates are the hold's trigger's) only when that search
+     fails too other than by an edge landing: a HIGH stage into a node below
+     ground draws less as the rail rises, and a pass whose partitions moved
+     left the Newton from the last rail nowhere to settle (cold 536 tpl 2,
+     which exact mode and 416537e hold in CC at 3.417 V). With a rail capacitor, a
      jump to `V` would draw without bound, so the exit is the rail itself
      reaching the setpoint, `dir·u >= |V|` (probe P9: classic stays in CC,
      −0.1 A, up to 5.0 V). The rail then solves in CV at the same
@@ -3764,7 +3837,29 @@ Constants, all from P3:35-38 unless marked new:
      past the setpoint is no current limit: CV again at the same instant,
      re-solved (W1gV4's cold seed 839: a 555 whose window the CC rail leaves
      drew nothing past it, and the rail published 2.3e10 V, `iLimit` over
-     the node shunt, every other step). Such a board re-solves twice at each
+     the node shunt, every other step). Between the entry's CC solve and that
+     clamp the operating point is point 5's, the highest at or below the
+     setpoint (ruling G; the fine reference shared defect G): the CC
+     solution stands when no free IC with a supply pin on the rail has a
+     window edge between it and the setpoint; otherwise the draw curve is
+     read by trial solves of a static rail partition with the rail held at a
+     trial voltage (the CV stamp there; no hold procedure or release runs in
+     a trial), walked down from the setpoint as default mode walks it. A
+     segment holding the root has it found by the Illinois method on the
+     trials and the CC solve then runs from the trial at it; an edge landing
+     re-solves in CC from the state before the trials with that edge's ICs
+     put to the iterated partition's hold procedure (point 1a), as if its
+     Newton had seen them alternate (`StaticPartitionSolver::edge_hold`),
+     and a hold procedure that cannot take it (a probe that fails to solve)
+     leaves the state before the search, the clamp's CV as before, rather
+     than decline the instant (cold 794 tpl 4); a
+     search that keeps the CC solution puts every piece of state back, bit
+     for bit. A CC exit whose CV draw is past the limit enters again at the
+     same instant through the same search (a static rail partition only:
+     a stepped one's CV draw just after its exit is its rail capacitors'
+     current); left in CV, nothing re-solved the rail's partition (cold 267
+     tpl 2). A stepped rail partition (a rail capacitor) is not searched:
+     each re-solve restarts its step, and its Newton runs no hold procedure. Such a board re-solves twice at each
      commit while its draw stays over the limit: about 2.7 s of CPU for 10
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
      the rail). A back-fed PSU in CV sinks without limit, as classic's model
