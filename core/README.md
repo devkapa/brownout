@@ -3215,7 +3215,14 @@ Constants, all from P3:35-38 unless marked new:
    a capacitor loop through the rail turned into 4.5 A, reflected by the
    trapezoid at every step: the rail sat up to 2.35 mV below the node a 1
    mohm switch holds it at
-   (`a_rail_capacitor_loop_through_a_stepped_partition_keeps_the_rail_on_its_switch`). One stepped
+   (`a_rail_capacitor_loop_through_a_stepped_partition_keeps_the_rail_on_its_switch`).
+   The fine reference's own limit shows on cold 84 tpl 1: an LED from the
+   rail to a clock's node drains 2.65 uF at a clock fall, an integral of
+   14.71 against its 24 by hand (a 37 ns exponential through its 71.5 S
+   line past the knee), so it survives the first fall and burns in the
+   second; exact mode latched it at the first, its stepped rail partition
+   taking the end rate over the 2.07 ms step that ended at the edge
+   (`an_led_draining_a_cc_rail_capacitor_carries_the_stress_its_own_drain_gives`). One stepped
    partition on such a rail now steps with it as exact mode does (within
    0.4 W0 of the fine reference where the frozen form was 650 W0 off,
    `a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it`); with two,
@@ -5365,6 +5372,17 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     output on its own rail collapses it, about 400 holds a second) whose
     falls at 1 kV/s re-anchor its two rated rail resistors every 172 ns
     (ruling R30's tolerance), 7M slow events a second of fall;
+  - **the hold cadence on a CC rail capacitor** (ruling R70, the R44
+    class): cold 482 tpl 4's 74LS00, whose 1Y and 4Y drive a clock's node
+    from a CC rail over 588.6 uF, is held off at its 4.275 V floor and freed
+    only at R44 (a)'s draw threshold or a host step's retry, so the
+    capacitors carry the rail past the floor with the chip off: default
+    mode reads 4.29 V and 4.67 V at 0.9896 s and 1.2 s where the hand
+    integration with the chip powered inside its window gives 4.1714 and
+    4.2516 V (exact mode within W0 of it). R53's duty hold, letting the
+    chip slide at its edge, is the fix; the hand oracle is the ignored
+    `cold_482_tpl4_default_mode_follows_the_hand_rail` (exact mode's,
+    `cold_482_tpl4_exact_mode_follows_the_hand_rail`, passes);
   - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
     tree): 9 runs publish a rail more than 0.1 mV outside their sources'
     range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13
