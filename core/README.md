@@ -3085,8 +3085,11 @@ Constants, all from P3:35-38 unless marked new:
    `a_cc_hub_seed_publishes_its_draw_at_the_power_its_solve_held` (178),
    `a_cc_hub_seed_near_a_power_edge_lets_the_rail_move` (bc_ic 6 hub 2) and
    `a_cc_hub_seed_with_a_capacitor_path_off_the_rail_publishes_the_draw_its_rail_row_holds`
-   (603). A CC rail with capacitors (ruling R42) is not covered: Known
-   follow-ups (W1g).
+   (603). On a CC rail with capacitors (ruling R68) the seed's rail row
+   also holds their current at the seed, `(u - q) / esr_eff` from the
+   charge `q` they hold, and its draw is the row's less that current; at
+   `esr_eff = 0` the rail is the charge itself and the draw is read as off
+   a CC rail (the CC step with a rail capacitor, below).
 
    **The CC step** (FXF, after G2bv's frozen tab). While a bench PSU with
    no rail capacitor is in CC, the rail is set by the draws alone, so it
@@ -3153,6 +3156,80 @@ Constants, all from P3:35-38 unless marked new:
    base build is (21.9x) and exact mode against the reference (16.2x): a
    1 mV step-controller error on the capacitor through the LED's
    exponential.
+
+   **The CC step with a rail capacitor** (ruling R68, superseding R47 (a)
+   for this case; F5c's R42 prototype, ported). With rail capacitors the
+   CC rail was the capacitors' segment, a boundary over each step, and a
+   stepped hub partition's draw was held on it linearised (the frozen
+   form): a partition coupled to the rail through microfarads of small esr
+   took the rail's microsecond motion as a draw it could not follow. The
+   cold fuzz's 347 tpl 5 (a {3.08 V, 332 mA} PSU, 1.75 uF of rail capacitor
+   behind 4.74 Ω, 562 uF on a switch contact to the rail and 12.6 mF from
+   a second node to it, 0.67 uF of 19 mΩ to a third) ran 2824 W0 off its
+   fine reference in the start-up inrush and 239 W0 after a switch's CC
+   entry, where exact mode at the same host stops is within 3.6. So while
+   no closed-form hub partition is active on the rail (their coupled path
+   is the segment then, which a step holding them frozen would not keep),
+   the CC step also carries the capacitors (`stepped::RailCap`): from
+   their C-weighted charge `q` and current `i` at the step's start, `u =
+   q' + esr_eff i'` with `C_rail q' = C_rail q + h i'` (backward Euler) or
+   `+ h (i + i') / 2` (the trapezoid), a companion of `1 / (esr_eff + h /
+   C_rail)` (or `h / 2 C_rail`) on the rail row; the step doubling compares
+   the two charges as it compares a capacitor's, and the second half starts
+   from the charge the first left. A step starts from its partition's own
+   last committed charge when it starts there, else from the segment's
+   charge at its start. Each commit keeps its charge, and the latest hands
+   it to the rail solve after it in place of the segment's, once
+   (`SteppedSolver::take_rail_charge`); the step's other terms are summed
+   afresh from the contributions, not read from the running sums (F5c: a
+   step cut inside an inrush handed the rail 5e15 S, whose removal left
+   0.4 A of rounding in them). At a CC entry a hub partition already
+   standing at the instant plans its pending trial again on the CC rail
+   (`SteppedSolver::replan`): solved against the rail before the entry as a
+   boundary, and past no band when linear, it went on to commit that trial
+   in CC (347 tpl 5's load stepped 10 ns at the setpoint, 30 uC into 562
+   uF through a 332 mA limit). It keeps its state and sensitivity: a
+   re-seed changes the draw's rounding, which solves the rail again, and a
+   rail capacitor of no esr entered at the setpoint, the rail its charge,
+   leaves CC at once there (CC and CV in turn for the loop's 50 passes on
+   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). Two
+   rules keep a rail IC's power on such a step's rail. A re-solve's
+   catch-up steps on the CC rail its pending trial was solved on, as a CC
+   exit's does: judged at the rail published after the change, cold 216
+   tpl 5's 74LS00, powered over the step, was judged off at the falling
+   edge that ended it, the step carried the rail back over the edge, and
+   the chip flipped at every instant 1e-14 s apart, never twice within one,
+   so the power hold never triggered (3.2M steps for 7 ms;
+   `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment`).
+   And a step whose rail reaches a rail IC's power edge (its window's
+   edges, a held one's release level) is cut there, by regula falsi from
+   the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
+   carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
+   it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). A
+   step starts from the latest charge at its start: a hand-off not yet
+   taken, else the segment's if aimed there, else the partition's own; and
+   a trapezoid from the partition's own last current, never the segment's
+   slope. Cold 581 tpl 5 re-seeded on a segment its rail solve had aimed
+   before the catch-up's commit, 6 uV off the partition's capacitors, which
+   a capacitor loop through the rail turned into 4.5 A, reflected by the
+   trapezoid at every step: the rail sat up to 2.35 mV below the node a 1
+   mohm switch holds it at
+   (`a_rail_capacitor_loop_through_a_stepped_partition_keeps_the_rail_on_its_switch`).
+   The fine reference's own limit shows on cold 84 tpl 1: an LED from the
+   rail to a clock's node drains 2.65 uF at a clock fall, an integral of
+   14.71 against its 24 by hand (a 37 ns exponential through its 71.5 S
+   line past the knee), so it survives the first fall and burns in the
+   second; exact mode latched it at the first, its stepped rail partition
+   taking the end rate over the 2.07 ms step that ended at the edge
+   (`an_led_draining_a_cc_rail_capacitor_carries_the_stress_its_own_drain_gives`). One stepped
+   partition on such a rail now steps with it as exact mode does (within
+   0.4 W0 of the fine reference where the frozen form was 650 W0 off,
+   `a_stepped_hub_partition_steps_a_cc_rail_capacitor_with_it`); with two,
+   each holds the other's draw where it last committed, the coupling error
+   of two stepped partitions on one CC rail above (rulings R32, R37, R39),
+   up to 21 W0 on R68's two-partition board against 3632 before
+   (`two_stepped_hub_partitions_on_a_cc_rail_capacitor_keep_near_the_fine_reference`).
 
    **Superseded events** (F1r11, after V9's MEDIUM 3). A host advancing
    every few nanoseconds through a CC ramp solves the rail at each horizon
@@ -3485,14 +3562,36 @@ Constants, all from P3:35-38 unless marked new:
      which is the power hold's case (W1c point 1a): the search fails with
      its last evaluations either side of the edge, which the hold's trigger
      reads as the chip alternating. In the probe the chip is held off and
-     the PSU is CV at 5 V, 40 mA. A PSU with a rail capacitor keeps the
-     Newton's candidate, as before: its rail lands nowhere at the instant
-     (CC starts from the capacitors' charge and ramps down), and what an
-     edge landing means there is not ruled (entered at the landing, a 555
-     slid along its 1.8 V floor to the hold-episode guard, cold 175 tpl 2
-     and 696 tpl 2; held at the instant, the hold's powered probe found the
-     capacitors holding the rail at the setpoint and declined, cold 627 tpl
-     4). Exact mode searches no stepped rail partition either (Rails point
+     the PSU is CV at 5 V, 40 mA. The hold's probes, its held solve and a
+     release solve the rail again whatever partitions they dirty: a chip
+     whose pins are all on the rail or fixed nodes dirties none, its direct
+     draw alone reading the hold, and a pass that found the rail clean
+     solved nothing (the verifier's repros: CV past the limit with the chip
+     free, and a CC rail published at 2.25 V with 45 mA delivered against
+     55 mA fed in). An edge at the setpoint itself counts (just under it the
+     draw can be another power state's); an edge whose lower band reaches
+     the Newton's root down to it is no landing (the draw within the limit
+     there is that root's); and a landing's last three evaluations are
+     `up`, `dn`, `up` whether or not the walk read `up` first.
+     A PSU with a rail capacitor (ruling R68)
+     takes the same search, an edge landing included as a CC candidate
+     below the setpoint: its rail lands nowhere at the instant (CC starts
+     from the capacitors' charge, at the setpoint, and the draws carry it
+     down to the edge, where the hold meets it as on any CC ramp), and the
+     Newton's candidate kept CV past the limit (G's probe on 10 uF: 72 mA
+     from a 50 mA supply). So that entry holds, CC with a rail capacitor
+     leaves at the setpoint only with the draw there within the limit (point
+     4; a rail that climbed to it had it so). And a chip held there is
+     retried, at its release level or the host step, only while its powered
+     draw would fit: R44 (a)'s draw threshold, at its edge on a CC
+     segment and at the setpoint in CV, where a release passed on the way up
+     re-entered CC at once (cold 696 tpl 2's 555, held 51 times within a host
+     step, the hold-episode guard's `-4`; 175 tpl 2 and 627 tpl 4 alike). G's
+     probe on 10 uF ends as without the capacitor, the chip held off and CV
+     at 5 V, 40 mA
+     (`a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_without_one`,
+     `a_555_at_its_floor_on_a_cc_rail_capacitor_is_held_once_and_the_runs_complete`).
+     Exact mode searches no stepped rail partition either (Rails point
      9). Within a segment the draw is
      taken to rise with the rail. Below every edge, a Newton that cannot
      reach the lowest segment's root from its top has it bracketed by steps
@@ -3745,7 +3844,10 @@ Constants, all from P3:35-38 unless marked new:
    source's edge counter and level, the pending `Rail` and `Source` events,
    and the device-state buffer; from F5, the power-hold table and each
    hold's release (W1c point 1a), and with the hub's state its held draws
-   (ruling R44 (a)) and HG1's count. A hold the static solver took in the
+   (ruling R44 (a)) and HG1's count; from R68, each stepped hub
+   partition's committed rail-capacitor charge and its pending trial's, and
+   the charge the latest commit hands the rail solve (pin
+   `a_rolled_back_instant_restores_the_cc_rail_capacitors_charge_a_stepped_commit_hands_over`). A hold the static solver took in the
    failed instant is undone with it, and so is the retry's arming, in the
    owner and in the static solver (pin
    `a_retry_taken_in_an_instant_that_then_fails_is_armed_again`). The
@@ -5281,6 +5383,17 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     output on its own rail collapses it, about 400 holds a second) whose
     falls at 1 kV/s re-anchor its two rated rail resistors every 172 ns
     (ruling R30's tolerance), 7M slow events a second of fall;
+  - **the hold cadence on a CC rail capacitor** (ruling R70, the R44
+    class): cold 482 tpl 4's 74LS00, whose 1Y and 4Y drive a clock's node
+    from a CC rail over 588.6 uF, is held off at its 4.275 V floor and freed
+    only at R44 (a)'s draw threshold or a host step's retry, so the
+    capacitors carry the rail past the floor with the chip off: default
+    mode reads 4.29 V and 4.67 V at 0.9896 s and 1.2 s where the hand
+    integration with the chip powered inside its window gives 4.1714 and
+    4.2516 V (exact mode within W0 of it). R53's duty hold, letting the
+    chip slide at its edge, is the fix; the hand oracle is the ignored
+    `cold_482_tpl4_default_mode_follows_the_hand_rail` (exact mode's,
+    `cold_482_tpl4_exact_mode_follows_the_hand_rail`, passes);
   - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
     tree): 9 runs publish a rail more than 0.1 mV outside their sources'
     range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13

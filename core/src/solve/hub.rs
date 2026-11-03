@@ -1089,6 +1089,10 @@ impl PartitionedSolver {
             }
             hub.state.t_last = now;
         }
+        // A stepped hub partition that stepped the rail capacitors with it
+        // (ruling R68, `sync_stepped_cc`) and committed now hands over their
+        // charge; the segment held its draw linearised over the step.
+        let handed = self.stepped.take_rail_charge(now);
         let (a_p, g_p, terms, cf_parts) = self.partition_totals(now);
         // A CC rail capacitor's segment held the closed-form draws where they
         // stood when it was aimed; the charge their motion took since is
@@ -1115,7 +1119,7 @@ impl PartitionedSolver {
         let has_cap = hub.c_rail > 0.0;
         // The CC segment's rail and charge as this solve finds them, before
         // it re-aims the segment: what a CC exit compares and keeps.
-        let seg_found = cap_seg.as_ref().map(|s| (s.at(now), s.charge_at(now) - cf_drift));
+        let seg_found = cap_seg.as_ref().map(|s| (s.at(now), handed.unwrap_or_else(|| s.charge_at(now) - cf_drift)));
         let solve_in = |reg: Regime, cap_seg: &mut Option<CapSeg>, u_from: f64| -> Result<f64, String> {
             match (&hub.kind, reg) {
                 (HubKind::Battery(m), _) => {
@@ -1134,7 +1138,7 @@ impl PartitionedSolver {
                         // it stands (`u_from` when the segment starts), and the
                         // rail sits `esr_eff I_cap` above it, which steps with
                         // the draws.
-                        let q = cap_seg.as_ref().map_or(u_from, |s| s.charge_at(now) - cf_drift);
+                        let q = cap_seg.as_ref().map_or(u_from, |s| handed.unwrap_or_else(|| s.charge_at(now) - cf_drift));
                         let e = hub.esr_eff;
                         let u = if e > 0.0 { rails::solve_cc_cap(q, e, dl, a_p, g_p, &direct)? } else { q };
                         let (a0, g) = {
@@ -1589,6 +1593,7 @@ impl PartitionedSolver {
             // Every partition either catch-up brought to `now`: an early
             // return below restarts them first.
             let mut caught: Vec<usize> = Vec::new();
+            let mut replan: Vec<usize> = Vec::new();
             if regime_changed {
                 let ids = self.stepped.hub_partitions();
                 if !ids.is_empty() {
@@ -1597,6 +1602,12 @@ impl PartitionedSolver {
                         caught = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
                     } else {
                         debug_assert_eq!(self.voltages[self.hub.as_ref().unwrap().node].to_bits(), old_u.to_bits(), "the entry's catch-up reads the rail before the solve");
+                        // With a rail capacitor a partition already at `now`
+                        // plans its trial again on the CC rail below
+                        // (`SteppedSolver::replan`, ruling R68).
+                        if self.hub.as_ref().unwrap().c_rail > 0.0 {
+                            replan = ids.iter().copied().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t == now)).collect();
+                        }
                         entered = ids.into_iter().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t < now)).collect();
                         self.stepped.catch_up(&entered, now, &pre, &self.live_params, &self.voltages)?;
                         caught.clone_from(&entered);
@@ -1784,6 +1795,16 @@ impl PartitionedSolver {
                 readers.extend(stepped?);
                 self.end_dynamic_writes();
             }
+            replan.retain(|p| !past_stepped.contains(p));
+            if !replan.is_empty() {
+                self.begin_dynamic_writes_list(&replan);
+                let pre = Rc::clone(&self.driver_snapshot);
+                self.sync_stepped_cc(now);
+                let planned = self.stepped.replan(&replan, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
+                self.stepped.cc = None;
+                planned?;
+                self.end_dynamic_writes();
+            }
             if past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() {
                 self.drain_contributions();
                 // A move alone changes no contribution: the rail is solved.
@@ -1847,16 +1868,27 @@ impl PartitionedSolver {
     }
 
     /// Hands the stepped solver the CC rail its hub partitions step against
-    /// (`stepped::CcRail`): a bench PSU in CC with no rail capacitor, the
-    /// draws at the present rail and each stepped hub partition's own share
-    /// of them. Every other regime sets none. The caller takes it back after
-    /// the call it is for.
+    /// (`stepped::CcRail`): a bench PSU in CC, the draws at the present rail
+    /// and each stepped hub partition's own share of them, and the rail
+    /// capacitors' segment when there are any (ruling R68). Every other
+    /// regime sets none, and so does a rail capacitor with a closed-form hub
+    /// partition on the rail: the segment is then their coupled path (Rails
+    /// point 4), whose charge a step holding them frozen would not keep. The
+    /// caller takes it back after the call it is for.
     pub(super) fn sync_stepped_cc(&mut self, now: f64) {
         let cc = self.hub.as_ref().and_then(|hub| {
             let (v, i_limit) = hub.psu()?;
-            if hub.state.reg != Regime::Cc || hub.c_rail > 0.0 {
+            if hub.state.reg != Regime::Cc {
                 return None;
             }
+            let cap = if hub.c_rail > 0.0 {
+                if hub.cf_hubs.iter().any(|&p| hub.contrib[p].active) {
+                    return None;
+                }
+                Some(stepped::RailCap { c: hub.c_rail, esr: hub.esr_eff, seg: hub.state.cap_seg.clone()? })
+            } else {
+                None
+            };
             let own: Vec<(usize, f64, f64)> = hub
                 .contrib
                 .iter()
@@ -1864,10 +1896,21 @@ impl PartitionedSolver {
                 .filter(|&(p, c)| c.active && c.b.is_none() && self.partition_kinds[p] == PartitionKind::Stepped)
                 .map(|(p, c)| (p, c.i - c.g * c.u_p, c.g))
                 .collect();
-            let (a_p, g_p, _, _) = self.partition_totals(now);
+            // With rail capacitors the terms are summed afresh, not read
+            // from the running sums: a step cut inside an inrush (F5c's
+            // prototype on the cold fuzz's 1429 tpl 5: 9e-21 s) hands the
+            // rail a draw of 5e15 S, whose removal left 0.4 A of rounding
+            // in them, a draw the step then held its rail against.
+            let (a_p, g_p) = if cap.is_some() {
+                hub.contrib.iter().filter(|c| c.active && c.b.is_none()).fold((0.0, 0.0), |(a, g), c| (a + c.i - c.g * c.u_p, g + c.g))
+            } else {
+                let (a_p, g_p, _, _) = self.partition_totals(now);
+                (a_p, g_p)
+            };
             let u = hub.state.u;
             let (i_d, g_d) = self.direct_at(u);
-            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own })
+            let edges = if cap.is_some() { self.rail_power_edges() } else { Vec::new() };
+            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own, cap, edges })
         });
         self.stepped.cc = cc;
     }
@@ -2745,7 +2788,7 @@ impl PartitionedSolver {
                 (false, true) => [self.voltages[ic.vcc.node] - hi, self.voltages[ic.vcc.node] - lo],
                 _ => continue,
             };
-            edges.extend(rails.iter().map(|&u| (dir * u, *d)).filter(|&(w, _)| w < top && w > floor));
+            edges.extend(rails.iter().map(|&u| (dir * u, *d)).filter(|&(w, _)| w <= top && w > floor));
         }
         if edges.is_empty() && floor > f64::NEG_INFINITY {
             return Ok(());
@@ -2795,6 +2838,11 @@ impl PartitionedSolver {
                         break;
                     }
                 }
+            }
+            // The CC solution within the edge's own band, under it: its
+            // root is what `dn` reads, and nothing above it is one.
+            if dn <= floor {
+                break;
             }
             match excess(self, dn, &mut moved) {
                 Some(x) if x <= 0.0 => {

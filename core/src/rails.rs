@@ -1574,6 +1574,12 @@ pub fn solve_cc(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Direct,
 /// How [`cc_entry_rail`]'s error for a landing on a power edge begins.
 pub const EDGE_LANDING: &str = "rail: the CC operating point lands on a power edge";
 
+/// The rail of a landing on a power edge, from [`cc_entry_rail`]'s error;
+/// `None` for any other error.
+pub fn landing_edge(err: &str) -> Option<f64> {
+    err.strip_prefix(EDGE_LANDING)?.strip_prefix(" at ")?.parse().ok()
+}
+
 /// The CC operating point the CV -> CC clamp reads (Rails point 5, ruling
 /// G): the highest rail at or below the setpoint, in the PSU's direction,
 /// where the draw meets the limit, the first one reached coming down from
@@ -1612,7 +1618,11 @@ pub fn cc_entry_rail(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Di
         Ok(u) if dir * u <= top => dir * u,
         _ => f64::NEG_INFINITY,
     };
-    let mut below: Vec<f64> = edges.iter().map(|&e| dir * e).filter(|&w| w < top && w > floor).collect();
+    // An edge at the setpoint itself counts: just below it the draw can
+    // already be another power state's (a chip whose window's floor is the
+    // setpoint), and dropped, the walk found a CC rail an ulp-scale step
+    // under the setpoint.
+    let mut below: Vec<f64> = edges.iter().map(|&e| dir * e).filter(|&w| w <= top && w > floor).collect();
     if below.is_empty() && floor > f64::NEG_INFINITY {
         return first;
     }
@@ -1628,7 +1638,17 @@ pub fn cc_entry_rail(v: f64, dir_limit: f64, a_p: f64, g_p: f64, direct: &dyn Di
         if up < hi && excess(up) <= 0.0 {
             return cc_in_segment(dir, dir_limit, a_p, g_p, direct, dir * up, dir * hi);
         }
+        // The Newton's root within the edge's own band, under it: the draw
+        // falls within the limit at `dn` because of that root, not across a
+        // jump, and nothing above it is a root.
+        if dn <= floor {
+            return first;
+        }
         if excess(dn) <= 0.0 {
+            // The last three evaluations straddle the edge whether or not
+            // `up` was read above (it is not when the band reaches `hi`).
+            excess(up);
+            excess(dn);
             excess(up);
             return Err(format!("{EDGE_LANDING} at {}", dir * e));
         }
@@ -1833,7 +1853,20 @@ pub fn next_regime(reg: Regime, v: f64, i_limit: f64, rail_cap: bool, a_p: f64, 
         let u_cc = if reg != Regime::Cv || !(i_at_v.abs() > i_limit) {
             u_rail
         } else if rail_cap {
-            solve_cc(v, direction(v) * i_limit, a_p, g_p, direct, v)?
+            // With a rail capacitor the rail lands nowhere at the instant: CC
+            // starts from the capacitors' charge and moves with the draws, so
+            // a draw past the limit at the setpoint enters CC wherever the
+            // operating point lies, a landing on a power edge included (the
+            // capacitors carry the rail down to that edge, where the power
+            // hold meets it as on any CC ramp). The Newton's candidate alone
+            // could settle past the setpoint on another power state's draw
+            // and keep CV past the limit (ruling R68 after G: a 74LS00
+            // powered only inside its window on 10 uF held CV at 72 mA from
+            // a 50 mA supply).
+            match cc_entry_rail(v, direction(v) * i_limit, a_p, g_p, direct, i_at_v, &edges()) {
+                Ok(u) => u,
+                Err(err) => landing_edge(&err).ok_or(err)?,
+            }
         } else {
             cc_entry_rail(v, direction(v) * i_limit, a_p, g_p, direct, i_at_v, &edges())?
         };
@@ -2374,6 +2407,36 @@ mod tests {
             let linear = |u: f64| (u / 50.0, 1.0 / 50.0);
             let newton_root = solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, dir * 5.7).unwrap();
             assert_eq!(cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, linear(dir * 5.7).0, &[dir * 3.0, dir * 6.0]).unwrap().to_bits(), newton_root.to_bits());
+        }
+    }
+
+    #[test]
+    fn an_edge_at_the_setpoint_lands_a_flat_edge_by_the_root_does_not_and_a_landing_straddles_its_edge() {
+        for dir in [1.0, -1.0] {
+            // An edge at the setpoint itself: a chip powered from 4.275 V up
+            // sinking 32 mA beside 125 ohm, on a 4.275 V, 50 mA PSU: 66.2 mA
+            // at the setpoint, 34.2 mA just under it: a landing there.
+            let floor = 4.75 * 0.9;
+            let window = move |u: f64| (dir * u) >= floor;
+            let sink = move |u: f64| (u / 125.0 + if window(u) { dir * 0.032 } else { 0.0 }, 1.0 / 125.0);
+            let trace = std::cell::RefCell::new(Vec::new());
+            let traced = |u: f64| {
+                trace.borrow_mut().push(u);
+                sink(u)
+            };
+            let landed = cc_entry_rail(dir * floor, dir * 0.05, 0.0, 0.0, &traced, sink(dir * floor).0, &[dir * floor]);
+            assert!(landed.as_ref().is_err_and(|e| e.starts_with(EDGE_LANDING)), "dir {dir}: an edge at the setpoint is a landing: {landed:?}");
+            // Its band reaches the setpoint, so `up` is read only after `dn`:
+            // the last three evaluations still straddle it.
+            let t = trace.borrow();
+            let on: Vec<bool> = t[t.len() - 3..].iter().map(|&u| window(u)).collect();
+            assert_eq!(on, [true, false, true], "dir {dir}");
+            // A flat edge (nothing jumps there) 1e-13 V above the Newton's
+            // root: the root stands, to the bit.
+            let linear = |u: f64| (u / 50.0, 1.0 / 50.0);
+            let root = solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, dir * 5.7).unwrap();
+            let got = cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, linear(dir * 5.7).0, &[root + dir * 1e-13]);
+            assert_eq!(got.map(f64::to_bits), Ok(root.to_bits()), "dir {dir}");
         }
     }
 
