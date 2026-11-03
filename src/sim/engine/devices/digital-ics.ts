@@ -1,7 +1,7 @@
 /**
  * DIGITAL-ICS device cohort (Wave A4 phase 2): ne555, 74ls00, 74ls04,
- * 74ls08, 74ls32, 74ls86, 74ls157, 74ls283, 74ls245, 74hc14, 74hc138,
- * 74ls47, 74ls161, 74ls173, 74ls189, 74hc595, 74hc165, 74hc74, cd4017,
+ * 74ls08, 74ls32, 74ls86, 74ls157, 74ls153, 74ls283, 74ls245, 74hc14,
+ * 74hc138, 74ls47, 74ls161, 74ls173, 74ls189, 74hc595, 74hc165, 74hc74, cd4017,
  * cd4060, cd4511, seg7_cc, seg7_ca, hd44780, max7219, 28c16, 28c256.
  *
  * Every handler body below is the engine's old switch-case body MOVED
@@ -23,7 +23,7 @@
  * trajectories.
  *
  * Kinds grouped into one model correspond exactly to switch cases that
- * shared a body in the engine (the 11 combinational-eval kinds; the
+ * shared a body in the engine (the 12 combinational-eval kinds; the
  * 28c16/28c256 EEPROMs; seg7_cc/seg7_ca) — handlers still branch on
  * comp.kind internally where the original shared body did.
  *
@@ -452,8 +452,8 @@ export const ne555Model: DeviceModel = {
 export const combinationalIcModel: DeviceModel = {
   // ── S4 combinational ICs ────────────────────────────────────────
   kinds: [
-    "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283",
-    "74ls245", "74hc14", "74hc138", "74ls47",
+    "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls153",
+    "74ls283", "74ls245", "74hc14", "74hc138", "74ls47",
   ],
   stamp: (ctx, comp, xGuess, _h) => {
     const power = ctx.icPowerInfo(comp, xGuess);

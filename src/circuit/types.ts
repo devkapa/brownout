@@ -63,6 +63,7 @@ export const COMPONENT_KINDS = [
   "74ls173",
   "74ls189",
   "74ls157",
+  "74ls153",
   "74ls245",
   "74ls283",
   "74hc595",
