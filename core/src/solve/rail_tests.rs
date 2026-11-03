@@ -11985,6 +11985,49 @@ fn a_cc_entry_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_rail_
     }
 }
 
+/// The cc pulse board with a second 20 ohm load from the rail to node 4,
+/// whose pulse pulls it to 0 V from `at`. At the first pulse's end (`at`
+/// 31.0371 ms) one load leaves as the other takes its place and the PSU
+/// stays in CC at the same rail; at 20 ms the second load joins the first
+/// and the CC rail drops from 3.5 V to 1.23 V.
+fn cc_pulse_board_second_load(force_stepped: bool, at: f64) -> Program {
+    let mut p = cc_pulse_board(force_stepped);
+    p.devices.extend([resistor(5, 1, 4, 20.0), pulse(6, 4, 0, [5.0, 0.0, at, 0.0, 0.0, 1.0, 10.0], 1)]);
+    p.node_count = 5;
+    p.digital_slot_count = 2;
+    p
+}
+
+#[test]
+fn a_cc_rail_stepped_at_a_source_edge_leaves_a_stepped_capacitor_where_it_was() {
+    // Defect D (F5rV): at the first pulse's end a second pulse puts an equal
+    // load on the rail, two source edges at one instant with no regime
+    // change. The rail stays at its CC value and node 2's 10 uF with it; in
+    // default mode its stepped partition (promoted in the stint) was
+    // re-solved at the passes' 1.05 V between the two edges and stepped its
+    // 3 ms gap there: 1.17 V just after the edge against the fine
+    // reference's 3.5 (647 W0), 44 W0 still 3 ms later. With the second
+    // load alone (20 ms), FORCE_STEPPED kept the trial it had planned before
+    // the edge, which the next host stop cut and stepped again from its
+    // start on the new rail: 1.46 V against 3.50 (566 W0). Within W0 of the
+    // fine reference (exact mode, 1 us host slices), or of exact mode's own
+    // error at the same host stops.
+    let t_end = 1e-3 + (0.0 + 0.0300371);
+    for at in [t_end, 0.02] {
+        let samples = [0.0181, at + 1e-6, at + 1e-5, at + 1e-4, at + 1e-3, at + 3e-3, 0.040];
+        let (want, _, _) = sampled(&exact(cc_pulse_board_second_load(false, at)), &samples, 1e-6);
+        let (floor, _, _) = sampled(&exact(cc_pulse_board_second_load(false, at)), &samples, 0.0);
+        for force_stepped in [false, true] {
+            let (got, _, _) = sampled(&cc_pulse_board_second_load(force_stepped, at), &samples, 0.0);
+            for k in 0..samples.len() {
+                let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
+                eprintln!("second load at {at} (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
+                assert!(off <= 1.0 || off <= floor_off + 1.0, "second load at {at}, force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
+            }
+        }
+    }
+}
+
 #[test]
 fn a_demoted_partition_draws_on_the_rail_as_its_closed_form_alone() {
     // R59 (1) (B): a demotion that brings the stepped copy to `now` commits

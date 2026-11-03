@@ -1603,6 +1603,31 @@ impl PartitionedSolver {
                     }
                 }
             }
+            // The rail moved at an event that changed what it sees (a source
+            // edge, a commit of drivers), with no regime change: a stepped
+            // hub partition short of `now` is brought to it on the CC rail
+            // its pending trial was planned on, as at an exit, and restarts
+            // there below. Stepped across its gap on the moved
+            // rail by the re-solve that follows, or by the horizon clamp
+            // that cuts its trial, it met this instant's draws all through
+            // the gap. Defect D: a second load put on as another left, a 10
+            // uF settled at 3.5 V on the CC rail stepped its 3 ms gap at the
+            // passes' 1.05 V between the two edges (1.17 V, 647 W0); one
+            // load put on, in both modes, its 1.9 ms gap at the new
+            // rail at the host's next stop (1.46 V, 566 W0). A partition's
+            // own step, a `Rail` event and the clamp move the rail as the
+            // draws drift, which each step's coupling bound covers
+            // (`stepped::coupling_ratio`), and each re-aimed partition keeps
+            // its step (FXEFv); this move is a step of the rail.
+            let mut jumped: Vec<usize> = Vec::new();
+            if !regime_changed && self.rail_jump && self.hub.as_ref().unwrap().state.reg == Regime::Cc && self.hub.as_ref().unwrap().state.u.to_bits() != old_u.to_bits() {
+                let ids = self.stepped.hub_partitions();
+                if !ids.is_empty() {
+                    let pre = Rc::clone(&self.driver_snapshot);
+                    jumped = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
+                    caught.extend_from_slice(&jumped);
+                }
+            }
             self.sync_hub_cache_band();
             self.sync_rail_drive();
             self.reset_cf_drift(now);
@@ -1714,8 +1739,11 @@ impl PartitionedSolver {
             // A switched partition starts afresh in its new kind.
             past_stepped.extend(&promoted);
             past_stepped.extend(&entered);
+            // The rail stepped at `now`: what was brought to it restarts
+            // there, as at an entry.
+            past_stepped.extend(&jumped);
             flipped_cf.extend(&demoted);
-            let flipped_p: Vec<usize> = flipped.iter().chain(&promoted).chain(&entered).copied().collect();
+            let flipped_p: Vec<usize> = flipped.iter().chain(&promoted).chain(&entered).chain(&jumped).copied().collect();
             for p in flipped {
                 match self.partition_kinds[p] {
                     PartitionKind::Static => past_static.push(PartitionId(p as u32)),

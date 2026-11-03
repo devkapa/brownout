@@ -2745,6 +2745,11 @@ pub struct PartitionedSolver {
     /// Set only inside the horizon clamp: the rail loop retries there even
     /// when no pass solved.
     at_clamp: bool,
+    /// Set only inside a source edge and a re-solve of dirty partitions:
+    /// what the rail sees changed at `now`, so a rail move there is a step,
+    /// not the draws' drift (`rail_passes` brings the stepped hub
+    /// partitions to it on the rail they were planned on).
+    rail_jump: bool,
     /// The length of the host step (`advance` call) running, the guard's
     /// yardstick for a short hold (ruling R54 (a)); set by the kernel at
     /// each call, infinite before the first.
@@ -3021,6 +3026,7 @@ impl PartitionedSolver {
             episodes: Rc::new(Vec::new()),
             retry_armed: true,
             at_clamp: false,
+            rail_jump: false,
             host_step: f64::INFINITY,
             changes: hold::Changes::None,
             cc_switch,
@@ -4444,6 +4450,12 @@ impl PartitionedSolver {
         self.begin_dynamic_writes(cf_ids, false, !st_ids.is_empty());
         self.sync_rail_drive();
         self.closed_form.resolve_dirty_into(cf_ids, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers)?;
+        // A stepped hub partition re-solved here is brought to `now` on the
+        // CC rail its pending trial was planned on (`rail_passes`'
+        // `rail_jump`): the rail's draws are already this instant's.
+        if !st_ids.is_empty() && self.hub.as_ref().is_some_and(|h| h.state.reg == crate::devices::sources::Regime::Cc) {
+            self.stepped.catch_up_on_cc_rail(st_ids, now, &self.pre_commit_drivers, &self.live_params, &self.voltages)?;
+        }
         self.sync_stepped_cc(now);
         let stepped = self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
         self.stepped.cc = None;
@@ -4562,7 +4574,9 @@ impl PartitionSolver for PartitionedSolver {
         // outputs, a zero-delay reader), they do not drive the rail.
         let mut readers = std::mem::take(&mut self.readers_buf);
         readers.clear();
+        self.rail_jump = true;
         let result = self.resolve_dirty_with(&static_ids, &mut cf_ids, &mut st_ids, now, drivers, &mut readers);
+        self.rail_jump = false;
         self.static_ids = static_ids;
         self.cf_ids = cf_ids;
         self.st_ids = st_ids;
@@ -5169,7 +5183,10 @@ impl PartitionSolver for PartitionedSolver {
         } else {
             // A waveform edge is a foreign change to every IC (ruling R54 (a)).
             self.changes = hold::Changes::Many;
-            self.source_edge_at(device.0 as usize, now)
+            self.rail_jump = true;
+            let result = self.source_edge_at(device.0 as usize, now);
+            self.rail_jump = false;
+            result
         }
     }
 

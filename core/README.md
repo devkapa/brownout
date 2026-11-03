@@ -5220,7 +5220,18 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     the rail moved, a partition had stepped its whole uncommitted gap on
     the new rail (F5pV: 3 ms of a capacitor settled at 2 V charged at 5
     V, 1346 W0; at the entry, 41.3 W0 under FORCE_STEPPED, both as at
-    da167d2). A promoted partition's CC steps hold
+    da167d2). The same holds with no regime change when the CC rail steps
+    at an event that changed what it sees (a source edge, a re-solve of
+    dirty partitions, `rail_jump`): every stepped hub partition short of
+    the event is brought to it on the CC rail its pending trial was
+    planned on and restarts there, and a dirty one re-solved before the
+    rail loop is brought there the same way (defect D: one load put on a
+    CC rail, a 10 uF settled at 3.5 V stepped its 1.9 ms gap on the new
+    rail at the next host stop, 1.46 V, 566 W0, in both modes; two edges
+    at one instant swapping two loads, 647 W0 in default mode). A
+    partition's own step, a `Rail` event and the horizon clamp move the
+    rail as the draws drift, which each step's coupling bound covers, and
+    keep the re-aim (FXEFv). A promoted partition's CC steps hold
     their error `CC_STEP_TOL_SCALE` (8) times under the controller's
     tolerance (R60 (4): G2bv's bc_ic 97 hub 2 crept 1.48 W0 off the fine
     reference at the sweep's host stops, exact mode 1.50 there, the host
