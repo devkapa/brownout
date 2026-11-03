@@ -297,6 +297,16 @@ impl CcRail {
     }
 }
 
+/// One committed step of a partition, as [`SteppedSolver::trail`] holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct Committed {
+    pub p: usize,
+    pub t0: f64,
+    pub t1: f64,
+    pub nodes: Vec<(usize, f64)>,
+    pub rail: Option<(usize, f64)>,
+}
+
 /// One partition's view of a [`CcRail`]: the rest of the draw without its
 /// own share, and the rail `u0` it starts from, at which a rail IC's power
 /// gate is judged for the whole step (power flips only at rail solves).
@@ -1276,6 +1286,19 @@ pub struct SteppedSolver {
     /// `POST_EVENT_H` made 2.77e6 steps of a 0.1 s board (FXEFv, FXF round
     /// 3). Set by the owner around the call, empty otherwise.
     pub(crate) reaim: Vec<usize>,
+    /// Every step committed since the owner last took them (ruling R71 (b),
+    /// ACC-A): the partition, the step's start and end, its own end node
+    /// voltages and, on a CC rail, its own rail. The owner closes each
+    /// stepped slow device's integrators over each step with them, before a
+    /// re-seed or a republish at the moved rail overwrites what is published.
+    /// Taken at the instant's settle; cleared with a rollback.
+    pub(crate) trail: Vec<Committed>,
+    /// The partitions whose steps go on the trail (the owner's: a stepped slow
+    /// device that is not cold sits in them), indexed by partition.
+    pub(crate) trail_parts: Vec<bool>,
+    /// The nodes outside each such partition its devices read: their values
+    /// at the commit, the boundary the step was solved against.
+    pub(crate) trail_reads: Vec<Vec<usize>>,
     /// Test builds keep every partition's state from when the window opened
     /// (keyed by partition) and check, at the window's end, that a partition
     /// the journal does not hold is unchanged, and after a rollback that all
@@ -1396,6 +1419,9 @@ impl SteppedSolver {
             cc_held: None,
             clamp: false,
             reaim: Vec::new(),
+            trail: Vec::new(),
+            trail_parts: Vec::new(),
+            trail_reads: Vec::new(),
             #[cfg(test)]
             w_saved: None,
             #[cfg(test)]
@@ -1624,6 +1650,15 @@ impl SteppedSolver {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
     }
 
+    /// Where the step partition `p` committed at `now` started: its last
+    /// commit's own start, or `now` itself when it was re-solved there after
+    /// that commit (a discontinuity: an event's re-solve or a promotion seeds
+    /// it at `now` and drops its step, and what it publishes is no step's
+    /// end). `None` when it is not at `now`.
+    pub(crate) fn step_start(&self, p: usize, now: f64) -> Option<f64> {
+        self.partitions.get(&p).filter(|part| !part.parked && part.t == now).map(|part| if part.has_prev { part.prev_t } else { now })
+    }
+
     /// Ruling R59 (1) (B): parks or unparks partition `p` with no change to
     /// its state (the owner's load and its rollback of a switch).
     pub(crate) fn set_parked(&mut self, p: usize, parked: bool) {
@@ -1764,6 +1799,18 @@ impl SteppedSolver {
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
+        }
+        if self.trail_parts.get(p).copied().unwrap_or(false) {
+            let part = &self.partitions[&p];
+            // On a CC rail the step's own rail; otherwise the rail is read as
+            // published (it moves through the step, held only at the plan).
+            let rail = match (part.hub, self.rail, part.pend_cc) {
+                (true, Some(r), Some(_)) => Some((r, part.pend_u)),
+                _ => None,
+            };
+            let mut nodes: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(part.x.iter().copied()).collect();
+            nodes.extend(self.trail_reads[p].iter().filter(|&&n| Some(n) != self.rail).map(|&n| (n, voltages[n])));
+            self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail });
         }
         #[cfg(test)]
         self.commit_log.push((p, self.partitions[&p].t));
@@ -2202,6 +2249,7 @@ impl SteppedSolver {
     /// The window's instant failed: every partition it touched, and the queue
     /// of steps to schedule, go back to what the window found.
     pub(crate) fn rollback_window(&mut self) {
+        self.trail.clear();
         self.scheduled.clone_from(&self.window_scheduled);
         self.rail_charge = self.window_rail_charge;
         self.deferred.clear();
@@ -2290,6 +2338,7 @@ impl SteppedSolver {
     }
 
     pub fn restore(&mut self, snapshot: Snapshot) {
+        self.trail.clear();
         self.scheduled = snapshot.scheduled;
         self.rail_charge = snapshot.rail_charge;
         self.deferred.clear();

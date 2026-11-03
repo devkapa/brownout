@@ -25,7 +25,7 @@ use crate::kinds;
 use crate::partition::{self, PartitionKind};
 use crate::program::Program;
 use crate::slow::failures::{self, FailureKind};
-use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StressDrive};
+use crate::slow::stress::{PtcDrive, PtcEvent, PtcParams, SegmentRate, StressDrive};
 use crate::slow::thermal::{PowerDrive, Shutdown, ThermalConfig};
 use crate::slow::{is_due, warnings, ExpVoltage, LatchKey, LatchRecord, SlowEventKind};
 
@@ -248,6 +248,9 @@ pub(super) struct SlowModel {
 /// What happened since the last settle, and the settle's own working lists.
 #[derive(Debug, Default)]
 pub(super) struct SlowScratch {
+    /// Ruling R71 (b): the stepped devices the trail closed at this instant,
+    /// by slow index; their visit keeps the drive the trail left.
+    pub trailed: Vec<u32>,
     /// The partitions published since the last settle (point 2).
     pub pub_flag: Vec<bool>,
     pub pub_list: Vec<u32>,
@@ -997,6 +1000,24 @@ impl PartitionedSolver {
         model.load_laws = self.junctions.iter().map(|j| j.law).collect();
         model.any = !model.devs.is_empty() || !model.sag_ics.is_empty();
         self.slow_model = model;
+        let mut trail_parts = vec![false; part_count];
+        let mut trail_reads: Vec<Vec<usize>> = vec![Vec::new(); part_count];
+        for sd in self.slow_model.devs.iter().filter(|sd| sd.class == Class::Stepped && !sd.cold && (self.slow.stress(sd.device).is_some() || self.slow.ptc(sd.device).is_some())) {
+            let mut nodes = sd.nodes.clone();
+            if let Some(e) = sd.led {
+                nodes.extend(self.led_devices[e].junctions.iter().flat_map(|j| [j.anode, j.cathode]));
+            }
+            for &p in sd.parts.iter().filter(|&&p| self.partition_kinds[p] == PartitionKind::Stepped) {
+                trail_parts[p] = true;
+                trail_reads[p].extend(nodes.iter().copied().filter(|&n| self.local_index[n].is_none_or(|(q, _)| q != p)));
+            }
+        }
+        for r in &mut trail_reads {
+            r.sort_unstable();
+            r.dedup();
+        }
+        self.stepped.trail_parts = trail_parts;
+        self.stepped.trail_reads = trail_reads;
         let words = |n: usize| vec![0u64; n.div_ceil(64)];
         self.slow_scratch = SlowScratch {
             pub_flag: vec![false; part_count],
@@ -1184,6 +1205,7 @@ impl PartitionedSolver {
                 return Ok(None);
             }
             let scheduled = self.pending_schedule.len();
+            self.close_stepped_trail(now);
             self.visit_noted(now);
             self.observe_noted(now, drivers);
             let sc = &self.slow_scratch;
@@ -1237,6 +1259,7 @@ impl PartitionedSolver {
                 }
             }
         }
+        self.close_stepped_trail(now);
         self.visit_noted(now);
         // A visit may have asked for another (a latch re-drives its device
         // after the re-solve it dirtied): those join the list handed back.
@@ -1313,6 +1336,14 @@ impl PartitionedSolver {
     /// Visits each noted device once, ascending, forced if any note forced it.
     #[inline]
     fn visit_noted(&mut self, now: f64) {
+        // The trail's devices not otherwise noted still schedule their latch
+        // from the drive it left.
+        for k in 0..self.slow_scratch.trailed.len() {
+            let i = self.slow_scratch.trailed[k];
+            let (w, bit) = ((i >> 6) as usize, 1u64 << (i & 63));
+            self.slow_scratch.dev_bits[w] |= bit;
+            self.slow_scratch.devs_any = true;
+        }
         if std::mem::take(&mut self.slow_scratch.devs_any) {
             for w in 0..self.slow_scratch.dev_bits.len() {
                 let mut bits = std::mem::take(&mut self.slow_scratch.dev_bits[w]);
@@ -1324,6 +1355,7 @@ impl PartitionedSolver {
                 }
             }
         }
+        self.slow_scratch.trailed.clear();
     }
 
     /// Observes each noted cell once, ascending, but for one noted by static
@@ -1388,6 +1420,85 @@ impl PartitionedSolver {
         super::PartitionSolver::resolve_dirty(self, &[], now, &drivers).map(|_| ())
     }
 
+    /// Ruling R71 (b) (ACC-A's 507/4 and 55/2): every step a stepped
+    /// partition committed since the last settle closes its slow devices'
+    /// stress and PTC integrators over that step, at the step's own end
+    /// voltages and its own CC rail. The published values are not them: a
+    /// re-seed at an event replaces them, a clamp or catch-up commits several
+    /// steps before one publish, and a hub node is republished at the rail
+    /// the loop moved to (55/2's PTC read 1 mV under its step's own end and
+    /// tripped at the host's step). A latch the step's end drive reaches
+    /// inside the step fires now, recorded where the integral crossed.
+    fn close_stepped_trail(&mut self, now: f64) {
+        if self.stepped.trail.is_empty() {
+            return;
+        }
+        let trail = std::mem::take(&mut self.stepped.trail);
+        for c in &trail {
+            for k in 0..self.slow_model.part_devs[c.p].len() {
+                let i = self.slow_model.part_devs[c.p][k] as usize;
+                let sd = &self.slow_model.devs[i];
+                let dev = sd.device;
+                if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(dev) {
+                    continue;
+                }
+                let over: Vec<(usize, f64)> = c.nodes.iter().chain(c.rail.iter()).copied().collect();
+                let saved: Vec<(usize, f64)> = over.iter().map(|&(n, _)| (n, self.voltages[n])).collect();
+                for &(n, v) in &over {
+                    self.voltages[n] = v;
+                }
+                let drives = self.drives(i, c.t1);
+                for (n, v) in saved {
+                    self.voltages[n] = v;
+                }
+                let mut due = None;
+                if let (Some(new), true) = (drives.stress, self.slow.stress(dev).is_some()) {
+                    let s = self.sw().stress_mut(dev).expect("checked above");
+                    s.close(c.t0);
+                    s.drive = new;
+                    match s.latch_time() {
+                        Some(t) if t <= c.t1 => due = Some((t, SlowEventKind::StressLatch)),
+                        _ => s.close(c.t1),
+                    }
+                }
+                if let Some(PtcDrive::Stress(new)) = drives.ptc.filter(|_| self.slow.ptc(dev).is_some_and(|p| !p.tripped)) {
+                    let e = self.sw().ptc_mut(dev).expect("checked above");
+                    e.close(c.t0);
+                    e.set_drive(PtcDrive::Stress(new));
+                    match e.next_event() {
+                        Some((t, PtcEvent::Trip)) if t <= c.t1 && due.is_none_or(|(d, _)| t < d) => due = Some((t, SlowEventKind::PtcTrip)),
+                        _ => e.close(c.t1),
+                    }
+                }
+                self.slow_scratch.trailed.push(i as u32);
+                if let Some((t, kind)) = due {
+                    self.fire_since(i, kind, now, t);
+                }
+            }
+        }
+        let mut trail = trail;
+        trail.clear();
+        self.stepped.trail = trail;
+    }
+
+    /// The start of the step a stepped device's visit at `now` closes over
+    /// (the latest of its stepped partitions committed at `now`), or `None`
+    /// when none was: then the window runs from its last visit, as before.
+    ///
+    /// Defect B (cold 668/1): a visit that wrote nothing (an idle device, R38
+    /// (a)) leaves the integrator's `t0` where it was, so the backward rule
+    /// held what the next visit read over every quiet step since. A clock
+    /// edge pulled a CC rail from 9.8 V to -1.4 V; rated R1-7 (84.7 ohm, 31
+    /// mW), idle on an 8.6 uF settled at the old rail since 9.3 ms, read
+    /// 47/s and was charged it back to then: S = 7 and burnt at the edge,
+    /// where the discharge the edge starts gives S = 0.016. What a partition
+    /// publishes after a re-solve at `now` is no step's end and starts at
+    /// `now` (`SteppedSolver::step_start`).
+    fn step_start(&self, i: usize, now: f64) -> Option<f64> {
+        let sd = &self.slow_model.devs[i];
+        sd.parts.iter().filter(|&&p| self.partition_kinds[p] == PartitionKind::Stepped).filter_map(|&p| self.stepped.step_start(p, now)).reduce(f64::max)
+    }
+
     /// One device's visit (point 2): close each integrator over what drove
     /// it, set the new drive, handle what is due at once, and schedule the
     /// next event. A device whose drives are unchanged is left alone, so a
@@ -1401,6 +1512,14 @@ impl PartitionedSolver {
         }
         let (dev, class) = (self.slow_model.devs[i].device, self.slow_model.devs[i].class);
         let backward = class == Class::Stepped;
+        // The backward rule holds what this visit reads over the step just
+        // committed, and over no more: up to the step's start each
+        // integrator runs on the drive it had.
+        let from = if backward { self.step_start(i, now) } else { None };
+        // The trail closed it over the step it just committed, at the step's
+        // own voltages, and left that drive: a re-seed at `now` starts the
+        // published one instead.
+        let kept = backward && from.is_some_and(|t| t < now) && self.slow_scratch.trailed.contains(&(i as u32));
         let failed = self.slow.is_failed(dev);
         let drives = self.drives(i, now);
         let mut wrote = false;
@@ -1410,9 +1529,14 @@ impl PartitionedSolver {
             // exponential holds only until its re-anchor.
             let new_quiet = !new.accumulates() || (drives.redrive_by == f64::INFINITY && !new.accumulates_after(now));
             let idle = old.s0 == 0.0 && !old.drive.accumulates_after(old.t0) && new_quiet;
-            if !failed && !idle && (backward || old.drive != new) {
+            if kept {
+                wrote = true;
+            } else if !failed && !idle && (backward || old.drive != new) {
                 let s = self.sw().stress_mut(dev).expect("checked above");
                 if backward {
+                    if let Some(t) = from {
+                        s.close(t);
+                    }
                     s.drive = new;
                     s.close(now);
                 } else {
@@ -1428,6 +1552,9 @@ impl PartitionedSolver {
             if !idle && (backward || old.drive != new) {
                 let th = self.sw().thermal_mut(dev).expect("checked above");
                 if backward {
+                    if let Some(t) = from {
+                        th.close(t);
+                    }
                     th.drive = new;
                     th.close(now);
                 } else {
@@ -1447,9 +1574,14 @@ impl PartitionedSolver {
         }
         if let (Some(new), Some(old)) = (drives.ptc, self.slow.ptc(dev).copied()) {
             let idle = !old.tripped && old.stress == 0.0 && matches!((old.drive, new), (PtcDrive::Stress(a), PtcDrive::Stress(b)) if !a.accumulates() && !b.accumulates());
-            if !idle && (backward || !ptc_same(old.drive, new, now)) {
+            if kept && !old.tripped {
+                wrote = true;
+            } else if !idle && (backward || !ptc_same(old.drive, new, now)) {
                 let e = self.sw().ptc_mut(dev).expect("checked above");
                 if backward {
+                    if let Some(t) = from {
+                        e.close(t);
+                    }
                     e.set_drive(new);
                     e.close(now);
                 } else {
@@ -1474,8 +1606,16 @@ impl PartitionedSolver {
         if wrote {
             self.slow_counts[0] += 1;
         }
-        // A stepped device latches at the end of the step that crosses (point
-        // 5), so it schedules nothing between steps.
+        // Ruling R71 (b): a stepped device's latch is scheduled from the drive
+        // its step ended with, so it fires where its stress crosses inside the
+        // step that follows; at the end of a step it crossed in, it latches at
+        // that commit. It schedules nothing else between steps.
+        if backward && (wrote || force) {
+            let token = self.sw().bump_token(dev);
+            if let Some((t, _)) = self.slow.next_latch(dev) {
+                self.pending_schedule.push((t, EventKind::Slow { device: DeviceId(dev as u32), token: token & !crate::events::SLOW_ANCHOR }));
+            }
+        }
         if !backward && (wrote || force) {
             let next = self.sw().reschedule(dev);
             if let Some((t, _, token)) = next {
@@ -1498,6 +1638,13 @@ impl PartitionedSolver {
     /// A due event of device `i` at `now` (points 3-10): the event is the
     /// transition, so nothing is re-tested against its threshold.
     fn fire(&mut self, i: usize, kind: SlowEventKind, now: f64) {
+        self.fire_since(i, kind, now, now);
+    }
+
+    /// [`Self::fire`], its latch or trip recorded at `since` (at or before
+    /// `now`): where a stepped device's integral crossed inside a step
+    /// committed earlier in the instant (ruling R71 (b)).
+    fn fire_since(&mut self, i: usize, kind: SlowEventKind, now: f64, since: f64) {
         let dev = self.slow_model.devs[i].device;
         match kind {
             SlowEventKind::StressLatch => {
@@ -1505,7 +1652,7 @@ impl PartitionedSolver {
                     s.close(now);
                 }
                 let (code, value, limit) = self.latch_values(i, now);
-                self.sw().latch(LatchRecord { device: dev as u32, code: code as u32, pin: -1, since: now, value, limit, aux: 0.0 }, true);
+                self.sw().latch(LatchRecord { device: dev as u32, code: code as u32, pin: -1, since, value, limit, aux: 0.0 }, true);
                 self.slow_counts[2] += 1;
                 self.stamp_changed(i, now, true);
             }
@@ -1526,7 +1673,7 @@ impl PartitionedSolver {
                 if self.window {
                     self.slow_scratch.ptc_log.push((dev as u32, old));
                 }
-                self.slow_scratch.ptc_since[dev] = now;
+                self.slow_scratch.ptc_since[dev] = since;
                 self.slow_counts[2] += 1;
                 self.stamp_changed(i, now, true);
             }
@@ -1894,7 +2041,7 @@ impl PartitionedSolver {
                         if entry.tripped {
                             // The backward rule's cool window starts where the
                             // step does, so the step's cool time counts.
-                            let from = if sd.class == Class::Stepped { entry.t0 } else { now };
+                            let from = if sd.class == Class::Stepped { self.step_start(i, now).map_or(entry.t0, |t| t.max(entry.t0)) } else { now };
                             params.tripped_constant(current, from)
                         } else {
                             PtcDrive::Stress(params.untripped_constant(current))
@@ -2156,7 +2303,20 @@ impl PartitionedSolver {
             return Ok(Vec::new());
         }
         let Some(i) = self.slow_index(dev) else { return Ok(Vec::new()) };
-        if let Some((_, kind)) = self.slow.next_event(dev) {
+        let stepped = self.slow_model.devs[i].class == Class::Stepped;
+        let next = if stepped { self.slow.next_latch(dev) } else { self.slow.next_event(dev) };
+        if let Some((_, kind)) = next {
+            if stepped {
+                // A latch inside a step: the device's stepped partitions come
+                // to it with the stamps they had, as a waveform edge brings
+                // the partitions it feeds (W1b rule 6), on the CC rail their
+                // trials were planned on; the re-solve the latch dirties then
+                // starts them there.
+                let parts: Vec<usize> = self.slow_model.devs[i].parts.iter().copied().filter(|&p| self.partition_kinds[p] == PartitionKind::Stepped).collect();
+                let drivers = Rc::clone(&self.driver_snapshot);
+                self.stepped.catch_up_on_cc_rail(&parts, now, &drivers, &self.live_params, &self.voltages)?;
+                self.stepped.catch_up(&parts, now, &drivers, &self.live_params, &self.voltages)?;
+            }
             self.fire(i, kind, now);
         }
         // Re-driven and rescheduled at the settle, once the partitions the

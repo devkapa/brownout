@@ -218,6 +218,48 @@ fn resistor_2x() -> Program {
     program(2, vec![source(0, 1, 0, 5.0), resistor(1, 1, 0, 50.0), rating(1, 0.25, 50.0)])
 }
 
+/// Cold 668/1's rated resistor alone: a pulse holds node 1 at 9.8 V and
+/// drops it to -1.4 V at 150 ms; 84.7 ohm (31 mW, `rPower` its own R) from
+/// node 1 to 8.6 uF, stepped. The capacitor discharges through it from 11.2
+/// V with tau = 0.73 ms: `S = (P0/pMax) (tau/2) (1 - pMax/P0) - t*` with `P0
+/// = 11.2^2/84.7 = 1.48 W`, `t* = (tau/2) ln(P0/pMax)` the time over its
+/// rating: 0.0157, far from the latch at 1.
+fn rated_rc_under_an_edge(force_stepped: bool) -> Program {
+    let mut p = program(3, vec![
+        Device { kind: kinds::PULSE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![9.8, -1.4, 0.15, 0.0, 0.0, 1.0, 10.0], blob: vec![0.0] },
+        resistor(1, 1, 2, 84.7),
+        capacitor(2, 2, 0, 8.6e-6),
+        rating(1, 0.031, 84.7),
+    ]);
+    p.options.force_stepped = force_stepped;
+    p
+}
+
+#[test]
+fn a_stepped_rated_resistor_idle_until_an_edge_is_charged_from_the_edge() {
+    // Defect B (cold 668/1): an idle visit (R38 (a)) writes nothing, so the
+    // integrator's `t0` stayed at the visit before the capacitor settled,
+    // and the backward rule held the rate read just after the edge (47/s)
+    // over the whole quiet stretch back to it: S = 7 at the edge, the
+    // resistor burnt there. The rate the edge brings starts at the edge.
+    let tau: f64 = 84.7 * 8.6e-6;
+    let p0 = 11.2f64 * 11.2 / 84.7;
+    let t_star = tau / 2.0 * (p0 / 0.031).ln();
+    let want = p0 / 0.031 * tau / 2.0 * (1.0 - 0.031 / p0) - t_star;
+    for (name, p) in [("stepped", rated_rc_under_an_edge(true)), ("exact mode", { let mut p = rated_rc_under_an_edge(true); p.options.no_rail_shortcut = true; p })] {
+        let mut rig = Rig::load(&p);
+        let mut peak: f64 = 0.0;
+        for t in [0.1, 0.15].into_iter().chain((1..=40).map(|k| 0.15 + k as f64 * 1e-4)).chain([0.16, 0.2]) {
+            rig.k.advance(t).unwrap();
+            peak = peak.max(rig.s().slow.stress(1).unwrap().value_at(t));
+        }
+        let s = rig.s();
+        eprintln!("{name}: S peaks at {peak:.5}, by hand {want:.5}; failed {}", s.slow.is_failed(1));
+        assert!(!s.slow.is_failed(1), "{name}: R1 burnt (S {:?})", s.slow.stress(1));
+        assert!(peak > 0.25 * want && peak < 4.0 * want, "{name}: S peaks at {peak} against {want} by hand");
+    }
+}
+
 #[test]
 fn a_resistor_at_twice_its_rating_on_a_fixed_pair_latches_at_one_second_and_then_carries_nothing() {
     let mut rig = Rig::load(&resistor_2x());
@@ -2087,7 +2129,11 @@ fn a_trapezoidal_ring_past_the_supply_latches_its_load_cold_or_visited_and_backw
         e.advance(t).unwrap();
         assert!(e.voltages()[2] <= 12.0, "backward Euler holds the node under its supply ({} V at {t})", e.voltages()[2]);
     }
-    assert!(e.records(0).unwrap().is_empty());
+    // Ruling R71 (b): the LED latches where its stress crosses, 5.8 ns in,
+    // as 12 V across it into the empty capacitor drives it (1990 A); latched
+    // at the end of that step from the step's end current, it never did.
+    let latched: Vec<f64> = e.records(0).unwrap().chunks(7).map(|c| c[0]).collect();
+    assert!(!latched.contains(&3.0), "the 100 Mohm stays intact: {latched:?}");
 }
 
 #[test]

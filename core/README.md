@@ -4339,7 +4339,21 @@ Constants:
        (ruling R21, below).
      - **Stepped:** the drive at the step's end voltages, held over the step:
        classic's backward rule (`rate·h` from the accepted step's solution,
-       SE:5510-5531, 6029-6054).
+       SE:5510-5531, 6029-6054). Over the step only: an idle visit (R38
+       (a)) writes nothing and leaves `t0` behind, so up to the start of
+       the step the visit closes each integrator on the drive it had; and
+       after a re-solve at `now` (an event's, a promotion's) what is
+       published is no step's end, and the drive starts at `now` (defect B,
+       cold 668/1: a clock edge put 11.2 V across a rated 84.7 ohm idle on
+       a settled 8.6 uF since 9.3 ms, and 47/s held back to then burnt it
+       at the edge, S = 7, where its discharge gives 0.016). Its latch
+       (stress or PTC trip, ruling R71 (b)) is scheduled from the drive the
+       step ended with, so it fires where the integral crosses inside the
+       step that follows, the device's stepped partitions first brought to
+       it with the stamps they had; a latch only the step's own end drive
+       reaches fires at that commit. At the step's end with the end rate,
+       cold 39 tpl 4's R20 latched 2.1 ms late and took R17 with it, 74
+       ms before the fine reference's R17.
    - **Re-anchoring** (rulings R21, R29, R30, 2026-10-21). A device whose
      voltage a moving rail drives takes, at each visit, a drive anchored at
      the visit, and is visited again before what that drive drops can move

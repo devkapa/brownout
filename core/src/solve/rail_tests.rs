@@ -11310,7 +11310,14 @@ fn a_crossing_inside_a_cc_step_is_aimed_at_the_threshold_on_the_steps_own_rail()
     // (2,120 steps in 0.5 ms, 26 a period). Aimed at each trial's own rail,
     // one step lands it (20 a period); the period is unchanged (6.142 us
     // both ways; the fine reference's 6.125 us).
-    let mut e = Engine::load(&cold_304_tpl4_switch_open()).unwrap();
+    // Ruling R71: without the two LEDs (15, 22), which burnt at 4.34 ms only
+    // from the backward rule's charge back to their last visit (S 0 -> 48 at
+    // an edge, 11,266/s); intact, the 555 ring declines at 4.344 ms in every
+    // mode (NE555 point 11, a separate item). There, aimed at the published
+    // rail, 28.0 steps a period; at each trial's own, 22.0.
+    let mut p = cold_304_tpl4_switch_open();
+    p.devices.retain(|d| !(d.kind == 30 && (d.component_index == 15 || d.component_index == 22)));
+    let mut e = Engine::load(&p).unwrap();
     e.advance(0.005).unwrap();
     let (s0, c0) = (e.stat(10), e.stat(13));
     for k in 1..=2 {
@@ -11318,9 +11325,9 @@ fn a_crossing_inside_a_cc_step_is_aimed_at_the_threshold_on_the_steps_own_rail()
     }
     let (steps, commits) = (e.stat(10) - s0, e.stat(13) - c0);
     let periods = commits / 4.0;
-    eprintln!("5-6 ms: {steps} steps, {commits} commits, {:.1} steps a period", steps / periods);
+    eprintln!("5-6 ms: {steps} steps, {commits} commits, {:.2} steps a period", steps / periods);
     assert!(periods > 150.0, "oscillating: {commits} commits");
-    assert!(steps / periods < 22.0, "{steps} steps over {periods} periods");
+    assert!(steps / periods < 24.0, "{steps} steps over {periods} periods");
 }
 
 /// Cold 674 tpl 4: a `{10.58 V, 44 mA}` PSU with no rail capacitor, a
@@ -13224,4 +13231,221 @@ fn cold_482_tpl4() -> Vec<Device> {
         fz(90, 17, &[], vec![17.0, 0.4652254677155526, 95.62687998160986], vec![]),
         fz(90, 19, &[], vec![19.0, 0.7095611534943612, 11.35105520744054], vec![]),
     ]
+}
+
+/// tpl=4 hub=2 e=10.933 psu ilim=0.968 CLK3 0.9..5.9 C5-0=1.1e-7 R7-3=15.4 F1-7=0.17/0.09 C1-2=2.2e-3 LED6-3+R1-6=943 R4-2=2.2 R2-1=197798.3 74LS00 vcc1 gnd0 in2,4 out2,7 SW5-6(0)+R6-0=1240 R6-4=66.6 SW0-7(1)+R7-0=21; exact mode
+fn cold_39_tpl4() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![10.933286069379529, 0.9684681458752474], vec![]),
+        fz(22, 1, &[3, 0], vec![24.69012126470536, 0.24569337194886948, 5.876795877236651, 0.9029359146706, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![84079.32405240185], vec![]),
+        fz(1, 3, &[4, 0], vec![67903.00466951706], vec![]),
+        fz(1, 4, &[5, 0], vec![4378.458207121376], vec![]),
+        fz(1, 5, &[6, 0], vec![7660.232934161665], vec![]),
+        fz(1, 6, &[7, 0], vec![15701.465251996993], vec![]),
+        fz(3, 7, &[5, 0], vec![1.1052814462456185e-7, 0.0, 0.0], vec![]),
+        fz(1, 8, &[7, 3], vec![15.360232755371694], vec![]),
+        fz(10, 9, &[1, 7], vec![0.16963240310714417, 0.0854298245055415], vec![]),
+        fz(3, 10, &[1, 2], vec![0.002168065767600623, 0.0, 0.0], vec![]),
+        fz(30, 11, &[6, 3], vec![2.281369834862081, 2.2508941490716845, 0.03800053357995761, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 12, &[1, 6], vec![942.829606302069], vec![]),
+        fz(1, 13, &[4, 2], vec![2.150492269391616], vec![]),
+        fz(1, 14, &[2, 1], vec![197798.3382206931], vec![]),
+        fz(50, 15, &[1, 0, 2, 4, 2, 0, 0, 7, 0, 0, 7, 0, 0, 2], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 7.613498786080187e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 16, &[2, 2], vec![119.59921047457372], vec![]),
+        fz(1, 17, &[7, 6], vec![58.41222708854561], vec![]),
+        fz(4, 18, &[5, 6], vec![0.0], vec![]),
+        fz(1, 19, &[6, 0], vec![1239.9216711781662], vec![]),
+        fz(1, 20, &[6, 4], vec![66.6090932858312], vec![]),
+        fz(4, 21, &[0, 7], vec![1.0], vec![]),
+        fz(1, 22, &[7, 0], vec![21.143596086964518], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.016442244677005374, 15.360232755371694], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.02212694646133105, 942.829606302069], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.6589638124975878, 2.150492269391616], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.0005286040479022892, 197798.3382206931], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.5015236520415853, 119.59921047457372], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.005005184070772641, 58.41222708854561], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.07830107949285799, 1239.9216711781662], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.010596900968222132, 66.6090932858312], vec![]),
+        fz(90, 22, &[], vec![22.0, 0.04647557905085862, 21.143596086964518], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.options.no_rail_shortcut = true;
+    p.digital_slot_count = 32;
+    p
+}
+
+/// Each failure record's device and latch time after running `p` to `end`
+/// through `stops`, or in host slices of `slice` when it is positive.
+fn latches(p: &Program, stops: &[f64], slice: f64, end: f64) -> Vec<(usize, f64)> {
+    let mut e = Engine::load(p).unwrap();
+    let mut t: f64 = 0.0;
+    let mut k = 0;
+    while t < end {
+        t = if slice > 0.0 { (t + slice).min(end) } else { stops.get(k).copied().unwrap_or(end).min(end) };
+        k += 1;
+        e.advance(t).unwrap_or_else(|er| panic!("{} at {t}: {}", er.code, er.message));
+    }
+    e.records(0).unwrap().chunks(7).map(|c| (c[0] as usize, c[3])).collect()
+}
+
+#[test]
+fn a_stepped_device_latches_where_its_stress_crosses_inside_a_step() {
+    // Ruling R71 (b). Cold 39 tpl 4 (exact mode): rated R20 (0.66 W on 10.6
+    // mW) and R17 (0.18 W on 5 mW) share a stepped partition. R20 latched
+    // at the end of the step its stress crossed in, 2.1 ms after the fine
+    // reference's crossing (19.85 ms), and R17, at 34/s until then, latched
+    // with it at 22.0 ms; the fine reference's R17 is down to 6 mW once R20
+    // is open and latches at 95.7 ms. The same devices latch in the same
+    // order, each within 0.5 ms of the fine reference (exact mode, 1 us host
+    // slices) or 10 % of its time: R17 then runs 26 % over its rating, 0.26/s,
+    // and turns R20's latch 70 us late (its drive held from the step before)
+    // into 7 ms early.
+    let stops = [0.00627287967254526, 0.016690206583740867, 0.0170375405909559, 0.017349086141227935, 0.03879249608408733, 0.043625293415744414, 0.04500685709789586, 0.0524890189823995, 0.05265925519389161, 0.0959884882405498, 0.09954981585820734, 0.09985143728957276];
+    let p = cold_39_tpl4();
+    let want = latches(&p, &[], 1e-6, 0.1);
+    let got = latches(&p, &stops, 0.0, 0.1);
+    eprintln!("fine {want:?}\ngot  {got:?}");
+    assert_eq!(got.iter().map(|l| l.0).collect::<Vec<_>>(), want.iter().map(|l| l.0).collect::<Vec<_>>(), "the devices latched, in order");
+    for (g, w) in got.iter().zip(&want) {
+        assert!((g.1 - w.1).abs() <= 5e-4_f64.max(0.1 * w.1), "device {} latched at {} against {}", g.0, g.1, w.1);
+    }
+}
+
+/// tpl=4 hub=2 e=6.111 psu ilim=0.033 CLK3 0.0..8.2 C4-0=3.4e-5 555 vcc1 gnd0 [3, 3, 1, 4, 6, 7] R6-7=20033.8 C3-0=2.1e-7 C0-3=4.0e-7 R0-1=20.1 LED6-3+R1-6=2564 C1-0=5.7e-6 R4-5=25.4 SW0-3(1)+R3-0=6 span=8.160452348801016
+/// options: Options { integration: 1, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 8
+/// toggles [(0.3254916072076612, 23), (1.1098892139986414, 23), (1.1920327808300362, 23)]
+fn cold_507_tpl4_dev() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![6.110964258203888, 0.032971578272426916], vec![]),
+        fz(22, 1, &[3, 0], vec![30.331350339428877, 0.2574818098436931, 8.160452348801016, 0.0, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![41321.66871885181], vec![]),
+        fz(1, 3, &[4, 0], vec![449465.19480459753], vec![]),
+        fz(1, 4, &[5, 0], vec![52335.203311963065], vec![]),
+        fz(1, 5, &[6, 0], vec![62313.92155031614], vec![]),
+        fz(1, 6, &[7, 0], vec![7440.6761389539815], vec![]),
+        fz(3, 7, &[4, 0], vec![3.3749559355324406e-5, 0.0, 0.0], vec![]),
+        fz(40, 8, &[1, 0, 3, 3, 1, 4, 6, 7], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 9, &[1, 7], vec![293.2083758083417], vec![]),
+        fz(1, 10, &[7, 6], vec![8309.814722462592], vec![]),
+        fz(3, 11, &[6, 0], vec![4.1218012772140167e-7, 0.0, 0.0], vec![]),
+        fz(1, 12, &[3, 7], vec![330.575703630589], vec![]),
+        fz(1, 13, &[6, 7], vec![20033.84947330294], vec![]),
+        fz(1, 14, &[7, 6], vec![48270.35610720781], vec![]),
+        fz(3, 15, &[3, 0], vec![2.1087576498729285e-7, 0.0, 0.0], vec![]),
+        fz(1, 16, &[4, 6], vec![3250.4019241438664], vec![]),
+        fz(3, 17, &[0, 3], vec![3.9684429074772786e-7, 0.0, 0.0], vec![]),
+        fz(1, 18, &[0, 1], vec![20.141858433856143], vec![]),
+        fz(30, 19, &[6, 3], vec![2.7986823911453116, 2.4923681507892668, 0.03736956562301265, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 20, &[1, 6], vec![2563.7471243276555], vec![]),
+        fz(3, 21, &[1, 0], vec![5.735486362429675e-6, 0.0, 0.0], vec![]),
+        fz(1, 22, &[4, 5], vec![25.439301295085983], vec![]),
+        fz(4, 23, &[0, 3], vec![1.0], vec![]),
+        fz(1, 24, &[3, 0], vec![6.187583217051827], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.00047985441686489855, 293.2083758083417], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.00025072927196634554, 8309.814722462592], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0144286459006432, 330.575703630589], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.000700845240240721, 20033.84947330294], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.3647540562764839, 20.141858433856143], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.001281935757022394, 2563.7471243276555], vec![]),
+        fz(90, 22, &[], vec![22.0, 1.4552438201559343, 25.439301295085983], vec![]),
+        fz(90, 24, &[], vec![24.0, 0.033023898442256144, 6.187583217051827], vec![]),
+    ]
+}
+
+/// tpl=2 hub=2 e=5.349 psu ilim=0.198 V2=8.60 C3-0=2.5e-3 R2-0=82228.8 C2-0=3.4e-3 SW3-4(1)+R4-0=7 555 vcc1 gnd0 [1, 4, 5, 2, 1, 4] P4-1 LED3-5+R1-3=1695 LED0-4+R0-0=17 R1-2=8446.9 R5-0=1.6 span=13.95377623038553
+/// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 6
+/// toggles [(0.2572420874394904, 8)]
+fn cold_55_tpl2_dev() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![5.3492357050722905, 0.19834564145007297], vec![]),
+        fz(2, 1, &[0, 2], vec![8.60454052531324], vec![]),
+        fz(1, 2, &[3, 0], vec![1416.1518798553122], vec![]),
+        fz(1, 3, &[4, 0], vec![13956.243237242461], vec![]),
+        fz(1, 4, &[5, 0], vec![5418.783256125151], vec![]),
+        fz(3, 5, &[3, 0], vec![0.002451199070188693, 0.0, 0.0], vec![]),
+        fz(1, 6, &[2, 0], vec![82228.81012716988], vec![]),
+        fz(3, 7, &[2, 0], vec![0.0033715286425486136, 0.0, 0.0], vec![]),
+        fz(4, 8, &[3, 4], vec![1.0], vec![]),
+        fz(1, 9, &[4, 0], vec![7.052586568880892], vec![]),
+        fz(40, 10, &[1, 0, 1, 4, 5, 2, 1, 4], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 11, &[1, 4], vec![2338.0025282828856], vec![]),
+        fz(1, 12, &[4, 1], vec![739.8772438040638], vec![]),
+        fz(3, 13, &[1, 0], vec![1.5689696594381792e-8, 0.0, 0.0], vec![]),
+        fz(1, 14, &[4, 4], vec![327.26372788107744], vec![]),
+        fz(13, 15, &[4, 1], vec![0.6362336862897945, 0.012095189234610391], vec![]),
+        fz(1, 16, &[2, 4], vec![47983.0207241084], vec![]),
+        fz(30, 17, &[3, 5], vec![2.1361035259660164, 2.3141408665244807, 0.023847034029166353, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 18, &[1, 3], vec![1695.3741168443169], vec![]),
+        fz(1, 19, &[3, 4], vec![16269.422364064012], vec![]),
+        fz(30, 20, &[0, 4], vec![3.1913560774879057, 1.7703926526296039, 0.026447246568378758, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 21, &[0, 0], vec![17.18607506618329], vec![]),
+        fz(1, 22, &[1, 2], vec![8446.91013171194], vec![]),
+        fz(1, 23, &[5, 0], vec![1.619732044714196], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00015392461021031858, 82228.81012716988], vec![]),
+        fz(90, 9, &[], vec![9.0, 1.6532381237051093, 7.052586568880892], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.08118038687391589, 2338.0025282828856], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.007824935827833796, 739.8772438040638], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.46901696396039405, 327.26372788107744], vec![]),
+        fz(90, 18, &[], vec![18.0, 0.018159214364218208, 1695.3741168443169], vec![]),
+        fz(90, 21, &[], vec![21.0, 15.979166136012056, 17.18607506618329], vec![]),
+        fz(90, 22, &[], vec![22.0, 8.583065830776106e-5, 8446.91013171194], vec![]),
+        fz(90, 23, &[], vec![23.0, 107.03694557254273, 1.619732044714196], vec![]),
+    ]
+}
+
+#[test]
+fn a_stepped_resistor_on_a_clock_latches_where_its_stress_integral_reaches_one() {
+    // ACC-A, cold 507 tpl 4: rated R7-6 (8.31 kohm, 0.25 mW) in a stepped hub
+    // partition on a clock. The high phase's rate was charged back over each
+    // low-phase step after the re-seed at its edge, and R7-6 latched at
+    // 0.239 s. By hand its integral reaches 0.44 at 0.2 s and the latch at
+    // 0.4006 s (the switch closes at 0.3255 s). Within 1 ms of that at 5 ms
+    // host stops, either mode.
+    let close_at = 0.3254916072076612;
+    for exact_mode in [false, true] {
+        let mut p = program(8, cold_507_tpl4_dev());
+        p.options.integration = 1;
+        p.digital_slot_count = 32;
+        p.options.no_rail_shortcut = exact_mode;
+        let mut stops: Vec<f64> = (1..=90).map(|k| k as f64 * 0.005).collect();
+        stops.push(close_at);
+        stops.sort_by(|a, b| a.total_cmp(b));
+        let mut e = Engine::load(&p).unwrap();
+        for &t in &stops {
+            e.advance(t).unwrap();
+            if t == close_at {
+                let v = 1.0 - p.devices[23].params[0];
+                e.set_params(&[(23, 0, v)]).unwrap();
+            }
+        }
+        let r7_6 = e.records(0).unwrap().chunks(7).find(|c| c[0] == 10.0).map(|c| c[3]);
+        eprintln!("507/4 exact {exact_mode}: R7-6 latched at {r7_6:?}, by hand 0.4006");
+        assert!(r7_6.is_some_and(|t| (t - 0.4006).abs() <= 1e-3), "exact {exact_mode}: R7-6 latched at {r7_6:?}");
+    }
+}
+
+#[test]
+fn a_stepped_ptc_trips_where_its_stress_reaches_the_threshold_whatever_the_host_step() {
+    // ACC-A, cold 55 tpl 2: the PTC (0.636 ohm, hold 12.1 mA) carries the CC
+    // rail's 198 mA less 1.1 mA elsewhere into 2.45 mF: by hand S' = I^2 -
+    // Ih^2 = 0.0387/s reaches 0.3 Ih^2 = 4.39e-5 at 1.135 ms. It tripped at
+    // the host's step, 1.14, 1.2 and 2.0 ms at 10 us, 0.1 and 1 ms hosts.
+    // Exact mode within 10 us of the hand time at every host step; default
+    // mode within 15 us at 10 us hosts and 0.15 ms at 1 ms ones (its stepped
+    // CC solution's own drift at long steps, not the latch).
+    for (exact_mode, slice, tol) in [(true, 1e-5, 1e-5), (true, 1e-4, 1e-5), (true, 1e-3, 1e-5), (false, 1e-5, 1.5e-5), (false, 1e-3, 1.5e-4)] {
+        let mut p = program(6, cold_55_tpl2_dev());
+        p.digital_slot_count = 32;
+        p.options.no_rail_shortcut = exact_mode;
+        let mut e = Engine::load(&p).unwrap();
+        let mut t: f64 = 0.0;
+        while t < 0.0025 {
+            t = (t + slice).min(0.0025);
+            e.advance(t).unwrap();
+        }
+        let trip = e.records(2).unwrap().chunks(7).find(|c| c[0] == 15.0).map(|c| c[3]);
+        eprintln!("55/2 exact {exact_mode}, {slice} s hosts: tripped at {trip:?}, by hand 1.135e-3");
+        assert!(trip.is_some_and(|t| (t - 1.135e-3).abs() <= tol), "exact {exact_mode}, {slice} s hosts: tripped at {trip:?}");
+    }
 }

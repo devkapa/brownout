@@ -546,6 +546,19 @@ impl SlowState {
 
     // ---- the next event ------------------------------------------------
 
+    /// The earliest latch this device's integrators will fire under their
+    /// current drives: its stress latch or its PTC's trip (ruling R71 (b): a
+    /// stepped device schedules only these, from the drive its last step
+    /// ended with, so it latches inside the step that follows).
+    pub fn next_latch(&self, dev: usize) -> Option<(f64, SlowEventKind)> {
+        let stress = self.stress(dev).filter(|_| !self.is_failed(dev)).and_then(|s| s.latch_time()).map(|t| (t, SlowEventKind::StressLatch));
+        let trip = self.ptc(dev).and_then(|p| p.next_event()).filter(|&(_, e)| e == PtcEvent::Trip).map(|(t, _)| (t, SlowEventKind::PtcTrip));
+        match (stress, trip) {
+            (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// The earliest event this device's integrators will fire under their
     /// current drives, with the earliest kind first on a tie. One pending event
     /// per device carries its token; a publish re-drives (`bump_token`) and
