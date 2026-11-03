@@ -5973,7 +5973,7 @@ export class SimEngine {
 
     // A `delay:` slot is the canonical record of a DRIVEN output stage (the
     // small-signal AC default and the pin readouts key off it), so a pin
-    // that left `immediate` — a 74LS245/157 whose /OE released the bus — must
+    // that left `immediate` — a 74LS245 whose /OE released the bus — must
     // drop its value/pending/due slots rather than advertise a stage that the
     // transient stamp no longer writes. Re-enabling later re-seeds from the
     // immediate level, exactly like the first driven step.
