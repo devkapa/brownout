@@ -13449,3 +13449,137 @@ fn a_stepped_ptc_trips_where_its_stress_reaches_the_threshold_whatever_the_host_
         assert!(trip.is_some_and(|t| (t - 1.135e-3).abs() <= tol), "exact {exact_mode}, {slice} s hosts: tripped at {trip:?}");
     }
 }
+
+#[test]
+fn exact_mode_charges_cold_84_tpl1s_led_its_drain_and_not_the_steps_end_rate() {
+    // R71 (b): exact mode, the fine reference, latched the LED at the first
+    // fall (the end rate, 7.9e8 per second, over the 2.07 ms step ending at
+    // the edge). With the step's own end drive, its seeded edge and the latch
+    // inside the step, it survives the first fall (S 12.3 by its BE steps
+    // across the 37 ns drain, by hand 14.71, the latch at 24) and burns at
+    // the second, as default mode does.
+    let mut p = program(6, cold_84_tpl1());
+    p.digital_slot_count = 32;
+    p.options.no_rail_shortcut = true;
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(0.0021).unwrap();
+    assert!(!rig.s().slow.is_failed(10), "the LED survives the first fall");
+    rig.advance(0.0054).unwrap();
+    assert!(!rig.s().slow.is_failed(10), "still intact before the second fall");
+    rig.advance(0.0055).unwrap();
+    assert!(rig.s().slow.is_failed(10), "the second fall burns it");
+}
+
+/// tpl=3 hub=2 e=13.685 psu ilim=0.082 SW1-3(1)+R3-0=1550 R3-1=1463.4 LED3-4+R1-3=979 C4-0=1.8e-3 C5-0=1.4e-3 R4-5=257.7
+fn cold_675_tpl3() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![13.684902848374957, 0.08161949607297277], vec![]),
+        fz(1, 1, &[2, 0], vec![281466.365342136], vec![]),
+        fz(1, 2, &[3, 0], vec![236475.01481167166], vec![]),
+        fz(1, 3, &[4, 0], vec![84875.99148766494], vec![]),
+        fz(1, 4, &[5, 0], vec![738786.6382091894], vec![]),
+        fz(1, 5, &[6, 0], vec![54290.934422395025], vec![]),
+        fz(4, 6, &[1, 3], vec![1.0], vec![]),
+        fz(1, 7, &[3, 0], vec![1550.3322954002194], vec![]),
+        fz(1, 8, &[3, 1], vec![1463.3971383123571], vec![]),
+        fz(30, 9, &[3, 4], vec![3.0660076479583918, 2.3847008349690926, 0.01299316214029995, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 10, &[1, 3], vec![978.8840905575431], vec![]),
+        fz(3, 11, &[4, 0], vec![0.0018388727366312652, 0.0, 0.0], vec![]),
+        fz(3, 12, &[5, 0], vec![0.0013660329587277412, 0.0, 0.0], vec![]),
+        fz(1, 13, &[4, 5], vec![257.6903587652661], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.044767533012357086, 1550.3322954002194], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0005065528999520752, 1463.3971383123571], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.0010837273211185066, 978.8840905575431], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.2449639729867886, 257.6903587652661], vec![]),
+    ]
+}
+
+/// tpl=3 hub=2 e=2.100 psu ilim=0.040 F0-1=1.44/0.02 R4-7=28.9 R6-1=115.2 C2-0=3.1e-5 555 vcc6 gnd0 [2, 6, 5, 4, 7, 3] R1-4=2727.8 R3-6=1794.4 P7-6
+fn cold_656_tpl3() -> Vec<Device> {
+    vec![
+        fz(21, 0, &[1, 0], vec![2.0997551283597415, 0.03993181995397193], vec![]),
+        fz(1, 1, &[2, 0], vec![70499.12728765282], vec![]),
+        fz(1, 2, &[3, 0], vec![104322.4772122887], vec![]),
+        fz(1, 3, &[4, 0], vec![2680.476161387651], vec![]),
+        fz(1, 4, &[5, 0], vec![32788.0180586396], vec![]),
+        fz(1, 5, &[6, 0], vec![156820.77936240626], vec![]),
+        fz(1, 6, &[7, 0], vec![405527.29783161636], vec![]),
+        fz(10, 7, &[0, 1], vec![1.4402208057314996, 0.02038315706881638], vec![]),
+        fz(1, 8, &[4, 7], vec![28.911521433020177], vec![]),
+        fz(1, 9, &[6, 1], vec![115.16380451031051], vec![]),
+        fz(3, 10, &[2, 0], vec![3.109340611974017e-5, 3.315715846515984, 0.0], vec![]),
+        fz(40, 11, &[6, 0, 2, 6, 5, 4, 7, 3], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 12, &[6, 3], vec![37505.864107821646], vec![]),
+        fz(1, 13, &[3, 7], vec![20757.966784553708], vec![]),
+        fz(3, 14, &[7, 0], vec![6.936969678706147e-8, 0.0, 0.0], vec![]),
+        fz(1, 15, &[6, 3], vec![1279.3335181110078], vec![]),
+        fz(1, 16, &[1, 4], vec![2727.7631154965725], vec![]),
+        fz(1, 17, &[3, 6], vec![1794.363266277742], vec![]),
+        fz(13, 18, &[7, 6], vec![0.570414384883887, 0.127126112188416], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.056515929711860466, 28.911521433020177], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.00023305991130195925, 115.16380451031051], vec![]),
+        fz(90, 12, &[], vec![12.0, 2.93155864453981e-6, 37505.864107821646], vec![]),
+        fz(90, 13, &[], vec![13.0, 3.97714993323673e-6, 20757.966784553708], vec![]),
+        fz(90, 15, &[], vec![15.0, 1.1961440614496167e-5, 1279.3335181110078], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.00015047479414880447, 2727.7631154965725], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.0001101907431417095, 1794.363266277742], vec![]),
+    ]
+}
+
+#[test]
+fn stepped_resistors_idle_until_a_switch_opens_latch_on_the_stress_after_it() {
+    // REF, cold 675 tpl 3: the rail-node 3 switch opens at 0.2958 s and puts
+    // R8 (1463 ohm, 0.507 mW) and R10 (979 ohm, 1.08 mW), idle since load,
+    // across 3.78 V. By hand R8 runs at 18.2/s and latches at 0.3508 s;
+    // then node 3 falls to 8.39 V and R10, at 0.683, runs at 25.4/s and
+    // latches at 0.3633 s. Both latched at the toggle, the post-toggle rate
+    // charged over [0, 0.2958] (S = 5.4). Within 1 ms of the hand times.
+    let toggle = 0.2958471421807681;
+    for exact_mode in [false, true] {
+        let mut p = program(7, cold_675_tpl3());
+        p.digital_slot_count = 32;
+        p.options.no_rail_shortcut = exact_mode;
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(toggle).unwrap();
+        let v = 1.0 - p.devices[6].params[0];
+        e.set_params(&[(6, 0, v)]).unwrap();
+        e.advance(0.4).unwrap();
+        let rec = e.records(0).unwrap().to_vec();
+        let at = |d: f64| rec.chunks(7).find(|c| c[0] == d).map(|c| c[3]);
+        let (r8, r10) = (at(8.0), at(10.0));
+        eprintln!("675/3 exact {exact_mode}: R8 {r8:?} (by hand 0.3508), R10 {r10:?} (0.3633)");
+        assert!(r8.is_some_and(|t| (t - 0.3508).abs() <= 1e-3), "exact {exact_mode}: R8 at {r8:?}");
+        assert!(r10.is_some_and(|t| (t - 0.3633).abs() <= 1e-3), "exact {exact_mode}: R10 at {r10:?}");
+    }
+}
+
+#[test]
+fn stepped_resistors_idle_until_a_fuse_burns_take_no_damage_from_before_it() {
+    // REF, cold 656 tpl 3: a fuse from the rail to ground holds the {2.10 V,
+    // 40 mA} PSU in CC at 57 mV until it latches at 0.105865 s. R9 (115 ohm,
+    // 0.233 mW) and R16 (2728 ohm, 0.150 mW), idle until then, latched at the
+    // fuse with S = 76.7 and 4.86, their post-burn rates charged from load.
+    // By hand their damage at the burn is 0 and grows from it at R9's 155/s
+    // at most. Neither latches at the burn instant. Just past it the 555 at
+    // node 6 reaches its window's floor through R9: at 1.8 V its OUT pair
+    // draws 22 mA where R9 gives 1.7 mA, so it has no consistent power state.
+    // Default mode holds it at its stepped partition's seed (W1c point 1a),
+    // retries it as its supply passes the release level, and declines through
+    // ruling R54 (a)'s guard (51 short holds); it failed the seed's Newton,
+    // with no hold. Exact mode's own hold is REF's item.
+    for exact_mode in [false, true] {
+        let mut p = program(8, cold_656_tpl3());
+        p.digital_slot_count = 32;
+        p.options.no_rail_shortcut = exact_mode;
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(0.10587).unwrap();
+        let rec: Vec<(f64, f64)> = e.records(0).unwrap().chunks(7).map(|c| (c[0], c[3])).collect();
+        eprintln!("656/3 exact {exact_mode}: {rec:?}");
+        assert!(rec.iter().any(|r| r.0 == 7.0), "exact {exact_mode}: the fuse latched");
+        assert!(!rec.iter().any(|r| r.0 == 9.0 || r.0 == 16.0), "exact {exact_mode}: R9 or R16 latched at the fuse: {rec:?}");
+        if !exact_mode {
+            let err = e.advance(0.2).expect_err("the 555 slides along its power edge");
+            assert!(err.code == -4 && err.message.contains("sliding episode"), "the episode guard: {} {}", err.code, err.message);
+        }
+    }
+}

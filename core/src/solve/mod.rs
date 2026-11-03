@@ -4460,6 +4460,7 @@ impl PartitionedSolver {
         let stepped = self.stepped.resolve_dirty(st_ids, now, &self.pre_commit_drivers, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
         self.stepped.cc = None;
         readers.extend(stepped?);
+        self.take_stepped_holds()?;
         self.end_dynamic_writes();
         // W1f (Rails point 3): the rail loop runs inside this one call.
         self.rail_loop(now, drivers, readers)?;
@@ -4515,8 +4516,14 @@ impl PartitionedSolver {
             let stepped = self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
             self.stepped.cc = None;
             readers.extend(self.on_error(stepped)?);
+            let held = self.take_stepped_holds();
+            self.on_error(held)?;
         }
         self.end_dynamic_writes();
+        if !is_crossing {
+            let retried = self.retry_stepped_holds(now, false, readers);
+            self.on_error(retried)?;
+        }
         // W1f: a closed-form crossing or a stepped commit of a hub partition
         // changes its contribution, so the rail solves at it (Rails point 4).
         let drivers = Rc::clone(&self.driver_snapshot);
@@ -5052,7 +5059,11 @@ impl PartitionSolver for PartitionedSolver {
         let result = self.stepped.sync_to(t_end, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
         self.stepped.cc = None;
         let mut readers = self.on_error(result)?;
+        let held = self.take_stepped_holds();
+        self.on_error(held)?;
         self.end_dynamic_writes();
+        let retried = self.retry_stepped_holds(t_end, true, &mut readers);
+        self.on_error(retried)?;
         // W1f: the stepped hub partitions the clamp committed contribute, and
         // a CC rail capacitor is published live (Rails point 4). The clamp
         // ends the host's step: every IC held off is retried powered there,

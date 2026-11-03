@@ -4353,7 +4353,14 @@ Constants:
        it with the stamps they had; a latch only the step's own end drive
        reaches fires at that commit. At the step's end with the end rate,
        cold 39 tpl 4's R20 latched 2.1 ms late and took R17 with it, 74
-       ms before the fine reference's R17.
+       ms before the fine reference's R17. Each committed step (a catch-up's
+       and a clamp's included) closes the integrators at its own end
+       voltages, its CC rail and the boundary it was solved against
+       (`SteppedSolver::trail`), before a re-seed or a republish at the moved
+       rail replaces what is published (ACC-A: cold 507 tpl 4's R7-6 latched
+       at 0.239 s against 0.4006 s by hand; cold 55 tpl 2's PTC tripped at the
+       host's step, 2.0 ms at 1 ms hosts against 1.135 ms by hand, now 1.24
+       ms in default mode and 1.135 in exact mode).
    - **Re-anchoring** (rulings R21, R29, R30, 2026-10-21). A device whose
      voltage a moving rail drives takes, at each visit, a drive anchored at
      the visit, and is visited again before what that drive drops can move

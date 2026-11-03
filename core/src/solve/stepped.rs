@@ -367,6 +367,7 @@ impl CcStep {
 /// trial `refine_crossing_h` takes) using the identical key, exactly as a
 /// single `static_part.rs::resolve_dirty` call uses one `now` throughout its
 /// own fixed-point iteration.
+#[derive(Clone, Copy)]
 struct IcStampCtx<'a> {
     now: f64,
     drivers: &'a [Driver],
@@ -453,6 +454,31 @@ fn solve_step(
     at: f64,
     polish: bool,
 ) -> Result<StepResult, StepError> {
+    solve_step_noting(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, polish, None)
+}
+
+/// The ICs with a supply pin free in a partition (device index, record),
+/// whose power verdicts a seed's Newton notes, and their flips.
+type Noting<'n, 'a> = (&'n [(usize, &'a digital::IcRecord)], &'n mut crate::solve::hold::Flips);
+
+/// [`solve_step`], noting each gated IC's power verdict at every iterate of
+/// the plain Newton in `noting` (W1c point 1a's trigger, as the static
+/// solver's `newton_in` notes them).
+#[allow(clippy::too_many_arguments)]
+fn solve_step_noting(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+    polish: bool,
+    mut noting: Option<Noting>,
+) -> Result<StepResult, StepError> {
     if let Some(cc) = ic_ctx.cc {
         return take_cc_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, cc, cc.cv);
     }
@@ -484,6 +510,15 @@ fn solve_step(
             break;
         }
         let (r, factors) = newton::solve_keeping_factors(n, n, x_from, linear, polish, |x, a, b| {
+            if let (false, Some((gated, flips))) = (slopes, noting.as_mut()) {
+                for (k, &(d, ic)) in gated.iter().enumerate() {
+                    let v = |node: usize| match ic_ctx.node_owner.get(&node) {
+                        Some(&(p, l)) if p == ic_ctx.p_idx => x[l],
+                        _ => bnd.get(node),
+                    };
+                    flips.note(k, digital::power::verdict(ic, v(ic.vcc.node), v(ic.gnd.node), bnd.hold(d)));
+                }
+            }
             stamp_step(shape, live_params, h, vc_from, i_prev, method, ic_ctx, &bnd, n, x, a, b);
             if slopes {
                 let extra = crate::solve::ic_supply_terms(ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, &bnd, ic_ctx.p_idx, x).extra_jacobian(x, n);
@@ -881,9 +916,115 @@ const SEED_H: f64 = 1e-12;
 /// 50-pass `-4`. Classic's seed is not polished; the polish moves the seed
 /// toward the solution of the same equations.
 fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx) -> Result<StepResult, String> {
+    seed_noting(shape, live_params, vc, x_from, ic_ctx, None).map_err(StepError::into_message)
+}
+
+fn seed_noting(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx, noting: Option<Noting>) -> Result<StepResult, StepError> {
     let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
-    solve_step(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu).map_err(StepError::into_message)
+    solve_step_noting(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu, noting)
+}
+
+/// Default mode (ported from REF's exact-mode one): the seed of a partition
+/// holding a free IC supply with W1c
+/// point 1a around it, as the static solver runs it around an iterated
+/// partition's Newton (`StaticPartitionSolver::hold_in`). A seed whose Newton
+/// fails with gated ICs' verdicts alternating (a chip whose own draw takes
+/// its supply out of its window, while its absence lets the supply come
+/// back) is solved with those held powered; the ones reading unpowered there
+/// starve themselves, are solved held unpowered for the drop, and the seed
+/// is solved with them held off. Returns the seed and the holds it took,
+/// which the caller enters in its copy and the owner in its table
+/// (`PartitionedSolver::take_stepped_holds`); any other failure is the
+/// seed's own. Without it a 555 reaching its window's floor through 115
+/// ohm from the rail failed the seed's Newton (cold 656 tpl 3, -4) before
+/// any hold; held and retried (`PartitionedSolver::retry_stepped_holds`)
+/// it slides along the edge and declines through ruling R54 (a)'s guard.
+fn seed_holding(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx) -> Result<(StepResult, Vec<(usize, digital::power::PowerHold)>), String> {
+    if !holds_around(ic_ctx) {
+        return solve_initial_x(shape, live_params, vc, x_from, ic_ctx).map(|s| (s, Vec::new()));
+    }
+    let mut solve = |ctx: &IcStampCtx, noting: Option<Noting>| seed_noting(shape, live_params, vc, x_from, ctx, noting);
+    hold_around(ic_ctx, &mut solve).map(|(seed, held)| (seed, held.map_or_else(Vec::new, |h| h.1))).map_err(StepError::into_message)
+}
+
+/// Whether a solve under `ic_ctx` runs W1c point 1a around its Newton
+/// (`hold_around`): default mode, a partition holding a free IC supply, off
+/// a CC rail. (Exact mode's own, with its retry, is REF's item.)
+fn holds_around(ic_ctx: &IcStampCtx) -> bool {
+    ic_ctx.exact.is_none() && ic_ctx.free_supply && ic_ctx.iterated && ic_ctx.cc.is_none()
+}
+
+/// W1c point 1a around one solve of a stepped partition (`solve`, a seed or
+/// a step, under the context it is handed), as the static solver runs it
+/// around an iterated partition's Newton (`StaticPartitionSolver::hold_in`):
+/// a solve whose Newton fails with gated ICs' verdicts alternating (a chip
+/// whose own draw takes its supply out of its window while its absence lets
+/// it come back) is solved with those held powered; the ones reading
+/// unpowered there starve themselves, are solved held unpowered for the
+/// drop, and the solve is done with them held off. Returns the solution
+/// and, when it held any, the table it solved under and the holds taken;
+/// any other failure is the solve's own.
+#[allow(clippy::type_complexity)]
+fn hold_around(ic_ctx: &IcStampCtx, solve: &mut dyn FnMut(&IcStampCtx, Option<Noting>) -> Result<StepResult, StepError>) -> Result<(StepResult, Option<(Vec<digital::power::PowerHold>, Vec<(usize, digital::power::PowerHold)>)>), StepError> {
+    use crate::solve::hold;
+    let local = |node: usize| ic_ctx.node_owner.get(&node).is_some_and(|&(p, _)| p == ic_ctx.p_idx);
+    let gated: Vec<(usize, &digital::IcRecord)> = ic_ctx.ics.iter().filter(|(_, ic)| local(ic.vcc.node) || local(ic.gnd.node)).map(|(d, ic)| (*d, ic)).collect();
+    let mut flips = hold::Flips::new(gated.len());
+    match solve(ic_ctx, Some((&gated, &mut flips))) {
+        Ok(solved) => return Ok((solved, None)),
+        Err(StepError::NoConverge) => {}
+        Err(err) => return Err(err),
+    }
+    let a: Vec<usize> = flips.alternating();
+    if a.is_empty() {
+        return Err(StepError::NoConverge);
+    }
+    let supply = |x: &[f64], ic: &digital::IcRecord| {
+        let v = |node: usize| match ic_ctx.node_owner.get(&node) {
+            Some(&(p, l)) if p == ic_ctx.p_idx => x[l],
+            _ => ic_ctx.bnd.get(node),
+        };
+        v(ic.vcc.node) - v(ic.gnd.node)
+    };
+    let mut table: Vec<digital::power::PowerHold> = ic_ctx.bnd.holds.to_vec();
+    let top = gated.iter().map(|g| g.0).max().unwrap_or(0);
+    if table.len() <= top {
+        table.resize(top + 1, digital::power::PowerHold::FREE);
+    }
+    let mut under = |table: &[digital::power::PowerHold]| {
+        let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(table), ..*ic_ctx };
+        solve(&ctx, None).ok()
+    };
+    for &k in &a {
+        table[gated[k].0] = hold::probe(true);
+    }
+    let Some(on) = under(&table) else { return Err(StepError::NoConverge) };
+    let starving: Vec<(usize, f64)> = a
+        .iter()
+        .map(|&k| gated[k])
+        .filter(|&(_, ic)| !digital::power::powered(ic, supply(&on.x, ic), 0.0))
+        .map(|(d, ic)| (d, supply(&on.x, ic)))
+        .collect();
+    if starving.is_empty() {
+        return Err(StepError::NoConverge);
+    }
+    for &k in &a {
+        table[gated[k].0] = ic_ctx.bnd.hold(gated[k].0);
+    }
+    for &(d, _) in &starving {
+        table[d] = hold::probe(false);
+    }
+    let Some(off) = under(&table) else { return Err(StepError::NoConverge) };
+    let mut taken = Vec::new();
+    for &(d, v_on) in &starving {
+        let ic = gated.iter().find(|g| g.0 == d).unwrap().1;
+        let held = hold::held_off(ic, v_on, supply(&off.x, ic), ic_ctx.now);
+        table[d] = held;
+        taken.push((d, held));
+    }
+    let Some(solved) = under(&table) else { return Err(StepError::NoConverge) };
+    Ok((solved, Some((table, taken))))
 }
 
 struct Partition {
@@ -1241,6 +1382,10 @@ pub struct SteppedSolver {
     /// whether any entry is not free; the owner journals it.
     holds: Rc<Vec<digital::power::PowerHold>>,
     holds_on: bool,
+    /// Holds a seed took in exact mode (`seed_holding`), `(device, hold,
+    /// when)`, for the owner to enter in its table after the call; dropped
+    /// whenever the owner hands its table over (a rollback among them).
+    hold_requests: Vec<(usize, digital::power::PowerHold, f64)>,
     /// Exact mode's battery partition, whose next step is planned only
     /// after the owner has advanced SoC with the step just committed, and
     /// the partitions whose plans are so held back (Rails point 9: E and r
@@ -1409,6 +1554,7 @@ impl SteppedSolver {
             exact: None,
             holds: Rc::new(Vec::new()),
             holds_on: false,
+            hold_requests: Vec::new(),
             defer: None,
             deferred: Vec::new(),
             bills: Vec::new(),
@@ -1437,6 +1583,12 @@ impl SteppedSolver {
     pub(crate) fn set_power_holds(&mut self, holds: Rc<Vec<digital::power::PowerHold>>, on: bool) {
         self.holds = holds;
         self.holds_on = on;
+        self.hold_requests.clear();
+    }
+
+    /// The holds the last calls' seeds took (`seed_holding`).
+    pub(crate) fn take_hold_requests(&mut self) -> Vec<(usize, digital::power::PowerHold, f64)> {
+        std::mem::take(&mut self.hold_requests)
     }
 
     /// The running ramps every step reads its boundary through (Sources
@@ -1979,6 +2131,7 @@ impl SteppedSolver {
             };
             let seed_sens;
             let seed_u;
+            let taken;
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
@@ -2000,7 +2153,8 @@ impl SteppedSolver {
                 // later re-aim it keeps them from publishing the OLD
                 // topology's stale values next to `live_params`-driven
                 // switch/resistor currents that already read the NEW one.
-                let seed = solve_initial_x(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
+                let (seed, holds) = seed_holding(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
+                taken = holds;
                 // `i_src` stays as it is: the step after a seed is backward
                 // Euler, whose bill reads only its end current (`plan_step`).
                 part.x = seed.x;
@@ -2062,6 +2216,20 @@ impl SteppedSolver {
                 self.sensitivities += 1;
                 self.hub_updates.push((p_idx, Contrib { active: true, i: sens.i, g: sens.g, u_p: u, b: None }));
                 self.partitions.get_mut(&p_idx).unwrap().sens = Some(Rc::new(sens));
+            }
+            if !taken.is_empty() {
+                // Held in this copy at once, so the plan from the seed steps
+                // with them; the owner enters them in its table after the call.
+                let table = Rc::make_mut(&mut self.holds);
+                for &(d, hold) in &taken {
+                    if table.len() <= d {
+                        table.resize(d + 1, digital::power::PowerHold::FREE);
+                    }
+                    table[d] = hold;
+                    readers.push(DeviceId(d as u32));
+                }
+                self.holds_on = true;
+                self.hold_requests.extend(taken.iter().map(|&(d, hold)| (d, hold, now)));
             }
             Self::publish(self.partitions.get(&p_idx).unwrap(), self.rail, live_params, voltages, currents);
             readers.extend(self.partitions[&p_idx].watches.values().flatten().map(|(id, _)| *id));
@@ -2674,7 +2842,11 @@ impl SteppedSolver {
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
         let keep_lu = part.hub && rail.is_some();
-        let ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply };
+        // A step held by W1c point 1a (`hold_around`) solves the rest of its
+        // plan under the table it took.
+        let held_table: std::cell::OnceCell<Vec<digital::power::PowerHold>> = std::cell::OnceCell::new();
+        let mut step_taken: Vec<(usize, digital::power::PowerHold)> = Vec::new();
+        let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);
@@ -2706,6 +2878,23 @@ impl SteppedSolver {
                 // step to try (classic's `hitMinStep`, HL:827-829).
                 Err(StepError::NoConverge) => {
                     if h <= H_MIN * 1.01 {
+                        // A chip alternating at its power edge
+                        // through the smallest step is held there (W1c point
+                        // 1a, `hold_around`), as at a seed.
+                        if held_table.get().is_none() && holds_around(&ic_ctx) {
+                            let (shape, t0) = (&part.shape, part.t);
+                            let iters = &mut part.newton_iterations;
+                            let mut solve = |ctx: &IcStampCtx, noting: Option<Noting>| solve_step_noting(shape, live_params, h, &vc0, &x0, &i_prev, method, iters, ctx, t0 + h, false, noting);
+                            if let Ok((step, Some((table, taken)))) = hold_around(&ic_ctx, &mut solve) {
+                                let _ = held_table.set(table);
+                                ic_ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(held_table.get().unwrap()), ..ic_ctx };
+                                step_taken = taken;
+                                ratio = 1.0;
+                                accepted = step;
+                                half = None;
+                                break;
+                            }
+                        }
                         return Err(format!("stepped: Newton did not converge at the minimum step h = {h:e} s"));
                     }
                     h = (0.25 * h).max(H_MIN);
@@ -2926,6 +3115,20 @@ impl SteppedSolver {
         part.pend_t = part.t + h;
         part.has_pend = true;
         part.version += 1;
+        let since = part.t;
+        if !step_taken.is_empty() {
+            // Held in this copy at once, so the steps after it keep them; the
+            // owner enters them in its table after the call.
+            let table = Rc::make_mut(&mut self.holds);
+            for &(d, hold) in &step_taken {
+                if table.len() <= d {
+                    table.resize(d + 1, digital::power::PowerHold::FREE);
+                }
+                table[d] = hold;
+            }
+            self.holds_on = true;
+            self.hold_requests.extend(step_taken.iter().map(|&(d, hold)| (d, hold, since)));
+        }
         Ok(())
     }
 }

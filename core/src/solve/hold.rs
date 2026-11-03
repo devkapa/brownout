@@ -193,6 +193,9 @@ pub(crate) struct Episode {
     /// When the hold in place was taken.
     held_at: f64,
     held: bool,
+    /// The hold in place was taken by a stepped partition's seed or step
+    /// (`stepped::hold_around`): `retry_stepped_holds` retries it.
+    pub(crate) stepped: bool,
 }
 
 impl Episode {
@@ -213,7 +216,7 @@ impl Episode {
             return self;
         }
         let short = now - self.held_at < host_step;
-        Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false }
+        Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false, stepped: false }
     }
 
     /// `Err` with the decline's message past [`EPISODE_MAX`] short holds.
@@ -664,6 +667,74 @@ impl PartitionedSolver {
                 Some(rails::Watch { value: dir * self.rail_draw_at(now, edge), thresholds: vec![i_limit - added], cap: None, terms: cf_motion(dir) })
             })
             .collect()
+    }
+
+    /// The holds the stepped solver's seeds and steps took (default mode,
+    /// `stepped::hold_around`), entered in the table (journaled and counted
+    /// as any hold, each one's episode counted as on the rail).
+    pub(super) fn take_stepped_holds(&mut self) -> Result<(), String> {
+        let requests = self.stepped.take_hold_requests();
+        let mut result = Ok(());
+        for (d, hold, now) in requests {
+            let old = self.power_hold(d);
+            let _ = self.set_power_hold(d, hold);
+            let mut episode = self.episode(d);
+            if old.kind != HoldKind::Off {
+                episode = episode.held(now);
+            }
+            episode.stepped = true;
+            result = result.and(self.set_episode(d, episode));
+        }
+        result
+    }
+
+    /// Default mode's retry of the chips a stepped partition's seed or step
+    /// holds (`stepped::hold_around`), as the rail's and the static solver's
+    /// are retried (ruling R51 (b)): once per host step at the clamp, and at
+    /// any commit once the supply passes the hold's release level. The chip
+    /// is freed and its stepped partition re-seeded, which holds it again if
+    /// its own draw still takes the supply out of its window; each release
+    /// of a hold shorter than the host step counts toward ruling R54 (a)'s
+    /// guard. Cold 656 tpl 3: a 555 at its window's floor through 115 ohm
+    /// slides along the edge (its OUT pair draws 22 mA where the feed gives
+    /// 1.7 mA) and declines through that guard; held once and never retried
+    /// it stayed unpowered at 2.1 V for the rest of the run.
+    pub(super) fn retry_stepped_holds(&mut self, now: f64, clamp: bool, readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        use digital::power::{HoldKind, PowerHold};
+        if self.exact.is_some() || self.holds_active == 0 {
+            return Ok(());
+        }
+        let stepped_of = |n: usize| self.partition_of_node(n).map(|q| q.0 as usize).filter(|&q| self.partition_kinds[q] == PartitionKind::Stepped);
+        let due: Vec<(usize, usize)> = self
+            .ics
+            .iter()
+            .filter_map(|(d, ic)| {
+                let q = stepped_of(ic.vcc.node).or_else(|| stepped_of(ic.gnd.node)).filter(|_| self.episode(*d).stepped)?;
+                let was = self.power_hold(*d);
+                let passed = was.release.is_some_and(|r| r.since < now && hold::passed(r, hold::supply(ic, &self.voltages)));
+                (was.kind == HoldKind::Off && (clamp || passed)).then_some((*d, q))
+            })
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let mut parts: Vec<usize> = Vec::new();
+        for &(d, q) in &due {
+            let _ = self.set_power_hold(d, PowerHold::FREE);
+            self.release_episode(d, now)?;
+            readers.push(DeviceId(d as u32));
+            parts.push(q);
+        }
+        parts.sort_unstable();
+        parts.dedup();
+        self.begin_dynamic_writes_list(&parts);
+        let pre = Rc::clone(&self.driver_snapshot);
+        self.sync_stepped_cc(now);
+        let stepped = self.stepped.resolve_dirty(&parts, now, &pre, &pre, &self.live_params, &mut self.voltages, &mut self.currents);
+        self.stepped.cc = None;
+        readers.extend(stepped?);
+        self.end_dynamic_writes();
+        self.take_stepped_holds()
     }
 
     /// The holds and releases the static solver took in its last resolve,
