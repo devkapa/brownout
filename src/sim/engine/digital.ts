@@ -162,7 +162,8 @@ const IC_PIN_MAPS: Partial<Record<string, IcPinDef[]>> = {
     { id: "4y", role: "output", gate: 3, gatePin: "y" },
   ],
   "74ls157": [
-    // Quad 2:1 mux — SELECT=0 → A inputs; SELECT=1 → B inputs
+    // Quad 2:1 mux — SELECT=0 → A inputs; SELECT=1 → B inputs. "/oe" is the
+    // data sheet's strobe /G: HIGH forces every Y LOW (totem-pole, not 3-state).
     { id: "sel",  role: "control" },
     { id: "/oe",  role: "control" },
     { id: "1a", role: "input",  gate: 0, gatePin: "a" },

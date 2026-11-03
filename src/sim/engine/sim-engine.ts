@@ -5842,8 +5842,11 @@ export class SimEngine {
       this.digitalEvaluationReuseCount += 1;
       return cached.outputs;
     }
+    // Only the 74LS245's outputs are 3-state. The 74LS157's strobe forces its
+    // totem-pole outputs LOW (evalCombinationalIC), it never floats them;
+    // the 3-state version of that selector is the 74LS257.
     const outputs =
-      (comp.kind === "74ls157" || comp.kind === "74ls245") && pinValues["/oe"] >= 0.5
+      comp.kind === "74ls245" && pinValues["/oe"] >= 0.5
         ? {}
         : evalCombinationalIC(comp.kind, pinValues, 0.5);
     this.digitalEvaluationCount += 1;
@@ -5970,7 +5973,7 @@ export class SimEngine {
 
     // A `delay:` slot is the canonical record of a DRIVEN output stage (the
     // small-signal AC default and the pin readouts key off it), so a pin
-    // that left `immediate` — a 74LS245/157 whose /OE released the bus — must
+    // that left `immediate` — a 74LS245 whose /OE released the bus — must
     // drop its value/pending/due slots rather than advertise a stage that the
     // transient stamp no longer writes. Re-enabling later re-seeds from the
     // immediate level, exactly like the first driven step.
