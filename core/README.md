@@ -3601,7 +3601,26 @@ Constants, all from P3:35-38 unless marked new:
      a chip whose drivers sit in a hub partition is linearised in `A0` and
      `G` at its present power, so its edge moves nothing in the scalar draw,
      and the rail loop's passes judge it at the rail they move to (cold 461
-     tpl 2). Pins:
+     tpl 2). Passes that settle the PSU in CV past its limit, with a free
+     rail IC's power edge under the setpoint, are no operating point: the
+     curve under that edge is the linearised one, not the circuit's (ruling
+     R74, cold 471 tpl 2 and 673 tpl 0: a 74LS00 sourcing into a node below
+     ground kept 64 mA under its floor on the curve and drew nothing in the
+     circuit; CV at 190 and 76 mA on 55 and 23.5 mA PSUs). The rail loop
+     then lands at the highest such edge (`cv_past_limit_landing`), and the
+     hold has a rule of its own: a powered probe that settles the PSU in CV
+     past the limit means the chips starve, their supply read two reached
+     widths under that edge; one its own window turns off in the unpowered
+     probe is freed, not held; a retry whose probe settles in CV past the
+     limit carries nothing. Held off, the PSU is in CV at the setpoint
+     delivering 0 and 5.87 mA, exact mode's answer. A landing that each
+     clock rise recreates (cold 360 tpl 3: a gate whose ground pin a
+     capacitor holds at the rise draws 140 mA even at its floor's rail) is
+     held and freed once a host step and declines by the episode guard;
+     ruling R76 (b) keeps that decline (the R53 list) rather than an
+     exception for edges the circuit recreates. A general fix of the linearised scalar curve (the hub
+     partitions re-solved under trial rails, as exact mode's search does) is
+     a later item. Pins:
      `rails::tests::the_cc_entry_takes_the_highest_root_at_or_below_the_setpoint_and_lands_on_a_power_edge_as_an_error`,
      `a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_held_off_at_its_power_edge`
      and `a_cc_entry_takes_the_highest_operating_point_at_or_below_the_setpoint`

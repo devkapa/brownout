@@ -300,6 +300,12 @@ impl Flips {
     }
 }
 
+/// The edge a landing's error names (`rails::cc_entry_rail`), when `err` is
+/// one.
+fn landing_edge(err: &str) -> Option<f64> {
+    err.strip_prefix(rails::EDGE_LANDING)?.trim_start().strip_prefix("at ")?.trim().parse().ok()
+}
+
 /// What a rail retry puts back when it frees nothing ([`PartitionedSolver::retry_on_rail`]):
 /// the published arrays, the dynamic snapshot and the hub's running sums.
 pub(super) struct Checkpoint {
@@ -338,18 +344,41 @@ impl PartitionedSolver {
         }
         self.rail_settle(now, drivers, readers, seed, &err)?;
         let draw_on = self.segment_draw(now);
+        // Ruling R74, a landing's own rule: held powered, the chips settle a
+        // PSU in CV past its limit, which no current-limited supply holds
+        // (the CC point lies at or below the landing's edge, where the walk
+        // read the draw within the limit, and the chips are off there; the
+        // probe cannot reach it because the rail's curve keeps their hub
+        // partition draw linearised at powered: `rails::cc_entry_rail`). So
+        // they starve themselves, their supply read two reached widths
+        // under that edge, the CC point's side of it.
+        let landing = landing_edge(&err).filter(|_| self.cv_past_limit(now));
         // Step 2: those reading unpowered there starve themselves; on a CC
         // rail capacitor's segment, so do they all when, powered, they turn
         // the segment down (ruling R44 (a): across instants the capacitor
         // holds the rail, and what their draw changes is its slope).
         let falling = draw_on.is_some_and(|draw| self.hub.as_ref().and_then(|h| h.psu_setpoint()).is_some_and(|(_, i_limit)| draw > i_limit));
-        let starving: Vec<(usize, f64)> = a
+        let mut starving: Vec<(usize, f64)> = a
             .iter()
             .filter_map(|&d| {
                 let ic = &self.ics[self.ic_position[d] as usize].1;
                 (falling || !digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node])).then(|| (d, supply(ic, &self.voltages)))
             })
             .collect();
+        let landed = starving.is_empty() && landing.is_some();
+        if let (true, Some(edge)) = (starving.is_empty(), landing) {
+            let rail = self.hub.as_ref().expect("a hub").node;
+            let (v, _) = self.hub.as_ref().expect("a hub").psu_setpoint().expect("a PSU");
+            let u_dn = edge - crate::devices::sources::direction(v) * 2.0 * rails::REACHED_REL * edge.abs().max(1.0);
+            starving = a
+                .iter()
+                .map(|&d| {
+                    let ic = &self.ics[self.ic_position[d] as usize].1;
+                    let at = |node: usize| if node == rail { u_dn } else { self.voltages[node] };
+                    (d, at(ic.vcc.node) - at(ic.gnd.node))
+                })
+                .collect();
+        }
         if starving.is_empty() {
             // Every alternating IC carries itself in the probe. When every
             // rail IC's free verdict there is the one it was probed at, that
@@ -407,6 +436,17 @@ impl PartitionedSolver {
             if let Some(added) = added {
                 state.held_draw.extend(starving.iter().map(|&(d, _)| (d, added)));
             }
+        }
+        // A landing's chip that its own window turns off in the unpowered
+        // probe is consistent free there (cold 360 tpl 3: a gate whose
+        // ground pin a clock edge lifts, its supply 5.95 V over its 5.775 V
+        // ceiling): it is freed, not held, as exact mode, solving the
+        // partition at the instant, finds it.
+        if landed {
+            starving.retain(|&(d, _)| {
+                let ic = &self.ics[self.ic_position[d] as usize].1;
+                digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node])
+            });
         }
         // Step 4: the held solve, each starving IC's episode counted first.
         for &(d, _) in &starving {
@@ -490,7 +530,9 @@ impl PartitionedSolver {
             seed.extend(self.set_power_hold(d, probe(true)).into_iter().map(|p| p.0 as usize));
             seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
         }
-        let carried = self.rail_settle(now, drivers, readers, seed, &err).is_ok();
+        // A probe that settles a PSU in CV past its limit carries nothing
+        // (ruling R74, as `hold_on_rail`'s landing rule reads it).
+        let carried = self.rail_settle(now, drivers, readers, seed, &err).is_ok() && !self.cv_past_limit(now);
         // Each one's verdict and its hold after the retry.
         let verdicts: Vec<(bool, PowerHold)> = held
             .iter()
@@ -611,6 +653,15 @@ impl PartitionedSolver {
     fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
         self.hub.as_mut().expect("a hub").dirty = true;
         self.rail_passes(now, drivers, readers, seed)
+    }
+
+    /// Whether a bench PSU on the rail sits in CV delivering past its limit
+    /// in its own direction (by more than the reached width the regime rules
+    /// land within).
+    fn cv_past_limit(&self, now: f64) -> bool {
+        let hub = self.hub.as_ref().expect("a hub");
+        let Some((v, i_limit)) = hub.psu_setpoint() else { return false };
+        hub.state.reg == crate::devices::sources::Regime::Cv && crate::devices::sources::direction(v) * self.rail_draw_at(now, hub.state.u) > i_limit + rails::REACHED_REL * i_limit.max(1.0)
     }
 
     /// The rail's draw at its published `u`, `dir` signed, while a PSU with

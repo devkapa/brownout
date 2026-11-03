@@ -13882,3 +13882,165 @@ fn exact_mode_holds_a_555_sliding_along_its_power_edge_and_burns_nothing_at_the_
     }
     assert!(rig.s().hold_counts()[0] > 0.0, "the 555 was held at its edge");
 }
+
+#[test]
+fn a_landing_whose_powered_probe_sits_in_cv_past_the_limit_holds_the_chip_off_in_both_modes() {
+    // Ruling R74, cold 471 tpl 2 and 673 tpl 0. Each 74LS00 sits on the rail
+    // with HIGH outputs into a node held below ground (471: 2Y, 3Y into a
+    // -4.6 V source, 1Y, 4Y into node 3 behind 98.7 and 263.5 ohm to it; 673:
+    // 2Y, 3Y into ground, 1Y, 4Y into node 4), drivers that sit in a hub
+    // partition. By hand: powered, inside [4.275, 5.775] V, the chip draws
+    // 190 mA (471) and 76 mA (673) at the setpoint, far past the 55 and 23.5
+    // mA limits, and stays past them down its window; under its floor, off,
+    // it draws nothing: on 471 the rail holds only the chip, 0 mA; on 673
+    // the rail feeds 1443 ohm to node 3 and 62.7 k to ground, (V - v3)/1443
+    // + V/62695 = 5.87 mA. A landing at the floor: the chip held off, CV at
+    // the setpoint delivering 0 and 5.87 mA, which exact mode, its trials
+    // solving the partitions at each rail, already gave. Before the fix
+    // default mode's linearised curve kept the chip's partition draw under
+    // its floor (64 mA on 471), placed the CC root past the setpoint, and the
+    // clamp held CV at 190 and 76 mA.
+    let b471 = || {
+        let mut p = program(7, vec![
+        fz(21, 0, &[1, 0], vec![4.751886091509621, 0.054961332725668104], vec![]),
+        fz(2, 1, &[2, 0], vec![-4.596049646086812], vec![]),
+        fz(1, 2, &[3, 0], vec![494452.0913392493], vec![]),
+        fz(1, 3, &[4, 0], vec![77429.4854565049], vec![]),
+        fz(1, 4, &[5, 0], vec![78194.52499104275], vec![]),
+        fz(1, 5, &[6, 0], vec![2675.744432386028], vec![]),
+        fz(1, 6, &[2, 3], vec![98.66153046803586], vec![]),
+        fz(50, 7, &[1, 0, 5, 2, 3, 0, 0, 2, 0, 0, 2, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 3.3711834227987145e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 8, &[3, 2], vec![263.508620325762], vec![]),
+        fz(1, 9, &[2, 0], vec![102.06709251544831], vec![]),
+        fz(3, 10, &[0, 0], vec![0.008790905891188373, 0.1361737485557175, 0.0], vec![]),
+        fz(1, 11, &[3, 5], vec![13563.322422657602], vec![]),
+        fz(30, 12, &[3, 6], vec![2.645442738804019, 1.9851176644289632, 0.03894033893409811, 0.0, 0.0, 0.0], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.05757475196045802, 98.66153046803586], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.019609209561770004, 263.508620325762], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.010313525627732776, 102.06709251544831], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.00012125106711201618, 13563.322422657602], vec![]),
+        ]);
+        p.digital_slot_count = 32;
+        p
+    };
+    let b673 = || {
+        let mut p = program(5, vec![
+        fz(21, 0, &[1, 0], vec![4.714141438666053, 0.023491781958795588], vec![]),
+        fz(2, 1, &[0, 2], vec![10.238988506030267], vec![]),
+        fz(1, 2, &[3, 0], vec![4147.990303747157], vec![]),
+        fz(1, 3, &[4, 0], vec![1080.9277279137743], vec![]),
+        fz(30, 4, &[3, 2], vec![3.2578847823938304, 1.5013889507842921, 0.012701189387349803, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 5, &[2, 0], vec![177.34950648254926], vec![]),
+        fz(1, 6, &[0, 4], vec![835.2238021718816], vec![]),
+        fz(1, 7, &[3, 4], vec![16.917609314085325], vec![]),
+        fz(1, 8, &[3, 1], vec![1442.958403632793], vec![]),
+        fz(50, 9, &[1, 0, 0, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 4], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 4.678551333515387e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 10, &[4, 2], vec![253.00725842672114], vec![]),
+        fz(1, 11, &[0, 3], vec![232.7966819363799], vec![]),
+        fz(1, 12, &[0, 1], vec![62695.06832422875], vec![]),
+        fz(4, 13, &[1, 4], vec![0.0], vec![]),
+        fz(1, 14, &[4, 0], vec![110.03868315949899], vec![]),
+        fz(1, 15, &[3, 2], vec![318.1845945203245], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.0025215526595527963, 177.34950648254926], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.005376102258413996, 835.2238021718816], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.05482817867166562, 16.917609314085325], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.16905584605281831, 1442.958403632793], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.018138173683196954, 253.00725842672114], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.016138968002100827, 232.7966819363799], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0001867517222310781, 62695.06832422875], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.2748100324643442, 110.03868315949899], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.032473750757841695, 318.1845945203245], vec![]),
+        ]);
+        p.digital_slot_count = 32;
+        p
+    };
+    let (v471, v673) = (4.751886091509621, 4.714141438666053);
+    for (mode, exact_mode) in [("default", false), ("exact", true)] {
+        let pick = |p: Program| if exact_mode { exact(p) } else { p };
+        let mut r471 = Rig::load(&pick(b471())).unwrap();
+        let mut r673 = Rig::load(&pick(b673())).unwrap();
+        // To 0.1 s: on 673 the 253 ohm from node 4 to the 10.2 V source (6.8
+        // V across, 182 mW on 18 mW) burns at about 0.11 s and moves v3.
+        for k in 0..=5 {
+            let t = k as f64 * 0.02;
+            if k > 0 {
+                r471.advance(t).unwrap();
+                r673.advance(t).unwrap();
+            }
+            let at = format!("{mode} at {t:.2} s");
+            close(r471.v(1), v471, 1e-12, &format!("{at}, 471: CV at the setpoint"));
+            assert_eq!(exact_regime(&r471), Regime::Cv, "{at}, 471");
+            assert!(!r471.s().power_hold(7).is_free(), "{at}, 471: the chip held off");
+            close(r471.i(0), 0.0, 1e-9, &format!("{at}, 471: nothing delivered"));
+            close(r673.v(1), v673, 1e-12, &format!("{at}, 673: CV at the setpoint"));
+            assert_eq!(exact_regime(&r673), Regime::Cv, "{at}, 673");
+            assert!(!r673.s().power_hold(9).is_free(), "{at}, 673: the chip held off");
+            let want = (v673 - r673.v(3)) / 1442.958403632793 + v673 / 62695.06832422875;
+            rel(-r673.i(0), want, 1e-6, &format!("{at}, 673: the PSU's current, the chip off"));
+            close(-r673.i(0), 0.00587, 0.0001, &format!("{at}, 673: 5.87 mA"));
+        }
+    }
+}
+
+#[test]
+fn a_landing_that_each_clock_rise_recreates_declines_by_the_episode_guard() {
+    // Ruling R76 (b), cold 360 tpl 3, on the R53 list of known declines. A
+    // {13.57 V, 90 mA} PSU; a 74LS00 with vcc on the rail and its ground pin
+    // on node 4, which 0.52 uF couples to a -2.7 / 7.2 V, 141.5 Hz clock's
+    // node. At each clock rise the passes settle CV at 138.6 mA, past the
+    // limit, with the gate's floor edge (its ground plus 4.275 V, 12.71 V)
+    // under the setpoint; solved with the rail just above that edge the
+    // gate still draws 140 mA (the capacitor holds its ground pin at the
+    // instant), so the R74 landing holds it off. It is free again at the next
+    // host step, once the capacitor has lifted its ground pin past its 5.775
+    // V ceiling, and held again at the next rise: each hold shorter than a
+    // host step, the episode guard (rulings R51, R54 (a)) declines at the
+    // 51st, at 0.3604 s. cf1822c ran it to the end, CV at 138.6 mA past the
+    // limit at each rise; no edge-recreation exception is made (R76).
+    let mut p = program(7, vec![
+        fz(21, 0, &[1, 0], vec![13.56831830455205, 0.0899977823668638], vec![]),
+        fz(22, 1, &[3, 0], vec![141.5065553275765, 0.7890347499709739, 7.155483571452099, -2.651931692289305, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![733231.4588983348], vec![]),
+        fz(1, 3, &[4, 0], vec![3239.42258066058], vec![]),
+        fz(1, 4, &[5, 0], vec![253108.83426089876], vec![]),
+        fz(1, 5, &[6, 0], vec![3531.880989138582], vec![]),
+        fz(3, 6, &[0, 5], vec![4.3765694311503106e-5, 0.0, 0.0], vec![]),
+        fz(3, 7, &[4, 2], vec![5.182119295011528e-7, 0.0, 0.0], vec![]),
+        fz(4, 8, &[6, 3], vec![1.0], vec![]),
+        fz(1, 9, &[3, 0], vec![58.6667009582244], vec![]),
+        fz(1, 10, &[5, 4], vec![125.42986408656836], vec![]),
+        fz(1, 11, &[6, 0], vec![1.6834310474624419], vec![]),
+        fz(1, 12, &[3, 1], vec![3967.9963460410227], vec![]),
+        fz(1, 13, &[2, 6], vec![19.054717277859613], vec![]),
+        fz(50, 14, &[1, 4, 5, 5, 6, 0, 0, 6, 0, 0, 6, 0, 0, 6], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 8.205458880913924e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 15, &[6, 3], vec![273.9179801394844], vec![]),
+        fz(1, 16, &[6, 4], vec![284.5026685144939], vec![]),
+        fz(1, 17, &[4, 5], vec![525.9392291225133], vec![]),
+        fz(3, 18, &[6, 5], vec![1.514196511782389e-6, 0.0, 0.0], vec![]),
+        fz(4, 19, &[5, 0], vec![1.0], vec![]),
+        fz(1, 20, &[0, 0], vec![82.90049821089357], vec![]),
+        fz(1, 21, &[2, 3], vec![732.1053013942415], vec![]),
+        fz(90, 9, &[], vec![9.0, 1.6619880934246645, 58.6667009582244], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.40917973189663, 125.42986408656836], vec![]),
+        fz(90, 11, &[], vec![11.0, 13.9973619476481, 1.6834310474624419], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.00021690767417563642, 3967.9963460410227], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.06680377745880885, 19.054717277859613], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.002488637972988142, 273.9179801394844], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.07364110329693237, 284.5026685144939], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.0012481278815312088, 525.9392291225133], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.9771690809602595, 82.90049821089357], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p.options.integration = 1;
+    let mut rig = Rig::load(&p).unwrap();
+    let mut declined = None;
+    for k in 1..=250 {
+        if let Err(e) = rig.advance(k as f64 * 2e-3) {
+            declined = Some((format!("{e:?}"), rig.k.time()));
+            break;
+        }
+    }
+    let (e, t) = declined.expect("the episode guard declines");
+    assert!(e.contains("power hold") && e.contains("device 14") && e.contains("51 times"), "{e}");
+    assert!((0.358..0.3605).contains(&t), "declined after the instant at {t} s");
+}

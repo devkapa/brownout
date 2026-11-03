@@ -1013,6 +1013,47 @@ impl PartitionedSolver {
         }
     }
 
+    /// Ruling R74's trigger (`rail_loop`): a PSU with no rail capacitor
+    /// settled in CV past its limit in its own direction, and under its
+    /// setpoint a free rail IC's power edge; the highest such edge and the
+    /// ICs whose edge it is.
+    fn cv_past_limit_landing(&self, now: f64) -> Option<(f64, Vec<usize>)> {
+        let hub = self.hub.as_ref()?;
+        let (v, i_limit) = hub.psu_setpoint()?;
+        // With a rail capacitor the entry keeps the Newton's candidate and an
+        // edge landing is ruled under R68/R69, not here (cold 559 tpl 0 and
+        // 175 tpl 2: landed here, a 555 behind 380 uF slid to the episode
+        // guard where exact mode holds nothing).
+        if hub.c_rail > 0.0 {
+            return None;
+        }
+        if hub.state.reg != Regime::Cv || !(direction(v) * self.rail_draw_at(now, hub.state.u) > i_limit + rails::REACHED_REL * i_limit.max(1.0)) {
+            return None;
+        }
+        let dir = direction(v);
+        let mut best: Option<(f64, Vec<usize>)> = None;
+        for &pos in &hub.rail_ics {
+            let (d, ic) = &self.ics[pos as usize];
+            if ic.vcc.open || ic.gnd.open || !self.power_hold(*d).is_free() {
+                continue;
+            }
+            let (lo, hi) = (ic.vcc_min * 0.9, ic.vcc_max * 1.1);
+            let edges = match (ic.vcc.node == hub.node, ic.gnd.node == hub.node) {
+                (true, false) => [self.voltages[ic.gnd.node] + lo, self.voltages[ic.gnd.node] + hi],
+                (false, true) => [self.voltages[ic.vcc.node] - hi, self.voltages[ic.vcc.node] - lo],
+                _ => continue,
+            };
+            for e in edges.into_iter().filter(|&e| dir * e < v.abs()) {
+                match best.as_mut() {
+                    Some((b, list)) if (dir * e - dir * *b).abs() <= rails::REACHED_REL * e.abs().max(1.0) => list.push(*d),
+                    Some((b, _)) if dir * e < dir * *b => {}
+                    _ => best = Some((e, vec![*d])),
+                }
+            }
+        }
+        best
+    }
+
     /// The rails at which a free rail IC's power window flips (`rails::
     /// cc_entry_rail`): each window edge of a rail IC with one supply pin on
     /// the rail, the other read where it stands, as `direct_at` judges it. A
@@ -1510,7 +1551,27 @@ impl PartitionedSolver {
         }
         let passes = self.rail_passes(now, drivers, readers, Vec::new());
         self.hub.as_mut().unwrap().chase_end = false;
-        match passes? {
+        let passes = passes?;
+        // Ruling R74: passes that settle a PSU in CV past its limit with a
+        // free rail IC's power edge under the setpoint are no operating point
+        // (no current-limited supply holds one): the rail's curve keeps a
+        // chip whose drivers sit in a hub partition linearised at powered
+        // under its own window, so the entry's walk found no root at or
+        // below the setpoint there (cold 471 tpl 2 and 673 tpl 0: a 74LS00
+        // sourcing into a node below ground, CV at 190 and 76 mA on 55 and
+        // 23.5 mA PSUs). The CC point lies under the highest such edge,
+        // where those chips are off: a landing there, which the hold
+        // procedure takes (`hold_on_rail`'s landing rule). Only such a
+        // settled state triggers it; a pass that leaves CV past the limit on
+        // the way to a settled one does not. A general fix of the linearised
+        // curve (the hub partitions re-solved under trial rails, as exact
+        // mode's search does) is a later item.
+        if let hold::Passes::Settled(_) = passes {
+            if let Some((edge, ics)) = self.cv_past_limit_landing(now) {
+                return self.hold_on_rail(now, drivers, readers, &ics, format!("{} at {edge}", rails::EDGE_LANDING));
+            }
+        }
+        match passes {
             // Ruling R51 (b): a held chip is retried once per host step, as
             // classic's H8 retries it at its next, at the first event
             // re-solve (a pass that solved) or else at the horizon clamp; at
