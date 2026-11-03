@@ -1109,8 +1109,8 @@ const MICROBIT_EDGE_PIN_TO_SIM: Record<string, string> = {
 // Combinational IC kinds (their icState carries delay keys, and the 74HC14's
 // Schmitt hysteresis levels).
 export const COMBINATIONAL_IC_KINDS = new Set<string>([
-  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
-  "74hc14", "74hc138", "74ls47",
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls153", "74ls283",
+  "74ls245", "74hc14", "74hc138", "74ls47",
 ]);
 
 // Combinational kinds deliberately judged NOT provable as a single RC pole
@@ -1126,8 +1126,8 @@ export const RC_OUTPUT_EXCLUDED_COMBINATIONAL = new Set<string>([]);
 // every combinational kind appears here or in
 // RC_OUTPUT_EXCLUDED_COMBINATIONAL.
 export const RC_OUTPUT_IC_KINDS = new Set<string>([
-  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
-  "74hc14", "74hc138", "74ls47",
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls153", "74ls283",
+  "74ls245", "74hc14", "74hc138", "74ls47",
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
 ]);
@@ -1220,7 +1220,7 @@ const STATE_UPDATE_KINDS = new Set<string>([
 /** Component kinds whose switch cases can publish or mutate digital state. */
 const DIGITAL_UPDATE_KINDS = new Set<string>([
   "28c16", "28c256", "74hc138", "74hc14", "74hc165", "74hc595", "74hc74",
-  "74ls00", "74ls04", "74ls08", "74ls157", "74ls161", "74ls173", "74ls189",
+  "74ls00", "74ls04", "74ls08", "74ls153", "74ls157", "74ls161", "74ls173", "74ls189",
   "74ls245", "74ls283", "74ls32", "74ls47", "74ls86", "cd4017", "cd4060",
   "cd4511", "clock", "clock_gen", "hd44780", "l293d", "lm393", "max7219",
   "ne555", "pulse_gen", "pulse_source", "tb6612", "uln2003", "uln2803",
@@ -7228,6 +7228,7 @@ export class SimEngine {
       case "74ls32":
       case "74ls86":
       case "74ls157":
+      case "74ls153":
       case "74ls283":
       case "74ls245":
       case "74hc14":
