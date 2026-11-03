@@ -669,7 +669,7 @@ impl PartitionedSolver {
             .collect()
     }
 
-    /// The holds the stepped solver's seeds and steps took (default mode,
+    /// The holds the stepped solver's seeds and steps took (both modes,
     /// `stepped::hold_around`), entered in the table (journaled and counted
     /// as any hold, each one's episode counted as on the rail).
     pub(super) fn take_stepped_holds(&mut self) -> Result<(), String> {

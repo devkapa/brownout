@@ -3591,8 +3591,7 @@ Constants, all from P3:35-38 unless marked new:
      at 5 V, 40 mA
      (`a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_without_one`,
      `a_555_at_its_floor_on_a_cc_rail_capacitor_is_held_once_and_the_runs_complete`).
-     Exact mode searches no stepped rail partition either (Rails point
-     9). Within a segment the draw is
+     Within a segment the draw is
      taken to rise with the rail. Below every edge, a Newton that cannot
      reach the lowest segment's root from its top has it bracketed by steps
      doubling down (a HIGH stage into a node below ground draws more as the
@@ -3944,24 +3943,50 @@ Constants, all from P3:35-38 unless marked new:
      setpoint (ruling G; the fine reference shared defect G): the CC
      solution stands when no free IC with a supply pin on the rail has a
      window edge between it and the setpoint; otherwise the draw curve is
-     read by trial solves of a static rail partition with the rail held at a
+     read by trial solves of the rail's partition with the rail held at a
      trial voltage (the CV stamp there; no hold procedure or release runs in
      a trial), walked down from the setpoint as default mode walks it. A
      segment holding the root has it found by the Illinois method on the
      trials and the CC solve then runs from the trial at it; an edge landing
      re-solves in CC from the state before the trials with that edge's ICs
      put to the iterated partition's hold procedure (point 1a), as if its
-     Newton had seen them alternate (`StaticPartitionSolver::edge_hold`),
-     and a hold procedure that cannot take it (a probe that fails to solve)
-     leaves the state before the search, the clamp's CV as before, rather
-     than decline the instant (cold 794 tpl 4); a
-     search that keeps the CC solution puts every piece of state back, bit
-     for bit. A CC exit whose CV draw is past the limit enters again at the
+     Newton had seen them alternate (`StaticPartitionSolver::edge_hold`).
+     Where that cannot take the landing, and always on a stepped rail
+     partition, whose Newton runs no hold procedure, the owner runs point 1a
+     on its own table (`exact_edge_hold`): probed held powered, probed held
+     unpowered, then held off, each a re-solve of the partitions the chips
+     touch. The landing itself shows they starve (the trial just under the
+     edge read the draw within the limit), so a powered probe that fails to
+     solve takes them as starving with their supply read at that trial's
+     rail (REF, cold 794 tpl 4: a 555 held powered has no CC solution its
+     Newton reaches, and the clamp then kept CV at 1.28 A on a 455 mA PSU
+     through every clock-low phase). Only a procedure that cannot take it
+     either leaves the state before the search, rather than decline the
+     instant; a search that keeps the CC solution puts every piece of state
+     back, bit for bit. A stepped rail partition's CC solve at the entry can
+     fail outright (the chip on above its edge, off below); the search then
+     runs from the CV state with no Newton root to keep, and fails with that
+     solve only if it places nothing. A CC exit whose CV draw is past the limit enters again at the
      same instant through the same search (a static rail partition only:
      a stepped one's CV draw just after its exit is its rail capacitors'
      current); left in CV, nothing re-solved the rail's partition (cold 267
-     tpl 2). A stepped rail partition (a rail capacitor) is not searched:
-     each re-solve restarts its step, and its Newton runs no hold procedure. Such a board re-solves twice at each
+     tpl 2). A stepped rail partition is searched as a static one is, each
+     trial a re-solve that restarts its step at the instant (REF, cold 789
+     tpl 3: unsearched, a 74LS00 sourcing into a clock's low phase held CV at
+     147 mA on a 107 mA PSU, where the landing holds it off at 27 mA). A chip
+     held there is retried by the owner (ruling R51 (b): once per host step,
+     or once its supply passes its release level, `exact_retry_stepped`):
+     probed free with the regime rules and the entry's search run on the
+     probe, it is free if it carries itself there, else the state goes back
+     bit for bit. A stepped partition's seed or minimum step whose Newton
+     fails with a gated IC's verdict alternating runs point 1a inside the
+     stepped solver (`stepped::hold_around`: probed powered, probed
+     unpowered, held off), the holds entered in the owner's table after the
+     call (`take_stepped_holds`) and retried as above (REF, cold 656 tpl 3:
+     a 555 fed through 115 ohm from a 2.1 V rail draws 22 mA at its 1.8 V
+     floor where its feed carries 1.7 mA; it slides along its edge, and the
+     episode guard declines it, ruling R54 (a), where the seed's Newton had
+     failed outright). Such a board re-solves twice at each
      commit while its draw stays over the limit: about 2.7 s of CPU for 10
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
      the rail). A back-fed PSU in CV sinks without limit, as classic's model

@@ -1833,7 +1833,7 @@ impl PartitionedSolver {
         self.stepped.cc = None;
         readers.extend(stepped?);
         self.end_dynamic_writes();
-        Ok(())
+        self.take_stepped_holds()
     }
 
     /// The device indices of the rail ICs at positions `ks` in `rail_ics`.
@@ -2350,6 +2350,8 @@ impl PartitionedSolver {
             if !stepped.is_empty() {
                 let result = self.stepped.catch_up(&stepped, now, &drivers, &self.live_params, &self.voltages);
                 self.on_error(result)?;
+                let held = self.take_stepped_holds();
+                self.on_error(held)?;
             }
         }
         let was_ramping = self.wave.sources[w].ramp.is_some();
@@ -2620,6 +2622,9 @@ impl PartitionedSolver {
             _ => self.stepped.committed(p).map(|(t, _)| t).filter(|&t| solved || t > self.exact.as_ref().unwrap().t_last),
         };
         let Some(at) = at else { return self.plan_deferred(drivers) };
+        if at == now {
+            self.exact_retry_stepped(p, now, drivers, readers)?;
+        }
         let u = self.voltages[node];
         let draw = -self.exact_hub_current();
         let e = self.exact.as_mut().unwrap();
@@ -2675,7 +2680,28 @@ impl PartitionedSolver {
         }
         self.push_exact_stamp();
         if transition {
-            self.exact_resolve(p, now, drivers, readers)?;
+            // A stepped rail partition's CC solve runs no hold procedure, so
+            // where a chip's draw takes the rail across its power edge its
+            // Newton can fail outright (the chip on above the edge, off
+            // below): the entry's search then reads the draw curve from the
+            // CV state by its trials, whose rail is held, and places the
+            // operating point or the landing itself.
+            let mut searched = false;
+            match (entered, self.partition_kinds[p]) {
+                (Some((v, i_limit)), kind) if kind != PartitionKind::Static => {
+                    let before = (self.snapshot(), self.dynamic_snapshot());
+                    let mut cc_readers = Vec::new();
+                    match self.exact_resolve(p, now, drivers, &mut cc_readers) {
+                        Ok(()) => readers.extend(cc_readers),
+                        Err(err) => {
+                            self.exact_restore(before)?;
+                            self.exact_cc_entry(p, now, drivers, readers, v, i_limit, Some(err))?;
+                            searched = true;
+                        }
+                    }
+                }
+                _ => self.exact_resolve(p, now, drivers, readers)?,
+            }
             // A CC exit whose CV draw is past the limit was no exit: the CC
             // solution passed the setpoint only on another power state's
             // draw (a chip powered only inside its window draws nothing past
@@ -2694,14 +2720,14 @@ impl PartitionedSolver {
                     _ => None,
                 }
             });
-            if let Some((v, i_limit)) = entered {
+            if let Some((v, i_limit)) = entered.filter(|_| !searched) {
                 let e = self.exact.as_mut().unwrap();
                 if e.reg == Regime::Cv {
                     e.reg = Regime::Cc;
                     self.push_exact_stamp();
                     self.exact_resolve(p, now, drivers, readers)?;
                 }
-                self.exact_cc_entry(p, now, drivers, readers, v, i_limit)?;
+                self.exact_cc_entry(p, now, drivers, readers, v, i_limit, None)?;
             }
             // The clamp, for a draw that does not rise with the rail: an IC
             // powers off past its window and draws nothing there, so the CC
@@ -2739,6 +2765,7 @@ impl PartitionedSolver {
                 let pre = Rc::clone(&self.driver_snapshot);
                 readers.extend(self.stepped.resolve_dirty(&[p], now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
                 self.end_dynamic_writes();
+                self.take_stepped_holds()?;
             }
         }
         Ok(())
@@ -2760,13 +2787,20 @@ impl PartitionedSolver {
     /// from the trial at it; an edge where the draw falls within the limit
     /// only across it puts its ICs to the hold procedure (W1c point 1a) in
     /// the CC solve. A search that keeps the Newton's root puts every piece
-    /// of state back as it was, bit for bit. Only a static rail partition is
-    /// searched: a stepped one restarts its step at each re-solve, and holds
-    /// no hold procedure.
-    fn exact_cc_entry(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, v: f64, i_limit: f64) -> Result<(), String> {
-        if self.partition_kinds[p] != PartitionKind::Static {
-            return Ok(());
-        }
+    /// of state back as it was, bit for bit. A stepped rail partition is
+    /// searched the same way, each trial a re-solve at the instant (its
+    /// step restarts there, as at any regime transition), and a landing on
+    /// it runs the hold procedure on the owner's table
+    /// (`Self::exact_edge_hold`), which a stepped partition has no copy of:
+    /// left unsearched, a 74LS00 sourcing into a clock's low phase held CV
+    /// at 147 mA on a 107 mA PSU (cold 789 tpl 3) where the landing holds it
+    /// off at 27 mA. `newton` is the entry's CC solve's failure when it had
+    /// none (a stepped partition's, the state the CV one): every rail at or
+    /// below the setpoint is searched, and a search that places nothing
+    /// fails with it.
+    #[allow(clippy::too_many_arguments)]
+    fn exact_cc_entry(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, v: f64, i_limit: f64, newton: Option<String>) -> Result<(), String> {
+        let stepped = self.partition_kinds[p] != PartitionKind::Static;
         let (node, local) = {
             let e = self.exact.as_ref().unwrap();
             (e.node, e.local)
@@ -2774,7 +2808,7 @@ impl PartitionedSolver {
         let dir = direction(v);
         let top = v.abs();
         let w_cc = dir * self.voltages[node];
-        let floor = if w_cc <= top { w_cc } else { f64::NEG_INFINITY };
+        let floor = if w_cc <= top && newton.is_none() { w_cc } else { f64::NEG_INFINITY };
         // Each free IC with one supply pin on the rail: its window's edges as
         // rails, the other pin read where it stands.
         let mut edges: Vec<(f64, usize)> = Vec::new();
@@ -2802,7 +2836,12 @@ impl PartitionedSolver {
         // hands them all on, the final solve moving them only from there.
         let mut moved = Vec::new();
         let excess = |this: &mut Self, w: f64, moved: &mut Vec<DeviceId>| -> Option<f64> {
-            this.static_solver.set_exact(Some(ExactStamp { partition: p, local, kind: ExactKind::Row { value: dir * w } }));
+            let stamp = Some(ExactStamp { partition: p, local, kind: ExactKind::Row { value: dir * w } });
+            if stepped {
+                this.stepped.set_exact(stamp);
+            } else {
+                this.static_solver.set_exact(stamp);
+            }
             this.static_solver.trial = true;
             let solved = this.exact_resolve(p, now, drivers, moved);
             this.static_solver.trial = false;
@@ -2810,7 +2849,7 @@ impl PartitionedSolver {
         };
         enum Found {
             Root(f64, f64),
-            Edge(Vec<usize>),
+            Edge(Vec<usize>, f64),
             Below(f64),
         }
         let mut hi = top;
@@ -2846,7 +2885,7 @@ impl PartitionedSolver {
             }
             match excess(self, dn, &mut moved) {
                 Some(x) if x <= 0.0 => {
-                    found = Some(Found::Edge(devices));
+                    found = Some(Found::Edge(devices, dn));
                     break;
                 }
                 Some(_) => hi = dn,
@@ -2857,7 +2896,7 @@ impl PartitionedSolver {
             }
         }
         if failed {
-            return self.exact_restore(checkpoint);
+            return self.exact_unplaced(checkpoint, newton);
         }
         if found.is_none() && floor == f64::NEG_INFINITY {
             found = Some(Found::Below(hi));
@@ -2867,7 +2906,7 @@ impl PartitionedSolver {
                 // The segment's root by the Illinois method on the trials'
                 // excess; the CC solve from the last trial polishes it.
                 let (mut a, mut b) = (w_in, w_out);
-                let (Some(mut fa), Some(mut fb)) = (excess(self, a, &mut moved), excess(self, b, &mut moved)) else { return self.exact_restore(checkpoint) };
+                let (Some(mut fa), Some(mut fb)) = (excess(self, a, &mut moved), excess(self, b, &mut moved)) else { return self.exact_unplaced(checkpoint, newton) };
                 let mut side = 0;
                 for _ in 0..100 {
                     if (b - a).abs() <= rails::RAIL_NEWTON_TOL * a.abs().max(1.0) || fa == 0.0 {
@@ -2875,7 +2914,7 @@ impl PartitionedSolver {
                     }
                     let c = if fb != fa { b - fb * (b - a) / (fb - fa) } else { 0.5 * (a + b) };
                     let c = if c > a.min(b) && c < a.max(b) { c } else { 0.5 * (a + b) };
-                    let Some(fc) = excess(self, c, &mut moved) else { return self.exact_restore(checkpoint) };
+                    let Some(fc) = excess(self, c, &mut moved) else { return self.exact_unplaced(checkpoint, newton) };
                     if fc <= 0.0 {
                         (a, fa) = (c, fc);
                         if side == -1 {
@@ -2895,23 +2934,32 @@ impl PartitionedSolver {
                 self.push_exact_stamp();
                 self.exact_resolve(p, now, drivers, readers)
             }
-            Some(Found::Edge(devices)) => {
-                // A hold procedure that cannot take the landing (a probe that
-                // fails to solve) leaves the CC solution as the search found
-                // it, as before the search: no instant declines for it (cold
-                // 794 tpl 4 did, `-4`, where default mode runs).
+            Some(Found::Edge(devices, dn)) => {
+                // The hold procedure from the CC solution as the search found
+                // it: a static partition's own (`edge_hold`) first, and where
+                // that cannot take the landing, or for a stepped partition,
+                // the owner's (`Self::exact_edge_hold`). Only one that cannot
+                // take it either leaves the CC solution, and with it the
+                // clamp's CV (cold 794 tpl 4 did at every clock-low phase:
+                // a 555 held powered by the probe has no CC solution its
+                // Newton reaches, and the PSU delivered 1.28 A in CV
+                // against a 455 mA limit).
                 self.exact_restore(checkpoint)?;
-                let before = (self.snapshot(), self.dynamic_snapshot());
-                let mut held_readers = Vec::new();
-                self.static_solver.edge_hold = devices;
-                let held = self.exact_resolve(p, now, drivers, &mut held_readers);
-                self.static_solver.edge_hold.clear();
-                match held {
-                    Ok(()) => {
+                if !stepped {
+                    let before = (self.snapshot(), self.dynamic_snapshot());
+                    let mut held_readers = Vec::new();
+                    self.static_solver.edge_hold = devices.clone();
+                    let held = self.exact_resolve(p, now, drivers, &mut held_readers);
+                    self.static_solver.edge_hold.clear();
+                    if held.is_ok() {
                         readers.extend(held_readers);
-                        Ok(())
+                        return Ok(());
                     }
-                    Err(_) => self.exact_restore(before),
+                    self.exact_restore(before)?;
+                }
+                match self.exact_edge_hold(p, now, drivers, readers, &devices, dir * dn)? {
+                    true => Ok(()),
+                    false => self.exact_unplaced((self.snapshot(), self.dynamic_snapshot()), newton),
                 }
             }
             Some(Found::Below(w)) => {
@@ -2923,8 +2971,15 @@ impl PartitionedSolver {
                 self.push_exact_stamp();
                 self.exact_resolve(p, now, drivers, readers)
             }
-            None => self.exact_restore(checkpoint),
+            None => self.exact_unplaced(checkpoint, newton),
         }
+    }
+
+    /// A search that placed nothing: the state before it, and the entry's
+    /// own CC failure when there was one.
+    fn exact_unplaced(&mut self, checkpoint: ((Vec<f64>, Vec<f64>), Box<dyn std::any::Any>), newton: Option<String>) -> Result<(), String> {
+        self.exact_restore(checkpoint)?;
+        newton.map_or(Ok(()), Err)
     }
 
     /// Puts the solver back at `checkpoint` and the exact stamp at the hub's.
@@ -2933,6 +2988,255 @@ impl PartitionedSolver {
         self.dynamic_restore(checkpoint.1);
         self.push_exact_stamp();
         Ok(())
+    }
+
+    /// Re-solves partitions `parts` of exact mode at `now`, the rail's `p`
+    /// last, so it solves against the rest as they now stand.
+    fn exact_resolve_set(&mut self, p: usize, mut parts: Vec<usize>, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        parts.sort_unstable();
+        parts.dedup();
+        for q in parts.into_iter().filter(|&q| q != p) {
+            self.exact_resolve(q, now, drivers, readers)?;
+        }
+        self.exact_resolve(p, now, drivers, readers)
+    }
+
+    /// W1c point 1a on a stepped exact rail partition `p` whose CC operating
+    /// point landed on the power edge of rail ICs `devices` (ruling G), the
+    /// CC stamp in place: the static solver runs it inside its own Newton
+    /// (`edge_hold`), a stepped partition on the owner's table. Probed held
+    /// powered, the ones reading unpowered there starve themselves; probed
+    /// held unpowered for the drop; then solved with them held off and the
+    /// rest as they were. The landing is itself the evidence that they
+    /// starve: the search read the draw past the limit just above the edge
+    /// and within it at `u_dn` just below. So a powered probe that fails to
+    /// solve (a chip held powered whose draw no CC Newton reaches) takes
+    /// them all as starving there, their supply read at `u_dn`. A procedure
+    /// that cannot take the landing (another probe that fails, or none
+    /// starving) leaves the CC solution as the search found it, every piece
+    /// of state back bit for bit, and returns false.
+    fn exact_edge_hold(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, devices: &[usize], u_dn: f64) -> Result<bool, String> {
+        let checkpoint = (self.snapshot(), self.dynamic_snapshot());
+        let counts = self.hold_counts;
+        let mut moved = Vec::new();
+        match self.exact_edge_hold_steps(p, now, drivers, &mut moved, devices, u_dn) {
+            Ok(Some(starving)) => {
+                // Each held IC's episode counts, as on the rail; past the
+                // guard the instant declines.
+                for d in starving {
+                    let episode = self.episode(d).held(now);
+                    self.set_episode(d, episode)?;
+                }
+                readers.extend(moved);
+                Ok(true)
+            }
+            _ => {
+                self.hold_counts = counts;
+                self.exact_restore(checkpoint).map(|()| false)
+            }
+        }
+    }
+
+    /// The steps of [`Self::exact_edge_hold`]: the ICs it held off, or `None`
+    /// when none starved.
+    fn exact_edge_hold_steps(&mut self, p: usize, now: f64, drivers: &[Driver], moved: &mut Vec<DeviceId>, devices: &[usize], u_dn: f64) -> Result<Option<Vec<usize>>, String> {
+        let before: Vec<digital::power::PowerHold> = devices.iter().map(|&d| self.power_hold(d)).collect();
+        let supply_of = |this: &Self, d: usize| hold::supply(&this.ics[this.ic_position[d] as usize].1, &this.voltages);
+        let start = (self.snapshot(), self.dynamic_snapshot());
+        let mut parts = Vec::new();
+        for &d in devices {
+            parts.extend(self.set_power_hold(d, hold::probe(true)).into_iter().map(|q| q.0 as usize));
+        }
+        let mut probe_moved = Vec::new();
+        let starving: Vec<(usize, f64)> = if self.exact_resolve_set(p, parts, now, drivers, &mut probe_moved).is_ok() {
+            moved.extend(probe_moved);
+            devices
+                .iter()
+                .filter(|&&d| {
+                    let ic = &self.ics[self.ic_position[d] as usize].1;
+                    !digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node])
+                })
+                .map(|&d| (d, supply_of(self, d)))
+                .collect()
+        } else {
+            self.exact_restore(start)?;
+            let node = self.exact.as_ref().unwrap().node;
+            devices
+                .iter()
+                .map(|&d| {
+                    let ic = &self.ics[self.ic_position[d] as usize].1;
+                    let s = if ic.vcc.node == node { u_dn - self.voltages[ic.gnd.node] } else { self.voltages[ic.vcc.node] - u_dn };
+                    (d, s)
+                })
+                .collect()
+        };
+        if starving.is_empty() {
+            return Ok(None);
+        }
+        let mut parts = Vec::new();
+        for &(d, _) in &starving {
+            parts.extend(self.set_power_hold(d, hold::probe(false)).into_iter().map(|q| q.0 as usize));
+        }
+        self.exact_resolve_set(p, parts, now, drivers, moved)?;
+        let mut parts = Vec::new();
+        for (k, &d) in devices.iter().enumerate() {
+            let held = match starving.iter().find(|e| e.0 == d) {
+                Some(&(_, v_on)) => {
+                    moved.push(DeviceId(d as u32));
+                    hold::held_off(&self.ics[self.ic_position[d] as usize].1, v_on, supply_of(self, d), now)
+                }
+                None => before[k],
+            };
+            parts.extend(self.set_power_hold(d, held).into_iter().map(|q| q.0 as usize));
+        }
+        self.exact_resolve_set(p, parts, now, drivers, moved)?;
+        Ok(Some(starving.into_iter().map(|e| e.0).collect()))
+    }
+
+    /// Ruling R51 (b) for the ICs held off on a stepped exact rail partition
+    /// `p` (`Self::exact_edge_hold`, or a seed's hold, `stepped::seed_holding`;
+    /// a static partition retries its own, in its solve): once per host step, or at any committed step once its
+    /// supply passes its release level, a held IC is probed free with the
+    /// regime rules run on the probe, the CC entry's search included. One
+    /// that carries itself there (free and powered, or reading unpowered
+    /// both held and free) is free again; the rest stay held, the solver
+    /// back as it was bit for bit when nothing is freed (as `retry_on_rail`,
+    /// a probe that asked: a stepped partition restarts its step at each
+    /// re-solve), one still starving past its level held at a further one
+    /// (`hold::refreshed`). Left unretried, a chip held at a clock's low
+    /// phase stayed off through every later high one.
+    fn exact_retry_stepped(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        use digital::power::{HoldKind, PowerHold};
+        if self.holds_active == 0 || self.partition_kinds[p] == PartitionKind::Static {
+            return Ok(());
+        }
+        let (node, v, i_limit) = match self.exact.as_ref() {
+            Some(e) => match e.kind {
+                HubKind::Psu { v, i_limit } => (e.node, v, i_limit),
+                _ => return Ok(()),
+            },
+            None => return Ok(()),
+        };
+        let held: Vec<(usize, PowerHold, f64)> = self
+            .ics
+            .iter()
+            .filter(|(_, ic)| {
+                let here = |n: usize| self.partition_of_node(n).is_some_and(|q| q.0 as usize == p);
+                ((ic.vcc.node == node) != (ic.gnd.node == node)) || here(ic.vcc.node) || here(ic.gnd.node)
+            })
+            .filter_map(|(d, ic)| {
+                let was = self.power_hold(*d);
+                let later = was.release.is_some_and(|r| r.since < now);
+                let s_off = hold::supply(ic, &self.voltages);
+                let due = self.retry_armed || was.release.is_some_and(|r| hold::passed(r, s_off));
+                (was.kind == HoldKind::Off && later && due).then_some((*d, was, s_off))
+            })
+            .collect();
+        if held.is_empty() {
+            return Ok(());
+        }
+        self.take_retry();
+        let checkpoint = (self.snapshot(), self.dynamic_snapshot());
+        let counts = self.hold_counts;
+        let mut moved = Vec::new();
+        let probed = self.exact_retry_probe(p, now, drivers, &mut moved, &held, v, i_limit);
+        let verdicts: Vec<(bool, PowerHold)> = held
+            .iter()
+            .map(|&(d, was, s_off)| {
+                let ic = &self.ics[self.ic_position[d] as usize].1;
+                let low = |s: f64| !digital::power::powered(ic, s, 0.0);
+                match &probed {
+                    Ok(Some(s_on)) => {
+                        let s_on = s_on.iter().find(|e| e.0 == d).map_or(f64::NAN, |e| e.1);
+                        let carried = self.power_hold(d).is_free() && !low(hold::supply(ic, &self.voltages));
+                        let free = carried || low(s_off) && low(s_on);
+                        let after = match was.release {
+                            Some(release) if !free && hold::passed(release, s_off) && s_on.is_finite() => hold::refreshed(ic, release, s_on, s_off, now),
+                            _ => was,
+                        };
+                        (free, after)
+                    }
+                    _ => (false, was),
+                }
+            })
+            .collect();
+        if verdicts.iter().all(|v| v.0) {
+            for &(d, _, _) in &held {
+                self.release_episode(d, now)?;
+                moved.push(DeviceId(d as u32));
+            }
+            readers.extend(moved);
+            return Ok(());
+        }
+        self.hold_counts = counts;
+        self.exact_restore(checkpoint)?;
+        let mut parts = Vec::new();
+        let mut freed = false;
+        for (&(d, was, _), &(free, after)) in held.iter().zip(&verdicts) {
+            if free {
+                self.release_episode(d, now)?;
+                readers.push(DeviceId(d as u32));
+                parts.extend(self.set_power_hold(d, PowerHold::FREE).into_iter().map(|q| q.0 as usize));
+                freed = true;
+            } else if after != was {
+                // Off to Off at a further level: the same stamps, uncounted.
+                self.write_power_hold(d, after);
+            }
+        }
+        if freed {
+            self.exact_resolve_set(p, parts, now, drivers, readers)?;
+        }
+        Ok(())
+    }
+
+    /// The probe of [`Self::exact_retry_stepped`]: `held` freed, the rail's
+    /// partition re-solved, and the regime rules run on it as
+    /// `exact_after_publish` runs them. Each one's supply right after the
+    /// free solve, before the rules moved the rail; `None` when a solve
+    /// failed.
+    #[allow(clippy::too_many_arguments)]
+    fn exact_retry_probe(&mut self, p: usize, now: f64, drivers: &[Driver], moved: &mut Vec<DeviceId>, held: &[(usize, digital::power::PowerHold, f64)], v: f64, i_limit: f64) -> Result<Option<Vec<(usize, f64)>>, String> {
+        let mut parts = Vec::new();
+        for &(d, _, _) in held {
+            parts.extend(self.set_power_hold(d, digital::power::PowerHold::FREE).into_iter().map(|q| q.0 as usize));
+        }
+        if self.exact_resolve_set(p, parts, now, drivers, moved).is_err() {
+            return Ok(None);
+        }
+        let s_on: Vec<(usize, f64)> = held.iter().map(|&(d, _, _)| (d, hold::supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages))).collect();
+        let dir = direction(v);
+        let node = self.exact.as_ref().unwrap().node;
+        let reg = self.exact.as_ref().unwrap().reg;
+        let solved = match reg {
+            Regime::Cv if dir * self.exact_rail_draw() > i_limit => {
+                self.exact.as_mut().unwrap().reg = Regime::Cc;
+                self.push_exact_stamp();
+                let mut cc = Vec::new();
+                let before = (self.snapshot(), self.dynamic_snapshot());
+                match self.exact_resolve(p, now, drivers, &mut cc) {
+                    Ok(()) => {
+                        moved.extend(cc);
+                        self.exact_cc_entry(p, now, drivers, moved, v, i_limit, None)
+                    }
+                    Err(err) => self.exact_restore(before).and_then(|()| self.exact_cc_entry(p, now, drivers, moved, v, i_limit, Some(err))),
+                }
+            }
+            Regime::Cc if dir * self.voltages[node] >= v.abs() => Ok(()),
+            _ => Ok(()),
+        };
+        if solved.is_err() {
+            return Ok(None);
+        }
+        // The compliance clamp, as after any entry or exit.
+        let e = self.exact.as_ref().unwrap();
+        if (e.reg == Regime::Cc && compliance_keeps_cv(self.voltages[node], v)) || (reg == Regime::Cc && dir * self.voltages[node] >= v.abs()) {
+            self.exact.as_mut().unwrap().reg = Regime::Cv;
+            self.push_exact_stamp();
+            if self.exact_resolve(p, now, drivers, moved).is_err() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(s_on))
     }
 
     /// Plans the battery partition's next step from the stamp just set

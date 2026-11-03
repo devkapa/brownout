@@ -9327,16 +9327,15 @@ fn a_555_whose_output_feeds_its_own_supply_converges_at_a_low_supply() {
     let board = |exact_mode: bool| { let mut p = program(6, cold_1120_tpl2()); p.digital_slot_count = 32; p.options.integration = 1; p.options.no_rail_shortcut = exact_mode; p };
     let toggles = [(0.41324546951082397, 14), (0.601000495581227, 14), (0.6806880874994053, 14)];
     let stops = [1.35e-5, 0.1, 0.41324546951082397, 0.601000495581227, 0.6806880874994053, 1.2];
-    match sweep_run(&board(false), &toggles, &stops) {
-        Ok(e) => assert!(e.stat(25) >= 1.0, "held off at least once"),
-        Err((er, t)) => panic!("{} at {t}: {}", er.code, er.message),
-    }
     // Exact mode's stepped seed alternates the same gate (powered at a 2.31 V
-    // supply, 0.16 V after), and a stepped partition's Newton runs no hold
-    // (W1c point 1a): its `-4` stands, at the same instant as before.
-    let Err((er, t)) = sweep_run(&board(true), &toggles, &stops) else { panic!("exact mode's stepped H8 now passes: update this pin") };
-    assert_eq!(er.code, -4);
-    assert!((t - 1.023e-5).abs() < 1e-8 && er.message.starts_with("stepped: Newton did not converge"), "{t} {}", er.message);
+    // supply, 0.16 V after); its Newton now runs the hold too (REF,
+    // `stepped::hold_around`), where it declined `-4` at 10.23 us.
+    for exact_mode in [false, true] {
+        match sweep_run(&board(exact_mode), &toggles, &stops) {
+            Ok(e) => assert!(e.stat(25) >= 1.0, "exact {exact_mode}: held off at least once"),
+            Err((er, t)) => panic!("exact {exact_mode}: {} at {t}: {}", er.code, er.message),
+        }
+    }
 }
 
 #[test]
@@ -13582,4 +13581,304 @@ fn stepped_resistors_idle_until_a_fuse_burns_take_no_damage_from_before_it() {
             assert!(err.code == -4 && err.message.contains("sliding episode"), "the episode guard: {} {}", err.code, err.message);
         }
     }
+}
+
+#[test]
+fn exact_mode_searches_a_stepped_rail_partition_and_holds_a_chip_at_its_landing() {
+    // REF (1), ruling R69: exact mode's CC entry skipped a stepped rail
+    // partition. PSU 5 V, 50 mA; 125 ohm on the rail; a 74LS00 with 1A, 1B
+    // and 1Y on the rail; 1 k from the rail to 1 uF (node 3, from 0 V), which
+    // makes the rail's partition stepped. By hand: powered, inside [4.275,
+    // 5.775] V, 1Y LOW sinks 32 mA, so at the setpoint the draw is 40 + 32 +
+    // (5 - vc)/1k >= 72 mA, past the limit; through the window it stays at
+    // or above 4.275/125 + 32 = 66.2 mA, and under the floor, the chip off,
+    // it is at most 34.2 + 4.3 = 38.5 mA: the draw meets the limit only
+    // across the power edge, the landing. The chip held off, the PSU is in
+    // CV at 5 V delivering 5/125 + (5 - vc)/1k, the capacitor charging on
+    // tau = 1 ms: vc = 5 (1 - e^(-t/tau)). Before the fix exact mode held
+    // CV with the chip free, 72 mA and more through a 50 mA supply.
+    let board = || window_chip_rail(5.0, 0.05, 125.0, 0, [1, 1], 1, vec![resistor(3, 1, 3, 1e3), capacitor(4, 3, 0, 1e-6, 0.0)]);
+    let mut rig = Rig::load(&exact(board())).unwrap();
+    let p = rig.s().exact.as_ref().unwrap().partition;
+    assert_ne!(rig.s().partition_kinds[p], PartitionKind::Static, "the rail's partition steps");
+    for k in 1..=8 {
+        let t = k as f64 * 0.5e-3;
+        rig.advance(t).unwrap();
+        let at = format!("at {:.1} ms", t * 1e3);
+        close(rig.v(1), 5.0, 1e-12, &format!("{at}: CV at the setpoint"));
+        assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+        assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+        let vc = 5.0 * (1.0 - (-t / 1e-3).exp());
+        close(rig.v(3), vc, 0.02 * 5.0, &format!("{at}: the capacitor charging on 1 ms"));
+        // The rail's KCL with the chip off: the resistor and the RC branch.
+        close(rig.i(0), -(5.0 / 125.0 + (5.0 - rig.v(3)) / 1e3), 1e-9, &format!("{at}: the PSU's current"));
+        assert!(-rig.i(0) <= 0.05 * (1.0 + 1e-9), "{at}: within the limit, {} A", -rig.i(0));
+    }
+}
+
+/// Cold fuzz 84 tpl 1 as its sweep ran it (`f5e gen 84 1`): a {10.65 V,
+/// 92 mA} PSU with 2.65 uF on the rail and an LED from the rail to a 292 Hz
+/// clock's node (-3.31 / 9.51 V), no series resistance.
+fn ref_cold_84_tpl1() -> Program {
+    let mut p = program(
+        6,
+        vec![
+            fz(21, 0, &[1, 0], vec![10.647486522334537, 0.0923007229999578], vec![]),
+            fz(22, 1, &[3, 0], vec![292.4270639400117, 0.6067396404390497, 9.512811525710633, -3.3131884104269833, 0.0], vec![8.0]),
+            fz(2, 2, &[4, 3], vec![1.0658932999473136], vec![]),
+            fz(1, 3, &[2, 0], vec![11183.931130067276], vec![]),
+            fz(1, 4, &[5, 0], vec![3653.7769026175633], vec![]),
+            fz(3, 5, &[1, 0], vec![2.654722241109152e-6, 0.0, 0.0], vec![]),
+            fz(1, 6, &[2, 3], vec![22.13610172025595], vec![]),
+            fz(1, 7, &[2, 3], vec![84817.38849207966], vec![]),
+            fz(1, 8, &[3, 5], vec![8.115792481404343], vec![]),
+            fz(1, 9, &[4, 5], vec![104.78146855709932], vec![]),
+            fz(30, 10, &[1, 3], vec![2.6844845184488806, 2.2666570131156947, 0.02805793538661563, 0.0, 0.0, 0.0], vec![]),
+            fz(1, 11, &[1, 1], vec![123.25751103521999], vec![]),
+            fz(50, 12, &[1, 0, 5, 3, 5, 0, 0, 0, 0, 0, 0, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.5215933255689305e-7], vec![0.0; 13]),
+            fz(1, 13, &[5, 1], vec![258.85338726766065], vec![]),
+            fz(1, 14, &[0, 1], vec![131.22013358699968], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.10039255154394434, 22.13610172025595], vec![]),
+            fz(90, 7, &[], vec![7.0, 1.144579996054986e-5, 84817.38849207966], vec![]),
+            fz(90, 8, &[], vec![8.0, 29.322249323215566, 8.115792481404343], vec![]),
+            fz(90, 9, &[], vec![9.0, 0.004031042336012474, 104.78146855709932], vec![]),
+            fz(90, 11, &[], vec![11.0, 0.04323459645416291, 123.25751103521999], vec![]),
+            fz(90, 13, &[], vec![13.0, 0.2251908463627935, 258.85338726766065], vec![]),
+            fz(90, 14, &[], vec![14.0, 0.003338164034755094, 131.22013358699968], vec![]),
+        ],
+    );
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn exact_mode_closes_a_stepped_step_that_ends_at_a_clock_edge_with_its_own_end_drive() {
+    // REF (4), cold 84 tpl 1 in exact mode, the LED in the stepped rail
+    // partition. By hand (ruling R68's analysis): at the clock's first fall,
+    // to -3.31 V, the LED (vf 2.68 V, n 2.27, ifMax 28.06 mA) takes 789.6 A
+    // from the rail capacitor charged to 10.65 V; past its knee its law is a
+    // line of 71.5 S, so the capacitor drains on tau = C / g = 37.1 ns to
+    // -0.563 V, the PSU's 92 mA aside. The damage integral of that drain is
+    // (I0 / ifMax)^2 tau / 2 = 14.71, under the latch's 24 (led_failed, rate
+    // (I / ifMax)^2 - 1): the LED survives the first fall. Over the high
+    // phase before it, the LED at the setpoint less the clock's 9.51 V, 1.14
+    // V, is far under its knee: no damage. Before the fix the LED, idle
+    // since the load, was never closed (its integrator stood at t = 0), and
+    // the first step to drive it, the fall's, closed with its end rate, 7.9e8
+    // per second, over the whole 2.07 ms: latched there with 1.6e6.
+    let mut rig = Rig::load(&exact(ref_cold_84_tpl1())).unwrap();
+    let p = rig.s().exact.as_ref().unwrap().partition;
+    assert_ne!(rig.s().partition_kinds[p], PartitionKind::Static, "the rail's partition steps");
+    let fall = 0.6067396404390497 / 292.4270639400117;
+    rig.advance(fall - 1e-6).unwrap();
+    let s0 = rig.s().slow.stress(10).map_or(0.0, |s| s.value_at(fall - 1e-6));
+    close(s0, 0.0, 1e-9, "no damage over the high phase");
+    rig.advance(fall + 2e-6).unwrap();
+    assert!(!rig.s().slow.is_failed(10), "the LED survives the first fall");
+    // The backward rule (W1g point 2) charges each step its end rate, a
+    // right sum of a falling integrand: at or under the integral, here by
+    // the drain's steps of about a fifth of tau (12.3 of 14.71 measured).
+    let s1 = rig.s().slow.stress(10).map(|s| s.value_at(fall + 2e-6)).unwrap();
+    assert!(s1 <= 14.71 * 1.01 && s1 >= 0.8 * 14.71, "the first drain's damage integral {s1} against 14.71 by hand");
+}
+
+/// Cold fuzz 789 tpl 3 as its sweep ran it (`f5e gen 789 3`), to 0.3 s (its
+/// first toggle is at 0.49 s).
+fn ref_cold_789_tpl3() -> Program {
+    let mut p = program(
+        6,
+        vec![
+            fz(21, 0, &[1, 0], vec![5.702815114093951, 0.10709034605756618], vec![]),
+            fz(2, 1, &[2, 0], vec![-2.1223983582616253], vec![]),
+            fz(22, 2, &[3, 0], vec![6.175657925034204, 0.13632525323120667, 11.637408847739295, 0.0, 0.0], vec![8.0]),
+            fz(1, 3, &[4, 0], vec![74866.59775382324], vec![]),
+            fz(1, 4, &[5, 0], vec![692863.7348067253], vec![]),
+            fz(30, 5, &[0, 3], vec![1.8144324704895112, 2.3694818343536106, 0.015605014551019997, 0.0, 0.0, 0.0], vec![]),
+            fz(1, 6, &[0, 0], vec![17.50282632860529], vec![]),
+            fz(1, 7, &[1, 0], vec![310.0258546740256], vec![]),
+            fz(50, 8, &[1, 0, 1, 2, 5, 0, 0, 3, 0, 0, 3, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 7.982905264005229e-7], vec![0.0; 13]),
+            fz(1, 9, &[5, 1], vec![618.691378274752], vec![]),
+            fz(1, 10, &[3, 0], vec![158.8410539324055], vec![]),
+            fz(3, 11, &[5, 0], vec![0.004441243309138362, 0.862470934417167, 0.0], vec![]),
+            fz(4, 12, &[0, 2], vec![0.0], vec![]),
+            fz(1, 13, &[2, 0], vec![226.01169158568942], vec![]),
+            fz(1, 14, &[5, 2], vec![12329.602924622965], vec![]),
+            fz(3, 15, &[3, 0], vec![0.0001454098095747667, 0.0, 0.0], vec![]),
+            fz(1, 16, &[4, 5], vec![2450.045329825011], vec![]),
+            fz(4, 17, &[0, 4], vec![1.0], vec![]),
+            fz(1, 18, &[4, 0], vec![24.10011433800014], vec![]),
+            fz(90, 6, &[], vec![6.0, 4.008861975871273, 17.50282632860529], vec![]),
+            fz(90, 7, &[], vec![7.0, 0.03208795361041518, 310.0258546740256], vec![]),
+            fz(90, 9, &[], vec![9.0, 0.050235466518358, 618.691378274752], vec![]),
+            fz(90, 10, &[], vec![10.0, 0.1978743367396583, 158.8410539324055], vec![]),
+            fz(90, 13, &[], vec![13.0, 0.004105486433659165, 226.01169158568942], vec![]),
+            fz(90, 18, &[], vec![18.0, 0.5190131069074609, 24.10011433800014], vec![]),
+        ],
+    );
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn exact_mode_holds_a_gate_sourcing_into_a_clock_low_on_a_stepped_rail_partition() {
+    // REF (1), cold 789 tpl 3 (ruling R69's pin). PSU 5.703 V, 107 mA; 310
+    // ohm on the rail; a 74LS00 on it whose 3Y and 4Y (HIGH: inputs on
+    // ground) drive a 0 / 11.64 V clock's node (158.8 ohm, 145 uF and an LED
+    // there), and whose 1Y, 4Y drive node 5, which holds 4.44 mF and 618.7
+    // ohm back to the rail: a stepped rail partition. By hand, clock low
+    // (22.1 to 161.9 ms): the two HIGH outputs source 64 mA into it, and with
+    // node 5's charging current the draw at the setpoint is 147 mA, past the
+    // limit, and stays past it through the window [4.275, 5.775] V; under its
+    // floor, the chip off, it is V/310 + (V - v5)/618.7, under 30 mA: a
+    // landing. The chip held off, the PSU is in CV at the setpoint
+    // delivering V/310.03 + (V - v5)/618.69 (26.99 mA at 38.6 ms, v5 = 0.385
+    // V). Clock high again, the chip carries itself in CV and is free at the
+    // next host step's retry.
+    // Before the fix exact mode, the fine reference, held CV with the chip
+    // free at 147.3 mA (682 W0 against default mode at 0.16 s).
+    let v = 5.702815114093951;
+    let mut rig = Rig::load(&exact(ref_cold_789_tpl3())).unwrap();
+    let p = rig.s().exact.as_ref().unwrap().partition;
+    assert_ne!(rig.s().partition_kinds[p], PartitionKind::Static, "the rail's partition steps");
+    for t in [0.03, 0.0386, 0.06, 0.1, 0.15] {
+        rig.advance(t).unwrap();
+        let at = format!("clock low, {:.1} ms", t * 1e3);
+        assert!(rig.v(3) < 1e-9, "{at}: the clock is low");
+        close(rig.v(1), v, 1e-12, &format!("{at}: CV at the setpoint"));
+        assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+        assert!(!rig.s().power_hold(8).is_free(), "{at}: the chip is held off");
+        let want = v / 310.0258546740256 + (v - rig.v(5)) / 618.691378274752;
+        rel(-rig.i(0), want, 1e-6, &format!("{at}: the PSU's current, the chip off"));
+        assert!(-rig.i(0) < 0.03, "{at}: well within the limit");
+    }
+    // A held chip is retried once per host step (ruling R51 (b)): 1 ms ones.
+    for k in 151..=175 {
+        rig.advance(k as f64 * 1e-3).unwrap();
+    }
+    assert!(rig.v(3) > 11.0, "the clock is high");
+    assert!(rig.s().power_hold(8).is_free(), "clock high: the chip is free again");
+    assert_eq!(exact_regime(&rig), Regime::Cv);
+    assert!(-rig.i(0) <= 0.10709034605756618, "clock high: within the limit");
+}
+
+#[test]
+fn exact_mode_holds_a_landing_whose_powered_probe_has_no_cc_solution() {
+    // REF (2), cold 794 tpl 4. PSU 11.965 V, 455 mA; a 555 on the rail with
+    // TRIG and THR on a -9.05 V node and DIS, OUT on a clock's node (-2.04 /
+    // 7.87 V, 16.76 Hz, high for 44.1 ms of 59.7); 59.6 ohm and 611 ohm from
+    // the rail to the clock's node (the 611 ohm, rated 1.5 mW, burns at the
+    // first low phase). By hand, clock low: powered, the 555 draws 1.05 A at
+    // the setpoint, past the limit, and the draw stays past it down its
+    // window to 1.8 V; under the floor, the 555 off, it is (u + 2.04)/59.6,
+    // 64 mA at the floor: a landing. The 555 held off, the PSU is in CV at
+    // the setpoint delivering (11.965 + 2.037)/59.61 = 234.9 mA. The powered
+    // probe of the hold procedure (the 555 held on, the PSU in CC) has no
+    // solution its Newton reaches; before the fix exact mode then kept the
+    // CC solution and its clamp's CV, 1.277 A against the 455 mA limit,
+    // through every low phase.
+    let board = || {
+    let mut p = program(
+        7,
+        vec![
+            fz(21, 0, &[1, 0], vec![11.96504207843962, 0.4552508446732851], vec![]),
+            fz(2, 1, &[0, 2], vec![9.046538307982303], vec![]),
+            fz(22, 2, &[3, 0], vec![16.75594445426356, 0.739333047096713, 7.868200537211464, -2.0372010795942597, 0.0], vec![8.0]),
+            fz(1, 3, &[4, 0], vec![46566.41285113872], vec![]),
+            fz(1, 4, &[5, 0], vec![2849.7521078903405], vec![]),
+            fz(1, 5, &[6, 0], vec![3662.158505283313], vec![]),
+            fz(40, 6, &[1, 0, 2, 2, 1, 0, 3, 3], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 7, &[1, 3], vec![611.0370664295151], vec![]),
+            fz(1, 8, &[3, 3], vec![4376.957214293443], vec![]),
+            fz(3, 9, &[3, 0], vec![1.0551435497994568e-6, 0.0, 0.0], vec![]),
+            fz(1, 10, &[2, 2], vec![2150.5584869417153], vec![]),
+            fz(1, 11, &[1, 3], vec![59.610495360161075], vec![]),
+            fz(1, 12, &[4, 6], vec![2994.110322297871], vec![]),
+            fz(90, 7, &[], vec![7.0, 0.0015265366482540331, 611.0370664295151], vec![]),
+            fz(90, 8, &[], vec![8.0, 0.0047824577690048385, 4376.957214293443], vec![]),
+            fz(90, 10, &[], vec![10.0, 0.041619826286586226, 2150.5584869417153], vec![]),
+            fz(90, 11, &[], vec![11.0, 0.6257606828479856, 59.610495360161075], vec![]),
+        ],
+    );
+    p.digital_slot_count = 32;
+    p
+    };
+    let v = 11.96504207843962;
+    for (mode, p) in [("default", board()), ("exact", exact(board()))] {
+        let mut rig = Rig::load(&p).unwrap();
+        for t in [0.046, 0.05, 0.058, 0.106, 0.118] {
+            rig.advance(t).unwrap();
+            let at = format!("{mode}, clock low, {:.1} ms", t * 1e3);
+            assert!(rig.v(3) < -2.0, "{at}: the clock is low");
+            assert!(rig.s().slow.is_failed(7), "{at}: the 611 ohm burnt");
+            close(rig.v(1), v, 1e-12, &format!("{at}: CV at the setpoint"));
+            assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+            assert!(!rig.s().power_hold(6).is_free(), "{at}: the 555 is held off");
+            rel(-rig.i(0), (v - rig.v(3)) / 59.610495360161075, 1e-6, &format!("{at}: the PSU's current, 234.9 mA"));
+        }
+    }
+}
+
+#[test]
+fn exact_mode_holds_a_555_sliding_along_its_power_edge_and_burns_nothing_at_the_fuse() {
+    // REF, cold 656 tpl 3 in exact mode. A {2.1 V, 39.9 mA} PSU shorted by a
+    // 1.44 ohm, 20.4 mA fuse from ground to the rail: CC at 0.0575 V until
+    // the fuse latches (about 0.107 s), then CV at 2.1 V. A 555 takes its
+    // supply (node 6) through 115.2 ohm from the rail, with 69 nF behind a
+    // 0.57 ohm PTC on node 7. By hand: powered at its 1.8 V floor, its OUT
+    // Thevenin pair (40 ohm to each supply pin there) draws vs / 80 = 22 mA, far
+    // past the (2.0 - 1.8) / 115 = 1.7 mA its feed can carry there, so it
+    // pulls its supply under the floor within a microsecond of the 69 nF;
+    // unpowered, node 6 recovers on 115 ohm * 69 nF = 8 us: it slides along
+    // its power edge for good, the case W1c point 1a holds and ruling R54
+    // (a)'s episode guard declines. The 115 ohm (pMax 0.23 mW) and the 2.73
+    // k (0.15 mW) carry nothing until the fuse opens, so neither can latch
+    // at that instant: before the fix (stale t0) both latched there, their
+    // post-burn rates charged from t = 0 (S = 76.7 and 4.86), and the 555
+    // lost its feed; with them intact the stepped seed's Newton then failed
+    // outright at the edge (-4) instead of holding the chip.
+    let mut p = program(8, vec![
+        fz(21, 0, &[1, 0], vec![2.0997551283597415, 0.03993181995397193], vec![]),
+        fz(1, 1, &[2, 0], vec![70499.12728765282], vec![]),
+        fz(1, 2, &[3, 0], vec![104322.4772122887], vec![]),
+        fz(1, 3, &[4, 0], vec![2680.476161387651], vec![]),
+        fz(1, 4, &[5, 0], vec![32788.0180586396], vec![]),
+        fz(1, 5, &[6, 0], vec![156820.77936240626], vec![]),
+        fz(1, 6, &[7, 0], vec![405527.29783161636], vec![]),
+        fz(10, 7, &[0, 1], vec![1.4402208057314996, 0.02038315706881638], vec![]),
+        fz(1, 8, &[4, 7], vec![28.911521433020177], vec![]),
+        fz(1, 9, &[6, 1], vec![115.16380451031051], vec![]),
+        fz(3, 10, &[2, 0], vec![3.109340611974017e-5, 3.315715846515984, 0.0], vec![]),
+        fz(40, 11, &[6, 0, 2, 6, 5, 4, 7, 3], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 12, &[6, 3], vec![37505.864107821646], vec![]),
+        fz(1, 13, &[3, 7], vec![20757.966784553708], vec![]),
+        fz(3, 14, &[7, 0], vec![6.936969678706147e-8, 0.0, 0.0], vec![]),
+        fz(1, 15, &[6, 3], vec![1279.3335181110078], vec![]),
+        fz(1, 16, &[1, 4], vec![2727.7631154965725], vec![]),
+        fz(1, 17, &[3, 6], vec![1794.363266277742], vec![]),
+        fz(13, 18, &[7, 6], vec![0.570414384883887, 0.127126112188416], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.056515929711860466, 28.911521433020177], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.00023305991130195925, 115.16380451031051], vec![]),
+        fz(90, 12, &[], vec![12.0, 2.93155864453981e-6, 37505.864107821646], vec![]),
+        fz(90, 13, &[], vec![13.0, 3.97714993323673e-6, 20757.966784553708], vec![]),
+        fz(90, 15, &[], vec![15.0, 1.1961440614496167e-5, 1279.3335181110078], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.00015047479414880447, 2727.7631154965725], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.0001101907431417095, 1794.363266277742], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    let mut rig = Rig::load(&exact(p)).unwrap();
+    let mut failure = None;
+    for k in 1..=200 {
+        if let Err(e) = rig.advance(k as f64 * 1e-3) {
+            failure = Some(format!("{e:?}"));
+            break;
+        }
+        if rig.s().slow.is_failed(7) {
+            assert!(!rig.s().slow.is_failed(9) && !rig.s().slow.is_failed(16), "at {k} ms: the 115 ohm and the 2.73 k outlive the fuse's instant");
+        }
+    }
+    assert!(rig.s().slow.is_failed(7), "the fuse latched");
+    if let Some(e) = failure {
+        assert!(e.contains("power hold") && e.contains("device 11"), "only the sliding-episode guard declines: {e}");
+    }
+    assert!(rig.s().hold_counts()[0] > 0.0, "the 555 was held at its edge");
 }

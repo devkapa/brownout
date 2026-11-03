@@ -925,7 +925,8 @@ fn seed_noting(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f
     solve_step_noting(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu, noting)
 }
 
-/// Default mode (ported from REF's exact-mode one): the seed of a partition
+/// Both modes (default mode's retry `PartitionedSolver::retry_stepped_holds`,
+/// exact mode's `exact_retry_stepped`): the seed of a partition
 /// holding a free IC supply with W1c
 /// point 1a around it, as the static solver runs it around an iterated
 /// partition's Newton (`StaticPartitionSolver::hold_in`). A seed whose Newton
@@ -949,10 +950,10 @@ fn seed_holding(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[
 }
 
 /// Whether a solve under `ic_ctx` runs W1c point 1a around its Newton
-/// (`hold_around`): default mode, a partition holding a free IC supply, off
-/// a CC rail. (Exact mode's own, with its retry, is REF's item.)
+/// (`hold_around`): either mode, a partition holding a free IC supply, off
+/// a CC rail.
 fn holds_around(ic_ctx: &IcStampCtx) -> bool {
-    ic_ctx.exact.is_none() && ic_ctx.free_supply && ic_ctx.iterated && ic_ctx.cc.is_none()
+    ic_ctx.free_supply && ic_ctx.iterated && ic_ctx.cc.is_none()
 }
 
 /// W1c point 1a around one solve of a stepped partition (`solve`, a seed or
