@@ -34,10 +34,11 @@ function netVoltage(engine: SimEngine, componentId: string, pinId: string): numb
 
 /**
  * Tie every logic input of a powered 74LS153 to VCC or GND, and load each
- * output with a 10k resistor to `outputPull` so an undriven output reads as
- * that rail rather than as the level we are testing for.
+ * output with a 10k resistor to the rail in `pulls`, so an undriven output
+ * reads as that rail rather than as the level we are testing for.
  */
-function circuit(levels: Record<string, 0 | 1>, outputPull: "vcc" | "gnd"): SimCircuit {
+type Pull = "vcc" | "gnd";
+function circuit(levels: Record<string, 0 | 1>, pulls: { "1y": Pull; "2y": Pull }): SimCircuit {
   const components: Comp[] = [
     {
       id: "u1",
@@ -60,7 +61,7 @@ function circuit(levels: Record<string, 0 | 1>, outputPull: "vcc" | "gnd"): SimC
   for (const [pin, level] of Object.entries(levels)) {
     wires.push(wire("vcc", level ? "pos" : "neg", "u1", pin));
   }
-  for (const y of ["1y", "2y"]) {
+  for (const y of ["1y", "2y"] as const) {
     components.push({
       id: `r_${y}`,
       kind: "resistor",
@@ -70,7 +71,7 @@ function circuit(levels: Record<string, 0 | 1>, outputPull: "vcc" | "gnd"): SimC
       params: { resistance: 10_000 },
     });
     wires.push(wire(`r_${y}`, "a", "u1", y));
-    wires.push(wire(`r_${y}`, "b", "vcc", outputPull === "vcc" ? "pos" : "neg"));
+    wires.push(wire(`r_${y}`, "b", "vcc", pulls[y] === "vcc" ? "pos" : "neg"));
   }
   return { components, wires };
 }
@@ -82,47 +83,61 @@ function run(c: SimCircuit): SimEngine {
   return engine;
 }
 
-/** Data inputs with only channel `hot` of each section HIGH. */
-function oneHot(hot: number): Record<string, 0 | 1> {
+/**
+ * Data inputs for section `s`: with `level` 1 only channel `sel` is HIGH, with
+ * `level` 0 every channel but `sel` is HIGH. Either way only the selected
+ * channel carries `level`, so Y shows `level` only if the select reaches it.
+ */
+function section(s: 1 | 2, sel: number, level: 0 | 1): Record<string, 0 | 1> {
   const levels: Record<string, 0 | 1> = {};
-  for (let i = 0; i < 4; i++) {
-    levels[`1c${i}`] = i === hot ? 1 : 0;
-    levels[`2c${i}`] = i === hot ? 1 : 0;
-  }
+  for (let i = 0; i < 4; i++) levels[`${s}c${i}`] = (i === sel ? level : 1 - level) as 0 | 1;
   return levels;
 }
+
+const PULL_AWAY: Record<0 | 1, Pull> = { 1: "gnd", 0: "vcc" };
 
 describe("74LS153 dual 4:1 mux", () => {
   for (let sel = 0; sel < 4; sel++) {
     const a = (sel & 1) as 0 | 1;
     const b = ((sel >> 1) & 1) as 0 | 1;
 
-    it(`B=${b} A=${a} routes C${sel} of both sections to their Y`, () => {
-      // Only the selected channel is HIGH: Y must go HIGH against a pull-down.
-      const hi = run(circuit({ ...oneHot(sel), a, b, "/1g": 0, "/2g": 0 }, "gnd"));
-      expect(netVoltage(hi, "u1", "1y")).toBeGreaterThan(2.7);
-      expect(netVoltage(hi, "u1", "2y")).toBeGreaterThan(2.7);
-
-      // Every channel but the selected one is HIGH: Y must go LOW against a pull-up.
-      const inverted = Object.fromEntries(
-        Object.entries(oneHot(sel)).map(([pin, v]) => [pin, v ? 0 : 1]),
-      ) as Record<string, 0 | 1>;
-      const lo = run(circuit({ ...inverted, a, b, "/1g": 0, "/2g": 0 }, "vcc"));
-      expect(netVoltage(lo, "u1", "1y")).toBeLessThan(0.5);
-      expect(netVoltage(lo, "u1", "2y")).toBeLessThan(0.5);
-    });
+    // The two sections carry opposite patterns, so a section reading the
+    // other's inputs, or the wrong channel, lands on the wrong level.
+    for (const [l1, l2] of [[1, 0], [0, 1]] as Array<[0 | 1, 0 | 1]>) {
+      it(`B=${b} A=${a} routes 1C${sel} (${l1}) to 1Y and 2C${sel} (${l2}) to 2Y`, () => {
+        const engine = run(
+          circuit(
+            { ...section(1, sel, l1), ...section(2, sel, l2), a, b, "/1g": 0, "/2g": 0 },
+            { "1y": PULL_AWAY[l1], "2y": PULL_AWAY[l2] },
+          ),
+        );
+        const expectLevel = (y: string, level: 0 | 1) =>
+          level
+            ? expect(netVoltage(engine, "u1", y)).toBeGreaterThan(2.7)
+            : expect(netVoltage(engine, "u1", y)).toBeLessThan(0.5);
+        expectLevel("1y", l1);
+        expectLevel("2y", l2);
+      });
+    }
   }
 
-  it("a HIGH strobe drives only its own section's Y LOW", () => {
-    // All data HIGH, so an enabled section outputs HIGH whatever the select.
-    const allHigh = Object.fromEntries(
-      Object.keys(oneHot(0)).map((pin) => [pin, 1]),
-    ) as Record<string, 0 | 1>;
-    const engine = run(circuit({ ...allHigh, a: 1, b: 0, "/1g": 1, "/2g": 0 }, "vcc"));
-    // Section 1 is strobed off: driven LOW, not left floating at the pull-up.
-    expect(netVoltage(engine, "u1", "1y")).toBeLessThan(0.5);
-    expect(netVoltage(engine, "u1", "2y")).toBeGreaterThan(2.7);
-  });
+  // All data HIGH, so an enabled section outputs HIGH whatever the select.
+  const allHigh: Record<string, 0 | 1> = {};
+  for (const s of [1, 2]) for (let i = 0; i < 4; i++) allHigh[`${s}c${i}`] = 1;
+  for (const off of [1, 2] as const) {
+    const on = off === 1 ? 2 : 1;
+    it(`a HIGH /${off}G drives only ${off}Y LOW`, () => {
+      const engine = run(
+        circuit(
+          { ...allHigh, a: 1, b: 0, [`/${off}g`]: 1, [`/${on}g`]: 0 },
+          { "1y": "vcc", "2y": "vcc" },
+        ),
+      );
+      // Strobed off: driven LOW, not left floating at the pull-up.
+      expect(netVoltage(engine, "u1", `${off}y`)).toBeLessThan(0.5);
+      expect(netVoltage(engine, "u1", `${on}y`)).toBeGreaterThan(2.7);
+    });
+  }
 
   it("follows the datasheet DIP-16 pinout", () => {
     const part = (defaultParts as { parts: Array<{ kind: string; pin_layout: Array<{ id: string; offset: { x: number; y: number } }> }> })
