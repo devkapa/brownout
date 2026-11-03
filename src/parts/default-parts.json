@@ -2607,42 +2607,10 @@
           "function": "gnd"
         },
         {
-          "id": "/oe",
-          "offset": {
-            "x": 80,
-            "y": 71
-          },
-          "function": "enable"
-        },
-        {
-          "id": "4y",
-          "offset": {
-            "x": 80,
-            "y": 62
-          },
-          "function": "output"
-        },
-        {
-          "id": "4b",
-          "offset": {
-            "x": 80,
-            "y": 53
-          },
-          "function": "input"
-        },
-        {
-          "id": "4a",
-          "offset": {
-            "x": 80,
-            "y": 44
-          },
-          "function": "input"
-        },
-        {
           "id": "3y",
           "offset": {
             "x": 80,
-            "y": 35
+            "y": 71
           },
           "function": "output"
         },
@@ -2650,7 +2618,7 @@
           "id": "3b",
           "offset": {
             "x": 80,
-            "y": 26
+            "y": 62
           },
           "function": "input"
         },
@@ -2658,9 +2626,41 @@
           "id": "3a",
           "offset": {
             "x": 80,
-            "y": 17
+            "y": 53
           },
           "function": "input"
+        },
+        {
+          "id": "4y",
+          "offset": {
+            "x": 80,
+            "y": 44
+          },
+          "function": "output"
+        },
+        {
+          "id": "4b",
+          "offset": {
+            "x": 80,
+            "y": 35
+          },
+          "function": "input"
+        },
+        {
+          "id": "4a",
+          "offset": {
+            "x": 80,
+            "y": 26
+          },
+          "function": "input"
+        },
+        {
+          "id": "/oe",
+          "offset": {
+            "x": 80,
+            "y": 17
+          },
+          "function": "enable"
         },
         {
           "id": "vcc",

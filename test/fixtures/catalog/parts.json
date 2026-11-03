@@ -4263,47 +4263,11 @@
           "function": "gnd"
         },
         {
-          "id": "/oe",
-          "label": "/OE",
-          "offset": {
-            "x": 80,
-            "y": 71
-          },
-          "function": "enable"
-        },
-        {
-          "id": "4y",
-          "label": "4Y",
-          "offset": {
-            "x": 80,
-            "y": 62
-          },
-          "function": "output"
-        },
-        {
-          "id": "4b",
-          "label": "4B",
-          "offset": {
-            "x": 80,
-            "y": 53
-          },
-          "function": "input"
-        },
-        {
-          "id": "4a",
-          "label": "4A",
-          "offset": {
-            "x": 80,
-            "y": 44
-          },
-          "function": "input"
-        },
-        {
           "id": "3y",
           "label": "3Y",
           "offset": {
             "x": 80,
-            "y": 35
+            "y": 71
           },
           "function": "output"
         },
@@ -4312,7 +4276,7 @@
           "label": "3B",
           "offset": {
             "x": 80,
-            "y": 26
+            "y": 62
           },
           "function": "input"
         },
@@ -4321,9 +4285,45 @@
           "label": "3A",
           "offset": {
             "x": 80,
-            "y": 17
+            "y": 53
           },
           "function": "input"
+        },
+        {
+          "id": "4y",
+          "label": "4Y",
+          "offset": {
+            "x": 80,
+            "y": 44
+          },
+          "function": "output"
+        },
+        {
+          "id": "4b",
+          "label": "4B",
+          "offset": {
+            "x": 80,
+            "y": 35
+          },
+          "function": "input"
+        },
+        {
+          "id": "4a",
+          "label": "4A",
+          "offset": {
+            "x": 80,
+            "y": 26
+          },
+          "function": "input"
+        },
+        {
+          "id": "/oe",
+          "label": "/OE",
+          "offset": {
+            "x": 80,
+            "y": 17
+          },
+          "function": "enable"
         },
         {
           "id": "vcc",
