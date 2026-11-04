@@ -14322,3 +14322,31 @@ fn r74_a_landing_whose_powered_probe_cannot_settle_holds_the_chip() {
     let e = sweep_run(&p, &toggles, &stops).unwrap_or_else(|(e, t)| panic!("{} at {t}: {}", e.code, e.message));
     assert!(e.stat(25) >= 1.0, "the gate held off");
 }
+
+
+#[test]
+fn a_retry_frees_an_innocent_chip_held_beside_the_culprit_at_the_same_edge() {
+    // REFV's probe T1b: cold 471 tpl 2's culprit (device 7) plus an
+    // identical 74LS00 (device 17, window [4.275, 5.775] V, the same edge)
+    // whose 1Y, inputs on ground and so HIGH, drives 1 k to ground (node 7).
+    // The landing holds both. By hand the innocent one carries itself: with
+    // the culprit off the rail is CV at 4.752 V, and its HIGH output into 1 k
+    // gives 4.14 V, 4.14 mA, within the 55 mA limit. A retry that probes the
+    // held chips together fails on the culprit's overload and kept both off
+    // for good; each probed on its own, the innocent one is free at the next
+    // host step's retry.
+    for (mode, exact_mode) in [("default", false), ("exact", true)] {
+        let b = ls00(17, 1, 0, [0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1e-8, 8);
+        let mut p = ref_b471(vec![b, resistor(18, 7, 0, 1e3)]);
+        p.node_count = 8;
+        let mut rig = Rig::load(&if exact_mode { exact(p) } else { p }).unwrap_or_else(|e| panic!("{mode}: load {e:?}"));
+        for k in 1..=200 {
+            rig.advance(k as f64 * 1e-3).unwrap_or_else(|e| panic!("{mode}: {e:?}"));
+        }
+        let at = format!("{mode} at 200 ms");
+        assert!(!rig.s().power_hold(7).is_free(), "{at}: the culprit held off");
+        assert!(rig.s().power_hold(17).is_free(), "{at}: the innocent chip free");
+        close(rig.v(7), 4.14, 0.01, &format!("{at}: its HIGH output into 1 k"));
+        close(-rig.i(0), rig.v(7) / 1e3, 1e-6, &format!("{at}: the PSU delivers the 1 k's current"));
+    }
+}
