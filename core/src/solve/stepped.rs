@@ -3068,6 +3068,17 @@ impl SteppedSolver {
                     &mut part.newton_iterations,
                     &ic_ctx,
                 )?;
+                // A catch-up (`sync_partition`) reads each watch's threshold
+                // from the published rail, which it does not move, while its
+                // steps move the rail's own partition: a node its step's
+                // start carries past that threshold at once (a CC rail's
+                // step beside the published one) bisects to a step of
+                // ~1e-16 s at every step, and the catch-up never reaches its
+                // horizon (cold 3254 tpl 0: 0.1 ns from the horizon, a tab
+                // frozen for good). No catch-up step is shorter than the
+                // shortest step, as no planned one is: a crossing it cannot
+                // act on before its horizon anyway is taken at `H_MIN`.
+                let refined_h = if clamp && refined_h < H_MIN { H_MIN.min(h) } else { refined_h };
                 h = refined_h;
                 // Deterministic: `refined_h` is an `h` a trial (or the accepted
                 // step itself) already converged at.
