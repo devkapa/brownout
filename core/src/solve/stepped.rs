@@ -1962,7 +1962,12 @@ impl SteppedSolver {
                 _ => None,
             };
             let mut nodes: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(part.x.iter().copied()).collect();
-            nodes.extend(self.trail_reads[p].iter().filter(|&&n| Some(n) != self.rail).map(|&n| (n, voltages[n])));
+            // A running ramp's node at the step's end, as the step read it
+            // (cold 798 tpl 4: the fuse from a falling pulse's node read the
+            // ramp where the last publish left it, 7.6 V from where the step
+            // ended, and blew on 34 mA).
+            let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.t);
+            nodes.extend(self.trail_reads[p].iter().filter(|&&n| Some(n) != self.rail).map(|&n| (n, bnd.get(n))));
             self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail });
         }
         #[cfg(test)]
