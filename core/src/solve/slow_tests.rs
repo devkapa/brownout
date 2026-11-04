@@ -2129,11 +2129,11 @@ fn a_trapezoidal_ring_past_the_supply_latches_its_load_cold_or_visited_and_backw
         e.advance(t).unwrap();
         assert!(e.voltages()[2] <= 12.0, "backward Euler holds the node under its supply ({} V at {t})", e.voltages()[2]);
     }
-    // Ruling R71 (b): the LED latches where its stress crosses, 5.8 ns in,
-    // as 12 V across it into the empty capacitor drives it (1990 A); latched
-    // at the end of that step from the step's end current, it never did.
-    let latched: Vec<f64> = e.records(0).unwrap().chunks(7).map(|c| c[0]).collect();
-    assert!(!latched.contains(&3.0), "the 100 Mohm stays intact: {latched:?}");
+    // Nor does the LED latch: its law is a 191 S line past 1.90 V, so the
+    // capacitor charges through it on 2.8 ns from 1940 A, a damage integral
+    // of 5.7 by hand against the latch's 24 (R71 (b): held forward, that
+    // first rate latched it 5.8 ns in).
+    assert!(e.records(0).unwrap().is_empty());
 }
 
 #[test]

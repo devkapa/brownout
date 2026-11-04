@@ -1481,6 +1481,42 @@ impl PartitionedSolver {
         self.stepped.trail = trail;
     }
 
+    /// When stepped device `i`'s integral crosses its latch on the drive its
+    /// pending trial ends with (the first of its stepped partitions with
+    /// one), from where it stands, and that trial's end; `None` without a
+    /// pending trial. Writes nothing.
+    fn pending_latch(&mut self, i: usize, now: f64) -> Option<(f64, f64)> {
+        let _ = now;
+        let dev = self.slow_model.devs[i].device;
+        let c = self.slow_model.devs[i].parts.iter().filter(|&&p| self.partition_kinds[p] == PartitionKind::Stepped).find_map(|&p| self.stepped.pending_end(p, &self.voltages))?;
+        let over: Vec<(usize, f64)> = c.nodes.iter().chain(c.rail.iter()).copied().collect();
+        let saved: Vec<(usize, f64)> = over.iter().map(|&(n, _)| (n, self.voltages[n])).collect();
+        for &(n, v) in &over {
+            self.voltages[n] = v;
+        }
+        let drives = self.drives(i, c.t1);
+        for (n, v) in saved {
+            self.voltages[n] = v;
+        }
+        let stress = match (drives.stress, self.slow.stress(dev)) {
+            (Some(drive), Some(s)) if !self.slow.is_failed(dev) => crate::slow::stress::Stress { drive, ..*s }.latch_time(),
+            _ => None,
+        };
+        let trip = match (drives.ptc, self.slow.ptc(dev)) {
+            (Some(PtcDrive::Stress(drive)), Some(e)) if !e.tripped => {
+                let mut e = *e;
+                e.set_drive(PtcDrive::Stress(drive));
+                e.next_event().filter(|&(_, k)| k == PtcEvent::Trip).map(|(t, _)| t)
+            }
+            _ => None,
+        };
+        let t = match (stress, trip) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b).unwrap_or(f64::INFINITY),
+        };
+        Some((t, c.t1))
+    }
+
     /// The start of the step a stepped device's visit at `now` closes over
     /// (the latest of its stepped partitions committed at `now`), or `None`
     /// when none was: then the window runs from its last visit, as before.
@@ -2305,6 +2341,29 @@ impl PartitionedSolver {
         let Some(i) = self.slow_index(dev) else { return Ok(Vec::new()) };
         let stepped = self.slow_model.devs[i].class == Class::Stepped;
         let next = if stepped { self.slow.next_latch(dev) } else { self.slow.next_event(dev) };
+        if let (true, Some(_)) = (stepped, next) {
+            // The latch was predicted from the drive the last committed step
+            // ended with, held forward. The step now running decides: its
+            // trial's own end drive, over it, crosses before `now` or it does
+            // not cross here (ruling R71 (b): the crossing inside its step).
+            // Held forward, a falling rate latched what it never reaches
+            // (cold 535 tpl 2: an LED charging 2.3 mF at the CC limit, 1603/s
+            // held past the CC exit, latched at 15.0 ms where by hand its
+            // damage tops out at 22.8 of 24).
+            match self.pending_latch(i, now) {
+                Some((t, _)) if is_due(t, now) => {}
+                Some((t, end)) if t <= end => {
+                    let token = self.sw().bump_token(dev);
+                    self.pending_schedule.push((t, EventKind::Slow { device: DeviceId(dev as u32), token: token & !crate::events::SLOW_ANCHOR }));
+                    return self.finish_slow(now);
+                }
+                Some(_) => {
+                    let _ = self.sw().bump_token(dev);
+                    return self.finish_slow(now);
+                }
+                None => {}
+            }
+        }
         if let Some((_, kind)) = next {
             if stepped {
                 // A latch inside a step: the device's stepped partitions come

@@ -1803,6 +1803,22 @@ impl SteppedSolver {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
     }
 
+    /// Partition `p`'s pending trial as a [`Committed`] would hold it: from
+    /// its committed time to the trial's end, at the trial's own end
+    /// voltages, its CC rail and its boundary at that end (ruling R71 (b): a
+    /// latch predicted inside it is judged on the drive the trial ends with).
+    pub(crate) fn pending_end(&self, p: usize, voltages: &[f64]) -> Option<Committed> {
+        let part = self.partitions.get(&p).filter(|part| !part.parked && part.has_pend)?;
+        let rail = match (part.hub, self.rail, part.pend_cc) {
+            (true, Some(r), Some(_)) => Some((r, part.pend_u)),
+            _ => None,
+        };
+        let mut nodes: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(part.pend_x.iter().copied()).collect();
+        let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.pend_t);
+        nodes.extend(self.trail_reads.get(p).into_iter().flatten().map(|&n| (n, bnd.get(n))));
+        Some(Committed { p, t0: part.t, t1: part.pend_t, nodes, rail })
+    }
+
     /// Where the step partition `p` committed at `now` started: its last
     /// commit's own start, or `now` itself when it was re-solved there after
     /// that commit (a discontinuity: an event's re-solve or a promotion seeds

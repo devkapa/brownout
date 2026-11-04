@@ -14145,3 +14145,44 @@ fn a_stepped_device_on_the_rail_reads_the_rail_its_step_ended_on() {
     assert!(rec.iter().any(|r| r.0 == 13.0), "the fuse latched: {rec:?}");
     assert!(!rec.iter().any(|r| r.0 == 7.0 || r.0 == 8.0), "R1-4 or R8 latched: {rec:?}");
 }
+
+/// tpl=2 hub=2 e=5.234 psu ilim=0.275 LED1-2+R1-1=1355 C5-0=2.3e-3 LED1-5+R1-1=71
+fn cold_535_tpl2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.234432841933891, 0.27456469733480177], vec![]),
+        fz(1, 1, &[2, 0], vec![141011.80857252545], vec![]),
+        fz(1, 2, &[3, 0], vec![31707.640364078485], vec![]),
+        fz(1, 3, &[4, 0], vec![1013.0749703674163], vec![]),
+        fz(1, 4, &[5, 0], vec![602620.7626514741], vec![]),
+        fz(30, 5, &[1, 2], vec![1.9216721394959964, 2.4560626778575756, 0.0340512703373638, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 6, &[1, 1], vec![1355.213844442966], vec![]),
+        fz(3, 7, &[5, 0], vec![0.0023060961643505047, 0.023372750461450608, 0.0], vec![]),
+        fz(30, 8, &[1, 5], vec![3.370604628158895, 2.4818603748546586, 0.006854894315031227, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 9, &[1, 1], vec![70.5361128726511], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.0013142563652867277, 1355.213844442966], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.02293015100366537, 70.5361128726511], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_stepped_latch_predicted_from_a_falling_rate_waits_for_the_steps_it_falls_in() {
+    // Ruling R71 (b), cold 535 tpl 2: LED R8 (vf 3.37 V, n 2.48, ifMax 6.85
+    // mA, no series resistance) charges 2.31 mF from a {5.23 V, 0.275 A} PSU.
+    // By hand it carries the 0.2746 A limit (1603/s) until the capacitor
+    // reaches 5.234 - 3.605 = 1.629 V at 13.7 ms, S = 21.96; in CV its current
+    // falls an e-fold per 64 mV of charge, adding C vtn I0 / ifMax^2 = 0.86:
+    // 22.8, under the latch's 24. Its latch, scheduled from the CC rate held
+    // forward, fired at 14.97 ms inside a step whose own drive had fallen.
+    let stops = [0.00627288078824777, 0.016829457476524014, 0.058843896577463285, 0.058976488413401716, 0.059103567309001626, 0.05970527509700228, 0.07520090991509062, 0.07780697361405664, 0.08073770949696749, 0.08757943996501401, 0.09266788130346024, 0.09857249569377252, 0.1];
+    let mut rig = Rig::load(&cold_535_tpl2()).unwrap();
+    let mut peak: f64 = 0.0;
+    for &t in &stops {
+        rig.advance(t).unwrap();
+        peak = peak.max(rig.s().slow.stress(8).map_or(0.0, |s| s.value_at(t)));
+    }
+    assert!(!rig.s().slow.is_failed(8), "the LED latched (S peaked at {peak})");
+    assert!((peak - 22.8).abs() <= 0.05 * 22.8, "S peaks at {peak}, by hand 22.8");
+}

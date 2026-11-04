@@ -4395,7 +4395,11 @@ Constants:
        step ended with, so it fires where the integral crosses inside the
        step that follows, the device's stepped partitions first brought to
        it with the stamps they had; a latch only the step's own end drive
-       reaches fires at that commit. At the step's end with the end rate,
+       reaches fires at that commit. When the predicted latch comes, the
+       step then running decides: its trial's own end drive crosses before
+       then, or the latch waits for that step (cold 535 tpl 2: an LED's CC
+       rate held forward past the CC exit latched it at 15.0 ms where by hand
+       its damage tops out at 22.8 of 24). At the step's end with the end rate,
        cold 39 tpl 4's R20 latched 2.1 ms late and took R17 with it, 74
        ms before the fine reference's R17. Each committed step (a catch-up's
        and a clamp's included) closes the integrators at its own end
