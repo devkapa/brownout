@@ -650,7 +650,7 @@ impl PartitionedSolver {
     /// matched (the verifier's DC repro, a 74LS00 sinking 64 mA from a 45 mA
     /// PSU through outputs on the rail itself, left CV at 64 mA; on a clock,
     /// a CC rail of 2.25 V reported 45 mA with 55 mA fed in).
-    fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
+    pub(super) fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
         self.hub.as_mut().expect("a hub").dirty = true;
         self.rail_passes(now, drivers, readers, seed)
     }

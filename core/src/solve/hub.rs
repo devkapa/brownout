@@ -1013,6 +1013,46 @@ impl PartitionedSolver {
         }
     }
 
+    /// Ruling R74's landing (`rail_loop`): as the rail sags from the setpoint
+    /// the chip with the highest power edge browns out first, so the edges
+    /// are walked down from the highest, each one's chips put off in turn,
+    /// until the draw at the setpoint falls within the limit: the CC point
+    /// lies at that edge, and only its chips are held (`hold_on_rail`); the
+    /// ones whose edges sit above it are powered again where the rail lands
+    /// (REFV's probe T1e: a 74LS00 drawing nothing with a 4.5 V floor above
+    /// 471 tpl 2's culprit at 4.275 V; held first and kept, default mode
+    /// declined at load). The walk is a trial, put back bit for bit.
+    fn r74_landing(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<(f64, Vec<usize>)>, String> {
+        let Some(first) = self.cv_past_limit_landing(now) else { return Ok(None) };
+        let checkpoint = (self.snapshot(), self.dynamic_snapshot(), self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)), self.hold_counts);
+        let mut landing = first;
+        let mut readers = Vec::new();
+        for _ in 0..self.ics.len() {
+            let mut seed = Vec::new();
+            for &d in &landing.1 {
+                seed.extend(self.write_power_hold(d, hold::probe(false)).into_iter().map(|p| p.0 as usize));
+            }
+            seed.sort_unstable();
+            seed.dedup();
+            match self.hold_passes(now, drivers, &mut readers, seed) {
+                Ok(hold::Passes::Settled(_)) => {}
+                _ => break,
+            }
+            match self.cv_past_limit_landing(now) {
+                Some(next) => landing = next,
+                None => break,
+            }
+        }
+        let ((published, dynamic), sums, counts) = ((checkpoint.0, checkpoint.1), checkpoint.2, checkpoint.3);
+        self.restore(published);
+        self.dynamic_restore(dynamic);
+        if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), sums) {
+            (hub.state.a_run, hub.state.g_run) = (a, g);
+        }
+        self.hold_counts = counts;
+        Ok(Some(landing))
+    }
+
     /// Ruling R74's trigger (`rail_loop`): a PSU with no rail capacitor
     /// settled in CV past its limit in its own direction, and under its
     /// setpoint a free rail IC's power edge; the highest such edge and the
@@ -1567,7 +1607,7 @@ impl PartitionedSolver {
         // curve (the hub partitions re-solved under trial rails, as exact
         // mode's search does) is a later item.
         if let hold::Passes::Settled(_) = passes {
-            if let Some((edge, ics)) = self.cv_past_limit_landing(now) {
+            if let Some((edge, ics)) = self.r74_landing(now, drivers)? {
                 return self.hold_on_rail(now, drivers, readers, &ics, format!("{} at {edge}", rails::EDGE_LANDING));
             }
         }

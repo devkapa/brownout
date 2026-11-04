@@ -14210,3 +14210,61 @@ fn a_catch_up_whose_crossing_lands_at_its_start_still_reaches_its_horizon() {
     assert!(run.is_ok(), "{:?}", run.err().map(|(e, t)| (e.message, t)));
     assert!(start.elapsed().as_secs_f64() < 30.0, "the first advance returned, in {:?}", start.elapsed());
 }
+
+
+fn ref_b471(extra: Vec<Device>) -> Program {
+    let mut p = program(7, vec![
+        fz(21, 0, &[1, 0], vec![4.751886091509621, 0.054961332725668104], vec![]),
+        fz(2, 1, &[2, 0], vec![-4.596049646086812], vec![]),
+        fz(1, 2, &[3, 0], vec![494452.0913392493], vec![]),
+        fz(1, 3, &[4, 0], vec![77429.4854565049], vec![]),
+        fz(1, 4, &[5, 0], vec![78194.52499104275], vec![]),
+        fz(1, 5, &[6, 0], vec![2675.744432386028], vec![]),
+        fz(1, 6, &[2, 3], vec![98.66153046803586], vec![]),
+        fz(50, 7, &[1, 0, 5, 2, 3, 0, 0, 2, 0, 0, 2, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 3.3711834227987145e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 8, &[3, 2], vec![263.508620325762], vec![]),
+        fz(1, 9, &[2, 0], vec![102.06709251544831], vec![]),
+        fz(3, 10, &[0, 0], vec![0.008790905891188373, 0.1361737485557175, 0.0], vec![]),
+        fz(1, 11, &[3, 5], vec![13563.322422657602], vec![]),
+        fz(30, 12, &[3, 6], vec![2.645442738804019, 1.9851176644289632, 0.03894033893409811, 0.0, 0.0, 0.0], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.05757475196045802, 98.66153046803586], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.019609209561770004, 263.508620325762], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.010313525627732776, 102.06709251544831], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.00012125106711201618, 13563.322422657602], vec![]),
+    ]);
+    p.devices.extend(extra);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn r74_walks_down_the_edges_and_frees_the_chips_above_where_the_rail_lands() {
+    // REFV's probe T1e: cold 471 tpl 2 (its 74LS00, device 7, sourcing into a
+    // -4.6 V node: 190 mA at the 4.752 V setpoint of a 55 mA PSU) plus a
+    // second 74LS00 (device 17) with every pin on ground and a 5.0 V floor,
+    // so a window [4.5, 5.775] V and a draw of nothing. Its edge, 4.5 V, is
+    // the highest under the setpoint. By hand, as the rail sags it browns
+    // out first (nothing changes: it drew nothing), then device 7 at 4.275 V,
+    // under which nothing is drawn: the CC point is device 7's edge. Held
+    // off there, the PSU is in CV at the setpoint delivering 0 mA, and device
+    // 17, whose edge lies above where the rail landed, is powered again.
+    // Exact mode, its trials solving the partitions at each rail, holds
+    // device 7 alone. Before the fix default mode declined at load.
+    for (mode, exact_mode) in [("default", false), ("exact", true)] {
+        let mut b = ls00(17, 1, 0, [0; 12], 1e-8, 8);
+        b.params[ic_param::VCC_MIN] = 5.0;
+        let p = ref_b471(vec![b]);
+        let mut rig = Rig::load(&if exact_mode { exact(p) } else { p }).unwrap_or_else(|e| panic!("{mode}: load {e:?}"));
+        for k in 0..=4 {
+            if k > 0 {
+                rig.advance(k as f64 * 0.01).unwrap_or_else(|e| panic!("{mode}: {e:?}"));
+            }
+            let at = format!("{mode} at {} ms", 10 * k);
+            close(rig.v(1), 4.751886091509621, 1e-12, &format!("{at}: CV at the setpoint"));
+            assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+            close(rig.i(0), 0.0, 1e-9, &format!("{at}: nothing delivered"));
+            assert!(!rig.s().power_hold(7).is_free(), "{at}: the culprit held off");
+            assert!(rig.s().power_hold(17).is_free(), "{at}: the chip above the landing free");
+        }
+    }
+}
