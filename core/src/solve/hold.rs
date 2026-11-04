@@ -332,6 +332,9 @@ impl PartitionedSolver {
     pub(super) fn hold_on_rail(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, a: &[usize], err: String) -> Result<(), String> {
         let rail_ics: Vec<usize> = self.hub.as_ref().expect("a hub").rail_ics.iter().map(|&pos| self.ics[pos as usize].0).collect();
         let before: Vec<PowerHold> = rail_ics.iter().map(|&d| self.power_hold(d)).collect();
+        // R74's landing (`rail_loop`) puts the state back if its powered
+        // probe cannot settle (below).
+        let start = std::mem::take(&mut self.landing_hold).then(|| Checkpoint { published: self.snapshot(), dynamic: self.dynamic_snapshot(), sums: self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)) });
         // Step 1: the alternating ICs held powered, the rest at their reading
         // (one already held off stays so: a probe is no release).
         let mut seed = Vec::new();
@@ -342,7 +345,23 @@ impl PartitionedSolver {
             let on = a.contains(&d) || self.ic_powered(d);
             seed.extend(self.set_power_hold(d, probe(on)).into_iter().map(|p| p.0 as usize));
         }
-        self.rail_settle(now, drivers, readers, seed, &err)?;
+        // R74's landing: a powered probe whose passes cannot settle (the
+        // chips held powered past the limit, the rail loop alternating CV at
+        // the setpoint and CC under it, cold 1986 tpl 0's 74LS00 after a
+        // switch toggle) holds no operating point with them powered either:
+        // they starve, read under the edge, from the state before the probe.
+        let probe_failed = match (self.rail_settle(now, drivers, readers, seed, &err), start) {
+            (Ok(()), _) => false,
+            (Err(_), Some(start)) => {
+                self.restore(start.published);
+                self.dynamic_restore(start.dynamic);
+                if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), start.sums) {
+                    (hub.state.a_run, hub.state.g_run) = (a, g);
+                }
+                true
+            }
+            (Err(e), None) => return Err(e),
+        };
         let draw_on = self.segment_draw(now);
         // Ruling R74, a landing's own rule: held powered, the chips settle a
         // PSU in CV past its limit, which no current-limited supply holds
@@ -352,7 +371,7 @@ impl PartitionedSolver {
         // partition draw linearised at powered: `rails::cc_entry_rail`). So
         // they starve themselves, their supply read two reached widths
         // under that edge, the CC point's side of it.
-        let landing = landing_edge(&err).filter(|_| self.cv_past_limit(now));
+        let landing = landing_edge(&err).filter(|_| probe_failed || self.cv_past_limit(now));
         // Step 2: those reading unpowered there starve themselves; on a CC
         // rail capacitor's segment, so do they all when, powered, they turn
         // the segment down (ruling R44 (a): across instants the capacitor

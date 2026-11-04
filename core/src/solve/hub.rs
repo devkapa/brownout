@@ -1608,6 +1608,7 @@ impl PartitionedSolver {
         // mode's search does) is a later item.
         if let hold::Passes::Settled(_) = passes {
             if let Some((edge, ics)) = self.r74_landing(now, drivers)? {
+                self.landing_hold = true;
                 return self.hold_on_rail(now, drivers, readers, &ics, format!("{} at {edge}", rails::EDGE_LANDING));
             }
         }
