@@ -1955,8 +1955,11 @@ impl SteppedSolver {
         }
         if self.trail_parts.get(p).copied().unwrap_or(false) {
             let part = &self.partitions[&p];
-            // On a CC rail the step's own rail; otherwise the rail is read as
-            // published (it moves through the step, held only at the plan).
+            // On a CC rail the step's own rail; otherwise the rail as the
+            // commit found it, before an event at its end moves it (cold 705
+            // tpl 4: read as published after a pulse's edge, 6.5 V across an
+            // LED from the rail to where its step ended latched it at 37 ms
+            // on a 40 mA PSU that cannot stress it).
             let rail = match (part.hub, self.rail, part.pend_cc) {
                 (true, Some(r), Some(_)) => Some((r, part.pend_u)),
                 _ => None,
@@ -1967,7 +1970,7 @@ impl SteppedSolver {
             // ramp where the last publish left it, 7.6 V from where the step
             // ended, and blew on 34 mA).
             let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.t);
-            nodes.extend(self.trail_reads[p].iter().filter(|&&n| Some(n) != self.rail).map(|&n| (n, bnd.get(n))));
+            nodes.extend(self.trail_reads[p].iter().map(|&n| (n, bnd.get(n))));
             self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail });
         }
         #[cfg(test)]
