@@ -1923,6 +1923,49 @@ their own, and the source KCL does with W1a point 2's branch fold.
    the procedure in `solve/rail_tests.rs`, listed under Equivalence harness
    rules, the power-gate ping-pong.
 
+   **The chatter entry** (rulings R92, R95 (b), R97 (b); `hold.rs`). A
+   chip whose draw reaches its supply through a capacitor that carries it
+   within any instant (cold 757 tpl 0: a 555's OUT sinking from behind a
+   0.64 ohm fuse and 4.94 mF) moves neither end of the slide's own solve, so
+   its edge shows only as a chatter. From the hold that follows its second
+   short self-released one, with its supply within W0 of the edge, it slides
+   at the powered fraction of the last held-then-powered cycle; that cycle's
+   held and powered drift rates are the duty's first bracket, at 0 and 1
+   (Filippov's drift is the duty's blend of them). Its duty is then
+   corrected across instants: once the supply has drifted W0 off the edge,
+   the drift rate measured since the last correction puts the duty on one
+   side of its zero-drift duty, the bracket keeps the newest point on each
+   side, and the next duty is the bracket's interpolation to the rate that
+   brings the supply back to the edge over that span, or the bracket's
+   midpoint when the same end moved at the last correction too. A bracket
+   end that a new measurement contradicts goes back to the chatter's own
+   phase. Not a secant: one across two corrections read the board's own
+   change between them as the duty's (757's PTC fuse tripping, ten times
+   the slope); not a fixed slope: 22 tpl 2's chatter showed its powered
+   phase only as a sub-microsecond esr step, -65,000 V/s against the
+   slide's few V/s. A correction waits for the supply to cross back over
+   the edge since the last one, or to drift a further W0 out, a `Rail` watch
+   on that level: a rate read right after a correction is the settling at
+   the band's level (1.9 V/s over 83 ns took 757's duty to 1). The drift is
+   measured across driver changes, which a chip toggling as it slides makes
+   at its own pace. A chip that, fully powered, still drifts as held (or off,
+   as powered) leaves the slide. 757 tpl 0 runs to 1.2 s at x = 0.640-0.649
+   against 0.6443 by hand, then 0.785 once its PTC fuse trips (0.787 by
+   hand), its rail within W0 of 1.8 V except at the trip (2 W0, the further
+   watch). On a capacitor's segment whose aim back at the edge needs more
+   than the limit leaves at any duty, yet one holds it flat, the slide takes
+   the end that turns it back fastest (off under the edge, on over it); cold
+   766 tpl 0 then slides to 0.507 s instead of 0.191 s. **A chip whose
+   outputs reach its own inputs through passive parts with no capacitor**
+   (`hold::self_fed`, at build: resistive parts, switches in either state,
+   fuses and LEDs, stopping at fixed nodes and at the chip's own supply
+   pins) never slides (ruling R97 (b)): its inputs read its own averaged
+   output between their thresholds, and 22 tpl 2's 555 (OUT on its TRIG and
+   THR) rang at 1e9 events a second; it chatters to the guard's `-4` as
+   before, the message naming the ruling (also 688 tpl 5's 555). Open item:
+   a self-feedback chip at a starving edge, to be checked against a longer
+   fine reference.
+
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
    supply out of its window; held off, the supply comes back) is held,
@@ -6420,11 +6463,11 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     carry the rail back across the edge (cold 757 tpl 0: a 555 in reset
     sinking 82.8 mA through a 71.8 mA supply chattered at its 1.8 V floor
     every 170 µs, 11 to 13 steps between flips and no hold, 6,805 steps in a
-    45 ms host step; it now declines at 0.1745 s through the guard, exact
-    mode at 0.1723 s, and stays an R53 item; off a segment cold 108 tpl 5's
-    74LS00 throws a capacitorless rail to 7.1 V and back at its floor, which
-    exact mode runs through:
-    `a_rail_ic_chased_across_its_own_partitions_restart_steps_is_held`,
+    45 ms host step; it then declined through the guard, and since ruling
+    R95 (b) it slides from its chatter, W1c point 1a; off a segment cold 108
+    tpl 5's 74LS00 throws a capacitorless rail to 7.1 V and back at its
+    floor, which exact mode runs through:
+    `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_from_its_chatter`,
     `a_rail_ic_flipping_off_a_rail_capacitor_is_not_counted_across_its_steps`).
     A source edge ends it too, and so does another partition's event when
     the rail solves again in that call (a clock swinging a load across a
@@ -6790,6 +6833,10 @@ failures and warnings (W1g)"):
   whatever the rate. Batching takes across frames should come with the next
   host-API revision.
 
+- A self-feedback chip at a starving edge (ruling R97 (b), W1c point 1a's
+  chatter entry): it does not slide and declines `-4` through the episode
+  guard; check against a longer fine reference whether its chatter has a
+  usable average (cold 22 tpl 2, 688 tpl 5).
 - Hysteresis at the IC supply floor, a classic change too: the W1c fixed point
   returns -4 (fallback to classic) when a free supply sits near the power
   floor. Accepted for 1.0.0 (manager, 2026-09-29).

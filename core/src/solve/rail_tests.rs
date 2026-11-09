@@ -14454,34 +14454,211 @@ pub(super) fn cold_757_tpl0() -> Program {
 }
 
 #[test]
-fn a_rail_ic_chased_across_its_own_partitions_restart_steps_is_held() {
-    // Ruling R82 (B'), cold 757 tpl 0: a 555 held in reset (RESET at 0) on
-    // a {12.56 V, 71.76 mA} PSU's rail with 1.13 mF (3.49 ohm) on it; its OUT
-    // pin, LOW, sinks 82.8 mA from node 2 (0.64 ohm fuse and 4.94 mF to the
-    // rail's side), past the limit. By hand, powered, the rail settles at
-    // about 1.41 V, under the chip's 1.8 V floor, and off, node 2's loads
-    // take about 6.6 mA, so the rail climbs past it: no power state holds,
-    // and the rail slides at 1.8 V with the chip powered x = (71.76 - 6.6) /
-    // 82.8 = 0.79 of the time (R53's class). Exact mode declines it at
-    // 0.1723 s through ruling R54 (a)'s guard. In default mode the rail
-    // capacitor's CC step carried the rail across the edge, and after each
-    // flip the partition restarted at H_MIN, so about 13 steps that flipped
-    // nothing lay between flips: each ended the chase count, no hold ran, and
-    // the chip chattered at ~170 us for as long as it ran (6,805 steps in a
-    // 45 ms host step).
-    let stops = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2];
+fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_from_its_chatter() {
+    // Cold 757 tpl 0 (rulings R82 (B'), R95 (b)): a 555 held in reset
+    // (RESET at 0) on a {12.56 V, 71.76 mA} PSU's rail with 1.13 mF (3.49
+    // ohm) on it; its OUT pin, LOW, sinks from node 2, which a 0.6364 ohm
+    // fuse and 18.49 ohm tie to the rail (0.6152 ohm together) and 4.94 mF
+    // holds. Powered, the rail settles near 1.41 V, under the chip's 1.8 V
+    // floor; off, it climbs past it: no power state holds, and the rail
+    // slides at 1.8 V. Node 2's capacitor carries the chip's sink within any
+    // instant, so neither end of the slide's own solve moves the rail
+    // (piece 2: held 51 times, `-4` at 0.181 s); the chatter shows the edge,
+    // and from its third hold (0.17326 s) the chip slides at the powered
+    // fraction of the last cycle (0.694), corrected across instants until
+    // the rail stops drifting.
+    //
+    // By hand, the zero-drift duty with every capacitor at rest: node 2
+    // carries what the PSU delivers less the rail's own 38.2 kohm (0.047 mA
+    // into node 4, which the 0.055 ohm PTC fuse holds at ground), 71.71 mA,
+    // so V2 = 1.8 - 0.6152 x 0.07163 = 1.75593 V. Off, node 2's loads take
+    // V2/416.30 + V2/776.42 + V2/35684 + V2/193088 = 6.537 mA, and V2/(139.84
+    // + (9.503 + 0.055) || 18521) = 11.754 mA into the PTC: D_off = 18.338
+    // mA with the 0.047. Powered, OUT LOW (fraction f = 0.1/1.8 to VCC)
+    // adds (1 - f)/20 x V2 = 82.920 mA at duty 1 (its pull to VCC returns
+    // through node 2). x = (71.760 - 18.338)/82.920 = 0.6443.
+    //
+    // The duty is corrected only when the rail has drifted W0 (1.9 mV) off
+    // the edge, so between corrections an error e in it drifts the rail at
+    // 13.8 e V/s (the chatter's powered rate less its held one); after 0.25
+    // s the corrections lie 39 ms or more apart, so e <= 2 W0/(13.8 x 0.039)
+    // = 0.007, and the hand value's own heating terms (the PTC's and LEDs'
+    // resistance rising with their dissipation) make it 0.01.
+    //
+    // Against the fine reference (exact mode, 1 us host steps, pre-ruling:
+    // drafts/r53-logs/fine), whose rail reaches the edge at 0.1723 and
+    // declines 11 us later, its chatter averaging 1.80003 V: this run's rail
+    // is still on its ramp there, 0.7 mV (0.37 W0) under it, and on the
+    // ramp 1.12 mV (0.59 W0) behind it at 0.162 s, both within W0.
+    let stops = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25, 0.3, 0.33];
+    let (i_limit, w0) = (0.07175978736463227, 1e-4 + 1e-3 * 1.8);
+    let x_hand = (i_limit - 0.018338) / 0.082920;
     let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
     for &t in &stops {
-        if let Err(err) = rig.advance(t) {
-            let at = rig.k.time();
-            let msg = format!("{err:?}");
-            assert!(msg.contains("held 51 times in one sliding episode"), "{msg}");
-            assert!((at - 0.1723).abs() <= 0.01, "declined at {at} s, exact mode at 0.1723 s");
-            assert!((rig.u() - 1.8).abs() <= 1e-4 + 1e-3 * 1.8, "the rail at {} V, by hand on the 555's 1.8 V floor", rig.u());
-            return;
+        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+        if t < 0.17 {
+            continue;
+        }
+        let hold = rig.s().power_hold(10);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t} s: sliding, not {hold:?}");
+        close(rig.u(), 1.8, w0, &format!("at {t} s: the rail at the 555's floor"));
+        close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("at {t} s: the PSU at its limit"));
+        if t >= 0.25 {
+            close(hold.kind.weight(), x_hand, 0.01, &format!("at {t} s: the duty against {x_hand} by hand"));
         }
     }
-    panic!("the 555 chattered at its power edge to {} s with {} holds", rig.k.time(), rig.s().hold_stats()[0]);
+}
+
+/// tpl=0 hub=2 e=8.919 psu ilim=0.113 V2=0.22 CLK3 -0.3..6.1 stacked4-3 1.7 C6-0=4.0e-6 555 vcc1 gnd0 [1, 3, 5, 1, 1, 1] C6-0=1.1e-4 C0-0=4.5e-5 LED1-4 R4-5=8.0 C6-1=1.4e-2 R0-6=2.8 LED6-5+R1-6=553 R4-3=149201.7 C4-0=1.5e-4
+fn cold_766_tpl0() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![8.918507796693085, 0.1134150218781756], vec![]),
+        fz(2, 1, &[0, 2], vec![0.22053873572612304], vec![]),
+        fz(22, 2, &[3, 0], vec![12.893233834069456, 0.4659378905659498, 6.1146166130891855, -0.33734335454824915, 0.0], vec![8.0]),
+        fz(2, 3, &[4, 3], vec![1.6787644949010998], vec![]),
+        fz(1, 4, &[5, 0], vec![275238.3748080027], vec![]),
+        fz(1, 5, &[6, 0], vec![3059.764101902056], vec![]),
+        fz(3, 6, &[6, 0], vec![3.9959235973627165e-6, 0.0, 0.0], vec![]),
+        fz(40, 7, &[1, 0, 1, 3, 5, 1, 1, 1], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 8, &[1, 1], vec![496.29824216622467], vec![]),
+        fz(1, 9, &[1, 1], vec![2462.7935156469352], vec![]),
+        fz(3, 10, &[1, 0], vec![2.6600744973443607e-6, 0.0, 0.0], vec![]),
+        fz(1, 11, &[3, 4], vec![170.6720031380302], vec![]),
+        fz(1, 12, &[1, 4], vec![522.3934136009821], vec![]),
+        fz(3, 13, &[6, 0], vec![0.00010505994661364452, 0.20309559559903922, 0.0], vec![]),
+        fz(3, 14, &[0, 0], vec![4.4891751560982645e-5, 0.0, 0.0], vec![]),
+        fz(30, 15, &[1, 4], vec![1.735602816674507, 1.7759607897614407, 0.02153998290766393, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 16, &[4, 5], vec![7.998357309822923], vec![]),
+        fz(3, 17, &[6, 1], vec![0.013533562674512407, 0.0, 0.0], vec![]),
+        fz(1, 18, &[0, 6], vec![2.823110238781758], vec![]),
+        fz(30, 19, &[6, 5], vec![2.959049719503402, 1.9779318949852036, 0.0067924894083449885, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 20, &[1, 6], vec![552.93764870821], vec![]),
+        fz(1, 21, &[4, 3], vec![149201.68663228722], vec![]),
+        fz(3, 22, &[4, 0], vec![0.00014550937914495, 0.0, 0.0], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0003452421262857693, 496.29824216622467], vec![]),
+        fz(90, 9, &[], vec![9.0, 0.0060389338726761915, 2462.7935156469352], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.02772524942848582, 170.6720031380302], vec![]),
+        fz(90, 16, &[], vec![16.0, 7.385057435550568, 7.998357309822923], vec![]),
+        fz(90, 18, &[], vec![18.0, 13.705460283069803, 2.823110238781758], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.006430906397718856, 552.93764870821], vec![]),
+        fz(90, 21, &[], vec![21.0, 2.6089725380356916e-5, 149201.68663228722], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end() {
+    // Cold 766 tpl 0 (ruling R95 (iv)): a 555 on a {8.92 V, 113 mA} PSU's
+    // rail, its OUT against a clock, slides at its 1.8 V
+    // floor (ruling R92). Its duty is solved again 10 ns apart where the
+    // board moves the rail W0 off, and aimed back over those 10 ns the
+    // rail capacitors' segment would need more current than the limit
+    // leaves at any duty, though a duty holds it flat: the slide then takes
+    // the end that turns it back fastest, off under the edge (on over it),
+    // which the board's own motion carries back to the edge, where it is
+    // solved flat again. Exiting there instead (piece 2), the chip was held,
+    // freed and held again, 51 times to the guard's `-4` at 0.191 s; with
+    // the end kept it slides to 0.5 s.
+    let stops = [0.006272881316202867, 0.006592239574557807, 0.006747974487588678, 0.009302569904999277, 0.011591259429672991, 0.012891930838384202, 0.013102337317568288, 0.017121114509552525, 0.01776977393624156, 0.017903256799721563, 0.018573567296525255, 0.019190791809711928, 0.027283241124519846, 0.03633238334655953, 0.03655508559102963, 0.05375819776730538, 0.053907005655440196, 0.05434366018173479, 0.05471144162919912, 0.05481549907582625, 0.058867174158759854, 0.09774042128506163, 0.13711284835022985, 0.1677137943913277, 0.16946598153329615, 0.17000367281961773, 0.17010636113855684, 0.17089289690872514, 0.2191317906044945, 0.22246539709907526, 0.22689536571424207, 0.2271144421500335, 0.25424151981471377, 0.2546238277775797, 0.2710727463304922, 0.27129307569300326, 0.28499382276150725, 0.2855188431517161, 0.2861424232586671, 0.3093323047182759, 0.324302244677687, 0.32446900395433265, 0.34039419607263716, 0.34427362694576674, 0.37214510234434706, 0.3730873691773048, 0.3737265355732723, 0.3742685747092929, 0.37465525493761176, 0.37480753065700917, 0.39492720918502816, 0.4182941417763242, 0.42037993834465476, 0.42059268601733263, 0.43781200950730526, 0.4379382404627846, 0.4394875796097216, 0.44197203244170324, 0.44320833929044123, 0.444283064174736, 0.4450314638403273, 0.47089326118430774, 0.5];
+    let mut rig = Rig::load(&cold_766_tpl0()).unwrap();
+    for &t in &stops {
+        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+    }
+    let hold = rig.s().power_hold(7);
+    assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "sliding at 0.5 s, not {hold:?}");
+    close(rig.v(1), 1.8, 1e-4 + 1e-3 * 1.8, "the rail at the 555's floor");
+}
+
+/// tpl=2 hub=2 e=5.284 psu ilim=0.046 V2=-6.77 R6-3=9832.2 C1-0=3.4e-4 C1-0=4.7e-3 R1-6=3.7 555 vcc1 gnd0 [7, 7, 3, 1, 7, 0] R6-7=4.2 R6-7=15.3
+fn cold_22_tpl2() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![5.284213110361023, 0.0457777656678858], vec![]),
+        fz(2, 1, &[2, 0], vec![-6.768206489177164], vec![]),
+        fz(1, 2, &[3, 0], vec![180565.56276704406], vec![]),
+        fz(1, 3, &[4, 0], vec![57537.14776259971], vec![]),
+        fz(1, 4, &[5, 0], vec![54323.36919607658], vec![]),
+        fz(1, 5, &[6, 0], vec![263229.86825546355], vec![]),
+        fz(1, 6, &[7, 0], vec![77665.00574261653], vec![]),
+        fz(1, 7, &[6, 3], vec![9832.239243767932], vec![]),
+        fz(3, 8, &[1, 0], vec![0.00033761238313776115, 0.0, 0.0], vec![]),
+        fz(3, 9, &[1, 0], vec![0.00473326146929658, 0.1841346734703889, 0.0], vec![]),
+        fz(1, 10, &[1, 6], vec![3.747742381457793], vec![]),
+        fz(40, 11, &[1, 0, 7, 7, 3, 1, 7, 0], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 12, &[1, 0], vec![337.8562438657402], vec![]),
+        fz(1, 13, &[0, 7], vec![1568.6175263493267], vec![]),
+        fz(3, 14, &[7, 0], vec![1.835036556759032e-8, 0.0, 0.0], vec![]),
+        fz(1, 15, &[7, 0], vec![1092.2523098752147], vec![]),
+        fz(1, 16, &[6, 7], vec![4.234906149834903], vec![]),
+        fz(1, 17, &[6, 7], vec![15.26577570849081], vec![]),
+        fz(1, 18, &[2, 5], vec![34856.53993909854], vec![]),
+        fz(1, 19, &[3, 1], vec![17949.746002911044], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0009603833328792034, 9832.239243767932], vec![]),
+        fz(90, 10, &[], vec![10.0, 1.5060186523825128, 3.747742381457793], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0018112441093365071, 337.8562438657402], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.0006288518966152803, 1568.6175263493267], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.0002758107092659011, 1092.2523098752147], vec![]),
+        fz(90, 16, &[], vec![16.0, 2.940447146223939, 4.234906149834903], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.3971973356124492, 15.26577570849081], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_self_fed_chip_starving_its_rail_declines_promptly_and_never_slides() {
+    // Ruling R97 (b), cold 22 tpl 2: a 555 on a {5.28 V, 45.8 mA} PSU's rail
+    // (0.34 + 4.73 mF) with its OUT on its own TRIG and THR (node 7), which
+    // 3.32 ohm and 3.75 ohm tie to the rail. Its outputs reach its inputs
+    // with no capacitor in the path, so at its starving 1.8 V floor it never
+    // slides: sliding, its inputs read its own averaged OUT between their
+    // thresholds and it rang at 1e9 events a second (15.6 million events in
+    // 4 ms), never finishing a run. It chatters to the episode guard's `-4`
+    // as before ruling R92, within 1.2 us of reaching the floor (0.2188676
+    // s; the fine reference reaches it at 0.218867 s and declines at
+    // 0.218883 s), naming the ruling, in under a thousand events (791).
+    // Cold 757 tpl 0's OUT reaches its TRIG only across the rail it slides
+    // on, which is no self-feedback.
+    assert!(PartitionedSolver::build(&cold_22_tpl2()).unwrap().self_fed[0], "22 tpl 2's 555 feeds itself");
+    assert!(!PartitionedSolver::build(&cold_757_tpl0()).unwrap().self_fed[0], "757 tpl 0's 555 does not");
+    let stops = [0.006272879633087429, 0.013345117839129006, 0.015494695988619472, 0.024315328917644118, 0.05064003930122574, 0.05490012932844035, 0.09847041802644906, 0.11261489541743265, 0.13533581879128037, 0.13558087861180135, 0.13754438097229324, 0.14868712175429308, 0.1820705201628072, 0.18390319258133392, 0.18406494908390086, 0.19984885060579188, 0.21626922703682835, 0.21721265502427278, 0.21731428865897925, 0.22036903193862042];
+    let mut e = Engine::load(&cold_22_tpl2()).unwrap();
+    let (run, end) = stops.split_at(stops.len() - 1);
+    for &t in run {
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {}", er.message));
+    }
+    let events = e.stat(4);
+    let err = e.advance(end[0]).expect_err("declined");
+    assert_eq!(err.code, -4, "{}", err.message);
+    assert!(err.message.contains("ruling R97"), "{}", err.message);
+    assert!(e.stat(4) - events < 1000.0, "{} events to the decline", e.stat(4) - events);
+    assert!(e.time() < 0.2188676 + 2e-6, "declined at {} s", e.time());
+}
+
+#[test]
+fn a_chatter_seeds_its_slide_at_its_powered_fraction() {
+    // Ruling R95 (b): held at 1 ms with the supply left at 1.7990 V, freed
+    // at 1.3 ms at 1.8010 V, starving again at 2 ms at 1.7976 V. Held 0.3
+    // ms, powered 0.7: the seed 0.7; the held phase rose (1.8010 -
+    // 1.7990)/0.3e-3 = 6.667 V/s, the powered one fell (1.7976 -
+    // 1.8010)/0.7e-3 = -4.857 V/s. Only from the episode's second short
+    // self-released hold, and only where the two rates point at each other.
+    let step = 0.01;
+    let mut e = hold::Episode::default().held(0.0).released(0.5e-3, step, false);
+    e = e.held(0.6e-3).released(0.8e-3, step, false);
+    assert_eq!(e.count, 2);
+    let mut e2 = e.held(1e-3).released(1.3e-3, step, false);
+    e2.set_chatter_for_test(1.7990, 1.3e-3, 1.8010);
+    let (x, r_off, r_on) = e2.chatter_seed(2e-3, 1.7976).expect("a whole cycle");
+    close(x, 0.7, 1e-12, "the powered fraction");
+    close(r_off, 0.0020 / 0.3e-3, 1e-9, "the held phase's rate");
+    close(r_on, -0.0034 / 0.7e-3, 1e-9, "the powered phase's rate");
+    assert!(e2.chatter_seed(2e-3, 1.8020).is_none(), "both phases rising: no edge attracts");
+    let mut one = hold::Episode::default().held(0.0).released(0.5e-3, step, false);
+    one.set_chatter_for_test(1.7990, 0.5e-3, 1.8010);
+    assert!(one.chatter_seed(1e-3, 1.7976).is_none(), "one short hold: no chatter yet");
 }
 
 fn cold_108_tpl5() -> Program {

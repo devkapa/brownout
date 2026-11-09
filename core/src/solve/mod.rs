@@ -2682,6 +2682,10 @@ pub struct PartitionedSolver {
     /// each keep their OWN copy of this same list (`solve::collect_ics`),
     /// used only for the driver/pull stamps that touch THEIR OWN partitions.
     ics: crate::shared::Shared<[(usize, digital::IcRecord)]>,
+    /// Per IC (positions in `ics`): its outputs reach its own inputs through
+    /// passive parts and no capacitor (`hold::self_fed`), so it never slides
+    /// (ruling R97 (b)).
+    self_fed: crate::shared::Shared<[bool]>,
     /// The currently-scheduled floating-bucket boundary time, or `None` —
     /// the dedup flag contract point 6 calls for ("the solver schedules...
     /// ONE boundary event... deduplicated"). Part of "the bucket schedule"
@@ -2984,6 +2988,9 @@ pub struct PartitionedSolver {
     /// [`hold::SLIDE_SOLVES_MAX`]. Not rolled back:
     /// a failed instant's solves still count, which only declines sooner.
     slide_solves: u32,
+    /// Set only inside a slide's second solve (`hold::slide_from`): the
+    /// segment is solved flat, not aimed back at the edge.
+    slide_flat: bool,
     /// Set only inside the horizon clamp: the rail loop retries there even
     /// when no pass solved.
     at_clamp: bool,
@@ -3139,6 +3146,7 @@ impl PartitionedSolver {
 
         let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
         let ics = collect_ics(program);
+        let self_fed = hold::self_fed(program, &ics, &fixed.iter().map(|f| f.is_some()).collect::<Vec<_>>());
 
         let static_solver = static_part::StaticPartitionSolver::build(program)?;
 
@@ -3200,6 +3208,7 @@ impl PartitionedSolver {
             fixed_pair_capacitors: fixed_pair_capacitors.into(),
             start_time: program.options.start_time,
             ics: ics.into(),
+            self_fed: self_fed.into(),
             next_bucket: None,
             pending_schedule: Vec::new(),
             largest_partition,
@@ -3287,6 +3296,7 @@ impl PartitionedSolver {
             episodes: Rc::new(Vec::new()),
             retry_armed: true,
             slide_solves: 0,
+            slide_flat: false,
             at_clamp: false,
             rail_jump: false,
             host_edit: false,
@@ -4628,7 +4638,11 @@ impl PartitionedSolver {
             table.resize(n, hold::Episode::default());
         }
         table[device] = episode;
-        episode.check(device)
+        let position = self.ic_position.get(device).copied().filter(|&i| i != u32::MAX);
+        episode.check(device).map_err(|err| match position {
+            Some(pos) if self.self_fed[pos as usize] => format!("{err}; its outputs reach its own inputs with no capacitor in the path, so it does not slide (ruling R97)"),
+            _ => err,
+        })
     }
 
     fn write_power_hold(&mut self, device: usize, hold: digital::power::PowerHold) -> Vec<PartitionId> {
@@ -6881,6 +6895,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_pair_capacitors, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.start_time, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ics, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.self_fed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.next_bucket, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending_schedule, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.largest_partition, w); }
@@ -6976,6 +6991,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.episodes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.retry_armed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_solves, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_flat, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.at_clamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_jump, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_edit, w); }

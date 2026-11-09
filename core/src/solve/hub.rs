@@ -2215,7 +2215,21 @@ impl PartitionedSolver {
                 // before its duty is solved again (ruling R92).
                 if let digital::power::HoldKind::Duty(_) = hold.kind {
                     let edge = self.slide_edge(*d);
-                    windows.extend([vg + edge - hold::slide_drift(edge), vg + edge, vg + edge + hold::slide_drift(edge)]);
+                    let band = hold::slide_drift(edge);
+                    let episode = self.episode(*d);
+                    if episode.chatter {
+                        // A chatter slide (ruling R95 (b)) is corrected only
+                        // past the band (its crossing back over the edge read
+                        // at any re-solve), or a further W0 out from where its
+                        // last correction left it.
+                        windows.extend([vg + edge - band, vg + edge + band]);
+                        let off0 = episode.drift_from.1 - edge;
+                        if !episode.inside {
+                            windows.push(vg + episode.drift_from.1 + off0.signum() * band);
+                        }
+                    } else {
+                        windows.extend([vg + edge - band, vg + edge, vg + edge + band]);
+                    }
                     continue;
                 }
                 if !hold.is_free() {
