@@ -5480,7 +5480,12 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     convention; exact mode declines at 30.0846 ms through R54 (a)'s guard,
     and classic stalls at 1.81 V (a decline with a diagnostic on its
     `fix/rail-ic-power-chatter`). R53's sliding hold settles the physics
-    (`a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_toggle`);
+    (`a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_toggle`).
+    Cold 3593 tpl 3 is of the same kind: a 555 on a {5.24 V, 54 mA} PSU's
+    rail that chatters at its edge from 0.98 ms, where the fine exact run
+    declines (R54 (a)'s guard) and classic stalls at 0.97 ms; default mode
+    runs its 1.2 s, and R89 (a)'s re-plan moves it by up to 4 W0 after its
+    switch toggle at 0.687 s, with no reference to judge either;
   - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
     tree): 9 runs publish a rail more than 0.1 mV outside their sources'
     range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13
