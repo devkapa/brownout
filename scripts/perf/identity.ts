@@ -66,7 +66,8 @@
  *   --no-sap1 | --no-fixtures
  *   --candidate-advance-for <ms>  the candidate advances through
  *                          bo_engine_advance_for with this budget on a fake
- *                          clock (1 ms a read), yielding every few checks:
+ *                          clock (1 us a read; 0.002 yields every instant
+ *                          or two), yielding every few checks:
  *                          with the same wasm on both sides it is ruling
  *                          R86's split-run identity check
  *   --stats                print every changed counter for every circuit
@@ -502,7 +503,7 @@ async function main(): Promise<void> {
     `\n${failures === 0 ? "IDENTICAL" : "DIFFERENT"}: ${String(total.compared)} compared, ${String(total.declined)} declined${declinedSeen.size > 0 ? ` (by design: ${[...declinedSeen].map((n) => n.replace(/@.*$/, "")).filter((n, i, all) => all.indexOf(n) === i).join(", ")})` : ""}, ${String(total.failed)} failed; ${String(frames)} readings compared (${baseCpu.toFixed(0)} ms base, ${candidateCpu.toFixed(0)} ms candidate CPU)\n`,
   );
   if (nanPayload > 0) process.stdout.write(`warning: ${String(nanPayload)} value(s) differ only in a NaN's payload (Object.is equal; not counted as a difference)\n`);
-  if (args.candidateAdvanceFor !== undefined) process.stdout.write(`candidate advances yielded ${String(advanceForYieldCount())} times (bo_engine_advance_for, ${String(args.candidateAdvanceFor)} ms on a fake clock)\n`);
+  if (args.candidateAdvanceFor !== undefined) process.stdout.write(`candidate advances yielded ${String(advanceForYieldCount())} times (bo_engine_advance_for, ${String(args.candidateAdvanceFor)} ms on a fake 1 us-a-read clock)\n`);
   if (statChanged > 0 && !args.stats) process.stdout.write(`note: ${String(statChanged)} run(s) changed a stat counter (--stats lists them; counters do not fail the check)\n`);
   process.exit(failures === 0 ? 0 : 1);
 }

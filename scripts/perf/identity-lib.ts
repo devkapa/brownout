@@ -318,7 +318,7 @@ const EMPTY_KEYS: Recording["keys"] = { nodeV: [], deviceI: [], digital: [], cha
 /** Run one spec on whichever wasm is live and record every reading. The caller installs the wasm first. Never throws. */
 /**
  * Ruling R86: when set, recordRun advances through `bo_engine_advance_for`
- * with this budget (ms) on a fake host clock that reads 1 ms later at every
+ * with this budget (ms) on a fake host clock that reads 1 us later at every
  * read, so a budgeted advance yields every few clock checks; `undefined`
  * (the default) advances with `bo_engine_advance`.
  */
@@ -339,8 +339,12 @@ export function setAdvanceFor(ms: number | undefined): void {
   }
   if (!realNow) {
     realNow = perf.now.bind(perf);
+    // 1 us a read: a budget of a few us yields every instant or two, and the
+    // busy time stays far under the progress floor's 30 s window, which a
+    // fake clock is no measure of (at 1 ms a read the floor declined a slow
+    // battery drain).
     let fake = 0;
-    perf.now = () => (fake += 1);
+    perf.now = () => (fake += 0.001);
   }
 }
 
