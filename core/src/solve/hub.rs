@@ -2229,6 +2229,10 @@ impl PartitionedSolver {
                         }
                     } else {
                         windows.extend([vg + edge - band, vg + edge, vg + edge + band]);
+                        // Off a capacitor's segment, also where an end of its
+                        // duty's bracket stops bracketing (Filippov's exit,
+                        // `slide_exits`), which the re-solve there decides.
+                        windows.extend([episode.exits.0, episode.exits.1].into_iter().filter(|l| l.is_finite()).map(|l| vg + l));
                     }
                     continue;
                 }

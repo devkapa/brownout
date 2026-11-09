@@ -6252,7 +6252,7 @@ fn a_closed_form_hub_partition_holding_a_rail_supplied_gate_follows_the_rail_wit
 }
 
 #[test]
-fn the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carries_it() {
+fn the_power_gate_pingpong_board_through_5_ohm_slides_until_its_rail_carries_it() {
     // The original board of `a_power_flip_inside_one_band_never_replays_the_
     // other_power_state` (a 4.06 V cell with 5 ohm, 1 kohm into 1 uF, a gate
     // whose 4.05 V power threshold the rail crosses as the capacitor
@@ -6260,15 +6260,28 @@ fn the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carrie
     // (`w1f-power-gate-pingpong`): powered, the gate's four HIGH outputs
     // draw 4.05 V through their node shunts (1.6e-11 A), whose 8e-11 V
     // across 5 ohm puts the rail back under a threshold the event landed
-    // two reached widths (8.1e-12 V) past. Now (W1c point 1a) the probes
-    // find it starving itself there, so it is held off until the rail
-    // passes the threshold by that drop and two reached widths, which the
-    // charging capacitor brings about 9 ps later; it then powers and drives
-    // its outputs high to 10 ms, cache on or off.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // two reached widths (8.1e-12 V) past. W1c point 1a held it off until
+    // the rail passed the threshold by that drop and two reached widths,
+    // about 8 ps later. Ruling R92: the edge attracts, so it slides there,
+    // the rail at the threshold, at the duty its shunts' draw allows: about
+    // 2e-11, as the outputs' drive scales with the duty against their
+    // 1e-12 S shunts, so the draw is whole by a duty of about 1e-10. The
+    // capacitor goes on charging the rail, at (E - floor) / tau = 0.01 /
+    // 1.005e-3 = 9.950 V/s (r i_cap / tau, i_cap = (E - floor) / r), and the
+    // slide's powered end (duty 1, probed at the solve: 8.1e-11 V under the
+    // edge less the 8.1e-12 V the event landed past) stops bracketing once
+    // the rail has risen by that much: Filippov's exit, the watch
+    // `slide_exits` places, landing two reached widths past, where the
+    // re-solve finds no bracket and frees it. That is the hold's release
+    // level, floor + drop + 2 eta, read off the unpowered rail: freed
+    // drop / rate = 5 x 4 x 4.05e-12 / 9.950 = 8.14e-12 s after the
+    // crossing (the drop in hand from the four HIGH outputs at the 4.05 V
+    // rail into 1e-12 S each; the solve's outputs sit a little under the
+    // rail, 8.06e-11 V measured, so 8.10e-12 s), within 0.5 ps. It then
+    // powers and drives its outputs high to 10 ms, cache on or off. Without
+    // the exit it sat at 2e-11, off in all but name, until the rail had
+    // drifted W0 (4.15 mV) past, 0.54 ms (and with a watch placed from the
+    // bracket's slope, 0.341 V per unit duty, as late).
     let mut gate = ls00(3, 1, 0, [0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0, 7], 10e-9, 0);
     gate.params[ic_param::VCC_MIN] = 4.5;
     let (e, r, big_r, c) = (4.06, 5.0, 1000.0, 1e-6);
@@ -6281,26 +6294,25 @@ fn the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carrie
         let mut p = program(8, vec![battery(0, 1, 0, e, r), resistor(1, 1, 2, big_r), capacitor(2, 2, 0, c, 0.0), gate.clone()]);
         p.options.no_solution_cache = !cache;
         let mut rig = Rig::load(&p).unwrap();
-        let (mut held, mut freed) = (None, None);
+        let (mut slid, mut freed) = (None, None);
         while rig.k.time() < 10e-3 {
             let t = rig.k.next_event_time().min(10e-3);
             rig.advance(t).unwrap_or_else(|err| panic!("cache {cache} at {t:e}: {err:?}"));
             let hold = rig.s().power_hold(3);
-            if held.is_none() && hold.kind == digital::power::HoldKind::Off {
-                held = Some((t, hold.release.expect("a release level")));
+            if slid.is_none() && matches!(hold.kind, digital::power::HoldKind::Duty(_)) {
+                slid = Some(t);
             }
-            if held.is_some() && freed.is_none() && hold.is_free() {
+            if slid.is_some() && freed.is_none() && hold.is_free() {
                 freed = Some(t);
             }
         }
-        let (t_held, release) = held.expect("held off at the threshold");
-        let t_freed = freed.expect("released");
-        close(t_held, rail_at(floor), 1e-9, "held where the rail reaches the threshold");
-        assert!(release.rising && release.level > floor + 2.0 * rails::REACHED_REL * floor && release.level < floor + 1e-9, "{release:?}");
-        close(t_freed, rail_at(release.level), 1e-9, "released where the rail reaches its release level");
-        eprintln!("cache {cache}: held at {t_held:.12e}, release {:.6e} V past the threshold, freed {:.3e} s later", release.level - floor, t_freed - t_held);
-        assert!(t_freed - t_held > 5e-12 && t_freed - t_held < 2e-11, "cache {cache}: {:e} s", t_freed - t_held);
-        assert_eq!(rig.s().hold_counts(), [1.0, 1.0], "cache {cache}");
+        let t_slid = slid.expect("sliding at the threshold");
+        let t_freed = freed.expect("freed");
+        close(t_slid, rail_at(floor), 1e-9, "slid where the rail reaches the threshold");
+        eprintln!("cache {cache}: slid at {t_slid:.12e}, freed {:.3e} s later", t_freed - t_slid);
+        assert!(t_freed - t_slid > 5e-12 && t_freed - t_slid < 2e-11, "cache {cache}: freed {:e} s after the crossing", t_freed - t_slid);
+        close(t_freed - t_slid, 5.0 * 4.0 * 4.05e-12 / ((e - floor) / tau), 0.5e-12, "freed at the hold's release level");
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "cache {cache}: no hold");
         assert!(rig.u() > floor && (rig.v(4) - rig.u()).abs() < 1e-6, "cache {cache}: powered, 1y HIGH at 10 ms: rail {} V, 1y {} V", rig.u(), rig.v(4));
     }
 }

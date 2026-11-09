@@ -280,6 +280,15 @@ pub(crate) fn slide_drift(edge: f64) -> f64 {
     1e-4 + 1e-3 * edge.abs()
 }
 
+/// What a slide's solve probed (`slide_exits`): its residual at duty 0 and
+/// 1 where it probed them, and how many duties it probed (none: the duty
+/// was left as it was).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct SlideEnds {
+    at: [Option<f64>; 2],
+    evals: u32,
+}
+
 /// A probe's hold: the verdict fixed at `on`.
 #[inline]
 pub(crate) fn probe(on: bool) -> PowerHold {
@@ -320,6 +329,10 @@ pub(crate) struct Episode {
     /// While the IC slides: when its duty was last solved (`-inf`: never),
     /// the span its segment is aimed back over (`slide_residual`).
     pub(crate) solved_at: f64,
+    /// While the IC slides off a capacitor's segment: the supply levels,
+    /// lower then upper, past which one end of its duty's bracket stops
+    /// bracketing, Filippov's exit (`slide_exits`; infinite: none).
+    pub(crate) exits: (f64, f64),
     /// Its slide could not be followed (`keep_sliding`'s fallback): held as
     /// before ruling R92 until the circuit changes, which drops every hold
     /// and episode.
@@ -364,6 +377,7 @@ impl Default for Episode {
             stepped: false,
             slope: 0.0,
             solved_at: 0.0,
+            exits: (f64::NEG_INFINITY, f64::INFINITY),
             unfollowed: false,
             s_held: 0.0,
             released_at: f64::NEG_INFINITY,
@@ -1060,7 +1074,12 @@ impl PartitionedSolver {
     fn slide_solve(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>) -> Result<bool, String> {
         let mut cp = Some(self.checkpoint());
         let mut probe_readers = Vec::new();
-        match self.slide_solve_from(now, drivers, &mut probe_readers, d, err, from, &mut cp) {
+        let mut ends = SlideEnds::default();
+        let solved = match self.slide_solve_from(now, drivers, &mut probe_readers, d, err, from, &mut cp, &mut ends) {
+            Ok(true) => self.slide_exits(now, drivers, &mut probe_readers, d, err, &mut cp, ends).map(|()| true),
+            other => other,
+        };
+        match solved {
             Ok(slid) => {
                 readers.extend(probe_readers);
                 Ok(slid)
@@ -1086,18 +1105,87 @@ impl PartitionedSolver {
         }
     }
 
+    /// The residual at duty `x`, solved from the state the slide's solve
+    /// was asked in (`cp`, kept for the next probe).
     #[allow(clippy::too_many_arguments)]
-    fn slide_solve_from(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>, cp: &mut Option<Checkpoint>) -> Result<bool, String> {
-        let edge = self.slide_edge(d);
+    fn slide_probe(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, cp: &mut Option<Checkpoint>, x: f64) -> Result<f64, String> {
         let k = self.hub.as_ref().expect("a hub").rail_ics.iter().position(|&pos| self.ics[pos as usize].0 == d).expect("a rail IC");
+        self.back_to(cp.take().expect("a checkpoint"));
+        *cp = Some(self.checkpoint());
+        let mut seed: Vec<usize> = self.set_power_hold(d, digital::power::PowerHold::duty(x)).into_iter().map(|p| p.0 as usize).collect();
+        seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
+        self.rail_settle(now, drivers, readers, seed, err)?;
+        Ok(self.slide_residual(now, d))
+    }
+
+    /// Filippov's exit for a slide off a capacitor's segment (ruling R92,
+    /// the class-A exit watch): the supply levels past which one end of
+    /// the duty's bracket stops bracketing, read from the probes at the ends
+    /// themselves, duty 0 and 1, at the instant of the solve. Each end's
+    /// residual is its own supply's distance past the edge, outward, so it
+    /// falls by the volt as that supply moves inward; as the board moves at
+    /// a fixed duty each end's supply moves with the sliding one, so an end
+    /// stops bracketing once the supply has moved by its residual (the
+    /// powered end's toward the inside, the unpowered end's outward). The
+    /// `Rail` event lands two reached widths past either level and the duty
+    /// is solved again there (`keep_sliding`), which decides: no bracket
+    /// left, and the chip is freed. Not from the bracket's slope: on the
+    /// cold 4.06 V cell the residual is far from linear in the duty (the
+    /// Illinois bracket's ends gave 0.341 V per unit duty, the powered end
+    /// 8e-11 V), and a watch so placed came 0.34 V out, past W0, so the chip
+    /// sat at its duty of 2e-11 for 0.54 ms with its supply past its floor.
+    /// An end the solve did not probe is probed here and the duty solved
+    /// again after; one whose probe fails (or that does not bracket, a slide
+    /// kept across a jump) is no exit. Kept as they were when the solve
+    /// left the duty as it was; none on a capacitor's segment.
+    #[allow(clippy::too_many_arguments)]
+    fn slide_exits(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, cp: &mut Option<Checkpoint>, ends: SlideEnds) -> Result<(), String> {
+        if ends.evals == 0 {
+            return Ok(());
+        }
+        let mut episode = self.episode(d);
+        episode.exits = (f64::NEG_INFINITY, f64::INFINITY);
+        if !self.slide_flat && self.segment_draw(now).is_none() {
+            let x = self.power_hold(d).kind.weight();
+            let mut r = ends.at;
+            let mut probed = false;
+            for (e, xe) in [(0usize, 0.0), (1, 1.0)] {
+                if r[e].is_none() {
+                    r[e] = self.slide_probe(now, drivers, readers, d, err, cp, xe).ok();
+                    probed = true;
+                }
+            }
+            if probed {
+                self.slide_probe(now, drivers, readers, d, err, cp, x)?;
+            }
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            let s = supply(ic, &self.voltages);
+            let sigma = if self.slide_edge(d) == digital::levels::power_window(ic).0 { 1.0 } else { -1.0 };
+            let levels = [r[0].filter(|&r0| r0 < 0.0), r[1].filter(|&r1| r1 > 0.0)];
+            for level in levels.into_iter().flatten().map(|r| s + sigma * r) {
+                if level < s {
+                    episode.exits.0 = episode.exits.0.max(level);
+                } else {
+                    episode.exits.1 = episode.exits.1.min(level);
+                }
+            }
+        }
+        self.set_episode(d, episode)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn slide_solve_from(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>, cp: &mut Option<Checkpoint>, ends: &mut SlideEnds) -> Result<bool, String> {
+        let edge = self.slide_edge(d);
         let tol = self.slide_tolerance(now, d);
         let mut eval = |s: &mut Self, x: f64| -> Result<f64, String> {
-            s.back_to(cp.take().expect("a checkpoint"));
-            *cp = Some(s.checkpoint());
-            let mut seed: Vec<usize> = s.set_power_hold(d, digital::power::PowerHold::duty(x)).into_iter().map(|p| p.0 as usize).collect();
-            seed.extend(&s.hub.as_ref().expect("a hub").ic_parts[k]);
-            s.rail_settle(now, drivers, readers, seed, err)?;
-            Ok(s.slide_residual(now, d))
+            let r = s.slide_probe(now, drivers, readers, d, err, cp, x)?;
+            ends.evals += 1;
+            if x == 0.0 {
+                ends.at[0] = Some(r);
+            } else if x == 1.0 {
+                ends.at[1] = Some(r);
+            }
+            Ok(r)
         };
         let (mut x0, mut r0, mut x1, mut r1): (f64, f64, f64, f64);
         match from {
@@ -1363,7 +1451,12 @@ impl PartitionedSolver {
             let eta = rails::REACHED_REL * edge.abs().max(1.0);
             let chatter = self.episode(d).chatter;
             let at_edge = !chatter && off.abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw - i_limit).abs() > self.slide_tolerance(now, d));
-            if !changed && !at_edge && off.abs() <= slide_drift(edge) {
+            // Past a level where an end of its duty's bracket stops
+            // bracketing (off a capacitor's segment, `slide_exits`, its
+            // `Rail` watch): solved again, which decides.
+            let exits = self.episode(d).exits;
+            let past_end = !chatter && (off + edge <= exits.0 || off + edge >= exits.1);
+            if !changed && !at_edge && !past_end && off.abs() <= slide_drift(edge) {
                 continue;
             }
             // On a capacitor's segment already aimed back at the edge: on its
@@ -1691,6 +1784,16 @@ impl crate::snapshot::HeapBytes for RetrySeam {
     }
 }
 
+impl crate::snapshot::HeapBytes for SlideEnds {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.at, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.evals, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for Episode {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -1701,6 +1804,7 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_at, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.unfollowed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.s_held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.released_at, w); }
