@@ -907,14 +907,28 @@ impl ClosedFormSolver {
             } else {
                 (v_now, f64::INFINITY)
             };
-            return Some((v_inf, v_now, tau, linear_anchor_deadline(a.abs(), s_sum, adx, w_sum, f, tol)));
+            // `S` and `W` as the modes stand at `τn`: each `e^(-kτ)` only
+            // falls from there (every `k >= 0`, checked above), so they
+            // bound the slopes over the whole anchor. Summed as aimed, a
+            // segment whose modes had long decayed (a CC rail settled at its
+            // operating point, cold 1838 tpl 1) kept the slope it was aimed
+            // with, and its rated devices re-anchored at `REDRIVE_MIN_DT`
+            // for as long as the segment stood.
+            let s_n: f64 = d.modes.iter().map(|m| m.s.abs() * (-m.k * tau_n).exp()).sum();
+            let w_n: f64 = d.modes.iter().map(|m| m.w.abs() * (-m.k * tau_n).exp()).sum();
+            return Some((v_inf, v_now, tau, linear_anchor_deadline(a.abs(), s_n, adx, w_n, f, tol)));
         }
         // A curved or folded segment (the coupling moves with `vc`): the
-        // segment's own exponential re-anchored through the exact value, and
-        // the bound below on what it drops.
+        // segment's own exponential re-anchored through the exact value, the
+        // rest of the node, `D = v - base` (the rail's part and the
+        // forcing's), held where it stands, and the bound below on how far
+        // `D` moves. Let decay with the exponential instead, `D` was dropped
+        // whole within a few `tau`: cold 2548 tpl 5's rail, creeping at 8 V/s
+        // through a 555's edge, left 29 uV of it on a node of a 1.5 ns
+        // segment, and its rated resistors re-anchored every 1-2 ns.
         let base = |t: f64| x0 + dx * vc_at(f, part.seg_inf, part.seg_vc0, part.seg_t0, t);
-        let (v_inf, tau) = if f < 0.0 { (x0 + dx * part.seg_inf, -1.0 / f) } else { (v_now, f64::INFINITY) };
         let d_now = v_now - base(now);
+        let (v_inf, tau) = if f < 0.0 { (x0 + dx * part.seg_inf + d_now, -1.0 / f) } else { (v_now, f64::INFINITY) };
         let held_we: f64 = if d.held { d.modes.iter().map(|m| m.we.abs()).sum() } else { 0.0 };
         let (a0, a1) = match seg.hub.as_ref() {
             Some(h) => (h.dx0du[l].abs(), h.curve.as_ref().map_or(0.0, |c| c.dx1du[l].abs())),
@@ -924,6 +938,7 @@ impl ClosedFormSolver {
             tau_n,
             s_sum,
             w_sum,
+            modes: d.modes.iter().map(|m| (m.s.abs(), m.k, m.w.abs())).collect(),
             we: held_we + d.cell_we.abs(),
             a0,
             a1,
@@ -931,7 +946,6 @@ impl ClosedFormSolver {
             vm: part.seg_vc0.abs().max(part.seg_inf.abs()),
             dvc: (part.seg_vc0 - part.seg_inf).abs(),
             f,
-            d_now: d_now.abs(),
         };
         Some((v_inf, v_now, tau, largest_within(|delta| b.at(delta), tol)))
     }
@@ -946,8 +960,11 @@ impl ClosedFormSolver {
         if part.ramp.is_some() || part.seg_f > 0.0 || d.modes.iter().any(|m| !(m.k >= 0.0)) {
             return None;
         }
-        let u = d.u_a + d.du(now - part.seg_t0);
-        let s_sum: f64 = d.modes.iter().map(|m| m.s.abs()).sum();
+        let tau_n = now - part.seg_t0;
+        let u = d.u_a + d.du(tau_n);
+        // The rail's slope bounded as the modes stand at `τn`, as
+        // `driven_anchor`'s linear bound.
+        let s_sum: f64 = d.modes.iter().map(|m| m.s.abs() * (-m.k * tau_n).exp()).sum();
         let tol = tol_abs + tol_rel * u.abs();
         Some((u, if s_sum > 0.0 { tol / s_sum } else { f64::INFINITY }))
     }
@@ -2265,12 +2282,23 @@ pub(crate) fn linear_anchor_deadline(a: f64, s_sum: f64, dx: f64, w_sum: f64, f:
 }
 
 /// R21, a curved or folded segment's re-anchor: the terms of the bound
-/// `(L(τn + δ) + |D(τn)| / tau) δ` (`ClosedFormSolver::driven_anchor`).
-#[derive(Debug, Clone, Copy)]
+/// `L(τn + δ) δ` (`ClosedFormSolver::driven_anchor`).
+/// The node is `x0 + (a0 + a1 vc) du + dx vc`, so `L` takes `(a0 + a1|vc|)
+/// |du'| + a1 |vc'| |du| + |dx| |vc'|` over the anchor, with `|vc|`, `|du|`
+/// and the rates each bounded from the segment's start to `τn + δ`.
+#[derive(Debug, Clone)]
 pub(crate) struct CurvedBound {
     pub tau_n: f64,
     pub s_sum: f64,
     pub w_sum: f64,
+    /// The drive's modes `(|s|, k, |w|)`, every `k >= 0`: the rail's rate
+    /// from `τn` on is at most `Σ|s| e^(-k τn)`, its move since the segment
+    /// began `Σ|s| φ_k(τ)`, and the forcing `Σ|w| φ_k(τ)`, `φ_k(τ) = (1 -
+    /// e^(-kτ))/k`. Bounded by `S` and `W` alone, a segment whose modes had
+    /// decayed kept the rates it was aimed with and a move growing with its
+    /// age: cold 1838 tpl 1's rated rail resistors re-anchored every 2 ns to
+    /// 67 ns on a CC rail settled at its operating point.
+    pub modes: Vec<(f64, f64, f64)>,
     pub we: f64,
     pub a0: f64,
     pub a1: f64,
@@ -2278,7 +2306,6 @@ pub(crate) struct CurvedBound {
     pub vm: f64,
     pub dvc: f64,
     pub f: f64,
-    pub d_now: f64,
 }
 
 impl CurvedBound {
@@ -2288,11 +2315,34 @@ impl CurvedBound {
         // `|J'| = ∫ e^(f(τ-s)) e^(-k s) ds <= min(τ, 1/|f|)`; the held and
         // cell terms by their derivatives' `τ + |f| τ²/2`.
         let j_rate = if af > 0.0 { t.min(1.0 / af) } else { t };
-        let dvc_rate = self.w_sum * j_rate + self.we * (t + af * t * t / 2.0);
-        let sens = self.a0 + self.a1 * (self.vm + (self.w_sum + self.we) * t * t / 2.0);
-        let l_bound = self.a1 * (af * self.dvc + dvc_rate) * self.s_sum * t + sens * self.s_sum + self.adx * dvc_rate;
-        let anchor = if self.f < 0.0 { self.d_now * af } else { 0.0 };
-        (l_bound + anchor) * delta
+        // From `τn` on, `J'` is the part already driven, decaying (at most
+        // `J'(τn)`), plus what the forcing still adds, `e^(-k τn) min(δ,
+        // 1/|f|)`.
+        let added = if af > 0.0 { delta.min(1.0 / af) } else { delta };
+        let forcing: f64 = self.modes.iter().map(|&(_, k, w)| w * (j_prime(self.f, k, self.tau_n) + (-k * self.tau_n).exp() * added).min(j_rate)).sum();
+        let dvc_rate = forcing.min(self.w_sum * j_rate) + self.we * (t + af * t * t / 2.0);
+        // `|vc|`: the forcing's part `∫ e^(f(τ-s)) F(s) ds`, `|F| <= Σ|w|
+        // φ_k(τ)`, is at most that times `min(τ, 1/|f|)` as well as `W τ²/2`.
+        let phi = |k: f64| rails::exp_integral(-k, t);
+        let forced = self.modes.iter().map(|&(_, k, w)| w * phi(k)).sum::<f64>() * j_rate;
+        let sens = self.a0 + self.a1 * (self.vm + forced.min(self.w_sum * t * t / 2.0) + self.we * t * t / 2.0);
+        // `|du|` since the segment began, and `|du'|` from `τn` on.
+        let moved = self.modes.iter().map(|&(s, k, _)| s * phi(k)).sum::<f64>().min(self.s_sum * t);
+        let rate = self.modes.iter().map(|&(s, k, _)| s * (-k * self.tau_n).exp()).sum::<f64>().min(self.s_sum);
+        let l_bound = self.a1 * (af * self.dvc + dvc_rate) * moved + sens * rate + self.adx * dvc_rate;
+        l_bound * delta
+    }
+}
+
+/// `J'(f, k, τ) = ∫0^τ e^(f(τ-s)) e^(-k s) ds = (e^(fτ) - e^(-kτ)) / (f + k)`,
+/// for `f <= 0 <= k`, the rate at which a capacitor of rate `f` follows a
+/// forcing mode of rate `k`, written so neither exponential overflows.
+fn j_prime(f: f64, k: f64, tau: f64) -> f64 {
+    let a = f + k;
+    if a > 0.0 {
+        (f * tau).exp() * rails::exp_integral(-a, tau)
+    } else {
+        (-k * tau).exp() * rails::exp_integral(a, tau)
     }
 }
 

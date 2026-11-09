@@ -701,11 +701,20 @@ fn the_re_anchor_deadlines_are_the_bounds_own_roots() {
     close(linear_anchor_deadline(a, s, 1.0, w, -100.0, tol), want, 1e-9 * want, "closed form, quadratic");
     close(linear_anchor_deadline(0.0, 7.0, 1.0, 1e3, -1e6, tol), 0.1, 1e-10, "closed form, linear");
     // A curved segment, flat (`a1 = we = 0`) and far into its segment
-    // (`τn |f| >> 1`, so `|J'| <= 1/|f|`): `(a0 S + |dx| W/|f| + |D|/tau) δ`.
-    let b = CurvedBound { tau_n: 1.0, s_sum: 3.0, w_sum: 40.0, we: 0.0, a0: 0.25, a1: 0.0, adx: 2.0, vm: 4.0, dvc: 1.0, f: -1e3, d_now: 2e-6 };
+    // (`τn |f| >> 1`, so `|J'| <= 1/|f|`), its modes ramps (`k = 0`, so
+    // nothing decays): `(a0 S + |dx| W/|f|) δ`.
+    let b = CurvedBound { tau_n: 1.0, s_sum: 3.0, w_sum: 40.0, modes: vec![(3.0, 0.0, 40.0)], we: 0.0, a0: 0.25, a1: 0.0, adx: 2.0, vm: 4.0, dvc: 1.0, f: -1e3 };
     let got = largest_within(|d| b.at(d), tol);
-    let want = tol / (0.25 * 3.0 + 2.0 * 40.0 / 1e3 + 2e-6 * 1e3);
+    let want = tol / (0.25 * 3.0 + 2.0 * 40.0 / 1e3);
     close(got, want, 1e-9 * want, "curved, flat");
+    // A curved segment whose rail mode has decayed: `|du'| <= S e^(-k τn)`
+    // from the anchor on, here 10 V/s at k = 1e3 /s, 10 ms in: 4.540e-4 V/s,
+    // so `δ = tol / (a0 S e^(-10))` = 0.2203 s, where `S` alone gave 10 us.
+    let b = CurvedBound { tau_n: 0.01, s_sum: 10.0, w_sum: 0.0, modes: vec![(10.0, 1e3, 0.0)], we: 0.0, a0: 1.0, a1: 0.0, adx: 0.0, vm: 0.0, dvc: 0.0, f: -1e6 };
+    let got = largest_within(|d| b.at(d), tol);
+    let want = tol / (10.0 * (-10.0f64).exp());
+    close(got, want, 1e-9 * want, "curved, decayed");
+    close(want, 0.2203, 1e-4, "by hand");
 }
 
 /// G2bv2's `p_for`: the `pMax` at which an RC of time constant `tau` fed at
