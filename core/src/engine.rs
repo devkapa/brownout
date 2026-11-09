@@ -437,6 +437,8 @@ impl Engine {
     /// (`ERR_MALFORMED` at load, `program::parse_option`) — the bytes were
     /// fine at load time; this is a live call misusing the ABI.
     pub fn set_option(&mut self, key: u32, value: f64) -> Result<(), BoError> {
+        // R86: host input between yields ends the host step, as an edit does.
+        self.kernel.end_host_step();
         match key {
             2 => {
                 let off = Self::require_switch("NO_SOLUTION_CACHE", value)?;

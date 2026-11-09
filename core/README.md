@@ -1000,28 +1000,43 @@ good readouts and reports how far time actually got. It is not a load
 error. The stat counters are the exception: they keep the failed attempt's
 counts, as classic keeps its failed diagnostics after restoring state.
 
-**A yielding advance** (ruling R86). `bo_engine_advance_for(h, t_end,
-budget_ms)` runs as `bo_engine_advance` does, reading the host clock at its
-start, at its end and once every 64 completed instants (`YIELD_CHECK_EVERY`).
-Once a read finds `budget_ms` gone and at least one instant has run in the
-call, it returns `1` between two instants: the state, readouts and
-`bo_engine_time` are the last completed instant's, short of `t_end`, with no
-horizon clamp. A later advance (either call) to the same `t_end` goes on with
-the same host step, whose span the hold guard reads (R54 (a)) and whose
-events the cap counts, so a run split by yields is bit for bit the same run
-as one without (`a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit`).
-A host edit ends the host step. Two checks decline with `-7`, the
-livelock's code, keeping the last completed instant:
-- every advance: a host step that has taken `HOST_STEP_EVENT_CAP` (20M)
-  events without reaching `t_end` (the busiest legitimate advance of the
-  cold fuzz takes 956k); asking again declines again;
-- a budgeted one with a clock: less than `PROGRESS_FLOOR` (0.01) simulated
-  seconds per wall second over `PROGRESS_WINDOW_MS` (30 s) of wall time spent
-  inside budgeted advances (time between calls does not count). The slow
-  legitimate boards bottom out at 0.003-0.03 s/s for 1-2 s of start-up;
-  the freezes ran at 4e-4 to 9e-4 s/s for 50-200 s.
+**A yielding advance** (rulings R86, R94 (a)). `bo_engine_advance_for(h,
+t_end, budget_ms)` runs as `bo_engine_advance` does, reading the host clock
+at its start, at its end, and every `check_stride` completed instants. The
+stride starts at 1, shrinks at once to what the measured time per instant
+allows within the budget, and grows back by a quarter a read up to 64
+(`YIELD_CHECK_EVERY`), so a call overruns its budget by about one instant at
+most. Once a read finds `budget_ms` gone and at least one instant has run in
+the call, it returns `1` between two instants: the state, readouts and
+`bo_engine_time` are the last completed instant's, with no horizon clamp. A
+host step stays open from its first call until it reaches `t_end`; a later
+advance (either call) to the same `t_end` goes on with the same host step,
+whose span the hold guard reads (R54 (a)) and whose events the cap counts,
+so a run split by yields is bit for bit the same run as one without
+(`a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit`).
+Any host input ends the host step: `set_params`, `seed_memory`,
+`set_option` and `reset_failures`.
+
+Two checks decline with `-7`, the livelock's code, keeping the last
+completed instant:
+- **without a clock** (`bo_engine_advance`, or a budget that is off): a host
+  step that has taken `HOST_STEP_EVENT_CAP` (20M) x max(1, its span in
+  simulated seconds) events without reaching `t_end`; asking again declines
+  again, at the same event count on every run. The busiest legitimate
+  advance of the cold fuzz takes 956k events, and fixture 26's oscillator at
+  100 pF takes 24.75M in `advance(3)` (cap 60M);
+- **with a clock**, the only check: less than `PROGRESS_FLOOR` (0.01)
+  simulated seconds per wall second over `PROGRESS_WINDOW_MS` (30 s) of wall
+  time spent inside budgeted advances, judged at every read, the call's end
+  read included. Time between calls does not count; one read adds at most
+  `BUSY_READ_CAP_MS` (250 ms) or four budgets, whichever is more (a longer
+  gap is a pause, such as a suspend); a clock that steps back re-anchors the
+  call's reads. An edit does not restart the window (it moves no simulated
+  time); a decline does, so a host that goes on is judged afresh. The slow
+  legitimate boards bottom out at 0.003-0.03 s/s for 1-2 s of start-up; the
+  freezes ran at 4e-4 to 9e-4 s/s for 50-200 s.
 A `budget_ms` that is not positive, or a clock that reads no finite time,
-never yields and leaves the progress floor off.
+never yields and leaves the floor off and the cap on.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never
