@@ -347,7 +347,7 @@ fn ls00_rail_powered(e: f64, r_load: f64) -> f64 {
 }
 
 #[test]
-fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_held_off() {
+fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_slides_along_it() {
     // Formerly `w1f-power-gate-pingpong`'s first pin (F5, W1c point 1a):
     // E 4.279, r 5, a 74LS00 on the rail with its inputs on the datum, so
     // every output drives HIGH, and 1y into 1 kohm. Unpowered it draws
@@ -358,23 +358,49 @@ fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_is_held_off()
     // itself: held powered its supply reads 4.2602 V, unpowered; held
     // unpowered, E. So it is held off with the rail at E, and its release
     // is the floor plus the drop its draw caused plus two reached widths,
-    // 4.2938 V: past E, so it stays off for good on this cell.
+    // 4.2938 V: past E, so it stays off for good on this cell. (With the
+    // hold's own machinery alone, as before ruling R92.)
     let p = program(6, vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0), resistor(2, 2, 0, 1000.0)]);
+    {
+        let _no_slide = hold::NoSlide::arm();
+        let mut rig = Rig::load(&p).unwrap();
+        let hold = rig.s().power_hold(1);
+        assert_eq!(hold.kind, digital::power::HoldKind::Off, "{hold:?}");
+        let floor = 0.9 * 4.75;
+        let u_on = ls00_rail_powered(4.279, 1000.0);
+        close(u_on, 4.2602, 1e-4, "the probed powered rail");
+        let release = hold.release.expect("a release level");
+        assert!(release.rising);
+        close(release.level, floor + (rig.u() - u_on) + 2.0 * rails::REACHED_REL * floor, 1e-9, "the release level");
+        assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
+        rig.advance(1e-3).unwrap();
+        close(rig.u(), 4.279, 1e-9, "the rail at E, the gate off");
+        assert!(rig.v(2).abs() < 1e-6, "1y unpowered, pulled to the datum by 1 kohm: {}", rig.v(2));
+        assert_eq!(rig.s().power_hold(1).kind, digital::power::HoldKind::Off);
+        assert_eq!(rig.s().hold_counts(), [1.0, 0.0], "never released: E is short of the release level");
+    }
+    // Ruling R92 (R53, Q2): the edge attracts (powered the rail sags to
+    // 4.2602 V, off it is E), so the gate slides along its 4.275 V floor:
+    // the cell delivers (4.279 - 4.275)/5 = 0.8 mA, all of it through 1y's
+    // HIGH stage at its duty, x / R_out with R_out = 4.275 / (4 ioMax) =
+    // 133.59 ohm, into the 1 kohm: R_out / x + 1000 = 4.275 / 0.0008, x =
+    // 0.030755, 1y at 0.8 V (the other outputs drive nothing but their
+    // node shunts).
     let mut rig = Rig::load(&p).unwrap();
-    let hold = rig.s().power_hold(1);
-    assert_eq!(hold.kind, digital::power::HoldKind::Off, "{hold:?}");
-    let floor = 0.9 * 4.75;
-    let u_on = ls00_rail_powered(4.279, 1000.0);
-    close(u_on, 4.2602, 1e-4, "the probed powered rail");
-    let release = hold.release.expect("a release level");
-    assert!(release.rising);
-    close(release.level, floor + (rig.u() - u_on) + 2.0 * rails::REACHED_REL * floor, 1e-9, "the release level");
-    assert_eq!(rig.s().hold_counts(), [1.0, 0.0]);
-    rig.advance(1e-3).unwrap();
-    close(rig.u(), 4.279, 1e-9, "the rail at E, the gate off");
-    assert!(rig.v(2).abs() < 1e-6, "1y unpowered, pulled to the datum by 1 kohm: {}", rig.v(2));
-    assert_eq!(rig.s().power_hold(1).kind, digital::power::HoldKind::Off);
-    assert_eq!(rig.s().hold_counts(), [1.0, 0.0], "never released: E is short of the release level");
+    let (v_e, r_out) = (4.275, 4.275 / 0.032);
+    let i = (4.279 - v_e) / 5.0;
+    let x_hand = r_out / (v_e / i - 1000.0);
+    for t in [0.0, 1e-3] {
+        if t > 0.0 {
+            rig.advance(t).unwrap();
+        }
+        let hold = rig.s().power_hold(1);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t} s: sliding, not {hold:?}");
+        close(rig.u(), v_e, 100e-6 + 1e-3 * v_e, &format!("at {t} s: the rail at the floor"));
+        close(rig.v(2), 1000.0 * i, 100e-6 + 1e-3 * 0.8, &format!("at {t} s: 1y at its duty's drive"));
+        close(hold.kind.weight(), x_hand, 1e-3 * x_hand, &format!("at {t} s: the duty against {x_hand} by hand"));
+        assert_eq!(rig.s().hold_counts()[0], 0.0, "a slide is no hold");
+    }
     // The control: with 1y unloaded the gate holds its supply, and loads
     // powered with no hold.
     let p = program(6, vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0), resistor(2, 2, 0, 1e9)]);
@@ -459,6 +485,10 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_of
     // would still let the segment rise: on this board when the rail leaves
     // CC, the RC's draw never falling far enough first. It powers once, on
     // a rail that carries it, and the run reaches 3 ms.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
     let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
     eprintln!("CC ramp into the floor: {err:?} after {n} events; holds {spans:?}; counts {:?}", rig.s().hold_counts());
@@ -537,6 +567,10 @@ fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_held_off_then_powered() {
     // until F5 the no-progress guard declined it with -4. Now the first gate
     // is held off as above and the reader follows it: 1y low, its own 1y
     // high while the gate is held, then the reverse once it powers, by 3 ms.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = cc_floor_with_a_reader(0.0, 0.02);
     let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
     eprintln!("zero-delay reader: {err:?} after {n} events; holds {spans:?}");
@@ -6231,6 +6265,10 @@ fn the_power_gate_pingpong_board_through_5_ohm_is_held_off_until_its_rail_carrie
     // passes the threshold by that drop and two reached widths, which the
     // charging capacitor brings about 9 ps later; it then powers and drives
     // its outputs high to 10 ms, cache on or off.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let mut gate = ls00(3, 1, 0, [0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0, 7], 10e-9, 0);
     gate.params[ic_param::VCC_MIN] = 4.5;
     let (e, r, big_r, c) = (4.06, 5.0, 1000.0, 1e-6);
@@ -9256,6 +9294,10 @@ fn a_g2bv_gate_starving_its_cell_at_load_is_held_off_and_again_after_a_toggle() 
     // its release the floor plus that drop and two reached widths: above
     // the EMF, never reached. A toggle (`set_params`) drops the hold, and
     // the same instant takes it again (W1c point 1a).
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = { let mut p = program(7, g2bv_bc_ic_20_hub1()); p.digital_slot_count = 16; p };
     let stops = [0.00010054129745299623, 0.001267074627819937, 0.19185406847861228, 0.44552757564924855, 0.44644865932111427, 0.5];
     let (rig, trace, err) = hold_trace(&p, &[(0.44552757564924855, 9)], &stops, 6);
@@ -9458,6 +9500,10 @@ fn the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off() {
     // release level is past the setpoint, so neither is released over 50
     // ms; 785's toggle at 18 ms drops the hold, and the toggle's instant
     // takes it again.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     for (name, p, toggles, stops, d, v) in [
         ("785 tpl 0", { let mut p = program(8, cold_785_tpl0()); p.digital_slot_count = 32; p }, vec![(0.01840803191451679, 16)], vec![0.006272880216392937, 0.01840803191451679, 0.02495905461262398, 0.05], 12, 4.698635237910),
         ("830 tpl 3", { let mut p = program(7, cold_830_tpl3()); p.digital_slot_count = 32; p }, vec![], vec![0.0062728803007134695, 0.006590779933999605, 0.02225723242285205, 0.05], 8, 5.032450386993),
@@ -9810,6 +9856,10 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     // reference puts at the floor at 34.7 ms, where exact mode stops).
     // (Its 1a, 1b and 1y share a node: powered, the gate rings at its own 81
     // ns delay, some 12,000 events a millisecond, which no hold touches.)
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = { let mut p = program(6, g2bv_bc_ic_97_hub2()); p.digital_slot_count = 16; p };
     let stops = [0.00010054129372012221, 0.0003467103846392178, 0.0004605220067872004, 0.05];
     let (rig, trace, err) = hold_trace(&p, &[], &stops, 10);
@@ -9831,6 +9881,10 @@ fn a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay() {
     // feeds its own input and rings at the gate's 27 ns delay, 18 MHz, two
     // events an edge: the run is slower than real time from there by the
     // circuit's own doing, not the hold's.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = { let mut p = program(7, g2bv_fz_ic_401_hub2()); p.digital_slot_count = 16; p };
     let (rig, trace, err) = hold_trace(&p, &[(0.44015570685572775, 13)], &[0.00010054129153157535, 0.0003458489221323154, 0.0005618221415494645, 0.0007140772565774002, 0.004709368587030973, 0.016874565396198055, 0.018490089942201665, 0.026414640575132733, 0.027084402744392, 0.2382891458762392, 0.2393829186074303, 0.33486761095951917, 0.33498479477918414, 0.3353630577252437, 0.44015570685572775], 10);
     assert!(err.is_none(), "{err:?}");
@@ -10265,6 +10319,10 @@ fn a_cc_hub_seed_publishes_its_draw_at_the_power_its_solve_held() {
     // 66 mA limit), so the loop's rail never moved, no verdict flipped, and
     // the partition re-seeded to the same 1.69 V for 50 passes (-4 at
     // 0.13 ms from 7279cb9; one hold and the sweep's 3 s at c213495).
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let mut p = program(8, g2bv_bc_ic_178_hub2());
     p.options.force_stepped = true;
     p.digital_slot_count = 16;
@@ -10544,6 +10602,9 @@ fn a_retry_taken_in_an_instant_that_then_fails_is_armed_again() {
     // Each solve on from one is failed in turn (a failed probe asks nothing, so
     // the instant can pass with the hold kept); every instant that fails
     // must leave the hold and be released when run again.
+    // The hold's own machinery, the fallback of a slide that cannot be
+    // followed (ruling R92): on this board the chip would slide.
+    let _no_slide = hold::NoSlide::arm();
     for cell in [false, true] {
         let mut p = stale_hold_board(cell);
         p.node_count = 9;
@@ -10581,6 +10642,9 @@ fn the_dynamic_snapshot_carries_each_ics_episode() {
     // R54 (a)) before the passes showed it was none. The checkpoint's
     // dynamic snapshot carries the episodes, so that release is undone with
     // the rest.
+    // The hold's own machinery, the fallback of a slide that cannot be
+    // followed (ruling R92): on this board the chip would slide.
+    let _no_slide = hold::NoSlide::arm();
     let mut rig = Rig::load(&stale_hold_board(true)).unwrap();
     assert_eq!(rig.s().power_hold(2).kind, digital::power::HoldKind::Off, "held at the load");
     let before = rig.s().episode(2);
@@ -10661,6 +10725,10 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
     // way. Classic (drafts/f5k-logs/s1r.mts, the board in classic's terms,
     // the cell as its Thevenin pair) at 1.5 and 3 ms: `s1` vcc 5 V, 2y
     // 0.675676 V; `s1b` vcc 4.635577 V, 1y 4.893268 V, 2y 0.632661 V.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     for (cell, vcc, y, y2) in [(false, 5.0, 5.0, 0.675676), (true, 4.635577, 4.893268, 0.632661)] {
         let p = stale_hold_board(cell);
         let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("load: {}", er.message));
@@ -10732,6 +10800,9 @@ fn a_gate_sliding_along_its_power_edge_declines_after_fifty_short_holds_in_one_e
     // 6.3 ms host step and each release the chip's own (no other driver
     // changes), so all count toward one episode, and the 51st release
     // declines `-4`, the board's classic fallback as at c5b1a13.
+    // The hold's own machinery, the fallback of a slide that cannot be
+    // followed (ruling R92): on this board the chip would slide.
+    let _no_slide = hold::NoSlide::arm();
     let mut e = Engine::load(&cold_552_tpl2()).unwrap_or_else(|er| panic!("load: {}", er.message));
     let err = e.advance(0.00627288085463002).expect_err("declined, not crawled through");
     assert_eq!(err.code, -4, "{}", err.message);
@@ -10816,6 +10887,10 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
     // held each time P falls to 0 V and freed when it rises, a foreign
     // change, so each hold is an episode of its own; R51's ratio rule
     // declined both at 0.4955 s.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     for cell in [false, true] {
         let mut e = Engine::load(&stale_hold_board(cell)).unwrap_or_else(|er| panic!("load: {}", er.message));
         for k in 1..=2000 {
@@ -11075,6 +11150,9 @@ fn a_retry_that_frees_nothing_leaves_the_run_bit_for_bit_as_it_was() {
     // the incremental ones: 182 tpl 0 off by 1e-13 V from 0.26 s), and the
     // clamp re-solved a static partition holding a held chip only to probe
     // it (196 tpl 1 off by 1e-15 V from the first host step).
+    // The hold's own machinery, the fallback of a slide that cannot be
+    // followed (ruling R92): on this board the chip would slide.
+    let _no_slide = hold::NoSlide::arm();
     let toggles: &[(f64, usize)] = &[(0.16964862719279233, 13), (0.2595604491700335, 13)];
     for (name, p, stops, toggles) in [("182 tpl 0", cold_182_tpl0(), vec![0.006272879998957345, 0.013318265673895324, 0.013519568466705188, 0.014317009684649685, 0.040378550111770425, 0.07057049561482419, 0.09297134995164474, 0.09315771753629373, 0.09565666438180485, 0.10153405682478835, 0.10202583796940948, 0.10220933460419031, 0.12443019075624726, 0.13250932588946368, 0.1327202125679568, 0.13501474161943483, 0.13578591735295228, 0.13615201829900628, 0.1401459363269185, 0.14910358004921206, 0.1500050127261678, 0.15063784184044718, 0.15162406913993892, 0.16266398231785245, 0.16964862719279233, 0.19049156196271452, 0.20392892161124826, 0.22540840453808006, 0.22591006094867933, 0.2262459710478473, 0.22804201127754886, 0.23074629780535588, 0.23598804876616586, 0.2398857751954551, 0.2595604491700335, 0.3], toggles), ("196 tpl 1", cold_196_tpl1(), vec![0.006272880040702927, 0.009518924590976103, 0.009902844739601756, 0.010256506809549005, 0.010737349902114918, 0.02], &[][..])] {
         let run = |seam: hold::RetrySeam| -> Vec<Vec<u64>> {
@@ -11148,6 +11226,10 @@ fn a_cc_step_solves_the_rail_its_gates_stamps_move_with() {
     // the CC step holds the gate off until the retry after classic powers
     // it (0.2485-0.249 s; here one stepped commit later). Classic's values
     // (`HeadlessRunner`, drafts/f5l-logs/c425.mts) at 32 ms and 0.3 s.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = g2bv_bc_ic_425_hub2();
     let w0 = |got: f64, want: f64| (got - want).abs() <= 1e-4 + 1e-3 * want.abs();
     let (rig, _, err) = hold_trace(&p, &[], &[0.032], 11);
@@ -11207,6 +11289,9 @@ fn a_held_chip_is_retried_once_per_host_step() {
     // once per host step it pays two per `advance`. (Since R59 (1) (B) the
     // climbing partition steps with the CC rail: no `Rail` events, the rail
     // moved once per committed step, and the retries' passes on top.)
+    // The hold's own machinery, the fallback of a slide that cannot be
+    // followed (ruling R92): on this board the chip would slide.
+    let _no_slide = hold::NoSlide::arm();
     let mut e = Engine::load(&cold_34_tpl0()).unwrap_or_else(|er| panic!("load: {}", er.message));
     let stops = [0.006272879661111714, 0.027755330060653026, 0.03946023509167783, 0.03975728524363152, 0.03987809344734865, 0.041087485294586786, 0.044213706364126304, 0.05088267414388208];
     for &t in &stops {
@@ -12287,6 +12372,10 @@ fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes
     // move, found it carried itself and freed it, and nothing ran the regime
     // rules on that solve, so the PSU delivered 126 mA in CV against its
     // 99.1 mA limit until the circuit changed; default mode keeps it held.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let i_limit = 0.09913892461723416;
     let mut published = Vec::new();
     for p in [cold_621_2(), exact(cold_621_2())] {
@@ -12322,7 +12411,7 @@ fn exact_regime(rig: &Rig) -> Regime {
 }
 
 #[test]
-fn a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_held_off_at_its_power_edge() {
+fn a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_slides_at_its_power_edge() {
     // Defect G (ruled 2026-10-31; ACC-EV's probe). PSU 5 V, 50 mA; 125 ohm
     // on the rail; a 74LS00 on the rail with 1A and 1B pulled up through 1k
     // and 100k (node 3, 4), so 1Y LOW, and 1Y on the rail itself. The draw
@@ -12334,13 +12423,22 @@ fn a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_hel
     // floor, and under it the unpowered draw is at most 34.2 mA: there is
     // no CC operating point at or below the setpoint, the draw crossing the
     // limit only across the chip's power edge, which is the power hold's
-    // case. The chip held off, the PSU is in CV at 5 V delivering 5/125 +
-    // 5/(1e9 + 1e3) = 40.000005 mA (the node shunts' 15 pA aside). The CC
-    // Newton's root past the setpoint, unpowered at 6.25 V above the
-    // window, is no operating point of a supply coming down from its
-    // setpoint: before the fix both modes held CV there at 72 mA.
+    // case. The CC Newton's root past the setpoint, unpowered at 6.25 V
+    // above the window, is no operating point of a supply coming down from
+    // its setpoint: before ruling G both modes held CV there at 72 mA.
+    //
+    // Ruling R92 (R53, Q2): the edge attracts (powered at the floor the
+    // draw is 66.2 mA, past the limit; off it is 34.2 mA, within it), so the
+    // chip slides along its floor instead of being held off with CV at the
+    // setpoint (40 mA, as before the ruling): the rail at 4.275 V, the PSU at
+    // its 50 mA limit in CC, and the chip powered at the duty that balances
+    // it, 4.275/125 + 4.275/(1e9 + 1e3) + 0.032 x = 0.05 (the node shunts'
+    // picoamps aside). Exact mode keeps the pre-ruling hold, CV at the
+    // setpoint delivering 5/125 + 5/(1e9 + 1e3) = 40.000005 mA, until its
+    // slide is built (R92's exact-mode piece).
     let board = || window_chip_rail(5.0, 0.05, 125.0, 0, [3, 4], 1, vec![resistor(3, 1, 3, 1e3), resistor(4, 1, 4, 1e5), resistor(5, 3, 0, 1e9)]);
-    let want = 5.0 / 125.0 + 5.0 / (1e9 + 1e3);
+    let v_e = 4.275;
+    let x_hand = (0.05 - v_e / 125.0 - v_e / (1e9 + 1e3)) / 0.032;
     for (mode, p) in [("default", board()), ("exact", exact(board()))] {
         let mut rig = Rig::load(&p).unwrap();
         for k in 0..=3 {
@@ -12348,10 +12446,19 @@ fn a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_is_hel
                 rig.advance(k as f64 * 1e-3).unwrap();
             }
             let at = format!("{mode} at {k} ms");
-            close(rig.v(1), 5.0, 1e-12, &format!("{at}: the rail at the setpoint"));
-            close(rig.i(0), -want, 1e-10, &format!("{at}: the PSU's current"));
-            assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
-            assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+            if mode == "exact" {
+                close(rig.v(1), 5.0, 1e-12, &format!("{at}: the rail at the setpoint"));
+                close(rig.i(0), -(5.0 / 125.0 + 5.0 / (1e9 + 1e3)), 1e-10, &format!("{at}: the PSU's current"));
+                assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
+                assert!(!rig.s().power_hold(2).is_free(), "{at}: the chip is held off");
+                continue;
+            }
+            close(rig.v(1), v_e, 100e-6 + 1e-3 * v_e, &format!("{at}: the rail at the floor"));
+            close(rig.i(0), -0.05, 1e-9 + 1e-3 * 0.05, &format!("{at}: the PSU at its limit"));
+            assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+            let hold = rig.s().power_hold(2);
+            assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{at}: the chip slides, not {hold:?}");
+            close(hold.kind.weight(), x_hand, 1e-6 * x_hand, &format!("{at}: the duty against {x_hand} by hand"));
         }
     }
 }
@@ -12498,7 +12605,7 @@ fn a_cc_exit_whose_cv_draw_is_past_the_limit_enters_again_at_once() {
 }
 
 #[test]
-fn a_landing_holds_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
+fn a_landing_slides_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
     // The verifier's repros of ruling G's landing (2026-11-01). Each chip's
     // pins are all on the rail or a fixed node, so its hold dirties no
     // partition. By hand, as in the probe: powered, inside [4.275, 5.775]
@@ -12512,12 +12619,19 @@ fn a_landing_holds_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
     // 64 mA >= 49.5 mA through the window, below it (u - 5)/50 < 0: held
     // off, CV at 5 V, nothing delivered (the node shunt's 5 pA). Before the
     // fix default mode stayed CV at 72, 72 and 64 mA, its chip free.
-    let boards: [(&str, fn() -> Program, f64); 3] = [
-        ("(a)", || window_chip_rail(5.0, 0.05, 125.0, 0, [1, 1], 1, vec![]), 5.0 / 125.0),
-        ("(b)", || window_chip_rail(5.0, 0.05, 125.0, 0, [3, 3], 1, vec![source(3, 3, 0, 5.0)]), 5.0 / 125.0),
-        ("(c)", || window_chip_rail(5.0, 0.045, 50.0, 2, [1, 1], 1, vec![source(3, 2, 0, 5.0)]), 0.0),
+    //
+    // Ruling R92 (R53, Q2): each edge attracts (past the limit powered at
+    // the floor, within it off), so each chip slides along its 4.275 V floor
+    // with the PSU at its limit, instead of being held off with CV at the
+    // setpoint: (a), (b) 4.275/125 + 0.032 x = 0.05, x = 0.49375; (c)
+    // (4.275 - 5)/50 + 0.064 x = 0.045, x = 0.9296875. Exact mode keeps the
+    // pre-ruling hold until its slide is built.
+    let boards: [(&str, fn() -> Program, f64, f64, f64, f64); 3] = [
+        ("(a)", || window_chip_rail(5.0, 0.05, 125.0, 0, [1, 1], 1, vec![]), 5.0 / 125.0, 0.05, (0.05 - 4.275 / 125.0) / 0.032, 0.032),
+        ("(b)", || window_chip_rail(5.0, 0.05, 125.0, 0, [3, 3], 1, vec![source(3, 3, 0, 5.0)]), 5.0 / 125.0, 0.05, (0.05 - 4.275 / 125.0) / 0.032, 0.032),
+        ("(c)", || window_chip_rail(5.0, 0.045, 50.0, 2, [1, 1], 1, vec![source(3, 2, 0, 5.0)]), 0.0, 0.045, (0.045 - (4.275 - 5.0) / 50.0) / 0.064, 0.064),
     ];
-    for (name, board, want) in boards {
+    for (name, board, want, i_limit, x_hand, per_duty) in boards {
         // (c) has 2A, 2B, 2Y on the rail too.
         let board = || {
             let mut p = board();
@@ -12533,6 +12647,15 @@ fn a_landing_holds_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
                     rig.advance(k as f64 * 1e-3).unwrap();
                 }
                 let at = format!("{name} {mode} at {k} ms");
+                if mode == "default" {
+                    close(rig.v(1), 4.275, 100e-6 + 1e-3 * 4.275, &format!("{at}: the rail at the floor"));
+                    close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("{at}: the PSU at its limit"));
+                    assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+                    let hold = rig.s().power_hold(2);
+                    assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{at}: the chip slides, not {hold:?}");
+                    close(per_duty * hold.kind.weight(), per_duty * x_hand, 1e-9 + 1e-3 * i_limit, &format!("{at}: the duty's draw against x = {x_hand} by hand"));
+                    continue;
+                }
                 close(rig.v(1), 5.0, 1e-12, &format!("{at}: the rail at the setpoint"));
                 close(rig.i(0), -want, 1e-10, &format!("{at}: the PSU's current"));
                 assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
@@ -12543,7 +12666,7 @@ fn a_landing_holds_a_chip_whose_other_pins_sit_on_the_rail_or_fixed_nodes() {
 }
 
 #[test]
-fn a_cc_exit_that_lands_on_a_power_edge_solves_the_rail_with_the_chip_held() {
+fn a_cc_exit_that_lands_on_a_power_edge_solves_the_rail_with_the_chip_held_or_sliding() {
     // The verifier's clock repro. PSU 5 V, 45 mA; 50 ohm from the rail to a
     // 0 / 5 V clock (node 2); a 74LS00 with 1A, 1B, 1Y, 2A, 2B, 2Y on the
     // rail (two LOW outputs sinking 32 mA each while powered, inside [4.275,
@@ -12557,6 +12680,15 @@ fn a_cc_exit_that_lands_on_a_power_edge_solves_the_rail_with_the_chip_held() {
     // held off, CV at 5 V with nothing delivered. Before the fix default
     // mode published the CC rail at 2.25 V with 45 mA from the PSU while
     // the resistor fed 55 mA into the rail.
+    //
+    // Ruling R92 (R53, Q2): clock high, the edge attracts (49.5 mA powered
+    // at the floor, -14.5 mA off, about the 45 mA limit): default mode
+    // slides the chip along its floor instead of holding it off, the rail at
+    // 4.275 V, the PSU at its limit, -14.5 mA + 0.064 x = 45 mA, x =
+    // 0.9296875, the chip drawing the PSU's 45 mA and the resistor's 14.5 mA.
+    // Clock low, even off at the floor the draw (85.5 mA) is past the limit:
+    // no slide, the chip off at the 2.25 V root as before. Exact mode keeps
+    // the pre-ruling hold until its slide is built.
     // The chip takes digital slots 0-3, the clock 4.
     let mut ck = clock(3, 2, 0, 1000.0, 0.5, 4);
     ck.params[2] = 5.0;
@@ -12568,11 +12700,21 @@ fn a_cc_exit_that_lands_on_a_power_edge_solves_the_rail_with_the_chip_held() {
             let t = k as f64 * 0.25e-3 + 0.1e-3;
             rig.advance(t).unwrap();
             let at = format!("{mode} at {:.2} ms, clock {}", t * 1e3, rig.v(2));
+            let sliding = matches!(rig.s().power_hold(2).kind, digital::power::HoldKind::Duty(_));
             // The rail's KCL: what the PSU delivers is what the resistor
-            // takes, the chip off either way (the node shunt aside).
-            close(-rig.i(0), rig.i(1), 1e-10, &format!("{at}: KCL at the rail"));
-            assert!(!digital::power::powered(&rig.s().ics[0].1, rig.v(1), rig.v(0)) || !rig.s().power_hold(2).is_free(), "{at}: the chip off or held");
-            if rig.v(2) < 1.0 {
+            // takes and, sliding, the chip's two LOW stages on the rail at
+            // their duty, 4 ioMax x each (the node shunt aside).
+            let chip = if sliding { 0.064 * rig.s().power_hold(2).kind.weight() } else { 0.0 };
+            close(-rig.i(0), rig.i(1) + chip, 1e-10, &format!("{at}: KCL at the rail"));
+            assert!(!digital::power::powered(&rig.s().ics[0].1, rig.v(1), rig.v(0)) || !rig.s().power_hold(2).is_free(), "{at}: the chip off, held or sliding");
+            if rig.v(2) >= 1.0 && mode == "default" {
+                high += 1;
+                assert!(sliding, "{at}: the chip slides");
+                close(rig.v(1), 4.275, 100e-6 + 1e-3 * 4.275, &format!("{at}: the rail at the floor"));
+                close(rig.i(0), -0.045, 1e-9 + 1e-3 * 0.045, &format!("{at}: the PSU at its limit"));
+                close(chip, 0.045 - (4.275 - 5.0) / 50.0, 1e-9 + 1e-3 * 0.045, &format!("{at}: the chip's draw at its duty"));
+                assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+            } else if rig.v(2) < 1.0 {
                 low += 1;
                 close(rig.v(1), 2.25, 1e-9, &format!("{at}: the unpowered CC root"));
                 close(rig.i(0), -0.045, 1e-10, &format!("{at}: the PSU at its limit"));
@@ -12937,7 +13079,7 @@ fn cold_581_tpl5() -> Vec<Device> {
 }
 
 #[test]
-fn a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_without_one() {
+fn a_chip_powered_only_inside_its_window_on_a_rail_capacitor_slides_as_without_one() {
     // Ruling G given a PSU with a rail capacitor (R68). Defect G's board (5
     // V, 50 mA; 125 ohm; a 74LS00 on the rail sinking 32 mA through 1Y only
     // inside [4.275, 5.775] V) with 10 uF (esr 0) on the rail. By hand: from
@@ -12952,18 +13094,33 @@ fn a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_with
     // setpoint to fit (R44 (a)'s threshold, read at the setpoint in CV):
     // freed at each crossing, cold 696 tpl 2's 555 was held 51 times in a
     // host step. The PSU never delivers past its limit.
+    //
+    // Ruling R92 (R53, Q2): at the floor the edge attracts (66.2 mA powered,
+    // 34.2 mA off, about the 50 mA limit), so the chip slides there instead
+    // of being held off (the rail then climbing to CV at the setpoint, 40
+    // mA, as before the ruling), as on the board without the capacitor
+    // (`a_chip_whose_draw_takes_its_rail_past_the_limit_only_inside_its_window_slides_at_its_power_edge`):
+    // the capacitors' current zero on the slide, the rail stays at 4.275 V,
+    // the PSU at its limit in CC, and the duty the same by hand,
+    // 4.275/125 + 4.275/(1e9 + 1e3) + 0.032 x = 0.05. The capacitor reaches
+    // the floor from 0 V in about 1.0 ms (10 uF at 50 mA less u/125); from
+    // 3 ms the slide has settled. Its duty is solved within W0 of the
+    // limit's current, the capacitor carrying the rest back to the edge.
     let board = window_chip_rail(5.0, 0.05, 125.0, 0, [3, 4], 1, vec![resistor(3, 1, 3, 1e3), resistor(4, 1, 4, 1e5), resistor(5, 3, 0, 1e9), capacitor(6, 1, 0, 10e-6, 0.0)]);
-    let want = 5.0 / 125.0 + 5.0 / (1e9 + 1e3);
+    let v_e = 4.275;
+    let x_hand = (0.05 - v_e / 125.0 - v_e / (1e9 + 1e3)) / 0.032;
     let mut rig = Rig::load(&board).unwrap();
     for k in 1..=24 {
         let t = k as f64 * 0.25e-3;
         rig.advance(t).unwrap();
         assert!(-rig.i(0) <= 0.05 * (1.0 + 1e-9), "at {t} s the PSU delivers {} A past its 50 mA limit", -rig.i(0));
         if t >= 3e-3 {
-            close(rig.v(1), 5.0, 1e-12, &format!("at {t} s: the rail at the setpoint"));
-            close(rig.i(0), -want, 1e-10, &format!("at {t} s: the PSU's current"));
-            assert_eq!(rig.hub().state.reg, Regime::Cv, "at {t} s");
-            assert!(!rig.s().power_hold(2).is_free(), "at {t} s: the chip is held off");
+            close(rig.v(1), v_e, 100e-6 + 1e-3 * v_e, &format!("at {t} s: the rail at the floor"));
+            close(rig.i(0), -0.05, 1e-9 + 1e-3 * 0.05, &format!("at {t} s: the PSU at its limit"));
+            assert_eq!(rig.hub().state.reg, Regime::Cc, "at {t} s");
+            let hold = rig.s().power_hold(2);
+            assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t} s: the chip slides, not {hold:?}");
+            close(0.032 * hold.kind.weight(), 0.032 * x_hand, 1e-9 + 1e-3 * 0.05, &format!("at {t} s: the duty's draw against {x_hand} by hand"));
         }
     }
 }
@@ -13822,6 +13979,17 @@ fn exact_mode_holds_a_landing_whose_powered_probe_has_no_cc_solution() {
     // solution its Newton reaches; before the fix exact mode then kept the
     // CC solution and its clamp's CV, 1.277 A against the 455 mA limit,
     // through every low phase.
+    //
+    // Ruling R92 (R53, Q2), default mode: at the 555's 1.8 V floor the edge
+    // attracts (off, 64.4 mA; powered, past the limit), so the 555 slides
+    // there instead of being held off with CV at the setpoint. Powered at vs,
+    // TRIG low holds OUT HIGH: its pair is f/20 S to pin 8 and (1 - f)/20 S
+    // to pin 1, f = 1 - 0.1/vs (NE555 point 7), and OUT sits on the -9.05 V
+    // node, so the rail feeds it f/20 (vs + 9.0465) = 0.5122 A at 1.8 V; DIS
+    // is released. With the 611 ohm burnt the rest of the rail's draw is
+    // (1.8 + 2.0372)/59.6105 = 64.37 mA. The PSU at its 455.25 mA limit:
+    // 0.06437 + 0.5122 x = 0.45525, x = 0.7631. Exact mode keeps the
+    // pre-ruling hold until its slide is built.
     let board = || {
     let mut p = program(
         7,
@@ -13856,6 +14024,20 @@ fn exact_mode_holds_a_landing_whose_powered_probe_has_no_cc_solution() {
             let at = format!("{mode}, clock low, {:.1} ms", t * 1e3);
             assert!(rig.v(3) < -2.0, "{at}: the clock is low");
             assert!(rig.s().slow.is_failed(7), "{at}: the 611 ohm burnt");
+            if mode == "default" {
+                let (v_e, i_limit) = (1.8, 0.4552508446732851);
+                let f = 1.0 - 0.1 / v_e;
+                let i_on = f / 20.0 * (v_e + 9.046538307982303);
+                let i_off = (v_e - rig.v(3)) / 59.610495360161075;
+                let x_hand = (i_limit - i_off) / i_on;
+                let hold = rig.s().power_hold(6);
+                assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{at}: the 555 slides, not {hold:?}");
+                close(rig.v(1), v_e, 100e-6 + 1e-3 * v_e, &format!("{at}: the rail at the 555's floor"));
+                close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("{at}: the PSU at its limit"));
+                close(i_on * hold.kind.weight(), i_on * x_hand, 1e-9 + 1e-3 * i_limit, &format!("{at}: the duty's draw against x = {x_hand} by hand"));
+                assert_eq!(exact_regime(&rig), Regime::Cc, "{at}");
+                continue;
+            }
             close(rig.v(1), v, 1e-12, &format!("{at}: CV at the setpoint"));
             assert_eq!(exact_regime(&rig), Regime::Cv, "{at}");
             assert!(!rig.s().power_hold(6).is_free(), "{at}: the 555 is held off");
@@ -14764,6 +14946,10 @@ fn a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_togg
     // with the 555's power judged at -2.776 V: never on, the rail ran up the
     // capacitor past the setpoint to 749.6 V, and the Rail events then chased
     // it for 82M events in one advance.
+    // The pre-ruling hold, the fallback of a slide that cannot be followed
+    // (ruling R92): this board's chip slides under the ruling, re-derived by
+    // hand with R92's chatter entry (piece 3).
+    let _no_slide = hold::NoSlide::arm();
     let p = cold_2575_tpl2();
     let (v_set, edge, d555) = (4.984117245919062, 1.8, 6);
     let toggles = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
@@ -16120,4 +16306,65 @@ fn zz_r101_2575_cadence_against_fine() {
         eprintln!("R101 t {t:.9}: stop {ws:.2} W0, yield {wy:.2} W0, yield-vs-stop {wb:.2} W0 off; device 9 stop {:.6} yield {:.6} fine {:.6}", d9(s), d9(y), d9(f));
     }
     eprintln!("R101 worst over {} instants: stop {worst_stop:.2} W0, yield {worst_yield:.2} W0 off the fine reference; yield against stop {worst_between:.2} W0", times.len());
+}
+
+/// Ruling R92's class A and B board: a 74LS00 on a 5 V, 20 mA CC rail
+/// (node 1), 1a and 1b on the rail so 1y (node 2) is LOW, sinking from the
+/// rail through 50 ohm; a 10k leak across the rail; 2y-4y HIGH into nodes
+/// 3-5 with nothing else on them. Powered at its 4.275 V floor the gate
+/// sinks 4.275 / (50 + 133.59375) A = 23.3 mA, past the limit with the leak,
+/// so the rail falls under the floor; off, the rail comes back to the
+/// setpoint: the edge is attracting. With `rail_cap` a 100 uF capacitor on
+/// the rail as well (class B), whose current is zero on the slide.
+fn sliding_gate(rail_cap: bool) -> Program {
+    let mut devs = vec![
+        psu(0, 1, 0, 5.0, 0.02),
+        ls00(1, 1, 0, [1, 1, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0),
+        resistor(2, 1, 2, 50.0),
+        resistor(3, 1, 0, 10_000.0),
+    ];
+    if rail_cap {
+        devs.push(capacitor(4, 1, 0, 100e-6, 0.0));
+    }
+    program(6, devs)
+}
+
+/// The slide's duty on [`sliding_gate`], by hand: at the floor `v_e` the
+/// gate's LOW stage is `R_out / x` ohm (`R_out = v_e / (4 io_max)`) in
+/// series with the 50 ohm, and the leak takes `v_e / 10k`; the two draw the
+/// PSU's 20 mA: `x = R_out / (v_e / (0.02 - v_e / 1e4) - 50)`.
+fn sliding_gate_duty_by_hand() -> (f64, f64) {
+    let v_e = 4.275;
+    let r_out = v_e / (4.0 * 0.008);
+    (v_e, r_out / (v_e / (0.02 - v_e / 1e4) - 50.0))
+}
+
+#[test]
+fn a_gate_whose_own_draw_starves_its_cc_rail_slides_at_its_floor_at_the_duty_its_limit_allows() {
+    // Ruling R92 (R53, Q1): the edge is attracting (powered, the gate takes
+    // the rail under its floor; off, the rail recovers), so the gate slides
+    // along it: the rail at the floor, the PSU at its limit, the gate
+    // powered with its drive scaled by the duty that balances the two
+    // (Filippov's average), not held off and declined by the episode guard.
+    // Class A (no rail capacitor) and class B (a rail capacitor, whose
+    // current on the slide is zero) give the same state.
+    let (v_e, x_hand) = sliding_gate_duty_by_hand();
+    for rail_cap in [false, true] {
+        let mut rig = Rig::load(&sliding_gate(rail_cap)).unwrap_or_else(|e| panic!("load: {}", e.message));
+        // With the capacitor the CC rail charges from 0 V at 200 V/s and
+        // reaches the floor at about 21 ms.
+        for t in [0.05, 0.1, 0.2] {
+            rig.advance(t).unwrap_or_else(|e| panic!("rail cap {rail_cap}: declined at {t} s: {e:?}"));
+            let hold = rig.s().power_hold(1);
+            assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "rail cap {rail_cap}, {t} s: sliding, not {hold:?}");
+            let x = hold.kind.weight();
+            assert!((x - x_hand).abs() <= 1e-6 * x_hand, "rail cap {rail_cap}, {t} s: duty {x} against {x_hand} by hand");
+            let rail = rig.k.solver().voltages()[1];
+            assert!((rail - v_e).abs() <= 100e-6 + 1e-3 * v_e, "rail cap {rail_cap}, {t} s: rail {rail} against the floor {v_e}");
+            let i_psu = rig.k.solver().currents()[0].abs();
+            assert!((i_psu - 0.02).abs() <= 1e-9 + 1e-3 * 0.02, "rail cap {rail_cap}, {t} s: the PSU at its limit, {i_psu}");
+            assert!(rig.s().ic_powered(1), "a sliding gate is powered");
+        }
+        assert_eq!(rig.s().hold_counts()[0], 0.0, "a slide is no hold");
+    }
 }

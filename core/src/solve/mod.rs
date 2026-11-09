@@ -2979,6 +2979,11 @@ pub struct PartitionedSolver {
     /// (`advance`), taken by the first retry after it. Journaled with the
     /// table (Rails point 8).
     retry_armed: bool,
+    /// The duties re-solved since the last horizon clamp (ruling R92,
+    /// `keep_sliding`), against [`hold::SLIDE_FOLLOW_MAX`] and
+    /// [`hold::SLIDE_SOLVES_MAX`]. Not rolled back:
+    /// a failed instant's solves still count, which only declines sooner.
+    slide_solves: u32,
     /// Set only inside the horizon clamp: the rail loop retries there even
     /// when no pass solved.
     at_clamp: bool,
@@ -3281,6 +3286,7 @@ impl PartitionedSolver {
             hold_counts: [0; 2],
             episodes: Rc::new(Vec::new()),
             retry_armed: true,
+            slide_solves: 0,
             at_clamp: false,
             rail_jump: false,
             host_edit: false,
@@ -4581,6 +4587,7 @@ impl PartitionedSolver {
     /// Arms the next host step's rail retry (the horizon clamp ended this
     /// one), journaled.
     fn arm_retry(&mut self) {
+        self.slide_solves = 0;
         if !self.retry_armed {
             // The clamp arms after its own retries, so the journal matters
             // only when the clamp then fails (its ramp re-solve or delta
@@ -6968,6 +6975,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hold_counts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.episodes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.retry_armed, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_solves, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.at_clamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_jump, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_edit, w); }

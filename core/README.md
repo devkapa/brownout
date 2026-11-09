@@ -3127,6 +3127,9 @@ Constants, all from P3:35-38 unless marked new:
 | `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
 | `RAIL_TAU_MAX` | `1e-4` s (new) | the largest battery rail time constant `r·C_rail` the core accepts (Rails point 7) |
 | `RAMP_STEP_RATIO` | `0.01` (new) | the longest pulse ramp, relative to the source's event timescale, that is a midpoint step (Sources point 3) |
+| `slide_drift(edge)` | `1e-4 + 1e-3·abs(edge)` V (new, ruling R92) | W0's voltage tolerance at a sliding chip's edge: its duty is solved again once its supply drifts this far, and a `Rail` watch sits on both levels (W1c point 1a, the slide) |
+| `SLIDE_FOLLOW_MAX` | `100` per host step (new, ruling R92) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling. Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
+| `SLIDE_SOLVES_MAX` | `1000` per host step (new, ruling R92) | the backstop past which a slide's re-solves decline `-4` (never reached while `SLIDE_FOLLOW_MAX` gives a slide up first) |
 
 ### Rails
 

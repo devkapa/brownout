@@ -95,6 +95,42 @@ impl RetrySeam {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static NO_SLIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the guard lives no chip slides (ruling R92), so a test
+/// of the hold's own machinery (its retry, rollback, snapshot and episode
+/// guard, all still the fallback of a slide that cannot be followed) runs
+/// on boards whose chips would otherwise slide.
+#[cfg(test)]
+pub(super) struct NoSlide;
+
+#[cfg(test)]
+impl NoSlide {
+    pub(super) fn arm() -> NoSlide {
+        NO_SLIDE.with(|c| c.set(true));
+        NoSlide
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoSlide {
+    fn drop(&mut self) {
+        NO_SLIDE.with(|c| c.set(false));
+    }
+}
+
+#[inline]
+fn sliding_allowed() -> bool {
+    #[cfg(test)]
+    if NO_SLIDE.with(|c| c.get()) {
+        return false;
+    }
+    true
+}
+
 /// An IC's raw supply difference over `v`.
 #[inline]
 pub(crate) fn supply(ic: &digital::IcRecord, v: &[f64]) -> f64 {
@@ -162,6 +198,31 @@ pub(crate) fn refreshed(ic: &digital::IcRecord, old: Release, v_on: f64, v_off: 
     hold
 }
 
+/// The duties `keep_sliding` may solve again in one host step before the
+/// instant declines (`-4`, classic's fallback): a slide whose board moves
+/// it past W0 that often is followed at a cost no host step can carry, and a
+/// frozen tab is never acceptable. A slide that follows its board's own
+/// pace (cold 175 tpl 2's 555, one every 60 us or so) takes about a hundred
+/// a host step.
+pub(crate) const SLIDE_SOLVES_MAX: u32 = 1000;
+
+/// The duties `keep_sliding` solves again in one host step before it gives
+/// a slide up as one it cannot follow (ruling R92): the chip is held as it
+/// was before the ruling (point 1a's hold and its release), so a board that
+/// ran under the hold still runs. A slide whose rail a dynamic partition
+/// moves past W0 at each of its steps (cold 230 tpl 2: a stepped hub
+/// partition on a CC rail, a solve every 210 ns) takes thousands a host
+/// step; one that follows its board's pace takes a few (cold 175 tpl 2:
+/// about one every 2 ms).
+pub(crate) const SLIDE_FOLLOW_MAX: u32 = 100;
+
+/// How far a sliding IC's supply may drift from its edge before its duty is
+/// solved again (ruling R92): W0's voltage tolerance at the edge, so every
+/// reading the slide sets stays within W0 of the slide's own.
+pub(crate) fn slide_drift(edge: f64) -> f64 {
+    1e-4 + 1e-3 * edge.abs()
+}
+
 /// A probe's hold: the verdict fixed at `on`.
 #[inline]
 pub(crate) fn probe(on: bool) -> PowerHold {
@@ -196,6 +257,16 @@ pub(crate) struct Episode {
     /// The hold in place was taken by a stepped partition's seed or step
     /// (`stepped::hold_around`): `retry_stepped_holds` retries it.
     pub(crate) stepped: bool,
+    /// While the IC slides (ruling R92): its residual's slope in its duty
+    /// at the last solve, the next solve's first secant step (0: none yet).
+    pub(crate) slope: f64,
+    /// While the IC slides: when its duty was last solved (`-inf`: never),
+    /// the span its segment is aimed back over (`slide_residual`).
+    pub(crate) solved_at: f64,
+    /// Its slide could not be followed (`keep_sliding`'s fallback): held as
+    /// before ruling R92 until the circuit changes, which drops every hold
+    /// and episode.
+    pub(crate) unfollowed: bool,
 }
 
 impl Episode {
@@ -216,7 +287,7 @@ impl Episode {
             return self;
         }
         let short = now - self.held_at < host_step;
-        Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false, stepped: false }
+        Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false, stepped: false, slope: 0.0, solved_at: f64::NEG_INFINITY, unfollowed: self.unfollowed }
     }
 
     /// A hold withdrawn at the instant it was taken (a landing's chip that
@@ -474,6 +545,34 @@ impl PartitionedSolver {
                 digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node])
             });
         }
+        // Ruling R92 (R53's sliding hold): one starving chip whose edge
+        // attracts (held unpowered its supply comes back inside its window,
+        // or on a CC rail capacitor's segment the segment rises; powered it
+        // leaves, or the segment falls) has no hold that fits: it slides
+        // along the edge, powered at the duty that keeps it there.
+        if let [(d, v_on)] = starving[..] {
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            // A chip whose own output starves it only once it has committed
+            // (a 555 in reset: its OUT sinks once it has turned on, after its
+            // delay) shows nothing at the instant's powered probe; its edge
+            // shows as a chatter instead, each hold its own: from its second,
+            // the slide's own probes, which see its committed outputs, decide
+            // (cold 757 tpl 0: on a 1.1 mF rail held just under its 1.8 V
+            // floor, both probes there, freed as the rail rose past it,
+            // starved once its OUT had sunk 82.8 mA past the 71.76 mA limit).
+            let chattering = self.episode(d).count >= 1;
+            let attracting = chattering
+                || match added {
+                    Some(_) => falling && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(off, (_, i_limit))| off < i_limit),
+                    None => !digital::power::powered(ic, v_on, 0.0) && digital::power::powered(ic, supply(ic, &self.voltages), 0.0),
+                };
+            if attracting && sliding_allowed() && !self.episode(d).unfollowed && self.slide_on_rail(now, drivers, readers, d, &err)? {
+                let episode = self.episode(d).held(now);
+                self.set_episode(d, episode)?;
+                self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
+                return Ok(());
+            }
+        }
         // Step 4: the held solve, each starving IC's episode counted first.
         for &(d, _) in &starving {
             let episode = self.episode(d).held(now);
@@ -626,6 +725,361 @@ impl PartitionedSolver {
             }
             Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
         }
+    }
+
+    /// Ruling R92 (R53, Q1): rail IC `d` slides along its power edge. Its
+    /// duty `x` is solved, by the Illinois method on the rail loop's settled
+    /// passes, so that its residual (`slide_residual`) is zero: on a CC rail
+    /// capacitor's segment the draw meets the limit (the segment flat), else
+    /// its supply sits at the edge. Both ends are probed first: `x = 0` must
+    /// leave the residual negative (unpowered, the supply comes back) and
+    /// `x = 1` positive (powered, it leaves), else there is no slide and
+    /// `false` (the state is then whatever the last probe left; the caller
+    /// re-solves with the hold it takes). `true` with the duty in the table
+    /// and the passes settled at it.
+    pub(super) fn slide_on_rail(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str) -> Result<bool, String> {
+        self.slide_from(now, drivers, readers, d, err, None)
+    }
+
+    /// [`Self::slide_on_rail`], from the duty `from` the passes settled at
+    /// when there is one: the bracket is searched outward from it, so that
+    /// keeping a slide probes its ends only when its duty has moved that far.
+    fn slide_from(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>) -> Result<bool, String> {
+        let slid = self.slide_solve(now, drivers, readers, d, err, from)?;
+        if slid {
+            let mut episode = self.episode(d);
+            episode.solved_at = now;
+            self.set_episode(d, episode)?;
+        }
+        Ok(slid)
+    }
+
+    /// [`Self::slide_from`]'s solve. Each probe of a duty starts from the
+    /// state it was asked in: the rail's CC Newton lands on the root nearest
+    /// where it starts, so a probe from where the last one left it gave the
+    /// same duty another rail (cold 471 tpl 2: 4.277 V from the edge,
+    /// -0.55 V after a probe one double further on had gone there). A probe
+    /// whose passes fail answers "no slide", the state as it was asked.
+    fn slide_solve(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>) -> Result<bool, String> {
+        let mut cp = Some(self.checkpoint());
+        let mut probe_readers = Vec::new();
+        match self.slide_solve_from(now, drivers, &mut probe_readers, d, err, from, &mut cp) {
+            Ok(slid) => {
+                readers.extend(probe_readers);
+                Ok(slid)
+            }
+            Err(_) => {
+                self.back_to(cp.expect("a checkpoint"));
+                Ok(false)
+            }
+        }
+    }
+
+    /// The solver's state as a retry or a slide's probe puts it back.
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint { published: self.snapshot(), dynamic: self.dynamic_snapshot(), sums: self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)) }
+    }
+
+    /// Back at `checkpoint`, bit for bit, the hub's running sums included.
+    fn back_to(&mut self, checkpoint: Checkpoint) {
+        self.restore(checkpoint.published);
+        self.dynamic_restore(checkpoint.dynamic);
+        if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), checkpoint.sums) {
+            (hub.state.a_run, hub.state.g_run) = (a, g);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn slide_solve_from(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>, cp: &mut Option<Checkpoint>) -> Result<bool, String> {
+        let edge = self.slide_edge(d);
+        let k = self.hub.as_ref().expect("a hub").rail_ics.iter().position(|&pos| self.ics[pos as usize].0 == d).expect("a rail IC");
+        let tol = self.slide_tolerance(now, d);
+        let mut eval = |s: &mut Self, x: f64| -> Result<f64, String> {
+            s.back_to(cp.take().expect("a checkpoint"));
+            *cp = Some(s.checkpoint());
+            let mut seed: Vec<usize> = s.set_power_hold(d, digital::power::PowerHold::duty(x)).into_iter().map(|p| p.0 as usize).collect();
+            seed.extend(&s.hub.as_ref().expect("a hub").ic_parts[k]);
+            s.rail_settle(now, drivers, readers, seed, err)?;
+            Ok(s.slide_residual(now, d))
+        };
+        let (mut x0, mut r0, mut x1, mut r1): (f64, f64, f64, f64);
+        match from {
+            Some(xc) => {
+                // The residual at the duty the passes settled at, then steps
+                // doubling away from it, against its sign, to a sign change
+                // or an end (where no change means no slide).
+                let rc = self.slide_residual(now, d);
+                if rc.abs() <= tol {
+                    return Ok(true);
+                }
+                let down = rc > 0.0;
+                let mut step = 1.0 / 64.0;
+                let mut x_prev = xc;
+                let mut r_prev = rc;
+                // The slope the last solve found (the residual is near
+                // linear in the duty): a secant step from it lands at or by
+                // the root, the doubling steps after it only when the board
+                // moved the slope too.
+                let slope = self.episode(d).slope;
+                if slope > 0.0 {
+                    let xs = (xc - rc / slope).clamp(0.0, 1.0);
+                    if xs != xc {
+                        let rs = eval(self, xs)?;
+                        if rs.abs() <= tol {
+                            let mut episode = self.episode(d);
+                            episode.slope = (rs - rc) / (xs - xc);
+                            self.set_episode(d, episode)?;
+                            readers.push(DeviceId(d as u32));
+                            self.schedule_rail_event(now);
+                            return Ok(true);
+                        }
+                        if (rs > 0.0) == down {
+                            // Short of the root: on from there.
+                            (x_prev, r_prev) = (xs, rs);
+                            step = (xs - xc).abs().max(1.0 / 64.0);
+                        } else {
+                            // Past it: the bracket is closed.
+                            (x_prev, r_prev, step) = (xs, rs, f64::NAN);
+                        }
+                    }
+                }
+                if step.is_nan() {
+                    (x0, r0, x1, r1) = if down { (x_prev, r_prev, xc, rc) } else { (xc, rc, x_prev, r_prev) };
+                } else { loop {
+                    let xt = if down { (x_prev - step).max(0.0) } else { (x_prev + step).min(1.0) };
+                    let rt = eval(self, xt)?;
+                    if (rt > 0.0) != down || rt.abs() <= tol {
+                        if rt.abs() <= tol {
+                            readers.push(DeviceId(d as u32));
+                            self.schedule_rail_event(now);
+                            return Ok(true);
+                        }
+                        (x0, r0, x1, r1) = if down { (xt, rt, x_prev, r_prev) } else { (x_prev, r_prev, xt, rt) };
+                        break;
+                    }
+                    if xt == 0.0 || xt == 1.0 {
+                        return Ok(false);
+                    }
+                    (x_prev, r_prev) = (xt, rt);
+                    step *= 2.0;
+                } }
+            }
+            None => {
+                (x0, r0) = (0.0, eval(self, 0.0)?);
+                if r0 >= -tol {
+                    return Ok(false);
+                }
+                (x1, r1) = (1.0, eval(self, 1.0)?);
+                if r1 <= tol {
+                    return Ok(false);
+                }
+            }
+        }
+        // The Illinois method: the residual is monotone in the duty, smooth
+        // inside the bracket; the end kept twice in a row has its residual
+        // halved. The bracket shrinks to the doubles next to the root at
+        // worst, so the cap is never what ends a solve.
+        let mut x = x1;
+        let mut r = r1;
+        let mut side = 0i8;
+        for _ in 0..200 {
+            x = (x0 * r1 - x1 * r0) / (r1 - r0);
+            if !(x > x0 && x < x1) {
+                x = 0.5 * (x0 + x1);
+            }
+            if x <= x0 || x >= x1 {
+                break;
+            }
+            r = eval(self, x)?;
+            if r.abs() <= tol {
+                break;
+            }
+            if r < 0.0 {
+                (x0, r0) = (x, r);
+                if side == -1 {
+                    r1 *= 0.5;
+                }
+                side = -1;
+            } else {
+                (x1, r1) = (x, r);
+                if side == 1 {
+                    r0 *= 0.5;
+                }
+                side = 1;
+            }
+        }
+        if r.abs() > tol {
+            // The bracket closed between two doubles with no root between:
+            // the residual jumps there (cold 471 tpl 2: one duty further on,
+            // the CC rail's root leaves the edge for one at -0.55 V, the
+            // chip's partition draw still past the limit below its floor).
+            // The nearer end is the slide when it holds the supply within W0
+            // of the edge (a capacitor's segment, aimed by its residual, is
+            // kept by `keep_sliding` in any case); else there is none.
+            let (xe, re) = if r0.abs() <= r1.abs() { (x0, r0) } else { (x1, r1) };
+            if self.segment_draw(now).is_none() && re.abs() > slide_drift(edge) {
+                return Ok(false);
+            }
+            let _ = re;
+            x = xe;
+        }
+        if self.power_hold(d) != digital::power::PowerHold::duty(x) {
+            eval(self, x)?;
+        }
+        if x1 > x0 && r1 != r0 {
+            let mut episode = self.episode(d);
+            episode.slope = (r1 - r0) / (x1 - x0);
+            self.set_episode(d, episode)?;
+        }
+        readers.push(DeviceId(d as u32));
+        self.schedule_rail_event(now);
+        Ok(true)
+    }
+
+    /// The residual a sliding rail IC `d`'s duty zeroes (ruling R92), rising
+    /// with the duty: on a CC rail capacitor's segment the draw (`dir`
+    /// signed) less the limit, less what aims the segment back at the edge
+    /// over one host step from where the capacitors carried the supply (zero
+    /// on the edge: there the segment is flat); else how far the IC's supply
+    /// lies past the window edge nearer it, outward (under its floor, over
+    /// its ceiling). The aim is what keeps a slide on a capacitor at its
+    /// edge: the capacitors integrate any draw the duty leaves unbalanced
+    /// as the board moves, and a flat segment wherever they stood when the
+    /// supply had drifted W0 off left it there, solved again at each step
+    /// after (cold 175 tpl 2, 1.8019 V on a 1.8 V edge, every 10 ns).
+    fn slide_residual(&self, now: f64, d: usize) -> f64 {
+        if let (Some(draw), Some((v, i_limit))) = (self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
+            let hub = self.hub.as_ref().expect("a hub");
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            let off = supply(ic, &self.voltages) - self.slide_edge(d);
+            // Back over the time the supply took to drift off since the last
+            // solve (a host step at most): the board's own pace, so the
+            // segment reaches the edge before the drift that carried it off
+            // carries it past the band again, where it is solved flat
+            // (`keep_sliding`). Aimed back over a whole host step, cold 175
+            // tpl 2's rail never left the band's edge, a solve every 60 us.
+            let host = if self.host_step.is_finite() && self.host_step > 0.0 { self.host_step } else { 1.0 };
+            let since = now - self.episode(d).solved_at;
+            let span = if since > 0.0 { since.min(host) } else { host };
+            return draw - i_limit - crate::devices::sources::direction(v) * hub.c_rail * off / span;
+        }
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        let s = supply(ic, &self.voltages);
+        let (lo, hi) = digital::levels::power_window(ic);
+        if (s - lo).abs() <= (s - hi).abs() {
+            lo - s
+        } else {
+            s - hi
+        }
+    }
+
+    /// The window edge a sliding IC `d`'s supply sits at (the nearer one).
+    pub(super) fn slide_edge(&self, d: usize) -> f64 {
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        let s = supply(ic, &self.voltages);
+        let (lo, hi) = digital::levels::power_window(ic);
+        if (s - lo).abs() <= (s - hi).abs() {
+            lo
+        } else {
+            hi
+        }
+    }
+
+    /// The residual a slide is solved to: the reached width of the edge or
+    /// of the limit (Rails point 4), as the regime rules land within.
+    fn slide_tolerance(&self, now: f64, d: usize) -> f64 {
+        if let (Some(_), Some((_, i_limit))) = (self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
+            return rails::REACHED_REL * i_limit.max(1.0);
+        }
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        let s = supply(ic, &self.voltages);
+        let (lo, hi) = digital::levels::power_window(ic);
+        let edge = if (s - lo).abs() <= (s - hi).abs() { lo } else { hi };
+        rails::REACHED_REL * edge.abs().max(1.0)
+    }
+
+    /// Ruling R92: after passes that settled, each rail IC sliding is kept
+    /// on its edge: its duty solved again once its supply has drifted from
+    /// the edge by more than W0 ([`slide_drift`]), as what it sees moves (a
+    /// `Rail` event watches those two levels, `rail_power_edges`). Solved
+    /// again at each re-solve that moved it at all, a duty that changed by
+    /// ulps restarted the stepped partitions it feeds at their floor step,
+    /// whose next 10 ns step moved it again (cold 175 tpl 2: a re-solve every
+    /// 10 ns). One that no duty keeps there leaves the
+    /// slide free (its draw carries it inside the window, or even unpowered
+    /// its supply stays out), its episode released, and the passes run again
+    /// with it free (alternating, the hold procedure takes it again).
+    pub(super) fn keep_sliding(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        if self.holds_active == 0 {
+            return Ok(());
+        }
+        let sliding: Vec<usize> = self
+            .hub
+            .as_ref()
+            .expect("a hub")
+            .rail_ics
+            .iter()
+            .map(|&pos| self.ics[pos as usize].0)
+            .filter(|&d| matches!(self.power_hold(d).kind, HoldKind::Duty(_)))
+            .collect();
+        for d in sliding {
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            let edge = self.slide_edge(d);
+            let off = supply(ic, &self.voltages) - edge;
+            // An instant that changed a driver or a source (a commit, the
+            // sliding 555's own toggle among them) stepped the draw the duty
+            // balances: solved again there, and in between only once the
+            // supply has drifted past W0 (cold 175 tpl 2's 555, which runs on
+            // as it slides: left to drift after each toggle it took a solve
+            // every 30 us).
+            let changed = self.changes != Changes::None;
+            // Back at the edge on a capacitor's segment aimed there (the
+            // watch on the edge itself): solved flat.
+            let eta = rails::REACHED_REL * edge.abs().max(1.0);
+            let at_edge = off.abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw - i_limit).abs() > self.slide_tolerance(now, d));
+            if !changed && !at_edge && off.abs() <= slide_drift(edge) {
+                continue;
+            }
+            // On a capacitor's segment already aimed back at the edge: on its
+            // way (the next solve comes inside the band, or at the far one).
+            if let (false, false, Some(draw), Some((_, i_limit))) = (changed, at_edge, self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
+                if (off > 0.0) == (draw > i_limit) {
+                    continue;
+                }
+            }
+            self.slide_solves += 1;
+            if self.slide_solves > SLIDE_SOLVES_MAX {
+                return Err(format!("power slide: IC (device {d}) had its duty solved again {} times in one host step, its supply drifting past W0 from its edge each time (ruling R92)", self.slide_solves));
+            }
+            if self.slide_solves > SLIDE_FOLLOW_MAX {
+                // Given up: free, and the passes find it alternating again,
+                // where the hold procedure holds it as before the ruling.
+                let mut episode = self.episode(d);
+                episode.unfollowed = true;
+                self.set_episode(d, episode)?;
+                self.release_episode(d, now)?;
+                readers.push(DeviceId(d as u32));
+                let seed: Vec<usize> = self.set_power_hold(d, PowerHold::FREE).into_iter().map(|p| p.0 as usize).collect();
+                match self.hold_passes(now, drivers, readers, seed)? {
+                    Passes::Settled(_) => {}
+                    Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err)?,
+                }
+                continue;
+            }
+            let err = rails::loop_unsettled();
+            let from = self.power_hold(d).kind.weight();
+            if self.slide_from(now, drivers, readers, d, &err, Some(from))? {
+                continue;
+            }
+            self.release_episode(d, now)?;
+            readers.push(DeviceId(d as u32));
+            let seed: Vec<usize> = self.set_power_hold(d, PowerHold::FREE).into_iter().map(|p| p.0 as usize).collect();
+            match self.hold_passes(now, drivers, readers, seed)? {
+                Passes::Settled(_) => {}
+                Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err)?,
+            }
+        }
+        Ok(())
     }
 
     /// `retry_on_rail`'s probe, one held chip at a time, the rest held: one
@@ -904,6 +1358,9 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.held_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_at, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.unfollowed, w); }
         n
     }
 }

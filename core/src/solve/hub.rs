@@ -1676,7 +1676,10 @@ impl PartitionedSolver {
             // re-solve (a pass that solved) or else at the horizon clamp; at
             // any other re-solve only one whose supply passed its release
             // level.
-            hold::Passes::Settled(solved) if solved || self.at_clamp => self.retry_on_rail(now, drivers, readers),
+            hold::Passes::Settled(solved) if solved || self.at_clamp => {
+                self.keep_sliding(now, drivers, readers)?;
+                self.retry_on_rail(now, drivers, readers)
+            }
             hold::Passes::Settled(_) => Ok(()),
             // W1c point 1a: rail ICs whose own draw flips their power each
             // pass (or each rail Newton iterate) are probed, and held off if
@@ -2208,6 +2211,13 @@ impl PartitionedSolver {
             if ic.vcc.node == hub.node && self.fixed_node[ic.gnd.node] && ic.gnd.node != hub.node {
                 let vg = self.voltages[ic.gnd.node];
                 let hold = self.power_hold(*d);
+                // A sliding IC watches the two levels its supply may drift to
+                // before its duty is solved again (ruling R92).
+                if let digital::power::HoldKind::Duty(_) = hold.kind {
+                    let edge = self.slide_edge(*d);
+                    windows.extend([vg + edge - hold::slide_drift(edge), vg + edge, vg + edge + hold::slide_drift(edge)]);
+                    continue;
+                }
                 if !hold.is_free() {
                     windows.extend(hold.release.map(|r| vg + r.level));
                     continue;
