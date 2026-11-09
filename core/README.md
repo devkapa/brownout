@@ -6243,6 +6243,23 @@ failures and warnings (W1g)"):
   latches a glitch's LOW-then-HIGH as one sag (the S1 `U41.y2n` latch, W1g
   point 9).
 
+## Open items (must close before 1.0.0)
+
+- **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
+  A backward Euler stepped partition's step-doubling bounds its node
+  voltages to W0 per step but never its capacitors' series currents, a
+  small decaying difference: fixture 38's supply partition (5 kohm into
+  100 nF, holding a 74HC14's free supply) reads `cd` 218 W0 off the fine
+  reference before INT-ACC and 323 W0 after it, its voltages 0.74 and 1.1
+  W0 (R79's longer input steps no longer cut its steps through
+  `sync_supplies`). Comparing the series current against classic's 10 nA in
+  every backward Euler partition cost +64 % cold-sweep steps, and in the
+  supply partitions alone +24 %, both with new wall caps. Fixture 38 is an
+  expected failure linked to this item (its sidecar's `openItem`); it turns
+  the gate red when it starts passing. First step: a current check relative
+  to the partition's own current scale, measured against the 1 % cold-wall
+  bound and R48.
+
 ## Deferred past 1.0.0
 
 - Hysteresis at the IC supply floor, a classic change too: the W1c fixed point

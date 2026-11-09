@@ -91,6 +91,15 @@ describe("synthetic fixtures — declared outcome (assertion a)", () => {
     for (const { entry, expected, result } of run.syntheticOutcomes) {
       if (expected.status === "pass") {
         expect(result.status, `${entry.id}: expected "pass", got "${result.status}"`).toBe("pass");
+      } else if (expected.status === "expected-fail") {
+        // Ruling R96: a known failure waiting on an open item still runs and
+        // reports red; once it passes, the expectation has to go.
+        expect(expected.openItem, `${entry.id}: an expected failure names its open item`).toBeTruthy();
+        expect(
+          result.status,
+          `${entry.id}: expected to fail until "${expected.openItem}" closes, got "${result.status}"` +
+            (result.status === "pass" ? ": it passes now, so remove the expectation from its sidecar" : ""),
+        ).toBe("fail");
       } else {
         expect(result.status, `${entry.id}: expected "core-declined", got "${result.status}"`).toBe("core-declined");
         if (expected.reasonPrefix && result.status === "core-declined") {

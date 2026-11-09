@@ -28,6 +28,10 @@ import {
   compareNe555Sidecar,
   EXTERNAL_CLASSIC_REFERENCE_CACHE_DIR,
   explainRichardsonMismatches,
+  explainTrapezoidMismatches,
+  TRAPEZOID_DIVERGENCE_ID,
+  trapezoidCone,
+  type ClassicFixedReplay,
   isLocalCorpusOrigin,
   levelChanges,
   ne555LagSurface,
@@ -1213,5 +1217,55 @@ describe("fixture 40 - a 555 whose watched pin and free supply are in different 
     expect(result.knownDivergences.filter((hit) => hit.divergenceId === RICHARDSON_CLOSER_DIVERGENCE_ID)).toEqual([]);
     // The comparison did have mismatches to explain, or this would prove nothing about the rules.
     expect(result.knownDivergences.length).toBeGreaterThan(0);
+  });
+});
+
+describe("R79's row: the trapezoid's cone, excused only where the core is closer (INT-ACC)", () => {
+  const fixture38 = JSON.parse(
+    fs.readFileSync(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "fixtures", "core", "38-74hc14-read-pin-moving-supply.sim.json"), "utf8"),
+  ) as SimCircuit;
+  // A classic stand-in whose fixed-step value at every instant is `truth + a h`,
+  // backward Euler's first-order error, so its Richardson reference is `truth`
+  // exactly and converged.
+  const linearReplay = (truth: number, a: number, id = "n2"): ClassicFixedReplay => (_circuit, durationS, h) => {
+    const samples = [];
+    for (let k = 0; k * h <= durationS + h; k++) samples.push({ phaseIndex: 0, simTime: k * h, netV: { [id]: truth + a * h }, elementI: {}, digitalState: {} });
+    return samples;
+  };
+  const n2At5ms = (coreValue: number, classicValue: number, id = "n2") =>
+    ({ sampleTime: 0.005, category: "netV", id, classicValue, coreValue, detail: "" }) as const;
+
+  it("fixture 38's cone is the input RC, the 74HC14 that reads it, and its supply's partition and source", () => {
+    const cone = trapezoidCone(fixture38);
+    expect([...cone.nets].sort()).toEqual(["n1", "n2"]);
+    expect([...cone.elements].sort()).toEqual(["ca", "cd", "ra", "rf", "u1", "vcc"]);
+  });
+
+  it("fixture 38's input node: the core (4.59020) closer than classic (4.56710) to classic's own converged reference", () => {
+    const { explained, remaining } = explainTrapezoidMismatches(fixture38, [n2At5ms(4.590204973994571, 4.567096861080074)]);
+    expect(remaining).toEqual([]);
+    expect(explained[0]!.divergenceId).toBe(TRAPEZOID_DIVERGENCE_ID);
+    // The analytic answer is 5 (1 - exp(-2.5)) = 4.58958; the reference lands on it.
+    expect(explained[0]!.richardson!.reference).toBeCloseTo(4.58958, 4);
+  });
+
+  it("a core FARTHER than classic from the reference is not excused, in the cone or out of it", () => {
+    const replay = linearReplay(4.5, 1000);
+    const farther = explainTrapezoidMismatches(fixture38, [n2At5ms(4.53, 4.52)], replay);
+    expect(farther.explained).toEqual([]);
+    expect(farther.remaining).toHaveLength(1);
+    const closer = explainTrapezoidMismatches(fixture38, [n2At5ms(4.51, 4.52)], replay);
+    expect(closer.explained).toHaveLength(1);
+    // A net outside the cone (the source's own) is never excused, closer or not.
+    const outside = explainTrapezoidMismatches(fixture38, [n2At5ms(4.51, 4.52, "n0")], linearReplay(4.5, 1000, "n0"));
+    expect(outside.explained).toEqual([]);
+  });
+
+  it("a reference that has not converged excuses nothing", () => {
+    // `truth + a sqrt(h)`: not first order, so R (4.5655) and R' (4.5463)
+    // disagree by far more than the tolerance; the core sits on R, closer
+    // than classic, and is still not excused.
+    const replay: ClassicFixedReplay = (_c, durationS, h) => linearReplay(4.5 + 50 * Math.sqrt(h), 0)(_c, durationS, h);
+    expect(explainTrapezoidMismatches(fixture38, [n2At5ms(4.5655, 4.52)], replay).explained).toEqual([]);
   });
 });
