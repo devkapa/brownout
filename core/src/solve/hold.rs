@@ -219,6 +219,13 @@ impl Episode {
         Episode { count: if short && !foreign { self.count + 1 } else { 0 }, held_at: self.held_at, held: false, stepped: false }
     }
 
+    /// A hold withdrawn at the instant it was taken (a landing's chip that
+    /// carries itself with the others held, freed at once): no hold at all,
+    /// so its release counts nothing.
+    pub(crate) fn withdrawn(self) -> Episode {
+        Episode { held: false, ..self }
+    }
+
     /// `Err` with the decline's message past [`EPISODE_MAX`] short holds.
     pub(crate) fn check(self, device: usize) -> Result<(), String> {
         if self.count > EPISODE_MAX {
@@ -332,6 +339,9 @@ impl PartitionedSolver {
     pub(super) fn hold_on_rail(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, a: &[usize], err: String) -> Result<(), String> {
         let rail_ics: Vec<usize> = self.hub.as_ref().expect("a hub").rail_ics.iter().map(|&pos| self.ics[pos as usize].0).collect();
         let before: Vec<PowerHold> = rail_ics.iter().map(|&d| self.power_hold(d)).collect();
+        // R74's landing (`rail_loop`) puts the state back if its powered
+        // probe cannot settle (below).
+        let start = std::mem::take(&mut self.landing_hold).then(|| Checkpoint { published: self.snapshot(), dynamic: self.dynamic_snapshot(), sums: self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)) });
         // Step 1: the alternating ICs held powered, the rest at their reading
         // (one already held off stays so: a probe is no release).
         let mut seed = Vec::new();
@@ -342,7 +352,23 @@ impl PartitionedSolver {
             let on = a.contains(&d) || self.ic_powered(d);
             seed.extend(self.set_power_hold(d, probe(on)).into_iter().map(|p| p.0 as usize));
         }
-        self.rail_settle(now, drivers, readers, seed, &err)?;
+        // R74's landing: a powered probe whose passes cannot settle (the
+        // chips held powered past the limit, the rail loop alternating CV at
+        // the setpoint and CC under it, cold 1986 tpl 0's 74LS00 after a
+        // switch toggle) holds no operating point with them powered either:
+        // they starve, read under the edge, from the state before the probe.
+        let probe_failed = match (self.rail_settle(now, drivers, readers, seed, &err), start) {
+            (Ok(()), _) => false,
+            (Err(_), Some(start)) => {
+                self.restore(start.published);
+                self.dynamic_restore(start.dynamic);
+                if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), start.sums) {
+                    (hub.state.a_run, hub.state.g_run) = (a, g);
+                }
+                true
+            }
+            (Err(e), None) => return Err(e),
+        };
         let draw_on = self.segment_draw(now);
         // Ruling R74, a landing's own rule: held powered, the chips settle a
         // PSU in CV past its limit, which no current-limited supply holds
@@ -352,7 +378,7 @@ impl PartitionedSolver {
         // partition draw linearised at powered: `rails::cc_entry_rail`). So
         // they starve themselves, their supply read two reached widths
         // under that edge, the CC point's side of it.
-        let landing = landing_edge(&err).filter(|_| self.cv_past_limit(now));
+        let landing = landing_edge(&err).filter(|_| probe_failed || self.cv_past_limit(now));
         // Step 2: those reading unpowered there starve themselves; on a CC
         // rail capacitor's segment, so do they all when, powered, they turn
         // the segment down (ruling R44 (a): across instants the capacitor
@@ -556,6 +582,13 @@ impl PartitionedSolver {
         let verdicts: Vec<(bool, PowerHold)> = if RetrySeam::get() == RetrySeam::AsksOnly { held.iter().map(|&(_, _, hold, _)| (false, hold)).collect() } else { verdicts };
         if verdicts.iter().all(|&(free, _)| !free) {
             self.keep_held(now, checkpoint, &held, &verdicts);
+            // Probed together, one chip's overload fails the probe for all
+            // (REFV's probe T1b: an innocent 74LS00 driving 1 k, held beside
+            // 471 tpl 2's culprit at the same edge, stayed off for good):
+            // each is probed on its own as well.
+            if held.len() > 1 {
+                self.retry_each_on_rail(now, drivers, readers, &held)?;
+            }
             return Ok(());
         }
         let counts = self.hold_counts;
@@ -593,6 +626,41 @@ impl PartitionedSolver {
             }
             Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
         }
+    }
+
+    /// `retry_on_rail`'s probe, one held chip at a time, the rest held: one
+    /// that carries itself (its free verdict powered, the PSU not past its
+    /// limit in CV) is freed, as a joint retry frees it; any other puts the
+    /// solver back bit for bit.
+    fn retry_each_on_rail(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, held: &[(usize, usize, PowerHold, f64)]) -> Result<(), String> {
+        let err = rails::loop_unsettled();
+        for &(k, d, hold, _) in held {
+            let checkpoint = Checkpoint { published: self.snapshot(), dynamic: self.dynamic_snapshot(), sums: self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)) };
+            let counts = self.hold_counts;
+            let mut seed: Vec<usize> = self.set_power_hold(d, probe(true)).into_iter().map(|p| p.0 as usize).collect();
+            seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
+            let mut probe_readers = Vec::new();
+            let carried = self.rail_settle(now, drivers, &mut probe_readers, seed, &err).is_ok() && !self.cv_past_limit(now);
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            let free = carried && digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            if free {
+                let mut seed: Vec<usize> = self.write_power_hold(d, hold).into_iter().map(|p| p.0 as usize).collect();
+                self.release_episode(d, now)?;
+                self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
+                seed.extend(self.set_power_hold(d, PowerHold::FREE).into_iter().map(|p| p.0 as usize));
+                seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
+                seed.sort_unstable();
+                seed.dedup();
+                if let Ok(Passes::Settled(_)) = self.hold_passes(now, drivers, &mut probe_readers, seed) {
+                    readers.extend(probe_readers);
+                    readers.push(DeviceId(d as u32));
+                    continue;
+                }
+            }
+            self.hold_counts = counts;
+            self.keep_held(now, checkpoint, &[], &[]);
+        }
+        Ok(())
     }
 
     /// A retry that frees nothing: the solver back at `checkpoint`, bit for
@@ -650,7 +718,7 @@ impl PartitionedSolver {
     /// matched (the verifier's DC repro, a 74LS00 sinking 64 mA from a 45 mA
     /// PSU through outputs on the rail itself, left CV at 64 mA; on a clock,
     /// a CC rail of 2.25 V reported 45 mA with 55 mA fed in).
-    fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
+    pub(super) fn hold_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, seed: Vec<usize>) -> Result<Passes, String> {
         self.hub.as_mut().expect("a hub").dirty = true;
         self.rail_passes(now, drivers, readers, seed)
     }

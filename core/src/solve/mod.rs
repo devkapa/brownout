@@ -2696,6 +2696,9 @@ pub struct PartitionedSolver {
     /// stepped one's seed), which runs the regime rules even with no step
     /// committed since the last (Rails point 5: at load, the only solve).
     exact_solved: bool,
+    /// Set by R74's landing (`rail_loop`) for the `hold_on_rail` it calls,
+    /// which takes it.
+    landing_hold: bool,
 
     // ---- W1g: thermal, failures and warnings ([`settle`]) -----------------
     /// All slow state (README W1g point 1), journaled per instant.
@@ -3014,6 +3017,7 @@ impl PartitionedSolver {
             exact: None,
             source_edges: 0,
             exact_solved: false,
+            landing_hold: false,
             slow: crate::slow::SlowState::new(device_count),
             slow_model: settle::SlowModel::default(),
             slow_scratch: settle::SlowScratch::default(),

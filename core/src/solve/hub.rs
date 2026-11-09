@@ -1021,6 +1021,46 @@ impl PartitionedSolver {
         }
     }
 
+    /// Ruling R74's landing (`rail_loop`): as the rail sags from the setpoint
+    /// the chip with the highest power edge browns out first, so the edges
+    /// are walked down from the highest, each one's chips put off in turn,
+    /// until the draw at the setpoint falls within the limit: the CC point
+    /// lies at that edge, and only its chips are held (`hold_on_rail`); the
+    /// ones whose edges sit above it are powered again where the rail lands
+    /// (REFV's probe T1e: a 74LS00 drawing nothing with a 4.5 V floor above
+    /// 471 tpl 2's culprit at 4.275 V; held first and kept, default mode
+    /// declined at load). The walk is a trial, put back bit for bit.
+    fn r74_landing(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<(f64, Vec<usize>)>, String> {
+        let Some(first) = self.cv_past_limit_landing(now) else { return Ok(None) };
+        let checkpoint = (self.snapshot(), self.dynamic_snapshot(), self.hub.as_ref().map(|h| (h.state.a_run, h.state.g_run)), self.hold_counts);
+        let mut landing = first;
+        let mut readers = Vec::new();
+        for _ in 0..self.ics.len() {
+            let mut seed = Vec::new();
+            for &d in &landing.1 {
+                seed.extend(self.write_power_hold(d, hold::probe(false)).into_iter().map(|p| p.0 as usize));
+            }
+            seed.sort_unstable();
+            seed.dedup();
+            match self.hold_passes(now, drivers, &mut readers, seed) {
+                Ok(hold::Passes::Settled(_)) => {}
+                _ => break,
+            }
+            match self.cv_past_limit_landing(now) {
+                Some(next) => landing = next,
+                None => break,
+            }
+        }
+        let ((published, dynamic), sums, counts) = ((checkpoint.0, checkpoint.1), checkpoint.2, checkpoint.3);
+        self.restore(published);
+        self.dynamic_restore(dynamic);
+        if let (Some(hub), Some((a, g))) = (self.hub.as_mut(), sums) {
+            (hub.state.a_run, hub.state.g_run) = (a, g);
+        }
+        self.hold_counts = counts;
+        Ok(Some(landing))
+    }
+
     /// Ruling R74's trigger (`rail_loop`): a PSU with no rail capacitor
     /// settled in CV past its limit in its own direction, and under its
     /// setpoint a free rail IC's power edge; the highest such edge and the
@@ -1575,7 +1615,8 @@ impl PartitionedSolver {
         // curve (the hub partitions re-solved under trial rails, as exact
         // mode's search does) is a later item.
         if let hold::Passes::Settled(_) = passes {
-            if let Some((edge, ics)) = self.cv_past_limit_landing(now) {
+            if let Some((edge, ics)) = self.r74_landing(now, drivers)? {
+                self.landing_hold = true;
                 return self.hold_on_rail(now, drivers, readers, &ics, format!("{} at {edge}", rails::EDGE_LANDING));
             }
         }
@@ -2832,6 +2873,25 @@ impl PartitionedSolver {
                     self.exact_resolve(p, now, drivers, readers)?;
                 }
             }
+            // A landing holds every chip at its edge; where several were held
+            // at this instant, each that carries itself with the rest held
+            // is freed at once (REFV's probe T1b: an innocent 74LS00 beside
+            // 471 tpl 2's culprit; a static partition frees and lands them
+            // all together at each of its retries, so a later retry never
+            // sees it held from before).
+            if let (&HubKind::Psu { v, i_limit }, true) = (&self.exact.as_ref().unwrap().kind, self.holds_active > 1) {
+                let fresh: Vec<(usize, digital::power::PowerHold, f64)> = self
+                    .ics
+                    .iter()
+                    .filter_map(|(d, ic)| {
+                        let hold = self.power_hold(*d);
+                        (hold.kind == digital::power::HoldKind::Off && hold.release.is_some_and(|r| r.since == now)).then(|| (*d, hold, hold::supply(ic, &self.voltages)))
+                    })
+                    .collect();
+                if fresh.len() > 1 {
+                    self.exact_retry_each(p, now, drivers, readers, &fresh, v, i_limit)?;
+                }
+            }
             let e = self.exact.as_mut().unwrap();
             e.held = 0.0;
             let draw = -self.exact_hub_current();
@@ -3197,9 +3257,10 @@ impl PartitionedSolver {
     /// phase stayed off through every later high one.
     fn exact_retry_stepped(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
         use digital::power::{HoldKind, PowerHold};
-        if self.holds_active == 0 || self.partition_kinds[p] == PartitionKind::Static {
+        if self.holds_active == 0 {
             return Ok(());
         }
+        let stat = self.partition_kinds[p] == PartitionKind::Static;
         let (node, v, i_limit) = match self.exact.as_ref() {
             Some(e) => match e.kind {
                 HubKind::Psu { v, i_limit } => (e.node, v, i_limit),
@@ -3222,10 +3283,15 @@ impl PartitionedSolver {
                 (was.kind == HoldKind::Off && later && due).then_some((*d, was, s_off))
             })
             .collect();
-        if held.is_empty() {
+        // A static partition retries its chips itself, all together, in its
+        // own solve; here only one at a time, where several are held.
+        if held.is_empty() || stat && held.len() < 2 {
             return Ok(());
         }
         self.take_retry();
+        if stat {
+            return self.exact_retry_each(p, now, drivers, readers, &held, v, i_limit);
+        }
         let checkpoint = (self.snapshot(), self.dynamic_snapshot());
         let counts = self.hold_counts;
         let mut moved = Vec::new();
@@ -3260,6 +3326,9 @@ impl PartitionedSolver {
         }
         self.hold_counts = counts;
         self.exact_restore(checkpoint)?;
+        if verdicts.iter().all(|v| !v.0) && held.len() > 1 {
+            return self.exact_retry_each(p, now, drivers, readers, &held, v, i_limit);
+        }
         let mut parts = Vec::new();
         let mut freed = false;
         for (&(d, was, _), &(free, after)) in held.iter().zip(&verdicts) {
@@ -3275,6 +3344,38 @@ impl PartitionedSolver {
         }
         if freed {
             self.exact_resolve_set(p, parts, now, drivers, readers)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::exact_retry_stepped`]'s probe, one held chip at a time, the
+    /// rest held (REFV's probe T1b: probed together, one chip's overload
+    /// failed the probe for an innocent one held at the same edge, off for
+    /// good): one free and powered after the regime rules is free again,
+    /// any other probe is put back bit for bit.
+    #[allow(clippy::too_many_arguments)]
+    fn exact_retry_each(&mut self, p: usize, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, held: &[(usize, digital::power::PowerHold, f64)], v: f64, i_limit: f64) -> Result<(), String> {
+        for &one in held {
+            let checkpoint = (self.snapshot(), self.dynamic_snapshot());
+            let counts = self.hold_counts;
+            let mut moved = Vec::new();
+            let probed = self.exact_retry_probe(p, now, drivers, &mut moved, &[one], v, i_limit);
+            let d = one.0;
+            let ic = &self.ics[self.ic_position[d] as usize].1;
+            let free = matches!(probed, Ok(Some(_))) && self.power_hold(d).is_free() && digital::power::powered(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            if free {
+                if one.1.release.is_some_and(|r| r.since == now) {
+                    let episode = self.episode(d).withdrawn();
+                    self.set_episode(d, episode)?;
+                } else {
+                    self.release_episode(d, now)?;
+                }
+                readers.extend(moved);
+                readers.push(DeviceId(d as u32));
+            } else {
+                self.hold_counts = counts;
+                self.exact_restore(checkpoint)?;
+            }
         }
         Ok(())
     }
