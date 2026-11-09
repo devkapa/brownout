@@ -197,6 +197,47 @@ pub extern "C" fn bo_engine_advance(h: u32, t_end: f64) -> i32 {
     }
 }
 
+// Ruling R86: the host's clock, in milliseconds (`performance.now()`), the
+// one import of the module. Read only by `bo_engine_advance_for`, once at its
+// start and end and once every `kernel::YIELD_CHECK_EVERY` instants; a
+// reading that is not finite turns the budget off.
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn bo_host_now_ms() -> f64;
+}
+
+/// Advances toward `t_end` for at most about `budget_ms` of the host's wall
+/// time (ruling R86): `0` once at `t_end`, `1` when it yielded short of it
+/// between two instants (call again with the same `t_end` to go on), or a
+/// negative error code, `-7` among them when the host step runs past its
+/// event cap or the run stays under the progress floor. A `budget_ms` that
+/// is not positive, or a build without the clock import, never yields; the
+/// event cap holds either way.
+#[no_mangle]
+pub extern "C" fn bo_engine_advance_for(h: u32, t_end: f64, budget_ms: f64) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine)) => {
+            #[cfg(target_arch = "wasm32")]
+            let mut clock = || unsafe { bo_host_now_ms() };
+            #[cfg(target_arch = "wasm32")]
+            let budget = Some(crate::kernel::Budget { clock: &mut clock, budget_ms, check_every: crate::kernel::YIELD_CHECK_EVERY });
+            #[cfg(not(target_arch = "wasm32"))]
+            let budget = {
+                let _ = budget_ms;
+                None
+            };
+            match engine.advance_for(t_end, budget) {
+                Ok(true) => 0,
+                Ok(false) => 1,
+                Err(err) => fail(&err),
+            }
+        }
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bo_engine_time(h: u32) -> f64 {
     with_engine(h, f64::NAN, |e| e.time())
@@ -959,6 +1000,20 @@ mod tests {
         assert_eq!(set_params(h, &[0.0, 0.0, 1.0]), -8);
         let after = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
         assert_eq!(after, before.as_slice());
+    }
+
+    #[test]
+    fn advance_for_without_the_clock_import_reaches_t_end_like_advance() {
+        // Ruling R86, addition (a): a native build has no clock import, so
+        // the budget is off and `bo_engine_advance_for` is
+        // `bo_engine_advance` (0 at `t_end`, never 1), its event cap the
+        // kernel's; an unusable handle is -5.
+        let _guard = lock();
+        assert_eq!(bo_engine_advance_for(999_999, 1.0, 16.0), -5);
+        let h = loaded(&[], 2.0, &[source_record(0.0, 1.0, 0.0, 5.0), resistor_record(1.0, 1.0, 0.0, 50.0)]);
+        assert_eq!(bo_engine_advance_for(h, 0.5, 1e-9), 0);
+        assert_eq!(bo_engine_time(h), 0.5);
+        assert_eq!(bo_engine_advance_for(h, 0.25, 16.0), -6, "backwards");
     }
 
     #[test]

@@ -62,6 +62,14 @@ describe("initCore — accepted sources (against the real built artifact)", () =
     expect(coreCall((exports) => exports.bo_abi_version())).toBe(CORE_ABI_VERSION);
   });
 
+  it("the module's one import is the host clock, which every load supplies (ruling R86)", async () => {
+    const module = await getWasmApi().compile(readWasmBytes());
+    expect(getWasmApi().Module.imports(module)).toEqual([{ module: "env", name: "bo_host_now_ms", kind: "function" }]);
+    expect(getWasmApi().Module.exports(module).map((e: { name: string }) => e.name)).toContain("bo_engine_advance_for");
+    await initCore(module);
+    expect(coreReady()).toBe(true);
+  });
+
   it("accepts raw bytes (ArrayBuffer)", async () => {
     const bytes = readWasmBytes();
     const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -108,10 +116,10 @@ describe("initCore — accepted sources (against the real built artifact)", () =
 });
 
 describe("the built module itself", () => {
-  it("has zero imports (core/README.md, C ABI v2)", () => {
+  it("imports only the host clock (core/README.md, C ABI v2; ruling R86)", () => {
     const WA = getWasmApi();
     const module = new WA.Module(readWasmBytes());
-    expect(WA.Module.imports(module)).toEqual([]);
+    expect(WA.Module.imports(module)).toEqual([{ module: "env", name: "bo_host_now_ms", kind: "function" }]);
   });
 
   it("exports memory and every C ABI v2 (W1a+W1b+W1d+W1f) function", () => {

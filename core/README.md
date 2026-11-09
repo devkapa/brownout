@@ -799,8 +799,11 @@ W1g adds (W1g point 12):
 
 ## C ABI, version 2
 
-All exports are `extern "C"` with `#[no_mangle]`. The module has **zero
-imports** and exports its `memory`, the functions below, and nothing else
+All exports are `extern "C"` with `#[no_mangle]`. The module has **one
+import**, `env.bo_host_now_ms: () -> f64`, the host's clock in milliseconds
+(`performance.now()`), which only `bo_engine_advance_for` reads (ruling R86);
+the TS loader supplies it at every load, and a host without a clock supplies
+one that reads NaN, which turns the wall budget off. It exports its `memory`, the functions below, and nothing else
 except the two inert linker globals `__heap_base` and `__data_end`, which
 rustc exports from every wasm32-unknown-unknown cdylib.
 `scripts/build-core.mjs` fails the build on any other import or export, so an
@@ -813,6 +816,7 @@ export lands in its list in the same change that adds it.
 | `bo_engine_create` / `bo_engine_destroy` | `() -> u32` / `(h)` | Handles; `0` is never valid; never reused. | v1 |
 | `bo_engine_load` | `(h, ptr: *const f64, len_f64: u32) -> i32` | Load a program and settle it at `START_TIME` (kernel semantics, point 6). | v1 |
 | `bo_engine_advance` | `(h, t_end: f64) -> i32` | Process every event with `t <= t_end`, then set time to `t_end`. | v1 |
+| `bo_engine_advance_for` | `(h, t_end: f64, budget_ms: f64) -> i32` | `bo_engine_advance` under a wall budget (ruling R86, "A yielding advance" below): `0` at `t_end`, `1` when it yielded short of it. | v2, R86 |
 | `bo_engine_time` | `(h) -> f64` | Current simulation time. | v1 |
 | `bo_engine_node_count` / `bo_engine_node_voltages` | `(h) -> u32` / `(h) -> *const f64` | `N` volts, node 0 = 0. | v1 |
 | `bo_engine_device_count` / `bo_engine_device_currents` | `(h) -> u32` / `(h) -> *const f64` | One current per device record, in record order. | v1 |
@@ -995,6 +999,29 @@ non-convergence, as classic's `lastConverged = false`: it keeps the last
 good readouts and reports how far time actually got. It is not a load
 error. The stat counters are the exception: they keep the failed attempt's
 counts, as classic keeps its failed diagnostics after restoring state.
+
+**A yielding advance** (ruling R86). `bo_engine_advance_for(h, t_end,
+budget_ms)` runs as `bo_engine_advance` does, reading the host clock at its
+start, at its end and once every 64 completed instants (`YIELD_CHECK_EVERY`).
+Once a read finds `budget_ms` gone and at least one instant has run in the
+call, it returns `1` between two instants: the state, readouts and
+`bo_engine_time` are the last completed instant's, short of `t_end`, with no
+horizon clamp. A later advance (either call) to the same `t_end` goes on with
+the same host step, whose span the hold guard reads (R54 (a)) and whose
+events the cap counts, so a run split by yields is bit for bit the same run
+as one without (`a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit`).
+A host edit ends the host step. Two checks decline with `-7`, the
+livelock's code, keeping the last completed instant:
+- every advance: a host step that has taken `HOST_STEP_EVENT_CAP` (20M)
+  events without reaching `t_end` (the busiest legitimate advance of the
+  cold fuzz takes 956k); asking again declines again;
+- a budgeted one with a clock: less than `PROGRESS_FLOOR` (0.01) simulated
+  seconds per wall second over `PROGRESS_WINDOW_MS` (30 s) of wall time spent
+  inside budgeted advances (time between calls does not count). The slow
+  legitimate boards bottom out at 0.003-0.03 s/s for 1-2 s of start-up;
+  the freezes ran at 4e-4 to 9e-4 s/s for 50-200 s.
+A `budget_ms` that is not positive, or a clock that reads no finite time,
+never yields and leaves the progress floor off.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never

@@ -527,6 +527,20 @@ function isArrayBufferView(x: unknown): x is ArrayBufferView {
 }
 
 /** A typed array's (or Buffer's) live window turned into a fresh ArrayBuffer — slicing, not just reading `.buffer`, because a Node `Buffer` is a view into a SHARED, pooled backing buffer. */
+/**
+ * The module's one import (ruling R86): the host's clock in milliseconds,
+ * which `bo_engine_advance_for` reads at its start and end and once every
+ * 64 instants to keep within its wall budget. `performance.now()` where the
+ * host has it; a host without it reads NaN, which turns the budget off (the
+ * event cap still holds). An older module that does not import it ignores
+ * the extra entry.
+ */
+export function coreImports(): Record<string, unknown> {
+  const perf = (globalThis as { performance?: { now?: () => number } }).performance;
+  const now = typeof perf?.now === "function" ? () => perf.now!() : () => Number.NaN;
+  return { env: { bo_host_now_ms: now } };
+}
+
 function toArrayBuffer(view: ArrayBufferView): ArrayBuffer {
   const { buffer, byteOffset, byteLength } = view;
   if (byteOffset === 0 && byteLength === (buffer as ArrayBuffer).byteLength) return buffer as ArrayBuffer;
@@ -543,11 +557,11 @@ async function instantiateFromResponse(response: Response): Promise<WasmInstance
   const WA = getWasmApi();
   const contentType = response.headers?.get?.("content-type") ?? "";
   if (contentType.includes("application/wasm") && typeof WA.instantiateStreaming === "function") {
-    const { instance } = await WA.instantiateStreaming(response, {});
+    const { instance } = await WA.instantiateStreaming(response, coreImports());
     return instance;
   }
   const bytes = await response.arrayBuffer();
-  const { instance } = await WA.instantiate(bytes, {});
+  const { instance } = await WA.instantiate(bytes, coreImports());
   return instance;
 }
 
@@ -598,7 +612,7 @@ async function instantiateFromUrl(url: URL): Promise<WasmInstanceLike> {
     // into a browser bundle that will never execute this branch either.
     const { readFile } = await import(/* webpackIgnore: true */ /* @vite-ignore */ "node:fs/promises");
     const bytes = await readFile(url);
-    const { instance } = await getWasmApi().instantiate(toArrayBuffer(bytes), {});
+    const { instance } = await getWasmApi().instantiate(toArrayBuffer(bytes), coreImports());
     return instance;
   }
   return instantiateFromResponse(await fetch(url));
@@ -611,7 +625,7 @@ async function instantiateFromSource(source: CoreWasmSource): Promise<WasmInstan
     // its doc comment), so `instanceof` narrowing here can't usefully narrow
     // `source`'s declared union on its own — the runtime check just passed,
     // which is what actually matters.
-    return WA.instantiate(source as unknown as CompiledWasmModule, {});
+    return WA.instantiate(source as unknown as CompiledWasmModule, coreImports());
   }
   if (source instanceof URL) {
     return instantiateFromUrl(source);
@@ -620,7 +634,7 @@ async function instantiateFromSource(source: CoreWasmSource): Promise<WasmInstan
     return instantiateFromUrl(resolveWasmUrlString(source));
   }
   if (source instanceof ArrayBuffer) {
-    return (await WA.instantiate(source, {})).instance;
+    return (await WA.instantiate(source, coreImports())).instance;
   }
   // Explicit casts from here down, rather than leaning on control-flow
   // narrowing: `CoreWasmSource` includes `object` (`CompiledWasmModule`,
@@ -643,7 +657,7 @@ async function instantiateFromSource(source: CoreWasmSource): Promise<WasmInstan
     return instantiateFromResponse(source as Response);
   }
   if (isArrayBufferView(source)) {
-    return (await WA.instantiate(source as ArrayBufferView, {})).instance;
+    return (await WA.instantiate(source as ArrayBufferView, coreImports())).instance;
   }
   throw new CoreInitError(`initCore: unrecognised wasm source (${Object.prototype.toString.call(source)}).`);
 }

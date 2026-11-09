@@ -50,6 +50,7 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_destroy",
   "bo_engine_load",
   "bo_engine_advance",
+  "bo_engine_advance_for",
   "bo_engine_time",
   "bo_engine_node_count",
   "bo_engine_node_voltages",
@@ -221,8 +222,8 @@ function buildWasm() {
 }
 
 function validateWasm(bytes) {
-  // Zero imports and the exact contract export set (core/README.md, "C ABI,
-  // version 1": "The module has zero imports ... and exports its memory").
+  // The host clock as the only import (ruling R86) and the exact contract
+  // export set (core/README.md, "C ABI").
   let mod;
   try {
     mod = new WebAssembly.Module(bytes);
@@ -230,10 +231,13 @@ function validateWasm(bytes) {
     fail(`the built artifact is not a valid wasm module: ${err.message}`);
   }
 
+  // One import, the host clock that `bo_engine_advance_for` reads (ruling
+  // R86); nothing else.
   const imports = WebAssembly.Module.imports(mod);
-  if (imports.length > 0) {
-    const names = imports.map((i) => `${i.module}.${i.name}`).join(", ");
-    fail(`the module must have zero imports, but found: ${names}`);
+  const unexpected = imports.filter((i) => !(i.module === "env" && i.name === "bo_host_now_ms" && i.kind === "function"));
+  if (unexpected.length > 0) {
+    const names = unexpected.map((i) => `${i.module}.${i.name}`).join(", ");
+    fail(`the module's only import may be env.bo_host_now_ms, but found: ${names}`);
   }
 
   const exports = WebAssembly.Module.exports(mod);

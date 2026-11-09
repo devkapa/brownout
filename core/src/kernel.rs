@@ -74,6 +74,54 @@ pub const NO_PROGRESS_DT: f64 = 1e-9;
 /// inside a second.
 pub const NO_PROGRESS_MAX: u32 = 10_000;
 
+/// Ruling R86 (d): the events one host step (one `advance` target, across
+/// the yields of a budgeted advance) may take before it declines with `-7`,
+/// a deterministic backstop that holds with or without a host clock. The
+/// busiest legitimate advance of the cold fuzz (1-4200, every template)
+/// takes 956k events (866 tpl 0); the six boards that froze took 30M to 82M.
+pub const HOST_STEP_EVENT_CAP: u64 = 20_000_000;
+
+/// Ruling R86 (c): a budgeted run that makes less than this much simulated
+/// time per second of the host's wall time, over [`PROGRESS_WINDOW_MS`] of
+/// wall time spent inside budgeted advances, declines with `-7`. The slow
+/// legitimate boards of the cold fuzz bottom out at 0.003-0.03 s/s, for the
+/// 1-2 s of their start-up inrush; the freezes that remained ran at 4e-4 to
+/// 9e-4 s/s for 50-200 s (2707 tpl 0, 4199 tpl 5, 894 tpl 0).
+pub const PROGRESS_FLOOR: f64 = 1e-2;
+pub const PROGRESS_WINDOW_MS: f64 = 30_000.0;
+
+/// How many instants a budgeted advance runs between reads of the host
+/// clock (ruling R86, addition (c): one import call a check, not one an
+/// event).
+pub const YIELD_CHECK_EVERY: u32 = 64;
+
+/// What a budgeted advance ([`Kernel::advance_budgeted`]) reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Advanced {
+    /// `t_end`, its horizon clamp included.
+    Reached,
+    /// The budget ran out between two instants: the state is the last
+    /// completed instant's, short of `t_end`, and an advance to the same
+    /// `t_end` goes on with the same host step.
+    Yielded,
+}
+
+/// A wall budget for one call (ruling R86): the host's clock in
+/// milliseconds, read every `check_every` instants, and how long the call
+/// may run. A clock reading that is not finite turns the budget off.
+pub struct Budget<'a> {
+    pub clock: &'a mut dyn FnMut() -> f64,
+    pub budget_ms: f64,
+    pub check_every: u32,
+}
+
+/// The host step in flight: its target and the event count it began at.
+#[derive(Debug, Clone, Copy)]
+struct HostStep {
+    t_end: f64,
+    events_at_start: u64,
+}
+
 /// The direction a published node voltage moved from `before` to `after`
 /// for the no-progress guard ([`NO_PROGRESS_MAX`]): 0 for a change of at
 /// most `RAIL_MOVE_EPS` (1e-12 V), which is no move, as it is none of the
@@ -122,6 +170,11 @@ pub enum KernelError {
     /// non-finite pivot, or a non-finite published value) — the kernel-level
     /// counterpart of `ERR_SOLVE_FAILED`. Maps to ABI `-4`.
     SolveFailed(String),
+    /// Ruling R86: the host step ran past [`HOST_STEP_EVENT_CAP`] events, or
+    /// a budgeted run made less than [`PROGRESS_FLOOR`] of simulated time per
+    /// wall second over [`PROGRESS_WINDOW_MS`]. Maps to ABI `-7`, the
+    /// livelock's code: the circuit chases itself without getting anywhere.
+    NoProgress { at: f64, message: String },
 }
 
 /// The outcome of a failed [`Kernel::seed_memory`] call: either the
@@ -622,6 +675,14 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// Whether the instant in progress applied a live waveform source edge:
     /// scheduled input, so progress whatever it turned back.
     instant_source: bool,
+    /// Ruling R86: the host step in flight ([`HOST_STEP_EVENT_CAP`]), kept
+    /// while a budgeted advance yields inside it; the event cap; the wall
+    /// time spent inside budgeted advances, and where the progress window
+    /// ([`PROGRESS_FLOOR`]) began, in that time and in simulated time.
+    host_step: Option<HostStep>,
+    pub(crate) event_cap: u64,
+    busy_ms: f64,
+    window: (f64, f64),
 }
 
 /// What [`Kernel::open_window`] captured for a rollback that the kernel does
@@ -666,6 +727,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             instant_other: false,
             instant_redrive: false,
             instant_source: false,
+            host_step: None,
+            event_cap: HOST_STEP_EVENT_CAP,
+            busy_ms: 0.0,
+            window: (0.0, 0.0),
         }
     }
 
@@ -1432,10 +1497,94 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// the state as of the previous instant's completion (nothing runs
     /// between one instant finishing and the next one's `self.time = t`).
     pub fn advance(&mut self, t_end: f64) -> Result<(), KernelError> {
-        if t_end > self.time {
-            self.solver.begin_host_step(self.time, t_end);
+        self.advance_budgeted(t_end, None).map(|_| ())
+    }
+
+    /// [`Self::advance`] under a wall budget (ruling R86): between two
+    /// instants, once the host's clock says the call has run `budget_ms`, it
+    /// returns [`Advanced::Yielded`] with the state of the last completed
+    /// instant, and an advance to the same `t_end` goes on with the same host
+    /// step (its span for the hold guard, its event count), so a run split
+    /// by yields is the same run, bit for bit, as one without them. It never
+    /// yields before an instant has run in the call. Without a budget, or
+    /// with a clock that reads no finite time, it is [`Self::advance`].
+    pub fn advance_budgeted(&mut self, t_end: f64, mut budget: Option<Budget>) -> Result<Advanced, KernelError> {
+        let resumed = self.time < t_end && self.host_step.is_some_and(|h| h.t_end.to_bits() == t_end.to_bits());
+        if !resumed {
+            if t_end > self.time {
+                self.solver.begin_host_step(self.time, t_end);
+            }
+            self.host_step = Some(HostStep { t_end, events_at_start: self.stats.events_processed });
         }
+        // (call start, last reading, instants since the last check)
+        let mut clock: Option<(f64, f64, u32)> = match budget.as_mut() {
+            Some(b) if b.budget_ms > 0.0 => {
+                let now = (b.clock)();
+                now.is_finite().then_some((now, now, 0))
+            }
+            _ => None,
+        };
+        let mut ran = false;
+        let result = self.advance_loop(t_end, &mut budget, &mut clock, &mut ran);
+        if let (Some(b), Some((_, last, _))) = (budget.as_mut(), clock) {
+            if !matches!(result, Ok(Advanced::Yielded)) {
+                let now = (b.clock)();
+                if now.is_finite() {
+                    self.busy_ms += (now - last).max(0.0);
+                }
+            }
+        }
+        if matches!(result, Ok(Advanced::Reached)) {
+            self.host_step = None;
+        }
+        result
+    }
+
+    fn advance_loop(&mut self, t_end: f64, budget: &mut Option<Budget>, clock: &mut Option<(f64, f64, u32)>, ran: &mut bool) -> Result<Advanced, KernelError> {
         loop {
+            // R86 (d): the host step's event cap, before the next instant
+            // runs, as every decline leaves the last completed instant.
+            if let Some(h) = self.host_step {
+                let taken = self.stats.events_processed - h.events_at_start;
+                if taken >= self.event_cap {
+                    return Err(KernelError::NoProgress {
+                        at: self.time,
+                        message: format!("the host step to t = {t_end} took {taken} events without reaching it (stopped at t = {})", self.time),
+                    });
+                }
+            }
+            // R86 (a)-(c): yield only here, between instants, and judge the
+            // progress window at the same reads.
+            if let (Some(b), Some((start, last, count))) = (budget.as_mut(), clock.as_mut()) {
+                *count += 1;
+                if *count >= b.check_every.max(1) {
+                    *count = 0;
+                    let now = (b.clock)();
+                    if now.is_finite() {
+                        self.busy_ms += (now - *last).max(0.0);
+                        *last = now;
+                        let span = self.busy_ms - self.window.0;
+                        if span >= PROGRESS_WINDOW_MS {
+                            let rate = (self.time - self.window.1) / (span / 1e3);
+                            if rate < PROGRESS_FLOOR {
+                                return Err(KernelError::NoProgress {
+                                    at: self.time,
+                                    message: format!(
+                                        "the run made {:.3e} s of progress in {:.0} s of wall time (t = {}), under the floor of {PROGRESS_FLOOR} s a second",
+                                        self.time - self.window.1,
+                                        span / 1e3,
+                                        self.time
+                                    ),
+                                });
+                            }
+                            self.window = (self.busy_ms, self.time);
+                        }
+                        if *ran && now - *start >= b.budget_ms {
+                            return Ok(Advanced::Yielded);
+                        }
+                    }
+                }
+            }
             // A superseded event at the head is dropped here, between
             // instants, as its handler would drop it inside one: it is no
             // instant, so it neither runs nor counts toward the no-progress
@@ -1502,6 +1651,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.stalled += 1;
             }
             self.last_instant = t;
+            *ran = true;
             // This instant reached a quiet fixed point and was NOT rolled
             // back: exactly "a completed instant" (W1c contract point 3), so
             // its digital-slot readout is published now, at ITS OWN `t`, not
@@ -1567,7 +1717,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 // way nothing more is needed here before publishing.
                 self.close_window(window);
                 self.publish_settled();
-                Ok(())
+                Ok(Advanced::Reached)
             }
             Err(e) => {
                 self.time = previous_time;
@@ -1649,6 +1799,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // this, once the guard declined, every later advance would decline
         // too, even after the edit that ends the livelock.
         self.stalled = 0;
+        // R86: and a new host step and a new progress window begin.
+        self.host_step = None;
+        self.window = (self.busy_ms, self.time);
         // The one event this call applies reached a quiet fixed point and
         // was not rolled back: a completed instant, same as any `advance`
         // delta.
@@ -3349,6 +3502,104 @@ mod tests {
             assert!(k.schedule_crossing(PartitionId(0), 0, 1e-3));
         }
         k
+    }
+
+    // ---- R86: the yielding wall budget -------------------------------------
+
+    /// A fake host clock: each call reads `step_ms` later than the last.
+    fn fake_clock(step_ms: f64) -> impl FnMut() -> f64 {
+        let mut t = 0.0;
+        move || {
+            t += step_ms;
+            t
+        }
+    }
+
+    /// A crawl of instants `step` apart, each moving both nodes on the same
+    /// way: progress, so the no-progress guard leaves it running.
+    fn progressing(step: f64) -> Kernel<Crawler, NoOpEvaluator> {
+        let monotone = |n: u64| [n as f64 * 1e-6, -(n as f64) * 1e-3];
+        let mut k = Kernel::new(Crawler { step, jump: step, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: Some(monotone), v: vec![0.0, 0.0], rail: false, slow: None }, NoOpEvaluator);
+        assert!(k.schedule_crossing(PartitionId(0), 0, step));
+        k
+    }
+
+    #[test]
+    fn a_budgeted_advance_yields_between_instants_and_resumes_its_host_step_exactly() {
+        // R86 (a): a 10 ms budget on a clock that reads 1 ms per check, one
+        // check an instant, yields after about ten instants, at an instant's
+        // boundary (the time is the last instant's, no horizon clamp), and
+        // the run, resumed to the same `t_end`, ends where the unsplit run
+        // does, instant for instant.
+        let t_end = 2e-6;
+        let mut plain = progressing(1e-9);
+        plain.advance(t_end).unwrap();
+        let mut k = progressing(1e-9);
+        let mut clock = fake_clock(1.0);
+        let mut yields = 0;
+        loop {
+            match k.advance_budgeted(t_end, Some(Budget { clock: &mut clock, budget_ms: 10.0, check_every: 1 })).unwrap() {
+                Advanced::Reached => break,
+                Advanced::Yielded => {
+                    yields += 1;
+                    assert!(k.time() < t_end && k.time() == k.last_instant, "yielded at {} off an instant {}", k.time(), k.last_instant);
+                }
+            }
+        }
+        assert!(yields >= 100, "{yields} yields");
+        assert_eq!(k.time().to_bits(), plain.time().to_bits());
+        assert_eq!((k.solver.done, k.stats().events_processed), (plain.solver.done, plain.stats().events_processed));
+        assert_eq!(k.solver.v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), plain.solver.v.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_host_step_past_its_event_cap_declines_with_minus_7() {
+        // R86 (d), with the budget off as without the clock import (R86
+        // addition (a)): re-anchor instants count neither way for the
+        // no-progress guard, so a crawl of them runs until the host step's
+        // event cap stops it. The cap is 20M events; 1,000 here.
+        assert_eq!(HOST_STEP_EVENT_CAP, 20_000_000);
+        let mut k = Kernel::new(Crawler { step: 5e-15, jump: 5e-15, jump_every: u64::MAX, fail_at: 0, calls: 0, done: 0, scheduled: Vec::new(), wave: None, v: vec![0.0], rail: false, slow: Some(true) }, NoOpEvaluator);
+        k.heap.push(1e-3, EventKind::Slow { device: DeviceId(0), token: crate::events::SLOW_ANCHOR });
+        k.event_cap = 1_000;
+        let before = k.time();
+        match k.advance(T_END).unwrap_err() {
+            KernelError::NoProgress { message, .. } => assert!(message.contains("1000 events"), "{message}"),
+            e => panic!("{e:?}"),
+        }
+        assert_eq!(k.solver.done, 1_000, "the cap stops the host step before the instant past it runs");
+        assert!(k.time() > before && k.time() < T_END);
+        // Asking again declines again: the count is the host step's.
+        assert!(matches!(k.advance(T_END), Err(KernelError::NoProgress { .. })));
+    }
+
+    #[test]
+    fn a_budgeted_run_under_the_progress_floor_for_thirty_seconds_declines_and_one_over_it_runs() {
+        // R86 (c): 1e-2 s simulated per wall second, over 30 s of the host's
+        // time inside budgeted advances. A crawl of 1 ns instants on a clock
+        // reading 1 ms per check makes 1e-6 s/s: after 30 s of reads it
+        // declines. One of 0.1 ms instants makes 0.1 s/s and runs to its end.
+        let mut k = progressing(1e-9);
+        let mut clock = fake_clock(1.0);
+        let err = loop {
+            match k.advance_budgeted(1.0, Some(Budget { clock: &mut clock, budget_ms: 16.0, check_every: 1 })) {
+                Ok(Advanced::Yielded) => {}
+                Ok(Advanced::Reached) => panic!("ran to 1 s"),
+                Err(e) => break e,
+            }
+        };
+        match err {
+            KernelError::NoProgress { message, .. } => assert!(message.contains("in 30 s"), "{message}"),
+            e => panic!("{e:?}"),
+        }
+        // 30 s of reads inside the calls; each 16 ms call reads the clock
+        // before its first instant too, so 16 reads to 15 instants.
+        assert!((k.busy_ms - 30_000.0).abs() <= 1.0, "declined after {} ms", k.busy_ms);
+        assert!((k.solver.done as f64 - 30_000.0 * 15.0 / 16.0).abs() <= 16.0, "declined after {} instants", k.solver.done);
+        let mut k = progressing(1e-4);
+        let mut clock = fake_clock(1.0);
+        while k.advance_budgeted(10.0, Some(Budget { clock: &mut clock, budget_ms: 16.0, check_every: 1 })).unwrap() == Advanced::Yielded {}
+        assert_eq!(k.time(), 10.0);
     }
 
     #[test]

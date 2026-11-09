@@ -192,6 +192,7 @@ fn kernel_error(e: KernelError) -> BoError {
     match e {
         KernelError::Livelock { at } => BoError::delta_livelock(format!("livelock at {at}")),
         KernelError::SolveFailed(m) => BoError::solve_failed(m),
+        KernelError::NoProgress { message, .. } => BoError::delta_livelock(message),
     }
 }
 
@@ -15429,4 +15430,79 @@ fn a_ptc_tripping_as_another_recovers_rebuilds_the_stress_probes() {
     s.refresh_stress_probes();
     assert!(ptc(s, pa), "A recovered: probed again");
     assert!(!ptc(s, pb), "B tripped: no probe");
+}
+
+/// One run of `p` through `stops`, the toggles applied as `sweep_run` does,
+/// with every advance under a budget (`Some(budget_ms)`, on a fake clock
+/// reading 1 ms a check, a check every instant) or plain (`None`): at each
+/// stop the voltages' and currents' bits, the time's, and stats 4, 10, 25
+/// and 26, then the failure, if any.
+fn traced_run(p: &Program, toggles: &[(f64, usize)], stops: &[f64], budget_ms: Option<f64>) -> (Vec<Vec<u64>>, Option<(i32, String, u64)>, u64) {
+    let mut e = Engine::load(p).unwrap();
+    let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
+    let (mut ev, mut trace, mut yields) = (0, Vec::new(), 0u64);
+    let mut now = 0.0;
+    let mut clock = move || {
+        now += 1.0;
+        now
+    };
+    for &stop in stops {
+        let result = match budget_ms {
+            None => e.advance(stop),
+            Some(ms) => loop {
+                match e.advance_for(stop, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: ms, check_every: 1 })) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) => yields += 1,
+                    Err(er) => break Err(er),
+                }
+            },
+        };
+        if let Err(er) = result {
+            return (trace, Some((er.code, er.message, e.time().to_bits())), yields);
+        }
+        let mut row: Vec<u64> = e.voltages().iter().chain(e.currents()).map(|v| v.to_bits()).collect();
+        row.push(e.time().to_bits());
+        row.extend([4, 10, 25, 26].map(|i| e.stat(i).to_bits()));
+        trace.push(row);
+        while ev < toggles.len() && toggles[ev].0 <= stop {
+            let d = toggles[ev].1;
+            state[d] = 1.0 - state[d];
+            e.set_params(&[(d as u32, 0, state[d])]).unwrap();
+            ev += 1;
+        }
+    }
+    (trace, None, yields)
+}
+
+#[test]
+fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
+    // Ruling R86 (a): a budgeted advance yields only between completed
+    // instants and resumes the same host step, so on boards that exercise
+    // the host step's span (757 tpl 0's hold guard, declining through it),
+    // a host edit's re-plan (2575 tpl 2), re-anchors (1838 tpl 1, 2548 tpl
+    // 5) and a CC capacitor's edge cuts (505 tpl 5), a run yielding every
+    // few instants publishes the same bits at every host stop, with the
+    // same stats, and fails the same way at the same time.
+    let p505 = { let mut p = program(5, cold_505_tpl5()); p.digital_slot_count = 32; p };
+    let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
+    let (p1838, t1838, s1838) = cold_1838_tpl1();
+    let (p2548, t2548, s2548) = cold_2548_tpl5();
+    let stops757 = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2];
+    let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>)> = vec![
+        ("757 tpl 0", cold_757_tpl0(), vec![], stops757.to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575.to_vec()),
+        ("1838 tpl 1", p1838, t1838, s1838),
+        ("2548 tpl 5", p2548, t2548, s2548),
+        ("505 tpl 5", p505, vec![], STOPS_505.to_vec()),
+    ];
+    for (name, p, toggles, stops) in &boards {
+        let (plain, plain_err, _) = traced_run(p, toggles, stops, None);
+        let (split, split_err, yields) = traced_run(p, toggles, stops, Some(5.0));
+        assert!(yields > 10, "{name}: {yields} yields");
+        assert_eq!(plain.len(), split.len(), "{name}: stops reached");
+        for (k, (a, b)) in plain.iter().zip(&split).enumerate() {
+            assert!(a == b, "{name}: stop {k} at {} differs", stops[k]);
+        }
+        assert_eq!(plain_err, split_err, "{name}: the failure");
+    }
 }

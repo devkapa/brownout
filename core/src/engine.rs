@@ -182,6 +182,7 @@ fn map_kernel_error(e: KernelError) -> BoError {
     match e {
         KernelError::Livelock { at } => BoError::delta_livelock(format!("delta-cycle livelock at t = {at}")),
         KernelError::SolveFailed(message) => BoError::solve_failed(message),
+        KernelError::NoProgress { message, .. } => BoError::delta_livelock(message),
     }
 }
 
@@ -489,6 +490,27 @@ impl Engine {
         self.apply_digital_writes();
         self.finish_readout();
         result.map_err(map_kernel_error)
+    }
+
+    /// `bo_engine_advance_for` (ruling R86): [`Self::advance`] under a wall
+    /// budget, `Ok(true)` once at `t_end` and `Ok(false)` when it yielded
+    /// short of it, between two instants, with the readouts of the last one
+    /// completed. Advancing to the same `t_end` again goes on with the same
+    /// host step, so a run split by yields is the same run as one without.
+    pub fn advance_for(&mut self, t_end: f64, budget: Option<crate::kernel::Budget>) -> Result<bool, BoError> {
+        if !t_end.is_finite() {
+            return Err(BoError::time_backwards("t_end must be finite".to_string()));
+        }
+        if t_end < self.kernel.time() - TIME_EPS {
+            return Err(BoError::time_backwards(format!(
+                "advance({t_end}) is before the current time {}",
+                self.kernel.time()
+            )));
+        }
+        let result = self.kernel.advance_budgeted(t_end, budget);
+        self.apply_digital_writes();
+        self.finish_readout();
+        result.map(|a| a == crate::kernel::Advanced::Reached).map_err(map_kernel_error)
     }
 
     /// `bo_engine_set_params` (owner decision 1): `(deviceIndex, paramIndex,
