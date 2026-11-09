@@ -13,6 +13,11 @@
 //! Only tables fixed at load, or ones only a host edit changes, go behind
 //! it. A table written on every instant would be copied at the first
 //! instant after each snapshot, which saves nothing.
+//!
+//! [`Scratch`] is the other half: a work buffer whose contents never outlive
+//! one use. It is empty between uses (`put` clears it, `take` asserts it in
+//! debug builds), so a snapshot copies nothing for it, and a restored engine
+//! starts each use exactly as the original did.
 
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -87,6 +92,39 @@ impl<T: Clone> DerefMut for Shared<T> {
 impl<T: Clone> DerefMut for Shared<[T]> {
     fn deref_mut(&mut self) -> &mut [T] {
         Rc::make_mut(&mut self.0)
+    }
+}
+
+/// A work buffer, empty between uses (see the module doc). The only access
+/// is [`Scratch::take`] at a use's start and [`Scratch::put`] at its end, so
+/// nothing reads it across two uses.
+#[derive(Debug)]
+pub struct Scratch<T>(Vec<T>);
+
+impl<T> Default for Scratch<T> {
+    fn default() -> Self {
+        Scratch(Vec::new())
+    }
+}
+
+impl<T> Scratch<T> {
+    /// The buffer for one use, empty, with the capacity the last use left.
+    pub fn take(&mut self) -> Vec<T> {
+        debug_assert!(self.0.is_empty(), "a scratch buffer was not cleared after its last use");
+        std::mem::take(&mut self.0)
+    }
+
+    /// Hands the buffer back, cleared, for the next use.
+    pub fn put(&mut self, mut buffer: Vec<T>) {
+        buffer.clear();
+        self.0 = buffer;
+    }
+}
+
+/// A copy is empty: what the buffer holds between uses.
+impl<T> Clone for Scratch<T> {
+    fn clone(&self) -> Self {
+        Scratch(Vec::new())
     }
 }
 

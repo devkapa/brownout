@@ -2605,7 +2605,7 @@ pub struct PartitionedSolver {
     partition_cap_devices: crate::shared::Shared<[usize]>,
     /// `leaving`/`extra` arrays the KCL walk reuses (zeroed at each use), so
     /// a compute allocates nothing.
-    kcl_scratch: (Vec<f64>, Vec<f64>),
+    kcl_scratch: (crate::shared::Scratch<f64>, crate::shared::Scratch<f64>),
     /// device index -> position in `ics` (`u32::MAX`: not an IC), so
     /// [`PartitionSolver::ic_powered`] does not walk the list per call.
     ic_position: crate::shared::Shared<[u32]>,
@@ -2663,12 +2663,12 @@ pub struct PartitionedSolver {
     /// after it.
     written: Vec<u32>,
     /// The classified dirty ids of one `resolve_dirty` call, reused.
-    static_ids: Vec<PartitionId>,
+    static_ids: crate::shared::Scratch<PartitionId>,
     /// The readers `resolve_dirty_into` and `handle_dynamic_event_into`
     /// collect before handing them on, reused across calls (F5q).
-    readers_buf: Vec<DeviceId>,
-    cf_ids: Vec<usize>,
-    st_ids: Vec<usize>,
+    readers_buf: crate::shared::Scratch<DeviceId>,
+    cf_ids: crate::shared::Scratch<usize>,
+    st_ids: crate::shared::Scratch<usize>,
     /// Per IC (position in `ics`): the ids of its drivers, ascending, and the
     /// driver-table length they were derived for; the table only grows at
     /// load and a driver's `device` never changes.
@@ -3064,7 +3064,7 @@ impl PartitionedSolver {
             derived_now: 0.0,
             lazy_static_ok: false,
             partition_cap_devices: partition_cap_devices.into(),
-            kcl_scratch: (vec![0.0; node_count], vec![0.0; node_count]),
+            kcl_scratch: (crate::shared::Scratch::default(), crate::shared::Scratch::default()),
             ic_position: ic_position.into(),
             kcl_position: kcl_position.into(),
             pre_commit_drivers: Rc::new(Vec::new()),
@@ -3076,10 +3076,10 @@ impl PartitionedSolver {
             cf_parts: cf_parts.into(),
             stepped_parts: stepped_parts.into(),
             written: Vec::new(),
-            static_ids: Vec::new(),
-            readers_buf: Vec::new(),
-            cf_ids: Vec::new(),
-            st_ids: Vec::new(),
+            static_ids: crate::shared::Scratch::default(),
+            readers_buf: crate::shared::Scratch::default(),
+            cf_ids: crate::shared::Scratch::default(),
+            st_ids: crate::shared::Scratch::default(),
             ic_driver_ids: (vec![Vec::new(); ic_count]).into(),
             ic_driver_ids_len: usize::MAX,
             watch_dependents: watch_dependents.into(),
@@ -3770,9 +3770,11 @@ impl PartitionedSolver {
     /// already-final values, exactly like every other term in `leaving`
     /// above them.
     fn recompute_source_currents(&self, currents: &mut [f64], scratch: &mut (Vec<f64>, Vec<f64>), now: f64, drivers: &[Driver]) {
+        // Scratch (W2a): empty between uses, so each starts zeroed here, as
+        // the `fill` it replaces did on a buffer kept at node-count length.
         let (leaving, extra) = scratch;
-        leaving.fill(0.0);
-        extra.fill(0.0);
+        leaving.resize(self.voltages.len(), 0.0);
+        extra.resize(self.voltages.len(), 0.0);
         for kd in &self.kcl_devices {
             for &(u, w, conductance) in &kd.contributions {
                 let i = conductance * (self.voltages[u] - self.voltages[w]);
@@ -3950,14 +3952,15 @@ impl PartitionedSolver {
         self.ensure_ic_driver_ids(&drivers);
         let mut currents = std::mem::take(&mut self.currents);
         let mut channels = std::mem::take(&mut self.channels);
-        let mut scratch = std::mem::take(&mut self.kcl_scratch);
+        let mut scratch = (self.kcl_scratch.0.take(), self.kcl_scratch.1.take());
         self.publish_fixed_pair_capacitors(&mut currents, now);
         self.recompute_source_currents(&mut currents, &mut scratch, now, &drivers);
         self.publish_ne555_currents(&mut currents, &drivers);
         self.publish_led_devices(&mut currents, &mut channels);
         self.currents = currents;
         self.channels = channels;
-        self.kcl_scratch = scratch;
+        self.kcl_scratch.0.put(scratch.0);
+        self.kcl_scratch.1.put(scratch.1);
     }
 
     /// The tail every publish point ends its readout with: the eager passes
@@ -4674,9 +4677,9 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn resolve_dirty_into(&mut self, dirty: &[PartitionId], now: f64, drivers: &[Driver], out: &mut Vec<DeviceId>) -> Result<(), String> {
-        let mut static_ids = std::mem::take(&mut self.static_ids);
-        let mut cf_ids = std::mem::take(&mut self.cf_ids);
-        let mut st_ids = std::mem::take(&mut self.st_ids);
+        let mut static_ids = self.static_ids.take();
+        let mut cf_ids = self.cf_ids.take();
+        let mut st_ids = self.st_ids.take();
         static_ids.clear();
         cf_ids.clear();
         st_ids.clear();
@@ -4692,18 +4695,18 @@ impl PartitionSolver for PartitionedSolver {
         // F5b: a commit does not end HG1's count (`end_gate_chase`): the
         // drivers that commit while a rail gate ping-pongs answer it (its own
         // outputs, a zero-delay reader), they do not drive the rail.
-        let mut readers = std::mem::take(&mut self.readers_buf);
+        let mut readers = self.readers_buf.take();
         readers.clear();
         self.rail_jump = true;
         let result = self.resolve_dirty_with(&static_ids, &mut cf_ids, &mut st_ids, now, drivers, &mut readers);
         self.rail_jump = false;
-        self.static_ids = static_ids;
-        self.cf_ids = cf_ids;
-        self.st_ids = st_ids;
+        self.static_ids.put(static_ids);
+        self.cf_ids.put(cf_ids);
+        self.st_ids.put(st_ids);
         if result.is_ok() {
             out.extend_from_slice(&readers);
         }
-        self.readers_buf = readers;
+        self.readers_buf.put(readers);
         self.on_error(result)
     }
 
@@ -5163,13 +5166,13 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn handle_dynamic_event_into(&mut self, partition: PartitionId, now: f64, is_crossing: bool, out: &mut Vec<DeviceId>) -> Result<(), String> {
-        let mut readers = std::mem::take(&mut self.readers_buf);
+        let mut readers = self.readers_buf.take();
         readers.clear();
         let result = self.handle_dynamic_event_with(partition, now, is_crossing, &mut readers);
         if result.is_ok() {
             out.extend_from_slice(&readers);
         }
-        self.readers_buf = readers;
+        self.readers_buf.put(readers);
         result
     }
 

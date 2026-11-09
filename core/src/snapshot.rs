@@ -177,6 +177,13 @@ impl<T: HeapBytes + ?Sized> HeapBytes for crate::shared::Shared<T> {
     }
 }
 
+/// Empty between uses, so a copy holds nothing.
+impl<T> HeapBytes for crate::shared::Scratch<T> {
+    fn heap_bytes(&self, _: &mut Walk) -> usize {
+        0
+    }
+}
+
 impl<T: Copy> HeapBytes for std::cell::Cell<T> {
     fn heap_bytes(&self, _: &mut Walk) -> usize {
         0

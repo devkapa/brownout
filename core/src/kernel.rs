@@ -702,12 +702,12 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// readers to evaluate (each kept sorted and duplicate-free, which is the
     /// order the `BTreeSet`s they replace iterated in), and one reader's
     /// requests.
-    dirty_buf: Vec<PartitionId>,
-    affected_buf: Vec<DeviceId>,
-    requests_buf: Vec<DriverRequest>,
+    dirty_buf: crate::shared::Scratch<PartitionId>,
+    affected_buf: crate::shared::Scratch<DeviceId>,
+    requests_buf: crate::shared::Scratch<DriverRequest>,
     /// The slot writes one `DeviceEvaluator::on_settled_into` call fills,
     /// reused across instants.
-    settled_buf: Vec<(usize, f64)>,
+    settled_buf: crate::shared::Scratch<(usize, f64)>,
     /// The no-progress guard ([`NO_PROGRESS_MAX`]): the time of the last
     /// completed instant `advance` popped off the heap, and how many
     /// completed instants of the present run (each within [`NO_PROGRESS_DT`]
@@ -865,10 +865,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             driver_journal: Vec::new(),
             driver_journaled: Vec::new(),
             fixed_reset: false,
-            dirty_buf: Vec::new(),
-            affected_buf: Vec::new(),
-            requests_buf: Vec::new(),
-            settled_buf: Vec::new(),
+            dirty_buf: crate::shared::Scratch::default(),
+            affected_buf: crate::shared::Scratch::default(),
+            requests_buf: crate::shared::Scratch::default(),
+            settled_buf: crate::shared::Scratch::default(),
             last_instant: f64::NEG_INFINITY,
             stalled: 0,
             run_before: Vec::new(),
@@ -1411,12 +1411,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// instant completed").
     fn publish_settled(&mut self) {
         let now = self.time;
-        let mut writes = std::mem::take(&mut self.settled_buf);
+        let mut writes = self.settled_buf.take();
         writes.clear();
         let holds = if self.holds_flag.as_ref().is_none_or(|f| f.get()) { self.solver.power_holds() } else { &[] };
         self.evaluator.on_settled_into(now, &self.drivers, &self.solver, holds, &mut writes);
         self.pending_digital_writes.extend(writes.iter().map(|&(slot, value)| (now, slot, value)));
-        self.settled_buf = writes;
+        self.settled_buf.put(writes);
     }
 
     /// Pushes every `Crossing`/`Step` a dynamic partition asked to be
@@ -1475,9 +1475,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // The scratch buffers are taken out of `self` for the whole cycle
         // (the loop below calls `&mut self` methods) and put back at the end;
         // an early `?` return just drops them and the next call regrows them.
-        let mut dirty = std::mem::take(&mut self.dirty_buf);
-        let mut affected = std::mem::take(&mut self.affected_buf);
-        let mut requests = std::mem::take(&mut self.requests_buf);
+        let mut dirty = self.dirty_buf.take();
+        let mut affected = self.affected_buf.take();
+        let mut requests = self.requests_buf.take();
         for _delta in 0..DELTA_CAP {
             depth += 1;
             if count_stats {
@@ -1599,9 +1599,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 break;
             }
         }
-        self.dirty_buf = dirty;
-        self.affected_buf = affected;
-        self.requests_buf = requests;
+        self.dirty_buf.put(dirty);
+        self.affected_buf.put(affected);
+        self.requests_buf.put(requests);
 
         if count_stats && depth > self.stats.max_delta_depth {
             self.stats.max_delta_depth = depth;

@@ -1080,6 +1080,11 @@ restored between calls only, so no instant is ever half done in one.
   snapshot before). `bo_engine_snapshot_bytes` walks the table: each
   snapshot's own heap, and each allocation the snapshots share once,
   whether the live engine shares it too or not.
+- **Scratch buffers copy empty.** Work buffers whose contents never outlive
+  one use (the kernel's delta lists, the solver's partition and reader
+  lists, the source-current fold's pair) are empty between uses, so a
+  snapshot holds none of them; each use takes an empty buffer (asserted in
+  debug builds) and hands it back cleared.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never

@@ -380,3 +380,38 @@ fn snapshots_share_the_tables_fixed_at_load_and_the_run_never_copies_them() {
 
 
 
+
+#[test]
+fn an_engine_restored_at_every_stop_with_its_scratch_emptied_runs_as_one_never_restored() {
+    // Scratch buffers (the kernel's delta lists, the solver's partition and
+    // reader lists, the KCL fold's pair) copy empty: a snapshot holds none of
+    // them. Restoring at every stop hands the engine empty buffers each time;
+    // each use starts from an empty buffer anyway (`Scratch::take` asserts
+    // it in debug builds), so the run must match an uninterrupted one bit
+    // for bit.
+    let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21)];
+    let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>)> = vec![
+        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575[..40].to_vec()),
+        ("fuse ring", ring_behind_a_fuse(), vec![], (1..=12).map(|k| k as f64 * 5e-3).collect()),
+        ("287 tpl 3", cold_287_tpl3(), vec![], vec![0.006272879077239732, 0.0104, 0.0105, 0.011, 0.014446754687130081, 0.02]),
+    ];
+    for (name, p, toggles, stops) in &boards {
+        let state = || Host { state: p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect(), next: 0 };
+        let mut plain = Engine::load(p).unwrap();
+        let expected = run(&mut plain, &mut state(), toggles, stops);
+        let mut e = Engine::load(p).unwrap();
+        let mut host = state();
+        let mut table = SnapshotTable::default();
+        let mut rows = Vec::new();
+        for k in 0..stops.len() {
+            let id = table.take(&e);
+            assert!(table.restore(&mut e, id), "{name}");
+            assert!(table.drop_snapshot(id));
+            rows.extend(run(&mut e, &mut host, toggles, &stops[k..=k]));
+        }
+        assert_eq!(rows.len(), expected.len(), "{name}: stops reached");
+        for (j, (a, b)) in expected.iter().zip(&rows).enumerate() {
+            assert!(a == b, "{name}: stop {j} at {} differs", stops[j]);
+        }
+    }
+}

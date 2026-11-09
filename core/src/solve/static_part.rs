@@ -588,7 +588,7 @@ pub struct StaticPartitionSolver {
     walk_skipped: bool,
     /// The readers of one resolve before they are sorted and deduplicated,
     /// reused across calls.
-    readers_scratch: Vec<usize>,
+    readers_scratch: crate::shared::Scratch<usize>,
     /// Test builds keep a whole copy of both arrays from when the window
     /// opened, and check on every window's end that undoing the log
     /// reproduces it: a slot written without being logged fails the test that
@@ -958,7 +958,7 @@ impl StaticPartitionSolver {
             inputs_bounded: false,
             hub_cache_rule: rails::BandRule::Curvature { fallback: rails::RAIL_RESOLVE_V },
             walk_skipped: false,
-            readers_scratch: Vec::new(),
+            readers_scratch: crate::shared::Scratch::default(),
             #[cfg(test)]
             w_saved: None,
             rail,
@@ -2941,7 +2941,7 @@ impl StaticPartitionSolver {
         self.full = false;
 
         // Ascending and duplicate-free, like the `BTreeSet` it replaces.
-        let mut readers = std::mem::take(&mut self.readers_scratch);
+        let mut readers = self.readers_scratch.take();
         readers.clear();
         for &node in changed[silent_len..].iter() {
             readers.extend_from_slice(&self.node_to_ic_readers[node]);
@@ -2949,7 +2949,7 @@ impl StaticPartitionSolver {
         readers.sort_unstable();
         readers.dedup();
         out.extend(readers.iter().map(|&d| DeviceId(d as u32)));
-        self.readers_scratch = readers;
+        self.readers_scratch.put(readers);
         Ok(())
     }
 
