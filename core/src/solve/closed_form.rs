@@ -938,7 +938,7 @@ impl ClosedFormSolver {
             tau_n,
             s_sum,
             w_sum,
-            modes: d.modes.iter().map(|m| (m.s.abs(), m.k, m.w.abs())).collect(),
+            modes: curved_modes(d.modes.iter().map(|m| (m.s.abs(), m.k, m.w.abs())), f, tau_n),
             we: held_we + d.cell_we.abs(),
             a0,
             a1,
@@ -2298,7 +2298,7 @@ pub(crate) struct CurvedBound {
     /// decayed kept the rates it was aimed with and a move growing with its
     /// age: cold 1838 tpl 1's rated rail resistors re-anchored every 2 ns to
     /// 67 ns on a CC rail settled at its operating point.
-    pub modes: Vec<(f64, f64, f64)>,
+    pub modes: Vec<CurvedMode>,
     pub we: f64,
     pub a0: f64,
     pub a1: f64,
@@ -2306,6 +2306,22 @@ pub(crate) struct CurvedBound {
     pub vm: f64,
     pub dvc: f64,
     pub f: f64,
+}
+
+/// One mode of a [`CurvedBound`], with what does not change over the
+/// deadline's search: `e^(-k τn)` and `J'(f, k, τn)`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CurvedMode {
+    pub s: f64,
+    pub k: f64,
+    pub w: f64,
+    pub e_n: f64,
+    pub jp_n: f64,
+}
+
+/// The modes `(|s|, k, |w|)` of a segment of rate `f`, `τn` into it.
+pub(crate) fn curved_modes(modes: impl Iterator<Item = (f64, f64, f64)>, f: f64, tau_n: f64) -> Vec<CurvedMode> {
+    modes.map(|(s, k, w)| CurvedMode { s, k, w, e_n: (-k * tau_n).exp(), jp_n: j_prime(f, k, tau_n) }).collect()
 }
 
 impl CurvedBound {
@@ -2319,16 +2335,21 @@ impl CurvedBound {
         // `J'(τn)`), plus what the forcing still adds, `e^(-k τn) min(δ,
         // 1/|f|)`.
         let added = if af > 0.0 { delta.min(1.0 / af) } else { delta };
-        let forcing: f64 = self.modes.iter().map(|&(_, k, w)| w * (j_prime(self.f, k, self.tau_n) + (-k * self.tau_n).exp() * added).min(j_rate)).sum();
-        let dvc_rate = forcing.min(self.w_sum * j_rate) + self.we * (t + af * t * t / 2.0);
         // `|vc|`: the forcing's part `∫ e^(f(τ-s)) F(s) ds`, `|F| <= Σ|w|
-        // φ_k(τ)`, is at most that times `min(τ, 1/|f|)` as well as `W τ²/2`.
-        let phi = |k: f64| rails::exp_integral(-k, t);
-        let forced = self.modes.iter().map(|&(_, k, w)| w * phi(k)).sum::<f64>() * j_rate;
-        let sens = self.a0 + self.a1 * (self.vm + forced.min(self.w_sum * t * t / 2.0) + self.we * t * t / 2.0);
-        // `|du|` since the segment began, and `|du'|` from `τn` on.
-        let moved = self.modes.iter().map(|&(s, k, _)| s * phi(k)).sum::<f64>().min(self.s_sum * t);
-        let rate = self.modes.iter().map(|&(s, k, _)| s * (-k * self.tau_n).exp()).sum::<f64>().min(self.s_sum);
+        // φ_k(τ)`, is at most that times `min(τ, 1/|f|)` as well as `W τ²/2`;
+        // `|du|` since the segment began is `Σ|s| φ_k(τ)` at most, and `|du'|`
+        // from `τn` on `Σ|s| e^(-k τn)`.
+        let (mut forcing, mut forced, mut moved, mut rate) = (0.0, 0.0, 0.0, 0.0);
+        for m in &self.modes {
+            let phi = rails::exp_integral(-m.k, t);
+            forcing += m.w * (m.jp_n + m.e_n * added).min(j_rate);
+            forced += m.w * phi;
+            moved += m.s * phi;
+            rate += m.s * m.e_n;
+        }
+        let dvc_rate = forcing.min(self.w_sum * j_rate) + self.we * (t + af * t * t / 2.0);
+        let sens = self.a0 + self.a1 * (self.vm + (forced * j_rate).min(self.w_sum * t * t / 2.0) + self.we * t * t / 2.0);
+        let (moved, rate) = (moved.min(self.s_sum * t), rate.min(self.s_sum));
         let l_bound = self.a1 * (af * self.dvc + dvc_rate) * moved + sens * rate + self.adx * dvc_rate;
         l_bound * delta
     }
@@ -2359,6 +2380,11 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
     let mut lo = 0.0;
     for _ in 0..80 {
         let mid = 0.5 * (lo + hi);
+        // Adjacent doubles: nothing is left to split, and every further
+        // pass would land on `lo` or `hi` again.
+        if mid <= lo || mid >= hi {
+            break;
+        }
         if bound(mid) <= tol {
             lo = mid;
         } else {

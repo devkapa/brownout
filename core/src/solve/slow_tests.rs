@@ -686,7 +686,7 @@ fn the_re_anchor_deadlines_are_the_bounds_own_roots() {
     // R21's deadline is the largest δ inside the bound; each case's root is
     // solved here by hand. A linear segment: `|a| S δ + |dx| W min(δ²/2,
     // δ/|f|)`.
-    use super::closed_form::{largest_within, linear_anchor_bound, linear_anchor_deadline, CurvedBound};
+    use super::closed_form::{curved_modes, largest_within, linear_anchor_bound, linear_anchor_deadline, CurvedBound};
     let tol = 1e-4;
     // Inside 2/|f| = 0.02 s: (W/2) δ² + a S δ = tol.
     let (a, s, w) = (0.5, 10.0, 20.0);
@@ -703,14 +703,14 @@ fn the_re_anchor_deadlines_are_the_bounds_own_roots() {
     // A curved segment, flat (`a1 = we = 0`) and far into its segment
     // (`τn |f| >> 1`, so `|J'| <= 1/|f|`), its modes ramps (`k = 0`, so
     // nothing decays): `(a0 S + |dx| W/|f|) δ`.
-    let b = CurvedBound { tau_n: 1.0, s_sum: 3.0, w_sum: 40.0, modes: vec![(3.0, 0.0, 40.0)], we: 0.0, a0: 0.25, a1: 0.0, adx: 2.0, vm: 4.0, dvc: 1.0, f: -1e3 };
+    let b = CurvedBound { tau_n: 1.0, s_sum: 3.0, w_sum: 40.0, modes: curved_modes([(3.0, 0.0, 40.0)].into_iter(), -1e3, 1.0), we: 0.0, a0: 0.25, a1: 0.0, adx: 2.0, vm: 4.0, dvc: 1.0, f: -1e3 };
     let got = largest_within(|d| b.at(d), tol);
     let want = tol / (0.25 * 3.0 + 2.0 * 40.0 / 1e3);
     close(got, want, 1e-9 * want, "curved, flat");
     // A curved segment whose rail mode has decayed: `|du'| <= S e^(-k τn)`
     // from the anchor on, here 10 V/s at k = 1e3 /s, 10 ms in: 4.540e-4 V/s,
     // so `δ = tol / (a0 S e^(-10))` = 0.2203 s, where `S` alone gave 10 us.
-    let b = CurvedBound { tau_n: 0.01, s_sum: 10.0, w_sum: 0.0, modes: vec![(10.0, 1e3, 0.0)], we: 0.0, a0: 1.0, a1: 0.0, adx: 0.0, vm: 0.0, dvc: 0.0, f: -1e6 };
+    let b = CurvedBound { tau_n: 0.01, s_sum: 10.0, w_sum: 0.0, modes: curved_modes([(10.0, 1e3, 0.0)].into_iter(), -1e6, 0.01), we: 0.0, a0: 1.0, a1: 0.0, adx: 0.0, vm: 0.0, dvc: 0.0, f: -1e6 };
     let got = largest_within(|d| b.at(d), tol);
     let want = tol / (10.0 * (-10.0f64).exp());
     close(got, want, 1e-9 * want, "curved, decayed");
