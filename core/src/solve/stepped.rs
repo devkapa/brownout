@@ -1072,6 +1072,10 @@ struct Partition {
     prev_t: f64,
     prev_x: Vec<f64>,
     has_prev: bool,
+    /// The nodes outside it its stepped devices read (and a CC rail), as
+    /// its last committed step ended: the next step's start state (ruling
+    /// R80 (a)).
+    end_reads: Vec<(usize, f64)>,
     /// Whether this partition holds a free IC supply node (W1c contract
     /// point 3) — a build-time topology fact (`SteppedSolver::build`
     /// computes it once, from `collect_ics`/`local_index`), not part of any
@@ -1209,6 +1213,7 @@ impl Partition {
             supply_deps: Vec::new(),
             prev_t: t0,
             prev_x: Vec::new(),
+            end_reads: Vec::new(),
             has_prev: false,
             holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
             journaled: false,
@@ -1274,6 +1279,7 @@ struct PartitionSnapshot {
     prev_t: f64,
     prev_x: Vec<f64>,
     has_prev: bool,
+    end_reads: Vec<(usize, f64)>,
     sens: Option<Rc<StepSens>>,
     pend_lu: Option<Rc<LuFactorization>>,
     pend_u: f64,
@@ -1309,6 +1315,7 @@ impl PartitionSnapshot {
         self.prev_t = part.prev_t;
         self.prev_x.clone_from(&part.prev_x);
         self.has_prev = part.has_prev;
+        self.end_reads.clone_from(&part.end_reads);
         self.sens.clone_from(&part.sens);
         self.pend_lu.clone_from(&part.pend_lu);
         self.pend_u = part.pend_u;
@@ -1808,20 +1815,21 @@ impl SteppedSolver {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
     }
 
-    /// Partition `p`'s state at the start `t0` of a step from `x0` (ruling
-    /// R80 (a)): its own nodes there, and the nodes its stepped devices read
-    /// outside it as the commit finds them, a running ramp where it was at
-    /// `t0`. A CC rail is read as published: where the step before left it,
-    /// or where a rail solve at `t0` put it (an entry or a landing lands it
-    /// at its own level: cold 507 tpl 4 at 0.0200 V, the step before ending
-    /// at 0.01997 V). The trial's `u0` is the rail it was planned from, a
-    /// step behind (cold 535 tpl 2: 3.622 V where the last step had carried
-    /// the rail to 3.632 V, which read the LED at 1180/s for 1603/s).
-    fn start_state(&self, p: usize, x0: &[f64], t0: f64, voltages: &[f64]) -> Vec<(usize, f64)> {
+    /// Partition `p`'s state at the start of a step from `x0` (ruling R80
+    /// (a)): its own nodes there, and its outside reads as the step before
+    /// it ended (`Partition::end_reads`, which a re-seed at the start would
+    /// have replaced with the seed's own start: that step keeps its end
+    /// rate). Read as published when the step commits, a CC rail other
+    /// partitions' solves had moved since the step began set 0.26 V across a
+    /// 0.98 ohm fuse against the node the step began from (cold 474 tpl 5:
+    /// 0.27 A where by hand it never carries 4.2 mA; tripped at 0.138 s); the
+    /// trial's own `u0` is the rail it was planned from, a step behind (cold
+    /// 535 tpl 2: 3.622 V where the last step had carried the rail to 3.632
+    /// V).
+    fn start_state(&self, p: usize, x0: &[f64]) -> Vec<(usize, f64)> {
         let part = &self.partitions[&p];
         let mut start: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(x0.iter().copied()).collect();
-        let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), t0);
-        start.extend(self.trail_reads.get(p).into_iter().flatten().map(|&n| (n, bnd.get(n))));
+        start.extend(part.end_reads.iter().copied());
         start
     }
 
@@ -1838,7 +1846,7 @@ impl SteppedSolver {
         let mut nodes: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(part.pend_x.iter().copied()).collect();
         let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.pend_t);
         nodes.extend(self.trail_reads.get(p).into_iter().flatten().map(|&n| (n, bnd.get(n))));
-        let start = part.has_prev.then(|| self.start_state(p, &part.x, part.t, voltages));
+        let start = part.has_prev.then(|| self.start_state(p, &part.x));
         Some(Committed { p, t0: part.t, t1: part.pend_t, nodes, rail, start })
     }
 
@@ -2011,8 +2019,13 @@ impl SteppedSolver {
             // ended, and blew on 34 mA).
             let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.t);
             nodes.extend(self.trail_reads[p].iter().map(|&n| (n, bnd.get(n))));
-            let start = (!reseeded).then(|| self.start_state(p, &part.prev_x, part.prev_t, voltages));
-            self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail, start });
+            let start = (!reseeded).then(|| self.start_state(p, &part.prev_x));
+            let (t0, t1, own) = (part.prev_t, part.t, part.shape.nodes.len().min(nodes.len()));
+            // What the next step starts from outside the partition: this
+            // step's end, its CC rail over the boundary's read of it.
+            let end_reads: Vec<(usize, f64)> = nodes[own..].iter().copied().chain(rail).collect();
+            self.partitions.get_mut(&p).unwrap().end_reads = end_reads;
+            self.trail.push(Committed { p, t0, t1, nodes, rail, start });
         }
         #[cfg(test)]
         self.commit_log.push((p, self.partitions[&p].t));
@@ -2494,6 +2507,7 @@ impl SteppedSolver {
                 part.prev_t = saved.prev_t;
                 std::mem::swap(&mut part.prev_x, &mut saved.prev_x);
                 part.has_prev = saved.has_prev;
+                std::mem::swap(&mut part.end_reads, &mut saved.end_reads);
                 saved.restore_w1f(part);
             }
             self.spare.push(saved);
@@ -2532,6 +2546,7 @@ impl SteppedSolver {
                             prev_t: part.prev_t,
                             prev_x: part.prev_x.clone(),
                             has_prev: part.has_prev,
+                            end_reads: part.end_reads.clone(),
                             sens: part.sens.clone(),
                             pend_lu: part.pend_lu.clone(),
                             pend_u: part.pend_u,
@@ -2579,6 +2594,7 @@ impl SteppedSolver {
                 part.prev_t = s.prev_t;
                 part.prev_x = s.prev_x;
                 part.has_prev = s.has_prev;
+                part.end_reads = s.end_reads;
                 part.sens = s.sens;
                 part.pend_lu = s.pend_lu;
                 part.pend_u = s.pend_u;

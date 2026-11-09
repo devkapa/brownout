@@ -14999,3 +14999,48 @@ fn a_stepped_resistors_stress_is_the_mean_of_its_steps_start_and_end_states() {
         }
     }
 }
+
+/// tpl=5 hub=2 e=2.338 psu ilim=0.097 C1-0=8.2e-6 C1-2=1.8e-5 C1-4=7.2e-3 C1-3=2.1e-6 C1-0=1.5e-7 F1-2=0.08/0.98 SW4-0(0)+R0-0=184 C0-1=1.2e-7
+fn cold_474_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![2.3375291345409845, 0.09678055859145739], vec![]),
+        fz(1, 1, &[2, 0], vec![7180.2199110408665], vec![]),
+        fz(1, 2, &[3, 0], vec![345814.27213022014], vec![]),
+        fz(1, 3, &[4, 0], vec![19525.064293459738], vec![]),
+        fz(3, 4, &[1, 0], vec![8.155629243426333e-6, 0.0, 0.0], vec![]),
+        fz(3, 5, &[1, 2], vec![1.836345948900337e-5, 0.0, 0.0], vec![]),
+        fz(1, 6, &[2, 4], vec![607.8206046545533], vec![]),
+        fz(3, 7, &[1, 4], vec![0.007205932911217215, 0.0, 0.0], vec![]),
+        fz(3, 8, &[1, 3], vec![2.144561582044065e-6, 0.0, 0.0], vec![]),
+        fz(3, 9, &[1, 0], vec![1.5440391025338377e-7, 0.0, 0.0], vec![]),
+        fz(10, 10, &[1, 2], vec![0.08054189918308306, 0.9788101989363357], vec![]),
+        fz(4, 11, &[4, 0], vec![0.0], vec![]),
+        fz(1, 12, &[0, 0], vec![183.51265257714326], vec![]),
+        fz(3, 13, &[0, 1], vec![1.229388233457951e-7, 0.0, 0.0], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.00035864224151590314, 183.51265257714326], vec![]),
+    ];
+    let mut p = program(5, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_stepped_steps_start_state_reads_its_outside_nodes_where_the_step_before_ended() {
+    // Ruling R80 (a), cold 474 tpl 5: a 0.98 ohm fuse rated 80.5 mA from a
+    // {2.34 V, 96.8 mA} PSU's rail to node 2, which feeds 7.2 kohm to ground
+    // and 608 ohm into the 7.2 mF that hangs from the rail; 18 uF across the
+    // fuse. By hand the fuse never carries more than 2.34 V over the two
+    // paths' 560 ohm, 4.2 mA, 5 % of its rating: its rate is 0 throughout,
+    // and the fine reference never stresses it. A step's start state read
+    // the rail as published when the step committed, where other
+    // partitions' rail solves had moved it since the step began: 0.26 V
+    // across the fuse against node 2 as the step began, 0.27 A, and the
+    // fuse tripped at 0.138 s. The start state is the step before's end.
+    let stops: &[f64] = &[0.00627287950500977, 0.007757064900799632, 0.007881150628536771, 0.00816013172635659, 0.009035029419257412, 0.020888221258013227, 0.04482961454967979, 0.04550677873296601, 0.05217013656613313, 0.07120611375942745, 0.11266777803099516, 0.11885725268952782, 0.16072453444507465, 0.17863163009750702, 0.1794031621633488, 0.18253635560309564, 0.1830587183835147, 0.1906137107148383, 0.2];
+    let mut e = Engine::load(&cold_474_tpl5()).unwrap_or_else(|er| panic!("load: {}", er.message));
+    for &t in stops {
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} {}", er.code, er.message));
+    }
+    let rec: Vec<(f64, f64)> = e.records(0).unwrap().chunks(7).map(|c| (c[0], c[3])).collect();
+    assert!(!rec.iter().any(|r| r.0 == 10.0), "the fuse tripped: {rec:?}");
+}

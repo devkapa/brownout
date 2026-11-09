@@ -4402,9 +4402,13 @@ Constants:
        414 tpl 0: 7.77 per fall for 9.6 by hand). The first step after a
        re-seed has no start state of its own and keeps its end drive. The
        start state is the partition's own nodes at the step's start and its
-       outside reads as the commit finds them, a running ramp at the start: a
-       CC rail is read as published, where the step before left it or a
-       rail solve at the start put it (the trial's `u0` is a step behind).
+       outside reads (a CC rail among them) as the step before ended
+       (`Partition::end_reads`): read as published at the commit, a rail
+       other partitions had moved since set 0.26 V across a 0.98 ohm fuse
+       (cold 474 tpl 5 tripped a fuse that by hand never carries 4.2 mA:
+       `a_stepped_steps_start_state_reads_its_outside_nodes_where_the_step_before_ended`),
+       and the trial's own `u0` is the rail it was planned from, a step
+       behind.
        Over the step only: an idle visit (R38
        (a)) writes nothing and leaves `t0` behind, so up to the start of
        the step the visit closes each integrator on the drive it had; and
