@@ -231,6 +231,19 @@ export interface CoreExports {
   bo_engine_records(h: number, channel: number): number;
   /** The buffer from the last {@link CoreExports.bo_engine_records} collect, valid until the next call on this engine. */
   bo_engine_records_ptr(h: number): number;
+  /**
+   * W2a (core/README.md, "Snapshots"): copy the whole engine into the
+   * handle's snapshot table and return the snapshot's id, or `0` for an
+   * unusable handle. Optional, as a module built before W2a has none of the
+   * four; `CoreEngine.saveState` refuses on such a module.
+   */
+  bo_engine_snapshot?(h: number): number;
+  /** Put snapshot `id` back: `0`; `-8` for an id this handle does not hold (dropped, another handle's, or taken before the last load); `-5` for an unusable handle. */
+  bo_engine_restore?(h: number, id: number): number;
+  /** Free snapshot `id`: `0`; `-8` for an id this handle does not hold; `-5` for an unusable handle. */
+  bo_engine_snapshot_drop?(h: number, id: number): number;
+  /** The handle's snapshot table in bytes, each shared memory image counted once; `NaN` for an unusable handle. */
+  bo_engine_snapshot_bytes?(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */

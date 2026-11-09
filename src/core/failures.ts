@@ -333,6 +333,14 @@ export class WarningLedger {
     return Object.fromEntries([...this.warnings].map(([key, warning]) => [key, { ...warning }]));
   }
 
+  /** A deep copy, for `CoreEngine.saveState` (W2a): the warnings and the announce queue as they stand. */
+  copy(): WarningLedger {
+    const out = new WarningLedger();
+    for (const [key, warning] of this.warnings) out.warnings.set(key, { ...warning });
+    out.unannounced = [...this.unannounced];
+    return out;
+  }
+
   /** `takeNewWarnings()`: the queued warnings in latch order, then an empty queue. */
   takeNew(): SimWarning[] {
     const out: SimWarning[] = [];

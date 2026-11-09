@@ -212,6 +212,8 @@ export class CoreEngine implements EngineReadout {
   private _warnings = new WarningLedger();
   /** Component ids `setParams` has already reported as unknown, so a host retrying the same stale id every frame logs it once (ruling R41). Per engine, kept across loads. */
   private _reportedUnknownParamIds = new Set<string>();
+  /** Bumped at every load() call, so a snapshot knows whether the program it was taken on is still the one loaded (W2a). */
+  private _loadSerial = 0;
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -376,6 +378,10 @@ export class CoreEngine implements EngineReadout {
     // engine correctly reporting "no program loaded" instead of re-serving
     // the OLD circuit's readouts (see the class doc comment for why this
     // diverges from what the Rust side itself does on a failed reload).
+    // Every load, failed ones included, retires the snapshots taken before
+    // it: a successful one replaces Rust's table, and after a failed one no
+    // program is loaded here to restore onto.
+    this._loadSerial++;
     this._compiled = null;
     this._netV = {};
     this._elementI = {};
@@ -1240,6 +1246,82 @@ export class CoreEngine implements EngineReadout {
   }
 
   /** Idempotent. Frees the wasm-side handle — but only if it still belongs to the live instance (see the class doc comment on generations). */
+  /**
+   * A whole-engine snapshot (W2a; core/README.md, "Snapshots"): the Rust
+   * engine's state, copied into its handle's table, plus this facade's own
+   * clock, convergence flag and warnings ledger with its announce queue.
+   * {@link restoreState} puts it back any number of times; a later `load()`
+   * retires it. The stats are not part of it (telemetry, monotonic).
+   *
+   * The core sets no cap on snapshots, and WASM memory never shrinks, so
+   * free one with {@link CoreSnapshot.dispose} when done; one that is
+   * collected without a `dispose()` is freed by a `FinalizationRegistry`.
+   * {@link snapshotBytes} reports what the table holds.
+   */
+  saveState(): CoreSnapshot {
+    this._requireLoaded();
+    const id = coreCall((exports) => {
+      if (typeof exports.bo_engine_snapshot !== "function") {
+        throw new CoreLoadError("CoreEngine.saveState: this brownout core module has no snapshot exports (built before W2a).");
+      }
+      const out = exports.bo_engine_snapshot(this._handle);
+      if (out === 0) {
+        throw new CoreLoadError(`bo_engine_snapshot failed: ${readCoreErrorMessage(exports)}`);
+      }
+      return out >>> 0;
+    });
+    const snapshot = new CoreSnapshot();
+    snapshotState.set(snapshot, {
+      engine: this,
+      handle: this._handle,
+      generation: this._generation,
+      loadSerial: this._loadSerial,
+      id,
+      simTime: this._simTime,
+      lastConverged: this._lastConverged,
+      warnings: this._warnings.copy(),
+      disposed: false,
+    });
+    coreSnapshotFinalizer.register(snapshot, { handle: this._handle, generation: this._generation, id }, snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Puts `snapshot` back: every readout, the clock, the convergence flag and
+   * the warnings are the snapshot's again, and the run from here is bit for
+   * bit the one that followed {@link saveState}. Throws for a snapshot of
+   * another engine, a disposed one, or one taken before the last `load()`.
+   */
+  restoreState(snapshot: CoreSnapshot): void {
+    this._requireLoaded();
+    const state = snapshotState.get(snapshot);
+    if (!state || state.engine !== this) {
+      throw new Error("CoreEngine.restoreState: this snapshot was taken on another engine.");
+    }
+    if (state.disposed) {
+      throw new Error("CoreEngine.restoreState: this snapshot has been disposed.");
+    }
+    if (state.loadSerial !== this._loadSerial) {
+      throw new Error("CoreEngine.restoreState: this snapshot was taken before the last load(), which retired it.");
+    }
+    coreCall((exports) => {
+      const code = exports.bo_engine_restore!(this._handle, state.id);
+      if (code !== 0) {
+        throw new CoreLoadError(`bo_engine_restore failed (code ${code}): ${readCoreErrorMessage(exports)}`);
+      }
+    });
+    this._simTime = state.simTime;
+    this._lastConverged = state.lastConverged;
+    this._warnings = state.warnings.copy();
+    this._publishReadouts();
+  }
+
+  /** The bytes this engine's snapshots hold in the core (`bo_engine_snapshot_bytes`): each copy, plus each shared memory image once. */
+  snapshotBytes(): number {
+    this._checkGeneration();
+    return coreCall((exports) => (typeof exports.bo_engine_snapshot_bytes === "function" ? exports.bo_engine_snapshot_bytes(this._handle) : 0));
+  }
+
   dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
@@ -1276,3 +1358,66 @@ const coreEngineFinalizer = new FinalizationRegistry<FinalizationToken>((token) 
     // Never throw from a finalizer callback.
   }
 });
+
+/**
+ * An opaque whole-engine snapshot from {@link CoreEngine.saveState} (W2a).
+ * Hand it back to the same engine's {@link CoreEngine.restoreState}, and
+ * `dispose()` it when done: the core holds its copy until then.
+ */
+export class CoreSnapshot {
+  /** Whether {@link dispose} has run. */
+  get disposed(): boolean {
+    return snapshotState.get(this)?.disposed ?? true;
+  }
+
+  /**
+   * Frees the core's copy. A second call does nothing, and so does one after
+   * the engine was disposed or reloaded (which already freed it). Never
+   * throws.
+   */
+  dispose(): void {
+    const state = snapshotState.get(this);
+    if (!state || state.disposed) return;
+    state.disposed = true;
+    coreSnapshotFinalizer.unregister(this);
+    dropSnapshot(state);
+  }
+}
+
+interface SnapshotState {
+  readonly engine: CoreEngine;
+  readonly handle: number;
+  readonly generation: number;
+  readonly loadSerial: number;
+  readonly id: number;
+  readonly simTime: number;
+  readonly lastConverged: boolean;
+  readonly warnings: WarningLedger;
+  disposed: boolean;
+}
+
+/** Each snapshot's state, kept off the object so a snapshot is opaque to its holder. */
+const snapshotState = new WeakMap<CoreSnapshot, SnapshotState>();
+
+interface SnapshotToken {
+  handle: number;
+  generation: number;
+  id: number;
+}
+
+/**
+ * Drops the core's copy, best effort: after a re-init the old instance (and
+ * its table) is gone, and after a load or the engine's dispose the id is
+ * already gone, which the core reports as `-8` or `-5` and this ignores.
+ */
+function dropSnapshot(token: SnapshotToken): void {
+  try {
+    if (coreGeneration() !== token.generation) return;
+    coreCall((exports) => exports.bo_engine_snapshot_drop?.(token.handle, token.id));
+  } catch {
+    // Never throw from dispose() or a finalizer callback.
+  }
+}
+
+/** Frees a snapshot collected without a `dispose()`: the core sets no cap, and WASM memory never shrinks. */
+const coreSnapshotFinalizer = new FinalizationRegistry<SnapshotToken>(dropSnapshot);

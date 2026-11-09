@@ -238,6 +238,38 @@ describe("CoreEngine: failures, PTCs, thermal state and warnings through the rea
     core.dispose();
   });
 
+  it("a restored snapshot brings back the warnings, their announce queue and the failures, and they latch and announce again (W2a)", () => {
+    const core = loaded(overloadedResistor());
+    const coilWarning = (since: number) => ({
+      componentId: "coil",
+      code: "missing_flyback",
+      since,
+      message: "coil stands in for a switched coil.",
+    });
+    core.advance(0.5);
+    const snapshot = core.saveState();
+    // Taken with the load's warning still unannounced.
+    core.advance(1.5);
+    expect(Object.keys(core.getFailures())).toEqual([RESISTOR_KEY]);
+    expect(core.takeNewWarnings()).toEqual([coilWarning(0)]);
+    core.resetFailures();
+    expect(core.takeNewWarnings()).toEqual([coilWarning(1.5)]);
+
+    core.restoreState(snapshot);
+    expect(core.simTime).toBe(0.5);
+    expect(core.getFailures()).toEqual({});
+    expect(core.getWarnings()).toEqual({ "missing_flyback\u0000coil\u0000": coilWarning(0) });
+    expect(core.takeNewWarnings()).toEqual([coilWarning(0)]);
+    core.advance(1.5);
+    const failure = core.getFailures()[RESISTOR_KEY]!;
+    expectLatchTime(failure.since, 1.0);
+    expect(core.takeLatchedFailures().map((f) => f.componentId)).toEqual(["r1"]);
+    core.resetFailures();
+    expect(core.takeNewWarnings()).toEqual([coilWarning(1.5)]);
+    snapshot.dispose();
+    core.dispose();
+  });
+
   it("getThermalState matches classic's object for the identified resistor at 4 s (probe F resHeat)", () => {
     const circuit = across(5, part("r1", "resistor", ["a", "b"], { resistance: 100 }, "resistor"));
     const classic = new SimEngine();

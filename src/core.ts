@@ -28,7 +28,7 @@ export { initCore, coreReady, coreStatus, CORE_ABI_VERSION } from "./core/wasm.j
 export type { CoreWasmSource } from "./core/wasm.js";
 
 export { CoreEngine } from "./core/engine.js";
-export type { CoreEngineStats, CoreParamChange } from "./core/engine.js";
+export type { CoreEngineStats, CoreParamChange, CoreSnapshot } from "./core/engine.js";
 
 export {
   CoreInitError,

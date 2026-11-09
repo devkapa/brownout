@@ -1203,6 +1203,16 @@ message builders live in `src/core/failures.ts`, which the facade calls):
   `EngineReadout`. `getPtcTripped`, `getThermalState`, `getPartTemperature`,
   `resetFailures` and `takeLatchedFailures` live on `CoreEngine` only (W1g
   Q5), for gate 1, as W1f's methods do; the worker path is W2.
+- **`saveState()` / `restoreState(s)`** (W2a, "Snapshots" under the C ABI):
+  `saveState()` takes `bo_engine_snapshot` plus the facade's own clock,
+  `lastConverged` and warnings ledger with its announce queue, and returns
+  an opaque `CoreSnapshot`; `restoreState(s)` puts all of it back and
+  republishes the readouts. It throws for a snapshot of another engine, a
+  disposed one, or one taken before the last `load()` (a failed load
+  included). `CoreSnapshot.dispose()` frees the core's copy (a second call
+  is a no-op); one collected without a `dispose()` is freed by a
+  `FinalizationRegistry`. `snapshotBytes()` reads
+  `bo_engine_snapshot_bytes`. The stats are not part of a snapshot.
 
 ## Kernel semantics: the static solve (W0)
 
