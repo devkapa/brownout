@@ -637,7 +637,7 @@ export interface SimFailure {
  * Stable engine warning codes. Additive: hosts key labels on these strings,
  * so a code is never renamed once published.
  */
-export type SimWarningCode = "transistor_overcurrent" | "missing_flyback";
+export type SimWarningCode = "transistor_overcurrent" | "missing_flyback" | "rail_ic_power_chatter";
 
 /**
  * A latched, session-only advisory: a condition the engine measured (or saw
@@ -1009,6 +1009,9 @@ function failureKeyComponentId(key: string): string | null {
 // disjoint, so the keys cannot collide), which gives warnings the identical
 // snapshot/rollback, load carry-forward (failureKeyComponentId) and reset
 // semantics without a second accumulator.
+/** The sources a rail_ic_power_chatter warning names as a chip's rail. */
+const POWER_CHATTER_SUPPLY_KINDS = new Set<string>(["bench_psu", "battery_pack", "voltage_source"]);
+
 function warningKey(code: SimWarningCode, componentId: string, pinId = ""): string {
   return `${code}\x00${componentId}\x00${pinId}`;
 }
@@ -1708,6 +1711,11 @@ export class SimEngine {
   // HOST_MIN_STEP_S, for every solve inside it (a 555's split sub-steps
   // included, whatever their own length).
   private _stepAtHostFloor = false;
+  // The supply-gated parts whose power reading alternated through a solve at
+  // the hosts' floor that the hold procedure could not settle, each with its
+  // power-on level (V): a step that ends unconverged latches
+  // rail_ic_power_chatter for them (_latchPowerChatter).
+  private _powerChatter: Map<string, number> | null = null;
   // While a step() runs: when it started, and each supply-gated part's power
   // reading at that moment (the first iterate of the step's first solve).
   // A 555's split re-solves the step from that moment, then from points
@@ -4338,9 +4346,12 @@ export class SimEngine {
     // h, not about the shorter sub-steps the 555 split solves within it.
     this._stepAtHostFloor = h <= HOST_MIN_STEP_S;
     this._stepStart = { time: this.simTime, power: null };
+    this._powerChatter = null;
     try {
       this._stepSolves(h);
+      if (!this.lastConverged && this._powerChatter !== null) this._latchPowerChatter(this._powerChatter);
     } finally {
+      this._powerChatter = null;
       this._stepAtHostFloor = false;
       this._stepStart = null;
     }
@@ -6373,6 +6384,34 @@ export class SimEngine {
     this._unannouncedWarnings.push(key);
   }
 
+  /**
+   * rail_ic_power_chatter: each part of `chatter` (id -> its power-on level)
+   * alternated at the hosts' floor with no state that holds. The warning
+   * names the part and its rail: the supply on its vcc net when there is
+   * one, else the net.
+   */
+  private _latchPowerChatter(chatter: ReadonlyMap<string, number>): void {
+    for (const [id, level] of chatter) {
+      const comp = this._componentById.get(id);
+      if (!comp) continue;
+      const { vccPin } = supplyPinsForComponent(comp);
+      const netId = vccPin ? this._netIdForPin(id, vccPin) : null;
+      const pins = netId ? this.nets.find((net) => net.id === netId)?.pins ?? [] : [];
+      const supply = pins.find(([cid]) => cid !== id && POWER_CHATTER_SUPPLY_KINDS.has(this._componentById.get(cid)?.kind ?? ""));
+      const rail = supply ? `${supply[0]}'s rail` : netId ? `net ${netId}` : "its supply";
+      const volts = Number(level.toPrecision(3));
+      this._latchWarning(warningKey("rail_ic_power_chatter", id), {
+        componentId: id,
+        code: "rail_ic_power_chatter",
+        since: this.simTime,
+        value: level,
+        message:
+          `${id} cannot power up on ${rail}: at its ${volts} V power-on level its own pins load the supply back below it, ` +
+          `and unpowered the supply rises past it again, so no state holds and the simulation cannot advance.`,
+      });
+    }
+  }
+
   private _pruneUnannouncedWarnings(): void {
     this._unannouncedWarnings = this._unannouncedWarnings.filter((key) => this.state.warnings.has(key));
   }
@@ -6702,6 +6741,18 @@ export class SimEngine {
       const starved = alternating.filter((comp) => !this._icPowerInfo(comp, onProbe.x).powered);
       if (starved.length === 0) {
         this._holdOffCounts.partsHold += 1;
+        // At the floor there is no shorter step to try: powered at an
+        // instant the part holds its supply, but over the shortest step its
+        // own draw takes the supply back under its power-on level, and
+        // unpowered the supply rises past it again. No state holds, and
+        // holding the part either way would be a state the circuit cannot
+        // be in, so the step fails as before and the engine says why.
+        if (this._stepAtHostFloor) {
+          this._powerChatter ??= new Map();
+          for (const comp of alternating) {
+            this._powerChatter.set(comp.id, 0.9 * (specsForComponent(comp)?.vcc_range?.min ?? 2.0));
+          }
+        }
         return null;
       }
       const offPower = new Map(probePower);
