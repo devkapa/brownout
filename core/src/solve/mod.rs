@@ -4089,7 +4089,9 @@ impl PartitionedSolver {
     /// [`Self::recompute_source_currents`] (every resolve, crossing, step and
     /// horizon clamp), from the committed OUT level and the published
     /// voltages, so it follows a moving supply or load. 0 while unpowered or
-    /// while OUT has never committed. A 555 is not in `kcl_devices` and no
+    /// while OUT has never committed; a sliding 555's at its duty, as its
+    /// OUT stamps (ruling R92: Filippov's average, cold 757 tpl 0 published
+    /// its 82.9 mA powered sink at x = 0.64). A 555 is not in `kcl_devices` and no
     /// other pass writes its `currents` slot, so this is its only writer.
     fn publish_ne555_currents(&self, currents: &mut [f64], drivers: &[Driver]) {
         for (pos, (device_index, ic)) in self.ics.iter().enumerate() {
@@ -4105,7 +4107,7 @@ impl PartitionedSolver {
                     self.voltages[ic.logic[digital::NE555_OUT].node],
                     self.voltages[ic.gnd.node],
                     self.voltages[ic.vcc.node],
-                ),
+                ) * power.weight,
                 _ => 0.0,
             };
         }

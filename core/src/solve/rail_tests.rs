@@ -14571,6 +14571,25 @@ fn a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end() {
     close(rig.v(1), 1.8, 1e-4 + 1e-3 * 1.8, "the rail at the 555's floor");
 }
 
+#[test]
+fn a_sliding_555_publishes_its_out_current_at_its_duty() {
+    // Ruling R92 (Filippov's average): a sliding chip's OUT stamps at its
+    // duty, so the current it publishes is the duty's share of the powered
+    // one, as KCL at node 2 counts it. Cold 757 tpl 0 at 0.25 s, sliding at
+    // its 1.8 V floor: OUT LOW with f = 0.1/vs to VCC, -(1 - f)/20 (V2 - 0)
+    // - f/20 (V2 - V1) powered (about -82.9 mA), times x (about 0.64).
+    let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
+    for t in [0.16419524959068535, 0.17745987266455407, 0.2, 0.25] {
+        rig.advance(t).unwrap();
+    }
+    let x = rig.s().power_hold(10).kind.weight();
+    assert!(x > 0.0 && x < 1.0, "sliding: {x}");
+    let (v1, v2) = (rig.v(1), rig.v(2));
+    let f = 0.1 / v1;
+    let powered = -((1.0 - f) / 20.0 * v2 + f / 20.0 * (v2 - v1));
+    close(rig.i(10), x * powered, 1e-12, &format!("OUT's current at duty {x} of the powered {powered} A"));
+}
+
 /// tpl=2 hub=2 e=5.284 psu ilim=0.046 V2=-6.77 R6-3=9832.2 C1-0=3.4e-4 C1-0=4.7e-3 R1-6=3.7 555 vcc1 gnd0 [7, 7, 3, 1, 7, 0] R6-7=4.2 R6-7=15.3
 fn cold_22_tpl2() -> Program {
     let devices = vec![
