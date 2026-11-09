@@ -1070,12 +1070,16 @@ restored between calls only, so no instant is ever half done in one.
   one dropped or one from another handle, reads `-8`. The core sets no count
   or byte cap: WASM memory never shrinks, so the host owns the lifetime (the
   facade drops a snapshot on `dispose()` or when its object is collected).
-- **Copy-on-write memories.** An EEPROM image is shared between the live
-  engine and its snapshots: taking one copies no memory, and the first write
-  to the image after it copies that image once. `bo_engine_snapshot_bytes`
-  is each snapshot's copy, measured as the bytes it allocated, plus each
-  distinct image the table holds, once. A 74ls189's 16 nibbles are copied
-  with its state.
+- **Copy-on-write tables.** The tables fixed at load (stamps, IC records,
+  node maps, the slow model and the slow tables' entries, each partition's
+  solution cache) and the EEPROM images are shared between the live engine
+  and its snapshots, and copied at the first write after a snapshot: a
+  latch, a host edit, a new cache entry or a law re-arm. So a snapshot
+  copies only the state the run changes; on the SAP-1, taken a frame apart,
+  about 125 KiB each (the table, shared tables included, was 610 KiB a
+  snapshot before). `bo_engine_snapshot_bytes` walks the table: each
+  snapshot's own heap, and each allocation the snapshots share once,
+  whether the live engine shares it too or not.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never

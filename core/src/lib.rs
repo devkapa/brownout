@@ -30,6 +30,7 @@ pub mod partition;
 pub mod program;
 pub mod rails;
 pub mod readout;
+pub mod shared;
 pub mod slow;
 pub mod snapshot;
 pub mod solve;

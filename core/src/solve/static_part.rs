@@ -426,32 +426,32 @@ fn fold_static_stamp(
 pub struct StaticPartitionSolver {
     /// Node ids per partition, in first-seen order (deterministic; contract
     /// point 3 of "W0 kernel semantics").
-    partitions: Vec<Vec<usize>>,
+    partitions: crate::shared::Shared<[Vec<usize>]>,
     /// node -> (partition index, local index), `None` for a fixed node.
-    local_index: Vec<Option<(usize, usize)>>,
+    local_index: crate::shared::Shared<[Option<(usize, usize)>]>,
     /// node -> fixed voltage, `None` for a free node. Node 0 is always
     /// `Some(0.0)`.
-    fixed: Vec<Option<f64>>,
+    fixed: crate::shared::Shared<[Option<f64>]>,
     /// Every source that fixed a node, in resolution order.
-    resolved: Vec<ResolvedSource>,
+    resolved: crate::shared::Shared<[ResolvedSource]>,
     /// Pristine per-partition conductance matrix: shunt + resistor stamps
     /// only, never a driver's or a switch's. Cloned fresh before every
     /// solve so a driver or switch that has since changed never leaves a
     /// stale stamp behind.
-    matrix_base: Vec<Vec<f64>>,
+    matrix_base: crate::shared::Shared<[Vec<f64>]>,
     /// Pristine per-partition right-hand side: resistor-to-fixed-neighbour
     /// stamps only.
-    rhs_base: Vec<Vec<f64>>,
+    rhs_base: crate::shared::Shared<[Vec<f64>]>,
     /// Every resistor (immutable after `build`), kept so `recompute_currents`
     /// can recompute its published current.
-    resistors: Vec<StaticStamp>,
+    resistors: crate::shared::Shared<[StaticStamp]>,
     /// Every switch-family device, in device order. `params` is mutated in
     /// place by `apply_params` — the only state in this whole struct a live
     /// `bo_engine_set_params` call ever changes.
-    switches: Vec<StaticStamp>,
+    switches: crate::shared::Shared<[StaticStamp]>,
     /// device index -> index into `switches`, for O(1) lookup during
     /// `validate_params`/`apply_params`/`param_value`.
-    switch_index_by_device: HashMap<usize, usize>,
+    switch_index_by_device: crate::shared::Shared<HashMap<usize, usize>>,
     voltages: Vec<f64>,
     currents: Vec<f64>,
     /// `NO_SOLUTION_CACHE` (option key 2): bypasses the cache below when
@@ -469,7 +469,7 @@ pub struct StaticPartitionSolver {
     /// never hit on a driver that alternates between two levels, which is
     /// what an LED on a clocked IC output does (W1e, LEDs point 7: "modes
     /// repeat every clock cycle"). Bounded by [`CACHE_ENTRIES_PER_PARTITION`].
-    caches: Vec<PartCache>,
+    caches: Vec<crate::shared::Shared<PartCache>>,
     /// Contract stat 7.
     cache_hits: f64,
     /// Every combinational IC whose driver/pull pins reach a `Static`
@@ -479,22 +479,22 @@ pub struct StaticPartitionSolver {
     /// filtered here, since `Self::stamp_ics_into`'s own per-driver/pull
     /// `in_partition` guard already skips anything that does not touch the
     /// partition being resolved.
-    ics: Vec<(usize, digital::IcRecord)>,
+    ics: crate::shared::Shared<[(usize, digital::IcRecord)]>,
     /// partition index -> whether it holds at least one free `vcc`/`gnd`
     /// node of some IC (W1c contract point 3): such a partition's R_out
     /// moves with its own solved state, so `Self::resolve_dirty` iterates it
     /// to a fixed point instead of solving it once and reading (or writing)
     /// the solution cache — see `Self::iterated_solve`.
-    holds_free_ic_supply: Vec<bool>,
+    holds_free_ic_supply: crate::shared::Shared<[bool]>,
     /// partition index -> every stamped LED junction touching it, resolved
     /// against it (W1e, LEDs point 4); empty for a partition this solver does
     /// not own and for one holding none. A non-empty entry makes the
     /// partition nonlinear: iterated and polished by `Self::iterated_solve`.
-    junctions: Vec<Vec<DynJunction>>,
+    junctions: crate::shared::Shared<[Vec<DynJunction>]>,
     /// Every stamped junction this solver owns the current of: those in a
     /// `Static` partition and those across two fixed nodes (which belong to
     /// none). Folded into `Self::recompute_currents`'s source KCL.
-    kcl_junctions: Vec<led::Junction>,
+    kcl_junctions: crate::shared::Shared<[led::Junction]>,
     /// Contract stat 11's static half: every iteration of every iterated
     /// partition, the polish and any failed attempt's included. Not rolled
     /// back, like every stat.
@@ -503,7 +503,7 @@ pub struct StaticPartitionSolver {
     /// every logic pin, W1c contract point 4's reader rule) — built once so
     /// `Self::resolve_dirty` can turn "this node's published bits changed"
     /// into "these readers must be queued" by a single lookup per node.
-    node_to_ic_readers: Vec<Vec<usize>>,
+    node_to_ic_readers: crate::shared::Shared<[Vec<usize>]>,
     /// The order-independent state `Self::resolve_dirty` keeps so it costs
     /// what CHANGED rather than what the circuit holds. None of it is part
     /// of a snapshot: it is either derived from the immutable topology, a
@@ -515,37 +515,37 @@ pub struct StaticPartitionSolver {
     /// time), so it is rebuilt only when the table's LENGTH differs from
     /// `driver_index_len`; a debug build re-derives and compares it on every
     /// call.
-    part_drivers: Vec<Vec<u32>>,
+    part_drivers: crate::shared::Shared<[Vec<u32>]>,
     /// IC index (into `ics`) -> ids of every driver of that IC (`device`
     /// equal to its device index), ascending; derived with `part_drivers`.
-    ic_drivers: Vec<Vec<u32>>,
+    ic_drivers: crate::shared::Shared<[Vec<u32>]>,
     driver_index_len: usize,
     /// partition index -> indices into `ics` of every IC with a supply or
     /// logic pin free in it, in `ics` order: the only ICs `stamp_ics_into`'s
     /// `touches` test can ever accept for that partition (a driver's or a
     /// pull's node is one of the IC's logic pins), so the stamp visits these
     /// instead of every IC in the program.
-    part_ics: Vec<Vec<u32>>,
+    part_ics: crate::shared::Shared<[Vec<u32>]>,
     /// device index -> index into `ics`, `u32::MAX` for a device that is no IC.
-    ic_of_device: Vec<u32>,
+    ic_of_device: crate::shared::Shared<[u32]>,
     /// partition index -> `(index into `ics`, logic-pin index)` of every
     /// would-be-pulled pin in it (an `OPEN` `FLOATING_INPUT`, non-`OPEN_HIGH`
     /// pin of a static IC record), in the key's fixed enumeration order.
-    part_pulls: Vec<Vec<(u32, u32)>>,
+    part_pulls: crate::shared::Shared<[Vec<(u32, u32)>]>,
     /// The packed cache key being built, reused across calls.
     key_scratch: Vec<u8>,
     /// Nodes whose published bits changed in the current `resolve_dirty`.
     changed_scratch: Vec<usize>,
     /// node -> ids of the stamps (resistors, then switches, as one list) with
     /// a pin on it, ascending, no repeats.
-    stamps_by_node: Vec<Vec<u32>>,
+    stamps_by_node: crate::shared::Shared<[Vec<u32>]>,
     /// Stamps whose params `apply_params` touched since the last resolve.
     param_dirty: Vec<u32>,
     /// Stamps to recompute in the current call, and which are already listed.
     work: Vec<u32>,
     stamp_listed: Vec<bool>,
     /// One per `resolved` source: the terms of its child node's KCL sum.
-    resolved_terms: Vec<Vec<Term>>,
+    resolved_terms: crate::shared::Shared<[Vec<Term>]>,
     /// One per `kcl_junctions` entry.
     junction_memo: Vec<JunctionMemo>,
     /// `extra` of the KCL walk, node-indexed and all `0.0` between calls (the
@@ -601,13 +601,13 @@ pub struct StaticPartitionSolver {
     rail: Option<usize>,
     /// partition index -> its resistor terms on live boundary nodes, `(local,
     /// g, node)`, added at each stamp instead of baked into `rhs_base`.
-    live_rhs: Vec<Vec<(usize, f64, usize)>>,
+    live_rhs: crate::shared::Shared<[Vec<(usize, f64, usize)>]>,
     /// partition index -> its hub state, `None` for a partition that does
     /// not read the rail.
     hubs: Vec<Option<Box<StaticHub>>>,
     /// partition index -> the waveform sources (by index in device order)
     /// whose level its cache key carries (Rails point 7, "Static cache").
-    part_waves: Vec<Vec<u32>>,
+    part_waves: crate::shared::Shared<[Vec<u32>]>,
     /// Each waveform source's level index, set by the owner at its edges.
     wave_levels: Vec<u8>,
     /// Every switch-family device's current params by device index, for the
@@ -640,11 +640,11 @@ pub struct StaticPartitionSolver {
     live: Vec<bool>,
     /// device index -> its index in `resistors` (a resistor, fuse or PTC this
     /// solver owns), `u32::MAX` for any other device.
-    stamp_of_device: Vec<u32>,
+    stamp_of_device: crate::shared::Shared<[u32]>,
     /// partition index -> every stamped junction placed in it at load, with
     /// its device and channel, in the order `junctions` holds them: the list
     /// `junctions` is rebuilt from after a latch, a re-arm or a reset.
-    junction_full: Vec<Vec<led::Junction>>,
+    junction_full: crate::shared::Shared<[Vec<led::Junction>]>,
     /// Per `kcl_junctions` entry: whether its device has not failed, and its
     /// law generation (the memo's key).
     kcl_active: Vec<bool>,
@@ -654,7 +654,7 @@ pub struct StaticPartitionSolver {
     /// The caches a slow change cleared in the open window, as they were: a
     /// rollback puts them back, so the run goes on as if the instant had
     /// never happened (an entry is part of a junction partition's result).
-    cache_journal: Vec<(u32, PartCache)>,
+    cache_journal: Vec<(u32, crate::shared::Shared<PartCache>)>,
     cache_journaled: Vec<bool>,
 
     // ---- F5: the power holds (W1c point 1a) -------------------------------
@@ -685,6 +685,15 @@ pub struct StaticPartitionSolver {
     /// Journaled with the copy.
     retry_armed: bool,
 }
+
+impl StaticPartitionSolver {
+    /// Each table this solver shares with snapshots, by address (W2a tests).
+    #[cfg(test)]
+    pub(crate) fn shared_tables(&self) -> Vec<(&'static str, usize)> {
+        vec![("partitions", crate::shared::Shared::addr(&self.partitions)), ("local_index", crate::shared::Shared::addr(&self.local_index)), ("fixed", crate::shared::Shared::addr(&self.fixed)), ("resolved", crate::shared::Shared::addr(&self.resolved)), ("matrix_base", crate::shared::Shared::addr(&self.matrix_base)), ("rhs_base", crate::shared::Shared::addr(&self.rhs_base)), ("resistors", crate::shared::Shared::addr(&self.resistors)), ("switches", crate::shared::Shared::addr(&self.switches)), ("switch_index_by_device", crate::shared::Shared::addr(&self.switch_index_by_device)), ("ics", crate::shared::Shared::addr(&self.ics)), ("holds_free_ic_supply", crate::shared::Shared::addr(&self.holds_free_ic_supply)), ("junctions", crate::shared::Shared::addr(&self.junctions)), ("kcl_junctions", crate::shared::Shared::addr(&self.kcl_junctions)), ("node_to_ic_readers", crate::shared::Shared::addr(&self.node_to_ic_readers)), ("part_drivers", crate::shared::Shared::addr(&self.part_drivers)), ("ic_drivers", crate::shared::Shared::addr(&self.ic_drivers)), ("part_ics", crate::shared::Shared::addr(&self.part_ics)), ("ic_of_device", crate::shared::Shared::addr(&self.ic_of_device)), ("part_pulls", crate::shared::Shared::addr(&self.part_pulls)), ("stamps_by_node", crate::shared::Shared::addr(&self.stamps_by_node)), ("resolved_terms", crate::shared::Shared::addr(&self.resolved_terms)), ("live_rhs", crate::shared::Shared::addr(&self.live_rhs)), ("part_waves", crate::shared::Shared::addr(&self.part_waves)), ("stamp_of_device", crate::shared::Shared::addr(&self.stamp_of_device)), ("junction_full", crate::shared::Shared::addr(&self.junction_full))]
+    }
+}
+
 
 impl StaticPartitionSolver {
     /// Builds the static topology (`partition::build`) and the pristine
@@ -905,40 +914,40 @@ impl StaticPartitionSolver {
         let switch_params: HashMap<usize, Vec<f64>> = switches.iter().map(|sw| (sw.device_index, sw.params.clone())).collect();
 
         Ok(StaticPartitionSolver {
-            partitions,
-            local_index,
-            fixed,
-            resolved,
-            matrix_base,
-            rhs_base,
-            resistors,
-            switches,
-            switch_index_by_device,
+            partitions: partitions.into(),
+            local_index: local_index.into(),
+            fixed: fixed.into(),
+            resolved: resolved.into(),
+            matrix_base: matrix_base.into(),
+            rhs_base: rhs_base.into(),
+            resistors: resistors.into(),
+            switches: switches.into(),
+            switch_index_by_device: switch_index_by_device.into(),
             voltages,
             currents: vec![0.0; program.devices.len()],
             no_solution_cache: program.options.no_solution_cache,
             epoch: 0,
-            caches: (0..partitions_len).map(|_| PartCache::default()).collect(),
+            caches: (0..partitions_len).map(|_| crate::shared::Shared::default()).collect(),
             cache_hits: 0.0,
-            ics,
-            holds_free_ic_supply,
-            junctions: partition_junctions,
-            kcl_junctions,
+            ics: ics.into(),
+            holds_free_ic_supply: holds_free_ic_supply.into(),
+            junctions: partition_junctions.into(),
+            kcl_junctions: kcl_junctions.into(),
             newton_iterations: 0,
-            node_to_ic_readers,
-            part_drivers: vec![Vec::new(); partitions_len],
-            ic_drivers: vec![Vec::new(); ics_len],
+            node_to_ic_readers: node_to_ic_readers.into(),
+            part_drivers: (vec![Vec::new(); partitions_len]).into(),
+            ic_drivers: (vec![Vec::new(); ics_len]).into(),
             driver_index_len: usize::MAX,
-            part_ics,
-            ic_of_device,
-            part_pulls,
+            part_ics: part_ics.into(),
+            ic_of_device: ic_of_device.into(),
+            part_pulls: part_pulls.into(),
             key_scratch: Vec::new(),
             changed_scratch: Vec::new(),
-            stamps_by_node,
+            stamps_by_node: stamps_by_node.into(),
             param_dirty: Vec::new(),
             work: Vec::with_capacity(stamp_count),
             stamp_listed: vec![false; stamp_count],
-            resolved_terms,
+            resolved_terms: resolved_terms.into(),
             junction_memo,
             walk_extra: vec![0.0; program.node_count],
             full: true,
@@ -953,10 +962,10 @@ impl StaticPartitionSolver {
             #[cfg(test)]
             w_saved: None,
             rail,
-            live_rhs,
+            live_rhs: live_rhs.into(),
             hubs,
-            part_waves,
-            wave_levels: vec![0; wave_count as usize],
+            part_waves: part_waves.into(),
+            wave_levels: (vec![0; wave_count as usize]).into(),
             switch_params,
             pending_bnd: Vec::new(),
             republish_hubs: false,
@@ -967,8 +976,8 @@ impl StaticPartitionSolver {
             hub_journaled: vec![false; partitions_len],
             exact: None,
             live,
-            stamp_of_device,
-            junction_full,
+            stamp_of_device: stamp_of_device.into(),
+            junction_full: junction_full.into(),
             kcl_active: vec![true; kcl_count],
             kcl_law_gen: vec![0; kcl_count],
             stamp_states: HashMap::new(),
@@ -1406,8 +1415,8 @@ impl StaticPartitionSolver {
     fn ensure_driver_index(&mut self, drivers: &[Driver]) {
         if self.driver_index_len != drivers.len() {
             let (part_drivers, ic_drivers) = self.derive_driver_index(drivers);
-            self.part_drivers = part_drivers;
-            self.ic_drivers = ic_drivers;
+            self.part_drivers = (part_drivers).into();
+            self.ic_drivers = (ic_drivers).into();
             self.driver_index_len = drivers.len();
         }
         #[cfg(debug_assertions)]
@@ -3812,4 +3821,207 @@ fn step_rounding(factors: &lu::LuFactorization, a: &[f64], b: &[f64], z: &[f64],
         }
     }
     noise.into_iter().fold(0.0, f64::max)
+}
+
+// ---- W2a: heap bytes (generated by the size walk generator; regenerate, do not edit) ----
+
+impl crate::snapshot::HeapBytes for Contact {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for StaticStamp {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.contacts, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Term {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Term::Contact { stamp, contact, plus } => crate::snapshot::HeapBytes::heap_bytes(stamp, w) + crate::snapshot::HeapBytes::heap_bytes(contact, w) + crate::snapshot::HeapBytes::heap_bytes(plus, w),
+            Term::Junction { junction, plus } => crate::snapshot::HeapBytes::heap_bytes(junction, w) + crate::snapshot::HeapBytes::heap_bytes(plus, w),
+            Term::Shunt => 0,
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for JunctionMemo {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_anode, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_cathode, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_gen, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.current, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.valid, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for StampState {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.failed, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.tripped, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_gen, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for CacheEntry {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hash, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.key, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for HubSolve {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.s, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_p, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.band, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for HubSolveSnapshot {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.0, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for StaticHub {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.shape, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_owner, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.touch_ics, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nonlinear, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.solve, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for PartCache {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.entries, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slots, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for StaticPartitionSolver {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.partitions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.local_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.resolved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.matrix_base, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rhs_base, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.resistors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.switches, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.switch_index_by_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.voltages, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.currents, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.no_solution_cache, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.epoch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.caches, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_hits, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ics, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_free_ic_supply, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_junctions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.newton_iterations, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_to_ic_readers, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_drivers, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_drivers, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.driver_index_len, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_ics, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_of_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_pulls, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.changed_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamps_by_node, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.param_dirty, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.work, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp_listed, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.resolved_terms, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junction_memo, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.walk_extra, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.full, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.window, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.source_walk_skippable, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.inputs_bounded, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub_cache_rule, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.walk_skipped, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.readers_scratch, w); }
+        #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_saved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.live_rhs, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hubs, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_waves, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_levels, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.switch_params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending_bnd, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.republish_hubs, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.silent_len, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub_updates, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.sensitivities, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub_journal, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub_journaled, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.live, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp_of_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junction_full, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_active, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_law_gen, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp_states, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_journal, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_journaled, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hold_requests, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.trial, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.edge_hold, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_holds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.retry_armed, w); }
+        n
+    }
 }

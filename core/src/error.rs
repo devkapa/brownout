@@ -72,3 +72,4 @@ impl BoError {
         Self::new(ERR_INVALID_ARGUMENT, message)
     }
 }
+

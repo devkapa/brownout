@@ -10,7 +10,7 @@ use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
 use crate::engine::Engine;
 use crate::error::ERR_SOLVE_FAILED;
 use crate::program::Program;
-use crate::snapshot::SnapshotTable;
+use crate::snapshot::{net_allocated, HeapBytes, SnapshotTable, Walk};
 
 const STAT_COUNT: u32 = 28;
 
@@ -298,9 +298,85 @@ fn a_snapshot_shares_the_eeprom_image_and_the_table_counts_it_once() {
     let one = table.bytes();
     assert!(one > 2048.0, "a copy and the image: {one}");
     let b = table.take(&e);
-    let copies = (table.copy_bytes(a).unwrap() + table.copy_bytes(b).unwrap()) as f64;
-    assert_eq!(table.bytes(), copies + 2048.0, "two copies and the image they share, once");
+    let two = table.bytes();
+    let alone = table.walk_one(b).unwrap() as f64;
+    assert!(alone > 2048.0, "walked alone, b counts the image: {alone}");
+    assert!(two - one <= alone - 2048.0, "with a, the image is already counted: {one} then {two}, b alone {alone}");
     assert!(table.drop_snapshot(a) && table.drop_snapshot(b));
     assert!(!table.drop_snapshot(a), "a second drop is refused");
     assert_eq!((table.bytes(), table.len()), (0.0, 0));
 }
+
+/// Boards for the size checks: an RC network with a 555 and a CC rail
+/// (2575 tpl 2), a 74LS04 behind a tripped fuse (the fuse ring), and the
+/// rollback rig's resistor, LED and 74LS00 before the latch.
+fn size_boards() -> Vec<(&'static str, Program, Vec<f64>)> {
+    vec![
+        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..30].to_vec()),
+        // From 20 ms: the fuse's trip at about 17 ms rewrites its stamps
+        // (a latch, as an edit does), which the sharing check leaves out.
+        ("fuse ring", ring_behind_a_fuse(), (4..=10).map(|k| k as f64 * 5e-3).collect()),
+        ("rollback rig", rollback_rig(), (1..=4).map(|k| k as f64 * 0.125).collect()),
+    ]
+}
+
+#[test]
+fn the_walk_counts_what_a_copy_allocates() {
+    // `bo_engine_snapshot_bytes` walks the snapshots instead of counting
+    // allocations (which cost about 1 % on every allocation of the advance
+    // path). Held to the counter here: a snapshot's own heap, walked after
+    // the live engine has marked everything the two share, is what its
+    // copy allocated, within the hash tables' bucket estimate.
+    for (name, p, stops) in size_boards() {
+        let mut e = Engine::load(&p).unwrap();
+        for &t in &stops {
+            e.advance(t).unwrap();
+        }
+        e.clear_test_logs();
+        let before = net_allocated();
+        let copy = Box::new(e.snapshot());
+        let counted = (net_allocated() - before) as f64;
+        let mut w = Walk::default();
+        e.heap_bytes(&mut w);
+        let walked = ((*copy).heap_bytes(&mut w) + std::mem::size_of::<Engine>()) as f64;
+        assert!((walked - counted).abs() <= 0.03 * counted + 512.0, "{name}: walked {walked} B, the copy allocated {counted} B");
+    }
+}
+
+/// Every shared table of the solver and its three sub-solvers, by address.
+fn shared_tables(e: &Engine) -> Vec<(String, usize)> {
+    let s = e.debug_solver();
+    let tag = |who: &str, v: Vec<(&'static str, usize)>| v.into_iter().map(|(n, a)| (format!("{who}.{n}"), a)).collect::<Vec<_>>();
+    [tag("solver", s.shared_tables()), tag("static", s.static_solver.shared_tables()), tag("stepped", s.stepped.shared_tables()), tag("closed_form", s.closed_form.shared_tables())].concat()
+}
+
+#[test]
+fn snapshots_share_the_tables_fixed_at_load_and_the_run_never_copies_them() {
+    // Step-back keeps a snapshot a frame, so each must copy only the state
+    // the run changes: the tables built at load (stamps, IC records, node
+    // maps, the slow model) are shared by the live engine and every
+    // snapshot. A run that wrote one would copy it at its first write after
+    // each snapshot, so after running on, every table must still be the
+    // snapshot's own allocation. The rollback rig is left out: its LED's
+    // junction law re-arms as it heats (W1g), a write to the junction tables
+    // that copies them once, as a latch or a host edit does.
+    for (name, p, stops) in size_boards().into_iter().filter(|b| b.0 != "rollback rig") {
+        let mut e = Engine::load(&p).unwrap();
+        let half = stops.len() / 2;
+        for &t in &stops[..half] {
+            e.advance(t).unwrap();
+        }
+        let snapshot = e.snapshot();
+        let tables = shared_tables(&snapshot);
+        assert!(tables.len() >= 60, "{name}: {} shared tables", tables.len());
+        for &t in &stops[half..] {
+            e.advance(t).unwrap();
+        }
+        let moved: Vec<&String> = tables.iter().zip(shared_tables(&e)).filter(|(a, b)| a.1 != b.1).map(|(a, _)| &a.0).collect();
+        assert!(moved.is_empty(), "{name}: the run copied {moved:?}");
+    }
+}
+
+
+
+

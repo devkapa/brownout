@@ -651,6 +651,19 @@ pub trait PartitionSolver {
     fn clone_box(&self) -> Box<dyn PartitionSolver> {
         unimplemented!("this solver is never snapshotted")
     }
+
+    /// The heap this solver owns, for `bo_engine_snapshot_bytes`'s walk
+    /// ([`crate::snapshot::HeapBytes`]). Default none: the mocks never
+    /// snapshot.
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let _ = w;
+        0
+    }
+
+    /// Empties the test builds' instrumentation logs, which grow for the
+    /// whole run, so a size check measures the engine's own state.
+    #[cfg(test)]
+    fn clear_test_logs(&mut self) {}
 }
 
 impl Clone for Box<dyn PartitionSolver> {
@@ -882,6 +895,15 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn clone_box(&self) -> Box<dyn PartitionSolver> {
         (**self).clone_box()
+    }
+
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        std::mem::size_of_val::<dyn PartitionSolver>(&**self) + (**self).heap_bytes(w)
+    }
+
+    #[cfg(test)]
+    fn clear_test_logs(&mut self) {
+        (**self).clear_test_logs()
     }
 
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
@@ -2454,6 +2476,13 @@ struct WindowToken;
 #[derive(Debug)]
 struct HoldsFlag(Rc<std::cell::Cell<bool>>);
 
+
+impl crate::snapshot::HeapBytes for HoldsFlag {
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        crate::snapshot::HeapBytes::heap_bytes(&self.0, w)
+    }
+}
+
 impl Clone for HoldsFlag {
     fn clone(&self) -> Self {
         HoldsFlag(Rc::new(std::cell::Cell::new(self.0.get())))
@@ -2470,9 +2499,9 @@ pub struct PartitionedSolver {
     /// until [`PartitionSolver::prepare_readout`] runs the pass; reading
     /// `currents()` while that is owed is a bug (`debug_assert`).
     currents: Vec<f64>,
-    resolved: Vec<partition::ResolvedSource>,
-    local_index: Vec<Option<(usize, usize)>>,
-    partition_kinds: Vec<PartitionKind>,
+    resolved: crate::shared::Shared<[partition::ResolvedSource]>,
+    local_index: crate::shared::Shared<[Option<(usize, usize)>]>,
+    partition_kinds: crate::shared::Shared<[PartitionKind]>,
     /// Every node whose owning partition is `Static`: the nodes
     /// [`Self::copy_in_static`] keeps in step with `StaticPartitionSolver`'s
     /// own array (it copies the ones that solver changed; a debug build checks
@@ -2480,7 +2509,7 @@ pub struct PartitionedSolver {
     /// `StaticPartitionSolver` never writes at all after `static_part.rs`'s
     /// W1b step 2 device filter).
     #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code, reason = "read by the debug-build check and the tests"))]
-    static_nodes: Vec<usize>,
+    static_nodes: crate::shared::Shared<[usize]>,
     static_solver: static_part::StaticPartitionSolver,
     closed_form: closed_form::ClosedFormSolver,
     stepped: stepped::SteppedSolver,
@@ -2492,10 +2521,10 @@ pub struct PartitionedSolver {
     /// static solver's (it copies the ones that solver recomputed; a debug
     /// build checks all of these on every call).
     #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code, reason = "read by the debug-build check and the tests"))]
-    static_kcl_devices: Vec<usize>,
+    static_kcl_devices: crate::shared::Shared<[usize]>,
     /// device index -> dispatch metadata, for every switch-family device
     /// only (a resistor/capacitor/voltage_source never takes a live param).
-    switches: HashMap<usize, SwitchInfo>,
+    switches: crate::shared::Shared<HashMap<usize, SwitchInfo>>,
     /// The single canonical, mutable copy of every switch-family device's
     /// CURRENT params (this module's doc comment).
     live_params: HashMap<usize, Vec<f64>>,
@@ -2505,7 +2534,7 @@ pub struct PartitionedSolver {
     /// [`FixedPairCapacitor`] too (its `device_index` appears in both lists)
     /// — this one only cares about the node ids for the KCL fold, not which
     /// list computed the current sitting in `currents[device_index]`.
-    cap_devices: Vec<(usize, usize, usize)>,
+    cap_devices: crate::shared::Shared<[(usize, usize, usize)]>,
     /// Every capacitor across two fixed, distinct nodes (rule 2a) —
     /// `partition::build` excludes these from every partition, so this is
     /// the only place anything ever publishes their current.
@@ -2530,7 +2559,7 @@ pub struct PartitionedSolver {
     /// `-3` decline): `static_part.rs`, `closed_form.rs` and `stepped.rs`
     /// each keep their OWN copy of this same list (`solve::collect_ics`),
     /// used only for the driver/pull stamps that touch THEIR OWN partitions.
-    ics: Vec<(usize, digital::IcRecord)>,
+    ics: crate::shared::Shared<[(usize, digital::IcRecord)]>,
     /// The currently-scheduled floating-bucket boundary time, or `None` —
     /// the dedup flag contract point 6 calls for ("the solver schedules...
     /// ONE boundary event... deduplicated"). Part of "the bucket schedule"
@@ -2548,10 +2577,10 @@ pub struct PartitionedSolver {
     /// Every stamped LED junction, program-wide, whichever partition holds it
     /// or none: folded into [`Self::recompute_source_currents`]'s KCL (LEDs
     /// point 12).
-    junctions: Vec<led::Junction>,
+    junctions: crate::shared::Shared<[led::Junction]>,
     /// Every LED-family device, for the device pass
     /// ([`Self::publish_led_devices`]).
-    led_devices: Vec<LedDevice>,
+    led_devices: crate::shared::Shared<[LedDevice]>,
     /// The published channel array, one slot per program channel slot
     /// (`PartitionSolver::channels`). Rolls back with a failed instant, in
     /// [`PartitionSolver::dynamic_snapshot`] (LEDs point 16).
@@ -2573,16 +2602,16 @@ pub struct PartitionedSolver {
     lazy_static_ok: bool,
     /// Capacitors whose current a partition solver publishes (every one but a
     /// [`FixedPairCapacitor`]), for [`Self::lazy_publish_ok`]'s magnitude scan.
-    partition_cap_devices: Vec<usize>,
+    partition_cap_devices: crate::shared::Shared<[usize]>,
     /// `leaving`/`extra` arrays the KCL walk reuses (zeroed at each use), so
     /// a compute allocates nothing.
     kcl_scratch: (Vec<f64>, Vec<f64>),
     /// device index -> position in `ics` (`u32::MAX`: not an IC), so
     /// [`PartitionSolver::ic_powered`] does not walk the list per call.
-    ic_position: Vec<u32>,
+    ic_position: crate::shared::Shared<[u32]>,
     /// device index -> position in `kcl_devices`, for
     /// [`Self::refresh_kcl_contributions`].
-    kcl_position: HashMap<usize, usize>,
+    kcl_position: crate::shared::Shared<HashMap<usize, usize>>,
     /// The previous `driver_snapshot` table. Each resolve swaps it with
     /// `driver_snapshot`, so the table `stepped.resolve_dirty` needs as its
     /// pre-commit input is already in hand, and the new `driver_snapshot` is
@@ -2622,13 +2651,13 @@ pub struct PartitionedSolver {
     i_hint: f64,
     /// The devices the readout pass writes (fixed-pair capacitors, sources,
     /// 555s, LED devices), for the window's undo log.
-    derived_devices: Vec<usize>,
+    derived_devices: crate::shared::Shared<[usize]>,
     /// Per dynamic partition, by global index (`DynOut::default()` for the
     /// rest): what it publishes.
-    dyn_out: Vec<DynOut>,
+    dyn_out: crate::shared::Shared<[DynOut]>,
     /// Global indices of the closed-form and of the stepped partitions.
-    cf_parts: Vec<usize>,
-    stepped_parts: Vec<usize>,
+    cf_parts: crate::shared::Shared<[usize]>,
+    stepped_parts: crate::shared::Shared<[usize]>,
     /// The dynamic partitions the current call may have written, by global
     /// index: logged before the call, folded into the bounds and checked
     /// after it.
@@ -2643,14 +2672,14 @@ pub struct PartitionedSolver {
     /// Per IC (position in `ics`): the ids of its drivers, ascending, and the
     /// driver-table length they were derived for; the table only grows at
     /// load and a driver's `device` never changes.
-    ic_driver_ids: Vec<Vec<u32>>,
+    ic_driver_ids: crate::shared::Shared<[Vec<u32>]>,
     ic_driver_ids_len: usize,
     /// The ICs (positions in `ics`, ascending) that can add partitions in
     /// [`Self::add_watch_dependent_partitions`]: a supply node free in a
     /// `Static` or `Stepped` partition and at least one watched read pin on a
     /// closed-form or stepped one, with those pins' partitions in pin order
     /// as `(is_closed_form, global index)`.
-    watch_dependents: Vec<(u32, Vec<(bool, usize)>)>,
+    watch_dependents: crate::shared::Shared<[(u32, Vec<(bool, usize)>)]>,
 
     // ---- the rollback window ([`PartitionSolver::begin_instant`]) ----------
     window: bool,
@@ -2713,23 +2742,23 @@ pub struct PartitionedSolver {
     w_wave: Option<Rc<live::RampEval>>,
     /// waveform source -> the forest entries under it, resolution order;
     /// and every partition reading a node under it.
-    wave_entries: Vec<Vec<u32>>,
-    wave_parts: Vec<Vec<usize>>,
+    wave_entries: crate::shared::Shared<[Vec<u32>]>,
+    wave_parts: crate::shared::Shared<[Vec<usize>]>,
     /// node -> the partitions, the watched closed-form or stepped partitions
     /// (through an IC supplied from it), the ICs and the rule-2a capacitors
     /// that read it. Filled for live nodes only.
-    node_parts: Vec<Vec<u32>>,
-    node_watch_parts: Vec<Vec<u32>>,
-    node_ic_readers: Vec<Vec<u32>>,
-    node_caps: Vec<Vec<u32>>,
+    node_parts: crate::shared::Shared<[Vec<u32>]>,
+    node_watch_parts: crate::shared::Shared<[Vec<u32>]>,
+    node_ic_readers: crate::shared::Shared<[Vec<u32>]>,
+    node_caps: crate::shared::Shared<[Vec<u32>]>,
     /// Whether a rule-2a capacitor sits on a live node (its anchor is then
     /// instant state).
     live_caps: bool,
     w_caps: Vec<(f64, f64, f64)>,
     /// node -> not free (fixed, or the rail outside exact mode).
-    fixed_node: Vec<bool>,
+    fixed_node: crate::shared::Shared<[bool]>,
     /// device -> its kind code.
-    device_kinds: Vec<u32>,
+    device_kinds: crate::shared::Shared<[u32]>,
     /// The hub rail outside exact mode, and exact mode's hub.
     hub: Option<Box<hub::Hub>>,
     exact: Option<Box<hub::ExactHub>>,
@@ -2737,7 +2766,7 @@ pub struct PartitionedSolver {
     /// PSU is in CC (`partition::PartitionBuild::cc_switch`), ascending, and
     /// the window's log of their kind switches, `(partition, kind before)`
     /// in order (a rollback undoes them newest first).
-    cc_switch: Vec<usize>,
+    cc_switch: crate::shared::Shared<[usize]>,
     kind_log: Vec<(u32, PartitionKind)>,
     /// The switch's own state (`hub::CcCrawl`), and its value when the
     /// window opened.
@@ -2758,7 +2787,7 @@ pub struct PartitionedSolver {
     slow: crate::slow::SlowState,
     /// The load-time tables the settle reads: which devices are slow, how
     /// each is driven, and the `output_sag` cells.
-    slow_model: settle::SlowModel,
+    slow_model: crate::shared::Shared<settle::SlowModel>,
     /// What happened since the last settle: the partitions published, the
     /// drivers that changed, the devices to re-drive.
     slow_scratch: settle::SlowScratch,
@@ -2830,6 +2859,14 @@ pub struct PartitionedSolver {
     /// one of them caused ends its IC's episode. Cleared as each instant
     /// opens, so nothing rolls it back.
     changes: hold::Changes,
+}
+
+impl PartitionedSolver {
+    /// Each table this solver shares with snapshots, by address (W2a tests).
+    #[cfg(test)]
+    pub(crate) fn shared_tables(&self) -> Vec<(&'static str, usize)> {
+        vec![("resolved", crate::shared::Shared::addr(&self.resolved)), ("local_index", crate::shared::Shared::addr(&self.local_index)), ("partition_kinds", crate::shared::Shared::addr(&self.partition_kinds)), ("static_nodes", crate::shared::Shared::addr(&self.static_nodes)), ("static_kcl_devices", crate::shared::Shared::addr(&self.static_kcl_devices)), ("switches", crate::shared::Shared::addr(&self.switches)), ("cap_devices", crate::shared::Shared::addr(&self.cap_devices)), ("ics", crate::shared::Shared::addr(&self.ics)), ("junctions", crate::shared::Shared::addr(&self.junctions)), ("led_devices", crate::shared::Shared::addr(&self.led_devices)), ("partition_cap_devices", crate::shared::Shared::addr(&self.partition_cap_devices)), ("ic_position", crate::shared::Shared::addr(&self.ic_position)), ("kcl_position", crate::shared::Shared::addr(&self.kcl_position)), ("derived_devices", crate::shared::Shared::addr(&self.derived_devices)), ("dyn_out", crate::shared::Shared::addr(&self.dyn_out)), ("cf_parts", crate::shared::Shared::addr(&self.cf_parts)), ("stepped_parts", crate::shared::Shared::addr(&self.stepped_parts)), ("ic_driver_ids", crate::shared::Shared::addr(&self.ic_driver_ids)), ("watch_dependents", crate::shared::Shared::addr(&self.watch_dependents)), ("wave_entries", crate::shared::Shared::addr(&self.wave_entries)), ("wave_parts", crate::shared::Shared::addr(&self.wave_parts)), ("node_parts", crate::shared::Shared::addr(&self.node_parts)), ("node_watch_parts", crate::shared::Shared::addr(&self.node_watch_parts)), ("node_ic_readers", crate::shared::Shared::addr(&self.node_ic_readers)), ("node_caps", crate::shared::Shared::addr(&self.node_caps)), ("fixed_node", crate::shared::Shared::addr(&self.fixed_node)), ("device_kinds", crate::shared::Shared::addr(&self.device_kinds)), ("cc_switch", crate::shared::Shared::addr(&self.cc_switch)), ("slow_model", crate::shared::Shared::addr(&self.slow_model))]
+    }
 }
 
 impl PartitionedSolver {
@@ -3001,51 +3038,51 @@ impl PartitionedSolver {
         let mut solver = PartitionedSolver {
             voltages,
             currents,
-            resolved,
-            local_index,
-            partition_kinds,
-            static_nodes,
+            resolved: resolved.into(),
+            local_index: local_index.into(),
+            partition_kinds: partition_kinds.into(),
+            static_nodes: static_nodes.into(),
             static_solver,
             closed_form,
             stepped,
-            kcl_devices,
-            static_kcl_devices,
-            switches,
+            kcl_devices: kcl_devices.into(),
+            static_kcl_devices: static_kcl_devices.into(),
+            switches: switches.into(),
             live_params,
-            cap_devices,
-            fixed_pair_capacitors,
+            cap_devices: cap_devices.into(),
+            fixed_pair_capacitors: fixed_pair_capacitors.into(),
             start_time: program.options.start_time,
-            ics,
+            ics: ics.into(),
             next_bucket: None,
             pending_schedule: Vec::new(),
             largest_partition,
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
-            junctions,
-            led_devices,
+            junctions: junctions.into(),
+            led_devices: led_devices.into(),
             channels: vec![0.0; channel_slot_count],
             derived_dirty: false,
             derived_now: 0.0,
             lazy_static_ok: false,
-            partition_cap_devices,
+            partition_cap_devices: partition_cap_devices.into(),
             kcl_scratch: (vec![0.0; node_count], vec![0.0; node_count]),
-            ic_position,
-            kcl_position,
+            ic_position: ic_position.into(),
+            kcl_position: kcl_position.into(),
             pre_commit_drivers: Rc::new(Vec::new()),
             driver_snapshot: Rc::new(Vec::new()),
             v_hint: f64::INFINITY,
             i_hint: f64::INFINITY,
-            derived_devices,
-            dyn_out,
-            cf_parts,
-            stepped_parts,
+            derived_devices: derived_devices.into(),
+            dyn_out: dyn_out.into(),
+            cf_parts: cf_parts.into(),
+            stepped_parts: stepped_parts.into(),
             written: Vec::new(),
             static_ids: Vec::new(),
             readers_buf: Vec::new(),
             cf_ids: Vec::new(),
             st_ids: Vec::new(),
-            ic_driver_ids: vec![Vec::new(); ic_count],
+            ic_driver_ids: (vec![Vec::new(); ic_count]).into(),
             ic_driver_ids_len: usize::MAX,
-            watch_dependents,
+            watch_dependents: watch_dependents.into(),
             window: false,
             v_log: Vec::new(),
             i_log: Vec::new(),
@@ -3072,12 +3109,12 @@ impl PartitionedSolver {
             bill_log: Vec::new(),
             wave: Rc::new(live::RampEval::default()),
             w_wave: None,
-            wave_entries: Vec::new(),
-            wave_parts: Vec::new(),
-            node_parts: Vec::new(),
-            node_watch_parts: Vec::new(),
-            node_ic_readers: Vec::new(),
-            node_caps: Vec::new(),
+            wave_entries: Vec::new().into(),
+            wave_parts: Vec::new().into(),
+            node_parts: Vec::new().into(),
+            node_watch_parts: Vec::new().into(),
+            node_ic_readers: Vec::new().into(),
+            node_caps: Vec::new().into(),
             live_caps: false,
             w_caps: Vec::new(),
             fixed_node: fixed.iter().map(|f| f.is_some()).collect(),
@@ -3088,7 +3125,7 @@ impl PartitionedSolver {
             exact_solved: false,
             landing_hold: false,
             slow: crate::slow::SlowState::new(device_count),
-            slow_model: settle::SlowModel::default(),
+            slow_model: settle::SlowModel::default().into(),
             slow_scratch: settle::SlowScratch::default(),
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
@@ -3105,7 +3142,7 @@ impl PartitionedSolver {
             host_edit: false,
             host_step: f64::INFINITY,
             changes: hold::Changes::None,
-            cc_switch,
+            cc_switch: cc_switch.into(),
             kind_log: Vec::new(),
             cc_crawl: hub::CcCrawl::default(),
             w_cc_crawl: hub::CcCrawl::default(),
@@ -3887,7 +3924,7 @@ impl PartitionedSolver {
             ids
         };
         if self.ic_driver_ids_len != drivers.len() {
-            self.ic_driver_ids = derive(&self.ic_position, self.ics.len());
+            self.ic_driver_ids = (derive(&self.ic_position, self.ics.len())).into();
             self.ic_driver_ids_len = drivers.len();
         }
         #[cfg(debug_assertions)]
@@ -5359,6 +5396,18 @@ impl PartitionSolver for PartitionedSolver {
         Box::new(self.clone())
     }
 
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        crate::snapshot::HeapBytes::heap_bytes(self, w)
+    }
+
+    #[cfg(test)]
+    fn clear_test_logs(&mut self) {
+        self.bill_log.clear();
+        self.stepped.commit_log.clear();
+        self.stepped.resolve_log.clear();
+        self.stepped.exact_commit_log.clear();
+    }
+
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
         self.release_every_hold()
     }
@@ -6295,5 +6344,305 @@ mod partitioned_solver_tests {
         let mut s = PartitionedSolver::build(&p).unwrap();
         s.resolve_dirty(&[], 0.0, &[]).unwrap();
         let _ = s.currents();
+    }
+}
+
+// ---- W2a: heap bytes (generated by the size walk generator; regenerate, do not edit) ----
+
+impl crate::snapshot::HeapBytes for Threshold {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.value, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rising, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynPin {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.local, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynStamped {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynCapacitor {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.c, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.esr, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.leak_g, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynJunction {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.anode, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cathode, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynShape {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.n, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamped, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.capacitors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for ExactStamp {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.partition, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.local, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for ExactKind {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            ExactKind::Norton { g, inject } => crate::snapshot::HeapBytes::heap_bytes(g, w) + crate::snapshot::HeapBytes::heap_bytes(inject, w),
+            ExactKind::Row { value } => crate::snapshot::HeapBytes::heap_bytes(value, w),
+            ExactKind::Inject { current } => crate::snapshot::HeapBytes::heap_bytes(current, w),
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for RailSens {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.s, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.jac, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.res, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.gross, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.gross_s, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.lu, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Owner {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Owner::Static => 0,
+            Owner::ClosedForm(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            Owner::Stepped(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for FixedPairCapacitor {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.d_v, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.c, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.esr, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.leak_g, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t0, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for KclDevice {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.owner, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.contributions, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for LedDevice {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_base, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_count, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for SwitchInfo {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pin_count, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.owner, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynOut {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.caps, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for PartitionedSolver {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.voltages, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.currents, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.resolved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.local_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.partition_kinds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.static_nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.static_solver, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.closed_form, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.static_kcl_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.switches, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.live_params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cap_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_pair_capacitors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.start_time, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ics, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.next_bucket, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending_schedule, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.largest_partition, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.multi_capacitor_linear_partitions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.led_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channels, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_dirty, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_now, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.lazy_static_ok, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.partition_cap_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_position, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_position, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pre_commit_drivers, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.driver_snapshot, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_hint, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_hint, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dyn_out, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cf_parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped_parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.written, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.static_ids, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.readers_buf, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cf_ids, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.st_ids, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_driver_ids, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_driver_ids_len, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.watch_dependents, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.window, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dyn_logged, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dyn_logged_list, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_logged, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_pending_schedule, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_next_bucket, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_driver_snapshot, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_derived, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_channels, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.mirror_seen, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.mirror_live, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.mirror_valid, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stale, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.call_patches, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.d_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.d_log_split, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_stale, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.window_mirror, w); }
+        #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_saved, w); }
+        #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_wave, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_entries, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_watch_parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_ic_readers, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_caps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.live_caps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_caps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_node, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_kinds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_crawl, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_cc_crawl, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.source_edges, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact_solved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.landing_hold, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow_model, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow_counts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_active, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.probe_version, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.probes_at, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_flag, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_holds, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hold_counts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.episodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.retry_armed, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.at_clamp, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_jump, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_edit, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_step, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.changes, w); }
+        n
     }
 }
