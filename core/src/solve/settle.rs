@@ -1067,6 +1067,11 @@ impl PartitionedSolver {
     /// generation number can recur for another law. The notes since the last
     /// settle are dropped with the instant that made them.
     pub(super) fn slow_rollback_instant(&mut self) {
+        // The rolled-back instant may have failed, tripped or recovered a
+        // device the probes were rebuilt for.
+        if self.slow_scratch.journal == 2 {
+            self.probe_version += 1;
+        }
         let law_gen_bumped = self.slow_scratch.journal == 2 && self.slow.rollback_instant();
         self.slow_scratch.journal = 0;
         for &(dev, t) in self.slow_scratch.ptc_log.iter().rev() {
@@ -1436,17 +1441,13 @@ impl PartitionedSolver {
     /// fail (not failed, a PTC not tripped), handed to the stepped planner,
     /// which reads each trial's stress ratios from them
     /// (`SteppedSolver::set_stress_probes`). Rebuilt when one fails or a PTC
-    /// trips or recovers (`probe_sig`), so a plan never cuts for a device
-    /// gone open.
+    /// trips or recovers (`probe_version`), so a plan never cuts for a device
+    /// gone open or misses one come back.
     pub(super) fn refresh_stress_probes(&mut self) {
-        if self.probe_sig.is_some_and(|s| s.0 == usize::MAX) {
+        if self.probes_at.is_some_and(|v| v == u64::MAX || v == self.probe_version) {
             return;
         }
-        let sig: (usize, usize) = self.slow_model.devs.iter().filter(|sd| sd.class == Class::Stepped && !sd.cold).fold((0, 0), |(f, t), sd| (f + self.slow.is_failed(sd.device) as usize, t + self.slow.ptc(sd.device).is_some_and(|p| p.tripped) as usize));
-        if self.probe_sig == Some(sig) {
-            return;
-        }
-        self.probe_sig = Some(sig);
+        self.probes_at = Some(self.probe_version);
         let mut any = false;
         for p in 0..self.slow_model.part_devs.len() {
             let mut probes = Vec::new();
@@ -1482,9 +1483,17 @@ impl PartitionedSolver {
             any |= !probes.is_empty();
             self.stepped.set_stress_probes(p, probes);
         }
-        if !any && sig == (0, 0) {
-            self.probe_sig = Some((usize::MAX, 0));
+        if !any && !self.slow_model.devs.iter().any(|sd| sd.class == Class::Stepped && !sd.cold && (self.slow.is_failed(sd.device) || self.slow.ptc(sd.device).is_some_and(|p| p.tripped))) {
+            self.probes_at = Some(u64::MAX);
         }
+    }
+
+    /// A PTC trip or recovery fired at `now` through the settle's own path
+    /// (`fire_since`), for a test that needs two in one settle.
+    #[cfg(test)]
+    pub(super) fn debug_ptc_event(&mut self, dev: usize, trip: bool, now: f64) {
+        let i = self.slow_index(dev).expect("a slow device");
+        self.fire_since(i, if trip { SlowEventKind::PtcTrip } else { SlowEventKind::PtcRecover }, now, now);
     }
 
     /// Ruling R90 (a)'s agreement check: for each rated stepped device, the
@@ -1812,6 +1821,7 @@ impl PartitionedSolver {
                 }
                 let (code, value, limit) = self.latch_values(i, now);
                 self.sw().latch(LatchRecord { device: dev as u32, code: code as u32, pin: -1, since, value, limit, aux: 0.0 }, true);
+                self.probe_version += 1;
                 self.slow_counts[2] += 1;
                 self.stamp_changed(i, now, true);
             }
@@ -1828,6 +1838,7 @@ impl PartitionedSolver {
                 let e = self.sw().ptc_mut(dev).expect("a trip needs a PTC");
                 e.close(now);
                 e.trip(now);
+                self.probe_version += 1;
                 let old = self.slow_scratch.ptc_since[dev];
                 if self.window {
                     self.slow_scratch.ptc_log.push((dev as u32, old));
@@ -1840,6 +1851,7 @@ impl PartitionedSolver {
                 let e = self.sw().ptc_mut(dev).expect("a recovery needs a PTC");
                 e.close(now);
                 e.recover(now);
+                self.probe_version += 1;
                 self.slow_counts[2] += 1;
                 self.stamp_changed(i, now, true);
             }
@@ -2523,6 +2535,7 @@ impl PartitionedSolver {
     /// every IC is scanned afresh from this instant.
     pub(super) fn reset_slow(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
         let effects = self.sw().reset_failures(now);
+        self.probe_version += 1;
         for c in 0..self.slow.sag_len() {
             if self.slow.sag_cell(c).state != SagState::Ok {
                 *self.sw().sag_state_mut(c) = SagState::Ok;

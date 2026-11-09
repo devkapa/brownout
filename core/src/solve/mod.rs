@@ -2723,10 +2723,16 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
-    /// Ruling R90 (a): the failed and tripped counts the stepped stress
-    /// probes were last built at (`refresh_stress_probes`); `Some((MAX, _))`
-    /// once a build found no rated stepped device, which none can become.
-    probe_sig: Option<(usize, usize)>,
+    /// Ruling R90 (a): bumped by every failure latch, PTC trip or recovery,
+    /// reset and rolled-back instant, the events that change which stepped
+    /// devices the stress probes cover (`refresh_stress_probes`). A count of
+    /// failed and tripped devices could not key them: one PTC tripping as
+    /// another recovers leaves the counts where they were (R80V3).
+    probe_version: u64,
+    /// The `probe_version` the probes were last built at; `Some(u64::MAX)`
+    /// once a build found no rated stepped device and none failed or
+    /// tripped, so none can become one.
+    probes_at: Option<u64>,
     /// `holds_active > 0`, as the kernel reads it
     /// ([`PartitionSolver::holds_flag`]); set with the sub-solvers' copies
     /// ([`Self::sync_power_holds`]), so it follows every change, rollback
@@ -3034,7 +3040,8 @@ impl PartitionedSolver {
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
             holds_active: 0,
-            probe_sig: None,
+            probe_version: 0,
+            probes_at: None,
             holds_flag: Rc::new(std::cell::Cell::new(false)),
             w_holds: None,
             hold_counts: [0; 2],

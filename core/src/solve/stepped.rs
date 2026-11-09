@@ -1899,13 +1899,6 @@ impl SteppedSolver {
         self.stress_probes.get(&p).cloned().unwrap_or_default()
     }
 
-    #[cfg(test)]
-    pub(crate) fn debug_probes(&self) -> Vec<(usize, usize)> {
-        let mut v: Vec<(usize, usize)> = self.stress_probes.iter().map(|(p, v)| (*p, v.len())).collect();
-        v.sort_unstable();
-        v
-    }
-
     /// Ruling R90 (a): whether partition `p` had a stressed device at its
     /// last commit (`settle`'s trail close sets it); only then is its next
     /// trial checked for a replan, so a board none of whose devices nears its
@@ -2971,7 +2964,7 @@ impl SteppedSolver {
     /// node OUTSIDE this partition (its IC's supply, sitting in a `Static`
     /// partition), which `part`'s own local `x0`/`x1` arrays never carry.
     fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
-        self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, 0)
+        self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, 0, f64::INFINITY)
     }
 
     /// [`Self::plan_step`], the `cuts`-th time for a stressed device's ratio
@@ -2982,9 +2975,12 @@ impl SteppedSolver {
     /// and crossing cuts (cold 535 tpl 2: the CC trial from its exit held the
     /// LED at 1604 and the exit's CV re-solve over the same 10 ms fell
     /// 16-fold), on every planning path: a Step event's, a re-seed's, a
-    /// catch-up's, a clamp's, exact mode's deferred plan.
+    /// catch-up's, a clamp's, exact mode's deferred plan. Each cut plans
+    /// again from the step length, regime and CC exit the plan started from,
+    /// under `cut` (ruling R80V3 2), so a cut step is the step a plan at
+    /// that reach makes outright.
     #[allow(clippy::too_many_arguments)]
-    fn plan_step_cut(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64], cuts: u32) -> Result<(), String> {
+    fn plan_step_cut(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64], cuts: u32, cut: f64) -> Result<(), String> {
         let option_method = self.method;
         // Each partition this one's watches take a supply from is a known
         // trajectory only as far as its pending trial reaches, so a step
@@ -3056,7 +3052,8 @@ impl SteppedSolver {
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
         // most in a step, a horizon on the step, never the error controller.
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.max(H_MIN));
+        let start_state = (part.h, part.changing, part.cc_exited);
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
         // The first half of the accepted step-doubling pair, whose end the
@@ -3313,7 +3310,8 @@ impl SteppedSolver {
                     STRESS_CUT_LOG.with(|l| l.borrow_mut().push((p_idx, t0, h, cut)));
                     #[cfg(test)]
                     STRESS_CUT_PATHS.with(|l| l.borrow_mut().push((t0, clamp, exact.is_some_and(|e| e.partition == p_idx))));
-                    return self.plan_step_cut(p_idx, t0 + cut, drivers, live_params, voltages, cuts + 1);
+                    (part.h, part.changing, part.cc_exited) = start_state;
+                    return self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, cuts + 1, cut);
                 }
             }
             part.stress_watch = stressed;

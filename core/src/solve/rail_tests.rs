@@ -15193,20 +15193,28 @@ fn cuts_by_start() -> Vec<(f64, usize, Vec<f64>)> {
 
 #[test]
 fn a_stress_cut_leaves_the_state_a_plan_at_its_reach_would_have() {
-    // Ruling R90 (a): a trial cut for a stressed device's ratio
+    // Ruling R90 (a), R80V3 2: a trial cut for a stressed device's ratio
     // (`plan_step`'s stress probe) must leave catch-up, readers, watches and
     // every later step as if the shorter step had been planned in the first
-    // place. Cold 535 tpl 2 at 50 ms host steps cuts its LED's partition at
-    // the CC exit (13.625 ms) and after; at the first later commit whose
-    // cuts settle the trial under e^0.5 (not at the cap), a second run plans
-    // that commit at the length the cuts ended with, and must match the
-    // first state for state to 0.2 s.
+    // place: the cut plans again from the step length and regime the plan
+    // started from, under the cut's length. Cold 535 tpl 2 at 50 ms host
+    // steps cuts its LED's partition at the CC exit (13.625 ms) and after;
+    // for every commit it cuts, a second run plans that commit at the
+    // length its cuts ended with, and matches the first state for state to
+    // 0.2 s. A commit whose cuts stop at the cap (`STRESS_CUTS`) is planned
+    // at that length outright too, and the forced run leaves it no cut only
+    // where the cuts settled under e^0.5.
     let cut = run_535_at_50ms(None);
     let starts = cuts_by_start();
-    let &(t, p, ref cuts) = starts.iter().skip(1).find(|e| e.2.len() < 4).expect("a later commit whose cuts settle under the ratio");
-    let forced = run_535_at_50ms(Some((p, t, *cuts.last().unwrap())));
-    assert!(!cuts_by_start().iter().any(|e| e.0 == t), "planned at that length, the trial needed no cut");
-    assert_eq!(cut, forced);
+    assert!(starts.len() > 1, "cuts at the exit and after: {starts:?}");
+    for (t, p, cuts) in starts {
+        let forced = run_535_at_50ms(Some((p, t, *cuts.last().unwrap())));
+        if cuts.len() < 4 {
+            assert!(!cuts_by_start().iter().any(|e| e.0 == t && e.1 == p), "at {t}: planned at {cuts:?}'s end, the trial needed no cut");
+        }
+        let diffs: Vec<usize> = cut.iter().zip(&forced).enumerate().filter(|(_, (a, b))| a != b).map(|(k, _)| k).collect();
+        assert!(diffs.is_empty(), "at {t} (cuts {cuts:?}): host steps {diffs:?} differ");
+    }
 }
 
 #[test]
@@ -15375,4 +15383,50 @@ fn a_clamps_catch_up_steps_are_cut_like_any_plan() {
     s.stepped.catch_up(&[p], 0.0236, &drivers, &live, &voltages).unwrap();
     let paths = stepped::STRESS_CUT_PATHS.with(|l| l.borrow().clone());
     assert!(paths.iter().any(|c| c.1), "a catch-up step was cut: {paths:?}");
+}
+
+/// Two PTC branches on one 6 V, 2 A supply, each a PTC (5 ohm, 0.5 A hold)
+/// into an LED (vf 2 V, ifMax 0.5 A) charging 1 mF across 1 ohm: nodes 2 and
+/// 4 sit in two stepped partitions (from the verifier's R80V3 board).
+fn two_ptc_branches() -> Program {
+    let led = || vec![2.0, 2.0, 0.5, 0.0, 0.0, 0.0];
+    let mut p = program(6, vec![
+        fz(21, 0, &[1, 0], vec![6.0, 2.0], vec![]),
+        fz(kinds::PTC_FUSE, 1, &[1, 2], vec![5.0, 0.5], vec![]),
+        fz(kinds::LED, 2, &[2, 3], led(), vec![]),
+        fz(kinds::CAPACITOR, 3, &[3, 0], vec![1e-3, 0.0, 0.0], vec![]),
+        fz(kinds::PTC_FUSE, 4, &[1, 4], vec![5.0, 0.5], vec![]),
+        fz(kinds::LED, 5, &[4, 5], led(), vec![]),
+        fz(kinds::CAPACITOR, 6, &[5, 0], vec![1e-3, 0.0, 0.0], vec![]),
+        fz(kinds::RESISTOR, 7, &[3, 0], vec![1.0], vec![]),
+        fz(kinds::RESISTOR, 8, &[5, 0], vec![1.0], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_ptc_tripping_as_another_recovers_rebuilds_the_stress_probes() {
+    // Ruling R90 (a), R80V3 1: the stepped planner's probes are rebuilt on
+    // every fail, trip or recovery. Keyed on the failed and tripped counts,
+    // PTC A recovering and PTC B tripping in one settle left the counts at
+    // (0, 1) as before, and the probes stale: B's read as untripped, A's
+    // missing, so A's recovered PTC went uncut. Both events fire through
+    // the settle's own path (`fire_since`) between two refreshes.
+    let mut rig = Rig::load(&two_ptc_branches()).unwrap();
+    rig.advance(0.001).unwrap();
+    let s = rig.k.solver_mut();
+    let (pa, pb) = (s.partition_of_node(2).unwrap().0 as usize, s.partition_of_node(4).unwrap().0 as usize);
+    assert_ne!(pa, pb, "two partitions");
+    let ptc = |s: &PartitionedSolver, p: usize| s.stepped.debug_probe_list(p).iter().any(|pr| matches!(pr, stepped::StressProbe::Ptc { .. }));
+    s.refresh_stress_probes();
+    assert!(ptc(s, pa) && ptc(s, pb), "both untripped, both probed");
+    s.debug_ptc_event(1, true, 0.001);
+    s.refresh_stress_probes();
+    assert!(!ptc(s, pa) && ptc(s, pb), "A tripped");
+    s.debug_ptc_event(1, false, 0.001);
+    s.debug_ptc_event(4, true, 0.001);
+    s.refresh_stress_probes();
+    assert!(ptc(s, pa), "A recovered: probed again");
+    assert!(!ptc(s, pb), "B tripped: no probe");
 }
