@@ -37,7 +37,7 @@
 
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { eepromImageBytes, specsForComponent, supplyPinsForComponent } from "../../sim/engine/sim-engine.js";
-import { T_WC } from "../../sim/engine/devices/digital-ics.js";
+import { EEPROM_T_WC } from "../../sim/engine/devices/digital-ics.js";
 import type { ProgramPinInput } from "../format.js";
 import { CORE_EEPROM_PARAM, CORE_EEPROM_SIZE, CORE_IC_PARAM, CORE_IC_PIN_FLOATING_INPUT } from "../kinds.js";
 import { resolveComponentPart } from "./catalog.js";
@@ -171,7 +171,7 @@ export function compileMemoryIc(
     // delay tail, in that order, matching CORE_EEPROM_PARAM's indices by
     // construction (the array is already length 23 here: 13 base + 5 pairs
     // * 2).
-    params.push(T_WC, resolveSdp(kind, component.params.sdpBypass));
+    params.push(EEPROM_T_WC[kind], resolveSdp(kind, component.params.sdpBypass));
     if (params.length !== CORE_EEPROM_PARAM.sdp + 1) {
       // Defensive: a drift between this module's param count and kinds.ts's
       // CORE_EEPROM_PARAM indices is a compiler bug, not a circuit fact —

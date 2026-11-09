@@ -56,6 +56,11 @@
  * wave5-regulators) delegate to the runner's `CoreEngine` and to nothing else,
  * as do W1g's `getPtcTripped`, `getThermalState`, `getPartTemperature` and
  * `resetFailures` (W1g Q5: on `CoreEngine` only, never `EngineReadout`).
+ * `takeEepromUpdates` (W2d, for eeprom-write) delegates to the runner's
+ * `CoreEngine` too, and `step()` first delivers the suite's in-place edits to
+ * the circuit object it loaded (classic re-reads that reference every step):
+ * live params through `setParams`, anything else as a thrown
+ * `CoreSuiteEditNotDeliverableError` until W2c's carry and live V land.
  * Nothing else on classic `SimEngine` (saveState/restoreState/
  * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
  * ...) is implemented: no case in classification.json currently needs any of
@@ -69,6 +74,7 @@
 import { HeadlessRunner } from "../../../src/host/headless.js";
 import { CoreEngine } from "../../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
+import { liveParamDiff } from "../../../src/core/edit.js";
 import type { EngineReadout } from "../../../src/core/surface.js";
 import type {
   BatteryRuntimeReadout,
@@ -114,6 +120,35 @@ export class CoreSuiteFellBackError extends Error {
   }
 }
 
+/**
+ * Thrown by `step()` when the suite edited the circuit object it loaded in a
+ * way the adapter cannot deliver to the core yet. Classic re-reads the live
+ * circuit every step, so an edit it cannot deliver would otherwise be dropped
+ * and the case would pass or fail on a circuit the core never ran.
+ *
+ * - `live-v-pending`: only voltage_source V changed (code 2 param 0). Ruled
+ *   live for W2 (D12) but not wired in Rust yet; `VOLTAGE_SOURCE_V_LIVE` in
+ *   src/core/edit.ts is the flag the W2c Rust worker flips.
+ * - `needs-carry`: a topology or non-live param change. Delivering it means a
+ *   reload that carries state across (W2c, `src/core/carry.ts`); a cold reload
+ *   would drop the capacitor charge and latches the case is checking.
+ * - `not-applied`: `setParams` returned false (it skipped a change for a
+ *   component the loaded program does not hold), so the edit did not land.
+ */
+export class CoreSuiteEditNotDeliverableError extends Error {
+  readonly reason: "live-v-pending" | "needs-carry" | "not-applied";
+
+  constructor(reason: "live-v-pending" | "needs-carry" | "not-applied", detail: string) {
+    super(
+      `core-suites adapter: the suite edited the loaded circuit in a way the core cannot take yet (${reason}): ` +
+        `${detail}. A gate-1 case must not run a circuit the core was never given; classify it "not-yet" ` +
+        "with this reason until W2c lands.",
+    );
+    this.name = "CoreSuiteEditNotDeliverableError";
+    this.reason = reason;
+  }
+}
+
 export interface CoreSuiteEngineOptions {
   /** Overrides which kinds this adapter is allowed to route to the core. Defaults to CORE_IMPLEMENTED_KINDS -- see the header comment for why NOT CORE_SUPPORTED_KINDS. */
   coreSupportedKinds?: ReadonlySet<string>;
@@ -130,6 +165,10 @@ export class SimEngine implements EngineReadout {
   private _runner: HeadlessRunner;
   /** Set by setIntegrationMethod(), applied on the NEXT step() -- see that method's own doc comment. */
   private _pendingIntegrationMethod: "be" | "trap" | undefined;
+  /** The circuit object the suite passed to load(): classic re-reads it live every step, so a suite mutates it in place. */
+  private _liveCircuit: SimCircuit | undefined;
+  /** A deep copy of `_liveCircuit` as of the last load() or delivered step: what the core has actually been given. */
+  private _delivered: SimCircuit | undefined;
 
   constructor(options?: CoreSuiteEngineOptions) {
     this._coreSupportedKinds = options?.coreSupportedKinds ?? CORE_IMPLEMENTED_KINDS;
@@ -146,6 +185,41 @@ export class SimEngine implements EngineReadout {
     if (this._runner.activeEngine !== "core") {
       throw new CoreSuiteFellBackError(this._runner.engineFallbackReasons);
     }
+    this._liveCircuit = circuit;
+    this._delivered = structuredClone(circuit);
+  }
+
+  /**
+   * Sends the suite's in-place edits since the last load() or step() to the
+   * core. Live params (the switch family today) go through `setParams`, which
+   * keeps all state; an edit with nothing to deliver is a no-op; anything else
+   * throws, because dropping it would let the case run a circuit the core was
+   * never given (see CoreSuiteEditNotDeliverableError).
+   */
+  private _deliverEdits(): void {
+    const live = this._liveCircuit;
+    const delivered = this._delivered;
+    if (!live || !delivered) return;
+    const diff = liveParamDiff(delivered, live);
+    if (diff === null) {
+      // Is V the only thing that blocks it? Then name the pending piece.
+      const ifVWereLive = liveParamDiff(delivered, live, { voltageSourceLive: true });
+      if (ifVWereLive !== null) {
+        const ids = ifVWereLive.map((change) => change.componentId).join(", ");
+        throw new CoreSuiteEditNotDeliverableError("live-v-pending", `voltage_source V changed on ${ids}`);
+      }
+      throw new CoreSuiteEditNotDeliverableError(
+        "needs-carry",
+        "a topology change or a param that is not live changed (liveParamDiff returned null)",
+      );
+    }
+    if (diff.length > 0 && !this._coreEngine("setParams").setParams(diff)) {
+      throw new CoreSuiteEditNotDeliverableError(
+        "not-applied",
+        `setParams skipped a change for ${diff.map((change) => change.componentId).join(", ")}`,
+      );
+    }
+    this._delivered = structuredClone(live);
   }
 
   /** Classic `SimEngine.load()`: carries the facade clock forward (HeadlessRunner's own load() semantics -- see headless.ts). */
@@ -190,6 +264,7 @@ export class SimEngine implements EngineReadout {
    * `coldLoad()` already refuse.
    */
   step(h: number): void {
+    this._deliverEdits();
     this._runner.run({ durationS: h, integrationMethod: this._pendingIntegrationMethod });
     if (this._runner.activeEngine !== "core") {
       throw new CoreSuiteFellBackError(this._runner.engineFallbackReasons);
@@ -317,6 +392,15 @@ export class SimEngine implements EngineReadout {
   /** Classic `SimEngine.getPartTemperature(id)`, for thermal-engine-physics' identity-less case. */
   getPartTemperature(componentId: string): number | undefined {
     return this._coreEngine("getPartTemperature").getPartTemperature(componentId);
+  }
+
+  /**
+   * Classic `SimEngine.takeEepromUpdates()`, for eeprom-write: component id to
+   * a fresh image of every EEPROM written since the last call, then cleared.
+   * The runner's `CoreEngine` has the same method and shape.
+   */
+  takeEepromUpdates(): Record<string, Uint8Array> {
+    return this._coreEngine("takeEepromUpdates").takeEepromUpdates();
   }
 
   /**

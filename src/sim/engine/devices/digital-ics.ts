@@ -86,10 +86,16 @@ import {
 const NE555_OUTPUT_R_OHM = 20;
 const NE555_OUTPUT_HEADROOM_V = 0.1;
 
-// EEPROM write-cycle time (datasheet t_WC, 10 ms class) — a started byte
-// write completes this long after the latching edge. Exported for the core
-// compiler (compile/memories.ts), which carries it as the EEPROMs' tWC param.
-export const T_WC = 10e-3;
+// EEPROM write-cycle time (datasheet t_WC) — a started byte write completes
+// this long after the latching edge. Per part: the AT28C16 table gives a
+// typical 0.5 ms, the AT28C256 only a 10 ms maximum (core/spec/
+// w1-datasheet-delays.md sections 12-13). Exported for the core compiler
+// (compile/memories.ts), which carries it as the EEPROMs' tWC param, so
+// both engines read one table.
+export const EEPROM_T_WC: Readonly<Record<"28c16" | "28c256", number>> = {
+  "28c16": 0.5e-3,
+  "28c256": 10e-3,
+};
 
 // 28C256 software-data-protection unlock sequence (Atmel datasheet order).
 const SDP_ENABLE: Array<[number, number]> = [
@@ -1089,7 +1095,9 @@ export const eepromModel: DeviceModel = {
     if (st.writeCompletesAt !== null && ctx.simTime() < st.writeCompletesAt && st.pendingByte !== null && pollingAddr) {
       byte = st.bytes[addr] ?? 0xff;
       const trueBit7 = (st.pendingByte >> 7) & 1;
-      const toggleBit = st.pollReads & 1;
+      // A read cycle that begins in this step counts in updateDigital after
+      // the solve; show its toggle now so the first read is not one behind.
+      const toggleBit = (st.pollReads + (st.prevReadCycle ? 0 : 1)) & 1;
       pollMask = (1 << 7) | (1 << 6);
       pollValue = ((trueBit7 ^ 1) << 7) | (toggleBit << 6);
     } else {
@@ -1147,12 +1155,18 @@ export const eepromModel: DeviceModel = {
       if (accepted) {
         st.pendingAddr = addr & addrMask;
         st.pendingByte = data & 0xff;
-        st.writeCompletesAt = ctx.simTime() + T_WC;
+        st.writeCompletesAt = ctx.simTime() + EEPROM_T_WC[comp.kind as "28c16" | "28c256"];
         st.pollReads = 0;
       }
     }
 
-    if (st.writeCompletesAt !== null) st.pollReads = (st.pollReads + 1) & 0xffff;
+    // DATA polling: I/O6 toggles on successive READS, so count a read cycle
+    // (the step /OE and /CE both go low), not every solver step it stays low.
+    const readCycleNow = oeLow && ceLow;
+    if (st.writeCompletesAt !== null && readCycleNow && !st.prevReadCycle) {
+      st.pollReads = (st.pollReads + 1) & 0xffff;
+    }
+    st.prevReadCycle = readCycleNow;
 
     st.lastWeHigh = weHigh;
     st.lastCeHigh = ceHigh;

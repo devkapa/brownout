@@ -28,7 +28,7 @@ export { initCore, coreReady, coreStatus, CORE_ABI_VERSION } from "./core/wasm.j
 export type { CoreWasmSource } from "./core/wasm.js";
 
 export { CoreEngine } from "./core/engine.js";
-export type { CoreEngineStats } from "./core/engine.js";
+export type { CoreEngineStats, CoreParamChange } from "./core/engine.js";
 
 export {
   CoreInitError,
@@ -45,7 +45,12 @@ export { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "./core/kinds.js";
 export { unsupportedCoreKinds, unsupportedCoreKindReasons } from "./core/select.js";
 export type { EngineChoice } from "./core/select.js";
 
-export type { EngineReadout } from "./core/surface.js";
+export type { EngineReadout, TelemetryEngine } from "./core/surface.js";
+
+export { liveParamDiff, VOLTAGE_SOURCE_V_LIVE } from "./core/edit.js";
+export type { LiveParamDiffOptions } from "./core/edit.js";
+export { coreSolverDiagnostics, readCoreStats, CORE_STAT_COUNT } from "./core/diagnostics.js";
+export type { CoreBatchInfo, CoreStatSnapshot } from "./core/diagnostics.js";
 
 // Useful to tooling (the equivalence harness, diagnostics) that wants to
 // compile a circuit without driving a full CoreEngine.

@@ -271,7 +271,8 @@ describe("CoreEngine.takeEepromUpdates — success path: a 28c16 write completes
     // their required levels for the whole run.
     engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
 
-    // tWC (10 ms, core/README.md's EEPROM further params) plus margin —
+    // tWC (0.5 ms for a 28c16, core/README.md's EEPROM further params; 11 ms
+    // here is ample) plus margin —
     // bo_engine_advance lands exactly on t_end (a horizon clamp), so the
     // pending write's Timer fires within this window.
     engine.advance(startTime + 10e-3 + 1e-3);

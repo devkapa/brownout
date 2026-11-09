@@ -168,6 +168,48 @@ function writeAndWait(engine: SimEngine, circuit: SimCircuit, addr: number, data
   stepFor(engine, 15e-3);
 }
 
+describe("EEPROM write-cycle time", () => {
+  it("a 28C16 finishes a write in its AT28C16 typical 0.5 ms, not 10 ms", () => {
+    const circuit = makeEepromCircuit("28c16");
+    const engine = new SimEngine();
+    engine.load(circuit);
+
+    pulseWeWrite(engine, circuit, 0x100, 0x5a);
+    stepFor(engine, 1e-3);
+
+    expect(engine.takeEepromUpdates()[EEPROM_ID]?.[0x100]).toBe(0x5a);
+  });
+
+  it("a 28C16 is still busy shortly before 0.5 ms", () => {
+    const circuit = makeEepromCircuit("28c16");
+    const engine = new SimEngine();
+    engine.load(circuit);
+
+    driveAddr(circuit, 0x100);
+    driveData(circuit, 0x5a);
+    driveCe(circuit, true);
+    driveOe(circuit, false);
+    driveWe(circuit, true);
+    stepFor(engine, 100e-6);
+    driveWe(circuit, false);
+    stepFor(engine, 300e-6);
+
+    expect(engine.takeEepromUpdates()[EEPROM_ID]).toBeUndefined();
+  });
+
+  it("a 28C256 keeps its 10 ms datasheet maximum", () => {
+    const circuit = makeEepromCircuit("28c256", { sdpBypass: 1 });
+    const engine = new SimEngine();
+    engine.load(circuit);
+
+    pulseWeWrite(engine, circuit, 0x100, 0x5a);
+    stepFor(engine, 5e-3);
+    expect(engine.takeEepromUpdates()[EEPROM_ID]).toBeUndefined();
+    stepFor(engine, 6e-3);
+    expect(engine.takeEepromUpdates()[EEPROM_ID]?.[0x100]).toBe(0x5a);
+  });
+});
+
 describe("EEPROM runtime writes", () => {
   it("writes a 28C16 byte after tWC", () => {
     const circuit = makeEepromCircuit("28c16");
@@ -246,8 +288,11 @@ describe("EEPROM runtime writes", () => {
     expect(readData(engine, circuit, 0x000) >> 7).toBe(1);
   });
 
-  it("toggles O6 during the busy window", () => {
-    const circuit = makeEepromCircuit("28c16");
+  it("holds O6 steady while /OE and /CE stay low through one busy-window read", () => {
+    // The datasheet toggles I/O6 on SUCCESSIVE READS. One read cycle held low
+    // across many solver steps is still one read, so the bit must not move
+    // with the step grid (the old rule flipped it every accepted step).
+    const circuit = makeEepromCircuit("28c256", { sdpBypass: 1 });
     const engine = new SimEngine();
     engine.load(circuit);
 
@@ -262,8 +307,34 @@ describe("EEPROM runtime writes", () => {
       samples.push((readBusVoltageByte(engine) >> 6) & 1);
     }
 
-    expect(new Set(samples).size).toBe(2);
+    expect(new Set(samples).size).toBe(1);
   });
+
+  for (const [kind, cycles] of [["28c16", 2], ["28c256", 4]] as const) {
+    it(`${kind} toggles O6 once per read cycle (each falling /OE) during the busy window`, () => {
+      // 28C16 tWC is 0.5 ms, 0.3 ms of it left after the write pulse: two
+      // one-step read cycles fit. The 28C256 has 10 ms, so it gets four.
+      const circuit = makeEepromCircuit(kind, { sdpBypass: 1 });
+      const engine = new SimEngine();
+      engine.load(circuit);
+
+      pulseWeWrite(engine, circuit, 0x000, 0x00);
+      driveData(circuit, 0);
+      driveAddr(circuit, 0x000);
+      driveCe(circuit, true);
+      const samples: number[] = [];
+      for (let i = 0; i < cycles; i++) {
+        driveOe(circuit, true);
+        engine.step(DT);
+        samples.push((readBusVoltageByte(engine) >> 6) & 1);
+        driveOe(circuit, false);
+        engine.step(DT);
+      }
+
+      // First read of a pending write reads I/O6 high, then it alternates.
+      expect(samples).toEqual(Array.from({ length: cycles }, (_, i) => (i % 2 === 0 ? 1 : 0)));
+    });
+  }
 
   it("reads unrelated addresses normally during the busy window", () => {
     const bytes = new Uint8Array(2048).fill(0xff);

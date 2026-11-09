@@ -1173,6 +1173,21 @@ export class CoreEngine implements EngineReadout {
   }
 
   /**
+   * `bo_engine_stat` for indices `0 .. count - 1`, copied in one call: the raw
+   * counters `stats()` names four of (core/README.md, "Stat indices"). An
+   * index the Rust side does not know reads `NaN`, as the ABI says. Read-only;
+   * `src/core/diagnostics.ts` turns two reads into a batch's diagnostics.
+   */
+  statCounters(count: number): number[] {
+    this._requireLoaded();
+    return coreCall((exports) => {
+      const out: number[] = [];
+      for (let i = 0; i < count; i++) out.push(exports.bo_engine_stat(this._handle, i));
+      return out;
+    });
+  }
+
+  /**
    * Turns the digital trace (`bo_engine_trace_enable`, core/README.md's ABI
    * v2 "W1a") on or off. Harness instrumentation only (the doc comment on the
    * ABI row itself: "W2's host traces are separate") — a normal host adapter

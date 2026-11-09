@@ -515,6 +515,8 @@ export interface EepromState {
   pendingAddr: number | null;
   pendingByte: number | null;
   pollReads: number;
+  /** /OE and /CE were both low at the last committed step; a read cycle is the false-to-true edge. */
+  prevReadCycle: boolean;
   sdpEnabled: boolean;
   sdpUnlocked: boolean;
   sdpStep: 0 | 1 | 2 | 3;
@@ -3097,6 +3099,7 @@ export class SimEngine {
             pendingAddr: null,
             pendingByte: null,
             pollReads: 0,
+            prevReadCycle: false,
             sdpEnabled,
             sdpUnlocked: false,
             sdpStep: 0,

@@ -7,7 +7,14 @@
 
 import type { Net, SimCircuit, SimFailure } from "./engine/sim-engine.js";
 
-export interface SolverDiagnostics {
+/**
+ * One worker batch's solver health on the classic engine. `engine` is optional
+ * so a host written before the core existed still builds this literal; absent
+ * means classic.
+ */
+export interface ClassicSolverDiagnostics {
+  /** Which engine produced the batch. Absent on records from before W2. */
+  engine?: "classic";
   steps: number;
   failedSteps: number;
   /** Converged trial steps rejected because the local transient error was too large. */
@@ -52,6 +59,74 @@ export interface SolverDiagnostics {
   matrixIllConditioned: boolean;
   relativeResidual: number;
 }
+
+/**
+ * The core's per-batch counters that have no classic counterpart (core/README.md
+ * "Stat indices"), as deltas over the batch; `maxDeltaDepth` is a level (the
+ * running maximum), not a delta. Hosts may show these in an engine-specific
+ * panel; nothing here is mapped onto a classic field it does not mean.
+ */
+export interface CoreStatDeltas {
+  /** Stat 4. The core's unit of advance; a quiet DC circuit does none. Not classic's `steps`. */
+  eventsProcessed: number;
+  deltaPasses: number;
+  maxDeltaDepth: number;
+  solutionCacheHits: number;
+  closedFormSegments: number;
+  crossings: number;
+  steppedSteps: number;
+  newtonIterations: number;
+  icEvaluations: number;
+  driverCommits: number;
+  railMoves: number;
+  railSensitivityComputations: number;
+  railScans: number;
+  railEvents: number;
+  sourceEdges: number;
+  readerFlips: number;
+  slowIntervalCloses: number;
+  slowEventsFired: number;
+  latches: number;
+  junctionRearms: number;
+  powerHoldsTaken: number;
+  powerHoldsReleased: number;
+  /** Stat 2, a level: nodes in the largest partition. Not classic's whole-circuit MNA `matrixSize`. */
+  largestPartitionNodes: number;
+  /** The batch's advance failed (-4 solve failed, which includes a singular solve, or -7). Not a rejected or minimum-size step. */
+  advanceFailed: boolean;
+  /** Stat 11 over stat 10: Newton iterations per stepped step over the batch (a mean, not the last solve's count). Absent when no stepped step ran. */
+  meanNewtonItersPerSteppedStep?: number;
+}
+
+/**
+ * One worker batch's solver health on the core (D17: only counters whose
+ * meaning matches classic's; every other classic field is absent, not
+ * faked). The mapping (src/core/diagnostics.ts):
+ * Only `engine` and the host's batch timing sit outside `core`. Every counter
+ * is published under `core` with its own name, because none means what a
+ * similarly named classic field means: events processed is not `steps`,
+ * solution-cache hits are not LU reuse after a restamp, IC evaluations are
+ * not truth-table cache misses, the largest partition is not the MNA size,
+ * the Newton mean is not `lastIters`, and a failed advance is not a rejected
+ * or minimum-size step. Stat 1 (static solves) is a load-time constant and is
+ * not published.
+ * `hitWallBudget` arrives with the advance wall budget (W2b).
+ */
+export interface CoreSolverDiagnostics {
+  engine: "core";
+  hitWallBudget?: boolean;
+  /** Fraction (0..1] of the requested batch sim-time interval actually simulated. */
+  batchCompletion?: number;
+  /** End-to-end wall time spent producing this worker batch (host-measured). */
+  batchWallUs?: number;
+  /** Fraction of the requested real-time rate achieved while computing this batch (host-measured). */
+  realtimeRatio?: number;
+  /** The counters with no classic equivalent, and those whose classic name would mislead. */
+  core: CoreStatDeltas;
+}
+
+/** Solver diagnostics from either engine; narrow on `engine === "core"`. */
+export type SolverDiagnostics = ClassicSolverDiagnostics | CoreSolverDiagnostics;
 
 /**
  * Uniform, noise-free simulator-domain samples captured inside one worker batch.

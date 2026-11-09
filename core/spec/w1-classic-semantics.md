@@ -752,7 +752,8 @@ Tests:
   (11 or 15 bits) is decoded live and `bytes[addr]` read. While a write is in
   flight, a read of the pending address returns DATA polling: bit 7
   complemented, bit 6 toggling on `pollReads` (1068-1076). `pollReads`
-  increments once per accepted pass (1138).
+  increments once per read cycle while busy (W2f change, see "EEPROM write
+  timing" below; it was once per accepted pass).
 - **Register-model inputs that are live:**
   - 74HC74 async `/PRE`/`/CLR` (636-647)
   - 74LS161 RCO from the live ENT pin (347-349)
@@ -762,7 +763,9 @@ Tests:
 **EEPROM write timing:**
 - A latch on `/WE` rise (with `/CE` low and `/OE` high) or on `/CE` rise (with
   `/WE` low and `/OE` high) (1117-1118) sets
-  `writeCompletesAt = ctx.simTime() + T_WC`, where `T_WC = 10e-3` (91, 1133).
+  `writeCompletesAt = ctx.simTime() + EEPROM_T_WC[kind]`, where `EEPROM_T_WC`
+  is 0.5 ms for the 28c16 and 10 ms for the 28c256 (W2f change; it was one
+  `T_WC = 10e-3` for both kinds, Q-W24).
 - Completion is checked with `ctx.simTime() >= writeCompletesAt` (1103).
 - `ctx.simTime()` is `engine.simTime`, the start of the interval
   (`sim-engine.ts:1929`), not `simTime + h`.
@@ -1799,9 +1802,18 @@ Reads of other addresses return the committed bytes
 3. The write is considered only if none is in flight. An edge during the busy
    window is ignored and never reaches SDP.
 4. `consumeEepromWrite` decides whether to accept. If accepted: `pendingAddr`,
-   `pendingByte`, `writeCompletesAt = simTime() + T_WC` (`T_WC = 10e-3`,
-   DI:91) and `pollReads = 0`.
-5. `pollReads` increments once per accepted step while busy (DI:1138).
+   `pendingByte`, `writeCompletesAt = simTime() + EEPROM_T_WC[kind]`
+   (`EEPROM_T_WC` in `digital-ics.ts`: 28c16 0.5 ms, 28c256 10 ms; W2f, was
+   `T_WC = 10e-3` for both) and `pollReads = 0`.
+5. `pollReads` increments once per READ CYCLE while busy (W2f; was once per
+   accepted step, DI:1138): the step on which /OE and /CE are both LOW having
+   not both been LOW at the previous committed step (`prevReadCycle`, a new
+   `EepromState` field journaled with the rest of the entry). The stamp of
+   that first step already shows the toggle the update is about to commit, so
+   a read is never one step behind. A read held LOW across many steps is one
+   read and does not move I/O6; this is the core's rule too (README, memories
+   point 4.4), so the `28c16-28c256-io6-write-poll-step-grid` divergence is
+   retired.
 6. `digitalState` io bits are published only when enabled and not busy.
 
 Timing notes:
@@ -1809,7 +1821,9 @@ Timing notes:
 - `writeCompletesAt` is not in `nextScheduledEventTime`, so the commit is not
   step-aligned.
 - There is no page-write mode.
-- One `T_WC` serves both 28c16 and 28c256 (Q-W24).
+- The write cycle is per kind (W2f, Q-W24 resolved): 28c16 0.5 ms (AT28C16
+  typical), 28c256 10 ms (AT28C256 maximum), one table (`EEPROM_T_WC`) read by
+  both classic and the core compiler.
 
 **SDP.** `sdpEnabled = kind==="28c256" && Number(sdpBypass ?? 0) === 0`
 (SE:2874), so 28c16 never has SDP. `consumeEepromWrite` (DI:105-118) works like
@@ -1953,7 +1967,7 @@ Consolidated in chapter 11: D4 (register delays), D5 (tri-state edges), D6
   250 ns (cd4017) and 550 ns (cd4060) but does not use them. The EEPROMs have
   no delay value at all.
 - EEPROM read access time is not modelled in classic; the only real EEPROM
-  timing classic models is T_WC = 10 ms.
+  timing classic models is the write cycle (W2f: 0.5 ms for the 28c16, 10 ms for the 28c256).
 - Classic re-baselining: classic's same-step-commit tests for these kinds will
   need re-baselining once delays exist.
 
@@ -5952,9 +5966,9 @@ a changed harness reference).
 - **Q-W23** [4,9] `28c16` is in `PASSIVE_FAILURE_UPDATE_KINDS` (`28c256` is not)
   but no EEPROM model has `updateFailures`; membership has no effect beyond the
   `vcc_range` scan. Confirm it is a stale entry.
-- **Q-W24** [4] Classic uses one `T_WC = 10 ms` (`DI:91`) for both 28c16 and
-  28c256. Check the 28C16 datasheet figure before the core's datasheet-delay
-  work adopts it (feeds Q-O1).
+- **Q-W24** [4] Classic used one `T_WC = 10 ms` (`DI:91`) for both 28c16 and
+  28c256. Resolved in W2f: the 28c16 takes the AT28C16 typical 0.5 ms in both
+  engines, the 28c256 keeps 10 ms (`EEPROM_T_WC`).
 
 ### 12.3 Resolved during assembly
 
@@ -6216,7 +6230,7 @@ Cross-cutting kinds the board touches without listing them: `voltage_source`
 **28c16**
 
 - **E1.** Beyond G4: classic's single `T_WC = 10 ms` for both EEPROM kinds
-  (Q-W24); the stale `PASSIVE_FAILURE_UPDATE_KINDS` entry (Q-W23); the possible
+  (Q-W24, since made per kind in W2f); the stale `PASSIVE_FAILURE_UPDATE_KINDS` entry (Q-W23); the possible
   false `output_sag` during DATA polling (Q-W11). The board never writes its
   EEPROMs (`/WE` tied HIGH), so only read behaviour is exercised.
 

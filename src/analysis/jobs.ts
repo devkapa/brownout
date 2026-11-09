@@ -32,6 +32,7 @@
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import type { ComponentKind } from "../circuit/types.js";
 import { resolveCatalogPart } from "../circuit/catalog-resolver.js";
+import type { AnalysisEngineChoice, AnalysisEngineKind } from "./engine.js";
 
 // ─── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ export interface DcSweepSpec {
   points: number;
   settleTimeS: number;
   outputs: SweepOutputSpec[];
+  engine?: AnalysisEngineChoice;
 }
 
 /**
@@ -111,6 +113,8 @@ export interface TempSweepSpec {
   points: number;
   settleTimeS: number;
   outputs: SweepOutputSpec[];
+  /** Which engine runs the analysis (default auto). A caller option of the same name wins. */
+  engine?: AnalysisEngineChoice;
 }
 
 // ─── Monte Carlo caps ─────────────────────────────────────────────────────────
@@ -197,6 +201,8 @@ export interface AcSweepSpec {
   points: number;
   /** Output nets to probe. */
   outputs: SweepOutputSpec[];
+  /** Which engine runs the analysis (default auto). A caller option of the same name wins. */
+  engine?: AnalysisEngineChoice;
 }
 
 /**
@@ -219,6 +225,8 @@ export interface MonteCarloSpec {
   seed: number;
   settleTimeS: number;
   outputs: SweepOutputSpec[];
+  /** Which engine runs the analysis (default auto). A caller option of the same name wins. */
+  engine?: AnalysisEngineChoice;
 }
 
 export type AnalysisJobSpec = DcSweepSpec | TempSweepSpec | AcSweepSpec | MonteCarloSpec;
@@ -245,6 +253,9 @@ export interface AnalysisJobResult {
   }>;
   pointFailures: string[][];
   cancelled: boolean;
+  /** The engine the whole run used (one choice per run) and why it is classic when it fell back. */
+  engine: AnalysisEngineKind;
+  fallbackReasons: string[];
 }
 
 /**
@@ -281,6 +292,8 @@ export interface AcSweepResult {
   pointFailures: string[][];
   notSettled: boolean[];
   cancelled: boolean;
+  engine: AnalysisEngineKind;
+  fallbackReasons: string[];
 }
 
 /**
@@ -311,6 +324,8 @@ export interface MonteCarloResult {
   }>;
   pointFailures: string[][];
   cancelled: boolean;
+  engine: AnalysisEngineKind;
+  fallbackReasons: string[];
 }
 
 /**
@@ -394,6 +409,13 @@ export function validateJobSpec(
   spec: AnalysisJobSpec,
   circuit: SimCircuit,
 ): string | null {
+  // A spec arrives over a worker message, so the engine choice is untrusted
+  // input like every other field: reject a typo rather than silently running
+  // it as `auto`.
+  if (spec.engine !== undefined && spec.engine !== "auto" && spec.engine !== "classic" && spec.engine !== "core") {
+    return 'engine must be "auto", "classic" or "core"';
+  }
+
   // ── Monte Carlo has its own validation path ───────────────────────────────
 
   if (spec.kind === "monte-carlo") {
