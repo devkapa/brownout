@@ -2753,6 +2753,12 @@ pub struct PartitionedSolver {
     /// not the draws' drift (`rail_passes` brings the stepped hub
     /// partitions to it on the rail they were planned on).
     rail_jump: bool,
+    /// Set by a host's live edit (`apply_params`) and cleared after the rail
+    /// loop that edit's instant runs (and at the next host step): on a CC rail capacitor the edit moves
+    /// the segment, not the rail, and a stepped hub partition already at the
+    /// instant plans its trial again on the new one (ruling R89 (a),
+    /// `rail_passes`).
+    host_edit: bool,
     /// The length of the host step (`advance` call) running, the guard's
     /// yardstick for a short hold (ruling R54 (a)); set by the kernel at
     /// each call, infinite before the first.
@@ -3031,6 +3037,7 @@ impl PartitionedSolver {
             retry_armed: true,
             at_clamp: false,
             rail_jump: false,
+            host_edit: false,
             host_step: f64::INFINITY,
             changes: hold::Changes::None,
             cc_switch,
@@ -4687,6 +4694,7 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn apply_params(&mut self, triples: &[(usize, usize, f64)]) -> Vec<PartitionId> {
+        self.host_edit = true;
         let mut touched = BTreeSet::new();
         let mut static_triples = Vec::new();
         for &(device_index, param_index, value) in triples {
@@ -4842,6 +4850,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn begin_host_step(&mut self, t_start: f64, t_end: f64) {
         self.host_step = t_end - t_start;
+        // A rolled-back edit restores its params through `apply_params`
+        // with no rail solve after it: nothing of it reaches the next host
+        // step.
+        self.host_edit = false;
     }
 
     /// Opens the window: nothing is copied. From here every slot of the

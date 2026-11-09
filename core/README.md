@@ -5399,7 +5399,14 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     rail loop is brought there the same way (defect D: one load put on a
     CC rail, a 10 uF settled at 3.5 V stepped its 1.9 ms gap on the new
     rail at the next host stop, 1.46 V, 566 W0, in both modes; two edges
-    at one instant swapping two loads, 647 W0 in default mode). A
+    at one instant swapping two loads, 647 W0 in default mode). On a rail
+    capacitor a host's live edit moves the CC segment rather than the
+    rail, and a stepped hub partition already at the edit's instant plans
+    its trial again on the new segment, as at a CC entry (ruling R89 (a):
+    cold 2575 tpl 2's trials, planned at a host stop before a switch freed
+    the rail from a source at -2.776 V, survived the edit, and the next
+    stop's clamp stepped the rail 0.22 ms with its 555's power judged at
+    the old rail, to 749.6 V and an 82M-event chase). A
     partition's own step, a `Rail` event and the horizon clamp move the
     rail as the draws drift, which each step's coupling bound covers, and
     keep the re-aim (FXEFv). A promoted partition's CC steps hold
@@ -5463,6 +5470,17 @@ Recorded at the W1g integration. None changes a rule above until it lands.
     chip slide at its edge, is the fix; the hand oracle is the ignored
     `cold_482_tpl4_default_mode_follows_the_hand_rail` (exact mode's,
     `cold_482_tpl4_exact_mode_follows_the_hand_rail`, passes);
+  - **a 555 held off on its own CC rail capacitor's ramp** (rulings G with
+    R68, R91 (a); R89 (a)'s finding): cold 2575 tpl 2's 555 has VCC, TRIG,
+    THR and DIS on a {4.984 V, 106.6 mA} PSU's rail over 11.9 nF; powered
+    at its 1.8 V edge it loads the rail past the limit, and off nothing
+    holds the rail under the edge, so no power state holds. Default mode
+    holds it off at the edge once per episode (each switch toggle starts
+    one) and the rail goes on to CV at 4.984 V, held off there by
+    convention; exact mode declines at 30.0846 ms through R54 (a)'s guard,
+    and classic stalls at 1.81 V (a decline with a diagnostic on its
+    `fix/rail-ic-power-chatter`). R53's sliding hold settles the physics
+    (`a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_toggle`);
   - rail excursions on the cold fuzz (1-800, hub 2, 5,600 runs; F5m's
     tree): 9 runs publish a rail more than 0.1 mV outside their sources'
     range, all 9 as at 1a84f72 and 8 the same size as at c5b1a13

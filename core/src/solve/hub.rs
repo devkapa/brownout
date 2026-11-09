@@ -1590,6 +1590,13 @@ impl PartitionedSolver {
     /// at most `RAIL_LOOP_MAX` passes. Schedules the next rail event after a
     /// solve.
     pub(super) fn rail_loop(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        // A host's edit is this instant's only (ruling R89 (a)).
+        let result = self.rail_loop_passes(now, drivers, readers);
+        self.host_edit = false;
+        result
+    }
+
+    fn rail_loop_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
         if self.exact.is_some() {
             return self.exact_after_publish(now, drivers, readers);
         }
@@ -1748,6 +1755,18 @@ impl PartitionedSolver {
                     jumped = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
                     caught.extend_from_slice(&jumped);
                 }
+            }
+            // On rail capacitors a host's edit does not step the rail: it moves
+            // its segment (the draws it charges at changed), and a hub
+            // partition already at `now` plans its trial again on the new one,
+            // as at an entry (`SteppedSolver::replan`, ruling R68). Ruling R89
+            // (a), cold 2575 tpl 2: a switch opened at a host stop freed a CC
+            // rail from a source at -2.776 V, and the trials planned there
+            // before the edit, on the rail the source held, survived it; the
+            // host's next stop clamped the rail 0.22 ms up the capacitor with
+            // its 555's power judged at the old rail, never on, to 749.6 V.
+            if !regime_changed && self.host_edit && self.hub.as_ref().is_some_and(|h| h.state.reg == Regime::Cc && h.c_rail > 0.0 && h.state.cap_seg != seg_before) {
+                replan.extend(self.stepped.hub_partitions().into_iter().filter(|&p| !jumped.contains(&p) && self.stepped.committed(p).is_some_and(|(t, _)| t == now)));
             }
             self.sync_hub_cache_band();
             self.sync_rail_drive();
