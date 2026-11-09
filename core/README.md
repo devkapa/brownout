@@ -1055,9 +1055,12 @@ run that followed the snapshot, any number of times. Snapshots are taken and
 restored between calls only, so no instant is ever half done in one.
 - **Not restored: the stats.** They are telemetry and read on monotonically
   across a restore: each counter keeps counting from its live value, and
-  stat 6 (a maximum) never reads below the largest it has shown. Internally
-  the counters go back with the state, so logic that reads one, R86's event
-  cap, counts against the same events it was taken with. Classic restores 7
+  stat 6 (a maximum) never reads below the largest it has shown. The counters
+  themselves go back with the state, and `bo_engine_stat` adds a per-stat
+  offset that the restore sets to the published value before it minus the
+  restored count, so logic that reads a counter, R86's event cap, counts
+  against the same events it was taken with, and a restored run stays bit
+  for bit the same. Classic restores 7
   diagnostics with its state; that is a registered divergence.
 - **Not restored: R86's busy clock.** It is wall time. The progress window
   re-anchors at the restore, to (busy now, the restored time), since a
