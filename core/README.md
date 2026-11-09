@@ -1350,10 +1350,10 @@ message builders live in `src/core/failures.ts`, which the facade calls):
      against the fine reference): 12 closer, 142 within 0.05 W0, 2 farther:
      300/0 (a resistor's burn latch, ruling R80's subject) and 214/5 (1.0 to
      1.59 W0 at 6.3 ms, a trap-option board's start-up; divergence log,
-     R88). Cold 61/5 and 505/5 decline (`-4`) where they ran: each sat at a
-     chip's or the rail Newton's edge already (fixed-host failures 4 of 20
-     and 1 of 20 before), on the R53 list (R88). Cold 360/3 runs where it
-     declined: its decline was the trapezoid's.
+     R88). Cold 61/5 declines (`-4`) where it ran: it sat at a chip's power
+     edge already (fixed-host failures 4 of 20 before), on the R53 list
+     (R88); 505/5 did at the rail Newton's edge until R80's stepped stress.
+     Cold 360/3 runs where it declined: its decline was the trapezoid's.
 7. **Rollback.** A failed instant (`-4`, `-7`, in `advance` or
    `set_params`) restores every piece of solver state the attempt touched:
    published arrays (the channel array included, W1e, LEDs point 16), each

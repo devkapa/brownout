@@ -12775,26 +12775,15 @@ fn a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge() {
     // The step is cut at the floor, as at the setpoint, so the chip's power
     // flips at that commit's rail solve, and the run goes on.
     //
-    // INT-ACC, ruling R88: the run now declines at the next such edge, 0.3892
-    // s, the rail Newton not converging there either (`-4`, on the R53 list).
-    // The edge was as close before: 0950536 failed there on 1 of 20 fixed
-    // host steps (4.7 ms among them), the floor estimate's held steps (R78
-    // (a)) on 5 of 20.
+    // INT-ACC (ruling R88) declined it at the next such edge, 0.3892 s (the
+    // rail Newton not converging); on R80's stepped stress it runs through
+    // again.
     let p = { let mut p = program(5, cold_505_tpl5()); p.digital_slot_count = 32; p };
     let stops: [f64; STOPS_505.len()] = STOPS_505;
     let mut e = Engine::load(&p).unwrap();
     for &t in &stops {
-        match e.advance(t) {
-            Ok(()) => assert!(t < 0.3892, "past the edge at {t}"),
-            Err(er) => {
-                assert_eq!(er.code, -4, "{}", er.message);
-                assert!(er.message.contains("the rail Newton did not converge"), "{}", er.message);
-                assert_eq!(t, 0.4172932478090943, "declined in the host step over the edge at 0.3892 s (rolled back to {})", e.time());
-                return;
-            }
-        }
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} at {}: {}", er.code, e.time(), er.message));
     }
-    panic!("ran past the rail Newton's edge at 0.3892 s");
 }
 
 const STOPS_505: [f64; 60] = [0.006272879571408905, 0.0072785054032582005, 0.017876457538686583, 0.018062886736138067, 0.018340502711687582, 0.02336229275905534, 0.03731104997307824, 0.037618554404920436, 0.038439311441490744, 0.03908783214516494, 0.039386454964519674, 0.04715109307293887, 0.056699242152804606, 0.056824490802280254, 0.05888527331802057, 0.059124089362100486, 0.05928655907634512, 0.0987567251478853, 0.11209473731118556, 0.1566669504946821, 0.1575207447526295, 0.18580802788194342, 0.18951967976761797, 0.19077110226964777, 0.1916870068860743, 0.20621913239321335, 0.20691562034439767, 0.20727761824740132, 0.20741492218813548, 0.20752859482385222, 0.20779185173384274, 0.22299673055917238, 0.2236406810111467, 0.22947657715238745, 0.23198271164301645, 0.23341168368260118, 0.2343051786433487, 0.2516176401706743, 0.25616393068783705, 0.2933665858089527, 0.3276966916619526, 0.3278697129857167, 0.32808620367788355, 0.3284254096619142, 0.33115954603093894, 0.33949753737674004, 0.37231679693597775, 0.37399489161947114, 0.3741727172839677, 0.3761215318740903, 0.3773743730054749, 0.37767444041233944, 0.4172932478090943, 0.4278969012092656, 0.42841611805988244, 0.42883785451457257, 0.43275199815425797, 0.43332230116377113, 0.43353983556620085, 0.44447736049582365];
