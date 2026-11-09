@@ -107,9 +107,11 @@ impl Walk {
 
 /// The heap bytes a value owns: what a clone of it allocates, with each
 /// shared allocation counted once per [`Walk`]. The inline size is the
-/// container's. Every engine type implements it (most generated, at the end
-/// of each module; `test_the_walk_matches_what_a_copy_allocates` holds them
-/// to a counting allocator).
+/// container's. Every engine type implements it: most impls are generated
+/// at the end of each module by `core/scripts/gen_heap_bytes.py` (rerun it
+/// with `--write` after changing an engine type's fields; `--check` reports a
+/// stale section), and `the_walk_counts_what_a_copy_allocates` holds them to
+/// a counting allocator.
 pub trait HeapBytes {
     fn heap_bytes(&self, w: &mut Walk) -> usize;
 }
