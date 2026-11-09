@@ -52,14 +52,17 @@ pub enum StressDrive {
     /// Static, fixed-pair and one stepped step (the step's end rate held over
     /// the step, SE:5510-5531 backward rule): `S' = rate` when `rate > 0`,
     /// else `S' = -recovery`.
-    Constant { rate: f64, recovery: f64 },
+    /// `zero` is the rate's zero level, `rate = q - zero` for the ratio `q`
+    /// the kind integrates (1 for a resistor, fuse or LED; the PTC's hold
+    /// current squared), which a stepped step's mean needs ([`Self::over_step`]).
+    Constant { rate: f64, recovery: f64, zero: f64 },
     /// A closed-form segment.
     Segment(SegmentRate),
 }
 
 impl StressDrive {
     /// Nothing accumulates: the state of a device that sits at rate 0.
-    pub const IDLE: StressDrive = StressDrive::Constant { rate: 0.0, recovery: 0.0 };
+    pub const IDLE: StressDrive = StressDrive::Constant { rate: 0.0, recovery: 0.0, zero: 1.0 };
 
     /// Whether `S` can grow under this drive. A reset skips an entry that sits
     /// at 0 under a drive that cannot, so a reset does not touch (and journal)
@@ -95,7 +98,7 @@ impl StressDrive {
             return s0;
         }
         match self {
-            StressDrive::Constant { rate, recovery } => constant_value(s0, *rate, *recovery, t - t0),
+            StressDrive::Constant { rate, recovery, .. } => constant_value(s0, *rate, *recovery, t - t0),
             StressDrive::Segment(seg) => match seg.collapsed() {
                 Some(constant) => constant.value_after(s0, t0, t),
                 None => seg.value_after(s0, t0, t),
@@ -119,14 +122,64 @@ impl StressDrive {
         }
     }
 
+    /// The drive a stepped step holds over itself (rulings R80 (a), R84
+    /// (B)), from the drives at the step's own start state (`start`) and end
+    /// state (`end`), in place of classic's backward rule (the end rate held
+    /// over the step, which under-counts a rate that falls through the step:
+    /// a 555 astable's timing resistors take most of their stress in the
+    /// discharge's exponential spikes, and burnt 5-17 % late).
+    ///
+    /// The rate is `q - zero` for a ratio `q` (`P/pMax`, `(I/limit)^2`, the
+    /// PTC's `I^2`), and it is `q` that relaxes exponentially in time across
+    /// an RC step, so where either end accumulates the step holds the
+    /// logarithmic mean of the two `q`s less `zero` (an end at rate 0 taken at
+    /// the zero level, which it is at or under: continuous as an end's rate
+    /// falls to 0). The mean of the rates themselves read 0.26 for 0.82 on
+    /// `q` from 1.001 to 3, and the trapezoid 2.72 for a CV tail of 0.86 by
+    /// hand on cold 535 tpl 2. Exact for `q = A e^(kt)`; for `q = (a + b
+    /// e^(-t/tau))^2` with `a b >= 0` (a voltage relaxing to a nonzero level)
+    /// `ln q` is convex with curvature at most 1/2 per tau^2, so the mean
+    /// over-counts by at most `exp((h/tau)^2 / 16) - 1` (1.6 % at h = tau/2;
+    /// the trapezoid's error on a pure exponential is `(h/tau)^2 / 3`). Where
+    /// neither end accumulates the step bleeds at the mean recovery. A closed
+    /// form on either side has nothing to average and keeps `end`.
+    pub fn over_step(start: StressDrive, end: StressDrive) -> StressDrive {
+        let (StressDrive::Constant { rate: r0, recovery: k0, .. }, StressDrive::Constant { rate: r1, recovery: k1, zero }) = (start, end) else {
+            return end;
+        };
+        if r0 > 0.0 || r1 > 0.0 {
+            let rate = log_mean(r0.max(0.0) + zero, r1.max(0.0) + zero) - zero;
+            StressDrive::Constant { rate: rate.max(0.0), recovery: k1, zero }
+        } else {
+            StressDrive::Constant { rate: 0.0, recovery: 0.5 * (k0.max(0.0) + k1.max(0.0)), zero }
+        }
+    }
+
     /// The time a bleeding integrator reaches 0: `None` unless it is bleeding
     /// from a positive value at a positive recovery (a closed-form segment
     /// returns `None` too: its entry is dropped lazily at the next close).
     pub fn zero_time(&self, s0: f64, t0: f64) -> Option<f64> {
         match self {
-            StressDrive::Constant { rate, recovery } => bleed_zero_time(s0, t0, *rate, *recovery),
+            StressDrive::Constant { rate, recovery, .. } => bleed_zero_time(s0, t0, *rate, *recovery),
             StressDrive::Segment(seg) => seg.collapsed().and_then(|constant| constant.zero_time(s0, t0)),
         }
+    }
+}
+
+/// The logarithmic mean `(b - a) / ln(b / a)` of two positive values, the
+/// mean of `A e^(kt)` over a span it runs from `a` to `b`; symmetric. With
+/// `a <= b`, `b - a` is exact (Sterbenz) wherever the two are near, and
+/// `ln(b / a)` is `ln_1p((b - a) / a)` to a few ulps, so the quotient keeps
+/// its digits down to `(b - a) / a` of 1e-8, under which its 0/0 is replaced
+/// by the series `a (1 + d/2)`, `d = (b - a) / a`, whose next term `d^2/12`
+/// is under 1e-17.
+pub fn log_mean(a: f64, b: f64) -> f64 {
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    let d = (b - a) / a;
+    if d < 1e-8 {
+        a * (1.0 + 0.5 * d)
+    } else {
+        (b - a) / d.ln_1p()
     }
 }
 
@@ -242,7 +295,7 @@ impl SegmentRate {
     /// the kernel schedules.
     fn collapsed(&self) -> Option<StressDrive> {
         let volts = self.v.constant_value()?;
-        Some(StressDrive::Constant { rate: self.k * volts * volts - self.c, recovery: self.recovery })
+        Some(StressDrive::Constant { rate: self.k * volts * volts - self.c, recovery: self.recovery, zero: self.c })
     }
 
     fn rate_s(&self, s: f64) -> f64 {
@@ -481,9 +534,9 @@ impl PtcParams {
     /// (PA:798). At exactly the hold current the rate is 0 and nothing bleeds.
     pub fn untripped_constant(&self, current: f64) -> StressDrive {
         if current >= self.i_hold {
-            StressDrive::Constant { rate: (current * current - self.i_hold * self.i_hold).max(0.0), recovery: 0.0 }
+            StressDrive::Constant { rate: (current * current - self.i_hold * self.i_hold).max(0.0), recovery: 0.0, zero: self.i_hold * self.i_hold }
         } else {
-            StressDrive::Constant { rate: 0.0, recovery: self.bleed_rate() }
+            StressDrive::Constant { rate: 0.0, recovery: self.bleed_rate(), zero: self.i_hold * self.i_hold }
         }
     }
 
@@ -736,21 +789,21 @@ mod tests {
     #[test]
     fn linear_latch_times_come_from_the_model() {
         // Resistor at 2x: P/pMax - 1 = 1, threshold 1: t = 1.0.
-        let resistor = StressDrive::Constant { rate: 2.0 - 1.0, recovery: 1.0 };
+        let resistor = StressDrive::Constant { rate: 2.0 - 1.0, recovery: 1.0, zero: 1.0 };
         assert!((resistor.time_to_reach(0.0, 0.0, RESISTOR_THRESHOLD).unwrap() - 1.0).abs() < 1e-15);
         // Fuse at 2x (1 A through 0.5 A): (I/iRating)^2 - 1 = 3, threshold 0.3: t = 0.1.
-        let fuse = StressDrive::Constant { rate: (1.0f64 / 0.5).powi(2) - 1.0, recovery: 0.3 };
+        let fuse = StressDrive::Constant { rate: (1.0f64 / 0.5).powi(2) - 1.0, recovery: 0.3, zero: 1.0 };
         assert!((fuse.time_to_reach(0.0, 0.0, FUSE_THRESHOLD).unwrap() - 0.1).abs() < 1e-15);
         // PTC at 2x hold (1 A, iHold 0.5): I^2 - iHold^2 = 0.75 against 3*0.5*0.5*0.1 = 0.075.
         let ptc = PtcParams { r_normal: 0.5, i_hold: 0.5 };
         let drive = ptc.untripped_constant(1.0);
-        assert_eq!(drive, StressDrive::Constant { rate: 0.75, recovery: 0.0 });
+        assert_eq!(drive, StressDrive::Constant { rate: 0.75, recovery: 0.0, zero: 0.25 });
         assert!((ptc.trip_threshold() - 0.075).abs() < 1e-15);
         assert!((drive.time_to_reach(0.0, 0.0, ptc.trip_threshold()).unwrap() - 0.1).abs() < 1e-14);
         // From a nonzero start and a later t0.
         assert!((resistor.time_to_reach(0.25, 3.0, RESISTOR_THRESHOLD).unwrap() - 3.75).abs() < 1e-15);
         // No rate, no event; already at the threshold is due now.
-        assert_eq!(StressDrive::Constant { rate: 0.0, recovery: 1.0 }.time_to_reach(0.5, 0.0, 1.0), None);
+        assert_eq!(StressDrive::Constant { rate: 0.0, recovery: 1.0, zero: 1.0 }.time_to_reach(0.5, 0.0, 1.0), None);
         assert_eq!(resistor.time_to_reach(1.0, 4.0, 1.0), Some(4.0));
     }
 
@@ -758,27 +811,27 @@ mod tests {
     fn recovery_bleeds_floor_at_zero_and_find_the_zero_time() {
         // Recoveries 1 (resistor), 0.3 (fuse) and 2 (LED) per second from 0.5.
         for (recovery, after_0_2, zero_at) in [(1.0, 0.3, 0.5), (0.3, 0.44, 0.5 / 0.3), (2.0, 0.1, 0.25)] {
-            let drive = StressDrive::Constant { rate: 0.0, recovery };
+            let drive = StressDrive::Constant { rate: 0.0, recovery, zero: 1.0 };
             assert!((drive.value_after(0.5, 0.0, 0.2) - after_0_2).abs() < 1e-15, "recovery {recovery}");
             assert_eq!(drive.value_after(0.5, 0.0, zero_at + 1.0), 0.0, "floored at 0");
             assert!((drive.zero_time(0.5, 0.0).unwrap() - zero_at).abs() < 1e-15);
             assert!(!drive.accumulates());
         }
         // A negative recovery never grows the integrator (classic clamps it).
-        assert_eq!(StressDrive::Constant { rate: 0.0, recovery: -1.0 }.value_after(0.5, 0.0, 2.0), 0.5);
+        assert_eq!(StressDrive::Constant { rate: 0.0, recovery: -1.0, zero: 1.0 }.value_after(0.5, 0.0, 2.0), 0.5);
         // Accumulating drives have no zero time.
-        assert_eq!(StressDrive::Constant { rate: 1.0, recovery: 1.0 }.zero_time(0.5, 0.0), None);
+        assert_eq!(StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0 }.zero_time(0.5, 0.0), None);
         // The PTC bleeds at 0.125 per second at iHold 0.5.
         let ptc = PtcParams { r_normal: 0.5, i_hold: 0.5 };
         let bleed = ptc.untripped_constant(0.4);
-        assert_eq!(bleed, StressDrive::Constant { rate: 0.0, recovery: 0.125 });
+        assert_eq!(bleed, StressDrive::Constant { rate: 0.0, recovery: 0.125, zero: 0.25 });
         assert!((bleed.value_after(0.05, 0.0, 0.2) - 0.025).abs() < 1e-15);
     }
 
     #[test]
     fn close_commits_and_value_at_projects() {
         let mut s = Stress::new(1.0, 2.0);
-        s.drive = StressDrive::Constant { rate: 0.5, recovery: 1.0 };
+        s.drive = StressDrive::Constant { rate: 0.5, recovery: 1.0, zero: 1.0 };
         let before = s;
         assert_eq!(s.value_at(4.0), 1.0);
         assert_eq!(s, before, "a projection never writes");
@@ -793,7 +846,7 @@ mod tests {
     #[test]
     fn reset_zeroes_the_value_and_keeps_the_drive() {
         let mut s = Stress::new(1.0, 2.0);
-        s.drive = StressDrive::Constant { rate: 0.5, recovery: 1.0 };
+        s.drive = StressDrive::Constant { rate: 0.5, recovery: 1.0, zero: 1.0 };
         s.s0 = 0.4;
         s.reset(10.0);
         assert_eq!((s.s0, s.t0), (0.0, 10.0));
@@ -1333,5 +1386,96 @@ mod tests {
         let drive = ptc.untripped_segment(ExpVoltage::new(0.5, 0.0, 0.0, 0.0));
         let t = drive.time_to_reach(0.0, 0.0, ptc.trip_threshold()).expect("a trip time");
         assert!((t - 0.1).abs() < 1e-14, "{t}");
+    }
+
+    // ---- a stepped step's mean (rulings R80 (a), R84 (B)) -------------------
+
+    /// `S'` over one step of length 1 for a ratio `q(t)`, by the midpoint rule
+    /// on a fine grid: the integral the step's mean stands for.
+    fn step_integral(q: impl Fn(f64) -> f64, zero: f64) -> f64 {
+        let n = 200_000;
+        (0..n).map(|k| (q((k as f64 + 0.5) / n as f64) - zero).max(0.0)).sum::<f64>() / n as f64
+    }
+
+    fn step_rate(r0: f64, r1: f64) -> f64 {
+        let at = |rate: f64| StressDrive::Constant { rate, recovery: 1.0, zero: 1.0 };
+        match StressDrive::over_step(at(r0), at(r1)) {
+            StressDrive::Constant { rate, .. } => rate,
+            other => panic!("a constant drive, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_steps_mean_is_exact_for_a_ratio_exponential_in_time() {
+        // A ratio q = A e^(kt) over the step, falling or rising: the step's
+        // rate is the integral of q - 1 to the grid's 1e-9. The first is q from
+        // 1.001 to 3, where the logarithmic mean of the rates themselves (0.001
+        // and 2) reads 0.263 and the trapezoid 1.0005; the last cold 104 tpl
+        // 6's discharge spike, q from 94 to 27 (trapezoid 59.5).
+        for (q0, q1, by_hand) in [(1.001f64, 3.0f64, 0.8212), (2.0, 30.0, 9.3395), (94.0, 27.0, 52.7092)] {
+            let exact = step_integral(|t| q0 * (q1 / q0).powf(t), 1.0);
+            let got = step_rate(q0 - 1.0, q1 - 1.0);
+            assert!((got - exact).abs() <= 1e-9 * exact.max(1.0), "q {q0} -> {q1}: {got} against {exact}");
+            assert!((got - by_hand).abs() <= 1e-4, "q {q0} -> {q1}: {got} against {by_hand} by hand");
+        }
+    }
+
+    #[test]
+    fn a_steps_mean_is_continuous_as_an_end_falls_to_the_zero_level() {
+        // An end at rate 0 is taken at the zero level, the limit of an end
+        // whose rate falls to 0, so a rate of 1e-12 and of 0 hold the same.
+        for r1 in [2.0, 0.5, 300.0] {
+            let (at_0, near_0) = (step_rate(0.0, r1), step_rate(1e-12, r1));
+            assert!((at_0 - near_0).abs() <= 1e-11, "end rate {r1}: {at_0} at 0, {near_0} at 1e-12");
+            assert_eq!(step_rate(r1, 0.0), at_0, "the mean is symmetric in its ends");
+        }
+    }
+
+    #[test]
+    fn a_step_whose_ratio_crosses_the_zero_level_holds_between_the_integral_and_the_trapezoid() {
+        // q from 0.9 to 3 crosses 1 inside the step: the end at rate 0 is read
+        // at the zero level, so the mean (0.8205) over-counts the integral
+        // (0.7487) by the step's stretch under the level, and stays under the
+        // trapezoid's 1.0; the same falling, q from 3 to 0.5 (0.5031).
+        for (q0, q1) in [(0.9f64, 3.0f64), (3.0, 0.5)] {
+            let exact = step_integral(|t| q0 * (q1 / q0).powf(t), 1.0);
+            let got = step_rate((q0 - 1.0f64).max(0.0), (q1 - 1.0f64).max(0.0));
+            let trapezoid = 0.5 * ((q0 - 1.0f64).max(0.0) + (q1 - 1.0f64).max(0.0));
+            assert!(got >= exact && got < trapezoid, "q {q0} -> {q1}: {got}, integral {exact}, trapezoid {trapezoid}");
+            assert!((got - 0.8205).abs() <= 1e-4, "{got}");
+        }
+    }
+
+    #[test]
+    fn the_log_mean_of_near_equal_ends_is_their_series() {
+        // (b - a) / ln(b / a) is 0/0 at a = b: the series a (1 + d/2 - d^2/12
+        // + d^3/24) against the quotient at d = 1e-6, the two sides of the
+        // switch at d = 1e-8, and a = b.
+        assert_eq!(log_mean(50.0, 50.0), 50.0);
+        let d = 1e-6;
+        let series = 50.0 * (1.0 + d / 2.0 - d * d / 12.0 + d * d * d / 24.0);
+        assert!((log_mean(50.0, 50.0 * (1.0 + d)) - series).abs() <= 4e-16 * 50.0, "{} against {series}", log_mean(50.0, 50.0 * (1.0 + d)));
+        for a in [1e-3, 1.0, 50.0, 1e6] {
+            let (under, over) = (log_mean(a, a * (1.0 + 0.999e-8)), log_mean(a, a * (1.0 + 1.001e-8)));
+            assert!((over - under) / a >= 0.0 && (over - under) / a <= 2e-11 + 4e-16, "a {a}: {under} under the switch, {over} over it");
+            assert_eq!(log_mean(a, 3.0 * a), log_mean(3.0 * a, a), "symmetric");
+        }
+        assert!((log_mean(2.0, 30.0) - 28.0 / 15.0f64.ln()).abs() <= 1e-15 * 10.0);
+    }
+
+    #[test]
+    fn a_step_that_accumulates_at_neither_end_bleeds_at_the_mean_recovery() {
+        let idle = |recovery: f64| StressDrive::Constant { rate: 0.0, recovery, zero: 1.0 };
+        assert_eq!(StressDrive::over_step(idle(1.0), idle(2.0)), StressDrive::Constant { rate: 0.0, recovery: 1.5, zero: 1.0 });
+    }
+
+    #[test]
+    fn a_ptcs_constant_drive_carries_its_hold_current_squared_as_its_zero_level() {
+        // An untripped PTC's rate is I^2 - I_hold^2: q = I^2, zero I_hold^2.
+        let ptc = PtcParams { r_normal: 0.5, i_hold: 0.5 };
+        let StressDrive::Constant { zero, .. } = ptc.untripped_constant(1.0) else { panic!("a constant drive") };
+        assert_eq!(zero, 0.25);
+        let StressDrive::Constant { zero, .. } = ptc.untripped_constant(0.1) else { panic!("a constant drive") };
+        assert_eq!(zero, 0.25);
     }
 }

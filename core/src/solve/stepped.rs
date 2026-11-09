@@ -305,6 +305,11 @@ pub(crate) struct Committed {
     pub t1: f64,
     pub nodes: Vec<(usize, f64)>,
     pub rail: Option<(usize, f64)>,
+    /// The step's own start state, as `nodes` and `rail` hold its end
+    /// (rulings R80 (a), R84 (B): its stress is the mean of the drives at
+    /// the two); `None` for the first step after a re-seed, which keeps its
+    /// end rate.
+    pub start: Option<Vec<(usize, f64)>>,
 }
 
 /// One partition's view of a [`CcRail`]: the rest of the draw without its
@@ -1803,6 +1808,23 @@ impl SteppedSolver {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
     }
 
+    /// Partition `p`'s state at the start `t0` of a step from `x0` (ruling
+    /// R80 (a)): its own nodes there, and the nodes its stepped devices read
+    /// outside it as the commit finds them, a running ramp where it was at
+    /// `t0`. A CC rail is read as published: where the step before left it,
+    /// or where a rail solve at `t0` put it (an entry or a landing lands it
+    /// at its own level: cold 507 tpl 4 at 0.0200 V, the step before ending
+    /// at 0.01997 V). The trial's `u0` is the rail it was planned from, a
+    /// step behind (cold 535 tpl 2: 3.622 V where the last step had carried
+    /// the rail to 3.632 V, which read the LED at 1180/s for 1603/s).
+    fn start_state(&self, p: usize, x0: &[f64], t0: f64, voltages: &[f64]) -> Vec<(usize, f64)> {
+        let part = &self.partitions[&p];
+        let mut start: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(x0.iter().copied()).collect();
+        let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), t0);
+        start.extend(self.trail_reads.get(p).into_iter().flatten().map(|&n| (n, bnd.get(n))));
+        start
+    }
+
     /// Partition `p`'s pending trial as a [`Committed`] would hold it: from
     /// its committed time to the trial's end, at the trial's own end
     /// voltages, its CC rail and its boundary at that end (ruling R71 (b): a
@@ -1816,7 +1838,8 @@ impl SteppedSolver {
         let mut nodes: Vec<(usize, f64)> = part.shape.nodes.iter().copied().zip(part.pend_x.iter().copied()).collect();
         let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.pend_t);
         nodes.extend(self.trail_reads.get(p).into_iter().flatten().map(|&n| (n, bnd.get(n))));
-        Some(Committed { p, t0: part.t, t1: part.pend_t, nodes, rail })
+        let start = part.has_prev.then(|| self.start_state(p, &part.x, part.t, voltages));
+        Some(Committed { p, t0: part.t, t1: part.pend_t, nodes, rail, start })
     }
 
     /// Where the step partition `p` committed at `now` started: its last
@@ -1965,6 +1988,7 @@ impl SteppedSolver {
         if self.defer == Some(p) {
             self.bills.push((self.partitions[&p].pend_t, charge));
         }
+        let reseeded = !self.partitions[&p].has_prev;
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
@@ -1987,7 +2011,8 @@ impl SteppedSolver {
             // ended, and blew on 34 mA).
             let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), part.t);
             nodes.extend(self.trail_reads[p].iter().map(|&n| (n, bnd.get(n))));
-            self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail });
+            let start = (!reseeded).then(|| self.start_state(p, &part.prev_x, part.prev_t, voltages));
+            self.trail.push(Committed { p, t0: part.prev_t, t1: part.t, nodes, rail, start });
         }
         #[cfg(test)]
         self.commit_log.push((p, self.partitions[&p].t));

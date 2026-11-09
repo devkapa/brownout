@@ -1429,6 +1429,27 @@ impl PartitionedSolver {
     /// the loop moved to (55/2's PTC read 1 mV under its step's own end and
     /// tripped at the host's step). A latch the step's end drive reaches
     /// inside the step fires now, recorded where the integral crossed.
+    /// Device `i`'s drives at committed step `c`'s start state (at `c.t0`)
+    /// and at its end state (at `c.t1`), each read with the step's own
+    /// voltages over the published ones.
+    fn step_drives(&mut self, i: usize, c: &stepped::Committed) -> (Option<Drives>, Drives) {
+        let start = c.start.as_ref().map(|s| self.drives_over(i, s, c.t0));
+        let end: Vec<(usize, f64)> = c.nodes.iter().chain(c.rail.iter()).copied().collect();
+        (start, self.drives_over(i, &end, c.t1))
+    }
+
+    fn drives_over(&mut self, i: usize, over: &[(usize, f64)], at: f64) -> Drives {
+        let saved: Vec<(usize, f64)> = over.iter().map(|&(n, _)| (n, self.voltages[n])).collect();
+        for &(n, v) in over {
+            self.voltages[n] = v;
+        }
+        let drives = self.drives(i, at);
+        for (n, v) in saved.into_iter().rev() {
+            self.voltages[n] = v;
+        }
+        drives
+    }
+
     fn close_stepped_trail(&mut self, now: f64) {
         if self.stepped.trail.is_empty() {
             return;
@@ -1442,32 +1463,37 @@ impl PartitionedSolver {
                 if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(dev) {
                     continue;
                 }
-                let over: Vec<(usize, f64)> = c.nodes.iter().chain(c.rail.iter()).copied().collect();
-                let saved: Vec<(usize, f64)> = over.iter().map(|&(n, _)| (n, self.voltages[n])).collect();
-                for &(n, v) in &over {
-                    self.voltages[n] = v;
-                }
-                let drives = self.drives(i, c.t1);
-                for (n, v) in saved {
-                    self.voltages[n] = v;
-                }
+                let (start, drives) = self.step_drives(i, c);
                 let mut due = None;
                 if let (Some(new), true) = (drives.stress, self.slow.stress(dev).is_some()) {
+                    // Rulings R80 (a), R84 (B): the step holds the mean of its
+                    // start and end drives, and the end drive from its end.
+                    let held = start.as_ref().and_then(|d| d.stress).map_or(new, |s0| StressDrive::over_step(s0, new));
                     let s = self.sw().stress_mut(dev).expect("checked above");
                     s.close(c.t0);
-                    s.drive = new;
+                    s.drive = held;
                     match s.latch_time() {
                         Some(t) if t <= c.t1 => due = Some((t, SlowEventKind::StressLatch)),
-                        _ => s.close(c.t1),
+                        _ => {
+                            s.close(c.t1);
+                            s.drive = new;
+                        }
                     }
                 }
                 if let Some(PtcDrive::Stress(new)) = drives.ptc.filter(|_| self.slow.ptc(dev).is_some_and(|p| !p.tripped)) {
+                    let held = match start.as_ref().and_then(|d| d.ptc) {
+                        Some(PtcDrive::Stress(s0)) => StressDrive::over_step(s0, new),
+                        _ => new,
+                    };
                     let e = self.sw().ptc_mut(dev).expect("checked above");
                     e.close(c.t0);
-                    e.set_drive(PtcDrive::Stress(new));
+                    e.set_drive(PtcDrive::Stress(held));
                     match e.next_event() {
                         Some((t, PtcEvent::Trip)) if t <= c.t1 && due.is_none_or(|(d, _)| t < d) => due = Some((t, SlowEventKind::PtcTrip)),
-                        _ => e.close(c.t1),
+                        _ => {
+                            e.close(c.t1);
+                            e.set_drive(PtcDrive::Stress(new));
+                        }
                     }
                 }
                 self.slow_scratch.trailed.push(i as u32);
@@ -1489,21 +1515,22 @@ impl PartitionedSolver {
         let _ = now;
         let dev = self.slow_model.devs[i].device;
         let c = self.slow_model.devs[i].parts.iter().filter(|&&p| self.partition_kinds[p] == PartitionKind::Stepped).find_map(|&p| self.stepped.pending_end(p, &self.voltages))?;
-        let over: Vec<(usize, f64)> = c.nodes.iter().chain(c.rail.iter()).copied().collect();
-        let saved: Vec<(usize, f64)> = over.iter().map(|&(n, _)| (n, self.voltages[n])).collect();
-        for &(n, v) in &over {
-            self.voltages[n] = v;
-        }
-        let drives = self.drives(i, c.t1);
-        for (n, v) in saved {
-            self.voltages[n] = v;
-        }
+        // The trial's step is judged as its commit will close it (ruling R80
+        // (a), R84 (B)): on the mean of its start and end drives.
+        let (start, drives) = self.step_drives(i, &c);
         let stress = match (drives.stress, self.slow.stress(dev)) {
-            (Some(drive), Some(s)) if !self.slow.is_failed(dev) => crate::slow::stress::Stress { drive, ..*s }.latch_time(),
+            (Some(drive), Some(s)) if !self.slow.is_failed(dev) => {
+                let drive = start.as_ref().and_then(|d| d.stress).map_or(drive, |s0| StressDrive::over_step(s0, drive));
+                crate::slow::stress::Stress { drive, ..*s }.latch_time()
+            }
             _ => None,
         };
         let trip = match (drives.ptc, self.slow.ptc(dev)) {
             (Some(PtcDrive::Stress(drive)), Some(e)) if !e.tripped => {
+                let drive = match start.as_ref().and_then(|d| d.ptc) {
+                    Some(PtcDrive::Stress(s0)) => StressDrive::over_step(s0, drive),
+                    _ => drive,
+                };
                 let mut e = *e;
                 e.set_drive(PtcDrive::Stress(drive));
                 e.next_event().filter(|&(_, k)| k == PtcEvent::Trip).map(|(t, _)| t)
@@ -2039,7 +2066,7 @@ impl PartitionedSolver {
                         Some(v) => StressDrive::Segment(SegmentRate { k: if sd.r_power > 0.0 { sd.r_power / (r * r * sd.p_max) } else { 0.0 }, c: 1.0, recovery: failures::RESISTOR_RECOVERY, v }),
                         None => {
                             let d = failures::resistor_overload(dv, r, sd.r_power, sd.p_max);
-                            StressDrive::Constant { rate: d.rate, recovery: d.recovery }
+                            StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
                         }
                     });
                 }
@@ -2062,7 +2089,7 @@ impl PartitionedSolver {
                     }
                     None => {
                         let d = failures::fuse_tripped(self.device_volts(i, now), r_normal, i_rating);
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery }
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
                     }
                 });
             }
@@ -2093,11 +2120,11 @@ impl PartitionedSolver {
                         // Every junction at or under the voltage where it
                         // carries `ifMax`: `peakI <= ifMax`, so the rate is
                         // `max(0, r^2 - 1)` with `r <= 1`, exactly 0.
-                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY }
+                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0 }
                     } else {
                         let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
                         let d = failures::led_failed(peak, led::if_max(&e.device).unwrap_or(0.0));
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery }
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
                     });
                 }
                 if sd.thermal {

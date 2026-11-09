@@ -4381,9 +4381,31 @@ Constants:
        (Rails point 4) the trajectory carries the rail's terms too, which
        no single exponential holds; such a device is re-anchored instead
        (ruling R21, below).
-     - **Stepped:** the drive at the step's end voltages, held over the step:
-       classic's backward rule (`rate·h` from the accepted step's solution,
-       SE:5510-5531, 6029-6054). Over the step only: an idle visit (R38
+     - **Stepped:** the mean of the drives at the step's own start and end
+       states, held over the step (rulings R80 (a), R84 (B)), where classic
+       holds the end drive (its backward rule, `rate·h` from the accepted
+       step's solution, SE:5510-5531, 6029-6054; divergence D37). The rate is
+       `q − zero` for the ratio `q` a kind integrates (`P/pMax` or
+       `(I/limit)^2`, zero 1; a PTC's `I^2`, zero `I_hold^2`;
+       `StressDrive::Constant::zero`), and `q` relaxes exponentially across an
+       RC step, so where either end accumulates the step holds the
+       logarithmic mean of the two `q`s less `zero`, an end at rate 0 taken
+       at the zero level (`StressDrive::over_step`, `log_mean`); where
+       neither does it bleeds at the mean recovery. That mean is exact for `q
+       = A e^(kt)` and over-counts `q = (a + b e^(−t/τ))^2` (`ab ≥ 0`) by at
+       most `exp((h/τ)^2/16) − 1`; the backward rule under-counts a falling
+       rate by about `h/2τ_q` and burnt a 555 astable's timing resistors 5-17
+       % late in exact mode, where default mode's closed form met the hand
+       integral (cold 104, 282, 7, 570 tpl 6:
+       `a_stepped_resistors_stress_is_the_mean_of_its_steps_start_and_end_states`),
+       and a clock-driven LED's drain spikes a whole clock fall late (cold
+       414 tpl 0: 7.77 per fall for 9.6 by hand). The first step after a
+       re-seed has no start state of its own and keeps its end drive. The
+       start state is the partition's own nodes at the step's start and its
+       outside reads as the commit finds them, a running ramp at the start: a
+       CC rail is read as published, where the step before left it or a
+       rail solve at the start put it (the trial's `u0` is a step behind).
+       Over the step only: an idle visit (R38
        (a)) writes nothing and leaves `t0` behind, so up to the start of
        the step the visit closes each integrator on the drive it had; and
        after a re-solve at `now` (an event's, a promotion's) what is
@@ -4396,7 +4418,7 @@ Constants:
        step that follows, the device's stepped partitions first brought to
        it with the stamps they had; a latch only the step's own end drive
        reaches fires at that commit. When the predicted latch comes, the
-       step then running decides: its trial's own end drive crosses before
+       step then running decides: its trial's own mean drive crosses before
        then, or the latch waits for that step (cold 535 tpl 2: an LED's CC
        rate held forward past the CC exit latched it at 15.0 ms where by hand
        its damage tops out at 22.8 of 24). At the step's end with the end rate,

@@ -13673,11 +13673,16 @@ fn exact_mode_closes_a_stepped_step_that_ends_at_a_clock_edge_with_its_own_end_d
     close(s0, 0.0, 1e-9, "no damage over the high phase");
     rig.advance(fall + 2e-6).unwrap();
     assert!(!rig.s().slow.is_failed(10), "the LED survives the first fall");
-    // The backward rule (W1g point 2) charges each step its end rate, a
-    // right sum of a falling integrand: at or under the integral, here by
-    // the drain's steps of about a fifth of tau (12.3 of 14.71 measured).
+    // Each step holds the mean of its start and end drives (rulings R80
+    // (a), R84 (B)); the first after the fall keeps its end rate. The window
+    // is 15 % either side for this board only (R84): the drain the core
+    // steps is no single exponential, the trapezoidal step ringing on it
+    // (node 5 at -2.90, -2.53, -3.02 V while the rail capacitor falls 8.30,
+    // 5.26, 4.06, 2.50 V), so any two-point mean misses the hand
+    // exponential's integral: 16.08 measured, 12.3 under classic's backward
+    // rule. Stress-aware step control on a ringing drain is a follow-up.
     let s1 = rig.s().slow.stress(10).map(|s| s.value_at(fall + 2e-6)).unwrap();
-    assert!(s1 <= 14.71 * 1.01 && s1 >= 0.8 * 14.71, "the first drain's damage integral {s1} against 14.71 by hand");
+    assert!((s1 - 14.71).abs() <= 0.15 * 14.71, "the first drain's damage integral {s1} against 14.71 by hand");
 }
 
 /// Cold fuzz 789 tpl 3 as its sweep ran it (`f5e gen 789 3`), to 0.3 s (its
@@ -14848,5 +14853,149 @@ fn rated_devices_on_a_settled_rail_segment_re_anchor_on_its_decayed_rates() {
         let e = sweep_run(&p, &toggles, &stops).unwrap_or_else(|(e, t)| panic!("{name}: {} at {t}: {}", e.code, e.message));
         assert!((e.time() - 1.2).abs() < 1e-12, "{name} reached {}", e.time());
         assert!(e.stat(4) < 50_000.0, "{name}: {} events to 1.2 s", e.stat(4));
+    }
+}
+
+fn cold_104_tpl6() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![8.687150581769643, 1.180118773796576], vec![]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![2191.237251268685], vec![]),
+        fz(1, 3, &[2, 3], vec![852.654212038412], vec![]),
+        fz(3, 4, &[3, 0], vec![1.0154847829101675e-7, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![1023.6384695918451], vec![]),
+        fz(30, 7, &[5, 0], vec![3.2276682801520256, 2.08777834869681, 0.005037545679024358, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 8, &[4, 0], vec![16.86101837494531], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.002365034093071564, 2191.237251268685], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.0003943049059350338, 852.654212038412], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.010711382735221682, 1023.6384695918451], vec![]),
+        fz(90, 8, &[], vec![8.0, 1.9439833317903972, 16.86101837494531], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.digital_slot_count = 32;
+    p.options.no_rail_shortcut = true;
+    p.options.integration = 1;
+    p
+}
+
+const COLD_104_TPL6_STOPS: &[f64] = &[0.006272879830282593, 0.006960822680210238, 0.03071029095223489, 0.041479051031954955, 0.04726268692453734, 0.05045957180685165, 0.05211002263275876, 0.05232404780116879, 0.05255293663601682, 0.07666730054396512, 0.08352946186073991, 0.08393607249334734, 0.09363782624136749, 0.09392697172623517, 0.09577386995266314, 0.09764821222649518, 0.09820365539657783, 0.09998862057558866, 0.10069605184992905, 0.14];
+
+fn cold_282_tpl6() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![13.292070515256059, 0.7573386050355044], vec![]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![278.08852894571385], vec![]),
+        fz(1, 3, &[2, 3], vec![2173.1937015167937], vec![]),
+        fz(3, 4, &[3, 0], vec![6.172520612032082e-6, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![21.68480848123426], vec![]),
+        fz(30, 7, &[5, 0], vec![1.6415888198857833, 1.595416792681203, 0.035732733875483286, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 8, &[4, 0], vec![582.7161311356624], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.04362890187070934, 278.08852894571385], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.0008651100548062045, 2173.1937015167937], vec![]),
+        fz(90, 6, &[], vec![6.0, 2.5837621206687995, 21.68480848123426], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0006899432167843668, 582.7161311356624], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p.options.no_rail_shortcut = true;
+    p.options.integration = 1;
+    p
+}
+
+const COLD_282_TPL6_STOPS: &[f64] = &[0.00627287906594856, 0.007759280870621779, 0.019473317143096153, 0.019582017040386174, 0.028210273278552245, 0.04418788592979969, 0.04972810566492482, 0.059732951588839414, 0.06424379020161758, 0.06736620232207068, 0.06816774509004235, 0.07190852553600559, 0.07673162631625222, 0.12];
+
+fn cold_7_tpl6() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![4.921430677373768, 1.8943974603642248], vec![]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![12141.990038265814], vec![]),
+        fz(1, 3, &[2, 3], vec![1065.4650562552722], vec![]),
+        fz(3, 4, &[3, 0], vec![5.1806354724289366e-6, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![385.22426114176847], vec![]),
+        fz(30, 7, &[5, 0], vec![2.0481761097158655, 1.8315076018960104, 0.007398767899840754, 0.0, 0.0, 0.0], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.00013698247125092347, 12141.990038265814], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.027755271666707194, 1065.4650562552722], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00038101217437008783, 385.22426114176847], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p.options.no_rail_shortcut = true;
+    p.options.integration = 0;
+    p
+}
+
+const COLD_7_TPL6_STOPS: &[f64] = &[0.006272879599356148, 0.016698232994375808, 0.017516190773174106, 0.0210471593856631, 0.023700230091663114, 0.024218131306263185, 0.024882135080202174, 0.03190567475933873, 0.04152108682251448, 0.05457620614236116, 0.05475715862700885, 0.05502787837056468, 0.055240284308500524, 0.05547824214556055, 0.07018945334296087, 0.0753977036576992, 0.12439770398421504, 0.12631407096851402, 0.1361452360811551, 0.14576710069909615, 0.15032218991751076, 0.19816592540611697, 0.19834690583834919, 0.20593281067285235, 0.2083771599560474, 0.21564673292461814, 0.2157682989750026, 0.2179475877035891, 0.24408607702474405, 0.27639781167971944, 0.2766101985117782, 0.28246624787966285, 0.29573011299706525, 0.33];
+
+fn cold_570_tpl6() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![13.647403951331636, 0.048202624113554284], vec![]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![2891.6365905004805], vec![]),
+        fz(1, 3, &[2, 3], vec![6742.850827704528], vec![]),
+        fz(3, 4, &[3, 0], vec![1.3945407714519867e-6, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![572.6007815138817], vec![]),
+        fz(30, 7, &[5, 0], vec![3.343020326655086, 2.055198801293253, 0.03362483906776208, 0.0, 0.0, 0.0], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.0044231187020022465, 2891.6365905004805], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.00028827904257487045, 6742.850827704528], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.16471244672539137, 572.6007815138817], vec![]),
+    ];
+    let mut p = program(8, devices);
+    p.digital_slot_count = 32;
+    p.options.no_rail_shortcut = true;
+    p.options.integration = 1;
+    p
+}
+
+const COLD_570_TPL6_STOPS: &[f64] = &[0.006272880886146131, 0.007785429794059074, 0.01542749630025457, 0.01633988555851327, 0.016683463569004787, 0.018343443761369482, 0.01853056749373825, 0.02600908587079125, 0.06855045350713991, 0.07705821184659765, 0.07764466706352305, 0.08324367010259509, 0.08338214093907599, 0.10876267700558855, 0.1150744200194748, 0.11618454136287167, 0.12382987425673352, 0.13];
+
+/// The resistor latches (device, time) an exact-mode 555 astable board records
+/// over `stops`.
+fn resistor_latches(p: &Program, stops: &[f64]) -> Vec<(usize, f64)> {
+    let mut e = Engine::load(p).unwrap_or_else(|er| panic!("load: {}", er.message));
+    for &t in stops {
+        e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} {}", er.code, er.message));
+    }
+    e.records(0).unwrap().chunks(7).filter(|c| c[1] == 1.0).map(|c| (c[0] as usize, c[3])).collect()
+}
+
+#[test]
+fn a_stepped_resistors_stress_is_the_mean_of_its_steps_start_and_end_states() {
+    // Rulings R80 (a), R84 (B): a stepped device's stress over a committed
+    // step is the mean of the drive at the step's own start state and at its
+    // end state (the logarithmic mean of the ratio the rate is taken from).
+    // Classic's backward rule held the end rate over the step; on a
+    // 555 astable's timing resistors, which take most of their stress in the
+    // discharge's exponential spikes, it under-counted by 5-17 % in exact
+    // mode (the rail's partition stepped), where default mode's closed form
+    // matched the hand integral. Hand values from an independent model of
+    // each board (ideal supply, thresholds at Vcc/3 and 2 Vcc/3, DIS 10 ohm,
+    // S' = max(0, P/Pmax - 1), a latched resistor open):
+    // - 104 tpl 6 (R1 2191, R2 853 ohm rated 0.39 mW, 0.1 uF, 8.69 V): R2
+    //   carries 3.6-6.6 mA through each discharge and burns at 0.072553 s,
+    //   freezing the capacitor; R1 then burns at 0.128156 s on the DIS
+    //   current. The backward rule burnt R2 at 0.0851 s.
+    // - 282 tpl 6 (R1 278, R2 2173 ohm, 6.2 uF, 13.29 V): R2 at 0.044604 s,
+    //   R1 at 0.107587 s; the backward rule burnt R2 at 0.0499 s, in another
+    //   phase, and R1 never.
+    // - 7 tpl 6 (R1 12142, R2 1065 ohm, 5.2 uF, 4.92 V, Euler): R1 at
+    //   0.307912 s; the backward rule at 0.3240 s.
+    // - 570 tpl 6 (R1 2892, R2 6743 ohm, 1.4 uF, 13.65 V): R2 at 0.062948 s,
+    //   R1 at 0.119089 s; the backward rule burnt R2 at 0.0691 s and R1 never.
+    let boards: [(&str, Program, &[f64], &[(usize, f64)]); 4] = [
+        ("104/6", cold_104_tpl6(), COLD_104_TPL6_STOPS, &[(3, 0.072553), (2, 0.128156)]),
+        ("282/6", cold_282_tpl6(), COLD_282_TPL6_STOPS, &[(3, 0.044604), (2, 0.107587)]),
+        ("7/6", cold_7_tpl6(), COLD_7_TPL6_STOPS, &[(2, 0.307912)]),
+        ("570/6", cold_570_tpl6(), COLD_570_TPL6_STOPS, &[(3, 0.062948), (2, 0.119089)]),
+    ];
+    for (name, p, stops, hand) in boards {
+        let got = resistor_latches(&p, stops);
+        for &(d, t) in hand {
+            let at = got.iter().find(|r| r.0 == d).map(|r| r.1);
+            assert!(at.is_some_and(|a| (a - t).abs() <= 0.02 * t), "{name}: R{} (device {d}) burns at {at:?}, by hand {t} s", d - 1);
+        }
     }
 }
