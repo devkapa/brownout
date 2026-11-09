@@ -4529,7 +4529,7 @@ impl PartitionedSolver {
         let drivers = Rc::clone(&self.driver_snapshot);
         let rail = self.rail_loop(now, &drivers, readers);
         self.on_error(rail)?;
-        if let Some(a) = gates.and_then(|g| self.count_gate_flip(g)) {
+        if let Some(a) = gates.and_then(|g| self.count_gate_flip(g, !is_crossing)) {
             let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());
             self.on_error(result)?;
             self.hub.as_mut().unwrap().state.gate_flips = 0;

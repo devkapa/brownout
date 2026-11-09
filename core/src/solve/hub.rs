@@ -19,6 +19,12 @@ use crate::solve::live::{RampEval, Schedule, WaveSource};
 /// charge by one bit, and one or two suffice.
 const TIE_STEPS: u32 = 8;
 
+/// How many of a stepped hub partition's own steps that flip nothing a
+/// power-gate chase spans (ruling R82 (B'), `count_gate_flip`): after a flip
+/// the partition restarts at `H_MIN` (10 ns) and doubles, about ten steps to
+/// regrow to 10 us, and cold 757 tpl 0's chase re-crosses in 11 to 13.
+const CHASE_REGROWTH: u32 = 16;
+
 /// Whether a draining cell's closed-form hub partitions advance on their
 /// coupled path (`rails::cell_modes`, ruling R16 (B)) rather than each on
 /// its own pull and the drain's line, the others' first order.
@@ -748,6 +754,8 @@ impl PartitionedSolver {
             settle_changed: false,
             gate_flips: 0,
             gates_before: Vec::new(),
+            gates_after: Vec::new(),
+            quiet_steps: 0,
             held_draw: Vec::new(),
         };
         let parts = self.partition_kinds.len();
@@ -2338,7 +2346,7 @@ impl PartitionedSolver {
         let gates = self.rail_gates();
         let result = self.rail_loop(now, &drivers, &mut readers);
         self.on_error(result)?;
-        if let Some(a) = self.count_gate_flip(gates) {
+        if let Some(a) = self.count_gate_flip(gates, false) {
             // W1c point 1a across instants: the gates flipped back at the
             // second event in a row, so the rail ICs that flipped are probed
             // at this one.
@@ -2372,16 +2380,37 @@ impl PartitionedSolver {
     /// event that flips nothing ends the run, and so does any other event
     /// (see [`Self::end_gate_chase`]); the horizon clamp does not, since a
     /// caller stepping event by event clamps after each one.
-    pub(super) fn count_gate_flip(&mut self, before: Vec<bool>) -> Option<Vec<usize>> {
+    ///
+    /// Ruling R82 (B'): on a CC rail capacitor's segment, a stepped hub
+    /// partition's own step (`restart`) that flips nothing leaves the run
+    /// standing for up to [`CHASE_REGROWTH`] such steps, when it starts from
+    /// the gates the last flip left. The capacitor holds the rail through a
+    /// flip, which restarts the partition at `H_MIN`, and the steps that
+    /// regrow from there carry the rail back across the same edge: the chase
+    /// is the same, spread over those steps (cold 757 tpl 0: a 555 in reset
+    /// sinking 82.8 mA through a 71.8 mA supply at its 1.8 V floor, 11 to 13
+    /// steps between flips, about 170 us a cycle, no hold, 6,805 steps in a
+    /// 45 ms host step). Off a segment a flip moves the rail at the instant,
+    /// and a step that starts from other gates found them set by something
+    /// else: either ends the run as before (cold 108 tpl 5: a 74LS00 on a
+    /// rail with no capacitor, whose flips at its floor throw the rail to 7.1
+    /// V and back, which exact mode runs through).
+    pub(super) fn count_gate_flip(&mut self, before: Vec<bool>, restart: bool) -> Option<Vec<usize>> {
         let after = self.rail_gates();
         let state = &mut self.hub.as_mut().unwrap().state;
         if after == before {
-            state.gate_flips = 0;
+            if restart && state.cap_seg.is_some() && state.gate_flips > 0 && before == state.gates_after && state.quiet_steps < CHASE_REGROWTH {
+                state.quiet_steps += 1;
+            } else {
+                state.gate_flips = 0;
+            }
             return None;
         }
         state.gate_flips = if state.gate_flips > 0 && after == state.gates_before { state.gate_flips + 1 } else { 1 };
         let flipped: Vec<usize> = before.iter().zip(&after).enumerate().filter(|(_, (b, a))| b != a).map(|(k, _)| k).collect();
         state.gates_before = before;
+        state.gates_after = after;
+        state.quiet_steps = 0;
         (state.gate_flips >= 2).then(|| self.rail_ic_devices(&flipped))
     }
 

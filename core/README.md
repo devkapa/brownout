@@ -5802,10 +5802,23 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     next over it, and ran free between the holds its rail loops took (cold
     301 tpl 2: 49 holds and an 11.5 s first advance of 6.3 ms; 204 tpl 5,
     279 tpl 5, G2bv's fz_ic 6 hub 2 alike). A `Rail` event or hub step that
-    flips nothing ends the count, and so do a source edge and another
-    partition's event when the rail solves again in that call (a clock
-    swinging a load across a floor every half period is no ping-pong); a
-    commit does not (the gate's own outputs and a zero-delay reader of them
+    flips nothing ends the count, except on a CC rail capacitor's segment,
+    where up to 16 of the stepped hub partition's own steps that flip
+    nothing, each starting from the gates the last flip left, keep it
+    standing (ruling R82 (B')): the capacitor holds the rail through a flip,
+    the partition restarts at `H_MIN`, and the steps that regrow from there
+    carry the rail back across the edge (cold 757 tpl 0: a 555 in reset
+    sinking 82.8 mA through a 71.8 mA supply chattered at its 1.8 V floor
+    every 170 µs, 11 to 13 steps between flips and no hold, 6,805 steps in a
+    45 ms host step; it now declines at 0.1745 s through the guard, exact
+    mode at 0.1723 s, and stays an R53 item; off a segment cold 108 tpl 5's
+    74LS00 throws a capacitorless rail to 7.1 V and back at its floor, which
+    exact mode runs through:
+    `a_rail_ic_chased_across_its_own_partitions_restart_steps_is_held`,
+    `a_rail_ic_flipping_off_a_rail_capacitor_is_not_counted_across_its_steps`).
+    A source edge ends it too, and so does another partition's event when
+    the rail solves again in that call (a clock swinging a load across a
+    floor every half period is no ping-pong); a commit does not (the gate's own outputs and a zero-delay reader of them
     answer the ping-pong), nor does the horizon clamp. The repro is held at the floor crossing,
     1.4421592 ms, and freed at 1.62047 ms when the PSU leaves CC, 472 events
     to 3 ms (it declined at 424 before F5). Pins:

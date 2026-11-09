@@ -1485,6 +1485,12 @@ pub struct RailState {
     /// hold procedure runs), and the gates before the last of them.
     pub gate_flips: u32,
     pub gates_before: Vec<bool>,
+    /// The gates the last of those flips left, and how many of a stepped
+    /// hub partition's own steps on a rail capacitor's segment have flipped
+    /// nothing since (ruling R82 (B'): they leave the run standing,
+    /// `CHASE_REGROWTH` at most).
+    pub gates_after: Vec<bool>,
+    pub quiet_steps: u32,
     /// The rail ICs (device indices) held off on a CC rail capacitor's
     /// segment, each with the draw its being powered adds, `dir` signed, from
     /// the hold's probes (ruling R44 (a)): such a chip is released only where,

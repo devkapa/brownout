@@ -14186,3 +14186,117 @@ fn a_stepped_latch_predicted_from_a_falling_rate_waits_for_the_steps_it_falls_in
     assert!(!rig.s().slow.is_failed(8), "the LED latched (S peaked at {peak})");
     assert!((peak - 22.8).abs() <= 0.05 * 22.8, "S peaks at {peak}, by hand 22.8");
 }
+
+fn cold_757_tpl0() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![12.55536651140569, 0.07175978736463227], vec![]),
+        fz(1, 1, &[2, 0], vec![193087.79499371018], vec![]),
+        fz(1, 2, &[3, 0], vec![18521.038002834935], vec![]),
+        fz(1, 3, &[4, 0], vec![116743.52822351363], vec![]),
+        fz(1, 4, &[3, 4], vec![9.5030121689896], vec![]),
+        fz(30, 5, &[1, 2], vec![2.6589948197773783, 1.6162173702828613, 0.035422923785642726, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 6, &[1, 1], vec![88.70770747871579], vec![]),
+        fz(1, 7, &[3, 2], vec![139.84254079217789], vec![]),
+        fz(10, 8, &[1, 2], vec![0.6363705875911793, 0.520692898999944], vec![]),
+        fz(3, 9, &[1, 0], vec![0.0011258032507684215, 3.48657095217715, 0.0], vec![]),
+        fz(40, 10, &[1, 0, 1, 2, 0, 1, 0, 4], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 11, &[1, 4], vec![38191.54118418172], vec![]),
+        fz(1, 12, &[4, 0], vec![50399.407580564475], vec![]),
+        fz(3, 13, &[0, 0], vec![8.395189886874198e-8, 0.0, 0.0], vec![]),
+        fz(1, 14, &[2, 0], vec![776.4179254184078], vec![]),
+        fz(1, 15, &[0, 2], vec![416.3016266812649], vec![]),
+        fz(3, 16, &[0, 0], vec![4.8537797738921665e-6, 0.0, 0.0], vec![]),
+        fz(13, 17, &[4, 0], vec![0.05495852872765491, 0.037060356438221025], vec![]),
+        fz(30, 18, &[2, 0], vec![2.6282409780138005, 2.0950830697546556, 0.017529062722669603, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 19, &[1, 2], vec![18.49418242129856], vec![]),
+        fz(3, 20, &[2, 0], vec![0.004944123567185785, 0.0, 0.0], vec![]),
+        fz(1, 21, &[2, 0], vec![35684.191910148096], vec![]),
+        fz(90, 4, &[], vec![4.0, 0.03317655608161077, 9.5030121689896], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.006333577366600456, 88.70770747871579], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.0033964198577820584, 139.84254079217789], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.0012476403385135381, 38191.54118418172], vec![]),
+        fz(90, 12, &[], vec![12.0, 7.176592215921902e-5, 50399.407580564475], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.13346510582182602, 776.4179254184078], vec![]),
+        fz(90, 19, &[], vec![19.0, 0.34002880010579595, 18.49418242129856], vec![]),
+    ];
+    let mut p = program(5, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_rail_ic_chased_across_its_own_partitions_restart_steps_is_held() {
+    // Ruling R82 (B'), cold 757 tpl 0: a 555 held in reset (RESET at 0) on
+    // a {12.56 V, 71.76 mA} PSU's rail with 1.13 mF (3.49 ohm) on it; its OUT
+    // pin, LOW, sinks 82.8 mA from node 2 (0.64 ohm fuse and 4.94 mF to the
+    // rail's side), past the limit. By hand, powered, the rail settles at
+    // about 1.41 V, under the chip's 1.8 V floor, and off, node 2's loads
+    // take about 6.6 mA, so the rail climbs past it: no power state holds,
+    // and the rail slides at 1.8 V with the chip powered x = (71.76 - 6.6) /
+    // 82.8 = 0.79 of the time (R53's class). Exact mode declines it at
+    // 0.1723 s through ruling R54 (a)'s guard. In default mode the rail
+    // capacitor's CC step carried the rail across the edge, and after each
+    // flip the partition restarted at H_MIN, so about 13 steps that flipped
+    // nothing lay between flips: each ended the chase count, no hold ran, and
+    // the chip chattered at ~170 us for as long as it ran (6,805 steps in a
+    // 45 ms host step).
+    let stops = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2];
+    let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
+    for &t in &stops {
+        if let Err(err) = rig.advance(t) {
+            let at = rig.k.time();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("held 51 times in one sliding episode"), "{msg}");
+            assert!((at - 0.1723).abs() <= 0.01, "declined at {at} s, exact mode at 0.1723 s");
+            assert!((rig.u() - 1.8).abs() <= 1e-4 + 1e-3 * 1.8, "the rail at {} V, by hand on the 555's 1.8 V floor", rig.u());
+            return;
+        }
+    }
+    panic!("the 555 chattered at its power edge to {} s with {} holds", rig.k.time(), rig.s().hold_stats()[0]);
+}
+
+fn cold_108_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![11.3202882887201, 0.03459077386322441], vec![]),
+        fz(1, 1, &[2, 0], vec![268661.33594287507], vec![]),
+        fz(1, 2, &[3, 0], vec![13401.875266756893], vec![]),
+        fz(1, 3, &[4, 0], vec![42379.72563549372], vec![]),
+        fz(1, 4, &[5, 0], vec![698676.4113034616], vec![]),
+        fz(1, 5, &[6, 0], vec![135156.75598749088], vec![]),
+        fz(3, 6, &[1, 3], vec![7.714598469201561e-7, 0.0, 0.0], vec![]),
+        fz(1, 7, &[4, 0], vec![33766.93589489301], vec![]),
+        fz(3, 8, &[3, 5], vec![6.592198340546241e-6, 0.0, 0.0], vec![]),
+        fz(50, 9, &[1, 0, 3, 3, 3, 0, 0, 1, 0, 0, 1, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.7951945369129708e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 10, &[3, 1], vec![404.4181104053365], vec![]),
+        fz(1, 11, &[1, 5], vec![48.78236835368356], vec![]),
+        fz(3, 12, &[1, 4], vec![0.010129635396223535, 0.19263911685269025, 0.0], vec![]),
+        fz(30, 13, &[0, 5], vec![2.842892286888211, 1.528311681120797, 0.039684320515477906, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 14, &[0, 0], vec![35.426427739042936], vec![]),
+        fz(3, 15, &[5, 2], vec![3.601981866910648e-5, 0.06428047465974664, 0.0], vec![]),
+        fz(3, 16, &[6, 0], vec![1.9308361169247496e-5, 0.01461543153104114, 0.0], vec![]),
+        fz(1, 17, &[6, 5], vec![118.61938041262384], vec![]),
+        fz(90, 7, &[], vec![7.0, 4.571267934805499e-5, 33766.93589489301], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.0024178672389142362, 404.4181104053365], vec![]),
+        fz(90, 11, &[], vec![11.0, 4.35356122116446, 48.78236835368356], vec![]),
+        fz(90, 14, &[], vec![14.0, 0.01584240439083085, 35.426427739042936], vec![]),
+    ];
+    let mut p = program(7, devices);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_rail_ic_flipping_off_a_rail_capacitor_is_not_counted_across_its_steps() {
+    // Ruling R82 (B')'s pin, cold 108 tpl 5: a 74LS00 on a {11.32 V, 34.6
+    // mA} PSU's rail with no rail capacitor, the rail climbing through the
+    // chip's 4.275 V floor on its way to CV at 11.32 V. From 0.90 ms the
+    // chip's flips at its floor throw the rail to 7.1 V and back, with up to
+    // 15 steps that flip nothing between them; counting through those steps
+    // off a rail capacitor's segment declined this board at 0.9 ms. Exact
+    // mode runs it, the rail in CV at 11.3203 V at 10 ms.
+    let mut rig = Rig::load(&cold_108_tpl5()).unwrap();
+    for t in [0.006272879839431231, 0.006418348458282123, 0.00949764155495048, 0.009882438911885259, 0.01] {
+        rig.advance(t).unwrap_or_else(|e| panic!("{e:?} at {:.9} s", rig.k.time()));
+    }
+    assert!((rig.u() - 11.3203).abs() <= 1e-4 + 1e-3 * 11.3203, "the rail at {} V, exact mode 11.3203 V", rig.u());
+}
