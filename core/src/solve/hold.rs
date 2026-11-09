@@ -333,6 +333,10 @@ pub(crate) struct Episode {
     /// lower then upper, past which one end of its duty's bracket stops
     /// bracketing, Filippov's exit (`slide_exits`; infinite: none).
     pub(crate) exits: (f64, f64),
+    /// While the IC slides on a capacitor's segment: the same exit as draw
+    /// thresholds, lower then upper, on its rail's draw at its edge, `dir`
+    /// signed (`slide_exits`, `slide_draw_watches`; infinite: none).
+    pub(crate) draw_exits: (f64, f64),
     /// Its slide could not be followed (`keep_sliding`'s fallback): held as
     /// before ruling R92 until the circuit changes, which drops every hold
     /// and episode.
@@ -378,6 +382,7 @@ impl Default for Episode {
             slope: 0.0,
             solved_at: 0.0,
             exits: (f64::NEG_INFINITY, f64::INFINITY),
+            draw_exits: (f64::NEG_INFINITY, f64::INFINITY),
             unfollowed: false,
             s_held: 0.0,
             released_at: f64::NEG_INFINITY,
@@ -1118,8 +1123,8 @@ impl PartitionedSolver {
         Ok(self.slide_residual(now, d))
     }
 
-    /// Filippov's exit for a slide off a capacitor's segment (ruling R92,
-    /// the class-A exit watch): the supply levels past which one end of
+    /// Filippov's exit (ruling R92). Off a capacitor's segment (class A):
+    /// the supply levels past which one end of
     /// the duty's bracket stops bracketing, read from the probes at the ends
     /// themselves, duty 0 and 1, at the instant of the solve. Each end's
     /// residual is its own supply's distance past the edge, outward, so it
@@ -1137,7 +1142,10 @@ impl PartitionedSolver {
     /// An end the solve did not probe is probed here and the duty solved
     /// again after; one whose probe fails (or that does not bracket, a slide
     /// kept across a jump) is no exit. Kept as they were when the solve
-    /// left the duty as it was; none on a capacitor's segment.
+    /// left the duty as it was. On a segment (class B), the same exit as
+    /// draw thresholds (`draw_exits`, below): HG1's CC ramp, left to the W0
+    /// re-solves 22 us apart, held its duty at 0.942 5.8 us past the exit,
+    /// 1y 7.4 W0 under the fine reference.
     #[allow(clippy::too_many_arguments)]
     fn slide_exits(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, cp: &mut Option<Checkpoint>, ends: SlideEnds) -> Result<(), String> {
         if ends.evals == 0 {
@@ -1145,19 +1153,45 @@ impl PartitionedSolver {
         }
         let mut episode = self.episode(d);
         episode.exits = (f64::NEG_INFINITY, f64::INFINITY);
-        if !self.slide_flat && self.segment_draw(now).is_none() {
-            let x = self.power_hold(d).kind.weight();
-            let mut r = ends.at;
-            let mut probed = false;
-            for (e, xe) in [(0usize, 0.0), (1, 1.0)] {
-                if r[e].is_none() {
-                    r[e] = self.slide_probe(now, drivers, readers, d, err, cp, xe).ok();
-                    probed = true;
-                }
+        episode.draw_exits = (f64::NEG_INFINITY, f64::INFINITY);
+        if self.slide_flat {
+            return self.set_episode(d, episode);
+        }
+        let x = self.power_hold(d).kind.weight();
+        let mut r = ends.at;
+        let mut probed = false;
+        for (e, xe) in [(0usize, 0.0), (1, 1.0)] {
+            if r[e].is_none() {
+                r[e] = self.slide_probe(now, drivers, readers, d, err, cp, xe).ok();
+                probed = true;
             }
-            if probed {
-                self.slide_probe(now, drivers, readers, d, err, cp, x)?;
+        }
+        if probed {
+            self.slide_probe(now, drivers, readers, d, err, cp, x)?;
+        }
+        if let Some((_, i_limit)) = self.segment_draw(now).and(self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
+            // On a capacitor's segment the residual is the draw less the
+            // limit and the aim, which the rail capacitor holds the same at
+            // every probe (the rail cannot jump): an end's draw is the
+            // duty's own plus the two residuals' difference, and the end
+            // stops bracketing where that draw, at the edge, crosses the
+            // limit (duty 1 no longer turning the segment down, duty 0 no
+            // longer letting it rise). A watch on the duty's draw at the edge
+            // as the board moves it (`slide_draw_watches`).
+            // An end already past its exit there (the aim, not the board,
+            // keeping it bracketing: the rail off the edge, aimed back) is
+            // left to the W0 re-solves, as a watch already past would fire at
+            // once and the re-solve keep it again (cold 766 tpl 0: held 51
+            // times by 0.219 s).
+            let r_x = self.slide_residual(now, d);
+            let w_x = self.slide_draw_at_edge(now, d).unwrap_or(f64::NAN);
+            if let Some(added) = r[1].map(|r1| r1 - r_x).filter(|&a| a > 0.0 && w_x > i_limit - a) {
+                episode.draw_exits.0 = i_limit - added;
             }
+            if let Some(added) = r[0].map(|r0| r0 - r_x).filter(|&a| a < 0.0 && w_x < i_limit - a) {
+                episode.draw_exits.1 = i_limit - added;
+            }
+        } else {
             let ic = &self.ics[self.ic_position[d] as usize].1;
             let s = supply(ic, &self.voltages);
             let sigma = if self.slide_edge(d) == digital::levels::power_window(ic).0 { 1.0 } else { -1.0 };
@@ -1171,6 +1205,36 @@ impl PartitionedSolver {
             }
         }
         self.set_episode(d, episode)
+    }
+
+    /// A sliding IC `d`'s rail draw at its edge, `dir` signed, while the
+    /// rail is on a capacitor's segment: what its `draw_exits` read.
+    fn slide_draw_at_edge(&self, now: f64, d: usize) -> Option<f64> {
+        self.segment_draw(now)?;
+        let (v, _) = self.hub.as_ref().and_then(|h| h.psu_setpoint())?;
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        Some(crate::devices::sources::direction(v) * self.rail_draw_at(now, self.voltages[ic.gnd.node] + self.slide_edge(d)))
+    }
+
+    /// The draw-threshold watches of the chips sliding on a CC rail
+    /// capacitor's segment (`slide_exits`): each one's draw at its edge,
+    /// `dir` signed, reaching the levels where an end of its duty's bracket
+    /// stops bracketing, its closed-form terms moving as the board moves it,
+    /// as ruling R44 (a)'s held chips' are (`held_draw_watches`).
+    pub(super) fn slide_draw_watches(&self, now: f64, v: f64, cf_motion: &dyn Fn(f64) -> Vec<rails::Motion>) -> Vec<rails::Watch> {
+        let hub = self.hub.as_ref().expect("a hub");
+        let dir = crate::devices::sources::direction(v);
+        hub.rail_ics
+            .iter()
+            .map(|&pos| self.ics[pos as usize].0)
+            .filter(|&d| matches!(self.power_hold(d).kind, HoldKind::Duty(_)) && !self.episode(d).chatter)
+            .filter_map(|d| {
+                let (lo, hi) = self.episode(d).draw_exits;
+                let thresholds: Vec<f64> = [lo, hi].into_iter().filter(|t| t.is_finite()).collect();
+                let value = self.slide_draw_at_edge(now, d)?;
+                (!thresholds.is_empty()).then(|| rails::Watch { value, thresholds, cap: None, terms: cf_motion(dir) })
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1454,14 +1518,16 @@ impl PartitionedSolver {
             // Past a level where an end of its duty's bracket stops
             // bracketing (off a capacitor's segment, `slide_exits`, its
             // `Rail` watch): solved again, which decides.
-            let exits = self.episode(d).exits;
-            let past_end = !chatter && (off + edge <= exits.0 || off + edge >= exits.1);
+            // On a capacitor's segment, past a draw where an end stops
+            // bracketing (`slide_draw_watches`).
+            let (exits, draw_exits) = (self.episode(d).exits, self.episode(d).draw_exits);
+            let past_end = !chatter && (off + edge <= exits.0 || off + edge >= exits.1 || self.slide_draw_at_edge(now, d).is_some_and(|w| w <= draw_exits.0 || w >= draw_exits.1));
             if !changed && !at_edge && !past_end && off.abs() <= slide_drift(edge) {
                 continue;
             }
             // On a capacitor's segment already aimed back at the edge: on its
             // way (the next solve comes inside the band, or at the far one).
-            if let (false, false, false, Some(draw), Some((_, i_limit))) = (chatter, changed, at_edge, self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
+            if let (false, false, false, false, Some(draw), Some((_, i_limit))) = (chatter, changed, at_edge, past_end, self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
                 if (off > 0.0) == (draw > i_limit) {
                     continue;
                 }
@@ -1805,6 +1871,7 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exits, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.draw_exits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.unfollowed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.s_held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.released_at, w); }

@@ -1968,6 +1968,34 @@ their own, and the source KCL does with W1a point 2's branch fold.
    a self-feedback chip at a starving edge, to be checked against a longer
    fine reference.
 
+   **Filippov's exit** (ruling R92; `hold::slide_exits`). A slide solved
+   within the instant (not a chatter slide) leaves where an end of its
+   duty's bracket stops bracketing: duty 1 no longer turning the supply
+   back (or the segment down), duty 0 no longer letting it come back. Each
+   solve keeps the residuals of its probes at duty 0 and 1 (probing an end
+   its search skipped, then solving the duty again) and turns them into a
+   watch on what the board moves at a fixed duty: off a CC rail capacitor's
+   segment the supply, each end's residual being its own supply's distance
+   past the edge (the cold 4.06 V cell: the powered end 8.06e-11 V past,
+   freed 8.10e-12 s after the crossing, the old hold's release level
+   floor + drop + 2 eta; left to the W0 re-solves it sat at x = 2e-11 for
+   0.54 ms, and a watch placed from the bracket's slope, 0.341 V per unit
+   duty, came as late); on a segment the rail's draw at the edge, each
+   end's draw being the duty's plus the two residuals' difference (the rail
+   capacitor holds the aim the same at every probe), watched along the
+   segment's closed-form terms as R44 (a)'s held chips are. The re-solve at
+   the watch decides. An end already past its exit at the solve (the aim
+   alone keeping it) gets no watch: one would fire at once, and cold 766
+   tpl 0 was held 51 times by 0.219 s. HG1's CC ramp (5 V, 20 mA, 1 uF and
+   100 ohm into 10 uF, a 74LS00's 1y into an LED): duty 1 at 1.638121 ms
+   against 1.638516 ms by hand (the rail up to W0 over the edge charges the
+   10 uF faster, up to 0.57 us); found at the W0 re-solves alone, about 22
+   us apart, the duty sat at 0.942 to 1.6475 ms, 1y 7.4 W0 under the fine
+   reference over the 5.8 us past the exit. From the exit to 1.70 ms
+   against exact mode at 0.2 us (its episode guard lifted in a scratch
+   build; it declines at 1.449 ms otherwise): rail 0.73 W0, 1y 0.52 W0, the
+   LED's current 0.05 W0.
+
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
    supply out of its window; held off, the supply comes back) is held,

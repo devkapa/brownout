@@ -2345,6 +2345,9 @@ impl PartitionedSolver {
                         // A chip held off here waits for the draw threshold
                         // too (ruling R44 (a)).
                         watches.extend(self.held_draw_watches(now, *v, *i_limit, &cf_motion));
+                        // A chip sliding here, where an end of its duty's
+                        // bracket stops bracketing (Filippov's exit).
+                        watches.extend(self.slide_draw_watches(now, *v, &cf_motion));
                         let mut th = windows;
                         th.extend(self.rail_kinks());
                         th.push(*v);

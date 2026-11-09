@@ -471,7 +471,7 @@ fn hold_intervals(p: &Program, t_end: f64, cap: u32, d: usize) -> (Option<Kernel
 }
 
 #[test]
-fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_off_until_the_supply_carries_it() {
+fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_until_the_supply_carries_it() {
     // Formerly `w1f-power-gate-pingpong`'s across-instant pin (HG1): a {5 V,
     // 20 mA} PSU ramps a 1 uF rail capacitor (esr 0) with 100 ohm into 10 uF
     // beside it, and a 74LS00's 1y drives an LED and 330 ohm. The rail cannot
@@ -480,23 +480,75 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_holds_the_gate_of
     // the rail capacitor gets), and the power-window events crossed the
     // floor 5.3 and 9.4 fs apart, declining at 424 events before F5 (HG1's
     // count) and, with the drop rule alone, at 10,377 (the drop is 0 on such
-    // a rail: ruling R44's case). Now (ruling R44 (a)) the gate, held off at
-    // the floor crossing, is released only where powered at its edge it
-    // would still let the segment rise: on this board when the rail leaves
-    // CC, the RC's draw never falling far enough first. It powers once, on
-    // a rail that carries it, and the run reaches 3 ms.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // a rail: ruling R44's case). Ruling R92: it slides at the floor, its
+    // duty x holding the segment flat, until even duty 1 lets it rise.
+    // By hand: before the crossing the rail and the 10 uF differ by d = I R
+    // C2 / (C1 + C2) = 1.818182 V (their transient, tau 90.9 us, long gone),
+    // so the RC takes 18.1818 mA and the rail capacitor 1.8182 mA; the rail
+    // reaches 4.275 V at (u (C1 + C2) - C2 d) / I = 1.442159 ms. Flat, the
+    // LED takes the 1.8182 mA left: the gate's 1y drives it through R_out /
+    // x (R_out = u / (4 x 8 mA) = 133.59 ohm, the drive scaled by the duty),
+    // the LED at 2 + 0.051384 ln(i / 20 mA) = 1.87678 V and 330 ohm, so
+    // R_out / x = (4.275 - 1.87678) / 1.8182e-3 - 330 = 989.0 ohm, x =
+    // 0.135077. (Its first five solves, picoseconds apart, swing it from
+    // 0.011 to 0.232: each aims the segment back at the edge over the
+    // picoseconds since the last, the reached widths it landed past. It
+    // settles within a nanosecond.) Held at the edge, the 10 uF relaxes
+    // with tau = 100 ohm x 10 uF = 1 ms, so the RC's draw falls as
+    // 18.1818 exp(-t / tau) mA and the duty rises; duty 1 (1y into the LED
+    // at 4.275 V: 5.0597 mA) stops bracketing once the RC's draw is 20 -
+    // 5.0597 = 14.9403 mA, at 1.442159 + ln(18.1818 / 14.9403) = 1.638516
+    // ms. The rail sits up to W0 (4.375 mV) over the edge between the duty's
+    // solves, which charges the 10 uF faster, by 43.75 uA at most: up to
+    // 0.57 us earlier. The draw watch on that end (`slide_draw_watches`)
+    // solves the duty there, at 1; it is freed at the next W0 re-solve, and
+    // the gate powers on a rail that carries it to 3 ms, never held.
+    // Found at the W0 re-solves alone (about sqrt(2 C1 W0 tau / i_RC) = 22
+    // us apart), the duty sat at 0.942 from 1.6229 ms to its release at
+    // 1.6475 ms: 1y 27 mV (7.4 W0) under the fine reference over the 5.8 us
+    // past the exit. Against the fine reference (exact mode at 0.2 us host
+    // steps, its episode guard lifted in a scratch build: it declines at
+    // 1.449 ms otherwise), from the exit to 1.70 ms, the slide's rail is
+    // within 0.73 W0 (the band it sat at), 1y 0.52 W0 and the LED's current
+    // 0.05 W0, at 1 us and 0.2 us host steps alike, and 0.65, 0.46 and 0.05
+    // W0 at its own events run event by event
+    // (drafts/r53-logs/p7-classb).
     let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
-    let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
-    eprintln!("CC ramp into the floor: {err:?} after {n} events; holds {spans:?}; counts {:?}", rig.s().hold_counts());
-    assert!(err.is_none(), "{err:?}");
-    assert_eq!(spans.len(), 1, "one hold, no cycle: {spans:?}");
-    close(spans[0].0, 1.4421592086e-3, 1e-9, "held at the floor crossing");
-    assert!(spans[0].1 - spans[0].0 > 1e-5, "held until the supply carries it: {spans:?}");
-    assert!(n < 2_000, "{n} events");
+    let t_floor = 1.442159e-3;
+    let t_exit = 1.638516e-3;
+    let mut rig = Rig::load(&p).unwrap();
+    let (mut slid, mut settled, mut at_one, mut freed, mut held, mut n) = (None, None, None, None, false, 0u32);
+    while rig.k.time() < 3e-3 {
+        n += 1;
+        assert!(n < 2_000, "{n} events");
+        let t = rig.k.next_event_time().min(3e-3);
+        rig.advance(t).unwrap_or_else(|err| panic!("at {t:e}: {err:?}"));
+        let hold = rig.s().power_hold(1);
+        held |= hold.kind == digital::power::HoldKind::Off;
+        let duty = matches!(hold.kind, digital::power::HoldKind::Duty(_)).then(|| hold.kind.weight());
+        if slid.is_none() && duty.is_some() {
+            slid = Some(t);
+        }
+        if let (Some(t0), Some(x)) = (slid, duty) {
+            if t < t0 + 1e-6 {
+                settled = Some(x);
+            }
+        }
+        if slid.is_some() && at_one.is_none() && (duty == Some(1.0) || hold.is_free()) {
+            at_one = Some(t);
+        }
+        if slid.is_some() && freed.is_none() && hold.is_free() {
+            freed = Some(t);
+        }
+    }
+    let (t_slid, x0, t_one, t_freed) = (slid.expect("slid"), settled.expect("a duty"), at_one.expect("duty 1"), freed.expect("freed"));
+    eprintln!("CC ramp into the floor: {n} events; slid at {t_slid:.12e}, x {x0}, duty 1 at {t_one:.9e}, freed at {t_freed:.9e}");
+    assert!(!held, "never held");
+    assert_eq!(rig.s().hold_counts(), [0.0, 0.0]);
+    close(t_slid, t_floor, 1e-9, "slid at the floor crossing");
+    close(x0, 0.135077, 2e-4, "the flat duty");
+    assert!(t_one >= t_exit - 0.6e-6 && t_one <= t_exit, "duty 1 where it stops bracketing, {t_exit:e} s by hand: {t_one:e}");
+    assert!(t_freed >= t_one && t_freed < t_one + 25e-6, "freed at the next W0 re-solve: {t_freed:e}");
     assert!(rig.u() > 0.9 * 4.75 && rig.v(2) > 3.0, "powered by 3 ms: rail {} V, 1y {} V", rig.u(), rig.v(2));
     // One advance, as a frame asks for it, ends the same way.
     let mut e = Engine::load(&p).unwrap();
@@ -559,32 +611,42 @@ fn cc_floor_with_a_reader(delay: f64, i_limit: f64) -> Program {
 }
 
 #[test]
-fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_held_off_then_powered() {
+fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_sliding_then_powered() {
     // The ping-pong above, but each power flip swings 1y across a second
     // gate's threshold, and with no delay its output commits in that same
     // instant (which ends HG1's count, `end_gate_chase`): on 076be49 the
     // `Rail` events alternated 5.3 and 9.4 fs apart past any event cap, and
-    // until F5 the no-progress guard declined it with -4. Now the first gate
-    // is held off as above and the reader follows it: 1y low, its own 1y
-    // high while the gate is held, then the reverse once it powers, by 3 ms.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
-    let p = cc_floor_with_a_reader(0.0, 0.02);
-    let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
-    eprintln!("zero-delay reader: {err:?} after {n} events; holds {spans:?}");
-    assert!(err.is_none(), "{err:?}");
-    assert_eq!(spans.len(), 1, "{spans:?}");
-    close(spans[0].0, 1.4421592086e-3, 1e-9, "held at the floor crossing");
-    assert!(rig.v(2) > 3.0 && rig.v(6) < 0.5, "1y HIGH, the reader's 1y LOW: {} V, {} V", rig.v(2), rig.v(6));
-    let mut e = Engine::load(&p).unwrap();
+    // until F5 the no-progress guard declined it with -4. Ruling R92: the
+    // first gate slides at its floor as above, never held, and its 1y at
+    // the flat duty is the LED's 1.87678 V and 330 ohm x 1.8182 mA, 2.4768
+    // V, rising with the duty, over the reader's 2.0 V VIH: the reader's 1y
+    // goes LOW at the floor crossing (the gate powered in that instant,
+    // before the slide) and stays LOW to 3 ms, 1y HIGH once it is freed.
+    // With the reader's own 10 ns delay, LOW 10 ns later.
+    for (delay, low_from) in [(0.0, 1.442159e-3), (10e-9, 1.442169e-3)] {
+        let p = cc_floor_with_a_reader(delay, 0.02);
+        let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
+        eprintln!("reader delay {delay:e}: {err:?} after {n} events; holds {spans:?}");
+        assert!(err.is_none(), "{err:?}");
+        assert!(spans.is_empty(), "never held: {spans:?}");
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0]);
+        assert!(rig.v(2) > 3.0 && rig.v(6) < 0.5, "1y HIGH, the reader's 1y LOW: {} V, {} V", rig.v(2), rig.v(6));
+        let mut rig = Rig::load(&p).unwrap();
+        let mut low = None;
+        while rig.k.time() < 3e-3 {
+            let t = rig.k.next_event_time().min(3e-3);
+            rig.advance(t).unwrap();
+            if let Some(t_low) = low {
+                assert!(rig.v(6) < 0.5, "the reader's 1y LOW from {t_low:e} on, {} V at {t:e}", rig.v(6));
+            } else if rig.v(6) < 0.5 {
+                low = Some(t);
+            }
+        }
+        close(low.expect("the reader's 1y LOW"), low_from, 1e-9, "the reader's 1y LOW from the floor crossing");
+    }
+    let mut e = Engine::load(&cc_floor_with_a_reader(0.0, 0.02)).unwrap();
     e.advance(3e-3).unwrap();
-    // The controls: with the reader's own 10 ns delay (HG1's count runs,
-    // nothing commits) the gate is held the same way; at 60 mA the rail
-    // outruns the LED and nothing is held.
-    let (err, _, spans, _) = hold_intervals(&cc_floor_with_a_reader(10e-9, 0.02), 3e-3, 50_000, 1);
-    assert!(err.is_none() && spans.len() == 1, "{err:?} {spans:?}");
+    // The control: at 60 mA the rail outruns the LED and nothing slides.
     let (err, n, t, v) = run_events(&cc_floor_with_a_reader(0.0, 0.06), 3e-3, 50_000);
     assert!(err.is_none(), "{err:?}");
     assert_eq!(t, 3e-3);
