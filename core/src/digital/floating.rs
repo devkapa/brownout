@@ -176,7 +176,8 @@ pub fn pull(ic: &IcRecord, power: &IcPower, pin: &IcPin, t: f64) -> Option<(f64,
     let r = if ic.ttl { 1e6 } else { 1e7 };
     let high = floating_high(pin.open_hash, t, ic.ttl);
     let target = power.v_gnd + if high { power.vs } else { 0.0 };
-    Some((1.0 / r, target))
+    // A sliding chip pulls at its duty too (ruling R92); 1 otherwise.
+    Some((power.weight / r, target))
 }
 
 #[cfg(test)]
@@ -323,7 +324,7 @@ mod tests {
     }
 
     fn powered(v_gnd: f64, vs: f64) -> IcPower {
-        IcPower { powered: true, v_gnd, vs, r_out: 156.25, vil: 0.8, vih: 2.0, schmitt: None }
+        IcPower { powered: true, v_gnd, vs, r_out: 156.25, vil: 0.8, vih: 2.0, schmitt: None, weight: 1.0 }
     }
 
     #[test]

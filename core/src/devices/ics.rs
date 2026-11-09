@@ -494,7 +494,7 @@ impl IcEvaluator {
         // 1a).
         let mut power = entry.power;
         if !hold.is_free() {
-            power.powered = digital::power::verdict(ic, v_vcc, v_gnd, hold);
+            digital::power::hold_onto(&mut power, ic, v_vcc, v_gnd, hold);
         }
         if !power.powered {
             // W1c contract point 9 / W1d sequential point 3 ("an unpowered
@@ -1163,7 +1163,7 @@ pub fn register<S: PartitionSolver, E: DeviceEvaluator>(kernel: &mut Kernel<S, E
             powered: false,
             dirty: false,
             power_key: None,
-            power: IcPower { powered: false, v_gnd: 0.0, vs: 0.0, r_out: 0.0, vil: 0.0, vih: 0.0, schmitt: None },
+            power: IcPower { powered: false, v_gnd: 0.0, vs: 0.0, r_out: 0.0, vil: 0.0, vih: 0.0, schmitt: None, weight: 1.0 },
         });
     }
     IcEvaluator::new(ics)
@@ -2373,6 +2373,86 @@ mod tests {
         // One hold taken; the two releases are the rolled-back ones above
         // (stats keep a failed attempt's counts); the drop is not a release.
         assert_eq!(kernel.solver().hold_stats(), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_sliding_ic_drives_at_its_duty_reads_and_commits_and_its_duty_rolls_back() {
+        // Ruling R92 (Q4): a chip sliding along its power edge (Duty(x)) stays
+        // powered, its logic running, and drives its outputs at x times its
+        // powered conductance (Filippov's average with the unpowered stamp,
+        // which is nothing). On an ideal 5 V supply only the hold can change
+        // anything.
+        //
+        // 0=gnd, 1=vcc, 2=1a=1b (spdt: sel 0 to gnd), 3=1y between two 10k,
+        // 4=dump. 1a LOW: 1y HIGH through R_out = 156.25 ohm (io_max 8 mA at
+        // 5 V) to vcc.
+        use crate::digital::power::PowerHold;
+        let ic = 4usize;
+        let p = program(5, 4, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            resistor(2, 1, 3, 10_000.0),
+            resistor(3, 3, 0, 10_000.0),
+            ls00(4, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 4, 0, 0, 4], 20e-9),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        let mut slots = [f64::NAN; 4];
+        let drain = |kernel: &mut Kernel<PartitionedSolver, IcEvaluator>, slots: &mut [f64; 4]| {
+            for (_, slot, v) in kernel.take_digital_writes() {
+                slots[slot] = v;
+            }
+        };
+        drain(&mut kernel, &mut slots);
+        let free = kernel.solver().voltages()[3];
+        // By hand: the node sees 5 V through 10k and through 156.25 / x ohm,
+        // and 0 V through 10k (the node shunt's nanovolts aside).
+        let by_hand = |x: f64| {
+            let (g, g_out) = (1e-4, x / 156.25);
+            5.0 * (g + g_out) / (2.0 * g + g_out)
+        };
+        assert!((free - by_hand(1.0)).abs() < 1e-6, "free: {free} against {}", by_hand(1.0));
+
+        let x = 0.25;
+        kernel.hold_power_as_event(ic, PowerHold::duty(x)).unwrap();
+        drain(&mut kernel, &mut slots);
+        assert!(kernel.solver().ic_powered(ic), "a sliding chip is powered");
+        let sliding = kernel.solver().voltages()[3];
+        assert!((sliding - by_hand(x)).abs() < 1e-6, "drive at its duty: {sliding} against {}", by_hand(x));
+        assert_eq!(slots[0], 1.0, "its logic reads and publishes");
+        // Each duty is its own stamp: a solution cached at one never answers
+        // for another.
+        for x2 in [0.5, 0.25, 1.0 / 3.0] {
+            kernel.hold_power_as_event(ic, PowerHold::duty(x2)).unwrap();
+            let v = kernel.solver().voltages()[3];
+            assert!((v - by_hand(x2)).abs() < 1e-6, "duty {x2}: {v} against {}", by_hand(x2));
+        }
+        kernel.hold_power_as_event(ic, PowerHold::duty(x)).unwrap();
+
+        // Its logic runs: inputs HIGH, the LOW commits 20 ns on, driven at x
+        // (a `set_params` drops every hold, so the duty is set again before
+        // the LOW falls due).
+        kernel.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+        kernel.hold_power_as_event(ic, PowerHold::duty(x)).unwrap();
+        kernel.advance(1e-6).unwrap();
+        drain(&mut kernel, &mut slots);
+        let y = kernel.evaluator().ics[0].output_drivers[0];
+        assert_eq!(kernel.driver(y).committed(), Some(Mode::Low), "a sliding chip commits");
+        let low = kernel.solver().voltages()[3];
+        let low_by_hand = 5.0 * 1e-4 / (2.0 * 1e-4 + x / 156.25);
+        assert!((low - low_by_hand).abs() < 1e-6, "LOW at its duty: {low} against {low_by_hand}");
+        assert_eq!(slots[0], 0.0);
+
+        // The duty rolls back with a failed instant and with a snapshot.
+        let solver = kernel.solver_mut();
+        let window = solver.begin_instant();
+        solver.set_power_hold(ic, PowerHold::duty(0.5));
+        solver.rollback_instant(window);
+        assert_eq!(solver.power_hold(ic), PowerHold::duty(x), "rollback restores the duty");
+        let snap = solver.dynamic_snapshot();
+        solver.set_power_hold(ic, PowerHold::FREE);
+        solver.dynamic_restore(snap);
+        assert_eq!(solver.power_hold(ic), PowerHold::duty(x), "a restored snapshot carries the duty");
     }
 
     #[test]

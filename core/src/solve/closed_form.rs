@@ -1801,6 +1801,10 @@ impl ClosedFormSolver {
             if !hold.is_free() {
                 key.extend_from_slice(&(k as u32).to_le_bytes());
                 key.push(hold.kind.tag());
+                // A sliding chip's stamp is its duty's (ruling R92).
+                if let digital::power::HoldKind::Duty(bits) = hold.kind {
+                    key.extend_from_slice(&bits.to_le_bytes());
+                }
             }
         }
     }

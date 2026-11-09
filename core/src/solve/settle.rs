@@ -2330,7 +2330,7 @@ impl PartitionedSolver {
         // a supply reading.
         let hold = self.power_hold(*device);
         if let Some(p) = e.const_power {
-            return if hold.is_free() { p } else { IcPower { powered: digital::power::verdict(ic, f64::NAN, f64::NAN, hold), ..p } };
+            return if hold.is_free() { p } else { IcPower { powered: digital::power::verdict(ic, f64::NAN, f64::NAN, hold), weight: hold.kind.weight(), ..p } };
         }
         digital::power::ic_power_held(ic, self.slow_voltage(ic.vcc.node, now), self.slow_voltage(ic.gnd.node, now), hold)
     }

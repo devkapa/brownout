@@ -952,7 +952,7 @@ impl PartitionedSolver {
                 for (uu, total) in [(u, &mut d0), (up, &mut d1)] {
                     let at = |node: usize| if node == rail { uu } else { v[node] };
                     let mut power = digital::power::ic_power(ic, at(ic.vcc.node), at(ic.gnd.node));
-                    power.powered = true;
+                    digital::power::hold_onto(&mut power, ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d));
                     for &id in ids {
                         let Some(driver) = self.driver_snapshot.get(id as usize) else { continue };
                         for (target, gd) in ic_driver_branches(&power, driver, ic).into_iter().flatten() {

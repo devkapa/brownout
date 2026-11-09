@@ -32,6 +32,9 @@ pub struct IcPower {
     /// `(vtMinus*s, vtPlus*s)` for a Schmitt part (`s` below), `None`
     /// otherwise.
     pub schmitt: Option<(f64, f64)>,
+    /// The scale on every output drive and floating pull the IC stamps: 1,
+    /// or the duty of a chip sliding along its power edge (ruling R92).
+    pub weight: f64,
 }
 
 /// The output-stage driver resistance floor, and the value used whenever
@@ -59,6 +62,12 @@ pub enum HoldKind {
     Off,
     /// A probe solve's fixed verdict (the hold procedure's steps 1 and 3).
     Probe(bool),
+    /// Sliding along its power edge (ruling R92, R53's Duty(x)): powered,
+    /// its logic running, every output drive scaled by the duty `x` in
+    /// `[0, 1]` (stored as its bits, so the kind stays `Eq` and a cache key
+    /// can carry it): Filippov's average of its powered and unpowered
+    /// stamps, an unpowered IC stamping nothing.
+    Duty(u64),
 }
 
 impl HoldKind {
@@ -69,6 +78,17 @@ impl HoldKind {
             HoldKind::Off => 1,
             HoldKind::Probe(false) => 2,
             HoldKind::Probe(true) => 3,
+            HoldKind::Duty(_) => 4,
+        }
+    }
+
+    /// The drive weight this kind gives an IC's stamps: its duty when
+    /// sliding, else 1.
+    #[inline]
+    pub fn weight(self) -> f64 {
+        match self {
+            HoldKind::Duty(bits) => f64::from_bits(bits),
+            _ => 1.0,
         }
     }
 }
@@ -104,6 +124,11 @@ impl PowerHold {
     pub fn is_free(&self) -> bool {
         self.kind == HoldKind::Free
     }
+
+    /// Sliding at duty `x` (ruling R92), kept unrounded.
+    pub fn duty(x: f64) -> PowerHold {
+        PowerHold { kind: HoldKind::Duty(x.to_bits()), release: None }
+    }
 }
 
 /// The hold of the IC at device index `device` in a device-indexed table.
@@ -122,7 +147,7 @@ pub fn verdict(ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) -> bool {
     match hold.kind {
         HoldKind::Free => powered(ic, v_vcc, v_gnd),
         HoldKind::Off | HoldKind::Probe(false) => false,
-        HoldKind::Probe(true) => true,
+        HoldKind::Probe(true) | HoldKind::Duty(_) => true,
     }
 }
 
@@ -132,9 +157,18 @@ pub fn verdict(ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) -> bool {
 pub fn ic_power_held(ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) -> IcPower {
     let mut power = ic_power(ic, v_vcc, v_gnd);
     if !hold.is_free() {
-        power.powered = verdict(ic, v_vcc, v_gnd, hold);
+        hold_onto(&mut power, ic, v_vcc, v_gnd, hold);
     }
     power
+}
+
+/// The hold's [`verdict`] and drive weight (a sliding chip's duty, ruling
+/// R92) onto `power`, as [`ic_power_held`] sets them: every site that judges
+/// the verdict apart from the rest of `power` goes through here.
+#[inline]
+pub fn hold_onto(power: &mut IcPower, ic: &IcRecord, v_vcc: f64, v_gnd: f64, hold: PowerHold) {
+    power.powered = verdict(ic, v_vcc, v_gnd, hold);
+    power.weight = hold.kind.weight();
 }
 
 /// `_icPowerInfo`, normal path (spec §1.3). `v_vcc` and `v_gnd` are the raw
@@ -173,7 +207,7 @@ pub fn ic_power(ic: &IcRecord, v_vcc: f64, v_gnd: f64) -> IcPower {
         (vt_minus * s, vt_plus * s)
     });
 
-    IcPower { powered, v_gnd, vs, r_out, vil, vih, schmitt }
+    IcPower { powered, v_gnd, vs, r_out, vil, vih, schmitt, weight: 1.0 }
 }
 
 /// A driver conductance as a function of the supply difference `vs`, of the
@@ -190,6 +224,12 @@ pub struct SupplyCurve {
 impl SupplyCurve {
     pub fn constant(g: f64) -> SupplyCurve {
         SupplyCurve { kinks: [f64::INFINITY; 2], pieces: [(g, 0.0); 3] }
+    }
+
+    /// The curve of a drive scaled by `w` (a sliding chip's duty, ruling
+    /// R92); `w = 1` gives it back bit for bit.
+    pub fn scaled(self, w: f64) -> SupplyCurve {
+        SupplyCurve { kinks: self.kinks, pieces: self.pieces.map(|(a, b)| (a * w, b * w)) }
     }
 
     /// `(alpha, beta)` of the piece holding `vs` (a kink belongs to the
@@ -479,6 +519,25 @@ mod tests {
     }
 
     #[test]
+    fn a_duty_hold_is_powered_with_its_drive_weighted_by_its_duty() {
+        // Ruling R92 (Q4): a chip sliding along its power edge stays powered,
+        // its logic running, and every drive it stamps is scaled by its duty,
+        // kept unrounded. Free and the other holds weigh 1.
+        let ic = base_ic();
+        let x = 0.787_123_456_789_f64;
+        for v in [5.0, 4.0, 6.0] {
+            assert!(verdict(&ic, v, 0.0, PowerHold::duty(x)), "powered at {v} whatever the window says");
+            let power = ic_power_held(&ic, v, 0.0, PowerHold::duty(x));
+            assert!(power.powered);
+            assert_eq!(power.weight.to_bits(), x.to_bits(), "the duty, bit for bit");
+            assert_eq!(ic_power_held(&ic, v, 0.0, PowerHold::FREE).weight, 1.0);
+            assert_eq!(ic_power_held(&ic, v, 0.0, PowerHold::off()).weight, 1.0);
+        }
+        assert_eq!(HoldKind::Duty(x.to_bits()).tag(), 4);
+        assert_ne!(PowerHold::duty(x), PowerHold::duty(0.5), "two duties are two holds");
+    }
+
+    #[test]
     fn gnd_is_carried_through_raw() {
         let ic = base_ic();
         let power = ic_power(&ic, 8.0, 3.2);
@@ -500,6 +559,7 @@ impl crate::snapshot::HeapBytes for IcPower {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vil, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vih, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.schmitt, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.weight, w); }
         n
     }
 }
@@ -511,6 +571,7 @@ impl crate::snapshot::HeapBytes for HoldKind {
             HoldKind::Free => 0,
             HoldKind::Off => 0,
             HoldKind::Probe(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            HoldKind::Duty(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
     }
 }

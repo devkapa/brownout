@@ -1508,6 +1508,10 @@ impl StaticPartitionSolver {
                 if !hold.is_free() {
                     key.extend_from_slice(&ic_index.to_le_bytes());
                     key.push(hold.kind.tag());
+                    // A sliding chip's stamp is its duty's (ruling R92).
+                    if let digital::power::HoldKind::Duty(bits) = hold.kind {
+                        key.extend_from_slice(&bits.to_le_bytes());
+                    }
                 }
             }
         }
@@ -1772,7 +1776,7 @@ impl StaticPartitionSolver {
                         if !free_supply {
                             continue;
                         }
-                        if let Some(curve) = crate::solve::ic_driver_curves(driver, ic)[slot] {
+                        if let Some(curve) = crate::solve::ic_driver_curves(&power, driver, ic)[slot] {
                             let w = self.read_node(driver.node, p_idx, x) - self.read_node(target, p_idx, x);
                             self.fold_supply_slope(p_idx, size, a, b, driver.node, target, ic, curve.derivs(power.vs)[1] * w, power.vs);
                         }

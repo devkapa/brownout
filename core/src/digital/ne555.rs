@@ -120,16 +120,17 @@ pub fn branches(stage: DriverStage, committed: Option<Mode>, power: &IcPower, _d
             };
             let f = out_fraction(high, power.vs);
             let mut out = [None, None];
+            // A sliding chip drives at its duty (ruling R92); 1 otherwise.
             if f > STAMP_EPS {
-                out[0] = Some((ic.vcc.node, f / OUTPUT_R_OHM));
+                out[0] = Some((ic.vcc.node, f / OUTPUT_R_OHM * power.weight));
             }
             if f < 1.0 - STAMP_EPS {
-                out[1] = Some((ic.gnd.node, (1.0 - f) / OUTPUT_R_OHM));
+                out[1] = Some((ic.gnd.node, (1.0 - f) / OUTPUT_R_OHM * power.weight));
             }
             out
         }
         DriverStage::Ne555Dis => match committed {
-            Some(Mode::Low) => [Some((ic.gnd.node, 1.0 / DIS_R_OHM)), None],
+            Some(Mode::Low) => [Some((ic.gnd.node, power.weight / DIS_R_OHM)), None],
             // Committed HIGH: released, stamps nothing (DI:216: `!outHigh &&
             // pDis >= 0`). Uncommitted/HIZ: likewise nothing.
             _ => [None, None],

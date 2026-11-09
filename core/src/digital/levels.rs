@@ -149,11 +149,11 @@ mod tests {
     }
 
     fn power_plain(v_gnd: f64, vs: f64) -> IcPower {
-        IcPower { powered: true, v_gnd, vs, r_out: 156.25, vil: 0.8, vih: 2.0, schmitt: None }
+        IcPower { powered: true, v_gnd, vs, r_out: 156.25, vil: 0.8, vih: 2.0, schmitt: None, weight: 1.0 }
     }
 
     fn power_schmitt(v_gnd: f64, vs: f64, vt_minus: f64, vt_plus: f64) -> IcPower {
-        IcPower { powered: true, v_gnd, vs, r_out: 62.5, vil: 0.8, vih: 2.0, schmitt: Some((vt_minus, vt_plus)) }
+        IcPower { powered: true, v_gnd, vs, r_out: 62.5, vil: 0.8, vih: 2.0, schmitt: Some((vt_minus, vt_plus)), weight: 1.0 }
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
                     ic.logic.push(p);
                     voltages.push(voltages_pool[(next() as usize + i as usize) % voltages_pool.len()]);
                 }
-                let power = IcPower { powered: true, v_gnd, vs: 5.0, r_out: 50.0, vil, vih, schmitt: None };
+                let power = IcPower { powered: true, v_gnd, vs: 5.0, r_out: 50.0, vil, vih, schmitt: None, weight: 1.0 };
                 for t in [0.0, 1.0e-3, 0.137, 12.5] {
                     let mut got = Vec::new();
                     read_plain_into(&ic, &power, &voltages, t, &mut got);

@@ -1818,8 +1818,8 @@ pub(crate) fn ic_driver_branches(power: &digital::power::IcPower, driver: &Drive
     match driver.stage {
         DriverStage::Logic => {
             let branch = match driver.committed() {
-                Some(Mode::High) if !driver.open_collector => Some((ic.vcc.node, 1.0 / power.r_out)),
-                Some(Mode::Low) => Some((ic.gnd.node, 1.0 / power.r_out)),
+                Some(Mode::High) if !driver.open_collector => Some((ic.vcc.node, power.weight / power.r_out)),
+                Some(Mode::Low) => Some((ic.gnd.node, power.weight / power.r_out)),
                 _ => None,
             };
             [branch, None]
@@ -1829,8 +1829,13 @@ pub(crate) fn ic_driver_branches(power: &digital::power::IcPower, driver: &Drive
 }
 
 /// The conductances [`ic_driver_branches`] stamps for `driver`, slot by
-/// slot, as curves in the IC's supply difference (Rails point 3).
-pub(crate) fn ic_driver_curves(driver: &Driver, ic: &digital::IcRecord) -> [Option<digital::power::SupplyCurve>; 2] {
+/// slot, as curves in the IC's supply difference (Rails point 3), scaled by
+/// the drive weight `power` carries (ruling R92).
+pub(crate) fn ic_driver_curves(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> [Option<digital::power::SupplyCurve>; 2] {
+    unweighted_driver_curves(driver, ic).map(|c| c.map(|c| c.scaled(power.weight)))
+}
+
+fn unweighted_driver_curves(driver: &Driver, ic: &digital::IcRecord) -> [Option<digital::power::SupplyCurve>; 2] {
     match driver.stage {
         DriverStage::Logic => match driver.committed() {
             Some(Mode::High) if !driver.open_collector => [Some(digital::power::r_out_curve(ic)), None],
@@ -1892,12 +1897,12 @@ pub(crate) fn ic_rail_terms(now: f64, drivers: &[Driver], ics: &[(usize, digital
         // Judged as the stamp judges it (`Bnd::hold_power_at`): the terms
         // are the derivative within the present power state.
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
+        digital::power::hold_onto(&mut power, ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
         for driver in local.iter().filter(|d| d.device == *device_index) {
-            let curves = ic_driver_curves(driver, ic);
+            let curves = ic_driver_curves(&power, driver, ic);
             for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
                 let Some((target, _)) = branch else { continue };
                 let far = resolve(target);
@@ -1963,13 +1968,13 @@ pub(crate) fn ic_supply_terms(now: f64, drivers: &[Driver], ics: &[(usize, digit
         let (vcc_pin, gnd_pin) = (resolve(ic.vcc.node), resolve(ic.gnd.node));
         let (vcc, gnd) = (end(&vcc_pin), end(&gnd_pin));
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
+        digital::power::hold_onto(&mut power, ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
         let supply_fixed = matches!((vcc, gnd), (curvature::End::Fixed(_), curvature::End::Fixed(_)));
         for driver in drivers.iter().filter(|d| d.device == *device_index) {
-            let curves = ic_driver_curves(driver, ic);
+            let curves = ic_driver_curves(&power, driver, ic);
             for (branch, curve) in ic_driver_branches(&power, driver, ic).into_iter().zip(curves) {
                 let (Some((target, _)), Some(curve)) = (branch, curve) else { continue };
                 if supply_fixed || !(in_partition(driver.node) || in_partition(target)) {
@@ -2197,7 +2202,7 @@ pub(crate) fn ic_elements(now: f64, drivers: &[Driver], ics: &[(usize, digital::
         let vcc_pin = resolve(ic.vcc.node);
         let gnd_pin = resolve(ic.gnd.node);
         let mut power = digital::power::ic_power(ic, pin_voltage(&vcc_pin, x, bnd), pin_voltage(&gnd_pin, x, bnd));
-        power.powered = digital::power::verdict(ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
+        digital::power::hold_onto(&mut power, ic, bnd.power_voltage(&vcc_pin, x), bnd.power_voltage(&gnd_pin, x), bnd.hold(*device_index));
         if !power.powered {
             continue;
         }
