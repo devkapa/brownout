@@ -99,6 +99,7 @@
     "test:core:rust": "cd core && cargo test --locked",
     "test:core-suites": "vitest run -c vitest.core-suites.config.ts",
     "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
+    "test:slow": "vitest run -c vitest.slow.config.ts",
     "bench": "tsx scripts/benchmark-linear-scale.ts",
     "bench:core": "node scripts/bench-core.mjs",
     "bench:sap1-cost": "tsx scripts/perf/sap1-cost.ts",

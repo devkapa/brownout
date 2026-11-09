@@ -15506,3 +15506,89 @@ fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
         assert_eq!(plain_err, split_err, "{name}: the failure");
     }
 }
+
+/// Fixture 26 (`test/fixtures/core/26-74hc74-divide-by-two.sim.json`): a
+/// 74HC14 RC oscillator clocking a 74HC74, compiled by `compileCircuit` with
+/// its timing capacitor at 100 pF (word 140; 10 pF patches it).
+const FIXTURE_26_100PF: [f64; 244] = [
+    1112490801.0, 3.0, 13.0, 6.0, 3.0, 1.0, 0.0, 5.0,
+    25.0, 7.0, 0.0, 10.0, 0.0, 2.0, 0.0, 2.0,
+    1.0, 0.0, 3208043335.0, 2289319053.0, 0.0, 0.0, 910234487.0, 2060763965.0,
+    1.0, 5.0, 0.0, 58.0, 1.0, 14.0, 1.0, 0.0,
+    1426695941.0, 1730104123.0, 0.0, 0.0, 1445746684.0, 1109618854.0, 3.0, 0.0,
+    423856805.0, 1457704155.0, 2.0, 0.0, 425136733.0, 3671355411.0, 0.0, 0.0,
+    720808156.0, 821612422.0, 5.0, 1.0, 2864400436.0, 1881475934.0, 0.0, 0.0,
+    940894819.0, 348415881.0, 6.0, 1.0, 942174747.0, 113393025.0, 0.0, 0.0,
+    3093232666.0, 753381340.0, 7.0, 1.0, 3094512594.0, 2643299412.0, 0.0, 0.0,
+    1134653153.0, 2156758135.0, 8.0, 1.0, 1130710201.0, 1842594703.0, 0.0, 0.0,
+    1421158744.0, 44056578.0, 9.0, 1.0, 3572533760.0, 2004382442.0, 13.0, 2.0,
+    6.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.7,
+    1.6, 5.0, 0.02, 1.5000000000000002e-8, 13.0, 0.0, 1.0, 0.0,
+    1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+    1.0, 0.0, 1.0, 2.0, 2.0, 2.0, 0.0, 805347193.0,
+    1968299215.0, 3.0, 0.0, 771350670.0, 3163191248.0, 1.0, 10000.0, 0.0,
+    3.0, 3.0, 2.0, 3.0, 0.0, 1332766294.0, 1752317976.0, 0.0,
+    0.0, 3514298049.0, 819633751.0, 3.0, 1e-10, 0.0, 0.0, 0.0,
+    72.0, 4.0, 14.0, 1.0, 0.0, 866142986.0, 1475507660.0, 0.0,
+    0.0, 2857214379.0, 2691565905.0, 1.0, 2.0, 140766551.0, 1448006813.0, 4.0,
+    0.0, 921708939.0, 1373334321.0, 2.0, 0.0, 3040784171.0, 2180203217.0, 1.0,
+    2.0, 803055925.0, 2975488747.0, 10.0, 1.0, 2275397424.0, 1301079642.0, 4.0,
+    0.0, 450516299.0, 844131697.0, 11.0, 1.0, 3468637608.0, 866316242.0, 12.0,
+    1.0, 2443026519.0, 4262043549.0, 1.0, 2.0, 1031360918.0, 2813173464.0, 0.0,
+    0.0, 994164916.0, 554338270.0, 0.0, 0.0, 1022521748.0, 3030353726.0, 1.0,
+    2.0, 1218410068.0, 2995671934.0, 17.0, 2.0, 6.0, 2.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.02,
+    2.5000000000000002e-8, 2e-8, 2e-8, 2e-8, 2e-8, 13.0, 6.0, 1.0,
+    1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    1.0, 1.0, 1.0, 90.0, 2.0, 0.0, 3.0, 2.0,
+    0.25, 10000.0, 0.0, 1112490801.0,
+];
+
+fn fixture_26(capacitance: f64) -> Program {
+    let mut words = FIXTURE_26_100PF;
+    assert_eq!(words[140], 1e-10, "the timing capacitor's word");
+    words[140] = capacitance;
+    Program::parse(&words).unwrap()
+}
+
+#[test]
+fn with_a_clock_only_the_floor_governs_and_without_one_the_scaled_cap_declines_deterministically() {
+    // Ruling R94 (a), fixture 26, the fast form of test/core/advance-for.slow.test.ts
+    // (the full 3 s at the real 20M cap): here 2 ms against a cap scaled to
+    // 100,000 events. At 10 pF the oscillator takes about 165,000 events in
+    // 2 ms: without a clock the host step declines -7 at exactly the cap, on
+    // every run; with one (no cap, only the floor) it completes. At 100 pF,
+    // about 16,500 events, both complete.
+    let run = |capacitance: f64, clock: bool| {
+        let mut rig = Rig::load(&fixture_26(capacitance)).unwrap();
+        rig.k.event_cap = 100_000;
+        let start = rig.k.stats().events_processed;
+        let result = if clock {
+            let mut now = 0.0;
+            let mut read = move || {
+                now += 0.01;
+                now
+            };
+            loop {
+                match rig.k.advance_budgeted(2e-3, Some(crate::kernel::Budget { clock: &mut read, budget_ms: 16.0, check_every: crate::kernel::YIELD_CHECK_EVERY })) {
+                    Ok(crate::kernel::Advanced::Yielded) => {}
+                    Ok(crate::kernel::Advanced::Reached) => break Ok(()),
+                    Err(e) => break Err(e),
+                }
+            }
+        } else {
+            rig.k.advance(2e-3)
+        };
+        (result, rig.k.stats().events_processed - start, rig.k.time())
+    };
+    let (r, events, t) = run(100e-12, false);
+    assert!(r.is_ok() && t == 2e-3 && events < 100_000, "100 pF, no clock: {r:?} at {t} after {events} events");
+    assert!(run(100e-12, true).0.is_ok(), "100 pF with a clock");
+    let (r, events, t) = run(10e-12, true);
+    assert!(r.is_ok() && events > 100_000, "10 pF with a clock: {r:?} after {events} events");
+    let first = run(10e-12, false);
+    assert!(matches!(&first.0, Err(KernelError::NoProgress { message, .. }) if message.contains("took 100000 events")), "{:?}", first.0);
+    let second = run(10e-12, false);
+    assert_eq!((first.1, first.2.to_bits()), (second.1, second.2.to_bits()), "the same decline on every run");
+    let _ = t;
+}

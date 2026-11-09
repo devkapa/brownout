@@ -7,6 +7,9 @@
  * - 100 pF: 24.75M events in 3 s, under the cap: both complete.
  * - 10 pF: about ten times that, past the cap: with a clock it completes; without
  *   one it declines -7 at the same event count on every run.
+ * Slow (minutes): `pnpm run test:slow`, in the gate. The fast form, 2 ms against a
+ * cap scaled to 100,000 events, is cargo's
+ * `with_a_clock_only_the_floor_governs_and_without_one_the_scaled_cap_declines_deterministically`.
  */
 import fs from "node:fs";
 import path from "node:path";
