@@ -3026,7 +3026,12 @@ impl SteppedSolver {
         // stepped rail partition in exact mode re-seeded under its held 555
         // at every step after.
         let in_p = |n: usize| node_owner.get(&n).is_some_and(|o| o.0 == p_idx);
-        let held_here = !probes.is_empty() && holds.iter().any(|h| !h.is_free()) && ics.iter().any(|(d, ic)| holds.get(*d).is_some_and(|h| !h.is_free()) && (in_p(ic.vcc.node) || in_p(ic.gnd.node) || ic.logic.iter().any(|pin| in_p(pin.node))));
+        #[cfg(test)]
+        let forced = FORCE_HELD.with(|f| f.get());
+        #[cfg(not(test))]
+        let forced: Option<usize> = None;
+        let held = |d: usize| forced == Some(d) || holds.get(d).is_some_and(|h| !h.is_free());
+        let held_here = !probes.is_empty() && (forced.is_some() || holds.iter().any(|h| !h.is_free())) && ics.iter().any(|(d, ic)| held(*d) && (in_p(ic.vcc.node) || in_p(ic.gnd.node) || ic.logic.iter().any(|pin| in_p(pin.node))));
         let part = self.partitions.get_mut(&p_idx).unwrap();
         // Within one horizon clamp (`sync_partition`) the CC rail it was
         // handed stays until the rail loop after it, so a step after one cut
@@ -4357,4 +4362,12 @@ thread_local! {
     /// (`sync_partition`) planned it, and whether it is exact mode's rail
     /// partition (whose plan is deferred to the owner's SoC charge).
     pub(crate) static STRESS_CUT_PATHS: std::cell::RefCell<Vec<(f64, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Ruling R90 (a)'s held-IC seam: an IC device index the planner reads
+    /// as held, whatever the owner's table says, so a test can hold one IC
+    /// on a board whose supply never browns it out.
+    pub(crate) static FORCE_HELD: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }

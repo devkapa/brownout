@@ -2908,7 +2908,6 @@ fn exact_mode_bills_conserve_charge_with_the_integrator() {
     }
 }
 
-
 // ---- Rails point 9: exact mode's start-up with a rail capacitor ------------------
 
 /// The instants of the first millisecond the start-up tests read.
@@ -5226,7 +5225,6 @@ fn two_leds_in_parallel_stay_inside_the_several_junction_bound() {
     eprintln!("parallel LEDs: worst {:.4} of the bound at {}", worst.0, worst.1);
     assert!(worst.0 <= 1.0, "a correction {} of its bound at {}", worst.0, worst.1);
 }
-
 
 /// The rail and the far node `(v1, v2)` of a PSU in CC at `i` on a rail
 /// capacitor `c_r`, loaded by `r_l` and by `r` into `c`, `t` after `(v10,
@@ -7898,8 +7896,6 @@ fn a_draining_cells_drift_leaves_its_closed_form_hub_partitions_published_quanti
     assert!(worst.0 <= 1.0, "{} of W0's tolerance at {}", worst.0, worst.1);
 }
 
-
-
 // ---- FXE (rulings R23 (i), (ii) and the keep-best stop rule) ----------------
 
 /// A double-double number, `hi + lo` with `|lo| <= ulp(hi) / 2`: about 32
@@ -9615,7 +9611,6 @@ fn g2bv_bc_ic_20_hub1() -> Vec<Device> {
         fz(1, 12, &[4, 5], vec![29.7326372318558], vec![]),
     ]
 }
-
 
 /// tpl=0 hub=2 e=4.699 psu ilim=0.022 V2=-0.65 CLK3 0.0..2.7 R6-4=2477.2 SW2-3(1)+R3-0=50 C0-6=2.1e-4 R3-1=306.4 74LS00 vcc1 gnd0 in5,7 out3,5 R7-0=113639.4 SW0-5(1)+R5-0=359 LED3-2+R3-3=1763 C3-0=3.2e-5 P7-5 exact=false span=1.2e1
 /// options: Options { integration: 0, no_solution_cache: false, no_rail_shortcut: false, force_stepped: false, ambient_c: 25.0, floating_model: 0, start_time: 0.0 } digital_slot_count 32 node_count 8
@@ -11593,7 +11588,6 @@ fn a_rolled_back_cc_entry_or_exit_restores_the_kind_and_the_state() {
     }
 }
 
-
 /// tpl=3 hub=2 e=11.017 psu ilim=0.097 V2=-1.91 74LS00 vcc4 gnd0 in5,0 out1,0 C6-3=1.9e-7 SW1-6(1)+R6-0=2893 span=11.017203710490474
 fn cold_794_tpl3() -> Program {
     let devices = vec![
@@ -11891,7 +11885,6 @@ fn cold_72_tpl4() -> Program {
     p.digital_slot_count = 32;
     p
 }
-
 
 #[test]
 fn a_closed_form_on_a_cc_rail_another_partition_moves_steps_with_it() {
@@ -12268,7 +12261,6 @@ fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes
     }
     close(published[1].1, published[0].1, 1e-9 + 1e-3 * published[0].1.abs(), "the PSU's current, exact against default");
 }
-
 
 // ---- Rails point 5: the CC operating point on a non-monotone draw (ruling G) --
 
@@ -12895,7 +12887,6 @@ fn cold_581_tpl5() -> Vec<Device> {
         fz(90, 20, &[], vec![20.0, 0.004419246789533757, 48203.8322706819], vec![]),
     ]
 }
-
 
 #[test]
 fn a_chip_powered_only_inside_its_window_on_a_rail_capacitor_is_held_off_as_without_one() {
@@ -14307,7 +14298,6 @@ fn a_rail_ic_flipping_off_a_rail_capacitor_is_not_counted_across_its_steps() {
     assert!((rig.u() - 11.3203).abs() <= 1e-4 + 1e-3 * 11.3203, "the rail at {} V, exact mode 11.3203 V", rig.u());
 }
 
-
 fn cold_3254_tpl0() -> (Program, Vec<(f64, usize)>, Vec<f64>) {
     let mut p = program(6, vec![
     fz(21, 0, &[1, 0], vec![11.246220343398445, 0.4551772607240805], vec![]),
@@ -14372,7 +14362,6 @@ fn a_catch_up_whose_crossing_lands_at_its_start_still_reaches_its_horizon() {
     assert!(e.stat(10) < 2e5 && e.stat(4) < 4e5, "steps {} and events {} within the budget", e.stat(10), e.stat(4));
 }
 
-
 fn ref_b471(extra: Vec<Device>) -> Program {
     let mut p = program(7, vec![
         fz(21, 0, &[1, 0], vec![4.751886091509621, 0.054961332725668104], vec![]),
@@ -14430,7 +14419,6 @@ fn r74_walks_down_the_edges_and_frees_the_chips_above_where_the_rail_lands() {
     }
 }
 
-
 fn cold_1986_tpl0() -> (Program, Vec<(f64, usize)>, Vec<f64>) {
     let mut p = program(7, vec![
     fz(21, 0, &[1, 0], vec![4.8867463521225085, 0.0214728538967793], vec![]),
@@ -14484,7 +14472,6 @@ fn r74_a_landing_whose_powered_probe_cannot_settle_holds_the_chip() {
     assert!(e.stat(25) >= 1.0, "the gate held off");
 }
 
-
 #[test]
 fn a_retry_frees_an_innocent_chip_held_beside_the_culprit_at_the_same_edge() {
     // REFV's probe T1b: cold 471 tpl 2's culprit (device 7) plus an
@@ -14511,7 +14498,6 @@ fn a_retry_frees_an_innocent_chip_held_beside_the_culprit_at_the_same_edge() {
         close(-rig.i(0), rig.v(7) / 1e3, 1e-6, &format!("{at}: the PSU delivers the 1 k's current"));
     }
 }
-
 
 fn cold_559_tpl0() -> (Program, Vec<(f64, usize)>, Vec<f64>) {
     let mut p = program(8, vec![
@@ -15167,7 +15153,6 @@ fn a_stepped_leds_cv_tail_at_long_host_steps_is_stepped_finely_enough_not_to_lat
     }
 }
 
-
 /// Cold 535 tpl 2 at host steps of 50 ms to 0.2 s, with the per-step state a
 /// stress cut could disturb: the stepped partitions' digest (their `version`
 /// counters aside), the published arrays, the LED's damage integral and the
@@ -15239,9 +15224,6 @@ fn a_stress_cut_stops_at_its_cap_on_a_ratio_that_keeps_falling() {
     assert!(starts.iter().any(|e| e.2.len() == 4), "a plan cuts to the cap: {starts:?}");
     assert!(starts.iter().all(|e| e.2.len() <= 4 && e.2.windows(2).all(|w| w[1] < w[0])), "{starts:?}");
 }
-
-
-
 
 #[test]
 fn the_stepped_stress_probe_reads_each_kinds_ratio_as_its_drives_do() {
@@ -15324,7 +15306,73 @@ fn exact_modes_deferred_rail_plan_is_cut_like_any_other() {
     assert!(!paths.is_empty() && paths.iter().all(|c| c.2), "the rail partition's deferred plans are cut: {paths:?}");
 }
 
+/// Cold 535 tpl 2's LED R8 twice on its {5.23 V, 0.275 A} supply: each LED
+/// (vf 3.37 V, ifMax 6.85 mA) charges its own 2.31 mF (nodes 2 and 3, each
+/// its own stepped partition), and a 74LS00's supply is node 3 (device 5).
+/// The two share the limit until the CC exit near 27.4 ms; in CV each LED's
+/// current then falls from 0.137 A through its rating within 20 ms.
+fn twin_led_branches_one_with_an_ic() -> Program {
+    let led = || vec![3.370604628158895, 2.4818603748546586, 0.006854894315031227, 0.0, 0.0, 0.0];
+    let cap = || vec![0.0023060961643505047, 0.023372750461450608, 0.0];
+    let mut p = program(4, vec![
+        fz(21, 0, &[1, 0], vec![5.234432841933891, 0.27456469733480177], vec![]),
+        fz(30, 1, &[1, 2], led(), vec![]),
+        fz(3, 2, &[2, 0], cap(), vec![]),
+        fz(30, 3, &[1, 3], led(), vec![]),
+        fz(3, 4, &[3, 0], cap(), vec![]),
+        fz(50, 5, &[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.7951945369129708e-7], vec![0.0; 13]),
+    ]);
+    p.digital_slot_count = 32;
+    p
+}
 
+#[test]
+fn a_held_ic_stops_the_stress_cut_in_its_own_partition_only() {
+    // Ruling R90 (a), R80V2 B: no cut under a held IC's table (planned
+    // again under it, cold 7 tpl 5 re-seeded under its held 555 at every
+    // step), but only in a partition that IC stamps. A catch-up plans both
+    // LED partitions across the CV fall, 26 to 36 ms, with the 74LS00 on
+    // node 3 held through a test seam (`FORCE_HELD`) or not: node 2's
+    // partition is cut either way, node 3's only without the hold.
+    let run = |held: Option<usize>| {
+        let mut rig = Rig::load(&twin_led_branches_one_with_an_ic()).unwrap();
+        rig.advance(0.026).unwrap();
+        let s = rig.k.solver_mut();
+        let (p2, p3) = (s.partition_of_node(2).unwrap().0 as usize, s.partition_of_node(3).unwrap().0 as usize);
+        assert_ne!(p2, p3, "two partitions");
+        let (drivers, live, voltages) = (s.driver_snapshot.clone(), s.live_params.clone(), s.voltages.clone());
+        stepped::FORCE_HELD.with(|f| f.set(held));
+        stepped::STRESS_CUT_LOG.with(|l| l.borrow_mut().clear());
+        let r = s.stepped.catch_up(&[p2, p3], 0.036, &drivers, &live, &voltages);
+        stepped::FORCE_HELD.with(|f| f.set(None));
+        r.unwrap();
+        let log = stepped::STRESS_CUT_LOG.with(|l| l.borrow().clone());
+        (log.iter().filter(|c| c.0 == p2).count(), log.iter().filter(|c| c.0 == p3).count())
+    };
+    let (free2, free3) = run(None);
+    assert!(free2 > 0 && free3 > 0, "both partitions cut with no hold: {free2}, {free3}");
+    let (held2, held3) = run(Some(5));
+    assert_eq!(held2, free2, "the partition the held IC does not stamp is cut as before");
+    assert_eq!(held3, 0, "the held IC's partition is not cut");
+}
 
-
-
+#[test]
+fn a_clamps_catch_up_steps_are_cut_like_any_plan() {
+    // Ruling R90 (a), R80V2 D: a catch-up or horizon clamp
+    // (`sync_partition`) plans its own steps with `plan_step`, so the probe
+    // applies there too. A clamp step only ever shortens a trial already
+    // planned and checked, and a ratio monotone over the step changes less
+    // over a shorter one, so in a run a clamp rarely needs a cut; this test
+    // drives a 10 ms catch-up directly from 13.6 ms, just before cold 535
+    // tpl 2's CC exit, across its CV fall, and the steps it plans there are
+    // cut, so the probe cannot drop out of this path unseen.
+    let mut rig = Rig::load(&cold_535_tpl2()).unwrap();
+    rig.advance(0.0136).unwrap();
+    stepped::STRESS_CUT_PATHS.with(|l| l.borrow_mut().clear());
+    let s = rig.k.solver_mut();
+    let p = s.partition_of_node(5).unwrap().0 as usize;
+    let (drivers, live, voltages) = (s.driver_snapshot.clone(), s.live_params.clone(), s.voltages.clone());
+    s.stepped.catch_up(&[p], 0.0236, &drivers, &live, &voltages).unwrap();
+    let paths = stepped::STRESS_CUT_PATHS.with(|l| l.borrow().clone());
+    assert!(paths.iter().any(|c| c.1), "a catch-up step was cut: {paths:?}");
+}
