@@ -4468,12 +4468,22 @@ export class SimEngine {
     }
     const t0 = this.simTime;
     let remaining = h;
+    // The interval's entry state. Once a split has committed its first
+    // segment and switched a supply, a later failed solve must roll all of it
+    // back, as _restoreFailedSplitTrial does for the 555 split, so a failed
+    // trial keeps the last trusted state for direct step() callers too.
+    let entry: StateSnapshot | null = null;
     try {
       for (let split = 0; ; split++) {
         const x0 = this._lastX ? new Float64Array(this._lastX) : null;
         const snap = split < BENCH_PSU_MAX_SPLITS ? this.saveState() : null;
+        entry ??= snap;
         this._solve(remaining, true);
-        if (!this.lastConverged || !snap) return;
+        if (!this.lastConverged) {
+          if (split > 0 && entry) this._restoreFailedSplitTrial(entry);
+          return;
+        }
+        if (!snap) return;
         const x1 = this._lastX!;
         const switches = this._benchPsuSwitches(x1);
         if (switches.length === 0) return;
@@ -4489,7 +4499,10 @@ export class SimEngine {
         const first = remaining * frac;
         if (first > 0) {
           this._solve(first, true);
-          if (!this.lastConverged) return;
+          if (!this.lastConverged) {
+            this._restoreFailedSplitTrial(entry!);
+            return;
+          }
           this.simTime += first;
           remaining -= first;
         }
