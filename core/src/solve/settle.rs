@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::static_part::{self, StampState};
 use super::stepped;
+use super::static_part::{self, StampState};
 use super::closed_form::DevicePin;
 use super::{place_junction, DynJunction, KclDevice, PartitionedSolver};
 use crate::devices::{self, led};
@@ -459,8 +459,9 @@ mod cold_hooks {
 ///   11.29 V supply after a shorting switch opens, 9.901 V on a 5 V one
 ///   back-driven through 10 ohm). A bound read off the rail's own solve is
 ///   only as sound as that solve, so there is none.
-/// - **No trapezoidal stepping.** `INTEGRATION` 1 steps every stepped
-///   partition by the trapezoidal rule, which has no maximum principle: past
+/// - **No trapezoidal stepping** (`may_trap`). `INTEGRATION` 1 steps every
+///   stepped partition by the trapezoidal rule, and R79 (a) a linear one off
+///   the hub under either option; it has no maximum principle: past
 ///   a stiff edge it rings, and a capacitor charged through an LED lands
 ///   volts past its supply and stays there while it discharges (W1gV4: 3.63
 ///   V over a 12.31 V supply for 0.3 s). Backward Euler, the closed forms
@@ -482,8 +483,8 @@ mod cold_hooks {
 ///   - every capacitor with a free pin has its other pin on a fixed node that
 ///     never moves: a capacitor between two free nodes, or from a free node to
 ///     a moving one, can pump a node past every source (a charge pump).
-pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::ResolvedSource], fixed: &[Option<f64>], live: &[bool], part_kinds: &[PartitionKind]) -> Option<(f64, f64)> {
-    if stepped::Method::from_option(program.options.integration) == stepped::Method::Trap && part_kinds.contains(&PartitionKind::Stepped) {
+pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::ResolvedSource], fixed: &[Option<f64>], live: &[bool], may_trap: bool) -> Option<(f64, f64)> {
+    if may_trap {
         return None;
     }
     for d in &program.devices {
@@ -767,7 +768,8 @@ impl PartitionedSolver {
 
         // R38 (a): the bound every cold test reads, widened, with what the
         // series walk needs (the pins on each node and their devices).
-        let span = voltage_span_bound(program, &self.resolved, fixed, live, &self.partition_kinds).filter(|_| !cold_hooks::disabled()).map(|(span, v_abs)| (span * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V, v_abs * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V));
+        let may_trap = self.stepped.may_step_trap(stepped::Method::from_option(program.options.integration));
+        let span = voltage_span_bound(program, &self.resolved, fixed, live, may_trap).filter(|_| !cold_hooks::disabled()).map(|(span, v_abs)| (span * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V, v_abs * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V));
         let mut pins_on = vec![0u32; program.node_count];
         let mut devs_on: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
         if span.is_some() {

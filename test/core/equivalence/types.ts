@@ -123,6 +123,13 @@ export interface AnalyticRcModel {
  * node1 voltage - analytic node2 voltage) / r2Ohms` — both exact by Ohm's
  * law across a resistor whose own two terminal voltages are both known
  * analytically, regardless of what else taps either node.
+ *
+ * `c1Component`/`c2Component` are the capacitors' ids, their series currents
+ * by KCL on the ladder's own nodes, when nothing else taps them: c2 carries
+ * r2's current, c1 r1's less r2's. Added for INT-ACC (ruling R79 (a)): the
+ * core's trapezoid tracks the ladder closer than classic's backward Euler,
+ * so the capacitor currents part from classic's too and need judging
+ * against the same closed form.
  */
 export interface AnalyticRcLadderModel {
   readonly kind: "rc-ladder";
@@ -135,6 +142,8 @@ export interface AnalyticRcLadderModel {
   readonly node2: AnalyticNodeRef;
   readonly r1Component?: string;
   readonly r2Component?: string;
+  readonly c1Component?: string;
+  readonly c2Component?: string;
 }
 
 /**

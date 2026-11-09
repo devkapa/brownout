@@ -57,8 +57,9 @@ pub const STAT_FIXED_NODES: u32 = 3;
 // and 16-20 (rail moves, rail sensitivity computations, rail scans, rail
 // events, source edges, reader flips at a scan) come live from the partition
 // solver (W1f). 25 and 26 (power holds taken, released: F5's D8, classic's
-// `_holdOffCounts.accepted`) come live from the partition solver. An index
-// past the table (>= `STAT_COUNT`) is `NaN`.
+// `_holdOffCounts.accepted`) come live from the partition solver, and 27
+// (trapezoid fallbacks, INT-ACC's R81 (1)) too. An index past the table (>=
+// `STAT_COUNT`) is `NaN`.
 pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// W1b's report to the orchestrator: index 15 is NOT in core/README.md's
 /// "Stat indices" table yet (that file is off limits to this worker) — it is
@@ -66,7 +67,7 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// plan row B2's "W1b reports the count of multi-capacitor linear
 /// partitions in the corpus". The `bo_engine_stat` export list itself is
 /// unaffected either way (it already accepts any `u32` index).
-const STAT_COUNT: usize = 27;
+const STAT_COUNT: usize = 28;
 
 /// The placeholder evaluator every `Engine::load` installs a `Kernel` with
 /// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
@@ -281,6 +282,8 @@ impl Engine {
             21..=24 => self.kernel.solver().slow_stats()[i as usize - 21],
             // W1c point 1a (F5, D8): power holds taken and released.
             25..=26 => self.kernel.solver().hold_stats()[i as usize - 25],
+            // INT-ACC (R81): trapezoidal partitions fallen back to backward Euler.
+            27 => self.kernel.solver().trap_fallbacks(),
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }

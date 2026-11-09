@@ -363,26 +363,31 @@ describe('engine: "core" — trap recovery (decision: HeadlessRunner rebuilds a 
 // t=0) with integrationMethod "trap" silently ran BE instead.
 describe('engine: "core" — integrationMethod reaches the core (W1b gave it real dynamics to seed)', () => {
   const TWO_CAP_LADDER = loadCoreFixture("14-two-capacitor-ladder.sim.json");
+  // INT-ACC (ruling R79 (a)): a linear stepped partition such as the ladder's
+  // steps by the trapezoid under either INTEGRATION value, so only a
+  // partition the option still picks for can show it honoured: an LED's
+  // (iterated) RC, backward Euler by default and trapezoidal under "trap".
+  const LED_RC = loadCoreFixture("35-led-rc-stepped.sim.json");
 
   it('a core-mode runner constructed with integrationMethod "trap" matches a CoreEngine loaded directly with trap, and differs from a BE load', () => {
     const beDirect = new CoreEngine();
-    beDirect.load(TWO_CAP_LADDER, CORE_IMPLEMENTED_KINDS, { integrationMethod: "be" });
+    beDirect.load(LED_RC, CORE_IMPLEMENTED_KINDS, { integrationMethod: "be" });
     beDirect.advance(1e-3);
 
     const trapDirect = new CoreEngine();
-    trapDirect.load(TWO_CAP_LADDER, CORE_IMPLEMENTED_KINDS, { integrationMethod: "trap" });
+    trapDirect.load(LED_RC, CORE_IMPLEMENTED_KINDS, { integrationMethod: "trap" });
     trapDirect.advance(1e-3);
 
     // Sanity: BE and trap must actually disagree on this circuit, or the
     // assertions below couldn't tell "ignored" from "honoured".
-    expect(trapDirect.getNetV().n2).not.toBeCloseTo(beDirect.getNetV().n2!, 6);
+    expect(trapDirect.getNetV().n1).not.toBeCloseTo(beDirect.getNetV().n1!, 6);
 
     const runner = new HeadlessRunner({
       engine: "core",
       coreSupportedKinds: CORE_IMPLEMENTED_KINDS,
       integrationMethod: "trap",
     });
-    runner.load(TWO_CAP_LADDER);
+    runner.load(LED_RC);
     expect(runner.activeEngine).toBe("core");
     runner.run({ durationS: 1e-3 });
 
@@ -390,17 +395,17 @@ describe('engine: "core" — integrationMethod reaches the core (W1b gave it rea
     // integrationMethod, so the compiled program always used the INTEGRATION
     // default ("be") regardless of what the runner was constructed with —
     // this would have matched beDirect's n2, bit for bit, instead of trap's.
-    expect(runner.readout.getNetV().n2).toBe(trapDirect.getNetV().n2);
-    expect(runner.readout.getNetV().n2).not.toBe(beDirect.getNetV().n2);
+    expect(runner.readout.getNetV().n1).toBe(trapDirect.getNetV().n1);
+    expect(runner.readout.getNetV().n1).not.toBe(beDirect.getNetV().n1);
   });
 
   it("switching BE to trap at t=0 in core mode takes effect (reloads the core program under the new method)", () => {
     const trapDirect = new CoreEngine();
-    trapDirect.load(TWO_CAP_LADDER, CORE_IMPLEMENTED_KINDS, { integrationMethod: "trap" });
+    trapDirect.load(LED_RC, CORE_IMPLEMENTED_KINDS, { integrationMethod: "trap" });
     trapDirect.advance(1e-3);
 
     const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS }); // default "be"
-    runner.load(TWO_CAP_LADDER);
+    runner.load(LED_RC);
     expect(runner.activeEngine).toBe("core");
 
     // Before the fix, applyIntegrationMethod's `if (this._activeEngine ===
@@ -408,7 +413,7 @@ describe('engine: "core" — integrationMethod reaches the core (W1b gave it rea
     // so this run still solved under "be".
     runner.run({ durationS: 1e-3, integrationMethod: "trap" });
     expect(runner.activeEngine).toBe("core"); // the reload must not itself trigger a classic fallback
-    expect(runner.readout.getNetV().n2).toBe(trapDirect.getNetV().n2);
+    expect(runner.readout.getNetV().n1).toBe(trapDirect.getNetV().n1);
   });
 
   it("the classic path is unchanged: a runner that falls back to classic (capacitor is not yet in the accuracy-cleared CORE_SUPPORTED_KINDS) still re-seeds under the requested method exactly as before this fix", () => {

@@ -1444,7 +1444,9 @@ fn stats_21_to_24_move() {
     let mut r = Engine::load(&resistor_2x()).unwrap();
     r.advance(1.5).unwrap();
     assert_eq!(r.stat(23), 1.0, "one latch");
-    assert!(e.stat(27).is_nan(), "past the table");
+    // Stat 27 (INT-ACC, R81 (1)): trapezoid fallbacks, none here.
+    assert_eq!(e.stat(27), 0.0, "no fallback");
+    assert!(e.stat(28).is_nan(), "past the table");
 }
 
 // ---- rollback ------------------------------------------------------------------
@@ -1768,10 +1770,15 @@ fn clock_src(ci: usize, pos: usize, neg: usize, freq: f64) -> Device {
     Device { kind: kinds::CLOCK, component_index: ci, pins: vec![pin(pos), pin(neg)], params: vec![freq, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] }
 }
 
+/// Whether `p`'s build may step a partition by the trapezoid (R79 (a)).
+fn may_trap(p: &Program) -> bool {
+    PartitionedSolver::build(p).expect("builds").stepped.may_step_trap(super::stepped::Method::from_option(p.options.integration))
+}
+
 /// The span bound of `p`, from its own partition build.
 fn span_of(p: &Program) -> Option<(f64, f64)> {
     let pb = partition::build(p).expect("builds");
-    super::settle::voltage_span_bound(p, &pb.resolved, &pb.fixed, &pb.live, &pb.kinds)
+    super::settle::voltage_span_bound(p, &pb.resolved, &pb.fixed, &pb.live, may_trap(p))
 }
 
 /// `p` with every rating's `pMax` at 0: the same circuit with no rated
@@ -1821,7 +1828,7 @@ fn a_resistance_in_series_through_a_bare_node_carries_its_share_of_the_span() {
     // the 1 mohm carries at most the span over 1000.001 ohm, times itself.
     let p = program(4, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1e3), resistor(2, 2, 3, 1e-3), capacitor(3, 3, 0, 1e-6)]);
     let pb = partition::build(&p).unwrap();
-    let (span, v_abs) = super::settle::voltage_span_bound(&p, &pb.resolved, &pb.fixed, &pb.live, &pb.kinds).unwrap();
+    let (span, v_abs) = super::settle::voltage_span_bound(&p, &pb.resolved, &pb.fixed, &pb.live, may_trap(&p)).unwrap();
     let mut pins_on = vec![0u32; p.node_count];
     let mut devs_on = vec![Vec::new(); p.node_count];
     for (e, d) in p.devices.iter().enumerate() {
@@ -2001,7 +2008,7 @@ fn no_cold_device_ever_sees_more_than_its_bound_on_random_circuits() {
         let Ok(solver) = PartitionedSolver::build(&p) else { continue };
         let Some((span, v_abs)) = ({
             let pb = partition::build(&p).unwrap();
-            super::settle::voltage_span_bound(&p, &pb.resolved, &pb.fixed, &pb.live, &pb.kinds)
+            super::settle::voltage_span_bound(&p, &pb.resolved, &pb.fixed, &pb.live, may_trap(&p))
         }) else {
             continue;
         };
@@ -2130,7 +2137,19 @@ fn a_trapezoidal_ring_past_the_supply_reads_its_load_alike_cold_or_visited_and_b
     // steps to a ratio change of e^0.5, and so finely stepped the ring no
     // longer carries the capacitor far enough past the supply to burn it
     // (it latched at 1.76 s before); cold or visited, the runs agree.
+    // INT-ACC (R77 (a), R81 (1)): the ring fails its first trapezoidal step
+    // at the floor on the series current, and the partition goes on by
+    // backward Euler (stat 27), so the node stays under the supply and
+    // nothing latches. The bound stays off: the program may still step by
+    // the trapezoid.
+    assert!(hot.is_empty(), "the ring past the supply is caught: {hot:?}");
     assert_eq!(cold, hot, "the cold run latches as the visited one");
+    let mut e = Engine::load(&trap).unwrap();
+    for &(t, _) in &script {
+        e.advance(t).unwrap();
+        assert!(e.voltages()[2] <= 12.0, "the trapezoid's fallback holds the node under its supply ({} V at {t})", e.voltages()[2]);
+    }
+    assert_eq!(e.stat(27), 1.0, "one fallback");
     assert_eq!(span_of(&trap), None, "no bound under the trapezoidal rule");
     assert_eq!(cold_devices(&trap), Vec::<usize>::new());
 
@@ -2243,3 +2262,4 @@ fn a_fixed_node_driver_the_load_settle_commits_last_is_in_the_solvers_table_and_
     twin.k.solver_mut().prepare_readout();
     assert_eq!(rig.i(6).to_bits(), twin.i(6).to_bits(), "the 2.5 V source's current at load: {} against {}", rig.i(6), twin.i(6));
 }
+

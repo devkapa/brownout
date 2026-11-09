@@ -833,6 +833,8 @@ function buildAnalyticTargets(entry: CorpusEntry, circuit: SimCircuit, model: An
     if (netId2) netV.set(netId2, v2At);
     if (model.r1Component) elementI.set(model.r1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms);
     if (model.r2Component) elementI.set(model.r2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
+    if (model.c1Component) elementI.set(model.c1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms - (v1At(t) - v2At(t)) / model.r2Ohms);
+    if (model.c2Component) elementI.set(model.c2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
   } else {
     // "fixed-pair-capacitor" (rule 2a): no free node at all, so only
     // elementI targets exist — see AnalyticFixedPairCapacitorModel's own doc
