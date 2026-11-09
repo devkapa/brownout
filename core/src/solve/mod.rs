@@ -187,6 +187,12 @@ pub trait PartitionSolver {
         0.0
     }
 
+    /// INT-ACC (R81): how many times a trapezoidal stepped partition fell
+    /// back to backward Euler on a ring (stat `27`).
+    fn trap_fallbacks(&self) -> f64 {
+        0.0
+    }
+
     /// Newton iterations run so far, summed across every stepped step and,
     /// from W1e, every iteration of an iterated static partition, the polish
     /// included (contract stat `11`).
@@ -697,6 +703,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn stepped_steps(&self) -> f64 {
         (**self).stepped_steps()
+    }
+
+    fn trap_fallbacks(&self) -> f64 {
+        (**self).trap_fallbacks()
     }
 
     fn newton_iterations(&self) -> f64 {
@@ -1256,6 +1266,9 @@ pub(crate) fn stamp_two_terminal(size: usize, a: &mut [f64], b: &mut [f64], pin_
 #[derive(Clone, Copy)]
 pub(crate) struct LiveTopology<'a> {
     pub rail: Option<usize>,
+    /// The PSU's rail node in either mode (`rail` is `None` in exact mode,
+    /// where the rail is a node of its own partition, not the hub's).
+    pub rail_node: Option<usize>,
     pub hub: &'a [bool],
     pub reads: &'a [Vec<usize>],
     pub live: &'a [bool],
@@ -1263,7 +1276,7 @@ pub(crate) struct LiveTopology<'a> {
 
 impl<'a> LiveTopology<'a> {
     pub(crate) fn of(pb: &'a partition::PartitionBuild) -> Self {
-        LiveTopology { rail: pb.rail.filter(|t| !t.exact).map(|t| t.rail), hub: &pb.hub, reads: &pb.reads, live: &pb.live }
+        LiveTopology { rail: pb.rail.filter(|t| !t.exact).map(|t| t.rail), rail_node: pb.rail.map(|t| t.rail), hub: &pb.hub, reads: &pb.reads, live: &pb.live }
     }
 
     /// Partition `p`'s live nodes, ascending.
@@ -4677,6 +4690,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn stepped_steps(&self) -> f64 {
         PartitionedSolver::stepped_steps(self)
+    }
+
+    fn trap_fallbacks(&self) -> f64 {
+        self.stepped.trap_fallbacks()
     }
 
     fn newton_iterations(&self) -> f64 {

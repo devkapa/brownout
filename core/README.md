@@ -938,7 +938,9 @@ rail sensitivity computations (pec3's `railSens`), `17` rail scans (pec3's
 `railScans`), `18` rail events processed, `19` source edges processed, `20`
 reader flips found at a rail scan, `21` slow interval closes, `22` slow
 events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
-`26` power holds released. Stat 11 counts every Newton iteration of
+`26` power holds released, `27` stepped partitions fallen back from the
+trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a).
+Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
 LEDs point 6, the polish included, and W1c's static fixed point, which W1c
@@ -1298,7 +1300,7 @@ message builders live in `src/core/failures.ts`, which the facade calls):
 6. **Closed form** evaluates the exact exponential between events, and
    lands threshold crossings analytically. **Stepped** partitions use
    classic's controller (BE step doubling; trapezoidal with a BE anchor when
-   `INTEGRATION` is `1`), land on every `t_end`, and refine crossings by
+   `INTEGRATION` is `1`, and in a linear partition by default, 6a), land on every `t_end`, and refine crossings by
    bisection. When an event (a driver commit, a reset, a `set_params`)
    dirties a stepped partition, its catch-up to the event instant integrates
    with the stamps in force BEFORE the event. The new stamps apply from the
@@ -1307,6 +1309,51 @@ message builders live in `src/core/failures.ts`, which the facade calls):
    `max(H_MIN, 0.25 h)`, `-4` only at the floor, and the re-aim seed
    warm-starts from the committed `x` (W1e, LEDs point 8). This changes
    W1c's free-supply stepped partitions too, which returned `-4` at once.
+6a. **The integrator (INT-ACC: rulings R77, R78, R79, R81, R88).**
+   - **Trapezoid by default** (R79 (a)). A linear stepped partition (no
+     stamped junction, no free IC supply, no rail-supplied IC pin when it
+     steps the CC rail) steps by the trapezoidal rule under either
+     `INTEGRATION` value; the first step after a discontinuity stays
+     backward Euler, as classic's trap mode has it. A partition that reads
+     the PSU's rail (`hub`), or in exact mode holds it, keeps backward
+     Euler (`on_rail`): the rail jumps at a regime change with no
+     discontinuity for the partition, which backward Euler steps through
+     and the trapezoid carries as a ring; the trapezoid there also let a
+     rail's stiff draw ring (cold 761/5, 207/5). `voltage_span_bound` gives
+     no bound when any partition may step by the trapezoid (`may_trap`).
+     Divergence from classic, whose default is backward Euler everywhere.
+   - **The series current compared** (R77 (a)). In a trapezoidal run the
+     step-doubling estimate also compares each capacitor's series current,
+     the next step's history (classic's `capsI`, `ABS_CURRENT` 10 nA plus
+     `REL_TOL`), so a ring the charges hide is caught. A current that rings
+     (over the two halves it steps down and back up about the current it
+     rides on) is not what a shorter step improves: it does not set the
+     next step's growth (R88), and above the floor a step failing on rings
+     alone is taken (R81 (3), the ring-aware R77). Classic feeds the whole
+     capsI ratio to its next factor and fails on it, and crawls: cold 287/3
+     (a 14 nA ring on a 6.6 uA current, 1.5 million steps to 0.25 s), and
+     `INTEGRATION` trap's draining cell in exact mode (15 million steps to
+     0.6 s). Recorded divergences. At the floor a failing ring falls back.
+   - **The floor step checked** (R78 (a)). A step at the floor (`h <= 2.01
+     H_MIN`) is still taken as the one plain step it always was, but its
+     two halves (below the floor) estimate it, and a failing estimate holds
+     the next step at the floor instead of doubling it unchecked. Growth
+     stays x2 (classic x1.5) and the floor restart at an edge (classic: a
+     10 ns guard step, then its old step); a recorded divergence.
+   - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
+     estimate even at the floor meets a mode the trapezoid does not damp:
+     the partition goes on by backward Euler until its next discontinuity,
+     under either `INTEGRATION` value. Stat `27` counts the fallbacks.
+     Classic's trap mode crawls there instead (cold 213/1, 582/5, 686/5);
+     a recorded divergence.
+   - Measured on the cold 1-800 hub-2 sweep's moved boards (every 16th, 156,
+     against the fine reference): 12 closer, 142 within 0.05 W0, 2 farther:
+     300/0 (a resistor's burn latch, ruling R80's subject) and 214/5 (1.0 to
+     1.59 W0 at 6.3 ms, a trap-option board's start-up; divergence log,
+     R88). Cold 61/5 declines (`-4`) where it ran: it sat at a chip's power
+     edge already (fixed-host failures 4 of 20 before), on the R53 list
+     (R88); 505/5 did at the rail Newton's edge until R80's stepped stress.
+     Cold 360/3 runs where it declined: its decline was the trapezoid's.
 7. **Rollback.** A failed instant (`-4`, `-7`, in `advance` or
    `set_params`) restores every piece of solver state the attempt touched:
    published arrays (the channel array included, W1e, LEDs point 16), each
@@ -6195,6 +6242,23 @@ failures and warnings (W1g)"):
 - The `output_sag` window is per pin AND direction. A pin-keyed count
   latches a glitch's LOW-then-HIGH as one sag (the S1 `U41.y2n` latch, W1g
   point 9).
+
+## Open items (must close before 1.0.0)
+
+- **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
+  A backward Euler stepped partition's step-doubling bounds its node
+  voltages to W0 per step but never its capacitors' series currents, a
+  small decaying difference: fixture 38's supply partition (5 kohm into
+  100 nF, holding a 74HC14's free supply) reads `cd` 218 W0 off the fine
+  reference before INT-ACC and 323 W0 after it, its voltages 0.74 and 1.1
+  W0 (R79's longer input steps no longer cut its steps through
+  `sync_supplies`). Comparing the series current against classic's 10 nA in
+  every backward Euler partition cost +64 % cold-sweep steps, and in the
+  supply partitions alone +24 %, both with new wall caps. Fixture 38 is an
+  expected failure linked to this item (its sidecar's `openItem`); it turns
+  the gate red when it starts passing. First step: a current check relative
+  to the partition's own current scale, measured against the 1 % cold-wall
+  bound and R48.
 
 ## Deferred past 1.0.0
 

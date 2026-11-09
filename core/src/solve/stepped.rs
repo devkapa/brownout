@@ -131,6 +131,11 @@ impl Method {
     }
 }
 
+/// Classic's `ABS_CURRENT` (`adaptive-step.ts:22`): the absolute part of a
+/// current's tolerance in the step-doubling comparison (R77: the capacitor
+/// series-current history in a trapezoidal run, classic's `capsI`).
+pub const ABS_CURRENT: f64 = 10e-9;
+
 fn next_step_factor(ratio: f64, method: Method) -> f64 {
     if !ratio.is_finite() {
         return 0.2;
@@ -1093,6 +1098,11 @@ struct Partition {
     /// Spec §7.2.3's `_beNextStep`: forces BE for the WHOLE next
     /// step-doubling trio, cleared only after that step is accepted.
     be_next_step: bool,
+    /// INT-ACC (R79): a trapezoidal partition whose step failed its estimate
+    /// at the floor rings (a stiff mode the trapezoid does not damp): it
+    /// steps by backward Euler until its next discontinuity.
+    trap_off: bool,
+    pend_trap_off: bool,
     version: u64,
     has_pend: bool,
     pend_t: f64,
@@ -1103,6 +1113,9 @@ struct Partition {
     /// Contract stats 10/11 (this partition's share). NOT rolled back
     /// (core/README.md, "A failed advance").
     steps_taken: u64,
+    /// R81 (1): times this partition fell back from the trapezoid to
+    /// backward Euler (stat `27`). NOT rolled back, as `steps_taken` is not.
+    trap_fallbacks: u64,
     newton_iterations: u64,
     /// Other Stepped partitions holding a supply node of an IC that watches
     /// one of this partition's nodes (`SteppedSolver::add_supply_dependency`).
@@ -1138,6 +1151,14 @@ struct Partition {
     /// W1f: whether the partition reads the rail (a hub partition, README
     /// Rails point 2), a build-time fact.
     hub: bool,
+    /// R79 (a): the partition reads the PSU's rail node (`hub`, set only
+    /// where the hub solves the rail) or, in exact mode, holds it with the
+    /// supply's own regime. It keeps backward Euler: the rail jumps at a
+    /// regime change with no discontinuity for the partition, which
+    /// backward Euler steps through and the trapezoid carries as a ring
+    /// (exact mode's cc pulse board, 13.6 mV off within 1 us of the CC
+    /// entry).
+    on_rail: bool,
     /// Whether it holds a pin of an IC supplied from the rail, whose driver
     /// curves it in the rail (Rails point 3), a build-time fact.
     rail_ic: bool,
@@ -1250,6 +1271,8 @@ impl Partition {
             h: POST_EVENT_H,
             changing: true,
             be_next_step: true, // classic's load(): the first step is always BE.
+            trap_off: false,
+            pend_trap_off: false,
             version: 0,
             has_pend: false,
             pend_t: 0.0,
@@ -1258,6 +1281,7 @@ impl Partition {
             pend_i: Vec::new(),
             watches: HashMap::new(),
             steps_taken: 0,
+            trap_fallbacks: 0,
             newton_iterations: 0,
             supply_deps: Vec::new(),
             prev_t: t0,
@@ -1269,6 +1293,7 @@ impl Partition {
             holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
             journaled: false,
             hub: false,
+            on_rail: false,
             rail_ic: false,
             sens: None,
             pend_lu: None,
@@ -1321,6 +1346,8 @@ struct PartitionSnapshot {
     h: f64,
     changing: bool,
     be_next_step: bool,
+    trap_off: bool,
+    pend_trap_off: bool,
     version: u64,
     has_pend: bool,
     pend_t: f64,
@@ -1359,6 +1386,8 @@ impl PartitionSnapshot {
         self.h = part.h;
         self.changing = part.changing;
         self.be_next_step = part.be_next_step;
+        self.trap_off = part.trap_off;
+        self.pend_trap_off = part.pend_trap_off;
         self.version = part.version;
         self.has_pend = part.has_pend;
         self.pend_t = part.pend_t;
@@ -1603,6 +1632,7 @@ impl SteppedSolver {
             let mut part = Partition::new(shape, program.options.start_time);
             part.holds_free_ic_supply = holds_free_ic_supply[p_idx];
             part.hub = topo.rail.is_some() && topo.hub[p_idx];
+            part.on_rail = topo.hub[p_idx] || topo.rail_node.is_some_and(|r| local_index[r].is_some_and(|(q, _)| q == p_idx));
             part.rail_ic = part.hub && rail_ic.as_ref().is_some_and(|r| r[p_idx]);
             parts.insert(p_idx, part);
         }
@@ -1980,6 +2010,7 @@ impl SteppedSolver {
         part.has_prev = false;
         part.has_pend = false;
         part.be_next_step = true;
+        part.trap_off = false;
         part.h = POST_EVENT_H;
         part.changing = true;
         // Its steps from the last time it stepped are stale.
@@ -2176,6 +2207,21 @@ impl SteppedSolver {
         self.partitions.values().map(|p| p.steps_taken as f64).sum()
     }
 
+    /// INT-ACC (R81): fallbacks to backward Euler taken so far, every
+    /// partition's (not rolled back, as `steps_taken` is not).
+    /// R79 (a): whether any partition here may step by the trapezoidal
+    /// rule, so has no maximum principle (`settle::voltage_span_bound`):
+    /// every one under `INTEGRATION` trap, else a linear one off the hub
+    /// (`plan_step`'s `trap_run`, off the rail; read without the CC rail's `rail_ic`,
+    /// which only takes a partition off it).
+    pub(super) fn may_step_trap(&self, option: Method) -> bool {
+        !self.partitions.is_empty() && (option == Method::Trap || self.partitions.values().any(|p| !p.iterated() && !p.on_rail))
+    }
+
+    pub fn trap_fallbacks(&self) -> f64 {
+        self.partitions.values().map(|p| p.trap_fallbacks as f64).sum()
+    }
+
     pub fn newton_iterations(&self) -> f64 {
         self.partitions.values().map(|p| p.newton_iterations as f64).sum()
     }
@@ -2294,6 +2340,7 @@ impl SteppedSolver {
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
                 part.be_next_step = true; // a discontinuity: force BE for the next trio.
+                part.trap_off = false;
                 part.has_prev = false;
                 // A re-aim keeps its step (`reaim`); a discontinuity restarts.
                 let kept = self.reaim.contains(&p_idx);
@@ -2598,6 +2645,8 @@ impl SteppedSolver {
                 part.h = saved.h;
                 part.changing = saved.changing;
                 part.be_next_step = saved.be_next_step;
+                part.trap_off = saved.trap_off;
+                part.pend_trap_off = saved.pend_trap_off;
                 part.version = saved.version;
                 part.has_pend = saved.has_pend;
                 part.pend_t = saved.pend_t;
@@ -2639,6 +2688,8 @@ impl SteppedSolver {
                             h: part.h,
                             changing: part.changing,
                             be_next_step: part.be_next_step,
+                            trap_off: part.trap_off,
+                            pend_trap_off: part.pend_trap_off,
                             version: part.version,
                             has_pend: part.has_pend,
                             pend_t: part.pend_t,
@@ -2689,6 +2740,8 @@ impl SteppedSolver {
                 part.h = s.h;
                 part.changing = s.changing;
                 part.be_next_step = s.be_next_step;
+                part.trap_off = s.trap_off;
+                part.pend_trap_off = s.pend_trap_off;
                 part.version = s.version;
                 part.has_pend = s.has_pend;
                 part.pend_t = s.pend_t;
@@ -2789,6 +2842,10 @@ impl SteppedSolver {
         part.i_src = part.pend_i_src;
         part.rail_q = part.pend_rail_q.map(|(q, i)| (part.t, q, i));
         part.be_next_step = false;
+        if part.pend_trap_off && !part.trap_off {
+            part.trap_fallbacks += 1;
+        }
+        part.trap_off |= part.pend_trap_off;
         part.steps_taken += 1;
     }
 
@@ -3038,7 +3095,19 @@ impl SteppedSolver {
         // failed Newton, a quarter of the step each time.
         let cc = cc.map(|c| CcStep { cv: part.cc_exited, ..c });
         let shape_n = part.shape.n;
-        let method = if part.be_next_step { Method::Be } else { option_method };
+        // R79 (a): a linear partition (no junction, no IC stamp that follows
+        // its own iterate) steps by the trapezoidal rule whatever the
+        // INTEGRATION option; the step after a discontinuity stays backward
+        // Euler, as classic's trap mode has it. A partition on the PSU's
+        // rail keeps backward Euler (`on_rail`): the trapezoid there let a
+        // rail's stiff draw ring (761/5, 207/5 on the cold sweep), and the
+        // rail jumps at a regime change with no discontinuity for its
+        // readers. A partition fallen back (R81 (1),
+        // `trap_off`) keeps backward Euler until its next discontinuity,
+        // under either option.
+        let trap_run = !part.trap_off && (option_method == Method::Trap || (!part.iterated_on(cc.is_some()) && !part.on_rail));
+        let mut method = if part.be_next_step || !trap_run { Method::Be } else { Method::Trap };
+        part.pend_trap_off = false;
         let vc0 = part.vc.clone();
         let x0 = part.x.clone();
         let i_prev = part.i_prev.clone();
@@ -3060,17 +3129,58 @@ impl SteppedSolver {
         // committed second half starts from; `None` when the accepted step
         // is one solve over `h`.
         let mut half: Option<StepResult>;
+        let mut growth: Option<f64> = None;
         loop {
-            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
+            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
             match attempt {
-                Ok((step, r, mid)) => {
-                    ratio = r.max(coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method));
+                Ok((step, r, mid, ringing, rest)) => {
+                    let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method);
+                    ratio = r.max(coupling);
+                    let mut smooth = rest.max(coupling);
                     if ic_ctx.cc.is_some() && part.cc_switch {
                         ratio *= CC_STEP_TOL_SCALE;
+                        smooth *= CC_STEP_TOL_SCALE;
                     }
-                    if ratio <= 1.0 {
+                    // R81 (3), the ring-aware R77: a trapezoidal step that
+                    // fails on its ringing series currents alone (`ringing`,
+                    // everything else within tolerance) is taken. A shorter
+                    // step does not shrink the trapezoid's `-1` mode, so
+                    // failing it shortened the step for good: INTEGRATION
+                    // trap's draining cell in exact mode (`exact_mode_takes_
+                    // e_and_r_per_step...`) took 15 million steps to 0.6 s.
+                    // Classic fails it and crawls; a recorded divergence.
+                    if ratio > 1.0 && method == Method::Trap && h > H_MIN * 1.01 && ringing > 1.0 && smooth <= 1.0 {
+                        ratio = smooth;
+                    }
+                    // R81 (1): a trapezoidal step that fails its estimate
+                    // even at the floor meets a stiff mode the trapezoid
+                    // does not damp, which no shorter step removes: the
+                    // partition goes on by backward Euler until its next
+                    // discontinuity, under either INTEGRATION option
+                    // (counted, stat `27`; a recorded divergence from
+                    // classic's trap mode, which crawls). Falling back on a
+                    // ring above the floor instead gave up the trapezoid for
+                    // good on a board whose inrush rang once (the R68
+                    // two-partition board, node 6 at 10 ms 18.8 W0 off the
+                    // fine reference against 1.5).
+                    if ratio > 1.0 && method == Method::Trap && h <= H_MIN * 1.01 {
+                        method = Method::Be;
+                        part.pend_trap_off = true;
+                        continue;
+                    }
+                    // At the floor there is no smaller step: it is taken,
+                    // and its estimate holds the next one there (R78 (a)).
+                    if ratio <= 1.0 || h <= H_MIN * 1.01 {
                         accepted = step;
                         half = mid;
+                        // A ring inside R77's tolerance passes, and a shorter
+                        // step would not shrink it, so it does not set the
+                        // growth; the rest of the estimate does (R88's
+                        // divergence: classic feeds the whole capsI ratio to
+                        // its next factor, and crawls on 287/3).
+                        if ratio <= 1.0 {
+                            growth = Some(smooth);
+                        }
                         break;
                     }
                     h = (h * next_step_factor(ratio, method)).max(H_MIN);
@@ -3112,7 +3222,7 @@ impl SteppedSolver {
         if h > H_MIN * 2.01 {
             part.changing = ratio * (H_MAX / h).powi(order_exp) > QUIET_FRACTION;
         }
-        part.h = (h * next_step_factor(ratio, method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
+        part.h = (h * next_step_factor(growth.unwrap_or(ratio), method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
 
         // The CC exit inside the step (Rails point 5): the step is cut where
         // its CC rail reaches the setpoint, just past it, so the regime rules
@@ -3383,11 +3493,19 @@ impl SteppedSolver {
     }
 }
 
-/// One attempt at the step-doubling trio at `h` (or, at `h <= 2.01 * H_MIN`,
-/// one plain step, which has nothing to compare against): the fine result,
-/// its error ratio, and the first half step it continues from (`None` for
-/// the plain step). `NoConverge` from any of the three solves rejects the
-/// whole attempt (`plan_step`).
+/// One attempt at the step-doubling trio at `h`: the result to commit, its
+/// error ratio, the first half step the committed second half continues
+/// from (`None` when the committed result is the one step over `h`), the
+/// ratio of the capacitor currents that ring (R77, `ringing`) and the ratio
+/// of everything else (what a shorter step would improve). `NoConverge` from
+/// any of the three solves rejects the whole attempt (`plan_step`), except
+/// at the floor.
+///
+/// At the floor (`h <= 2.01 * H_MIN`) the trio is an estimate only (R78
+/// (a)): its halves fall below the floor, so the floor step itself is
+/// committed as the one plain step it always was, and the estimate decides
+/// whether the next step may grow from it; where a half does not converge
+/// the floor step stands unchecked.
 #[allow(clippy::too_many_arguments)]
 fn attempt_step(
     shape: &DynShape,
@@ -3397,38 +3515,70 @@ fn attempt_step(
     x0: &[f64],
     i_prev: &[f64],
     method: Method,
+    trap_run: bool,
     shape_n: usize,
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
-) -> Result<(StepResult, f64, Option<StepResult>), StepError> {
-    if h <= H_MIN * 2.01 {
-        return Ok((take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?, 0.0, None));
-    }
+) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
     let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
-    let mid = take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0)?;
+    let at_floor = h <= H_MIN * 2.01;
+    let mid = match take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0) {
+        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
+        other => other?,
+    };
     // The second half starts from the rail capacitors' charge the first
     // left (ruling R68).
     let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(mid.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
-    let fine = take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, &second, t0 + h)?;
+    let fine = match take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, &second, t0 + h) {
+        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
+        other => other?,
+    };
 
     let mut ratio = 0.0f64;
+    let mut ringing = 0.0f64;
     for k in 0..shape_n {
         let r = rel_error(coarse.x[k], fine.x[k]);
         if r > ratio {
             ratio = r;
         }
     }
+    // Everything but a ring's current: what a shorter step would improve.
+    let mut rest = ratio;
     for i in 0..vc0.len() {
         let r = rel_error(coarse.vc[i], fine.vc[i]);
         if r > ratio {
             ratio = r;
         }
+        rest = rest.max(r);
+        // R77 (a): in a trapezoidal run the series current is the next
+        // step's history, compared as classic compares `capsI`
+        // (`adaptive-step.ts` estimateStepError), so a ring the charges hide
+        // is still caught.
+        if trap_run {
+            let (ci, fi) = (coarse.i[i], fine.i[i]);
+            let ri = (ci - fi).abs() / (ABS_CURRENT + REL_TOL * ci.abs().max(fi.abs()));
+            ratio = ratio.max(ri);
+            // A ring, not a step too long, read about the current it rides
+            // on: over the two halves the trapezoid's undamped `-1` mode
+            // steps the current down and back up (`i_prev`, `mid`, `fine` =
+            // I+a, I-a, I+a), so the halves' net move is small beside their
+            // swing, where a smooth current moves the same way twice.
+            if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
+                ringing = ringing.max(ri);
+            } else {
+                rest = rest.max(ri);
+            }
+        }
     }
     if let (Some((qc, _)), Some((qf, _))) = (coarse.rail_q, fine.rail_q) {
         ratio = ratio.max(rel_error(qc, qf));
+        rest = rest.max(rel_error(qc, qf));
     }
-    Ok((fine, ratio, Some(mid)))
+    if at_floor {
+        return Ok((coarse, ratio, None, ringing, rest));
+    }
+    Ok((fine, ratio, Some(mid), ringing, rest))
 }
 
 /// The cross-branch coupling on a CC rail (ruling R37 (a), R39 (1)), as a

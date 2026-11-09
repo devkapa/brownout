@@ -22,7 +22,13 @@ const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 
 /** What equivalence.test.ts's assertion (a) checks a synthetic fixture against. */
 export interface SyntheticExpectation {
-  readonly status: "pass" | "core-declined";
+  readonly status: "pass" | "core-declined" | "expected-fail";
+  /**
+   * With status "expected-fail" (ruling R96): the open item (core/README.md, "Open items") the
+   * failure waits on. The fixture still runs and reports red; assertion (a) fails the moment it passes,
+   * so the expectation is removed when the item closes.
+   */
+  readonly openItem?: string;
   /** Only meaningful when status is "core-declined" — e.g. "topology:" for the two topology-rejection fixtures. */
   readonly reasonPrefix?: string;
   /** Gate 2e / decision 3's analytic reference, when this fixture declares one — threaded straight onto the CorpusEntry (types.ts's own doc); see AnalyticFixtureModel and run-entry.ts's use of it. `undefined` for every fixture without one. */

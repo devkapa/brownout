@@ -409,6 +409,171 @@ export function explainRichardsonMismatches(
   return { explained, remaining };
 }
 
+// ─── INT-ACC, ruling R79 (a): the trapezoid closer than classic ─────────────
+//
+// R79 (a) steps a linear stepped partition by the trapezoidal rule where
+// classic steps backward Euler, so a reading on such a partition, and on
+// what it drives, parts from classic by classic's own discretisation error.
+// A plain-flow mismatch is explained here only when BOTH hold:
+//   1. it names something in the trapezoid's cone (`trapezoidCone`): a net
+//      of a free, capacitor-holding partition with no LED-family junction,
+//      no IC supply pin and no PSU or cell on it; every component with a pin
+//      on such a net and the sources feeding them; and an IC reading such a
+//      net with its input, together with its supply's partition and the
+//      sources feeding that (its draw follows the input it reads);
+//   2. the core is STRICTLY closer than classic to a reference R and R has
+//      converged, exactly the Richardson rule 2 above: R = 2 c(h/2) - c(h)
+//      from classic replayed at fixed backward Euler steps h and h/2,
+//      R' = 2 c(h/4) - c(h/2) within the ordinary tolerance of R.
+// So the row can never hide a regression: a core farther from R than
+// classic stays a failure whatever the cone says.
+
+/** Exported so a test can name the id without retyping it. */
+export const TRAPEZOID_DIVERGENCE_ID = "r79-trapezoid-closer";
+const TRAPEZOID_DECISION_REF =
+  "Ruling R79 (a) (INT-ACC): a linear stepped partition steps by the trapezoidal rule where classic steps backward " +
+  "Euler; a mismatch in that partition's cone is explained only when the core is strictly closer than classic to " +
+  "a converged Richardson reference of classic itself (fixed backward Euler steps h, h/2, h/4).";
+/** The reference replay's step: fine against classic's adaptive steps on a fixture's millisecond scales. */
+const TRAPEZOID_REFERENCE_STEP_S = 1e-5;
+
+const TRAPEZOID_PASSIVE_KINDS = new Set(["resistor", "capacitor", "switch", "push_button", "spdt_switch", "dip_switch", "fuse", "ptc_fuse", "potentiometer", "trimmer", "thermistor"]);
+const SOURCE_KINDS = new Set(["voltage_source", "bench_psu", "battery_pack", "pulse_source", "pulse_gen", "clock", "clock_gen"]);
+const isLedKind = (kind: string) => /led|seg7|bargraph/.test(kind);
+const isSupplyPin = (pinId: string) => /^(vcc|gnd)$/i.test(pinId);
+
+/** R79's cone in `circuit` (this section's header, condition 1): net ids and component ids. */
+export function trapezoidCone(circuit: SimCircuit): { readonly nets: ReadonlySet<string>; readonly elements: ReadonlySet<string> } {
+  const built = buildCoreNodes(circuit);
+  const kindOf = new Map(circuit.components.map((c) => [c.id, c.kind] as const));
+  const pinsOnNet = new Map<string, (readonly [string, string])[]>(built.nets.map((n) => [n.id, [...n.pins]]));
+  const netsOf = new Map<string, Set<string>>();
+  for (const net of built.nets) for (const [cid] of net.pins) (netsOf.get(cid) ?? netsOf.set(cid, new Set()).get(cid)!).add(net.id);
+  // A net an ideal source or the datum holds is fixed; everything else is free.
+  const fixed = new Set<string>();
+  for (const net of built.nets) if (net.id === "gnd" || net.pins.some(([cid]) => kindOf.get(cid) === "voltage_source" || kindOf.get(cid) === "ground")) fixed.add(net.id);
+  // Free nets joined by passives: the core's partitions, near enough for a cone
+  // that only ever excuses a core closer than classic.
+  const parent = new Map<string, string>();
+  const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
+  for (const net of built.nets) if (!fixed.has(net.id)) parent.set(net.id, net.id);
+  for (const c of circuit.components) {
+    if (!TRAPEZOID_PASSIVE_KINDS.has(c.kind)) continue;
+    const free = [...(netsOf.get(c.id) ?? [])].filter((n) => !fixed.has(n));
+    for (let i = 1; i < free.length; i++) parent.set(find(free[i]!), find(free[0]!));
+  }
+  const groups = new Map<string, string[]>();
+  for (const id of parent.keys()) (groups.get(find(id)) ?? groups.set(find(id), []).get(find(id))!).push(id);
+  const groupOf = (net: string) => (parent.has(net) ? groups.get(find(net))! : null);
+  const qualifies = (nets: readonly string[]) => {
+    const pins = nets.flatMap((n) => pinsOnNet.get(n) ?? []);
+    return pins.some(([cid]) => kindOf.get(cid) === "capacitor")
+      && !pins.some(([cid, pid]) => isLedKind(kindOf.get(cid) ?? "") || ((kindOf.get(cid) ?? "").match(/^(74|28c|ne555)/) && isSupplyPin(pid)) || kindOf.get(cid) === "bench_psu" || kindOf.get(cid) === "battery_pack");
+  };
+  const nets = new Set<string>();
+  const elements = new Set<string>();
+  const addGroup = (group: readonly string[]) => {
+    for (const n of group) {
+      nets.add(n);
+      for (const [cid] of pinsOnNet.get(n) ?? []) {
+        elements.add(cid);
+        // The sources feeding the group through a passive.
+        if (TRAPEZOID_PASSIVE_KINDS.has(kindOf.get(cid) ?? "")) for (const m of netsOf.get(cid) ?? []) if (m !== "gnd") for (const [sid] of pinsOnNet.get(m) ?? []) if (SOURCE_KINDS.has(kindOf.get(sid) ?? "")) elements.add(sid);
+      }
+    }
+  };
+  for (const group of groups.values()) if (qualifies(group)) addGroup(group);
+  // A reader IC's draw follows the input it reads: its supply's partition and sources.
+  for (const c of circuit.components) {
+    if (!(c.kind.match(/^(74|28c|ne555)/))) continue;
+    const reads = [...built.nets].some((n) => nets.has(n.id) && n.pins.some(([cid, pid]) => cid === c.id && !isSupplyPin(pid)));
+    if (!reads) continue;
+    elements.add(c.id);
+    for (const net of built.nets) {
+      if (!net.pins.some(([cid, pid]) => cid === c.id && /^vcc$/i.test(pid))) continue;
+      const g = groupOf(net.id);
+      if (g) addGroup(g);
+      else for (const [sid] of net.pins) if (SOURCE_KINDS.has(kindOf.get(sid) ?? "")) elements.add(sid);
+    }
+  }
+  return { nets, elements };
+}
+
+/** The plain flow's classic replay at a fixed step (stimuli.ts's), standing in for a hand-built one in a test. */
+export type ClassicFixedReplay = (circuit: SimCircuit, durationS: number, fixedStepS: number) => readonly StimulusStepSample[];
+const fixedReplay: ClassicFixedReplay = (circuit, durationS, fixedStepS) => replayStimuliOnClassic(circuit, [{ durationS }], fixedStepS);
+
+/** Splits `mismatches` into what R79's row explains (this section's header) and the rest, untouched. */
+export function explainTrapezoidMismatches(
+  circuit: SimCircuit,
+  mismatches: readonly Mismatch[],
+  replay: ClassicFixedReplay = fixedReplay,
+): { readonly explained: readonly KnownDivergenceHit[]; readonly remaining: readonly Mismatch[] } {
+  const cone = trapezoidCone(circuit);
+  const inCone = (m: Mismatch) => (m.category === "netV" ? cone.nets.has(m.id) : m.category === "elementI" ? cone.elements.has(m.id) : false);
+  const candidates = mismatches.filter((m) => inCone(m) && typeof m.classicValue === "number" && typeof m.coreValue === "number");
+  if (candidates.length === 0) return { explained: [], remaining: mismatches };
+  const until = Math.max(...candidates.map((m) => m.sampleTime));
+  const runs = new Map<number, readonly StimulusStepSample[] | null>();
+  const at = (h: number) => {
+    if (!runs.has(h)) {
+      try {
+        runs.set(h, replay(circuit, until + h, h));
+      } catch {
+        runs.set(h, null);
+      }
+    }
+    return runs.get(h)!;
+  };
+  const explained: KnownDivergenceHit[] = [];
+  const remaining: Mismatch[] = [];
+  for (const mismatch of mismatches) {
+    if (!candidates.includes(mismatch)) {
+      remaining.push(mismatch);
+      continue;
+    }
+    // Classic's replay samples sit a load step (1.5e-8 s) off the grid, so the
+    // reference is read between the two samples around the instant: linear,
+    // h^2 v'' / 8 off, far inside the tolerance at these steps.
+    const value = (h: number): number | undefined => {
+      const samples = at(h);
+      if (!samples) return undefined;
+      const read = (x: StimulusStepSample) => (mismatch.category === "netV" ? x.netV[mismatch.id] : x.elementI[mismatch.id]);
+      const k = samples.findIndex((x) => x.simTime >= mismatch.sampleTime);
+      if (k <= 0) return undefined;
+      const [s0, s1] = [samples[k - 1]!, samples[k]!];
+      const [v0, v1] = [read(s0), read(s1)];
+      if (typeof v0 !== "number" || typeof v1 !== "number") return undefined;
+      return v0 + ((v1 - v0) * (mismatch.sampleTime - s0.simTime)) / (s1.simTime - s0.simTime);
+    };
+    const h = TRAPEZOID_REFERENCE_STEP_S;
+    const [c1, c2, c4] = [value(h), value(h / 2), value(h / 4)];
+    if (typeof c1 !== "number" || typeof c2 !== "number" || typeof c4 !== "number") {
+      remaining.push(mismatch);
+      continue;
+    }
+    const r = richardsonEstimate(c1, c2, "be");
+    const rNext = richardsonEstimate(c2, c4, "be");
+    const [absTol, relTol] = mismatch.category === "netV" ? [VOLT_ABS_TOL, VOLT_REL_TOL] : [AMP_ABS_TOL, AMP_REL_TOL];
+    const coreErr = Math.abs((mismatch.coreValue as number) - r);
+    const classicErr = Math.abs((mismatch.classicValue as number) - r);
+    if (!(coreErr < classicErr) || !withinTolerance(rNext, r, absTol, relTol)) {
+      remaining.push(mismatch);
+      continue;
+    }
+    explained.push({
+      mismatch,
+      divergenceId: TRAPEZOID_DIVERGENCE_ID,
+      decisionRef: TRAPEZOID_DECISION_REF,
+      reason:
+        `in the trapezoid's cone and closer than classic to the converged reference R=${r} (|core-R|=` +
+        `${coreErr.toExponential(3)} < |classic-R|=${classicErr.toExponential(3)}; |R'-R|=${Math.abs(rNext - r).toExponential(3)})`,
+      richardson: { reference: r, coreError: coreErr, classicError: classicErr, tolerance: absTol + relTol * Math.abs(r), convergenceEstimate: Math.abs(rNext - r) },
+    });
+  }
+  return { explained, remaining };
+}
+
 /**
  * Gate 2d's stimuli path (W1b): replays `entry.phases` on classic, then on
  * the core, and — once both sides actually produced samples — compares them
@@ -833,6 +998,8 @@ function buildAnalyticTargets(entry: CorpusEntry, circuit: SimCircuit, model: An
     if (netId2) netV.set(netId2, v2At);
     if (model.r1Component) elementI.set(model.r1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms);
     if (model.r2Component) elementI.set(model.r2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
+    if (model.c1Component) elementI.set(model.c1Component, (t) => (model.sourceVolts - v1At(t)) / model.r1Ohms - (v1At(t) - v2At(t)) / model.r2Ohms);
+    if (model.c2Component) elementI.set(model.c2Component, (t) => (v1At(t) - v2At(t)) / model.r2Ohms);
   } else {
     // "fixed-pair-capacitor" (rule 2a): no free node at all, so only
     // elementI targets exist — see AnalyticFixedPairCapacitorModel's own doc
@@ -2069,8 +2236,10 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   // known-divergences.ts's registry about it — the two are independent
   // explanations for the SAME mismatch list, so both are tried and merged.
   const analyticSplit = explainAnalyticMismatches(entry, circuit, allMismatches);
-  const { known, unexplained } = classifyMismatches(circuit, analyticSplit.remaining);
-  const knownDivergences = [...analyticSplit.explained, ...known.map(toKnownDivergenceHit), ...(sidecarChecks.recorded ?? [])];
+  // INT-ACC (R79 (a)): the trapezoid's cone, only where the core is closer.
+  const trapezoidSplit = explainTrapezoidMismatches(circuit, analyticSplit.remaining);
+  const { known, unexplained } = classifyMismatches(circuit, trapezoidSplit.remaining);
+  const knownDivergences = [...analyticSplit.explained, ...trapezoidSplit.explained, ...known.map(toKnownDivergenceHit), ...(sidecarChecks.recorded ?? [])];
 
   if (unexplained.length === 0) {
     return { status: "pass", kinds: entry.kinds, classicWallMs, coreWallMs, knownDivergences, ...errorStats };

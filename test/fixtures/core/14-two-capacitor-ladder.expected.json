@@ -10,6 +10,8 @@
     "node1": { "component": "c1", "pin": "a" },
     "node2": { "component": "c2", "pin": "a" },
     "r1Component": "r1",
-    "r2Component": "r2"
+    "r2Component": "r2",
+    "c1Component": "c1",
+    "c2Component": "c2"
   }
 }

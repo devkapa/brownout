@@ -3625,15 +3625,19 @@ fn a_resolved_ramp_is_a_linear_boundary_with_stepped_readers_and_an_exact_crossi
     let mut e = Engine::load(&stepped(devices())).unwrap();
     // At every instant the node is pulseVoltage's value, and where the RC
     // committed one step since the last instant (stat 10), it is the
-    // step-doubling controller's accepted result: two backward Euler half
-    // steps, each with the boundary read at its own end (Rails point 7,
-    // Sources point 3), vc' = (vc + (h / tau) v(t)) / (1 + h / tau); one
-    // plain step at the minimum step. A corner restarts the partition: its
+    // step-doubling controller's accepted result: two half steps, each with
+    // the boundary read at its own end (Rails point 7, Sources point 3); one
+    // plain step at the minimum step. The first step from the load or a
+    // corner is backward Euler, vc' = (vc + (h / tau) v(t)) / (1 + h / tau);
+    // every later one the trapezoid (R79 (a): a linear partition), the
+    // boundary read at both ends, vc' = (vc (1 - a) + a (v(t0) + v(t))) /
+    // (1 + a), a = h / (2 tau). A corner restarts the partition: its
     // published nodes come from W1b's 1 ps backward Euler seed solve, and its
     // capacitor goes on from the step's own value.
     let t_cross = (1.7 + closed_form::CROSS_NUDGE_V) / 5000.0;
     let (mut t_prev, mut vc_prev, mut steps_prev) = (0.0, 0.0, e.stat(10));
     let (mut fall, mut worst_be, mut worst_exact, mut checked): (Option<f64>, f64, f64, u32) = (None, 0.0, 0.0, 0);
+    let mut be_next = true;
     loop {
         let t = e.next_event_time();
         if t > 3e-3 {
@@ -3643,14 +3647,19 @@ fn a_resolved_ramp_is_a_linear_boundary_with_stepped_readers_and_an_exact_crossi
         let (v1, vc) = (e.voltages()[1], e.voltages()[2]);
         close(v1, pulse_voltage(t), 1e-12, &format!("the node at {t:e}"));
         let be_step = |vc: f64, h: f64, t_end: f64| (vc + (h / 1e-3) * pulse_voltage(t_end)) / (1.0 + h / 1e-3);
+        let trap_step = |vc: f64, h: f64, t_end: f64| {
+            let a = h / 2e-3;
+            (vc * (1.0 - a) + a * (pulse_voltage(t_end - h) + pulse_voltage(t_end))) / (1.0 + a)
+        };
+        let step = |vc: f64, h: f64, t_end: f64| if be_next { be_step(vc, h, t_end) } else { trap_step(vc, h, t_end) };
         let h = t - t_prev;
-        let state = if h <= 2.01 * stepped::H_MIN { be_step(vc_prev, h, t) } else { be_step(be_step(vc_prev, h / 2.0, t_prev + h / 2.0), h / 2.0, t) };
+        let state = if h <= 2.01 * stepped::H_MIN { step(vc_prev, h, t) } else { step(step(vc_prev, h / 2.0, t_prev + h / 2.0), h / 2.0, t) };
         let corner = [1e-3, 5e-3, 6e-3].contains(&t);
         let be = if corner { be_step(state, 1e-12, t) } else { state };
         worst_exact = worst_exact.max((vc - exact(t)).abs());
         if e.stat(10) - steps_prev == 1.0 {
             worst_be = worst_be.max((vc - be).abs());
-            close(vc, be, 1e-9, &format!("one BE step to {t:e}"));
+            close(vc, be, 1e-9, &format!("one {} step to {t:e}", if be_next { "BE" } else { "trapezoidal" }));
             checked += 1;
         }
         if fall.is_none() && e.digital_slots()[1] == 0.0 {
@@ -3658,13 +3667,16 @@ fn a_resolved_ramp_is_a_linear_boundary_with_stepped_readers_and_an_exact_crossi
         }
         // The next step goes on from the capacitor's state, which a corner's
         // seed does not move.
+        // The step after a corner (or the load) is backward Euler until one
+        // has been committed.
+        be_next = corner || (be_next && e.stat(10) == steps_prev);
         (t_prev, vc_prev, steps_prev) = (t, if corner && e.stat(10) - steps_prev == 1.0 { state } else { vc }, e.stat(10));
     }
     // The gate's input crosses 1.7 V on the ramp at (1.7 + 1e-9) / 5000 s,
     // exactly; 1y falls one 10 ns delay later.
     close(fall.expect("1y fell on the ramp"), t_cross + 10e-9, 1e-15, "1y falls a delay after the exact crossing");
     assert!(checked >= 50, "most instants were one step: {checked}");
-    eprintln!("ramp RC: {checked} single steps, worst against the BE recursion {worst_be:.3e}, against the exact continuous response {worst_exact:.3e}; steps {}", e.stat(10));
+    eprintln!("ramp RC: {checked} single steps, worst against the recursion {worst_be:.3e}, against the exact continuous response {worst_exact:.3e}; steps {}", e.stat(10));
     e.advance(5.6e-3).unwrap();
     assert_eq!(e.digital_slots()[0], 0.0, "the slot back at 0 past the fall's midpoint");
     // A capacitor straight across the ramp node is declined (rule 2a).
@@ -10854,7 +10866,17 @@ fn a_chip_chattering_at_its_edge_in_ten_nanosecond_holds_declines_within_its_fir
     // s to hit the sweep's wall cap. Every hold is far shorter than the host
     // step and released by the chip's own supply, so the 51st release
     // declines `-4`, within the first host step.
-    for (name, p, first) in [("577 tpl 5", cold_577_tpl5(), 0.006272880912080727), ("670 tpl 2", cold_670_tpl2_default(), 0.006272881096655422)] {
+    //
+    // 670 tpl 2 (INTEGRATION trap) no longer chatters (R77 (a)): its
+    // capacitor currents rang in the trapezoid's `-1` mode, which drove the
+    // gate's supply back and forth across its edge; checked against the
+    // series current, its steps do not ring, and it runs without a hold,
+    // within 0.01 W0 of exact mode on 1 us host steps at 6.3 ms, 0.1, 0.5
+    // and 1 s (as its exact-mode sweep run always did).
+    let mut e = Engine::load(&cold_670_tpl2_default()).unwrap();
+    e.advance(0.006272881096655422).expect("670 tpl 2 runs its first host step");
+    assert_eq!(e.stat(25), 0.0, "670 tpl 2 takes no hold");
+    for (name, p, first) in [("577 tpl 5", cold_577_tpl5(), 0.006272880912080727)] {
         let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
         let err = e.advance(first).expect_err("declined, not crawled through");
         assert_eq!(err.code, -4, "{name}: {}", err.message);
@@ -12752,6 +12774,10 @@ fn a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge() {
     // failed at the floor with no verdict alternating (`-4` at 0.3919 s).
     // The step is cut at the floor, as at the setpoint, so the chip's power
     // flips at that commit's rail solve, and the run goes on.
+    //
+    // INT-ACC (ruling R88) declined it at the next such edge, 0.3892 s (the
+    // rail Newton not converging); on R80's stepped stress it runs through
+    // again.
     let p = { let mut p = program(5, cold_505_tpl5()); p.digital_slot_count = 32; p };
     let stops: [f64; STOPS_505.len()] = STOPS_505;
     let mut e = Engine::load(&p).unwrap();
@@ -13982,7 +14008,7 @@ fn a_landing_whose_powered_probe_sits_in_cv_past_the_limit_holds_the_chip_off_in
 }
 
 #[test]
-fn a_landing_that_each_clock_rise_recreates_declines_by_the_episode_guard() {
+fn a_landing_that_each_clock_rise_recreated_under_the_trapezoid_runs_once_it_falls_back() {
     // Ruling R76 (b), cold 360 tpl 3, on the R53 list of known declines. A
     // {13.57 V, 90 mA} PSU; a 74LS00 with vcc on the rail and its ground pin
     // on node 4, which 0.52 uF couples to a -2.7 / 7.2 V, 141.5 Hz clock's
@@ -13996,6 +14022,13 @@ fn a_landing_that_each_clock_rise_recreates_declines_by_the_episode_guard() {
     // host step, the episode guard (rulings R51, R54 (a)) declines at the
     // 51st, at 0.3604 s. cf1822c ran it to the end, CV at 138.6 mA past the
     // limit at each rise; no edge-recreation exception is made (R76).
+    //
+    // INT-ACC: the 140 mA was the trapezoid's (INTEGRATION trap). Under
+    // backward Euler the same board runs to 1.2 s without a hold (0950536
+    // too), and so it does now: at the clock's first rise the coupled
+    // node's floor step fails its estimate (R78 (a)), the partition falls
+    // back to backward Euler (R81 (1), counted), and the gate's ground pin
+    // is never dragged across its edge. Off the R53 list (ruling R88).
     let mut p = program(7, vec![
         fz(21, 0, &[1, 0], vec![13.56831830455205, 0.0899977823668638], vec![]),
         fz(22, 1, &[3, 0], vec![141.5065553275765, 0.7890347499709739, 7.155483571452099, -2.651931692289305, 0.0], vec![8.0]),
@@ -14032,16 +14065,11 @@ fn a_landing_that_each_clock_rise_recreates_declines_by_the_episode_guard() {
     p.digital_slot_count = 32;
     p.options.integration = 1;
     let mut rig = Rig::load(&p).unwrap();
-    let mut declined = None;
     for k in 1..=250 {
-        if let Err(e) = rig.advance(k as f64 * 2e-3) {
-            declined = Some((format!("{e:?}"), rig.k.time()));
-            break;
-        }
+        rig.advance(k as f64 * 2e-3).unwrap_or_else(|e| panic!("at {} s: {e:?}", k as f64 * 2e-3));
     }
-    let (e, t) = declined.expect("the episode guard declines");
-    assert!(e.contains("power hold") && e.contains("device 14") && e.contains("51 times"), "{e}");
-    assert!((0.358..0.3605).contains(&t), "declined after the instant at {t} s");
+    assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "no hold");
+    assert!(rig.s().trap_fallbacks() >= 1.0, "fallen back to backward Euler");
 }
 
 /// tpl=4 hub=2 e=7.316 psu ilim=0.023 PULSE3 -2.9..9.4 tr=4e-4 R3-1=34379.3 LED5-1+R1-5=18 C4-0=1.7e-6 R2-5=26737.0 R0-1=258.9 LED2-1+R1-2=977 R4-5=21084.2 F3-5=0.34/0.72 P5-2
@@ -14649,6 +14677,7 @@ fn exact_mode_enters_a_stepped_seeds_hold_in_the_owners_table_after_a_regime_re_
     let e = sweep_run(&p, &toggles, &stops).unwrap_or_else(|(e, t)| panic!("{} at {t}: {}", e.code, e.message));
     assert!(e.stat(25) >= 1.0 && e.stat(25) <= 2.0, "held once and kept: {} holds", e.stat(25));
 }
+
 
 fn cold_2575_tpl2() -> Program {
     let devices = vec![
@@ -15591,4 +15620,156 @@ fn with_a_clock_only_the_floor_governs_and_without_one_the_scaled_cap_declines_d
     let second = run(10e-12, false);
     assert_eq!((first.1, first.2.to_bits()), (second.1, second.2.to_bits()), "the same decline on every run");
     let _ = t;
+}
+
+// ---- INT-ACC: rulings R77, R78, R79 (the integrator) -------------------------
+
+/// The cold fuzz's seed 300 tpl 0 (default integration, every partition
+/// stepped), as `f5e gen` prints it.
+fn cold_300_tpl0() -> Program {
+    let devs = vec![
+        fz(21, 0, &[1, 0], vec![3.188682178881826, 0.11838646386462125], vec![]),
+        fz(2, 1, &[2, 0], vec![-7.3746310919255755], vec![]),
+        fz(1, 2, &[3, 0], vec![6923.827993408138], vec![]),
+        fz(1, 3, &[4, 0], vec![151067.53534992778], vec![]),
+        fz(1, 4, &[5, 0], vec![8605.209004031496], vec![]),
+        fz(1, 5, &[5, 4], vec![880.0888779177508], vec![]),
+        fz(50, 6, &[1, 0, 0, 4, 0, 0, 0, 2, 0, 0, 2, 0, 0, 0], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.5035165527321878e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 7, &[0, 5], vec![86.76508847033743], vec![]),
+        fz(1, 8, &[2, 4], vec![697.5050764312546], vec![]),
+        fz(1, 9, &[0, 3], vec![523.0212175287705], vec![]),
+        fz(4, 10, &[2, 0], vec![0.0], vec![]),
+        fz(1, 11, &[0, 0], vec![1880.6861086568774], vec![]),
+        fz(1, 12, &[2, 4], vec![9056.080782848696], vec![]),
+        fz(3, 13, &[3, 4], vec![2.638522845423853e-5, 0.3824061055348708, 0.0], vec![]),
+        fz(3, 14, &[1, 0], vec![0.0007906566063213092, 0.0, 0.0], vec![]),
+        fz(3, 15, &[4, 0], vec![4.592262849576482e-6, 0.0, 0.0], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.00025357571831027945, 880.0888779177508], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.09466182858766371, 86.76508847033743], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0007703072456902789, 697.5050764312546], vec![]),
+        fz(90, 11, &[], vec![11.0, 0.013859645248348982, 1880.6861086568774], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.0030530064835915887, 9056.080782848696], vec![]),
+    ];
+    let mut p = program(6, devs);
+    p.options.force_stepped = true;
+    p.digital_slot_count = 32;
+    p
+}
+
+/// The cold fuzz's seed 287 tpl 3 (`INTEGRATION` trap): a PSU into 14 mF, and
+/// node 5 between 0.42 mF to ground and 3.6 mF to a pulse source on node 3,
+/// a loop of two capacitors and a source with no resistance in it.
+fn cold_287_tpl3() -> Program {
+    let devs = vec![
+        fz(21, 0, &[1, 0], vec![6.262085585161733, 0.13900276430198796], vec![]),
+        fz(24, 1, &[3, 0], vec![0.1847667290649473, 7.04250672031382, 0.010365688443445249, 0.000719151091347534, 0.000719151091347534, 0.008439918186706639, 0.21462028006052797], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![1048.9248481721863], vec![]),
+        fz(1, 3, &[4, 0], vec![1953.0893992296808], vec![]),
+        fz(1, 4, &[5, 0], vec![2327.5960253487497], vec![]),
+        fz(3, 5, &[5, 0], vec![0.00041565946485909374, 0.0, 0.0], vec![]),
+        fz(3, 6, &[1, 0], vec![0.014020352469376992, 0.0, 0.0], vec![]),
+        fz(3, 7, &[5, 3], vec![0.0036383201974891496, 0.0, 0.0], vec![]),
+    ];
+    let mut p = program(6, devs);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_linear_partition_steps_by_the_trapezoid_and_lands_on_the_fine_reference() {
+    // R79 (a). Seed 300 tpl 0 runs backward Euler under its options; its
+    // node 3 (26 uF to node 4, 523 + 6924 ohm to ground) decays over the
+    // 19 ms from the host's stop at 6.996 ms to 26 ms in steps the
+    // step-doubling estimate allows. Backward Euler's error there builds to
+    // 9.2 mV (9.8 W0) over the run, where the trapezoid, second order, lands
+    // within 0.1 W0. The reference: exact mode on 1 us and 0.5 us host steps
+    // (-0.82965231, -0.82964759 V), extrapolated to h = 0 (first order).
+    let p = cold_300_tpl0();
+    let mut rig = Rig::load(&p).unwrap_or_else(|e| panic!("load: {}", e.message));
+    for t in [0.006272879107540682, 0.006417244685150293, 0.0069955339214060825, 0.026] {
+        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+    }
+    let want = 2.0 * -0.8296475888 - -0.8296523129;
+    close(rig.v(3), want, 1e-4 + 1e-3 * want.abs(), "seed 300 node 3 at 26 ms against the fine reference (W0)");
+}
+
+#[test]
+fn a_trapezoid_ringing_in_a_capacitor_loop_falls_back_and_reads_physical_currents() {
+    // R77 (a) with R81 (1)'s fallback. Seed 287 tpl 3 (INTEGRATION trap):
+    // its first step, backward Euler from the load, puts 69 MA through the
+    // loop of 0.42 mF, 3.6 mF and the pulse source (a jump across 10 ns),
+    // and the trapezoid carries that as its history: an undamped `-1` mode
+    // of +-6893 A that no node voltage shows, read out as each capacitor's
+    // current for good. Before the source's first edge (10.4 ms) the loop
+    // carries only what node 5's 2328 ohm draws, 7.1e-5 A at 0.166 V.
+    // Comparing the series current (classic's capsI) fails the step even
+    // at the floor, so the partition goes on by backward Euler (counted).
+    let p = cold_287_tpl3();
+    let mut rig = Rig::load(&p).unwrap_or_else(|e| panic!("load: {}", e.message));
+    rig.advance(0.006272879077239732).unwrap();
+    for d in [5, 7] {
+        assert!(rig.i(d).abs() < 1e-4, "capacitor {d} reads {} A with the source flat", rig.i(d));
+    }
+    assert!(rig.s().trap_fallbacks() >= 1.0, "the fallback is counted: {}", rig.s().trap_fallbacks());
+}
+
+#[test]
+fn a_ring_within_the_current_tolerance_does_not_hold_the_step_down() {
+    // R77 with ruling R88's divergence (287/3). After the pulse's edges at
+    // 0.2249 and 0.2257 s the same loop carries a `-1` mode of 14 nA on a
+    // 6.6 uA standing current: inside the 16.6 nA tolerance, ratio 0.85 at
+    // every step, which a shorter step does not shrink. Fed to the step
+    // factor it trims every step by 6 %, down to the floor: 1.5 million
+    // steps to 0.25 s. Read about the standing current it is a ring and
+    // leaves the growth to the rest of the estimate.
+    let p = cold_287_tpl3();
+    let mut rig = Rig::load(&p).unwrap_or_else(|e| panic!("load: {}", e.message));
+    let stops = [0.006272879077239732, 0.006736377178363159, 0.007084346449321804, 0.007187986291425173, 0.008613776996843828, 0.008878259068608818, 0.009406094390207904, 0.014446754687130081, 0.015624770754264678, 0.01580150088674773, 0.03994365372729529, 0.04605573194571669, 0.0461999676586049, 0.04638261214331129, 0.047227614951221575, 0.08581340188327743, 0.13317591585762445, 0.16120309963984014, 0.16516456297336166, 0.18474749670990603, 0.20292586096811266, 0.21583416670096595, 0.21647283961336253, 0.2166474253797772, 0.21675638009904363, 0.24080895231620025, 0.24428098850074947, 0.24520275893163646];
+    for t in stops {
+        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+    }
+    let steps = rig.s().stepped_steps();
+    assert!(steps < 2000.0, "{steps} steps to 0.245 s");
+}
+
+#[test]
+fn a_fast_transient_after_an_event_holds_the_step_at_the_floor() {
+    // R78 (a). 5 V through 100 ohm into 1 nF (tau 100 ns), the switch
+    // closed at 1 ms; an LED reverse-biased across the capacitor makes the
+    // partition iterated, so it steps by backward Euler (R79 leaves it).
+    // The step after the event sits at the 10 ns floor, where h / tau = 0.1:
+    // backward Euler's two halves part from its one step by ~5 W0 there
+    // and stay apart until the transient has decayed by some 3 tau. Checked,
+    // the floor step's estimate holds the next one at the floor all that
+    // while; unchecked, the steps doubled to 20, 40, 80 ns. The closed form
+    // (the LED's reverse leakage aside): 5 (1 - exp(-t / tau)).
+    let mut p = program(4, vec![source(0, 1, 0, 5.0), switch(1, 1, 2, false), resistor(2, 2, 3, 100.0), capacitor(3, 3, 0, 1e-9, 0.0), led(4, 0, 3)]);
+    p.options.force_stepped = true;
+    let mut rig = Rig::load(&p).unwrap_or_else(|e| panic!("load: {}", e.message));
+    rig.advance(1e-3).unwrap();
+    rig.k.apply_params_as_event(&[(1, 0, 1.0)]).unwrap();
+    rig.k.solver_mut().prepare_readout();
+    let before = rig.s().stepped_steps();
+    rig.advance(1e-3 + 1e-7).unwrap();
+    let steps = rig.s().stepped_steps() - before;
+    let want = 5.0 * (1.0 - (-1.0f64).exp());
+    let w0 = (rig.v(3) - want).abs() / (1e-4 + 1e-3 * want.abs());
+    eprintln!("{steps} steps to +100 ns; {} V against {want} V, {w0:.3} W0", rig.v(3));
+    assert!(steps >= 9.0, "{steps} steps over the 100 ns after the event: held at the 10 ns floor, ten");
+}
+
+#[test]
+fn a_step_failing_on_a_ring_alone_is_taken_above_the_floor() {
+    // R81 (3), the ring-aware R77. A cell of 0.9 ohm draining into 100 nF
+    // and 100 ohm in exact mode under INTEGRATION trap: the cell's partition
+    // holds the rail, and each SoC step moves E under it, which leaves the
+    // capacitor's series current ringing about its draw. Failed on the ring
+    // alone, every step was cut and grew back: 15.4 million steps to 0.6 s.
+    // Taken, as the rest of its estimate allows, a few hundred.
+    let p = draining_rail_cap(0.9, 1e-7, 1);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(0.6).unwrap();
+    let steps = rig.s().stepped_steps();
+    assert!(steps < 5000.0, "{steps} steps to 0.6 s");
 }
