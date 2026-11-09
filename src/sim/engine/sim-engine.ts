@@ -1128,7 +1128,7 @@ const NANO_USB_HOST_R = UNO_USB_HOST_R + 0.07;
 const NANO_USB_SCHOTTKY_IS = 2.4e-6;
 const NANO_USB_SCHOTTKY_N = 1.0;
 /** The fit is at 25 C, so D1 uses that temperature's thermal voltage. */
-const NANO_USB_SCHOTTKY_VT = 0.025693;
+const SCHOTTKY_FIT_VT_25C = 0.025693;
 
 // Raspberry Pi Pico 3V3(OUT) (Pico datasheet, "Powering Pico"): VBUS -> D1
 // Schottky -> VSYS -> RT6150B buck-boost -> 3V3. The pin is a regulator
@@ -1144,13 +1144,29 @@ const PICO_REG_R_OUT = 0.01;
 /** Sink current above which the regulator is taken to have been back-fed. */
 const PICO_REG_BACKFEED_A = 1e-3;
 
+// BBC micro:bit V1 3V pad (V1.3B and V1.5 schematics, "Power Supply" sheet):
+// the interface chip's (MKL26Z128) 3.3 V USB regulator, +3.3V_IF, reaches
+// +V_TGT, the nRF51822 rail and the edge connector's 3V pad, through D1, an
+// Infineon BAT60A Schottky (a second BAT60A, D2, feeds it from the battery
+// connector, which is not modelled). D1 needs an internal node between the
+// regulator and the diode. Shockley fit to the BAT60A datasheet's typical VF
+// at 25 C (0.12 V at 10 mA, 0.2 V at 100 mA, 0.3 V at 1 A): 80 mV/decade,
+// n = 1.352, Is = 316 uA (which also matches its 0.3 mA typical reverse
+// current at 5 V), plus ~0.02 ohm of bulk resistance taken from the 1 A
+// point. The regulator itself is taken as ideal: there is no published
+// output-resistance figure for it. A supply on the pad above +3.3V_IF
+// reverse-biases D1 (VR 10 V).
+const MICROBIT_USB_SCHOTTKY_IS = 3.16e-4;
+const MICROBIT_USB_SCHOTTKY_N = 1.352;
+const MICROBIT_USB_PATH_R = 0.02;
+
 // Absolute maximum supply voltage of each board's MCU, on the pin that feeds
 // it. A supply past it (most often a bench PSU back-feeding a USB-powered
 // board) latches a supply_overvoltage failure. The failure changes no stamp:
 // the engine does not know how the chip would fail, only that it is outside
 // what the datasheet allows.
 const MCU_SUPPLY_ABS_MAX: Readonly<Record<
-  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico",
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
   { pin: string; chip: string; maxV: number; source: string }
 >> = {
   // ATmega328P datasheet, Absolute Maximum Ratings: VCC -0.5 V to 6.0 V.
@@ -1159,6 +1175,9 @@ const MCU_SUPPLY_ABS_MAX: Readonly<Record<
   // RP2040 datasheet 5.5.3.1, Table 622: IOVDD -0.5 V to 3.63 V. The Pico's
   // 3V3 rail is IOVDD.
   raspberry_pi_pico: { pin: "3v3", chip: "RP2040", maxV: 3.63, source: "IOVDD" },
+  // nRF51822 Product Specification v2.0, chapter 6, Table 16: VDD -0.3 V to
+  // +3.9 V. The micro:bit V1's 3V pad is the nRF51822's VDD rail (+V_TGT).
+  microbit: { pin: "3v", chip: "nRF51822", maxV: 3.9, source: "VDD" },
 };
 
 // S18b — see hcsr04MaxStepH()'s doc comment: a hard cap on outer step size,
@@ -1819,6 +1838,8 @@ export class SimEngine {
   /** Set when a commit switches a Pico regulator's regime; load() re-solves
    *  its seed so the published operating point is in the committed regime. */
   private _picoRegimeFlipped = false;
+  /** Boards with an MCU supply absolute maximum (MCU_SUPPLY_ABS_MAX). */
+  private _supplyRatedComponents: SimComponent[] = [];
   private _stateUpdateComponents: SimComponent[] = [];
   private _digitalUpdateComponents: SimComponent[] = [];
   private _failureUpdateComponents: SimComponent[] = [];
@@ -5347,10 +5368,13 @@ export class SimEngine {
         this.internalNodeIdx.set(`${c.id}:${name}`, idx++);
       }
     }
-    // The Nano's VUSB node, between the USB host branch and D1.
+    // The Nano's VUSB node, between the USB host branch and D1, and the
+    // micro:bit's +3.3V_IF, between its USB regulator and D1.
     for (const c of this.circuit!.components) {
       if (c.kind === "arduino_nano" && Number(c.params.usb_power ?? 1) !== 0) {
         this.internalNodeIdx.set(`${c.id}:vusb`, idx++);
+      } else if (c.kind === "microbit" && Number(c.params.power ?? 1) !== 0) {
+        this.internalNodeIdx.set(`${c.id}:3v3_if`, idx++);
       }
     }
     this.nodeCount = idx;
@@ -5407,6 +5431,7 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    this._supplyRatedComponents = circuit.components.filter((component) => component.kind in MCU_SUPPLY_ABS_MAX);
     // H11 readback: nets only change on load(), so the per-load candidate
     // scan (and its diagnostics counter) restart here.
     this._readbackCandidates = null;
@@ -6412,8 +6437,8 @@ export class SimEngine {
         this._updateFailureStates(h, x);
         for (const comp of this._mcuComponents) {
           if (comp.kind === "arduino_uno") this._updateUnoUsbPolyfuse(comp, x, h);
-          this._checkMcuSupplyOvervoltage(comp, x, h);
         }
+        for (const comp of this._supplyRatedComponents) this._checkMcuSupplyOvervoltage(comp, x, h);
       }
       for (const comp of this._mcuComponents) {
         if (comp.kind === "raspberry_pi_pico") this._commitPicoRegulatorRegime(comp, x);
@@ -6664,7 +6689,7 @@ export class SimEngine {
                 this._vAt(xGuess, vusb) - this._vAt(xGuess, v5),
                 NANO_USB_SCHOTTKY_IS,
                 NANO_USB_SCHOTTKY_N,
-                NANO_USB_SCHOTTKY_VT,
+                SCHOTTKY_FIT_VT_25C,
               );
             }
           }
@@ -6773,14 +6798,26 @@ export class SimEngine {
           const gndNode = this._pinNode(comp.id, "gnd");
           const usbK = this.vsrcIdx.get(`${comp.id}:usb`);
           if (usbK !== undefined) {
-            // The rail source scales during source stepping; the idle-load
-            // resistor below keeps its authored nominal (it is a load).
-            stampVSource(
+            // The regulator source scales during source stepping; the
+            // idle-load resistor below keeps its authored nominal (it is a
+            // load). See MICROBIT_USB_SCHOTTKY_IS for the path.
+            const vIf = this.internalNodeIdx.get(`${comp.id}:3v3_if`) ?? -1;
+            stampVSourceSeriesR(
               this.mna,
-              node3v,
+              vIf,
               gndNode,
               usbK,
               this._independentSourceMagnitude(vcc),
+              MICROBIT_USB_PATH_R,
+            );
+            stampDiodeShockley(
+              this.mna,
+              vIf,
+              node3v,
+              this._vAt(xGuess, vIf) - this._vAt(xGuess, node3v),
+              MICROBIT_USB_SCHOTTKY_IS,
+              MICROBIT_USB_SCHOTTKY_N,
+              SCHOTTKY_FIT_VT_25C,
             );
           }
           this._stampBoardIdleLoad(
