@@ -31,6 +31,7 @@ const CHASE_REGROWTH: u32 = 16;
 const CELL_COUPLED: bool = true;
 
 /// The hub rail outside exact mode (Rails points 1-8).
+#[derive(Clone)]
 pub(super) struct Hub {
     pub node: usize,
     pub device: usize,
@@ -194,6 +195,7 @@ impl Hub {
 
 /// Exact mode's hub (Rails point 9): the rail is a free node of one
 /// partition, and the source is a stamp there.
+#[derive(Clone)]
 pub(super) struct ExactHub {
     pub node: usize,
     pub device: usize,

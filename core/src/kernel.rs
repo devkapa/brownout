@@ -490,6 +490,20 @@ pub trait DeviceEvaluator {
     fn take_eeprom_updates(&mut self) -> Vec<f64> {
         Vec::new()
     }
+
+    /// A boxed deep copy, for W2a's snapshots (the dyn-clone pattern: a
+    /// trait object cannot require `Clone` itself). Every evaluator
+    /// `Engine::load` installs overrides this; the test mocks never
+    /// snapshot, so the default panics rather than make each one clonable.
+    fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
+        unimplemented!("this evaluator is never snapshotted")
+    }
+}
+
+impl Clone for Box<dyn DeviceEvaluator> {
+    fn clone(&self) -> Self {
+        (**self).clone_box()
+    }
 }
 
 /// So `Kernel<_, Box<dyn DeviceEvaluator>>` satisfies the trait bound
@@ -558,6 +572,10 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn take_eeprom_updates(&mut self) -> Vec<f64> {
         (**self).take_eeprom_updates()
+    }
+
+    fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
+        (**self).clone_box()
     }
 }
 
@@ -722,6 +740,53 @@ struct Window {
     evaluator: Box<dyn std::any::Any>,
 }
 
+/// A deep copy for W2a's snapshots. The one field `derive(Clone)` would get
+/// wrong is `holds_flag`: the kernel and its solver share one cell, so the
+/// copy takes its flag from the solver's copy (which has a cell of its own,
+/// [`crate::solve::PartitionSolver::clone_box`]) instead of aliasing the
+/// original's. Written out field by field so a new field cannot be left out.
+impl<S: PartitionSolver + Clone, E: DeviceEvaluator + Clone> Clone for Kernel<S, E> {
+    fn clone(&self) -> Self {
+        let solver = self.solver.clone();
+        let holds_flag = solver.holds_flag();
+        Kernel {
+            solver,
+            heap: self.heap.clone(),
+            drivers: self.drivers.clone(),
+            driver_partition: self.driver_partition.clone(),
+            time: self.time.clone(),
+            holds_flag,
+            evaluator: self.evaluator.clone(),
+            stats: self.stats.clone(),
+            held_commits: self.held_commits.clone(),
+            pending_digital_writes: self.pending_digital_writes.clone(),
+            windowed: self.windowed.clone(),
+            heap_popped: self.heap_popped.clone(),
+            driver_journal: self.driver_journal.clone(),
+            driver_journaled: self.driver_journaled.clone(),
+            fixed_reset: self.fixed_reset.clone(),
+            dirty_buf: self.dirty_buf.clone(),
+            affected_buf: self.affected_buf.clone(),
+            requests_buf: self.requests_buf.clone(),
+            settled_buf: self.settled_buf.clone(),
+            last_instant: self.last_instant.clone(),
+            stalled: self.stalled.clone(),
+            run_before: self.run_before.clone(),
+            run_moves: self.run_moves.clone(),
+            instant_rail: self.instant_rail.clone(),
+            instant_other: self.instant_other.clone(),
+            instant_redrive: self.instant_redrive.clone(),
+            instant_source: self.instant_source.clone(),
+            host_step: self.host_step.clone(),
+            event_cap: self.event_cap.clone(),
+            busy_ms: self.busy_ms.clone(),
+            window: self.window.clone(),
+            check_stride: self.check_stride.clone(),
+            since_check: self.since_check.clone(),
+        }
+    }
+}
+
 impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     pub fn new(solver: S, evaluator: E) -> Self {
         Kernel {
@@ -860,6 +925,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// (`PartitionSolver::set_no_solution_cache`) into whatever solver is
     /// actually behind the kernel, without this generic module needing to
     /// know that cache exists at all.
+    /// The holds flag the kernel reads, so a test can check which cell it is.
+    #[cfg(test)]
+    pub(crate) fn holds_flag_cell(&self) -> Option<&std::rc::Rc<std::cell::Cell<bool>>> {
+        self.holds_flag.as_ref()
+    }
+
     pub fn solver_mut(&mut self) -> &mut S {
         &mut self.solver
     }

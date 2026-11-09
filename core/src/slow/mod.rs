@@ -140,7 +140,7 @@ impl ExpVoltage {
 /// the reference, so no mutator can forget the journal. The entry type is
 /// generic over `Clone`, so G2b can hold G2a's `output_sag` table in the same
 /// mechanism.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct JournaledTable<E: Clone> {
     entries: Vec<E>,
     open: bool,
@@ -317,7 +317,7 @@ pub struct ResetEffects {
 ///
 /// Tables are indexed by the program's device index, with `None` for a device
 /// that has no such integrator.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SlowState {
     flags: JournaledTable<DeviceFlags>,
     stress: JournaledTable<Option<Stress>>,

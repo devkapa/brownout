@@ -78,12 +78,16 @@ const STAT_COUNT: usize = 28;
 /// IC (or no digital kind at all, W0/W1b) never swaps this out, so it is
 /// also, still, `Engine`'s real evaluator for every such program — not just
 /// a load-time scaffold.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NoDevices;
 
 impl DeviceEvaluator for NoDevices {
     fn evaluate(&mut self, _reader: DeviceId, _now: f64, _acting_on_edges: bool, _voltages: &[f64]) -> Vec<DriverRequest> {
         Vec::new()
+    }
+
+    fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
+        Box::new(self.clone())
     }
 }
 
@@ -91,6 +95,7 @@ impl DeviceEvaluator for NoDevices {
 /// completed instant's readout (W1f, Readouts: a clock or pulse slot is 1
 /// while its value is above the midpoint of its two levels). Every other
 /// method forwards, so the ICs evaluate exactly as without it.
+#[derive(Clone)]
 struct WithSources {
     inner: Box<dyn DeviceEvaluator>,
 }
@@ -162,6 +167,10 @@ impl DeviceEvaluator for WithSources {
     fn take_eeprom_updates(&mut self) -> Vec<f64> {
         self.inner.take_eeprom_updates()
     }
+
+    fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
+        Box::new(self.clone())
+    }
 }
 
 /// Boxed rather than the concrete `Kernel<StaticPartitionSolver, NoDevices>`
@@ -194,6 +203,10 @@ fn map_kernel_error(e: KernelError) -> BoError {
 // minimal impl follows instead: `Result::unwrap_err` on a `Result<Engine,
 // BoError>` needs `Engine: Debug` for the success case's panic message, which
 // several tests below exercise (`Engine::load(&p).unwrap_err()`).
+//
+// `Clone` is W2a's deep copy (the snapshot); the boxed solver and evaluator
+// clone through their traits' `clone_box`.
+#[derive(Clone)]
 pub struct Engine {
     node_count: usize,
     device_count: usize,
@@ -1588,5 +1601,56 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 28c16: io0..io7
         ];
         assert_eq!(e.digital_slots(), &expected);
+    }
+
+    /// Every bit an advance publishes, for bit-for-bit comparisons.
+    fn published_bits(e: &Engine) -> (u64, Vec<u64>, Vec<u64>, Vec<u64>) {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        (e.time().to_bits(), bits(e.voltages()), bits(e.currents()), bits(e.digital_slots()))
+    }
+
+    #[test]
+    fn a_cloned_engine_runs_on_bit_identically_and_shares_no_mutable_state_with_the_original() {
+        // W2a piece 1: the snapshot is a deep copy of the engine. One of each
+        // W1d kind (the 28c16 holding its copy-on-write image), an RC that is
+        // still charging, and a switch the original toggles after the clone.
+        let mut devices = vec![
+            source(0, 1, 0, 5.0),
+            w1d_ic(kinds::IC_74LS161, 1, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74LS173, 2, 1, 0, 14, w1d_params(4, &[]), 0),
+            w1d_ic(kinds::IC_74HC74, 3, 1, 0, 12, w1d_params(2, &[]), 0),
+            w1d_ic(kinds::IC_74LS189, 4, 1, 0, 14, w1d_params(5, &[]), 0),
+            w1d_ic(kinds::IC_28C16, 5, 1, 0, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4),
+            resistor(6, 1, 2, 1_000.0),
+            capacitor(7, 2, 0, 1e-6, 0.0, 0.0),
+            switch_dev(8, 2, 3, 0.0),
+            resistor(9, 3, 0, 1_000.0),
+        ];
+        for (device, base) in devices[1..6].iter_mut().zip([0.0, 5.0, 9.0, 13.0, 17.0]) {
+            device.blob[0] = base;
+        }
+        let p = Program { node_count: 4, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
+        let switch = 8u32;
+        let mut e = Engine::load(&p).unwrap();
+        let mut unedited = Engine::load(&p).unwrap();
+        e.advance(0.3e-3).unwrap();
+        unedited.advance(0.3e-3).unwrap();
+        let at_clone = published_bits(&e);
+        let mut copy = e.clone();
+        assert_eq!(published_bits(&copy), at_clone);
+
+        e.advance(1e-3).unwrap();
+        let original_at_1ms = published_bits(&e);
+        assert_eq!(published_bits(&copy), at_clone, "advancing the original must not move the clone");
+        e.set_params(&[(switch, 0, 1.0)]).unwrap();
+        e.advance(2e-3).unwrap();
+
+        copy.advance(1e-3).unwrap();
+        assert_eq!(published_bits(&copy), original_at_1ms, "the clone runs on bit-identically");
+        copy.advance(2e-3).unwrap();
+        unedited.advance(1e-3).unwrap();
+        unedited.advance(2e-3).unwrap();
+        assert_eq!(published_bits(&copy), published_bits(&unedited), "the original's switch edit must not reach the clone");
+        assert_ne!(published_bits(&e).1, published_bits(&copy).1, "the edit does move the original");
     }
 }

@@ -151,7 +151,7 @@ struct IcEntry {
 /// do and the bits of the voltage `on_settled` last saw on it. A supply
 /// almost never moves, so watching these few nodes replaces asking every IC
 /// whether it is still powered.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SupplyNode {
     node: usize,
     bits: u64,
@@ -249,7 +249,7 @@ struct Saved {
 /// built AFTER the drivers it needs ids from already exist; this module's
 /// `register` does the same thing in one function since nothing else here
 /// needs the intermediate list).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IcEvaluator {
     ics: Vec<IcEntry>,
     /// Stat 12 (IC evaluations, core/README.md's "Stat indices"). Bumped at
@@ -954,6 +954,10 @@ impl DeviceEvaluator for IcEvaluator {
             }
         }
         out
+    }
+
+    fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
+        Box::new(self.clone())
     }
 }
 
@@ -2294,5 +2298,34 @@ mod tests {
         assert!(flag.get() && agrees(solver), "a restored snapshot sets it back");
         kernel.reset_failures_as_event().unwrap();
         assert!(!flag.get() && agrees(kernel.solver()), "dropping every hold clears it");
+    }
+
+    #[test]
+    fn a_cloned_kernel_gets_its_own_holds_flag_linked_into_its_own_solver() {
+        // W2a: `derive(Clone)` would alias the `Rc<Cell<bool>>` the kernel
+        // and the solver share, so a hold taken in a snapshot would flip the
+        // live kernel's flag (and the reverse).
+        use crate::digital::power::PowerHold;
+        use crate::solve::PartitionSolver;
+        let ic = 4usize;
+        let p = program(5, 4, vec![
+            source(0, 1, 0, 5.0),
+            spdt(1, 2, 0, 1, 0.0),
+            resistor(2, 1, 3, 10_000.0),
+            resistor(3, 3, 0, 10_000.0),
+            ls00(4, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 4, 0, 0, 4], 20e-9),
+        ]);
+        let (mut kernel, all_partitions, all_readers) = build(&p);
+        kernel.settle(0.0, &all_partitions, &all_readers).unwrap();
+        let mut copy = kernel.clone();
+        let flag = kernel.solver().holds_flag().unwrap();
+        let copy_flag = copy.solver().holds_flag().unwrap();
+        assert!(!std::rc::Rc::ptr_eq(&flag, &copy_flag), "the clone must get a cell of its own");
+        assert!(std::rc::Rc::ptr_eq(copy.holds_flag_cell().unwrap(), &copy_flag), "the clone's kernel must read its own solver's cell");
+        copy.hold_power_as_event(ic, PowerHold::off()).unwrap();
+        assert!(copy_flag.get() && !flag.get(), "a hold in the clone leaves the original's flag alone");
+        kernel.hold_power_as_event(ic, PowerHold::off()).unwrap();
+        copy.reset_failures_as_event().unwrap();
+        assert!(flag.get() && !copy_flag.get(), "and the reverse");
     }
 }

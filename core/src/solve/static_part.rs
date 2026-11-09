@@ -166,7 +166,7 @@ pub(crate) struct StampState {
 
 /// One partition's solution cache entry. A hub partition's entry also holds
 /// the rail sensitivity of its solve (README, Rails point 3, "Static cache").
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CacheEntry {
     hash: u64,
     key: Box<[u8]>,
@@ -209,7 +209,7 @@ pub(crate) struct HubSolveSnapshot(HubSolve);
 /// the rail is curved (re-solved past the band, Rails point 3): it holds a
 /// junction, a free IC supply, or a pin of an IC supplied from the rail,
 /// whose driver's `R_out` follows the rail even into a linear network.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct StaticHub {
     shape: DynShape,
     node_owner: HashMap<usize, (usize, usize)>,
@@ -252,7 +252,7 @@ struct StaticHub {
 /// what a junction partition's `iterated_solve` result depends on (it starts
 /// from the last published voltages), so that pattern is part of the
 /// results.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct PartCache {
     entries: Vec<CacheEntry>,
     /// Open-addressed table of `entries` indices plus one (`0` is empty),
@@ -422,7 +422,7 @@ fn fold_static_stamp(
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StaticPartitionSolver {
     /// Node ids per partition, in first-seen order (deterministic; contract
     /// point 3 of "W0 kernel semantics").

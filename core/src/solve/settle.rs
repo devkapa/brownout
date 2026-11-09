@@ -194,7 +194,7 @@ pub(super) struct SafeJunction {
 }
 
 /// The load-time tables the settle reads.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct SlowModel {
     pub devs: Vec<SlowDevice>,
     /// device index -> its index in `devs`, `u32::MAX` for none.
@@ -246,7 +246,7 @@ pub(super) struct SlowModel {
 }
 
 /// What happened since the last settle, and the settle's own working lists.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct SlowScratch {
     /// Ruling R71 (b): the stepped devices the trail closed at this instant,
     /// by slow index; their visit keeps the drive the trail left.

@@ -77,7 +77,7 @@ use crate::rails::{self, Contrib};
 use crate::solve::live::RampEval;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, rail_sensitivity, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base,
-    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, ThresholdFn,
+    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, SharedThresholdFn, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -1132,6 +1132,7 @@ fn hold_around(ic_ctx: &IcStampCtx, solve: &mut dyn FnMut(&IcStampCtx, Option<No
     Ok((solved, Some((table, taken))))
 }
 
+#[derive(Clone)]
 struct Partition {
     shape: DynShape,
     /// Committed local node voltages (len `n`) — the authoritative internal
@@ -1160,7 +1161,7 @@ struct Partition {
     pend_x: Vec<f64>,
     pend_vc: Vec<f64>,
     pend_i: Vec<f64>,
-    watches: HashMap<usize, Vec<(DeviceId, ThresholdFn)>>,
+    watches: HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>,
     /// Contract stats 10/11 (this partition's share). NOT rolled back
     /// (core/README.md, "A failed advance").
     steps_taken: u64,
@@ -1488,6 +1489,7 @@ impl PartitionSnapshot {
 
 /// Owns every `Stepped` partition (>= 2 capacitors, or a single one under
 /// `FORCE_STEPPED` — Decision 14), keyed by GLOBAL partition index.
+#[derive(Clone)]
 pub struct SteppedSolver {
     partitions: HashMap<usize, Partition>,
     node_owner: HashMap<usize, (usize, usize)>,
@@ -2232,7 +2234,7 @@ impl SteppedSolver {
             return false;
         };
         let part = self.partitions.get_mut(&p_idx).expect("node_owner and partitions built together");
-        part.watches.entry(local).or_default().push((reader, thresholds));
+        part.watches.entry(local).or_default().push((reader, Rc::from(thresholds)));
         true
     }
 
@@ -3815,7 +3817,7 @@ struct Crossing {
 /// THEN ([`ThresholdEnv`]), and a crossing is the node's distance from it
 /// changing sign, whichever of the two moved (a supply sweeping a threshold
 /// past a node that stands still is one too).
-fn find_crossing(watches: &HashMap<usize, Vec<(DeviceId, ThresholdFn)>>, x0: &[f64], t0: f64, x1: &[f64], t1: f64, env: &mut ThresholdEnv) -> Option<Crossing> {
+fn find_crossing(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>, x0: &[f64], t0: f64, x1: &[f64], t1: f64, env: &mut ThresholdEnv) -> Option<Crossing> {
     let mut best: Option<(f64, Crossing)> = None;
     for (&local, watchers) in watches {
         for (w, (_, thresholds)) in watchers.iter().enumerate() {
@@ -3852,7 +3854,7 @@ fn refine_crossing_h(
     x0: &[f64],
     i_prev: &[f64],
     method: Method,
-    watches: &HashMap<usize, Vec<(DeviceId, ThresholdFn)>>,
+    watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>,
     crossing: Crossing,
     t0: f64,
     env: &mut ThresholdEnv,

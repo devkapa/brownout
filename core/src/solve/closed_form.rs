@@ -54,7 +54,7 @@ use crate::solve::live::RampEval;
 use crate::solve::curvature;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, live_params_for, pin_voltage_global, rail_sensitivity, stamp_branch_terminal, stamp_ics_into_dyn,
-    stamp_linear_base, stamp_residual, Bnd, DynCapacitor, DynPin, DynShape, LiveTopology, ThresholdFn,
+    stamp_linear_base, stamp_residual, Bnd, DynCapacitor, DynPin, DynShape, LiveTopology, SharedThresholdFn, ThresholdFn,
 };
 
 /// The 1e-9 V nudge past a crossed threshold (W1 plan row B2; pec3.mjs
@@ -256,6 +256,7 @@ struct RampDrive {
     end: f64,
 }
 
+#[derive(Clone)]
 struct Partition {
     /// This partition's GLOBAL index.
     global: usize,
@@ -286,7 +287,7 @@ struct Partition {
     /// solve/snapshot/restore — registrations are load-time/setup wiring,
     /// not per-instant state (this module's doc comment on
     /// `ClosedFormSolver::snapshot`).
-    watches: HashMap<usize, Vec<(DeviceId, ThresholdFn)>>,
+    watches: HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>,
     /// Every registered reader, once per registration: what a re-aim queues.
     /// Kept beside `watches` (whose hash order the crossing tie-break
     /// follows) so queuing them walks one flat list.
@@ -493,6 +494,7 @@ impl HubTerm {
 /// partition index (the same numbering `partition::build`/`PartitionId` use)
 /// so `solve::PartitionedSolver` can route a dirty id straight here without
 /// a separate id-remapping table.
+#[derive(Clone)]
 pub struct ClosedFormSolver {
     /// The closed-form partitions, ascending by global index.
     parts: Vec<Partition>,
@@ -743,7 +745,7 @@ impl ClosedFormSolver {
         };
         let slot = self.slot_of[p_idx] as usize;
         let part = &mut self.parts[slot];
-        part.watches.entry(local).or_default().push((reader, thresholds));
+        part.watches.entry(local).or_default().push((reader, Rc::from(thresholds)));
         part.watch_ids.push(reader);
         true
     }

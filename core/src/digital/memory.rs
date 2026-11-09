@@ -861,6 +861,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_write_completing_after_a_clone_copies_the_image_once_and_leaves_the_clone_alone() {
+        // W2a: a snapshot shares the image; the live engine's next write
+        // pays the one copy, and the snapshot keeps the old byte.
+        let ic = ic_28c16();
+        let mut state = eeprom_state(vec![0xFF; 2048]);
+        state.pending = Some((7, 0x42, 10e-3));
+        let snapshot = state.clone();
+        assert!(Rc::ptr_eq(&state.image, &snapshot.image));
+        let unrelated = reads_eeprom(11, 0, 0, true, true, true);
+        let _ = evaluate_eeprom(&ic, &mut state, &unrelated, None, true, 10e-3);
+        assert!(!Rc::ptr_eq(&state.image, &snapshot.image), "the write copied the image");
+        assert_eq!((state.image[7], snapshot.image[7]), (0x42, 0xFF));
+        assert_eq!((Rc::strong_count(&state.image), Rc::strong_count(&snapshot.image)), (1, 1));
+    }
+
     // ---- seed / take_update ----------------------------------------------------
 
     #[test]

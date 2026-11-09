@@ -642,6 +642,19 @@ pub trait PartitionSolver {
         let _ = (device, hold);
         unimplemented!("this solver takes no power hold")
     }
+
+    /// A boxed deep copy, for W2a's snapshots (the dyn-clone pattern).
+    /// [`PartitionedSolver`], the one solver `Engine::load` installs,
+    /// overrides it; the test mocks never snapshot, so the default panics.
+    fn clone_box(&self) -> Box<dyn PartitionSolver> {
+        unimplemented!("this solver is never snapshotted")
+    }
+}
+
+impl Clone for Box<dyn PartitionSolver> {
+    fn clone(&self) -> Self {
+        (**self).clone_box()
+    }
 }
 
 /// So `Kernel<Box<dyn PartitionSolver>, _>` satisfies the trait bound
@@ -865,6 +878,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).holds_flag()
     }
 
+    fn clone_box(&self) -> Box<dyn PartitionSolver> {
+        (**self).clone_box()
+    }
+
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
         (**self).drop_power_holds()
     }
@@ -918,6 +935,11 @@ pub struct Threshold {
 /// two supply voltages) keeps this a single, uniform shape regardless of
 /// which node(s) a given reader's own thresholds happen to depend on.
 pub type ThresholdFn = Box<dyn Fn(&[f64]) -> Vec<Threshold>>;
+
+/// A registered [`ThresholdFn`] as a partition stores it: shared, so a
+/// partition clones (W2a's snapshot) without copying a closure, which a
+/// `Box<dyn Fn>` cannot do. It is never mutated after registration.
+pub type SharedThresholdFn = Rc<dyn Fn(&[f64]) -> Vec<Threshold>>;
 
 /// One of a device's own pins, already resolved against a SPECIFIC dynamic
 /// partition: `local` is `Some(index)` into that partition's own node list
@@ -2280,6 +2302,7 @@ fn junction_current_bounded(law: &led::JunctionLaw) -> bool {
 /// source-current KCL walk ([`PartitionedSolver::recompute_source_currents`])
 /// and for copying a `Static`-owned one's current out of
 /// `StaticPartitionSolver` after it resolves.
+#[derive(Clone)]
 struct KclDevice {
     device_index: usize,
     kind: u32,
@@ -2305,6 +2328,7 @@ impl KclDevice {
 /// and channel values from the published voltages. The device is not one
 /// partition's stamp (its junctions can sit in several, or across two fixed
 /// nodes), so this pass is solver-wide, like `recompute_source_currents`.
+#[derive(Clone)]
 struct LedDevice {
     device_index: usize,
     /// A copy of the record: `led::readout` reads its kind and `burnt` flag.
@@ -2332,6 +2356,7 @@ impl LedDevice {
 
 /// A switch-family device's dispatch metadata for
 /// `PartitionSolver::validate_params`/`apply_params`/`param_value`.
+#[derive(Clone)]
 struct SwitchInfo {
     kind: u32,
     pin_count: usize,
@@ -2399,7 +2424,7 @@ fn build_watch_dependents(ics: &[(usize, digital::IcRecord)], local_index: &[Opt
 /// writes into `voltages`, and the devices it writes into `currents` (its
 /// capacitors' and its stamped resistors' and switches'), the capacitors also
 /// listed on their own for the readout's magnitude bound.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct DynOut {
     nodes: Vec<usize>,
     devices: Vec<usize>,
@@ -2421,8 +2446,21 @@ impl DynOut {
 /// it costs no allocation.
 struct WindowToken;
 
+/// [`PartitionedSolver::holds_flag`]'s cell. The kernel holds the other
+/// reference to it, so a clone must not share it: the copy gets a cell of
+/// its own with the same value, and `Kernel`'s `Clone` takes that one.
+#[derive(Debug)]
+struct HoldsFlag(Rc<std::cell::Cell<bool>>);
+
+impl Clone for HoldsFlag {
+    fn clone(&self) -> Self {
+        HoldsFlag(Rc::new(std::cell::Cell::new(self.0.get())))
+    }
+}
+
 /// The composite solver `engine.rs`'s `Engine::load` builds and boxes as
 /// `Box<dyn PartitionSolver>` (`solve::PartitionedSolver::build`).
+#[derive(Clone)]
 pub struct PartitionedSolver {
     voltages: Vec<f64>,
     /// The published device currents. The slots the readout pass derives
@@ -2750,7 +2788,7 @@ pub struct PartitionedSolver {
     /// ([`PartitionSolver::holds_flag`]); set with the sub-solvers' copies
     /// ([`Self::sync_power_holds`]), so it follows every change, rollback
     /// and restore of the table. Derived, so not journaled itself.
-    holds_flag: Rc<std::cell::Cell<bool>>,
+    holds_flag: HoldsFlag,
     /// The window's journal of the table, `holds_active` and `episodes`,
     /// taken at the first touch of either (Rails point 8).
     w_holds: Option<(Rc<Vec<digital::power::PowerHold>>, u32, Rc<Vec<hold::Episode>>, bool)>,
@@ -3055,7 +3093,7 @@ impl PartitionedSolver {
             holds_active: 0,
             probe_version: 0,
             probes_at: None,
-            holds_flag: Rc::new(std::cell::Cell::new(false)),
+            holds_flag: HoldsFlag(Rc::new(std::cell::Cell::new(false))),
             w_holds: None,
             hold_counts: [0; 2],
             episodes: Rc::new(Vec::new()),
@@ -4375,7 +4413,7 @@ impl PartitionedSolver {
     /// the static one its cache keys) by.
     fn sync_power_holds(&mut self) {
         let on = self.holds_active > 0;
-        self.holds_flag.set(on);
+        self.holds_flag.0.set(on);
         self.static_solver.set_power_holds(Rc::clone(&self.holds), on);
         self.closed_form.set_power_holds(Rc::clone(&self.holds), on);
         self.stepped.set_power_holds(Rc::clone(&self.holds), on);
@@ -5312,7 +5350,11 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn holds_flag(&self) -> Option<Rc<std::cell::Cell<bool>>> {
-        Some(Rc::clone(&self.holds_flag))
+        Some(Rc::clone(&self.holds_flag.0))
+    }
+
+    fn clone_box(&self) -> Box<dyn PartitionSolver> {
+        Box::new(self.clone())
     }
 
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
