@@ -109,7 +109,8 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
     };
   }
   await wasm.initCore();
-  const raw = forMs === undefined ? undefined : ((await import(src("core/wasm.js"))) as { coreCall: <T>(f: (x: { bo_engine_advance_for(h: number, t: number, ms: number): number }) => T) => T }).coreCall;
+  const raw = forMs === undefined ? undefined : ((await import(src("core/wasm.js"))) as { coreCall: <T>(f: (x: { bo_engine_advance_for(h: number, t: number, ms: number): number; bo_engine_stat(h: number, i: number): number }) => T) => T }).coreCall;
+  let calls = 0;
   const cpu = () => {
     const u = process.cpuUsage();
     return (u.user + u.system) / 1000;
@@ -126,7 +127,10 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
       const h = (e as unknown as { _handle: number })._handle;
       e.advance = (t: number) => {
         let code = 1;
-        while (code === 1) code = raw((x) => x.bo_engine_advance_for(h, t, forMs!));
+        while (code === 1) {
+          code = raw((x) => x.bo_engine_advance_for(h, t, forMs!));
+          calls += 1;
+        }
         if (code !== 0) throw new Error(`bo_engine_advance_for: ${code}`);
         plain(t);
       };
@@ -142,10 +146,22 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
         for (; frames < Math.round(warmupS / FRAME_S); frames++) e.advance(e.simTime + FRAME_S);
         const s0 = e.simTime;
         const c0 = cpu();
+        const h = (e as unknown as { _handle: number })._handle;
+        const events = () => (raw === undefined ? 0 : raw((x) => x.bo_engine_stat(h, 4)));
+        const [r0, k0, ev0] = [clockReads, calls, events()];
         for (let f = 0; f < Math.round(measureS / FRAME_S); f++, frames++) e.advance(e.simTime + FRAME_S);
         if (!e.lastConverged) throw new Error(`${tree}: ${variant} did not converge`);
         out[variant].push((cpu() - c0) / (e.simTime - s0));
-        if (forMs !== undefined) console.error(`clock reads ${variant} after ${frames} frames: ${clockReads}`);
+        if (forMs !== undefined) {
+          // The stride the run settles at, as events per in-call check: the
+          // reads that are not a call's start or end read are the checks.
+          const [reads, n, ev] = [clockReads - r0, calls - k0, events() - ev0];
+          const checks = reads - 2 * n;
+          console.error(
+            `R86 ${variant}: ${(reads / (e.simTime - s0)).toFixed(0)} clock reads per simulated s, ${n} calls, ` +
+              `${checks} in-call checks, ${checks > 0 ? (ev / checks).toFixed(1) : "-"} events a check`,
+          );
+        }
       }
     } finally {
       e.dispose();
