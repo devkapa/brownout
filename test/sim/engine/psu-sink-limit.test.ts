@@ -207,6 +207,57 @@ describe("bench_psu let-go and take-back are crossings inside a step", () => {
     };
   }
 
+  it("keeps the last trusted state when a later segment of a crossing split fails", () => {
+    // Add an RC so the step carries capacitor state, then fail the solve
+    // after the split's first segment: that segment has already moved the
+    // capacitor and the supply has switched regime, so a failed step must
+    // roll all of it back, as the 555 split does.
+    const circuit = triangle();
+    circuit.components.push(
+      { id: "rc", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 100 } },
+      { id: "c", kind: "capacitor", pins: [{ id: "a" }, { id: "b" }], params: { capacitance: 1e-5 } },
+    );
+    circuit.wires.push(
+      { from_component: "a", from_pin: "pos", to_component: "rc", to_pin: "a" },
+      { from_component: "rc", from_pin: "b", to_component: "c", to_pin: "a" },
+      { from_component: "c", from_pin: "b", to_component: "a", to_pin: "neg" },
+    );
+    const engine = new SimEngine();
+    engine.load(circuit);
+    for (let ms = 1; ms <= 5; ms++) engine.step(1e-3);
+    const internals = engine as unknown as {
+      _solve(h: number, hold?: boolean): void;
+      state: { caps: Map<string, number>; icState: Map<string, Record<string, number>> };
+    };
+    const before = {
+      simTime: engine.simTime,
+      netV: { ...engine.getNetV() },
+      elementI: { ...engine.getElementI() },
+      caps: [...internals.state.caps],
+      psu: JSON.stringify(internals.state.icState.get("a") ?? null),
+    };
+    // The 5 -> 6 ms step crosses at 5.5 ms: call 1 is the full trial, call 2
+    // the segment up to the crossing, call 3 the rest after the switch.
+    const original = internals._solve.bind(engine);
+    let calls = 0;
+    internals._solve = (h: number, hold?: boolean) => {
+      calls += 1;
+      if (calls === 3) {
+        (engine as unknown as { lastConverged: boolean }).lastConverged = false;
+        return;
+      }
+      original(h, hold);
+    };
+    engine.step(1e-3);
+    expect(calls).toBe(3);
+    expect(engine.lastConverged).toBe(false);
+    expect(engine.simTime).toBe(before.simTime);
+    expect(engine.getNetV()).toEqual(before.netV);
+    expect(engine.getElementI()).toEqual(before.elementI);
+    expect([...internals.state.caps]).toEqual(before.caps);
+    expect(JSON.stringify(internals.state.icState.get("a") ?? null)).toBe(before.psu);
+  });
+
   it("publishes every 1 ms endpoint in the regime the source asks for", () => {
     const engine = new SimEngine();
     engine.load(triangle());
