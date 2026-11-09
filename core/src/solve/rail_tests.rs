@@ -15169,12 +15169,12 @@ fn a_stepped_leds_cv_tail_at_long_host_steps_is_stepped_finely_enough_not_to_lat
 
 
 /// Cold 535 tpl 2 at host steps of 50 ms to 0.2 s, with the per-step state a
-/// replan could disturb: the stepped partitions' digest (their `version`
-/// counters aside, which a replan bumps to stale the trial's event), the
-/// published arrays, the LED's damage integral and the latch log.
+/// stress cut could disturb: the stepped partitions' digest (their `version`
+/// counters aside), the published arrays, the LED's damage integral and the
+/// latch log.
 fn run_535_at_50ms(force: Option<(usize, f64, f64)>) -> Vec<String> {
     stepped::FORCE_REACH.with(|f| f.set(force));
-    super::settle::REPLAN_LOG.with(|l| l.borrow_mut().clear());
+    stepped::STRESS_CUT_LOG.with(|l| l.borrow_mut().clear());
     let mut rig = Rig::load(&cold_535_tpl2()).unwrap();
     let mut t: f64 = 0.0;
     let mut states = Vec::new();
@@ -15192,47 +15192,139 @@ fn run_535_at_50ms(force: Option<(usize, f64, f64)>) -> Vec<String> {
     states
 }
 
-#[test]
-fn a_stress_replan_leaves_the_state_a_plan_at_its_reach_would_have() {
-    // Ruling R90 (a): a trial planned again for a stressed device's ratio
-    // (`stress_replan`, R68's `SteppedSolver::replan`) must leave catch-up,
-    // readers, watches and every later step as if the shorter step had been
-    // planned in the first place. Cold 535 tpl 2 at 50 ms host steps
-    // replans its LED's partition at the CC exit (13.625 ms) and at the
-    // commits after it; at the first whose replans settle the trial under
-    // e^0.5 (not at the cap), a second run plans that commit at the reach
-    // the replans ended with, and must match the first state for state to
-    // 0.2 s.
-    let replanned = run_535_at_50ms(None);
-    let log = super::settle::REPLAN_LOG.with(|l| l.borrow().clone());
-    let settled = |t: f64| log.iter().filter(|r| r.1 == t).count() < 4;
-    let second = log.iter().map(|r| r.1).find(|&t| t > log[0].1 && settled(t)).expect("a later commit whose replans settle under the ratio");
-    let (p, _, reach) = *log.iter().rev().find(|r| r.1 == second).unwrap();
-    let forced = run_535_at_50ms(Some((p, second, reach)));
-    let log_forced = super::settle::REPLAN_LOG.with(|l| l.borrow().clone());
-    assert!(!log_forced.iter().any(|r| r.1 == second), "planned at its reach, the trial needed no replan: {log_forced:?}");
-    assert_eq!(replanned, forced);
+/// The stress cuts logged so far, grouped by the step's start: each start's
+/// cut lengths in order.
+fn cuts_by_start() -> Vec<(f64, usize, Vec<f64>)> {
+    let log = stepped::STRESS_CUT_LOG.with(|l| l.borrow().clone());
+    let mut out: Vec<(f64, usize, Vec<f64>)> = Vec::new();
+    for (p, t, _, cut) in log {
+        match out.iter_mut().find(|e| e.0 == t && e.1 == p) {
+            Some(e) => e.2.push(cut),
+            None => out.push((t, p, vec![cut])),
+        }
+    }
+    out
 }
 
 #[test]
-fn a_stress_replan_stops_at_its_cap_on_a_ratio_that_keeps_falling() {
+fn a_stress_cut_leaves_the_state_a_plan_at_its_reach_would_have() {
+    // Ruling R90 (a): a trial cut for a stressed device's ratio
+    // (`plan_step`'s stress probe) must leave catch-up, readers, watches and
+    // every later step as if the shorter step had been planned in the first
+    // place. Cold 535 tpl 2 at 50 ms host steps cuts its LED's partition at
+    // the CC exit (13.625 ms) and after; at the first later commit whose
+    // cuts settle the trial under e^0.5 (not at the cap), a second run plans
+    // that commit at the length the cuts ended with, and must match the
+    // first state for state to 0.2 s.
+    let cut = run_535_at_50ms(None);
+    let starts = cuts_by_start();
+    let &(t, p, ref cuts) = starts.iter().skip(1).find(|e| e.2.len() < 4).expect("a later commit whose cuts settle under the ratio");
+    let forced = run_535_at_50ms(Some((p, t, *cuts.last().unwrap())));
+    assert!(!cuts_by_start().iter().any(|e| e.0 == t), "planned at that length, the trial needed no cut");
+    assert_eq!(cut, forced);
+}
+
+#[test]
+fn a_stress_cut_stops_at_its_cap_on_a_ratio_that_keeps_falling() {
     // Cold 84 tpl 1 (exact mode) at the clock's first fall: the LED drains
     // the rail capacitor on tau = 37 ns from 790 A, and the drain's steps
     // ring, so a trial cut in proportion to its ratio's change still changes
-    // by more than e^0.5: one commit replans `STRESS_REPLANS` (4) times, each
-    // at a shorter reach, and goes on; no commit replans more, and the run
-    // gets past the fall.
-    super::settle::REPLAN_LOG.with(|l| l.borrow_mut().clear());
+    // by more than e^0.5: a plan cuts `STRESS_CUTS` (4) times, each shorter,
+    // and goes on; none cuts more, and the run gets past the fall.
+    stepped::STRESS_CUT_LOG.with(|l| l.borrow_mut().clear());
     let mut rig = Rig::load(&exact(ref_cold_84_tpl1())).unwrap();
     let fall = 0.6067396404390497 / 292.4270639400117;
     rig.advance(fall + 2e-6).unwrap();
-    let log = super::settle::REPLAN_LOG.with(|l| l.borrow().clone());
-    let mut counts: std::collections::HashMap<u64, Vec<f64>> = std::collections::HashMap::new();
-    for r in &log {
-        counts.entry(r.1.to_bits()).or_default().push(r.2);
-    }
-    assert!(counts.values().any(|r| r.len() == 4), "a commit replans to the cap: {log:?}");
-    assert!(counts.values().all(|r| r.len() <= 4), "{log:?}");
-    assert!(counts.values().all(|r| r.windows(2).all(|w| w[1] < w[0])), "each replan shortens the reach: {log:?}");
+    let starts = cuts_by_start();
+    assert!(starts.iter().any(|e| e.2.len() == 4), "a plan cuts to the cap: {starts:?}");
+    assert!(starts.iter().all(|e| e.2.len() <= 4 && e.2.windows(2).all(|w| w[1] < w[0])), "{starts:?}");
 }
+
+
+
+
+#[test]
+fn the_stepped_stress_probe_reads_each_kinds_ratio_as_its_drives_do() {
+    // Ruling R90 (a): the planner's probe and the slow pass's drives read a
+    // stepped device's stress ratio through the same formulas
+    // (`failures::resistor_q`, `fuse_q`, `led_q`, `PtcParams::
+    // untripped_constant`); at the published voltages they agree for each
+    // kind: resistors (cold 104 tpl 6), an LED (535 tpl 2), a PTC (55 tpl
+    // 2) and a fuse (474 tpl 5).
+    let mut p55 = program(6, cold_55_tpl2_dev());
+    p55.digital_slot_count = 32;
+    let boards: [(&str, Program, f64); 4] = [("104/6", cold_104_tpl6(), 0.01), ("535/2", cold_535_tpl2(), 0.005), ("55/2", p55, 0.0005), ("474/5", cold_474_tpl5(), 0.03)];
+    let mut kinds_seen = std::collections::BTreeSet::new();
+    for (name, p, t) in boards {
+        let mut rig = Rig::load(&p).unwrap();
+        rig.advance(t).unwrap();
+        let rows = rig.s().probe_agreement(t);
+        assert!(!rows.is_empty(), "{name}: rated stepped devices");
+        for (kind, q, pq) in rows {
+            kinds_seen.insert(kind);
+            assert!((q - pq).abs() <= 1e-12 * q.abs().max(1.0), "{name}: kind {kind} drives q {q}, probe {pq}");
+        }
+    }
+    for kind in [kinds::RESISTOR, kinds::FUSE, kinds::LED, kinds::PTC_FUSE] {
+        assert!(kinds_seen.contains(&kind), "kind {kind} checked: {kinds_seen:?}");
+    }
+}
+
+/// A 0.2 s ramp from 0 to 6 V into an LED (vf 2 V, ifMax 20 mA) charging
+/// 1 mF: dark until the ramp passes the LED's knee, then carrying C dV/dt =
+/// 30 mA, past its rating, from a partition nothing watched.
+fn ramp_fed_led() -> Program {
+    let mut p = program(3, vec![
+        fz(kinds::PULSE_SOURCE, 0, &[1, 0], vec![0.0, 6.0, 0.0, 0.2, 0.2, 10.0, 20.0], vec![0.0]),
+        fz(kinds::LED, 1, &[1, 2], vec![2.0, 2.0, 0.02, 0.0, 0.0, 0.0], vec![]),
+        fz(kinds::CAPACITOR, 2, &[2, 0], vec![1e-3, 0.0, 0.0], vec![]),
+        fz(kinds::RESISTOR, 3, &[2, 0], vec![1e4], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_device_going_stressed_from_an_unwatched_partition_is_cut_on_the_step_that_takes_it() {
+    // Ruling R90 (a), R80V2 A: the ramp-fed LED's partition carries no
+    // stressed device until the ramp passes the LED's knee; each trial is
+    // read from its own end (`plan_step_cut`), whatever the last commit
+    // watched, and at 10 ms host steps the LED's damage tracks a run at
+    // 0.1 ms within 3 %.
+    let s_at = |dt: f64| {
+        stepped::STRESS_CUT_LOG.with(|l| l.borrow_mut().clear());
+        let mut rig = Rig::load(&ramp_fed_led()).unwrap();
+        let mut t: f64 = 0.0;
+        while t < 0.2 - 1e-12 {
+            t = (t + dt).min(0.2);
+            rig.advance(t).unwrap();
+        }
+        let cuts = stepped::STRESS_CUT_LOG.with(|l| l.borrow().len());
+        (rig.s().slow.stress(1).map_or(0.0, |s| s.value_at(0.2)), rig.s().slow.is_failed(1), cuts)
+    };
+    let (coarse, failed_c, _) = s_at(0.01);
+    let (fine, failed_f, _) = s_at(1e-4);
+    assert_eq!(failed_c, failed_f);
+    assert!(fine > 0.0 && (coarse - fine).abs() <= 0.03 * fine, "S at 0.2 s: {coarse} at 10 ms hosts, {fine} at 0.1 ms");
+}
+
+#[test]
+fn exact_modes_deferred_rail_plan_is_cut_like_any_other() {
+    // Ruling R90 (a), R80V2 C and D: exact mode plans its rail partition
+    // only once the owner has charged the step's SoC (`plan_deferred`),
+    // after every other path; the stress probe sits in `plan_step` itself,
+    // so cold 84 tpl 1's drain (its LED in the stepped rail partition) is
+    // cut there, the first step after the fall's re-seed read from the
+    // seed. That first step starts at the shortest step, under any cut.
+    let fall = 0.6067396404390497 / 292.4270639400117;
+    stepped::STRESS_CUT_PATHS.with(|l| l.borrow_mut().clear());
+    let mut rig = Rig::load(&exact(ref_cold_84_tpl1())).unwrap();
+    rig.advance(fall + 2e-6).unwrap();
+    let paths = stepped::STRESS_CUT_PATHS.with(|l| l.borrow().clone());
+    assert!(!paths.is_empty() && paths.iter().all(|c| c.2), "the rail partition's deferred plans are cut: {paths:?}");
+}
+
+
+
+
 

@@ -320,6 +320,12 @@ pub fn peak_from_currents(kind: u32, currents: &[f64]) -> f64 {
 /// the caller does not ask. `voltages` is the whole circuit's node-voltage
 /// array.
 pub fn peak_current(device: &Device, junctions: &[Junction], voltages: &[f64]) -> f64 {
+    peak_current_with(device, junctions, |n| voltages[n])
+}
+
+/// [`peak_current`] with the node voltages read through `v` (ruling R90
+/// (a)'s stepped stress probe reads a trial's own nodes).
+pub fn peak_current_with(device: &Device, junctions: &[Junction], v: impl Fn(usize) -> f64) -> f64 {
     let burnt = match device.kind {
         kinds::LED => device.params[led_param::BURNT],
         kinds::RGB_LED => device.params[rgb_param::BURNT],
@@ -332,7 +338,7 @@ pub fn peak_current(device: &Device, junctions: &[Junction], voltages: &[f64]) -
     let mut currents = [0.0f64; 3];
     for j in junctions {
         if j.channel < currents.len() {
-            currents[j.channel] = j.law.current(voltages[j.anode] - voltages[j.cathode]);
+            currents[j.channel] = j.law.current(v(j.anode) - v(j.cathode));
         }
     }
     peak_from_currents(device.kind, &currents)

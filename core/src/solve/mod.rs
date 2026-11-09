@@ -2723,6 +2723,10 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
+    /// Ruling R90 (a): the failed and tripped counts the stepped stress
+    /// probes were last built at (`refresh_stress_probes`); `Some((MAX, _))`
+    /// once a build found no rated stepped device, which none can become.
+    probe_sig: Option<(usize, usize)>,
     /// `holds_active > 0`, as the kernel reads it
     /// ([`PartitionSolver::holds_flag`]); set with the sub-solvers' copies
     /// ([`Self::sync_power_holds`]), so it follows every change, rollback
@@ -3030,6 +3034,7 @@ impl PartitionedSolver {
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
             holds_active: 0,
+            probe_sig: None,
             holds_flag: Rc::new(std::cell::Cell::new(false)),
             w_holds: None,
             hold_counts: [0; 2],
@@ -4527,12 +4532,6 @@ impl PartitionedSolver {
             let stepped = self.stepped.handle_step(p, now, &self.driver_snapshot, &self.live_params, &mut self.voltages, &mut self.currents);
             self.stepped.cc = None;
             readers.extend(self.on_error(stepped)?);
-            let held = self.take_stepped_holds();
-            self.on_error(held)?;
-            // After the plan's holds are the owner's (W1c point 1a), so a
-            // replan plans under the table the first plan left.
-            let replanned = self.stress_replan(p, now, readers);
-            self.on_error(replanned)?;
             let held = self.take_stepped_holds();
             self.on_error(held)?;
         }

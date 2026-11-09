@@ -297,6 +297,49 @@ impl CcRail {
     }
 }
 
+/// Ruling R90 (a): one stepped device with a rating, as the planner reads
+/// its stress ratio `q` from a trial's own nodes ([`StressProbe::ratio`],
+/// the formulas the slow pass's drives use: `failures::resistor_q`,
+/// `fuse_q`, `led_q`, `PtcParams::untripped_constant`). The slow pass hands
+/// each partition the ones not failed or tripped (`set_stress_probes`).
+#[derive(Debug, Clone)]
+pub(crate) enum StressProbe {
+    Resistor { a: usize, b: usize, r: f64, r_power: f64, p_max: f64 },
+    Fuse { a: usize, b: usize, r_normal: f64, i_rating: f64 },
+    Led { device: Rc<crate::program::Device>, junctions: Rc<Vec<devices::led::Junction>>, if_max: f64 },
+    Ptc { a: usize, b: usize, params: crate::slow::stress::PtcParams },
+}
+
+impl StressProbe {
+    /// `(q, zero)` with the node voltages read through `v`.
+    pub(crate) fn ratio(&self, v: &dyn Fn(usize) -> f64) -> (f64, f64) {
+        use crate::slow::failures;
+        match self {
+            StressProbe::Resistor { a, b, r, r_power, p_max } => (failures::resistor_q(v(*a) - v(*b), *r, *r_power, *p_max), 1.0),
+            StressProbe::Fuse { a, b, r_normal, i_rating } => (failures::fuse_q(v(*a) - v(*b), *r_normal, *i_rating), 1.0),
+            StressProbe::Led { device, junctions, if_max } => (failures::led_q(devices::led::peak_current_with(device, junctions, v), *if_max), 1.0),
+            StressProbe::Ptc { a, b, params } => match params.untripped_constant((v(*a) - v(*b)).abs() / params.resistance(false)) {
+                crate::slow::stress::StressDrive::Constant { q, zero, .. } => (q, zero),
+                crate::slow::stress::StressDrive::Segment(_) => (-1.0, 1.0),
+            },
+        }
+    }
+}
+
+/// Ruling R90 (a): the step a trial from `q0` to `q1` (zero level `zero`)
+/// should have been, `h` cut in proportion to its ratio's log change with a
+/// margin, when the change passes `STRESS_STEP_RATIO`; `None` within it, or
+/// when neither end is at least half the level.
+fn stress_cut(changes: impl Iterator<Item = ((f64, f64), (f64, f64))>, h: f64) -> Option<f64> {
+    let mut worst: f64 = 0.0;
+    for ((q0, zero), (q1, _)) in changes {
+        if q0 > 0.0 && q1 > 0.0 && q0.max(q1) >= 0.5 * zero {
+            worst = worst.max((q1 / q0).ln().abs());
+        }
+    }
+    (worst > crate::slow::stress::STRESS_STEP_RATIO && h > 2.0 * H_MIN).then(|| (0.8 * h * crate::slow::stress::STRESS_STEP_RATIO / worst).max(H_MIN))
+}
+
 /// One committed step of a partition, as [`SteppedSolver::trail`] holds it.
 #[derive(Debug, Clone)]
 pub(crate) struct Committed {
@@ -1463,6 +1506,9 @@ pub struct SteppedSolver {
     /// re-seed or a republish at the moved rail overwrites what is published.
     /// Taken at the instant's settle; cleared with a rollback.
     pub(crate) trail: Vec<Committed>,
+    /// Ruling R90 (a): each partition's rated stepped devices
+    /// (`set_stress_probes`).
+    stress_probes: HashMap<usize, Vec<StressProbe>>,
     /// The partitions whose steps go on the trail (the owner's: a stepped slow
     /// device that is not cold sits in them), indexed by partition.
     pub(crate) trail_parts: Vec<bool>,
@@ -1591,6 +1637,7 @@ impl SteppedSolver {
             clamp: false,
             reaim: Vec::new(),
             trail: Vec::new(),
+            stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
             trail_reads: Vec::new(),
             #[cfg(test)]
@@ -1831,9 +1878,32 @@ impl SteppedSolver {
     /// stepped stressed devices (`settle`'s trail close sets it at each
     /// commit, infinite once none is stressed).
     pub(crate) fn set_stress_reach(&mut self, p: usize, reach: f64) {
-        if let Some(part) = self.partitions.get_mut(&p) {
-            part.stress_reach = reach;
+        if self.partitions.get(&p).is_some_and(|part| part.stress_reach.to_bits() != reach.to_bits()) {
+            self.journal(p);
+            self.partitions.get_mut(&p).unwrap().stress_reach = reach;
         }
+    }
+
+    /// Ruling R90 (a): partition `p`'s rated stepped devices still able to
+    /// fail, which its planner reads each trial's stress ratios from.
+    pub(crate) fn set_stress_probes(&mut self, p: usize, probes: Vec<StressProbe>) {
+        if probes.is_empty() {
+            self.stress_probes.remove(&p);
+        } else {
+            self.stress_probes.insert(p, probes);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_probe_list(&self, p: usize) -> Vec<StressProbe> {
+        self.stress_probes.get(&p).cloned().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_probes(&self) -> Vec<(usize, usize)> {
+        let mut v: Vec<(usize, usize)> = self.stress_probes.iter().map(|(p, v)| (*p, v.len())).collect();
+        v.sort_unstable();
+        v
     }
 
     /// Ruling R90 (a): whether partition `p` had a stressed device at its
@@ -1841,14 +1911,12 @@ impl SteppedSolver {
     /// trial checked for a replan, so a board none of whose devices nears its
     /// rating pays nothing for the check.
     pub(crate) fn set_stress_watch(&mut self, p: usize, watch: bool) {
-        if let Some(part) = self.partitions.get_mut(&p) {
-            part.stress_watch = watch;
+        if self.partitions.get(&p).is_some_and(|part| part.stress_watch != watch) {
+            self.journal(p);
+            self.partitions.get_mut(&p).unwrap().stress_watch = watch;
         }
     }
 
-    pub(crate) fn stress_watch(&self, p: usize) -> bool {
-        self.partitions.get(&p).is_some_and(|part| part.stress_watch)
-    }
 
     /// Partition `p`'s state at the start of a step from `x0` (ruling R80
     /// (a)): its own nodes there, and its outside reads as the step before
@@ -2903,6 +2971,20 @@ impl SteppedSolver {
     /// node OUTSIDE this partition (its IC's supply, sitting in a `Static`
     /// partition), which `part`'s own local `x0`/`x1` arrays never carry.
     fn plan_step(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+        self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, 0)
+    }
+
+    /// [`Self::plan_step`], the `cuts`-th time for a stressed device's ratio
+    /// (ruling R90 (a)): a plan whose accepted step changes a stressed
+    /// device's ratio by more than e^0.5 is planned again under a horizon
+    /// that step's length cut in proportion, at most `STRESS_CUTS` times. It
+    /// reads the step as the plan finally takes it, after its CC exit, edge
+    /// and crossing cuts (cold 535 tpl 2: the CC trial from its exit held the
+    /// LED at 1604 and the exit's CV re-solve over the same 10 ms fell
+    /// 16-fold), on every planning path: a Step event's, a re-seed's, a
+    /// catch-up's, a clamp's, exact mode's deferred plan.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_step_cut(&mut self, p_idx: usize, horizon: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64], cuts: u32) -> Result<(), String> {
         let option_method = self.method;
         // Each partition this one's watches take a supply from is a known
         // trajectory only as far as its pending trial reaches, so a step
@@ -2938,6 +3020,13 @@ impl SteppedSolver {
             _ => None,
         };
         let clamp = self.clamp;
+        let probes: &[StressProbe] = self.stress_probes.get(&p_idx).map_or(&[], |v| v.as_slice());
+        // Ruling R90 (a): not while an IC this partition stamps is held (W1c
+        // point 1a): cut under the hold procedure's table, cold 7 tpl 5's
+        // stepped rail partition in exact mode re-seeded under its held 555
+        // at every step after.
+        let in_p = |n: usize| node_owner.get(&n).is_some_and(|o| o.0 == p_idx);
+        let held_here = !probes.is_empty() && holds.iter().any(|h| !h.is_free()) && ics.iter().any(|(d, ic)| holds.get(*d).is_some_and(|h| !h.is_free()) && (in_p(ic.vcc.node) || in_p(ic.gnd.node) || ic.logic.iter().any(|pin| in_p(pin.node))));
         let part = self.partitions.get_mut(&p_idx).unwrap();
         // Within one horizon clamp (`sync_partition`) the CC rail it was
         // handed stays until the rail loop after it, so a step after one cut
@@ -3189,6 +3278,40 @@ impl SteppedSolver {
                 accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, t0 + h).map_err(StepError::into_message)?;
                 half = None;
             }
+        }
+
+        // Ruling R90 (a): a stressed device's ratio over the step as taken.
+        if !probes.is_empty() && !held_here && held_table.get().is_none() && cuts < STRESS_CUTS && h > 2.0 * H_MIN {
+            let t1 = part.t + h;
+            let bnd1 = ic_ctx.bnd.at_time(ramps, t1);
+            let u1 = accepted.u.filter(|_| part.hub).zip(rail);
+            let end = |n: usize| match node_owner.get(&n) {
+                Some(&(q, k)) if q == p_idx => accepted.x[k],
+                _ => match u1 {
+                    Some((u, r)) if r == n => u,
+                    _ => bnd1.get(n),
+                },
+            };
+            let q1: Vec<(f64, f64)> = probes.iter().map(|pr| pr.ratio(&end)).collect();
+            let stressed = q1.iter().any(|&(q, zero)| q >= 0.5 * zero);
+            if stressed || part.stress_watch {
+                let bnd0 = ic_ctx.bnd.at_time(ramps, part.t);
+                let reads = &part.end_reads;
+                let start = |n: usize| match node_owner.get(&n) {
+                    Some(&(q, k)) if q == p_idx => x0[k],
+                    _ => reads.iter().rev().find(|r| r.0 == n).map_or_else(|| bnd0.get(n), |r| r.1),
+                };
+                let q0: Vec<(f64, f64)> = probes.iter().map(|pr| pr.ratio(&start)).collect();
+                if let Some(cut) = stress_cut(q0.into_iter().zip(q1), h) {
+                    let t0 = part.t;
+                    #[cfg(test)]
+                    STRESS_CUT_LOG.with(|l| l.borrow_mut().push((p_idx, t0, h, cut)));
+                    #[cfg(test)]
+                    STRESS_CUT_PATHS.with(|l| l.borrow_mut().push((t0, clamp, exact.is_some_and(|e| e.partition == p_idx))));
+                    return self.plan_step_cut(p_idx, t0 + cut, drivers, live_params, voltages, cuts + 1);
+                }
+            }
+            part.stress_watch = stressed;
         }
 
         // The source's charge over the trial in the integrator's own
@@ -4215,7 +4338,23 @@ mod tests {
 #[cfg(test)]
 thread_local! {
     /// A test's (partition, instant, reach): that partition's plan at that
-    /// commit takes the reach from the start, as `stress_replan` would leave
+    /// commit takes the reach from the start, as a stress cut would leave
     /// it (ruling R90 (a)'s equivalence test).
     pub(crate) static FORCE_REACH: std::cell::Cell<Option<(usize, f64, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Ruling R90 (a): how many times one plan cuts its trial for a stressed
+/// device's ratio; each cut is shorter, and a ratio that keeps falling
+/// faster stops here.
+const STRESS_CUTS: u32 = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// Every cut `plan_step` makes for a stressed device: (partition, the
+    /// step's start, the trial's h, the cut h).
+    pub(crate) static STRESS_CUT_LOG: std::cell::RefCell<Vec<(usize, f64, f64, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// For each cut: the step's start, whether a catch-up or clamp
+    /// (`sync_partition`) planned it, and whether it is exact mode's rail
+    /// partition (whose plan is deferred to the owner's SoC charge).
+    pub(crate) static STRESS_CUT_PATHS: std::cell::RefCell<Vec<(f64, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
 }

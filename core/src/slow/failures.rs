@@ -146,6 +146,23 @@ pub fn fuse_current(dv: f64, r_normal: f64) -> f64 {
     (dv / r_normal).abs()
 }
 
+/// Ruling R90 (a): the ratio `q` a resistor's rate is `q - 1` of, `P/pMax`
+/// (-1 where it has no rating). The step mean and the stepped stress probe
+/// both read it here.
+pub fn resistor_q(dv: f64, r: f64, r_power: f64, p_max: f64) -> f64 {
+    if p_max > 0.0 { resistor_power(dv, r, r_power) / p_max } else { -1.0 }
+}
+
+/// A fuse's ratio `(I/iRating)^2` (-1 with no rating).
+pub fn fuse_q(dv: f64, r_normal: f64, i_rating: f64) -> f64 {
+    if i_rating > 0.0 { (fuse_current(dv, r_normal) / i_rating).powi(2) } else { -1.0 }
+}
+
+/// An LED's ratio `(peakI/ifMax)^2` (-1 with no rating).
+pub fn led_q(peak_i: f64, if_max: f64) -> f64 {
+    if if_max > 0.0 { (peak_i / if_max).powi(2) } else { -1.0 }
+}
+
 /// `resistor_overload` for a `resistor` across `dv = V(pins[0]) - V(pins[1])`
 /// (point 6). `r` is the resistor record's stamped `R`, `r_power` and `p_max`
 /// the Rating record's values. Record: `value = P`, `limit = pMax`.

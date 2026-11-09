@@ -2110,7 +2110,7 @@ fn a_load_on_a_current_limited_rail_latches_alike_cold_or_visited_wherever_the_r
 }
 
 #[test]
-fn a_trapezoidal_ring_past_the_supply_latches_its_load_cold_or_visited_and_backward_euler_keeps_it_cold() {
+fn a_trapezoidal_ring_past_the_supply_reads_its_load_alike_cold_or_visited_and_backward_euler_keeps_it_cold() {
     // R38 (a), W1gV4 finding 2: the trapezoidal rule has no maximum
     // principle. A capacitor charged from 12 V through an LED (1.63 V, 31
     // mA, as fuzz seed 860's; a stiff edge, so the first steps ring) lands near 15.8 V and holds it, discharging
@@ -2126,7 +2126,10 @@ fn a_trapezoidal_ring_past_the_supply_latches_its_load_cold_or_visited_and_backw
     let script: Vec<(f64, Vec<(u32, u32, f64)>)> = (1..=10).map(|k| (0.5 * k as f64, vec![])).collect();
     let trap = rc(true);
     let (cold, hot) = records_cold_and_hot(&trap, &script);
-    assert!(!hot.is_empty(), "the ring past the supply latches the visited resistor");
+    // Ruling R90 (a): the resistor near its rating holds its partition's
+    // steps to a ratio change of e^0.5, and so finely stepped the ring no
+    // longer carries the capacitor far enough past the supply to burn it
+    // (it latched at 1.76 s before); cold or visited, the runs agree.
     assert_eq!(cold, hot, "the cold run latches as the visited one");
     assert_eq!(span_of(&trap), None, "no bound under the trapezoidal rule");
     assert_eq!(cold_devices(&trap), Vec::<usize>::new());

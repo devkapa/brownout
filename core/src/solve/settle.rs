@@ -25,7 +25,7 @@ use crate::kinds;
 use crate::partition::{self, PartitionKind};
 use crate::program::Program;
 use crate::slow::failures::{self, FailureKind};
-use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StepMean, StressDrive, STRESS_STEP_RATIO};
+use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StepMean, StressDrive};
 use crate::slow::thermal::{PowerDrive, Shutdown, ThermalConfig};
 use crate::slow::{is_due, warnings, ExpVoltage, LatchKey, LatchRecord, SlowEventKind};
 
@@ -1166,6 +1166,9 @@ impl PartitionedSolver {
     /// left past the cap waits for the next settle, as before.
     pub(super) fn settle_slow(&mut self, now: f64, drivers: &[Driver]) -> Result<Option<Vec<PartitionId>>, String> {
         self.note_rail_segment();
+        if self.slow_model.any {
+            self.refresh_stress_probes();
+        }
         let scheduled = self.pending_schedule.len();
         let mut out = self.settle_pass(now, drivers)?;
         let mut passes = 0;
@@ -1429,62 +1432,90 @@ impl PartitionedSolver {
     /// the loop moved to (55/2's PTC read 1 mV under its step's own end and
     /// tripped at the host's step). A latch the step's end drive reaches
     /// inside the step fires now, recorded where the integral crossed.
-    /// Ruling R90 (a) on the step being taken: once a stepped partition
-    /// `p` has committed at `now` and planned its next trial, a stressed
-    /// device whose ratio changes by more than e^0.5 across that trial has
-    /// the trial planned again (R68's `SteppedSolver::replan`) under a reach
-    /// shortened in proportion, at most `STRESS_REPLANS` times. The reach the
-    /// step before sets (the trail close) shortens the steps after the first
-    /// of a fall; this one shortens the first, which nothing before it
-    /// foresees (cold 535 tpl 2's first CV step after its CC exit: the LED's
-    /// current falls 16-fold in it, and at 50 ms host steps one step took
-    /// the fall and latched the LED at 19.45 ms, where by hand it never
-    /// latches).
-    pub(super) fn stress_replan(&mut self, p: usize, now: f64, readers: &mut Vec<DeviceId>) -> Result<(), String> {
-        // Not while a rail IC is held (W1c point 1a): the trial's plan took
-        // the hold procedure's table (`hold_around`, `seed_holding`), and
-        // planned again under it, cold 7 tpl 5's stepped rail partition in
-        // exact mode re-seeded under its held 555 at every step after (0.04 s
-        // of test run became minutes).
-        if !self.slow_model.any || self.holds_active > 0 || !self.stepped.stress_watch(p) {
-            return Ok(());
+    /// Ruling R90 (a): every partition's rated stepped devices still able to
+    /// fail (not failed, a PTC not tripped), handed to the stepped planner,
+    /// which reads each trial's stress ratios from them
+    /// (`SteppedSolver::set_stress_probes`). Rebuilt when one fails or a PTC
+    /// trips or recovers (`probe_sig`), so a plan never cuts for a device
+    /// gone open.
+    pub(super) fn refresh_stress_probes(&mut self) {
+        if self.probe_sig.is_some_and(|s| s.0 == usize::MAX) {
+            return;
         }
-        for _ in 0..STRESS_REPLANS {
-            let Some(c) = self.stepped.pending_end(p, &self.voltages).filter(|c| c.start.is_some() && c.t0 == now) else { return Ok(()) };
-            let h = c.t1 - c.t0;
-            let mut worst: f64 = 0.0;
-            for k in 0..self.slow_model.part_devs[p].len() {
-                let i = self.slow_model.part_devs[p][k] as usize;
-                let sd = &self.slow_model.devs[i];
-                if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(sd.device) {
+        let sig: (usize, usize) = self.slow_model.devs.iter().filter(|sd| sd.class == Class::Stepped && !sd.cold).fold((0, 0), |(f, t), sd| (f + self.slow.is_failed(sd.device) as usize, t + self.slow.ptc(sd.device).is_some_and(|p| p.tripped) as usize));
+        if self.probe_sig == Some(sig) {
+            return;
+        }
+        self.probe_sig = Some(sig);
+        let mut any = false;
+        for p in 0..self.slow_model.part_devs.len() {
+            let mut probes = Vec::new();
+            for &i in &self.slow_model.part_devs[p] {
+                let sd = &self.slow_model.devs[i as usize];
+                if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(sd.device) || sd.nodes.len() < 2 && sd.led.is_none() {
                     continue;
                 }
-                let (start, end) = self.step_drives(i, &c);
-                let Some(start) = start else { continue };
-                if let (Some(a), Some(b)) = (start.stress, end.stress) {
-                    worst = worst.max(StressDrive::ratio_change(a, b));
-                }
-                if let (Some(PtcDrive::Stress(a)), Some(PtcDrive::Stress(b))) = (start.ptc, end.ptc) {
-                    worst = worst.max(StressDrive::ratio_change(a, b));
+                let (a, b) = (sd.nodes.first().copied().unwrap_or(0), sd.nodes.get(1).copied().unwrap_or(0));
+                match sd.kind {
+                    kinds::RESISTOR if sd.p_max > 0.0 => probes.push(stepped::StressProbe::Resistor { a, b, r: sd.record[0], r_power: sd.r_power, p_max: sd.p_max }),
+                    kinds::FUSE => {
+                        use kinds::fuse_param::*;
+                        if sd.record[I_RATING] > 0.0 {
+                            probes.push(stepped::StressProbe::Fuse { a, b, r_normal: sd.record[R_NORMAL], i_rating: sd.record[I_RATING] });
+                        }
+                    }
+                    kinds::PTC_FUSE => {
+                        if let Some(e) = self.slow.ptc(sd.device).filter(|e| !e.tripped) {
+                            probes.push(stepped::StressProbe::Ptc { a, b, params: e.params });
+                        }
+                    }
+                    kinds::RESISTOR => {}
+                    _ => {
+                        if let Some(e) = sd.led.map(|e| &self.led_devices[e]) {
+                            if let Some(m) = led::if_max(&e.device).filter(|&m| m > 0.0) {
+                                probes.push(stepped::StressProbe::Led { device: std::rc::Rc::new(e.device.clone()), junctions: std::rc::Rc::new(e.junctions.clone()), if_max: m });
+                            }
+                        }
+                    }
                 }
             }
-            if worst <= STRESS_STEP_RATIO || h <= 2.0 * stepped::H_MIN {
-                return Ok(());
-            }
-            // In proportion to the ratio's log change, with a margin: a fall
-            // that steepens as the step shortens (a CV tail, I0 / (1 + k t))
-            // leaves a proportional cut over the bound again.
-            let reach = (0.8 * h * STRESS_STEP_RATIO / worst).max(stepped::H_MIN);
-            #[cfg(test)]
-            REPLAN_LOG.with(|l| l.borrow_mut().push((p, now, reach)));
-            self.stepped.set_stress_reach(p, reach);
-            self.sync_stepped_cc(now);
-            let drivers = std::rc::Rc::clone(&self.driver_snapshot);
-            let planned = self.stepped.replan(&[p], now, &drivers, &drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
-            self.stepped.cc = None;
-            planned?;
+            any |= !probes.is_empty();
+            self.stepped.set_stress_probes(p, probes);
         }
-        Ok(())
+        if !any && sig == (0, 0) {
+            self.probe_sig = Some((usize::MAX, 0));
+        }
+    }
+
+    /// Ruling R90 (a)'s agreement check: for each rated stepped device, the
+    /// ratio its drives carry and the one the stepped planner's probe reads,
+    /// both at the published voltages.
+    #[cfg(test)]
+    pub(super) fn probe_agreement(&self, now: f64) -> Vec<(u32, f64, f64)> {
+        let mut out = Vec::new();
+        for p in 0..self.slow_model.part_devs.len() {
+            let probes = self.stepped.debug_probe_list(p);
+            let mut k = 0;
+            for &i in &self.slow_model.part_devs[p] {
+                let sd = &self.slow_model.devs[i as usize];
+                if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(sd.device) || k >= probes.len() {
+                    continue;
+                }
+                let d = self.drives(i as usize, now);
+                let q = match (d.stress, d.ptc) {
+                    (Some(StressDrive::Constant { q, .. }), _) => q,
+                    (_, Some(PtcDrive::Stress(StressDrive::Constant { q, .. }))) => q,
+                    _ => continue,
+                };
+                if q < 0.0 {
+                    continue;
+                }
+                let (pq, _) = probes[k].ratio(&|n| self.voltages[n]);
+                out.push((sd.kind, q, pq));
+                k += 1;
+            }
+        }
+        out
     }
 
     /// Device `i`'s drives at committed step `c`'s start state (at `c.t0`)
@@ -2131,7 +2162,7 @@ impl PartitionedSolver {
                         Some(v) => StressDrive::Segment(SegmentRate { k: if sd.r_power > 0.0 { sd.r_power / (r * r * sd.p_max) } else { 0.0 }, c: 1.0, recovery: failures::RESISTOR_RECOVERY, v }),
                         None => {
                             let d = failures::resistor_overload(dv, r, sd.r_power, sd.p_max);
-                            StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { d.value / d.limit } else { -1.0 } }
+                            StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::resistor_q(dv, r, sd.r_power, sd.p_max) }
                         }
                     });
                 }
@@ -2153,8 +2184,9 @@ impl PartitionedSolver {
                         StressDrive::Segment(SegmentRate { k, c: 1.0, recovery: failures::FUSE_RECOVERY, v })
                     }
                     None => {
-                        let d = failures::fuse_tripped(self.device_volts(i, now), r_normal, i_rating);
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { (d.value / d.limit).powi(2) } else { -1.0 } }
+                        let dv = self.device_volts(i, now);
+                        let d = failures::fuse_tripped(dv, r_normal, i_rating);
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::fuse_q(dv, r_normal, i_rating) }
                     }
                 });
             }
@@ -2190,14 +2222,15 @@ impl PartitionedSolver {
                         // level, a step from 3 ifMax^2 to 0.5 gained 0.82 for
                         // 0.12), so it alone pays for the peak current here.
                         let q = match led::if_max(&e.device) {
-                            Some(m) if m > 0.0 && sd.class == Class::Stepped => (led::peak_current(&e.device, &e.junctions, &self.voltages) / m).powi(2),
+                            Some(m) if m > 0.0 && sd.class == Class::Stepped => failures::led_q(led::peak_current(&e.device, &e.junctions, &self.voltages), m),
                             _ => -1.0,
                         };
                         StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0, q }
                     } else {
                         let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
-                        let d = failures::led_failed(peak, led::if_max(&e.device).unwrap_or(0.0));
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { (d.value / d.limit).powi(2) } else { -1.0 } }
+                        let if_max = led::if_max(&e.device).unwrap_or(0.0);
+                        let d = failures::led_failed(peak, if_max);
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::led_q(peak, if_max) }
                     });
                 }
                 if sd.thermal {
@@ -2589,13 +2622,3 @@ impl PartitionedSolver {
     }
 }
 
-/// Ruling R90 (a): how many times one step's trial is planned again for a
-/// stressed device's ratio (`stress_replan`); each shortens the reach, and a
-/// ratio that keeps falling faster stops here.
-const STRESS_REPLANS: u32 = 4;
-
-#[cfg(test)]
-thread_local! {
-    /// Every replan `stress_replan` makes: (partition, instant, reach).
-    pub(super) static REPLAN_LOG: std::cell::RefCell<Vec<(usize, f64, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
