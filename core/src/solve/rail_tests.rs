@@ -14205,12 +14205,12 @@ fn a_catch_up_whose_crossing_lands_at_its_start_still_reaches_its_horizon() {
     // never returned. With no catch-up step shorter than the shortest step,
     // that advance returns (in about 3 s of this board's crawl; what follows
     // the crawl is reported, not pinned here).
+    // A budget the run can be held to in any build: the first advance takes
+    // 79,198 steps and 167,237 events with the floor (stats 10 and 4).
     let (p, toggles, stops) = cold_3254_tpl0();
-    let start = std::time::Instant::now();
     let first: Vec<f64> = stops.iter().copied().take(1).collect();
-    let run = sweep_run(&p, &toggles, &first);
-    assert!(run.is_ok(), "{:?}", run.err().map(|(e, t)| (e.message, t)));
-    assert!(start.elapsed().as_secs_f64() < 30.0, "the first advance returned, in {:?}", start.elapsed());
+    let e = sweep_run(&p, &toggles, &first).unwrap_or_else(|(e, t)| panic!("{} at {t}: {}", e.code, e.message));
+    assert!(e.stat(10) < 2e5 && e.stat(4) < 4e5, "steps {} and events {} within the budget", e.stat(10), e.stat(4));
 }
 
 
