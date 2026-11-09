@@ -162,7 +162,8 @@ const IC_PIN_MAPS: Partial<Record<string, IcPinDef[]>> = {
     { id: "4y", role: "output", gate: 3, gatePin: "y" },
   ],
   "74ls157": [
-    // Quad 2:1 mux — SELECT=0 → A inputs; SELECT=1 → B inputs
+    // Quad 2:1 mux — SELECT=0 → A inputs; SELECT=1 → B inputs. "/oe" is the
+    // data sheet's strobe /G: HIGH forces every Y LOW (totem-pole, not 3-state).
     { id: "sel",  role: "control" },
     { id: "/oe",  role: "control" },
     { id: "1a", role: "input",  gate: 0, gatePin: "a" },
@@ -177,6 +178,20 @@ const IC_PIN_MAPS: Partial<Record<string, IcPinDef[]>> = {
     { id: "4a", role: "input",  gate: 3, gatePin: "a" },
     { id: "4b", role: "input",  gate: 3, gatePin: "b" },
     { id: "4y", role: "output", gate: 3, gatePin: "y" },
+  ],
+  "74ls153": [
+    // Dual 4:1 mux (16-pin DIP). A (LSB) and B select C0-C3 in both
+    // sections; each section has its own active-low strobe.
+    { id: "a",   role: "control" },
+    { id: "b",   role: "control" },
+    { id: "/1g", role: "control" },
+    { id: "/2g", role: "control" },
+    { id: "1c0", role: "input" }, { id: "1c1", role: "input" },
+    { id: "1c2", role: "input" }, { id: "1c3", role: "input" },
+    { id: "1y",  role: "output" },
+    { id: "2c0", role: "input" }, { id: "2c1", role: "input" },
+    { id: "2c2", role: "input" }, { id: "2c3", role: "input" },
+    { id: "2y",  role: "output" },
   ],
   "74ls283": [
     // 4-bit binary adder
@@ -497,6 +512,17 @@ export function evalCombinationalIC(
     for (let g = 0; g < 4; g++) {
       const pinA = `${g + 1}a`, pinB = `${g + 1}b`, pinY = `${g + 1}y`;
       result[pinY] = oe ? false : sel ? (pinV[pinB] ?? 0) >= vth : (pinV[pinA] ?? 0) >= vth;
+    }
+    return result;
+  }
+
+  if (kind === "74ls153") {
+    const sel =
+      ((pinV["a"] ?? 0) >= vth ? 1 : 0) | ((pinV["b"] ?? 0) >= vth ? 2 : 0);
+    for (const s of [1, 2]) {
+      // A HIGH strobe forces Y LOW: the outputs are totem-pole, never hi-Z.
+      const strobed = (pinV[`/${s}g`] ?? 0) >= vth;
+      result[`${s}y`] = !strobed && (pinV[`${s}c${sel}`] ?? 0) >= vth;
     }
     return result;
   }

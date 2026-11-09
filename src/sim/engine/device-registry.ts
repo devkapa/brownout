@@ -74,7 +74,7 @@
 
 import type { AcStampSurface } from "./ac-system.js";
 import type { MnaStampSurface } from "./linear-system.js";
-import type { MicrocontrollerCore } from "./mcu.js";
+import type { MicrocontrollerCore, PinEvent } from "./mcu.js";
 import type { ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
 import type {
   BatteryOperatingPoint,
@@ -104,6 +104,64 @@ import type {
 
 /** One loaded component instance, exactly as the engine passes see it. */
 export type DeviceComponent = SimCircuit["components"][number];
+
+/** An MCU's edges on a component's pins during one MCU step (DeviceContext.mcuInputEdges). */
+export interface McuInputEdges {
+  /**
+   * Each listed pin that shares a net with the MCU, keyed by the
+   * component's own pin id, at the moment the step began: 1 or 0 while
+   * the MCU drove it, null while the MCU left it to the rest of the circuit
+   * (an input, with or without its pull-up). Pins on no MCU net are absent.
+   */
+  readonly start: Readonly<Record<string, 0 | 1 | null>>;
+  /**
+   * The edges in the order they happened, as the levels the MCU drove.
+   * Edges written by one instruction (two bits of one port write) share a
+   * cycle and arrive as one group, because on hardware they are
+   * simultaneous.
+   */
+  readonly groups: ReadonlyArray<ReadonlyArray<{ readonly pin: string; readonly level: 0 | 1 | null }>>;
+}
+
+/**
+ * A registered clocked part's digital shadow, run inside the MCU step that
+ * writes it (H11 readback). The engine feeds each GPIO write the core
+ * captures to applyWrite — one replay-walker group, the same semantics the
+ * committed digital pass will replay this step with — and reads the levels
+ * the part's outputs hold after it, pushing them into the core's input path
+ * so a read between two writes (a shiftIn()) returns them. A shadow lives
+ * for exactly one MCU step and is then discarded; the committed pass remains
+ * the state of record.
+ */
+export interface McuStepShadow {
+  /** One MCU write's pin levels, as McuInputEdges group members. */
+  applyWrite(events: ReadonlyArray<{ pin: string; level: 0 | 1 | null }>): void;
+  /** The part's output pin levels after the writes applied so far. */
+  outputLevels(): Readonly<Record<string, 0 | 1>>;
+}
+
+/** What a device model supplies to run an McuStepShadow for one part. */
+export interface McuStepShadowSpec {
+  /** Input pins the MCU's writes can reach (the part's replay pin list). */
+  readonly inputs: readonly string[];
+  /** Output pins whose level a program can read back mid-step. */
+  readonly outputs: readonly string[];
+  /**
+   * Build one step's shadow from the part's committed state and the input
+   * levels the MCU step begins from — the same start the committed pass's
+   * replay walker walks this step from: `st` as the last digital pass left
+   * it, `start` holding the part pins that share the MCU's nets at the level
+   * the MCU drove them (null when it left the net alone), `solved` for every
+   * other input pin, and `pinNode` to find the part's own-output feedback
+   * nets.
+   */
+  build(args: {
+    st: Record<string, number>;
+    start: Record<string, 0 | 1 | null>;
+    solved: (pin: string) => 0 | 1;
+    pinNode: (pin: string) => number;
+  }): McuStepShadow;
+}
 
 /**
  * Element-state maps a device may read and commit. Each getter returns the
@@ -483,7 +541,9 @@ export interface DeviceContext {
    * Ordered sub-step MCU pin events for a display's protocol pins, with
    * the engine's lazily built shared Arduino-pin-driver map behind it
    * (first display in the pass builds it, later ones reuse it — exactly
-   * the old `_dispDrivers ??=` behavior). Empty events = sampled fallback.
+   * the old `_dispDrivers ??=` behavior). Consumed once per MCU step: a
+   * pass the driving advance does not owe events to gets an empty list.
+   * Empty events = sampled fallback.
    */
   mergedDisplayEvents(
     comp: DeviceComponent,
@@ -513,6 +573,21 @@ export interface DeviceContext {
    * SEPARATE cache from mergedDisplayEvents' uno/nano-only map.
    */
   mcuEventDriverForNode(node: number): { compId: string; pin: string } | undefined;
+  /**
+   * The raw ordered PinEvents one driver MCU produced during its last step,
+   * for cycle-timestamped decode (servo PWM widths, HC-SR04 TRIG edges).
+   * Consumed once per MCU step, like mergedDisplayEvents and mcuInputEdges:
+   * a pass the driving advance does not owe events to gets an empty list,
+   * so the NE555 split's re-solves cannot re-feed one MCU step's edges into
+   * a decoder twice (at the base the split's second feed of the boot-time
+   * [low, high] first-observation pair on TRIG read as a complete pulse and
+   * armed a phantom echo). Empty events = nothing happened this step.
+   * Optional like mcuInputEdges (mergedDisplayEvents, by contrast,
+   * is required): a context built
+   * outside this engine keeps compiling, and its decoders read no MCU
+   * events (the pre-H15 sampled behaviour).
+   */
+  mcuStepPinEvents?(compId: string): readonly PinEvent[];
   /** Whether an MCU board is powered enough to run (engine _mcuPowered). */
   mcuPowered(comp: DeviceComponent, x: Float64Array): boolean;
   /**
@@ -528,6 +603,29 @@ export interface DeviceContext {
   hcsr04MicrobitBridge(
     comp: DeviceComponent,
   ): { boardComponentId: string; pinId: string } | null;
+  /**
+   * The edges an MCU drove onto some of `pinIds` during its last step, for a
+   * clocked part to replay before it reads its step-end levels. The solver
+   * sees an MCU's pins only as they stand at the end of each MCU step (up to
+   * 100 us), so a pulse that starts and ends inside one step, like each
+   * shiftOut() clock, never reaches a once-per-solve edge detector.
+   *
+   * Each MCU step is handed out by one digital pass: the first pass after
+   * the step, and again only if that pass is rolled back, so a step that
+   * solves more than once (the NE555 split) does not replay it twice.
+   * Valid only inside updateDigital. Null when no listed pin shares a net
+   * with an Arduino or Pico I/O pin, when they share nets with two
+   * different MCUs, or when that MCU did not step or changed none of them.
+   * The engine starts recording MCU steps the first time a model asks, so
+   * the steps before that ask are not available.
+   *
+   * Optional so that a context built outside this engine still satisfies
+   * the interface; callers treat an absent member as no edges.
+   */
+  mcuInputEdges?(
+    comp: DeviceComponent,
+    pinIds: readonly string[],
+  ): McuInputEdges | null;
 
   // ── Element state ────────────────────────────────────────────────────────
   readonly state: DeviceStateMaps;
@@ -821,6 +919,22 @@ export interface DeviceModel {
     x: Float64Array,
     h: number,
   ): void;
+  /**
+   * H11 readback: a digital shadow of this registered clocked part, run
+   * INSIDE the MCU step that writes it. Present only for kinds a program can
+   * read back between two of its own writes (the 74HC165 today); the engine
+   * installs a shadow for one MCU step only when the SAME single MCU drives
+   * one of `inputs` and reads one of `outputs` (never when a relevant net
+   * carries two MCUs). The shadow must apply the SAME replay walker
+   * semantics the committed updateDigital pass uses, one write at a time, so
+   * the register the committed pass commits and the levels the shadow feeds
+   * back cannot diverge in its clocking semantics: both walks share the
+   * factory. Inputs the microcontroller does not drive are read at the
+   * step's starting solve (the committed pass reads the step's end), so a
+   * non-driven input crossing a threshold inside one step can differ there
+   * for that step. The committed pass stays the state of record.
+   */
+  mcuStepShadow?: McuStepShadowSpec;
   /**
    * Publish the component's element current via ctx.setElementCurrent.
    * `h` is the accepted step interval — the engine's element-current pass

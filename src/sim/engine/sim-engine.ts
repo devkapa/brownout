@@ -36,7 +36,9 @@ import {
   stampDiodeShockley,
   stampResistor,
   stampVSource,
+  stampVSourceSeriesR,
 } from "./elements.js";
+import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
 import { type PinEvent } from "./arduino.js";
@@ -60,7 +62,15 @@ import {
 } from "../thermal-physics.js";
 import type { DisplayInfo, Hcsr04EchoEvent } from "../messages.js";
 import type { ComponentKind, ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
-import { getDeviceModel, type AcDeviceContext, type DeviceContext, type DeviceModel } from "./device-registry.js";
+import {
+  getDeviceModel,
+  type AcDeviceContext,
+  type DeviceContext,
+  type DeviceModel,
+  type McuInputEdges,
+  type McuStepShadow,
+  type McuStepShadowSpec,
+} from "./device-registry.js";
 // Deterministic device-model registration (Wave A4). This call is the single
 // point where registered kinds enter the engine: devices/index registers
 // every model in a fixed explicit order before this module's body evaluates,
@@ -620,7 +630,8 @@ export type SimFailureKind =
   | "resistor_overload"
   | "fuse_tripped"
   | "led_failed"
-  | "output_sag";
+  | "output_sag"
+  | "supply_overvoltage";
 
 export interface SimFailure {
   componentId: string;
@@ -825,6 +836,12 @@ export interface StateSnapshot {
   solverDiagnostics?: SolverDiagnosticsSnapshot;
   /** Optional for compatibility with snapshots created before step breakpoints. */
   stepBreakpointCount?: number;
+  /**
+   * Whether the last MCU step's edges still await the digital pass that
+   * replays them into clocked ICs. Optional for compatibility with older
+   * snapshots.
+   */
+  mcuEdgesPending?: boolean;
   simTime: number;
 }
 
@@ -941,6 +958,35 @@ function cloneValueMap<K, V extends object>(source: Map<K, V> | undefined): Map<
   const out = new Map<K, V>();
   if (source) for (const [key, value] of source) out.set(key, { ...value });
   return out;
+}
+
+/** Each I/O pin's drive as a PinEvent level: 1 or 0 when driven, null when released. */
+function mcuPinLevels(mcu: MicrocontrollerCore): Map<string, 0 | 1 | null> {
+  const levels = new Map<string, 0 | 1 | null>();
+  for (const pin of mcu.ioPins) {
+    const drive = mcu.pinDriveState(pin);
+    levels.set(pin, drive === "out-high" ? 1 : drive === "out-low" ? 0 : null);
+  }
+  return levels;
+}
+
+/**
+ * One registered clocked part a single MCU both writes and reads (H11
+ * readback). Collected per load by _buildReadbackCandidates; each MCU step
+ * that has candidates gets a fresh shadow of each part
+ * (_stepMcuWithReadback).
+ */
+interface ReadbackCandidate {
+  readonly comp: SimComponent;
+  readonly spec: McuStepShadowSpec;
+  /**
+   * MCU pin -> the part input pins on its net, the same mapping
+   * DeviceContext.mcuInputEdges builds for the part (the engine's collapsed
+   * driver map keys the node, so the LAST MCU pin on a net wins there too).
+   */
+  readonly pinsByMcuPin: ReadonlyMap<string, readonly string[]>;
+  /** The part's output pins this MCU can read -> the MCU pin on the net. */
+  readonly outputs: ReadonlyArray<{ partPin: string; mcuPin: string }>;
 }
 
 // failureKey runs for every stressed device on every step; memoised per
@@ -1108,6 +1154,93 @@ const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
   microbit: 0.015,
 };
 
+// Arduino Uno R3 USB supply path (Arduino UNO R3 reference schematic):
+// USB VBUS -> F1 (Bourns MF-MSMF050-2 PTC) -> T1 (onsemi FDN340P P-MOSFET)
+// -> +5V. T1's gate is held low by the LMV358 VIN comparator whenever VIN is
+// below ~6.6 V; VIN and its regulator are not modelled, so T1 is always on
+// and its body diode never conducts on its own. The path is a Thevenin
+// branch: host EMF behind host + polyfuse + channel resistance, so an
+// external supply on the 5V pin shares or back-feeds through it instead of
+// meeting a second ideal source. The host EMF stays the board's `vcc`
+// param (default 5 V, USB 2.0 nominal VBUS; the spec allows 4.75-5.25 V).
+/** Host port, connectors and a short cable, round trip. USB 2.0 7.2.2
+ *  budgets up to ~0.35 V of drop between host and device at 500 mA. */
+const UNO_USB_HOST_R = 0.2;
+/** MF-MSMF050-2: Ihold 0.50 A, Itrip 1.00 A, Rmin 0.15 ohm, R1max 1.0 ohm. */
+const UNO_USB_PTC_I_HOLD = 0.5;
+const UNO_USB_PTC_R = 0.15;
+/** FDN340P: Rds(on) 0.07 ohm max at Vgs = -4.5 V. */
+const UNO_USB_FET_R = 0.07;
+
+function unoUsbPathResistance(ptcTripped: boolean): number {
+  return UNO_USB_HOST_R + ptcResistance(UNO_USB_PTC_R, ptcTripped) + UNO_USB_FET_R;
+}
+
+// Arduino Nano 3.x USB supply path (Arduino Nano 3.0 reference schematic,
+// "+5V AUTO SELECTOR"): USB VBUS -> D1 (onsemi MBR0520LT1 Schottky) -> +5V,
+// with no polyfuse. D1 is a junction, so the path gets an internal node
+// (VUSB) between the host branch and the diode. Shockley fit to MBR0520LT1
+// datasheet Figure 1 (typical, TJ = 25 C): 10 mA at 0.215 V and 100 mA at
+// 0.275 V, i.e. 60 mV/decade (n = 1.0) and Is = 2.4 uA; the bend to ~0.41 V
+// at 1 A is ~0.07 ohm of bulk resistance, lumped into the host branch. A
+// supply on the 5V pin above VUSB reverse-biases D1 (VRRM 20 V), so it
+// neither back-feeds the host nor meets a second ideal source.
+const NANO_USB_HOST_R = UNO_USB_HOST_R + 0.07;
+const NANO_USB_SCHOTTKY_IS = 2.4e-6;
+const NANO_USB_SCHOTTKY_N = 1.0;
+/** The fit is at 25 C, so D1 uses that temperature's thermal voltage. */
+const SCHOTTKY_FIT_VT_25C = 0.025693;
+
+// Raspberry Pi Pico 3V3(OUT) (Pico datasheet, "Powering Pico"): VBUS -> D1
+// Schottky -> VSYS -> RT6150B buck-boost -> 3V3. The pin is a regulator
+// output: it sources, but a supply holding it above the setpoint stops the
+// regulator instead of being sunk (the Pico runs the RT6150B in power-save
+// mode by default, GPIO23 low, which does not sink). Modelled as a committed
+// two-regime output: regulating = the setpoint behind a small closed-loop
+// output resistance; back-fed = branch current pinned to zero. VBUS and VSYS
+// stay unpowered pins, as before. The output resistance is not a datasheet
+// figure: 10 mohm keeps the pin within 3 mV of the setpoint up to the 300 mA
+// the Pico datasheet recommends drawing from 3V3(OUT).
+const PICO_REG_R_OUT = 0.01;
+/** Sink current above which the regulator is taken to have been back-fed. */
+const PICO_REG_BACKFEED_A = 1e-3;
+
+// BBC micro:bit V1 3V pad (V1.3B and V1.5 schematics, "Power Supply" sheet):
+// the interface chip's (MKL26Z128) 3.3 V USB regulator, +3.3V_IF, reaches
+// +V_TGT, the nRF51822 rail and the edge connector's 3V pad, through D1, an
+// Infineon BAT60A Schottky (a second BAT60A, D2, feeds it from the battery
+// connector, which is not modelled). D1 needs an internal node between the
+// regulator and the diode. Shockley fit to the BAT60A datasheet's typical VF
+// at 25 C (0.12 V at 10 mA, 0.2 V at 100 mA, 0.3 V at 1 A): 80 mV/decade,
+// n = 1.352, Is = 316 uA (which also matches its 0.3 mA typical reverse
+// current at 5 V), plus ~0.02 ohm of bulk resistance taken from the 1 A
+// point. The regulator itself is taken as ideal: there is no published
+// output-resistance figure for it. A supply on the pad above +3.3V_IF
+// reverse-biases D1 (VR 10 V).
+const MICROBIT_USB_SCHOTTKY_IS = 3.16e-4;
+const MICROBIT_USB_SCHOTTKY_N = 1.352;
+const MICROBIT_USB_PATH_R = 0.02;
+
+// Absolute maximum supply voltage of each board's MCU, on the pin that feeds
+// it. A supply past it (most often a bench PSU back-feeding a USB-powered
+// board) latches a supply_overvoltage failure. The failure changes no stamp:
+// the engine does not know how the chip would fail, only that it is outside
+// what the datasheet allows.
+const MCU_SUPPLY_ABS_MAX: Readonly<Record<
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
+  { pin: string; chip: string; maxV: number; source: string }
+>> = {
+  // ATmega328P datasheet, Absolute Maximum Ratings: VCC -0.5 V to 6.0 V.
+  arduino_uno: { pin: "5v", chip: "ATmega328P", maxV: 6.0, source: "VCC" },
+  arduino_nano: { pin: "5v", chip: "ATmega328P", maxV: 6.0, source: "VCC" },
+  // RP2040 datasheet 5.5.3.1, Table 622: IOVDD -0.5 V to 3.63 V. The Pico's
+  // 3V3 rail is IOVDD.
+  raspberry_pi_pico: { pin: "3v3", chip: "RP2040", maxV: 3.63, source: "IOVDD" },
+  // nRF51822 Product Specification v2.0, chapter 6, Table 16: VDD -0.3 V to
+  // +3.9 V. The micro:bit V1's 3V pad is the nRF51822's VDD rail (+V_TGT).
+  microbit: { pin: "3v", chip: "nRF51822", maxV: 3.9, source: "VDD" },
+};
+
 // S18b — see hcsr04MaxStepH()'s doc comment: a hard cap on outer step size,
 // comfortably under the fixed 250 µs TRIG-fall-to-ECHO-rise delay, applied
 // whenever the circuit contains an hcsr04.
@@ -1127,8 +1260,8 @@ const MICROBIT_EDGE_PIN_TO_SIM: Record<string, string> = {
 // Combinational IC kinds (their icState carries delay keys, and the 74HC14's
 // Schmitt hysteresis levels).
 export const COMBINATIONAL_IC_KINDS = new Set<string>([
-  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
-  "74hc14", "74hc138", "74ls47",
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls153", "74ls283",
+  "74ls245", "74hc14", "74hc138", "74ls47",
 ]);
 
 // Combinational kinds deliberately judged NOT provable as a single RC pole
@@ -1144,8 +1277,8 @@ export const RC_OUTPUT_EXCLUDED_COMBINATIONAL = new Set<string>([]);
 // every combinational kind appears here or in
 // RC_OUTPUT_EXCLUDED_COMBINATIONAL.
 export const RC_OUTPUT_IC_KINDS = new Set<string>([
-  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls283", "74ls245",
-  "74hc14", "74hc138", "74ls47",
+  "74ls00", "74ls04", "74ls08", "74ls32", "74ls86", "74ls157", "74ls153", "74ls283",
+  "74ls245", "74hc14", "74hc138", "74ls47",
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
 ]);
@@ -1238,7 +1371,7 @@ const STATE_UPDATE_KINDS = new Set<string>([
 /** Component kinds whose switch cases can publish or mutate digital state. */
 const DIGITAL_UPDATE_KINDS = new Set<string>([
   "28c16", "28c256", "74hc138", "74hc14", "74hc165", "74hc595", "74hc74",
-  "74ls00", "74ls04", "74ls08", "74ls157", "74ls161", "74ls173", "74ls189",
+  "74ls00", "74ls04", "74ls08", "74ls153", "74ls157", "74ls161", "74ls173", "74ls189",
   "74ls245", "74ls283", "74ls32", "74ls47", "74ls86", "cd4017", "cd4060",
   "cd4511", "clock", "clock_gen", "hd44780", "l293d", "lm393", "max7219",
   "ne555", "pulse_gen", "pulse_source", "tb6612", "uln2003", "uln2803",
@@ -1854,6 +1987,11 @@ export class SimEngine {
   private _hasHcsr04 = false;
   private _ne555Components: SimComponent[] = [];
   private _mcuComponents: SimComponent[] = [];
+  /** Set when a commit switches a Pico regulator's regime; load() re-solves
+   *  its seed so the published operating point is in the committed regime. */
+  private _picoRegimeFlipped = false;
+  /** Boards with an MCU supply absolute maximum (MCU_SUPPLY_ABS_MAX). */
+  private _supplyRatedComponents: SimComponent[] = [];
   private _stateUpdateComponents: SimComponent[] = [];
   private _digitalUpdateComponents: SimComponent[] = [];
   private _failureUpdateComponents: SimComponent[] = [];
@@ -2098,11 +2236,38 @@ export class SimEngine {
   private _previousMosfetGates: ReadonlyMap<string, MosfetGateState> | null = null;
   // Pass-scoped lazy MCU pin-driver map for _updateState device handlers
   // (servo PWM decode, hcsr04 TRIG edges), reached via
-  // ctx.mcuEventDriverForNode: built with includePico=true on first use,
+  // ctx.mcuEventDriverForNode, and for ctx.mcuInputEdges in the digital pass
+  // that follows in the same solve: built with includePico=true on first use,
   // reset at _updateState entry. Deliberately SEPARATE from `_dispDrivers`
   // above — that cache is built includePico=false and the display decoders
   // must keep their exact prior uno/nano-only behaviour.
   private _mcuEventDrivers: Map<number, { compId: string; pin: string }> | null = null;
+  // ctx.mcuInputEdges bookkeeping; the merged display-event path
+  // (_mergedDisplayEvents) and the raw servo/hcsr04 handout
+  // (_mcuStepPinEvents) arm these same flags. A PinEvent says where a
+  // pin went, not where it started, so each MCU's pin levels are recorded
+  // as its step begins, once some device has asked for edges (recording
+  // costs every MCU step a pass over its pins). Only MCUs that stepped in
+  // the last advance have an entry: a core that did not step owes no
+  // replay, and its stale event list is cleared where the skip is decided.
+  private _mcuStepStartLevels = new Map<string, ReadonlyMap<string, 0 | 1 | null>>();
+  private _mcuInputEdgesWanted = false;
+  // Set by an MCU advance, cleared by the next completed digital pass, so
+  // each MCU step's edges are replayed once even when one electrical step
+  // solves several times (the NE555 split) — by the clocked-IC edge path,
+  // the merged display-event path, and the servo/hcsr04 raw handout alike.
+  // It rolls back with the snapshot, as the icState/lcds the replays write
+  // do.
+  private _mcuEdgesPending = false;
+  // H11 readback: clocked parts whose inputs one MCU writes and whose
+  // outputs the SAME MCU reads (see _buildReadbackCandidates), keyed by the
+  // MCU's component id. Null until the first MCU advance after a load();
+  // rebuilt per load because nets only change there.
+  private _readbackCandidates: Map<string, ReadbackCandidate[]> | null = null;
+  // H11 diagnostics: shadows installed since the last load() — zero for
+  // every circuit without a part the MCU both writes and reads, which is
+  // what the identity tests pin.
+  private _readbackShadowInstalls = 0;
   // Pass-scoped lazy channel-current readout for _updateFailureStates,
   // reached via ctx.elementChannelCurrents: the old pass computed
   // getElementChannelI() at most once and shared it across every
@@ -2247,9 +2412,11 @@ export class SimEngine {
         engine._mcuEventDrivers ??= engine._buildArduinoPinDrivers(true);
         return engine._mcuEventDrivers.get(node);
       },
+      mcuStepPinEvents: (compId) => engine._mcuStepPinEvents(compId),
       mcuPowered: (comp, x) => engine._mcuPowered(comp, x),
       mcuBootSimTime: (compId) => engine._mcuBootSimTime.get(compId),
       hcsr04MicrobitBridge: (comp) => engine._hcsr04MicrobitBridge(comp),
+      mcuInputEdges: (comp, pinIds) => engine._mcuInputEdges(comp, pinIds),
       state: {
         get caps() {
           return engine.state.caps;
@@ -2393,6 +2560,7 @@ export class SimEngine {
         lastRelativeResidual: this.lastRelativeResidual,
       },
       stepBreakpointCount: this._stepBreakpoints.length,
+      mcuEdgesPending: this._mcuEdgesPending,
       simTime: this.simTime,
     };
     // Trap-mode-only: the histories are read only by trap stamps, so copying
@@ -2508,6 +2676,9 @@ export class SimEngine {
     if (snap.stepBreakpointCount !== undefined && this._stepBreakpoints.length > snap.stepBreakpointCount) {
       this._stepBreakpoints.length = snap.stepBreakpointCount;
     }
+    // The icState just restored predates the replay the trial ran, so the
+    // edges are owed again.
+    this._mcuEdgesPending = snap.mcuEdgesPending ?? this._mcuEdgesPending;
   }
 
   /** The breakpoints committed since the last call, oldest first. See StepBreakpoint. */
@@ -2985,6 +3156,11 @@ export class SimEngine {
           prevPtcs.get(c.id) ?? { tripped: false, tripStress: 0, recoveryTime: 0 },
         );
       }
+      // The Uno's USB polyfuse (F1) is keyed by the board's id, so a trip
+      // carries across edits and getPtcTripped() names the board.
+      if (c.kind === "arduino_uno" && prevPtcs.has(c.id)) {
+        this.state.ptcs.set(c.id, prevPtcs.get(c.id)!);
+      }
       if (c.kind === "thermistor") {
         this.state.thermalTemps.set(
           c.id,
@@ -3133,7 +3309,20 @@ export class SimEngine {
     // _beNextStep anyway, and its accepted update refreshes both maps.
     const initializedCapsI = new Map(this.state.capsI);
     const initializedIndsV = new Map(this.state.indsV);
+    this._picoRegimeFlipped = false;
     this._solve(1e-12);
+    // A Pico regulator's regime is committed from a solve, so a supply
+    // back-feeding its 3V3 pin is only seen after the seed solve; solve the
+    // seed again from the authored initial conditions in the committed
+    // regime. Bounded: each pass can only switch a regulator off or on.
+    for (let pass = 0; pass < 2 && this._picoRegimeFlipped && this.lastConverged; pass++) {
+      this._picoRegimeFlipped = false;
+      this.state.caps = new Map(initializedCaps);
+      this.state.inds = new Map(initializedInds);
+      this.state.capsI = new Map(initializedCapsI);
+      this.state.indsV = new Map(initializedIndsV);
+      this._solve(1e-12);
+    }
     // Wave A3 rescue, gated on the single lastConverged check. Limiter-free
     // circuits take a bit-identical path through this seed; the one
     // deliberate exception is the pnjlim acceptance guard inside the Newton
@@ -3225,6 +3414,9 @@ export class SimEngine {
     this.netV = { gnd: 0 };
     this.elementI = {};
     this.digitalState = {};
+    // The cores are rebuilt, so the old ones' edges belong to nothing.
+    this._mcuStepStartLevels = new Map();
+    this._mcuEdgesPending = false;
     this.load(circuit);
   }
 
@@ -4297,13 +4489,294 @@ export class SimEngine {
    * exactly once. Its resulting GPIO state and ordered PinEvents are retained
    * for the next electrical interval. This explicit ordering keeps an MCU out
    * of Newton/NE555 trial solves and makes a worker retry firmware-neutral.
+   * Once a model has asked for MCU input edges, each core's pin levels are
+   * recorded before it steps and its edges wait for the next digital pass.
    */
   private _advanceMcusAfterAcceptedSolve(h: number): void {
     this._sampleArduinoInputs();
+    const recordStarts = this._mcuInputEdgesWanted;
+    if (recordStarts) this._mcuStepStartLevels = new Map();
     for (const [id, mcu] of this.state.arduinos) {
       const comp = this._componentById.get(id);
-      if (comp && this._mcuPowered(comp)) mcu.step(h);
+      if (!comp || !this._mcuPowered(comp)) {
+        // A core that did not step keeps the events its last powered step
+        // produced — step() is the only place a core clears its own list —
+        // and the decoders that read getStepPinEvents() would re-replay
+        // those stale edges on every later step (a display's bit count grew
+        // 32 -> 48 -> 64 after the board lost power). Fence the list at the
+        // advance that skips the core: edges from a step that did not
+        // happen are owed to nobody.
+        mcu.clearStepPinEvents?.();
+        continue;
+      }
+      if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
+      // A registered clocked part this core both writes and reads gets a
+      // shadow for the step (H11 readback): the core's own writes run the
+      // part's replay walker inside the step and the part's output levels
+      // are pushed into the core's input path, so a read between two writes
+      // (shiftIn) sees the level the writes produced.
+      const readback = this._readbackCandidatesFor(id);
+      if (readback) this._stepMcuWithReadback(mcu, id, readback, h);
+      else mcu.step(h);
     }
+    if (recordStarts && this._mcuStepStartLevels.size > 0) this._mcuEdgesPending = true;
+  }
+
+  /** This MCU's readback candidates, or null when it has none (H11). */
+  private _readbackCandidatesFor(mcuId: string): readonly ReadbackCandidate[] | null {
+    this._readbackCandidates ??= this._buildReadbackCandidates();
+    const candidates = this._readbackCandidates.get(mcuId);
+    return candidates && candidates.length > 0 ? candidates : null;
+  }
+
+  /**
+   * Scan the loaded topology once per load for registered clocked parts an
+   * MCU can read back mid-step (H11). A part qualifies for an MCU only when
+   * the SAME single MCU shares a net with one of its shadow inputs (it
+   * writes the part) and with one of its shadow outputs (it reads the
+   * part): two MCUs on any of those nets means no shadow, matching the
+   * null rule the committed replay (mcuInputEdges) applies to two drivers.
+   * Every other circuit — including an MCU with no clocked part — collects
+   * nothing, and its stepping stays byte-identical.
+   */
+  private _buildReadbackCandidates(): Map<string, ReadbackCandidate[]> {
+    const byMcu = new Map<string, ReadbackCandidate[]>();
+    if (!this.circuit || this._mcuComponents.length === 0) return byMcu;
+    // Every MCU I/O pin on each net, uncollapsed: the driver map below in
+    // this file collapses two MCUs on one net to the last, which is fine
+    // for replay but cannot enforce the readback's one-MCU rule.
+    const mcuPinsByNode = new Map<number, Array<{ compId: string; pin: string }>>();
+    for (const mcuComp of this._mcuComponents) {
+      if (!isMcuBoardKind(mcuComp.kind)) continue;
+      const mcu = this.state.arduinos.get(mcuComp.id);
+      if (!mcu) continue;
+      for (const pinId of mcu.ioPins) {
+        const node = this._pinNode(mcuComp.id, pinId);
+        if (node < 0) continue;
+        const attached = mcuPinsByNode.get(node);
+        if (attached) attached.push({ compId: mcuComp.id, pin: pinId });
+        else mcuPinsByNode.set(node, [{ compId: mcuComp.id, pin: pinId }]);
+      }
+    }
+    for (const comp of this.circuit.components) {
+      const spec = getDeviceModel(comp.kind)?.mcuStepShadow;
+      if (!spec) continue;
+      let owner: string | null = null;
+      const pinsByMcuPin = new Map<string, string[]>();
+      let conflicted = false;
+      for (const pinId of spec.inputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1) { conflicted = true; break; }
+        // The engine's driver map keeps the LAST MCU pin on a net; match it
+        // so the shadow's pin mapping is the committed replay's.
+        const driver = attached[attached.length - 1]!;
+        if (owner === null) owner = driver.compId;
+        else if (owner !== driver.compId) { conflicted = true; break; }
+        const pins = pinsByMcuPin.get(driver.pin);
+        if (pins) pins.push(pinId);
+        else pinsByMcuPin.set(driver.pin, [pinId]);
+      }
+      if (conflicted || owner === null || pinsByMcuPin.size === 0) continue;
+      const outputs: Array<{ partPin: string; mcuPin: string }> = [];
+      for (const pinId of spec.outputs) {
+        const node = this._pinNode(comp.id, pinId);
+        const attached = node >= 0 ? mcuPinsByNode.get(node) : undefined;
+        if (!attached) continue;
+        const compIds = new Set(attached.map((entry) => entry.compId));
+        if (compIds.size > 1 || attached[0]!.compId !== owner) { conflicted = true; break; }
+        outputs.push({ partPin: pinId, mcuPin: attached[0]!.pin });
+      }
+      if (conflicted || outputs.length === 0) continue;
+      const candidates = byMcu.get(owner);
+      if (candidates) candidates.push({ comp, spec, pinsByMcuPin, outputs });
+      else byMcu.set(owner, [{ comp, spec, pinsByMcuPin, outputs }]);
+    }
+    return byMcu;
+  }
+
+  /**
+   * Run one MCU step with its readback shadows installed (H11). Each write
+   * the core captures drives every shadow's replay walker — grouped into
+   * writes exactly as the committed pass will group them, by cycle — and
+   * each shadow's output levels are pushed into the core's input path as
+   * they change. At install the current output levels are pushed once too:
+   * the solve the core just sampled stamps the part's outputs one replay
+   * behind, and a read before any write this step belongs to the register
+   * as it stands now. The committed digital pass remains the state of
+   * record; the shadows are discarded with the step.
+   */
+  private _stepMcuWithReadback(
+    mcu: MicrocontrollerCore,
+    mcuId: string,
+    candidates: readonly ReadbackCandidate[],
+    h: number,
+  ): void {
+    // A core that cannot feed its writes (or nothing to shadow): the step
+    // runs exactly as it would without the readback machinery — no shadow
+    // is built for it and nothing is installed.
+    if (candidates.length === 0 || mcu.setStepWriteObserver === undefined) {
+      mcu.step(h);
+      return;
+    }
+    const installed: Array<{
+      candidate: ReadbackCandidate;
+      shadow: McuStepShadow;
+      outputs: Array<{ partPin: string; mcuPin: string; last: 0 | 1 }>;
+    }> = [];
+    const x = this._lastX ?? new Float64Array(this.mna?.size ?? 0);
+    for (const candidate of candidates) {
+      const power = this._icPowerInfo(candidate.comp, x);
+      // An unpowered part is skipped by its committed pass; its shadow
+      // must not move either.
+      if (!power.powered) continue;
+      const st = this.state.icState.get(candidate.comp.id)
+        ?? defaultIcState(candidate.comp.kind);
+      // The start levels the committed replay walks from (McuInputEdges
+      // start): what the MCU drove at step start for pins that share its
+      // nets, null where it left the net to the circuit. The recorded map
+      // is exactly this moment's levels; fall back to reading them direct
+      // if no model asked for edges yet.
+      const recorded = this._mcuStepStartLevels.get(mcuId);
+      const startLevels = recorded ?? mcuPinLevels(mcu);
+      const start: Record<string, 0 | 1 | null> = {};
+      for (const [mcuPin, pins] of candidate.pinsByMcuPin) {
+        const level = startLevels.get(mcuPin) ?? null;
+        for (const pin of pins) start[pin] = level;
+      }
+      const shadow = candidate.spec.build({
+        st,
+        start,
+        solved: (pin) => (this._logicHigh(candidate.comp, pin, x, power) ? 1 : 0),
+        pinNode: (pin) => this._pinNode(candidate.comp.id, pin),
+      });
+      const levels = shadow.outputLevels();
+      const outputs = candidate.outputs.map(({ partPin, mcuPin }) => {
+        const last = levels[partPin] ?? 0;
+        mcu.setInputBit(mcuPin, last);
+        return { partPin, mcuPin, last };
+      });
+      installed.push({ candidate, shadow, outputs });
+      this._readbackShadowInstalls++;
+    }
+    // Buffer the core's write events and cut them into writes on cycle
+    // changes, the same cut _mcuInputEdges makes; a group is complete once
+    // a later event carries a new cycle.
+    let pending: Array<{ pin: string; level: 0 | 1 | null }> = [];
+    let pendingCycle = Number.NaN;
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      for (const { candidate, shadow, outputs } of installed) {
+        const events: Array<{ pin: string; level: 0 | 1 | null }> = [];
+        for (const event of pending) {
+          const pins = candidate.pinsByMcuPin.get(event.pin);
+          if (pins) for (const pin of pins) events.push({ pin, level: event.level });
+        }
+        if (events.length === 0) continue;
+        shadow.applyWrite(events);
+        const out = shadow.outputLevels();
+        for (const target of outputs) {
+          const level = out[target.partPin];
+          if (level !== undefined && level !== target.last) {
+            mcu.setInputBit(target.mcuPin, level);
+            target.last = level;
+          }
+        }
+      }
+      pending = [];
+    };
+    mcu.setStepWriteObserver((events) => {
+      for (const event of events) {
+        if (pending.length > 0 && event.cycle !== pendingCycle) flush();
+        pending.push(event);
+        pendingCycle = event.cycle;
+      }
+    });
+    // A throw from inside the step (a third-party model's shadow could)
+    // must not leave this observer installed with this step's closures.
+    try {
+      mcu.step(h);
+      flush();
+    } finally {
+      mcu.setStepWriteObserver(null);
+    }
+  }
+
+  /**
+   * The edges one MCU drove onto `pinIds` in its last step (see
+   * DeviceContext.mcuInputEdges). Pins map to MCU pins through the same
+   * includePico driver map the servo and HC-SR04 decoders use.
+   */
+  private _mcuInputEdges(comp: SimComponent, pinIds: readonly string[]): McuInputEdges | null {
+    if (this._mcuComponents.length === 0) return null;
+    this._mcuEventDrivers ??= this._buildArduinoPinDrivers(true);
+    let mcuId: string | null = null;
+    const pinsByMcuPin = new Map<string, string[]>();
+    for (const pinId of pinIds) {
+      const node = this._pinNode(comp.id, pinId);
+      if (node < 0) continue;
+      const driver = this._mcuEventDrivers.get(node);
+      if (!driver) continue;
+      // Two cores count cycles from different boots on different clocks, so
+      // their edges have no common order to replay in.
+      if (mcuId !== null && driver.compId !== mcuId) return null;
+      mcuId = driver.compId;
+      const pins = pinsByMcuPin.get(driver.pin);
+      if (pins) pins.push(pinId);
+      else pinsByMcuPin.set(driver.pin, [pinId]);
+    }
+    if (mcuId === null) return null;
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return null;
+    const startLevels = this._mcuStepStartLevels.get(mcuId);
+    const mcu = this.state.arduinos.get(mcuId);
+    if (!startLevels || !mcu) return null;
+    const groups: Array<Array<{ pin: string; level: 0 | 1 | null }>> = [];
+    let groupCycle = Number.NaN;
+    // A core appends events as its instructions write, so they arrive in
+    // time order; one write that moves several pins stamps them one cycle.
+    for (const event of mcu.getStepPinEvents()) {
+      const pins = pinsByMcuPin.get(event.pin);
+      if (!pins) continue;
+      if (event.cycle !== groupCycle) {
+        groups.push([]);
+        groupCycle = event.cycle;
+      }
+      const group = groups[groups.length - 1]!;
+      for (const pin of pins) group.push({ pin, level: event.level });
+    }
+    if (groups.length === 0) return null;
+    const start: Record<string, 0 | 1 | null> = {};
+    for (const [mcuPin, pins] of pinsByMcuPin) {
+      const level = startLevels.get(mcuPin) ?? null;
+      for (const pin of pins) start[pin] = level;
+    }
+    return { start, groups };
+  }
+
+  // Shared empty handout for _mcuStepPinEvents' gated-out passes (the servo
+  // and hcsr04 decoders only iterate it, and the servo's filter allocates a
+  // fresh array regardless, so one frozen constant covers every caller).
+  private static readonly _NO_STEP_PIN_EVENTS: readonly PinEvent[] = Object.freeze([] as PinEvent[]);
+
+  /**
+   * The raw step-event handout behind ctx.mcuStepPinEvents (servo PWM
+   * decode, hcsr04 TRIG edges): the same consumed-once lifecycle as
+   * _mcuInputEdges and _mergedDisplayEvents. Asking arms the start-level
+   * recording (so the next advance arms _mcuEdgesPending), and the events
+   * are handed out only while that advance's replay is still owed; the
+   * first completed digital pass consumes the flag, so the NE555 split's
+   * re-solves — and every later pass — cannot re-feed one MCU step's edges
+   * into these decoders twice (at the base the split's second feed of the
+   * boot-time [low, high] first-observation pair on TRIG read as a complete
+   * pulse and armed a phantom echo 250 us after boot).
+   */
+  private _mcuStepPinEvents(compId: string): readonly PinEvent[] {
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return SimEngine._NO_STEP_PIN_EVENTS;
+    return this.state.arduinos.get(compId)?.getStepPinEvents() ?? SimEngine._NO_STEP_PIN_EVENTS;
   }
 
   /** Restore the trusted pre-trial state while preserving failed-solve diagnostics. */
@@ -4647,6 +5120,15 @@ export class SimEngine {
     return this.state.icState.get(compId);
   }
 
+  /**
+   * H11 diagnostics: MCU-step readback shadows installed since the last
+   * load(). Zero for every circuit without a registered clocked part the MCU
+   * both writes and reads — the guard the identity tests pin.
+   */
+  get readbackShadowInstalls(): number {
+    return this._readbackShadowInstalls;
+  }
+
   /** Per-board runtime state for onboard LED/button art. Only boards with an MCU are included. */
   getArduinoState(): Record<string, import("../messages.js").ArduinoState> {
     if (!this.circuit) return {};
@@ -4876,8 +5358,13 @@ export class SimEngine {
    * then drops back to the shunts' 0 V and powers it again, and Newton
    * alternated between the two on every iterate, so no step converged (a 555
    * whose ground is on a breadboard rail wired to nothing). _icPowerInfo
-   * reads such a part as unpowered for the whole load. It then joins like any
-   * other part, so the sections do not change.
+   * reads such a part as unpowered for the whole load, and it joins no
+   * section: through its own power pins it would merge the island on one
+   * side of its missing supply return into the section on the other, while
+   * its off stamps leave that island without a reference row. An island left
+   * holding charge then rested on the node shunts alone, and no step
+   * converged at any size. The island stays what the rest of the wiring
+   * makes it, an isolated section with its own anchor.
    */
   private _compileIsolatedSectionAnchors(circuit: SimCircuit): void {
     const netRows = this.nodeCount - this.internalNodeIdx.size;
@@ -4935,7 +5422,6 @@ export class SimEngine {
       waiting = stillWaiting;
     }
     this._noSupplyReturnIds = new Set(waiting.map((part) => part.comp.id));
-    for (const part of waiting) join(part.comp, part.byPin);
 
     // Prefer a source's return terminal, as buildNets does for the circuit's
     // ground, so a second battery reads 0 V at its own negative terminal.
@@ -4975,6 +5461,15 @@ export class SimEngine {
       if (!model?.internalNodes) continue;
       for (const name of model.internalNodes(c)) {
         this.internalNodeIdx.set(`${c.id}:${name}`, idx++);
+      }
+    }
+    // The Nano's VUSB node, between the USB host branch and D1, and the
+    // micro:bit's +3.3V_IF, between its USB regulator and D1.
+    for (const c of this.circuit!.components) {
+      if (c.kind === "arduino_nano" && Number(c.params.usb_power ?? 1) !== 0) {
+        this.internalNodeIdx.set(`${c.id}:vusb`, idx++);
+      } else if (c.kind === "microbit" && Number(c.params.power ?? 1) !== 0) {
+        this.internalNodeIdx.set(`${c.id}:3v3_if`, idx++);
       }
     }
     this.nodeCount = idx;
@@ -5031,6 +5526,11 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    this._supplyRatedComponents = circuit.components.filter((component) => component.kind in MCU_SUPPLY_ABS_MAX);
+    // H11 readback: nets only change on load(), so the per-load candidate
+    // scan (and its diagnostics counter) restart here.
+    this._readbackCandidates = null;
+    this._readbackShadowInstalls = 0;
     // Wave A4: bucket membership is (engine const set) OR (registry hook
     // present). Migrated kinds remain listed in the sets, so the union is an
     // exact no-op for them; only a third-party registered kind can extend a
@@ -5560,9 +6060,9 @@ export class SimEngine {
       this.digitalEvaluationReuseCount += 1;
       return cached.outputs;
     }
-    // Only the 74LS245 tri-states here. The 74LS157's /oe is a strobe /G:
-    // real-part HIGH forces every Y LOW (Q-O64), which the evaluator itself
-    // does (digital.ts), not a suppressed result.
+    // Only the 74LS245's outputs are 3-state. The 74LS157's strobe forces its
+    // totem-pole outputs LOW (evalCombinationalIC), it never floats them;
+    // the 3-state version of that selector is the 74LS257.
     const outputs =
       comp.kind === "74ls245" && pinValues["/oe"] >= 0.5
         ? {}
@@ -5621,6 +6121,74 @@ export class SimEngine {
    * the stamp linear and naturally reduces draw during brown-out. Users can
    * override `idleCurrent` for a particular firmware/peripheral configuration.
    */
+  /** Trip / recover the Uno's USB polyfuse (F1) on the USB branch current,
+   *  whichever way it flows: a supply back-feeding the 5V pin into the host
+   *  trips it the same as an overload drawn from USB. With USB unplugged
+   *  (usb_power off) nothing drives current through F1, so a tripped fuse
+   *  cools and resets on the shared PTC model's recovery time, as unplugging
+   *  a real board does. */
+  private _updateUnoUsbPolyfuse(comp: SimComponent, x: Float64Array, h: number): void {
+    const k = this.vsrcIdx.get(`${comp.id}:usb`);
+    let st = this.state.ptcs.get(comp.id);
+    if (k === undefined) {
+      if (st) advancePtcTrip(st, 0, UNO_USB_PTC_I_HOLD, UNO_USB_PTC_R, h);
+      return;
+    }
+    if (!st) {
+      st = { tripped: false, tripStress: 0, recoveryTime: 0 };
+      this.state.ptcs.set(comp.id, st);
+    }
+    advancePtcTrip(st, Math.abs(x[k] ?? 0), UNO_USB_PTC_I_HOLD, UNO_USB_PTC_R, h);
+  }
+
+  /** Latch supply_overvoltage when an accepted step puts the MCU's supply
+   *  pin past its absolute maximum. It stays latched once the supply comes
+   *  back down, as a damage risk does, until resetFailures(). */
+  private _checkMcuSupplyOvervoltage(comp: SimComponent, x: Float64Array, h: number): void {
+    const rating = MCU_SUPPLY_ABS_MAX[comp.kind as keyof typeof MCU_SUPPLY_ABS_MAX];
+    if (!rating) return;
+    const key = failureKey("supply_overvoltage", comp.id, rating.pin);
+    if (this.state.failures.has(key)) return;
+    const v = this._vAt(x, this._pinNode(comp.id, rating.pin)) - this._vAt(x, this._pinNode(comp.id, "gnd"));
+    if (!(v > rating.maxV)) return;
+    this.state.failures.set(key, {
+      componentId: comp.id,
+      kind: "supply_overvoltage",
+      pinId: rating.pin,
+      since: this.simTime + h,
+      value: v,
+      limit: rating.maxV,
+      message:
+        `${comp.id}.${rating.pin} reached ${v.toFixed(2)} V, past the ${rating.chip}'s ${rating.maxV.toFixed(rating.maxV % 1 === 0 ? 1 : 2)} V absolute maximum ${rating.source}. ` +
+        "A real chip can be damaged at this voltage; the simulator keeps running it and does not model how it would fail.",
+    });
+  }
+
+  private _picoRegulatorBackfed(comp: SimComponent): boolean {
+    return this.state.icState.get(`${comp.id}:usb`)?.backfed === 1;
+  }
+
+  /** Switch the Pico's 3V3 regulator between regulating and back-fed on the
+   *  accepted solution, like bench_psu's committed CV/CC regime: it turns
+   *  off once it would sink current, and back on once the pin falls below
+   *  its setpoint (the external supply is gone or lower). */
+  private _commitPicoRegulatorRegime(comp: SimComponent, x: Float64Array): void {
+    const k = this.vsrcIdx.get(`${comp.id}:usb`);
+    if (k === undefined) return;
+    const key = `${comp.id}:usb`;
+    let backfed: boolean;
+    if (this._picoRegulatorBackfed(comp)) {
+      const vOut = this._vAt(x, this._pinNode(comp.id, "3v3")) - this._vAt(x, this._pinNode(comp.id, "gnd"));
+      backfed = vOut >= this._independentSourceMagnitude(Number(comp.params.vcc ?? 3.3));
+    } else {
+      // Branch current is positive INTO the source, i.e. the regulator sinking.
+      backfed = (x[k] ?? 0) > PICO_REG_BACKFEED_A;
+    }
+    if (backfed !== this._picoRegulatorBackfed(comp)) this._picoRegimeFlipped = true;
+    if (backfed) this.state.icState.set(key, { backfed: 1 });
+    else this.state.icState.delete(key);
+  }
+
   private _stampBoardIdleLoad(
     comp: SimComponent,
     vccPin: string,
@@ -5940,6 +6508,13 @@ export class SimEngine {
       if (!this._dcPhysicalTimeHold) {
         this._updatePackageThermalState(h, x);
         this._updateFailureStates(h, x);
+        for (const comp of this._mcuComponents) {
+          if (comp.kind === "arduino_uno") this._updateUnoUsbPolyfuse(comp, x, h);
+        }
+        for (const comp of this._supplyRatedComponents) this._checkMcuSupplyOvervoltage(comp, x, h);
+      }
+      for (const comp of this._mcuComponents) {
+        if (comp.kind === "raspberry_pi_pico") this._commitPicoRegulatorRegime(comp, x);
       }
     } finally {
       // A part held unpowered stays held through its own step's commit, so
@@ -6160,13 +6735,36 @@ export class SimEngine {
         case "arduino_nano": {
           const usbK = this.vsrcIdx.get(`${comp.id}:usb`);
           if (usbK !== undefined && Number(comp.params.usb_power ?? 1) !== 0) {
-            stampVSource(
-              this.mna,
-              this._pinNode(comp.id, "5v"),
-              this._pinNode(comp.id, "gnd"),
-              usbK,
-              this._independentSourceMagnitude(Number(comp.params.vcc ?? 5)),
-            );
+            if (comp.kind === "arduino_uno") {
+              stampVSourceSeriesR(
+                this.mna,
+                this._pinNode(comp.id, "5v"),
+                this._pinNode(comp.id, "gnd"),
+                usbK,
+                this._independentSourceMagnitude(Number(comp.params.vcc ?? 5)),
+                unoUsbPathResistance(this.state.ptcs.get(comp.id)?.tripped === true),
+              );
+            } else {
+              const vusb = this.internalNodeIdx.get(`${comp.id}:vusb`) ?? -1;
+              const v5 = this._pinNode(comp.id, "5v");
+              stampVSourceSeriesR(
+                this.mna,
+                vusb,
+                this._pinNode(comp.id, "gnd"),
+                usbK,
+                this._independentSourceMagnitude(Number(comp.params.vcc ?? 5)),
+                NANO_USB_HOST_R,
+              );
+              stampDiodeShockley(
+                this.mna,
+                vusb,
+                v5,
+                this._vAt(xGuess, vusb) - this._vAt(xGuess, v5),
+                NANO_USB_SCHOTTKY_IS,
+                NANO_USB_SCHOTTKY_N,
+                SCHOTTKY_FIT_VT_25C,
+              );
+            }
           }
           this._stampBoardIdleLoad(
             comp,
@@ -6207,17 +6805,24 @@ export class SimEngine {
         }
 
         case "raspberry_pi_pico": {
-          // 3V3(OUT) sources 3.3 V when USB-powered — stamp it so a wired supply
-          // rail works. (Allocation of this branch row is gated on usb_power too.)
+          // 3V3(OUT) is the on-board regulator's output when USB-powered (see
+          // PICO_REG_R_OUT). (Allocation of this branch row is gated on
+          // usb_power too.)
           const v3K = this.vsrcIdx.get(`${comp.id}:usb`);
           if (v3K !== undefined && Number(comp.params.usb_power ?? 1) !== 0) {
-            stampVSource(
-              this.mna,
-              this._pinNode(comp.id, "3v3"),
-              this._pinNode(comp.id, "gnd"),
-              v3K,
-              this._independentSourceMagnitude(Number(comp.params.vcc ?? 3.3)),
-            );
+            if (this._picoRegulatorBackfed(comp)) {
+              // Regulator off: no current through its branch.
+              this.mna.add(v3K, v3K, 1);
+            } else {
+              stampVSourceSeriesR(
+                this.mna,
+                this._pinNode(comp.id, "3v3"),
+                this._pinNode(comp.id, "gnd"),
+                v3K,
+                this._independentSourceMagnitude(Number(comp.params.vcc ?? 3.3)),
+                PICO_REG_R_OUT,
+              );
+            }
           }
           this._stampBoardIdleLoad(
             comp,
@@ -6266,14 +6871,26 @@ export class SimEngine {
           const gndNode = this._pinNode(comp.id, "gnd");
           const usbK = this.vsrcIdx.get(`${comp.id}:usb`);
           if (usbK !== undefined) {
-            // The rail source scales during source stepping; the idle-load
-            // resistor below keeps its authored nominal (it is a load).
-            stampVSource(
+            // The regulator source scales during source stepping; the
+            // idle-load resistor below keeps its authored nominal (it is a
+            // load). See MICROBIT_USB_SCHOTTKY_IS for the path.
+            const vIf = this.internalNodeIdx.get(`${comp.id}:3v3_if`) ?? -1;
+            stampVSourceSeriesR(
               this.mna,
-              node3v,
+              vIf,
               gndNode,
               usbK,
               this._independentSourceMagnitude(vcc),
+              MICROBIT_USB_PATH_R,
+            );
+            stampDiodeShockley(
+              this.mna,
+              vIf,
+              node3v,
+              this._vAt(xGuess, vIf) - this._vAt(xGuess, node3v),
+              MICROBIT_USB_SCHOTTKY_IS,
+              MICROBIT_USB_SCHOTTKY_N,
+              SCHOTTKY_FIT_VT_25C,
             );
           }
           this._stampBoardIdleLoad(
@@ -6491,7 +7108,9 @@ export class SimEngine {
   // the ordered sub-step PinEvents contributed by the single Arduino that
   // drives all those pins.  If the pins span multiple Arduinos (multi-master),
   // or no Arduino drives any of them, returns an empty event list so callers
-  // can fall back to sampled-level decoding.
+  // can fall back to sampled-level decoding.  The events are consumed once
+  // per MCU step: they are handed out only while _mcuEdgesPending says the
+  // driving advance's replay is still owed (see the flags' comments above).
   private _mergedDisplayEvents(
     comp: SimComponent,
     pinNames: string[],
@@ -6517,6 +7136,16 @@ export class SimEngine {
     const thatCompId = [...driverCompIds][0];
     const mcu = this.state.arduinos.get(thatCompId);
     if (!mcu) return { arduinoCompId: null, events: [] };
+
+    // A display decoder is a per-step MCU-edge consumer exactly like the
+    // clocked-IC path's ctx.mcuInputEdges: asking arms the start-level
+    // recording (so the next advance arms _mcuEdgesPending), and the merged
+    // events are handed out only while that advance's replay is still owed.
+    // The first completed digital pass consumes the flag, so the NE555
+    // split's re-solves — and every later pass — cannot re-merge one MCU
+    // step's events into the decoder twice.
+    this._mcuInputEdgesWanted = true;
+    if (!this._mcuEdgesPending) return { arduinoCompId: thatCompId, events: [] };
 
     const mapped = mcu
       .getStepPinEvents()
@@ -6591,6 +7220,10 @@ export class SimEngine {
     this._displayStateOut = null;
     this.digitalState = ds;
     this._displayState = disp;
+    // This pass replayed the last MCU step's edges (ctx.mcuInputEdges,
+    // ctx.mergedDisplayEvents, ctx.mcuStepPinEvents); a later pass in the
+    // same electrical step must not apply them again.
+    this._mcuEdgesPending = false;
   }
 
   /**
@@ -6911,6 +7544,7 @@ export class SimEngine {
       case "74ls32":
       case "74ls86":
       case "74ls157":
+      case "74ls153":
       case "74ls283":
       case "74ls245":
       case "74hc14":

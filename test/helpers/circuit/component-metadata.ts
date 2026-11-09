@@ -152,6 +152,7 @@ export const DIP_PIN_COUNTS: Partial<Record<ComponentKind, number>> = {
   "74ls173": 16,
   "74ls189": 16,
   "74ls157": 16,
+  "74ls153": 16,
   "74ls245": 20,
   "74ls283": 16,
   "74hc595": 16,

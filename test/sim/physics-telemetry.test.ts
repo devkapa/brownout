@@ -133,7 +133,10 @@ describe("structured physics telemetry", () => {
     };
     const telemetry = buildPhysicsTelemetry(run(circuit, 3), circuit, true);
     expect(telemetry.components.board.catalogUid).toBe("mcu-microbit-v1");
-    expect(telemetry.components.board.current?.valueA).toBeCloseTo(0.015, 8);
+    // The 15 mA idle load is sized at 3.3 V; the V1 USB path's BAT60A drop
+    // leaves the rail at 3.16631 V, so it draws 14.3923 mA (see
+    // microbit-3v-path.test.ts for the hand calculation).
+    expect(telemetry.components.board.current?.valueA).toBeCloseTo(0.0143923, 6);
     expect(telemetry.components.board.current).toMatchObject({
       reference: "supply",
       direction: "positive-draw",

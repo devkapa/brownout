@@ -32,8 +32,17 @@ export const CORE_RECORD_STRIDE = 7;
 /** `bo_engine_records` channels. */
 export const CORE_RECORD_CHANNEL = { failures: 0, warnings: 1, ptcTripped: 2, latchLog: 3 } as const;
 
+/**
+ * The failure kinds the core records. Classic's other kinds stay off this
+ * list: `supply_overvoltage` (0.6.8) latches on an MCU board's supply, and
+ * MCU boards never compile to the core (unsupported-kind), so no core record
+ * names one. Keeping the type narrow keeps `failureFromRecord`'s switch
+ * exhaustive when classic adds a kind.
+ */
+export type CoreFailureKind = Extract<SimFailureKind, "resistor_overload" | "fuse_tripped" | "led_failed" | "output_sag">;
+
 /** Failure codes on channels 0 and 3. */
-export const CORE_FAILURE_KIND_BY_CODE: ReadonlyMap<number, SimFailureKind> = new Map([
+export const CORE_FAILURE_KIND_BY_CODE: ReadonlyMap<number, CoreFailureKind> = new Map([
   [1, "resistor_overload"],
   [2, "fuse_tripped"],
   [3, "led_failed"],

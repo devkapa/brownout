@@ -268,7 +268,10 @@ describe("Arduino Uno board integration", () => {
   it("powers the 5V header from USB when USB power is on", () => {
     const engine = new SimEngine();
     engine.load(arduinoCircuit({ usb_power: 1 }));
-    expect(engine.getNetV()[pinNet(engine, "uno", "5v")]).toBeCloseTo(5, 4);
+    // USB host 5 V behind 0.2 ohm host/cable + 0.15 ohm F1 (MF-MSMF050-2
+    // Rmin) + 0.07 ohm T1 (FDN340P Rds(on)) into the 45 mA idle load
+    // (111.11 ohm): 5 * 111.11 / 111.53 = 4.98117 V.
+    expect(engine.getNetV()[pinNet(engine, "uno", "5v")]).toBeCloseTo(4.98117, 4);
     expect(engine.getNetV()[pinNet(engine, "uno", "gnd")]).toBeCloseTo(0, 6);
   });
 
@@ -324,7 +327,9 @@ describe("Arduino Uno board integration", () => {
     cpu.writeData(0x2b, 1 << 2);
 
     engine.step(1e-4);
-    expect(engine.getNetV()[pinNet(engine, "uno", "d2")]).toBeGreaterThan(4.99);
+    // An unloaded pull-up sits at the USB-fed rail, 4.98117 V (see "powers
+    // the 5V header from USB" above).
+    expect(engine.getNetV()[pinNet(engine, "uno", "d2")]).toBeCloseTo(4.98117, 4);
   });
 
   it("forms the expected divider between INPUT_PULLUP and an external resistor", () => {
@@ -352,8 +357,9 @@ describe("Arduino Uno board integration", () => {
     cpu.writeData(0x2b, 1 << 2);
     engine.step(1e-4);
 
-    // 5 V × 10 kΩ / (35 kΩ + 10 kΩ) = 1.111... V.
-    expect(engine.getNetV()[pinNet(engine, "uno", "d2")]).toBeCloseTo(5 / 4.5, 3);
+    // Rail × 10 kΩ / (35 kΩ + 10 kΩ), on the 4.98117 V USB-fed rail (see
+    // "powers the 5V header from USB" above): 4.98117 / 4.5 = 1.10693 V.
+    expect(engine.getNetV()[pinNet(engine, "uno", "d2")]).toBeCloseTo(4.98117 / 4.5, 4);
   });
 });
 
@@ -402,7 +408,10 @@ describe("Arduino Nano board integration", () => {
   it("powers the 5V header from USB when USB power is on", () => {
     const engine = new SimEngine();
     engine.load(nanoCircuit({ usb_power: 1 }));
-    expect(engine.getNetV()[pinNet(engine, "nano", "5v")]).toBeCloseTo(5, 4);
+    // USB host 5 V behind 0.27 ohm, then D1 (MBR0520LT1, Shockley fit to its
+    // Figure 1: Is 2.4 uA, n 1.0) into the 20 mA idle load (250 ohm):
+    // 5 = I*0.27 + Vt*ln(I/Is + 1) + I*250 gives I = 19.06 mA, rail 4.764 V.
+    expect(engine.getNetV()[pinNet(engine, "nano", "5v")]).toBeCloseTo(4.764, 3);
     expect(engine.getNetV()[pinNet(engine, "nano", "gnd")]).toBeCloseTo(0, 6);
   });
 

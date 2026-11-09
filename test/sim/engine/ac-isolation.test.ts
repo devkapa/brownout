@@ -332,6 +332,7 @@ const AC_HIGH_Z_DEFAULT_KINDS = [
   "74ls32",
   "74ls86",
   "74ls157",
+  "74ls153",
   "74ls283",
   "74ls245",
   "74hc14",

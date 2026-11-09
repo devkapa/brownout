@@ -82,8 +82,33 @@ export interface MicrocontrollerCore {
   setAnalogVolts(pin: string, volts: number, vcc?: number): void;
   /** GPIO edges captured during the most recent `step()`, in capture order. */
   getStepPinEvents(): readonly PinEvent[];
+  /**
+   * Drop the captured step events without advancing. The engine calls this
+   * when it decides a core will not step (unpowered): step() is the only
+   * place a core clears its own list, so a skipped core would otherwise keep
+   * describing its last powered step forever, and edge decoders must not
+   * re-replay those stale edges. Optional: this interface is public
+   * (brownout/mcu, and DeviceContext.arduinos), so a core that predates it
+   * keeps compiling, and the engine treats a missing implementation as the
+   * pre-H13 behaviour for that core (its stale list is fenced by the
+   * consumed-once gate alone).
+   */
+  clearStepPinEvents?(): void;
   /** Re-load the program image and clear runtime state. */
   reset(): void;
+  /**
+   * H11 readback: feed every GPIO write the core captures during the next
+   * step() to this observer, synchronously as each write happens, with only
+   * the events that write appended — the same stream, in the same order,
+   * getStepPinEvents() returns at the end of the step. The engine uses it to
+   * run a clocked part's digital shadow inside the step and push the part's
+   * output levels back through setInputBit, so a read between two writes
+   * (a shiftIn()) sees the level the writes produced. One observer pairs
+   * with exactly one step(); the engine passes null right after. Optional: a
+   * core without it cannot be read back to mid-step, and the engine builds
+   * no shadow against it.
+   */
+  setStepWriteObserver?(observer: ((events: readonly PinEvent[]) => void) | null): void;
 }
 
 /**

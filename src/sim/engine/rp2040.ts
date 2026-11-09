@@ -107,6 +107,9 @@ export class RP2040Mcu implements MicrocontrollerCore {
   private _pinEvents: PinEvent[] = [];
   private _lastLevel = new Map<string, 0 | 1 | null>();
   private _removeListeners: Array<() => void> = [];
+  // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver);
+  // null unless the engine is shadowing a clocked part this core reads.
+  private _writeObserver: ((events: readonly PinEvent[]) => void) | null = null;
   // REPL feed state machine (see pumpRepl). Progressed once per step().
   private _serialOut = "";
   private _connected = false;
@@ -333,6 +336,16 @@ export class RP2040Mcu implements MicrocontrollerCore {
     return this._pinEvents;
   }
 
+  /** H11 readback seam (see MicrocontrollerCore.setStepWriteObserver). */
+  setStepWriteObserver(observer: ((events: readonly PinEvent[]) => void) | null): void {
+    this._writeObserver = observer;
+  }
+
+  /** Drop the captured edges without advancing (see MicrocontrollerCore). */
+  clearStepPinEvents(): void {
+    this._pinEvents = [];
+  }
+
   reset(): void {
     // Full rebuild (fresh Simulator/USB) so USB re-enumerates and any queued
     // program is re-fed to the REPL after the firmware re-boots.
@@ -365,6 +378,13 @@ export class RP2040Mcu implements MicrocontrollerCore {
           // wall-time-equivalent as recorded).
           this._pinEvents.push({ pin, level, cycle: this.sim.clock.nanos / CYCLE_NANOS });
           this._lastLevel.set(pin, level);
+          // H11 readback: hand the single event this drive change appended to
+          // the observer, still inside the write that made it (the engine
+          // regroups events into writes by cycle, exactly as the committed
+          // replay does).
+          if (this._writeObserver !== null) {
+            this._writeObserver([this._pinEvents[this._pinEvents.length - 1]!]);
+          }
         }
       });
       this._removeListeners.push(remove);

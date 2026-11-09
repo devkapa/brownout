@@ -2652,42 +2652,10 @@
           "function": "gnd"
         },
         {
-          "id": "/oe",
-          "offset": {
-            "x": 80,
-            "y": 71
-          },
-          "function": "enable"
-        },
-        {
-          "id": "4y",
-          "offset": {
-            "x": 80,
-            "y": 62
-          },
-          "function": "output"
-        },
-        {
-          "id": "4b",
-          "offset": {
-            "x": 80,
-            "y": 53
-          },
-          "function": "input"
-        },
-        {
-          "id": "4a",
-          "offset": {
-            "x": 80,
-            "y": 44
-          },
-          "function": "input"
-        },
-        {
           "id": "3y",
           "offset": {
             "x": 80,
-            "y": 35
+            "y": 71
           },
           "function": "output"
         },
@@ -2695,7 +2663,7 @@
           "id": "3b",
           "offset": {
             "x": 80,
-            "y": 26
+            "y": 62
           },
           "function": "input"
         },
@@ -2703,9 +2671,199 @@
           "id": "3a",
           "offset": {
             "x": 80,
+            "y": 53
+          },
+          "function": "input"
+        },
+        {
+          "id": "4y",
+          "offset": {
+            "x": 80,
+            "y": 44
+          },
+          "function": "output"
+        },
+        {
+          "id": "4b",
+          "offset": {
+            "x": 80,
+            "y": 35
+          },
+          "function": "input"
+        },
+        {
+          "id": "4a",
+          "offset": {
+            "x": 80,
+            "y": 26
+          },
+          "function": "input"
+        },
+        {
+          "id": "/oe",
+          "offset": {
+            "x": 80,
+            "y": 17
+          },
+          "function": "enable"
+        },
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 80,
+            "y": 8
+          },
+          "function": "vcc"
+        }
+      ],
+      "electrical_specs": {
+        "v_input": {
+          "v_il_max": 0.8,
+          "v_ih_min": 2
+        },
+        "vcc_range": {
+          "min": 4.75,
+          "nominal": 5,
+          "max": 5.25
+        },
+        "io_max": 0.008,
+        "logic_family": "LS-TTL",
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "strobe": {
+            "tplh": 13,
+            "tphl": 14
+          }
+        },
+        "switching_source": "TI SDLS058 p.5, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
+      }
+    },
+    {
+      "uid": "ic-74ls153",
+      "kind": "74ls153",
+      "default_params": {
+        "vcc": 5
+      },
+      "pin_layout": [
+        {
+          "id": "/1g",
+          "offset": {
+            "x": 0,
+            "y": 8
+          },
+          "function": "enable"
+        },
+        {
+          "id": "b",
+          "offset": {
+            "x": 0,
             "y": 17
           },
           "function": "input"
+        },
+        {
+          "id": "1c3",
+          "offset": {
+            "x": 0,
+            "y": 26
+          },
+          "function": "input"
+        },
+        {
+          "id": "1c2",
+          "offset": {
+            "x": 0,
+            "y": 35
+          },
+          "function": "input"
+        },
+        {
+          "id": "1c1",
+          "offset": {
+            "x": 0,
+            "y": 44
+          },
+          "function": "input"
+        },
+        {
+          "id": "1c0",
+          "offset": {
+            "x": 0,
+            "y": 53
+          },
+          "function": "input"
+        },
+        {
+          "id": "1y",
+          "offset": {
+            "x": 0,
+            "y": 62
+          },
+          "function": "output"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 0,
+            "y": 71
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "2y",
+          "offset": {
+            "x": 80,
+            "y": 71
+          },
+          "function": "output"
+        },
+        {
+          "id": "2c0",
+          "offset": {
+            "x": 80,
+            "y": 62
+          },
+          "function": "input"
+        },
+        {
+          "id": "2c1",
+          "offset": {
+            "x": 80,
+            "y": 53
+          },
+          "function": "input"
+        },
+        {
+          "id": "2c2",
+          "offset": {
+            "x": 80,
+            "y": 44
+          },
+          "function": "input"
+        },
+        {
+          "id": "2c3",
+          "offset": {
+            "x": 80,
+            "y": 35
+          },
+          "function": "input"
+        },
+        {
+          "id": "a",
+          "offset": {
+            "x": 80,
+            "y": 26
+          },
+          "function": "input"
+        },
+        {
+          "id": "/2g",
+          "offset": {
+            "x": 80,
+            "y": 17
+          },
+          "function": "enable"
         },
         {
           "id": "vcc",

@@ -29,6 +29,7 @@ import type {
   DeviceModel,
 } from "../device-registry.js";
 import { stampAcAdmittance } from "../ac-system.js";
+import { advancePtcTrip, ptcResistance } from "../ptc.js";
 import {
   capacitorInternalVoltage,
   capacitorInternalVoltageTrap,
@@ -777,9 +778,7 @@ export const ptcFuseModel: DeviceModel = {
     const pins = comp.pins;
     const rNormalPtc = Math.max(0.001, Number(comp.params.rNormal ?? 0.5));
     const ptcSt = ctx.state.ptcs.get(comp.id) ?? { tripped: false, tripStress: 0, recoveryTime: 0 };
-    // Tripped resistance = 200x rNormal — high enough to limit fault current,
-    // but not truly open (PTCs don't blow, they go high-R).
-    const ptcR = ptcSt.tripped ? rNormalPtc * 200 : rNormalPtc;
+    const ptcR = ptcResistance(rNormalPtc, ptcSt.tripped);
     const aiPtc = ctx.pinNode(comp.id, pins[0].id);
     const ciPtc = ctx.pinNode(comp.id, pins[1].id);
     stampResistor(ctx.mna, aiPtc, ciPtc, ptcR);
@@ -788,7 +787,7 @@ export const ptcFuseModel: DeviceModel = {
     const pins = comp.pins;
     const rNormalPtcI = Math.max(0.001, Number(comp.params.rNormal ?? 0.5));
     const ptcStI = ctx.state.ptcs.get(comp.id);
-    const ptcRI = ptcStI?.tripped ? rNormalPtcI * 200 : rNormalPtcI;
+    const ptcRI = ptcResistance(rNormalPtcI, ptcStI?.tripped === true);
     const vaP = ctx.vAt(x, ctx.pinNode(comp.id, pins[0].id));
     const vcP = ctx.vAt(x, ctx.pinNode(comp.id, pins[1].id));
     ctx.setElementCurrent(comp.id, (vaP - vcP) / ptcRI);
@@ -802,43 +801,8 @@ export const ptcFuseModel: DeviceModel = {
       ptcSt = { tripped: false, tripStress: 0, recoveryTime: 0 };
       ctx.state.ptcs.set(comp.id, ptcSt);
     }
-
-    if (!ptcSt.tripped) {
-      // Normalized excess I²t: 100 ms at exactly 2× hold current, faster
-      // at larger faults. Stress bleeds below hold current instead of being
-      // erased by every PWM off interval.
-      if (current >= iHold) {
-        ptcSt.tripStress += Math.max(0, current * current - iHold * iHold) * h;
-        const tripThreshold = 3 * iHold * iHold * 0.1;
-        if (ptcSt.tripStress >= tripThreshold) {
-          ptcSt.tripped = true;
-          ptcSt.tripStress = 0;
-          ptcSt.recoveryTime = 0;
-        }
-      } else {
-        // Bleed stress when current is below trip threshold so short spikes
-        // don't permanently accumulate.
-        ptcSt.tripStress = Math.max(0, ptcSt.tripStress - h * iHold * iHold * 0.5);
-      }
-    } else {
-      // Recovery also requires low hot-state dissipation. A fault that is
-      // merely current-limited by the tripped PTC keeps it hot and must not
-      // unrealistically reset after a fixed timer.
-      const rNormal = Math.max(0.001, Number(comp.params.rNormal ?? 0.5));
-      const trippedPower = current * current * rNormal * 200;
-      const coolPower = iHold * iHold * rNormal * 0.1;
-      if (current < iHold / 2 && trippedPower < coolPower) {
-        ptcSt.recoveryTime += h;
-        if (ptcSt.recoveryTime >= 2.0) {
-          ptcSt.tripped = false;
-          ptcSt.tripStress = 0;
-          ptcSt.recoveryTime = 0;
-        }
-      } else {
-        // Current rose above recovery threshold — restart the recovery timer.
-        ptcSt.recoveryTime = 0;
-      }
-    }
+    const rNormal = Math.max(0.001, Number(comp.params.rNormal ?? 0.5));
+    advancePtcTrip(ptcSt, current, iHold, rNormal, h);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // A PTC never opens: the committed trip state selects the same 200x
@@ -847,7 +811,7 @@ export const ptcFuseModel: DeviceModel = {
     const pins = comp.pins;
     const rNormal = Math.max(0.001, Number(comp.params.rNormal ?? 0.5));
     const tripped = ctx.state.ptcs.get(comp.id)?.tripped === true;
-    const ptcR = tripped ? rNormal * 200 : rNormal;
+    const ptcR = ptcResistance(rNormal, tripped);
     stampAcAdmittance(
       ac,
       ctx.pinNode(comp.id, pins[0].id),
