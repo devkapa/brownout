@@ -46,6 +46,28 @@ pub struct SegmentRate {
     pub v: ExpVoltage,
 }
 
+/// What a stepped step holds over itself, in order ([`StressDrive::over_step`]):
+/// `first` over the first `split` of the step (a fraction of it), `then`
+/// over the rest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StepMean {
+    pub first: StressDrive,
+    pub split: f64,
+    pub then: StressDrive,
+}
+
+impl StepMean {
+    /// One drive over the whole step.
+    pub fn whole(drive: StressDrive) -> StepMean {
+        StepMean { first: drive, split: 1.0, then: drive }
+    }
+
+    /// The instant `first` gives way to `then` in a step from `t0` to `t1`.
+    pub fn split_at(&self, t0: f64, t1: f64) -> f64 {
+        if self.split >= 1.0 { t1 } else { t0 + self.split * (t1 - t0) }
+    }
+}
+
 /// What drives a stress integrator from `t0` on.
 #[derive(Clone, Copy, Debug)]
 pub enum StressDrive {
@@ -141,56 +163,65 @@ impl StressDrive {
         }
     }
 
-    /// The drive a stepped step holds over itself (rulings R80 (a), R84
-    /// (B)), from the drives at the step's own start state (`start`) and end
-    /// state (`end`), in place of classic's backward rule (the end rate held
-    /// over the step, which under-counts a rate that falls through the step:
-    /// a 555 astable's timing resistors take most of their stress in the
+    /// What a stepped step holds over itself (rulings R80 (a), R84 (B)),
+    /// from the drives at the step's own start state (`start`) and end state
+    /// (`end`), in place of classic's backward rule (the end rate held over
+    /// the step, which under-counts a rate that falls through the step: a
+    /// 555 astable's timing resistors take most of their stress in the
     /// discharge's exponential spikes, and burnt 5-17 % late).
     ///
     /// The rate is `q - zero` for a ratio `q` (`P/pMax`, `(I/limit)^2`, the
     /// PTC's `I^2`), and it is `q` that relaxes exponentially in time across
-    /// an RC step, so where either end accumulates the step holds the
-    /// logarithmic mean of the two `q`s less `zero`; a step whose `q` crosses
-    /// the level accrues to the crossing and bleeds after it (an end at rate 0
-    /// whose `q` the drive does not carry is read at the level: continuous
-    /// as an end's rate falls to 0). The mean of the rates themselves read 0.26 for 0.82 on
-    /// `q` from 1.001 to 3, and the trapezoid 2.72 for a CV tail of 0.86 by
-    /// hand on cold 535 tpl 2. Exact for `q = A e^(kt)`; for `q = (a + b
-    /// e^(-t/tau))^2` with `a b >= 0` (a voltage relaxing to a nonzero level)
-    /// `ln q` is convex with curvature at most 1/2 per tau^2, so the mean
-    /// over-counts by at most `exp((h/tau)^2 / 16) - 1` (1.6 % at h = tau/2;
-    /// the trapezoid's error on a pure exponential is `(h/tau)^2 / 3`). Where
+    /// an RC step, so where both ends accumulate the step holds the
+    /// logarithmic mean of the two `q`s less `zero`. Where only one does, `q`
+    /// crosses the level inside the step, at the fraction `f` of the step it
+    /// spends above it: the step accrues `LM(q_hi, zero) - zero` over that
+    /// stretch and bleeds at the idle end's recovery over the rest, each in
+    /// its own order in time (a rising `q` bleeds first, floored at 0 as the
+    /// integrator is, then accrues; netted into one slope, a step from S = 0
+    /// with `q` from 0.5 to 3 gained 0.116 for 0.503). An end at `q = 0` is a
+    /// voltage through zero, where no exponential goes: `q` is read as the
+    /// square of a voltage linear over the step. An end whose `q` the drive
+    /// does not carry (-1) is read at the level. The mean of the rates
+    /// themselves read 0.26 for 0.82 on `q` from 1.001 to 3, and the
+    /// trapezoid 2.72 for a CV tail of 0.86 by hand on cold 535 tpl 2. Exact
+    /// for `q = A e^(kt)`; for `q = (a + b e^(-t/tau))^2` with `a b >= 0` (a
+    /// voltage relaxing to a nonzero level) `ln q` is convex with curvature
+    /// at most 1/2 per tau^2, so the mean over-counts by at most `exp((h/tau)^2
+    /// / 16) - 1` (1.6 % at h = tau/2; the trapezoid's error on a pure
+    /// exponential is `(h/tau)^2 / 3`); a crossing step's split over-counts
+    /// more, +20-25 % at h = 2 tau, which no step bound limits yet. Where
     /// neither end accumulates the step bleeds at the mean recovery. A closed
     /// form on either side has nothing to average and keeps `end`.
-    pub fn over_step(start: StressDrive, end: StressDrive) -> StressDrive {
-        let (StressDrive::Constant { rate: r0, recovery: k0, q: q0, .. }, StressDrive::Constant { rate: r1, recovery: k1, zero, q: q1 }) = (start, end) else {
-            return end;
+    pub fn over_step(start: StressDrive, end: StressDrive) -> StepMean {
+        let (StressDrive::Constant { rate: r0, recovery: k0, q: q0, .. }, StressDrive::Constant { rate: r1, recovery: k1, zero, .. }) = (start, end) else {
+            return StepMean::whole(end);
         };
-        let held = |slope: f64| {
-            if slope > 0.0 {
-                StressDrive::Constant { rate: slope, recovery: k1, zero, q: -1.0 }
-            } else {
-                StressDrive::Constant { rate: 0.0, recovery: -slope, zero, q: -1.0 }
-            }
-        };
+        let q1 = match end { StressDrive::Constant { q, .. } => q, _ => -1.0 };
+        let accrue = |slope: f64| StressDrive::Constant { rate: slope.max(0.0), recovery: k1, zero, q: -1.0 };
+        let bleed = |recovery: f64| StressDrive::Constant { rate: 0.0, recovery: recovery.max(0.0), zero, q: -1.0 };
         match (r0 > 0.0, r1 > 0.0) {
-            (true, true) => held(log_mean(r0 + zero, r1 + zero) - zero),
-            (false, false) => held(-0.5 * (k0.max(0.0) + k1.max(0.0))),
-            (up0, _) => {
-                // One end accumulates and the other sits under the level: the
-                // ratio crosses it inside the step, at the fraction `f` of the
-                // step it spends above (exact for q exponential in time), so
-                // the step accrues `f (LM(q_hi, zero) - zero)` and bleeds the
-                // rest at the idle end's recovery. An end whose ratio is not
-                // known is read at the level (f = 1, no bleed).
-                let (hi, lo, recovery) = if up0 { (r0 + zero, q1, k1) } else { (r1 + zero, q0, k0) };
-                let above = log_mean(hi, zero) - zero;
-                if lo > 0.0 && lo < zero {
-                    let f = (hi / zero).ln() / (hi / lo).ln();
-                    held(f * above - (1.0 - f) * recovery.max(0.0))
+            (true, true) => StepMean::whole(accrue(log_mean(r0 + zero, r1 + zero) - zero)),
+            (false, false) => StepMean::whole(bleed(0.5 * (k0.max(0.0) + k1.max(0.0)))),
+            (falling, _) => {
+                let (hi, lo, recovery) = if falling { (r0 + zero, q1, k1) } else { (r1 + zero, q0, k0) };
+                let (f, above) = if lo == 0.0 {
+                    // q = hi (1 - s)^2 over the stretch from the accruing end:
+                    // above the level for 1 - sqrt(zero/hi) of the step.
+                    let f = 1.0 - (zero / hi).sqrt();
+                    let mean = if f > 0.0 { hi * (1.0 - (1.0 - f).powi(3)) / (3.0 * f) - zero } else { 0.0 };
+                    (f, mean)
+                } else if lo > 0.0 && lo < zero {
+                    ((hi / zero).ln() / (hi / lo).ln(), log_mean(hi, zero) - zero)
                 } else {
-                    held(above)
+                    (1.0, log_mean(hi, zero) - zero)
+                };
+                if f >= 1.0 {
+                    StepMean::whole(accrue(above))
+                } else if falling {
+                    StepMean { first: accrue(above), split: f, then: bleed(recovery) }
+                } else {
+                    StepMean { first: bleed(recovery), split: 1.0 - f, then: accrue(above) }
                 }
             }
         }
@@ -496,6 +527,26 @@ pub struct Stress {
 }
 
 impl Stress {
+    /// Closes the integrator over a stepped step from `t0` to `t1` under
+    /// `mean`'s pieces in order, and returns the latch time if one falls
+    /// inside it (the integrator is then left at the piece it latches in,
+    /// closed to that piece's start).
+    pub fn run_step(&mut self, mean: &StepMean, t0: f64, t1: f64) -> Option<f64> {
+        self.close(t0);
+        let tm = mean.split_at(t0, t1);
+        self.drive = mean.first;
+        if let Some(t) = self.latch_time().filter(|&t| t <= tm) {
+            return Some(t);
+        }
+        self.close(tm);
+        self.drive = mean.then;
+        if let Some(t) = self.latch_time().filter(|&t| t <= t1) {
+            return Some(t);
+        }
+        self.close(t1);
+        None
+    }
+
     pub fn new(threshold: f64, t0: f64) -> Self {
         Stress { s0: 0.0, t0, drive: StressDrive::IDLE, threshold }
     }
@@ -740,6 +791,25 @@ impl PtcEntry {
         if self.tripped && !drive.cool_at(self.t0) {
             self.rt = 0.0;
         }
+    }
+
+    /// [`Stress::run_step`] for an untripped PTC's stress: closes it over a
+    /// stepped step under `mean`'s pieces in order and returns the trip time
+    /// if one falls inside it.
+    pub fn run_step(&mut self, mean: &StepMean, t0: f64, t1: f64) -> Option<f64> {
+        self.close(t0);
+        let tm = mean.split_at(t0, t1);
+        self.set_drive(PtcDrive::Stress(mean.first));
+        if let Some((t, PtcEvent::Trip)) = self.next_event().filter(|&(t, _)| t <= tm) {
+            return Some(t);
+        }
+        self.close(tm);
+        self.set_drive(PtcDrive::Stress(mean.then));
+        if let Some((t, PtcEvent::Trip)) = self.next_event().filter(|&(t, _)| t <= t1) {
+            return Some(t);
+        }
+        self.close(t1);
+        None
     }
 
     /// The next trip or recovery.
@@ -1438,12 +1508,19 @@ mod tests {
         (0..n).map(|k| (q((k as f64 + 0.5) / n as f64) - zero).max(0.0)).sum::<f64>() / n as f64
     }
 
+    /// `S` gained over a step of 1 from `s0`, the step's ends at rates `r0`
+    /// and `r1` (zero level 1, recovery 1, `q` unknown).
     fn step_rate(r0: f64, r1: f64) -> f64 {
         let at = |rate: f64| StressDrive::Constant { rate, recovery: 1.0, zero: 1.0, q: -1.0 };
-        match StressDrive::over_step(at(r0), at(r1)) {
-            StressDrive::Constant { rate, .. } => rate,
-            other => panic!("a constant drive, not {other:?}"),
-        }
+        step_gain(StressDrive::over_step(at(r0), at(r1)), 100.0)
+    }
+
+    /// `S` gained over a step from 0 to 1 under `mean`, from `s0` (threshold
+    /// out of reach).
+    fn step_gain(mean: StepMean, s0: f64) -> f64 {
+        let mut s = Stress { s0, t0: 0.0, drive: StressDrive::IDLE, threshold: 1e9 };
+        assert_eq!(s.run_step(&mean, 0.0, 1.0), None);
+        s.s0 - s0
     }
 
     #[test]
@@ -1507,7 +1584,9 @@ mod tests {
     #[test]
     fn a_step_that_accumulates_at_neither_end_bleeds_at_the_mean_recovery() {
         let idle = |recovery: f64| StressDrive::Constant { rate: 0.0, recovery, zero: 1.0, q: -1.0 };
-        let StressDrive::Constant { rate, recovery, .. } = StressDrive::over_step(idle(1.0), idle(2.0)) else { panic!("a constant drive") };
+        let mean = StressDrive::over_step(idle(1.0), idle(2.0));
+        assert_eq!(mean.split, 1.0);
+        let StressDrive::Constant { rate, recovery, .. } = mean.first else { panic!("a constant drive") };
         assert_eq!((rate, recovery), (0.0, 1.5));
     }
 
@@ -1525,11 +1604,14 @@ mod tests {
     /// recovery `rec`), as the step's mean drive holds it: the rate, or minus
     /// the recovery it bleeds at.
     fn crossing_slope(q0: f64, q1: f64, rec: f64) -> f64 {
+        crossing_gain(q0, q1, rec, 100.0)
+    }
+
+    /// `S` gained over a step of 1 from `s0` whose ends sit at ratios `q0`
+    /// and `q1` (zero level 1, recovery `rec`).
+    fn crossing_gain(q0: f64, q1: f64, rec: f64, s0: f64) -> f64 {
         let at = |q: f64| StressDrive::Constant { rate: (q - 1.0).max(0.0), recovery: rec, zero: 1.0, q };
-        match StressDrive::over_step(at(q0), at(q1)) {
-            StressDrive::Constant { rate, recovery, .. } => if rate > 0.0 { rate } else { -recovery },
-            other => panic!("a constant drive, not {other:?}"),
-        }
+        step_gain(StressDrive::over_step(at(q0), at(q1)), s0)
     }
 
     #[test]
@@ -1574,5 +1656,41 @@ mod tests {
     fn step_integral_bleeding(q: impl Fn(f64) -> f64, rec: f64) -> f64 {
         let n = 200_000;
         (0..n).map(|k| { let v = q((k as f64 + 0.5) / n as f64); if v > 1.0 { v - 1.0 } else { -rec } }).sum::<f64>() / n as f64
+    }
+
+    #[test]
+    fn a_rising_crossing_from_the_floor_bleeds_nothing_before_it_accrues() {
+        // From S = 0 the bleed before the crossing has nothing to take, so the
+        // step gains all it accrues after: q = 0.5 6^t crosses 1 at ln 2 / ln 6
+        // and accrues 0.503074 after; q = 0.1 30^t is above 1 for ln 3 / ln 30 and
+        // accrues 0.265021. Netted into one slope, the bleed ate the first
+        // (0.116) and all of the second (R80V).
+        for (q0, by_hand) in [(0.5, 0.503074), (0.1, 0.265021)] {
+            let got = crossing_gain(q0, 3.0, 1.0, 0.0);
+            assert!((got - by_hand).abs() <= 1e-6, "q {q0} -> 3 from S = 0: {got}, by hand {by_hand}");
+        }
+    }
+
+    #[test]
+    fn a_falling_crossing_latches_in_its_accrual_though_the_step_nets_a_loss() {
+        // q = 3 (0.2/3)^t from S = 0.8, threshold 1, recovery 1: it accrues
+        // 0.8205/s until f = ln 3 / ln 15 = 0.4057 and bleeds after, a net
+        // loss of 0.26 over the step, but S reaches 1 at 0.2 / 0.8205 = 0.2438.
+        let at = |q: f64| StressDrive::Constant { rate: (q - 1.0f64).max(0.0), recovery: 1.0, zero: 1.0, q };
+        let mean = StressDrive::over_step(at(3.0), at(0.2));
+        let mut s = Stress { s0: 0.8, t0: 0.0, drive: StressDrive::IDLE, threshold: 1.0 };
+        let t = s.run_step(&mean, 0.0, 1.0).expect("a latch inside the step");
+        assert!((t - 0.2 / (2.0 / 3.0f64.ln() - 1.0)).abs() <= 1e-12, "{t}");
+    }
+
+    #[test]
+    fn an_end_at_zero_ratio_is_a_voltage_through_zero() {
+        // q = 3 (1 - t)^2 (a voltage linear to 0): above 1 until 1 - 1/sqrt 3,
+        // accruing (1 - 3^-1.5) - (1 - 1/sqrt 3) = 0.384900, then bleeding
+        // 1/sqrt 3 = 0.577350 at recovery 1: -0.192450 from a high S. Read as
+        // unknown it was 0.820 accrued and no bleed.
+        let got = crossing_gain(3.0, 0.0, 1.0, 100.0);
+        assert!((got + 0.192450).abs() <= 1e-6, "{got}");
+        assert!((crossing_gain(0.0, 3.0, 1.0, 100.0) - got).abs() <= 1e-12, "the same rising");
     }
 }

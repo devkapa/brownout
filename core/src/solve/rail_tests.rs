@@ -15100,3 +15100,42 @@ fn a_stepped_steps_start_state_reads_its_outside_nodes_where_the_step_before_end
     let rec: Vec<(f64, f64)> = e.records(0).unwrap().chunks(7).map(|c| (c[0], c[3])).collect();
     assert!(!rec.iter().any(|r| r.0 == 10.0), "the fuse tripped: {rec:?}");
 }
+
+#[test]
+fn a_stepped_restore_puts_back_each_partitions_end_reads() {
+    // A step's start state is its partition's outside reads where the step
+    // before ended (`Partition::end_reads`, ruling R80 (a)); a restored
+    // snapshot must put them back with the rest, or the next step starts
+    // from where the abandoned future left the rail (R80V). Cold 474 tpl 5:
+    // its fuse's partition reads the rail.
+    let mut rig = Rig::load(&cold_474_tpl5()).unwrap();
+    rig.advance(0.0209).unwrap();
+    let snap = rig.s().stepped.snapshot();
+    let before = snap.digest();
+    assert!(before.contains("end_reads: [("), "the fuse's partition has end reads to keep: {before}");
+    rig.advance(0.05).unwrap();
+    assert_ne!(rig.s().stepped.snapshot().digest(), before, "later steps moved the end reads");
+    rig.k.solver_mut().stepped.restore(snap);
+    assert_eq!(rig.s().stepped.snapshot().digest(), before);
+}
+
+#[test]
+fn a_stepped_led_under_its_rating_carries_its_current_ratio() {
+    // R80V: a stepped LED whose junctions all sit under the voltage where
+    // they carry ifMax takes the fast path (rate 0) without computing its
+    // peak current, and a step whose current crossed ifMax inside it read
+    // that end at the level: accruing all of the step and bleeding none
+    // (+0.820 for +0.116 on q from 3 to 0.5). Cold 535 tpl 2's LED R8 (ifMax
+    // 6.85 mA) is in CV by 14 ms and its current falls under ifMax at 35 ms by
+    // hand (I0 / (1 + I0 t / (C n vt)), I0 = 0.2746 A, C n vt = 1.474e-4): at
+    // 0.1 s its drive carries (I / ifMax)^2 under 1, not the unknown -1.
+    let stops = [0.00627288078824777, 0.016829457476524014, 0.058843896577463285, 0.058976488413401716, 0.059103567309001626, 0.05970527509700228, 0.07520090991509062, 0.07780697361405664, 0.08073770949696749, 0.08757943996501401, 0.09266788130346024, 0.09857249569377252, 0.1];
+    let mut rig = Rig::load(&cold_535_tpl2()).unwrap();
+    for &t in &stops {
+        rig.advance(t).unwrap();
+    }
+    let drive = rig.s().slow.stress(8).expect("the LED's integrator").drive;
+    let crate::slow::stress::StressDrive::Constant { rate, q, .. } = drive else { panic!("a constant drive: {drive:?}") };
+    assert_eq!(rate, 0.0, "under its rating");
+    assert!((0.0..1.0).contains(&q), "the drive carries its ratio: q = {q}");
+}

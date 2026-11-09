@@ -25,7 +25,7 @@ use crate::kinds;
 use crate::partition::{self, PartitionKind};
 use crate::program::Program;
 use crate::slow::failures::{self, FailureKind};
-use crate::slow::stress::{PtcDrive, PtcEvent, PtcParams, SegmentRate, StressDrive};
+use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StepMean, StressDrive};
 use crate::slow::thermal::{PowerDrive, Shutdown, ThermalConfig};
 use crate::slow::{is_due, warnings, ExpVoltage, LatchKey, LatchRecord, SlowEventKind};
 
@@ -1466,34 +1466,25 @@ impl PartitionedSolver {
                 let (start, drives) = self.step_drives(i, c);
                 let mut due = None;
                 if let (Some(new), true) = (drives.stress, self.slow.stress(dev).is_some()) {
-                    // Rulings R80 (a), R84 (B): the step holds the mean of its
-                    // start and end drives, and the end drive from its end.
-                    let held = start.as_ref().and_then(|d| d.stress).map_or(new, |s0| StressDrive::over_step(s0, new));
+                    // Rulings R80 (a), R84 (B): the step holds its mean's
+                    // pieces in order, and the end drive from its end.
+                    let mean = start.as_ref().and_then(|d| d.stress).map_or(StepMean::whole(new), |s0| StressDrive::over_step(s0, new));
                     let s = self.sw().stress_mut(dev).expect("checked above");
-                    s.close(c.t0);
-                    s.drive = held;
-                    match s.latch_time() {
-                        Some(t) if t <= c.t1 => due = Some((t, SlowEventKind::StressLatch)),
-                        _ => {
-                            s.close(c.t1);
-                            s.drive = new;
-                        }
+                    match s.run_step(&mean, c.t0, c.t1) {
+                        Some(t) => due = Some((t, SlowEventKind::StressLatch)),
+                        None => s.drive = new,
                     }
                 }
                 if let Some(PtcDrive::Stress(new)) = drives.ptc.filter(|_| self.slow.ptc(dev).is_some_and(|p| !p.tripped)) {
-                    let held = match start.as_ref().and_then(|d| d.ptc) {
+                    let mean = match start.as_ref().and_then(|d| d.ptc) {
                         Some(PtcDrive::Stress(s0)) => StressDrive::over_step(s0, new),
-                        _ => new,
+                        _ => StepMean::whole(new),
                     };
                     let e = self.sw().ptc_mut(dev).expect("checked above");
-                    e.close(c.t0);
-                    e.set_drive(PtcDrive::Stress(held));
-                    match e.next_event() {
-                        Some((t, PtcEvent::Trip)) if t <= c.t1 && due.is_none_or(|(d, _)| t < d) => due = Some((t, SlowEventKind::PtcTrip)),
-                        _ => {
-                            e.close(c.t1);
-                            e.set_drive(PtcDrive::Stress(new));
-                        }
+                    match e.run_step(&mean, c.t0, c.t1) {
+                        Some(t) if due.is_none_or(|(d, _)| t < d) => due = Some((t, SlowEventKind::PtcTrip)),
+                        Some(_) => {}
+                        None => e.set_drive(PtcDrive::Stress(new)),
                     }
                 }
                 self.slow_scratch.trailed.push(i as u32);
@@ -1520,20 +1511,20 @@ impl PartitionedSolver {
         let (start, drives) = self.step_drives(i, &c);
         let stress = match (drives.stress, self.slow.stress(dev)) {
             (Some(drive), Some(s)) if !self.slow.is_failed(dev) => {
-                let drive = start.as_ref().and_then(|d| d.stress).map_or(drive, |s0| StressDrive::over_step(s0, drive));
-                crate::slow::stress::Stress { drive, ..*s }.latch_time()
+                let mean = start.as_ref().and_then(|d| d.stress).map_or(StepMean::whole(drive), |s0| StressDrive::over_step(s0, drive));
+                let mut s = *s;
+                s.run_step(&mean, c.t0, c.t1)
             }
             _ => None,
         };
         let trip = match (drives.ptc, self.slow.ptc(dev)) {
             (Some(PtcDrive::Stress(drive)), Some(e)) if !e.tripped => {
-                let drive = match start.as_ref().and_then(|d| d.ptc) {
+                let mean = match start.as_ref().and_then(|d| d.ptc) {
                     Some(PtcDrive::Stress(s0)) => StressDrive::over_step(s0, drive),
-                    _ => drive,
+                    _ => StepMean::whole(drive),
                 };
                 let mut e = *e;
-                e.set_drive(PtcDrive::Stress(drive));
-                e.next_event().filter(|&(_, k)| k == PtcEvent::Trip).map(|(t, _)| t)
+                e.run_step(&mean, c.t0, c.t1)
             }
             _ => None,
         };
@@ -2119,8 +2110,16 @@ impl PartitionedSolver {
                     out.stress = Some(if below {
                         // Every junction at or under the voltage where it
                         // carries `ifMax`: `peakI <= ifMax`, so the rate is
-                        // `max(0, r^2 - 1)` with `r <= 1`, exactly 0.
-                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0, q: -1.0 }
+                        // `max(0, r^2 - 1)` with `r <= 1`, exactly 0. A
+                        // stepped LED's step mean needs `r^2` itself where its
+                        // current crosses `ifMax` inside a step (read at the
+                        // level, a step from 3 ifMax^2 to 0.5 gained 0.82 for
+                        // 0.12), so it alone pays for the peak current here.
+                        let q = match led::if_max(&e.device) {
+                            Some(m) if m > 0.0 && sd.class == Class::Stepped => (led::peak_current(&e.device, &e.junctions, &self.voltages) / m).powi(2),
+                            _ => -1.0,
+                        };
+                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0, q }
                     } else {
                         let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
                         let d = failures::led_failed(peak, led::if_max(&e.device).unwrap_or(0.0));
