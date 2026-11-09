@@ -210,12 +210,14 @@ export function analyzeLive(input: DiagnosticsInput): DiagnosticFinding[] {
       fuse_tripped: `Fuse "${failure.componentId}" tripped open`,
       led_failed: `LED "${failure.componentId}" failed open`,
       output_sag: `Output "${failure.componentId}${pinSuffix}" is sagging`,
+      supply_overvoltage: `"${failure.componentId}${pinSuffix}" supply is past its absolute maximum`,
     };
     const suggestedFixByKind: Record<typeof failure.kind, string> = {
       resistor_overload: "Reduce the current or use a resistor with a higher wattage, then reset simulated failures.",
       fuse_tripped: "Reduce the fault current or choose a correctly rated fuse, then reset simulated failures.",
       led_failed: "Add or increase the LED series resistor, then reset simulated failures.",
       output_sag: "Reduce the output load or buffer the signal. This warning clears automatically when the output returns to its guaranteed logic range.",
+      supply_overvoltage: "Lower the supply on that pin to the board's rated voltage, then reset simulated failures.",
     };
     findings.push({
       id,

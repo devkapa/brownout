@@ -614,7 +614,8 @@ export type SimFailureKind =
   | "resistor_overload"
   | "fuse_tripped"
   | "led_failed"
-  | "output_sag";
+  | "output_sag"
+  | "supply_overvoltage";
 
 export interface SimFailure {
   componentId: string;
@@ -1142,6 +1143,23 @@ const NANO_USB_SCHOTTKY_VT = 0.025693;
 const PICO_REG_R_OUT = 0.01;
 /** Sink current above which the regulator is taken to have been back-fed. */
 const PICO_REG_BACKFEED_A = 1e-3;
+
+// Absolute maximum supply voltage of each board's MCU, on the pin that feeds
+// it. A supply past it (most often a bench PSU back-feeding a USB-powered
+// board) latches a supply_overvoltage failure. The failure changes no stamp:
+// the engine does not know how the chip would fail, only that it is outside
+// what the datasheet allows.
+const MCU_SUPPLY_ABS_MAX: Readonly<Record<
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico",
+  { pin: string; chip: string; maxV: number; source: string }
+>> = {
+  // ATmega328P datasheet, Absolute Maximum Ratings: VCC -0.5 V to 6.0 V.
+  arduino_uno: { pin: "5v", chip: "ATmega328P", maxV: 6.0, source: "VCC" },
+  arduino_nano: { pin: "5v", chip: "ATmega328P", maxV: 6.0, source: "VCC" },
+  // RP2040 datasheet 5.5.3.1, Table 622: IOVDD -0.5 V to 3.63 V. The Pico's
+  // 3V3 rail is IOVDD.
+  raspberry_pi_pico: { pin: "3v3", chip: "RP2040", maxV: 3.63, source: "IOVDD" },
+};
 
 // S18b — see hcsr04MaxStepH()'s doc comment: a hard cap on outer step size,
 // comfortably under the fixed 250 µs TRIG-fall-to-ECHO-rise delay, applied
@@ -6003,6 +6021,29 @@ export class SimEngine {
     advancePtcTrip(st, Math.abs(x[k] ?? 0), UNO_USB_PTC_I_HOLD, UNO_USB_PTC_R, h);
   }
 
+  /** Latch supply_overvoltage when an accepted step puts the MCU's supply
+   *  pin past its absolute maximum. It stays latched once the supply comes
+   *  back down, as a damage risk does, until resetFailures(). */
+  private _checkMcuSupplyOvervoltage(comp: SimComponent, x: Float64Array, h: number): void {
+    const rating = MCU_SUPPLY_ABS_MAX[comp.kind as keyof typeof MCU_SUPPLY_ABS_MAX];
+    if (!rating) return;
+    const key = failureKey("supply_overvoltage", comp.id, rating.pin);
+    if (this.state.failures.has(key)) return;
+    const v = this._vAt(x, this._pinNode(comp.id, rating.pin)) - this._vAt(x, this._pinNode(comp.id, "gnd"));
+    if (!(v > rating.maxV)) return;
+    this.state.failures.set(key, {
+      componentId: comp.id,
+      kind: "supply_overvoltage",
+      pinId: rating.pin,
+      since: this.simTime + h,
+      value: v,
+      limit: rating.maxV,
+      message:
+        `${comp.id}.${rating.pin} reached ${v.toFixed(2)} V, past the ${rating.chip}'s ${rating.maxV.toFixed(rating.maxV % 1 === 0 ? 1 : 2)} V absolute maximum ${rating.source}. ` +
+        "A real chip can be damaged at this voltage; the simulator keeps running it and does not model how it would fail.",
+    });
+  }
+
   private _picoRegulatorBackfed(comp: SimComponent): boolean {
     return this.state.icState.get(`${comp.id}:usb`)?.backfed === 1;
   }
@@ -6371,6 +6412,7 @@ export class SimEngine {
         this._updateFailureStates(h, x);
         for (const comp of this._mcuComponents) {
           if (comp.kind === "arduino_uno") this._updateUnoUsbPolyfuse(comp, x, h);
+          this._checkMcuSupplyOvervoltage(comp, x, h);
         }
       }
       for (const comp of this._mcuComponents) {
