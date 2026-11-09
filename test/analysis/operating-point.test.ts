@@ -367,6 +367,29 @@ describe("buildOperatingPoint", () => {
     expect(op.components.find((component) => component.id === "r1")?.failed).toBeUndefined();
   });
 
+  it("reports a supply past its chip's absolute maximum as over-rated, not failed", () => {
+    // supply_overvoltage changes no stamp: the board keeps running, with
+    // damage likely and operation not guaranteed. It is not a destroyed part.
+    const op = buildOperatingPoint(
+      defaultInput({
+        failures: {
+          ov: {
+            componentId: "r1",
+            kind: "supply_overvoltage",
+            message: "r1.5v reached 9.00 V, past the ATmega328P's 6.0 V absolute maximum VCC.",
+          } as MinFailure as never,
+        },
+      }),
+    );
+    const row = op.components.find((component) => component.id === "r1")!;
+    expect(row.failed).toBeUndefined();
+    expect(row.overRated).toBe(true);
+    const csv = operatingPointToCsv(op).split("\r\n");
+    const header = csv.findIndex((line) => line.endsWith(",failed,over_rated"));
+    expect(header).toBeGreaterThanOrEqual(0);
+    expect(csv.find((line) => line.startsWith("r1,"))).toMatch(/,,true$/);
+  });
+
   // ── simTime and converged in output ───────────────────────────────────────
 
   it("passes simTime and converged through to the output", () => {
