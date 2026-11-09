@@ -95,7 +95,21 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
     compileCircuit: (c: unknown, kinds: unknown, o: { startTimeS: number }) => { ok: boolean; reasons?: unknown; compiled?: { devices: { kind: string }[] } };
   };
   const kinds = (await import(src("core/kinds.js"))) as { CORE_IMPLEMENTED_KINDS: unknown; CORE_KIND_CODES: Record<string, number> };
+  // SAP1_ADVANCE_FOR_MS (ruling R86, addition (c)): every frame through
+  // bo_engine_advance_for with this budget (a non-positive one leaves the
+  // clock unread), then a plain advance to the same time, which only
+  // publishes; the host clock's reads are counted.
+  const forMs = process.env.SAP1_ADVANCE_FOR_MS === undefined ? undefined : Number(process.env.SAP1_ADVANCE_FOR_MS);
+  let clockReads = 0;
+  if (forMs !== undefined) {
+    const now = performance.now.bind(performance);
+    performance.now = () => {
+      clockReads += 1;
+      return now();
+    };
+  }
   await wasm.initCore();
+  const raw = forMs === undefined ? undefined : ((await import(src("core/wasm.js"))) as { coreCall: <T>(f: (x: { bo_engine_advance_for(h: number, t: number, ms: number): number }) => T) => T }).coreCall;
   const cpu = () => {
     const u = process.cpuUsage();
     return (u.user + u.system) / 1000;
@@ -107,6 +121,16 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
     if (!compiled.ok || !compiled.compiled) throw new Error(`${tree}: the compiler declines ${file}: ${JSON.stringify(compiled.reasons)}`);
     out.ratings = compiled.compiled.devices.filter((d) => d.kind === "rating").length;
     const e = new core.CoreEngine();
+    if (raw !== undefined) {
+      const plain = e.advance.bind(e);
+      const h = (e as unknown as { _handle: number })._handle;
+      e.advance = (t: number) => {
+        let code = 1;
+        while (code === 1) code = raw((x) => x.bo_engine_advance_for(h, t, forMs!));
+        if (code !== 0) throw new Error(`bo_engine_advance_for: ${code}`);
+        plain(t);
+      };
+    }
     try {
       e.load(circuit);
       e.setMemoryContents(circuit.bench.ramLo, programNibbles(circuit.bench.program, 0));
@@ -121,6 +145,7 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
         for (let f = 0; f < Math.round(measureS / FRAME_S); f++, frames++) e.advance(e.simTime + FRAME_S);
         if (!e.lastConverged) throw new Error(`${tree}: ${variant} did not converge`);
         out[variant].push((cpu() - c0) / (e.simTime - s0));
+        if (forMs !== undefined) console.error(`clock reads ${variant} after ${frames} frames: ${clockReads}`);
       }
     } finally {
       e.dispose();

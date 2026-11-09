@@ -64,6 +64,11 @@
  *   --options <a,b|all>    which load options (default all)
  *   --only <substr>        keep circuits whose name contains the substring
  *   --no-sap1 | --no-fixtures
+ *   --candidate-advance-for <ms>  the candidate advances through
+ *                          bo_engine_advance_for with this budget on a fake
+ *                          clock (1 ms a read), yielding every few checks:
+ *                          with the same wasm on both sides it is ruling
+ *                          R86's split-run identity check
  *   --stats                print every changed counter for every circuit
  *                          (counters never fail the check by themselves)
  *   --strict-stats         a changed counter fails the check
@@ -95,6 +100,8 @@ import {
   describeDifference,
   installWasm,
   recordRun,
+  setAdvanceFor,
+  advanceForYieldCount,
   type PhaseSpec,
   type ReadPlan,
   type Recording,
@@ -130,6 +137,7 @@ interface Args {
   sap1: boolean;
   fixtures: boolean;
   stats: boolean;
+  candidateAdvanceFor?: number;
   strictStats: boolean;
   failFast: boolean;
   detectorCheck: boolean;
@@ -203,6 +211,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--no-sap1") args.sap1 = false;
     else if (a === "--no-fixtures") args.fixtures = false;
     else if (a === "--stats") args.stats = true;
+    else if (a === "--candidate-advance-for") args.candidateAdvanceFor = Number(argv[(i += 1)]);
     else if (a === "--strict-stats") args.strictStats = true;
     else if (a === "--fail-fast") args.failFast = true;
     else if (a === "--detector-check") args.detectorCheck = true;
@@ -409,7 +418,9 @@ async function main(): Promise<void> {
         process.stdout.write(`skip ${spec.name}: no resistor to nudge\n`);
         continue;
       }
-      const candidate = await record(candidateModule, changed);
+      setAdvanceFor(args.candidateAdvanceFor);
+    const candidate = await record(candidateModule, changed);
+    setAdvanceFor(undefined);
       const cmp = compareRecordings(base, candidate);
       if (job.kind === "sap1") sap1Runs += 1;
       // Here a difference is the GOOD outcome. A circuit the nudge cannot reach (a resistor on a branch nothing
@@ -425,7 +436,9 @@ async function main(): Promise<void> {
       continue;
     }
 
+    setAdvanceFor(args.candidateAdvanceFor);
     const candidate = await record(candidateModule, spec);
+    setAdvanceFor(undefined);
     const cmp = compareRecordings(base, candidate);
     frames += base.frames.length;
     baseCpu += base.cpuMs;
@@ -489,6 +502,7 @@ async function main(): Promise<void> {
     `\n${failures === 0 ? "IDENTICAL" : "DIFFERENT"}: ${String(total.compared)} compared, ${String(total.declined)} declined${declinedSeen.size > 0 ? ` (by design: ${[...declinedSeen].map((n) => n.replace(/@.*$/, "")).filter((n, i, all) => all.indexOf(n) === i).join(", ")})` : ""}, ${String(total.failed)} failed; ${String(frames)} readings compared (${baseCpu.toFixed(0)} ms base, ${candidateCpu.toFixed(0)} ms candidate CPU)\n`,
   );
   if (nanPayload > 0) process.stdout.write(`warning: ${String(nanPayload)} value(s) differ only in a NaN's payload (Object.is equal; not counted as a difference)\n`);
+  if (args.candidateAdvanceFor !== undefined) process.stdout.write(`candidate advances yielded ${String(advanceForYieldCount())} times (bo_engine_advance_for, ${String(args.candidateAdvanceFor)} ms on a fake clock)\n`);
   if (statChanged > 0 && !args.stats) process.stdout.write(`note: ${String(statChanged)} run(s) changed a stat counter (--stats lists them; counters do not fail the check)\n`);
   process.exit(failures === 0 ? 0 : 1);
 }

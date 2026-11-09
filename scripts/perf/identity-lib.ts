@@ -316,6 +316,34 @@ function readFrame(engine: CoreEngine, meta: Meta, reverse: boolean): FrameRecor
 const EMPTY_KEYS: Recording["keys"] = { nodeV: [], deviceI: [], digital: [], channel: [] };
 
 /** Run one spec on whichever wasm is live and record every reading. The caller installs the wasm first. Never throws. */
+/**
+ * Ruling R86: when set, recordRun advances through `bo_engine_advance_for`
+ * with this budget (ms) on a fake host clock that reads 1 ms later at every
+ * read, so a budgeted advance yields every few clock checks; `undefined`
+ * (the default) advances with `bo_engine_advance`.
+ */
+let advanceForMs: number | undefined;
+/** How many times a candidate's `bo_engine_advance_for` yielded. */
+let advanceForYields = 0;
+export function advanceForYieldCount(): number {
+  return advanceForYields;
+}
+let realNow: (() => number) | undefined;
+export function setAdvanceFor(ms: number | undefined): void {
+  advanceForMs = ms;
+  const perf = globalThis.performance;
+  if (ms === undefined) {
+    if (realNow) perf.now = realNow;
+    realNow = undefined;
+    return;
+  }
+  if (!realNow) {
+    realNow = perf.now.bind(perf);
+    let fake = 0;
+    perf.now = () => (fake += 1);
+  }
+}
+
 export function recordRun(spec: RunSpec): Recording {
   const reads = spec.reads ?? DEFAULT_READS;
   const cpu0 = process.cpuUsage();
@@ -403,7 +431,19 @@ export function recordRun(spec: RunSpec): Recording {
       // and the code and bo_error's text are part of what has to stay identical.
       stage = `advance to t=${String(tEnd)} s`;
       const { code, message } = coreCall((ex) => {
-        const c = ex.bo_engine_advance(handle, tEnd);
+        let c: number;
+        if (advanceForMs === undefined) {
+          c = ex.bo_engine_advance(handle, tEnd);
+        } else {
+          // Ruling R86: the same advance through bo_engine_advance_for,
+          // yielding as often as the fake clock makes it, until it is done.
+          const raw = ex as unknown as { bo_engine_advance_for(h: number, t: number, ms: number): number };
+          for (;;) {
+            c = raw.bo_engine_advance_for(handle, tEnd, advanceForMs);
+            if (c !== 1) break;
+            advanceForYields += 1;
+          }
+        }
         return { code: c, message: c !== 0 ? readCoreErrorMessage(ex) : "" };
       });
       previousEnd = tEnd;
