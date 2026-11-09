@@ -9294,10 +9294,9 @@ fn a_g2bv_gate_starving_its_cell_at_load_is_held_off_and_again_after_a_toggle() 
     // its release the floor plus that drop and two reached widths: above
     // the EMF, never reached. A toggle (`set_params`) drops the hold, and
     // the same instant takes it again (W1c point 1a).
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the gate feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let p = { let mut p = program(7, g2bv_bc_ic_20_hub1()); p.digital_slot_count = 16; p };
     let stops = [0.00010054129745299623, 0.001267074627819937, 0.19185406847861228, 0.44552757564924855, 0.44644865932111427, 0.5];
     let (rig, trace, err) = hold_trace(&p, &[(0.44552757564924855, 9)], &stops, 6);
@@ -9500,10 +9499,11 @@ fn the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off() {
     // release level is past the setpoint, so neither is released over 50
     // ms; 785's toggle at 18 ms drops the hold, and the toggle's instant
     // takes it again.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): 785 tpl 0's gate feeds its own inputs
+    // from its outputs with no series capacitor (`hold::self_fed`), so it
+    // never slides; 830 tpl 3's edge does not attract (held off its supply
+    // reads 3.263 V, under its 4.275 V floor as well: ruling D2 (a)). Both
+    // keep the holds below.
     for (name, p, toggles, stops, d, v) in [
         ("785 tpl 0", { let mut p = program(8, cold_785_tpl0()); p.digital_slot_count = 32; p }, vec![(0.01840803191451679, 16)], vec![0.006272880216392937, 0.01840803191451679, 0.02495905461262398, 0.05], 12, 4.698635237910),
         ("830 tpl 3", { let mut p = program(7, cold_830_tpl3()); p.digital_slot_count = 32; p }, vec![], vec![0.0062728803007134695, 0.006590779933999605, 0.02225723242285205, 0.05], 8, 5.032450386993),
@@ -9856,10 +9856,9 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     // reference puts at the floor at 34.7 ms, where exact mode stops).
     // (Its 1a, 1b and 1y share a node: powered, the gate rings at its own 81
     // ns delay, some 12,000 events a millisecond, which no hold touches.)
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the gate (1a, 1b and 1y on one node) feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let p = { let mut p = program(6, g2bv_bc_ic_97_hub2()); p.digital_slot_count = 16; p };
     let stops = [0.00010054129372012221, 0.0003467103846392178, 0.0004605220067872004, 0.05];
     let (rig, trace, err) = hold_trace(&p, &[], &stops, 10);
@@ -9881,10 +9880,9 @@ fn a_gate_tied_to_its_own_input_is_held_at_load_then_rings_at_its_own_delay() {
     // feeds its own input and rings at the gate's 27 ns delay, 18 MHz, two
     // events an edge: the run is slower than real time from there by the
     // circuit's own doing, not the hold's.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the gate feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let p = { let mut p = program(7, g2bv_fz_ic_401_hub2()); p.digital_slot_count = 16; p };
     let (rig, trace, err) = hold_trace(&p, &[(0.44015570685572775, 13)], &[0.00010054129153157535, 0.0003458489221323154, 0.0005618221415494645, 0.0007140772565774002, 0.004709368587030973, 0.016874565396198055, 0.018490089942201665, 0.026414640575132733, 0.027084402744392, 0.2382891458762392, 0.2393829186074303, 0.33486761095951917, 0.33498479477918414, 0.3353630577252437, 0.44015570685572775], 10);
     assert!(err.is_none(), "{err:?}");
@@ -10319,10 +10317,9 @@ fn a_cc_hub_seed_publishes_its_draw_at_the_power_its_solve_held() {
     // 66 mA limit), so the loop's rail never moved, no verdict flipped, and
     // the partition re-seeded to the same 1.69 V for 50 passes (-4 at
     // 0.13 ms from 7279cb9; one hold and the sweep's 3 s at c213495).
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the chip feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let mut p = program(8, g2bv_bc_ic_178_hub2());
     p.options.force_stepped = true;
     p.digital_slot_count = 16;
@@ -11226,10 +11223,9 @@ fn a_cc_step_solves_the_rail_its_gates_stamps_move_with() {
     // the CC step holds the gate off until the retry after classic powers
     // it (0.2485-0.249 s; here one stepped commit later). Classic's values
     // (`HeadlessRunner`, drafts/f5l-logs/c425.mts) at 32 ms and 0.3 s.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the gate feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let p = g2bv_bc_ic_425_hub2();
     let w0 = |got: f64, want: f64| (got - want).abs() <= 1e-4 + 1e-3 * want.abs();
     let (rig, _, err) = hold_trace(&p, &[], &[0.032], 11);
@@ -12372,10 +12368,9 @@ fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes
     // move, found it carried itself and freed it, and nothing ran the regime
     // rules on that solve, so the PSU delivered 126 mA in CV against its
     // 99.1 mA limit until the circuit changed; default mode keeps it held.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Rulings R92, R95 (b), R97 (b): the 555 feeds its own inputs from its
+    // outputs with no series capacitor (`hold::self_fed`), so it never
+    // slides and keeps the hold below.
     let i_limit = 0.09913892461723416;
     let mut published = Vec::new();
     for p in [cold_621_2(), exact(cold_621_2())] {
@@ -14692,6 +14687,76 @@ fn a_self_fed_chip_off_a_starving_edge_runs_as_before_the_ruling() {
     assert!(PartitionedSolver::build(&program(7, vec![source(0, 1, 0, 5.0), ls00(1, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6], 10e-9, 0), resistor(2, 3, 2, 1000.0), capacitor(3, 2, 0, 1e-9, 0.0)])).unwrap().self_fed[0], "the gate feeds itself");
     let (h, n) = self_fed_ring_hash();
     assert_eq!((h, n), (0x2d4c5b4c628aba36, 1086), "the run's bits");
+}
+
+/// tpl=5 hub=2 e=8.644 psu ilim=0.107 V2=-2.69 555 vcc1 gnd0 [2, 2, 4, 3, 3, 3] C3-4=3.9e-6 C2-3=3.2e-7 C2-0=1.8e-6 C2-0=7.7e-5 C1-4=2.9e-4 R2-4=1.7 LED2-3
+/// options: integration 1 (trapezoid)
+fn cold_688_tpl5() -> Program {
+    let devices = vec![
+        fz(21, 0, &[1, 0], vec![8.643506818226655, 0.10733128803093946], vec![]),
+        fz(2, 1, &[2, 0], vec![-2.689354200288019], vec![]),
+        fz(1, 2, &[3, 0], vec![65499.620098952415], vec![]),
+        fz(1, 3, &[4, 0], vec![30274.35373014427], vec![]),
+        fz(40, 4, &[1, 0, 2, 2, 4, 3, 3, 3], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 5, &[1, 3], vec![987.8928133855809], vec![]),
+        fz(1, 6, &[3, 3], vec![2069.597265905664], vec![]),
+        fz(3, 7, &[3, 0], vec![1.3974372495273097e-8, 0.0, 0.0], vec![]),
+        fz(1, 8, &[2, 0], vec![813.7958945142129], vec![]),
+        fz(3, 9, &[3, 4], vec![3.902442548152086e-6, 0.0, 0.0], vec![]),
+        fz(1, 10, &[4, 3], vec![10277.160843673153], vec![]),
+        fz(3, 11, &[2, 3], vec![3.1743977978754827e-7, 0.03980102110485864, 0.0], vec![]),
+        fz(3, 12, &[2, 0], vec![1.8485419579486108e-6, 0.09914624055742273, 0.0], vec![]),
+        fz(3, 13, &[2, 0], vec![7.681094499604606e-5, 0.0, 0.0], vec![]),
+        fz(3, 14, &[1, 4], vec![0.0002903066136937227, 0.0, 0.0], vec![]),
+        fz(1, 15, &[2, 4], vec![1.7170095009895388], vec![]),
+        fz(1, 16, &[4, 0], vec![613.1499796095212], vec![]),
+        fz(30, 17, &[2, 3], vec![1.8373158092377833, 1.8413528564931274, 0.030463844009329263, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 18, &[4, 2], vec![9447.012454029269], vec![]),
+        fz(1, 19, &[3, 1], vec![410.0367203344279], vec![]),
+        fz(90, 5, &[], vec![5.0, 0.0015659668329656023, 987.8928133855809], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.08315327335902598, 2069.597265905664], vec![]),
+        fz(90, 8, &[], vec![8.0, 0.0011248143222319727, 813.7958945142129], vec![]),
+        fz(90, 15, &[], vec![15.0, 19.591514497867248, 1.7170095009895388], vec![]),
+    ];
+    let mut p = program(5, devices);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_555_whose_dis_feeds_its_own_thr_declines_at_its_floor_as_the_fine_reference_does() {
+    // Ruling R97 (b), cold 688 tpl 5: a 555 on an {8.64 V, 107 mA} PSU's
+    // rail, its OUT and TRIG on an ideal -2.69 V source's node (no loop
+    // there), its DIS on its own THR and CV (node 3: 14 nF to ground, 0.317
+    // uF to that source node, 3.9 uF to node 4; 988 and 410 ohm to the rail).
+    // That loop has no series capacitor, so the chip does not slide at its
+    // starving 1.8 V floor; it chatters to the guard's `-4`, in the same host
+    // advance as the fine reference (exact mode, 1 us host steps, on this
+    // tree), which chatters about the floor in a 70 us limit cycle (rail
+    // 1.637 to 1.811 V) and declines at 0.011842 s. Allowed to slide, the
+    // chip took 2 holds, carried itself, and the rail climbed to the
+    // setpoint by 0.038 s, which the fine reference never does. The decline
+    // instant is pinned: 0.012095436 s, 0.253 ms after the fine reference's
+    // (0.011909 s before INT-ACC's trapezoid fallback moved this
+    // trapezoid-option board).
+    assert!(PartitionedSolver::build(&cold_688_tpl5()).unwrap().self_fed[0], "688 tpl 5's 555 feeds itself through DIS and THR");
+    let mut e = Engine::load(&cold_688_tpl5()).unwrap();
+    let (mut from, mut declined) = (0.0, None);
+    for t in [0.006272881165391273, 0.02178123799865174] {
+        match e.advance(t) {
+            Ok(()) => from = t,
+            Err(er) => {
+                declined = Some((er, t));
+                break;
+            }
+        }
+    }
+    let (er, to) = declined.expect("declined");
+    assert_eq!(er.code, -4, "{}", er.message);
+    assert!(er.message.contains("ruling R97"), "{}", er.message);
+    assert!(from < 0.011842 && 0.011842 <= to, "the fine reference's decline in the same advance ({from} to {to} s)");
+    rel(e.time(), 0.012095436370395774, 1e-9, "the decline instant");
 }
 
 #[test]
