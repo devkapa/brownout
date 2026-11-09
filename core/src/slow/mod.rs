@@ -705,7 +705,7 @@ mod tests {
     fn populated() -> SlowState {
         let mut s = SlowState::new(5);
         s.init_stress(0, 1.0, 0.0);
-        s.stress_mut(0).unwrap().drive = StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0 };
+        s.stress_mut(0).unwrap().drive = StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0, q: -1.0 };
         s.init_stress(1, 24.0, 0.0);
         s.init_thermal(1, cfg(), 0.0);
         s.init_ptc(2, PtcParams { r_normal: 0.5, i_hold: 0.5 }, 0.0);
@@ -717,7 +717,7 @@ mod tests {
     fn fingerprint(s: &SlowState) -> Vec<u64> {
         fn drive(out: &mut Vec<u64>, d: &StressDrive) {
             match d {
-                StressDrive::Constant { rate, recovery, zero } => out.extend([1, rate.to_bits(), recovery.to_bits(), zero.to_bits()]),
+                StressDrive::Constant { rate, recovery, zero, .. } => out.extend([1, rate.to_bits(), recovery.to_bits(), zero.to_bits()]),
                 StressDrive::Segment(g) => out.extend([2, g.k.to_bits(), g.c.to_bits(), g.recovery.to_bits(), g.v.a.to_bits(), g.v.b.to_bits(), g.v.tau.to_bits(), g.v.t_seg.to_bits()]),
             }
         }
@@ -828,7 +828,7 @@ mod tests {
         assert_rolls_back("stress", |s| {
             let x = s.stress_mut(0).unwrap();
             x.close(0.4);
-            x.drive = StressDrive::Constant { rate: 7.0, recovery: 0.5, zero: 1.0 };
+            x.drive = StressDrive::Constant { rate: 7.0, recovery: 0.5, zero: 1.0, q: -1.0 };
         });
     }
 
@@ -846,7 +846,7 @@ mod tests {
     fn rollback_restores_the_ptc_entry() {
         assert_rolls_back("ptc", |s| {
             let p = s.ptc_mut(2).unwrap();
-            p.set_drive(PtcDrive::Stress(StressDrive::Constant { rate: 0.75, recovery: 0.0, zero: 1.0 }));
+            p.set_drive(PtcDrive::Stress(StressDrive::Constant { rate: 0.75, recovery: 0.0, zero: 1.0, q: -1.0 }));
             p.close(0.05);
             p.trip(0.1);
             p.set_drive(PtcDrive::Cool { from: 0.1, until: f64::INFINITY });
@@ -1089,7 +1089,7 @@ mod tests {
         assert!(!s.is_failed(0));
         let x = s.stress(0).unwrap();
         assert_eq!((x.s0, x.t0), (0.0, 3.0));
-        assert_eq!(x.drive, StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0 }, "the drive is kept, so the device integrates from 0 at the reset");
+        assert_eq!(x.drive, StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0, q: -1.0 }, "the drive is kept, so the device integrates from 0 at the reset");
         assert_eq!(x.latch_time(), Some(4.0));
         let p = s.ptc(2).unwrap();
         assert_eq!((p.tripped, p.stress, p.rt, p.t0), (false, 0.0, 0.0, 3.0));
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(s.next_event(0), None);
         // Device 1: a thermal boundary and a stress latch compete.
         s.thermal_mut(1).unwrap().drive = PowerDrive::Constant(0.038);
-        s.stress_mut(1).unwrap().drive = StressDrive::Constant { rate: 8.867, recovery: 2.0, zero: 1.0 };
+        s.stress_mut(1).unwrap().drive = StressDrive::Constant { rate: 8.867, recovery: 2.0, zero: 1.0, q: -1.0 };
         let (t, kind) = s.next_event(1).unwrap();
         assert_eq!(kind, SlowEventKind::ThermalBoundary, "a 0.01 C band is crossed long before a 24-unit stress");
         assert!(t < 0.01);

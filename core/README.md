@@ -4389,9 +4389,14 @@ Constants:
        `(I/limit)^2`, zero 1; a PTC's `I^2`, zero `I_hold^2`;
        `StressDrive::Constant::zero`), and `q` relaxes exponentially across an
        RC step, so where either end accumulates the step holds the
-       logarithmic mean of the two `q`s less `zero`, an end at rate 0 taken
-       at the zero level (`StressDrive::over_step`, `log_mean`); where
-       neither does it bleeds at the mean recovery. That mean is exact for `q
+       logarithmic mean of the two `q`s less `zero` (`StressDrive::over_step`,
+       `log_mean`); a step whose `q` crosses the level (the drive carries `q`,
+       `StressDrive::Constant::q`) accrues to the crossing, at the fraction
+       of the step exponential `q` spends above it, and bleeds the rest at
+       the idle end's recovery (read at the level, a charging 555's R1
+       accrued through every such step and never bled: cold 323 tpl 6 burnt
+       at 0.78 s for 1.02 s, 178 tpl 6 5 % early); where neither end
+       accumulates it bleeds at the mean recovery. That mean is exact for `q
        = A e^(kt)` and over-counts `q = (a + b e^(−t/τ))^2` (`ab ≥ 0`) by at
        most `exp((h/τ)^2/16) − 1`; the backward rule under-counts a falling
        rate by about `h/2τ_q` and burnt a 555 astable's timing resistors 5-17

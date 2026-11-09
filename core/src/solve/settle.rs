@@ -2066,7 +2066,7 @@ impl PartitionedSolver {
                         Some(v) => StressDrive::Segment(SegmentRate { k: if sd.r_power > 0.0 { sd.r_power / (r * r * sd.p_max) } else { 0.0 }, c: 1.0, recovery: failures::RESISTOR_RECOVERY, v }),
                         None => {
                             let d = failures::resistor_overload(dv, r, sd.r_power, sd.p_max);
-                            StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
+                            StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { d.value / d.limit } else { -1.0 } }
                         }
                     });
                 }
@@ -2089,7 +2089,7 @@ impl PartitionedSolver {
                     }
                     None => {
                         let d = failures::fuse_tripped(self.device_volts(i, now), r_normal, i_rating);
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { (d.value / d.limit).powi(2) } else { -1.0 } }
                     }
                 });
             }
@@ -2120,11 +2120,11 @@ impl PartitionedSolver {
                         // Every junction at or under the voltage where it
                         // carries `ifMax`: `peakI <= ifMax`, so the rate is
                         // `max(0, r^2 - 1)` with `r <= 1`, exactly 0.
-                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0 }
+                        StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0, q: -1.0 }
                     } else {
                         let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
                         let d = failures::led_failed(peak, led::if_max(&e.device).unwrap_or(0.0));
-                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0 }
+                        StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: if d.limit > 0.0 { (d.value / d.limit).powi(2) } else { -1.0 } }
                     });
                 }
                 if sd.thermal {
