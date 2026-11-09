@@ -1,5 +1,4 @@
 {
-  "status": "expected-fail",
-  "openItem": "BE stepped capacitor-current error control",
+  "status": "pass",
   "durationS": 0.02
 }

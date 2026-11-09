@@ -1340,6 +1340,19 @@ message builders live in `src/core/failures.ts`, which the facade calls):
      the next step at the floor instead of doubling it unchecked. Growth
      stays x2 (classic x1.5) and the floor restart at an edge (classic: a
      10 ns guard step, then its old step); a recorded divergence.
+   - **TR-BDF2 in place of a backward Euler step** (R96's open item). A
+     step that would be backward Euler, except the one after a
+     discontinuity, a floor step, and a partition on the PSU's rail
+     (`on_rail`, as R79's trapezoid; see Open items), is
+     TR-BDF2: a trapezoidal stage to `gamma h` (`gamma = 2 - sqrt(2)`), then a
+     BDF2 stage, solved as a backward Euler step over `h (1 - gamma) / (2 -
+     gamma)` from the history `k vc_gamma - m vc_0`. Second order and
+     L-stable: a junction's or a chip supply's partition keeps the damping
+     backward Euler gave it and gains the trapezoid's order. Steps grow by
+     the order-2 factor. A cell's charge bill (Rails point 9) follows the
+     same quadrature, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1`, so it still
+     matches each capacitor's `C dv`. Classic steps backward Euler; a
+     recorded divergence.
    - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
      estimate even at the floor meets a mode the trapezoid does not damp:
      the partition goes on by backward Euler until its next discontinuity,
@@ -6254,11 +6267,24 @@ failures and warnings (W1g)"):
   W0 (R79's longer input steps no longer cut its steps through
   `sync_supplies`). Comparing the series current against classic's 10 nA in
   every backward Euler partition cost +64 % cold-sweep steps, and in the
-  supply partitions alone +24 %, both with new wall caps. Fixture 38 is an
-  expected failure linked to this item (its sidecar's `openItem`); it turns
-  the gate red when it starts passing. First step: a current check relative
-  to the partition's own current scale, measured against the 1 % cold-wall
-  bound and R48.
+  supply partitions alone +24 %, both with new wall caps. Fixture 38 was an
+  expected failure of the equivalence gate linked to this item; with
+  TR-BDF2 it passes again and the expectation is gone. A current check relative to the
+  partition's own current scale was measured and dropped (+9.7 % cold-sweep
+  steps and new crawls at k = 1). TR-BDF2 (W1b 6a) took fixture 38's current
+  from 326 to 16 W0 and cold 360/3's gate ground pin from 9.6 to 0.4 W0 after
+  each clock edge. Left to do: (1) fixture 38's 16 W0 against W0 (the Rust
+  test `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
+  closed_form` keeps its 5 W0 bound as an expected failure); (2) the PSU
+  rail's partitions (`on_rail`: hub partitions, and exact mode's rail or
+  cell partition), which still step by backward Euler: a rail regime change
+  lands inside a TR-BDF2 step there with no discontinuity for the partition
+  (four CC-rail tests failed with them included), a CC step's rail
+  capacitors (`CapStep`) and the coupling bound have no TR-BDF2 form, and
+  exact mode's per-step battery references are backward Euler's. Cold
+  360/3's gate ground pin (9.6 W0 at +100 us; 0.4 W0 with TR-BDF2 on the
+  rail) is the second expected-failure test,
+  `a_gate_ground_pin_coupled_to_a_clock_keeps_to_the_fine_reference_after_each_edge`.
 
 ## Deferred past 1.0.0
 

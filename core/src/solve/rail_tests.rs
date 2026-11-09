@@ -15773,3 +15773,139 @@ fn a_step_failing_on_a_ring_alone_is_taken_above_the_floor() {
     let steps = rig.s().stepped_steps();
     assert!(steps < 5000.0, "{steps} steps to 0.6 s");
 }
+
+// ---- R96 open item: BE stepped capacitor-current error control ---------------
+
+/// Fixture 38 (`74hc14-read-pin-moving-supply`) as the compiler emits it: a
+/// 74HC14 whose supply is 5 V through 5 kohm into 100 nF (node 2), its input
+/// 1a on 5 V through 20 kohm into 100 nF (node 3), its outputs open.
+fn fixture_38() -> Program {
+    let f = |node: usize, flags: u32| PinRecord { node, flags, open_hash: 0, dead_hash: 0 };
+    let ic_pins = [(2, 0), (0, 0), (3, 0), (4, 1), (0, 0), (5, 1), (0, 0), (6, 1), (0, 0), (7, 1), (0, 0), (8, 1), (0, 0), (9, 1)];
+    let devices = vec![
+        source(0, 1, 0, 5.0),
+        Device {
+            kind: kinds::IC_74HC14,
+            component_index: 1,
+            pins: ic_pins.iter().map(|&(n, fl)| f(n, fl)).collect(),
+            params: vec![2.0, 6.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.7, 1.6, 5.0, 0.02, 1.5000000000000002e-8],
+            blob: vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        },
+        resistor(2, 1, 2, 5000.0),
+        capacitor(3, 2, 0, 1e-7, 0.0),
+        resistor(4, 1, 3, 20000.0),
+        capacitor(5, 3, 0, 1e-7, 0.0),
+    ];
+    let mut p = program(10, devices);
+    p.digital_slot_count = 6;
+    p
+}
+
+#[test]
+// R96's open item, still open: TR-BDF2 brings the current from 326 to 16 W0
+// at 3 ms, not yet within this 5 W0. An expected failure, so the gate stays
+// green while the gap is recorded; when it passes, `should_panic` fails the
+// gate, and this attribute comes off with the item.
+#[should_panic(expected = "off the closed form")]
+fn a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_closed_form() {
+    // R96's open item. Fixture 38's supply partition steps by backward Euler
+    // (it holds the 74HC14's free supply); the chip draws nothing from it, so
+    // it is a plain RC: v = 5 (1 - exp(-t / tau)), the current through the
+    // 5 kohm and the 100 nF both 1 mA exp(-t / tau), tau = 0.5 ms. Its
+    // step-doubling bounds the voltage to W0 per step but never the current,
+    // a small decaying difference: 323 W0 off at 3 ms (218 before INT-ACC).
+    let p = fixture_38();
+    let mut rig = Rig::load(&p).unwrap();
+    let tau = 5e-4;
+    let w0 = |x: f64, r: f64, abs: f64| (x - r).abs() / (abs + 1e-3 * r.abs());
+    let mut off = Vec::new();
+    for k in 1..=6 {
+        let t = k as f64 * 1e-3;
+        rig.advance(t).unwrap();
+        let (v, i) = (5.0 * (1.0 - (-t / tau).exp()), 1e-3 * (-t / tau).exp());
+        off.push((t, w0(rig.v(2), v, 1e-4), w0(rig.i(2), i, 1e-9), w0(rig.i(3), i, 1e-9)));
+    }
+    eprintln!("fixture 38's supply, W0 off the closed form (t, v, rf, cd): {off:.2?}; {} steps", rig.s().stepped_steps());
+    for &(t, v, rf, cd) in &off {
+        assert!(v <= 1.0 && rf <= 5.0 && cd <= 5.0, "at {t} s: the supply {v:.2} W0, rf {rf:.1} W0, cd {cd:.1} W0 off the closed form (all: {off:.2?})");
+    }
+}
+
+#[test]
+// R96's open item, still open: the ground pin's partition reads the PSU's
+// rail (`on_rail`), so it keeps backward Euler; TR-BDF2 there took it to 0.4
+// W0, but a rail regime change lands inside its steps (the item's rail
+// piece). An expected failure, as the supply test's above.
+#[should_panic(expected = "past the edge")]
+fn a_gate_ground_pin_coupled_to_a_clock_keeps_to_the_fine_reference_after_each_edge() {
+    // R96's open item, cold 360/3: the 74LS00's ground pin (node 4) is
+    // coupled to the clock's node by 0.52 uF; 100 us after each edge its
+    // partition, backward Euler after R81's fallback (and in 905f9d0's
+    // backward Euler run alike), sat 8.4 to 9.5 W0 off. The fine reference:
+    // exact mode on backward Euler host steps of 0.25 and 0.125 us,
+    // extrapolated (0.37 W0 from the 0.5 and 0.25 us pair at worst).
+    let mut p = program(7, vec![
+        fz(21, 0, &[1, 0], vec![13.56831830455205, 0.0899977823668638], vec![]),
+        fz(22, 1, &[3, 0], vec![141.5065553275765, 0.7890347499709739, 7.155483571452099, -2.651931692289305, 0.0], vec![8.0]),
+        fz(1, 2, &[2, 0], vec![733231.4588983348], vec![]),
+        fz(1, 3, &[4, 0], vec![3239.42258066058], vec![]),
+        fz(1, 4, &[5, 0], vec![253108.83426089876], vec![]),
+        fz(1, 5, &[6, 0], vec![3531.880989138582], vec![]),
+        fz(3, 6, &[0, 5], vec![4.3765694311503106e-5, 0.0, 0.0], vec![]),
+        fz(3, 7, &[4, 2], vec![5.182119295011528e-7, 0.0, 0.0], vec![]),
+        fz(4, 8, &[6, 3], vec![1.0], vec![]),
+        fz(1, 9, &[3, 0], vec![58.6667009582244], vec![]),
+        fz(1, 10, &[5, 4], vec![125.42986408656836], vec![]),
+        fz(1, 11, &[6, 0], vec![1.6834310474624419], vec![]),
+        fz(1, 12, &[3, 1], vec![3967.9963460410227], vec![]),
+        fz(1, 13, &[2, 6], vec![19.054717277859613], vec![]),
+        fz(50, 14, &[1, 4, 5, 5, 6, 0, 0, 6, 0, 0, 6, 0, 0, 6], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 8.205458880913924e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 15, &[6, 3], vec![273.9179801394844], vec![]),
+        fz(1, 16, &[6, 4], vec![284.5026685144939], vec![]),
+        fz(1, 17, &[4, 5], vec![525.9392291225133], vec![]),
+        fz(3, 18, &[6, 5], vec![1.514196511782389e-6, 0.0, 0.0], vec![]),
+        fz(4, 19, &[5, 0], vec![1.0], vec![]),
+        fz(1, 20, &[0, 0], vec![82.90049821089357], vec![]),
+        fz(1, 21, &[2, 3], vec![732.1053013942415], vec![]),
+        fz(90, 9, &[], vec![9.0, 1.6619880934246645, 58.6667009582244], vec![]),
+        fz(90, 10, &[], vec![10.0, 0.40917973189663, 125.42986408656836], vec![]),
+        fz(90, 11, &[], vec![11.0, 13.9973619476481, 1.6834310474624419], vec![]),
+        fz(90, 12, &[], vec![12.0, 0.00021690767417563642, 3967.9963460410227], vec![]),
+        fz(90, 13, &[], vec![13.0, 0.06680377745880885, 19.054717277859613], vec![]),
+        fz(90, 15, &[], vec![15.0, 0.002488637972988142, 273.9179801394844], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.07364110329693237, 284.5026685144939], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.0012481278815312088, 525.9392291225133], vec![]),
+        fz(90, 20, &[], vec![20.0, 0.9771690809602595, 82.90049821089357], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p.options.integration = 1;
+    let want = [(0.005676, -1.3857314115376527), (0.007167, 2.5385169719434044), (0.012743, -1.3829951969553178), (0.014234, 2.5356308781891697), (0.019810, -1.3801407414621394), (0.021301, 2.532764076452241)];
+    let mut rig = Rig::load(&p).unwrap();
+    for (t, v) in want {
+        rig.advance(t).unwrap();
+        let w0 = (rig.v(4) - v).abs() / (1e-4 + 1e-3 * v.abs());
+        assert!(w0 <= 3.0, "the ground pin 100 us past the edge at {t} s: {} V against {v} V, {w0:.2} W0", rig.v(4));
+    }
+}
+
+#[test]
+fn a_cell_bills_exactly_the_charge_its_capacitor_takes_over_tr_bdf2_steps() {
+    // R96 with Rails point 9: in exact mode a cell's partition bills the
+    // charge it delivers per step, in the integrator's own quadrature, so a
+    // cell charging a lone capacitor has delivered exactly what the
+    // capacitor holds, C v, whatever the steps. A {5 V, 5 ohm} cell into
+    // 10 uF (tau 50 us, under the battery rail's 100 us). Billed by backward Euler's end current over the
+    // whole step, a TR-BDF2 step (a trapezoidal stage, then BDF2) bills
+    // other than its capacitor moved.
+    let p = exact(program(2, vec![generic_battery(0, 1, 0, 5.0, 5.0, 1e-4), capacitor(1, 1, 0, 1e-5, 0.0)]));
+    let mut rig = Rig::load(&p).unwrap();
+    for k in 1..=25 {
+        let t = k as f64 * 1e-5;
+        rig.advance(t).unwrap();
+        let (q, held) = (rig.state(0)[4], 1e-5 * rig.v(1));
+        // Rounding only: summed over the steps, a few ulps a step. Billed
+        // by backward Euler's quadrature it was 1.4e-7 C (1.6 %) off at 10 us.
+        close(q, held, 1e-10 * held.abs(), &format!("the charge billed by {t} s against the capacitor's"));
+    }
+    assert!(rig.v(1) > 4.0, "not vacuous: the capacitor charged to {} V", rig.v(1));
+}

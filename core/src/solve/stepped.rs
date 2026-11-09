@@ -168,6 +168,25 @@ struct StepResult {
     /// On a CC rail with capacitors ([`CapStep`]), their C-weighted charge
     /// (as a rail voltage) and current at the step's end.
     rail_q: Option<(f64, f64)>,
+    /// A TR-BDF2 step's first stage (R96), for the charge bill's quadrature.
+    stage: Option<Box<TrBdf2Stage>>,
+}
+
+/// TR-BDF2's `gamma`: the trapezoidal stage ends at `gamma h`, `2 - sqrt(2)`,
+/// the value that makes both stages' Jacobians the same multiple of `C / h`
+/// and the method L-stable.
+const TRBDF2_GAMMA: f64 = 2.0 - std::f64::consts::SQRT_2;
+
+/// The trapezoidal stage of a TR-BDF2 step and the BDF2 stage's history.
+#[derive(Debug, Clone)]
+struct TrBdf2Stage {
+    /// The stage's length, `gamma h`, and its end state.
+    h_g: f64,
+    x_g: Vec<f64>,
+    i_g: Vec<f64>,
+    /// The BDF2 stage as a backward Euler solve: its length and history.
+    h_2: f64,
+    vh: Vec<f64>,
 }
 
 /// A bench PSU in CC with no rail capacitor, as the stepped hub partitions
@@ -488,7 +507,39 @@ fn take_step(
     ic_ctx: &IcStampCtx,
     at: f64,
 ) -> Result<StepResult, StepError> {
+    // R96: a backward Euler step of a partition `plan_step` marks (`TRB`)
+    // is TR-BDF2: a trapezoidal stage to gamma h, then a BDF2 stage to h.
+    // The BDF2 stage is a backward Euler solve over h (1 - g) / (2 - g) from
+    // the history vc = k vc_g - m vc_0, k = 1 / (g (2 - g)), m = (1 - g)^2 k,
+    // which is BDF2's companion exactly. Second order and L-stable, where
+    // backward Euler is first order: its voltages kept to W0 per step left
+    // a capacitor's decaying current hundreds of W0 off (fixture 38's
+    // supply, 326 W0; cold 360/3's gate ground pin 9.6 W0 after each clock
+    // edge). A floor step stays the one plain step (R78 (a)).
+    if method == Method::Be && h > H_MIN * 2.01 && TRB.with(|f| f.get()) {
+        let g = TRBDF2_GAMMA;
+        let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
+        let k = 1.0 / (g * (2.0 - g));
+        let m = (1.0 - g) * (1.0 - g) * k;
+        let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
+        let h_2 = h * (1.0 - g) / (2.0 - g);
+        let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
+        b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh }));
+        return Ok(b);
+    }
     solve_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, false)
+}
+
+// The partition `plan_step` is planning steps by TR-BDF2 (R96): set there,
+// read by `take_step`, so its trials, crossing searches and hold retries all
+// take the same steps. Cleared by `TrbGuard` however the plan returns.
+thread_local! { static TRB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Clears `TRB` however `plan_step` returns.
+struct TrbGuard;
+impl Drop for TrbGuard {
+    fn drop(&mut self) {
+        TRB.with(|f| f.set(false));
+    }
 }
 
 /// [`take_step`], with `polish` handed to the iterated Newton solve (one more
@@ -615,7 +666,7 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None })
 }
 
 /// [`take_step`] on a CC rail ([`CcRail`]): the rail is unknown `n`, its row
@@ -742,7 +793,7 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None })
 }
 
 /// One step's network, every element about `x`: the linear base, each
@@ -3107,6 +3158,16 @@ impl SteppedSolver {
         // under either option.
         let trap_run = !part.trap_off && (option_method == Method::Trap || (!part.iterated_on(cc.is_some()) && !part.on_rail));
         let mut method = if part.be_next_step || !trap_run { Method::Be } else { Method::Trap };
+        // R96: a backward Euler step is TR-BDF2 (`take_step`), except the
+        // one after a discontinuity and on the PSU's rail (`on_rail`, as
+        // R79's trapezoid): there exact mode's PSU switches regime inside a
+        // step of its own partition, and a hub partition's rail sensitivity
+        // and a CC step's rail capacitors are backward Euler's (four CC-rail
+        // tests and exact mode's per-step battery references; R96's open
+        // item).
+        let trb = !part.be_next_step && cc.is_none() && !part.on_rail;
+        TRB.with(|f| f.set(trb));
+        let _trb_guard = TrbGuard;
         part.pend_trap_off = false;
         let vc0 = part.vc.clone();
         let x0 = part.x.clone();
@@ -3183,7 +3244,7 @@ impl SteppedSolver {
                         }
                         break;
                     }
-                    h = (h * next_step_factor(ratio, method)).max(H_MIN);
+                    h = (h * next_step_factor(ratio, if trb { Method::Trap } else { method })).max(H_MIN);
                     part.changing = true;
                 }
                 // A rejected step (README, LEDs point 8; classic's
@@ -3218,11 +3279,11 @@ impl SteppedSolver {
             }
         }
 
-        let order_exp = if method == Method::Trap { 3 } else { 2 };
+        let order_exp = if method == Method::Trap || trb { 3 } else { 2 };
         if h > H_MIN * 2.01 {
             part.changing = ratio * (H_MAX / h).powi(order_exp) > QUIET_FRACTION;
         }
-        part.h = (h * next_step_factor(growth.unwrap_or(ratio), method)).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
+        part.h = (h * next_step_factor(growth.unwrap_or(ratio), if trb { Method::Trap } else { method })).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
 
         // The CC exit inside the step (Rails point 5): the step is cut where
         // its CC rail reaches the setpoint, just past it, so the regime rules
@@ -3437,25 +3498,43 @@ impl SteppedSolver {
         if let Some(e) = billed {
             let t0 = part.t;
             let shape = &part.shape;
-            let draw = |at: f64, h_sub: f64, vc_from: &[f64], i_from: &[f64], x: &[f64]| {
+            let draw = |at: f64, h_sub: f64, vc_from: &[f64], i_from: &[f64], x: &[f64], m: Method| {
                 let bnd = ic_ctx.bnd.at_time(ramps, at);
-                source_current(&e, shape, live_params, h_sub, vc_from, i_from, method, &ic_ctx, &bnd, x)
+                source_current(&e, shape, live_params, h_sub, vc_from, i_from, m, &ic_ctx, &bnd, x)
             };
-            let over = |i0: f64, i1: f64, h_sub: f64| match method {
-                Method::Be => i1 * h_sub,
-                Method::Trap => 0.5 * (i0 + i1) * h_sub,
+            // One solved sub-step from `t_s` (state `vc_s`, `i_s`, source
+            // current `i0`) to `t_s + h_sub` (`end`): its charge and end
+            // current. A TR-BDF2 sub-step bills in its own quadrature, as
+            // each capacitor's charge moves: C (v1 - v0) = h_2 i_1 + k
+            // (gamma h / 2) (i_0 + i_g), the trapezoid over its first stage
+            // weighted by k, and the BDF2 stage's end current over h_2.
+            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64) {
+                match &end.stage {
+                    Some(st) => {
+                        let g = TRBDF2_GAMMA;
+                        let k = 1.0 / (g * (2.0 - g));
+                        let i_g = draw(t_s + st.h_g, st.h_g, vc_s, i_s, &st.x_g, Method::Trap);
+                        let i_1 = draw(t_s + h_sub, st.h_2, &st.vh, &st.i_g, &end.x, Method::Be);
+                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1)
+                    }
+                    None => {
+                        let i_1 = draw(t_s + h_sub, h_sub, vc_s, i_s, &end.x, method);
+                        let q = match method {
+                            Method::Be => i_1 * h_sub,
+                            Method::Trap => 0.5 * (i0 + i_1) * h_sub,
+                        };
+                        (q, i_1)
+                    }
+                }
             };
             let i_start = part.i_src;
             (part.pend_charge, part.pend_i_src) = match &half {
                 Some(mid) => {
-                    let i_mid = draw(t0 + h / 2.0, h / 2.0, &vc0, &i_prev, &mid.x);
-                    let i_end = draw(t0 + h, h / 2.0, &mid.vc, &mid.i, &accepted.x);
-                    (over(i_start, i_mid, h / 2.0) + over(i_mid, i_end, h / 2.0), i_end)
+                    let (q_a, i_mid) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
+                    let (q_b, i_end) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
+                    (q_a + q_b, i_end)
                 }
-                None => {
-                    let i_end = draw(t0 + h, h, &vc0, &i_prev, &accepted.x);
-                    (over(i_start, i_end, h), i_end)
-                }
+                None => sub(t0, h, &vc0, &i_prev, i_start, &accepted),
             };
         }
         #[cfg(test)]
