@@ -959,6 +959,14 @@ impl DeviceEvaluator for IcEvaluator {
     fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
         Box::new(self.clone())
     }
+
+    fn memory_images(&self, out: &mut Vec<(usize, usize)>) {
+        for entry in &self.ics {
+            if let Family::Memory(state) = &entry.family {
+                out.extend(digital::memory::image_ref(state));
+            }
+        }
+    }
 }
 
 /// Registers every IC device in `program` against `kernel` — combinational,

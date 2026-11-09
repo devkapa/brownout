@@ -838,6 +838,10 @@ export lands in its list in the same change that adds it.
 | `bo_engine_reset_failures` | `(h) -> i32` | Classic's `resetFailures()`, applied as ONE event at the current time (W1g point 13). `0`; `-5` with no program; `-4` or `-7` when the re-solve at that instant fails, and then the reset rolls back and the engine is exactly as it was. | v2 (W1g) |
 | `bo_engine_records` | `(h, channel: u32) -> i32` | Collect one channel's records into the engine's record buffer; returns its length in f64, a multiple of 7. Channel `0` failures, `1` warnings (empty in W1), `2` tripped PTCs, `3` the latch log. `-8` for any other channel, `-5` with no program. Channels 0-2 are read-only: they project to the current time and commit nothing. Collecting channel 3 empties it (below). | v2 (W1g) |
 | `bo_engine_records_ptr` | `(h) -> *const f64` | The buffer from the last collect, valid until the next call on that engine. | v2 (W1g) |
+| `bo_engine_snapshot` | `(h) -> u32` | Copy the whole engine into the handle's snapshot table ("Snapshots" below) and return the snapshot's id; `0` for an unusable handle, with the message. | v2 (W2a) |
+| `bo_engine_restore` | `(h, id: u32) -> i32` | Put snapshot `id` back; it stays restorable. `-8` for an id this handle does not hold, `-5` for an unusable handle. | v2 (W2a) |
+| `bo_engine_snapshot_drop` | `(h, id: u32) -> i32` | Free snapshot `id`. `-8` for an id this handle does not hold (a second drop among them), `-5` for an unusable handle. | v2 (W2a) |
+| `bo_engine_snapshot_bytes` | `(h) -> f64` | The handle's snapshot table in bytes, each shared memory image counted once; `NaN` for an unusable handle. | v2 (W2a) |
 
 **`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
 through W1e. Exact mode makes the rail node free and merges every partition
@@ -1039,6 +1043,36 @@ completed instant:
   freezes ran at 4e-4 to 9e-4 s/s for 50-200 s.
 A `budget_ms` that is not positive, or a clock that reads no finite time,
 never yields and leaves the floor off and the cap on.
+
+**Snapshots** (W2a; W2 design 2.3, ruling D7 (a)). `bo_engine_snapshot`
+copies the whole engine: time, the event heap, drivers and held commits, the
+partition solvers with their integrator history and hold table, the IC
+evaluator, slow state with its records and warnings ledger, the memories,
+the readouts (slots, channels and the harness trace), the options and an
+open host step with its event count and check stride. `bo_engine_restore`
+puts all of that back, so a run from a restored snapshot is bit for bit the
+run that followed the snapshot, any number of times. Snapshots are taken and
+restored between calls only, so no instant is ever half done in one.
+- **Not restored: the stats.** They are telemetry and read on monotonically
+  across a restore: each counter keeps counting from its live value, and
+  stat 6 (a maximum) never reads below the largest it has shown. Internally
+  the counters go back with the state, so logic that reads one, R86's event
+  cap, counts against the same events it was taken with. Classic restores 7
+  diagnostics with its state; that is a registered divergence.
+- **Not restored: R86's busy clock.** It is wall time. The progress window
+  re-anchors at the restore, to (busy now, the restored time), since a
+  restore moves simulated time back while wall time runs on.
+- **Ids.** One counter for the module issues them and never reuses one. A
+  load starts the handle's table afresh, so every id taken before it, like
+  one dropped or one from another handle, reads `-8`. The core sets no count
+  or byte cap: WASM memory never shrinks, so the host owns the lifetime (the
+  facade drops a snapshot on `dispose()` or when its object is collected).
+- **Copy-on-write memories.** An EEPROM image is shared between the live
+  engine and its snapshots: taking one copies no memory, and the first write
+  to the image after it copies that image once. `bo_engine_snapshot_bytes`
+  is each snapshot's copy, measured as the bytes it allocated, plus each
+  distinct image the table holds, once. A 74ls189's 16 nibbles are copied
+  with its state.
 
 **Memory.** Any call may grow the wasm memory, which detaches every JS view of
 `memory.buffer`. The TS glue re-derives each view after every call and never

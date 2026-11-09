@@ -498,6 +498,13 @@ pub trait DeviceEvaluator {
     fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
         unimplemented!("this evaluator is never snapshotted")
     }
+
+    /// Every copy-on-write memory image this evaluator holds, as (address,
+    /// bytes), so the snapshot table can count an image its snapshots share
+    /// once (`bo_engine_snapshot_bytes`). Default none.
+    fn memory_images(&self, out: &mut Vec<(usize, usize)>) {
+        let _ = out;
+    }
 }
 
 impl Clone for Box<dyn DeviceEvaluator> {
@@ -576,6 +583,10 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
         (**self).clone_box()
+    }
+
+    fn memory_images(&self, out: &mut Vec<(usize, usize)>) {
+        (**self).memory_images(out)
     }
 }
 
@@ -1644,6 +1655,30 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// next advance starts a new one.
     pub fn end_host_step(&mut self) {
         self.host_step = None;
+    }
+
+    /// Whether the kernel is between two calls (W2a): no instant window open
+    /// and no digital write waiting for the engine to publish it. Snapshots
+    /// are taken and restored only there.
+    pub(crate) fn is_quiescent(&self) -> bool {
+        !self.windowed && self.pending_digital_writes.is_empty()
+    }
+
+    /// The wall time the budgeted advances have run, R86's busy clock.
+    pub(crate) fn busy_ms(&self) -> f64 {
+        self.busy_ms
+    }
+
+    /// After a W2a restore put the whole kernel back: the busy time is wall
+    /// telemetry, so it keeps the live value, and the progress window
+    /// re-anchors at (busy now, restored time), as a host edit leaves it to
+    /// a fresh judgement, since a restore moves simulated time back while
+    /// wall time runs on. The host step, its event count and the check
+    /// stride stay as the snapshot had them, with the event counter they
+    /// were taken against.
+    pub(crate) fn rebase_after_restore(&mut self, busy_ms: f64) {
+        self.busy_ms = busy_ms;
+        self.window = (busy_ms, self.time);
     }
 
     /// One read of the host clock inside a budgeted call (ruling R86): adds

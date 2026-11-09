@@ -17,6 +17,7 @@
 use crate::engine::Engine;
 use crate::error::BoError;
 use crate::program::Program;
+use crate::snapshot::SnapshotTable;
 use std::cell::UnsafeCell;
 
 const ABI_VERSION: u32 = 2;
@@ -29,7 +30,9 @@ const ABI_VERSION: u32 = 2;
 enum HandleState {
     /// Created, no program loaded yet — `bo_engine_load` has not succeeded.
     Empty,
-    Loaded(Engine),
+    /// A loaded engine and its snapshots (W2a). A load replaces both, which
+    /// is what invalidates every snapshot id taken before it.
+    Loaded(Engine, SnapshotTable),
     /// `bo_engine_destroy` was called; the slot is permanently dead.
     Destroyed,
 }
@@ -95,7 +98,7 @@ fn slot_mut(handles: &mut [HandleState], h: u32) -> Option<&mut HandleState> {
 fn with_engine<R>(h: u32, missing: R, f: impl FnOnce(&mut Engine) -> R) -> R {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => f(engine),
+        Some(HandleState::Loaded(engine, _)) => f(engine),
         _ => missing,
     }
 }
@@ -177,7 +180,7 @@ pub extern "C" fn bo_engine_load(h: u32, ptr: *const f64, len_f64: u32) -> i32 {
     let data = unsafe { std::slice::from_raw_parts(ptr, len_f64 as usize) };
     match Program::parse(data).and_then(|program| Engine::load(&program)) {
         Ok(engine) => {
-            *slot = HandleState::Loaded(engine);
+            *slot = HandleState::Loaded(engine, SnapshotTable::default());
             0
         }
         Err(err) => fail(&err),
@@ -189,7 +192,7 @@ pub extern "C" fn bo_engine_load(h: u32, ptr: *const f64, len_f64: u32) -> i32 {
 pub extern "C" fn bo_engine_advance(h: u32, t_end: f64) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => match engine.advance(t_end) {
+        Some(HandleState::Loaded(engine, _)) => match engine.advance(t_end) {
             Ok(()) => 0,
             Err(err) => fail(&err),
         },
@@ -218,7 +221,7 @@ extern "C" {
 pub extern "C" fn bo_engine_advance_for(h: u32, t_end: f64, budget_ms: f64) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => {
+        Some(HandleState::Loaded(engine, _)) => {
             #[cfg(target_arch = "wasm32")]
             let mut clock = || unsafe { bo_host_now_ms() };
             #[cfg(target_arch = "wasm32")]
@@ -282,7 +285,7 @@ pub extern "C" fn bo_engine_stat(h: u32, i: u32) -> f64 {
 pub extern "C" fn bo_engine_set_option(h: u32, key: u32, value: f64) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => match engine.set_option(key, value) {
+        Some(HandleState::Loaded(engine, _)) => match engine.set_option(key, value) {
             Ok(()) => 0,
             Err(err) => fail(&err),
         },
@@ -318,7 +321,7 @@ fn whole_index(v: f64) -> Option<u32> {
 pub extern "C" fn bo_engine_set_params(h: u32, ptr: *const f64, len_f64: u32) -> i32 {
     let handles = HANDLES.get();
     let engine = match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => engine,
+        Some(HandleState::Loaded(engine, _)) => engine,
         _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
     };
 
@@ -380,7 +383,7 @@ pub extern "C" fn bo_engine_set_params(h: u32, ptr: *const f64, len_f64: u32) ->
 pub extern "C" fn bo_engine_seed_memory(h: u32, device: u32, ptr: *const f64, len_f64: u32) -> i32 {
     let handles = HANDLES.get();
     let engine = match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => engine,
+        Some(HandleState::Loaded(engine, _)) => engine,
         _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
     };
     if len_f64 != 16 {
@@ -409,7 +412,7 @@ pub extern "C" fn bo_engine_seed_memory(h: u32, device: u32, ptr: *const f64, le
 pub extern "C" fn bo_engine_take_eeprom_updates(h: u32) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => engine.take_eeprom_updates().len() as i32,
+        Some(HandleState::Loaded(engine, _)) => engine.take_eeprom_updates().len() as i32,
         _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
     }
 }
@@ -432,7 +435,7 @@ pub extern "C" fn bo_engine_eeprom_updates_ptr(h: u32) -> *const f64 {
 pub extern "C" fn bo_engine_device_state(h: u32, device: u32) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => match engine.device_state(device) {
+        Some(HandleState::Loaded(engine, _)) => match engine.device_state(device) {
             Ok(values) => values.len() as i32,
             Err(err) => fail(&err),
         },
@@ -455,7 +458,7 @@ pub extern "C" fn bo_engine_device_state_ptr(h: u32) -> *const f64 {
 pub extern "C" fn bo_engine_reset_failures(h: u32) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => match engine.reset_failures() {
+        Some(HandleState::Loaded(engine, _)) => match engine.reset_failures() {
             Ok(()) => 0,
             Err(err) => fail(&err),
         },
@@ -472,7 +475,7 @@ pub extern "C" fn bo_engine_reset_failures(h: u32) -> i32 {
 pub extern "C" fn bo_engine_records(h: u32, channel: u32) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => match engine.records(channel) {
+        Some(HandleState::Loaded(engine, _)) => match engine.records(channel) {
             Ok(values) => values.len() as i32,
             Err(err) => fail(&err),
         },
@@ -534,7 +537,7 @@ pub extern "C" fn bo_engine_channel_slots(h: u32) -> *const f64 {
 pub extern "C" fn bo_engine_trace_enable(h: u32, on: u32) -> i32 {
     let handles = HANDLES.get();
     match slot_mut(handles, h) {
-        Some(HandleState::Loaded(engine)) => {
+        Some(HandleState::Loaded(engine, _)) => {
             engine.trace_enable(on != 0);
             0
         }
@@ -561,6 +564,67 @@ pub extern "C" fn bo_engine_trace_len(h: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn bo_engine_trace_clear(h: u32) {
     with_engine(h, (), |e| e.trace_clear());
+}
+
+/// Copies the whole engine into its snapshot table (W2a; core/README.md,
+/// "Snapshots") and returns the snapshot's id, or `0` with the message in
+/// [`bo_error_ptr`] for an unknown handle or one with no program loaded.
+#[no_mangle]
+pub extern "C" fn bo_engine_snapshot(h: u32) -> u32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, table)) => table.take(engine),
+        _ => {
+            set_error(&format!("engine handle {h}: unknown or no program loaded"));
+            0
+        }
+    }
+}
+
+/// Puts snapshot `id` back: `0`, `-5` for an unusable handle, `-8` for an id
+/// this handle's table does not hold (never issued, dropped, from another
+/// handle, or taken before the last load). The snapshot stays restorable.
+#[no_mangle]
+pub extern "C" fn bo_engine_restore(h: u32, id: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, table)) => {
+            if table.restore(engine, id) {
+                0
+            } else {
+                fail(&BoError::invalid_argument(format!("snapshot {id} is not held by engine handle {h}")))
+            }
+        }
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// Drops snapshot `id`: `0`, `-5` for an unusable handle, `-8` for an id the
+/// table does not hold, a second drop among them.
+#[no_mangle]
+pub extern "C" fn bo_engine_snapshot_drop(h: u32, id: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(_, table)) => {
+            if table.drop_snapshot(id) {
+                0
+            } else {
+                fail(&BoError::invalid_argument(format!("snapshot {id} is not held by engine handle {h}")))
+            }
+        }
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The handle's snapshot table in bytes (each snapshot's copy, plus each
+/// shared memory image once), `NaN` for an unusable handle.
+#[no_mangle]
+pub extern "C" fn bo_engine_snapshot_bytes(h: u32) -> f64 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(_, table)) => table.bytes(),
+        _ => f64::NAN,
+    }
 }
 
 /// UTF-8 message for the most recent non-zero return from `bo_engine_load`
@@ -1248,6 +1312,73 @@ mod tests {
             assert_eq!(bo_engine_records(h, 0), -5, "handle {h}");
             assert_eq!(bo_engine_reset_failures(h), -5, "handle {h}");
             assert!(bo_engine_records_ptr(h).is_null(), "handle {h}");
+        }
+    }
+
+    // ---- W2a: snapshots --------------------------------------------------
+
+    fn node2(h: u32) -> f64 {
+        unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3)[2] }
+    }
+
+    #[test]
+    fn a_snapshot_restores_any_number_of_times_and_only_on_its_own_handle() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        let open = bo_engine_snapshot(h);
+        assert_ne!(open, 0);
+        assert_eq!(set_params(h, &[1.0, 0.0, 1.0]), 0);
+        assert!((node2(h) - 10.0).abs() < 1e-3, "closed");
+        for _ in 0..2 {
+            assert_eq!(bo_engine_restore(h, open), 0);
+            assert!(node2(h).abs() < 1e-6, "the open switch is back");
+            assert_eq!(set_params(h, &[1.0, 0.0, 1.0]), 0);
+        }
+        let other = bo_engine_create();
+        assert_eq!(load(other, &switch_program()), 0);
+        assert_eq!(bo_engine_restore(other, open), -8, "another handle's id");
+        assert!(last_error().contains("not held"), "{}", last_error());
+        assert_eq!(bo_engine_snapshot_drop(other, open), -8);
+        assert_eq!(bo_engine_restore(h, 0), -8, "0 is never issued");
+        assert_eq!(bo_engine_restore(h, u32::MAX), -8, "never issued");
+    }
+
+    #[test]
+    fn a_drop_or_a_load_retires_an_id_and_the_bytes_go_back_to_zero() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(bo_engine_snapshot_bytes(h), 0.0);
+        let a = bo_engine_snapshot(h);
+        let b = bo_engine_snapshot(h);
+        assert!(a != 0 && b != 0 && a != b, "{a} {b}");
+        assert!(bo_engine_snapshot_bytes(h) > 0.0);
+        assert_eq!(bo_engine_snapshot_drop(h, a), 0);
+        assert_eq!(bo_engine_snapshot_drop(h, a), -8, "a second drop");
+        assert_eq!(bo_engine_restore(h, a), -8, "a dropped id");
+        assert_eq!(load(h, &switch_program()), 0);
+        assert_eq!(bo_engine_restore(h, b), -8, "an id from before the load");
+        assert_eq!(bo_engine_snapshot_drop(h, b), -8);
+        assert_eq!(bo_engine_snapshot_bytes(h), 0.0, "the load emptied the table");
+        let c = bo_engine_snapshot(h);
+        assert!(c > b, "ids are never reused: {c} after {b}");
+    }
+
+    #[test]
+    fn the_snapshot_exports_need_a_loaded_handle() {
+        let _guard = lock();
+        let empty = bo_engine_create();
+        let destroyed = bo_engine_create();
+        assert_eq!(load(destroyed, &switch_program()), 0);
+        let id = bo_engine_snapshot(destroyed);
+        bo_engine_destroy(destroyed);
+        for h in [0, empty, destroyed, u32::MAX] {
+            assert_eq!(bo_engine_snapshot(h), 0, "handle {h}");
+            assert!(last_error().contains("unknown or no program loaded"), "{}", last_error());
+            assert_eq!(bo_engine_restore(h, id), -5, "handle {h}");
+            assert_eq!(bo_engine_snapshot_drop(h, id), -5, "handle {h}");
+            assert!(bo_engine_snapshot_bytes(h).is_nan(), "handle {h}");
         }
     }
 }

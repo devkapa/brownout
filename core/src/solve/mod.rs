@@ -37,6 +37,8 @@ mod rail_tests;
 #[cfg(test)]
 mod slow_tests;
 #[cfg(test)]
+mod snapshot_tests;
+#[cfg(test)]
 mod window_tests;
 
 use std::collections::{BTreeSet, HashMap};

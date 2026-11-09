@@ -1454,7 +1454,7 @@ fn stats_21_to_24_move() {
 /// The rollback rig: the 2x resistor across the source (device 1, a fixed
 /// pair, latching at 1 s), a self-heating LED on 150 ohm (device 3, in a
 /// static partition), and the 74LS00's sagging 1Y (device 4).
-fn rollback_rig() -> Program {
+pub(super) fn rollback_rig() -> Program {
     program(
         6,
         vec![
@@ -1597,7 +1597,7 @@ fn a_failed_instant_that_tripped_a_ptc_leaves_it_as_a_twins() {
 /// into 1k, so it trips at about 17 ms) and, through a switch, its own 1A:
 /// with the fuse open the loop is broken, and a reset that restores it
 /// closes a zero-delay ring.
-fn ring_behind_a_fuse() -> Program {
+pub(super) fn ring_behind_a_fuse() -> Program {
     program(
         12,
         vec![

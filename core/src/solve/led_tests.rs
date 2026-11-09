@@ -435,7 +435,7 @@ fn ls04(ci: usize, vcc: usize, gnd: usize, pins: [usize; 12], slot_base: usize, 
 /// drives `330 ohm + red LED` (nodes 4, 5) and gate 2 drives a plain 1 kohm
 /// (node 6). Nothing is ever set through `bo_engine_set_params`: the level
 /// changes come only from the oscillator. `no_solution_cache` is the option.
-fn clocked_led(no_solution_cache: bool) -> Program {
+pub(super) fn clocked_led(no_solution_cache: bool) -> Program {
     let mut p = program(29, 0, vec![
         source(0, 1, 0, 5.0),
         resistor(1, 2, 3, 10_000.0),

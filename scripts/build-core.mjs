@@ -79,6 +79,11 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_trace_ptr",
   "bo_engine_trace_len",
   "bo_engine_trace_clear",
+  // W2a: whole-engine snapshots behind opaque ids (core/README.md, "Snapshots").
+  "bo_engine_snapshot",
+  "bo_engine_restore",
+  "bo_engine_snapshot_drop",
+  "bo_engine_snapshot_bytes",
 ];
 
 function fail(message) {

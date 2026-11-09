@@ -93,6 +93,16 @@ impl MemState {
     }
 }
 
+/// An EEPROM's shared image as (address, bytes), the identity the snapshot
+/// table counts it by (W2a); `None` for a 74ls189, whose 16 nibbles are
+/// copied with its state.
+pub fn image_ref(state: &MemState) -> Option<(usize, usize)> {
+    match state {
+        MemState::Eeprom(st) => Some((Rc::as_ptr(&st.image) as usize, st.image.len())),
+        MemState::Ram189(_) => None,
+    }
+}
+
 /// Little-endian word decode, the README's "ROM image": word `k` is
 /// `b[4k] + b[4k+1]*2^8 + b[4k+2]*2^16 + b[4k+3]*2^24`, inverted here.
 fn words_to_bytes(rom: &[u32]) -> Vec<u8> {

@@ -14,6 +14,7 @@
 //! - [`devices`]: per-kind stamps and currents for the passive and switch
 //!   kinds.
 //! - [`readout`]: digital and channel slots and the harness trace.
+//! - [`snapshot`]: W2a's whole-engine snapshots behind opaque ids.
 //! - [`abi`]: the thin `extern "C"` shim. No physics lives there.
 
 pub mod devices;
@@ -30,6 +31,7 @@ pub mod program;
 pub mod rails;
 pub mod readout;
 pub mod slow;
+pub mod snapshot;
 pub mod solve;
 
 mod abi;

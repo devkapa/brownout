@@ -171,6 +171,10 @@ impl DeviceEvaluator for WithSources {
     fn clone_box(&self) -> Box<dyn DeviceEvaluator> {
         Box::new(self.clone())
     }
+
+    fn memory_images(&self, out: &mut Vec<(usize, usize)>) {
+        self.inner.memory_images(out)
+    }
 }
 
 /// Boxed rather than the concrete `Kernel<StaticPartitionSolver, NoDevices>`
@@ -230,6 +234,13 @@ pub struct Engine {
     state_buf: Vec<f64>,
     /// The last `bo_engine_records` collect (W1g), likewise.
     records_buf: Vec<f64>,
+    /// What [`Self::stat`] adds to each live counter so the stats stay
+    /// monotonic across a W2a restore (W2 design 2.3: the stats are
+    /// telemetry and are not restored). The counters themselves go back with
+    /// the rest of the state, so logic that reads one (R86's event cap) sees
+    /// the count it was taken against. For stat 6, a maximum, it is the
+    /// floor the maximum never reads below.
+    stat_base: [f64; STAT_COUNT],
 }
 
 impl std::fmt::Debug for Engine {
@@ -277,6 +288,16 @@ impl Engine {
     /// from the partition solver (W1f). Unknown `i` (>= `STAT_COUNT`) is
     /// `NaN`.
     pub fn stat(&self, i: u32) -> f64 {
+        let raw = self.raw_stat(i);
+        match self.stat_base.get(i as usize) {
+            Some(&base) if i == 6 => raw.max(base),
+            Some(&base) => raw + base,
+            None => raw,
+        }
+    }
+
+    /// [`Self::stat`] as the state holds it, before the restore offsets.
+    fn raw_stat(&self, i: u32) -> f64 {
         match i {
             4 => self.kernel.stats().events_processed as f64,
             5 => self.kernel.stats().delta_passes as f64,
@@ -689,6 +710,37 @@ impl Engine {
     /// solve per partition, plus the KCL current pass, `Engine::load` always
     /// ran. Never panics on a well-formed `Program` — `Program::parse` is
     /// what turns malformed bytes into `BoError` before this ever runs.
+    /// A deep copy of the whole engine for W2a's snapshot table
+    /// (`bo_engine_snapshot`; core/README.md, "Snapshots"). Taken only
+    /// between two calls, when no instant window is open.
+    pub fn snapshot(&self) -> Engine {
+        debug_assert!(self.kernel.is_quiescent(), "a snapshot is taken between calls");
+        self.clone()
+    }
+
+    /// Puts `snapshot`'s state back (`bo_engine_restore`): time, heap,
+    /// drivers, solver, evaluator, slow state, memories, readouts, records
+    /// and options, everything [`Self::snapshot`] copied, except the stats,
+    /// which read on from their live values ([`Self::stat_base`]), and R86's
+    /// busy clock ([`Kernel::rebase_after_restore`]).
+    pub fn restore(&mut self, snapshot: &Engine) {
+        debug_assert!(self.kernel.is_quiescent(), "a restore runs between calls");
+        let published: Vec<f64> = (0..STAT_COUNT as u32).map(|i| self.stat(i)).collect();
+        let busy_ms = self.kernel.busy_ms();
+        *self = snapshot.clone();
+        for (i, before) in published.into_iter().enumerate() {
+            let raw = self.raw_stat(i as u32);
+            self.stat_base[i] = if i == 6 { before } else { before - raw };
+        }
+        self.kernel.rebase_after_restore(busy_ms);
+    }
+
+    /// Every copy-on-write memory image this engine holds, as (address,
+    /// bytes): what `bo_engine_snapshot_bytes` counts once per image.
+    pub fn memory_images(&self, out: &mut Vec<(usize, usize)>) {
+        self.kernel.evaluator().memory_images(out);
+    }
+
     pub fn load(program: &Program) -> Result<Engine, BoError> {
         let solver = PartitionedSolver::build(program)?;
         let partition_count = solver.partition_count();
@@ -734,6 +786,7 @@ impl Engine {
             eeprom_updates: Vec::new(),
             state_buf: Vec::new(),
             records_buf: Vec::new(),
+            stat_base: [0.0; STAT_COUNT],
         };
         // The settle above already queued every IC's initial digital-slot
         // state on the kernel side (`Kernel::settle`'s own `publish_settled`

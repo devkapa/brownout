@@ -1,0 +1,306 @@
+//! W2a: whole-engine snapshots (core/README.md, "Snapshots"). Each board runs
+//! to a stop, takes a snapshot, runs on recording every stop, restores, and
+//! must run on again bit for bit, with every stat reading on from where it
+//! was rather than going back.
+
+use super::led_tests::clocked_led;
+use super::newton::hooks;
+use super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
+use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
+use crate::engine::Engine;
+use crate::error::ERR_SOLVE_FAILED;
+use crate::program::Program;
+use crate::snapshot::SnapshotTable;
+
+const STAT_COUNT: u32 = 28;
+
+/// Everything a stop publishes, as bits: time, voltages, currents, digital
+/// and channel slots, the four record channels, the EEPROM update buffer and
+/// the two next-due times. Reading the records and the EEPROM buffer drains
+/// them, which both runs do at the same stops.
+fn seen(e: &mut Engine) -> Vec<u64> {
+    let mut row: Vec<u64> = vec![e.time().to_bits()];
+    row.extend(e.voltages().iter().chain(e.currents()).chain(e.digital_slots()).chain(e.channel_slots()).map(|v| v.to_bits()));
+    for channel in 0..4 {
+        let records = e.records(channel).unwrap().to_vec();
+        row.push(records.len() as u64);
+        row.extend(records.iter().map(|v| v.to_bits()));
+    }
+    let eeprom = e.take_eeprom_updates().to_vec();
+    row.push(eeprom.len() as u64);
+    row.extend(eeprom.iter().map(|v| v.to_bits()));
+    row.push(e.next_event_time().to_bits());
+    row.push(e.next_digital_due_time().to_bits());
+    row
+}
+
+fn stats(e: &Engine) -> Vec<u64> {
+    (0..STAT_COUNT).map(|i| e.stat(i).to_bits()).collect()
+}
+
+/// The host's side of a run: the params it toggles, as `traced_run` keeps
+/// them, so a restore can put them back with the engine.
+#[derive(Clone)]
+struct Host {
+    state: Vec<f64>,
+    next: usize,
+}
+
+/// Advances through `stops`, recording each, toggling a switch whose time
+/// has come after the stop (as `traced_run` does). A failed advance ends
+/// the run with its code and time.
+fn run(e: &mut Engine, host: &mut Host, toggles: &[(f64, usize)], stops: &[f64]) -> Vec<Vec<u64>> {
+    let mut rows = Vec::new();
+    for &stop in stops {
+        if let Err(er) = e.advance(stop) {
+            rows.push(vec![er.code as u64, e.time().to_bits()]);
+            break;
+        }
+        rows.push(seen(e));
+        while host.next < toggles.len() && toggles[host.next].0 <= stop {
+            let d = toggles[host.next].1;
+            host.state[d] = 1.0 - host.state[d];
+            e.set_params(&[(d as u32, 0, host.state[d])]).unwrap();
+            host.next += 1;
+        }
+    }
+    rows
+}
+
+/// Runs `stops[..k]`, snapshots, runs the rest, then restores twice and
+/// runs the rest again each time: three identical futures, and stats that
+/// never go back. Returns the first future.
+fn round_trip(name: &str, p: &Program, toggles: &[(f64, usize)], stops: &[f64], k: usize) -> Vec<Vec<u64>> {
+    let mut e = Engine::load(p).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
+    let mut host = Host { state: p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect(), next: 0 };
+    let before = run(&mut e, &mut host, toggles, &stops[..k]);
+    assert_eq!(before.len(), k, "{name}: the run reaches the snapshot");
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    let saved = host.clone();
+    let at_snapshot = seen(&mut e);
+    let first = run(&mut e, &mut host, toggles, &stops[k..]);
+    for again in 0..2 {
+        let published = stats(&e);
+        assert!(table.restore(&mut e, id), "{name}: the id is held");
+        assert_eq!(stats(&e), published, "{name}: a restore leaves every stat where it was");
+        let mut host = saved.clone();
+        assert_eq!(seen(&mut e), at_snapshot, "{name}: the restored state publishes the snapshot's");
+        let rerun = run(&mut e, &mut host, toggles, &stops[k..]);
+        assert_eq!(rerun.len(), first.len(), "{name}: restore {again}: stops reached");
+        for (j, (a, b)) in first.iter().zip(&rerun).enumerate() {
+            assert!(a == b, "{name}: restore {again}: stop {} at {} differs", k + j, stops[k + j]);
+        }
+        for i in 0..STAT_COUNT {
+            assert!(e.stat(i) >= f64::from_bits(published[i as usize]) || f64::from_bits(published[i as usize]).is_nan(), "{name}: stat {i} went back");
+        }
+    }
+    first
+}
+
+#[test]
+fn a_restored_run_goes_on_bit_identically_on_the_rail_and_slow_boards() {
+    // 2575 tpl 2: a CC rail capacitor and host edits. 1838 tpl 1: slow
+    // re-anchors. 757 tpl 0: the hold guard's episodes. 474 tpl 5: a fuse's
+    // stepped partition reading the rail (R80's end reads). Each snapshot
+    // lands mid-run, with an edit still to come where the board has them.
+    let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
+    let (p1838, t1838, s1838) = cold_1838_tpl1();
+    let stops757: Vec<f64> = (1..=40).map(|k| k as f64 * 5e-3).collect();
+    let stops474 = [0.0209, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05];
+    let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>, usize)> = vec![
+        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575[..60].to_vec(), 25),
+        ("1838 tpl 1", p1838, t1838, s1838.clone(), s1838.len() / 2),
+        ("757 tpl 0", cold_757_tpl0(), vec![], stops757, 13),
+        ("474 tpl 5", cold_474_tpl5(), vec![], stops474.to_vec(), 1),
+    ];
+    for (name, p, toggles, stops, k) in &boards {
+        round_trip(name, p, toggles, stops, *k);
+    }
+}
+
+#[test]
+fn a_restore_brings_back_the_trapezoids_history_after_a_discontinuity() {
+    // INT-ACC: 287 tpl 3's pulse source steps at 10.4 ms and the next step
+    // goes by backward Euler (`be_next_step`) before the trapezoid resumes;
+    // its history (`i_prev`, `trap_off`, `trap_run`) is partition state. A
+    // snapshot at each stop around the edge must give the same steps, and
+    // the fallbacks counted after the restore match the first run's.
+    let p = cold_287_tpl3();
+    let stops = [0.006272879077239732, 0.0104, 0.010400001, 0.0104001, 0.0105, 0.011, 0.014446754687130081, 0.02, 0.04];
+    for k in 1..5 {
+        round_trip("287 tpl 3", &p, &[], &stops, k);
+        let mut e = Engine::load(&p).unwrap();
+        for &t in &stops[..k] {
+            e.advance(t).unwrap();
+        }
+        let mut table = SnapshotTable::default();
+        let id = table.take(&e);
+        let counted = |e: &mut Engine| {
+            let (steps, fallbacks) = (e.stat(10), e.stat(27));
+            for &t in &stops[k..] {
+                e.advance(t).unwrap();
+            }
+            (e.stat(10) - steps, e.stat(27) - fallbacks)
+        };
+        let first = counted(&mut e);
+        assert!(table.restore(&mut e, id));
+        assert_eq!(counted(&mut e), first, "snapshot after stop {k}: the same steps and fallbacks again");
+    }
+}
+
+#[test]
+fn a_fuse_tripped_after_the_snapshot_trips_again_with_the_same_records_and_probes() {
+    // The fuse behind the 74LS04 trips at about 17 ms (records channel 0),
+    // R80's stress probes rebuild on it (`probe_version`), and the reset at
+    // 50 ms closes a ring. A snapshot at 10 ms, before the trip, must replay
+    // the trip, the records and every readout after it bit for bit: the
+    // probe cache is in the copy, so the restored probes are the ones built
+    // on the restored failure state.
+    let p = ring_behind_a_fuse();
+    let stops: Vec<f64> = (1..=12).map(|k| k as f64 * 5e-3).collect();
+    round_trip("fuse ring", &p, &[], &stops, 2);
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.01).unwrap();
+    assert!(e.records(0).unwrap().is_empty(), "the snapshot is taken before the trip");
+    e.advance(0.03).unwrap();
+    assert_eq!(e.records(0).unwrap().len(), 7, "and the fuse trips after it");
+}
+
+#[test]
+fn the_slow_state_and_its_latches_come_back_with_a_restore() {
+    // The rollback rig: a resistor latching at 1 s, a self-heating LED and a
+    // sagging 74LS00 output. Snapshot at 0.5 s, before the latch.
+    let p = rollback_rig();
+    let stops: Vec<f64> = (1..=16).map(|k| k as f64 * 0.125).collect();
+    round_trip("rollback rig", &p, &[], &stops, 4);
+}
+
+#[test]
+fn a_restore_after_a_failed_advance_and_after_a_failed_reset_works() {
+    // A failed advance (-4) and a failed reset (-7) each leave the engine at
+    // its last completed instant; a snapshot taken before either restores,
+    // and the run goes on as one that never failed.
+    let mut p = clocked_led(true);
+    p.channel_slot_count = 0;
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.25e-3).unwrap();
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    let mut control = Engine::load(&p).unwrap();
+    control.advance(0.25e-3).unwrap();
+    e.advance(0.5e-3).unwrap();
+    let err = {
+        let _guard = hooks::force_unconverged(u32::MAX);
+        e.advance(1.5e-3).unwrap_err()
+    };
+    assert_eq!(err.code, ERR_SOLVE_FAILED);
+    assert!(table.restore(&mut e, id));
+    for t in [0.5e-3, 1e-3, 1.5e-3, 2e-3] {
+        e.advance(t).unwrap();
+        control.advance(t).unwrap();
+        assert_eq!(seen(&mut e), seen(&mut control), "after the failed advance, at {t}");
+    }
+
+    let mut e = Engine::load(&ring_behind_a_fuse()).unwrap();
+    e.advance(0.05).unwrap();
+    let id = table.take(&e);
+    let mut control = Engine::load(&ring_behind_a_fuse()).unwrap();
+    control.advance(0.05).unwrap();
+    e.set_params(&[(4, 0, 1.0)]).unwrap();
+    e.advance(0.06).unwrap();
+    assert_eq!(e.reset_failures().unwrap_err().code, crate::error::ERR_DELTA_LIVELOCK);
+    assert!(table.restore(&mut e, id));
+    for t in [0.06, 0.08, 0.1] {
+        e.advance(t).unwrap();
+        control.advance(t).unwrap();
+        assert_eq!(seen(&mut e), seen(&mut control), "after the failed reset, at {t}");
+    }
+}
+
+#[test]
+fn a_budgeted_host_step_yielded_before_the_snapshot_goes_on_the_same_after_a_restore() {
+    // R86: an `advance_for` that yields at t_y < t_end leaves its host step
+    // open (target, events at start, span). Snapshot there, go on to t_end,
+    // restore, go on again: both continuations publish the same bits and
+    // count the same events against the host step's cap, and the first
+    // equals a run that never yielded.
+    let p = cold_757_tpl0();
+    // 757 tpl 0's own stops (the split-run test's): host steps short enough
+    // for the hold guard, the snapshot inside the one from 53.1 to 70.3 ms.
+    let before = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986];
+    let t_end = 0.07025570911480136;
+    let mut now = 0.0;
+    let mut clock = move || {
+        now += 1.0;
+        now
+    };
+    fn budget<'a>(clock: &'a mut dyn FnMut() -> f64) -> Option<crate::kernel::Budget<'a>> {
+        Some(crate::kernel::Budget { clock, budget_ms: 2.0, check_every: 1 })
+    }
+    let mut e = Engine::load(&p).unwrap();
+    for t in before {
+        e.advance(t).unwrap();
+    }
+    let reached = e.advance_for(t_end, budget(&mut clock)).unwrap();
+    assert!(!reached && e.time() < t_end, "it yielded short of t_end, at {}", e.time());
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    let finish = |e: &mut Engine, clock: &mut dyn FnMut() -> f64| -> (Vec<u64>, f64, u32) {
+        let events = e.stat(4);
+        let mut yields = 0;
+        while !e.advance_for(t_end, budget(&mut *clock)).unwrap() {
+            yields += 1;
+        }
+        (seen(e), e.stat(4) - events, yields)
+    };
+    let first = finish(&mut e, &mut clock);
+    assert!(table.restore(&mut e, id));
+    let second = finish(&mut e, &mut clock);
+    assert_eq!((&first.0, first.1), (&second.0, second.1), "the same bits and the same events counted");
+    assert!(first.2 > 0 && first.2 == second.2, "both continuations yielded the same number of times: {} and {}", first.2, second.2);
+    let mut plain = Engine::load(&p).unwrap();
+    for t in before {
+        plain.advance(t).unwrap();
+    }
+    plain.advance(t_end).unwrap();
+    assert_eq!(seen(&mut plain), first.0, "and both are the run that never yielded");
+}
+
+#[test]
+fn a_snapshot_shares_the_eeprom_image_and_the_table_counts_it_once() {
+    // The bytes the table reports: each copy, plus each shared image once.
+    // A 28c16 holds a 2 KiB image; two snapshots of the same state share it
+    // with the live engine, so the table counts 2048 once, not twice.
+    use crate::kinds;
+    use crate::program::{Device, Options, PinRecord};
+    let pin = |node| PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 };
+    let mut params = vec![0.0; kinds::ic_param::COUNT];
+    params[kinds::ic_param::VCC_MIN] = 4.5;
+    params[kinds::ic_param::VCC_MAX] = 5.5;
+    params[kinds::ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+    params[kinds::ic_param::VIL_FIXED] = 1.0;
+    params[kinds::ic_param::VIL] = 0.8;
+    params[kinds::ic_param::VIH_FIXED] = 1.0;
+    params[kinds::ic_param::VIH] = 2.0;
+    params[kinds::ic_param::NOMINAL] = 5.0;
+    params.extend(std::iter::repeat(20e-9).take(10));
+    params.extend_from_slice(&[10e-3, 0.0]);
+    let mut blob = vec![0.0; 1 + 22];
+    blob.extend(std::iter::repeat(0.0).take(2048 / 4));
+    let eeprom = Device { kind: kinds::IC_28C16, component_index: 1, pins: std::iter::once(pin(1)).chain(std::iter::once(pin(0))).chain((0..22).map(|_| pin(0))).collect(), params, blob };
+    let source = Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] };
+    let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 8, channel_slot_count: 0, devices: vec![source, eeprom] };
+    let e = Engine::load(&p).unwrap();
+    let mut table = SnapshotTable::default();
+    assert_eq!(table.bytes(), 0.0);
+    let a = table.take(&e);
+    let one = table.bytes();
+    assert!(one > 2048.0, "a copy and the image: {one}");
+    let b = table.take(&e);
+    let copies = (table.copy_bytes(a).unwrap() + table.copy_bytes(b).unwrap()) as f64;
+    assert_eq!(table.bytes(), copies + 2048.0, "two copies and the image they share, once");
+    assert!(table.drop_snapshot(a) && table.drop_snapshot(b));
+    assert!(!table.drop_snapshot(a), "a second drop is refused");
+    assert_eq!((table.bytes(), table.len()), (0.0, 0));
+}
