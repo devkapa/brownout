@@ -25,7 +25,7 @@ use crate::kinds;
 use crate::partition::{self, PartitionKind};
 use crate::program::Program;
 use crate::slow::failures::{self, FailureKind};
-use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StepMean, StressDrive};
+use crate::slow::stress::{PtcDrive, PtcParams, SegmentRate, StepMean, StressDrive, STRESS_STEP_RATIO};
 use crate::slow::thermal::{PowerDrive, Shutdown, ThermalConfig};
 use crate::slow::{is_due, warnings, ExpVoltage, LatchKey, LatchRecord, SlowEventKind};
 
@@ -1429,6 +1429,64 @@ impl PartitionedSolver {
     /// the loop moved to (55/2's PTC read 1 mV under its step's own end and
     /// tripped at the host's step). A latch the step's end drive reaches
     /// inside the step fires now, recorded where the integral crossed.
+    /// Ruling R90 (a) on the step being taken: once a stepped partition
+    /// `p` has committed at `now` and planned its next trial, a stressed
+    /// device whose ratio changes by more than e^0.5 across that trial has
+    /// the trial planned again (R68's `SteppedSolver::replan`) under a reach
+    /// shortened in proportion, at most `STRESS_REPLANS` times. The reach the
+    /// step before sets (the trail close) shortens the steps after the first
+    /// of a fall; this one shortens the first, which nothing before it
+    /// foresees (cold 535 tpl 2's first CV step after its CC exit: the LED's
+    /// current falls 16-fold in it, and at 50 ms host steps one step took
+    /// the fall and latched the LED at 19.45 ms, where by hand it never
+    /// latches).
+    pub(super) fn stress_replan(&mut self, p: usize, now: f64, readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        // Not while a rail IC is held (W1c point 1a): the trial's plan took
+        // the hold procedure's table (`hold_around`, `seed_holding`), and
+        // planned again under it, cold 7 tpl 5's stepped rail partition in
+        // exact mode re-seeded under its held 555 at every step after (0.04 s
+        // of test run became minutes).
+        if !self.slow_model.any || self.holds_active > 0 || !self.stepped.stress_watch(p) {
+            return Ok(());
+        }
+        for _ in 0..STRESS_REPLANS {
+            let Some(c) = self.stepped.pending_end(p, &self.voltages).filter(|c| c.start.is_some() && c.t0 == now) else { return Ok(()) };
+            let h = c.t1 - c.t0;
+            let mut worst: f64 = 0.0;
+            for k in 0..self.slow_model.part_devs[p].len() {
+                let i = self.slow_model.part_devs[p][k] as usize;
+                let sd = &self.slow_model.devs[i];
+                if sd.class != Class::Stepped || sd.cold || self.slow.is_failed(sd.device) {
+                    continue;
+                }
+                let (start, end) = self.step_drives(i, &c);
+                let Some(start) = start else { continue };
+                if let (Some(a), Some(b)) = (start.stress, end.stress) {
+                    worst = worst.max(StressDrive::ratio_change(a, b));
+                }
+                if let (Some(PtcDrive::Stress(a)), Some(PtcDrive::Stress(b))) = (start.ptc, end.ptc) {
+                    worst = worst.max(StressDrive::ratio_change(a, b));
+                }
+            }
+            if worst <= STRESS_STEP_RATIO || h <= 2.0 * stepped::H_MIN {
+                return Ok(());
+            }
+            // In proportion to the ratio's log change, with a margin: a fall
+            // that steepens as the step shortens (a CV tail, I0 / (1 + k t))
+            // leaves a proportional cut over the bound again.
+            let reach = (0.8 * h * STRESS_STEP_RATIO / worst).max(stepped::H_MIN);
+            #[cfg(test)]
+            REPLAN_LOG.with(|l| l.borrow_mut().push((p, now, reach)));
+            self.stepped.set_stress_reach(p, reach);
+            self.sync_stepped_cc(now);
+            let drivers = std::rc::Rc::clone(&self.driver_snapshot);
+            let planned = self.stepped.replan(&[p], now, &drivers, &drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
+            self.stepped.cc = None;
+            planned?;
+        }
+        Ok(())
+    }
+
     /// Device `i`'s drives at committed step `c`'s start state (at `c.t0`)
     /// and at its end state (at `c.t1`), each read with the step's own
     /// voltages over the published ones.
@@ -1456,6 +1514,10 @@ impl PartitionedSolver {
         }
         let trail = std::mem::take(&mut self.stepped.trail);
         for c in &trail {
+            // Ruling R90 (a): the next step's reach from this step's devices,
+            // and whether any of them is stressed.
+            let mut reach = f64::INFINITY;
+            let mut watch = false;
             for k in 0..self.slow_model.part_devs[c.p].len() {
                 let i = self.slow_model.part_devs[c.p][k] as usize;
                 let sd = &self.slow_model.devs[i];
@@ -1464,6 +1526,16 @@ impl PartitionedSolver {
                     continue;
                 }
                 let (start, drives) = self.step_drives(i, c);
+                watch |= drives.stress.is_some_and(|d| d.stressed()) || matches!(drives.ptc, Some(PtcDrive::Stress(d)) if d.stressed());
+                if let Some(s0) = start.as_ref() {
+                    let h = c.t1 - c.t0;
+                    if let (Some(a), Some(b)) = (s0.stress, drives.stress) {
+                        reach = reach.min(StressDrive::stress_reach(a, b, h));
+                    }
+                    if let (Some(PtcDrive::Stress(a)), Some(PtcDrive::Stress(b))) = (s0.ptc, drives.ptc) {
+                        reach = reach.min(StressDrive::stress_reach(a, b, h));
+                    }
+                }
                 let mut due = None;
                 if let (Some(new), true) = (drives.stress, self.slow.stress(dev).is_some()) {
                     // Rulings R80 (a), R84 (B): the step holds its mean's
@@ -1492,6 +1564,8 @@ impl PartitionedSolver {
                     self.fire_since(i, kind, now, t);
                 }
             }
+            self.stepped.set_stress_reach(c.p, reach);
+            self.stepped.set_stress_watch(c.p, watch);
         }
         let mut trail = trail;
         trail.clear();
@@ -2513,4 +2587,15 @@ impl PartitionedSolver {
             _ => None,
         }
     }
+}
+
+/// Ruling R90 (a): how many times one step's trial is planned again for a
+/// stressed device's ratio (`stress_replan`); each shortens the reach, and a
+/// ratio that keeps falling faster stops here.
+const STRESS_REPLANS: u32 = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// Every replan `stress_replan` makes: (partition, instant, reach).
+    pub(super) static REPLAN_LOG: std::cell::RefCell<Vec<(usize, f64, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
 }

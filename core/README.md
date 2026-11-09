@@ -4414,6 +4414,19 @@ Constants:
        `a_stepped_steps_start_state_reads_its_outside_nodes_where_the_step_before_ended`),
        and the trial's own `u0` is the rail it was planned from, a step
        behind.
+       The step a stepped stressed device (its ratio at least half its zero
+       level) lets its partition take is held to a ratio change of `e^0.5`
+       (ruling R90 (a), `STRESS_STEP_RATIO`): from the step before, its log
+       rate held (`stress_reach`, a horizon on the next step, never the
+       error controller), and on the step itself, a trial over it planned
+       again (R68's `SteppedSolver::replan`) under a reach cut in proportion
+       with a margin, at most four times (`stress_replan`), and not while a
+       rail IC is held. Without it a CV tail falling 16-fold in one step at
+       50 ms host steps latched cold 535 tpl 2's LED at 19.45 ms, where by
+       hand it never latches
+       (`a_stepped_leds_cv_tail_at_long_host_steps_is_stepped_finely_enough_not_to_latch`,
+       `a_stress_replan_leaves_the_state_a_plan_at_its_reach_would_have`,
+       `a_stress_replan_stops_at_its_cap_on_a_ratio_that_keeps_falling`).
        Over the step only: an idle visit (R38
        (a)) writes nothing and leaves `t0` behind, so up to the start of
        the step the visit closes each integrator on the drive it had; and

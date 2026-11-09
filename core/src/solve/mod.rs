@@ -4529,6 +4529,12 @@ impl PartitionedSolver {
             readers.extend(self.on_error(stepped)?);
             let held = self.take_stepped_holds();
             self.on_error(held)?;
+            // After the plan's holds are the owner's (W1c point 1a), so a
+            // replan plans under the table the first plan left.
+            let replanned = self.stress_replan(p, now, readers);
+            self.on_error(replanned)?;
+            let held = self.take_stepped_holds();
+            self.on_error(held)?;
         }
         self.end_dynamic_writes();
         if !is_crossing {

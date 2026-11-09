@@ -238,6 +238,45 @@ impl StressDrive {
     }
 }
 
+/// Ruling R90 (a): the most a stepped stressed device's ratio may change in
+/// one step, `|ln(q1/q0)| <= 0.5`. Under it the step mean over-counts `q =
+/// (a + b e^(-t/tau))^2` by at most 1.5 % and a crossing step's split as
+/// little (+19-33 % at h = 2 tau unbounded), and a CV tail falling 16-fold
+/// in a step (cold 535 tpl 2 at 50 ms host steps, which latched) is taken
+/// in a dozen.
+pub const STRESS_STEP_RATIO: f64 = 0.5;
+
+impl StressDrive {
+    /// Ruling R90 (a): the step this drive's device lets its partition take
+    /// next, from its ratio at the start (`start`) and end of the step just
+    /// taken, over `h`: the ratio's log rate held, `STRESS_STEP_RATIO` of it;
+    /// unbounded where [`Self::ratio_change`] is 0.
+    pub fn stress_reach(start: StressDrive, end: StressDrive, h: f64) -> f64 {
+        let change = Self::ratio_change(start, end);
+        if change > 0.0 && h > 0.0 { STRESS_STEP_RATIO * h / change } else { f64::INFINITY }
+    }
+
+    /// Whether this drive's device is near or above its level (ruling R90
+    /// (a)): its ratio known and at least half the zero level.
+    pub fn stressed(&self) -> bool {
+        matches!(*self, StressDrive::Constant { q, zero, .. } if q >= 0.5 * zero)
+    }
+
+    /// `|ln(q1/q0)|` across a step from `start` to `end`, 0 unless both ends
+    /// know their ratio and either sits within a factor 2 of the zero level
+    /// or above it (ruling R90 (a): a device far under its rating does not
+    /// limit its partition's steps).
+    pub fn ratio_change(start: StressDrive, end: StressDrive) -> f64 {
+        let (StressDrive::Constant { q: q0, .. }, StressDrive::Constant { q: q1, zero, .. }) = (start, end) else {
+            return 0.0;
+        };
+        if !(q0 > 0.0 && q1 > 0.0) || q0.max(q1) < 0.5 * zero {
+            return 0.0;
+        }
+        (q1 / q0).ln().abs()
+    }
+}
+
 /// The logarithmic mean `(b - a) / ln(b / a)` of two positive values, the
 /// mean of `A e^(kt)` over a span it runs from `a` to `b`; symmetric. With
 /// `a <= b`, `b - a` is exact (Sterbenz) wherever the two are near, and

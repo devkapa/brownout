@@ -1076,6 +1076,12 @@ struct Partition {
     /// its last committed step ended: the next step's start state (ruling
     /// R80 (a)).
     end_reads: Vec<(usize, f64)>,
+    /// The longest step its stepped stressed devices let it take (ruling
+    /// R90 (a), `SteppedSolver::set_stress_reach`): infinite while none is;
+    /// and whether one was stressed at the last commit, without which its
+    /// trial is not checked for a replan.
+    stress_reach: f64,
+    stress_watch: bool,
     /// Whether this partition holds a free IC supply node (W1c contract
     /// point 3) — a build-time topology fact (`SteppedSolver::build`
     /// computes it once, from `collect_ics`/`local_index`), not part of any
@@ -1214,6 +1220,8 @@ impl Partition {
             prev_t: t0,
             prev_x: Vec::new(),
             end_reads: Vec::new(),
+            stress_reach: f64::INFINITY,
+            stress_watch: false,
             has_prev: false,
             holds_free_ic_supply: false, // overwritten by `SteppedSolver::build` right after construction.
             journaled: false,
@@ -1280,6 +1288,8 @@ struct PartitionSnapshot {
     prev_x: Vec<f64>,
     has_prev: bool,
     end_reads: Vec<(usize, f64)>,
+    stress_reach: f64,
+    stress_watch: bool,
     sens: Option<Rc<StepSens>>,
     pend_lu: Option<Rc<LuFactorization>>,
     pend_u: f64,
@@ -1316,6 +1326,8 @@ impl PartitionSnapshot {
         self.prev_x.clone_from(&part.prev_x);
         self.has_prev = part.has_prev;
         self.end_reads.clone_from(&part.end_reads);
+        self.stress_reach = part.stress_reach;
+        self.stress_watch = part.stress_watch;
         self.sens.clone_from(&part.sens);
         self.pend_lu.clone_from(&part.pend_lu);
         self.pend_u = part.pend_u;
@@ -1813,6 +1825,29 @@ impl SteppedSolver {
     /// voltages (exact mode reads the rail's partition through it).
     pub(crate) fn committed(&self, p: usize) -> Option<(f64, &[f64])> {
         self.partitions.get(&p).map(|part| (part.t, &part.x[..]))
+    }
+
+    /// Ruling R90 (a): the longest step partition `p` may take next, from its
+    /// stepped stressed devices (`settle`'s trail close sets it at each
+    /// commit, infinite once none is stressed).
+    pub(crate) fn set_stress_reach(&mut self, p: usize, reach: f64) {
+        if let Some(part) = self.partitions.get_mut(&p) {
+            part.stress_reach = reach;
+        }
+    }
+
+    /// Ruling R90 (a): whether partition `p` had a stressed device at its
+    /// last commit (`settle`'s trail close sets it); only then is its next
+    /// trial checked for a replan, so a board none of whose devices nears its
+    /// rating pays nothing for the check.
+    pub(crate) fn set_stress_watch(&mut self, p: usize, watch: bool) {
+        if let Some(part) = self.partitions.get_mut(&p) {
+            part.stress_watch = watch;
+        }
+    }
+
+    pub(crate) fn stress_watch(&self, p: usize) -> bool {
+        self.partitions.get(&p).is_some_and(|part| part.stress_watch)
     }
 
     /// Partition `p`'s state at the start of a step from `x0` (ruling R80
@@ -2336,6 +2371,10 @@ impl SteppedSolver {
         let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
+        #[cfg(test)]
+        if let Some(reach) = FORCE_REACH.with(|f| f.get()).filter(|&(p, t, _)| p == partition && t == commit_time).map(|f| f.2) {
+            self.partitions.get_mut(&partition).unwrap().stress_reach = reach;
+        }
         self.plan_and_schedule(partition, commit_time, drivers, drivers, live_params, voltages, currents, &mut readers)?;
         Ok(readers)
     }
@@ -2508,6 +2547,8 @@ impl SteppedSolver {
                 std::mem::swap(&mut part.prev_x, &mut saved.prev_x);
                 part.has_prev = saved.has_prev;
                 std::mem::swap(&mut part.end_reads, &mut saved.end_reads);
+                part.stress_reach = saved.stress_reach;
+                part.stress_watch = saved.stress_watch;
                 saved.restore_w1f(part);
             }
             self.spare.push(saved);
@@ -2547,6 +2588,8 @@ impl SteppedSolver {
                             prev_x: part.prev_x.clone(),
                             has_prev: part.has_prev,
                             end_reads: part.end_reads.clone(),
+                            stress_reach: part.stress_reach,
+                            stress_watch: part.stress_watch,
                             sens: part.sens.clone(),
                             pend_lu: part.pend_lu.clone(),
                             pend_u: part.pend_u,
@@ -2595,6 +2638,8 @@ impl SteppedSolver {
                 part.prev_x = s.prev_x;
                 part.has_prev = s.has_prev;
                 part.end_reads = s.end_reads;
+                part.stress_reach = s.stress_reach;
+                part.stress_watch = s.stress_watch;
                 part.sens = s.sens;
                 part.pend_lu = s.pend_lu;
                 part.pend_u = s.pend_u;
@@ -2915,7 +2960,9 @@ impl SteppedSolver {
         let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach);
+        // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
+        // most in a step, a horizon on the step, never the error controller.
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
         // The first half of the accepted step-doubling pair, whose end the
@@ -4163,4 +4210,12 @@ mod tests {
         assert_eq!(short, 1e-5);
         assert!(short < supplier_end);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's (partition, instant, reach): that partition's plan at that
+    /// commit takes the reach from the start, as `stress_replan` would leave
+    /// it (ruling R90 (a)'s equivalence test).
+    pub(crate) static FORCE_REACH: std::cell::Cell<Option<(usize, f64, f64)>> = const { std::cell::Cell::new(None) };
 }
