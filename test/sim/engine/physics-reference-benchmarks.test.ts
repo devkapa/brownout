@@ -731,9 +731,11 @@ describe("reference physics — active-device rail current and power", () => {
 
   /**
    * Validity envelope: a powered micro:bit board drives P0 HIGH into 1 kohm.
-   * The board model declares a 15 mA nominal idle load plus its 50 ohm GPIO
-   * stage. Firmware-dependent peripheral draw is excluded. Acceptance: USB
-   * branch current equals idle plus GPIO current within 10 nA.
+   * The board model declares a 15 mA nominal idle load (a 220 ohm resistor
+   * on the 3V rail, sized at 3.3 V) plus its 50 ohm GPIO stage. The rail sits
+   * a BAT60A drop below 3.3 V (the V1 USB path), so the idle draw is the rail
+   * over 220 ohm. Firmware-dependent peripheral draw is excluded. Acceptance:
+   * USB branch current equals idle plus GPIO current within 10 nA.
    */
   it("MCU USB current includes board idle draw and GPIO load", () => {
     const circuit: SimCircuit = {
@@ -758,7 +760,9 @@ describe("reference physics — active-device rail current and power", () => {
 
     const loadCurrent = engine.getElementI().load ?? Number.NaN;
     const usbCurrent = engine.getElementI().board ?? Number.NaN;
-    expect(Math.abs(-usbCurrent - (0.015 + loadCurrent))).toBeLessThanOrEqual(10e-9);
+    const railNet = engine.nets.find((net) => net.pins.some(([c, p]) => c === "board" && p === "3v"))!;
+    const idleCurrent = (engine.getNetV()[railNet.id] ?? Number.NaN) / (3.3 / 0.015);
+    expect(Math.abs(-usbCurrent - (idleCurrent + loadCurrent))).toBeLessThanOrEqual(10e-9);
   });
 
   /**

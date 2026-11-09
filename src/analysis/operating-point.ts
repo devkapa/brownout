@@ -102,6 +102,10 @@ export interface OperatingPointComponent {
   digitalState?: number;
   /** True when a simulated failure is latched on this component. */
   failed?: boolean;
+  /** True when its supply went past its chip's absolute maximum rating
+   *  (supply_overvoltage): damage is likely and correct operation is not
+   *  guaranteed, but the simulator keeps running it, so it is not failed. */
+  overRated?: boolean;
 }
 
 export interface OperatingPoint {
@@ -264,12 +268,14 @@ export function buildOperatingPoint(input: OperatingPointInput): OperatingPoint 
   // ── Component rows ───────────────────────────────────────────────────────
   // Check if any component has a simulated destructive failure latched.
   // output_sag is a reversible finite-drive warning and must not paint the
-  // component as failed in engineering reports.
+  // component as failed in engineering reports. supply_overvoltage is a
+  // rating crossed, not modelled damage, so it reads as over-rated.
   const failedCompIds = new Set<string>();
+  const overRatedCompIds = new Set<string>();
   for (const failure of Object.values(failures)) {
-    if (failure.componentId && failure.kind !== "output_sag") {
-      failedCompIds.add(failure.componentId);
-    }
+    if (!failure.componentId || failure.kind === "output_sag") continue;
+    if (failure.kind === "supply_overvoltage") overRatedCompIds.add(failure.componentId);
+    else failedCompIds.add(failure.componentId);
   }
 
   const hasStructuredSnapshot = physicsTelemetry != null;
@@ -319,6 +325,7 @@ export function buildOperatingPoint(input: OperatingPointInput): OperatingPoint 
 
     // Failure badge.
     if (failedCompIds.has(comp.id)) row.failed = true;
+    if (overRatedCompIds.has(comp.id)) row.overRated = true;
 
     // Structured terminal power covers more honest two-terminal models than
     // the legacy passive-only derivation (for example sources and inductors).
@@ -408,6 +415,7 @@ export function operatingPointToCsv(op: OperatingPoint): string {
     "power_provenance_method",
     "digital_state",
     "failed",
+    "over_rated",
   ].join(","));
   for (const comp of op.components) {
     const current = comp.current !== undefined ? String(comp.current) : "";
@@ -416,6 +424,7 @@ export function operatingPointToCsv(op: OperatingPoint): string {
     const powerTelemetry = comp.powerTelemetry;
     const ds = comp.digitalState !== undefined ? String(comp.digitalState) : "";
     const failed = comp.failed ? "true" : "";
+    const overRated = comp.overRated ? "true" : "";
     lines.push([
       quoteCsvCell(comp.id),
       quoteCsvCell(comp.kind),
@@ -435,6 +444,7 @@ export function operatingPointToCsv(op: OperatingPoint): string {
       quoteCsvCell(powerTelemetry?.provenance.method ?? (comp.power !== undefined ? "legacy-absolute-terminal-voltage-times-current" : "")),
       ds,
       failed,
+      overRated,
     ].join(","));
   }
 
