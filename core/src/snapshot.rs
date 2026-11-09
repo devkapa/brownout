@@ -114,10 +114,13 @@ pub fn net_allocated() -> isize {
 }
 
 /// The system allocator with a net byte count, so a snapshot can measure its
-/// own copy.
+/// own copy. Each method stays out of line: inlined into every allocation
+/// site, the wrapper (and the allocator under it) grew the module by 184 KB;
+/// out of line it costs 4 KB.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
+    #[inline(never)]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc(layout);
         if !p.is_null() {
@@ -126,6 +129,7 @@ unsafe impl GlobalAlloc for Counting {
         p
     }
 
+    #[inline(never)]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc_zeroed(layout);
         if !p.is_null() {
@@ -134,11 +138,13 @@ unsafe impl GlobalAlloc for Counting {
         p
     }
 
+    #[inline(never)]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
         note(-(layout.size() as isize));
     }
 
+    #[inline(never)]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let p = System.realloc(ptr, layout, new_size);
         if !p.is_null() {
