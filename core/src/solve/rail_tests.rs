@@ -14656,6 +14656,44 @@ fn a_self_fed_chip_starving_its_rail_declines_promptly_and_never_slides() {
     assert!(e.time() < 0.2188676 + 2e-6, "declined at {} s", e.time());
 }
 
+/// A 74LS00 on an ideal 5 V source, its 1y (node 3) back on its own 1a and
+/// 1b (node 2) through 1 kohm, 1 nF on node 2: a relaxation oscillator,
+/// run event by event to 20 us. Every reading's bits, folded (FNV-1a), and
+/// the events taken.
+fn self_fed_ring_hash() -> (u64, u32) {
+    let p = program(7, vec![source(0, 1, 0, 5.0), ls00(1, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6], 10e-9, 0), resistor(2, 3, 2, 1000.0), capacitor(3, 2, 0, 1e-9, 0.0)]);
+    let mut e = Engine::load(&p).unwrap();
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut fold = |xs: &[f64]| {
+        for x in xs {
+            h = (h ^ x.to_bits()).wrapping_mul(0x100000001b3);
+        }
+    };
+    let mut n = 0;
+    while e.time() < 20e-6 {
+        let t = e.next_event_time().min(20e-6);
+        e.advance(t).unwrap();
+        n += 1;
+        fold(&[t]);
+        fold(e.voltages());
+        fold(e.currents());
+        fold(e.digital_slots());
+    }
+    (h, n)
+}
+
+#[test]
+fn a_self_fed_chip_off_a_starving_edge_runs_as_before_the_ruling() {
+    // Ruling R97 (b)'s negative control: a NAND gate relaxing on its own
+    // inputs (1y back on 1a and 1b through 1 kohm, no capacitor in that
+    // path) on an ideal supply feeds itself, but no edge starves it, so nothing of the slide or its
+    // detection touches its run: bit-identical to bd6eb65, the W2 base
+    // before R92 (hash and event count taken there).
+    assert!(PartitionedSolver::build(&program(7, vec![source(0, 1, 0, 5.0), ls00(1, 1, 0, [2, 2, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6], 10e-9, 0), resistor(2, 3, 2, 1000.0), capacitor(3, 2, 0, 1e-9, 0.0)])).unwrap().self_fed[0], "the gate feeds itself");
+    let (h, n) = self_fed_ring_hash();
+    assert_eq!((h, n), (0x2d4c5b4c628aba36, 1086), "the run's bits");
+}
+
 #[test]
 fn a_chatter_seeds_its_slide_at_its_powered_fraction() {
     // Ruling R95 (b): held at 1 ms with the supply left at 1.7990 V, freed

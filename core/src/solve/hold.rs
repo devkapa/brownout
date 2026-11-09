@@ -141,7 +141,15 @@ fn sliding_allowed() -> bool {
 /// resistive parts, switches (either state), fuses and LEDs, and stop at a
 /// fixed node and at the chip's own supply pins (the loop through its supply
 /// is the slide's own: cold 757 tpl 0's OUT reaches its TRIG only across its
-/// rail, through a 0.64 ohm fuse).
+/// rail, through a 0.64 ohm fuse). Only a series capacitor breaks a loop: a
+/// shunt one on the shared node does not exempt it. 22 tpl 2's OUT, TRIG
+/// and THR share a node with 18 nF to ground (the loop's time constant about
+/// 0.1 us) and it rang all the same; 688 tpl 5's DIS shares node 3 with its
+/// THR and CV (14 nF to ground, 0.32 and 3.9 uF to other nodes), and
+/// allowed to slide its 555 carried itself after two holds and the rail
+/// climbed to the setpoint, which the fine reference never does (it
+/// chatters about the floor in a 70 us limit cycle and declines at 0.01184
+/// s); held, it declines at 0.01210 s.
 pub(crate) fn self_fed(program: &crate::program::Program, ics: &[(usize, digital::IcRecord)], fixed: &[bool]) -> Vec<bool> {
     use crate::kinds;
     let n = fixed.len();
