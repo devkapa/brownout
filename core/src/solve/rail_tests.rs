@@ -1167,28 +1167,23 @@ fn a_cc_exit_that_pinned_the_rail_now_runs_on_a_coarse_host() {
     // drift cap: the rail sat at 4.99999999999925837 V while Rail events came
     // 1.14 ps apart. Round 15's coupled CC path leaves no such stall, so the
     // board must now run to the end on the coarse host; the no-progress guard's
-    // own decline of that shape is pinned by the kernel's mock tests. On a
-    // thread given a minute, so a regression fails the test rather than
-    // hanging it.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut rig, mut t) = cc_exit_stall_rig();
-        let result = loop {
-            t += 6.119836310668826e-4;
-            if let Err(e) = rig.advance(t) {
-                break Err((e, rig.k.time(), rig.u()));
-            }
-            if t > 0.25 {
-                break Ok(rig.u());
-            }
-        };
-        let _ = tx.send(result);
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-        Ok(Ok(u)) => assert!((u - 5.0).abs() < 1e-6, "ran to 250 ms off the setpoint: rail {u:.17} V"),
-        Ok(Err((e, at, u))) => panic!("declined at {at:.12e}, rail {u:.17} V: {e:?}"),
-        Err(_) => panic!("the frame over the CC exit did not return within a minute: hung"),
+    // own decline of that shape is pinned by the kernel's mock tests. The run
+    // is held to an event budget rather than to wall time (a loaded host made
+    // a minute's budget fail in a debug build), as 3254/0's test is.
+    let (mut rig, mut t) = cc_exit_stall_rig();
+    let start = rig.k.stats().events_processed;
+    loop {
+        t += 6.119836310668826e-4;
+        rig.advance(t).unwrap_or_else(|e| panic!("declined at {:.12e}, rail {:.17} V: {e:?}", rig.k.time(), rig.u()));
+        if t > 0.25 {
+            break;
+        }
     }
+    let events = rig.k.stats().events_processed - start;
+    eprintln!("B1070 on the coarse host: {events} events to 250 ms");
+    assert!((rig.u() - 5.0).abs() < 1e-6, "ran to 250 ms off the setpoint: rail {:.17} V", rig.u());
+    // 7,000 events at 43c9e2b; the stall's Rail events came 1.14 ps apart.
+    assert!(events < 70_000, "{events} events to 250 ms on the coarse host");
     // Stepped event by event, the same board passes the exit without
     // stalling (about 64,500 events to 250 ms), so the guard must leave it
     // running; under a cap that turns a hang into a failure.
