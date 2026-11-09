@@ -1798,6 +1798,9 @@ export class SimEngine {
   private _hasHcsr04 = false;
   private _ne555Components: SimComponent[] = [];
   private _mcuComponents: SimComponent[] = [];
+  /** Set when a commit switches a Pico regulator's regime; load() re-solves
+   *  its seed so the published operating point is in the committed regime. */
+  private _picoRegimeFlipped = false;
   private _stateUpdateComponents: SimComponent[] = [];
   private _digitalUpdateComponents: SimComponent[] = [];
   private _failureUpdateComponents: SimComponent[] = [];
@@ -3172,7 +3175,20 @@ export class SimEngine {
     // _beNextStep anyway, and its accepted update refreshes both maps.
     const initializedCapsI = new Map(this.state.capsI);
     const initializedIndsV = new Map(this.state.indsV);
+    this._picoRegimeFlipped = false;
     this._solve(1e-12);
+    // A Pico regulator's regime is committed from a solve, so a supply
+    // back-feeding its 3V3 pin is only seen after the seed solve; solve the
+    // seed again from the authored initial conditions in the committed
+    // regime. Bounded: each pass can only switch a regulator off or on.
+    for (let pass = 0; pass < 2 && this._picoRegimeFlipped && this.lastConverged; pass++) {
+      this._picoRegimeFlipped = false;
+      this.state.caps = new Map(initializedCaps);
+      this.state.inds = new Map(initializedInds);
+      this.state.capsI = new Map(initializedCapsI);
+      this.state.indsV = new Map(initializedIndsV);
+      this._solve(1e-12);
+    }
     // Wave A3 rescue, gated on the single lastConverged check. Limiter-free
     // circuits take a bit-identical path through this seed; the one
     // deliberate exception is the pnjlim acceptance guard inside the Newton
@@ -5969,11 +5985,17 @@ export class SimEngine {
    */
   /** Trip / recover the Uno's USB polyfuse (F1) on the USB branch current,
    *  whichever way it flows: a supply back-feeding the 5V pin into the host
-   *  trips it the same as an overload drawn from USB. */
+   *  trips it the same as an overload drawn from USB. With USB unplugged
+   *  (usb_power off) nothing drives current through F1, so a tripped fuse
+   *  cools and resets on the shared PTC model's recovery time, as unplugging
+   *  a real board does. */
   private _updateUnoUsbPolyfuse(comp: SimComponent, x: Float64Array, h: number): void {
     const k = this.vsrcIdx.get(`${comp.id}:usb`);
-    if (k === undefined) return;
     let st = this.state.ptcs.get(comp.id);
+    if (k === undefined) {
+      if (st) advancePtcTrip(st, 0, UNO_USB_PTC_I_HOLD, UNO_USB_PTC_R, h);
+      return;
+    }
     if (!st) {
       st = { tripped: false, tripStress: 0, recoveryTime: 0 };
       this.state.ptcs.set(comp.id, st);
@@ -6001,6 +6023,7 @@ export class SimEngine {
       // Branch current is positive INTO the source, i.e. the regulator sinking.
       backfed = (x[k] ?? 0) > PICO_REG_BACKFEED_A;
     }
+    if (backfed !== this._picoRegulatorBackfed(comp)) this._picoRegimeFlipped = true;
     if (backfed) this.state.icState.set(key, { backfed: 1 });
     else this.state.icState.delete(key);
   }

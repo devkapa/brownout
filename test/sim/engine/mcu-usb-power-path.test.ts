@@ -188,3 +188,58 @@ describe("raspberry_pi_pico regulator regime", () => {
     expect(pinV(engine, "u", "3v3")).toBeCloseTo(3.29975, 5);
   });
 });
+
+describe("load() seed with a supply back-feeding the Pico's 3V3 pin", () => {
+  // The regulator's back-fed regime is committed after a solve, so the seed
+  // solve used to run in the regulating regime and publish it: 170 A through
+  // the regulator against an ideal 5 V PSU, or 3V3 at 3.31 V against a 1 A
+  // limited one.
+  for (const iLimit of [undefined, 1]) {
+    it(`publishes the back-fed operating point (${iLimit === undefined ? "ideal PSU" : "1 A PSU"})`, () => {
+      const engine = new SimEngine();
+      engine.load(boardWithPsu("raspberry_pi_pico", 1, { voltage: 5, iLimit, pin: "3v3" }));
+      expect(engine.lastConverged).toBe(true);
+      expect(pinV(engine, "u", "3v3")).toBeCloseTo(5, 3);
+      expect(Math.abs(engine.getElementI().u ?? Number.NaN)).toBeLessThan(1e-6);
+    });
+  }
+});
+
+describe("arduino_uno USB polyfuse reset on unplug", () => {
+  function tripped(): SimEngine {
+    const { engine } = run(boardWithPsu("arduino_uno", 1, { voltage: 9, iLimit: 1, pin: "5v" }), 0.5);
+    expect(ptcTripped(engine, "u")).toBe(true);
+    return engine;
+  }
+
+  function stepFor(engine: SimEngine, seconds: number): void {
+    for (let i = 0; i < Math.round(seconds / 1e-2); i++) engine.step(1e-2);
+  }
+
+  it("cools and resets while USB is unplugged, so a replug powers the board again", () => {
+    const engine = tripped();
+    // Fault removed and USB unplugged: no voltage across F1, so it cools.
+    engine.load(boardWithPsu("arduino_uno", 0, null));
+    stepFor(engine, 2.5);
+    engine.load(boardWithPsu("arduino_uno", 1, null));
+    stepFor(engine, 0.05);
+    expect(ptcTripped(engine, "u")).toBe(false);
+    expect(pinV(engine, "u", "5v")).toBeCloseTo(4.98117, 4);
+  });
+
+  it("is still tripped on a replug before it has had time to cool", () => {
+    const engine = tripped();
+    engine.load(boardWithPsu("arduino_uno", 0, null));
+    stepFor(engine, 0.5);
+    engine.load(boardWithPsu("arduino_uno", 1, null));
+    stepFor(engine, 0.05);
+    expect(ptcTripped(engine, "u")).toBe(true);
+  });
+
+  it("stays tripped while USB holds it hot through the 45 mA idle load", () => {
+    const engine = tripped();
+    engine.load(boardWithPsu("arduino_uno", 1, null));
+    stepFor(engine, 3);
+    expect(ptcTripped(engine, "u")).toBe(true);
+  });
+});

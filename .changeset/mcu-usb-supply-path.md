@@ -13,4 +13,9 @@ Readings that change, all on USB-powered boards (usb_power on); boards with usb_
 - Uno 5V rail, idle (45 mA): 5.000 V to 4.981 V. It drops about 0.42 V per amp of further load, e.g. 4.975 V with one LED at about 14 mA. Everything referenced to that rail moves with it: pull-up levels, GPIO HIGH levels, LED and load currents (about -0.8% for an LED from a pin), and the `vcc` the ADC uses, so `analogRead()` of a fixed voltage reads about 0.4% higher.
 - Nano 5V rail, idle (20 mA): 5.000 V to 4.764 V, from the Schottky drop (-4.7%). The same knock-on effects follow at that size: `analogRead()` of a fixed voltage reads about 5% higher.
 - Pico 3V3 rail, idle (25 mA): 3.300 V to 3.29975 V, a 10 mV/A load line.
-- Board supply current telemetry for the Pico reads 0 while a supply on its 3V3 pin is back-feeding it.
+- Board supply current telemetry now reads what flows through the board's USB path, so it changes whenever a supply shares or back-feeds the rail:
+  - Uno with a 5 V PSU on its 5V pin: about 0, because the PSU carries the board.
+  - Uno back-fed by a 1 A-limited 9 V PSU: a negative draw, -0.95 A until the polyfuse trips and about -0.13 A after it.
+  - Nano with a 5 V PSU on its 5V pin: about 0, because D1 is not forward-biased.
+  - Pico back-fed on its 3V3 pin: 0 while the regulator is off.
+- A tripped Uno polyfuse stays tripped while USB holds it hot, which leaves a degraded rail. With usb_power off it cools and resets after the shared PTC model's 2 s recovery, so unplugging and replugging restores the board.
