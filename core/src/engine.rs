@@ -723,17 +723,21 @@ impl Engine {
     /// what turns malformed bytes into `BoError` before this ever runs.
     /// W2c's carry (`crate::carry`; core/README.md, "Carry"): every device's
     /// carriable state as versioned records, for the host to map onto the
-    /// program it loads next. The dynamic partitions are first brought to
-    /// `bo_engine_time` as `advance(time)` brings them (the horizon clamp),
-    /// so a carry taken where an `advance_for` yielded reads what a host
-    /// stopping there plainly would. Valid until the next call.
+    /// program it loads next. Read off a copy brought to `bo_engine_time` as
+    /// `advance(time)` brings it (the horizon clamp), so a carry taken where
+    /// an `advance_for` yielded reads the clamped state there, and the live
+    /// engine is untouched. Valid until the next call.
     pub fn carry_take(&mut self) -> Result<&[f64], BoError> {
+        // The clamp runs on a copy (W2a's Clone), so taking a carry is not
+        // observable: a run that takes one at a yield and goes on is the run
+        // that never took it.
         let now = self.time();
-        self.advance(now)?;
+        let mut clamped = self.clone();
+        clamped.advance(now)?;
         let mut out = std::mem::take(&mut self.carry_buf);
         out.clear();
-        self.kernel.solver().carry_take(now, &mut out);
-        self.kernel.evaluator().carry_take(self.kernel.drivers(), &mut out);
+        clamped.kernel.solver().carry_take(now, &mut out);
+        clamped.kernel.evaluator().carry_take(clamped.kernel.drivers(), &mut out);
         self.carry_buf = out;
         Ok(&self.carry_buf)
     }

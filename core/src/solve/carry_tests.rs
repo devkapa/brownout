@@ -208,15 +208,14 @@ fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
     // partitions each at its own last step. The take brings the dynamic
     // partitions to the engine's time first, as advance(time) does, so it
     // reads what a host stopping there plainly would. Every yield of a host
-    // step on 757 tpl 0 is checked.
+    // step on 757 tpl 0 and 2575 tpl 2 is checked: bit for bit, since the
+    // run is the same and the take clamps a copy (R101: an earlier take that
+    // clamped the live engine changed the run after it, which read as a
+    // cadence difference of up to 3.3 mV on 2575's device 9).
     let boards: Vec<(&str, Program, Vec<f64>, f64)> = vec![
         ("757 tpl 0", cold_757_tpl0(), vec![0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986], 0.07025570911480136),
+        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..2].to_vec(), STOPS_2575[2]),
     ];
-    // 2575 tpl 2 (STOPS_2575[..2], host step to STOPS_2575[2]) is held out
-    // pending a ruling: around 19.23 ms its CC rail-edge capacitor (device 9)
-    // stopped plainly at a yield's time parts from the yielded run by up to
-    // 3.3 mV at 2.7 V, over the equivalence tolerance (W2 design D6: beyond
-    // W0 between host cadences is a STOP).
     let mut differed = 0;
     for (name, p, before, t_end) in &boards {
         let mut now = 0.0;
@@ -236,24 +235,7 @@ fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
             plain.advance(t_y).unwrap();
             let at_stop = take(&mut plain);
             let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-            // The analog state matches within the host cadence's own
-            // difference (W2 design D6 (a): a stepped partition's steps are
-            // planned toward its host's stop, so a run stopped at t_y and one
-            // yielded there on its way to a later stop took different steps;
-            // 2575 tpl 2's rail-edge capacitor parts by up to 0.9 mV at 2.7 V,
-            // inside the equivalence tolerance). Everything discrete matches
-            // exactly.
-            let (ra, rb) = (carry::records(&at_yield).unwrap(), carry::records(&at_stop).unwrap());
-            assert_eq!(ra.len(), rb.len(), "{name}: yield {yields}: the same records");
-            for (x, y) in ra.iter().zip(&rb) {
-                assert_eq!((x.device, x.family, x.values.len()), (y.device, y.family, y.values.len()), "{name}: yield {yields}");
-                for (a, b) in x.values.iter().zip(y.values) {
-                    let analog = x.family == carry::FAMILY_CAPACITOR || x.family == carry::FAMILY_BATTERY || x.family == carry::FAMILY_SLOW;
-                    // The equivalence harness's volts tolerance, 100 uV plus 0.1 %.
-                    let same = a.to_bits() == b.to_bits() || (analog && (a - b).abs() <= 1e-4 + 1e-3 * a.abs().max(b.abs()));
-                    assert!(same, "{name}: yield {yields} at t = {t_y}: device {} family {}: {a} against {b}", x.device, x.family);
-                }
-            }
+            assert_eq!(bits(&at_yield), bits(&at_stop), "{name}: yield {yields} at t = {t_y}");
             let mut raw = unclamped;
             let mut out = Vec::new();
             raw.debug_carry_unclamped(&mut out);
@@ -266,5 +248,38 @@ fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
         }
         assert!(yields > 0, "{name}: it yielded");
     }
-    let _ = differed;
+    assert!(differed > 0, "at some yield the unclamped state differs, so the clamp in the take matters");
+}
+
+#[test]
+fn taking_a_carry_at_every_yield_leaves_the_run_bit_identical() {
+    // The take clamps a copy, never the live engine: a run that takes a
+    // carry at each yield and goes on equals one that never takes one.
+    for (name, p, before, t_end) in [
+        ("757 tpl 0", cold_757_tpl0(), vec![0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986], 0.07025570911480136),
+        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..2].to_vec(), STOPS_2575[2]),
+    ] {
+        let run = |taking: bool| {
+            let mut now = 0.0;
+            let mut clock = move || {
+                now += 1.0;
+                now
+            };
+            let mut e = advanced(&p, &before);
+            let mut rows = Vec::new();
+            while !e.advance_for(t_end, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+                if taking {
+                    take(&mut e);
+                }
+                rows.push(e.voltages().iter().chain(e.currents()).map(|v| v.to_bits()).collect::<Vec<_>>());
+            }
+            rows.push(e.voltages().iter().chain(e.currents()).map(|v| v.to_bits()).collect());
+            (rows, (0..28).map(|i| e.stat(i).to_bits()).collect::<Vec<_>>())
+        };
+        let (plain, plain_stats) = run(false);
+        let (taken, taken_stats) = run(true);
+        assert!(plain.len() > 1, "{name}: it yielded");
+        assert!(plain == taken, "{name}: taking carries changed the run");
+        assert_eq!(plain_stats, taken_stats, "{name}: and its stats");
+    }
 }
