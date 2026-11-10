@@ -448,7 +448,7 @@ mod tests {
     }
 
     fn program(node_count: usize, digital_slot_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, options: Options::default(), digital_slot_count, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count, channel_slot_count: 0, devices }
     }
 
     /// Flat `(t, value)` pairs for every recorded change on digital slot 0,

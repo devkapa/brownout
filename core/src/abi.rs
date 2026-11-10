@@ -696,8 +696,8 @@ mod tests {
     /// separate since it exercises the ABI's byte-level `bo_engine_load`
     /// rather than `Program::parse` directly.
     fn build_program(node_count: f64, options: &[(f64, f64)], digital_slots: f64, channel_slots: f64, devices: &[Vec<f64>]) -> Vec<f64> {
-        use crate::program::{MAGIC, VERSION};
-        let mut out = vec![MAGIC, VERSION, node_count, devices.len() as f64, options.len() as f64];
+        use crate::program::{MAGIC, VERSION_3};
+        let mut out = vec![MAGIC, VERSION_3, node_count, devices.len() as f64, options.len() as f64];
         for &(k, v) in options {
             out.push(k);
             out.push(v);

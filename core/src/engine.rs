@@ -810,7 +810,15 @@ impl Engine {
     }
 
     pub fn load(program: &Program) -> Result<Engine, BoError> {
-        let solver = PartitionedSolver::build(program)?;
+        // W2c's `CARRY` block (program v4): checked again here for a program
+        // built in Rust rather than parsed, then seeded before the settle.
+        crate::carry::validate(&program.devices, &program.carry).map_err(BoError::malformed)?;
+        let with_soc = crate::carry::with_carried_soc(program);
+        let program = with_soc.as_ref().unwrap_or(program);
+        let mut solver = PartitionedSolver::build(program)?;
+        if !program.carry.is_empty() {
+            solver.seed_carry(&program.carry);
+        }
         let partition_count = solver.partition_count();
         let static_solve_count = solver.static_solve_count();
         let largest_partition = solver.largest_partition();
@@ -898,7 +906,7 @@ mod tests {
     }
 
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
     }
 
     #[test]
@@ -1184,6 +1192,7 @@ mod tests {
                 let mut options = Options::default();
                 options.force_stepped = force_stepped;
                 let p = Program {
+                    carry: Vec::new(),
                     node_count: 3,
                     options,
                     digital_slot_count: 0,
@@ -1632,6 +1641,7 @@ mod tests {
         options.force_stepped = true;
         let (v0, r, c) = (5.0, 1000.0, 1e-6);
         let p = Program {
+            carry: Vec::new(),
             node_count: 3,
             options,
             digital_slot_count: 0,
@@ -1713,7 +1723,7 @@ mod tests {
         for (device, base) in devices[1..].iter_mut().zip([0.0, 5.0, 9.0, 13.0, 17.0]) {
             device.blob[0] = base;
         }
-        let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
+        let p = Program { carry: Vec::new(), node_count: 2, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
         let e = Engine::load(&p).expect("a program holding every W1d kind must load through the real Engine::load entry point");
         let expected = [
             0.0, 0.0, 0.0, 0.0, 0.0, // 161: count, qa..qd
@@ -1751,7 +1761,7 @@ mod tests {
         for (device, base) in devices[1..6].iter_mut().zip([0.0, 5.0, 9.0, 13.0, 17.0]) {
             device.blob[0] = base;
         }
-        let p = Program { node_count: 4, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
+        let p = Program { carry: Vec::new(), node_count: 4, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
         let switch = 8u32;
         let mut e = Engine::load(&p).unwrap();
         let mut unedited = Engine::load(&p).unwrap();

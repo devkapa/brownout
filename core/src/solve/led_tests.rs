@@ -86,7 +86,7 @@ fn seg7(kind: u32, ci: usize, pins: Vec<PinRecord>, base: usize) -> Device {
 }
 
 fn program(node_count: usize, channel_slot_count: usize, devices: Vec<Device>) -> Program {
-    Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count, devices }
+    Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count, devices }
 }
 
 fn at_temperature(mut p: Program, ambient_c: f64) -> Program {

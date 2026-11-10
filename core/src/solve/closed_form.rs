@@ -1364,6 +1364,19 @@ impl ClosedFormSolver {
         out.extend(self.parts.iter().map(|p| (p.cap.device_index, if p.seg.is_some() { vc_of(p, now) } else { p.seg_vc0 })));
     }
 
+    /// W2c's seed, at load before the first segment: capacitor `device`'s
+    /// charge, the one the first segment starts from (0 on a cold load).
+    /// Whether this solver holds the capacitor.
+    pub(crate) fn seed_vc(&mut self, device: usize, vc: f64) -> bool {
+        let mut found = false;
+        for part in self.parts.iter_mut().filter(|p| p.cap.device_index == device) {
+            debug_assert!(part.seg.is_none(), "a seed comes before the first segment");
+            part.seg_vc0 = vc;
+            found = true;
+        }
+        found
+    }
+
     pub(crate) fn sensitivities(&self) -> u64 {
         self.sensitivities
     }
@@ -3225,7 +3238,7 @@ mod tests {
     }
 
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
     }
 
     fn build(program: &Program) -> ClosedFormSolver {

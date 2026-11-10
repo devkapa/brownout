@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
     }
 
     // ---- step 2b: the former dynamic-partition decline is lifted ---------

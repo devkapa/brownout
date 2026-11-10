@@ -38,9 +38,10 @@ export const CARRY_FAMILY = {
 export const CARRY_VERSION = 1;
 
 const HEADER = 4;
-/** In the slow layout `[failed, stress, temperature, shutdown, ptc_tripped, ptc_stress, ptc_rt]`, the thermal model's two. */
+/** In the slow layout `[failed, stress, temperature, shutdown, ptc_tripped, ptc_stress, ptc_rt, t_hold]`, the thermal model's three. */
 const SLOW_TEMPERATURE = 2;
 const SLOW_SHUTDOWN = 3;
+const SLOW_T_HOLD = 7;
 
 export interface CarryRecord {
   readonly device: number;
@@ -168,6 +169,7 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
         if (!thermalCarries) {
           values[SLOW_TEMPERATURE] = Number.NaN;
           values[SLOW_SHUTDOWN] = Number.NaN;
+          values[SLOW_T_HOLD] = Number.NaN;
         }
         out.push({ ...r, device: at, values });
         break;

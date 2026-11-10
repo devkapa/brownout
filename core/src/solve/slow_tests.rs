@@ -119,7 +119,7 @@ fn ptc_trips(p: &Program, step: f64, end: f64) -> Vec<f64> {
 }
 
 fn program(node_count: usize, devices: Vec<Device>) -> Program {
-    Program { node_count, options: Options::default(), digital_slot_count: 16, channel_slot_count: 0, devices }
+    Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 16, channel_slot_count: 0, devices }
 }
 
 struct Quiet;

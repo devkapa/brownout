@@ -526,6 +526,24 @@ impl SlowState {
         self.book.get(0).order.iter().any(|r| r.key() == key)
     }
 
+    // ---- W2c's seed, at load ------------------------------------------
+
+    /// A carried failed flag: the device's stamp is open from the load on.
+    pub fn seed_failed(&mut self, dev: usize) {
+        self.flags.get_mut(dev).failed = true;
+        self.ever_failed = true;
+    }
+
+    /// A carried latch: in the order, after those carried before it, and not
+    /// in the log (the host announced it before the reload, as classic's
+    /// carried `failures` map is not announced again). A key already there
+    /// keeps its place.
+    pub fn seed_latch(&mut self, rec: LatchRecord) {
+        if !self.is_latched(rec.key()) {
+            self.book.get_mut(0).order.push(rec);
+        }
+    }
+
     /// The latched failures in latch order (`bo_engine_records` channel 0; an
     /// `output_sag` entry is re-projected at collect time).
     pub fn latched(&self) -> &[LatchRecord] {

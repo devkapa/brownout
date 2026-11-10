@@ -567,7 +567,10 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
         lo = lo.min(a);
         hi = hi.max(b);
     }
-    Some((hi - lo, lo.abs().max(hi.abs())))
+    // Ruling R57 D10 (a): a carried charge holds its free node off the fixed
+    // one by up to its `|vc|` (`crate::carry::abs_vc_sum`).
+    let carried = crate::carry::abs_vc_sum(&program.carry);
+    Some((hi - lo + carried, lo.abs().max(hi.abs()) + carried))
 }
 
 /// A two-terminal resistance's least resistance, `None` for any other kind:
@@ -2646,19 +2649,99 @@ impl PartitionedSolver {
         for d in 0..self.slow.device_count() {
             let failed = self.slow.is_failed(d);
             let stress = self.slow.stress(d).map(|s| s.value_at(now));
-            let thermal = self.slow.thermal(d).map(|th| (th.temperature_at(now), f64::from(u8::from(th.shutdown))));
+            let thermal = self.slow.thermal(d).map(|th| (th.temperature_at(now), f64::from(u8::from(th.shutdown)), th.t_hold));
             let ptc = self.slow.ptc(d).map(|p| p.projected(now));
             if !failed && stress.is_none() && thermal.is_none() && ptc.is_none() {
                 continue;
             }
-            let (temperature, shutdown) = thermal.unwrap_or((nan, nan));
+            let (temperature, shutdown, t_hold) = thermal.unwrap_or((nan, nan, nan));
             let (tripped, ptc_stress, rt) = ptc.map_or((nan, nan, nan), |(t, s, r)| (f64::from(u8::from(t)), s, r));
-            crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &[f64::from(u8::from(failed)), stress.unwrap_or(nan), temperature, shutdown, tripped, ptc_stress, rt]);
+            crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &[f64::from(u8::from(failed)), stress.unwrap_or(nan), temperature, shutdown, tripped, ptc_stress, rt, t_hold]);
         }
         let mut latched: Vec<LatchRecord> = self.slow.latched().to_vec();
         latched.sort_by_key(|r| r.device);
         for r in latched {
             crate::carry::push(out, r.device as usize, crate::carry::FAMILY_LATCH, &[r.code as f64, r.pin as f64, r.since, r.value, r.limit, r.aux]);
+        }
+    }
+
+    /// W2c's seed (program v4's `CARRY` block, already validated), at load
+    /// before the settle, at `START_TIME`: capacitor charges into whichever
+    /// solver holds each, a battery's discharge counts (its SoC came in as
+    /// the record's `soc0`, `crate::carry::with_carried_soc`), and the slow
+    /// physics (failed flags, latches, stress, temperature, PTC trip state),
+    /// whose stamps are then set from it so the settle's first solve sees an
+    /// open fuse or a tripped PTC. A value the device has no integrator for
+    /// (a stress onto a resistor no longer rated) is dropped, and `NaN`
+    /// reads as none. A PSU's regime is not seeded: the settle decides it
+    /// from the carried charges, as classic's first step does from its
+    /// carried `reg` and the same charges (a rail capacitor short of the
+    /// setpoint draws past the limit).
+    pub(crate) fn seed_carry(&mut self, block: &[f64]) {
+        use crate::carry::{self, slow::*};
+        let t = self.start_time;
+        let mut touched: Vec<usize> = Vec::new();
+        for r in carry::records(block).expect("a validated block") {
+            if !carry::known(&r) {
+                continue;
+            }
+            let (d, v) = (r.device, r.values);
+            match r.family {
+                carry::FAMILY_CAPACITOR => {
+                    let stepped = self.stepped.seed_vc(d, v[0]);
+                    let closed = self.closed_form.seed_vc(d, v[0]);
+                    if !stepped && !closed {
+                        if let Some(c) = self.fixed_pair_capacitors.iter_mut().find(|c| c.device_index == d) {
+                            c.vc0 = v[0];
+                        }
+                    }
+                }
+                carry::FAMILY_BATTERY => {
+                    let (discharged, rejected) = (v[4], v[5]);
+                    if let Some(hub) = self.hub.as_mut().filter(|h| h.device == d) {
+                        hub.state.battery.discharged = discharged;
+                        hub.state.battery.rejected = rejected;
+                    }
+                    if let Some(e) = self.exact.as_mut().filter(|e| e.device == d) {
+                        e.battery.discharged = discharged;
+                        e.battery.rejected = rejected;
+                        let state = e.battery;
+                        self.stepped.set_cell_state(state);
+                    }
+                }
+                carry::FAMILY_SLOW => {
+                    if v[FAILED] == 1.0 {
+                        self.slow.seed_failed(d);
+                    }
+                    if let (false, Some(s)) = (v[STRESS].is_nan(), self.slow.stress_mut(d)) {
+                        s.s0 = v[STRESS];
+                        s.t0 = t;
+                    }
+                    if let (false, Some(th)) = (v[TEMPERATURE].is_nan(), self.slow.thermal_mut(d)) {
+                        th.temp0 = v[TEMPERATURE];
+                        th.t0 = t;
+                        th.shutdown = v[SHUTDOWN] == 1.0;
+                        th.t_hold = if v[T_HOLD].is_nan() { v[TEMPERATURE] } else { v[T_HOLD] };
+                    }
+                    if let (false, Some(p)) = (v[PTC_TRIPPED].is_nan(), self.slow.ptc_mut(d)) {
+                        if v[PTC_TRIPPED] == 1.0 {
+                            p.trip(t);
+                        }
+                        p.stress = if v[PTC_STRESS].is_nan() { 0.0 } else { v[PTC_STRESS] };
+                        p.rt = if v[PTC_RT].is_nan() { 0.0 } else { v[PTC_RT] };
+                    }
+                    touched.push(d);
+                }
+                carry::FAMILY_LATCH => {
+                    self.slow.seed_latch(LatchRecord { device: d as u32, code: v[0] as u32, pin: v[1] as i32, since: v[2], value: v[3], limit: v[4], aux: v[5] });
+                }
+                _ => {}
+            }
+        }
+        for d in touched {
+            if let Some(i) = self.slow_index(d) {
+                self.apply_stamp(i, true);
+            }
         }
     }
 

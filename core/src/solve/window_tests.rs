@@ -95,6 +95,7 @@ fn composite(open_hash: u32) -> Program {
     };
 
     Program {
+        carry: Vec::new(),
         node_count: 9,
         options: Options::default(),
         digital_slot_count: 0,
@@ -537,6 +538,7 @@ fn the_static_solvers_source_walk_runs_when_a_coefficient_could_overflow_and_the
     // finite 1e308 A, the source's sum is not. Nothing bounds that walk, so
     // it must run and fail the resolve on the source (device 0).
     let p = Program {
+        carry: Vec::new(),
         node_count: 2,
         options: Options::default(),
         digital_slot_count: 0,
@@ -610,7 +612,7 @@ fn a_crossing_a_step_and_a_failure() -> Program {
 }
 
 fn program(node_count: usize, devices: Vec<Device>) -> Program {
-    Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
 }
 
 #[test]
@@ -757,6 +759,7 @@ fn a_driver_on_a_stepped_ladder() -> (Program, Vec<Driver>) {
     pins.extend([0usize, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0].into_iter().map(pin));
     let ls04 = Device { kind: kinds::IC_74LS04, component_index: 1, pins, params: ls04_params, blob };
     let p = Program {
+        carry: Vec::new(),
         node_count: 5,
         options: Options::default(),
         digital_slot_count: 0,

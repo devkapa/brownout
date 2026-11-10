@@ -109,7 +109,7 @@ fn program(node_count: usize, devices: Vec<Device>) -> Program {
         _ => 0,
     });
     let digital_slot_count = digital.max().unwrap_or(0);
-    Program { node_count, options: Options::default(), digital_slot_count, channel_slot_count: 0, devices }
+    Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count, channel_slot_count: 0, devices }
 }
 
 fn exact(mut p: Program) -> Program {
@@ -8824,7 +8824,7 @@ fn psu_555_short(load: Option<f64>, exact_mode: bool) -> Program {
     if let Some(r) = load {
         devices.push(resistor(3, 1, 0, r));
     }
-    let mut p = Program { node_count: 6, options: Options::default(), digital_slot_count: 16, channel_slot_count: 0, devices };
+    let mut p = Program { carry: Vec::new(), node_count: 6, options: Options::default(), digital_slot_count: 16, channel_slot_count: 0, devices };
     p.options.no_rail_shortcut = exact_mode;
     p
 }
@@ -9080,7 +9080,7 @@ fn fuzz_board_704(exact_mode: bool) -> Program {
         raw(1, 22, &[3, 3], &[159.27187461695368], &[]),
         raw(1, 23, &[3, 0], &[1.2529850049883364], &[]),
     ];
-    let mut p = Program { node_count: 7, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    let mut p = Program { carry: Vec::new(), node_count: 7, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
     p.options.no_rail_shortcut = exact_mode;
     p
 }
@@ -9117,7 +9117,7 @@ fn fuzz_board_985(exact_mode: bool) -> Program {
         raw(1, 23, &[2, 3], &[162.05324192171082], &[]),
         raw(1, 24, &[1, 5], &[18.918788164939212], &[]),
     ];
-    let mut p = Program { node_count: 8, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    let mut p = Program { carry: Vec::new(), node_count: 8, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
     p.options.no_rail_shortcut = exact_mode;
     p
 }
@@ -10110,7 +10110,7 @@ fn fuzz_board_226(exact_mode: bool) -> Program {
         raw(1, 14, &[1, 5], &[341.19836764024944], &[]),
         raw(3, 15, &[5, 0], &[0.0144928188878566, 3.4588400262396184, 0.0], &[]),
     ];
-    let mut p = Program { node_count: 6, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    let mut p = Program { carry: Vec::new(), node_count: 6, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
     p.options.no_rail_shortcut = exact_mode;
     p
 }
@@ -12269,7 +12269,7 @@ fn cold_621_2() -> Program {
         fz(30, 11, &[3, 4], vec![2.3804250756327083, 2.269744551659818, 0.02453319387718482, 0.0, 0.0, 0.0], vec![]),
         fz(1, 12, &[1, 3], vec![894.6488234871266], vec![]),
     ];
-    Program { node_count: 5, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices }
+    Program { carry: Vec::new(), node_count: 5, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices }
 }
 
 #[test]

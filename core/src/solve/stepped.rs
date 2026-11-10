@@ -1841,6 +1841,21 @@ impl SteppedSolver {
         }
     }
 
+    /// W2c's seed, at load before the first solve: capacitor `device`'s
+    /// charge, which that solve seeds the partition's node voltages from
+    /// (as from `vc = 0` on a cold load). A parked `cc_switch` copy takes it
+    /// too. Whether this solver holds the capacitor.
+    pub(crate) fn seed_vc(&mut self, device: usize, vc: f64) -> bool {
+        let mut found = false;
+        for part in self.partitions.values_mut() {
+            if let Some(k) = part.shape.capacitors.iter().position(|c| c.device_index == device) {
+                part.vc[k] = vc;
+                found = true;
+            }
+        }
+        found
+    }
+
     pub(crate) fn sensitivities(&self) -> u64 {
         self.sensitivities
     }
@@ -3942,7 +3957,7 @@ mod tests {
         Device { kind: crate::kinds::CAPACITOR, component_index: ci, pins: vec![pin(a), pin(b)], params: vec![c, esr, leak], blob: vec![] }
     }
     fn program(node_count: usize, devices: Vec<Device>, options: Options) -> Program {
-        Program { node_count, options, digital_slot_count: 0, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options, digital_slot_count: 0, channel_slot_count: 0, devices }
     }
     fn build(program: &Program) -> SteppedSolver {
         let pb = partition::build(program).unwrap();

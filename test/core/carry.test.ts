@@ -8,9 +8,12 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { CARRY_FAMILY, CARRY_VERSION, decodeCarry, encodeCarry, mapCarry, type CarryRecord, type CarrySource } from "../../src/core/carry.js";
 import { compileCircuit } from "../../src/core/compile/index.js";
+import { CoreEngine } from "../../src/core/engine.js";
+import { decodeProgram } from "../../src/core/format.js";
+import { coreCall, initCore, verifyCoreExports, __installCoreForTest, __resetCoreForTest, type CoreExports } from "../../src/core/wasm.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
 type Component = SimCircuit["components"][number];
@@ -102,12 +105,26 @@ describe("mapCarry: classic's reload rules", () => {
     const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../fixtures/core/16-74ls00-open-input.sim.json"), "utf8")) as SimCircuit;
     const from = source(fixture);
     const u1 = deviceOf(from, "u1");
-    const records = [rec(u1, CARRY_FAMILY.ic, [50, 0, 4, 0, 0, 0, 0]), rec(u1, CARRY_FAMILY.slow, [0, 0.1, NaN, NaN, NaN, NaN, NaN]), rec(u1, CARRY_FAMILY.latch, [4, 3, 0.01, 0.2, 0.1, 1])];
+    const records = [rec(u1, CARRY_FAMILY.ic, [50, 0, 4, 0, 0, 0, 0]), rec(u1, CARRY_FAMILY.slow, [0, 0.1, NaN, NaN, NaN, NaN, NaN, NaN]), rec(u1, CARRY_FAMILY.latch, [4, 3, 0.01, 0.2, 0.1, 1])];
     const same = source(fixture);
     expect(mapCarry(records, from, same)).toEqual(records.map((r) => ({ ...r, device: deviceOf(same, "u1") })));
     const swapped = JSON.parse(JSON.stringify(fixture)) as SimCircuit;
     swapped.components.find((c) => c.id === "u1")!.kind = "74ls08";
     expect(mapCarry(records, from, source(swapped))).toEqual([]);
+  });
+
+  it("drops a thermal model's temperature, shutdown and held temperature onto another part", () => {
+    const withUid = (catalogUid?: string): SimCircuit => {
+      const c = rc();
+      if (catalogUid) Object.assign(c.components.find((k) => k.id === "r1")!, { catalogUid });
+      return c;
+    };
+    const from = source(withUid("resistor"));
+    expect(from.compiled.thermalDevices.has("r1")).toBe(true);
+    const r1 = deviceOf(from, "r1");
+    const slow = rec(r1, CARRY_FAMILY.slow, [0, 0.1, 40, 0, NaN, NaN, NaN, 38]);
+    expect(mapCarry([slow], from, source(withUid("resistor")))).toEqual([slow]);
+    expect(mapCarry([slow], from, source(withUid()))).toEqual([rec(r1, CARRY_FAMILY.slow, [0, 0.1, NaN, NaN, NaN, NaN, NaN, NaN])]);
   });
 
   it("carries a battery's state only onto the same authored charge and catalog part", () => {
@@ -125,5 +142,85 @@ describe("mapCarry: classic's reload rules", () => {
     expect(mapCarry(state, from, same)).toEqual([{ ...state[0]!, device: deviceOf(same, "b1") }]);
     expect(mapCarry(state, from, source(pack(0.5))), "another authored charge").toEqual([]);
     expect(mapCarry(state, from, source(pack(1, "battery-aa"))), "another catalog part").toEqual([]);
+  });
+});
+
+// ---- ruling R100 (a): the ABI stays 2, the program goes to v4 ---------------
+
+/** Loads `program` on a fresh handle through the raw exports: the load's code, and node voltages after `advance` to `t`. */
+function rawRun(program: ArrayLike<number>, t: number): { code: number; voltages: number[] } {
+  return coreCall((x) => {
+    const h = x.bo_engine_create();
+    const ptr = x.bo_alloc(program.length);
+    try {
+      new Float64Array(x.memory.buffer, ptr, program.length).set(Array.from(program));
+      const code = x.bo_engine_load(h, ptr, program.length);
+      if (code !== 0) return { code, voltages: [] };
+      if (t > 0) expect(x.bo_engine_advance(h, t)).toBe(0);
+      const n = x.bo_engine_node_count(h);
+      return { code, voltages: Array.from(new Float64Array(x.memory.buffer, x.bo_engine_node_voltages(h), n)) };
+    } finally {
+      x.bo_free(ptr, program.length);
+      x.bo_engine_destroy(h);
+    }
+  });
+}
+
+/** `v3` as program v4: the version, then the CARRY block before the trailer. */
+function asV4(v3: Float64Array, carry: readonly number[]): number[] {
+  const out = Array.from(v3);
+  out[1] = 4;
+  const trailer = out.pop()!;
+  out.push(carry.length, ...carry, trailer);
+  return out;
+}
+
+describe("R100 (a): program v4 on ABI 2", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  afterEach(async () => {
+    __resetCoreForTest();
+    await initCore();
+  });
+
+  it("a v3 program, as this package's encoder writes it, loads and runs on the new core", () => {
+    const s = source(rc());
+    expect(s.compiled.program[1]).toBe(3);
+    const run = rawRun(s.compiled.program, 1e-3);
+    expect(run.code).toBe(0);
+    const x = decodeProgram(s.compiled.program).devices[deviceOf(s, "c1")]!.pins[0]!.node;
+    // 5 V through 1k into 1k || 1 uF: tau 0.5 ms, 2.5 (1 - e^-2) at 1 ms.
+    expect(run.voltages[x]).toBeCloseTo(2.5 * (1 - Math.exp(-2)), 6);
+  });
+
+  it("a v4 program's CARRY block seeds the load: the capacitor starts at its carried charge", () => {
+    const s = source(rc());
+    const c1 = deviceOf(s, "c1");
+    const x = decodeProgram(s.compiled.program).devices[c1]!.pins[0]!.node;
+    const cold = rawRun(asV4(s.compiled.program, []), 0);
+    expect(cold.code).toBe(0);
+    expect(cold.voltages[x]).toBe(0);
+    const carried = rawRun(asV4(s.compiled.program, [c1, CARRY_FAMILY.capacitor, CARRY_VERSION, 1, 4]), 0);
+    expect(carried.code).toBe(0);
+    expect(carried.voltages[x]).toBe(4);
+    // A record on the wrong kind is a malformed program.
+    expect(rawRun(asV4(s.compiled.program, [deviceOf(s, "r1"), CARRY_FAMILY.capacitor, CARRY_VERSION, 1, 4]), 0).code).toBe(-1);
+  });
+
+  it("a host whose core has no carry exports still loads and runs", () => {
+    const real = coreCall((x) => x);
+    const { bo_engine_carry_take: _take, bo_engine_carry_ptr: _ptr, ...rest } = real as CoreExports & Record<string, unknown>;
+    expect(typeof _take).toBe("function");
+    const without = verifyCoreExports({ ...rest, memory: real.memory } as unknown as Record<string, unknown>);
+    expect("bo_engine_carry_take" in without).toBe(false);
+    __installCoreForTest(without);
+    const core = new CoreEngine();
+    core.load(rc());
+    core.advance(1e-3);
+    expect(core.simTime).toBeCloseTo(1e-3, 12);
+    expect(Object.keys(core.getNetV()).length).toBeGreaterThan(0);
+    core.dispose();
   });
 });

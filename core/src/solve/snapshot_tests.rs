@@ -290,7 +290,7 @@ fn a_snapshot_shares_the_eeprom_image_and_the_table_counts_it_once() {
     blob.extend(std::iter::repeat(0.0).take(2048 / 4));
     let eeprom = Device { kind: kinds::IC_28C16, component_index: 1, pins: std::iter::once(pin(1)).chain(std::iter::once(pin(0))).chain((0..22).map(|_| pin(0))).collect(), params, blob };
     let source = Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] };
-    let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 8, channel_slot_count: 0, devices: vec![source, eeprom] };
+    let p = Program { carry: Vec::new(), node_count: 2, options: Options::default(), digital_slot_count: 8, channel_slot_count: 0, devices: vec![source, eeprom] };
     let e = Engine::load(&p).unwrap();
     let mut table = SnapshotTable::default();
     assert_eq!(table.bytes(), 0.0);

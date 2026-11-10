@@ -55,7 +55,7 @@ fn spdt(ci: usize, com: usize, b: usize, c: usize, sel: f64) -> Device {
 }
 
 fn program(node_count: usize, devices: Vec<Device>) -> Program {
-    Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
 }
 
 /// A from-scratch FNV-1a, used only to build the SAME `openHash`/`deadHash`

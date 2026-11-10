@@ -117,9 +117,116 @@ pub mod ic {
 }
 
 /// The slow layout: `[failed, stress, temperature, shutdown, ptc_tripped,
-/// ptc_stress, ptc_rt]`, at the engine's time. `NaN` for a quantity the
-/// device has none of (no stress integral, no thermal model, not a PTC);
-/// `failed` is 0 or 1. Its latch records are their own family.
+/// ptc_stress, ptc_rt, t_hold]`, at the engine's time. `NaN` for a quantity
+/// the device has none of (no stress integral, no thermal model, not a PTC);
+/// `failed` is 0 or 1. `t_hold` is the temperature an LED's junction law
+/// holds (the thermal model's last boundary). Its latch records are their
+/// own family. A seed reads `NaN` as "start fresh", which is how the host
+/// drops a thermal model's state onto another part.
 pub mod slow {
-    pub const LEN: usize = 7;
+    pub const FAILED: usize = 0;
+    pub const STRESS: usize = 1;
+    pub const TEMPERATURE: usize = 2;
+    pub const SHUTDOWN: usize = 3;
+    pub const PTC_TRIPPED: usize = 4;
+    pub const PTC_STRESS: usize = 5;
+    pub const PTC_RT: usize = 6;
+    pub const T_HOLD: usize = 7;
+    pub const LEN: usize = 8;
+}
+
+/// The values a seed reads per family (a longer record's tail is a later
+/// layout's, ignored).
+fn min_len(family: u32) -> Option<usize> {
+    Some(match family {
+        FAMILY_CAPACITOR => 1,
+        FAMILY_IC => 2,
+        FAMILY_BATTERY => 6,
+        FAMILY_PSU => 1,
+        FAMILY_SLOW => slow::LEN,
+        FAMILY_LATCH => 6,
+        _ => return None,
+    })
+}
+
+/// Whether a record is one this core seeds: a family it knows, at the
+/// version it writes. Any other reads as none.
+pub fn known(r: &Record) -> bool {
+    r.version == VERSION && min_len(r.family).is_some()
+}
+
+/// Checks a program's `CARRY` block against its devices (program v4): the
+/// records whole, each known one on a device of its family's kind, at least
+/// its layout's length, with values in range, and at most one per device and
+/// family (latches excepted: a device may have several). A malformed block
+/// is a malformed program, so nothing is seeded from it.
+pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(), String> {
+    use crate::kinds;
+    let mut seen = std::collections::BTreeSet::new();
+    for r in records(block)? {
+        let d = devices.get(r.device).ok_or_else(|| format!("carry: device {} is out of range for {} device(s)", r.device, devices.len()))?;
+        if !known(&r) {
+            continue;
+        }
+        let what = format!("carry: device {}'s family {} record", r.device, r.family);
+        let need = min_len(r.family).expect("known");
+        if r.values.len() < need {
+            return Err(format!("{what} has {} value(s), at least {need} needed", r.values.len()));
+        }
+        if r.family != FAMILY_LATCH && !seen.insert((r.device, r.family)) {
+            return Err(format!("{what} is repeated"));
+        }
+        let v = r.values;
+        let flag = |x: f64| x == 0.0 || x == 1.0;
+        let finite_or_none = |x: f64| x.is_finite() || x.is_nan();
+        let ok = match r.family {
+            FAMILY_CAPACITOR => d.kind == kinds::CAPACITOR && v[0].is_finite(),
+            FAMILY_IC => crate::digital::is_ic(d.kind) && v[0] == d.kind as f64,
+            FAMILY_BATTERY => d.kind == kinds::BATTERY_PACK && (0.0..=1.0).contains(&v[0]) && v[1..6].iter().all(|x| x.is_finite()),
+            FAMILY_PSU => d.kind == kinds::BENCH_PSU && crate::devices::sources::Regime::from_code(v[0]).is_some(),
+            FAMILY_SLOW => {
+                use slow::*;
+                flag(v[FAILED])
+                    && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
+                    && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
+                    && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+            }
+            FAMILY_LATCH => {
+                crate::slow::failures::FailureKind::from_code(v[0]).is_some() && v[1] >= -1.0 && v[1].fract() == 0.0 && v[1] < u32::MAX as f64 && v[2].is_finite()
+            }
+            _ => unreachable!("known families only"),
+        };
+        if !ok {
+            return Err(format!("{what} does not fit device kind {} or has a value out of range: {v:?}", d.kind));
+        }
+    }
+    Ok(())
+}
+
+/// Ruling R57 D10 (a): the sum of the carried capacitor charges' `|vc|`,
+/// what the cold-device span widens by. A charge held on a capacitor from a
+/// free node to a fixed one is that node's potential's offset from the
+/// fixed one: until it discharges, the free node can sit past every source
+/// by as much, and the maximum principle bounds the rest by it. The sum is
+/// over the whole program (a bound per section is no tighter than the one
+/// span the bound keeps).
+pub fn abs_vc_sum(block: &[f64]) -> f64 {
+    records(block).map_or(0.0, |rs| rs.iter().filter(|r| known(r) && r.family == FAMILY_CAPACITOR).map(|r| r.values[0].abs()).sum())
+}
+
+/// A battery's carried SoC goes in as its record's `soc0`, the charge it
+/// loads with, so every load-time value read from it (the rail's open-circuit
+/// voltage, each partition's fixed node, the cell state) is the carried
+/// charge's. `None` when nothing carries a battery.
+pub fn with_carried_soc(program: &crate::program::Program) -> Option<crate::program::Program> {
+    let rs = records(&program.carry).ok()?;
+    let socs: Vec<(usize, f64)> = rs.iter().filter(|r| known(r) && r.family == FAMILY_BATTERY).map(|r| (r.device, r.values[0])).collect();
+    if socs.is_empty() {
+        return None;
+    }
+    let mut seeded = program.clone();
+    for (d, soc) in socs {
+        seeded.devices[d].params[crate::kinds::battery_param::SOC0] = soc;
+    }
+    Some(seeded)
 }

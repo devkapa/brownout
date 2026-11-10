@@ -1,7 +1,9 @@
-//! Program format v3 reader (core/README.md, "Program format, version 3").
+//! Program format v4 reader (core/README.md, "Program format, version 4").
 //!
 //! One `&[f64]`: header (magic, version, node count, device count, an
-//! options block, then the readout slot counts), D device records, trailer.
+//! options block, then the readout slot counts), D device records, the
+//! `CARRY` block (v4 only), trailer. A v3 program, which has no `CARRY`
+//! block, still loads (ruling R100 (a)).
 //! Every field is an f64 carrying an exact integer, so reading a count or an
 //! index means checking it is finite, non-negative, whole, and in range
 //! *before* trusting it — the whole point of this module is that no
@@ -18,7 +20,9 @@ use crate::error::BoError;
 use crate::kinds::{self, BlobShape};
 
 pub const MAGIC: f64 = 0x424F4331 as f64; // "BOC1"
-pub const VERSION: f64 = 3.0;
+pub const VERSION: f64 = 4.0;
+/// The version before the `CARRY` block, still read (ruling R100 (a)).
+pub const VERSION_3: f64 = 3.0;
 
 /// Pin record flag bits (core/README.md, "Device record"). Every other bit
 /// must be 0 — since these are the only two defined bits, "no unknown bit
@@ -118,13 +122,17 @@ pub(crate) fn switch_value(value: f64) -> Option<bool> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Program {
     pub node_count: usize,
     pub options: Options,
     pub digital_slot_count: usize,
     pub channel_slot_count: usize,
     pub devices: Vec<Device>,
+    /// W2c's `CARRY` block (`crate::carry`): the state the load seeds before
+    /// its settle, as records `[device, family, version, len, values]`.
+    /// Empty for a cold load and for every v3 program.
+    pub carry: Vec<f64>,
 }
 
 struct Reader<'a> {
@@ -260,7 +268,10 @@ impl Program {
         let mut r = Reader::new(data);
 
         r.expect("header magic", MAGIC)?;
-        r.expect("version", VERSION)?;
+        let version = r.raw("version")?;
+        if version != VERSION && version != VERSION_3 {
+            return Err(BoError::malformed(format!("version: expected {VERSION} or {VERSION_3}, got {version}")));
+        }
         let node_count = r.bounded_index("node count N", MAX_NODES_OR_DEVICES)?;
         if node_count < 1 {
             return Err(BoError::malformed("node count N must be at least 1 (node 0 is the datum)"));
@@ -299,6 +310,17 @@ impl Program {
         Self::check_slot_ranges_disjoint(&mut claims)?;
         Self::check_slow_records(&devices)?;
 
+        // v4's `CARRY` block: a length, then that many values, every record
+        // checked against the devices before anything is seeded.
+        let carry = if version == VERSION {
+            let len = r.count_of("carry length L", 1).and_then(|n| if n < r.remaining() { Ok(n) } else { Err(BoError::malformed(format!("carry length L: {n} leaves no room for the trailer"))) })?;
+            let block = r.f64s("carry", len)?;
+            crate::carry::validate(&devices, &block).map_err(BoError::malformed)?;
+            block
+        } else {
+            Vec::new()
+        };
+
         r.expect("trailer magic", MAGIC)?;
         if r.remaining() != 0 {
             return Err(BoError::malformed(format!(
@@ -307,7 +329,7 @@ impl Program {
             )));
         }
 
-        Ok(Program { node_count, options, digital_slot_count, channel_slot_count, devices })
+        Ok(Program { node_count, options, digital_slot_count, channel_slot_count, devices, carry })
     }
 
     /// Reads and applies one `(key, value)` option pair (core/README.md,
@@ -661,7 +683,7 @@ mod tests {
     /// the trailer. `build_full` is the general form; `build` is the common
     /// case of no options and no readout slots.
     fn build_full(node_count: f64, options: &[(f64, f64)], digital_slots: f64, channel_slots: f64, devices: &[Vec<f64>]) -> Vec<f64> {
-        let mut out = vec![MAGIC, VERSION, node_count, devices.len() as f64, options.len() as f64];
+        let mut out = vec![MAGIC, VERSION_3, node_count, devices.len() as f64, options.len() as f64];
         for &(k, v) in options {
             out.push(k);
             out.push(v);
@@ -1598,6 +1620,77 @@ mod tests {
         parse_err(&with([340.0, 8.0, 0.5, 0.0, 0.0]), "hasShutdown");
         parse_err(&with([340.0, 8.0, 0.0, 150.0, 0.0]), "without a shutdown");
         parse_err(&with([340.0, 8.0, 1.0, 130.0, 150.0]), "below tripC");
+    }
+
+    // --- W2c: program v4's CARRY block (ruling R100 (a)) ------------------
+
+    /// A v4 program: `build`'s v3 one with the version bumped and the carry
+    /// block before the trailer.
+    fn build_v4(node_count: f64, devices: &[Vec<f64>], carry: &[f64]) -> Vec<f64> {
+        let mut out = build(node_count, devices);
+        out[1] = VERSION;
+        out.pop();
+        out.push(carry.len() as f64);
+        out.extend_from_slice(carry);
+        out.push(MAGIC);
+        out
+    }
+
+    fn capacitor_record(component_index: f64, a: f64, b: f64, c: f64) -> Vec<f64> {
+        let mut out = vec![kinds::CAPACITOR as f64, component_index, 2.0];
+        out.extend(simple_pin(a));
+        out.extend(simple_pin(b));
+        out.extend([3.0, c, 0.0, 0.0, 0.0]);
+        out
+    }
+
+    fn rc() -> Vec<Vec<f64>> {
+        vec![source_record(0.0, 1.0, 0.0, 5.0), resistor_record(1.0, 1.0, 2.0, 1000.0), capacitor_record(2.0, 2.0, 0.0, 1e-6)]
+    }
+
+    #[test]
+    fn a_v3_program_still_loads_with_nothing_carried() {
+        let data = build(3.0, &rc());
+        assert_eq!(data[1], VERSION_3);
+        let p = Program::parse(&data).expect("v3 loads (R100 (a))");
+        assert_eq!(p.devices.len(), 3);
+        assert!(p.carry.is_empty());
+    }
+
+    #[test]
+    fn a_v4_program_holds_its_carry_block() {
+        let p = Program::parse(&build_v4(3.0, &rc(), &[])).expect("an empty block");
+        assert!(p.carry.is_empty());
+        let block = [2.0, 1.0, 1.0, 1.0, 12.0];
+        let p = Program::parse(&build_v4(3.0, &rc(), &block)).expect("a capacitor's voltage");
+        assert_eq!(p.carry, block.to_vec());
+        // A family or version this core does not know reads as none, and a
+        // longer record's tail is a later layout's.
+        let p = Program::parse(&build_v4(3.0, &rc(), &[0.0, 99.0, 1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 7.0, 1.0, 7.0, 2.0, 1.0, 1.0, 2.0, 12.0, 0.0])).expect("unknown family, v7, and a long record");
+        assert_eq!(p.carry.len(), 17);
+    }
+
+    #[test]
+    fn a_malformed_carry_block_is_a_malformed_program() {
+        let bad = |carry: &[f64], what: &str| {
+            let err = Program::parse(&build_v4(3.0, &rc(), carry)).unwrap_err();
+            assert_eq!(err.code, -1, "{what}");
+            assert!(err.message.contains("carry"), "{what}: {}", err.message);
+        };
+        bad(&[2.0, 1.0, 1.0], "a cut header");
+        bad(&[2.0, 1.0, 1.0, 2.0, 12.0], "a record past the end");
+        bad(&[3.0, 1.0, 1.0, 1.0, 12.0], "a device out of range");
+        bad(&[1.0, 1.0, 1.0, 1.0, 12.0], "a capacitor's voltage on a resistor");
+        bad(&[2.0, 1.0, 1.0, 0.0], "a capacitor record with no value");
+        bad(&[2.0, 1.0, 1.0, 1.0, f64::NAN], "a capacitor's voltage not finite");
+        bad(&[2.0, 1.0, 1.0, 1.0, 12.0, 2.0, 1.0, 1.0, 1.0, 11.0], "a capacitor carried twice");
+        bad(&[2.0, 1.5, 1.0, 1.0, 12.0], "a fractional family");
+        // The length runs into the trailer.
+        let mut data = build_v4(3.0, &rc(), &[]);
+        let at = data.len() - 2;
+        data[at] = 1.0;
+        let err = Program::parse(&data).unwrap_err();
+        assert_eq!(err.code, -1);
     }
 }
 

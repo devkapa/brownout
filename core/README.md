@@ -46,7 +46,7 @@ npm tarball carries it under `dist/core/`.
   instruction loops. From W6 it also owns the DC operating point and
   small-signal AC, and the classic engine is deleted.
 
-## Program format, version 3
+## Program format, version 4
 
 One `Float64Array`. Every value is an f64; integers are carried as exact
 doubles (all counts, indices and 32-bit hash states are far below 2^53). The
@@ -59,11 +59,25 @@ header   MAGIC, VERSION, nodeCount N, deviceCount D,
          optionCount O, (key, value) x O,
          digitalSlotCount S, channelSlotCount C
 devices  D records, in component order
+carry    carryLength L, value x L          (v4 only)
 trailer  MAGIC
 ```
 
-- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `3`. W1d bumped it from 2,
-  because the 74ls157 and 74ls245 records gained a delay tail.
+- `MAGIC` = `0x424F4331` ("BOC1"), `VERSION` = `4`. W1d bumped it from 2 to
+  3, because the 74ls157 and 74ls245 records gained a delay tail; W2c to 4
+  for the `CARRY` block. A v3 program (no `CARRY` block) still loads, as a
+  cold load (ruling R100 (a): the ABI stays 2, and a host on the v3 writer
+  keeps working).
+- **`CARRY` block** (W2c, rulings R57 D8 (a) and D9 (a)). The state a
+  reload carries, which `bo_engine_load` seeds before its settle (see
+  Carry). `L = 0` is a cold load. Its values are records `device, family,
+  version, len, value x len`; `NaN` is a value here (none, or start fresh),
+  unlike params and blobs. The reader checks every record: whole, its
+  device `< D`, at most one per device and family (latches excepted), and a
+  known family at the current version on a device of its kind, with at
+  least its layout's values, each in range. A malformed block is `-1`, and
+  nothing is seeded. A family or version the core does not know is skipped,
+  and a longer record's tail is a later layout's.
 - **Nodes.** As in v1: node 0 is the datum, the net `buildNets` names `gnd`
   when there is one, otherwise a synthetic node with no pins; every other net
   becomes nodes `1..N-1` in `buildNets` order. Node classes (fixed, rail,
@@ -842,6 +856,8 @@ export lands in its list in the same change that adds it.
 | `bo_engine_restore` | `(h, id: u32) -> i32` | Put snapshot `id` back; it stays restorable. `-8` for an id this handle does not hold, `-5` for an unusable handle. | v2 (W2a) |
 | `bo_engine_snapshot_drop` | `(h, id: u32) -> i32` | Free snapshot `id`. `-8` for an id this handle does not hold (a second drop among them), `-5` for an unusable handle. | v2 (W2a) |
 | `bo_engine_snapshot_bytes` | `(h) -> f64` | The handle's snapshot table in bytes, each shared memory image counted once; `NaN` for an unusable handle. | v2 (W2a) |
+| `bo_engine_carry_take` | `(h) -> i32` | Collect every device's carry records ("Carry" below) and return their length in f64; `-5` for an unusable handle, `-4`/`-7` when bringing the partitions to the engine's time fails. Optional, detected by presence. | v2 (W2c) |
+| `bo_engine_carry_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2c) |
 
 **`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
 through W1e. Exact mode makes the rail node free and merges every partition
@@ -1096,6 +1112,50 @@ the readout exports are valid until the next call on that engine.
 trap. The TS side poisons the instance on a trap, and on any non-core error
 thrown during an ABI call (a wasm stack overflow surfaces as a JS
 `RangeError`): every later call throws until the core is re-initialised.
+
+## Carry (W2c)
+
+A reload carries state the way classic's `load()` does (SE:2807-3200). The
+core reads it off the old engine, the host maps it onto the new program's
+devices (`src/core/carry.ts`: by component id, a capacitor also by its two
+nets' fingerprint, each kind-gated), and the new program's `CARRY` block
+(program v4) seeds the load. Ids and nets stay in TS (ruling R57 D8 (a)).
+
+- **Take.** `bo_engine_carry_take(h) -> i32` collects the records and
+  returns their length (or an error code), `bo_engine_carry_ptr(h)` the
+  buffer, valid until the next call on the engine. Both are optional
+  exports, detected by presence (R100 (a)). The take brings a copy of the
+  engine's dynamic partitions to `bo_engine_time` (as `advance(time)` does),
+  so a carry taken where an `advance_for` yielded is the one a plain stop
+  there takes, and the live engine is not touched.
+- **Records** `device, family, version, len, value x len`, version 1:
+
+  | Family | Values |
+  |---|---|
+  | 1 capacitor | `vc`, the charge's voltage (behind any `esr`) |
+  | 2 IC | `kind, tag, family values, reads, slots, drivers` (`carry::ic`) |
+  | 3 battery | `bo_engine_device_state`'s battery layout |
+  | 4 bench PSU (limited) | `reg` (0 CV, 2 CC) |
+  | 5 slow | `failed, stress, temperature, shutdown, ptc_tripped, ptc_stress, ptc_rt, t_hold` |
+  | 6 latch | `code, pin, since, value, limit, aux`, one per latched failure |
+
+  `NaN` is a quantity the device has none of; times are absolute.
+- **Seed**, at `START_TIME` before the settle: a capacitor's `vc` into the
+  solver that holds it (a stepped partition's first solve then seeds its
+  nodes from it, a closed form's first segment starts from it, a fixed
+  pair's anchor is it); a battery's SoC as its `soc0` (so the rail's
+  open-circuit voltage and every fixed node follow it) and its discharge
+  counts; the slow state (stress, temperature and held junction
+  temperature, PTC trip state and timer, failed flags), then the stamps it
+  implies, so the settle's first solve sees an open fuse or a tripped PTC;
+  the latches in record order, not logged again (the host announced them
+  before). A value for an integrator the new device lacks is dropped, and
+  `NaN` starts that quantity fresh. A PSU's regime is not seeded: the
+  settle decides it from the carried charges, as classic's first step does.
+  IC records are checked but not yet seeded (W2c piece 3). The integrator
+  history is not carried, so the first step is backward Euler, as classic
+  forces after a load. The cold-device span widens over carried charges
+  (see the thermal, failures and warnings section).
 
 ## Readouts
 
@@ -4747,16 +4807,17 @@ Constants:
        program with a stepped partition under `INTEGRATION` 1 has no bound
        anywhere, since a node it overshoots can be an IC's supply that
        another partition's outputs follow.
-     - **The span assumes a fresh start** (a forward risk for W2). Every
-       capacitor starts at 0 V and every node inside the span at load
-       (W1b point 5), which the maximum principle needs: it bounds where a
-       node can go, not where it starts. W2's carry-forward of capacitor
-       voltages across a reload breaks that, since a carried capacitor can
-       start outside the new program's span (a source lowered under a
-       charged one). W2 must re-derive the bound (widen it over every
-       carried start) or disable cold devices on a carried load. A carried
-       battery SoC does not move the battery's range while that range is
-       taken over the whole OCV table, as now.
+     - **A carried start** (W2c, ruling R57 D10 (a)). On a cold load every
+       capacitor starts at 0 V and every node inside the span (W1b point
+       5), which the maximum principle needs: it bounds where a node can
+       go, not where it starts. A carried capacitor can start outside the
+       new program's span (a source lowered under a charged one): its free
+       node sits off its fixed one by its `vc` until it discharges. So the
+       span and `|v|` bound are both widened by the sum of the carried
+       charges' `|vc|` (`carry::abs_vc_sum`): 12 V carried onto a 5 V
+       circuit makes a resistor rated past 5 V's power hot. A carried
+       battery SoC does not move the battery's range, which is taken over
+       the whole OCV table.
      - **Series chains** (`settle::resistance_volts_bound`). A resistance
        joined to others through free nodes nothing else touches (two pins
        each) carries the chain's one current, less the node shunts' leak:

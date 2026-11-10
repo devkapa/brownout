@@ -5473,7 +5473,7 @@ mod partitioned_solver_tests {
         Device { kind: kinds::DIP_SWITCH, component_index: ci, pins: pins.into_iter().map(pin).collect(), params, blob: vec![] }
     }
     fn program(node_count: usize, devices: Vec<Device>) -> Program {
-        Program { node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+        Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
     }
     fn all_partitions(solver: &PartitionedSolver) -> Vec<PartitionId> {
         (0..solver.partition_count() as u32).map(PartitionId).collect()
@@ -6006,7 +6006,7 @@ mod partitioned_solver_tests {
         let build_at = |start_time: f64| {
             let mut options = Options::default();
             options.start_time = start_time;
-            let p = Program { node_count: 2, options, digital_slot_count: 0, channel_slot_count: 0, devices: vec![source(0, 1, 0, v0), capacitor(1, 1, 0, c, esr, 0.0)] };
+            let p = Program { carry: Vec::new(), node_count: 2, options, digital_slot_count: 0, channel_slot_count: 0, devices: vec![source(0, 1, 0, v0), capacitor(1, 1, 0, c, esr, 0.0)] };
             let mut solver = PartitionedSolver::build(&p).unwrap();
             solver.resolve_dirty(&[], start_time, &[]).unwrap();
             solver.prepare_readout();
@@ -6087,6 +6087,7 @@ mod partitioned_solver_tests {
             blob: vec![0.0],
         };
         Program {
+            carry: Vec::new(),
             node_count: 3,
             options: Options::default(),
             digital_slot_count: 0,
@@ -6140,6 +6141,7 @@ mod partitioned_solver_tests {
         let ne555 = Device { kind: kinds::NE555, component_index: 4, pins: ne555_pins, params: ne555_params, blob: vec![0.0; 7] };
 
         Program {
+            carry: Vec::new(),
             node_count: 5,
             options: Options::default(),
             digital_slot_count: 0,

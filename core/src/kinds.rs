@@ -756,7 +756,7 @@ mod tests {
     //! message names the field).
     use super::*;
     use crate::error::ERR_MALFORMED;
-    use crate::program::{Program, MAGIC, VERSION};
+    use crate::program::{Program, MAGIC, VERSION_3};
 
     /// `[ocvScale, rBase, tempFactor, depA, depP, depK, capacityAh, soc0,
     /// profileCode]`: a `{5 V, 0.9 ohm}` generic battery.
@@ -781,7 +781,7 @@ mod tests {
     }
 
     fn program(digital_slots: f64, devices: &[Vec<f64>]) -> Vec<f64> {
-        let mut out = vec![MAGIC, VERSION, 4.0, devices.len() as f64, 0.0, digital_slots, 0.0];
+        let mut out = vec![MAGIC, VERSION_3, 4.0, devices.len() as f64, 0.0, digital_slots, 0.0];
         for d in devices {
             out.extend_from_slice(d);
         }
