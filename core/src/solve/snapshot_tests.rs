@@ -415,3 +415,138 @@ fn an_engine_restored_at_every_stop_with_its_scratch_emptied_runs_as_one_never_r
         }
     }
 }
+
+/// W2aV's adversarial round trips (the verifier's own test, kept): a snapshot
+/// at every host stop, then 24 restores to random snapshots, each run on for
+/// a random number of stops (with a live edit every third round where the
+/// board has one), and finally every snapshot run to the end; every stop must
+/// match a fresh run bit for bit, and no stat may ever go down. Trimmed to
+/// run in seconds.
+mod random_restores {
+    use super::super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
+    use super::super::slow_tests::{ring_behind_a_fuse, rollback_rig};
+    use crate::engine::Engine;
+    use crate::program::Program;
+    use crate::snapshot::SnapshotTable;
+
+    fn seen(e: &mut Engine) -> Vec<u64> {
+        let mut row: Vec<u64> = vec![e.time().to_bits()];
+        row.extend(e.voltages().iter().chain(e.currents()).chain(e.digital_slots()).chain(e.channel_slots()).map(|v| v.to_bits()));
+        for channel in 0..4 {
+            let records = e.records(channel).unwrap().to_vec();
+            row.push(records.len() as u64);
+            row.extend(records.iter().map(|v| v.to_bits()));
+        }
+        let eeprom = e.take_eeprom_updates().to_vec();
+        row.push(eeprom.len() as u64);
+        row.extend(eeprom.iter().map(|v| v.to_bits()));
+        row.push(e.next_event_time().to_bits());
+        row.push(e.next_digital_due_time().to_bits());
+        row
+    }
+
+    #[derive(Clone)]
+    struct Host {
+        state: Vec<f64>,
+        next: usize,
+    }
+
+    fn step(e: &mut Engine, host: &mut Host, toggles: &[(f64, usize)], stop: f64) -> Vec<u64> {
+        e.advance(stop).unwrap();
+        let row = seen(e);
+        while host.next < toggles.len() && toggles[host.next].0 <= stop {
+            let d = toggles[host.next].1;
+            host.state[d] = 1.0 - host.state[d];
+            e.set_params(&[(d as u32, 0, host.state[d])]).unwrap();
+            host.next += 1;
+        }
+        row
+    }
+
+    fn stats(e: &Engine) -> Vec<f64> {
+        (0..28).map(|i| e.stat(i)).collect()
+    }
+
+    fn check_monotone(name: &str, prev: &mut Vec<f64>, e: &Engine, what: &str) {
+        let now = stats(e);
+        for i in 0..28 {
+            assert!(now[i].is_nan() || prev[i].is_nan() || now[i] >= prev[i], "{name}: stat {i} went {} -> {} at {what}", prev[i], now[i]);
+        }
+        *prev = now;
+    }
+
+    fn board(name: &str, p: &Program, toggles: &[(f64, usize)], stops: &[f64], mutate: Option<(u32, u32)>) {
+        let fresh = || Host { state: p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect(), next: 0 };
+        let mut plain = Engine::load(p).unwrap();
+        let mut ph = fresh();
+        let expected: Vec<Vec<u64>> = stops.iter().map(|&s| step(&mut plain, &mut ph, toggles, s)).collect();
+
+        let mut e = Engine::load(p).unwrap();
+        let mut host = fresh();
+        let mut table = SnapshotTable::default();
+        let mut snaps: Vec<(u32, Host)> = Vec::new();
+        let mut prev = stats(&e);
+        for (k, &s) in stops.iter().enumerate() {
+            let row = step(&mut e, &mut host, toggles, s);
+            assert!(row == expected[k], "{name}: taking snapshots perturbed stop {k}");
+            snaps.push((table.take(&e), host.clone()));
+            check_monotone(name, &mut prev, &e, "snapshot");
+        }
+        let n = stops.len();
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for round in 0..24 {
+            let j = (next() % n as u64) as usize;
+            assert!(table.restore(&mut e, snaps[j].0));
+            check_monotone(name, &mut prev, &e, "restore");
+            let mut h = snaps[j].1.clone();
+            let reach = ((next() % (n - j) as u64) as usize).min(n - j - 1);
+            for k in j + 1..=(j + reach).min(n - 1) {
+                let row = step(&mut e, &mut h, toggles, stops[k]);
+                assert!(row == expected[k], "{name}: round {round}: after restoring snapshot {j}, stop {k} differs");
+            }
+            check_monotone(name, &mut prev, &e, "run");
+            if let Some((d, pi)) = mutate {
+                if round % 3 == 0 {
+                    let _ = e.set_params(&[(d, pi, 1.0)]);
+                }
+            }
+        }
+        for j in 0..n {
+            assert!(table.restore(&mut e, snaps[j].0));
+            check_monotone(name, &mut prev, &e, "final restore");
+            let mut h = snaps[j].1.clone();
+            for k in j + 1..n {
+                let row = step(&mut e, &mut h, toggles, stops[k]);
+                assert!(row == expected[k], "{name}: final: snapshot {j}, stop {k} differs");
+            }
+        }
+        for (id, _) in &snaps {
+            assert!(table.drop_snapshot(*id));
+        }
+        assert_eq!(table.bytes(), 0.0, "{name}: table empties");
+    }
+
+    #[test]
+    fn snapshots_at_every_stop_survive_random_restores_with_live_edits() {
+        let stops757 = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.07025570911480136];
+        board("757/0", &cold_757_tpl0(), &[], &stops757, None);
+        let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21)];
+        board("2575/2", &cold_2575_tpl2(), &t2575, &STOPS_2575[..32], Some((14, 0)));
+        let stops287 = [0.006272879077239732, 0.0104, 0.010400001, 0.0104001, 0.0105, 0.011, 0.014446754687130081, 0.02, 0.04];
+        board("287/3", &cold_287_tpl3(), &[], &stops287, None);
+        board("474/5", &cold_474_tpl5(), &[], &[0.0209, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05], None);
+        let stops_fuse: Vec<f64> = (1..=14).map(|k| k as f64 * 5e-3).collect();
+        board("fuse", &ring_behind_a_fuse(), &[], &stops_fuse, Some((4, 0)));
+        let (p, t, s) = cold_1838_tpl1();
+        let half = s.len() / 2;
+        board("1838/1", &p, &t, &s[..half], None);
+        let stops_rig: Vec<f64> = (1..=8).map(|k| k as f64 * 0.125).collect();
+        board("rollback rig", &rollback_rig(), &[], &stops_rig, None);
+    }
+}
