@@ -936,7 +936,7 @@ function netFingerprint(net: Net, excludeCompId: string): string {
  * Normalised so swapping net0/net1 gives the same key; `flipped` tells
  * the caller whether to negate the stored value (for polarity consistency).
  */
-function netPairKey(
+export function netPairKey(
   net0: Net,
   net1: Net,
   excludeCompId: string,
