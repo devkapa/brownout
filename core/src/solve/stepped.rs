@@ -1836,7 +1836,8 @@ impl SteppedSolver {
     /// Each capacitor's committed charge voltage, by device (W2c's carry).
     /// Taken between calls, after the horizon clamp, so at the engine's time.
     pub(crate) fn carry_caps(&self, out: &mut Vec<(usize, f64)>) {
-        for part in self.partitions.values() {
+        // A parked `cc_switch` copy's charge is the closed form's to carry.
+        for part in self.partitions.values().filter(|p| !p.parked) {
             out.extend(part.shape.capacitors.iter().zip(&part.vc).map(|(c, &vc)| (c.device_index, vc)));
         }
     }

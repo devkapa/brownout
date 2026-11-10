@@ -11520,7 +11520,7 @@ fn a_closed_form_partition_carrying_a_cc_rail_with_no_rail_capacitor_steps_with_
 /// ground. CV while it is open (50 mA at most); closed it draws 250 mA, CC,
 /// where the rail is `(0.1 + vc / 100) / 0.06` and `vc` rises toward 2 V
 /// with `tau` 1.2 ms. `extra` joins it.
-fn cc_switch_board(extra: Vec<Device>) -> Program {
+pub(super) fn cc_switch_board(extra: Vec<Device>) -> Program {
     let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), resistor(1, 1, 2, 100.0), capacitor(2, 2, 0, 1e-5, 0.0), switch(3, 1, 3, false), resistor(4, 3, 0, 20.0)];
     devices.extend(extra);
     let nodes = devices.iter().flat_map(|d| d.pins.iter().map(|p| p.node)).max().unwrap() + 1;

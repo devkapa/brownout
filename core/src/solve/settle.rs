@@ -2629,7 +2629,8 @@ impl PartitionedSolver {
         let mut caps: Vec<(usize, f64)> = Vec::new();
         self.stepped.carry_caps(&mut caps);
         self.closed_form.carry_caps(now, &mut caps);
-        caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.device_index, c.vc_at(now))));
+        let in_cc = self.cc_rail_cap_charges(now);
+        caps.extend(self.fixed_pair_capacitors.iter().enumerate().map(|(k, c)| (c.device_index, in_cc.iter().find(|&&(j, _)| j == k).map_or_else(|| c.vc_at(now), |&(_, vc)| vc))));
         caps.sort_by_key(|c| c.0);
         for (d, vc) in caps {
             crate::carry::push(out, d, crate::carry::FAMILY_CAPACITOR, &[vc]);
@@ -2663,6 +2664,23 @@ impl PartitionedSolver {
         for r in latched {
             crate::carry::push(out, r.device as usize, crate::carry::FAMILY_LATCH, &[r.code as f64, r.pin as f64, r.since, r.value, r.limit, r.aux]);
         }
+        let mut sag = Vec::new();
+        for ic in &self.slow_model.sag_ics {
+            let cells = ic.first..ic.first + ic.outputs.len();
+            if cells.clone().all(|c| self.slow.sag_cell(c).state == SagState::Ok) {
+                continue;
+            }
+            sag.clear();
+            sag.push(ic.outputs.len() as f64);
+            for c in cells {
+                sag.extend(match self.slow.sag_cell(c).state {
+                    SagState::Ok => [0.0, nan, nan],
+                    SagState::Pending { dir, t_s } => [1.0, dir.aux(), t_s],
+                    SagState::Latched { dir } => [2.0, dir.aux(), nan],
+                });
+            }
+            crate::carry::push(out, ic.device, crate::carry::FAMILY_SAG, &sag);
+        }
     }
 
     /// W2c's seed (program v4's `CARRY` block, already validated), at load
@@ -2677,7 +2695,7 @@ impl PartitionedSolver {
     /// from the carried charges, as classic's first step does from its
     /// carried `reg` and the same charges (a rail capacitor short of the
     /// setpoint draws past the limit).
-    pub(crate) fn seed_carry(&mut self, block: &[f64]) {
+    pub(crate) fn seed_carry(&mut self, block: &[f64]) -> Result<(), String> {
         use crate::carry::{self, slow::*};
         let t = self.start_time;
         let mut touched: Vec<usize> = Vec::new();
@@ -2735,6 +2753,27 @@ impl PartitionedSolver {
                 carry::FAMILY_LATCH => {
                     self.slow.seed_latch(LatchRecord { device: d as u32, code: v[0] as u32, pin: v[1] as i32, since: v[2], value: v[3], limit: v[4], aux: v[5] });
                 }
+                carry::FAMILY_SAG => {
+                    let Some(&k) = self.slow_model.sag_of_device.get(d).filter(|&&k| k != u32::MAX) else { continue };
+                    let (first, n) = (self.slow_model.sag_ics[k as usize].first, self.slow_model.sag_ics[k as usize].outputs.len());
+                    if v[0] != n as f64 {
+                        return Err(format!("carry: IC device {d}'s {} output_sag windows for {n} outputs", v[0]));
+                    }
+                    let token = self.slow.token(d);
+                    for (i, c) in v[1..1 + 3 * n].chunks_exact(3).enumerate() {
+                        let dir = if c[1] == 1.0 { sag::Dir::High } else { sag::Dir::Low };
+                        let state = match c[0] {
+                            1.0 => {
+                                // Its window ends where it would have.
+                                self.pending_schedule.push((sag::window_end(c[2]), EventKind::Slow { device: DeviceId(d as u32), token: token & !crate::events::SLOW_ANCHOR }));
+                                SagState::Pending { dir, t_s: c[2] }
+                            }
+                            2.0 => SagState::Latched { dir },
+                            _ => SagState::Ok,
+                        };
+                        *self.sw().sag_state_mut(first + i) = state;
+                    }
+                }
                 _ => {}
             }
         }
@@ -2743,6 +2782,7 @@ impl PartitionedSolver {
                 self.apply_stamp(i, true);
             }
         }
+        Ok(())
     }
 
     pub(super) fn slow_state_of(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {

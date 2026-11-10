@@ -1361,7 +1361,8 @@ impl ClosedFormSolver {
 
     /// Each partition's capacitor voltage at `now`, by device (W2c's carry).
     pub(crate) fn carry_caps(&self, now: f64, out: &mut Vec<(usize, f64)>) {
-        out.extend(self.parts.iter().map(|p| (p.cap.device_index, if p.seg.is_some() { vc_of(p, now) } else { p.seg_vc0 })));
+        // A parked `cc_switch` copy's charge is the stepped one's to carry.
+        out.extend(self.parts.iter().filter(|p| !p.parked).map(|p| (p.cap.device_index, if p.seg.is_some() { vc_of(p, now) } else { p.seg_vc0 })));
     }
 
     /// W2c's seed, at load before the first segment: capacitor `device`'s

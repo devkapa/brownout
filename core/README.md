@@ -1151,8 +1151,13 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   | 4 bench PSU (limited) | `reg` (0 CV, 2 CC) |
   | 5 slow | `failed, stress, temperature, shutdown, ptc_tripped, ptc_stress, ptc_rt, t_hold` |
   | 6 latch | `code, pin, since, value, limit, aux`, one per latched failure |
+  | 7 output_sag windows | `n, (state, dir, t_s) x n` per output pin: 0 none, 1 pending since `t_s`, 2 latched |
 
-  `NaN` is a quantity the device has none of; times are absolute.
+  `NaN` is a quantity the device has none of; times are absolute. A
+  capacitor's charge is the running solver's: a `cc_switch` partition's
+  from whichever copy runs it, and a rail capacitor's in CC from the rail's
+  segment (its charge less what the closed-form draws took since it was
+  aimed), which its fixed pair does not hold there.
 - **Seed**, at `START_TIME` before the settle: a capacitor's `vc` into the
   solver that holds it (a stepped partition's first solve then seeds its
   nodes from it, a closed form's first segment starts from it, a fixed
@@ -1162,7 +1167,8 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   temperature, PTC trip state and timer, failed flags), then the stamps it
   implies, so the settle's first solve sees an open fuse or a tripped PTC;
   the latches in record order, not logged again (the host announced them
-  before). A value for an integrator the new device lacks is dropped, and
+  before), and the `output_sag` windows (a pending one ends where it would
+  have, a latched one stays published). A value for an integrator the new device lacks is dropped, and
   `NaN` starts that quantity fresh. A PSU's regime is not seeded: CV/CC
   is a function of the state with no hysteresis (CC exactly while the CV
   draw would pass the limit, CV once the CC rail reaches the setpoint), so

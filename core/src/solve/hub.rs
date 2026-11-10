@@ -979,6 +979,25 @@ impl PartitionedSolver {
     /// Each rail capacitor's `(position in fixed_pair_capacitors, sign, far
     /// node)`: `sign` is `+1` when its `pins[0]` is on the rail, so `sign *
     /// vc` is its charge measured from the far node to the rail.
+    /// W2c's carry: in CC the rail's segment carries the rail capacitors
+    /// (Rails point 4), so a fixed pair's own anchor is not their charge.
+    /// Their charge is the segment's at `now`, less what the closed-form
+    /// draws took since it was aimed (as the next rail solve reads it), each
+    /// capacitor with an esr at that charge and one without at the rail
+    /// (as a CC exit hands them on, `tie_exit`), by fixed-pair index. Empty
+    /// unless a PSU hub is in CC with a segment.
+    pub(super) fn cc_rail_cap_charges(&self, now: f64) -> Vec<(usize, f64)> {
+        let Some(seg) = self.hub.as_ref().filter(|h| h.state.reg == Regime::Cc).and_then(|h| h.state.cap_seg.as_ref()) else { return Vec::new() };
+        let (_, _, _, cf_parts) = self.partition_totals(now);
+        let (u, q) = (seg.at(now), seg.charge_at(now) - self.cf_drift_charge(now, &cf_parts));
+        self.rail_cap_ends()
+            .map(|(k, sign, far)| {
+                let held = if self.fixed_pair_capacitors[k].esr > 0.0 { q } else { u };
+                (k, sign * (held - self.voltages[far]))
+            })
+            .collect()
+    }
+
     fn rail_cap_ends(&self) -> impl Iterator<Item = (usize, f64, usize)> + '_ {
         let hub = self.hub.as_ref().expect("a hub");
         hub.caps.iter().map(move |&(k, _)| {

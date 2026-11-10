@@ -36,6 +36,13 @@ pub const FAMILY_SLOW: u32 = 5;
 /// IC's `output_sag`, one per pin).
 pub const FAMILY_LATCH: u32 = 6;
 
+/// An IC's `output_sag` windows (W1g point 9), one per output-capable pin
+/// in pin order: `[n, (state, dir, t_s) x n]`, `state` 0 none, 1 pending
+/// since `t_s`, 2 latched; `dir` 1 HIGH, 0 LOW (`NaN` with no state); `t_s`
+/// `NaN` unless pending. Only an IC with a window open or latched has one
+/// (classic carries the debounce count with the failures, `failureStress`).
+pub const FAMILY_SAG: u32 = 7;
+
 /// Every family's current layout version.
 pub const VERSION: u32 = 1;
 
@@ -259,6 +266,7 @@ fn min_len(family: u32) -> Option<usize> {
         FAMILY_PSU => 1,
         FAMILY_SLOW => slow::LEN,
         FAMILY_LATCH => 6,
+        FAMILY_SAG => 1,
         _ => return None,
     })
 }
@@ -310,6 +318,18 @@ pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(),
                     && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
                     && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
                     && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+            }
+            FAMILY_SAG => {
+                let n = v[0];
+                let whole = n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n * 3.0 + 1.0 <= v.len() as f64;
+                crate::digital::is_ic(d.kind)
+                    && whole
+                    && v[1..1 + 3 * n as usize].chunks_exact(3).all(|c| match c[0] {
+                        0.0 => c[1].is_nan() && c[2].is_nan(),
+                        1.0 => flag(c[1]) && c[2].is_finite(),
+                        2.0 => flag(c[1]) && c[2].is_nan(),
+                        _ => false,
+                    })
             }
             FAMILY_LATCH => {
                 crate::slow::failures::FailureKind::from_code(v[0]).is_some() && v[1] >= -1.0 && v[1].fract() == 0.0 && v[1] < u32::MAX as f64 && v[2].is_finite()

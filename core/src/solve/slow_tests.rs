@@ -1236,7 +1236,7 @@ fn an_led_across_two_volts_fails_fast_then_cools_to_ambient() {
 
 /// A 74LS00 with 1A and 1B grounded, so 1Y is HIGH, into 100 ohm: `5 * 100 /
 /// (100 + 156.25) = 1.9512195` V against `vih` 2.0 (probe F `sag`).
-fn ls00_sag() -> Program {
+pub(super) fn ls00_sag() -> Program {
     program(4, vec![source(0, 1, 0, 5.0), ic(kinds::IC_74LS00, 1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 3, 0, 0, 3], 1e-8, 0), resistor(2, 2, 0, 100.0)])
 }
 

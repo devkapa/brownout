@@ -817,7 +817,7 @@ impl Engine {
         let program = with_soc.as_ref().unwrap_or(program);
         let mut solver = PartitionedSolver::build(program)?;
         if !program.carry.is_empty() {
-            solver.seed_carry(&program.carry);
+            solver.seed_carry(&program.carry).map_err(BoError::malformed)?;
         }
         let partition_count = solver.partition_count();
         let static_solve_count = solver.static_solve_count();

@@ -7,8 +7,8 @@
  * core knows device indices only; ids and nets live here. `mapCarry` moves
  * each record onto the new program's device by classic's own reload rules
  * (`SimEngine.load`, SE:2807-3200):
- * - by component id, kind-gated: an IC's state, its slow physics and its
- *   latched failures carry only onto the same kind (a same-id kind swap
+ * - by component id, kind-gated: an IC's state, its slow physics, its
+ *   latched failures and output_sag windows carry only onto the same kind (a same-id kind swap
  *   starts from the new kind's defaults);
  * - a capacitor by id, else by the fingerprint of its two nets with itself
  *   left out (`netPairKey`, classic's own), its voltage's sign flipped with
@@ -32,6 +32,7 @@ export const CARRY_FAMILY = {
   psu: 4,
   slow: 5,
   latch: 6,
+  sag: 7,
 } as const;
 
 /** Every family's layout version this side reads. */
@@ -182,6 +183,7 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
         }
         break;
       case CARRY_FAMILY.latch:
+      case CARRY_FAMILY.sag:
         if (sameKind) out.push({ ...r, device: at });
         break;
       case CARRY_FAMILY.battery: {

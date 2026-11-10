@@ -4,8 +4,8 @@
 //! capacitor, battery, PSU, PTC and thermal values to `bo_engine_device_state`,
 //! a latched failure to its record, an IC's drivers to the kernel's table.
 
-use super::rail_tests::{cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575};
-use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
+use super::rail_tests::{cc_switch_board, cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575};
+use super::slow_tests::{ls00_sag, ring_behind_a_fuse, rollback_rig};
 use crate::carry::{self, Record};
 use crate::digital;
 use crate::engine::Engine;
@@ -211,7 +211,8 @@ fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
     // step on 757 tpl 0 and 2575 tpl 2 is checked: bit for bit, since the
     // run is the same and the take clamps a copy (R101: an earlier take that
     // clamped the live engine changed the run after it, which read as a
-    // cadence difference of up to 3.3 mV on 2575's device 9).
+    // cadence difference of up to 3.3 mV on 2575's device 9), but for a CC
+    // rail capacitor's charge, to rounding (below).
     let boards: Vec<(&str, Program, Vec<f64>, f64)> = vec![
         ("757 tpl 0", cold_757_tpl0(), vec![0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986], 0.07025570911480136),
         ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..2].to_vec(), STOPS_2575[2]),
@@ -234,8 +235,19 @@ fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
             let mut plain = advanced(p, before);
             plain.advance(t_y).unwrap();
             let at_stop = take(&mut plain);
+            // Bit for bit, but a CC rail capacitor's charge: the rail's
+            // segment holds it, and the stop's horizon clamp re-solves the
+            // rail where the yield's last instant did not, so the two
+            // segments agree to rounding (R101's 0.00 W0).
+            let (a, b) = (carry::records(&at_yield).unwrap(), carry::records(&at_stop).unwrap());
+            assert_eq!(a.len(), b.len(), "{name}: yield {yields}: as many records");
+            for (x, y) in a.iter().zip(&b) {
+                let close = |p: f64, q: f64| p.to_bits() == q.to_bits() || (p - q).abs() <= 1e-12 * p.abs().max(q.abs());
+                let same = (x.device, x.family, x.version, x.values.len()) == (y.device, y.family, y.version, y.values.len())
+                    && if x.family == carry::FAMILY_CAPACITOR { close(x.values[0], y.values[0]) } else { x.values.iter().zip(y.values).all(|(p, q)| p.to_bits() == q.to_bits()) };
+                assert!(same, "{name}: yield {yields} at t = {t_y}: {x:?} against {y:?}");
+            }
             let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-            assert_eq!(bits(&at_yield), bits(&at_stop), "{name}: yield {yields} at t = {t_y}");
             let mut raw = unclamped;
             let mut out = Vec::new();
             raw.debug_carry_unclamped(&mut out);
@@ -649,4 +661,90 @@ fn a_snapshot_taken_after_a_carried_load_round_trips() {
     let first = run(&mut seeded);
     seeded.restore(&snap);
     assert!(first == run(&mut seeded), "the run from the restored snapshot is the run from the load");
+}
+
+#[test]
+fn a_cc_rail_capacitors_carry_is_its_charge_behind_the_esr() {
+    // Corpus 45: a 5 V, 100 mA PSU into 100 ohm and 1 mF with 50 mohm esr,
+    // in CC from the load (the capacitor discharged). In CC the rail's
+    // segment carries the capacitor (Rails point 4): its charge is the rail
+    // less the esr drop of its current, `vc = dV - esr I`, which a reload
+    // starts the rail from again, so the rail comes back where it was.
+    let p = {
+        let devices = vec![
+            Device { kind: kinds::BENCH_PSU, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0, 0.1], blob: vec![] },
+            Device { kind: kinds::RESISTOR, component_index: 1, pins: vec![pin(1), pin(0)], params: vec![100.0], blob: vec![] },
+            Device { kind: kinds::CAPACITOR, component_index: 2, pins: vec![pin(1), pin(0)], params: vec![1e-3, 0.05, 0.0], blob: vec![] },
+        ];
+        Program { carry: Vec::new(), node_count: 2, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    };
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(2.5e-3).unwrap();
+    let (rail, i_cap) = (e.voltages()[1], e.currents()[2]);
+    assert!(rail < 1.0 && i_cap > 0.09, "in CC: rail {rail}, capacitor {i_cap}");
+    let buf = take(&mut e);
+    let vc = one(&buf, carry::FAMILY_CAPACITOR, 2).values[0];
+    assert!((vc - (rail - 0.05 * i_cap)).abs() <= 1e-12, "vc {vc} against the rail less the esr drop {}", rail - 0.05 * i_cap);
+    let seeded = reload(&p, &buf, 2.5e-3);
+    assert!((seeded.voltages()[1] - rail).abs() <= 1e-9, "the reload's rail {} against {rail}", seeded.voltages()[1]);
+}
+
+#[test]
+fn a_latched_output_sag_carries_and_is_not_announced_again() {
+    // A 74LS00's 1Y HIGH into 100 ohm sits at 1.95 V against vih 2.0: it
+    // latches one window (10 ns) after the load. Carried, the record is
+    // still published at the reload and after, from its window state.
+    let p = ls00_sag();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(1e-6).unwrap();
+    let before = e.records(0).unwrap().to_vec();
+    assert_eq!(before.len(), 7, "latched");
+    e.records(3).unwrap();
+    let buf = take(&mut e);
+    let mut seeded = reload(&p, &buf, 1e-6);
+    assert_eq!(seeded.records(0).unwrap().to_vec(), before, "still latched at the reload");
+    assert!(seeded.records(3).unwrap().is_empty(), "and not logged again");
+    for t in [2e-6, 1e-3] {
+        e.advance(t).unwrap();
+        seeded.advance(t).unwrap();
+        assert_eq!(seeded.records(0).unwrap().to_vec(), e.records(0).unwrap().to_vec(), "at {t}");
+    }
+}
+
+#[test]
+fn a_pending_output_sag_window_carries_its_start() {
+    // Reloaded 5 ns into the window that opened at the load: it latches when
+    // that window ends (10 ns), as the engine it was taken from, not 10 ns
+    // after the reload.
+    let p = ls00_sag();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.5e-8).unwrap();
+    assert!(e.records(0).unwrap().is_empty(), "pending");
+    let buf = take(&mut e);
+    let mut seeded = reload(&p, &buf, 0.5e-8);
+    for t in [0.9e-8, 1.05e-8, 1.4e-8, 2e-8] {
+        e.advance(t).unwrap();
+        seeded.advance(t).unwrap();
+        assert_eq!(seeded.records(0).unwrap().to_vec(), e.records(0).unwrap().to_vec(), "at {t}");
+    }
+    assert_eq!(e.records(0).unwrap().len(), 7, "latched by then");
+}
+
+#[test]
+fn a_cc_switch_partitions_capacitor_is_taken_once_from_the_solver_running_it() {
+    // R59 (1) (B): a `cc_switch` partition is compiled by both dynamic
+    // solvers, the closed form running it in CV and the stepped copy in CC,
+    // the other parked. Its capacitor carries once, from the one running
+    // (external corpus: a record from each was a repeated record, -1).
+    let p = cc_switch_board(vec![]);
+    let mut e = Engine::load(&p).unwrap();
+    for (t, closed) in [(2e-3, false), (4e-3, true)] {
+        e.set_params(&[(3, 0, f64::from(u8::from(closed)))]).unwrap();
+        e.advance(t).unwrap();
+        let buf = take(&mut e);
+        let r = one(&buf, carry::FAMILY_CAPACITOR, 2);
+        let across = e.voltages()[2];
+        assert!((r.values[0] - across).abs() <= 1e-9, "at {t}: vc {} against {across}", r.values[0]);
+        reload(&p, &buf, t);
+    }
 }
