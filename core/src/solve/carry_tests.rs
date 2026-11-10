@@ -748,3 +748,60 @@ fn a_cc_switch_partitions_capacitor_is_taken_once_from_the_solver_running_it() {
         reload(&p, &buf, t);
     }
 }
+
+#[test]
+fn a_reload_exactly_on_a_cc_exit_runs_on_as_the_fine_reference() {
+    // Corpus 47: 5 V, 100 mA into 100 uF (no esr) from 0 V. In CC the rail
+    // is the charge, 1000 V/s, so it reaches the setpoint at 5 ms exactly and
+    // the PSU leaves CC there. Reloaded at that very instant, the core runs
+    // on as the fine reference does (exact mode, trapezoidal, 1 us host
+    // steps): the rail within W0 at every reading, and the supply current
+    // from the next microsecond on at the hand value, 0 (at 5 ms itself it
+    // steps from 100 mA to 0; the reference's own current there rings, its
+    // trapezoidal companion across an esr-free capacitor clamped at the
+    // setpoint, so only its rail is read). The
+    // corpus test reloads off this instant because there classic reads its
+    // seed solve's 1 ps companion artifact, not the carry: its rail stood at
+    // 4.99999999986 V, the seed takes the capacitor to the setpoint in 1 ps,
+    // and the supply reads C dV / 1 ps = 1e-4 x 1.43e-10 / 1e-12 = -14.3 mA
+    // (measured, HeadlessRunner reloaded at 5 ms), where it is 100 mA just
+    // before and 0 just after.
+    let p = {
+        let devices = vec![
+            Device { kind: kinds::BENCH_PSU, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0, 0.1], blob: vec![] },
+            Device { kind: kinds::CAPACITOR, component_index: 1, pins: vec![pin(1), pin(0)], params: vec![1e-4, 0.0, 0.0], blob: vec![] },
+        ];
+        Program { carry: Vec::new(), node_count: 2, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices }
+    };
+    let reads = [5e-3, 5e-3 + 1e-6, 5.5e-3, 7e-3, 10e-3];
+    let fine = {
+        let mut q = p.clone();
+        q.options.no_rail_shortcut = true;
+        q.options.integration = 1;
+        let mut e = Engine::load(&q).unwrap();
+        let (mut t, mut out) = (0.0f64, Vec::new());
+        for &s in &reads {
+            while t < s {
+                t = (t + 1e-6).min(s);
+                e.advance(t).unwrap();
+            }
+            out.push(e.voltages()[1]);
+        }
+        out
+    };
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(5e-3).unwrap();
+    let buf = take(&mut e);
+    let mut seeded = reload(&p, &buf, 5e-3);
+    let w0 = |got: f64, want: f64, abs: f64| (got - want).abs() <= abs + 1e-3 * got.abs().max(want.abs());
+    for (k, &t) in reads.iter().enumerate() {
+        seeded.advance(t).unwrap();
+        let (rail, i) = (seeded.voltages()[1], seeded.currents()[0]);
+        let rail_ref = fine[k];
+        assert!(w0(rail, rail_ref, 1e-4), "at {t}: rail {rail} against the fine reference's {rail_ref}");
+        assert!((rail - 5.0f64.min(1000.0 * t)).abs() <= 1e-4, "at {t}: rail {rail} against the hand value");
+        if t > 5e-3 {
+            assert!(w0(i, 0.0, 1e-9), "at {t}: supply {i} against 0");
+        }
+    }
+}
