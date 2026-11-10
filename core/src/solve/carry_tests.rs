@@ -322,6 +322,12 @@ fn a_load_seeded_from_a_carry_holds_that_carry() {
         let mut e = advanced(&p, &stops);
         let t = e.time();
         let buf = take(&mut e);
+        if name == "2575 tpl 2" {
+            // Pins the regime rule: the PSU is in CC here, and the reload,
+            // which does not seed it, comes back in CC from the charges.
+            let psu = p.devices.iter().position(|d| d.kind == kinds::BENCH_PSU).unwrap();
+            assert_eq!(one(&buf, carry::FAMILY_PSU, psu).values, &[2.0], "{name}: the PSU is in CC");
+        }
         let mut seeded = reload(&p, &buf, t);
         let again = take(&mut seeded);
         let (want, got) = (bits_of(&buf, &SEEDED), bits_of(&again, &SEEDED));

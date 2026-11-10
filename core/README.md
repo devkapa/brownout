@@ -1150,8 +1150,12 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   implies, so the settle's first solve sees an open fuse or a tripped PTC;
   the latches in record order, not logged again (the host announced them
   before). A value for an integrator the new device lacks is dropped, and
-  `NaN` starts that quantity fresh. A PSU's regime is not seeded: the
-  settle decides it from the carried charges, as classic's first step does.
+  `NaN` starts that quantity fresh. A PSU's regime is not seeded: CV/CC
+  is a function of the state with no hysteresis (CC exactly while the CV
+  draw would pass the limit, CV once the CC rail reaches the setpoint), so
+  the settle derives it from the carried charges, as classic's first step
+  does (2575 tpl 2 reloaded in CC comes back in CC, a test pins it). A PSU
+  model that gains hysteresis must carry its regime.
   IC records are checked but not yet seeded (W2c piece 3). The integrator
   history is not carried, so the first step is backward Euler, as classic
   forces after a load. The cold-device span widens over carried charges
