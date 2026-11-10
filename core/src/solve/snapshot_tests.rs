@@ -550,3 +550,40 @@ mod random_restores {
         board("rollback rig", &rollback_rig(), &[], &stops_rig, None);
     }
 }
+
+#[test]
+fn a_slide_restored_mid_way_goes_on_bit_identically_with_its_duty_and_exits() {
+    // W2a's plan for ruling R92: 757 tpl 0's 555 slides at its 1.8 V floor
+    // from 0.17 s (its chatter entry, R95 (b)). Snapshot at 0.25 s mid-slide,
+    // run 20 ms in 1 ms stops, restore, run again: the same stops bit for
+    // bit, and at each the same hold (the duty's bits) and the same episode
+    // (the chatter bracket, the drift measure and the exits).
+    let p = cold_757_tpl0();
+    let stops: Vec<f64> = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25].to_vec();
+    let after: Vec<f64> = (1..=20).map(|k| 0.25 + k as f64 * 1e-3).collect();
+    let mut e = Engine::load(&p).unwrap();
+    for &t in &stops {
+        e.advance(t).unwrap();
+    }
+    let hold = e.debug_solver().power_hold(10);
+    assert!(matches!(hold.kind, crate::digital::power::HoldKind::Duty(_)), "sliding at 0.25 s: {hold:?}");
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    let mut go = |e: &mut Engine| -> Vec<(Vec<u64>, crate::digital::power::PowerHold, super::hold::Episode)> {
+        after.iter().map(|&t| {
+            e.advance(t).unwrap();
+            let s = e.debug_solver();
+            let (h, ep) = (s.power_hold(10), s.episode(10));
+            (seen(e), h, ep)
+        }).collect()
+    };
+    let first = go(&mut e);
+    assert!(first.iter().all(|r| matches!(r.1.kind, crate::digital::power::HoldKind::Duty(_))), "sliding through the 20 ms");
+    assert!(table.restore(&mut e, id), "the id is held");
+    let again = go(&mut e);
+    for (k, (a, b)) in first.iter().zip(&again).enumerate() {
+        assert!(a.0 == b.0, "stop {} at {} differs", k, after[k]);
+        assert_eq!(a.1, b.1, "stop {k}: the hold");
+        assert_eq!(a.2, b.2, "stop {k}: the episode");
+    }
+}

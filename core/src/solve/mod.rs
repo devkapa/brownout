@@ -1832,6 +1832,15 @@ pub(crate) fn ic_driver_branches(power: &digital::power::IcPower, driver: &Drive
 /// slot, as curves in the IC's supply difference (Rails point 3), scaled by
 /// the drive weight `power` carries (ruling R92).
 pub(crate) fn ic_driver_curves(power: &digital::power::IcPower, driver: &Driver, ic: &digital::IcRecord) -> [Option<digital::power::SupplyCurve>; 2] {
+    // A slide at duty 0 drives nothing, as an unpowered chip: a curve scaled
+    // to 0 left its partition's curvature bound unformed, so its band was the
+    // narrowest and the rail solved it again at each move: cold 2575 tpl 2,
+    // its 555 on the flat end at 0 while its rail ramped at 9e6 V/s, took
+    // `Rail` events 1 fs apart, 276,982 in a row, for a host stepping on
+    // each event (REF's ruling (d) tests).
+    if power.weight == 0.0 {
+        return [None, None];
+    }
     unweighted_driver_curves(driver, ic).map(|c| c.map(|c| c.scaled(power.weight)))
 }
 
