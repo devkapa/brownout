@@ -1066,7 +1066,8 @@ restored between calls only, so no instant is ever half done in one.
   re-anchors at the restore, to (busy now, the restored time), since a
   restore moves simulated time back while wall time runs on.
 - **Ids.** One counter for the module issues them and never reuses one. A
-  load starts the handle's table afresh, so every id taken before it, like
+  load starts the handle's table afresh, a failed one too (which keeps the
+  old program), so every id taken before it, like
   one dropped or one from another handle, reads `-8`. The core sets no count
   or byte cap: WASM memory never shrinks, so the host owns the lifetime (the
   facade drops a snapshot on `dispose()` or when its object is collected).

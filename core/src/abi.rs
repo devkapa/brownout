@@ -183,7 +183,15 @@ pub extern "C" fn bo_engine_load(h: u32, ptr: *const f64, len_f64: u32) -> i32 {
             *slot = HandleState::Loaded(engine, SnapshotTable::default());
             0
         }
-        Err(err) => fail(&err),
+        Err(err) => {
+            // A failed load keeps the old program but retires its snapshots,
+            // as every load does (README "Snapshots"): the host asked for a
+            // new program, and its facade has already dropped the old ones.
+            if let HandleState::Loaded(_, table) = slot {
+                *table = SnapshotTable::default();
+            }
+            fail(&err)
+        }
     }
 }
 
@@ -1363,6 +1371,22 @@ mod tests {
         assert_eq!(bo_engine_snapshot_bytes(h), 0.0, "the load emptied the table");
         let c = bo_engine_snapshot(h);
         assert!(c > b, "ids are never reused: {c} after {b}");
+    }
+
+    #[test]
+    fn a_failed_load_retires_every_snapshot_too() {
+        // README "Snapshots": a load, failed ones included, retires the ids
+        // taken before it, even though a failed load keeps the old program.
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &switch_program()), 0);
+        let id = bo_engine_snapshot(h);
+        assert_ne!(id, 0);
+        let malformed = vec![1.0, 2.0, 3.0];
+        assert_eq!(load(h, &malformed), -1);
+        assert!(node2(h).abs() < 1e-6, "the old program is still loaded");
+        assert_eq!(bo_engine_restore(h, id), -8, "an id from before the failed load");
+        assert_eq!(bo_engine_snapshot_bytes(h), 0.0);
     }
 
     #[test]
