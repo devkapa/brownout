@@ -248,19 +248,24 @@ fn thresholds_for(ic: &IcRecord, vs: f64) -> (f64, f64) {
 /// The supply differences `vs` at which [`thresholds_for`]'s clamps start
 /// to scale: past them each generic threshold is affine in `vs`, and a
 /// crossing solved under a moving supply must not step across one (Rails
-/// point 4). Empty when both levels are fixed.
-pub fn threshold_kinks(ic: &IcRecord) -> Vec<f64> {
+/// point 4), the first `n` of the array. None when both levels are fixed.
+pub fn threshold_kinks(ic: &IcRecord) -> ([f64; 2], usize) {
     if ic.cmos_ratio {
-        return vec![0.2 / 0.3, 0.4 / 0.7];
+        return ([0.2 / 0.3, 0.4 / 0.7], 2);
     }
-    let mut kinks = Vec::new();
+    // At most two, in this order; an array, as the rail asks for every IC's
+    // kinks at each rail event.
+    let mut kinks = [0.0; 2];
+    let mut n = 0;
     if ic.vil.is_none() {
-        kinks.push(0.8 / 0.3);
+        kinks[n] = 0.8 / 0.3;
+        n += 1;
     }
     if ic.vih.is_none() {
-        kinks.push(2.0 / 0.6);
+        kinks[n] = 2.0 / 0.6;
+        n += 1;
     }
-    kinks
+    (kinks, n)
 }
 
 #[cfg(test)]

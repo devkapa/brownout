@@ -536,6 +536,9 @@ pub struct StaticPartitionSolver {
     key_scratch: Vec<u8>,
     /// Nodes whose published bits changed in the current `resolve_dirty`.
     changed_scratch: Vec<usize>,
+    /// `publish_hub`'s values, kept between calls so a rail move's
+    /// re-publish of every hub partition allocates nothing.
+    publish_scratch: Vec<f64>,
     /// node -> ids of the stamps (resistors, then switches, as one list) with
     /// a pin on it, ascending, no repeats.
     stamps_by_node: crate::shared::Shared<[Vec<u32>]>,
@@ -943,6 +946,7 @@ impl StaticPartitionSolver {
             part_pulls: part_pulls.into(),
             key_scratch: Vec::new(),
             changed_scratch: Vec::new(),
+            publish_scratch: Vec::new(),
             stamps_by_node: stamps_by_node.into(),
             param_dirty: Vec::new(),
             work: Vec::with_capacity(stamp_count),
@@ -2366,11 +2370,14 @@ impl StaticPartitionSolver {
         let (Some(rail), Some(hub)) = (self.rail, self.hubs[p].as_ref()) else { return };
         let Some(solve) = hub.solve.as_ref() else { return };
         let du = self.voltages[rail] - solve.u_p;
-        let values: Vec<f64> = solve.x.iter().zip(&solve.s).map(|(x, s)| x + s * du).collect();
-        for (l, value) in values.into_iter().enumerate() {
+        let mut values = std::mem::take(&mut self.publish_scratch);
+        values.clear();
+        values.extend(solve.x.iter().zip(&solve.s).map(|(x, s)| x + s * du));
+        for (l, &value) in values.iter().enumerate() {
             let node = self.partitions[p][l];
             self.write_voltage(node, value, changed);
         }
+        self.publish_scratch = values;
     }
 
     /// Replaces hub partition `p`'s solve (journaled), publishes it and hands
@@ -3976,6 +3983,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_pulls, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.changed_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.publish_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamps_by_node, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.param_dirty, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.work, w); }

@@ -850,7 +850,8 @@ impl PartitionedSolver {
     fn rail_kinks(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, ic) in &self.ics {
-            let kinks = digital::power::threshold_kinks(ic);
+            let (kinks, n) = digital::power::threshold_kinks(ic);
+            let kinks = &kinks[..n];
             if kinks.is_empty() {
                 continue;
             }
@@ -2170,7 +2171,7 @@ impl PartitionedSolver {
     /// held off watches its release level instead (W1c points 1a and 4).
     fn rail_power_edges(&self) -> Vec<f64> {
         let hub = self.hub.as_ref().unwrap();
-        let mut windows = Vec::new();
+        let mut windows = Vec::with_capacity(2 * hub.rail_ics.len());
         for &pos in &hub.rail_ics {
             let (d, ic) = &self.ics[pos as usize];
             if ic.vcc.node == hub.node && self.fixed_node[ic.gnd.node] && ic.gnd.node != hub.node {
