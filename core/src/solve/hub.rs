@@ -1382,7 +1382,10 @@ impl PartitionedSolver {
         hub.state.reg = reg;
         hub.state.cap_seg = cap_seg;
         hub.state.cell = cell;
-        hub.state.cell_until = cell_path.as_ref().and_then(|p| p.modes.as_ref()).map_or(f64::INFINITY, |m| now + m.passage(rails::RAIL_DRIFT_V).min(m.passage(-rails::RAIL_DRIFT_V)));
+        hub.state.cell_until = cell_path.as_ref().and_then(|p| p.modes.as_ref()).map_or(f64::INFINITY, |m| {
+            let (up, down) = m.passages(Some(rails::RAIL_DRIFT_V), Some(-rails::RAIL_DRIFT_V));
+            now + up.min(down)
+        });
         hub.state.cell_path = cell_path;
         hub.state.held_i = held_i;
         hub.state.held_cf = held_cf;

@@ -331,11 +331,22 @@ impl RailModes {
     /// The first `τ > 0` at which the rail has moved by `d` (either sign),
     /// or infinity.
     pub fn passage(&self, d: f64) -> f64 {
-        if d == 0.0 {
-            return 0.0;
-        }
+        self.passages(Some(d), None).0
+    }
+
+    /// [`Self::passage`] of `a` and of `b` (infinity for `None`), as two
+    /// calls give: the sums differ only in `c0`, so their turning points are
+    /// found once. Every caller wants a move each way, at each rail event.
+    pub fn passages(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
         let terms: Vec<(f64, Basis)> = self.modes.iter().map(|&(k, s)| (s, Basis::Phi(k))).collect();
-        ExpSum { c0: -d, terms: &terms }.first_crossing(d > 0.0).unwrap_or(f64::INFINITY)
+        let mut zeros = None;
+        let mut one = |d: Option<f64>| match d {
+            None => f64::INFINITY,
+            Some(d) if d == 0.0 => 0.0,
+            Some(d) => ExpSum { c0: -d, terms: &terms }.first_crossing_sharing(d > 0.0, &mut zeros).unwrap_or(f64::INFINITY),
+        };
+        let pa = one(a);
+        (pa, one(b))
     }
 }
 
@@ -916,18 +927,46 @@ impl ExpSum<'_> {
 
     /// [`Self::first_crossing`] on the merged form `m`.
     fn first_crossing_merged(&self, m: &Merged, rising: bool, until: f64) -> Option<f64> {
+        self.first_crossing_merged_sharing(m, rising, until, &mut None)
+    }
+
+    /// [`Self::first_crossing`], sharing with other sums of the same terms
+    /// (`c0` aside) the turning points `zeros` holds, or computing them into
+    /// it: they depend on the terms' rates and weights alone.
+    fn first_crossing_sharing(&self, rising: bool, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
+        match self.merged() {
+            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, zeros),
+            None => self.first_crossing_scan(rising).filter(|&t| t <= f64::INFINITY),
+        }
+    }
+
+    fn first_crossing_merged_sharing(&self, m: &Merged, rising: bool, until: f64, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
         let dir = if rising { 1.0 } else { -1.0 };
         let (lo, hi, margin) = m.bounds(until);
-        let g0 = dir * self.at(0.0);
-        let scale = self.c0.abs() + self.terms.iter().map(|&(a, b)| (a * b.at(0.0)).abs()).sum::<f64>();
+        // Each term at `τ = 0` once, for the sum and its scale alike.
+        let (mut at0, mut scale_terms) = (self.c0, 0.0);
+        for &(a, b) in self.terms {
+            let y = a * b.at(0.0);
+            at0 += y;
+            scale_terms += y.abs();
+        }
+        let g0 = dir * at0;
+        let scale = self.c0.abs() + scale_terms;
         let eps = 64.0 * f64::EPSILON * scale;
         let (least, most) = if dir > 0.0 { (lo, hi) } else { (-hi, -lo) };
         // Never reaching 0, or (already past it) never coming back.
         if (g0 < 0.0 && most < -margin) || (g0 >= 0.0 && least > -eps + margin) {
             return None;
         }
-        let mut turns = Vec::new();
-        exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut turns);
+        let mut turns = match zeros {
+            Some(z) => z.clone(),
+            None => {
+                let mut z = Vec::new();
+                exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut z);
+                *zeros = Some(z.clone());
+                z
+            }
+        };
         let slow = m.lam[..m.n].iter().copied().filter(|&l| l > 0.0).fold(f64::INFINITY, f64::min);
         // Past every rate's decay below the smallest double the sum is its
         // line: a turn there is the merged form's own rounding.
@@ -1923,9 +1962,14 @@ fn phi1(z: f64) -> f64 {
 /// `∫0^1 θ^n e^(zθ) dθ`, the n-th derivative of [`phi1`], for `z <= 0`.
 fn phi1_deriv(n: u32, z: f64) -> f64 {
     if z.abs() < 1.0 {
-        // `Σ z^j / (j! (n + j + 1))`: no cancellation below |z| = 1.
+        // `Σ z^j / (j! (n + j + 1))`: no cancellation below |z| = 1. A term
+        // that reached 0 adds nothing from there on (at `z = 0`, every call
+        // of `ramp_response` at `τ = 0`, all but the first).
         let (mut term, mut sum) = (1.0, 0.0);
         for j in 0..30u32 {
+            if term == 0.0 {
+                break;
+            }
             sum += term / f64::from(n + j + 1);
             term *= z / f64::from(j + 1);
         }
@@ -2221,7 +2265,10 @@ impl Motion {
                 }
             }
             Motion::Drift(b) => b.time_to(d),
-            Motion::Path(m) => m.passage(d).min(m.passage(-d)),
+            Motion::Path(m) => {
+                let (up, down) = m.passages(Some(d), Some(-d));
+                up.min(down)
+            }
         }
     }
 }
@@ -2275,8 +2322,7 @@ impl Watch {
                 above = above.min(cap);
                 below = below.max(-cap);
             }
-            let up = if above.is_finite() { m.passage(above) } else { f64::INFINITY };
-            let down = if below.is_finite() { m.passage(below) } else { f64::INFINITY };
+            let (up, down) = m.passages(above.is_finite().then_some(above), below.is_finite().then_some(below));
             return up.min(down);
         }
         let moving: Vec<(&Motion, f64)> = self.terms.iter().map(|m| (m, m.direction())).filter(|(_, d)| *d != 0.0).collect();
