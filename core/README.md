@@ -6349,7 +6349,14 @@ failures and warnings (W1g)"):
   0.93 / 2.34, a second load on the CC rail 3.10 / 8.62, two branches on one
   CC rail 1.10, three 3.18. Each case is an expected failure
   (`cc_*_within_w0_of_the_truth`) and is pinned no farther from the truth
-  than at 8c5cde7.
+  than at 8c5cde7. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
+  fine reference (exact mode, trapezoid, the host stepping 1 us), its
+  readings across 19-25 ms (from STOPS_2575[1], the host step to
+  STOPS_2575[2]) sit up to 31.9 W0 off, and 190 W0 inside the swing at 19.23
+  ms (the CC rail-edge capacitor, device 9, -2.6415 V against -2.6379 V at
+  19.2365 ms). A host stopping at each instant and one yielding there read
+  the same, bit for bit, so this is accuracy, not host cadence (D6).
+  `zz_r101_2575_cadence_against_fine` (ignored) re-measures it.
 
 ## Deferred past 1.0.0
 

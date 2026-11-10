@@ -16046,3 +16046,70 @@ fn no_rail_edge_event_reschedules_itself_more_than_once_within_two_femtoseconds(
     assert!(longest <= 2, "757 tpl 0: {longest} Rail events in a row within 2 fs");
 }
 
+#[test]
+#[ignore = "measurement for the open item \"default-mode CC-rail accuracy\" (R101): run with --nocapture"]
+fn zz_r101_2575_cadence_against_fine() {
+    // Cold 2575 tpl 2 read at the yields of the host step from STOPS_2575[1]
+    // to STOPS_2575[2] in 19-25 ms, three ways: a clamped copy of the
+    // yielded run, a fresh run stopping plainly at each time, and the fine
+    // reference (exact mode, trapezoid, a 1 us host step). Prints each in W0
+    // off the reference and against each other. At 81514bf/8434bf3: up to
+    // 31.9 W0 off across the window, 190 W0 in the 19.23 ms swing, and the
+    // two cadences the same bit for bit.
+    let p = cold_2575_tpl2();
+    let before = &STOPS_2575[..2];
+    let t_end = STOPS_2575[2];
+    // The yield run, read at each yield in 19-25 ms off a clamped copy.
+    let mut now = 0.0;
+    let mut clock = move || {
+        now += 1.0;
+        now
+    };
+    let mut e = Engine::load(&p).unwrap();
+    for &t in before {
+        e.advance(t).unwrap();
+    }
+    let mut yielded: Vec<(f64, Vec<f64>)> = Vec::new();
+    while !e.advance_for(t_end, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+        let t = e.time();
+        if (0.019..=0.025).contains(&t) {
+            let mut c = e.snapshot();
+            c.advance(t).unwrap();
+            yielded.push((t, c.voltages().to_vec()));
+        }
+    }
+    // Thin to at most 40 instants spread over the window.
+    let step = (yielded.len() / 40).max(1);
+    let picks: Vec<(f64, Vec<f64>)> = yielded.into_iter().step_by(step).collect();
+    let times: Vec<f64> = picks.iter().map(|p| p.0).collect();
+    // Plain stops: a fresh run from the same stops, stopping at each time.
+    let stops: Vec<Vec<f64>> = times.iter().map(|&t| {
+        let mut s = Engine::load(&p).unwrap();
+        for &b in before {
+            s.advance(b).unwrap();
+        }
+        s.advance(t).unwrap();
+        s.voltages().to_vec()
+    }).collect();
+    // The fine reference: exact mode, trapezoid, a 1 us horizon.
+    let mut fine_p = exact(cold_2575_tpl2());
+    fine_p.options.integration = 1;
+    let mut fine_samples: Vec<f64> = before.to_vec();
+    fine_samples.extend(&times);
+    let (fine, _, _) = sampled(&fine_p, &fine_samples, 1e-6);
+    let fine = &fine[before.len()..];
+    let nodes = p.devices[9].pins.iter().map(|pin| pin.node).collect::<Vec<_>>();
+    let (mut worst_stop, mut worst_yield, mut worst_between) = (0.0f64, 0.0f64, 0.0f64);
+    for (k, &t) in times.iter().enumerate() {
+        let (y, s, f) = (&picks[k].1, &stops[k], &fine[k]);
+        let ws = worst_w0(std::slice::from_ref(s), std::slice::from_ref(f));
+        let wy = worst_w0(std::slice::from_ref(y), std::slice::from_ref(f));
+        let wb = worst_w0(std::slice::from_ref(y), std::slice::from_ref(s));
+        worst_stop = worst_stop.max(ws);
+        worst_yield = worst_yield.max(wy);
+        worst_between = worst_between.max(wb);
+        let d9 = |v: &[f64]| v[nodes[0]] - v[nodes[1]];
+        eprintln!("R101 t {t:.9}: stop {ws:.2} W0, yield {wy:.2} W0, yield-vs-stop {wb:.2} W0 off; device 9 stop {:.6} yield {:.6} fine {:.6}", d9(s), d9(y), d9(f));
+    }
+    eprintln!("R101 worst over {} instants: stop {worst_stop:.2} W0, yield {worst_yield:.2} W0 off the fine reference; yield against stop {worst_between:.2} W0", times.len());
+}
