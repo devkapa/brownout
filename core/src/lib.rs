@@ -14,9 +14,11 @@
 //! - [`devices`]: per-kind stamps and currents for the passive and switch
 //!   kinds.
 //! - [`readout`]: digital and channel slots and the harness trace.
+//! - [`carry`]: W2c's load carry-forward records.
 //! - [`snapshot`]: W2a's whole-engine snapshots behind opaque ids.
 //! - [`abi`]: the thin `extern "C"` shim. No physics lives there.
 
+pub mod carry;
 pub mod devices;
 pub mod digital;
 pub mod drivers;

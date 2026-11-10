@@ -574,6 +574,30 @@ pub extern "C" fn bo_engine_trace_clear(h: u32) {
     with_engine(h, (), |e| e.trace_clear());
 }
 
+/// W2c's carry (core/README.md, "Carry"): collects every device's carry
+/// records and returns the buffer's length in f64, or `-5` for an unusable
+/// handle, `-4`/`-7` when bringing the partitions to the engine's time fails
+/// (the engine then stays at its last completed instant). Read the buffer
+/// with [`bo_engine_carry_ptr`].
+#[no_mangle]
+pub extern "C" fn bo_engine_carry_take(h: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, _)) => match engine.carry_take() {
+            Ok(buf) => buf.len() as i32,
+            Err(err) => fail(&err),
+        },
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_carry_take`], valid until the next
+/// call on that engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_carry_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.carry_buffer().as_ptr())
+}
+
 /// Copies the whole engine into its snapshot table (W2a; core/README.md,
 /// "Snapshots") and returns the snapshot's id, or `0` with the message in
 /// [`bo_error_ptr`] for an unknown handle or one with no program loaded.

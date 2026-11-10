@@ -2618,6 +2618,50 @@ impl PartitionedSolver {
     /// without committing anything (point 16): a resistor's or `led`'s
     /// thermal state `[T, P, shutdown]` (none without a code 91 record), and
     /// a PTC's `[tripped, tripStress, recoveryTime]`.
+    /// W2c's carry records for the state this solver owns (`crate::carry`):
+    /// every capacitor's charge voltage, a battery or limited PSU's state as
+    /// `device_state` reads it, and each device's slow physics and latches,
+    /// all at `now`, in device order within each family.
+    pub(super) fn carry_records(&self, now: f64, out: &mut Vec<f64>) {
+        let mut caps: Vec<(usize, f64)> = Vec::new();
+        self.stepped.carry_caps(&mut caps);
+        self.closed_form.carry_caps(now, &mut caps);
+        caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.device_index, c.vc_at(now))));
+        caps.sort_by_key(|c| c.0);
+        for (d, vc) in caps {
+            crate::carry::push(out, d, crate::carry::FAMILY_CAPACITOR, &[vc]);
+        }
+        let mut state = Vec::new();
+        for (d, &kind) in self.device_kinds.iter().enumerate() {
+            let family = match kind {
+                kinds::BATTERY_PACK => crate::carry::FAMILY_BATTERY,
+                kinds::BENCH_PSU => crate::carry::FAMILY_PSU,
+                _ => continue,
+            };
+            if self.hub_device_state(d, now, &mut state).is_some_and(|n| n > 0) {
+                crate::carry::push(out, d, family, &state);
+            }
+        }
+        let nan = f64::NAN;
+        for d in 0..self.slow.device_count() {
+            let failed = self.slow.is_failed(d);
+            let stress = self.slow.stress(d).map(|s| s.value_at(now));
+            let thermal = self.slow.thermal(d).map(|th| (th.temperature_at(now), f64::from(u8::from(th.shutdown))));
+            let ptc = self.slow.ptc(d).map(|p| p.projected(now));
+            if !failed && stress.is_none() && thermal.is_none() && ptc.is_none() {
+                continue;
+            }
+            let (temperature, shutdown) = thermal.unwrap_or((nan, nan));
+            let (tripped, ptc_stress, rt) = ptc.map_or((nan, nan, nan), |(t, s, r)| (f64::from(u8::from(t)), s, r));
+            crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &[f64::from(u8::from(failed)), stress.unwrap_or(nan), temperature, shutdown, tripped, ptc_stress, rt]);
+        }
+        let mut latched: Vec<LatchRecord> = self.slow.latched().to_vec();
+        latched.sort_by_key(|r| r.device);
+        for r in latched {
+            crate::carry::push(out, r.device as usize, crate::carry::FAMILY_LATCH, &[r.code as f64, r.pin as f64, r.since, r.value, r.limit, r.aux]);
+        }
+    }
+
     pub(super) fn slow_state_of(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
         out.clear();
         match *self.device_kinds.get(device)? {

@@ -36,6 +36,21 @@ pub enum SeqState {
 }
 
 impl SeqState {
+    /// W2c's carry values (`crate::carry`'s IC layout, sequential tag): a
+    /// 161's count and last clock, a 173's four Q and last clock, a 74hc74's
+    /// two flip-flops (Q, /Q, last clock each).
+    pub fn carry_values(&self, out: &mut Vec<f64>) {
+        use crate::carry::ic::bit;
+        match *self {
+            SeqState::Ls161 { count, last_clk } => out.extend([f64::from(count), bit(last_clk)]),
+            SeqState::Ls173 { q, last_clk } => {
+                out.extend(q.iter().map(|&b| bit(b)));
+                out.push(bit(last_clk));
+            }
+            SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => out.extend([q1, q1n, last_clk1, q2, q2n, last_clk2].map(bit)),
+        }
+    }
+
     /// Power-on values (contract point 2: classic's `defaultIcState`, all 0
     /// except `q1n = q2n = 1`).
     pub fn power_on(ic: &IcRecord) -> Self {

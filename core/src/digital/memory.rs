@@ -93,6 +93,29 @@ impl MemState {
     }
 }
 
+/// W2c's carry: this memory's IC-record tag and values (`crate::carry`'s
+/// IC layout). A 189: its sixteen nibbles and `/WE`'s last level. An EEPROM:
+/// its image by hash and length (the image itself reloads from the
+/// program's ROM blob, and carries only onto the same contents), then the
+/// write cycle: `/WE` and `/CE` history, a pending write as `(address, byte,
+/// completes at)` or three `NaN`, the DATA-polling reads, the SDP step and
+/// unlock, the dirty flag and the last read cycle.
+pub fn carry_values(state: &MemState, out: &mut Vec<f64>) -> f64 {
+    use crate::carry::ic::{bit, image_hash, EEPROM, RAM_189};
+    match state {
+        MemState::Ram189(st) => {
+            out.extend(st.mem.iter().map(|&n| f64::from(n)));
+            out.push(bit(st.last_we));
+            RAM_189
+        }
+        MemState::Eeprom(st) => {
+            let (addr, byte, due) = st.pending.map_or((f64::NAN, f64::NAN, f64::NAN), |(a, b, t)| (a as f64, f64::from(b), t));
+            out.extend([image_hash(&st.image), st.image.len() as f64, bit(st.last_we_high), bit(st.last_ce_high), addr, byte, due, f64::from(st.poll_reads), f64::from(st.sdp_step), bit(st.sdp_unlocked), bit(st.dirty), bit(st.prev_read_cycle)]);
+            EEPROM
+        }
+    }
+}
+
 /// Little-endian word decode, the README's "ROM image": word `k` is
 /// `b[4k] + b[4k+1]*2^8 + b[4k+2]*2^16 + b[4k+3]*2^24`, inverted here.
 fn words_to_bytes(rom: &[u32]) -> Vec<u8> {

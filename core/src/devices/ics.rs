@@ -964,6 +964,60 @@ impl DeviceEvaluator for IcEvaluator {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         crate::snapshot::HeapBytes::heap_bytes(self, w)
     }
+
+    /// One IC record per entry (`crate::carry`'s IC layout): `[kind, tag,
+    /// family values..., reads, read x reads, slots, slot x slots, drivers,
+    /// (committed, pending target, pending due) x drivers]`, `reads` being
+    /// `-1` before the IC's first powered evaluation.
+    fn carry_take(&self, drivers: &[crate::drivers::Driver], out: &mut Vec<f64>) {
+        use crate::carry::ic;
+        let mut entries: Vec<&IcEntry> = self.ics.iter().collect();
+        entries.sort_by_key(|e| e.device_index);
+        let mut v = Vec::new();
+        for entry in entries {
+            v.clear();
+            v.push(f64::from(entry.record.kind));
+            let tag_at = v.len();
+            v.push(0.0);
+            v[tag_at] = match &entry.family {
+                Family::Combinational { schmitt_state } => {
+                    v.push(schmitt_state.len() as f64);
+                    v.extend(schmitt_state.iter().map(|&b| ic::bit(b)));
+                    ic::COMBINATIONAL
+                }
+                Family::Sequential(state) => {
+                    state.carry_values(&mut v);
+                    ic::SEQUENTIAL
+                }
+                Family::Memory(state) => digital::memory::carry_values(state, &mut v),
+                Family::Ne555(state) => {
+                    v.push(ic::bit(state.out_high));
+                    ic::NE555
+                }
+            };
+            match &entry.last_reads {
+                Some(reads) => {
+                    v.push(reads.len() as f64);
+                    v.extend(reads.iter().map(|&b| ic::bit(b)));
+                }
+                None => v.push(-1.0),
+            }
+            v.push(entry.family_slots.len() as f64);
+            v.extend_from_slice(&entry.family_slots);
+            v.push(entry.output_drivers.len() as f64);
+            for id in entry.output_drivers.iter() {
+                let d = &drivers[id.0 as usize];
+                let (target, due) = d.pending().map_or((-1.0, f64::NAN), |p| (ic::mode(Some(p.target)), p.due));
+                v.extend([ic::mode(d.committed()), target, due]);
+            }
+            crate::carry::push(out, entry.device_index, crate::carry::FAMILY_IC, &v);
+        }
+    }
+
+    #[cfg(test)]
+    fn debug_output_drivers(&self, device: usize) -> Vec<DriverId> {
+        self.ics.iter().find(|e| e.device_index == device).map(|e| e.output_drivers.to_vec()).unwrap_or_default()
+    }
 }
 
 /// Registers every IC device in `program` against `kernel` — combinational,

@@ -1,0 +1,270 @@
+//! W2c: what `bo_engine_carry_take` reads off an engine (core/README.md,
+//! "Carry"). Each family's record is held to what the engine already
+//! publishes: capacitor voltages to the node voltages across an esr-free
+//! capacitor, battery, PSU, PTC and thermal values to `bo_engine_device_state`,
+//! a latched failure to its record, an IC's drivers to the kernel's table.
+
+use super::rail_tests::{cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575};
+use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
+use crate::carry::{self, Record};
+use crate::digital;
+use crate::engine::Engine;
+use crate::kinds;
+use crate::program::{Device, Options, PinRecord, Program};
+
+fn take(e: &mut Engine) -> Vec<f64> {
+    e.carry_take().unwrap().to_vec()
+}
+
+fn family<'a>(buf: &'a [f64], family: u32) -> Vec<Record<'a>> {
+    carry::records(buf).unwrap().into_iter().filter(|r| r.family == family).collect()
+}
+
+fn one<'a>(buf: &'a [f64], fam: u32, device: usize) -> Record<'a> {
+    let mut hits = family(buf, fam).into_iter().filter(|r| r.device == device);
+    let r = hits.next().unwrap_or_else(|| panic!("no family {fam} record for device {device}"));
+    assert!(hits.next().is_none(), "one record per device and family");
+    r
+}
+
+fn advanced(p: &Program, stops: &[f64]) -> Engine {
+    let mut e = Engine::load(p).unwrap();
+    for &t in stops {
+        e.advance(t).unwrap();
+    }
+    e
+}
+
+#[test]
+fn every_record_is_versioned_and_the_buffer_reads_back_whole() {
+    let mut e = advanced(&cold_2575_tpl2(), &STOPS_2575[..20]);
+    let buf = take(&mut e);
+    let records = carry::records(&buf).unwrap();
+    assert!(records.len() > 5, "{} records", records.len());
+    assert!(records.iter().all(|r| r.version == carry::VERSION));
+    assert!(carry::records(&buf[..buf.len() - 1]).is_err(), "a cut buffer is refused");
+}
+
+#[test]
+fn a_carry_holds_every_capacitors_voltage_at_the_engines_time() {
+    // On every partition kind: 2575 tpl 2 (a CC rail capacitor and stepped
+    // and closed-form ones), the PTC board's two 1 mF capacitors, and the
+    // cell board's 7 uF one. With no esr, the charge's voltage is the one
+    // across the pins.
+    for (name, p, stops) in [
+        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()),
+        ("two PTCs", two_ptc_branches(), vec![1e-3, 2e-3]),
+        ("cell loop", cell_switch_into_an_led_loop(), vec![0.01, 0.05]),
+    ] {
+        let mut e = advanced(&p, &stops);
+        let buf = take(&mut e);
+        let caps: Vec<(usize, &Device)> = p.devices.iter().enumerate().filter(|(_, d)| d.kind == kinds::CAPACITOR).collect();
+        assert!(!caps.is_empty());
+        assert_eq!(family(&buf, carry::FAMILY_CAPACITOR).len(), caps.len(), "{name}: one record per capacitor");
+        for (i, d) in caps {
+            let r = one(&buf, carry::FAMILY_CAPACITOR, i);
+            assert_eq!(r.values.len(), 1);
+            if d.params[1] == 0.0 {
+                let across = e.voltages()[d.pins[0].node] - e.voltages()[d.pins[1].node];
+                assert!((r.values[0] - across).abs() <= 1e-9 * (1.0 + across.abs()), "{name}: capacitor {i}: vc {} against {across} across it", r.values[0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_carry_holds_the_battery_the_psu_the_ptcs_and_the_thermal_state_as_device_state_reads_them() {
+    let mut e = advanced(&cell_switch_into_an_led_loop(), &[0.01, 0.05]);
+    let buf = take(&mut e);
+    let battery = one(&buf, carry::FAMILY_BATTERY, 0).values.to_vec();
+    assert_eq!(battery, e.device_state(0).unwrap().to_vec(), "the battery as device_state reads it");
+
+    let p = cold_2575_tpl2();
+    let mut e = advanced(&p, &STOPS_2575[..25]);
+    let buf = take(&mut e);
+    let psu = p.devices.iter().position(|d| d.kind == kinds::BENCH_PSU).unwrap();
+    assert_eq!(one(&buf, carry::FAMILY_PSU, psu).values.to_vec(), e.device_state(psu as u32).unwrap().to_vec());
+
+    let mut e = advanced(&two_ptc_branches(), &[1e-3, 2e-3]);
+    let buf = take(&mut e);
+    for ptc in [1usize, 4] {
+        let slow = one(&buf, carry::FAMILY_SLOW, ptc).values.to_vec();
+        assert_eq!(slow.len(), carry::slow::LEN);
+        assert_eq!(slow[4..7].to_vec(), e.device_state(ptc as u32).unwrap().to_vec(), "PTC {ptc}: tripped, stress, rt");
+    }
+
+    let p = rollback_rig();
+    let mut e = advanced(&p, &[0.25, 0.5]);
+    let buf = take(&mut e);
+    let led = p.devices.iter().position(|d| d.kind == kinds::LED).unwrap();
+    let state = e.device_state(led as u32).unwrap().to_vec();
+    let slow = one(&buf, carry::FAMILY_SLOW, led).values.to_vec();
+    assert_eq!((slow[2], slow[3]), (state[0], state[2]), "the LED's temperature and shutdown");
+}
+
+#[test]
+fn a_latched_failure_carries_with_its_record() {
+    // The fuse behind the 74LS04 trips at about 17 ms.
+    let mut e = advanced(&ring_behind_a_fuse(), &[0.01, 0.03]);
+    let latched = e.records(0).unwrap().to_vec();
+    assert_eq!(latched.len(), 7, "the fuse has tripped");
+    let fuse = latched[0] as usize;
+    let buf = take(&mut e);
+    let slow = one(&buf, carry::FAMILY_SLOW, fuse).values.to_vec();
+    assert_eq!(slow[0], 1.0, "failed");
+    assert_eq!(one(&buf, carry::FAMILY_LATCH, fuse).values.to_vec(), latched[1..7].to_vec(), "its latch record");
+}
+
+#[test]
+fn a_carry_holds_each_ics_family_state_edge_history_and_drivers() {
+    // 2575 tpl 2's 555 and the rollback rig's 74LS00: one record per IC,
+    // its kind and family tag first, and one (committed, pending target,
+    // pending due) triple per output driver, as the kernel's table holds it.
+    for (name, p, stops) in [("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()), ("rollback rig", rollback_rig(), vec![0.25, 0.5])] {
+        let mut e = advanced(&p, &stops);
+        let buf = take(&mut e);
+        let ics: Vec<usize> = p.devices.iter().enumerate().filter(|(_, d)| digital::is_ic(d.kind)).map(|(i, _)| i).collect();
+        assert!(!ics.is_empty());
+        assert_eq!(family(&buf, carry::FAMILY_IC).len(), ics.len(), "{name}: one record per IC");
+        for i in ics {
+            let r = one(&buf, carry::FAMILY_IC, i);
+            assert_eq!(r.values[0], p.devices[i].kind as f64, "{name}: device {i}'s kind");
+            let drivers = e.debug_ic_drivers(i);
+            let tail = &r.values[r.values.len() - 3 * drivers.len()..];
+            assert_eq!(r.values[r.values.len() - 3 * drivers.len() - 1], drivers.len() as f64, "{name}: device {i}'s driver count");
+            for (k, (committed, pending)) in drivers.iter().enumerate() {
+                assert_eq!(tail[3 * k], carry::ic::mode(*committed), "{name}: device {i} driver {k} committed");
+                match pending {
+                    Some((target, due)) => assert_eq!((tail[3 * k + 1], tail[3 * k + 2]), (carry::ic::mode(Some(*target)), *due)),
+                    None => assert!(tail[3 * k + 1] == -1.0 && tail[3 * k + 2].is_nan()),
+                }
+            }
+        }
+        let ne555 = p.devices.iter().position(|d| d.kind == kinds::NE555);
+        if let Some(i) = ne555 {
+            assert_eq!(one(&buf, carry::FAMILY_IC, i).values[1], carry::ic::NE555);
+        }
+    }
+}
+
+fn pin(node: usize) -> PinRecord {
+    PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
+}
+
+fn w1d_params(delay_pairs: usize, extra: &[f64]) -> Vec<f64> {
+    let mut p = vec![0.0; kinds::ic_param::COUNT];
+    p[kinds::ic_param::VCC_MIN] = 4.5;
+    p[kinds::ic_param::VCC_MAX] = 5.5;
+    p[kinds::ic_param::FAM_FLAGS] = kinds::FAM_TTL as f64;
+    p[kinds::ic_param::VIL_FIXED] = 1.0;
+    p[kinds::ic_param::VIL] = 0.8;
+    p[kinds::ic_param::VIH_FIXED] = 1.0;
+    p[kinds::ic_param::VIH] = 2.0;
+    p[kinds::ic_param::NOMINAL] = 5.0;
+    p.extend(std::iter::repeat(20e-9).take(2 * delay_pairs));
+    p.extend_from_slice(extra);
+    p
+}
+
+fn w1d_ic(kind: u32, ci: usize, logic_len: usize, params: Vec<f64>, rom_words: usize, slot_base: f64) -> Device {
+    let pins = std::iter::once(pin(1)).chain(std::iter::once(pin(0))).chain((0..logic_len).map(|_| pin(0))).collect();
+    let mut blob = vec![slot_base];
+    blob.extend(std::iter::repeat(0.0).take(logic_len + rom_words));
+    Device { kind, component_index: ci, pins, params, blob }
+}
+
+#[test]
+fn the_sequential_and_memory_families_carry_their_registers_and_write_state() {
+    // One each of 161, 173, 74hc74, 189 and 28c16 on 5 V, every logic pin
+    // grounded; the 189 seeded with 0..15.
+    let devices = vec![
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] },
+        w1d_ic(kinds::IC_74LS161, 1, 14, w1d_params(4, &[]), 0, 0.0),
+        w1d_ic(kinds::IC_74LS173, 2, 14, w1d_params(4, &[]), 0, 5.0),
+        w1d_ic(kinds::IC_74HC74, 3, 12, w1d_params(2, &[]), 0, 9.0),
+        w1d_ic(kinds::IC_74LS189, 4, 14, w1d_params(5, &[]), 0, 13.0),
+        w1d_ic(kinds::IC_28C16, 5, 22, w1d_params(5, &[10e-3, 0.0]), 2048 / 4, 17.0),
+    ];
+    let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 25, channel_slot_count: 0, devices };
+    let mut e = Engine::load(&p).unwrap();
+    let nibbles: Vec<f64> = (0..16).map(|k| k as f64).collect();
+    e.seed_memory(4, &nibbles).unwrap();
+    e.advance(1e-6).unwrap();
+    let buf = take(&mut e);
+    let tag = |i: usize| one(&buf, carry::FAMILY_IC, i).values[1];
+    assert_eq!([tag(1), tag(2), tag(3), tag(4), tag(5)], [carry::ic::SEQUENTIAL, carry::ic::SEQUENTIAL, carry::ic::SEQUENTIAL, carry::ic::RAM_189, carry::ic::EEPROM]);
+    let ram = one(&buf, carry::FAMILY_IC, 4).values.to_vec();
+    assert_eq!(ram[2..18].to_vec(), nibbles, "the 189's sixteen nibbles");
+    let eeprom = one(&buf, carry::FAMILY_IC, 5).values.to_vec();
+    assert_eq!(eeprom[2], carry::ic::image_hash(&[0u8; 2048]), "the 28c16's image by hash");
+    assert_eq!(eeprom[3], 2048.0);
+    assert!(eeprom[6].is_nan(), "no write in flight");
+}
+
+#[test]
+fn a_carry_taken_at_an_r86_yield_is_the_carry_taken_at_a_plain_stop_there() {
+    // A carry is taken between calls; an advance_for that yielded leaves
+    // the last completed instant with no horizon clamp, its stepped
+    // partitions each at its own last step. The take brings the dynamic
+    // partitions to the engine's time first, as advance(time) does, so it
+    // reads what a host stopping there plainly would. Every yield of a host
+    // step on 757 tpl 0 is checked.
+    let boards: Vec<(&str, Program, Vec<f64>, f64)> = vec![
+        ("757 tpl 0", cold_757_tpl0(), vec![0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986], 0.07025570911480136),
+    ];
+    // 2575 tpl 2 (STOPS_2575[..2], host step to STOPS_2575[2]) is held out
+    // pending a ruling: around 19.23 ms its CC rail-edge capacitor (device 9)
+    // stopped plainly at a yield's time parts from the yielded run by up to
+    // 3.3 mV at 2.7 V, over the equivalence tolerance (W2 design D6: beyond
+    // W0 between host cadences is a STOP).
+    let mut differed = 0;
+    for (name, p, before, t_end) in &boards {
+        let mut now = 0.0;
+        let mut clock = move || {
+            now += 1.0;
+            now
+        };
+        let mut e = advanced(p, before);
+        let mut yields = 0;
+        while !e.advance_for(*t_end, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+            yields += 1;
+            let t_y = e.time();
+            // The state at the yield, before the take clamps it.
+            let unclamped = e.snapshot();
+            let at_yield = take(&mut e);
+            let mut plain = advanced(p, before);
+            plain.advance(t_y).unwrap();
+            let at_stop = take(&mut plain);
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            // The analog state matches within the host cadence's own
+            // difference (W2 design D6 (a): a stepped partition's steps are
+            // planned toward its host's stop, so a run stopped at t_y and one
+            // yielded there on its way to a later stop took different steps;
+            // 2575 tpl 2's rail-edge capacitor parts by up to 0.9 mV at 2.7 V,
+            // inside the equivalence tolerance). Everything discrete matches
+            // exactly.
+            let (ra, rb) = (carry::records(&at_yield).unwrap(), carry::records(&at_stop).unwrap());
+            assert_eq!(ra.len(), rb.len(), "{name}: yield {yields}: the same records");
+            for (x, y) in ra.iter().zip(&rb) {
+                assert_eq!((x.device, x.family, x.values.len()), (y.device, y.family, y.values.len()), "{name}: yield {yields}");
+                for (a, b) in x.values.iter().zip(y.values) {
+                    let analog = x.family == carry::FAMILY_CAPACITOR || x.family == carry::FAMILY_BATTERY || x.family == carry::FAMILY_SLOW;
+                    // The equivalence harness's volts tolerance, 100 uV plus 0.1 %.
+                    let same = a.to_bits() == b.to_bits() || (analog && (a - b).abs() <= 1e-4 + 1e-3 * a.abs().max(b.abs()));
+                    assert!(same, "{name}: yield {yields} at t = {t_y}: device {} family {}: {a} against {b}", x.device, x.family);
+                }
+            }
+            let mut raw = unclamped;
+            let mut out = Vec::new();
+            raw.debug_carry_unclamped(&mut out);
+            if bits(&out) != bits(&at_yield) {
+                differed += 1;
+            }
+            if yields >= 40 {
+                break;
+            }
+        }
+        assert!(yields > 0, "{name}: it yielded");
+    }
+    let _ = differed;
+}

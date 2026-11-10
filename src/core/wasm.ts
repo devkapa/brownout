@@ -244,6 +244,15 @@ export interface CoreExports {
   bo_engine_snapshot_drop?(h: number, id: number): number;
   /** The handle's snapshot table in bytes, each shared memory image counted once; `NaN` for an unusable handle. */
   bo_engine_snapshot_bytes?(h: number): number;
+  /**
+   * W2c (core/README.md, "Carry"): collect every device's carry records and
+   * return the buffer's length in f64; `-5` for an unusable handle, `-4` or
+   * `-7` when bringing the partitions to the engine's time fails. Optional,
+   * detected by its presence (ruling R100 (a)).
+   */
+  bo_engine_carry_take?(h: number): number;
+  /** The buffer from the last {@link CoreExports.bo_engine_carry_take}, valid until the next call on this engine. */
+  bo_engine_carry_ptr?(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */

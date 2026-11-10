@@ -37,6 +37,8 @@ mod rail_tests;
 #[cfg(test)]
 mod slow_tests;
 #[cfg(test)]
+mod carry_tests;
+#[cfg(test)]
 mod snapshot_tests;
 #[cfg(test)]
 mod window_tests;
@@ -664,6 +666,13 @@ pub trait PartitionSolver {
     /// whole run, so a size check measures the engine's own state.
     #[cfg(test)]
     fn clear_test_logs(&mut self) {}
+
+    /// Appends the carry records (`crate::carry`) of the state this solver
+    /// owns, at `now`: capacitors, a battery or PSU on the rail, and the slow
+    /// physics with their latches. Default none.
+    fn carry_take(&self, now: f64, out: &mut Vec<f64>) {
+        let _ = (now, out);
+    }
 }
 
 impl Clone for Box<dyn PartitionSolver> {
@@ -904,6 +913,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
     #[cfg(test)]
     fn clear_test_logs(&mut self) {
         (**self).clear_test_logs()
+    }
+
+    fn carry_take(&self, now: f64, out: &mut Vec<f64>) {
+        (**self).carry_take(now, out)
     }
 
     fn drop_power_holds(&mut self) -> (Vec<PartitionId>, Vec<DeviceId>) {
@@ -5401,6 +5414,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         crate::snapshot::HeapBytes::heap_bytes(self, w)
+    }
+
+    fn carry_take(&self, now: f64, out: &mut Vec<f64>) {
+        self.carry_records(now, out);
     }
 
     #[cfg(test)]

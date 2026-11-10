@@ -1833,6 +1833,14 @@ impl SteppedSolver {
         self.hub_updates.drain(..)
     }
 
+    /// Each capacitor's committed charge voltage, by device (W2c's carry).
+    /// Taken between calls, after the horizon clamp, so at the engine's time.
+    pub(crate) fn carry_caps(&self, out: &mut Vec<(usize, f64)>) {
+        for part in self.partitions.values() {
+            out.extend(part.shape.capacitors.iter().zip(&part.vc).map(|(c, &vc)| (c.device_index, vc)));
+        }
+    }
+
     pub(crate) fn sensitivities(&self) -> u64 {
         self.sensitivities
     }

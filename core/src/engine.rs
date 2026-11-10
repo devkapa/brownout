@@ -175,6 +175,15 @@ impl DeviceEvaluator for WithSources {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         crate::snapshot::HeapBytes::heap_bytes(&self.inner, w)
     }
+
+    fn carry_take(&self, drivers: &[crate::drivers::Driver], out: &mut Vec<f64>) {
+        self.inner.carry_take(drivers, out)
+    }
+
+    #[cfg(test)]
+    fn debug_output_drivers(&self, device: usize) -> Vec<crate::events::DriverId> {
+        self.inner.debug_output_drivers(device)
+    }
 }
 
 /// Boxed rather than the concrete `Kernel<StaticPartitionSolver, NoDevices>`
@@ -234,6 +243,8 @@ pub struct Engine {
     state_buf: Vec<f64>,
     /// The last `bo_engine_records` collect (W1g), likewise.
     records_buf: Vec<f64>,
+    /// The last `bo_engine_carry_take` collect (W2c), likewise.
+    carry_buf: Vec<f64>,
     /// What [`Self::stat`] adds to each live counter so the stats stay
     /// monotonic across a W2a restore (W2 design 2.3: the stats are
     /// telemetry and are not restored). The counters themselves go back with
@@ -710,6 +721,51 @@ impl Engine {
     /// solve per partition, plus the KCL current pass, `Engine::load` always
     /// ran. Never panics on a well-formed `Program` — `Program::parse` is
     /// what turns malformed bytes into `BoError` before this ever runs.
+    /// W2c's carry (`crate::carry`; core/README.md, "Carry"): every device's
+    /// carriable state as versioned records, for the host to map onto the
+    /// program it loads next. The dynamic partitions are first brought to
+    /// `bo_engine_time` as `advance(time)` brings them (the horizon clamp),
+    /// so a carry taken where an `advance_for` yielded reads what a host
+    /// stopping there plainly would. Valid until the next call.
+    pub fn carry_take(&mut self) -> Result<&[f64], BoError> {
+        let now = self.time();
+        self.advance(now)?;
+        let mut out = std::mem::take(&mut self.carry_buf);
+        out.clear();
+        self.kernel.solver().carry_take(now, &mut out);
+        self.kernel.evaluator().carry_take(self.kernel.drivers(), &mut out);
+        self.carry_buf = out;
+        Ok(&self.carry_buf)
+    }
+
+    /// The carry records as the engine holds them, without the take's clamp
+    /// (tests: shows the clamp matters).
+    #[cfg(test)]
+    pub(crate) fn debug_carry_unclamped(&mut self, out: &mut Vec<f64>) {
+        let now = self.time();
+        self.kernel.solver().carry_take(now, out);
+        self.kernel.evaluator().carry_take(self.kernel.drivers(), out);
+    }
+
+    /// The buffer from the last [`Self::carry_take`].
+    pub fn carry_buffer(&self) -> &[f64] {
+        &self.carry_buf
+    }
+
+    /// Each output driver of IC `device` as `(committed, pending)` (tests).
+    #[cfg(test)]
+    pub(crate) fn debug_ic_drivers(&self, device: usize) -> Vec<(Option<crate::events::Mode>, Option<(crate::events::Mode, f64)>)> {
+        self.kernel
+            .evaluator()
+            .debug_output_drivers(device)
+            .into_iter()
+            .map(|id| {
+                let d = self.kernel.driver(id);
+                (d.committed(), d.pending().map(|p| (p.target, p.due)))
+            })
+            .collect()
+    }
+
     /// A deep copy of the whole engine for W2a's snapshot table
     /// (`bo_engine_snapshot`; core/README.md, "Snapshots"). Taken only
     /// between two calls, when no instant window is open.
@@ -794,6 +850,7 @@ impl Engine {
             eeprom_updates: Vec::new(),
             state_buf: Vec::new(),
             records_buf: Vec::new(),
+            carry_buf: Vec::new(),
             stat_base: [0.0; STAT_COUNT],
         };
         // The settle above already queued every IC's initial digital-slot
@@ -1748,6 +1805,7 @@ impl crate::snapshot::HeapBytes for Engine {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.eeprom_updates, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.state_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.records_buf, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.carry_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stat_base, w); }
         n
     }

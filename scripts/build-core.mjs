@@ -84,6 +84,9 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_restore",
   "bo_engine_snapshot_drop",
   "bo_engine_snapshot_bytes",
+  // W2c: load carry-forward (core/README.md, "Carry").
+  "bo_engine_carry_take",
+  "bo_engine_carry_ptr",
 ];
 
 function fail(message) {

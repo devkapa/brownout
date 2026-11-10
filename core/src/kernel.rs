@@ -506,6 +506,20 @@ pub trait DeviceEvaluator {
         let _ = w;
         0
     }
+
+    /// Appends W2c's carry records (`crate::carry`) of the devices this
+    /// evaluator owns, their output drivers read from `drivers`. Default
+    /// none.
+    fn carry_take(&self, drivers: &[Driver], out: &mut Vec<f64>) {
+        let _ = (drivers, out);
+    }
+
+    /// The output drivers of `device`, in pin order (tests).
+    #[cfg(test)]
+    fn debug_output_drivers(&self, device: usize) -> Vec<DriverId> {
+        let _ = device;
+        Vec::new()
+    }
 }
 
 impl Clone for Box<dyn DeviceEvaluator> {
@@ -588,6 +602,15 @@ impl DeviceEvaluator for Box<dyn DeviceEvaluator> {
 
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         std::mem::size_of_val::<dyn DeviceEvaluator>(&**self) + (**self).heap_bytes(w)
+    }
+
+    fn carry_take(&self, drivers: &[Driver], out: &mut Vec<f64>) {
+        (**self).carry_take(drivers, out)
+    }
+
+    #[cfg(test)]
+    fn debug_output_drivers(&self, device: usize) -> Vec<DriverId> {
+        (**self).debug_output_drivers(device)
     }
 }
 
@@ -1710,6 +1733,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
     pub fn end_host_step(&mut self) {
         self.host_step = None;
+    }
+
+    /// The driver table, by driver id (W2c's carry reads its commits).
+    pub(crate) fn drivers(&self) -> &[Driver] {
+        &self.drivers
     }
 
     /// Whether the kernel is between two calls (W2a): no instant window open

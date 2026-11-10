@@ -704,7 +704,7 @@ fn a_cc_psu_charging_a_capacitor_through_an_led_steps_at_its_own_time_constants(
 /// loop's 330 A. At the seed's ratings W1g's `led_failed` latched devices 10
 /// (0.143 s) and 5 (0.448 s) and opened them, so the later checkpoints
 /// compared open-LED circuits, not the loop this test is about.
-fn cell_switch_into_an_led_loop() -> Program {
+pub(super) fn cell_switch_into_an_led_loop() -> Program {
     let led_with = |ci: usize, a: usize, b: usize, vf: f64, n: f64, i_rated: f64| Device {
         kind: kinds::LED,
         component_index: ci,
@@ -15431,7 +15431,7 @@ fn a_clamps_catch_up_steps_are_cut_like_any_plan() {
 /// Two PTC branches on one 6 V, 2 A supply, each a PTC (5 ohm, 0.5 A hold)
 /// into an LED (vf 2 V, ifMax 0.5 A) charging 1 mF across 1 ohm: nodes 2 and
 /// 4 sit in two stepped partitions (from the verifier's R80V3 board).
-fn two_ptc_branches() -> Program {
+pub(super) fn two_ptc_branches() -> Program {
     let led = || vec![2.0, 2.0, 0.5, 0.0, 0.0, 0.0];
     let mut p = program(6, vec![
         fz(21, 0, &[1, 0], vec![6.0, 2.0], vec![]),
