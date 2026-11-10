@@ -832,7 +832,17 @@ impl Engine {
         // and installed via `set_evaluator` — AFTER `Kernel::new`, exactly
         // like `solve::ic_tests`'s own `IcHarness` build order (that
         // module's own doc comment).
-        let ic_evaluator = ics::register(&mut kernel, program);
+        let mut ic_evaluator = ics::register(&mut kernel, program);
+        if !program.carry.is_empty() {
+            // W2c: carried IC state, drivers and timers, before the settle.
+            let (drivers, timers) = ic_evaluator.carry_seed(&program.carry).map_err(BoError::malformed)?;
+            for (id, committed, pending) in drivers {
+                kernel.seed_driver(id, committed, pending);
+            }
+            for (device, at, tag) in timers {
+                kernel.seed_timer(device, at, tag);
+            }
+        }
         let all_readers = ic_evaluator.reader_ids();
         // W1f: a program with a waveform source also publishes its digital
         // slot at every completed instant (Readouts); every other program

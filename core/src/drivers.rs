@@ -304,6 +304,10 @@ pub struct Driver {
     committed: Option<Mode>,
     pending: Option<Pending>,
     token: Token,
+    /// W2c: the FSM state came from a carry ([`Self::seed`]), so the load
+    /// settle times this pin's transitions by its real delays, not the
+    /// settle's zero override (which stands in for first observations).
+    seeded: bool,
 }
 
 impl Driver {
@@ -321,6 +325,7 @@ impl Driver {
             committed: None,
             pending: None,
             token: 0,
+            seeded: false,
         }
     }
 
@@ -347,6 +352,7 @@ impl Driver {
             committed: None,
             pending: None,
             token: 0,
+            seeded: false,
         }
     }
 
@@ -408,6 +414,24 @@ impl Driver {
             }
             fsm::Applied::Stale => false,
         }
+    }
+
+    /// W2c's seed, at load before the settle: a carried committed level and
+    /// in-flight transition. Returns the token a pending transition's
+    /// `Commit` event must carry, for the caller to schedule at its due time.
+    pub fn seed(&mut self, committed: Option<Mode>, pending: Option<Pending>) -> Option<Token> {
+        self.committed = committed;
+        self.pending = pending;
+        self.seeded = true;
+        pending.map(|_| {
+            self.token += 1;
+            self.token
+        })
+    }
+
+    /// Whether [`Self::seed`] set this driver's state.
+    pub fn seeded(&self) -> bool {
+        self.seeded
     }
 
     /// See [`fsm::reset`].

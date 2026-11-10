@@ -590,6 +590,58 @@ impl IcEvaluator {
     /// calls this once, right after [`register`], to build the reader list
     /// load settling requires (W1c contract point 2: "settle with every IC
     /// as a reader").
+    /// W2c's seed (program v4's `CARRY` block), at load before the settle:
+    /// each carried IC's family state, its last reads (so the settle's edge
+    /// pass sees an edge the reload made, against the level it had), its
+    /// slot readout, and its output drivers, returned for the kernel to seed
+    /// (`(driver, committed, pending (target, due))`), with the timers the
+    /// state needs (an EEPROM write in flight). An EEPROM carried from
+    /// another image starts afresh, drivers included, as classic's does. A
+    /// record whose counts do not fit the IC is `Err`.
+    #[allow(clippy::type_complexity)]
+    pub fn carry_seed(&mut self, block: &[f64]) -> Result<(Vec<(DriverId, Option<Mode>, Option<(Mode, f64)>)>, Vec<(DeviceId, f64, u64)>), String> {
+        use crate::carry;
+        let (mut drivers, mut timers) = (Vec::new(), Vec::new());
+        for r in carry::records(block)? {
+            if !carry::known(&r) || r.family != carry::FAMILY_IC {
+                continue;
+            }
+            let Some(entry) = self.ics.iter_mut().find(|e| e.device_index == r.device) else { continue };
+            let seed = carry::ic::decode(entry.record.kind, r.values)?;
+            let what = format!("carry: IC device {}", r.device);
+            if seed.reads.as_ref().is_some_and(|reads| reads.len() != entry.record.logic.len()) {
+                return Err(format!("{what}: {} reads for {} logic pins", seed.reads.as_ref().unwrap().len(), entry.record.logic.len()));
+            }
+            if seed.slots.len() != entry.family_slots.len() || seed.drivers.len() != entry.output_drivers.len() {
+                return Err(format!("{what}: {} slots and {} drivers for {} and {}", seed.slots.len(), seed.drivers.len(), entry.family_slots.len(), entry.output_drivers.len()));
+            }
+            match &mut entry.family {
+                Family::Combinational { schmitt_state } => {
+                    if seed.family[0] != schmitt_state.len() as f64 {
+                        return Err(format!("{what}: {} Schmitt levels for {} pins", seed.family[0], schmitt_state.len()));
+                    }
+                    for (b, &v) in schmitt_state.iter_mut().zip(&seed.family[1..]) {
+                        *b = carry::ic::bit_of(v)?;
+                    }
+                }
+                Family::Sequential(state) => state.carry_seed(seed.family)?,
+                Family::Memory(state) => {
+                    if !digital::memory::carry_seed(state, seed.family)? {
+                        continue;
+                    }
+                    if let Some((at, tag)) = digital::memory::carried_timer(state) {
+                        timers.push((DeviceId(entry.device_index as u32), at, tag));
+                    }
+                }
+                Family::Ne555(state) => state.out_high = carry::ic::bit_of(seed.family[0])?,
+            }
+            entry.last_reads = seed.reads;
+            entry.family_slots.copy_from_slice(seed.slots);
+            drivers.extend(entry.output_drivers.iter().zip(seed.drivers).map(|(&id, (committed, pending))| (id, committed, pending)));
+        }
+        Ok((drivers, timers))
+    }
+
     pub fn reader_ids(&self) -> Vec<DeviceId> {
         self.ics.iter().map(|e| DeviceId(e.device_index as u32)).collect()
     }

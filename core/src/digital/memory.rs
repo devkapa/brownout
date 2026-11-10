@@ -116,6 +116,64 @@ pub fn carry_values(state: &MemState, out: &mut Vec<f64>) -> f64 {
     }
 }
 
+/// W2c's seed: [`carry_values`]' inverse, at load. A 189 takes its nibbles
+/// and `/WE` history. An EEPROM takes its write cycle only when the carried
+/// image is this one (hash and length): the image itself is the program's
+/// ROM blob, so the host carries a written image by loading it there.
+/// Returns whether the state was seeded (`false` for another image), and
+/// `Err` for a value out of range.
+pub fn carry_seed(state: &mut MemState, v: &[f64]) -> Result<bool, String> {
+    use crate::carry::ic::{bit_of, image_hash};
+    let whole = |x: f64, max: f64, what: &str| -> Result<f64, String> {
+        if x.is_finite() && x >= 0.0 && x.fract() == 0.0 && x <= max {
+            Ok(x)
+        } else {
+            Err(format!("carry: a memory's {what} {x} is out of range"))
+        }
+    };
+    match state {
+        MemState::Ram189(st) => {
+            for (k, &n) in v[..16].iter().enumerate() {
+                st.mem[k] = whole(n, 15.0, "nibble")? as u8;
+            }
+            st.last_we = bit_of(v[16])?;
+            Ok(true)
+        }
+        MemState::Eeprom(st) => {
+            if v[0] != image_hash(&st.image) || v[1] != st.image.len() as f64 {
+                return Ok(false);
+            }
+            let mask = (st.image.len() - 1) as f64;
+            let pending = if v[4].is_nan() && v[5].is_nan() && v[6].is_nan() {
+                None
+            } else {
+                if !v[6].is_finite() {
+                    return Err(format!("carry: an EEPROM write completing at {}", v[6]));
+                }
+                Some((whole(v[4], mask, "pending address")? as usize, whole(v[5], 255.0, "pending byte")? as u8, v[6]))
+            };
+            st.last_we_high = bit_of(v[2])?;
+            st.last_ce_high = bit_of(v[3])?;
+            st.pending = pending;
+            st.poll_reads = whole(v[7], f64::from(u16::MAX), "poll count")? as u16;
+            st.sdp_step = whole(v[8], 3.0, "SDP step")? as u8;
+            st.sdp_unlocked = bit_of(v[9])?;
+            st.dirty = bit_of(v[10])?;
+            st.prev_read_cycle = bit_of(v[11])?;
+            Ok(true)
+        }
+    }
+}
+
+/// The timer a seeded state needs: an EEPROM write in flight wakes its
+/// device when it completes, as the evaluation that accepted it scheduled.
+pub fn carried_timer(state: &MemState) -> Option<(f64, u64)> {
+    match state {
+        MemState::Eeprom(st) => st.pending.map(|(_, _, at)| (at, WRITE_COMPLETE_TAG)),
+        MemState::Ram189(_) => None,
+    }
+}
+
 /// Little-endian word decode, the README's "ROM image": word `k` is
 /// `b[4k] + b[4k+1]*2^8 + b[4k+2]*2^16 + b[4k+3]*2^24`, inverted here.
 fn words_to_bytes(rom: &[u32]) -> Vec<u8> {

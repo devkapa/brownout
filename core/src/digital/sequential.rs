@@ -51,6 +51,32 @@ impl SeqState {
         }
     }
 
+    /// W2c's seed: [`Self::carry_values`]' inverse, at load.
+    pub fn carry_seed(&mut self, v: &[f64]) -> Result<(), String> {
+        use crate::carry::ic::bit_of;
+        match self {
+            SeqState::Ls161 { count, last_clk } => {
+                if !(v[0].fract() == 0.0 && (0.0..=15.0).contains(&v[0])) {
+                    return Err(format!("carry: a 161's count {} is out of range", v[0]));
+                }
+                *count = v[0] as u8;
+                *last_clk = bit_of(v[1])?;
+            }
+            SeqState::Ls173 { q, last_clk } => {
+                for (k, b) in q.iter_mut().enumerate() {
+                    *b = bit_of(v[k])?;
+                }
+                *last_clk = bit_of(v[4])?;
+            }
+            SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => {
+                for (k, b) in [q1, q1n, last_clk1, q2, q2n, last_clk2].into_iter().enumerate() {
+                    *b = bit_of(v[k])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Power-on values (contract point 2: classic's `defaultIcState`, all 0
     /// except `q1n = q2n = 1`).
     pub fn power_on(ic: &IcRecord) -> Self {

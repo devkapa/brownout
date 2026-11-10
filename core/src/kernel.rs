@@ -1164,6 +1164,21 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// reports it so — W1c contract point 4): such a driver still commits
     /// and stamps into the solver's KCL, it simply never dirties a partition
     /// re-solve of its own.
+    /// W2c's seed, at load before [`Self::settle`]: driver `id`'s carried
+    /// committed level and in-flight transition, whose `Commit` goes on the
+    /// heap at its absolute due time.
+    pub fn seed_driver(&mut self, id: DriverId, committed: Option<Mode>, pending: Option<(Mode, f64)>) {
+        let pending = pending.map(|(target, due)| crate::drivers::Pending { target, due });
+        if let (Some(token), Some(p)) = (self.drivers[id.0 as usize].seed(committed, pending), pending) {
+            self.heap.push(p.due, EventKind::Commit { driver: id, mode: p.target, token });
+        }
+    }
+
+    /// W2c's seed: a carried device timer (an EEPROM write completing).
+    pub fn seed_timer(&mut self, device: DeviceId, at: f64, tag: u64) {
+        self.heap.push(at, EventKind::Timer { device, tag });
+    }
+
     pub fn add_driver(&mut self, driver: Driver, partition: Option<PartitionId>) -> DriverId {
         let id = DriverId(self.drivers.len() as u32);
         self.drivers.push(driver);
@@ -1222,7 +1237,10 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 if self.drivers[idx].request_is_noop(level) {
                     return None;
                 }
-                let delays = if zero_delays { DelaySet::uniform(0.0) } else { delays };
+                // A carried driver is no first observation: classic's seed
+                // solve after a load times its transitions by the real
+                // delays from the carried slots (W2c).
+                let delays = if zero_delays && !self.drivers[idx].seeded() { DelaySet::uniform(0.0) } else { delays };
                 self.journal_driver(idx);
                 if let Some((due, mode, token)) = self.drivers[idx].request(level, now, &delays) {
                     self.heap.push(due, EventKind::Commit { driver, mode, token });

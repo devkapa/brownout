@@ -299,8 +299,8 @@ fn bits_of(buf: &[f64], families: &[u32]) -> Vec<(usize, u32, Vec<u64>)> {
     carry::records(buf).unwrap().into_iter().filter(|r| families.contains(&r.family)).map(|r| (r.device, r.family, r.values.iter().map(|v| v.to_bits()).collect())).collect()
 }
 
-/// The families this piece seeds (an IC's is piece 3's).
-const SEEDED: [u32; 5] = [carry::FAMILY_CAPACITOR, carry::FAMILY_BATTERY, carry::FAMILY_PSU, carry::FAMILY_SLOW, carry::FAMILY_LATCH];
+/// Every family.
+const SEEDED: [u32; 6] = [carry::FAMILY_CAPACITOR, carry::FAMILY_IC, carry::FAMILY_BATTERY, carry::FAMILY_PSU, carry::FAMILY_SLOW, carry::FAMILY_LATCH];
 
 #[test]
 fn a_load_seeded_from_a_carry_holds_that_carry() {
@@ -311,7 +311,8 @@ fn a_load_seeded_from_a_carry_holds_that_carry() {
     // rail capacitor, stepped and closed-form ones, the PSU in CC), the PTC
     // board (two PTCs, a limited PSU), the cell board (the battery, LEDs),
     // the rollback rig (a rated resistor's stress, an LED's temperature and
-    // held junction temperature) and the fuse ring (a latched fuse).
+    // held junction temperature, a 74LS00) and the fuse ring (a latched
+    // fuse, a 74LS04 ring); 2575's 555 carries its latch.
     for (name, p, stops) in [
         ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()),
         ("two PTCs", two_ptc_branches(), vec![1e-3, 2e-3]),
@@ -436,36 +437,216 @@ fn a_twelve_volt_charge_carried_onto_five_volts_stresses_a_resistor_cold_at_five
 #[test]
 fn a_carry_taken_at_an_r86_yield_seeds_the_load_a_plain_stops_carry_does() {
     // The take at a yield is the plain stop's, bit for bit (above); so are
-    // the loads seeded from them, run on.
-    let p = two_ptc_branches();
-    let mut now = 0.0;
-    let mut clock = move || {
-        now += 1.0;
-        now
-    };
-    let mut e = advanced(&p, &[1e-3]);
-    let mut yields = 0;
-    while !e.advance_for(0.02, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
-        yields += 1;
-        if yields % 7 != 1 {
-            continue;
+    // the loads seeded from them, run on: on the PTC board, and on the
+    // counting board, whose ICs carry drivers in flight.
+    for (name, p, t_end) in [("two PTCs", two_ptc_branches(), 0.02), ("counting board", counting_board(), 0.006)] {
+        let mut now = 0.0;
+        let mut clock = move || {
+            now += 1.0;
+            now
+        };
+        let mut e = advanced(&p, &[1e-3]);
+        let mut yields = 0;
+        while !e.advance_for(t_end, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+            yields += 1;
+            if yields % 7 != 1 {
+                continue;
+            }
+            let t_y = e.time();
+            let at_yield = take(&mut e);
+            let mut plain = advanced(&p, &[1e-3]);
+            plain.advance(t_y).unwrap();
+            let at_stop = take(&mut plain);
+            let mut a = reload(&p, &at_yield, t_y);
+            let mut b = reload(&p, &at_stop, t_y);
+            for t1 in [t_y + 1e-8, t_y + 1e-4, t_y + 1e-3] {
+                a.advance(t1).unwrap();
+                b.advance(t1).unwrap();
+                let bits = |e: &Engine| e.voltages().iter().chain(e.currents()).chain(e.digital_slots()).map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&a), bits(&b), "{name}: yield {yields} at {t_y}, run to {t1}");
+            }
+            if yields > 30 {
+                break;
+            }
         }
-        let t_y = e.time();
-        let at_yield = take(&mut e);
-        let mut plain = advanced(&p, &[1e-3]);
-        plain.advance(t_y).unwrap();
-        let at_stop = take(&mut plain);
-        let mut a = reload(&p, &at_yield, t_y);
-        let mut b = reload(&p, &at_stop, t_y);
-        for t1 in [t_y + 1e-4, t_y + 1e-3] {
-            a.advance(t1).unwrap();
-            b.advance(t1).unwrap();
-            let bits = |e: &Engine| e.voltages().iter().chain(e.currents()).map(|v| v.to_bits()).collect::<Vec<_>>();
-            assert_eq!(bits(&a), bits(&b), "yield {yields} at {t_y}, run to {t1}");
-        }
-        if yields > 30 {
-            break;
-        }
+        assert!(yields > 1, "{name}: it yielded");
     }
-    assert!(yields > 1, "it yielded");
+}
+
+// ---- the IC seed (W2c piece 3) -------------------------------------------
+
+fn ic_on(kind: u32, ci: usize, logic: &[usize], params: Vec<f64>, rom_words: usize, slot_base: usize) -> Device {
+    let pins = [pin(1), pin(0)].into_iter().chain(logic.iter().map(|&n| pin(n))).collect();
+    let mut blob = vec![slot_base as f64];
+    blob.extend(std::iter::repeat(0.0).take(logic.len() + rom_words));
+    Device { kind, component_index: ci, pins, params, blob }
+}
+
+/// A 1 kHz clock (node 2) runs a 161 counter (qa..qd, rco on 3..7), a
+/// 74hc74 toggling on it (q1 on 8, /q1 on 9 fed back to d1), a 173
+/// latching the count (12..15), a 189 written at the count's address on
+/// each `/we` rise (16..19), and a 28c16 written on each `/we` rise, a 10 ms
+/// write cycle, so one is nearly always in flight. Every output has 10k to
+/// ground.
+fn counting_board() -> Program {
+    let mut devices = vec![
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] },
+        Device { kind: kinds::CLOCK, component_index: 1, pins: vec![pin(2), pin(0)], params: vec![1000.0, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] },
+        // /clr clk /load enp ent a b c d | qa qb qc qd rco
+        ic_on(kinds::IC_74LS161, 2, &[1, 2, 1, 1, 1, 0, 0, 0, 0, 3, 4, 5, 6, 7], w1d_params(4, &[]), 0, 1),
+        // clr1_n d1 clk1 pre1_n | q1 q1_n q2_n q2 | pre2_n clk2 d2 clr2_n
+        ic_on(kinds::IC_74HC74, 3, &[1, 9, 2, 1, 8, 9, 10, 11, 1, 2, 0, 1], w1d_params(2, &[]), 0, 6),
+        // /clr clk m n g1 g2 d1..d4 | q1..q4
+        ic_on(kinds::IC_74LS173, 4, &[0, 2, 0, 0, 0, 0, 3, 4, 5, 6, 12, 13, 14, 15], w1d_params(4, &[]), 0, 10),
+        // a0..a3 d1..d4 /cs /we | /o1../o4
+        ic_on(kinds::IC_74LS189, 5, &[3, 4, 5, 6, 3, 1, 4, 1, 0, 2, 16, 17, 18, 19], w1d_params(5, &[]), 0, 14),
+        // a0..a10 /oe /ce /we | io0..io7
+        ic_on(kinds::IC_28C16, 6, &[3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 1, 0, 1, 0, 1, 0, 1, 0], w1d_params(5, &[10e-3, 0.0]), 2048 / 4, 18),
+    ];
+    for (k, n) in [3usize, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19].into_iter().enumerate() {
+        devices.push(Device { kind: kinds::RESISTOR, component_index: 7 + k, pins: vec![pin(n), pin(0)], params: vec![1e4], blob: vec![] });
+    }
+    Program { carry: Vec::new(), node_count: 20, options: Options::default(), digital_slot_count: 26, channel_slot_count: 0, devices }
+}
+
+fn digital_bits(e: &Engine) -> Vec<u64> {
+    e.digital_slots().iter().map(|v| v.to_bits()).collect()
+}
+
+#[test]
+fn a_reload_seeded_from_a_carry_runs_the_digital_side_on_unchanged() {
+    // Taken at instants between clock edges and inside the 13-37 ns after
+    // one (commits in flight), seeded into a fresh load at that time: the
+    // IC records come back bit for bit, the slots stay identical at every
+    // later stop, and the node voltages within W0. A cold load at the same
+    // time is not (the counter restarts at 0).
+    let p = counting_board();
+    let mut saw_pending = false;
+    let mut saw_write = false;
+    for t in [2.3e-3, 3e-3 + 5e-9, 3e-3 + 1.5e-8, 4.5e-3 + 2e-8, 6.2e-3] {
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(t).unwrap();
+        let buf = take(&mut e);
+        for r in family(&buf, carry::FAMILY_IC) {
+            let seed = carry::ic::decode(p.devices[r.device].kind, r.values).unwrap();
+            saw_pending |= seed.drivers.iter().any(|d| d.1.is_some());
+            saw_write |= r.values[1] == carry::ic::EEPROM && !r.values[8].is_nan();
+        }
+        let mut seeded = reload(&p, &buf, t);
+        let again = take(&mut seeded);
+        assert_eq!(bits_of(&again, &[carry::FAMILY_IC]), bits_of(&buf, &[carry::FAMILY_IC]), "t = {t}: the IC records");
+        assert_eq!(digital_bits(&seeded), digital_bits(&e), "t = {t}: the slots at the reload");
+        let mut cold = reload(&p, &[], t);
+        let mut cold_differs = false;
+        for dt in [1e-8, 3e-8, 1e-6, 1.3e-3, 4e-3, 12e-3] {
+            e.advance(t + dt).unwrap();
+            seeded.advance(t + dt).unwrap();
+            cold.advance(t + dt).unwrap();
+            assert_eq!(digital_bits(&seeded), digital_bits(&e), "t = {t} + {dt}: the slots");
+            for (n, (&g, &w)) in seeded.voltages().iter().zip(e.voltages()).enumerate() {
+                let w0 = (g - w).abs() / (1e-4 + 1e-3 * g.abs().max(w.abs()));
+                assert!(w0 <= 1.0, "t = {t} + {dt}: node {n}: {g} against {w}");
+            }
+            cold_differs |= digital_bits(&cold) != digital_bits(&e);
+        }
+        assert!(cold_differs, "t = {t}: a cold load would differ");
+        assert_eq!(seeded.take_eeprom_updates().to_vec(), e.take_eeprom_updates().to_vec(), "t = {t}: the EEPROM image");
+    }
+    assert!(saw_pending, "some take had a commit in flight");
+    assert!(saw_write, "some take had an EEPROM write in flight");
+}
+
+#[test]
+fn an_eeprom_carried_onto_another_image_starts_afresh() {
+    let p = counting_board();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(2.3e-3).unwrap();
+    let buf = take(&mut e);
+    let mut q = p.clone();
+    q.devices[6].blob[1 + 22] = 1.0; // another image
+    let mut seeded = reload(&q, &buf, 2.3e-3);
+    // The layout from value 2: hash, length, /we and /ce history, then the
+    // pending write's address, byte and completion.
+    assert!(!one(&buf, carry::FAMILY_IC, 6).values[8].is_nan(), "a write was in flight");
+    let eeprom = one(&take(&mut seeded), carry::FAMILY_IC, 6).values.to_vec();
+    assert!(eeprom[8].is_nan(), "no write in flight on the other image: {eeprom:?}");
+    assert_eq!(seeded.take_eeprom_updates().len(), 0, "and nothing written to it");
+    let counter = one(&take(&mut seeded), carry::FAMILY_IC, 2).values.to_vec();
+    assert_eq!(counter[2..4].to_vec(), one(&buf, carry::FAMILY_IC, 2).values[2..4].to_vec(), "the counter still carries");
+}
+
+#[test]
+fn an_ic_record_that_does_not_fit_its_ic_is_a_malformed_load() {
+    let p = counting_board();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(2.3e-3).unwrap();
+    let buf = take(&mut e);
+    let r = one(&buf, carry::FAMILY_IC, 2);
+    let mut values = r.values.to_vec();
+    let n = values.len();
+    values.truncate(n - 3); // one driver short
+    values[n - 3 - 1 - 3 * 4] = 4.0;
+    let mut bad = Vec::new();
+    carry::push(&mut bad, 2, carry::FAMILY_IC, &values);
+    let mut q = p.clone();
+    q.options.start_time = 2.3e-3;
+    q.carry = bad;
+    assert_eq!(Engine::load(&q).err().map(|e| e.code), Some(-1));
+}
+
+#[test]
+fn a_carried_driver_answers_the_reload_after_its_delay_not_at_once() {
+    // Classic's seed solve after a load times a carried output by its
+    // carried committed level and the real delay (its `delay:` slot); a
+    // fresh one is a first observation at zero delay. The reload ties the
+    // 74hc74's clr1_n low with q1 HIGH. The frozen settle passes act on an
+    // asynchronous clear (sequential point 6), where the settle's zero
+    // override would commit q1 LOW at once: carried, it holds until
+    // preClrQ (20 ns) has passed.
+    let p = counting_board();
+    let t = [2.3e-3, 3.3e-3, 4.3e-3, 5.3e-3]
+        .into_iter()
+        .find(|&t| {
+            let mut e = Engine::load(&p).unwrap();
+            e.advance(t).unwrap();
+            e.voltages()[8] > 2.0
+        })
+        .expect("q1 HIGH at one of them");
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(t).unwrap();
+    let buf = take(&mut e);
+    let mut cleared = p.clone();
+    cleared.devices[3].pins[2] = pin(0);
+    let mut seeded = reload(&cleared, &buf, t);
+    assert!(seeded.voltages()[8] > 2.0, "q1 still HIGH at the reload: {}", seeded.voltages()[8]);
+    seeded.advance(t + 1.5e-8).unwrap();
+    assert!(seeded.voltages()[8] > 2.0, "and 15 ns on");
+    seeded.advance(t + 2.5e-8).unwrap();
+    assert!(seeded.voltages()[8] < 0.5, "LOW once preClrQ has passed: {}", seeded.voltages()[8]);
+    // A cold load of the edited board is a first observation: LOW at once.
+    let cold = reload(&cleared, &[], t);
+    assert!(cold.voltages()[8] < 0.5);
+}
+
+#[test]
+fn a_snapshot_taken_after_a_carried_load_round_trips() {
+    // What the seed writes (driver states, timers, charges, slow state) is
+    // all snapshot state, so W2a's snapshot needs nothing new for it.
+    let p = counting_board();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(3e-3 + 5e-9).unwrap();
+    let buf = take(&mut e);
+    let mut seeded = reload(&p, &buf, e.time());
+    let snap = seeded.snapshot();
+    let run = |e: &mut Engine| {
+        let mut rows = Vec::new();
+        for dt in [1e-8, 1e-6, 2e-3, 9e-3] {
+            e.advance(3e-3 + 5e-9 + dt).unwrap();
+            rows.push(e.voltages().iter().chain(e.digital_slots()).map(|v| v.to_bits()).collect::<Vec<_>>());
+        }
+        rows
+    };
+    let first = run(&mut seeded);
+    seeded.restore(&snap);
+    assert!(first == run(&mut seeded), "the run from the restored snapshot is the run from the load");
 }

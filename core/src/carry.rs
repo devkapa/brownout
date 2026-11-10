@@ -114,6 +114,120 @@ pub mod ic {
         }
         f64::from(h)
     }
+
+    /// [`mode`]'s inverse; `Err` for any other value.
+    pub fn mode_of(v: f64) -> Result<Option<Mode>, String> {
+        Ok(match v {
+            -1.0 => None,
+            0.0 => Some(Mode::Hiz),
+            1.0 => Some(Mode::High),
+            2.0 => Some(Mode::Low),
+            _ => return Err(format!("carry: {v} is no driver mode")),
+        })
+    }
+
+    /// [`bit`]'s inverse; `Err` for anything but 0 or 1.
+    pub fn bit_of(v: f64) -> Result<bool, String> {
+        if v == 0.0 || v == 1.0 {
+            Ok(v == 1.0)
+        } else {
+            Err(format!("carry: {v} is no bit"))
+        }
+    }
+
+    /// The family tag a kind's record carries.
+    pub fn tag_of(kind: u32) -> f64 {
+        use crate::digital;
+        if digital::is_sequential_ic(kind) {
+            SEQUENTIAL
+        } else if kind == crate::kinds::IC_74LS189 {
+            RAM_189
+        } else if digital::is_memory_ic(kind) {
+            EEPROM
+        } else if digital::is_ne555(kind) {
+            NE555
+        } else {
+            COMBINATIONAL
+        }
+    }
+
+    /// An IC record split into its parts, each checked as far as the record
+    /// alone can be (the counts against the IC itself are the seed's).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Seed<'a> {
+        /// The family values after the tag (a combinational IC's count
+        /// included).
+        pub family: &'a [f64],
+        /// The logic-pin reads at the last powered evaluation, if any.
+        pub reads: Option<Vec<bool>>,
+        pub slots: &'a [f64],
+        /// Per output driver: the committed mode and the pending `(target,
+        /// due)`.
+        pub drivers: Vec<(Option<Mode>, Option<(Mode, f64)>)>,
+    }
+
+    /// Splits `values` (a family-2 record's) for an IC of `kind`.
+    pub fn decode(kind: u32, values: &[f64]) -> Result<Seed<'_>, String> {
+        let short = || format!("carry: an IC record of kind {kind} is cut short");
+        let at = |i: usize| values.get(i).copied().ok_or_else(short);
+        let count = |v: f64, what: &str| -> Result<usize, String> {
+            if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= values.len() as f64 {
+                Ok(v as usize)
+            } else {
+                Err(format!("carry: an IC's {what} count {v} is out of range"))
+            }
+        };
+        if at(0)? != kind as f64 {
+            return Err(format!("carry: an IC record of kind {} on a kind {kind}", at(0)?));
+        }
+        let tag = at(1)?;
+        if tag != tag_of(kind) {
+            return Err(format!("carry: family tag {tag} on kind {kind}"));
+        }
+        let family_len = match tag {
+            COMBINATIONAL => 1 + count(at(2)?, "Schmitt")?,
+            SEQUENTIAL => match kind {
+                crate::kinds::IC_74LS161 => 2,
+                crate::kinds::IC_74LS173 => 5,
+                _ => 6,
+            },
+            RAM_189 => 17,
+            EEPROM => 12,
+            _ => 1,
+        };
+        let family = values.get(2..2 + family_len).ok_or_else(short)?;
+        let mut i = 2 + family_len;
+        let reads = match at(i)? {
+            -1.0 => {
+                i += 1;
+                None
+            }
+            n => {
+                let n = count(n, "reads")?;
+                let bits = values.get(i + 1..i + 1 + n).ok_or_else(short)?.iter().map(|&b| bit_of(b)).collect::<Result<Vec<_>, _>>()?;
+                i += 1 + n;
+                Some(bits)
+            }
+        };
+        let n = count(at(i)?, "slot")?;
+        let slots = values.get(i + 1..i + 1 + n).ok_or_else(short)?;
+        i += 1 + n;
+        let n = count(at(i)?, "driver")?;
+        let triples = values.get(i + 1..i + 1 + 3 * n).ok_or_else(short)?;
+        let drivers = triples
+            .chunks_exact(3)
+            .map(|t| {
+                let committed = mode_of(t[0])?;
+                let pending = match (mode_of(t[1])?, t[2]) {
+                    (None, due) if due.is_nan() => None,
+                    (Some(target), due) if due.is_finite() => Some((target, due)),
+                    _ => return Err(format!("carry: a pending commit ({}, {}) is malformed", t[1], t[2])),
+                };
+                Ok((committed, pending))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Seed { family, reads, slots, drivers })
+    }
 }
 
 /// The slow layout: `[failed, stress, temperature, shutdown, ptc_tripped,
@@ -181,7 +295,13 @@ pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(),
         let finite_or_none = |x: f64| x.is_finite() || x.is_nan();
         let ok = match r.family {
             FAMILY_CAPACITOR => d.kind == kinds::CAPACITOR && v[0].is_finite(),
-            FAMILY_IC => crate::digital::is_ic(d.kind) && v[0] == d.kind as f64,
+            FAMILY_IC => {
+                if !crate::digital::is_ic(d.kind) {
+                    return Err(format!("{what} is on device kind {}, no IC", d.kind));
+                }
+                ic::decode(d.kind, v).map_err(|e| format!("{what}: {e}"))?;
+                true
+            }
             FAMILY_BATTERY => d.kind == kinds::BATTERY_PACK && (0.0..=1.0).contains(&v[0]) && v[1..6].iter().all(|x| x.is_finite()),
             FAMILY_PSU => d.kind == kinds::BENCH_PSU && crate::devices::sources::Regime::from_code(v[0]).is_some(),
             FAMILY_SLOW => {

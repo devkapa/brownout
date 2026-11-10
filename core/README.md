@@ -1156,7 +1156,22 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   the settle derives it from the carried charges, as classic's first step
   does (2575 tpl 2 reloaded in CC comes back in CC, a test pins it). A PSU
   model that gains hysteresis must carry its regime.
-  IC records are checked but not yet seeded (W2c piece 3). The integrator
+  An IC takes its family state (registers, a 189's nibbles, an EEPROM's
+  write cycle, a 555's latch, Schmitt-held levels), its last reads and
+  slot readout, and its output drivers: each committed level, and a
+  transition in flight as a `Commit` at its absolute due time (an EEPROM
+  write in flight likewise wakes its device when it completes). An EEPROM
+  takes its write cycle only onto the same image (hash and length); the
+  image is the program's ROM blob, so a host carries a written image by
+  loading it there, and onto another image the IC starts afresh, drivers
+  included, as classic's does. A record whose counts do not fit its IC
+  makes the load `-1`. The settle then runs as on a cold load, except that
+  a carried driver is no first observation: its transitions take their
+  real delays, not the settle's zero override, as classic's seed solve
+  times them from the carried `delay:` slots (classic's seed solve sits 1
+  ps after the load time, the core's at it). The carried edge history
+  (`lastClk`, `lastWE`, `/WE` and `/CE`) makes an edge the reload made act
+  in the edge pass. The integrator
   history is not carried, so the first step is backward Euler, as classic
   forces after a load. The cold-device span widens over carried charges
   (see the thermal, failures and warnings section).
@@ -1902,9 +1917,10 @@ their own, and the source KCL does with W1a point 2's branch fold.
    - `zh`/`zl`/`hz`/`lz` come from the output class's enable and disable
      pairs; where a kind has several enables, from the one that changed.
    - `lastReads` is written at every powered evaluation, frozen-settle passes
-     included (it only chooses delays, which are zero while settling). It is
-     in the evaluator's snapshot, so it rolls back with a failed instant; a
-     load drops it.
+     included (it only chooses delays, which are zero while settling for a
+     driver not carried). It is in the evaluator's snapshot, so it rolls
+     back with a failed instant; a cold load drops it, and a carried one
+     seeds it.
 
    | Kind | Outputs | `lh`/`hl` by cause | `zh`/`zl` | `hz`/`lz` |
    |---|---|---|---|---|
@@ -1946,10 +1962,11 @@ their own, and the source KCL does with W1a point 2's branch fold.
    20 ns package delay for all of them.
 7. **State across calls.** A driver's FSM state (committed level, pending
    transition, token) survives `bo_engine_set_params` and `bo_engine_seed_memory`,
-   rolls back with a failed instant, and is rebuilt uncommitted by a load, so
-   the load settle is all first observations at zero delay. Classic carries
-   the `delay:/pending:/due:` slots across `load()` by id and kind; in the
-   core that is W2 (load carry-forward). HIZ commits are ordinary commits:
+   rolls back with a failed instant, and is rebuilt uncommitted by a cold
+   load, so its settle is all first observations at zero delay. Classic
+   carries the `delay:/pending:/due:` slots across `load()` by id and kind;
+   so does the core's carried load (W2c, "Carry"), whose carried drivers
+   keep their real delays through the settle. HIZ commits are ordinary commits:
    held while unpowered (W1c point 9), counted in stat 13, and reported by
    `bo_engine_next_digital_due_time`.
 8. **Readouts of the 157 and 245** stay the committed pin level (W1c point
