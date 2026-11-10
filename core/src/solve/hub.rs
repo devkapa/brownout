@@ -2385,13 +2385,35 @@ impl PartitionedSolver {
     /// closed-form partitions follow its path (ruling R15 (a)): they publish
     /// against the rail they followed, which the rail node holds only from
     /// its last solve.
+    ///
+    /// Its flips of the rail ICs' power count in the gate chase as a `Rail`
+    /// event's do (REF's ruling (d), cold 2575 tpl 2 stepped event by event):
+    /// a host stopping on a `Rail` event clamps at its very time, and the
+    /// clamp's rail loop can flip back what the event just flipped, so the
+    /// chase runs event, clamp, event 1 fs on, clamp, with each event alone
+    /// flipping the same way. Counted at both, the second flip back is the
+    /// chase, and the rail ICs that flipped are probed as at a `Rail` event.
+    /// A clamp that flips nothing is no part of the count.
     pub(super) fn rail_at_clamp(&mut self, t_end: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
-        if let Some(hub) = self.hub.as_mut() {
-            if hub.state.cap_seg.is_some() || hub.state.cell.is_some() {
-                hub.dirty = true;
-            }
+        let Some(hub) = self.hub.as_mut() else {
+            return self.rail_loop(t_end, drivers, readers);
+        };
+        if hub.state.cap_seg.is_some() || hub.state.cell.is_some() {
+            hub.dirty = true;
         }
-        self.rail_loop(t_end, drivers, readers)
+        let gates = self.rail_gates();
+        self.rail_loop(t_end, drivers, readers)?;
+        // A clamp that flips nothing leaves the chase as it stands: a host
+        // stepping event by event clamps after each event, and the run is
+        // the events' (`count_gate_flip`'s own doc comment).
+        if self.rail_gates() == gates {
+            return Ok(());
+        }
+        if let Some(a) = self.count_gate_flip(gates, false) {
+            self.hold_on_rail(t_end, drivers, readers, &a, rails::loop_unsettled())?;
+            self.hub.as_mut().unwrap().state.gate_flips = 0;
+        }
+        Ok(())
     }
 
     /// A due `Rail` event (Rails point 4, stat 18).

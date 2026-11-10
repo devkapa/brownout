@@ -15970,3 +15970,78 @@ fn cc_branches_within_w0_of_the_truth() {
     }
     assert_within_w0_of_the_truth(&all, "the branches");
 }
+
+
+/// 2575 tpl 2 from switch 14's opening at 30.08 ms, advanced by a host that
+/// stops `past` after each next event, to `t_end`. Returns the host steps
+/// taken and the longest run of `Rail` events each within 2 fs of the one
+/// before it.
+fn event_stepped_2575(past: f64, t_end: f64) -> Result<(u64, u32), String> {
+    let p = cold_2575_tpl2();
+    let mut rig = Rig::load(&p).unwrap();
+    for &stop in STOPS_2575.iter().take_while(|&&s| s < 0.030082069747425742) {
+        rig.advance(stop).unwrap();
+    }
+    rig.advance(0.030082069747425742).unwrap();
+    rig.k.apply_params_as_event(&[(14, 0, 0.0)]).unwrap();
+    rig.k.solver_mut().prepare_readout();
+    let (mut steps, mut run, mut longest, mut last_rail) = (0u64, 0u32, 0u32, f64::NEG_INFINITY);
+    while rig.k.time() < t_end {
+        let next = rig.k.next_event_time();
+        if matches!(rig.k.next_event_kind(), Some(EventKind::Rail { .. })) {
+            run = if next - last_rail <= 2e-15 { run + 1 } else { 0 };
+            longest = longest.max(run);
+            last_rail = next;
+        }
+        let t = (next + past).min(t_end);
+        rig.advance(t).map_err(|e| format!("{e:?} at {t:e} after {steps} host steps"))?;
+        steps += 1;
+    }
+    Ok((steps, longest))
+}
+
+#[test]
+fn a_host_stepping_onto_each_event_through_a_555_power_edge_on_a_cc_rail_progresses() {
+    // R53-P4's find (REF's ruling (d)). Cold 2575 tpl 2 after switch 14
+    // opens: the CC rail ramps at 9e6 V/s on 11.9 nF up to its 555's 1.8 V
+    // floor. A `Rail` event crosses the edge and the 555 powers; a host
+    // stopping at that event clamps there, and the clamp's own rail loop
+    // drew the rail back under the edge and powered the 555 off, so the next
+    // edge event, 1 fs on, crossed again: a Zeno chase the gate-flip
+    // detector (HG1, W1c point 1a) never saw, since it counted only `Rail`
+    // events' flips. After 10,000 instants the no-progress guard declined
+    // with the rail loop's message. The clamp's flips now count in the same
+    // chase. This checks the outcome, not the mechanism: no Zeno run and
+    // progress past 30.4 ms for a host stopping on each event, 1 fs after
+    // it and 1 ps after it. (The chase ends in the W1c point 1a hold today;
+    // with R53 it is the default mode's slide.)
+    for past in [0.0, 1e-15, 1e-12] {
+        let (_, longest) = event_stepped_2575(past, 0.0304).unwrap_or_else(|e| panic!("stopping {past:e} after each event: {e}"));
+        assert!(longest <= 2, "stopping {past:e} after each event: {longest} Rail events in a row within 2 fs");
+    }
+}
+
+#[test]
+fn no_rail_edge_event_reschedules_itself_more_than_once_within_two_femtoseconds() {
+    // A `Rail` event floors its next edge at 1 fs on (`rails::next_event`),
+    // so a chase across an IC's power edge shows as Rail events 1 fs apart.
+    // The gate-flip detector ends one at its second flip back, so on boards
+    // that run through power edges, advanced event by event, no more than
+    // two such events may follow one another.
+    let (_, longest) = event_stepped_2575(0.0, 0.031).unwrap();
+    assert!(longest <= 2, "2575 tpl 2: {longest} Rail events in a row within 2 fs");
+    let p = cold_757_tpl0();
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(0.05).unwrap();
+    let (mut run, mut longest, mut last_rail) = (0u32, 0u32, f64::NEG_INFINITY);
+    while rig.k.time() < 0.053 {
+        let next = rig.k.next_event_time();
+        if matches!(rig.k.next_event_kind(), Some(EventKind::Rail { .. })) {
+            run = if next - last_rail <= 2e-15 { run + 1 } else { 0 };
+            longest = longest.max(run);
+            last_rail = next;
+        }
+        rig.advance(next.min(0.053)).unwrap();
+    }
+    assert!(longest <= 2, "757 tpl 0: {longest} Rail events in a row within 2 fs");
+}

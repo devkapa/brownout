@@ -1702,6 +1702,12 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// Ends the host step in flight (ruling R86): a host's edit, a memory
     /// seed, an option change or a failure reset between two yields, so the
     /// next advance starts a new one.
+    /// The kind of the event at the head of the heap (tests).
+    #[cfg(test)]
+    pub(crate) fn next_event_kind(&self) -> Option<EventKind> {
+        self.heap.peek().map(|e| e.kind)
+    }
+
     pub fn end_host_step(&mut self) {
         self.host_step = None;
     }
