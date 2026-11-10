@@ -21,7 +21,7 @@
 //! copy really allocates.
 
 use crate::engine::Engine;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The next snapshot id. `0` is never issued (`bo_engine_snapshot`'s error).
@@ -32,9 +32,13 @@ struct Entry {
 }
 
 /// One handle's snapshots. A load replaces the table with an empty one.
+///
+/// A `BTreeMap`, not a `HashMap`: hashing a key here added call sites to
+/// std's `DefaultHasher::write`, and LLVM stopped inlining it into the hot
+/// `HashMap` reads of the advance path (about 1.5 % on the SAP-1, W2a).
 #[derive(Default)]
 pub struct SnapshotTable {
-    entries: HashMap<u32, Entry>,
+    entries: BTreeMap<u32, Entry>,
 }
 
 impl SnapshotTable {
@@ -91,10 +95,11 @@ impl SnapshotTable {
     }
 }
 
-/// One size walk: the shared allocations already counted.
+/// One size walk: the shared allocations already counted (a `BTreeSet`,
+/// for the reason [`SnapshotTable`] gives).
 #[derive(Default)]
 pub struct Walk {
-    seen: HashSet<usize>,
+    seen: BTreeSet<usize>,
 }
 
 impl Walk {
