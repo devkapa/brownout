@@ -1245,7 +1245,6 @@ export class CoreEngine implements EngineReadout {
     coreCall((exports) => exports.bo_engine_trace_clear(this._handle));
   }
 
-  /** Idempotent. Frees the wasm-side handle — but only if it still belongs to the live instance (see the class doc comment on generations). */
   /**
    * A whole-engine snapshot (W2a; core/README.md, "Snapshots"): the Rust
    * engine's state, copied into its handle's table, plus this facade's own
@@ -1322,6 +1321,7 @@ export class CoreEngine implements EngineReadout {
     return coreCall((exports) => (typeof exports.bo_engine_snapshot_bytes === "function" ? exports.bo_engine_snapshot_bytes(this._handle) : 0));
   }
 
+  /** Idempotent. Frees the wasm-side handle — but only if it still belongs to the live instance (see the class doc comment on generations). */
   dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
