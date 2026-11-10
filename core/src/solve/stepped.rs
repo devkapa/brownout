@@ -3158,14 +3158,18 @@ impl SteppedSolver {
         // under either option.
         let trap_run = !part.trap_off && (option_method == Method::Trap || (!part.iterated_on(cc.is_some()) && !part.on_rail));
         let mut method = if part.be_next_step || !trap_run { Method::Be } else { Method::Trap };
-        // R96: a backward Euler step is TR-BDF2 (`take_step`), except the
-        // one after a discontinuity and on the PSU's rail (`on_rail`, as
-        // R79's trapezoid): there exact mode's PSU switches regime inside a
-        // step of its own partition, and a hub partition's rail sensitivity
-        // and a CC step's rail capacitors are backward Euler's (four CC-rail
-        // tests and exact mode's per-step battery references; R96's open
-        // item).
-        let trb = !part.be_next_step && cc.is_none() && !part.on_rail;
+        // R96, R98: a backward Euler step is TR-BDF2 (`take_step`), except
+        // the one after a discontinuity (a CV/CC regime switch is one: exact
+        // mode's re-solve and default mode's restart both set
+        // `be_next_step`), a step on a CC rail, whose rail capacitors
+        // (`CapStep`) and coupling bound have no TR-BDF2 form, and exact
+        // mode's cell partition: its E and r are held from the SoC at each
+        // step's start, an explicit first-order coupling that TR-BDF2's
+        // longer steps stretch (a 5 V, 0.9 ohm cell draining into 100 nF
+        // and 100 ohm read its rail 3.8 W0 off the fine reference at 0.6 s
+        // against 1.5).
+        let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
+        let trb = !part.be_next_step && cc.is_none() && !cell_partition;
         TRB.with(|f| f.set(trb));
         let _trb_guard = TrbGuard;
         part.pend_trap_off = false;

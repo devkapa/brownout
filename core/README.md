@@ -1340,19 +1340,21 @@ message builders live in `src/core/failures.ts`, which the facade calls):
      the next step at the floor instead of doubling it unchecked. Growth
      stays x2 (classic x1.5) and the floor restart at an edge (classic: a
      10 ns guard step, then its old step); a recorded divergence.
-   - **TR-BDF2 in place of a backward Euler step** (R96's open item). A
-     step that would be backward Euler, except the one after a
-     discontinuity, a floor step, and a partition on the PSU's rail
-     (`on_rail`, as R79's trapezoid; see Open items), is
+   - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
+     would be backward Euler, except the one after a discontinuity (a CV/CC
+     regime switch is one), a floor step, a step on a CC rail (its rail
+     capacitors and coupling bound have no TR-BDF2 form) and a step of
+     exact mode's cell partition (its E and r are held from the SoC at each
+     step's start, a first-order coupling longer steps stretch), is
      TR-BDF2: a trapezoidal stage to `gamma h` (`gamma = 2 - sqrt(2)`), then a
      BDF2 stage, solved as a backward Euler step over `h (1 - gamma) / (2 -
      gamma)` from the history `k vc_gamma - m vc_0`. Second order and
      L-stable: a junction's or a chip supply's partition keeps the damping
      backward Euler gave it and gains the trapezoid's order. Steps grow by
-     the order-2 factor. A cell's charge bill (Rails point 9) follows the
-     same quadrature, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1`, so it still
-     matches each capacitor's `C dv`. Classic steps backward Euler; a
-     recorded divergence.
+     the order-2 factor. A cell's charge bill (Rails point 9) has the same
+     quadrature ready, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
+     capacitor's `C dv`), for when its partition steps by TR-BDF2. Classic
+     steps backward Euler; a recorded divergence.
    - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
      estimate even at the floor meets a mode the trapezoid does not damp:
      the partition goes on by backward Euler until its next discontinuity,
@@ -6273,18 +6275,24 @@ failures and warnings (W1g)"):
   partition's own current scale was measured and dropped (+9.7 % cold-sweep
   steps and new crawls at k = 1). TR-BDF2 (W1b 6a) took fixture 38's current
   from 326 to 16 W0 and cold 360/3's gate ground pin from 9.6 to 0.4 W0 after
-  each clock edge. Left to do: (1) fixture 38's 16 W0 against W0 (the Rust
-  test `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
-  closed_form` keeps its 5 W0 bound as an expected failure); (2) the PSU
-  rail's partitions (`on_rail`: hub partitions, and exact mode's rail or
-  cell partition), which still step by backward Euler: a rail regime change
-  lands inside a TR-BDF2 step there with no discontinuity for the partition
-  (four CC-rail tests failed with them included), a CC step's rail
-  capacitors (`CapStep`) and the coupling bound have no TR-BDF2 form, and
-  exact mode's per-step battery references are backward Euler's. Cold
-  360/3's gate ground pin (9.6 W0 at +100 us; 0.4 W0 with TR-BDF2 on the
-  rail) is the second expected-failure test,
-  `a_gate_ground_pin_coupled_to_a_clock_keeps_to_the_fine_reference_after_each_edge`.
+  each clock edge (R98 brought TR-BDF2 onto the PSU's rail). Left to do:
+  (1) fixture 38's 16 W0 against W0 (the Rust test
+  `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
+  closed_form` keeps its 5 W0 bound as an expected failure); (2) a CC step
+  (its rail capacitors, `CapStep`, and the coupling bound have no TR-BDF2
+  form) and exact mode's cell partition (E and r held from the SoC at each
+  step's start: under TR-BDF2 a 5 V, 0.9 ohm cell draining into 100 nF and
+  100 ohm read its rail 3.8 W0 off a fine reference at 0.6 s, 1.5 under
+  backward Euler), which still step by backward Euler.
+- **Default-mode CC-rail accuracy** (ruling R99 (a)). Against an independent
+  truth (exact mode at 0.25 and 0.125 us host steps, extrapolated;
+  `CC_TRUTH`, int-acc-logs/truth/cc-truth.txt), default mode's readings on
+  the four CC-rail boards sit past W0, worst default / FORCE_STEPPED: the cc
+  entry with one capacitor 1.83 / 4.89 W0, with two 29.6 / 29.6, the cc exit
+  0.93 / 2.34, a second load on the CC rail 3.10 / 8.62, two branches on one
+  CC rail 1.10, three 3.18. Each case is an expected failure
+  (`cc_*_within_w0_of_the_truth`) and is pinned no farther from the truth
+  than at 8c5cde7.
 
 ## Deferred past 1.0.0
 

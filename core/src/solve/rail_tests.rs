@@ -914,6 +914,42 @@ fn worst_w0(got: &[Vec<f64>], want: &[Vec<f64>]) -> f64 {
     got.iter().zip(want).flat_map(|(g, w)| g.iter().zip(w).map(|(x, y)| (x - y).abs() / (1e-4 + 1e-3 * y.abs()))).fold(0.0, f64::max)
 }
 
+include!("cc_truth_data.rs");
+
+/// Ruling R99 (a): `p` (`case`'s board, default mode or FORCE_STEPPED)
+/// read at `case`'s instants in [`CC_TRUTH`], each reading's worst W0 off
+/// the independent truth, `(t, now, at 8c5cde7)`. Pins it: the case's worst
+/// reading is no farther from the truth than 8c5cde7's worst. Not per
+/// reading: entry2 (default) at 1.5 ms reads 10.76 W0 against 5.43 at
+/// 8c5cde7. That is the backward-Euler drift after the CC entry, which the
+/// open item "default-mode CC-rail accuracy" covers; at 8c5cde7 it was
+/// partly cancelled by an opposite error before the entry (-13.3 mV at
+/// 1.001 ms, now +0.6). The case's worst is 29.61 W0 against 42.01, both
+/// at 3 ms on node 4.
+fn cc_truth_offsets(case: &str, p: &Program, force_stepped: bool) -> Vec<(f64, f64, f64)> {
+    let rows: Vec<_> = CC_TRUTH.iter().filter(|r| r.0 == case).collect();
+    assert!(!rows.is_empty(), "no truth for {case}");
+    let samples: Vec<f64> = rows.iter().map(|r| r.1).collect();
+    let (got, _, _) = sampled(p, &samples, 0.0);
+    let offsets = rows.iter().zip(&got).map(|(r, g)| {
+        let off = worst_w0(std::slice::from_ref(g), &[r.2.to_vec()]);
+        let before = if force_stepped { r.4 } else { r.3 };
+        eprintln!("{case} (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the truth ({before:.3} at 8c5cde7): {g:?} against {:?}", r.1, r.2);
+        (r.1, off, before)
+    }).collect::<Vec<_>>();
+    let worst = |pick: fn(&(f64, f64, f64)) -> f64| offsets.iter().map(|o| (pick(o), o.0)).fold((0.0, 0.0), |a, b| if b.0 > a.0 { b } else { a });
+    let (now, now_t) = worst(|o| o.1);
+    let (then, then_t) = worst(|o| o.2);
+    assert!(now <= then + 1e-3, "{case}, force_stepped {force_stepped}: worst {now:.3} W0 off the truth at {now_t} s, farther than 8c5cde7's worst ({then:.3} at {then_t} s)");
+    offsets
+}
+
+/// R99 (a): every reading within W0 of the truth, or the case's worst.
+fn assert_within_w0_of_the_truth(offsets: &[(f64, f64, f64)], what: &str) {
+    let worst = offsets.iter().cloned().fold((0.0, 0.0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    assert!(worst.1 <= 1.0, "{what}: {:.2} W0 off the truth at {} s", worst.1, worst.0);
+}
+
 /// Every node voltage of `p` at each of `samples`, the engine advanced in
 /// host slices of at most `slice` (0: straight to each sample), with the
 /// wall time and the steps taken.
@@ -946,17 +982,17 @@ fn stepped_partitions_sharing_a_cc_rail_bound_the_rail_move_across_each_step() {
     // (no coupling), is that floor here. The fine reference is exact mode
     // under the trapezoid in 2 us host slices (scipy's Radau agrees with it
     // to 0.00 W0 on W1gV3's board).
+    //
+    // Ruling R99 (a): anchored to the independent truth (`CC_TRUTH`), each
+    // reading no farther from it than at 8c5cde7; within W0 of it is
+    // `cc_branches_within_w0_of_the_truth`, an expected failure on the open
+    // item "default-mode CC-rail accuracy" (core/README.md).
     let samples: Vec<f64> = (1..=100).map(|k| k as f64 * 1e-3).collect();
     for three in [false, true] {
         let name = if three { "three branches" } else { "two branches" };
-        let mut fine = exact(cc_seed21_branches(three));
-        fine.options.integration = 1;
-        let (want, _, _) = sampled(&fine, &samples, 2e-6);
-        let (floor, _, _) = sampled(&exact(cc_seed21_branches(three)), &samples, 0.0);
-        let (got, secs, steps) = sampled(&cc_seed21_branches(three), &samples, 0.0);
-        let (err, floor_err) = (worst_w0(&got, &want), worst_w0(&floor, &want));
-        eprintln!("{name}: {err:.3} W0 off the fine reference (exact mode {floor_err:.3}), {steps} steps, {secs:.4} s wall");
-        assert!(err <= floor_err + 1.0, "{name}: {err} W0 off the fine reference, the controller's floor {floor_err} W0");
+        cc_truth_offsets(&format!("branches{three}"), &cc_seed21_branches(three), false);
+        let (_, secs, steps) = sampled(&cc_seed21_branches(three), &samples, 0.0);
+        eprintln!("{name}: {steps} steps, {secs:.4} s wall");
         // FXF round 3's freeze (each re-solve restarting at POST_EVENT_H)
         // took 1.1e6 steps for this 0.1 s; 3,682 and 3,024 steps run in
         // 0.08 s alone in a release build, faster than real time. The time
@@ -11954,18 +11990,11 @@ fn a_cc_exit_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_cc_rai
     // at the exit, it stepped those 3 ms at the 5 V setpoint and read
     // 4.834 V just after the edge against the fine reference's 2.003 (1346
     // W0). On the CC rail its pending step was planned on it stays at 2 V
-    // to the edge. Within W0 of the fine reference (exact mode, 1 us host
-    // slices), or of exact mode's own error at the same host stops.
-    let samples = [1.5e-3, 0.0280371, 0.0310381, 0.0310471, 0.0311371, 0.0330371];
-    let (want, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 1e-6);
-    let (floor, _, _) = sampled(&exact(cc_pulse_board(false)), &samples, 0.0);
+    // to the edge. Ruling R99 (a): no reading farther from the independent
+    // truth (`CC_TRUTH`) than at 8c5cde7; within W0 of it is
+    // `cc_exit_within_w0_of_the_truth`, an expected failure.
     for force_stepped in [false, true] {
-        let (got, _, _) = sampled(&cc_pulse_board(force_stepped), &samples, 0.0);
-        for k in 0..samples.len() {
-            let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
-            eprintln!("cc pulse board (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
-            assert!(off <= 1.0 || off <= floor_off + 1.0, "force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
-        }
+        cc_truth_offsets("exit", &cc_pulse_board(force_stepped), force_stepped);
     }
 }
 
@@ -11986,21 +12015,13 @@ fn a_cc_entry_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_rail_
     // edge and was brought to it after the rail had left the 5 V setpoint
     // for the CC rail: it stepped its gap at the CC rail and read 2.883 V at
     // 1.5 ms against the fine reference's 2.765 (41.3 W0, as at da167d2).
-    // On the setpoint it stood at to the edge, within W0 of the fine
-    // reference (exact mode, 1 us host slices), or of exact mode's own error
-    // at the same host stops.
-    let samples = [1.001e-3, 1.01e-3, 1.1e-3, 1.5e-3, 3e-3, 0.0280371];
-    for (name, board) in [("two capacitors", cc_pulse_board_two_caps as fn(bool) -> Program), ("one capacitor", cc_pulse_board)] {
-        let (want, _, _) = sampled(&exact(board(false)), &samples, 1e-6);
-        let (floor, _, _) = sampled(&exact(board(false)), &samples, 0.0);
+    // On the setpoint it stood at to the edge. Ruling R99 (a): no reading
+    // farther from the independent truth (`CC_TRUTH`) than at 8c5cde7;
+    // within W0 of it is `cc_entry_within_w0_of_the_truth`, an expected
+    // failure.
+    for (case, board) in [("entry2", cc_pulse_board_two_caps as fn(bool) -> Program), ("entry1", cc_pulse_board)] {
         for force_stepped in [false, true] {
-            let p = board(force_stepped);
-            let (got, _, _) = sampled(&p, &samples, 0.0);
-            for k in 0..samples.len() {
-                let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
-                eprintln!("{name} (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
-                assert!(off <= 1.0 || off <= floor_off + 1.0, "{name}, force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
-            }
+            cc_truth_offsets(case, &board(force_stepped), force_stepped);
         }
     }
 }
@@ -12028,22 +12049,14 @@ fn a_cc_rail_stepped_at_a_source_edge_leaves_a_stepped_capacitor_where_it_was() 
     // 3 ms gap there: 1.17 V just after the edge against the fine
     // reference's 3.5 (647 W0), 44 W0 still 3 ms later. With the second
     // load alone (20 ms), FORCE_STEPPED kept the trial it had planned before
-    // the edge, which the next host stop cut and stepped again from its
-    // start on the new rail: 1.46 V against 3.50 (566 W0). Within W0 of the
-    // fine reference (exact mode, 1 us host slices), or of exact mode's own
-    // error at the same host stops.
+    // start on the new rail: 1.46 V against 3.50 (566 W0). Ruling R99 (a):
+    // no reading farther from the independent truth (`CC_TRUTH`) than at
+    // 8c5cde7; within W0 of it is `cc_source_edge_within_w0_of_the_truth`,
+    // an expected failure.
     let t_end = 1e-3 + (0.0 + 0.0300371);
-    for at in [t_end, 0.02] {
-        let samples = [0.0181, at + 1e-6, at + 1e-5, at + 1e-4, at + 1e-3, at + 3e-3, 0.040];
-        let (want, _, _) = sampled(&exact(cc_pulse_board_second_load(false, at)), &samples, 1e-6);
-        let (floor, _, _) = sampled(&exact(cc_pulse_board_second_load(false, at)), &samples, 0.0);
+    for (case, at) in [("load0.0310371", t_end), ("load0.02", 0.02)] {
         for force_stepped in [false, true] {
-            let (got, _, _) = sampled(&cc_pulse_board_second_load(force_stepped, at), &samples, 0.0);
-            for k in 0..samples.len() {
-                let (off, floor_off) = (worst_w0(&got[k..=k], &want[k..=k]), worst_w0(&floor[k..=k], &want[k..=k]));
-                eprintln!("second load at {at} (force_stepped {force_stepped}) at {} s: {off:.3} W0 off the fine reference (exact mode {floor_off:.3}), node 2 {:.6} against {:.6}", samples[k], got[k][2], want[k][2]);
-                assert!(off <= 1.0 || off <= floor_off + 1.0, "second load at {at}, force_stepped {force_stepped} at {} s: {off:.2} W0 off the fine reference (floor {floor_off:.2}): {:?} against {:?}", samples[k], got[k], want[k]);
-            }
+            cc_truth_offsets(case, &cc_pulse_board_second_load(force_stepped, at), force_stepped);
         }
     }
 }
@@ -15832,16 +15845,12 @@ fn a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_closed_f
 }
 
 #[test]
-// R96's open item, still open: the ground pin's partition reads the PSU's
-// rail (`on_rail`), so it keeps backward Euler; TR-BDF2 there took it to 0.4
-// W0, but a rail regime change lands inside its steps (the item's rail
-// piece). An expected failure, as the supply test's above.
-#[should_panic(expected = "past the edge")]
 fn a_gate_ground_pin_coupled_to_a_clock_keeps_to_the_fine_reference_after_each_edge() {
     // R96's open item, cold 360/3: the 74LS00's ground pin (node 4) is
     // coupled to the clock's node by 0.52 uF; 100 us after each edge its
     // partition, backward Euler after R81's fallback (and in 905f9d0's
-    // backward Euler run alike), sat 8.4 to 9.5 W0 off. The fine reference:
+    // backward Euler run alike), sat 8.4 to 9.5 W0 off. TR-BDF2 on the
+    // rail (R98) takes it to 0.4 W0. The fine reference:
     // exact mode on backward Euler host steps of 0.25 and 0.125 us,
     // extrapolated (0.37 W0 from the 0.5 and 0.25 us pair at worst).
     let mut p = program(7, vec![
@@ -15908,4 +15917,56 @@ fn a_cell_bills_exactly_the_charge_its_capacitor_takes_over_tr_bdf2_steps() {
         close(q, held, 1e-10 * held.abs(), &format!("the charge billed by {t} s against the capacitor's"));
     }
     assert!(rig.v(1) > 4.0, "not vacuous: the capacitor charged to {} V", rig.v(1));
+}
+
+// ---- R99 (a): default-mode CC-rail accuracy (open item) ---------------------
+//
+// Each of the four CC-rail boards against the independent truth
+// (`CC_TRUTH`): an expected failure while any reading sits past W0, as at
+// 8c5cde7 (the open item "default-mode CC-rail accuracy", core/README.md,
+// which must close before 1.0.0). When a case comes within W0 its
+// `should_panic` fails the gate, and the attribute comes off.
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn cc_entry_within_w0_of_the_truth() {
+    let mut all = Vec::new();
+    for (case, board) in [("entry2", cc_pulse_board_two_caps as fn(bool) -> Program), ("entry1", cc_pulse_board)] {
+        for force_stepped in [false, true] {
+            all.extend(cc_truth_offsets(case, &board(force_stepped), force_stepped));
+        }
+    }
+    assert_within_w0_of_the_truth(&all, "the cc entry");
+}
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn cc_exit_within_w0_of_the_truth() {
+    let mut all = Vec::new();
+    for force_stepped in [false, true] {
+        all.extend(cc_truth_offsets("exit", &cc_pulse_board(force_stepped), force_stepped));
+    }
+    assert_within_w0_of_the_truth(&all, "the cc exit");
+}
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn cc_source_edge_within_w0_of_the_truth() {
+    let mut all = Vec::new();
+    for (case, at) in [("load0.0310371", 1e-3 + (0.0 + 0.0300371)), ("load0.02", 0.02)] {
+        for force_stepped in [false, true] {
+            all.extend(cc_truth_offsets(case, &cc_pulse_board_second_load(force_stepped, at), force_stepped));
+        }
+    }
+    assert_within_w0_of_the_truth(&all, "the source edge");
+}
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn cc_branches_within_w0_of_the_truth() {
+    let mut all = Vec::new();
+    for three in [false, true] {
+        all.extend(cc_truth_offsets(&format!("branches{three}"), &cc_seed21_branches(three), false));
+    }
+    assert_within_w0_of_the_truth(&all, "the branches");
 }
