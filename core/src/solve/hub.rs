@@ -926,39 +926,48 @@ impl PartitionedSolver {
         // `RAIL_DELTA` under a power floor would difference an unpowered
         // driver against a powered one: `vs / (R_out RAIL_DELTA)`, kS of
         // false slope.
-        let ic_draw = |uu: f64| -> f64 {
-            let mut total = 0.0;
+        // One walk takes both sides of the difference, each summed in the
+        // walk's order, so a draw is exactly what two walks gave. A driver
+        // branch counts only between the rail and another non-free node; an
+        // IC none of whose drivers can have one is passed over before its
+        // power is computed, which is most of the rail's ICs (their outputs
+        // drive free partition nodes) and most of this function's cost on a
+        // battery SAP-1, where it runs about four times a rail solve.
+        if !hub.rail_ics.is_empty() {
+            let up = u + rails::RAIL_DELTA;
+            let free = |n: usize| n != rail && !self.fixed_node[n];
+            let (mut d0, mut d1) = (0.0, 0.0);
             for &pos in &hub.rail_ics {
                 let (d, ic) = &self.ics[pos as usize];
-                let at = |node: usize| if node == rail { uu } else { v[node] };
-                let held = |node: usize| if node == rail { u } else { v[node] };
-                let mut power = digital::power::ic_power(ic, at(ic.vcc.node), at(ic.gnd.node));
-                power.powered = digital::power::verdict(ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d));
-                if !power.powered {
+                let ids = &self.ic_driver_ids[pos as usize];
+                if !ids.iter().any(|&id| self.driver_snapshot.get(id as usize).is_some_and(|driver| may_draw_from_rail(driver, ic, rail, &free))) {
                     continue;
                 }
-                for &id in &self.ic_driver_ids[pos as usize] {
-                    let Some(driver) = self.driver_snapshot.get(id as usize) else { continue };
-                    for (target, gd) in ic_driver_branches(&power, driver, ic).into_iter().flatten() {
-                        let (a, b) = (driver.node, target);
-                        let free = |n: usize| n != rail && !self.fixed_node[n];
-                        if free(a) || free(b) || a == b {
-                            continue;
-                        }
-                        if a == rail {
-                            total += gd * (uu - v[b]);
-                        } else if b == rail {
-                            total += gd * (uu - v[a]);
+                let held = |node: usize| if node == rail { u } else { v[node] };
+                if !digital::power::verdict(ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d)) {
+                    continue;
+                }
+                for (uu, total) in [(u, &mut d0), (up, &mut d1)] {
+                    let at = |node: usize| if node == rail { uu } else { v[node] };
+                    let mut power = digital::power::ic_power(ic, at(ic.vcc.node), at(ic.gnd.node));
+                    power.powered = true;
+                    for &id in ids {
+                        let Some(driver) = self.driver_snapshot.get(id as usize) else { continue };
+                        for (target, gd) in ic_driver_branches(&power, driver, ic).into_iter().flatten() {
+                            let (a, b) = (driver.node, target);
+                            if free(a) || free(b) || a == b {
+                                continue;
+                            }
+                            if a == rail {
+                                *total += gd * (uu - v[b]);
+                            } else if b == rail {
+                                *total += gd * (uu - v[a]);
+                            }
                         }
                     }
                 }
             }
-            total
-        };
-        if !hub.rail_ics.is_empty() {
-            let d0 = ic_draw(u);
-            if d0 != 0.0 || ic_draw(u + rails::RAIL_DELTA) != 0.0 {
-                let d1 = ic_draw(u + rails::RAIL_DELTA);
+            if d0 != 0.0 || d1 != 0.0 {
                 i += d0;
                 g += (d1 - d0) / rails::RAIL_DELTA;
             }
@@ -3542,6 +3551,27 @@ impl PartitionedSolver {
         }
         leaving
     }
+}
+
+/// Whether `driver` of `ic` can have a branch [`PartitionedSolver::direct_at`]
+/// counts, between the rail and another non-free node, whatever the IC's
+/// power: a logic output's branch runs to its supply pin while high and its
+/// ground pin while low ([`ic_driver_branches`]); a 555 stage is always
+/// walked.
+fn may_draw_from_rail(driver: &Driver, ic: &digital::IcRecord, rail: usize, free: &impl Fn(usize) -> bool) -> bool {
+    if driver.node == 0 {
+        return false;
+    }
+    let target = match driver.stage {
+        DriverStage::Logic => match driver.committed() {
+            Some(Mode::High) if !driver.open_collector => ic.vcc.node,
+            Some(Mode::Low) => ic.gnd.node,
+            _ => return false,
+        },
+        DriverStage::Ne555Out | DriverStage::Ne555Dis => return true,
+    };
+    let a = driver.node;
+    !(free(a) || free(target) || a == target) && (a == rail || target == rail)
 }
 
 // ---- W2a: heap bytes (generated by core/scripts/gen_heap_bytes.py; regenerate, do not edit) ----
