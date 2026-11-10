@@ -341,6 +341,20 @@ export class WarningLedger {
     return out;
   }
 
+  /**
+   * W2c: the ledger a reload starts from, as classic's load carries
+   * `state.warnings` for each component whose id and kind survive (its
+   * announce queue, pruned to them, goes on; SE:3171).
+   */
+  carryOnto(keep: (componentId: string) => boolean): WarningLedger {
+    const out = new WarningLedger();
+    for (const [key, warning] of this.warnings) {
+      if (keep(warning.componentId)) out.warnings.set(key, { ...warning });
+    }
+    out.unannounced = this.unannounced.filter((key) => out.warnings.has(key));
+    return out;
+  }
+
   /** `takeNewWarnings()`: the queued warnings in latch order, then an empty queue. */
   takeNew(): SimWarning[] {
     const out: SimWarning[] = [];

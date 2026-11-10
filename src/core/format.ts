@@ -49,6 +49,15 @@ export const CORE_FORMAT_MAGIC = 0x424f4331;
 export const CORE_FORMAT_VERSION = 3;
 
 /**
+ * Program v4 (W2c, ruling R100 (a)): v3 with a `CARRY` block between the
+ * devices and the trailer, `carryLength L, value x L` (core/README.md,
+ * "Carry"). The writer emits it only for a carrying load
+ * ({@link withCarryBlock}); a cold load stays v3, which every core since W1d
+ * reads.
+ */
+export const CORE_FORMAT_VERSION_CARRY = 4;
+
+/**
  * v1 export names, kept as aliases now that the kind-code table moved to
  * kinds.ts (the orchestrator's table, shared with core/src/kinds.rs) — any
  * code still importing `CORE_KIND_CODE`/`CoreKindName` from format.ts (this
@@ -428,6 +437,23 @@ export interface DecodedProgram {
   digitalSlotCount: number;
   channelSlotCount: number;
   devices: DecodedDevice[];
+  /** v4's `CARRY` block, as records (empty for v3). Checked against the devices by the core, not here. */
+  carry: readonly number[];
+}
+
+/** `program` (v3, as {@link ProgramWriter} writes it) as v4 with `carry` as its `CARRY` block. */
+export function withCarryBlock(program: Float64Array, carry: ArrayLike<number>): Float64Array {
+  if (program[1] !== CORE_FORMAT_VERSION) {
+    throw new Error(`withCarryBlock: expected a v${CORE_FORMAT_VERSION} program, got v${program[1]}`);
+  }
+  const out = new Float64Array(program.length + 1 + carry.length);
+  out.set(program.subarray(0, program.length - 1));
+  out[1] = CORE_FORMAT_VERSION_CARRY;
+  let at = program.length - 1;
+  out[at++] = carry.length;
+  out.set(Array.from(carry), at);
+  out[out.length - 1] = program[program.length - 1]!;
+  return out;
 }
 
 /**
@@ -473,8 +499,8 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
   }
 
   const version = readCount("version");
-  if (version !== CORE_FORMAT_VERSION) {
-    throw new Error(`decodeProgram: unsupported version ${version}, expected ${CORE_FORMAT_VERSION}`);
+  if (version !== CORE_FORMAT_VERSION && version !== CORE_FORMAT_VERSION_CARRY) {
+    throw new Error(`decodeProgram: unsupported version ${version}, expected ${CORE_FORMAT_VERSION} or ${CORE_FORMAT_VERSION_CARRY}`);
   }
 
   const nodeCount = readCount("nodeCount");
@@ -651,6 +677,12 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
     devices.push({ kindCode, componentIndex, pins, params, blob });
   }
 
+  const carry: number[] = [];
+  if (version === CORE_FORMAT_VERSION_CARRY) {
+    const carryLength = readCount("carryLength");
+    for (let k = 0; k < carryLength; k++) carry.push(readValue(`carry[${k}]`));
+  }
+
   const trailer = readValue("trailer magic");
   if (trailer !== CORE_FORMAT_MAGIC) {
     throw new Error(
@@ -664,5 +696,5 @@ export function decodeProgram(program: Float64Array): DecodedProgram {
     );
   }
 
-  return { version, nodeCount, options, digitalSlotCount, channelSlotCount, devices };
+  return { version, nodeCount, options, digitalSlotCount, channelSlotCount, devices, carry };
 }

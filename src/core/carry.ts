@@ -87,6 +87,33 @@ export function encodeCarry(records: readonly CarryRecord[]): number[] {
 
 const KNOWN = new Set<number>(Object.values(CARRY_FAMILY));
 
+function isEeprom(kind: string): boolean {
+  return kind === "28c16" || kind === "28c256";
+}
+
+/** An EEPROM's authored image, as classic's load hashes it (`String(params.contents ?? "")`). */
+function authoredContents(component: SimCircuit["components"][number] | undefined): string {
+  return String(component?.params.contents ?? "");
+}
+
+/**
+ * The EEPROMs of `to` whose state a reload from `from` carries (same id and
+ * kind, same authored contents, as classic's `contentsHash`), mapped to the
+ * image the old engine holds: the host loads it as the new ROM blob, so a
+ * written byte survives the reload (classic carries `bytes` with the rest).
+ * `images` are the old engine's current images by component id.
+ */
+export function eepromCarryImages(from: SimCircuit, to: SimCircuit, images: ReadonlyMap<string, Uint8Array>): Map<string, Uint8Array> {
+  const out = new Map<string, Uint8Array>();
+  for (const component of to.components) {
+    if (!isEeprom(component.kind)) continue;
+    const old = from.components.find((c) => c.id === component.id);
+    const image = images.get(component.id);
+    if (old && image && old.kind === component.kind && authoredContents(old) === authoredContents(component)) out.set(component.id, image);
+  }
+  return out;
+}
+
 /** Synthetic records (section anchors, ratings, thermal models) are no component of their own. */
 function isComponent(id: string): boolean {
   return !/^(section_anchor|rating|thermal):/.test(id);
@@ -146,6 +173,14 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
         }
         break;
       case CARRY_FAMILY.ic:
+        // An EEPROM only onto the same authored contents (classic's
+        // `contentsHash`, SE:3260): the host then loads the old engine's
+        // image as the new ROM blob (`eepromCarryImages`), which the core
+        // checks by hash before seeding the write cycle.
+        if (sameKind && (!isEeprom(old.kind) || authoredContents(componentOf(from, id)) === authoredContents(componentOf(to, id)))) {
+          out.push({ ...r, device: at });
+        }
+        break;
       case CARRY_FAMILY.latch:
         if (sameKind) out.push({ ...r, device: at });
         break;

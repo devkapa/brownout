@@ -34,6 +34,9 @@
  */
 
 import { compileCircuit, LIVE_PARAM_SPECS, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
+import { decodeCarry, eepromCarryImages, encodeCarry, mapCarry, type CarryRecord } from "./carry.js";
+import { withCarryBlock } from "./format.js";
+import { eepromImageBytes } from "../sim/engine/sim-engine.js";
 import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
 import {
@@ -208,8 +211,15 @@ export class CoreEngine implements EngineReadout {
   private _lastConverged = false;
   /** The loaded circuit, which `resetFailures` re-derives the static warnings from, as classic's `this.circuit`. */
   private _circuit: SimCircuit | null = null;
-  /** The static warnings and the announce queue (W1g point 11). Fresh per load: W1 has no carry-forward (point 15). */
+  /** The static warnings and the announce queue (W1g point 11). A reload carries a same-kind component's entries, as classic's load (W2c); coldLoad starts afresh. */
   private _warnings = new WarningLedger();
+  /**
+   * W2c: each EEPROM's image as this facade last knew it (the ROM blob it
+   * loaded, then every image `takeEepromUpdates` or a reload drained), by
+   * component id: what a reload onto the same authored contents loads as
+   * the new ROM blob, so a written byte survives it as in classic.
+   */
+  private _eepromImages = new Map<string, Uint8Array>();
   /** Component ids `setParams` has already reported as unknown, so a host retrying the same stale id every frame logs it once (ruling R41). Per engine, kept across loads. */
   private _reportedUnknownParamIds = new Set<string>();
   /** Bumped at every load() call, so a snapshot knows whether the program it was taken on is still the one loaded (W2a). */
@@ -328,6 +338,17 @@ export class CoreEngine implements EngineReadout {
    * check) — a caller bug, not a circuit problem, so unlike a rejected
    * circuit it does NOT clear this engine's currently loaded program.
    *
+   * **Carry** (W2c, classic's `load()`, core/README.md "Carry"). A load
+   * onto a loaded program, with no `options.simTime`, carries its state:
+   * capacitor charges by id or net-pair fingerprint, IC state and outputs
+   * in flight, a battery's charge, the slow physics and latched failures,
+   * each kind-gated as classic's, an EEPROM's written image onto the same
+   * authored contents, and the warnings of components whose id and kind
+   * survive, none announced again. The program goes to the core as v4 with
+   * its `CARRY` block. A load given a time (another engine's, or a cold
+   * start), a core without the carry exports, and {@link coldLoad} carry
+   * nothing.
+   *
    * `options`' other fields (`integrationMethod`, and the exactness switches)
    * pass straight through to `compileCircuit` (compile/index.js's
    * `CompileOptions`) — the ambient temperature option is NOT here, since
@@ -355,6 +376,52 @@ export class CoreEngine implements EngineReadout {
     implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
     options?: CoreEngineLoadOptions,
   ): void {
+    this._load(circuit, implementedKinds, options, true);
+  }
+
+  /**
+   * Classic's `coldLoad` (W2c): load `circuit` at time 0 with nothing carried,
+   * every capacitor, register and integrator at its power-on value, as a
+   * fresh engine would. Throws as {@link load} does.
+   */
+  coldLoad(
+    circuit: SimCircuit,
+    implementedKinds: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS,
+    options?: Omit<CoreEngineLoadOptions, "simTime">,
+  ): void {
+    this._load(circuit, implementedKinds, { ...(options ?? {}), simTime: 0 }, false);
+  }
+
+  /**
+   * W2c's carry, taken off the loaded program before a reload replaces it:
+   * the core's records (`bo_engine_carry_take`), what they were taken from,
+   * and every EEPROM's current image (the dirty ones drained here: the
+   * records carry their dirty flags, so the new program still reports them
+   * to the host). `null` when nothing is loaded, or the core has no carry
+   * exports (R100 (a): an older core loads cold), or its take failed (the
+   * reload is then cold, as on such a core).
+   */
+  private _takeCarry(): { records: CarryRecord[]; from: { circuit: SimCircuit; compiled: CompiledCircuit } } | null {
+    const compiled = this._compiled;
+    const circuit = this._circuit;
+    if (!compiled || !circuit) return null;
+    const raw = coreCall((exports) => {
+      if (typeof exports.bo_engine_carry_take !== "function" || typeof exports.bo_engine_carry_ptr !== "function") return null;
+      const len = exports.bo_engine_carry_take(this._handle);
+      if (len < 0) return null;
+      return copyF64(exports, exports.bo_engine_carry_ptr(this._handle) >>> 0, len);
+    });
+    if (raw === null) return null;
+    this._drainEepromImages(compiled);
+    return { records: decodeCarry(raw), from: { circuit, compiled } };
+  }
+
+  private _load(
+    circuit: SimCircuit,
+    implementedKinds: ReadonlySet<string>,
+    options: CoreEngineLoadOptions | undefined,
+    carrying: boolean,
+  ): void {
     this._checkGeneration();
 
     const requestedSimTime = options?.simTime;
@@ -373,6 +440,13 @@ export class CoreEngine implements EngineReadout {
     // resume at the pre-failure time instead of restarting at 0; see
     // engine.test.ts's "does not reset the clock" test for exactly this.
     const previousSimTime = requestedSimTime ?? this._simTime;
+
+    // W2c: a reload carries the loaded program's state, as classic's load()
+    // does. Not when the caller seeds the clock (`options.simTime`: another
+    // engine's time, or a cold start), since the carry is this engine's own,
+    // at its own time.
+    const carried = carrying && requestedSimTime === undefined ? this._takeCarry() : null;
+    const previousWarnings = this._warnings;
 
     // Clear the PROGRAM state now. Every throw from this point on leaves the
     // engine correctly reporting "no program loaded" instead of re-serving
@@ -400,12 +474,14 @@ export class CoreEngine implements EngineReadout {
     // START_TIME on every load" (core/README.md, Options key 7): every load,
     // including one with no caller options at all, must seed Rust's clock
     // with wherever this engine's own clock already was.
-    const result = compileCircuit(circuit, implementedKinds, { ...(options ?? {}), startTimeS: previousSimTime });
+    const eepromImages = carried ? eepromCarryImages(carried.from.circuit, circuit, this._eepromImages) : undefined;
+    const result = compileCircuit(circuit, implementedKinds, { ...(options ?? {}), startTimeS: previousSimTime, ...(eepromImages ? { eepromImages } : {}) });
     if (!result.ok) {
       throw new CoreUnsupportedError(result.reasons);
     }
     const { compiled } = result;
-    const program = compiled.program;
+    const records = carried ? mapCarry(carried.records, carried.from, { circuit, compiled }) : [];
+    const program = records.length > 0 ? withCarryBlock(compiled.program, encodeCarry(records)) : compiled.program;
 
     coreCall((exports) => {
       // `>>> 0`: bo_alloc returns a wasm32 pointer, which crosses the ABI as
@@ -434,6 +510,13 @@ export class CoreEngine implements EngineReadout {
     this._compiled = compiled;
     this._simTime = previousSimTime;
     this._lastConverged = true;
+    if (carried) {
+      // Classic carries a component's warnings onto the same id and kind.
+      const kindBefore = new Map(carried.from.circuit.components.map((c) => [c.id, c.kind]));
+      const kindAfter = new Map(circuit.components.map((c) => [c.id, c.kind]));
+      this._warnings = previousWarnings.carryOnto((id) => kindBefore.get(id) !== undefined && kindBefore.get(id) === kindAfter.get(id));
+    }
+    this._eepromImages = loadedEepromImages(circuit, eepromImages);
     this._circuit = circuit;
     // Since START_TIME, as classic's load evaluates them at its simTime.
     this._warnings.evaluateStatic(circuit, compiled.nets, previousSimTime);
@@ -719,6 +802,17 @@ export class CoreEngine implements EngineReadout {
    */
   takeEepromUpdates(): Record<string, Uint8Array> {
     const compiled = this._requireLoaded();
+    const out = this._takeEepromUpdatesRaw(compiled);
+    for (const [id, bytes] of Object.entries(out)) this._eepromImages.set(id, bytes.slice());
+    return out;
+  }
+
+  /** A reload's drain: every dirty image into `_eepromImages`, none handed out (the carried dirty flags hand them out of the new program). */
+  private _drainEepromImages(compiled: CompiledCircuit): void {
+    for (const [id, bytes] of Object.entries(this._takeEepromUpdatesRaw(compiled))) this._eepromImages.set(id, bytes);
+  }
+
+  private _takeEepromUpdatesRaw(compiled: CompiledCircuit): Record<string, Uint8Array> {
     return coreCall((exports) => {
       const len = exports.bo_engine_take_eeprom_updates(this._handle);
       if (len < 0) {
@@ -1421,3 +1515,15 @@ function dropSnapshot(token: SnapshotToken): void {
 
 /** Frees a snapshot collected without a `dispose()`: the core sets no cap, and WASM memory never shrinks. */
 const coreSnapshotFinalizer = new FinalizationRegistry<SnapshotToken>(dropSnapshot);
+
+/** The EEPROMs' images a load put in their ROM blobs: a carried one, else the authored `contents` (W2c). */
+function loadedEepromImages(circuit: SimCircuit, carried: ReadonlyMap<string, Uint8Array> | undefined): Map<string, Uint8Array> {
+  const out = new Map<string, Uint8Array>();
+  for (const component of circuit.components) {
+    const size = component.kind === "28c16" ? 2048 : component.kind === "28c256" ? 32768 : 0;
+    if (size === 0) continue;
+    const image = carried?.get(component.id);
+    out.set(component.id, image?.length === size ? image : eepromImageBytes(size, String(component.params.contents ?? "")));
+  }
+  return out;
+}

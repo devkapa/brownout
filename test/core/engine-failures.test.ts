@@ -238,6 +238,45 @@ describe("CoreEngine: failures, PTCs, thermal state and warnings through the rea
     core.dispose();
   });
 
+  it("a reload carries the failures and warnings as classic's load does, unannounced again; coldLoad starts afresh (W2c)", () => {
+    const coilWarning = (since: number) => ({
+      componentId: "coil",
+      code: "missing_flyback",
+      since,
+      message: "coil stands in for a switched coil.",
+    });
+    // Classic, the reference for the failures: the same steps on SimEngine.
+    // (The coil's stand-in warning is the facade's mock alone; classic's load
+    // carries a same-kind component's warnings the same way, SE:3171.)
+    const classic = new SimEngine();
+    classic.load(overloadedResistor());
+    while (classic.simTime < 1.5) classic.step(Math.min(0.01, 1.5 - classic.simTime));
+    classic.load(overloadedResistor());
+    const classicFailures = classic.getFailures();
+    expect(Object.keys(classicFailures)).toEqual([RESISTOR_KEY]);
+
+    const core = loaded(overloadedResistor());
+    expect(core.takeNewWarnings()).toEqual([coilWarning(0)]);
+    core.advance(1.5);
+    expect(core.takeLatchedFailures().map((f) => f.componentId)).toEqual(["r1"]);
+    const failures = core.getFailures();
+
+    core.load(overloadedResistor());
+    expect(core.simTime).toBe(1.5);
+    expect(Object.keys(core.getFailures())).toEqual(Object.keys(classicFailures));
+    expect(core.getFailures()).toEqual(failures);
+    expect(core.takeLatchedFailures()).toEqual([]);
+    expect(core.getElementI().r1).toBe(0);
+    expect(core.getWarnings()).toEqual({ "missing_flyback\u0000coil\u0000": coilWarning(0) });
+    expect(core.takeNewWarnings()).toEqual([]);
+
+    core.coldLoad(overloadedResistor());
+    expect(core.simTime).toBe(0);
+    expect(core.getFailures()).toEqual({});
+    expect(core.takeNewWarnings()).toEqual([coilWarning(0)]);
+    core.dispose();
+  });
+
   it("a restored snapshot brings back the warnings, their announce queue and the failures, and they latch and announce again (W2a)", () => {
     const core = loaded(overloadedResistor());
     const coilWarning = (since: number) => ({

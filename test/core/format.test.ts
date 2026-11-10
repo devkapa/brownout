@@ -152,6 +152,7 @@ describe("ProgramWriter -> decodeProgram round trip", () => {
           blob: [],
         },
       ],
+      carry: [],
     });
   });
 
@@ -165,6 +166,7 @@ describe("ProgramWriter -> decodeProgram round trip", () => {
       digitalSlotCount: 3,
       channelSlotCount: 2,
       devices: [],
+      carry: [],
     });
   });
 });

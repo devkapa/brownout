@@ -150,6 +150,12 @@ export interface CompileOptions {
    * never needs to.
    */
   startTimeS?: number;
+  /**
+   * W2c: EEPROM images by component id that replace the authored `contents`
+   * as the ROM blob: what a carrying reload hands on (src/core/carry.ts,
+   * `eepromCarryImages`). An image of the wrong size is ignored.
+   */
+  eepromImages?: ReadonlyMap<string, Uint8Array>;
 }
 
 /** Classic's own ambient default (`sim-engine.ts`'s `NOMINAL_TEMP_C`), used when `circuit.environment?.temperatureC` is absent (or non-finite — see compileCircuit's own check, which reports that case as `malformed:circuit:non-finite-ambient` rather than letting `ProgramWriter` throw). */
@@ -744,7 +750,7 @@ export function compileCircuit(
       case "74ls189":
       case "28c16":
       case "28c256": {
-        const result = compileMemoryIc(built, openKeys, component);
+        const result = compileMemoryIc(built, openKeys, component, options.eepromImages?.get(component.id));
         if (!result.ok) {
           reasons.add(result.reason);
           return;

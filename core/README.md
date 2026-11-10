@@ -1121,6 +1121,19 @@ devices (`src/core/carry.ts`: by component id, a capacitor also by its two
 nets' fingerprint, each kind-gated), and the new program's `CARRY` block
 (program v4) seeds the load. Ids and nets stay in TS (ruling R57 D8 (a)).
 
+- **Host** (`CoreEngine`, `src/core/carry.ts`). `load()` onto a loaded
+  program takes a carry, maps it (component id; a capacitor also by its
+  nets' fingerprint, its sign with its orientation; each record kind-gated:
+  an IC, its slow state and latches onto the same kind, a battery onto the
+  same authored charge and part, a thermal model's temperature onto the
+  same part and profile, an EEPROM onto the same authored `contents`) and
+  writes program v4; a cold load stays v3. An EEPROM so carried loads the
+  old engine's current image as its ROM blob, so a written byte survives
+  even when the host has taken it, while new authored contents start
+  afresh, as classic's `contentsHash`. Warnings of components whose id and
+  kind survive carry, not announced again. A load given `options.simTime`,
+  `coldLoad()` (time 0, as classic's) and a core without the carry exports
+  carry nothing.
 - **Take.** `bo_engine_carry_take(h) -> i32` collects the records and
   returns their length (or an error code), `bo_engine_carry_ptr(h)` the
   buffer, valid until the next call on the engine. Both are optional

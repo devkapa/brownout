@@ -90,7 +90,12 @@ function memoryDigitalSlotKeys(kind: MemoryKind, componentId: string): string[] 
  * math into the unsigned integer the wire format requires.
  */
 function romWords(size: number, contentsB64: string): number[] {
-  const bytes = eepromImageBytes(size, contentsB64);
+  return wordsOf(eepromImageBytes(size, contentsB64));
+}
+
+/** `bytes` as the ROM blob's little-endian words. */
+function wordsOf(bytes: Uint8Array): number[] {
+  const size = bytes.length;
   const wordCount = size / 4;
   const words = new Array<number>(wordCount);
   for (let k = 0; k < wordCount; k++) {
@@ -134,6 +139,8 @@ export function compileMemoryIc(
   built: CoreNodeBuild,
   openKeys: ReadonlySet<string>,
   component: SimComponent,
+  /** W2c: an EEPROM's image carried across a reload, in place of its authored `contents` (CompileOptions.eepromImages). */
+  carriedImage?: Uint8Array,
 ): MemoryCompileResult {
   const kind = component.kind as MemoryKind;
   const logicPinIds = logicPinIdsFor(kind);
@@ -181,7 +188,7 @@ export function compileMemoryIc(
       );
     }
     const size = CORE_EEPROM_SIZE[kind]!;
-    words = romWords(size, String(component.params.contents ?? ""));
+    words = carriedImage?.length === size ? wordsOf(carriedImage) : romWords(size, String(component.params.contents ?? ""));
   }
 
   const part = resolveComponentPart(component);

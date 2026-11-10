@@ -11,8 +11,10 @@ import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { CARRY_FAMILY, CARRY_VERSION, decodeCarry, encodeCarry, mapCarry, type CarryRecord, type CarrySource } from "../../src/core/carry.js";
 import { compileCircuit } from "../../src/core/compile/index.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { BUNDLED_DEFAULT_PARTS } from "../../src/parts/part-library.js";
 import { CoreEngine } from "../../src/core/engine.js";
-import { decodeProgram } from "../../src/core/format.js";
+import { decodeProgram, withCarryBlock } from "../../src/core/format.js";
 import { coreCall, initCore, verifyCoreExports, __installCoreForTest, __resetCoreForTest, type CoreExports } from "../../src/core/wasm.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
@@ -127,6 +129,26 @@ describe("mapCarry: classic's reload rules", () => {
     expect(mapCarry([slow], from, source(withUid()))).toEqual([rec(r1, CARRY_FAMILY.slow, [0, 0.1, NaN, NaN, NaN, NaN, NaN, NaN])]);
   });
 
+  it("carries an EEPROM's state only onto the same authored contents, as classic's contents hash", () => {
+    const eeprom = (contents: string): SimCircuit => {
+      const c = rc();
+      const def = BUNDLED_DEFAULT_PARTS.find((d) => d.kind === "28c16")!;
+      c.components.push({ id: "u1", kind: "28c16", catalogUid: def.uid, pins: def.pin_layout.map((p) => ({ id: p.id })), params: { contents } } as Component);
+      return c;
+    };
+    const kinds = new Set([...CORE_IMPLEMENTED_KINDS, "28c16"]);
+    const src = (c: SimCircuit): CarrySource => {
+      const result = compileCircuit(c, kinds);
+      if (!result.ok) throw new Error(`compile: ${JSON.stringify(result.reasons)}`);
+      return { circuit: c, compiled: result.compiled };
+    };
+    const from = src(eeprom(""));
+    const u1 = deviceOf(from, "u1");
+    const r = rec(u1, CARRY_FAMILY.ic, [81, 3, 1, 2048, 1, 1, NaN, NaN, NaN, 0, 0, 0, 0, 0, -1, 8, ...Array(8).fill(NaN), 8, ...Array(24).fill(0)]);
+    expect(mapCarry([r], from, src(eeprom("")))).toHaveLength(1);
+    expect(mapCarry([r], from, src(eeprom("EQ==")))).toEqual([]);
+  });
+
   it("carries a battery's state only onto the same authored charge and catalog part", () => {
     const pack = (charge: number, catalogUid = "battery-9v") =>
       ({
@@ -175,6 +197,57 @@ function asV4(v3: Float64Array, carry: readonly number[]): number[] {
   return out;
 }
 
+describe("program v4's CARRY block (src/core/format.ts)", () => {
+  it("withCarryBlock writes v4 with the block before the trailer, and decodeProgram reads it back", () => {
+    const v3 = source(rc()).compiled.program;
+    const v4 = withCarryBlock(v3, [2, 1, 1, 1, 4.5]);
+    expect(v4[1]).toBe(4);
+    expect(v4.length).toBe(v3.length + 6);
+    const decoded = decodeProgram(v4);
+    expect(decoded.version).toBe(4);
+    expect(Array.from(decoded.carry)).toEqual([2, 1, 1, 1, 4.5]);
+    expect(decoded.devices).toEqual(decodeProgram(v3).devices);
+    expect(Array.from(decodeProgram(v3).carry)).toEqual([]);
+  });
+});
+
+describe("CoreEngine: a reload carries, coldLoad does not (classic's load and coldLoad)", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  const vc = (core: CoreEngine) => core.getNetV()[core.getNetIdForPin("c1", "a")!]!;
+
+  it("load() carries the capacitor's charge onto the edited circuit; coldLoad() starts it at 0 and the clock at 0", () => {
+    const core = new CoreEngine();
+    core.load(rc());
+    core.advance(1e-3);
+    const before = vc(core);
+    expect(before).toBeCloseTo(2.5 * (1 - Math.exp(-2)), 6);
+    const edited = rc();
+    edited.components.find((c) => c.id === "r2")!.params.resistance = 2000;
+    core.load(edited);
+    expect(core.simTime).toBe(1e-3);
+    expect(vc(core)).toBeCloseTo(before, 12);
+    // And on from there: 5 V through 1k into 2k || 1 uF from `before`.
+    core.advance(2e-3);
+    const tau = (1000 * 2000) / 3000 * 1e-6;
+    expect(vc(core)).toBeCloseTo(10 / 3 + (before - 10 / 3) * Math.exp(-1e-3 / tau), 4);
+
+    core.coldLoad(edited);
+    expect(core.simTime).toBe(0);
+    expect(vc(core)).toBe(0);
+    core.dispose();
+  });
+
+  it("a load onto a fresh engine carries nothing", () => {
+    const core = new CoreEngine();
+    core.load(rc(), undefined, { simTime: 1e-3 });
+    expect(vc(core)).toBe(0);
+    core.dispose();
+  });
+});
+
 describe("R100 (a): program v4 on ABI 2", () => {
   beforeAll(async () => {
     await initCore();
@@ -221,6 +294,11 @@ describe("R100 (a): program v4 on ABI 2", () => {
     core.advance(1e-3);
     expect(core.simTime).toBeCloseTo(1e-3, 12);
     expect(Object.keys(core.getNetV()).length).toBeGreaterThan(0);
+    // A reload on it is a cold one at the same time: nothing to take a carry with.
+    core.load(rc());
+    expect(core.simTime).toBe(1e-3);
+    expect(core.getNetV()[core.getNetIdForPin("c1", "a")!]).toBe(0);
+    core.advance(2e-3);
     core.dispose();
   });
 });

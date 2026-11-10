@@ -293,3 +293,56 @@ describe("CoreEngine.takeEepromUpdates — success path: a 28c16 write completes
     expect(engine.takeEepromUpdates()).toEqual({});
   });
 });
+
+// ---- W2c: a reload carries a written EEPROM only onto the same authored contents --
+
+/** The write circuit, edited: `a0` moved to HIGH (address 1) and `/we` LOW again, with `contents` as authored. */
+function eepromReloaded(contents: string | undefined, addressOne: boolean): SimCircuit {
+  const c = eeprom28c16WriteCircuit();
+  if (contents !== undefined) c.components.find((k) => k.id === "u1")!.params.contents = contents;
+  if (addressOne) c.wires = c.wires.map((w) => (w.to_component === "u1" && w.to_pin === "a0" ? { ...w, from_pin: "pos" } : w));
+  return c;
+}
+
+/** Writes WRITE_BYTE at address 0, through tWC. */
+function written(): CoreEngine {
+  const engine = loadCore(eeprom28c16WriteCircuit());
+  engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
+  engine.advance(engine.simTime + 11e-3);
+  return engine;
+}
+
+describe("CoreEngine: a reload carries a written EEPROM only onto the same authored contents (W2c, classic's contents hash)", () => {
+  it("unchanged contents, the write not yet taken: the reload still holds it, dirty, for the host to take", () => {
+    const engine = written();
+    engine.load(eepromReloaded(undefined, false), WITH_MEMORIES);
+    const updates = engine.takeEepromUpdates();
+    expect(Object.keys(updates)).toEqual(["u1"]);
+    expect(updates.u1![WRITE_ADDRESS]).toBe(WRITE_BYTE);
+    expect(engine.takeEepromUpdates()).toEqual({});
+  });
+
+  it("unchanged contents, the write already taken: the written byte survives, under a second write at address 1", () => {
+    const engine = written();
+    expect(engine.takeEepromUpdates().u1![WRITE_ADDRESS]).toBe(WRITE_BYTE);
+    engine.load(eepromReloaded(undefined, true), WITH_MEMORIES);
+    expect(engine.takeEepromUpdates()).toEqual({});
+    engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
+    engine.advance(engine.simTime + 11e-3);
+    const image = engine.takeEepromUpdates().u1!;
+    expect(image[0]).toBe(WRITE_BYTE);
+    expect(image[1]).toBe(WRITE_BYTE);
+    expect(image[2]).toBe(0xff);
+  });
+
+  it("changed contents: the EEPROM starts afresh from the new authoring, the write lost", () => {
+    const engine = written();
+    engine.load(eepromReloaded("EQ==", true), WITH_MEMORIES); // byte 0 authored 0x11
+    expect(engine.takeEepromUpdates()).toEqual({});
+    engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
+    engine.advance(engine.simTime + 11e-3);
+    const image = engine.takeEepromUpdates().u1!;
+    expect(image[0]).toBe(0x11);
+    expect(image[1]).toBe(WRITE_BYTE);
+  });
+});

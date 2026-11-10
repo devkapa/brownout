@@ -108,8 +108,9 @@ class CoreAnalysisEngine implements AnalysisEngine {
   coldLoad(circuit: SimCircuit): void {
     try {
       // `simTime: 0` is what makes a reused engine cold: a bare load() keeps
-      // the engine's own clock moving forward, as classic's load() does. The
-      // core carries nothing else across a load without a CARRY block.
+      // the engine's own clock moving forward and carries its state, as
+      // classic's load() does, and a load given a time carries nothing
+      // (CoreEngine.load, W2c), as coldLoad().
       this._core.load(circuit, undefined, { simTime: 0 });
     } catch (err) {
       const reasons = coreFailureReasons(err);
