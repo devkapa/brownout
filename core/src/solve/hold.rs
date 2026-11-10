@@ -37,6 +37,12 @@ use crate::rails;
 
 #[cfg(test)]
 thread_local! {
+    /// Re-entries tried after a fallback (`reenter_slides`), for the tests.
+    pub(super) static REENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
     static FAIL_PROBE_RESIDUAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -287,6 +293,28 @@ pub(crate) fn slide_drift(edge: f64) -> f64 {
 pub(super) struct SlideEnds {
     at: [Option<f64>; 2],
     evals: u32,
+}
+
+/// The aim of a slide on a CC rail capacitor's segment (ruling R92;
+/// `slide_residual`): the draw at the edge past the limit, `dir` signed,
+/// that brings the supply from `off` past the edge back to it over `span`.
+/// The segment is `C u' = dir (I - D)`, and the draw moves with the rail by
+/// its own conductance `g = dD/du`, so off the edge it is `C off' = dir (I -
+/// w) - g off` (`w` the draw at the edge): off relaxes with `tau = C / g`
+/// toward `dir (I - w) / g`, and reaches the edge at `span` for `w - I = dir
+/// g off / (exp(g span / C) - 1)`. With `g` going to 0 that is the line
+/// `dir C off / span`, the aim before the rail's conductance was counted,
+/// also taken for `g <= 0` (no relaxation to lean on). Cold 2575 tpl 2: a
+/// 555 at its 1.8 V floor on 11.9 nF with DIS on, `g` = 0.0575 S, `tau` =
+/// 0.2 us; the line read as a current at the supply put the segment's
+/// equilibrium at `off (1 - C / (g span))`, 0.92 of its W0 off, and it went
+/// back past W0 every 2.7 us, past `SLIDE_FOLLOW_MAX`.
+pub(crate) fn segment_aim(off: f64, span: f64, c: f64, g: f64, dir: f64) -> f64 {
+    let r = g * span / c;
+    if !(g > 0.0 && r.is_finite()) {
+        return dir * c * off / span;
+    }
+    dir * g * off / r.exp_m1()
 }
 
 /// A probe's hold: the verdict fixed at `on`.
@@ -911,6 +939,9 @@ impl PartitionedSolver {
         if RetrySeam::get() == RetrySeam::NoRetry {
             return Ok(());
         }
+        if self.retry_armed {
+            self.reenter_slides(now, drivers, readers)?;
+        }
         let held: Vec<(usize, usize, PowerHold, f64)> = {
             let hub = self.hub.as_ref().expect("a hub");
             hub.rail_ics
@@ -931,7 +962,7 @@ impl PartitionedSolver {
                     // 20 times its run's cost.
                     let s_off = supply(ic, &self.voltages);
                     let due = self.retry_armed || hold.release.is_some_and(|r| passed(r, s_off));
-                    (hold.kind == HoldKind::Off && later && due && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, s_off))
+                    (hold.kind == HoldKind::Off && later && due && !self.episode(*d).unfollowed && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, s_off))
                 })
                 .collect()
         };
@@ -1020,6 +1051,68 @@ impl PartitionedSolver {
             }
             Passes::Alternating(a, err) => self.hold_on_rail(now, drivers, readers, &a, err),
         }
+    }
+
+    /// Ruling R92 with R95's `SLIDE_FOLLOW_MAX`: a slide given up in a host
+    /// step (`keep_sliding`'s fallback, `Episode::unfollowed`) is held for
+    /// that host step only. The next host step's retry frees each such chip
+    /// and runs the hold procedure again, which slides it where its edge
+    /// attracts; held again instead (the drift still past following, or no
+    /// edge that attracts), the solver goes back bit for bit, still given
+    /// up, to be tried at the next host step: one extra solve a host step.
+    /// Held until the circuit changed (piece 2), cold 2575 tpl 2's 555 sat
+    /// unpowered with its rail in CV for 0.63 s after a source's 1.1 ms
+    /// ramp had outrun its slide (switch 21 tying the source to OUT through
+    /// 105.7 ohm: 114 A/s of draw against the rail's 0.04 S).
+    fn reenter_slides(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        // Not in the host step that gave it up (its re-solves still past
+        // the cap, which the host step's end resets): retried there, it fell
+        // back again at once, each hold a short one, to the episode guard.
+        if self.slide_solves > SLIDE_FOLLOW_MAX {
+            return Ok(());
+        }
+        let given_up: Vec<(usize, usize)> = {
+            let hub = self.hub.as_ref().expect("a hub");
+            hub.rail_ics
+                .iter()
+                .enumerate()
+                .map(|(k, &pos)| (k, self.ics[pos as usize].0))
+                .filter(|&(_, d)| {
+                    let hold = self.power_hold(d);
+                    hold.kind == HoldKind::Off && hold.release.is_some_and(|r| r.since < now) && self.episode(d).unfollowed
+                })
+                .collect()
+        };
+        if !given_up.is_empty() {
+            self.take_retry();
+        }
+        for (k, d) in given_up {
+            #[cfg(test)]
+            REENTRIES.with(|c| c.set(c.get() + 1));
+            let checkpoint = self.checkpoint();
+            let counts = self.hold_counts;
+            let mut episode = self.episode(d);
+            episode.unfollowed = false;
+            self.set_episode(d, episode)?;
+            self.release_episode(d, now)?;
+            let mut moved = Vec::new();
+            let mut seed: Vec<usize> = self.set_power_hold(d, PowerHold::FREE).into_iter().map(|p| p.0 as usize).collect();
+            seed.extend(&self.hub.as_ref().expect("a hub").ic_parts[k]);
+            let kept = match self.hold_passes(now, drivers, &mut moved, seed) {
+                Ok(Passes::Settled(_)) => true,
+                Ok(Passes::Alternating(a, err)) => self.hold_on_rail(now, drivers, &mut moved, &a, err).is_ok() && self.power_hold(d).kind != HoldKind::Off,
+                Err(_) => false,
+            };
+            if kept {
+                self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
+                readers.extend(moved);
+                readers.push(DeviceId(d as u32));
+            } else {
+                self.back_to(checkpoint);
+                self.hold_counts = counts;
+            }
+        }
+        Ok(())
     }
 
     /// Ruling R92 (R53, Q1): rail IC `d` slides along its power edge. Its
@@ -1410,8 +1503,31 @@ impl PartitionedSolver {
             let host = if self.host_step.is_finite() && self.host_step > 0.0 { self.host_step } else { 1.0 };
             let since = now - self.episode(d).solved_at;
             let span = if since > 0.0 { since.min(host) } else { host };
-            let aim = if self.slide_flat { 0.0 } else { crate::devices::sources::direction(v) * hub.c_rail * off / span };
-            return draw - i_limit - aim;
+            if self.slide_flat {
+                return draw - i_limit;
+            }
+            // The draw at the edge, not at the supply: the rail's own
+            // conductance `G = dD/du` (a sliding 555's DIS, x / 10 S) pulls
+            // the segment toward where the draw meets the limit, and an aim
+            // read at the supply as a current alone left that point W0 off
+            // (`segment_aim`). Only near the edge, where the draw's line in
+            // the rail holds: a supply far off it (cold 627 tpl 4, its ground
+            // pin's step putting it 6.95 V under its floor) is read at the
+            // supply, the line aim's, so no duty brackets it and it is
+            // freed; read at the edge 6.95 V away a duty of 0.373 balanced
+            // a draw the rail never had, and its watches fired a femtosecond
+            // apart, 20 million events without progress.
+            let dir = crate::devices::sources::direction(v);
+            if off.abs() > 2.0 * slide_drift(self.slide_edge(d)) {
+                return draw - i_limit - dir * hub.c_rail * off / span;
+            }
+            // The draw's line at the supply carried to the edge (the
+            // linearised segment's own `w`): read at the edge itself across
+            // a kink of the draw (cold 766 tpl 0) it swung the duty between
+            // its ends at each W0 crossing.
+            let g = self.rail_draw_slope(hub.state.u);
+            let at_edge = draw - dir * g * off;
+            return at_edge - i_limit - segment_aim(off, span, hub.c_rail, g, dir);
         }
         let ic = &self.ics[self.ic_position[d] as usize].1;
         let s = supply(ic, &self.voltages);

@@ -10796,14 +10796,38 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
     // way. Classic (drafts/f5k-logs/s1r.mts, the board in classic's terms,
     // the cell as its Thevenin pair) at 1.5 and 3 ms: `s1` vcc 5 V, 2y
     // 0.675676 V; `s1b` vcc 4.635577 V, 1y 4.893268 V, 2y 0.632661 V.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // Ruling R92: on the cell's rail the gate slides at the load instead,
+    // its supply at its 4.275 V floor and the cell's 16.25 mA, (4.6 -
+    // 4.275) / 20, its draw: 1y into P through R_out / x (R_out = 4.275 /
+    // 0.032 = 133.59 ohm, the drive scaled by the duty) and 60 ohm, less
+    // what 2y (HIGH, its inputs on P) takes back from the 5 V source through
+    // 1 kohm, 4.275 / (R_out / x + 60) - 0.725 / (1000 + R_out / x) =
+    // 16.25 mA: x = 0.6900585. P's rise steps at its midpoint, 1.0005 ms,
+    // which takes 1y's draw away, so no duty keeps the supply at the floor
+    // and it is freed there, never held; from then on it runs as classic's.
+    // On `s1` (an iterated static partition, whose slide is a later piece)
+    // it is still held at the load and released at P's edge.
     for (cell, vcc, y, y2) in [(false, 5.0, 5.0, 0.675676), (true, 4.635577, 4.893268, 0.632661)] {
         let p = stale_hold_board(cell);
         let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("load: {}", er.message));
-        assert_eq!(e.stat(25), 1.0, "cell {cell}: held off at the load");
+        assert_eq!(e.stat(25), if cell { 0.0 } else { 1.0 }, "cell {cell}: held off at the load on `s1` only");
+        if cell {
+            let mut rig = Rig::load(&p).unwrap();
+            let hold = rig.s().power_hold(2);
+            assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "sliding at the load: {hold:?}");
+            close(hold.kind.weight(), 0.6900585, 1e-8, "the duty at the load");
+            close(rig.u(), 4.275, 1e-4 + 1e-3 * 4.275, "the supply at the floor");
+            let freed = loop {
+                let t = rig.k.next_event_time();
+                rig.advance(t).unwrap();
+                let hold = rig.s().power_hold(2);
+                if hold.is_free() {
+                    break t;
+                }
+                close(hold.kind.weight(), 0.6900585, 1e-8, "the duty until P's step");
+            };
+            close(freed, 1.0005e-3, 1e-15, "freed at P's step");
+        }
         for t in [1.5e-3, 3e-3] {
             e.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {} at {}", er.message, e.time()));
             let v = e.voltages();
@@ -10812,7 +10836,7 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
             w0_volts(v[3], y, "1y");
             w0_volts(v[5], y2, "2y, the gate powered");
         }
-        assert_eq!((e.stat(25), e.stat(26)), (1.0, 1.0), "cell {cell}: one hold, released at the edge");
+        assert_eq!((e.stat(25), e.stat(26)), if cell { (0.0, 0.0) } else { (1.0, 1.0) }, "cell {cell}: one hold on `s1`, released at the edge; none on the cell");
     }
 }
 
@@ -10957,18 +10981,66 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
     // Ruling R54 (a), F5V2 finding 1 on F5V's stale-hold boards: the gate is
     // held each time P falls to 0 V and freed when it rises, a foreign
     // change, so each hold is an episode of its own; R51's ratio rule
-    // declined both at 0.4955 s.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // declined both at 0.4955 s. Ruling R92: on the cell's rail it slides
+    // instead, at load and from each fall of P (its step at the fall's
+    // midpoint) to the next rise, each time at x = 0.6900585 by hand (the
+    // cell's 16.25 mA at the 4.275 V floor, as at the load in
+    // `a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone`:
+    // the cell's EMF and resistance are constants), and is freed at each
+    // rise: 101 slides, never held. At each fall 2y is still LOW for its 10
+    // ns delay, so the duty first balances 1y alone, 4.275 / (R_out / x +
+    // 60) = 16.25 mA, x = 0.657848; 2y's commit then moves it back. That
+    // re-solve leaves 1y's and 2y's nodes (a curved static hub partition,
+    // their drive following the supply) on the first-order line their last
+    // solve published (Rails point 3), whose band keeps every quantity it
+    // publishes within W0, the draw included: x = 0.6900570 there, 1.5e-6
+    // under the hand value, KCL at those nodes off by 3e-8 A (solved afresh
+    // at the rail, 0.6900585008 and 1e-12 A). So the later phases are held
+    // to W0 of the draw over its slope in the duty, (1e-4 + 1e-3 x 16.25 mA)
+    // / 0.018506 A = 6.28e-3, the load to 1e-8. On `s1` (an iterated static
+    // partition, whose slide is a later piece) it is held each low phase as
+    // before.
     for cell in [false, true] {
+        let mut rig = Rig::load(&stale_hold_board(cell)).unwrap();
+        let mut slides = u32::from(matches!(rig.s().power_hold(2).kind, digital::power::HoldKind::Duty(_)));
+        if cell {
+            close(rig.s().power_hold(2).kind.weight(), 0.6900585, 1e-8, "the duty at the load");
+        }
+        let mut was = slides == 1;
+        for k in 1..=2000 {
+            let t = k as f64 * 5e-4;
+            rig.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {er:?} at {t}"));
+            let hold = rig.s().power_hold(2);
+            let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
+            if sliding {
+                let x = hold.kind.weight();
+                close(x, 0.6900585, 6.28e-3, &format!("cell {cell}: the duty at {t}"));
+                // The mechanism: KCL at 1y's node (R_out / x from the
+                // supply, 60 ohm to P) and 2y's (R_out / x from the supply,
+                // 1 kohm from the 5 V source) holds to W0 of the current.
+                let (u, v3, v4, v5) = (rig.v(1), rig.v(3), rig.v(4), rig.v(5));
+                let g = x * 0.032 / u;
+                let w0 = |i: f64| 1e-4 + 1e-3 * i.abs();
+                let i60 = (v3 - v4) / 60.0;
+                let i1k = (5.0 - v5) / 1000.0;
+                assert!(((u - v3) * g - i60).abs() <= w0(i60), "cell {cell}: KCL at 1y's node at {t}");
+                assert!((i1k - (v5 - u) * g).abs() <= w0(i1k), "cell {cell}: KCL at 2y's node at {t}");
+            }
+            slides += u32::from(sliding && !was);
+            was = sliding;
+        }
         let mut e = Engine::load(&stale_hold_board(cell)).unwrap_or_else(|er| panic!("load: {}", er.message));
         for k in 1..=2000 {
             let t = k as f64 * 5e-4;
             e.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {} at {}", er.message, e.time()));
         }
-        assert_eq!((e.stat(25), e.stat(26)), (101.0, 100.0), "cell {cell}: a hold each low phase, each released");
+        if cell {
+            assert_eq!(slides, 101, "a slide at load and at each of the 100 falls to 0.995 s");
+            assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0), "never held");
+        } else {
+            assert_eq!(slides, 0, "`s1`: no slide");
+            assert_eq!((e.stat(25), e.stat(26)), (101.0, 100.0), "`s1`: a hold each low phase, each released");
+        }
     }
 }
 
@@ -15300,47 +15372,87 @@ pub(super) fn cold_2575_tpl2() -> Program {
 pub(super) const STOPS_2575: [f64; 144] = [0.006272885454268746, 0.006722358845361651, 0.030082069747425742, 0.030305514505074526, 0.07737467669015351, 0.11079122496282161, 0.11101267854173187, 0.1113951420967517, 0.11164419206590313, 0.11180195028027584, 0.1138701213278603, 0.11650259652189927, 0.11675684593067406, 0.11692578059784811, 0.12231022624887829, 0.12242676381306818, 0.12269457187038708, 0.14557142082448843, 0.1514403471524137, 0.15217171434011573, 0.153632621076611, 0.15632653220215822, 0.17836178888619977, 0.1799941324399469, 0.18047972075070431, 0.22265137577819227, 0.25672253328407624, 0.2968355431585014, 0.3064171231383485, 0.30688352703536487, 0.3166121668293984, 0.33316069978529217, 0.35593598078893585, 0.35632858407926943, 0.3567093322188216, 0.3568610316481533, 0.3570258849223718, 0.3588561046044093, 0.3674662495607346, 0.37175636193375877, 0.37317703863544827, 0.3795858435485576, 0.3797855597249306, 0.38146413740463214, 0.4016293832812307, 0.40393609255256335, 0.4053301890226898, 0.44492194354769654, 0.4735156336506627, 0.4860672140295934, 0.5054636814031529, 0.5056213307976068, 0.506186254598784, 0.5063994240091841, 0.5065156050996727, 0.5186636110113361, 0.5200976434439157, 0.5274607808928731, 0.5378025079205805, 0.5667890865375645, 0.5670166441290978, 0.5678225549865811, 0.5687631669913571, 0.5836424522695971, 0.5848768777581916, 0.5902366435220326, 0.614503823816892, 0.6429047511219942, 0.6432247246476697, 0.6470889473414827, 0.6490163406287742, 0.6762247114388868, 0.6795320793458005, 0.6800198505890974, 0.6803932584303227, 0.6817750765335221, 0.6819841119665235, 0.6847669906360809, 0.6853687843254429, 0.6895029689998767, 0.6984460485300185, 0.7016778913941555, 0.7087958014950311, 0.7154846718803052, 0.7183619292769835, 0.7218445496130511, 0.7223110340740124, 0.7247842218978595, 0.725051741895515, 0.7262447841499476, 0.7265708656173511, 0.7268138907606634, 0.7275653545693996, 0.7384622599982188, 0.7499971678142786, 0.7691818876925283, 0.7694417255295235, 0.8026818300912854, 0.8029622039682913, 0.8047022924910198, 0.8057310874381503, 0.8064638171716066, 0.8076940084282942, 0.8156975243194418, 0.8165081417132876, 0.8166318682116716, 0.8286683076718543, 0.8308657692853977, 0.8312159213788277, 0.8315494819225858, 0.8685473107410446, 0.8691493498018293, 0.8695113574669172, 0.9054047813416228, 0.9340903172156757, 0.9521403437392756, 0.9543873550382468, 0.9656266456197006, 0.9670293630256126, 0.9674565417937, 0.9678220131197381, 0.9726532211607167, 1.0017706854196933, 1.0022022420650438, 1.009710339541874, 1.0104472581284287, 1.0335355896152079, 1.0359573122741632, 1.0372701531874613, 1.0384282283459234, 1.0389323403255502, 1.0500829132535774, 1.0991813283619407, 1.1022758598967872, 1.1025908131810065, 1.1049535032499194, 1.1050610457213186, 1.1330034529780417, 1.137007465821038, 1.1371086660730299, 1.1711438348268193, 1.1935460904267732, 1.1945409348701024, 1.2];
 
 #[test]
-fn a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_toggle() {
+fn a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_re_enters_after_each_fallback() {
     // Rulings R89 (a) and R91 (a), cold 2575 tpl 2: a {4.984 V, 106.6 mA}
     // PSU in CC, its rail tied to a pulse source at -2.776 V through switch
     // 14 until the switch opens at 30.08 ms. Then the limit charges the 11.9
     // nF rail capacitor at 106.6 mA / 11.9 nF = 9.0e6 V/s toward the
-    // setpoint. A 555 has VCC, TRIG, THR and DIS on the rail: by hand it
-    // powers at its 1.8 V edge (0.9 x VCC_MIN 2 V), 0.51 us after the
-    // toggle ((1.8 + 2.776) / 9.0e6 s), and powered, THR at VCC puts OUT LOW
-    // and DIS on, which load the rail past the limit (classic, with the edge
-    // lowered to 0.9 V, holds the rail at 0.96 V powered). By ruling G (with
-    // R68) the 555 is held off there, once per episode, and the rail goes on
-    // to the setpoint; each later toggle starts a new episode. Exact mode
-    // declines at 30.0846 ms (R54 (a)'s guard) and classic stalls at 1.81 V:
-    // the default-versus-exact split is an R53/R70 item. Before the fix the
-    // hub partitions' trials, planned at the toggle's instant before the
-    // edit, survived it, and the host's next stop clamped the rail 0.22 ms
-    // with the 555's power judged at -2.776 V: never on, the rail ran up the
-    // capacitor past the setpoint to 749.6 V, and the Rail events then chased
-    // it for 82M events in one advance.
-    // The pre-ruling hold, the fallback of a slide that cannot be followed
-    // (ruling R92): this board's chip slides under the ruling, re-derived by
-    // hand with R92's chatter entry (piece 3).
-    let _no_slide = hold::NoSlide::arm();
+    // setpoint. A 555 has VCC, TRIG, THR and DIS on the rail: it powers at
+    // its 1.8 V edge (0.9 x VCC_MIN 2 V), and powered, THR at VCC puts OUT
+    // LOW and DIS on, which load the rail past the limit. Before ruling R92
+    // it was held off there, once per toggle, the rail at the setpoint.
+    // Ruling R92: it slides at the edge, the PSU at its limit, at the duty
+    // whose draw there is the limit (R53's proposal: the R91 row retired).
+    // By hand, with f = 0.1 / 1.8 (OUT's headroom split, 20 ohm) and DIS x /
+    // 10 S: switch 14 open (21 and 12 open), OUT LOW on node 2 behind 105.7
+    // ohm from the rail, x 1.8 / 10 + v2 x (1 - f) / 20 = I, v2 = 1.8 (1 /
+    // 105.7 + x f / 20) / (1 / 105.7 + x / 20): x = 0.51665 (v2 0.5557 V),
+    // once C17 (0.27 uF into node 6) has settled; switch 21 closed (node 2
+    // on the source at -2.776 V between its pulses), (1.8 + 2.776) / 105.7 +
+    // x (1.8 / 10 + f / 20 x 4.576) = I: x = 0.328264; switch 12 closed too
+    // (node 2 on ground), x = 0.483920. The duty sits within the rail's band
+    // of these: the rail anywhere within W0 (1.9 mV) of the edge moves the
+    // draw by g W0, g = dD/du (0.042 to 0.059 S here), so x by g W0 over the
+    // draw's slope in x (0.185 to 0.2 A): 6.1e-4 at most.
+    // The aim counts the rail's own conductance (`hold::segment_aim`): read
+    // as a current at the supply it left the segment's equilibrium 0.92 of
+    // W0 off, and the slide was solved again every 2.7 us to its follow cap
+    // (`SLIDE_FOLLOW_MAX`). Each pulse of the source (-2.776 to 10.62 V,
+    // 1.11 ms edges, every 89.7 ms) drifts the draw through switch 21 at
+    // about 114 A/s against g 0.04 S, which a constant duty holds within W0
+    // for only about 0.8 us: the slide falls back to the hold at those
+    // edges, for that host step only, and re-enters at the next (held until
+    // the circuit changed, it sat unpowered at the setpoint for 0.63 s).
+    // Exact mode declines at 30.0846 ms (R54 (a)'s guard) and classic stalls
+    // at 1.81 V: the default-versus-exact split is an R53/R70 item. Before
+    // R89 (a)'s fix the hub partitions' trials, planned at the toggle's
+    // instant before the edit, survived it, and the rail ran up the
+    // capacitor past the setpoint to 749.6 V.
     let p = cold_2575_tpl2();
-    let (v_set, edge, d555) = (4.984117245919062, 1.8, 6);
+    let (v_set, edge, d555, i_limit) = (4.984117245919062, 1.8, 6, 0.10655500310025036);
+    let w0 = 1e-4 + 1e-3 * edge;
     let toggles = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
     let mut rig = Rig::load(&p).unwrap();
     let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
-    let (mut ev, mut holds) = (0, Vec::new());
+    let (mut ev, mut held_before, mut low_before, mut slid, mut held) = (0, false, false, 0, 0);
     for &stop in &STOPS_2575 {
         rig.advance(stop).unwrap_or_else(|e| panic!("{e:?} at {}", rig.k.time()));
         assert!(rig.u() <= v_set + 1e-9, "the rail at {} V at {stop} s, past the {v_set} V setpoint", rig.u());
-        // The hold the last toggle's episode took, read at the next stop.
-        if ev > 0 && holds.len() < ev {
-            let hold = rig.s().power_hold(d555);
-            let release = hold.release.unwrap_or_else(|| panic!("the 555 free at {stop} s after toggle {}", ev - 1));
-            assert_eq!(hold.kind, digital::power::HoldKind::Off);
-            assert!((release.level - edge).abs() <= 1e-9 && release.rising, "held at {release:?}, by hand at the {edge} V edge");
-            let after = release.since - toggles[ev - 1].0;
-            assert!(after > 0.0 && after <= 1e-6, "held {after} s after toggle {}", ev - 1);
-            holds.push(after);
+        let hold = rig.s().power_hold(d555);
+        let phase = toggles.iter().rposition(|t| t.0 < stop);
+        let settled = phase.is_some_and(|k| stop > toggles[k].0 + 1e-3);
+        let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
+        if let (Some(k), true) = (phase, settled) {
+            let source_low = (rig.v(3) + 2.776143448201199).abs() < 1e-6;
+            if sliding {
+                slid += 1;
+                close(rig.u(), edge, w0, &format!("at {stop} s: the rail at the edge"));
+                close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("at {stop} s: the PSU at its limit"));
+                // Once C17 has settled (node 6 back at ground: its current
+                // is the draw's only other part).
+                let x_hand = match k {
+                    _ if rig.v(6).abs() > 1e-3 => None,
+                    0 | 2 => Some(0.51665),
+                    1 if source_low => Some(0.328264),
+                    3 => Some(0.483920),
+                    _ => None,
+                };
+                if let Some(x) = x_hand {
+                    close(hold.kind.weight(), x, 6.1e-4, &format!("at {stop} s: the duty against {x} by hand"));
+                }
+            }
+            // Phase A slides throughout; a fallback anywhere lasts one stop.
+            if k == 0 {
+                assert!(sliding, "at {stop} s: sliding until switch 21 closes, not {hold:?}");
+            }
+            // Held again at the next stop only while the source is still on
+            // a pulse (its drift past following again); with the source low
+            // through the host step, the retry slides it.
+            let off = hold.kind == digital::power::HoldKind::Off;
+            assert!(!(off && held_before && source_low && low_before), "at {stop} s: held for a second stop with the source low: a fallback re-enters at the next host step");
+            held += usize::from(off);
+            held_before = off;
+            low_before = source_low;
         }
         while ev < toggles.len() && toggles[ev].0 <= stop {
             let d = toggles[ev].1;
@@ -15348,14 +15460,17 @@ fn a_cc_rail_freed_by_a_switch_holds_its_555_off_at_the_power_edge_once_per_togg
             rig.k.apply_params_as_event(&[(d, 0, state[d])]).unwrap_or_else(|e| panic!("toggle {d} at {stop}: {e:?}"));
             rig.k.solver_mut().prepare_readout();
             ev += 1;
+            held_before = false;
         }
     }
-    assert_eq!((ev, holds.len()), (toggles.len(), toggles.len()), "every toggle applied, each with its hold");
-    assert_eq!(rig.s().hold_stats(), [toggles.len() as f64, 0.0], "one hold per toggle and no release: {holds:?}");
+    assert_eq!(ev, toggles.len(), "every toggle applied");
     assert!((rig.k.time() - 1.2).abs() < 1e-12, "the run reached 1.2 s");
-    // The first hold by hand: (1.8 + 2.776) V at 9.0e6 V/s, 0.51 us after the
-    // switch opened.
-    assert!((holds[0] - 5.1e-7).abs() <= 0.05e-6, "the first hold {} s after the toggle, by hand 0.51 us", holds[0]);
+    assert!(matches!(rig.s().power_hold(d555).kind, digital::power::HoldKind::Duty(_)), "sliding at 1.2 s");
+    eprintln!("2575 tpl 2: sliding at {slid} settled stops, held at {held}; holds {:?}", rig.s().hold_stats());
+    // The source pulses 8 times while switch 21 ties it to OUT (from 0.3779
+    // s, every 89.7 ms, to 1.0056 s), and each of a pulse's two 1.11 ms
+    // edges can outrun the slide once: 16 held stops at most.
+    assert!(slid > 100 && held <= 16, "{slid} sliding stops, {held} held");
 }
 
 /// tpl=1 hub=2 e=9.038 psu ilim=0.189 V2=-2.24 F2-0=0.06/0.64 R2-4=8388.0 R0-2=16.0 C4-0=3.0e-6 P3-0 R1-2=1.1 R2-3=43338.1 SW0-4(0)+R4-0=160 555 vcc1 gnd0 [2, 4, 1, 2, 1, 2] R1-4=21.9 R4-3=391.7 R0-1=6.2 R1-2=5.9 R3-4=203.8 R4-0=1.4 span=9.038178759358374
@@ -16740,4 +16855,63 @@ fn a_gate_whose_own_draw_starves_its_cc_rail_slides_at_its_floor_at_the_duty_its
         }
         assert_eq!(rig.s().hold_counts()[0], 0.0, "a slide is no hold");
     }
+}
+
+#[test]
+fn a_segment_aim_counts_the_rails_own_conductance_and_keeps_the_line_as_its_limit() {
+    // Ruling R92, `hold::segment_aim` (C u' = dir (I - D), the draw moving
+    // with the rail by g = dD/du). With g = 0 (and g < 0, where nothing
+    // relaxes) it is the line, dir C off / span: 1e-8 F x 1e-3 V / 1e-6 s =
+    // 1e-5 A. With g = 1e-12 S, g span / C = 1e-10, and g off / expm1 of that
+    // is the line to 5e-11 relative. Cold 2575 tpl 2's numbers, g 0.0575 S,
+    // C 11.9 nF, span 2.7 us, off 1.9 mV: g span / C = 13.046218, so the aim
+    // is 0.0575 x 1.9e-3 / (e^13.046218 - 1) = 2.35788e-10 A, the draw at the
+    // edge all but at the limit; and from off the rail, C off' = -aim - g off,
+    // is back at the edge at span: off e^(-span g / C) - (aim / g)(1 -
+    // e^(-span g / C)) = 0. A negative supply flips the sign.
+    let line = 1e-8 * 1e-3 / 1e-6;
+    close(hold::segment_aim(1e-3, 1e-6, 1e-8, 0.0, 1.0), line, 1e-20, "g = 0: the line");
+    close(hold::segment_aim(1e-3, 1e-6, 1e-8, -0.1, 1.0), line, 1e-20, "g < 0: the line");
+    rel(hold::segment_aim(1e-3, 1e-6, 1e-8, 1e-12, 1.0), line, 1e-9, "g tiny: the line's limit");
+    let (g, c, span, off) = (0.0575, 11.9e-9, 2.7e-6, 1.9e-3);
+    let aim = hold::segment_aim(off, span, c, g, 1.0);
+    rel(aim, 2.35788e-10, 1e-5, "2575 tpl 2's aim");
+    let k = (-span * g / c).exp();
+    close(off * k - aim / g * (1.0 - k), 0.0, 1e-18, "back at the edge at span");
+    assert_eq!(hold::segment_aim(off, span, c, g, -1.0), -aim, "a negative supply");
+    assert_eq!(hold::segment_aim(1e-3, 1e-6, 1e-8, 0.0, -1.0), -line);
+}
+
+#[test]
+fn a_slide_that_falls_back_costs_one_hold_procedure_a_host_step_at_most() {
+    // Ruling R95's SLIDE_FOLLOW_MAX, per host step: a slide given up there
+    // is held for that host step only, and the next host step's retry runs
+    // the hold procedure once for it (`hold::reenter_slides`), which slides
+    // it again or, held again, puts the solver back. Cold 2575 tpl 2 with
+    // its source's pulses outrunning the slide on switch 21 (see
+    // `a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_
+    // re_enters_after_each_fallback`): at most one re-entry per host step,
+    // and only in a host step that began with the chip given up.
+    let p = cold_2575_tpl2();
+    let toggles = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
+    let mut rig = Rig::load(&p).unwrap();
+    let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
+    let (mut ev, mut total) = (0, 0);
+    for &stop in &STOPS_2575 {
+        let given_up = rig.s().episode(6).unfollowed && rig.s().power_hold(6).kind == digital::power::HoldKind::Off;
+        let before = hold::REENTRIES.with(|c| c.get());
+        rig.advance(stop).unwrap();
+        let tried = hold::REENTRIES.with(|c| c.get()) - before;
+        assert!(tried <= u64::from(given_up), "at {stop} s: {tried} re-entries in the host step (given up at its start: {given_up})");
+        total += tried;
+        while ev < toggles.len() && toggles[ev].0 <= stop {
+            let d = toggles[ev].1;
+            state[d] = 1.0 - state[d];
+            rig.k.apply_params_as_event(&[(d, 0, state[d])]).unwrap();
+            rig.k.solver_mut().prepare_readout();
+            ev += 1;
+        }
+    }
+    eprintln!("2575 tpl 2: {total} re-entries");
+    assert!(total >= 8, "a re-entry after each pulse's fallback: {total}");
 }

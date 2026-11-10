@@ -1166,6 +1166,19 @@ impl PartitionedSolver {
 
     /// The rail's whole draw at `now` were the rail at `u`: the partitions'
     /// linearised terms and the direct devices exact there.
+    /// The rail's own conductance on the scale of a slide's aim (ruling
+    /// R92, `hold::segment_aim`): the direct devices' slope at `u` and the
+    /// static partitions' conductance to it. A stepped or closed-form
+    /// partition's conductance is its capacitors' companions at its step, a
+    /// capacitance on the aim's scale, not a conductance: counted, cold 766
+    /// tpl 0's read 4e6 S, and the duty swung between its ends at each W0
+    /// crossing to its follow cap.
+    pub(super) fn rail_draw_slope(&self, u: f64) -> f64 {
+        let hub = self.hub.as_ref().expect("a hub");
+        let statics: f64 = hub.contrib.iter().enumerate().filter(|&(p, c)| c.active && c.b.is_none() && self.partition_kinds[p] == PartitionKind::Static).map(|(_, c)| c.g).sum();
+        statics + self.direct_at(u).1
+    }
+
     pub(super) fn rail_draw_at(&self, now: f64, u: f64) -> f64 {
         let (a_p, g_p, _, _) = self.partition_totals(now);
         a_p + g_p * u + self.direct_at(u).0

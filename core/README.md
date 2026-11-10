@@ -1996,6 +1996,31 @@ their own, and the source KCL does with W1a point 2's branch fold.
    build; it declines at 1.449 ms otherwise): rail 0.73 W0, 1y 0.52 W0, the
    LED's current 0.05 W0.
 
+   **The aim on a segment** (`hold::segment_aim`). Off the edge by `off`,
+   the duty aims the segment back at the edge over the span the supply took
+   to drift off: `C u' = dir (I - D)` with the draw moving with the rail by
+   its own conductance `g = dD/du`, read at the solve (the direct devices'
+   slope and the static partitions' conductance: a stepped or closed-form
+   partition's is its capacitors' companions at its step, a capacitance on
+   the aim's scale; counted, cold 766 tpl 0's read 4e6 S and its duty swung
+   between its ends), so the duty's draw at the edge `w` (the draw's line
+   at the supply carried to the edge) is the limit plus `dir g off / (exp(g span / C) - 1)`, and
+   `dir C off / span` as `g` goes to 0 (also for `g <= 0`). Read as a
+   current at the supply instead, the aim set the segment's equilibrium at
+   `off (1 - C / (g span))`: cold 2575 tpl 2 (a 555 on 11.9 nF, DIS on, `g`
+   0.0575 S, `tau` = C / g = 0.2 us) sat 0.92 of W0 off, measured 1.71 mV
+   against 1.75 by hand, back past W0 every 2.7 us, to `SLIDE_FOLLOW_MAX`
+   in under a millisecond. Only within 2 W0 of the edge, where the draw's
+   line holds: further off the supply is read as before (cold 627 tpl 4,
+   its ground pin's step 6.95 V under its floor, balanced a draw the rail
+   never had at a duty of 0.373 and stalled at 20 million events).
+   2575 tpl 2 then slides at 0.51665, 0.328264 and 0.483920 by hand per
+   switch state (within the band's 6.1e-4), its re-solves 472 to 198 over
+   its run before re-entry after a fallback (1,736 with it, the slide
+   re-entered and followed to its cap at each pulse edge, 13 holds against
+   4 and 124 sliding stops against 1); 627 tpl 4 (13 re-solves against 12),
+   766 tpl 0, 757 tpl 0, 175 tpl 2 and 696 tpl 2 run as before.
+
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
    supply out of its window; held off, the supply comes back) is held,
@@ -3201,7 +3226,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_TAU_MAX` | `1e-4` s (new) | the largest battery rail time constant `r·C_rail` the core accepts (Rails point 7) |
 | `RAMP_STEP_RATIO` | `0.01` (new) | the longest pulse ramp, relative to the source's event timescale, that is a midpoint step (Sources point 3) |
 | `slide_drift(edge)` | `1e-4 + 1e-3·abs(edge)` V (new, ruling R92) | W0's voltage tolerance at a sliding chip's edge: its duty is solved again once its supply drifts this far, and a `Rail` watch sits on both levels (W1c point 1a, the slide) |
-| `SLIDE_FOLLOW_MAX` | `100` per host step (new, ruling R92) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling. Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
+| `SLIDE_FOLLOW_MAX` | `100` per host step (new, ruling R92) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling for that host step only, and the next host step's retry runs the hold procedure for it again (`hold::reenter_slides`), which slides it again or puts the solver back (held until the circuit changed, cold 2575 tpl 2's 555 sat unpowered in CV for 0.63 s after one source ramp). Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
 | `SLIDE_SOLVES_MAX` | `1000` per host step (new, ruling R92) | the backstop past which a slide's re-solves decline `-4` (never reached while `SLIDE_FOLLOW_MAX` gives a slide up first) |
 
 ### Rails
@@ -6867,6 +6892,21 @@ failures and warnings (W1g)"):
   chatter entry): it does not slide and declines `-4` through the episode
   guard; check against a longer fine reference whether its chatter has a
   usable average (cold 22 tpl 2, 688 tpl 5).
+- A slide's duty moving in time within a step during a source ramp (ruling
+  R92): the duty is constant between its solves, so where the board's draw
+  drifts fast against the rail's own conductance the supply leaves W0 within
+  a microsecond and the slide falls back for that host step. Cold 2575 tpl 2
+  with switch 21 closed: each 1.11 ms edge of the source's pulse (-2.776 to
+  10.62 V) drifts the draw through 105.7 ohm at about 114 A/s against g
+  about 0.04 S, the segment's equilibrium moving at about 2.6 kV/s, so a
+  constant duty holds W0 for about 0.8 us (re-solves came 0.87 us apart);
+  following the edge would take about 1,200 re-solves (600 at the best
+  constant-duty aim) against `SLIDE_FOLLOW_MAX`'s 100. A duty `x0 + x' t`
+  from the measured drift, its stamps following `x(t)` inside the step,
+  would follow it. Meanwhile re-entry could wait until the drift measured
+  at the fallback has dropped below what one constant duty can hold, saving
+  about 100 re-solves per ramp edge (each re-entry during an edge follows to
+  the cap first).
 - Hysteresis at the IC supply floor, a classic change too: the W1c fixed point
   returns -4 (fallback to classic) when a free supply sits near the power
   floor. Accepted for 1.0.0 (manager, 2026-09-29).
