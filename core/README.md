@@ -3311,6 +3311,24 @@ Constants, all from P3:35-38 unless marked new:
    a PSU with no rail capacitor is the exception (point 3, the CC step): a
    step whose rail passes the setpoint is cut where it reaches it.
 
+   **A seed's capacitor currents** (W2c, the ruling on option (A)). A
+   stepped seed (`SEED_H`: a load, a re-aim at a discontinuity, a CC
+   promotion) publishes each capacitor that holds a charge at the current
+   of its branch formulation: the capacitor an ideal source of its `vc` in
+   series with its esr, its current an unknown of one linear solve with the
+   rest of the partition linearised at the seed's solution
+   (`stepped::seed_branch_currents`). Read through the companion instead,
+   it is `C / SEED_H` times the node's offset from the charge, and a node an
+   ulp off a settled charge read up to `C / 1 ps x ulp(v) / 2`: 1.9 nA on
+   corpus 35's 10 uF at a reload (the true current 1e-14 A), 0.44 uA for 1 mF
+   at 5 V. The seed's node voltages and the charges are unchanged; a
+   capacitor at `vc = 0` (every cold load) keeps the companion's current,
+   which has no cancellation, bit for bit. **Known divergence**: classic's
+   own seed is the 1 ps companion, so at a load onto charged capacitors (its
+   carrying reload) and at a re-aim its published capacitor currents carry
+   up to `C / 1 ps x ulp / 2` of that error; the core's are the true current
+   to the currents' own rounding, closer than classic's by that bound.
+
    **The CC seed** (F5c, ruling R28 (a)). A stepped hub partition's seed
    (`SEED_H`, BE at 1 ps) stamps each capacitor as `C / SEED_H` siemens (up
    to 2e10 S), and a draw read through that conductance carries the solve's

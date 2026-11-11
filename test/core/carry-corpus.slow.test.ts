@@ -132,15 +132,7 @@ function sweep(entries: { id: string; circuit: SimCircuit; d: number }[]): { loa
       continue;
     }
     loaded++;
-    // At the reload's own instant a settled capacitor's current is its seed
-    // solve's KCL residual (35-led-rc-stepped: 1.9 nA where the run reads
-    // 1e-14, past the 1 nA tolerance), not a carried quantity: that one
-    // reading leaves the capacitors' currents out.
-    const atReload = times.indexOf(reloadAt);
-    const capIds = circuit.components.filter((k) => k.kind === "capacitor").map((k) => k.id);
-    const withoutCaps = (samples: SampleReadout[]) =>
-      samples.map((s, i) => (i === atReload ? { ...s, elementI: Object.fromEntries(Object.entries(s.elementI).filter(([k]) => !capIds.includes(k))) } : s));
-    const same = firstMismatch(withoutCaps(plain), withoutCaps(coreRun(circuit, circuit, reloadAt, times)));
+    const same = firstMismatch(plain, coreRun(circuit, circuit, reloadAt, times));
     if (same) failures.push(`${id} unchanged: ${same}`);
 
     let baseline: string | null;

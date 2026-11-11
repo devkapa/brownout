@@ -659,8 +659,13 @@ fn solve_step_noting(
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &x, &bnd), pin_voltage(&cap.pins[1], &x, &bnd));
-        let i = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
-        i_new[idx] = i;
+        i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
+    }
+    if h == SEED_H {
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
+    }
+    for (idx, cap) in shape.capacitors.iter().enumerate() {
+        let i = i_new[idx];
         vc[idx] = match method {
             Method::Be => vc_from[idx] + (h / cap.c) * i,
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
@@ -770,8 +775,13 @@ fn take_cc_step(
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &z, &bnd), pin_voltage(&cap.pins[1], &z, &bnd));
-        let i = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
-        i_new[idx] = i;
+        i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
+    }
+    if cc.seed {
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, None, size, &z, vc_from, &mut i_new);
+    }
+    for (idx, cap) in shape.capacitors.iter().enumerate() {
+        let i = i_new[idx];
         vc[idx] = match method {
             Method::Be => vc_from[idx] + (h / cap.c) * i,
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
@@ -794,6 +804,62 @@ fn take_cc_step(
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
     Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None })
+}
+
+/// A seed's capacitor currents in the branch formulation (W2c, the ruling on
+/// option (A)): each capacitor an ideal source of its charge `vc` in series
+/// with its esr, its current an unknown of the solve, with the rest of the
+/// network linearised at the seed's own solution `x` (`size` is `shape.n`,
+/// or `shape.n + 1` on a CC rail, whose rail `x[n]` then enters as a known
+/// boundary). Through the seed's companion the current is `C / SEED_H`
+/// times the node's offset from the charge, so a node an ulp off a settled
+/// charge read up to `C / 1 ps x ulp / 2` (0.44 uA for 1 mF at 5 V, 1.9 nA
+/// on corpus 35's 10 uF), where the true current is ~0; here it comes out
+/// of the solve to the rounding of the currents themselves. Only for a
+/// capacitor with a charge: at `vc = 0` (every cold load) the companion's
+/// current has no cancellation, and is kept bit for bit. A singular system
+/// (a loop of esr-free capacitors) keeps the companion's.
+#[allow(clippy::too_many_arguments)]
+fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], i: &mut [f64]) {
+    if vc_from.iter().all(|&v| v == 0.0) {
+        return;
+    }
+    let (n, m) = (shape.n, shape.capacitors.len());
+    let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
+    stamp_linear_base(shape, size, &mut a, &mut b, live_params, bnd);
+    stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
+    stamp_junctions(&shape.junctions, size, &mut a, &mut b, x, bnd);
+    if let Some(e) = exact {
+        e.apply(size, &mut a, &mut b);
+    }
+    let dim = n + m;
+    let (mut mna, mut rhs) = (vec![0.0; dim * dim], vec![0.0; dim]);
+    for r in 0..n {
+        mna[r * dim..r * dim + n].copy_from_slice(&a[r * size..r * size + n]);
+        rhs[r] = b[r] - (n..size).map(|c| a[r * size + c] * x[c]).sum::<f64>();
+    }
+    for (k, cap) in shape.capacitors.iter().enumerate() {
+        let row = n + k;
+        for (pin, sign) in [(&cap.pins[0], 1.0), (&cap.pins[1], -1.0)] {
+            match bnd.local(pin) {
+                Some(l) if l < n => {
+                    mna[l * dim + row] += sign;
+                    mna[row * dim + l] += sign;
+                }
+                Some(l) => rhs[row] -= sign * x[l],
+                None => rhs[row] -= sign * bnd.get(pin.node),
+            }
+        }
+        mna[row * dim + row] = -cap.esr;
+        rhs[row] += vc_from[k];
+    }
+    if let Ok(sol) = crate::lu::solve(mna, dim, rhs) {
+        for k in 0..m {
+            if vc_from[k] != 0.0 && sol[n + k].is_finite() {
+                i[k] = sol[n + k];
+            }
+        }
+    }
 }
 
 /// One step's network, every element about `x`: the linear base, each

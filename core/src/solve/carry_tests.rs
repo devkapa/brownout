@@ -805,3 +805,113 @@ fn a_reload_exactly_on_a_cc_exit_runs_on_as_the_fine_reference() {
         }
     }
 }
+
+// ---- a stepped seed's capacitor current (W2c, ruling on option (A)) -----
+
+/// Within W0 for currents: 1 nA + 0.1 %.
+fn within_w0_amps(got: f64, want: f64) -> bool {
+    (got - want).abs() <= 1e-9 + 1e-3 * got.abs().max(want.abs())
+}
+
+fn dev2(kind: u32, ci: usize, a: usize, b: usize, params: Vec<f64>) -> Device {
+    Device { kind, component_index: ci, pins: vec![pin(a), pin(b)], params, blob: vec![] }
+}
+
+#[test]
+fn a_reloaded_settled_capacitors_current_is_its_true_current_at_the_reload() {
+    // Corpus 35: 5 V through 1k into 10 uF and a red LED, stepped, settled
+    // by 10 ms. Reloaded there, the seed solves the LED's node against the
+    // carried charge through the 1 ps companion's C / 1 ps = 1e7 S, where a
+    // node an ulp off the charge read 1.86 nA (the true current is 1e-14 A):
+    // past W0's 1 nA. Against the engine it was taken from (a step's
+    // current), at a run of reload instants.
+    let p = Program {
+        carry: Vec::new(),
+        node_count: 3,
+        options: Options::default(),
+        digital_slot_count: 0,
+        channel_slot_count: 0,
+        devices: vec![
+            dev2(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+            dev2(kinds::RESISTOR, 1, 1, 2, vec![1000.0]),
+            dev2(kinds::CAPACITOR, 2, 2, 0, vec![1e-5, 0.0, 0.0]),
+            dev2(kinds::LED, 3, 2, 0, vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0]),
+        ],
+    };
+    let mut worst = 0.0f64;
+    for k in 0..12 {
+        let t = 10.148e-3 + 0.37e-3 * k as f64;
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(5e-3).unwrap();
+        e.advance(t).unwrap();
+        let want = e.currents()[2];
+        let buf = take(&mut e);
+        let seeded = reload(&p, &buf, t);
+        let got = seeded.currents()[2];
+        worst = worst.max((got - want).abs());
+        assert!(within_w0_amps(got, want), "reloaded at {t}: capacitor {got} A against {want} A");
+    }
+    eprintln!("worst capacitor current off at a reload: {worst:e} A");
+}
+
+#[test]
+fn a_capacitors_current_at_a_switch_toggle_is_its_true_current() {
+    // A re-aim seed: 5 V through 10 ohm into 1 mF, stepped, settled (tau 10
+    // ms, 0.3 s on); a switch then puts 1 Mohm across the capacitor, and
+    // each toggle re-seeds the partition from its charge. The true current
+    // just after a closing is -5 uA (the charge holds 5 V and feeds the 1
+    // Mohm), and 0 after an opening, to 1e-13 A. The companion read up to C
+    // / 1 ps x ulp(5 V) = 0.9 uA of noise there.
+    let mut p = Program {
+        carry: Vec::new(),
+        node_count: 4,
+        options: Options::default(),
+        digital_slot_count: 0,
+        channel_slot_count: 0,
+        devices: vec![
+            dev2(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+            dev2(kinds::RESISTOR, 1, 1, 2, vec![10.0]),
+            dev2(kinds::CAPACITOR, 2, 2, 0, vec![1e-3, 0.0, 0.0]),
+            dev2(kinds::SWITCH, 3, 2, 3, vec![0.0]),
+            dev2(kinds::RESISTOR, 4, 3, 0, vec![1e6]),
+        ],
+    };
+    p.options.force_stepped = true;
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.3).unwrap();
+    for k in 0..12 {
+        let closed = k % 2 == 0;
+        e.set_params(&[(3, 0, f64::from(u8::from(closed)))]).unwrap();
+        let (vc, got) = (e.voltages()[2], e.currents()[2]);
+        // The closed switch is its 1 mohm contact (devices::switches).
+        let want = if closed { (5.0 - vc) / 10.0 - vc / (1e6 + 1e-3) } else { (5.0 - vc) / 10.0 };
+        assert!(within_w0_amps(got, want), "toggle {k} ({}): capacitor {got} A against {want} A", if closed { "closed" } else { "open" });
+        e.advance(0.3 + 0.01 * (k + 1) as f64).unwrap();
+    }
+}
+
+#[test]
+fn a_capacitors_current_at_a_cc_promotion_is_its_true_current() {
+    // R59 (1) (B): {5 V, 0.1 A} into 100 ohm and 0.1 F (a closed-form hub
+    // partition, `cc_switch`), with 20 ohm switched across the rail. Closing
+    // the switch puts the PSU in CC, which promotes the partition to its
+    // stepped copy, seeded from the charge: there the rail is `(0.1 + vc /
+    // 100) / 0.06` and the capacitor takes `(u - vc) / 100`. Passed before
+    // the branch formulation too (within 5e-13 A): this pins it.
+    let mut p = cc_switch_board(vec![]);
+    p.devices[2].params[0] = 0.1;
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.5).unwrap();
+    for k in 0..6 {
+        let closed = k % 2 == 0;
+        e.set_params(&[(3, 0, f64::from(u8::from(closed)))]).unwrap();
+        if closed {
+            let (u, vc, got) = (e.voltages()[1], e.voltages()[2], e.currents()[2]);
+            let u_want = (0.1 + vc / 100.0) / (1.0 / 100.0 + 1.0 / (20.0 + 1e-3));
+            assert!((u - u_want).abs() <= 1e-4 + 1e-3 * u_want, "closing {k}: the CC rail {u} against {u_want}");
+            let want = (u - vc) / 100.0;
+            assert!(within_w0_amps(got, want), "closing {k}: capacitor {got} A against {want} A");
+        }
+        e.advance(0.5 + 0.2 * (k + 1) as f64).unwrap();
+    }
+}
