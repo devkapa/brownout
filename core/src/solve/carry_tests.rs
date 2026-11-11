@@ -915,3 +915,35 @@ fn a_capacitors_current_at_a_cc_promotion_is_its_true_current() {
         e.advance(0.5 + 0.2 * (k + 1) as f64).unwrap();
     }
 }
+
+#[test]
+fn an_exact_mode_cv_seeds_capacitor_current_is_its_branch_current() {
+    // Exact mode (corpus 45): the rail is a free node whose row a CV PSU
+    // replaces with `u = V`, a constraint, not the rail's KCL. 5 V, 0.1 A
+    // into 100 ohm and 1 mF with 50 mohm esr, run in 1 ms host steps through
+    // the CC exit near 69 ms; at every reading the capacitor's current is
+    // its branch current `(u - vc) / esr` at the charge it holds, the exit's
+    // seed included (the seed's branch solve once read the capacitor into
+    // that row, publishing -0.083 A for -1.74 A there).
+    let p = {
+        let devices = vec![
+            Device { kind: kinds::BENCH_PSU, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0, 0.1], blob: vec![] },
+            Device { kind: kinds::RESISTOR, component_index: 1, pins: vec![pin(1), pin(0)], params: vec![100.0], blob: vec![] },
+            Device { kind: kinds::CAPACITOR, component_index: 2, pins: vec![pin(1), pin(0)], params: vec![1e-3, 0.05, 0.0], blob: vec![] },
+        ];
+        let mut options = Options::default();
+        options.no_rail_shortcut = true;
+        Program { carry: Vec::new(), node_count: 2, options, digital_slot_count: 0, channel_slot_count: 0, devices }
+    };
+    let mut e = Engine::load(&p).unwrap();
+    let mut exited = false;
+    for k in 1..=150 {
+        e.advance(k as f64 * 1e-3).unwrap();
+        let vc = one(&take(&mut e), carry::FAMILY_CAPACITOR, 2).values[0];
+        let (u, i) = (e.voltages()[1], e.currents()[2]);
+        let want = (u - vc) / 0.05;
+        assert!(within_w0_amps(i, want), "at {k} ms: capacitor {i} A against (u - vc) / esr = {want} A (u {u}, vc {vc})");
+        exited |= e.currents()[0] > -0.0999;
+    }
+    assert!(exited, "the PSU left CC");
+}

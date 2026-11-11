@@ -832,6 +832,10 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
     if let Some(e) = exact {
         e.apply(size, &mut a, &mut b);
     }
+    // Exact mode's source row (`ExactKind::Row`, a CV rail or an `r = 0`
+    // cell) is a constraint, not the rail's KCL: no capacitor current
+    // enters it.
+    let constraint = exact.filter(|e| matches!(e.kind, crate::solve::ExactKind::Row { .. })).map(|e| e.local);
     let dim = n + m;
     let (mut mna, mut rhs) = (vec![0.0; dim * dim], vec![0.0; dim]);
     for r in 0..n {
@@ -843,7 +847,9 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
         for (pin, sign) in [(&cap.pins[0], 1.0), (&cap.pins[1], -1.0)] {
             match bnd.local(pin) {
                 Some(l) if l < n => {
-                    mna[l * dim + row] += sign;
+                    if constraint != Some(l) {
+                        mna[l * dim + row] += sign;
+                    }
                     mna[row * dim + l] += sign;
                 }
                 Some(l) => rhs[row] -= sign * x[l],
