@@ -3226,8 +3226,9 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_TAU_MAX` | `1e-4` s (new) | the largest battery rail time constant `r·C_rail` the core accepts (Rails point 7) |
 | `RAMP_STEP_RATIO` | `0.01` (new) | the longest pulse ramp, relative to the source's event timescale, that is a midpoint step (Sources point 3) |
 | `slide_drift(edge)` | `1e-4 + 1e-3·abs(edge)` V (new, ruling R92) | W0's voltage tolerance at a sliding chip's edge: its duty is solved again once its supply drifts this far, and a `Rail` watch sits on both levels (W1c point 1a, the slide) |
-| `SLIDE_FOLLOW_MAX` | `100` per host step (new, ruling R92) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling for that host step only, and the next host step's retry runs the hold procedure for it again (`hold::reenter_slides`), which slides it again or puts the solver back (held until the circuit changed, cold 2575 tpl 2's 555 sat unpowered in CV for 0.63 s after one source ramp). Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
-| `SLIDE_SOLVES_MAX` | `1000` per host step (new, ruling R92) | the backstop past which a slide's re-solves decline `-4` (never reached while `SLIDE_FOLLOW_MAX` gives a slide up first) |
+| `SLIDE_FOLLOW_MAX` | `100` per host step, or per `SLIDE_FOLLOW_SPAN` (10 ms) of a longer one, whichever allows more (new, ruling R92; per time since R53V) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling for that host step only, and the next host step's retry runs the hold procedure for it again (`hold::reenter_slides`), which slides it again or puts the solver back (held until the circuit changed, cold 2575 tpl 2's 555 sat unpowered in CV for 0.63 s after one source ramp). Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
+| `SLIDE_SOLVES_MAX` | `1000` per host step (new, ruling R92), scaled with `SLIDE_FOLLOW_MAX` | the backstop past which a slide's re-solves decline `-4` (never reached while `SLIDE_FOLLOW_MAX` gives a slide up first) |
+| `SLIDE_FOLLOW_SPAN` | `10e-3` s (new, R53V) | the simulated time per 100 re-solves a long host step may also make (`hold::slide_follow_cap`). The cap was set at the app's cadence, a host step a frame (1/60 s): 100 re-solves in 16.7 ms, one per 167 us. Counted per host step only, it gave a slide up at long host steps that frame steps followed: cold 766 tpl 0 under the trapezoid re-solves its duty every 0.3 to 0.6 ms (open item (c)), about 160 times across a 50 ms host step, and lost its slide at 0.25 s at stops 0.2, 0.25, ... 1.0 s, kept at 1 ms stops. Per 10 ms the allowance at any host step is never below the frame cadence's pace (one per 100 us). A slide given up is held as before ruling R92 and retried at its release level within the host step as any hold (kept from that retry, 766's chip sat off while its rail climbed to 2.3 to 3.6 V) |
 
 ### Rails
 
@@ -6814,6 +6815,21 @@ failures and warnings (W1g)"):
   it. Closing it needs the step's knots kept (or the step re-planned
   passively) whenever it may be armed into.
 
+- (c) A slide's aim back at its edge sees only the rail's own capacitors to
+  fixed nodes and the conductance of its direct and static parts (ruling
+  R92, (b3)): capacitance a stepped hub partition carries is not in it. Cold
+  766 tpl 0's rail carries C17, 13.5 mF to node 6, which 2.82 ohm and 105 uF
+  tie to ground: over a re-solve's span (0.3 to 0.6 ms) about 0.35 S and
+  104 uF against the 2.66 uF the aim reads, so its aim current is about a
+  thousand times short and each re-solve leaves the rail at the band's
+  edge. The rail runs on past W0 until the next turns it, by up to 2.2 W0
+  (4.2 mV at 1 ms stops), and the duty is solved again every 0.3 to 0.6 ms
+  where a full aim would space its re-solves out. An aim that counts the
+  stepped hub partitions' admittance at the rail over the span (R53-P4's
+  derived effective capacitance) would close it. R53's own: in scope
+  before R53 lands; `a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end`
+  and `a_slide_is_followed_alike_at_long_host_steps_within_w0` are its
+  expected failures, pinned at 2.5 W0 meanwhile.
 - **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
   A backward Euler stepped partition's step-doubling bounds its node
   voltages to W0 per step but never its capacitors' series currents, a

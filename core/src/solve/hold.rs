@@ -128,6 +128,32 @@ impl Drop for NoSlide {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static NO_FOLLOW_PER_TIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the guard lives the follow cap counts per host step
+/// only ([`slide_follow_cap`]'s per-time allowance off), so a test can give
+/// a slide up at a long host step and watch its fallback hold.
+#[cfg(test)]
+pub(super) struct NoFollowPerTime;
+
+#[cfg(test)]
+impl NoFollowPerTime {
+    pub(super) fn arm() -> NoFollowPerTime {
+        NO_FOLLOW_PER_TIME.with(|c| c.set(true));
+        NoFollowPerTime
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoFollowPerTime {
+    fn drop(&mut self) {
+        NO_FOLLOW_PER_TIME.with(|c| c.set(false));
+    }
+}
+
 #[inline]
 fn sliding_allowed() -> bool {
     #[cfg(test)]
@@ -278,6 +304,30 @@ pub(crate) const SLIDE_SOLVES_MAX: u32 = 1000;
 /// step; one that follows its board's pace takes a few (cold 175 tpl 2:
 /// about one every 2 ms).
 pub(crate) const SLIDE_FOLLOW_MAX: u32 = 100;
+
+/// The simulated time per [`SLIDE_FOLLOW_MAX`] re-solves a long host step
+/// is allowed besides its own 100 ([`slide_follow_cap`]). The cap was set
+/// at the app's own cadence, a host step a frame (1/60 s): 100 re-solves in
+/// 16.7 ms, one per 167 us. Counted only per host step it gave a slide up at
+/// longer steps that it followed at frame steps (R53V: cold 766 tpl 0 under
+/// the trapezoid, about 160 re-solves across a 50 ms host step, one every
+/// 0.3 ms, given up there, kept at 1 ms stops), so the answer hung on the
+/// host's cadence. Per 10 ms the allowance at any host step is never below
+/// the frame cadence's pace (100 per 10 ms is one per 100 us).
+pub(crate) const SLIDE_FOLLOW_SPAN: f64 = 10e-3;
+
+/// The re-solves `keep_sliding` may make in a host step `host_step` long
+/// before it gives a slide up: [`SLIDE_FOLLOW_MAX`] a host step, or as many
+/// per [`SLIDE_FOLLOW_SPAN`] of it, whichever allows more; and its
+/// backstop decline, [`SLIDE_SOLVES_MAX`], scaled alike, so it stays ten
+/// times the cap.
+pub(crate) fn slide_follow_cap(host_step: f64) -> (u32, u32) {
+    let scale = if host_step.is_finite() { (host_step / SLIDE_FOLLOW_SPAN).max(1.0) } else { 1.0 };
+    #[cfg(test)]
+    let scale = if NO_FOLLOW_PER_TIME.with(|c| c.get()) { 1.0 } else { scale };
+    let cap = |n: u32| (n as f64 * scale).min(u32::MAX as f64 / 2.0) as u32;
+    (cap(SLIDE_FOLLOW_MAX), cap(SLIDE_SOLVES_MAX))
+}
 
 /// How far a sliding IC's supply may drift from its edge before its duty is
 /// solved again (ruling R92): W0's voltage tolerance at the edge, so every
@@ -962,7 +1012,15 @@ impl PartitionedSolver {
                     // 20 times its run's cost.
                     let s_off = supply(ic, &self.voltages);
                     let due = self.retry_armed || hold.release.is_some_and(|r| passed(r, s_off));
-                    (hold.kind == HoldKind::Off && later && due && !self.episode(*d).unfollowed && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, s_off))
+                    // A slide given up in this host step (`unfollowed`) is
+                    // retried at its release level as any hold (its host
+                    // step's retry is `reenter_slides`'): kept from it, the
+                    // chip stayed off with its rail climbing 0.5 to 1.8 V
+                    // past its floor for the rest of the host step (R53V,
+                    // cold 766 tpl 0 under the trapezoid at 50 ms stops).
+                    let passed_release = hold.release.is_some_and(|r| passed(r, s_off));
+                    let retried = !self.episode(*d).unfollowed || passed_release;
+                    (hold.kind == HoldKind::Off && later && due && retried && self.r44_draw_fits(now, *d) != Some(false)).then(|| (k, *d, hold, s_off))
                 })
                 .collect()
         };
@@ -1068,7 +1126,7 @@ impl PartitionedSolver {
         // Not in the host step that gave it up (its re-solves still past
         // the cap, which the host step's end resets): retried there, it fell
         // back again at once, each hold a short one, to the episode guard.
-        if self.slide_solves > SLIDE_FOLLOW_MAX {
+        if self.slide_solves > slide_follow_cap(self.host_step).0 {
             return Ok(());
         }
         let given_up: Vec<(usize, usize)> = {
@@ -1649,10 +1707,11 @@ impl PartitionedSolver {
                 }
             }
             self.slide_solves += 1;
-            if self.slide_solves > SLIDE_SOLVES_MAX {
+            let (follow_max, solves_max) = slide_follow_cap(self.host_step);
+            if self.slide_solves > solves_max {
                 return Err(format!("power slide: IC (device {d}) had its duty solved again {} times in one host step, its supply drifting past W0 from its edge each time (ruling R92)", self.slide_solves));
             }
-            if self.slide_solves > SLIDE_FOLLOW_MAX {
+            if self.slide_solves > follow_max {
                 // Given up: free, and the passes find it alternating again,
                 // where the hold procedure holds it as before the ruling.
                 let mut episode = self.episode(d);
