@@ -410,6 +410,52 @@ fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_slides_along_
     assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0));
 }
 
+#[test]
+fn a_gate_that_feeds_another_of_its_own_with_no_way_back_is_not_self_fed_and_slides() {
+    // R53V (ruling R97 (b)): a chip is self-fed when an output reaches,
+    // through passive parts with no series capacitor, an input that output
+    // is a function of, directly or through its other outputs. Before, any
+    // input counted. The 4.279 V cell of the test above (5 ohm, a 74LS00
+    // with 1A and 1B on the datum, so 1Y HIGH into 1 kohm) slides at its
+    // 4.275 V floor at x = 0.030755. Wire 1Y to 2A and 2B as well and leave
+    // 2Y open: 1Y is a function of 1A and 1B only (`digital::output_inputs`)
+    // and 2Y goes nowhere, so there is no loop. It read as self-fed and
+    // chattered its 10 ns holds to the episode guard's decline. It slides
+    // as the plain cell does: 2A and 2B draw nothing and 2Y loads nothing
+    // but its node shunt, so it settles at the same duty.
+    //
+    // The loops still count: 1Y through 10 k onto its own 1A and 1B (100 k
+    // to the datum), and 1Y to 2A, 2B with 2Y back on 1A, 1B, a loop through
+    // two of its gates.
+    let cell = |logic: [usize; 12], extra: Vec<Device>, nodes: usize| {
+        let mut devices = vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, logic, 10e-9, 0), resistor(2, 2, 0, 1000.0)];
+        devices.extend(extra);
+        program(nodes, devices)
+    };
+    let fed = |p: &Program| {
+        let ics = collect_ics(p);
+        let pb = crate::partition::build(p).unwrap();
+        hold::self_fed(p, &ics, &pb.fixed.iter().map(|f| f.is_some()).collect::<Vec<_>>())[0]
+    };
+    let plain = cell([0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], vec![], 6);
+    let chain = cell([0, 0, 2, 2, 2, 3, 0, 0, 4, 0, 0, 5], vec![], 6);
+    let direct = cell([6, 6, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], vec![resistor(3, 2, 6, 1e4), resistor(4, 6, 0, 1e5)], 7);
+    let ring = cell([3, 3, 2, 2, 2, 3, 0, 0, 4, 0, 0, 5], vec![], 6);
+    for (name, p, want) in [("plain", &plain, false), ("1Y on 2A, 2B, 2Y open", &chain, false), ("1Y back on 1A, 1B through 10 k", &direct, true), ("1Y to 2A, 2B, 2Y back on 1A, 1B", &ring, true)] {
+        assert_eq!(fed(p), want, "{name}: self-fed");
+    }
+    let (v_e, r_out) = (4.275, 4.275 / 0.032);
+    let x_hand = r_out / (v_e / ((4.279 - v_e) / 5.0) - 1000.0);
+    for (name, p) in [("plain", plain), ("1Y on 2A, 2B, 2Y open", chain)] {
+        let mut rig = Rig::load(&p).unwrap();
+        rig.advance(1e-3).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let hold = rig.s().power_hold(1);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{name}: sliding, not {hold:?}");
+        close(rig.u(), v_e, 100e-6 + 1e-3 * v_e, &format!("{name}: the rail at the floor"));
+        close(hold.kind.weight(), x_hand, 1e-3 * x_hand, &format!("{name}: the duty against {x_hand} by hand"));
+    }
+}
+
 /// The ping-pong's CC start-up form (HG1): a {5 V, 20 mA} PSU ramps a 1 uF
 /// rail capacitor with 100 ohm into 10 uF beside it, and a 74LS00's 1y
 /// drives an LED and 330 ohm. Near the floor the RC takes about 18 mA, so
@@ -9368,9 +9414,10 @@ fn a_g2bv_gate_starving_its_cell_at_load_is_held_off_and_again_after_a_toggle() 
     // its release the floor plus that drop and two reached widths: above
     // the EMF, never reached. A toggle (`set_params`) drops the hold, and
     // the same instant takes it again (W1c point 1a).
-    // Rulings R92, R95 (b), R97 (b): the gate feeds its own inputs from its
-    // outputs with no series capacitor (`hold::self_fed`), so it never
-    // slides and keeps the hold below.
+    // Ruling R92: the board slides now (`the_hold_boards_r97_read_as_self_fed_slide`:
+    // no output reaches the logic that drives it, R53V); this checks the
+    // hold machinery, so it runs with no slide (`hold::NoSlide`).
+    let _no_slide = hold::NoSlide::arm();
     let p = { let mut p = program(7, g2bv_bc_ic_20_hub1()); p.digital_slot_count = 16; p };
     let stops = [0.00010054129745299623, 0.001267074627819937, 0.19185406847861228, 0.44552757564924855, 0.44644865932111427, 0.5];
     let (rig, trace, err) = hold_trace(&p, &[(0.44552757564924855, 9)], &stops, 6);
@@ -9573,11 +9620,13 @@ fn the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off() {
     // release level is past the setpoint, so neither is released over 50
     // ms; 785's toggle at 18 ms drops the hold, and the toggle's instant
     // takes it again.
-    // Rulings R92, R95 (b), R97 (b): 785 tpl 0's gate feeds its own inputs
-    // from its outputs with no series capacitor (`hold::self_fed`), so it
-    // never slides; 830 tpl 3's edge does not attract (held off its supply
-    // reads 3.263 V, under its 4.275 V floor as well: ruling D2 (a)). Both
-    // keep the holds below.
+    // Ruling R92: 785 tpl 0's gate slides now
+    // (`the_hold_boards_r97_read_as_self_fed_slide`: no output reaches the
+    // logic that drives it, R53V); 830 tpl 3's edge does not attract (held
+    // off its supply reads 3.263 V, under its 4.275 V floor as well: ruling
+    // D2 (a)). This checks the hold machinery, so it runs with no slide
+    // (`hold::NoSlide`).
+    let _no_slide = hold::NoSlide::arm();
     for (name, p, toggles, stops, d, v) in [
         ("785 tpl 0", { let mut p = program(8, cold_785_tpl0()); p.digital_slot_count = 32; p }, vec![(0.01840803191451679, 16)], vec![0.006272880216392937, 0.01840803191451679, 0.02495905461262398, 0.05], 12, 4.698635237910),
         ("830 tpl 3", { let mut p = program(7, cold_830_tpl3()); p.digital_slot_count = 32; p }, vec![], vec![0.0062728803007134695, 0.006590779933999605, 0.02225723242285205, 0.05], 8, 5.032450386993),
@@ -9590,6 +9639,37 @@ fn the_fxh_boards_that_declined_at_load_load_with_their_gate_held_off() {
         assert!(freed.is_empty() && held.iter().all(|h| h.1 > v), "{name}: release levels past the setpoint {v}: {held:?}");
         assert_eq!(rig.s().hold_counts(), [toggles.len() as f64 + 1.0, 0.0], "{name}");
         assert!(rig.u() <= v + 1e-9, "{name}: the rail {} V", rig.u());
+    }
+}
+
+#[test]
+fn the_hold_boards_r97_read_as_self_fed_slide() {
+    // R53V: three boards whose 74LS00 R97 (b)'s first reading called
+    // self-fed, an output reaching any input of its chip, though none
+    // reaches the logic that drives it (`hold::self_fed`): cold 621 tpl 2
+    // (2Y and 3Y on 1A, 1Y and 4Y on the rail), G2bv's bc_ic 20 hub 1 and
+    // cold 785 tpl 0. Each starves at its 4.275 V floor and its edge
+    // attracts, so each slides (ruling R92): the supply at the floor within
+    // W0 and its source at the current the floor leaves it, by hand: 621's
+    // and 785's PSUs at their limits in CC, 99.14 and 785's own; bc_ic 20's
+    // cell, 4.2774 V behind 0.236 ohm, at (E - 4.275) / r = 10.34 mA.
+    let w0 = 1e-4 + 1e-3 * 4.275;
+    let cell = (4.277440234153144 - 4.275) / 0.2359746390621206;
+    let boards: Vec<(&str, Program, usize, Option<f64>, f64)> = vec![
+        ("621 tpl 2", cold_621_2(), 4, None, 1e-3),
+        ("bc_ic 20 hub 1", { let mut p = program(7, g2bv_bc_ic_20_hub1()); p.digital_slot_count = 16; p }, 6, Some(cell), 1e-3),
+        ("785 tpl 0", { let mut p = program(8, cold_785_tpl0()); p.digital_slot_count = 32; p }, 12, None, 6e-3),
+    ];
+    for (name, p, d, source, t) in boards {
+        let i_limit = p.devices[0].params.get(1).copied().unwrap_or(f64::NAN);
+        let mut rig = Rig::load(&p).unwrap();
+        rig.advance(t).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let hold = rig.s().power_hold(d);
+        eprintln!("{name}: {hold:?} u={} i0={} limit {i_limit}", rig.u(), rig.i(0));
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{name}: sliding, not {hold:?}");
+        close(rig.u(), 4.275, w0, &format!("{name}: the supply at the floor"));
+        let want = source.unwrap_or(i_limit);
+        close(-rig.i(0), want, 1e-9 + 1e-3 * want, &format!("{name}: the source's current"));
     }
 }
 
@@ -12514,9 +12594,11 @@ fn a_chip_starving_its_own_rail_stays_held_at_the_host_steps_retry_in_both_modes
     // move, found it carried itself and freed it, and nothing ran the regime
     // rules on that solve, so the PSU delivered 126 mA in CV against its
     // 99.1 mA limit until the circuit changed; default mode keeps it held.
-    // Rulings R92, R95 (b), R97 (b): the 555 feeds its own inputs from its
-    // outputs with no series capacitor (`hold::self_fed`), so it never
-    // slides and keeps the hold below.
+    // Ruling R92: the board slides now (`the_hold_boards_r97_read_as_self_fed_slide`:
+    // its 74LS00's 2Y and 3Y drive 1A, and 1Y sits on the rail, so no
+    // output reaches the logic that drives it, R53V); this checks the hold
+    // machinery, so it runs with no slide (`hold::NoSlide`).
+    let _no_slide = hold::NoSlide::arm();
     let i_limit = 0.09913892461723416;
     let mut published = Vec::new();
     for p in [cold_621_2(), exact(cold_621_2())] {

@@ -163,9 +163,12 @@ fn sliding_allowed() -> bool {
     true
 }
 
-/// Ruling R97 (b): per IC (positions in `ics`), whether its outputs reach
-/// one of its own inputs through passive parts with no capacitor in the
-/// path. Such a chip's slide reads its own averaged output at its inputs,
+/// Ruling R97 (b): per IC (positions in `ics`), whether one of its outputs
+/// reaches, through passive parts with no capacitor in the path, an input
+/// that output is a function of, directly or through its other outputs
+/// (`digital::output_inputs`; every input for a kind that does not say):
+/// a loop from an output back into the logic that drives it. Such a chip's
+/// slide reads its own averaged output at its inputs,
 /// which sit between their thresholds and toggle it at every solve (cold 22
 /// tpl 2: a 555 with OUT on its TRIG and THR rang at 1e9 events a second at
 /// its duty, never finishing a run), so it never slides: it chatters to the
@@ -181,7 +184,10 @@ fn sliding_allowed() -> bool {
 /// allowed to slide its 555 carried itself after two holds and the rail
 /// climbed to the setpoint, which the fine reference never does (it
 /// chatters about the floor in a 70 us limit cycle and declines at 0.01184
-/// s); held, it declines at 0.01210 s.
+/// s); held, it declines at 0.01210 s. An output that feeds another gate of
+/// its own chip whose output goes nowhere back is no loop (R53V: a 74LS00's
+/// 1Y on its own 2A and 2B, 2Y open, read as self-fed when every input
+/// counted, and the 4.279 V cell's slide was lost).
 pub(crate) fn self_fed(program: &crate::program::Program, ics: &[(usize, digital::IcRecord)], fixed: &[bool]) -> Vec<bool> {
     use crate::kinds;
     let n = fixed.len();
@@ -207,15 +213,48 @@ pub(crate) fn self_fed(program: &crate::program::Program, ics: &[(usize, digital
         .map(|(_, ic)| {
             let outputs = digital::output_capable(ic.kind);
             let blocked = |node: usize| node >= n || fixed[node] || node == ic.vcc.node || node == ic.gnd.node;
-            let mut seen = vec![false; n];
-            let mut stack: Vec<usize> = outputs.iter().filter_map(|&i| ic.logic.get(i)).map(|p| p.node).filter(|&a| !blocked(a)).collect();
-            while let Some(a) = stack.pop() {
-                if std::mem::replace(&mut seen[a], true) {
-                    continue;
+            // The nodes each output reaches.
+            let reach: Vec<Vec<bool>> = outputs
+                .iter()
+                .map(|&o| {
+                    let mut seen = vec![false; n];
+                    let mut stack: Vec<usize> = ic.logic.get(o).map(|p| p.node).filter(|&a| !blocked(a)).into_iter().collect();
+                    while let Some(a) = stack.pop() {
+                        if std::mem::replace(&mut seen[a], true) {
+                            continue;
+                        }
+                        stack.extend(adjacent[a].iter().copied().filter(|&b| !blocked(b) && !seen[b]));
+                    }
+                    seen
+                })
+                .collect();
+            // Output `j` feeds output `k` when it reaches an input `k` reads.
+            let reads = |k: usize| -> Vec<usize> {
+                match digital::output_inputs(ic.kind, outputs[k]) {
+                    Some(inputs) => inputs.to_vec(),
+                    None => (0..ic.logic.len()).filter(|i| !outputs.contains(i)).collect(),
                 }
-                stack.extend(adjacent[a].iter().copied().filter(|&b| !blocked(b) && !seen[b]));
-            }
-            ic.logic.iter().enumerate().any(|(i, p)| !outputs.contains(&i) && p.node < n && seen[p.node])
+            };
+            let feeds = |j: usize, k: usize| reads(k).iter().any(|&i| ic.logic.get(i).is_some_and(|p| p.node < n && reach[j][p.node]));
+            // A loop among the outputs (one feeding itself included): a
+            // walk from each output along `feeds` that comes back to it.
+            (0..outputs.len()).any(|start| {
+                let mut seen = vec![false; outputs.len()];
+                let mut stack = vec![start];
+                while let Some(j) = stack.pop() {
+                    for k in 0..outputs.len() {
+                        if feeds(j, k) {
+                            if k == start {
+                                return true;
+                            }
+                            if !std::mem::replace(&mut seen[k], true) {
+                                stack.push(k);
+                            }
+                        }
+                    }
+                }
+                false
+            })
         })
         .collect()
 }

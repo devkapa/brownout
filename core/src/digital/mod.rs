@@ -174,6 +174,20 @@ pub const NE555_DIS: usize = 5;
 /// OUT and DIS: each is its own driver stage, not a logic output.
 const OUT_555: [usize; 2] = [NE555_OUT, NE555_DIS];
 
+/// The logic pins (indices, pin order) output `out` of an IC of `kind` is a
+/// function of, where the model computes each output from its own gate's
+/// inputs (the quad two-input gates, the hex inverters); `None` for any
+/// other kind, whose outputs read every input as far as this crate states.
+pub fn output_inputs(kind: u32, out: usize) -> Option<&'static [usize]> {
+    const QUAD: [[usize; 2]; 4] = [[0, 1], [3, 4], [6, 7], [9, 10]];
+    const HEX: [[usize; 1]; 6] = [[0], [2], [4], [6], [8], [10]];
+    match kind {
+        kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => OUT_QUAD3.iter().position(|&o| o == out).map(|k| &QUAD[k][..]),
+        kinds::IC_74LS04 | kinds::IC_74HC14 => OUT_HEX2.iter().position(|&o| o == out).map(|k| &HEX[k][..]),
+        _ => None,
+    }
+}
+
 /// Indices into an IC's logic pins (pin order) that own a digital slot and a
 /// `Driver`, across every IC kind — combinational (README's "IC logic pins"
 /// table) and W1d sequential/memory (README's "Sequential and memory IC

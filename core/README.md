@@ -1957,11 +1957,16 @@ their own, and the source KCL does with W1a point 2's branch fold.
    watch). On a capacitor's segment whose aim back at the edge needs more
    than the limit leaves at any duty, yet one holds it flat, the slide takes
    the end that turns it back fastest (off under the edge, on over it); cold
-   766 tpl 0 then slides to 0.507 s instead of 0.191 s. **A chip whose
-   outputs reach its own inputs through passive parts with no capacitor**
-   (`hold::self_fed`, at build: resistive parts, switches in either state,
-   fuses and LEDs, stopping at fixed nodes and at the chip's own supply
-   pins) never slides (ruling R97 (b)): its inputs read its own averaged
+   766 tpl 0 then slides to 0.507 s instead of 0.191 s. **A chip with a
+   loop from an output back into the logic that drives it**, through
+   passive parts with no capacitor (`hold::self_fed`, at build: resistive
+   parts, switches in either state, fuses and LEDs, stopping at fixed nodes
+   and at the chip's own supply pins; an output drives the outputs whose
+   inputs it reaches, by `digital::output_inputs` where the model computes
+   each output from its own gate's inputs, the quad gates and hex
+   inverters, else every input; a loop is a cycle among them, an output on
+   its own inputs included) never slides (ruling R97 (b); a 74LS00's 1Y on
+   its own 2A and 2B with 2Y open is no loop, R53V): its inputs read its own averaged
    output between their thresholds, and 22 tpl 2's 555 (OUT on its TRIG and
    THR) rang at 1e9 events a second; it chatters to the guard's `-4` as
    before, the message naming the ruling (also 688 tpl 5's 555). Open item:
