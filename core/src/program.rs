@@ -1735,3 +1735,17 @@ impl crate::snapshot::HeapBytes for Options {
         n
     }
 }
+
+impl crate::snapshot::HeapBytes for Program {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_count, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.options, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.digital_slot_count, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_slot_count, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.carry, w); }
+        n
+    }
+}

@@ -346,3 +346,24 @@ describe("CoreEngine: a reload carries a written EEPROM only onto the same autho
     expect(image[1]).toBe(WRITE_BYTE);
   });
 });
+
+describe("CoreEngine: a reload of the same circuit object, edited in place, carries from it as it was loaded (W2c)", () => {
+  it("changed contents on the loaded object itself still start afresh from the new authoring", () => {
+    const circuit = eeprom28c16WriteCircuit();
+    const engine = loadCore(circuit);
+    engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
+    engine.advance(engine.simTime + 11e-3);
+    // The host edits the object it loaded and reloads that same object:
+    // the carry compares against the contents as they were at the load.
+    circuit.components.find((k) => k.id === "u1")!.params.contents = "EQ=="; // byte 0 authored 0x11
+    circuit.components.find((k) => k.id === "we_sw")!.params.position = 0;
+    circuit.wires.find((w) => w.to_component === "u1" && w.to_pin === "a0")!.from_pin = "pos"; // the next write goes to address 1
+    engine.load(circuit, WITH_MEMORIES);
+    expect(engine.takeEepromUpdates()).toEqual({});
+    engine.setParams([{ componentId: "we_sw", params: { position: 1 } }]);
+    engine.advance(engine.simTime + 11e-3);
+    const image = engine.takeEepromUpdates().u1!;
+    expect(image[0]).toBe(0x11);
+    expect(image[1]).toBe(WRITE_BYTE);
+  });
+});

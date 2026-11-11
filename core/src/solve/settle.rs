@@ -196,6 +196,10 @@ pub(super) struct SafeJunction {
 /// The load-time tables the settle reads.
 #[derive(Clone, Debug, Default)]
 pub(super) struct SlowModel {
+    /// W2c, live V: the widened `(span, |v|)` the cold decisions were taken
+    /// under, and each resolved source's range then (`source_ranges`).
+    pub cold_span: Option<(f64, f64)>,
+    pub span_ranges: Vec<Option<(f64, f64)>>,
     pub devs: Vec<SlowDevice>,
     /// device index -> its index in `devs`, `u32::MAX` for none.
     pub of_device: Vec<u32>,
@@ -532,31 +536,54 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
             }
         }
     }
+    let ranges = source_ranges(program, resolved);
+    let fixed_nodes: Vec<bool> = fixed.iter().map(|f| f.is_some()).collect();
+    let (span, v_abs) = span_of_ranges(resolved, &ranges, &fixed_nodes)?;
+    // Ruling R57 D10 (a): a carried charge holds its free node off the fixed
+    // one by up to its `|vc|` (`crate::carry::abs_vc_sum`).
+    let carried = crate::carry::abs_vc_sum(&program.carry);
+    Some((span + carried, v_abs + carried))
+}
+
+/// Each resolved source's range of values (`voltage_span_bound`), `None` for
+/// a kind with no bound (a current-limited PSU's rail, any other).
+pub(super) fn source_ranges(program: &Program, resolved: &[partition::ResolvedSource]) -> Vec<Option<(f64, f64)>> {
+    resolved
+        .iter()
+        .map(|r| {
+            let d = &program.devices[r.device_index];
+            let p = &d.params;
+            let span_of = |a: f64, b: f64| if a <= b { (a, b) } else { (b, a) };
+            Some(match d.kind {
+                kinds::SECTION_ANCHOR => (0.0, 0.0),
+                kinds::VOLTAGE_SOURCE => (p[0], p[0]),
+                kinds::BENCH_PSU if !(p[1] > 0.0) => (p[0], p[0]),
+                // A current-limited one's rail falls through to `None` (above).
+                kinds::CLOCK | kinds::CLOCK_GEN => span_of(p[2], p[3]),
+                kinds::PULSE_SOURCE | kinds::PULSE_GEN => span_of(p[0], p[1]),
+                kinds::BATTERY_PACK => {
+                    let (a, b) = devices::battery::BatteryModel::from_record(p, &d.blob).emf_range()?;
+                    (a.min(0.0), b.max(0.0))
+                }
+                _ => return None,
+            })
+        })
+        .collect()
+}
+
+/// The forest's `(hi - lo, max |v|)` from its sources' ranges, `None` when a
+/// fixed node has no range or one is not finite.
+pub(super) fn span_of_ranges(resolved: &[partition::ResolvedSource], ranges: &[Option<(f64, f64)>], fixed: &[bool]) -> Option<(f64, f64)> {
     let mut range: Vec<Option<(f64, f64)>> = vec![None; fixed.len()];
     range[0] = Some((0.0, 0.0));
-    for r in resolved {
-        let d = &program.devices[r.device_index];
-        let p = &d.params;
-        let span_of = |a: f64, b: f64| if a <= b { (a, b) } else { (b, a) };
-        let (lo, hi) = match d.kind {
-            kinds::SECTION_ANCHOR => (0.0, 0.0),
-            kinds::VOLTAGE_SOURCE => (p[0], p[0]),
-            kinds::BENCH_PSU if !(p[1] > 0.0) => (p[0], p[0]),
-            // A current-limited one's rail falls through to `None` (above).
-            kinds::CLOCK | kinds::CLOCK_GEN => span_of(p[2], p[3]),
-            kinds::PULSE_SOURCE | kinds::PULSE_GEN => span_of(p[0], p[1]),
-            kinds::BATTERY_PACK => {
-                let (a, b) = devices::battery::BatteryModel::from_record(p, &d.blob).emf_range()?;
-                (a.min(0.0), b.max(0.0))
-            }
-            _ => return None,
-        };
+    for (r, src) in resolved.iter().zip(ranges) {
+        let (lo, hi) = (*src)?;
         let (plo, phi) = range[r.parent_node]?;
         range[r.child_node] = Some(if r.parent_is_pos { (plo - hi, phi - lo) } else { (plo + lo, phi + hi) });
     }
     let (mut lo, mut hi) = (0.0f64, 0.0f64);
-    for (n, f) in fixed.iter().enumerate() {
-        if f.is_some() && range[n].is_none() {
+    for (n, &f) in fixed.iter().enumerate() {
+        if f && range[n].is_none() {
             return None;
         }
     }
@@ -567,10 +594,7 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
         lo = lo.min(a);
         hi = hi.max(b);
     }
-    // Ruling R57 D10 (a): a carried charge holds its free node off the fixed
-    // one by up to its `|vc|` (`crate::carry::abs_vc_sum`).
-    let carried = crate::carry::abs_vc_sum(&program.carry);
-    Some((hi - lo + carried, lo.abs().max(hi.abs()) + carried))
+    Some((hi - lo, lo.abs().max(hi.abs())))
 }
 
 /// A two-terminal resistance's least resistance, `None` for any other kind:
@@ -773,6 +797,11 @@ impl PartitionedSolver {
         // series walk needs (the pins on each node and their devices).
         let may_trap = self.stepped.may_step_trap(stepped::Method::from_option(program.options.integration));
         let span = voltage_span_bound(program, &self.resolved, fixed, live, may_trap).filter(|_| !cold_hooks::disabled()).map(|(span, v_abs)| (span * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V, v_abs * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V));
+        // W2c, live V: what a set re-derives the span from (`rederive_cold`).
+        model.cold_span = span;
+        if span.is_some() {
+            model.span_ranges = source_ranges(program, &self.resolved);
+        }
         let mut pins_on = vec![0u32; program.node_count];
         let mut devs_on: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
         if span.is_some() {
@@ -2785,6 +2814,51 @@ impl PartitionedSolver {
         Ok(())
     }
 
+    /// W2c, live V: the cold decisions (R38 (a)) were taken under the span
+    /// at load. After a set the forest's span is taken again, from the
+    /// sources' values now and widened by the charges the capacitors hold
+    /// (as a carried load's, D10 (a)); while it is within the load's, every
+    /// cold device stays provably cold. Past it, every cold device turns hot,
+    /// a superset of those the new span makes stressable, and is driven from
+    /// the settle that follows (every device is visited there). A rollback
+    /// leaves them hot: a hot device that cannot be stressed only costs its
+    /// visits.
+    pub(super) fn rederive_cold(&mut self, now: f64) {
+        if !self.slow_model.devs.iter().any(|sd| sd.cold) {
+            return;
+        }
+        let still = self.slow_model.cold_span.is_some_and(|(span0, v_abs0)| {
+            let mut ranges = self.slow_model.span_ranges.clone();
+            for (k, r) in self.resolved.iter().enumerate() {
+                if self.device_kinds[r.device_index] == kinds::VOLTAGE_SOURCE {
+                    let v = self.wave.constant[r.device_index];
+                    ranges[k] = Some((v, v));
+                }
+            }
+            let Some((span, v_abs)) = span_of_ranges(&self.resolved, &ranges, &self.fixed_node) else { return false };
+            let mut caps: Vec<(usize, f64)> = Vec::new();
+            self.stepped.carry_caps(&mut caps);
+            self.closed_form.carry_caps(now, &mut caps);
+            let held: f64 = caps.iter().map(|c| c.1.abs()).sum::<f64>() + self.fixed_pair_capacitors.iter().map(|c| c.vc_at(now).abs()).sum::<f64>();
+            let widen = |x: f64| (x + held) * (1.0 + COLD_MARGIN_REL) + COLD_MARGIN_V;
+            widen(span) <= span0 && widen(v_abs) <= v_abs0
+        });
+        if still {
+            return;
+        }
+        let model = &mut *self.slow_model;
+        for i in 0..model.devs.len() {
+            if !model.devs[i].cold {
+                continue;
+            }
+            model.devs[i].cold = false;
+            for k in 0..model.devs[i].parts.len() {
+                let p = model.devs[i].parts[k];
+                model.part_devs[p].push(i as u32);
+            }
+        }
+    }
+
     pub(super) fn slow_state_of(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
         out.clear();
         match *self.device_kinds.get(device)? {
@@ -2908,6 +2982,8 @@ impl crate::snapshot::HeapBytes for SlowModel {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cold_span, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.span_ranges, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.devs, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.of_device, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_devs, w); }

@@ -29,16 +29,12 @@ import { CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./ki
 type SimComponent = SimCircuit["components"][number];
 
 /**
- * `voltage_source`'s `voltage` is ruled live for W2 (D12: a set is a source
- * edge on the fixed node) but the Rust side does not implement it yet
- * (`CORE_RECORD_SHAPES.voltage_source.liveParams` is empty, and
- * `bo_engine_set_params` would answer -8). Until it does, a V change must be
- * a reload, so the answer sits behind this one flag. The W2c Rust worker
- * flips it to `true` in the same change that adds the live spec; once
- * `voltage_source` appears in `LIVE_PARAM_SPECS` the generic path answers and
- * this flag is dead code to delete.
+ * `voltage_source`'s `voltage` is live (W2c, ruling R57 D12 (a): a set is a
+ * source edge on the fixed node in Rust). `LIVE_PARAM_SPECS` and
+ * `CORE_RECORD_SHAPES` carry it now, so the generic path answers and this
+ * flag no longer decides anything; it stays `true`, exported as it was.
  */
-export const VOLTAGE_SOURCE_V_LIVE = false;
+export const VOLTAGE_SOURCE_V_LIVE = true;
 
 export interface LiveParamDiffOptions {
   /** Overrides {@link VOLTAGE_SOURCE_V_LIVE} (tests exercise the pending state both ways). */

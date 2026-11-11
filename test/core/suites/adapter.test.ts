@@ -306,20 +306,14 @@ describe("adapter.ts SimEngine — an edit it cannot deliver is refused, not dro
     };
   }
 
-  it("a changed voltage_source V says it needs live V (W2c) and names the component", () => {
+  it("a changed voltage_source V is delivered live (W2c): the node takes it at the next step", () => {
     const circuit = pair();
     const engine = new SimEngine();
     engine.load(circuit);
     circuit.components[0]!.params.voltage = 3;
-    let thrown: unknown;
-    try {
-      engine.step(1e-4);
-    } catch (err) {
-      thrown = err;
-    }
-    expect(thrown).toBeInstanceOf(CoreSuiteEditNotDeliverableError);
-    expect((thrown as CoreSuiteEditNotDeliverableError).reason).toBe("live-v-pending");
-    expect((thrown as Error).message).toMatch(/voltage_source/);
+    engine.step(1e-4);
+    const netId = engine.nets.find((n) => n.pins.some(([c, p]) => c === "r" && p === "a"))!.id;
+    expect(engine.getNetV()[netId]).toBeCloseTo(3, 12);
   });
 
   it("a changed non-live param or a rewire says it needs a reload with carry (W2c)", () => {

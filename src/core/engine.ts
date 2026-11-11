@@ -211,6 +211,13 @@ export class CoreEngine implements EngineReadout {
   private _lastConverged = false;
   /** The loaded circuit, which `resetFailures` re-derives the static warnings from, as classic's `this.circuit`. */
   private _circuit: SimCircuit | null = null;
+  /**
+   * W2c: the loaded circuit as it was at the load, which the next reload's
+   * carry maps from. A copy: a host may edit the circuit object it loaded in
+   * place and reload that same object (classic keeps what it needs at load,
+   * its EEPROM's contents hash and a battery's authored charge).
+   */
+  private _loadedAs: SimCircuit | null = null;
   /** The static warnings and the announce queue (W1g point 11). A reload carries a same-kind component's entries, as classic's load (W2c); coldLoad starts afresh. */
   private _warnings = new WarningLedger();
   /**
@@ -403,7 +410,7 @@ export class CoreEngine implements EngineReadout {
    */
   private _takeCarry(): { records: CarryRecord[]; from: { circuit: SimCircuit; compiled: CompiledCircuit } } | null {
     const compiled = this._compiled;
-    const circuit = this._circuit;
+    const circuit = this._loadedAs;
     if (!compiled || !circuit) return null;
     const raw = coreCall((exports) => {
       if (typeof exports.bo_engine_carry_take !== "function" || typeof exports.bo_engine_carry_ptr !== "function") return null;
@@ -463,6 +470,7 @@ export class CoreEngine implements EngineReadout {
     this._elementChannelI = {};
     this._lastConverged = false;
     this._circuit = null;
+    this._loadedAs = null;
     this._warnings = new WarningLedger();
 
     // `options`' other fields pass straight through: compileCircuit's
@@ -518,6 +526,7 @@ export class CoreEngine implements EngineReadout {
     }
     this._eepromImages = loadedEepromImages(circuit, eepromImages);
     this._circuit = circuit;
+    this._loadedAs = structuredClone(circuit);
     // Since START_TIME, as classic's load evaluates them at its simTime.
     this._warnings.evaluateStatic(circuit, compiled.nets, previousSimTime);
     this._publishReadouts();

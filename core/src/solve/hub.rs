@@ -542,6 +542,7 @@ impl PartitionedSolver {
 
         // Which partitions, ICs, watches and rule-2a capacitors each live
         // node feeds.
+        self.fixed_reads = reads.iter().map(|nodes| nodes.iter().map(|&n| n as u32).collect()).collect::<Vec<Vec<u32>>>().into();
         self.node_parts = (vec![Vec::new(); node_count]).into();
         for (p, nodes) in reads.iter().enumerate() {
             for &n in nodes {
@@ -2638,6 +2639,125 @@ impl PartitionedSolver {
         let published = self.finish_publish(now);
         self.on_error(published)?;
         Ok((dirty, readers))
+    }
+
+    /// W2c, live V (ruling R57 D12 (a)): a `voltage_source`'s new `V` as a
+    /// source edge at `now`. Every node the source fixes, and every node a
+    /// source stacked on it fixes, takes its new value in the published array
+    /// and the static solver's; what reads one re-solves as at any edge: the
+    /// partitions whose stamps read it, the ICs reading it (and, for a
+    /// supply, the partitions watching their read pins), the rule-2a
+    /// capacitors on it (re-aimed), the rail when it is a direct node. Every
+    /// slow device is visited again at the settle, as at load, and the
+    /// cold-device span is re-derived (`rederive_cold`). The window rolls all
+    /// of it back with the instant (the forest's values with `w_wave`).
+    pub(super) fn source_params_at(&mut self, triples: &[(usize, usize, f64)], now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        let edited: Vec<(usize, f64)> = triples.iter().filter(|&&(d, p, _)| p == 0 && self.device_kinds.get(d) == Some(&kinds::VOLTAGE_SOURCE)).map(|&(d, _, v)| (d, v)).collect();
+        if edited.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.host_edit = true;
+        {
+            let wave = Rc::make_mut(&mut self.wave);
+            for &(d, v) in &edited {
+                wave.constant[d] = v;
+            }
+        }
+        let node_count = self.voltages.len();
+        let mut moved = vec![false; node_count];
+        let mut changed: Vec<usize> = Vec::new();
+        let resolved = self.wave.resolved.clone();
+        for r in &resolved {
+            if !(edited.iter().any(|&(d, _)| d == r.device_index) || moved[r.parent_node]) {
+                continue;
+            }
+            let v = self.wave.source_value(r.device_index, now);
+            let parent = self.voltages[r.parent_node];
+            let value = if r.parent_is_pos { parent - v } else { parent + v };
+            let node = r.child_node;
+            if value.to_bits() != self.voltages[node].to_bits() {
+                self.write_boundary(node, value);
+                self.static_solver.set_boundary(node, value);
+                moved[node] = true;
+                changed.push(node);
+            }
+        }
+        let mut dirty: Vec<PartitionId> = Vec::new();
+        let mut readers: Vec<DeviceId> = Vec::new();
+        self.sync_static_fixed();
+        if !changed.is_empty() {
+            // The caches hold every constant fixed node as it was at load.
+            self.closed_form.bump_boundary_epoch();
+            // Rule-2a capacitors: a window that did not journal them (no live
+            // node at load) does now, so the instant rolls them back.
+            if !self.live_caps && self.window {
+                self.w_caps.clear();
+                self.w_caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)));
+            }
+            self.live_caps = true;
+            for k in 0..self.fixed_pair_capacitors.len() {
+                let (a, b) = self.fixed_pair_capacitors[k].nodes;
+                if moved[a] || moved[b] {
+                    let d_v = self.voltages[a] - self.voltages[b];
+                    self.fixed_pair_capacitors[k].reaim(now, d_v);
+                }
+            }
+            for (p, nodes) in self.fixed_reads.iter().enumerate() {
+                if nodes.iter().any(|&n| moved[n as usize]) {
+                    dirty.push(PartitionId(p as u32));
+                }
+            }
+            for (node, ics) in build_ic_reader_index(&self.ics) {
+                if moved[node] {
+                    readers.extend(ics.into_iter().map(|d| DeviceId(d as u32)));
+                }
+            }
+            for (_, ic) in self.ics.iter() {
+                if !(moved[ic.vcc.node] || moved[ic.gnd.node]) {
+                    continue;
+                }
+                for (i, pin) in ic.logic.iter().enumerate() {
+                    if let (true, Some((p, _))) = (partition::is_watched_read_pin(ic, i), self.local_index[pin.node]) {
+                        if matches!(self.partition_kinds[p], PartitionKind::ClosedForm | PartitionKind::Stepped) {
+                            dirty.push(PartitionId(p as u32));
+                        }
+                    }
+                }
+            }
+            if let Some(hub) = self.hub.as_mut() {
+                if changed.iter().any(|&n| hub.direct_nodes[n]) {
+                    hub.dirty = true;
+                }
+            }
+        }
+        dirty.sort_unstable();
+        dirty.dedup();
+        readers.sort_unstable();
+        readers.dedup();
+        // Every slow device is driven afresh at the settle, as at load.
+        self.slow_scratch.loaded = false;
+        self.rederive_cold(now);
+        let drivers = Rc::clone(&self.driver_snapshot);
+        self.static_solver.set_inputs_bounded(false);
+        let result = self.static_solver.resolve_dirty_into(&[], now, &drivers, &mut readers);
+        self.on_error(result)?;
+        let held = self.copy_in_static();
+        self.on_error(held)?;
+        let result = self.rail_loop(now, &drivers, &mut readers);
+        self.on_error(result)?;
+        let published = self.finish_publish(now);
+        self.on_error(published)?;
+        Ok((dirty, readers))
+    }
+
+    /// The static solver's constant fixed nodes as the forest publishes them
+    /// (`StaticPartitionSolver::set_fixed_values`): after a live V set, and
+    /// after its rollback, which puts the published values back.
+    pub(super) fn sync_static_fixed(&mut self) {
+        let values: Vec<(usize, f64)> = self.wave.resolved.iter().map(|r| (r.child_node, self.voltages[r.child_node])).collect();
+        if self.static_solver.set_fixed_values(&values) {
+            self.source_set = true;
+        }
     }
 
     /// Brings every node a running ramp moves to its value at `now` in the

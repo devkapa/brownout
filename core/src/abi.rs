@@ -1092,8 +1092,8 @@ mod tests {
         let h = bo_engine_create();
         assert_eq!(load(h, &switch_program()), 0);
         let before = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) }.to_vec();
-        // Device 0 (the source) has no live params.
-        assert_eq!(set_params(h, &[0.0, 0.0, 1.0]), -8);
+        // Device 0 (the source) has no live param 1 (its V is param 0, W2c).
+        assert_eq!(set_params(h, &[0.0, 1.0, 1.0]), -8);
         let after = unsafe { std::slice::from_raw_parts(bo_engine_node_voltages(h), 3) };
         assert_eq!(after, before.as_slice());
     }

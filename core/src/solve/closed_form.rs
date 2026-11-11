@@ -529,6 +529,10 @@ pub struct ClosedFormSolver {
     rail: Option<usize>,
     hub_updates: Vec<(usize, Contrib)>,
     sensitivities: u64,
+    /// W2c, live V: bumped at each set of a voltage source, whose fixed
+    /// nodes a segment's key otherwise holds constant; in the key once it is
+    /// not 0, so a run with no set keys as it always did.
+    boundary_epoch: u64,
     /// The CC rail capacitor's segment while the rail is that known closed
     /// form (Rails point 4), and the rail voltages where an IC on the rail
     /// turns on or off. The owner sets both from its own state before every
@@ -678,6 +682,7 @@ impl ClosedFormSolver {
             rail: topo.rail,
             hub_updates: Vec::new(),
             sensitivities: 0,
+            boundary_epoch: 0,
             rail_seg: None,
             rail_edges: Vec::new(),
             cell: None,
@@ -1108,7 +1113,7 @@ impl ClosedFormSolver {
             };
             Self::note_bits(part, voltages);
             let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
-            Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, 0.0)?;
+            Self::segment_and_aim(part, now, vc_now, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, 0.0, self.boundary_epoch)?;
             Self::publish(part, live_params, voltages, currents);
             readers.extend_from_slice(&part.watch_ids);
             Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, readers);
@@ -1194,7 +1199,7 @@ impl ClosedFormSolver {
         };
         Self::note_bits(part, voltages);
         let on = OnRail { rail: self.rail, seg: self.rail_seg.as_ref(), cell: self.cell.as_ref(), held: self.rail_held };
-        Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, jump)?;
+        Self::segment_and_aim(part, now, vc, drivers, &self.node_owner, &Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }), live_params, on, self.ramps.as_deref(), &mut self.hub_updates, &mut self.sensitivities, jump, self.boundary_epoch)?;
         Self::publish(part, live_params, voltages, currents);
         readers.extend_from_slice(&part.watch_ids);
         Self::report_changed_ic_readers(part, voltages, &self.node_to_ic_readers, readers);
@@ -1380,6 +1385,11 @@ impl ClosedFormSolver {
 
     pub(crate) fn sensitivities(&self) -> u64 {
         self.sensitivities
+    }
+
+    /// W2c, live V: a fixed node a segment reads may have moved.
+    pub(crate) fn bump_boundary_epoch(&mut self) {
+        self.boundary_epoch += 1;
     }
 
     /// Drains every crossing this solver wants scheduled since the last
@@ -1648,9 +1658,12 @@ impl ClosedFormSolver {
     /// shape, the capacitor, every IC record and driver's fixed fields, the
     /// fixed supply voltages, `node_owner`) is immutable after load, so equal
     /// keys mean equal inputs and a bit-identical segment.
-    fn segment_key(part: &mut Partition, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, ramps: Option<&RampEval>) {
+    fn segment_key(part: &mut Partition, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd, ramps: Option<&RampEval>, epoch: u64) {
         let key = &mut part.key_scratch;
         key.clear();
+        if epoch != 0 {
+            key.extend_from_slice(&epoch.to_le_bytes());
+        }
         for &id in &part.driver_ids {
             key.push(drivers[id as usize].committed().map_or(3, mode_discriminant));
         }
@@ -1706,10 +1719,11 @@ impl ClosedFormSolver {
         hub_updates: &mut Vec<(usize, Contrib)>,
         sensitivities: &mut u64,
         jump: f64,
+        epoch: u64,
     ) -> Result<(), String> {
         bank_drift(part, now);
         Self::ensure_driver_ids(part, drivers, node_owner);
-        Self::segment_key(part, now, drivers, live_params, bnd, ramps);
+        Self::segment_key(part, now, drivers, live_params, bnd, ramps, epoch);
         // A curved segment's band holds over the capacitor voltages it was
         // sized for; a reuse from outside them builds again.
         let reusable = matches!(&part.seg, Some(seg) if seg.key == part.key_scratch && seg.hub.as_ref().and_then(|h| h.curve.as_ref()).is_none_or(|c| vc_now >= c.vc_lo && vc_now <= c.vc_hi));
@@ -3794,6 +3808,7 @@ impl crate::snapshot::HeapBytes for ClosedFormSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub_updates, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sensitivities, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.boundary_epoch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_seg, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_edges, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell, w); }

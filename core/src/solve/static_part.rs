@@ -2243,6 +2243,46 @@ impl StaticPartitionSolver {
         self.pending_bnd.push((node, value));
     }
 
+    /// W2c, live V: the constant fixed nodes a set moved. A resistor to a
+    /// constant node is folded into its partition's base (`fold_static_stamp`),
+    /// so each node takes its new value in `fixed` and every partition with
+    /// a contact on one folds its base afresh; no cache key holds a constant
+    /// node, so every cached solution goes stale, as at a param change.
+    /// Returns whether anything moved. Idempotent: setting the values back
+    /// (a rollback) folds the old bases again.
+    pub(crate) fn set_fixed_values(&mut self, values: &[(usize, f64)]) -> bool {
+        let mut moved = vec![false; self.fixed.len()];
+        let mut any = false;
+        for &(node, value) in values {
+            if self.fixed[node].is_some_and(|f| f.to_bits() != value.to_bits()) {
+                self.fixed[node] = Some(value);
+                moved[node] = true;
+                any = true;
+            }
+        }
+        if !any {
+            return false;
+        }
+        let mut touched: Vec<usize> = Vec::new();
+        for stamp in self.resistors.iter() {
+            for c in &stamp.contacts {
+                for (a, b) in [(c.u, c.w), (c.w, c.u)] {
+                    if let (Some((p, _)), true) = (self.local_index[a], moved[b]) {
+                        if !touched.contains(&p) {
+                            touched.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        for p in touched {
+            self.rebuild_base(p);
+        }
+        self.epoch += 1;
+        self.full = true;
+        true
+    }
+
     /// Asks the next resolve to re-publish every hub partition at the
     /// present rail, `x + s (u - u_p)` (Rails point 3).
     pub(crate) fn request_hub_republish(&mut self) {

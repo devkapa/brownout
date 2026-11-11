@@ -78,7 +78,13 @@ export type { CompiledBatteryInfo, SectionAnchor } from "./sources.js";
  * `CORE_RECORD_SHAPES`/`CORE_IMPLEMENTED_KINDS` (kinds.ts) and whichever
  * compile/*.ts module a later kind's live params live in.
  */
-export const LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new Map([...PASSIVE_LIVE_PARAM_SPECS]);
+export const LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new Map([
+  ...PASSIVE_LIVE_PARAM_SPECS,
+  // W2c, live V (ruling R57 D12 (a)): a set is a source edge in Rust. As the
+  // compile case resolves it (`Number(params.voltage ?? 5)`); a non-finite
+  // value is refused by setParams' finite check.
+  ["voltage_source", { paramNames: ["voltage"], resolveLiveValue: (_paramName, rawValue) => Number((rawValue as number | string | undefined) ?? 5) }],
+]);
 
 // ─── Readout slot tables ────────────────────────────────────────────────────
 

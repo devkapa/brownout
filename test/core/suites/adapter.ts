@@ -72,7 +72,7 @@
  */
 
 import { HeadlessRunner } from "../../../src/host/headless.js";
-import { CoreEngine } from "../../../src/core/engine.js";
+import { CoreEngine, type CoreSnapshot } from "../../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { liveParamDiff } from "../../../src/core/edit.js";
 import type { EngineReadout } from "../../../src/core/surface.js";
@@ -126,9 +126,6 @@ export class CoreSuiteFellBackError extends Error {
  * circuit every step, so an edit it cannot deliver would otherwise be dropped
  * and the case would pass or fail on a circuit the core never ran.
  *
- * - `live-v-pending`: only voltage_source V changed (code 2 param 0). Ruled
- *   live for W2 (D12) but not wired in Rust yet; `VOLTAGE_SOURCE_V_LIVE` in
- *   src/core/edit.ts is the flag the W2c Rust worker flips.
  * - `needs-carry`: a topology or non-live param change. Delivering it means a
  *   reload that carries state across (W2c, `src/core/carry.ts`); a cold reload
  *   would drop the capacitor charge and latches the case is checking.
@@ -136,9 +133,9 @@ export class CoreSuiteFellBackError extends Error {
  *   component the loaded program does not hold), so the edit did not land.
  */
 export class CoreSuiteEditNotDeliverableError extends Error {
-  readonly reason: "live-v-pending" | "needs-carry" | "not-applied";
+  readonly reason: "needs-carry" | "not-applied";
 
-  constructor(reason: "live-v-pending" | "needs-carry" | "not-applied", detail: string) {
+  constructor(reason: "needs-carry" | "not-applied", detail: string) {
     super(
       `core-suites adapter: the suite edited the loaded circuit in a way the core cannot take yet (${reason}): ` +
         `${detail}. A gate-1 case must not run a circuit the core was never given; classify it "not-yet" ` +
@@ -191,7 +188,7 @@ export class SimEngine implements EngineReadout {
 
   /**
    * Sends the suite's in-place edits since the last load() or step() to the
-   * core. Live params (the switch family today) go through `setParams`, which
+   * core. Live params (the switch family and a voltage source's V) go through `setParams`, which
    * keeps all state; an edit with nothing to deliver is a no-op; anything else
    * throws, because dropping it would let the case run a circuit the core was
    * never given (see CoreSuiteEditNotDeliverableError).
@@ -202,12 +199,6 @@ export class SimEngine implements EngineReadout {
     if (!live || !delivered) return;
     const diff = liveParamDiff(delivered, live);
     if (diff === null) {
-      // Is V the only thing that blocks it? Then name the pending piece.
-      const ifVWereLive = liveParamDiff(delivered, live, { voltageSourceLive: true });
-      if (ifVWereLive !== null) {
-        const ids = ifVWereLive.map((change) => change.componentId).join(", ");
-        throw new CoreSuiteEditNotDeliverableError("live-v-pending", `voltage_source V changed on ${ids}`);
-      }
       throw new CoreSuiteEditNotDeliverableError(
         "needs-carry",
         "a topology change or a param that is not live changed (liveParamDiff returned null)",
@@ -387,6 +378,24 @@ export class SimEngine implements EngineReadout {
   /** Classic `SimEngine.getThermalState(id)`, for thermal-engine-physics and thermal-cold-start-warnings. */
   getThermalState(componentId: string): ThermalRuntimeReadout | undefined {
     return this._coreEngine("getThermalState").getThermalState(componentId);
+  }
+
+  // ---- Snapshots (W2a): CoreEngine only -------------------------------------
+
+  /**
+   * Classic `SimEngine.saveState()`, for eeprom-write's snapshot case: the
+   * core's snapshot (W2a) and the circuit as delivered then, since a restore
+   * puts back the params the core held at the save, and the next step must
+   * deliver the live circuit's against those.
+   */
+  saveState(): { readonly core: CoreSnapshot; readonly delivered: SimCircuit | undefined } {
+    return { core: this._coreEngine("saveState").saveState(), delivered: structuredClone(this._delivered) };
+  }
+
+  /** Classic `SimEngine.restoreState(snapshot)`, the pair of {@link saveState}. */
+  restoreState(snapshot: { readonly core: CoreSnapshot; readonly delivered: SimCircuit | undefined }): void {
+    this._coreEngine("restoreState").restoreState(snapshot.core);
+    this._delivered = structuredClone(snapshot.delivered);
   }
 
   /** Classic `SimEngine.getPartTemperature(id)`, for thermal-engine-physics' identity-less case. */

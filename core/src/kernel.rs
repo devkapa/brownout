@@ -2041,10 +2041,22 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             .collect();
 
         let mut dirty: Vec<PartitionId> = self.solver.apply_params(triples);
+        // W2c: a voltage source's V is a source edge now.
+        let (edge_dirty, edge_readers) = match self.solver.apply_source_params(triples, self.time) {
+            Ok(edge) => edge,
+            Err(e) => {
+                // The window puts the sources and the boundary back.
+                self.roll_back(window);
+                self.solver.apply_params(&old_values);
+                return Err(KernelError::SolveFailed(e));
+            }
+        };
+        dirty.extend(edge_dirty);
         // W1c point 1a: the circuit changed, so every power hold goes (a
         // ping-pong still there re-holds at once), inside the window; a
         // released IC reads at once.
-        let (released, readers) = self.solver.drop_power_holds();
+        let (released, mut readers) = self.solver.drop_power_holds();
+        readers.extend(edge_readers);
         dirty.extend(released);
         dirty.sort_unstable();
         dirty.dedup();
@@ -2071,6 +2083,8 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
         if let Err(e) = result {
             self.roll_back(window);
+            // The window puts a voltage source's value and the boundary it
+            // fixed back with the rest.
             self.solver.apply_params(&old_values);
             return Err(e);
         }

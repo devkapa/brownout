@@ -76,7 +76,7 @@ fn ls_params(delay: f64) -> Vec<f64> {
 
 /// An IC of `kind` on `vcc`/`gnd` with its logic pins on `logic`, digital
 /// slots from `slot`.
-fn ic(kind: u32, ci: usize, vcc: usize, gnd: usize, logic: [usize; 12], delay: f64, slot: usize) -> Device {
+pub(super) fn ic(kind: u32, ci: usize, vcc: usize, gnd: usize, logic: [usize; 12], delay: f64, slot: usize) -> Device {
     let mut pins = vec![pin(vcc), pin(gnd)];
     pins.extend(logic.iter().map(|&n| pin(n)));
     let mut blob = vec![slot as f64];

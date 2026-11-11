@@ -39,6 +39,8 @@ mod slow_tests;
 #[cfg(test)]
 mod carry_tests;
 #[cfg(test)]
+mod live_v_tests;
+#[cfg(test)]
 mod snapshot_tests;
 #[cfg(test)]
 mod window_tests;
@@ -241,6 +243,16 @@ pub trait PartitionSolver {
     fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
         let _ = (device_index, param_index);
         None
+    }
+
+    /// W2c, live V (ruling R57 D12 (a)): the `voltage_source` triples of a
+    /// batch [`Self::apply_params`] took, applied as a source edge at `now`
+    /// (every node the source fixes takes its new value, and every source
+    /// stacked on it). Returns the partitions to re-solve and the readers to
+    /// re-evaluate. Default nothing: no other solver has a live source.
+    fn apply_source_params(&mut self, triples: &[(usize, usize, f64)], now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        let _ = (triples, now);
+        Ok((Vec::new(), Vec::new()))
     }
 
     // ---- W1b step 2: dynamic partitions (closed-form/stepped) -------------
@@ -760,6 +772,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
         (**self).param_value(device_index, param_index)
+    }
+
+    fn apply_source_params(&mut self, triples: &[(usize, usize, f64)], now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        (**self).apply_source_params(triples, now)
     }
 
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
@@ -2764,6 +2780,12 @@ pub struct PartitionedSolver {
     node_watch_parts: crate::shared::Shared<[Vec<u32>]>,
     node_ic_readers: crate::shared::Shared<[Vec<u32>]>,
     node_caps: crate::shared::Shared<[Vec<u32>]>,
+    /// Per partition: the non-free nodes its stamps read (`partition::build`'s
+    /// `reads`), for a live V set (W2c), which can move any fixed node.
+    fixed_reads: crate::shared::Shared<[Vec<u32>]>,
+    /// W2c: a live V set has moved a constant fixed node since load, so a
+    /// rollback puts the static solver's folded values back as well.
+    source_set: bool,
     /// Whether a rule-2a capacitor sits on a live node (its anchor is then
     /// instant state).
     live_caps: bool,
@@ -3125,6 +3147,8 @@ impl PartitionedSolver {
             wave_entries: Vec::new().into(),
             wave_parts: Vec::new().into(),
             node_parts: Vec::new().into(),
+            fixed_reads: Vec::new().into(),
+            source_set: false,
             node_watch_parts: Vec::new().into(),
             node_ic_readers: Vec::new().into(),
             node_caps: Vec::new().into(),
@@ -4798,6 +4822,16 @@ impl PartitionSolver for PartitionedSolver {
             if !value.is_finite() {
                 return Err(format!("device {device_index} param {param_index}: value {value} is not finite"));
             }
+            // Live V (W2c): a voltage source the forest resolves, param 0.
+            if self.device_kinds.get(device_index) == Some(&kinds::VOLTAGE_SOURCE) {
+                if param_index != 0 {
+                    return Err(format!("device {device_index} (voltage_source): param {param_index} is not live"));
+                }
+                if !self.wave.resolved.iter().any(|r| r.device_index == device_index) {
+                    return Err(format!("device {device_index} (voltage_source): fixes no node of the forest"));
+                }
+                continue;
+            }
             let info = self.switches.get(&device_index).ok_or_else(|| format!("device {device_index}: has no live parameters"))?;
             let shape = kinds::shape(info.kind).expect("a tracked switch device always has a known kind code");
             if !shape.live_params.contains(&param_index) {
@@ -4848,7 +4882,14 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
+        if self.device_kinds.get(device_index) == Some(&kinds::VOLTAGE_SOURCE) {
+            return (param_index == 0).then(|| self.wave.constant[device_index]);
+        }
         self.live_params.get(&device_index)?.get(param_index).copied()
+    }
+
+    fn apply_source_params(&mut self, triples: &[(usize, usize, f64)], now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
+        self.source_params_at(triples, now)
     }
 
     /// Contract point 7 ("A failed advance"/"A failed set_params"): beyond
@@ -5132,6 +5173,9 @@ impl PartitionSolver for PartitionedSolver {
             for (w, src) in self.wave.sources.iter().enumerate() {
                 self.static_solver.set_wave_level(w, src.level_index);
             }
+        }
+        if self.source_set {
+            self.sync_static_fixed();
         }
         if self.live_caps {
             for (cap, &(d_v, vc0, t0)) in self.fixed_pair_capacitors.iter_mut().zip(&self.w_caps) {
@@ -6634,6 +6678,8 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_watch_parts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_ic_readers, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_caps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_reads, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.source_set, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.live_caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_node, w); }

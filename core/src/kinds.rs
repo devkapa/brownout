@@ -695,7 +695,7 @@ macro_rules! w1d_shape {
 
 const SHAPES: &[KindShape] = &[
     KindShape { code: RESISTOR, name: "resistor", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: resistor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
-    KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: CAPACITOR, name: "capacitor", pins: 2, pins_max: 2, params: 3, blob: BlobShape::Exact(0), check: capacitor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: SWITCH, name: "switch", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: PUSH_BUTTON, name: "push_button", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: single_switch_check, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },

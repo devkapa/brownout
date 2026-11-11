@@ -842,6 +842,7 @@ impl crate::snapshot::HeapBytes for Driver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.committed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.token, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.seeded, w); }
         n
     }
 }

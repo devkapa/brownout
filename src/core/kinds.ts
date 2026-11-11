@@ -321,7 +321,7 @@ function icShape(logic: number, outputs: number, pairs = 0): CoreRecordShape {
 /** Shapes of the kinds ported so far. Grows per sub-wave, in step with core/src/kinds.rs. */
 export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<number, CoreRecordShape>([
   [CORE_KIND_CODES.resistor, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [] }],
-  [CORE_KIND_CODES.voltage_source, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.voltage_source, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.capacitor, { pins: 2, pinsMax: 2, params: 3, blob: { exact: 0 }, liveParams: [] }],
   [CORE_KIND_CODES.switch, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.push_button, { pins: 2, pinsMax: 2, params: 1, blob: { exact: 0 }, liveParams: [0] }],

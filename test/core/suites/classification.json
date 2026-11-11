@@ -4864,169 +4864,204 @@
       "file": "test/sim/engine/eeprom-write.test.ts",
       "cases": [
         {
-          "describe": "EEPROM runtime writes",
-          "name": "writes a 28C16 byte after tWC",
-          "status": "not-yet",
+          "describe": "EEPROM write-cycle time",
+          "name": "a 28C16 finishes a write in its AT28C16 typical 0.5 ms, not 10 ms",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "TypeError: engine.takeEepromUpdates is not a function -- the gate-1 adapter (test/core/suites/adapter.ts) implements only the EngineReadout surface plus load/coldLoad/step/setIntegrationMethod (its own header comment: \"Nothing else on classic SimEngine... is implemented\"); takeEepromUpdates has no core-adapter equivalent. Even setting that aside, the write this case checks would not have landed on the core anyway -- see the plain AssertionError cases below for the shared root cause (the driveXxx-without-reload gap)."
+          ]
+        },
+        {
+          "describe": "EEPROM write-cycle time",
+          "name": "a 28C16 is still busy shortly before 0.5 ms",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c16"
+          ]
+        },
+        {
+          "describe": "EEPROM write-cycle time",
+          "name": "a 28C256 keeps its 10 ms datasheet maximum",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c256"
+          ]
+        },
+        {
+          "describe": "EEPROM runtime writes",
+          "name": "writes a 28C16 byte after tWC",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c16"
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "does not write while /CE is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "TypeError: engine.takeEepromUpdates is not a function -- same missing adapter method as the sibling \"writes a 28C16 byte\" case."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "writes different bytes to different addresses",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 170 (0xaa). reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "supports CE-controlled write cycles",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 60 (0x3c). reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
+        },
+        {
+          "describe": "EEPROM runtime writes",
+          "name": "holds O6 steady while /OE and /CE stay low through one busy-window read",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c256"
+          ]
+        },
+        {
+          "describe": "EEPROM runtime writes",
+          "name": "28c16 toggles O6 once per read cycle (each falling /OE) during the busy window",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c16"
+          ]
+        },
+        {
+          "describe": "EEPROM runtime writes",
+          "name": "28c256 toggles O6 once per read cycle (each falling /OE) during the busy window",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "28c256"
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "inverts O7 during the busy window",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 1. reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all. (No write ever actually lands on the core here, so there is no busy window to observe either.)"
-        },
-        {
-          "describe": "EEPROM runtime writes",
-          "name": "toggles O6 during the busy window",
-          "status": "not-yet",
-          "kinds": [
-            "voltage_source",
-            "resistor",
-            "28c16"
-          ],
-          "reason": "AssertionError: expected the six busy-window samples to contain two distinct values (a real toggle) but they were all the same. reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "reads unrelated addresses normally during the busy window",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 51 (0x33). reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "drops unsequenced 28C256 writes while SDP is enabled",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c256"
-          ],
-          "reason": "TypeError: engine.takeEepromUpdates is not a function -- same missing adapter method as \"writes a 28C16 byte\" above."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "unlocks 28C256 writes after the SDP sequence",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c256"
-          ],
-          "reason": "TypeError: engine.takeEepromUpdates is not a function -- same missing adapter method."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "resets the SDP sequence on a bad byte",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c256"
-          ],
-          "reason": "AssertionError: expected +0 to be 255 (0xff, i.e. the write was correctly rejected -- but for the wrong reason: no write of any kind ever reached the core, sequenced or not). reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "bypasses 28C256 SDP when sdpBypass is set",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c256"
-          ],
-          "reason": "AssertionError: expected +0 to be 90 (0x5a). reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "restores pending writes across snapshots",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "TypeError: engine.saveState is not a function -- the gate-1 adapter does not implement saveState/restoreState (its own header comment: no case needs them yet, and this one now does but cannot use them, since the write it snapshots never lands on the core in the first place; see reads something the gate-1 adapter does not expose below for that separate, deeper gap)."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "carries EEPROM bytes across reloads with unchanged contents",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 90 (0x5a). This case DOES call engine.load() a second time, but the write pulse before it (pulseWeWrite, itself built from driveXxx calls with no reload in between) never reached the core -- the second load() simply re-seeds the ROM to its factory image (README's memories section point 2, \"Reload: nothing carries across bo_engine_load in W1: RAM returns to 0xF and the EEPROM to its contents image\") with the write never having happened, and the final readData() call has the same no-reload gap as every other case here, so it reads back the electrical state frozen at that second load() (/OE never actually driven LOW) rather than the intended read. reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "reseeds EEPROM bytes when contents changes",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "AssertionError: expected +0 to be 34 (0x22). Same shape as the sibling \"carries EEPROM bytes across reloads\" case -- the write never reached the core before the reload, and the trailing readData() has the same no-reload gap. reads something the gate-1 adapter does not expose: this file's own helpers (driveAddr/driveData/driveCe/driveWe/driveOe) mutate a voltage_source's params.voltage on the SAME circuit object already passed to engine.load(), with no second load() call before the next engine.step() -- relying on classic SimEngine.step() re-reading that live `this.circuit` reference every call. voltage_source has no live params (CORE_RECORD_SHAPES, kinds.ts) and neither the gate-1 adapter nor HeadlessRunner ever calls CoreEngine.setParams() (core/engine.ts's own live-update entry point) anywhere -- only a full reload pushes a changed input into the core's compiled program. So on the core every step() after the first load() keeps seeing the circuit's ORIGINAL load-time voltages; this case's driven address/data/CE/OE/WE transitions have no effect there at all."
+          ]
         },
         {
           "describe": "EEPROM runtime writes",
           "name": "emits EEPROM updates once per committed write",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "28c16"
-          ],
-          "reason": "TypeError: engine.takeEepromUpdates is not a function -- same missing adapter method as \"writes a 28C16 byte\" above."
+          ]
         }
       ]
     },

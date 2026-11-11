@@ -1568,8 +1568,9 @@ mod tests {
         let mut e = Engine::load(&p).unwrap();
         let before = e.voltages().to_vec();
 
-        // Device 0 is the voltage_source: it has no live params at all.
-        let err = e.set_params(&[(0, 0, 1.0)]).unwrap_err();
+        // Device 0 is the voltage_source: its V (param 0) is its one live
+        // param (W2c), so a param 1 is invalid.
+        let err = e.set_params(&[(0, 1, 1.0)]).unwrap_err();
         assert_eq!(err.code, ERR_INVALID_ARGUMENT);
         assert_eq!(e.voltages(), before.as_slice(), "an invalid batch must change nothing");
 

@@ -168,16 +168,17 @@ describe("liveParamDiff: switch family", () => {
   });
 });
 
-describe("liveParamDiff: voltage_source V (code 2 param 0), pending the Rust side", () => {
+describe("liveParamDiff: voltage_source V (code 2 param 0)", () => {
   function vChanged(): SimCircuit {
     const next = clone(base());
     comp(next, "v1").params.voltage = 3.3;
     return next;
   }
 
-  it("the flag ships off: the wired state of Rust decides, and a V change reloads", () => {
-    expect(VOLTAGE_SOURCE_V_LIVE).toBe(false);
-    expect(liveParamDiff(base(), vChanged())).toBeNull();
+  it("V is live (W2c): the flag ships on, and a V change is a live change by default", () => {
+    expect(VOLTAGE_SOURCE_V_LIVE).toBe(true);
+    expect(LIVE_PARAM_SPECS.has("voltage_source")).toBe(true);
+    expect(liveParamDiff(base(), vChanged())).toEqual([{ componentId: "v1", params: { voltage: 3.3 } }]);
   });
 
   it("with the flag on a V change is a live change; an unchanged V is not", () => {

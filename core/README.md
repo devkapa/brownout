@@ -206,7 +206,7 @@ the resistor's and the fuse's absent-param defaults, Q-O27 and W1g Q3),
 | Code | Kind | Pins, in order | Params | Blob | Added |
 |---|---|---|---|---|---|
 | 1 | `resistor` | `pins[0]`, `pins[1]` (positional) | `R = max(1e-3, Number(params.resistance ?? 1000))`, `R > 0` | empty | W0 |
-| 2 | `voltage_source` | `pins[0]` (+), `pins[1]` (−) (positional) | `V = Number(params.voltage ?? 5)` | empty | W0 |
+| 2 | `voltage_source` | `pins[0]` (+), `pins[1]` (−) (positional) | `V = Number(params.voltage ?? 5)` | empty | W0; live param 0 (W2c, Live V) |
 | 3 | `capacitor` | `pins[0]`, `pins[1]` (positional) | `[C, esr, leakage]`: `C = max(1e-15, Number(params.capacitance ?? 1e-6))`; `esr` and `leakage` by classic's `modelParam` exact-uid rule (spec §7.2.6), `esr` 0 when absent or invalid, `leakage` 0 meaning none (classic's infinite parallel resistance) | empty | W1b |
 | 4 | `switch` | `pins[0]`, `pins[1]` (positional) | `[closed]`: `Boolean(params.closed) ? 1 : 0` (the string `"0"` counts as closed, as in classic); the closed contact is a literal 1 mΩ | empty | W1b; live param 0 |
 | 5 | `push_button` | `pins[0]`, `pins[1]` (positional; `buildNets` already merges `a≡a2`, `b≡b2`) | `[closed]`, as `switch` | empty | W1b; live param 0 |
@@ -541,8 +541,8 @@ also call, bit-identical.
   `malformed:<componentId>:non-finite-ocvTable` for a non-finite table
   entry (no shipped profile has one). `depP` has no decline: every profile's
   is a positive constant.
-- A battery param edit is a reload, as in classic; SoC carry-forward across a
-  reload is W2 (§8.3.4, D25), so until then the core restarts at `soc0`.
+- A battery param edit is a reload, as in classic; the reload carries its
+  SoC onto the same authored charge and part (W2c, Carry).
 
 **Bench PSU record** (code 21).
 - **Params.** `0 V = Number(params.voltage ?? 5)`, `1 iLimit =
@@ -558,7 +558,9 @@ also call, bit-identical.
   state).
 - **Validation** (`kinds.rs`, `-1`): `V` finite; `iLimit` finite and `>=
   0` (the compiler never emits a negative one).
-- Regime carry-forward across a reload is W2 (Q-O37).
+- Across a reload the regime is not carried but derived again at the
+  settle from the carried charges (W2c, Carry): CV/CC is a function of the
+  state.
 
 **Waveform source records** (codes 22-25).
 - **Clock** (SO:360-364, SE:6188-6197): `0 freq = max(1e-6,
@@ -1194,6 +1196,34 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   history is not carried, so the first step is backward Euler, as classic
   forces after a load. The cold-device span widens over carried charges
   (see the thermal, failures and warnings section).
+
+## Live V (W2c)
+
+A `voltage_source`'s `V` (param 0) is live (ruling R57 D12 (a)):
+`bo_engine_set_params` sets it as a source edge at the engine's time, one
+event like every set, which ends the host step in flight (R86).
+
+- **The edge.** Every node the source fixes, and every node a source stacked
+  on it fixes, takes its new value (`PartitionedSolver::source_params_at`).
+  What reads one re-solves as at any edge: the partitions whose stamps read
+  it, the ICs reading it (for a supply, the partitions watching their read
+  pins too), the rule-2a capacitors on it (re-aimed, their charge
+  continuous), and the rail where it is a direct node. The static solver
+  folds a constant node into its partitions' bases, so those fold afresh,
+  and the solution caches (static and closed-form) take a new epoch: no
+  key holds a constant node. Every slow device is driven afresh at the
+  settle, as at load.
+- **Cold devices.** The cold decisions (R38 (a)) hold under the span at
+  load. A set takes the span again from the sources' values then, widened
+  by the charges the capacitors hold (as a carried load's, D10 (a)); while
+  it is within the load's, every cold device stays cold, and past it every
+  cold device turns hot (a superset of those now stressable).
+- **Equivalence.** A set runs on as a carrying reload onto the new `V`
+  does, classic's answer to the edit (`solve/live_v_tests.rs`, and each
+  switch kind's live param likewise): digital identical, analog within W0.
+- **A failed set** (`-4`, `-7`) rolls back with its instant: the source,
+  the nodes it fixed and the static solver's folded bases.
+- A battery or a bench PSU stays a reload.
 
 ## Readouts
 
