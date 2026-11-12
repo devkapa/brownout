@@ -18,6 +18,7 @@
 //! unchanged, because a solver with no dynamic partitions has nothing to say
 //! through any of them.
 
+mod charge;
 pub mod closed_form;
 mod curvature;
 mod hold;
@@ -40,6 +41,8 @@ mod slow_tests;
 mod carry_tests;
 #[cfg(test)]
 mod live_v_tests;
+#[cfg(test)]
+mod charge_tests;
 #[cfg(test)]
 mod observe_tests;
 #[cfg(test)]
@@ -264,6 +267,19 @@ pub trait PartitionSolver {
     /// emptied; `false` (and `out` untouched) when it is not armed.
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
         let _ = out;
+        false
+    }
+
+    /// W2b piece 4: arms the charge on `devices` from `now` (`None`
+    /// disarms; core/README.md, "Charge").
+    fn arm_charge(&mut self, devices: Option<&[usize]>, now: f64) {
+        let _ = (devices, now);
+    }
+
+    /// W2b piece 4: `[t0, t1, q x slots]` into `out` at `now`, the sums
+    /// cleared; `false` (and `out` untouched) when nothing is armed.
+    fn take_charge(&mut self, now: f64, out: &mut Vec<f64>) -> bool {
+        let _ = (now, out);
         false
     }
 
@@ -810,6 +826,14 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
         (**self).take_samples(out)
+    }
+
+    fn arm_charge(&mut self, devices: Option<&[usize]>, now: f64) {
+        (**self).arm_charge(devices, now)
+    }
+
+    fn take_charge(&mut self, now: f64, out: &mut Vec<f64>) -> bool {
+        (**self).take_charge(now, out)
     }
 
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
@@ -2846,6 +2870,8 @@ pub struct PartitionedSolver {
     rail_log: Vec<(f64, f64)>,
     /// The stepped hub commits counted at the last note.
     rail_log_commits: u64,
+    /// W2b piece 4: the armed charge (`charge.rs`).
+    charge: Option<Box<charge::ChargeState>>,
     kind_log: Vec<(u32, PartitionKind)>,
     /// The switch's own state (`hub::CcCrawl`), and its value when the
     /// window opened.
@@ -3228,6 +3254,7 @@ impl PartitionedSolver {
             w_observer: None,
             rail_log: Vec::new(),
             rail_log_commits: 0,
+            charge: None,
             kind_log: Vec::new(),
             cc_crawl: hub::CcCrawl::default(),
             w_cc_crawl: hub::CcCrawl::default(),
@@ -4982,6 +5009,9 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn observe(&mut self, t: f64, inclusive: bool, now: f64) {
+        if self.charge.is_some() {
+            self.charge_observe(t, now);
+        }
         if let Some(mut obs) = self.observer.take() {
             self.log_rail(now, inclusive);
             obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
@@ -4999,6 +5029,14 @@ impl PartitionSolver for PartitionedSolver {
             }
             None => false,
         }
+    }
+
+    fn arm_charge(&mut self, devices: Option<&[usize]>, now: f64) {
+        self.arm_charge_on(devices, now);
+    }
+
+    fn take_charge(&mut self, now: f64, out: &mut Vec<f64>) -> bool {
+        self.take_charge_at(now, out)
     }
 
     /// Contract point 7 ("A failed advance"/"A failed set_params"): beyond
@@ -6805,6 +6843,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_observer, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log_commits, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_crawl, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_cc_crawl, w); }

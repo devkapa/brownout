@@ -265,6 +265,18 @@ export interface CoreExports {
   bo_engine_acquire_take?(h: number): number;
   /** The buffer from the last {@link CoreExports.bo_engine_acquire_take}, valid until the next call on this engine. */
   bo_engine_acquire_ptr?(h: number): number;
+  /**
+   * W2b piece 4 (core/README.md, "Charge"): integrate the published current
+   * of the `n` devices at `devicesPtr` (f64 indices), and each one's channel
+   * slots, from the engine's time on; `n` 0 disarms. `0`; `-5` for an
+   * unusable handle; `-8` for a bad device. Optional, detected by its
+   * presence (ruling R100 (a)).
+   */
+  bo_engine_charge_arm?(h: number, devicesPtr: number, n: number): number;
+  /** Take the charge, `[t0, t1, then per device its charge and its channels' in channel order]`, the sums cleared; the length in f64, or `-5`. */
+  bo_engine_take_charge?(h: number): number;
+  /** The buffer from the last {@link CoreExports.bo_engine_take_charge}, valid until the next call on this engine. */
+  bo_engine_charge_ptr?(h: number): number;
 }
 
 /** The C ABI v2 export names (core/README.md's table) every instance must have, beyond `memory`. */

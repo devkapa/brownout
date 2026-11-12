@@ -9,27 +9,27 @@ use crate::kinds;
 use crate::observe::TAKE_HEADER;
 use crate::program::{Device, Options, PinRecord, Program};
 
-fn pin(node: usize) -> PinRecord {
+pub(super) fn pin(node: usize) -> PinRecord {
     PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
 }
 
-fn dev(kind: u32, ci: usize, a: usize, b: usize, params: Vec<f64>) -> Device {
+pub(super) fn dev(kind: u32, ci: usize, a: usize, b: usize, params: Vec<f64>) -> Device {
     Device { kind, component_index: ci, pins: vec![pin(a), pin(b)], params, blob: vec![] }
 }
 
-fn program(node_count: usize, devices: Vec<Device>) -> Program {
+pub(super) fn program(node_count: usize, devices: Vec<Device>) -> Program {
     Program { carry: Vec::new(), node_count, options: Options::default(), digital_slot_count: 2, channel_slot_count: 0, devices }
 }
 
 /// A waveform source: its blob holds its digital slot.
-fn wave(kind: u32, ci: usize, a: usize, slot: usize, params: Vec<f64>) -> Device {
+pub(super) fn wave(kind: u32, ci: usize, a: usize, slot: usize, params: Vec<f64>) -> Device {
     Device { blob: vec![slot as f64], ..dev(kind, ci, a, 0, params) }
 }
 
 /// 5 V through 1k into 1 uF, every node shunted by `NODE_RSHUNT_G` (1e-12
 /// S): the capacitor (node 2) at `v (1 - e^(-t / tau))`, `v = 5 / (1 + R g)`,
 /// `tau = R C / (1 + R g)`.
-fn rc() -> Program {
+pub(super) fn rc() -> Program {
     program(3, vec![dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]), dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]), dev(kinds::CAPACITOR, 2, 2, 0, vec![1e-6, 0.0, 0.0])])
 }
 
@@ -37,7 +37,7 @@ fn rc() -> Program {
 /// 2k/10k divider, and a 1 ms pulse ramp (0 to 5 V from 0.25 ms) into 2k: a
 /// fixed node with edges, a closed-form node re-aimed at each, a static node
 /// that steps with them, and a ramping fixed node.
-fn edges() -> Program {
+pub(super) fn edges() -> Program {
     program(6, vec![
         wave(kinds::CLOCK, 0, 1, 0, vec![1000.0, 0.5, 5.0, 0.0, 0.0]),
         dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]),
@@ -90,7 +90,7 @@ fn acquire(p: &Program, nodes: &[u32], interval: f64, steps: &[f64]) -> (Vec<f64
 }
 
 /// Host steps that land on no grid time, on some, and on instants.
-const STEPS: [f64; 7] = [0.37e-3, 1e-3, 1.5e-3, 2.05e-3, 1.0 / 60.0 * 0.2, 4e-3, 5e-3];
+pub(super) const STEPS: [f64; 7] = [0.37e-3, 1e-3, 1.5e-3, 2.05e-3, 1.0 / 60.0 * 0.2, 4e-3, 5e-3];
 
 #[test]
 fn a_closed_form_node_samples_its_exact_curve() {
@@ -321,7 +321,7 @@ fn lookup(table: &[(f64, f64)]) -> impl Fn(f64) -> f64 + '_ {
     move |t| table[table.binary_search_by(|x| x.0.total_cmp(&t)).unwrap_or_else(|_| panic!("no reference at {t}"))].1
 }
 
-fn stepped(mut p: Program, trap: bool) -> Program {
+pub(super) fn stepped(mut p: Program, trap: bool) -> Program {
     p.options.force_stepped = true;
     p.options.integration = u8::from(trap);
     p
@@ -348,7 +348,7 @@ fn a_stepped_rc_samples_between_its_commits_within_each_steps_error() {
 
 /// A 1 kHz clock through 1k into 1 uF, a red LED and 100 ohm across it: a
 /// nonlinear stepped partition, which steps by TR-BDF2 by default (R98).
-fn led_rc() -> Program {
+pub(super) fn led_rc() -> Program {
     let mut p = program(4, vec![
         wave(kinds::CLOCK, 0, 1, 0, vec![1000.0, 0.5, 5.0, 0.0, 0.0]),
         dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]),
@@ -378,7 +378,7 @@ fn an_led_rc_samples_its_tr_bdf2_steps_within_each_steps_error_of_a_fine_referen
 /// A 1 kHz clock through 1k into a ring of three 100 nF capacitors joined
 /// by 2k resistors, one with a 1k/1k divider in it (node 5, no capacitor's
 /// plate): a linear stepped partition of three capacitors.
-fn rc_ring() -> Program {
+pub(super) fn rc_ring() -> Program {
     program(6, vec![
         wave(kinds::CLOCK, 0, 1, 0, vec![1000.0, 0.5, 5.0, 0.0, 0.0]),
         dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]),
@@ -395,7 +395,7 @@ fn rc_ring() -> Program {
 /// An NE555 astable on 5 V: 1k to DIS (4), 10k to THR/TRIG (3), 10 nF there,
 /// OUT (5) into 1k, CV (6) with 10 nF; period about 0.146 ms. Stepped
 /// (`FORCE_STEPPED`: one capacitor per partition is a closed form).
-fn astable() -> Program {
+pub(super) fn astable() -> Program {
     let mut p = program(7, vec![
         dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
         dev(kinds::RESISTOR, 1, 1, 4, vec![1000.0]),
@@ -486,7 +486,7 @@ fn cell_dev(ci: usize, pos: usize, e: f64, r: f64) -> Device {
 /// A 5 V PSU limited to 20 mA charging 100 uF on its rail (node 1) through
 /// CC into CV, a 1k/1k divider off the rail (node 2, static on the hub) and
 /// 1k into 10 uF (node 3, a closed form the rail drives).
-fn cc_rail() -> Program {
+pub(super) fn cc_rail() -> Program {
     program(4, vec![
         psu_dev(0, 1, 5.0, 0.02),
         dev(kinds::CAPACITOR, 1, 1, 0, vec![100e-6, 0.0, 0.0]),
@@ -500,7 +500,7 @@ fn cc_rail() -> Program {
 /// A small cell (9 V, 2 ohm, 0.1 mAh, generic depletion) draining into 100
 /// ohm and 100 uF (node 2) and a 1k/1k divider (node 3): its rail (node 1)
 /// moves with its charge between events.
-fn cell_rail() -> Program {
+pub(super) fn cell_rail() -> Program {
     program(4, vec![
         cell_dev(0, 1, 9.0, 2.0),
         dev(kinds::RESISTOR, 1, 1, 2, vec![100.0]),

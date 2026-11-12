@@ -247,6 +247,8 @@ pub struct Engine {
     carry_buf: Vec<f64>,
     /// The last `bo_engine_acquire_take` (W2b), likewise.
     samples_buf: Vec<f64>,
+    /// The last `bo_engine_take_charge` (W2b piece 4), likewise.
+    charge_buf: Vec<f64>,
     /// What [`Self::stat`] adds to each live counter so the stats stay
     /// monotonic across a W2a restore (W2 design 2.3: the stats are
     /// telemetry and are not restored). The counters themselves go back with
@@ -793,6 +795,40 @@ impl Engine {
         &self.samples_buf
     }
 
+    /// `bo_engine_charge_arm` (W2b piece 4; core/README.md, "Charge"):
+    /// integrates each device's published current, and each of its channel
+    /// slots, from the engine's time on. Re-arming discards what was not
+    /// taken; an empty list disarms. `-8` for a device out of range.
+    pub fn charge_arm(&mut self, devices: &[u32]) -> Result<(), BoError> {
+        if let Some(&d) = devices.iter().find(|&&d| d as usize >= self.device_count) {
+            return Err(BoError::invalid_argument(format!("charge_arm: device {d} out of range")));
+        }
+        let list: Vec<usize> = devices.iter().map(|&d| d as usize).collect();
+        let now = self.kernel.time();
+        self.kernel.solver_mut().arm_charge((!list.is_empty()).then_some(&list[..]), now);
+        Ok(())
+    }
+
+    /// `bo_engine_take_charge` (W2b piece 4): `[t0, t1, then per armed
+    /// device its charge and its channel slots' in channel order]` over the
+    /// span `[t0, t1]` since the last take (or the arming), and the sums
+    /// cleared; `[t, t]` at the engine's time when nothing is armed.
+    pub fn take_charge(&mut self) -> &[f64] {
+        let now = self.kernel.time();
+        let mut out = std::mem::take(&mut self.charge_buf);
+        if !self.kernel.solver_mut().take_charge(now, &mut out) {
+            out.clear();
+            out.extend([now, now]);
+        }
+        self.charge_buf = out;
+        &self.charge_buf
+    }
+
+    /// The buffer from the last [`Self::take_charge`].
+    pub fn charge_buffer(&self) -> &[f64] {
+        &self.charge_buf
+    }
+
     /// The buffer from the last [`Self::carry_take`].
     pub fn carry_buffer(&self) -> &[f64] {
         &self.carry_buf
@@ -929,6 +965,7 @@ impl Engine {
             records_buf: Vec::new(),
             carry_buf: Vec::new(),
             samples_buf: Vec::new(),
+            charge_buf: Vec::new(),
             stat_base: [0.0; STAT_COUNT],
         };
         // The settle above already queued every IC's initial digital-slot
@@ -1888,6 +1925,7 @@ impl crate::snapshot::HeapBytes for Engine {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.records_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carry_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.samples_buf, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.charge_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stat_base, w); }
         n
     }

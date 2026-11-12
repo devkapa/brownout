@@ -91,6 +91,10 @@ const EXPECTED_FUNCTION_EXPORTS = [
   "bo_engine_acquire",
   "bo_engine_acquire_take",
   "bo_engine_acquire_ptr",
+  // W2b piece 4: light means, the charge (core/README.md, "Charge").
+  "bo_engine_charge_arm",
+  "bo_engine_take_charge",
+  "bo_engine_charge_ptr",
 ];
 
 function fail(message) {

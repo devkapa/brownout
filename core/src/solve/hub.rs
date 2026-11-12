@@ -2681,6 +2681,19 @@ impl PartitionedSolver {
         Some((ua + (ub - ua) * (t - ta) / (tb - ta), true))
     }
 
+    /// W2b piece 4: the rail's mean over `[a, b]` between instants on its
+    /// model: the CC segment's or the cell path's integral, else the rail as
+    /// last solved (a CV setpoint; held where nothing models it between its
+    /// solves, which the observer reads linear once the next solve comes).
+    pub(super) fn rail_mean(&self, a: f64, b: f64) -> Option<f64> {
+        let hub = self.hub.as_ref()?;
+        let st = &hub.state;
+        match (st.cap_seg.as_ref(), st.cell_path.as_ref()) {
+            (Some(seg), _) | (None, Some(seg)) => Some(seg.mean(a, b)),
+            _ => Some(st.u),
+        }
+    }
+
     /// Whether the rail holds between its solves when no segment or path
     /// models it: a PSU's CV setpoint, or no hub partition stepping (and no
     /// cell drive).

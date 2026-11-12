@@ -654,6 +654,61 @@ pub extern "C" fn bo_engine_acquire_ptr(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.samples_buffer().as_ptr())
 }
 
+/// W2b piece 4 (core/README.md, "Charge"): arms the charge on the `n`
+/// device indices at `devices` (f64 whole numbers): each one's published
+/// current, and each of its channel slots, integrated from the engine's time
+/// on. `n == 0` disarms. `0`, or `-5` for an unusable handle, `-8` for a
+/// malformed device buffer or a device out of range.
+#[no_mangle]
+pub extern "C" fn bo_engine_charge_arm(h: u32, devices: *const f64, n: u32) -> i32 {
+    let handles = HANDLES.get();
+    let engine = match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, _)) => engine,
+        _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    };
+    let raw: &[f64] = if n == 0 {
+        &[]
+    } else if devices.is_null() {
+        return fail(&BoError::invalid_argument("bo_engine_charge_arm: device pointer is null".to_string()));
+    } else {
+        // SAFETY: as `bo_engine_set_params`'s buffer: `n` live, initialized
+        // f64s in this instance's memory for the duration of this call.
+        unsafe { std::slice::from_raw_parts(devices, n as usize) }
+    };
+    let mut list = Vec::with_capacity(raw.len());
+    for &v in raw {
+        match whole_index(v) {
+            Some(i) => list.push(i),
+            None => return fail(&BoError::invalid_argument(format!("bo_engine_charge_arm: device index {v} is not a whole number"))),
+        }
+    }
+    match engine.charge_arm(&list) {
+        Ok(()) => 0,
+        Err(err) => fail(&err),
+    }
+}
+
+/// W2b piece 4: takes the charge since the last take into the engine's
+/// buffer, `[t0, t1, then per armed device its charge and its channel
+/// slots' in channel order]`, and returns its length in f64 (`2`, `[t, t]`,
+/// when nothing is armed), or `-5` for an unusable handle. Read it with
+/// [`bo_engine_charge_ptr`].
+#[no_mangle]
+pub extern "C" fn bo_engine_take_charge(h: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, _)) => engine.take_charge().len() as i32,
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_take_charge`], valid until the next
+/// call on that engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_charge_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.charge_buffer().as_ptr())
+}
+
 /// Copies the whole engine into its snapshot table (W2a; core/README.md,
 /// "Snapshots") and returns the snapshot's id, or `0` with the message in
 /// [`bo_error_ptr`] for an unknown handle or one with no program loaded.
@@ -1335,6 +1390,35 @@ mod tests {
         assert_eq!(bo_engine_acquire(h, std::ptr::null(), 0, 0.0, 0.0, 0), 0, "disarm, no nodes");
         assert_eq!(bo_engine_acquire(99, nodes.as_ptr(), 1, 0.0, 1.0, 0), -5);
         assert_eq!(bo_engine_acquire_take(99), -5);
+    }
+
+    // --- bo_engine_charge_arm (W2b piece 4) ----------------------------------
+
+    #[test]
+    fn charge_integrates_through_the_abi_and_validates_its_arguments() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        assert_eq!(bo_engine_take_charge(h), 2, "nothing armed: [t, t]");
+        let devices = [2.0, 0.0];
+        assert_eq!(bo_engine_charge_arm(h, devices.as_ptr(), 2), 0);
+        assert_eq!(bo_engine_advance(h, 2.5e-3), 0);
+        let len = bo_engine_take_charge(h);
+        assert_eq!(len, 2 + 2, "the span, then a slot per device");
+        let got = unsafe { std::slice::from_raw_parts(bo_engine_charge_ptr(h), len as usize) }.to_vec();
+        let i = with_engine(h, Vec::new(), |e| e.currents().to_vec());
+        assert_eq!(&got[..2], &[0.0, 2.5e-3]);
+        // A static divider: its current held over the span.
+        assert_eq!(got[2], i[2] * 2.5e-3);
+        assert!((got[3] - i[0] * 2.5e-3).abs() <= 1e-12 * got[3].abs(), "the source by KCL: {} against {}", got[3], i[0] * 2.5e-3);
+        for (ptr, n, why) in [([3.0].as_ptr(), 1, "out of range"), ([1.5].as_ptr(), 1, "not a whole number"), (std::ptr::null(), 1, "null")] {
+            assert_eq!(bo_engine_charge_arm(h, ptr, n), -8, "{why}");
+            assert!(last_error().contains(why), "{why}: {}", last_error());
+        }
+        assert_eq!(bo_engine_charge_arm(h, std::ptr::null(), 0), 0, "disarm, no devices");
+        assert_eq!(bo_engine_take_charge(h), 2);
+        assert_eq!(bo_engine_charge_arm(99, devices.as_ptr(), 1), -5);
+        assert_eq!(bo_engine_take_charge(99), -5);
     }
 
     #[test]

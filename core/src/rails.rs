@@ -246,6 +246,22 @@ impl CapSeg {
         }
     }
 
+    /// W2b piece 4: the rail's mean over `[a, b]`, `∫ at / (b - a)`: each
+    /// exponential's integral `χ_k`, or the line's midpoint where
+    /// [`Self::at`] takes the line.
+    pub fn mean(&self, a: f64, b: f64) -> f64 {
+        let (ta, tb) = (a - self.t0, b - self.t0);
+        let dt = b - a;
+        if let Some(m) = &self.modes {
+            return self.u0 + m.modes.iter().map(|&(k, s)| s * (phi_integral(k, tb) - phi_integral(k, ta))).sum::<f64>() / dt;
+        }
+        if self.k * tb < RAIL_CAP_LINEAR {
+            self.u0 + self.slope * 0.5 * (ta + tb)
+        } else {
+            self.u0 + self.slope * (phi_integral(self.k, tb) - phi_integral(self.k, ta)) / dt
+        }
+    }
+
     pub fn slope_at(&self, t: f64) -> f64 {
         let dt = t - self.t0;
         if let Some(m) = &self.modes {

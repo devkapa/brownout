@@ -1470,6 +1470,79 @@ impl ClosedFormSolver {
         Some(v)
     }
 
+    /// W2b piece 4: partition `p`'s means over `[a, b]` on its present
+    /// segment, as [`Self::publish_at`] publishes at a time: each node and
+    /// each resistor's and switch's current at the mean of `vc`, of the
+    /// rail's move `du` (and of `vc du` for a curved segment) and of the
+    /// ramp's time, which is exact because every one is affine in those;
+    /// the capacitor's current as `C (vc(b) - vc(a)) / (b - a)` plus its
+    /// leakage at the mean voltages. Writes its nodes into `voltages`, its
+    /// devices into `currents`, and with `rail`, the rail's mean into
+    /// `voltages[rail]` while a known rail drives it. `None` for a partition
+    /// with no running segment (not settled, or parked while its stepped copy
+    /// runs).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_mean(&self, p: usize, a: f64, b: f64, rail: Option<usize>, live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64]) -> Option<()> {
+        let part = &self.parts[self.slot(p)?];
+        let seg = part.seg.as_ref()?;
+        let dt = b - a;
+        let (ta, tb) = (a - part.seg_t0, b - part.seg_t0);
+        let f = part.seg_f;
+        // `∫ vc` over [a, b]: the exponential from its value at `a`, the
+        // drive's and the ramp's responses by their charges, and a draining
+        // cell's held and curved terms (no closed charge) by Gauss-Legendre.
+        let base_a = vc_at(f, part.seg_inf, part.seg_vc0, part.seg_t0, a);
+        let mut int_vc = if f == 0.0 { part.seg_vc0 * dt } else { part.seg_inf * dt + (base_a - part.seg_inf) * rails::exp_integral(f, dt) };
+        if let Some(d) = part.drive.as_ref().filter(|d| d.follows()) {
+            int_vc += d.jw_charge(f, tb) - d.jw_charge(f, ta);
+            if d.held && d.modes.iter().any(|m| m.we != 0.0) {
+                int_vc += gauss_legendre(ta, tb, |tau| (f * tau).exp() * d.sum(|m| m.we * rails::phi_integral(m.k, tau)));
+            }
+            if d.cell_we != 0.0 {
+                int_vc += gauss_legendre(ta, tb, |tau| d.cell_we * 0.5 * tau * tau * (f * tau).exp());
+            }
+        }
+        if let Some(r) = part.ramp.as_ref().filter(|r| r.w != 0.0) {
+            int_vc += r.w * (rails::ramp_charge(f, 0.0, tb) - rails::ramp_charge(f, 0.0, ta));
+        }
+        let vc = int_vc / dt;
+        let du = part.drive.as_ref().map(|d| d.sum(|m| m.s * (rails::phi_integral(m.k, tb) - rails::phi_integral(m.k, ta))) / dt);
+        let tau = 0.5 * (ta + tb);
+        let x0 = if seg.hub.is_some() { &part.aim_x0[..] } else { &seg.x0[..] };
+        let dx = part.dx();
+        match (du, seg.hub.as_ref()) {
+            (Some(du), Some(h)) => {
+                // `dxdu` is `dx0du + dx1du vc` on a curved segment: its mean
+                // against `du` is the mean of the product.
+                let vcdu = match (&h.curve, part.drive.as_ref()) {
+                    (Some(_), Some(d)) => gauss_legendre(a, b, |t| vc_of(part, t) * d.du(t - part.seg_t0)) / dt,
+                    _ => 0.0,
+                };
+                for (l, &node) in part.shape.nodes.iter().enumerate() {
+                    let curved = h.curve.as_ref().map_or(0.0, |c| c.dx1du[l] * vcdu);
+                    voltages[node] = x0[l] + h.dx0du[l] * du + curved + dx[l] * vc;
+                }
+            }
+            _ => {
+                for (l, &node) in part.shape.nodes.iter().enumerate() {
+                    voltages[node] = x0[l] + dx[l] * vc;
+                }
+            }
+        }
+        if let Some(r) = &part.ramp {
+            for (l, &node) in part.shape.nodes.iter().enumerate() {
+                voltages[node] += r.rate_x[l] * tau;
+            }
+        }
+        if let (Some(rail), Some(d), Some(du)) = (rail, part.drive.as_ref(), du) {
+            voltages[rail] = d.u_a + du;
+        }
+        let (va, vb) = (pin_voltage_global(&part.cap.pins[0], voltages), pin_voltage_global(&part.cap.pins[1], voltages));
+        currents[part.cap.device_index] = part.cap.c * (vc_of(part, b) - vc_of(part, a)) / dt + part.cap.leak_g * (va - vb);
+        crate::solve::publish_stamped_currents(&part.shape, voltages, live_params, currents);
+        Some(())
+    }
+
     fn partition_snapshot(part: &Partition) -> PartitionSnapshot {
         PartitionSnapshot {
             seg: part.seg.clone(),
@@ -2461,6 +2534,16 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
         }
     }
     lo
+}
+
+/// `∫ g` over `[a, b]` by five-point Gauss-Legendre: exact to rounding for
+/// the smooth, slowly varying terms it is used on within one interval
+/// between instants (W2b piece 4).
+fn gauss_legendre(a: f64, b: f64, g: impl Fn(f64) -> f64) -> f64 {
+    const X: [f64; 5] = [0.0, -0.538_469_310_105_683_1, 0.538_469_310_105_683_1, -0.906_179_845_938_664, 0.906_179_845_938_664];
+    const W: [f64; 5] = [0.568_888_888_888_888_9, 0.478_628_670_499_366_5, 0.478_628_670_499_366_5, 0.236_926_885_056_189_1, 0.236_926_885_056_189_1];
+    let (m, h) = (0.5 * (a + b), 0.5 * (b - a));
+    X.iter().zip(W).map(|(&x, w)| w * g(m + h * x)).sum::<f64>() * h
 }
 
 fn vc_of(part: &Partition, t: f64) -> f64 {
