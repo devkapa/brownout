@@ -4,7 +4,7 @@
 //! capacitor, battery, PSU, PTC and thermal values to `bo_engine_device_state`,
 //! a latched failure to its record, an IC's drivers to the kernel's table.
 
-use super::rail_tests::{cc_switch_board, cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575};
+use super::rail_tests::{cc_switch_board, cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575, STOPS_757};
 use super::slow_tests::{ls00_sag, ring_behind_a_fuse, rollback_rig};
 use crate::carry::{self, Record};
 use crate::digital;
@@ -946,4 +946,44 @@ fn an_exact_mode_cv_seeds_capacitor_current_is_its_branch_current() {
         exited |= e.currents()[0] > -0.0999;
     }
     assert!(exited, "the PSU left CC");
+}
+
+#[test]
+fn a_reload_mid_slide_carries_no_hold_or_slide_and_judges_the_power_afresh() {
+    // W2c ("hold and slide state is not carried; power is judged afresh at
+    // settle") with ruling R92's slide. Cold 757 tpl 0's 555 slides along
+    // its 1.8 V floor from 0.1728 s (the rail tests'
+    // `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor`),
+    // at the duty whose powered sink takes what the 71.76 mA limit leaves:
+    // by hand x = (0.07176 - 0.018338) / 0.082920 = 0.6443 before its PTC
+    // trips at about 0.338 s. Taken at 0.25 s and loaded again there, the
+    // capacitors, the latches and the PSU's charge come back, but no hold
+    // and no episode: the load's settle decides the chip's power from the
+    // carried charges alone. Its powered solve still starves the rail and
+    // its unpowered one still lets it climb, so the hold procedure slides it
+    // again: by 0.3 s (50 ms, 17 of the rail's 2.96 ms settlings, after the
+    // reload) it slides with the rail within W0 (1.9 mV) of the floor and
+    // its duty within 0.01 of the hand value, as the run that was not
+    // reloaded does there (`cold_757_slide`'s bounds).
+    let p = cold_757_tpl0();
+    let (d555, edge) = (10usize, 1.8);
+    let w0 = 1e-4 + 1e-3 * edge;
+    let x_hand = (0.07175978736463227 - 0.018338) / 0.082920;
+    let mut e = advanced(&p, &STOPS_757[..=31]);
+    assert_eq!(e.time(), 0.25);
+    assert!(matches!(e.debug_solver().power_hold(d555).kind, digital::power::HoldKind::Duty(_)), "sliding at 0.25 s before the take");
+    let buf = take(&mut e);
+    let mut r = reload(&p, &buf, 0.25);
+    assert_eq!(r.debug_solver().episode(d555), super::hold::Episode::default(), "no episode carried");
+    for eng in [&mut e, &mut r] {
+        eng.advance(0.3).unwrap();
+    }
+    for (name, eng) in [("uninterrupted", &e), ("reloaded", &r)] {
+        let hold = eng.debug_solver().power_hold(d555);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{name}: sliding at 0.3 s, not {hold:?}");
+        let u = eng.voltages()[1];
+        assert!((u - edge).abs() <= w0, "{name}: the rail {u} V within W0 of the floor at 0.3 s");
+        let x = hold.kind.weight();
+        assert!((x - x_hand).abs() <= 0.01, "{name}: the duty {x} against {x_hand} by hand");
+    }
 }
