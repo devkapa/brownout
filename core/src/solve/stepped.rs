@@ -1807,6 +1807,11 @@ struct Partition {
     /// which the partition's next step starts when it starts there.
     pend_rail_q: Option<(f64, f64)>,
     rail_q: Option<(f64, f64, f64)>,
+    /// The pending trial took holds at its start (W1c point 1a,
+    /// `hold_around` at the floor): the owner's table has them from `t` on,
+    /// but the committed solution at `t` was solved without them (exact
+    /// mode re-solves it there, ruling R106 (a): `SteppedSolver::held_at`).
+    pend_held: bool,
     /// Ruling R59 (1) (B): a closed-form hub partition that steps only while
     /// its PSU is in CC (`PartitionBuild::cc_switch`) is parked here in CV:
     /// nothing steps, publishes or schedules it, and its events are stale.
@@ -1927,6 +1932,7 @@ impl Partition {
             i_src: 0.0,
             pend_i_src: 0.0,
             pend_rail_q: None,
+            pend_held: false,
             rail_q: None,
             parked: false,
             cc_exited: false,
@@ -1997,6 +2003,7 @@ struct PartitionSnapshot {
     pend_rail_q: Option<(f64, f64)>,
     rail_q: Option<(f64, f64, f64)>,
     pend_dense: PendDense,
+    pend_held: bool,
     #[cfg(test)]
     pend_mid: MidHalf,
 }
@@ -2040,6 +2047,7 @@ impl PartitionSnapshot {
         self.pend_rail_q = part.pend_rail_q;
         self.rail_q = part.rail_q;
         self.pend_dense.clone_from(&part.pend_dense);
+        self.pend_held = part.pend_held;
         #[cfg(test)]
         self.pend_mid.clone_from(&part.pend_mid);
     }
@@ -2061,6 +2069,7 @@ impl PartitionSnapshot {
         part.pend_rail_q = self.pend_rail_q;
         part.rail_q = self.rail_q;
         part.pend_dense.clone_from(&self.pend_dense);
+        part.pend_held = self.pend_held;
         #[cfg(test)]
         part.pend_mid.clone_from(&self.pend_mid);
     }
@@ -2365,6 +2374,15 @@ impl SteppedSolver {
     /// The holds the last calls' seeds took (`seed_holding`).
     pub(crate) fn take_hold_requests(&mut self) -> Vec<(usize, digital::power::PowerHold, f64)> {
         std::mem::take(&mut self.hold_requests)
+    }
+
+    /// The partitions committed at `now` whose pending trial took holds at
+    /// its start: their published solution at `now` is the one before the
+    /// chips went off (ruling R106 (a)).
+    pub(crate) fn held_at(&self, now: f64) -> Vec<usize> {
+        let mut out: Vec<usize> = self.partitions.iter().filter(|(_, part)| part.pend_held && part.has_pend && part.t == now).map(|(&p, _)| p).collect();
+        out.sort_unstable();
+        out
     }
 
     /// The running ramps every step reads its boundary through (Sources
@@ -3850,6 +3868,7 @@ impl SteppedSolver {
                             pend_rail_q: part.pend_rail_q,
                             rail_q: part.rail_q,
                             pend_dense: part.pend_dense.clone(),
+                            pend_held: part.pend_held,
                             #[cfg(test)]
                             pend_mid: part.pend_mid.clone(),
                         },
@@ -3905,6 +3924,7 @@ impl SteppedSolver {
                 part.pend_rail_q = s.pend_rail_q;
                 part.rail_q = s.rail_q;
                 part.pend_dense = s.pend_dense;
+                part.pend_held = s.pend_held;
                 #[cfg(test)]
                 {
                     part.pend_mid = s.pend_mid;
@@ -3981,6 +4001,7 @@ impl SteppedSolver {
         part.i_src = part.pend_i_src;
         part.rail_q = part.pend_rail_q.map(|(q, i)| (part.t, q, i));
         part.be_next_step = false;
+        part.pend_held = false;
         if part.pend_trap_off && !part.trap_off {
             part.trap_fallbacks += 1;
         }
@@ -4706,6 +4727,7 @@ impl SteppedSolver {
         part.has_pend = true;
         part.version += 1;
         let since = part.t;
+        part.pend_held = !step_taken.is_empty();
         if !step_taken.is_empty() {
             // Held in this copy at once, so the steps after it keep them; the
             // owner enters them in its table after the call.
@@ -6015,6 +6037,7 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_i_src, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.parked, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_exited, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
@@ -6088,6 +6111,7 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_dense, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_held, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_mid, w); }
         n
     }

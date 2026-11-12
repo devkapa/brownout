@@ -3117,6 +3117,7 @@ impl PartitionedSolver {
     /// re-solves the rail's partition at once.
     fn exact_after_publish(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
         self.drain_contributions();
+        self.exact_resolve_held(now, drivers, readers)?;
         let (node, p) = {
             let e = self.exact.as_ref().unwrap();
             (e.node, e.partition)
@@ -3279,6 +3280,31 @@ impl PartitionedSolver {
             self.exact.as_mut().unwrap().held = draw;
         }
         self.plan_deferred(drivers)
+    }
+
+    /// Ruling R106 (a): a stepped partition whose step from `now` held a
+    /// chip off at its start (W1c point 1a, `stepped::hold_around` at the
+    /// floor) leaves its trial pending with the hold already in the table,
+    /// while the solution it published at `now` is the one before: the
+    /// chip unpowered, its outputs at their powered solution, KCL broken at
+    /// every sample until the step commits (the CC ramp's `1y` at 3.599 V
+    /// and its LED lit with the chip held off). Each such partition is
+    /// re-solved at `now` under the table, as at any power change, so its
+    /// outputs (on its own nodes: `partition::build` joins an IC's
+    /// output-capable pins with its free supply) take the unpowered
+    /// solution there. Its next plan meets the chip held and takes no hold
+    /// for it, so the loop ends; it is bounded all the same.
+    fn exact_resolve_held(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
+        for _ in 0..4 {
+            let held = self.stepped.held_at(now);
+            if held.is_empty() {
+                break;
+            }
+            for q in held {
+                self.exact_resolve(q, now, drivers, readers)?;
+            }
+        }
+        Ok(())
     }
 
     /// Re-solves the exact hub's partition `p` at `now` after its source's

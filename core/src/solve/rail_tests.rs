@@ -523,6 +523,90 @@ fn hold_intervals(p: &Program, t_end: f64, cap: u32, d: usize) -> (Option<Kernel
 }
 
 #[test]
+fn exact_mode_publishes_a_chip_held_off_at_a_steps_start_with_its_outputs_unpowered() {
+    // Ruling R106 (a). The CC ramp of the next test in exact mode: the rail
+    // (1 uF, esr 0), 1y, the LED's cathode and the RC all sit in one stepped
+    // partition (the free rail joins the 74LS00's outputs). Along the floor
+    // the chip's own draw takes the rail under 4.275 V and its absence lets
+    // it back, so a step at the floor holds it off from the step's start
+    // (W1c point 1a, `stepped::hold_around`), the step pending. A held chip
+    // stamps nothing (W1c point 8), so at every sample it is held off, KCL
+    // at 1y has only the LED and the node shunt: the LED carries what the
+    // shunt does, under W0's current tolerance. Before the fix the solution
+    // published at the step's start was the powered one, 1y at 3.599 V and
+    // the LED at 5.06 mA, until the step committed: 6,453 such samples
+    // event by event and mid-way from 1.40 to 1.50 ms, as R53-P8's fine
+    // trace found them; 1,516 held samples here, every one lit. Sampled event
+    // by event and mid-way between events, as a host stopping anywhere would
+    // read it.
+    let p = exact(cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3)));
+    let mut rig = Rig::load(&p).unwrap();
+    let mut t = 0.0f64;
+    while t < 1.44e-3 {
+        t = (t + 1e-6).min(1.44e-3);
+        rig.advance(t).unwrap();
+    }
+    let (mut held, mut lit, mut worst) = (0u32, 0u32, (0.0f64, 0.0f64));
+    let mut mid = false;
+    while t < 1.47e-3 {
+        let ne = rig.k.next_event_time().min(1.47e-3);
+        let at = if mid && ne - t > 1e-13 { 0.5 * (t + ne) } else { ne };
+        mid = !mid;
+        t = at;
+        rig.advance(at).unwrap();
+        let hold = rig.s().power_hold(1);
+        if hold.kind == digital::power::HoldKind::Off {
+            held += 1;
+            // KCL at 1y: the LED's current leaves it, the shunt's arrives.
+            let residual = (rig.i(2) - static_part::NODE_RSHUNT_G * rig.v(2)).abs();
+            if residual > worst.0 {
+                worst = (residual, at);
+            }
+        } else if rig.s().ic_powered(1) {
+            lit += 1;
+        }
+    }
+    eprintln!("exact CC ramp at its floor: {held} samples held off, {lit} powered; worst KCL residual at 1y held off {:.3e} A at {:.9e} s", worst.0, worst.1);
+    assert!(held > 100 && lit > 100, "the chip chatters along its floor here: {held} held, {lit} powered");
+    assert!(worst.0 <= 1e-9, "held off, 1y keeps KCL: the LED carries {:.4e} A at {:.9e} s", worst.0, worst.1);
+    // Cold 2575 tpl 2 in exact mode, once switch 14 frees its CC rail at
+    // 30.08 ms: the 555 (VCC on the rail) chatters at its 1.8 V floor. Node
+    // 2, its OUT and DIS, hangs 105.7 ohm from the rail and 820 kohm from
+    // ground (switches 12 and 21 open), so held off it is the divider's
+    // (KCL: what the 105.7 ohm brings, the 820 kohm takes). Before the fix it
+    // read the powered solution, about 0.38 V against 1.87 V, at 11,620 of
+    // the 11,628 held samples to 30.2 ms.
+    let p = exact(cold_2575_tpl2());
+    let (r_up, r_dn, toggle) = (105.69729298224514, 820463.1551430054, 0.030082069747425742);
+    let mut rig = Rig::load(&p).unwrap();
+    let mut t = 0.0f64;
+    while t < toggle {
+        t = (t + 1e-4).min(toggle);
+        rig.advance(t).unwrap();
+    }
+    rig.k.apply_params_as_event(&[(14, 0, 0.0)]).unwrap();
+    rig.k.solver_mut().prepare_readout();
+    let (mut held, mut worst, mut mid) = (0u32, (0.0f64, 0.0f64), false);
+    while t < 0.03012 {
+        let ne = rig.k.next_event_time().min(0.03012);
+        let at = if mid && ne - t > 1e-13 { 0.5 * (t + ne) } else { ne };
+        mid = !mid;
+        t = at;
+        rig.advance(at).unwrap();
+        if rig.s().power_hold(6).kind == digital::power::HoldKind::Off {
+            held += 1;
+            let residual = ((rig.v(1) - rig.v(2)) / r_up - rig.v(2) / r_dn).abs();
+            if residual > worst.0 {
+                worst = (residual, at);
+            }
+        }
+    }
+    eprintln!("exact 2575 tpl 2 past its toggle: {held} samples held off; worst KCL residual at node 2 {:.3e} A at {:.9e} s", worst.0, worst.1);
+    assert!(held > 100, "the 555 chatters along its floor here: {held} held");
+    assert!(worst.0 <= 1e-9, "held off, node 2 keeps KCL: {:.4e} A at {:.9e} s", worst.0, worst.1);
+}
+
+#[test]
 fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_until_the_supply_carries_it() {
     // Formerly `w1f-power-gate-pingpong`'s across-instant pin (HG1): a {5 V,
     // 20 mA} PSU ramps a 1 uF rail capacitor (esr 0) with 100 ohm into 10 uF

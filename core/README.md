@@ -4807,6 +4807,21 @@ Constants, all from P3:35-38 unless marked new:
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
      the rail). A back-fed PSU in CV sinks without limit, as classic's model
      does; a supply that cannot sink is not modelled.
+   - **A hold at a step's start** (ruling R106 (a)). A stepped partition
+     whose step from an instant holds a chip off there (point 1a inside the
+     stepped solver, `stepped::hold_around` at the floor) leaves that step
+     pending with the hold already in the owner's table, while what it
+     published at the instant was solved before it: the chip unpowered,
+     its outputs at the powered solution, KCL broken at every sample until
+     the step commits (the CC ramp's `1y` at 3.599 V and its LED lit at
+     1,516 held samples in 30 us; cold 2575 tpl 2's node 2, OUT and DIS,
+     at 0.38 V against the 1.87 V its divider holds, 11,620 of 11,628 held
+     samples to 30.2 ms). Each such partition is re-solved at the instant
+     under the table (`exact_resolve_held`, flagged by the partition's
+     `pend_held`), as at any power change; the chip's outputs and pulls
+     sit in its free supply's partition (W1c point 2), so that one
+     re-solve is the downstream one. Default mode solves the rail's chips
+     in the rail loop and was already clean (R53-P8 checked).
    - An `r = 0` battery publishes at the load instant the 1 ps seed's
      capacitor current, `C·E / 1e-12` (5e6 A for 1 µF), as classic does;
      default mode publishes 0 there.
