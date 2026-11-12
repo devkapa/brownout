@@ -45,7 +45,7 @@ pub struct NewtonResult {
 
 /// One restamp and one dense solve about `x`, with the factors it solved
 /// through (`lu::solve` is exactly this factor and apply).
-fn iterate<F>(size: usize, x: &[f64], stamp: &mut F) -> Result<(Vec<f64>, lu::LuFactorization), String>
+fn iterate<F>(size: usize, x: &[f64], hub: Option<usize>, stamp: &mut F) -> Result<(Vec<f64>, lu::LuFactorization), String>
 where
     F: FnMut(&[f64], &mut [f64], &mut [f64]),
 {
@@ -53,7 +53,10 @@ where
     let mut b = vec![0.0; size];
     stamp(x, &mut a, &mut b);
     let fail = |_| "singular or non-finite pivot in a Newton iteration".to_string();
-    let factors = lu::lu_factor(a, size).map_err(fail)?;
+    let factors = match hub.and_then(|h| lu::lu_factor_hub(&a, size, h)) {
+        Some(f) => f,
+        None => lu::lu_factor(a, size).map_err(fail)?,
+    };
     factors.solve(&mut b).map_err(fail)?;
     let solved = b;
     // A finite pivot at every step does not rule out an overflowing entry,
@@ -102,7 +105,18 @@ where
 /// [`solve`], also returning the factors of the last iteration it ran (the
 /// polish included): a hub partition's rail sensitivity solves through the
 /// last iteration's Jacobian (README, Rails point 3).
-pub fn solve_keeping_factors<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, mut stamp: F) -> Result<(NewtonResult, lu::LuFactorization), String>
+pub fn solve_keeping_factors<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, stamp: F) -> Result<(NewtonResult, lu::LuFactorization), String>
+where
+    F: FnMut(&[f64], &mut [f64], &mut [f64]),
+{
+    solve_keeping_factors_on(size, n, x_init, linear, polish, None, stamp)
+}
+
+/// [`solve_keeping_factors`] whose every iteration factors by block
+/// elimination over unknown `hub` where that pays (`lu::lu_factor_hub`,
+/// ruling R105 part 2: exact mode's rail, the one unknown the board's
+/// blocks share), else whole.
+pub fn solve_keeping_factors_on<F>(size: usize, n: usize, x_init: &[f64], linear: bool, polish: bool, hub: Option<usize>, mut stamp: F) -> Result<(NewtonResult, lu::LuFactorization), String>
 where
     F: FnMut(&[f64], &mut [f64], &mut [f64]),
 {
@@ -119,7 +133,7 @@ where
 
     loop {
         iterations += 1;
-        let (solved, factors) = iterate(size, &x, &mut stamp)?;
+        let (solved, factors) = iterate(size, &x, hub, &mut stamp)?;
 
         let mut converged = !forced_unconverged;
         for k in 0..n {
@@ -136,7 +150,7 @@ where
         if converged {
             if polish {
                 iterations += 1;
-                let (polished, polish_factors) = iterate(size, &x, &mut stamp)?;
+                let (polished, polish_factors) = iterate(size, &x, hub, &mut stamp)?;
                 return Ok((NewtonResult { x: polished, iterations, converged: true }, polish_factors));
             }
             return Ok((NewtonResult { x, iterations, converged: true }, factors));

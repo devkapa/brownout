@@ -16965,6 +16965,69 @@ fn exact_mode_cuts_a_cc_step_where_its_rail_reaches_the_setpoint() {
 }
 
 #[test]
+fn exact_mode_solves_the_rails_partition_block_by_block_as_it_solves_it_whole() {
+    // Ruling R105 part 2: exact mode's rail partition holds every branch
+    // that reads the rail (the battery SAP-1's is 323 nodes, its dense LU
+    // 79 % of the samples), yet those branches meet only at the rail. A
+    // Newton iteration there factors block by block with the rail as the
+    // one shared unknown (`lu::lu_factor_hub`), and must publish what the
+    // whole system's LU does, to rounding (not W0). Here 40 branches off a
+    // CC rail (a 1.5 nF rail capacitor, so the partition steps), each 470
+    // ohm into its own capacitor and every fourth an LED across it (so the
+    // Newton iterates): a CC charge-up at 100 mA to CV, at host steps of 0.5
+    // ms, run with the seam off (whole) and on.
+    let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), capacitor(1, 1, 0, 1.5e-9, 0.0)];
+    let mut ci = 2;
+    for k in 0..40 {
+        let node = 2 + k;
+        devices.push(resistor(ci, 1, node, 470.0));
+        devices.push(capacitor(ci + 1, node, 0, 1e-6 * (1.0 + k as f64 * 0.1), 0.0));
+        ci += 2;
+        if k % 4 == 0 {
+            devices.push(led(ci, node, 0));
+            ci += 1;
+        }
+    }
+    let p = exact(program(42, devices));
+    let run = |off: bool| {
+        crate::lu::hub_seam::OFF.with(|c| c.set(off));
+        crate::lu::hub_seam::USES.with(|c| c.set(0));
+        let mut e = Engine::load(&p).unwrap();
+        let mut out = Vec::new();
+        for k in 1..=40 {
+            e.advance(k as f64 * 5e-4).unwrap();
+            out.push((e.voltages().to_vec(), e.currents().to_vec()));
+        }
+        crate::lu::hub_seam::OFF.with(|c| c.set(false));
+        (out, crate::lu::hub_seam::USES.with(|c| c.get()), e.stat(10))
+    };
+    let (whole, whole_uses, whole_steps) = run(true);
+    let (blocks, uses, steps) = run(false);
+    assert_eq!(whole_uses, 0);
+    assert!(uses > 100, "the rail's partition was split: {uses} systems");
+    assert_eq!(steps, whole_steps, "the same steps");
+    // Within 1e-9 of each reading, past a floor of rounding: 1e-13 V, and
+    // 1e-15 A for a current that rounds about zero (1e-14 A here differs
+    // by its own size from one LU to the other).
+    let (mut worst, mut fails) = (0.0f64, 0u32);
+    for ((v1, i1), (v2, i2)) in whole.iter().zip(&blocks) {
+        for ((a, b), floor) in v1.iter().zip(v2).map(|p| (p, 1e-13)).chain(i1.iter().zip(i2).map(|p| (p, 1e-15))) {
+            let d = (a - b).abs();
+            if a.abs().max(b.abs()) > 1e3 * floor {
+                worst = worst.max(d / a.abs().max(b.abs()));
+            }
+            if d > 1e-9 * a.abs().max(b.abs()) + floor {
+                fails += 1;
+            }
+        }
+    }
+    eprintln!("exact block elimination: {uses} systems split, {steps} steps; worst relative difference from the whole LU {worst:.3e} (readings above 1e-10 V, 1e-12 A)");
+    assert_eq!(fails, 0, "block by block within rounding of the whole: {fails} readings past it");
+    // The supply ran CC to CV.
+    assert!((whole.last().unwrap().0[1] - 5.0).abs() < 1e-3, "the rail at the setpoint by 20 ms: {}", whole.last().unwrap().0[1]);
+}
+
+#[test]
 fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
     // Ruling R86 (a): a budgeted advance yields only between completed
     // instants and resumes the same host step, so on boards that exercise

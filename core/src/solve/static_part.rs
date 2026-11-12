@@ -2230,7 +2230,8 @@ impl StaticPartitionSolver {
             // garbage.
             let mut stamp_error: Option<String> = None;
             let mut noted = if slopes { None } else { flips.as_deref_mut() };
-            let result = newton::solve_keeping_factors(size, size, &x0, false, polish, |x, a, b| {
+            let hub = self.exact.filter(|e| e.partition == p_idx).map(|e| e.local);
+            let result = newton::solve_keeping_factors_on(size, size, &x0, false, polish, hub, |x, a, b| {
                 if stamp_error.is_some() {
                     return;
                 }

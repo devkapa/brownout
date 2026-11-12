@@ -37,6 +37,29 @@ pub struct LuFactorization {
     /// piv[k] is the row (>= k) swapped into position k at step k.
     piv: Vec<usize>,
     n: usize,
+    /// Exact mode's block elimination over the rail (ruling R105 part 2):
+    /// when set, `a` and `piv` are empty and the system is solved block by
+    /// block with the rail as the one shared unknown ([`lu_factor_hub`]).
+    hub: Option<Box<HubBlocks>>,
+}
+
+/// A system whose unknowns other than `r` fall into blocks that meet only
+/// through `r` (ruling R105 part 2): each block's own LU, its solve of the
+/// rail's column (`z = A_kk^-1 a_kr`) and the rail row's entries over it
+/// (`d = a_rk`), and the Schur complement on the rail, `s = a_rr - sum d.z`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HubBlocks {
+    r: usize,
+    blocks: Vec<HubBlock>,
+    s: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HubBlock {
+    idx: Vec<usize>,
+    lu: LuFactorization,
+    z: Vec<f64>,
+    d: Vec<f64>,
 }
 
 /// Factors `a` (n x n, row-major, consumed) in place. Returns the
@@ -83,8 +106,109 @@ pub fn lu_factor(mut a: Vec<f64>, n: usize) -> Result<LuFactorization, ()> {
         }
     }
 
-    Ok(LuFactorization { a, piv, n })
+    Ok(LuFactorization { a, piv, n, hub: None })
 }
+
+/// Factors `a` (n x n, row-major) by block elimination over unknown `hub`
+/// (ruling R105 part 2, exact mode's rail): the unknowns other than `hub`
+/// are split into the connected components of `a`'s pattern with `hub`
+/// taken out, each factored on its own (dense, partial pivoting within it),
+/// and the rail is solved from the Schur complement, one scalar. `None`
+/// when that does not pay (one block holding nearly everything, or a block
+/// structure too fine to matter) or a block or the complement is singular:
+/// the caller then factors `a` whole, as before.
+pub fn lu_factor_hub(a: &[f64], n: usize, hub: usize) -> Option<LuFactorization> {
+    debug_assert_eq!(a.len(), n * n);
+    if hub >= n || n < HUB_MIN_N {
+        return None;
+    }
+    #[cfg(test)]
+    if hub_seam::OFF.with(|c| c.get()) {
+        return None;
+    }
+    // Components of the pattern without the hub, by union-find.
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    for i in 0..n {
+        if i == hub {
+            continue;
+        }
+        let row = &a[i * n..(i + 1) * n];
+        for (j, &v) in row.iter().enumerate() {
+            if v != 0.0 && j != hub && j != i {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+    }
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    let mut slot = vec![usize::MAX; n];
+    for i in 0..n {
+        if i == hub {
+            continue;
+        }
+        let root = find(&mut parent, i);
+        if slot[root] == usize::MAX {
+            slot[root] = members.len();
+            members.push(Vec::new());
+        }
+        members[slot[root]].push(i);
+    }
+    // Pays when the blocks' dense work is a small part of the whole's.
+    let work: f64 = members.iter().map(|m| (m.len() as f64).powi(3)).sum();
+    if work > HUB_WORK_FRACTION * (n as f64).powi(3) {
+        return None;
+    }
+    let mut blocks = Vec::with_capacity(members.len());
+    let mut s = a[hub * n + hub];
+    for idx in members {
+        let m = idx.len();
+        let mut block = vec![0.0; m * m];
+        for (bi, &i) in idx.iter().enumerate() {
+            for (bj, &j) in idx.iter().enumerate() {
+                block[bi * m + bj] = a[i * n + j];
+            }
+        }
+        let lu = lu_factor(block, m).ok()?;
+        let mut z: Vec<f64> = idx.iter().map(|&i| a[i * n + hub]).collect();
+        lu.solve(&mut z).ok()?;
+        let d: Vec<f64> = idx.iter().map(|&j| a[hub * n + j]).collect();
+        s -= d.iter().zip(&z).map(|(d, z)| d * z).sum::<f64>();
+        blocks.push(HubBlock { idx, lu, z, d });
+    }
+    if !s.is_finite() || s == 0.0 {
+        return None;
+    }
+    #[cfg(test)]
+    hub_seam::USES.with(|c| c.set(c.get() + 1));
+    Some(LuFactorization { a: Vec::new(), piv: Vec::new(), n, hub: Some(Box::new(HubBlocks { r: hub, blocks, s })) })
+}
+
+/// Test seam: `OFF` makes [`lu_factor_hub`] decline (every system factored
+/// whole, as before ruling R105 part 2), `USES` counts the systems it split.
+/// Per thread, so parallel tests never see each other's.
+#[cfg(test)]
+pub(crate) mod hub_seam {
+    thread_local! {
+        pub static OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub static USES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+}
+
+/// The smallest system [`lu_factor_hub`] splits: below it the whole's LU
+/// costs little.
+pub const HUB_MIN_N: usize = 32;
+/// [`lu_factor_hub`] splits only when its blocks' summed cubes are at most
+/// this fraction of the whole's.
+const HUB_WORK_FRACTION: f64 = 0.25;
 
 impl LuFactorization {
     /// Solves `A x = b` for the `A` this factorization came from, in place
@@ -94,6 +218,9 @@ impl LuFactorization {
     /// ordering is what makes the "swap only columns k..n" factorization
     /// above correct (see module docs).
     pub fn solve(&self, b: &mut [f64]) -> Result<(), ()> {
+        if let Some(h) = self.hub.as_deref() {
+            return h.solve(b);
+        }
         let n = self.n;
         debug_assert_eq!(b.len(), n);
 
@@ -124,6 +251,30 @@ impl LuFactorization {
             b[i] = s / d;
         }
 
+        Ok(())
+    }
+}
+
+impl HubBlocks {
+    fn solve(&self, b: &mut [f64]) -> Result<(), ()> {
+        let mut ys: Vec<Vec<f64>> = Vec::with_capacity(self.blocks.len());
+        let mut rhs = b[self.r];
+        for blk in &self.blocks {
+            let mut y: Vec<f64> = blk.idx.iter().map(|&i| b[i]).collect();
+            blk.lu.solve(&mut y)?;
+            rhs -= blk.d.iter().zip(&y).map(|(d, y)| d * y).sum::<f64>();
+            ys.push(y);
+        }
+        let xr = rhs / self.s;
+        if !xr.is_finite() {
+            return Err(());
+        }
+        b[self.r] = xr;
+        for (blk, y) in self.blocks.iter().zip(ys) {
+            for ((&i, y), z) in blk.idx.iter().zip(y).zip(&blk.z) {
+                b[i] = y - z * xr;
+            }
+        }
         Ok(())
     }
 }
@@ -288,6 +439,74 @@ mod tests {
         assert!(solve(singular, 2, vec![1.0, 1.0]).is_err());
     }
 
+    /// Ruling R105 part 2: blocks that meet only through one unknown, the
+    /// rail, solved block by block over its Schur complement, agree with
+    /// the whole's LU to rounding, through the rail's row being a source
+    /// constraint (`u = V`) as well as a KCL row, and decline a system that
+    /// is one block.
+    #[test]
+    fn a_hub_factorization_solves_blocks_meeting_at_one_unknown_as_the_whole_does() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (n, hub) = (60, 17);
+        for constraint in [false, true] {
+            // Blocks of 1-5 unknowns, each a conductance network with ties
+            // to the hub, diagonally dominant as nodal analysis is.
+            let mut a = vec![0.0; n * n];
+            let others: Vec<usize> = (0..n).filter(|&i| i != hub).collect();
+            let mut k = 0;
+            while k < others.len() {
+                let m = (1 + (rnd() * 5.0) as usize).min(others.len() - k);
+                let blk = &others[k..k + m];
+                for (x, &i) in blk.iter().enumerate() {
+                    for &j in &blk[x + 1..] {
+                        let g = rnd();
+                        a[i * n + j] -= g;
+                        a[j * n + i] -= g;
+                        a[i * n + i] += g;
+                        a[j * n + j] += g;
+                    }
+                    let g = rnd() + 0.1;
+                    a[i * n + hub] -= g;
+                    a[hub * n + i] -= g;
+                    a[i * n + i] += g + rnd();
+                    a[hub * n + hub] += g;
+                }
+                k += m;
+            }
+            a[hub * n + hub] += 1.0;
+            if constraint {
+                for j in 0..n {
+                    a[hub * n + j] = if j == hub { 1.0 } else { 0.0 };
+                }
+            }
+            let x_expected: Vec<f64> = (0..n).map(|_| rnd() * 10.0 - 5.0).collect();
+            let b = matvec(&a, n, &x_expected);
+            let whole = solve(a.clone(), n, b.clone()).unwrap();
+            let f = lu_factor_hub(&a, n, hub).expect("the blocks pay");
+            let mut x = b.clone();
+            f.solve(&mut x).unwrap();
+            assert_close(&x, &whole, 1e-11);
+            assert_close(&x, &x_expected, 1e-9);
+        }
+        // One block holding everything: no split.
+        let n = 40;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 3.0;
+            if i + 1 < n {
+                a[i * n + i + 1] = -1.0;
+                a[(i + 1) * n + i] = -1.0;
+            }
+        }
+        assert!(lu_factor_hub(&a, n, 0).is_none());
+    }
+
     #[test]
     fn nan_pivot_is_an_error() {
         let a = vec![f64::NAN, 0.0, 0.0, 1.0];
@@ -304,6 +523,30 @@ impl crate::snapshot::HeapBytes for LuFactorization {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.a, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.piv, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.n, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for HubBlocks {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.r, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.blocks, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.s, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for HubBlock {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.idx, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.lu, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.z, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.d, w); }
         n
     }
 }

@@ -900,7 +900,7 @@ fn solve_step_noting(
         if slopes && (linear || !ic_ctx.free_supply || h > H_MIN * 1.01) {
             break;
         }
-        let (r, factors) = newton::solve_keeping_factors(n, n, x_from, linear, polish, |x, a, b| {
+        let (r, factors) = newton::solve_keeping_factors_on(n, n, x_from, linear, polish, exact.map(|e| e.local), |x, a, b| {
             if let (false, Some((gated, flips))) = (slopes, noting.as_mut()) {
                 for (k, &(d, ic)) in gated.iter().enumerate() {
                     let v = |node: usize| match ic_ctx.node_owner.get(&node) {

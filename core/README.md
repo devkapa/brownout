@@ -4862,6 +4862,29 @@ Constants, all from P3:35-38 unless marked new:
      against 0.14 s in default mode, about 200-300 s of CPU per simulated
      second. The exact-mode fixes since (FX1-FX5, EX1) moved it within noise
      (8.5-9.0 s frozen, 12.5-13.5 s running).
+   - **Block elimination over the rail** (ruling R105 part 2). The merged
+     partition's branches meet only at the rail: the battery SAP-1's 323
+     nodes fall into 217 blocks, the largest 20, once the rail is taken
+     out, where the dense LU of the whole was 79 % of the samples. Each
+     Newton iteration of the rail's partition (stepped or static) factors
+     by `lu::lu_factor_hub`: the connected components of the system's
+     pattern without the rail, each a dense LU with partial pivoting
+     within it, and the rail from the Schur complement, one scalar,
+     `s = a_rr - sum a_rk A_kk^-1 a_kr`. A source row (`u = V`) is such a
+     row too. It applies at 32 unknowns or more and when the blocks'
+     summed cubes are at most a quarter of the whole's; a singular block or
+     complement factors the whole as before. Its answers are the whole
+     LU's to rounding, as far as Newton's own tolerance lets a rounding
+     show: the pin
+     `exact_mode_solves_the_rails_partition_block_by_block_as_it_solves_it_whole`
+     takes the same steps with every reading within 1e-9 of the whole's
+     (past 1e-13 V and 1e-15 A), and so does every fixture in exact mode
+     at 1 ms frames; the battery SAP-1 (running, 0.25 s), whose Newtons
+     stop at classic's tolerance a rounding apart, sits within 7.6e-8 V
+     of the whole's (8e-4 of W0) and its capacitor currents within 0.5 of
+     W0's 1 nA, not growing. Its CPU there: 23.4 s to 4.0 s for 0.05 s
+     (running), 12.1 to 3.6 s (frozen), measured on a loaded machine.
+
 ### Sources
 
 1. **Identity rules** are the compiler's (Battery record): explicit uid
