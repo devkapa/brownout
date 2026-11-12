@@ -207,6 +207,10 @@ pub(crate) struct Knot {
     /// On a CC rail, the rail solved with this point (W2b's charge reads the
     /// step's devices against it).
     u: Option<f64>,
+    /// On a CC rail with capacitors, their current at this point (W2bV: the
+    /// charge weighs the rail capacitors at the step's points with it, so
+    /// their charge is the companion's `C dq` of the step).
+    pub(crate) rail_i: Option<f64>,
 }
 
 /// W2b piece 4: one committed step of a partition whose devices' charge is
@@ -224,6 +228,9 @@ pub(crate) struct ChargeStep {
     /// Planned before the charge was armed: no knots were kept, so `knots`
     /// holds its end alone and the step is weighed by its end.
     pub(crate) ends_only: bool,
+    /// On a CC rail with capacitors, their current at the step's start (the
+    /// trapezoid's `i`, `CapStep`).
+    pub(crate) rail_i0: Option<f64>,
 }
 
 impl ChargeStep {
@@ -285,6 +292,8 @@ pub(crate) struct PendDense {
     /// On a CC rail, the rail the trial starts from: its capacitors' charge,
     /// or with none the rail as last solved.
     u0: Option<f64>,
+    /// On a CC rail with capacitors, their current at the trial's start.
+    rail_i0: Option<f64>,
 }
 
 impl PendDense {
@@ -2288,7 +2297,7 @@ impl SteppedSolver {
         let part = &self.partitions[&p];
         if knots.is_empty() {
             // Planned before the observer read it: its ends only.
-            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None });
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: None });
         }
         // A linear partition with one capacitor: every node an affine map of
         // its voltage when nothing it reads moves within the step (R104:
@@ -2309,7 +2318,7 @@ impl SteppedSolver {
         let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
         if ends_only {
-            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None });
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: part.pend_rail_q.map(|r| r.1) });
         }
         let reads = self.charge_reads(p);
         // On a CC rail each point at the rail it was solved with (the end's
@@ -2327,7 +2336,7 @@ impl SteppedSolver {
                 _ => bnd.get(n),
             }));
         }
-        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only }
+        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only) }
     }
 
     /// Drops what no sample at or after `t` needs: each partition's latest
@@ -4185,10 +4194,10 @@ impl SteppedSolver {
                         let k = 1.0 / (g * (2.0 - g));
                         let m = (1.0 - g) * (1.0 - g) * k;
                         let vc_g = st.vh.iter().zip(vc_s).map(|(vh, v0)| (vh + m * v0) / k).collect();
-                        knots.push(Knot { t: t_s + st.h_g, x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), hermite: true, stage: true, u: st.u_g });
-                        knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: true, stage: false, u: end.u });
+                        knots.push(Knot { t: t_s + st.h_g, x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), hermite: true, stage: true, u: st.u_g, rail_i: None });
+                        knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: true, stage: false, u: end.u, rail_i: end.rail_q.map(|r| r.1) });
                     }
-                    None => knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: method == Method::Trap, stage: false, u: end.u }),
+                    None => knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: method == Method::Trap, stage: false, u: end.u, rail_i: end.rail_q.map(|r| r.1) }),
                 }
             };
             let mut knots = Vec::new();
@@ -4227,7 +4236,8 @@ impl SteppedSolver {
                 }
             }
             let u0 = ic_ctx.cc.map(|c| c.cap.map_or(c.u0, |cap| cap.q));
-            part.pend_dense = PendDense { knots, solved, u0 };
+            let rail_i0 = ic_ctx.cc.and_then(|c| c.cap).filter(|_| ic_ctx.cc.is_some_and(|c| !c.seed)).map(|cap| cap.i);
+            part.pend_dense = PendDense { knots, solved, u0, rail_i0 };
         }
         #[cfg(test)]
         {
@@ -5343,6 +5353,7 @@ impl crate::snapshot::HeapBytes for Knot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hermite, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stage, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i, w); }
         n
     }
 }
@@ -5358,6 +5369,7 @@ impl crate::snapshot::HeapBytes for ChargeStep {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vals, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ends_only, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
         n
     }
 }
@@ -5369,6 +5381,7 @@ impl crate::snapshot::HeapBytes for PendDense {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
         n
     }
 }

@@ -1394,6 +1394,19 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
   on each armed source whose walk reads the rail, for a span holding such an
   interval, and stat `28` counts the intervals. Bound: the coupling error of
   the steps, 1.88 W0 measured; a must-close item.
+- **A CC rail with capacitors and stepped hub partitions** (ruling R68): each
+  step carries the rail capacitors as a companion on its rail row and hands
+  their charge to the rail solve after it commits, which re-aims the CC
+  segment from that charge; between solves the segment is only the frozen
+  draws' estimate. With one stepped hub partition its steps carry the rail:
+  the capacitors fold at its points at their companion current, the lines
+  with them, so a capacitor's charge is `C dV` of its readout and the PSU's
+  `-dir iLimit t` the KCL of what leaves the rail to the step's Newton
+  tolerance (measured 8e-7 W0; on the segment they were 1.2e-2 of `C dV` and
+  1-7 W0 apart, W2bV). With several, the capacitors fold on the segment and
+  take each re-aim's jump as their own charge, so they stay `C dV`; the lines
+  fold on the segment, and the PSU's KCL is flagged and counted as above
+  (measured up to 0.52 W0).
 
 ## Readouts
 

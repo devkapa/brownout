@@ -600,3 +600,90 @@ fn two_stepped_hubs_on_a_cc_rail_with_no_capacitor_fold_its_lines_linear_between
     assert_eq!(one.stat(28), 0.0);
     assert!((q[0] - qf[0]).abs() <= w0(qf[0]), "the PSU's CC charge");
 }
+
+// ---- W2bV fixes ---------------------------------------------------------------
+
+/// W2bV finding 1: a CC PSU (8 V, `i_limit`) holding `c_rail` on its rail
+/// (node 1), 150 ohm across it, and 100 ohm into 2.2 uF (node 2) feeding a
+/// red LED and 60 ohm (node 3): one stepped hub partition stepping with the
+/// rail capacitor as a companion on its rail row (ruling R68).
+fn cc_rail_cap_led(c_rail: f64, i_limit: f64) -> Program {
+    let mut p = program(4, vec![
+        super::observe_tests::psu_dev(0, 1, 8.0, i_limit),
+        dev(kinds::CAPACITOR, 1, 1, 0, vec![c_rail, 0.0, 0.0]),
+        dev(kinds::RESISTOR, 2, 1, 0, vec![150.0]),
+        dev(kinds::RESISTOR, 3, 1, 2, vec![100.0]),
+        dev(kinds::CAPACITOR, 4, 2, 0, vec![2.2e-6, 0.0, 0.0]),
+        Device { kind: kinds::LED, component_index: 5, pins: vec![pin(2), pin(3)], params: vec![2.0, 2.0, 0.02, 0.0, 0.0, 0.0], blob: vec![] },
+        dev(kinds::RESISTOR, 6, 3, 0, vec![60.0]),
+    ]);
+    p.options.force_stepped = false;
+    p
+}
+
+#[test]
+fn a_cc_rail_capacitors_charge_is_c_dv_and_its_psu_the_kcl_of_its_rail_with_one_stepped_hub() {
+    // The rail capacitor's charge against `C dV` of its own readout, and the
+    // PSU's (its `-dir iLimit t` while in CC) against what leaves the rail.
+    // Each in one advance, and the last (trapezoidal) through several takes.
+    for (c_rail, i_limit, trap) in [(47e-6, 0.02, false), (10e-6, 0.05, false), (220e-6, 0.01, false), (47e-6, 0.02, true)] {
+        for t in [2e-3, 20e-3] {
+            let mut p = cc_rail_cap_led(c_rail, i_limit);
+            p.options.integration = u8::from(trap);
+            let v0 = Engine::load(&p).unwrap().voltages()[1];
+            let steps: Vec<f64> = if trap { [0.37e-3, 1e-3, 1.7e-3, 5e-3, 13e-3, 20e-3].into_iter().filter(|&s| s < t).chain([t]).collect() } else { vec![t] };
+            let (e, q) = charge(&p, &[0, 1, 2, 3], &steps);
+            let b: Vec<f64> = std::iter::repeat_n(0.0, 2).chain(q.iter().copied()).collect();
+            let q = &b[2..6];
+            let v = e.voltages()[1];
+            let name = format!("{c_rail:e} F, {i_limit} A, trapezoid {trap}, to {t}");
+            close(&format!("{name}: rail capacitor"), q[1], c_rail * (v - v0), 1e-9 * c_rail * v);
+            let kcl = q[1] + q[2] + q[3];
+            let w0 = (1e-9 + 1e-3 * (kcl / t).abs()) * t;
+            let share = (q[0].abs() - kcl - G * 8.0 * t).abs() / w0;
+            eprintln!("{name}: KCL {share:.3e} W0");
+            assert!(share <= 1e-2, "{name}: the PSU's KCL within 0.01 W0: {share}");
+        }
+    }
+    // Nothing approximate: one stepped hub carries the rail.
+    let mut e = Engine::load(&cc_rail_cap_led(47e-6, 0.02)).unwrap();
+    e.charge_arm(&[0, 1, 2, 3]).unwrap();
+    e.advance(20e-3).unwrap();
+    let b = e.take_charge().to_vec();
+    assert_eq!(b[b.len() - 4..], [0.0; 4], "no kcl_approximate flag");
+    assert_eq!(e.stat(28), 0.0);
+}
+
+#[test]
+fn two_stepped_hubs_on_a_cc_rail_with_capacitors_charge_them_c_dv_and_say_the_kcl_is_approximate() {
+    // A second 137 ohm into 4.4 uF and a red LED off the rail: two stepped
+    // hub partitions, each stepping the rail capacitor as its companion
+    // against the other's draw held. Each solve after a commit re-aims the
+    // CC segment from the charge the step handed it: the capacitor's charge
+    // takes that jump (was 9.4e-4 of `C dV` off), so it is `C dV` of its
+    // readout. No one rail trajectory closes the PSU's KCL: flagged and
+    // counted, within the steps' coupling gap (measured up to 0.52 W0).
+    let mut p = cc_rail_cap_led(47e-6, 0.02);
+    p.node_count = 6;
+    p.devices.push(dev(kinds::RESISTOR, 7, 1, 4, vec![137.0]));
+    p.devices.push(dev(kinds::CAPACITOR, 8, 4, 0, vec![4.4e-6, 0.0, 0.0]));
+    p.devices.push(Device { kind: kinds::LED, component_index: 9, pins: vec![pin(4), pin(5)], params: vec![2.0, 2.0, 0.02, 0.0, 0.0, 0.0], blob: vec![] });
+    p.devices.push(dev(kinds::RESISTOR, 10, 5, 0, vec![60.0]));
+    let v0 = Engine::load(&p).unwrap().voltages()[1];
+    for steps in [vec![2e-3], vec![20e-3], vec![0.37e-3, 1e-3, 5e-3, 20e-3]] {
+        let t = *steps.last().unwrap();
+        let (e, q) = charge(&p, &[0, 1, 2, 3, 7], &steps);
+        let v = e.voltages()[1];
+        close(&format!("to {t} in {}: rail capacitor", steps.len()), q[1], 47e-6 * (v - v0), 1e-9 * 47e-6 * v);
+        let kcl = q[1] + q[2] + q[3] + q[4];
+        let gap = (q[0].abs() - kcl - G * 8.0 * t).abs() / ((1e-9 + 1e-3 * (kcl / t).abs()) * t);
+        eprintln!("to {t}: KCL {gap:.3e} W0");
+        assert!(gap <= 1.0, "the PSU's KCL within the coupling's gap: {gap} W0");
+    }
+    let mut e = Engine::load(&p).unwrap();
+    e.charge_arm(&[0, 1]).unwrap();
+    e.advance(5e-3).unwrap();
+    let b = e.take_charge().to_vec();
+    assert_eq!(b[b.len() - 2..], [1.0, 0.0], "the PSU's charge says its KCL is approximate");
+    assert!(e.stat(28) > 0.0, "stat 28 counts the intervals");
+}

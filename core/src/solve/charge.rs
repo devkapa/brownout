@@ -182,6 +182,11 @@ pub(crate) struct ChargeState {
     /// The stepped hub partition whose steps carry the rail, as the last fold
     /// found it (`charge_rail_carrier`): its steps fold the rail's lines.
     carrier: Option<usize>,
+    /// The rail capacitors' charge (as a rail voltage) where the last fold on
+    /// the CC segment left it, to charge them the jump when a rail solve
+    /// re-aims the segment from a stepped hub partition's commit
+    /// (`charge_rail_jump`); `None` while nothing folds them on a segment.
+    rail_q: Option<f64>,
 }
 
 impl ChargeState {
@@ -346,7 +351,7 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new() };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new(), rail_q: None };
         st.interval_devs = (0..st.devs.len() as u32).filter(|&k| matches!(st.devs[k as usize].class, ChargeClass::Mean(_) | ChargeClass::Line(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))).collect();
         st.fixed_caps = (0..self.fixed_pair_capacitors.len() as u32)
             .filter(|&k| {
@@ -553,11 +558,12 @@ impl PartitionedSolver {
         }
     }
 
-    /// Whether a device's current follows the hub rail: a line, or a mean
-    /// with a node on the rail.
+    /// Whether a device's current follows the hub rail: a line, a mean
+    /// with a node on the rail, or a rail capacitor.
     fn charge_on_line(&self, dev: &ArmedDev, line: &[bool]) -> bool {
         match dev.class {
             ChargeClass::Line(_) => true,
+            ChargeClass::FixedCap(j) => self.hub_cap_share(j as usize).is_some(),
             ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].nodes.iter().any(|&n| line[n]),
             ChargeClass::Mean(None) => match (dev.led, dev.ne555) {
                 (Some(k), _) => self.led_devices[k as usize].junctions.iter().any(|j| line[j.anode] || line[j.cathode]),
@@ -607,6 +613,17 @@ impl PartitionedSolver {
         }
         let series = if cap.esr > 0.0 { cap.c * (cap.vc_at(b) - cap.vc_at(a)) / dt } else { 0.0 };
         series + cap.leak_g * cap.d_v
+    }
+
+    /// A rail capacitor's share of the rail capacitors' current, `C_k /
+    /// C_rail` with the sign of the rail at its first pin; `None` for any
+    /// other fixed-pair capacitor.
+    fn hub_cap_share(&self, k: usize) -> Option<f64> {
+        let hub = self.hub.as_ref()?;
+        hub.caps.iter().any(|&(j, _)| j as usize == k).then(|| {
+            let cap = &self.fixed_pair_capacitors[k];
+            (if cap.nodes.0 == hub.node { 1.0 } else { -1.0 }) * cap.c / hub.c_rail
+        })
     }
 
     /// Writes `value` over `v[node]`, keeping what was there.
@@ -720,13 +737,17 @@ impl PartitionedSolver {
         self.charge_fold_held(&mut st, now);
         self.charge_line_regime(&mut st, now);
         self.charge_resolve_rail(&mut st);
-        if st.reads_rail {
+        if st.reads_rail || !st.fixed_caps.is_empty() {
             st.carrier = self.charge_rail_carrier();
         }
+        self.charge_rail_jump(&mut st);
         if t > st.cursor {
             let a = st.cursor;
             self.charge_fold_interval(&mut st, a, t);
             st.cursor = t;
+            if st.rail_q.is_some() {
+                st.rail_q = self.hub.as_ref().and_then(|h| h.state.cap_seg.as_ref()).map(|seg| seg.charge_at(t));
+            }
         }
         if let Some(s) = st.src.as_mut() {
             s.cc_prev = self.cc_hub_current().is_some();
@@ -734,24 +755,87 @@ impl PartitionedSolver {
         self.charge = Some(st);
     }
 
+    /// The rail capacitors' charge at the cursor on the CC segment as it is
+    /// now, against where the last fold left it: a rail solve after a stepped
+    /// hub partition's commit re-aims the segment from the charge that step
+    /// handed it (ruling R68), so the segment the last fold read was only the
+    /// frozen draws' estimate. The difference is the capacitors' own charge
+    /// (their state moved by it), charged to them at once, so a rail
+    /// capacitor's charge is `C dV` of its readout however many stepped hub
+    /// partitions move it. Where one stepped hub partition carries the rail
+    /// its steps fold the capacitors instead (`charge_rail_carrier`).
+    fn charge_rail_jump(&self, st: &mut ChargeState) {
+        let seg = self.hub.as_ref().and_then(|h| h.state.cap_seg.as_ref()).filter(|_| st.carrier.is_none() && !st.fixed_caps.is_empty());
+        let Some(seg) = seg else {
+            st.rail_q = None;
+            return;
+        };
+        let q_now = seg.charge_at(st.cursor);
+        let Some(prev) = st.rail_q.replace(q_now) else { return };
+        let dq = q_now - prev;
+        if dq == 0.0 {
+            return;
+        }
+        let c_rail = self.hub.as_ref().map_or(0.0, |h| h.c_rail);
+        let bucket = usize::from(self.cc_hub_current().is_some());
+        for &j in &st.fixed_caps {
+            let Some(share) = self.hub_cap_share(j as usize) else { continue };
+            let cap = &self.fixed_pair_capacitors[j as usize];
+            let q = share * c_rail * dq;
+            for dev in &st.devs {
+                if matches!(dev.class, ChargeClass::FixedCap(k) if k == j) {
+                    st.q[dev.slot] += q;
+                }
+            }
+            if let Some(src) = st.src.as_mut() {
+                let (u, x) = cap.nodes;
+                if src.rel[u] {
+                    src.lq[bucket][u] += q;
+                }
+                if src.rel[x] {
+                    src.lq[bucket][x] -= q;
+                }
+            }
+        }
+    }
+
     /// The stepped hub partition whose steps carry the rail, if one does: a
     /// PSU in CC with no rail capacitor, its rail set by the one stepped hub
-    /// partition's draws and solved at each point of its steps. The rail's
-    /// lines then fold at that partition's points with its weights, as its
-    /// own draws do, so the PSU's `-dir iLimit` is the KCL of what leaves the
-    /// rail. With several stepped hub partitions each step solves the rail
-    /// against the others' draws held where they last committed, so no one
-    /// trajectory exists: the lines then fold linear between the rail's
-    /// solves (`RailPending`), and the PSU's KCL holds only to the steps'
-    /// coupling error.
+    /// partition's draws and solved at each point of its steps; or a PSU in
+    /// CC with rail capacitors that partition steps as a companion on its
+    /// rail row (ruling R68), handing their charge to the rail solve after
+    /// each commit, so the CC segment between solves is only the frozen
+    /// draws' estimate that the next solve replaces (W2bV: folded on the
+    /// segment, the capacitors' charge missed the jump at each solve, up to
+    /// 1.2e-2 of `C dV`, and the PSU's KCL 1-7 W0). The rail's lines and
+    /// capacitors then fold at that partition's points with its weights, as
+    /// its own draws do (a capacitor at its companion current there), so the
+    /// PSU's `-dir iLimit` is the KCL of what leaves the rail. With several
+    /// stepped hub partitions each step solves the rail against the others'
+    /// draws held where they last committed, so no one trajectory exists:
+    /// the lines then fold linear between the rail's solves (`RailPending`),
+    /// or on the segment, and the PSU's KCL holds only to the steps' coupling
+    /// error.
     pub(crate) fn charge_rail_carrier(&self) -> Option<usize> {
-        if !self.rail_unmodelled() || self.cc_hub_current().is_none() {
+        if !self.charge_rail_stepped() {
             return None;
         }
         match self.stepped.hub_partitions()[..] {
             [p] => Some(p),
             _ => None,
         }
+    }
+
+    /// Whether the stepped hub partitions step the hub rail itself: a PSU in
+    /// CC with no rail capacitor (its rail an unknown of their steps), or
+    /// with rail capacitors and no closed form coupled to them (their charge
+    /// a companion on the steps' rail row, `sync_stepped_cc`).
+    fn charge_rail_stepped(&self) -> bool {
+        if self.cc_hub_current().is_none() {
+            return false;
+        }
+        let stepped_caps = self.hub.as_ref().is_some_and(|h| h.c_rail > 0.0 && h.state.cap_seg.as_ref().is_some_and(|s| s.modes.is_none()) && !h.cf_hubs.iter().any(|&p| h.contrib[p].active));
+        self.rail_unmodelled() || (stepped_caps && self.stepped.any_hub_stepping())
     }
 
     /// Whether the charge reads the hub rail's notes (`log_rail`).
@@ -1072,10 +1156,11 @@ impl PartitionedSolver {
             if let (Some((_, i)), 0.0) = (cc, shift) {
                 src.cc_q += i * dt;
             }
-            // Several stepped hub partitions carry a CC rail with no
-            // capacitor: no one rail trajectory closes the KCL (README,
-            // "Charge"); said in the take and counted (stat 28).
-            if shift == 0.0 && cc.is_some() && st.carrier.is_none() && self.rail_unmodelled() && !src.on_rail.is_empty() {
+            // Several stepped hub partitions step a CC rail (with no
+            // capacitor, or its capacitors as their companion): no one rail
+            // trajectory closes the KCL (README, "Charge"); said in the take
+            // and counted (stat 28).
+            if shift == 0.0 && cc.is_some() && st.carrier.is_none() && self.charge_rail_stepped() && !src.on_rail.is_empty() {
                 src.approximate = true;
                 self.charge_kcl_approx += 1;
             }
@@ -1145,7 +1230,8 @@ impl PartitionedSolver {
                 }
                 publish_stamped_currents(shape, &v, &self.live_params, &mut sc);
                 // The partition carrying the rail: the rail's static lines at
-                // this point's rail, and what follows them weighed here too.
+                // this point's rail, its capacitors at their companion's
+                // current, and what follows them weighed here too.
                 let carries = st.carrier == Some(p);
                 if carries {
                     if let Some(u) = self.hub.as_ref().map(|h| v[h.node]) {
@@ -1155,12 +1241,19 @@ impl PartitionedSolver {
                             }
                         }
                     }
+                    let i_rail = if k == 0 { step.rail_i0 } else { step.knots[k - 1].rail_i };
+                    for &j in &st.fixed_caps {
+                        let Some(share) = self.hub_cap_share(j as usize) else { continue };
+                        debug_assert!(i_rail.is_some(), "charge: a step carrying rail capacitors kept their current at each weighed point");
+                        let cap = &self.fixed_pair_capacitors[j as usize];
+                        sc[cap.device_index] = share * i_rail.unwrap_or(0.0) + cap.leak_g * (v[cap.nodes.0] - v[cap.nodes.1]);
+                    }
                 }
                 for dev in &st.devs {
                     if carries && self.charge_on_line(dev, &st.line_flag) {
                         chs.clear();
                         chs.resize(dev.nch, 0.0);
-                        let cur = self.line_current_on(dev, &v, &drivers, &mut chs);
+                        let cur = if let ChargeClass::FixedCap(j) = dev.class { sc[self.fixed_pair_capacitors[j as usize].device_index] } else { self.line_current_on(dev, &v, &drivers, &mut chs) };
                         st.q[dev.slot] += wk * cur;
                         for (c, &value) in chs.iter().enumerate() {
                             st.q[dev.slot + 1 + c] += wk * value;
@@ -1206,6 +1299,7 @@ impl PartitionedSolver {
         self.charge_fold_steps(&mut st);
         self.charge_fold_held(&mut st, now);
         self.charge_resolve_rail(&mut st);
+        self.charge_rail_jump(&mut st);
         let t1 = st.cursor.max(now);
         Self::charge_close_held(&mut st, t1);
         if let Some(src) = st.src.as_mut() {
@@ -1239,7 +1333,9 @@ impl PartitionedSolver {
         // pending; its charge comes with the take after it commits), and a
         // source's as far as every stepped partition its walk reads.
         let stepped_final = |p: usize| if self.partition_kinds[p] == PartitionKind::Stepped { self.stepped.committed_time(p).map_or(t1, |t| t.min(t1)) } else { t1 };
-        let src_final = st.src.as_ref().map_or(t1, |s| s.parts.iter().fold(t1, |m, &p| m.min(stepped_final(p))));
+        // What the rail's carrier folds is final to its last commit too.
+        let carried_final = st.carrier.map_or(t1, stepped_final);
+        let src_final = st.src.as_ref().map_or(t1, |s| s.parts.iter().fold(carried_final, |m, &p| m.min(stepped_final(p))));
         out.clear();
         out.extend([st.t0, t1]);
         out.extend_from_slice(&st.q);
@@ -1250,6 +1346,7 @@ impl PartitionedSolver {
             let f = match d.class {
                 ChargeClass::Part(p) => stepped_final(p as usize),
                 ChargeClass::Source => src_final.min(src_held),
+                _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => carried_final,
                 _ => t1,
             };
             f.min(held_from(d.slot..d.slot + 1 + d.nch))
@@ -1361,6 +1458,7 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.interval_devs, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carrier, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         n
     }
 }

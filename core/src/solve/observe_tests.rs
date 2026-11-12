@@ -465,7 +465,7 @@ fn a_solve_that_fails_falls_back_to_linear_and_is_counted() {
 
 // ---- piece 3: the rail model (Rails point 4) --------------------------------
 
-fn psu_dev(ci: usize, pos: usize, v: f64, i_limit: f64) -> Device {
+pub(super) fn psu_dev(ci: usize, pos: usize, v: f64, i_limit: f64) -> Device {
     Device { kind: kinds::BENCH_PSU, component_index: ci, pins: vec![pin(pos), pin(0)], params: vec![v, i_limit], blob: vec![] }
 }
 
