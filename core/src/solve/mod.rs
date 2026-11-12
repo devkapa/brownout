@@ -276,6 +276,12 @@ pub trait PartitionSolver {
         false
     }
 
+    /// W2b, D2 at a host's edit completed at `now`: the samples read at
+    /// exactly `now` before it are read again after it.
+    fn reobserve_at(&mut self, now: f64) {
+        let _ = now;
+    }
+
     /// W2b piece 4: arms the charge on `devices` from `now` (`None`
     /// disarms; core/README.md, "Charge").
     fn arm_charge(&mut self, devices: Option<&[usize]>, now: f64) {
@@ -836,6 +842,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
         (**self).take_samples(out)
+    }
+
+    fn reobserve_at(&mut self, now: f64) {
+        (**self).reobserve_at(now)
     }
 
     fn arm_charge(&mut self, devices: Option<&[usize]>, now: f64) {
@@ -5086,6 +5096,20 @@ impl PartitionSolver for PartitionedSolver {
         if notes {
             self.prune_rail_log(keep);
         }
+    }
+
+    fn reobserve_at(&mut self, now: f64) {
+        let Some(mut obs) = self.observer.take() else { return };
+        obs.unread_at(now);
+        if obs.next_time() <= now {
+            // The observer's half of `observe` (the charge folds at the next
+            // one as ever, so a charged run sums the same with or without).
+            self.log_rail(now, true);
+            let moving = self.rail_moving();
+            let targets: Vec<SampleTarget<'_>> = obs.nodes().iter().map(|&n| self.sample_target_of(n, moving)).collect();
+            obs.read_until(now, true, |j, ts| self.sample_target(&targets[j], ts));
+        }
+        self.observer = Some(obs);
     }
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {

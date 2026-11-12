@@ -2106,6 +2106,9 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // was not rolled back: a completed instant, same as any `advance`
         // delta.
         self.publish_settled();
+        // W2b, D2: a sample at this time reads after this instant too
+        // (W2bV finding 5: the clamp had read it before the edit).
+        self.solver.reobserve_at(self.time);
         Ok(())
     }
 

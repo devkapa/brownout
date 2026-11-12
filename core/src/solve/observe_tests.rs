@@ -569,3 +569,47 @@ fn a_rail_its_stepped_draws_move_between_solves_samples_linear_between_its_solve
         }
     }
 }
+
+#[test]
+fn a_sample_at_a_host_edits_time_reads_after_the_edit() {
+    // W2bV finding 5 (D2): an edit at `t` is an instant at `t`, and a sample
+    // on an instant reads the state after it. The clamp of `advance(t)` had
+    // read the sample at `t` before the host set the source there, so it
+    // kept the old value; it is read again after the edit. Taken before the
+    // edit, it went out with the value the run had then.
+    // 0 a 5 V source (node 1), 1 1k 1-2, 2 1k 2-0: node 2 at half the source.
+    let p = program(3, vec![dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]), dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]), dev(kinds::RESISTOR, 2, 2, 0, vec![1000.0])]);
+    let mut e = Engine::load(&p).unwrap();
+    e.acquire(&[2], 0.0, 1e-3, 0).unwrap();
+    e.advance(2e-3).unwrap();
+    e.set_params(&[(0, 0, 10.0)]).unwrap();
+    e.advance(4e-3).unwrap();
+    let k = take(&mut e, 1);
+    assert_eq!(k.t, vec![0.0, 1e-3, 2e-3, 3e-3, 4e-3]);
+    let half = |v: f64| v / 2.0;
+    for (s, &want) in [half(5.0), half(5.0), half(10.0), half(10.0), half(10.0)].iter().enumerate() {
+        assert!((k.v[0][s] - want).abs() <= 1e-6, "at {}: {} against {want}", k.t[s], k.v[0][s]);
+    }
+    // A take between the clamp and the edit delivered the sample at `t`.
+    let mut e = Engine::load(&p).unwrap();
+    e.acquire(&[2], 0.0, 1e-3, 0).unwrap();
+    e.advance(2e-3).unwrap();
+    let before = take(&mut e, 1);
+    e.set_params(&[(0, 0, 10.0)]).unwrap();
+    e.advance(4e-3).unwrap();
+    let after = take(&mut e, 1);
+    assert_eq!((before.t.last().copied(), after.t.first().copied()), (Some(2e-3), Some(3e-3)));
+    assert!((before.v[0][2] - 2.5).abs() <= 1e-6);
+    // Not taken, an edit away from the grid leaves the samples alone, and a
+    // full queue's dropped sample at `t` is not counted twice.
+    let mut e = Engine::load(&p).unwrap();
+    e.acquire(&[2], 0.0, 1e-3, 2).unwrap();
+    e.advance(2e-3).unwrap();
+    e.set_params(&[(0, 0, 10.0)]).unwrap();
+    e.advance(2.5e-3).unwrap();
+    e.set_params(&[(0, 0, 6.0)]).unwrap();
+    e.advance(4e-3).unwrap();
+    let k = take(&mut e, 1);
+    assert_eq!(k.t, vec![0.0, 1e-3]);
+    assert_eq!(k.dropped, 3.0, "2, 3 and 4 ms dropped once each");
+}

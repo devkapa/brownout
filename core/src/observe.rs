@@ -168,6 +168,31 @@ impl Observer {
         self.max_span = 0.0;
     }
 
+    /// D2 at a host's edit: the samples already read at exactly `now` (the
+    /// clamp reads its `t_end`) go back to be read again after the edit's
+    /// instant, which is at the same time and after them. A stored one
+    /// leaves the queue (its fallbacks, the last row read, uncounted), a
+    /// dropped one leaves the count; one already taken stays the host's.
+    pub fn unread_at(&mut self, now: f64) {
+        let n = self.nodes.len();
+        while self.next > 0 && self.origin + (self.next - 1) as f64 * self.interval == now {
+            if self.times.last() == Some(&now) {
+                self.times.pop();
+                self.values.truncate(self.times.len() * n);
+                for (f, &b) in self.fallbacks.iter_mut().zip(&self.row_fallback) {
+                    *f -= u64::from(b && *f > 0);
+                }
+                self.row_fallback.iter_mut().for_each(|b| *b = false);
+            } else if self.dropped > 0 && self.times.len() >= self.limit {
+                self.dropped -= 1;
+            } else {
+                // Taken already: the host has it.
+                return;
+            }
+            self.next -= 1;
+        }
+    }
+
     pub fn mark(&self) -> Mark {
         Mark { len: self.times.len(), next: self.next, dropped: self.dropped, max_span: self.max_span, fallbacks: self.fallbacks.clone() }
     }
