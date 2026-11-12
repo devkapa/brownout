@@ -323,6 +323,10 @@ pub(crate) struct DenseSeg {
     /// the step (`None`: the solve failed, the sample is linear), R104 as
     /// ruled for a node no capacitor's voltage gives.
     solved: Vec<(f64, Option<Vec<f64>>)>,
+    /// Planned before the observer armed, in an iterated partition: its
+    /// nodes no capacitor's voltage gives read linear across it, beyond W0
+    /// (3.40 W0 measured), so each such sample counts as a fallback.
+    pre_arm: bool,
 }
 
 impl DenseSeg {
@@ -366,6 +370,9 @@ impl DenseSeg {
     fn value(&self, shape: &DynShape, l: usize, t: f64) -> (f64, bool) {
         let plate = plate_of(shape, l);
         if plate.is_none() {
+            if self.pre_arm {
+                return (self.interpolate(shape, l, t, None), t > self.t0 && t < self.end());
+            }
             if let Some((_, solved)) = self.solved.iter().find(|s| s.0 == t) {
                 return match solved {
                     Some(x) => (x[l], false),
@@ -2295,6 +2302,7 @@ impl SteppedSolver {
     fn dense_seg_taken(&mut self, p: usize) -> DenseSeg {
         let PendDense { mut knots, solved, .. } = std::mem::take(&mut self.partitions.get_mut(&p).expect("a committing partition").pend_dense);
         let part = &self.partitions[&p];
+        let pre_arm = knots.is_empty() && part.iterated();
         if knots.is_empty() {
             // Planned before the observer read it: its ends only, which hold
             // each capacitor's voltage and current, so its plates read the
@@ -2308,7 +2316,7 @@ impl SteppedSolver {
         let steady = !part.hub && self.ramps.is_none();
         let affine = steady && part.shape.capacitors.len() == 1 && !part.iterated();
         let sens = part.sens.as_ref().map(|s| (s.s.clone(), s.u_p));
-        DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine, sens }
+        DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine, sens, pre_arm }
     }
 
     /// Partition `p`'s pending step as it commits, for the charge: its start,
@@ -3051,7 +3059,7 @@ impl SteppedSolver {
                 if self.dense_on.get(p_idx).copied().unwrap_or(false) {
                     // A seed is the partition's state from its instant on
                     // (a discontinuity: right-continuous, D2).
-                    self.dense.push(DenseSeg { p: p_idx, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots: Vec::new(), solved: Vec::new(), steady: false, affine: false, sens: None });
+                    self.dense.push(DenseSeg { p: p_idx, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots: Vec::new(), solved: Vec::new(), steady: false, affine: false, sens: None, pre_arm: false });
                 }
                 // A seed holds the rail capacitors' charge where it stands
                 // (ruling R68): the next step starts from it. Read from the
@@ -4224,7 +4232,7 @@ impl SteppedSolver {
             let mut solved = Vec::new();
             let dense_solve = dense_on && self.dense_solve.get(p_idx).copied().unwrap_or(false);
             if let (true, Some((origin, interval))) = (dense_solve && part.iterated() && !part.hub && ramps.is_none(), self.dense_grid) {
-                let seg = DenseSeg { p: p_idx, t0, x0: x0.clone(), vc0: vc0.clone(), i0: i_prev.clone(), knots: knots.clone(), solved: Vec::new(), steady: true, affine: false, sens: None };
+                let seg = DenseSeg { p: p_idx, t0, x0: x0.clone(), vc0: vc0.clone(), i0: i_prev.clone(), knots: knots.clone(), solved: Vec::new(), steady: true, affine: false, sens: None, pre_arm: false };
                 let mut k = ((t0 - origin) / interval).floor().max(0.0) as u64;
                 loop {
                     let ts = origin + k as f64 * interval;
@@ -5409,6 +5417,7 @@ impl crate::snapshot::HeapBytes for DenseSeg {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.affine, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sens, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pre_arm, w); }
         n
     }
 }

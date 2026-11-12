@@ -1412,7 +1412,9 @@ export class CoreEngine implements EngineReadout {
    * W2b: every sample final since the last take, in time order, and the
    * queue emptied; `null` while disarmed. `maxSpan` is the widest step a
    * stepped net's samples were interpolated across, `fallbacks` per net the
-   * samples read linear where R104's solve failed.
+   * samples read linear where R104's solve failed or was not there to run
+   * (inside the step in flight when the observer armed): approximate, past
+   * W0.
    */
   takeSamples(): CoreSamples | null {
     this._requireLoaded();
@@ -1711,7 +1713,7 @@ export interface CoreSamples {
   /** Whether the queue filled, and how many samples were dropped (the newest; the oldest are kept). */
   readonly overflowed: boolean;
   readonly dropped: number;
-  /** Net id -> its samples read linear where R104's solve failed. */
+  /** Net id -> its samples read linear where R104's solve failed, or inside the step in flight when the observer armed: approximate. */
   readonly fallbacks: Readonly<Record<string, number>>;
 }
 

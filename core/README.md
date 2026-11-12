@@ -1283,7 +1283,9 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
   every index, a full queue's skip and the first after arming too, is
   decided by the grid times themselves, not by a rounded quotient (W2bV),
   and an interval too fine for `u64` indices saturates rather than wraps.
-  `maxSpan` is the widest stepped step a sample was read across.
+  `maxSpan` is the widest stepped step a sample was read across; a node's
+  fallbacks count its samples read linear past W0 (R104's solve failed, or
+  inside the step in flight when the observer armed, below).
 - **A sample** at `t_s` between two completed instants is the model's state
   there, read off what the solver holds: a fixed node's value (a running
   ramp's line), a static node held, a closed-form node its segment's exact
@@ -1304,7 +1306,9 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
   voltage's W0 of 100 uV + 1e-3 |v|). The limit: an iterated partition's
   other nodes read linear across that one step, since their scratch solves
   need the step's own context, gone by then; measured 3.40 W0 (an LED's
-  cathode with no capacitor at turn-on), the samples after it as any.
+  cathode with no capacitor at turn-on), each such sample inside the step
+  counted on the node's fallbacks (a must-close item), the samples after it
+  as any.
 - **Passive.** Nothing is stepped, cut or re-solved for a sample (an
   iterated partition's scratch solve keeps nothing): a probed run is the
   unprobed run bit for bit.
@@ -1365,7 +1369,13 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   4 probes at 10 kS/s with the means +12.3 %. Unarmed, the core is gated
   within noise of its base (the sap1-cost gate; +0.7 % measured against
   2f62f88); armed, the budget case must stay within +15 %
-  (`bench:probe-cost -- --gate`). What remains at 10 kS/s is a floor per
+  (`bench:probe-cost -- --gate`). Where wall time is too noisy to read a few
+  per cent (a desktop with a browser running), count instructions retired
+  instead (`/usr/bin/time -l` on one case run in-process, `node --import tsx`,
+  30 simulated seconds, head and base interleaved; run spread about 0.4 %):
+  after the W2bV fixes (68bc58b, 4c532a1 the base) unarmed -0.25 % (equal:
+  nothing new runs unarmed), the budget case +0.8 %, so about +13 % over
+  unarmed against 4c532a1's measured +12.3 %. What remains at 10 kS/s is a floor per
   instant and per take, not per sample (an optimisation item below).
 - **Folding.** At the kernel's `observe` calls, between instants: the steps
   committed since, the held currents the last instant changed, and the
@@ -6680,12 +6690,21 @@ failures and warnings (W1g)"):
 ## Open items (must close before 1.0.0)
 
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
-  partitions on a CC rail with no capacitor each solve the rail against the
-  others' draws held, so no one rail trajectory exists and a source's charge
-  closes its KCL only to the steps' coupling error (measured 1.88 W0 on
-  `two_stepped_hubs_on_a_cc_rail_with_no_capacitor_fold_its_lines_linear_between_its_solves`),
-  flagged `kcl_approximate` in the take and counted in stat 28. Closing it
-  needs the stepped hub partitions on such a rail solved together.
+  partitions on a CC rail (with no capacitor, or stepping its capacitors as
+  their companion) each solve the rail against the others' draws held, so
+  no one rail trajectory exists and a source's charge closes its KCL only to
+  the steps' coupling error (measured 1.88 W0 on
+  `two_stepped_hubs_on_a_cc_rail_with_no_capacitor_fold_its_lines_linear_between_its_solves`,
+  0.52 W0 with a rail capacitor), flagged `kcl_approximate` in the take and
+  counted in stat 28. Closing it needs the stepped hub partitions on such a
+  rail solved together.
+
+- **The step planned before the observer armed** (W2b, "Acquisition",
+  W2bV 6a). It kept no points, so an iterated partition's nodes no
+  capacitor's voltage gives read linear across it: measured 3.40 W0 (an
+  LED's cathode at turn-on), counted on the node's fallbacks so a host sees
+  it. Closing it needs the step's knots kept (or the step re-planned
+  passively) whenever it may be armed into.
 
 - **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
   A backward Euler stepped partition's step-doubling bounds its node

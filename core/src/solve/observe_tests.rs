@@ -659,25 +659,40 @@ fn a_step_planned_before_arming_samples_by_its_capacitors_hermite() {
     };
     // W0 for a voltage as the verifier read it, 100 uV + 1e-3 |v|, against
     // the same run armed from the start, per node.
-    let worst = |p: &Program| {
+    let worst = |p: &Program, cathode_counted: bool| {
         let all = run(p, None);
+        assert_eq!(all.fallbacks, vec![0.0, 0.0], "armed from the start: no fallback");
         let mut worst = [0.0f64; 2];
+        let mut counted = 0.0;
         for arm in [3, 11, 25] {
             let late = run(p, Some(arm));
             assert!(!late.t.is_empty());
+            // A non-plate node read linear across the step planned before
+            // arming counts as a fallback, so a host sees it is approximate:
+            // any sample off the run armed from the start is counted.
+            assert_eq!(late.fallbacks[0], 0.0, "a plate is no fallback");
             let k0 = all.t.iter().position(|&t| t == late.t[0]).expect("the same grid");
+            let mut off = [0.0f64; 2];
             for (s, &t) in late.t.iter().enumerate().take(40) {
                 assert_eq!(all.t[k0 + s], t);
                 for j in 0..2 {
                     let (got, want) = (late.v[j][s], all.v[j][k0 + s]);
-                    worst[j] = worst[j].max((got - want).abs() / (1e-4 + 1e-3 * want.abs()));
+                    off[j] = off[j].max((got - want).abs() / (1e-4 + 1e-3 * want.abs()));
                 }
             }
+            if cathode_counted {
+                assert_eq!(off[1] > 0.0, late.fallbacks[1] > 0.0, "armed after {arm}: the cathode off by {} W0 with {} fallbacks", off[1], late.fallbacks[1]);
+                counted += late.fallbacks[1];
+            } else {
+                assert_eq!(late.fallbacks[1], 0.0);
+            }
+            worst = [worst[0].max(off[0]), worst[1].max(off[1])];
         }
+        assert!(!cathode_counted || counted > 0.0, "some arming lands a sample in the step planned before it");
         worst
     };
-    let w = worst(&plates);
-    let c = worst(&cathode);
+    let w = worst(&plates, false);
+    let c = worst(&cathode, true);
     eprintln!("armed mid-step against armed from the start: plates {w:?} W0; cathode no plate {c:?} W0");
     // Measured: 0.49 (the cathode's turn-on curve, which one Hermite across
     // a TR-BDF2 step overshoots by 50 uV); linear between the ends, 11.4.
