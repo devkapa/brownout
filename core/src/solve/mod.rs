@@ -5036,7 +5036,10 @@ impl PartitionSolver for PartitionedSolver {
         if self.observer.is_none() && self.charge.is_none() {
             return;
         }
-        self.log_rail(now, inclusive);
+        let notes = self.observer.is_some() || self.charge_reads_rail();
+        if notes {
+            self.log_rail(now, inclusive);
+        }
         // The rail notes the observer and the charge still read.
         let mut keep = f64::INFINITY;
         if self.charge.is_some() {
@@ -5051,7 +5054,9 @@ impl PartitionSolver for PartitionedSolver {
             keep = keep.min(obs.next_time());
             self.observer = Some(obs);
         }
-        self.prune_rail_log(keep);
+        if notes {
+            self.prune_rail_log(keep);
+        }
     }
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
@@ -5264,6 +5269,13 @@ impl PartitionSolver for PartitionedSolver {
     fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
         checkpoint.downcast::<WindowToken>().expect("a checkpoint made by this solver's begin_instant");
         debug_assert!(self.window, "end_instant without an open window");
+        // W2b piece 4: the held currents this instant moved, off its logs.
+        if self.charge.is_some() {
+            let holds = self.hold_counts();
+            if let Some(st) = self.charge.as_mut() {
+                st.note_instant(&self.v_log, &self.i_log, holds);
+            }
+        }
         #[cfg(test)]
         self.check_logs_reproduce_the_window_start();
         self.close_window();
