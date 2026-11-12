@@ -1310,7 +1310,10 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
 `solve/charge_tests.rs`). A mean is a charge over its span.
 
 - **Arm.** `bo_engine_charge_arm(h, devices, n)`, from the engine's time on;
-  re-arming drops what was not taken, `n` 0 disarms, a load disarms.
+  re-arming drops what was not taken, `n` 0 disarms, a load disarms. A
+  device's charge does not depend on what else is armed: when anything that
+  follows the hub rail is armed, every stepped hub partition keeps its steps
+  for the charge, since any of them may carry the rail (W2bV).
   Unarmed, nothing runs but an `Option` test at each instant; a charged run
   is the uncharged run bit for bit.
 - **Take.** `[t0, t1, then per device its charge and its channel slots' in

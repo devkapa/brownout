@@ -344,6 +344,19 @@ impl PartitionedSolver {
             slot += 1 + nch;
         }
         let src = self.source_terms(devices, &mut parts, &mut reads, &mut line_nodes);
+        // Whatever follows the hub rail (a line, a mean on it, a rail
+        // capacitor, a source's walk) folds at a carrier's points while one
+        // stepped hub partition carries the rail (`charge_rail_carrier`), so
+        // every stepped hub partition keeps its steps for the charge, however
+        // little of it is armed (W2bV: a resistor across the rail armed alone
+        // read 0, its carrier's steps never kept).
+        if let Some(rail) = rail {
+            let hub_cap = |d: usize| self.fixed_pair_capacitors.iter().any(|c| c.device_index == d && (c.nodes.0 == rail || c.nodes.1 == rail));
+            let follows = src.is_some() || devs.iter().any(|d| matches!(d.class, ChargeClass::Line(_) | ChargeClass::Mean(_)) || (matches!(d.class, ChargeClass::FixedCap(_)) && hub_cap(d.device)));
+            if follows {
+                parts.extend(self.stepped.all_hub_partitions());
+            }
+        }
         parts.sort_unstable();
         parts.dedup();
         line_nodes.sort_unstable();

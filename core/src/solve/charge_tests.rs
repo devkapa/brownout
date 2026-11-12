@@ -687,3 +687,34 @@ fn two_stepped_hubs_on_a_cc_rail_with_capacitors_charge_them_c_dv_and_say_the_kc
     assert_eq!(b[b.len() - 2..], [1.0, 0.0], "the PSU's charge says its KCL is approximate");
     assert!(e.stat(28) > 0.0, "stat 28 counts the intervals");
 }
+
+#[test]
+fn a_device_armed_alone_charges_as_it_does_armed_with_everything() {
+    // W2bV finding 2: a resistor across a CC rail with no capacitor, armed
+    // alone, read 0 (its carrier's steps were kept only when a device of
+    // that partition or a source was armed too).
+    let mut two = cc_rail_cap_led(47e-6, 0.02);
+    two.devices.remove(1);
+    two.devices.push(dev(kinds::RESISTOR, 7, 1, 4, vec![137.0]));
+    two.devices.push(dev(kinds::CAPACITOR, 8, 4, 0, vec![4.4e-6, 0.0, 0.0]));
+    two.node_count = 5;
+    let boards = [
+        ("cc rail, no capacitor, stepped", cc_rail_no_cap()),
+        ("cc rail, capacitor, led", cc_rail_cap_led(47e-6, 0.02)),
+        ("cc rail, no capacitor, led", { let mut p = cc_rail_cap_led(47e-6, 0.02); p.devices.remove(1); p }),
+        ("cc rail, no capacitor, two hubs", two),
+        ("cc rail", cc_rail()),
+        ("cell rail, stepped", stepped(cell_rail(), false)),
+    ];
+    let steps = [0.37e-3, 1e-3, 5e-3];
+    for (name, p) in boards {
+        let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+        let (_, qa) = charge(&p, &all, &steps);
+        for &d in &all {
+            let (_, q) = charge(&p, &[d], &steps);
+            assert_eq!(qa.len(), all.len(), "{name}: no channel slots");
+            let k = d as usize;
+            assert!((q[0] - qa[k]).abs() <= 1e-12 * qa[k].abs(), "{name}: device {d} alone {:e} against {:e} with everything", q[0], qa[k]);
+        }
+    }
+}

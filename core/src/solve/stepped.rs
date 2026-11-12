@@ -2441,6 +2441,12 @@ impl SteppedSolver {
         self.partitions.values().any(|p| p.hub && !p.parked)
     }
 
+    /// Every stepped hub partition, parked or not (W2b's charge: any of
+    /// them may come to carry the rail).
+    pub(crate) fn all_hub_partitions(&self) -> impl Iterator<Item = usize> + '_ {
+        self.partitions.iter().filter(|(_, p)| p.hub).map(|(&p, _)| p)
+    }
+
     pub(crate) fn hub_partitions(&self) -> Vec<usize> {
         let mut out: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub && !p.parked).map(|(&p, _)| p).collect();
         out.sort_unstable();
