@@ -6758,6 +6758,25 @@ failures and warnings (W1g)"):
   seed keeps the 1 ps companion's current, so the CC step at an exit seed
   overshoots the setpoint (corpus 47 publishes about 1e8 A there, at
   26ed5ee and after W2c alike).
+- **Threshold-aware battery rail cadence** (rulings R105, R108). A cell's
+  rail re-solves at every 10 uV of its coupled path's motion
+  (`RAIL_DRIFT_V`), about 32,000 times a simulated second on the battery
+  SAP-1 and most of its cost (1.0-1.4 s of CPU per simulated second
+  natively). Re-solving instead on the path's own cadence (R105 C2: a time
+  step `sqrt(2 RAIL_DRIFT_V / |rho_dot|)` for the drain line's change, 10 uV
+  only with direct draws, every curved partition's band and the scan band as
+  rail thresholds, the cell's charge integrated along the path) cut that
+  cost by 51-58 % and kept the gate's tests within a tenth of W0's
+  allowance, but on 700 battery cold boards (0.3 s, against exact mode at a
+  1 us host step) it moved every 555 astable on a cell (template 6) far
+  past today's error (74/6: 0.06 to 31,354 W0 on its voltages; 45/6's rail
+  0.001 to 16.4 W0), plus five boards' currents (26/5 0.31 to 1.09 W0):
+  the 555's thresholds ride the rail, and its timing capacitor's crossings
+  were scheduled on the drain line against thresholds read at the last
+  solve, so the oscillation slips in phase. Closing it needs the cadence to
+  re-solve wherever a watched IC's rail-borne threshold could be crossed
+  within it. Variants A, B, C and C2 and their numbers: drafts
+  `battery-rail-cadence.md`; patches in int-acc-logs/r105.
 
 ## Deferred past 1.0.0
 
