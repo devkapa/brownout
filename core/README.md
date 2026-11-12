@@ -1299,9 +1299,12 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
   (D2). A stepped node's sample waits for its later commit, so a yield can
   leave samples pending; the horizon clamp flushes them. A step planned
   before the observer armed kept no points: its plates read the cubic
-  Hermite across the whole step from its ends' capacitor currents, an
-  iterated partition's other nodes linear (W2bV: linear, 11.4 W0 off a run
-  armed from the start; Hermite 0.49).
+  Hermite across the whole step from its ends' capacitor currents (W2bV:
+  linear, 11.4 W0 off a run armed from the start; Hermite 0.49, at a
+  voltage's W0 of 100 uV + 1e-3 |v|). The limit: an iterated partition's
+  other nodes read linear across that one step, since their scratch solves
+  need the step's own context, gone by then; measured 3.40 W0 (an LED's
+  cathode with no capacitor at turn-on), the samples after it as any.
 - **Passive.** Nothing is stepped, cut or re-solved for a sample (an
   iterated partition's scratch solve keeps nothing): a probed run is the
   unprobed run bit for bit.
