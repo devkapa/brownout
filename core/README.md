@@ -1304,7 +1304,7 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
 - **Interactions.** A rolled-back instant reads no sample. A run split by
   `advance_for` yields reads the same samples. A snapshot carries the queue
   and the arming (a restore retakes from there). A host's edit (a live V
-  set, any ) is an instant at the engine's time: samples on and
+  set, any `bo_engine_set_params`) is an instant at the engine's time: samples on and
   after it see the new value, so one at that time the horizon clamp had
   already read is read again after the edit (W2bV, D2); one a take already
   delivered stays the host's, with the value the run had then.
