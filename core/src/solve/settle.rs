@@ -2823,6 +2823,37 @@ impl PartitionedSolver {
     /// the settle that follows (every device is visited there). A rollback
     /// leaves them hot: a hot device that cannot be stressed only costs its
     /// visits.
+    /// W2c, live V: the `output_sag` power of every IC on constant supplies,
+    /// judged again at their present values (the free verdict, as at load;
+    /// a hold still overrides it in [`Self::sag_power`]). A set moves a
+    /// constant supply; so does its rollback, back. Without it an IC a set
+    /// took out of its window kept the power it had at load, and its outputs
+    /// latched `output_sag` where a reload onto that voltage latches none
+    /// (W2cV, corpus 02).
+    pub(super) fn rejudge_const_power(&mut self) {
+        let mut changed: Vec<(usize, digital::power::IcPower)> = Vec::new();
+        for (k, e) in self.slow_model.sag_ics.iter().enumerate() {
+            let Some(old) = e.const_power else { continue };
+            let ic = &self.ics[e.pos].1;
+            let p = digital::power::ic_power(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            if p != old {
+                changed.push((k, p));
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        let model = &mut *self.slow_model;
+        for (k, p) in changed {
+            let e = &mut model.sag_ics[k];
+            e.const_power = Some(p);
+            let (first, n) = (e.first, e.outputs.len());
+            for cell in &mut model.cells[first..first + n] {
+                (cell.power, cell.v_gnd, cell.vih, cell.vil) = (if p.powered { POWER_ON } else { POWER_OFF }, p.v_gnd, p.vih, p.vil);
+            }
+        }
+    }
+
     pub(super) fn rederive_cold(&mut self, now: f64) {
         if !self.slow_model.devs.iter().any(|sd| sd.cold) {
             return;

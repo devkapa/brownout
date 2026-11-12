@@ -62,6 +62,10 @@ fn live_param_against_reload(name: &str, p: &Program, device: usize, param: usiz
         for (d, (&g, &w)) in live.currents().iter().zip(reload.currents()).enumerate() {
             assert!(w0_amps(g, w), "{name} at {t}: device {d} {g} A against the reload's {w} A");
         }
+        // The fault records too: which devices latched what, on which pin
+        // (their times are each run's own).
+        let latched = |e: &mut Engine| e.records(0).unwrap().chunks(7).map(|r| (r[0], r[1], r[2], r[6])).collect::<Vec<_>>();
+        assert_eq!(latched(&mut live), latched(&mut reload), "{name} at {t}: the fault records");
     }
 }
 
@@ -210,5 +214,56 @@ fn each_switch_kind_set_live_runs_on_as_a_carrying_reload() {
         let mut stepped = p.clone();
         stepped.options.force_stepped = true;
         live_param_against_reload(&format!("{name} stepped"), &stepped, 3, param, v, 3e-3, &[3e-3 + 2e-8, 3e-3 + 1e-6, 4e-3, 8e-3]);
+    }
+}
+
+#[test]
+fn a_live_voltage_that_takes_an_ic_supply_out_of_its_window_latches_no_sag() {
+    // W2cV (corpus 02, vcc_5v to 4.0 or 6.0): a 74LS04 on the edited 5 V,
+    // its inputs grounded, so every output HIGH into 10k. Out of its window
+    // (4.75 .. 5.25 V) it is unpowered and drives nothing, so a reload onto
+    // 4 V or 6 V latches no output_sag; a set must not either.
+    let p = program(4, 6, vec![
+        dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+        ic(kinds::IC_74LS04, 1, 1, 0, [0, 2, 0, 3, 0, 3, 0, 3, 0, 3, 0, 3], 1e-8, 0),
+        dev(kinds::RESISTOR, 2, 2, 0, vec![1e4]),
+        dev(kinds::RESISTOR, 3, 3, 0, vec![1e4]),
+    ]);
+    for v in [4.0, 6.0, 4.9] {
+        live_against_reload(&format!("74LS04 at {v} V"), &p, 0, v, 1e-3, &[1e-3 + 2e-8, 1.5e-3, 3e-3]);
+    }
+}
+
+#[test]
+fn a_live_voltage_redecides_the_power_of_an_ic_whose_free_supply_it_moves() {
+    // W2cV (corpus 39): 5 V through 1k to a 74LS04's VCC (a free node), its
+    // 1Y on a fixed 4.5 V. Powered, it draws through the 1k (4.56 V). Set to
+    // 7 V the supply has two consistent states: powered and drawing (4.83 V)
+    // or off and drawing nothing (7 V). A reload decides it from the start,
+    // off (7 V, as classic); a set decides it as the reload does.
+    let p = program(5, 6, vec![
+        dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+        dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]),
+        dev(kinds::VOLTAGE_SOURCE, 2, 3, 0, vec![4.5]),
+        ic(kinds::IC_74LS04, 3, 2, 0, [0, 3, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4], 1e-8, 0),
+        dev(kinds::RESISTOR, 4, 4, 0, vec![1e4]),
+    ]);
+    for v in [7.0, 9.5, 5.5, 3.0, 0.0] {
+        live_against_reload(&format!("free vcc at {v} V"), &p, 0, v, 1e-3, &[1e-3 + 1e-6, 1.1e-3, 2e-3]);
+    }
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(1e-3).unwrap();
+    e.set_params(&[(0, 0, 7.0)]).unwrap();
+    e.advance(2e-3).unwrap();
+    assert!((e.voltages()[2] - 7.0).abs() < 1e-6, "off at 7 V: {}", e.voltages()[2]);
+    // The same supply in a stepped partition (1k and 1 uF hang off VCC): its
+    // seed decides it as the reload's does, powered (4.73 V just after the
+    // set, against 5.75 V off).
+    let mut q = p.clone();
+    q.node_count = 6;
+    q.devices.push(dev(kinds::RESISTOR, 5, 2, 5, vec![1000.0]));
+    q.devices.push(dev(kinds::CAPACITOR, 6, 5, 0, vec![1e-6, 0.0, 0.0]));
+    for v in [7.0, 5.5, 0.0] {
+        live_against_reload(&format!("stepped free vcc at {v} V"), &q, 0, v, 10e-3, &[10e-3 + 1e-6, 10.1e-3, 12e-3]);
     }
 }

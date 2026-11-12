@@ -5176,6 +5176,7 @@ impl PartitionSolver for PartitionedSolver {
         }
         if self.source_set {
             self.sync_static_fixed();
+            self.rejudge_const_power();
         }
         if self.live_caps {
             for (cap, &(d_v, vc0, t0)) in self.fixed_pair_capacitors.iter_mut().zip(&self.w_caps) {

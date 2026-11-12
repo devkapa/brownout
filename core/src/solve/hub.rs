@@ -2686,6 +2686,7 @@ impl PartitionedSolver {
         let mut readers: Vec<DeviceId> = Vec::new();
         self.sync_static_fixed();
         if !changed.is_empty() {
+            self.rejudge_const_power();
             // The caches hold every constant fixed node as it was at load.
             self.closed_form.bump_boundary_epoch();
             // Rule-2a capacitors: a window that did not journal them (no live
@@ -2705,6 +2706,13 @@ impl PartitionedSolver {
             for (p, nodes) in self.fixed_reads.iter().enumerate() {
                 if nodes.iter().any(|&n| moved[n as usize]) {
                     dirty.push(PartitionId(p as u32));
+                    // An IC supply it holds moves: its power is decided
+                    // again, as a reload decides it. (A stepped partition's
+                    // seed already does: the live-V test's stepped case runs
+                    // on as the reload with no change.)
+                    if self.partition_kinds[p] == PartitionKind::Static {
+                        self.static_solver.cold_start(p);
+                    }
                 }
             }
             for (node, ics) in build_ic_reader_index(&self.ics) {

@@ -486,6 +486,11 @@ pub struct StaticPartitionSolver {
     /// to a fixed point instead of solving it once and reading (or writing)
     /// the solution cache — see `Self::iterated_solve`.
     holds_free_ic_supply: crate::shared::Shared<[bool]>,
+    /// W2c, live V: free-supply partitions whose next solve starts where a
+    /// load starts it (every node at 0 V), not from the published values:
+    /// a set moved a supply, and the ICs' power is decided again as a reload
+    /// decides it ([`Self::cold_start`]).
+    cold_start: Vec<bool>,
     /// partition index -> every stamped LED junction touching it, resolved
     /// against it (W1e, LEDs point 4); empty for a partition this solver does
     /// not own and for one holding none. A non-empty entry makes the
@@ -934,6 +939,7 @@ impl StaticPartitionSolver {
             cache_hits: 0.0,
             ics: ics.into(),
             holds_free_ic_supply: holds_free_ic_supply.into(),
+            cold_start: vec![false; partitions_len],
             junctions: partition_junctions.into(),
             kcl_junctions: kcl_junctions.into(),
             newton_iterations: 0,
@@ -1285,6 +1291,7 @@ impl StaticPartitionSolver {
     /// a slot written twice ends at its first pre-image), and the next resolve
     /// recomputes and checks everything, as after [`PartitionSolver::restore`].
     pub(crate) fn rollback_window(&mut self) {
+        self.cold_start.fill(false);
         for &(node, bits) in self.v_log.iter().rev() {
             self.voltages[node as usize] = f64::from_bits(bits);
         }
@@ -2177,7 +2184,8 @@ impl StaticPartitionSolver {
     /// `flips` when given.
     fn newton_in(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], mut flips: Option<&mut crate::solve::hold::Flips>) -> Result<(Vec<f64>, lu::LuFactorization), String> {
         let size = self.partitions[p_idx].len();
-        let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| self.voltages[n]).collect();
+        let cold = std::mem::take(&mut self.cold_start[p_idx]);
+        let x0: Vec<f64> = self.partitions[p_idx].iter().map(|&n| if cold { 0.0 } else { self.voltages[n] }).collect();
         let polish = !self.junctions[p_idx].is_empty();
         // Classic's loop restamps each IC stamp at the iterate's supply, its
         // slope in that supply left out. Where that does not converge, the
@@ -2239,6 +2247,18 @@ impl StaticPartitionSolver {
 
     /// Queues a boundary node's new value for the next resolve, which writes
     /// it before it solves anything (README, Rails point 7).
+    /// W2c, live V (W2cV, corpus 39): partition `p`'s next solve starts as
+    /// at load when it holds a free IC supply. The supply a set moved can
+    /// have two consistent states (an IC powered and drawing through a
+    /// resistor, or off and drawing nothing); a solve from the published
+    /// values keeps the IC's old power, where a reload decides it afresh.
+    pub(crate) fn cold_start(&mut self, p: usize) {
+        if self.holds_free_ic_supply.get(p).copied().unwrap_or(false) {
+            self.cold_start[p] = true;
+            self.full = true;
+        }
+    }
+
     pub(crate) fn set_boundary(&mut self, node: usize, value: f64) {
         self.pending_bnd.push((node, value));
     }
@@ -4011,6 +4031,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_hits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ics, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_free_ic_supply, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cold_start, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_junctions, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.newton_iterations, w); }

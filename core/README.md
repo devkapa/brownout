@@ -1135,7 +1135,11 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   afresh, as classic's `contentsHash`. Warnings of components whose id and
   kind survive carry, not announced again. A load given `options.simTime`,
   `coldLoad()` (time 0, as classic's) and a core without the carry exports
-  carry nothing.
+  carry nothing. A take that fails (its clamp to the engine's time, `-4` or
+  `-7`) is the load's failure, never a silent cold load: the facade throws
+  `CoreUnsupportedError` with `carry:` reasons and holds no program, as
+  after a load-time solve failure, so the host routes the edit as it routes
+  one (to classic, whose own load carries) or calls `coldLoad()`.
 - **Cost** (2026-11-12, against 26ed5ee, 5 interleaved reps on a quiet
   machine). A carrying reload of the SAP-1 takes 14.7 ms (ideal) and 18.1
   ms (battery) of CPU against 11.7 and 15.5 ms for a cold one before W2c
@@ -1225,14 +1229,31 @@ event like every set, which ends the host step in flight (R86).
   and the solution caches (static and closed-form) take a new epoch: no
   key holds a constant node. Every slow device is driven afresh at the
   settle, as at load.
+- **IC power.** A set decides the power of each IC whose supply it moves
+  as a reload onto the new `V` does. An IC on constant supplies takes its
+  `output_sag` power afresh at the new values (and back at a rollback):
+  out of its window it drives nothing, so its outputs latch no sag. A static
+  partition holding a free IC supply that reads a moved node solves from
+  0 V, as at load, not from the published values: such a supply can hold
+  two consistent states (powered and drawing through its resistor, or off
+  and drawing nothing), and a solve from the old values kept the old one
+  (corpus 39 at 7 V: 4.83 V powered, where classic and a reload read 7 V
+  off). A stepped partition's seed already decides it as the reload's does.
 - **Cold devices.** The cold decisions (R38 (a)) hold under the span at
   load. A set takes the span again from the sources' values then, widened
   by the charges the capacitors hold (as a carried load's, D10 (a)); while
   it is within the load's, every cold device stays cold, and past it every
   cold device turns hot (a superset of those now stressable).
-- **Equivalence.** A set runs on as a carrying reload onto the new `V`
-  does, classic's answer to the edit (`solve/live_v_tests.rs`, and each
-  switch kind's live param likewise): digital identical, analog within W0.
+- **Equivalence.** Classic has no live set: its answer to an edit is its
+  `load()`, which carries, so the reference for a set is a carrying reload
+  onto the new `V`. A set runs on as that reload does: digital identical,
+  analog within W0, and the same failure records (`solve/live_v_tests.rs`,
+  and each switch kind's live param likewise). Measured across the corpus
+  (W2cV's sweep, 2026-11-12: every voltage source of 25 fixtures set to 0,
+  half, 1.7 times plus 1 V and minus itself less 2 V, at four times each):
+  1040 set and reload pairs, every readout and failure equal within W0.
+  Before the IC power rule above, 358 of them latched `output_sag` that the
+  reload, and classic's own edit, did not.
 - **A failed set** (`-4`, `-7`) rolls back with its instant: the source,
   the nodes it fixed and the static solver's folded bases.
 - A battery or a bench PSU stays a reload.
@@ -6518,6 +6539,11 @@ failures and warnings (W1g)"):
   19.2365 ms). A host stopping at each instant and one yielding there read
   the same, bit for bit, so this is accuracy, not host cadence (D6).
   `zz_r101_2575_cadence_against_fine` (ignored) re-measures it.
+  Exact mode's esr-0 rail capacitor belongs here too: when its seed's branch
+  solve is singular (W2c's capacitor currents, `seed_branch_currents`), the
+  seed keeps the 1 ps companion's current, so the CC step at an exit seed
+  overshoots the setpoint (corpus 47 publishes about 1e8 A there, at
+  26ed5ee and after W2c alike).
 
 ## Deferred past 1.0.0
 
