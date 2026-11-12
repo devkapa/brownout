@@ -648,7 +648,7 @@ export interface SimFailure {
  * Stable engine warning codes. Additive: hosts key labels on these strings,
  * so a code is never renamed once published.
  */
-export type SimWarningCode = "transistor_overcurrent" | "missing_flyback";
+export type SimWarningCode = "transistor_overcurrent" | "missing_flyback" | "rail_ic_power_chatter";
 
 /**
  * A latched, session-only advisory: a condition the engine measured (or saw

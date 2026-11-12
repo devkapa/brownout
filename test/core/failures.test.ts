@@ -18,8 +18,10 @@ import {
   ledFailedMessage,
   outputSagMessage,
   ptcTrippedFromRecords,
+  railIcPowerChatterMessage,
   resistorOverloadMessage,
   thermalReadout,
+  warningFromRecord,
   warningKey,
   WarningLedger,
   type CoreSlowRecord,
@@ -269,6 +271,38 @@ describe("decoding records", () => {
 });
 
 // ─── Thermal readout ────────────────────────────────────────────────────────
+
+describe("rail_ic_power_chatter: a chip sliding along its power floor (ruling R92, R53)", () => {
+  it("builds Dev's text, the limit clause only where a current limit applies", () => {
+    // Dev's approved wording, character for character, at its own example.
+    expect(railIcPowerChatterMessage("U1", 1.8, 0.072)).toBe(
+      "U1 can't power up: its supply sits at its 1.8 V floor, the supply at its 72 mA limit",
+    );
+    // A cell, or a PSU in CV through a series part: no limit, no clause.
+    expect(railIcPowerChatterMessage("U1", 1.8, Number.NaN)).toBe("U1 can't power up: its supply sits at its 1.8 V floor");
+    // Three significant figures, as classic R89 prints its level: a
+    // 74LS00's 0.9 x 4.75 V floor on a 20 mA PSU.
+    expect(railIcPowerChatterMessage("u1", 0.9 * 4.75, 0.02)).toBe(
+      "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
+    );
+  });
+
+  it("decodes a channel 1 record as classic's SimWarning and refuses a code with no Rust producer", () => {
+    const names: RecordNames = { devices: [{ componentId: "psu" }, { componentId: "u1", pinIds: NAND_PINS }] };
+    expect(warningFromRecord(record(1, 3, -1, 1.442159e-3, 4.275, 0.02), names)).toEqual({
+      key: "rail_ic_power_chatter\u0000u1\u0000",
+      warning: {
+        componentId: "u1",
+        code: "rail_ic_power_chatter",
+        since: 1.442159e-3,
+        value: 4.275,
+        message: "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
+      },
+    });
+    expect(() => warningFromRecord(record(1, 1, -1, 0, 0, 0), names)).toThrow(/no Rust producer/);
+    expect(() => warningFromRecord(record(1, 9, -1, 0, 0, 0), names)).toThrow(/no Rust producer/);
+  });
+});
 
 describe("thermalReadout: classic's getThermalState, composed through stepThermalDevice at dt = 0", () => {
   // Probe F `resHeat`: the identified resistor at 0.25 W, T(4 s) = 110 − 85·e^{−0.5}.

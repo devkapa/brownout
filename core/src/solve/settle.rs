@@ -1085,7 +1085,7 @@ impl PartitionedSolver {
     /// The slow state for a write: the instant's journal is begun first if a
     /// window is open and it has not been (point 15's first-touch journal,
     /// begun at the first touch). Every write goes through here.
-    fn sw(&mut self) -> &mut crate::slow::SlowState {
+    pub(super) fn sw(&mut self) -> &mut crate::slow::SlowState {
         if self.slow_scratch.journal == 1 {
             self.slow.begin_instant();
             self.slow_scratch.journal = 2;
@@ -2592,7 +2592,7 @@ impl PartitionedSolver {
 
     /// `bo_engine_records` (C ABI): channel 0 the failures in latch order,
     /// an `output_sag` projected to `now` (point 9, "Record"); 1 the Rust
-    /// warnings (none in W1); 2 the tripped PTCs; 3 the latch log, taken.
+    /// warnings in latch order; 2 the tripped PTCs; 3 the latch log, taken.
     pub(super) fn slow_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
         out.clear();
         let push = |out: &mut Vec<f64>, r: &LatchRecord| out.extend([r.device as f64, r.code as f64, r.pin as f64, r.since, r.value, r.limit, r.aux]);
@@ -2611,7 +2611,7 @@ impl PartitionedSolver {
                 true
             }
             1 => {
-                warnings::collect(out);
+                warnings::collect(self.slow.warnings(), out);
                 true
             }
             2 => {

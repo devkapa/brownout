@@ -258,18 +258,22 @@ impl LatchRecord {
 }
 
 /// The latch bookkeeping: the latch order (the order classic's `failures` map
-/// iterates) and the latch log (`bo_engine_records` channel 3).
+/// iterates), the latch log (`bo_engine_records` channel 3) and the latched
+/// Rust warnings (channel 1), which a failed instant and a reset treat as
+/// they treat a failure.
 #[derive(Debug, Default, PartialEq)]
 struct LatchBook {
     /// Currently latched keys, in latch order.
     order: Vec<LatchRecord>,
     /// The first latch of each key since the last take, in first-latch order.
     log: Vec<LatchRecord>,
+    /// Currently latched warnings, in latch order.
+    warnings: Vec<LatchRecord>,
 }
 
 impl Clone for LatchBook {
     fn clone(&self) -> Self {
-        LatchBook { order: self.order.clone(), log: self.log.clone() }
+        LatchBook { order: self.order.clone(), log: self.log.clone(), warnings: self.warnings.clone() }
     }
 
     /// In place, so a recycled pre-image keeps its buffers: the derived
@@ -277,6 +281,7 @@ impl Clone for LatchBook {
     fn clone_from(&mut self, source: &Self) {
         self.order.clone_from(&source.order);
         self.log.clone_from(&source.log);
+        self.warnings.clone_from(&source.warnings);
     }
 }
 
@@ -522,6 +527,24 @@ impl SlowState {
         true
     }
 
+    /// Latches a warning (channel 1, `slow::warnings`). A key already latched
+    /// keeps its place and its record, as classic's `_latchWarning` (a
+    /// still-true warning keeps its `since`). Returns whether it was newly
+    /// latched. A warning never changes a stamp.
+    pub fn latch_warning(&mut self, rec: LatchRecord) -> bool {
+        let key = rec.key();
+        if self.book.get(0).warnings.iter().any(|r| r.key() == key) {
+            return false;
+        }
+        self.book.get_mut(0).warnings.push(rec);
+        true
+    }
+
+    /// The latched warnings in latch order (`bo_engine_records` channel 1).
+    pub fn warnings(&self) -> &[LatchRecord] {
+        &self.book.get(0).warnings
+    }
+
     pub fn is_latched(&self, key: LatchKey) -> bool {
         self.book.get(0).order.iter().any(|r| r.key() == key)
     }
@@ -628,6 +651,11 @@ impl SlowState {
         let mut effects = ResetEffects::default();
         if !self.book.get(0).order.is_empty() {
             self.book.get_mut(0).order.clear();
+        }
+        // Classic's `resetFailures` clears the warnings with the failures
+        // (SE:2407-2448); one still true latches again at its next sighting.
+        if !self.book.get(0).warnings.is_empty() {
+            self.book.get_mut(0).warnings.clear();
         }
         for dev in 0..self.device_count() {
             let mut stale = false;
@@ -784,6 +812,8 @@ mod tests {
         book.order.iter().for_each(|r| record(&mut out, r));
         out.push(book.log.len() as u64);
         book.log.iter().for_each(|r| record(&mut out, r));
+        out.push(book.warnings.len() as u64);
+        book.warnings.iter().for_each(|r| record(&mut out, r));
         out
     }
 
@@ -883,6 +913,31 @@ mod tests {
         assert_rolls_back("latch order, cleared", |s| {
             s.clear_latch(LatchKey { device: 0, code: 1, pin: -1 });
         });
+    }
+
+    #[test]
+    fn rollback_restores_a_latched_warning() {
+        // A sliding chip's warning (channel 1, code 3) latched by a failed
+        // instant is gone with it: the comparison covers the warnings too.
+        assert_rolls_back("warning", |s| {
+            s.latch_warning(LatchRecord { device: 1, code: 3, pin: -1, since: 0.5, value: 1.8, limit: 0.072, aux: 0.0 });
+        });
+    }
+
+    #[test]
+    fn a_warning_latches_once_keeps_its_since_and_a_reset_clears_it() {
+        // Classic's `_latchWarning` (a still-true warning keeps its `since`)
+        // and `resetFailures` (every warning goes, SE:2407-2448). A warning
+        // never opens its device: no failure, no failed flag.
+        let mut s = SlowState::new(5);
+        let first = LatchRecord { device: 1, code: 3, pin: -1, since: 0.5, value: 1.8, limit: 0.072, aux: 0.0 };
+        assert!(s.latch_warning(first));
+        assert!(!s.latch_warning(LatchRecord { since: 0.7, ..first }), "still latched: not again");
+        assert_eq!(s.warnings(), &[first]);
+        assert!(s.latched().is_empty() && s.latch_log().is_empty() && !s.is_failed(1), "a warning is no failure");
+        s.reset_failures(0.9);
+        assert!(s.warnings().is_empty());
+        assert!(s.latch_warning(LatchRecord { since: 0.9, ..first }), "true again after the reset: latched again");
     }
 
     #[test]
@@ -1437,6 +1492,7 @@ impl crate::snapshot::HeapBytes for LatchBook {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.order, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.warnings, w); }
         n
     }
 }

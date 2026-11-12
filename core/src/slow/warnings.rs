@@ -1,18 +1,23 @@
-//! The Rust warning channel, empty in W1 (G2a): core/README.md, W1g kernel
-//! semantics, point 11; "C ABI", `bo_engine_records` channel 1.
+//! The Rust warning channel (G2a): core/README.md, W1g kernel semantics,
+//! point 11; "C ABI", `bo_engine_records` channel 1.
 //!
 //! `transistor_overcurrent` is W3, and `missing_flyback` is a static topology
 //! check over nets, kinds and the inductance param that the facade derives
-//! with classic's own helper (point 11), so no Rust producer exists yet. The
-//! channel and its codes are declared now so the ABI has one place that says
-//! "empty" and a later wave adds a producer without a new export.
+//! with classic's own helper (point 11): neither has a Rust producer. The one
+//! producer is `rail_ic_power_chatter` (ruling R92, R53): a chip that slides
+//! along its power floor (W1c point 1a), latched in the slow state's book
+//! (`SlowState::latch_warning`) where the solver commits the slide.
 
-/// Warning codes of `bo_engine_records` channel 1. Both are reserved: no W1
-/// kind produces either in Rust.
+/// Warning codes of `bo_engine_records` channel 1. The first two are
+/// reserved: no kind produces either in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     TransistorOvercurrent = 1,
     MissingFlyback = 2,
+    /// A chip sliding along its power floor (ruling R92): `value` the floor
+    /// (V), `limit` the PSU's current limit (A) when the rail is in CC at
+    /// the slide, else `NaN`, `pin` -1, `aux` 0. Classic's R89 code.
+    RailIcPowerChatter = 3,
 }
 
 impl WarningKind {
@@ -21,9 +26,13 @@ impl WarningKind {
     }
 }
 
-/// Appends the Rust warnings to `out`, 7 f64 each (`RECORD_LEN`, the same
-/// layout as a failure record). Nothing in W1.
-pub fn collect(_out: &mut Vec<f64>) {}
+/// Appends the latched Rust warnings to `out` in latch order, 7 f64 each
+/// (`RECORD_LEN`, the same layout as a failure record).
+pub fn collect(latched: &[crate::slow::LatchRecord], out: &mut Vec<f64>) {
+    for r in latched {
+        out.extend([r.device as f64, r.code as f64, r.pin as f64, r.since, r.value, r.limit, r.aux]);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -31,20 +40,23 @@ mod tests {
     use crate::slow::failures::RECORD_LEN;
 
     #[test]
-    fn the_warning_codes_are_reserved_as_one_and_two() {
+    fn the_warning_codes_are_one_two_and_three() {
         assert_eq!(WarningKind::TransistorOvercurrent.code(), 1.0);
         assert_eq!(WarningKind::MissingFlyback.code(), 2.0);
+        assert_eq!(WarningKind::RailIcPowerChatter.code(), 3.0);
     }
 
     #[test]
-    fn the_w1_channel_is_empty_and_leaves_the_buffer_alone() {
+    fn the_channel_appends_each_latched_warning_as_one_record() {
         let mut out = vec![1.0, 2.0];
-        collect(&mut out);
-        assert_eq!(out, vec![1.0, 2.0]);
-        let mut empty = Vec::new();
-        collect(&mut empty);
-        assert_eq!(empty.len() % RECORD_LEN, 0);
-        assert!(empty.is_empty());
+        collect(&[], &mut out);
+        assert_eq!(out, vec![1.0, 2.0], "nothing latched: the buffer as it was");
+        let r = crate::slow::LatchRecord { device: 6, code: 3, pin: -1, since: 0.03, value: 1.8, limit: f64::NAN, aux: 0.0 };
+        let mut one = Vec::new();
+        collect(&[r], &mut one);
+        assert_eq!(one.len(), RECORD_LEN);
+        assert_eq!(one[..5], [6.0, 3.0, -1.0, 0.03, 1.8]);
+        assert!(one[5].is_nan() && one[6] == 0.0);
     }
 }
 
@@ -56,6 +68,7 @@ impl crate::snapshot::HeapBytes for WarningKind {
         match self {
             WarningKind::TransistorOvercurrent => 0,
             WarningKind::MissingFlyback => 0,
+            WarningKind::RailIcPowerChatter => 0,
         }
     }
 }

@@ -639,6 +639,67 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_u
     eprintln!("clocked rail: {flips} crossings of the floor in {n} events to 1.5 ms");
 }
 
+/// Channel 1 of `bo_engine_records` at the rig's time, record by record.
+fn warning_records(rig: &mut Rig) -> Vec<[f64; 7]> {
+    let now = rig.k.time();
+    let mut out = Vec::new();
+    assert!(rig.k.solver_mut().collect_records(1, now, &mut out));
+    out.chunks_exact(7).map(|c| c.try_into().unwrap()).collect()
+}
+
+#[test]
+fn a_chip_sliding_along_its_floor_latches_its_warning_once_naming_its_floor_and_the_supplys_limit() {
+    // Ruling R92's user warning (R53; Dev's text, "U1 can't power up: its
+    // supply sits at its 1.8 V floor, the supply at its 72 mA limit", built
+    // by the facade from this record): device, code 3
+    // (`rail_ic_power_chatter`), pin -1, since, the floor (V), the PSU's
+    // limit (A) when its rail is in CC, else NaN, aux 0.
+    // HG1's CC ramp: the gate slides at its floor 0.9 x 4.75 = 4.275 V from
+    // the crossing at 1.442159 ms by hand (the slide test above), its {5 V,
+    // 20 mA} PSU in CC throughout, so the record reads 4.275 V and 0.02 A.
+    // It is freed by 1.65 ms and the record stays latched (classic latches
+    // a warning until `resetFailures`), once.
+    let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
+    let mut rig = Rig::load(&p).unwrap();
+    let mut slid = None;
+    while rig.k.time() < 3e-3 {
+        let t = rig.k.next_event_time().min(3e-3);
+        rig.advance(t).unwrap();
+        let sliding = matches!(rig.s().power_hold(1).kind, digital::power::HoldKind::Duty(_));
+        let records = warning_records(&mut rig);
+        if slid.is_none() {
+            assert_eq!(records.is_empty(), !sliding, "at {t:e}: a record exactly from the slide's first instant, {records:?}");
+            if sliding {
+                slid = Some(t);
+            }
+        }
+    }
+    let t_slid = slid.expect("slid");
+    close(t_slid, 1.442159e-3, 1e-9, "slid at the floor crossing");
+    assert!(rig.s().power_hold(1).is_free(), "freed by 3 ms");
+    let records = warning_records(&mut rig);
+    assert_eq!(records.len(), 1, "one record, kept latched past the slide: {records:?}");
+    assert_eq!(records[0], [1.0, 3.0, -1.0, t_slid, 0.9 * 4.75, 0.02, 0.0]);
+    // A cell has no current limit: E 4.279 V, r 5 ohm, a 74LS00 with 1y into
+    // 1 kohm slides along the same floor from the load's own settle (the
+    // slide test with this board, above), so the record's since is the
+    // start time, 0, and its limit NaN.
+    let cell = program(6, vec![battery(0, 1, 0, 4.279, 5.0), ls00(1, 1, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0), resistor(2, 2, 0, 1000.0)]);
+    let mut rig = Rig::load(&cell).unwrap();
+    rig.advance(1e-3).unwrap();
+    let records = warning_records(&mut rig);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0][..5], [1.0, 3.0, -1.0, 0.0, 0.9 * 4.75]);
+    assert!(records[0][5].is_nan() && records[0][6] == 0.0, "{records:?}");
+    // The control: held as before ruling R92, the gate does not slide, and
+    // nothing latches.
+    let _no_slide = hold::NoSlide::arm();
+    let mut rig = Rig::load(&cell).unwrap();
+    rig.advance(1e-3).unwrap();
+    assert_eq!(rig.s().power_hold(1).kind, digital::power::HoldKind::Off);
+    assert!(warning_records(&mut rig).is_empty());
+}
+
 /// HG1's CC ramp into a 74LS00's floor, with a second 74LS00 on a fixed 5 V
 /// supply whose 1a and 1b read the first gate's 1y, its own propagation delay
 /// `delay` (NP1).

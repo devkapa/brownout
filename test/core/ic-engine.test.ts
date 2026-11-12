@@ -507,3 +507,74 @@ describe("an unpowered IC (vcc fed through a switch)", () => {
     }
   });
 });
+
+describe("a chip sliding along its power floor (ruling R92, R53): rail_ic_power_chatter", () => {
+  // HG1's CC ramp (core rail_tests.rs, `cc_ramp_into_an_ic_floor`): a
+  // {5 V, 20 mA} PSU charges 1 uF on the rail, with 100 ohm into 10 uF
+  // beside it; a 74LS00 on the rail with 1a and 1b on ground drives 1y HIGH
+  // into an LED and 330 ohm. At the gate's 0.9 x 4.75 = 4.275 V floor
+  // (about 1.44 ms) its LED's draw turns the rail back under the floor, so
+  // it slides there until the 10 uF has charged enough for the supply to
+  // carry it (about 1.64 ms). The core names it once, from the slide's
+  // first instant, with Dev's text; classic declines such boards.
+  function build(): SimCircuit {
+    const ic = icComponent("u1", partFor("74ls00"));
+    return {
+      components: [
+        part("psu", "bench_psu", ["pos", "neg"], { voltage: 5, iLimit: 0.02 }),
+        part("gnd", "ground", ["gnd"]),
+        part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part("c2", "capacitor", ["a", "b"], { capacitance: 1e-5 }),
+        ic,
+        { ...part("led1", "led", ["a", "k"]), catalogUid: "led-red" },
+        part("r2", "resistor", ["a", "b"], { resistance: 330 }),
+      ],
+      wires: [
+        wire("psu", "neg", "gnd", "gnd"),
+        wire("psu", "pos", "c1", "a"),
+        wire("c1", "b", "gnd", "gnd"),
+        wire("psu", "pos", "r1", "a"),
+        wire("r1", "b", "c2", "a"),
+        wire("c2", "b", "gnd", "gnd"),
+        wire("psu", "pos", "u1", "vcc"),
+        wire("u1", "gnd", "gnd", "gnd"),
+        wire("u1", "1a", "gnd", "gnd"),
+        wire("u1", "1b", "gnd", "gnd"),
+        wire("u1", "1y", "led1", "a"),
+        wire("led1", "k", "r2", "a"),
+        wire("r2", "b", "gnd", "gnd"),
+      ],
+    };
+  }
+
+  it("latches once with the floor and the PSU's limit, announced once, kept past the slide, and cleared by resetFailures", () => {
+    const core = new CoreEngine();
+    core.load(build(), new Set([...WITH_ICS, "bench_psu", "led", "ground"]));
+    core.advance(1.4e-3);
+    expect(core.getWarnings()).toEqual({});
+    core.advance(3e-3);
+    const warnings = Object.values(core.getWarnings());
+    expect(warnings).toHaveLength(1);
+    const [warning] = warnings;
+    expect(warning).toEqual({
+      componentId: "u1",
+      code: "rail_ic_power_chatter",
+      since: warning!.since,
+      value: 0.9 * 4.75,
+      message: "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
+    });
+    expect(warning!.since).toBeGreaterThan(1.4e-3);
+    expect(warning!.since).toBeLessThan(1.5e-3);
+    expect(core.takeNewWarnings()).toEqual([warning]);
+    core.advance(3.5e-3);
+    expect(core.takeNewWarnings()).toEqual([]);
+    expect(Object.keys(core.getWarnings())).toEqual(["rail_ic_power_chatter\u0000u1\u0000"]);
+    // Powered by now, the chip no longer slides: a reset clears the warning
+    // and nothing latches it again.
+    core.resetFailures();
+    expect(core.getWarnings()).toEqual({});
+    core.advance(4e-3);
+    expect(core.getWarnings()).toEqual({});
+  });
+});

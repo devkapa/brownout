@@ -56,6 +56,7 @@ import {
   ptcTrippedFromRecords,
   thermalReadout,
   WarningLedger,
+  warningFromRecord,
   type CoreSlowRecord,
 } from "./failures.js";
 import {
@@ -1248,14 +1249,12 @@ export class CoreEngine implements EngineReadout {
   }
 
   /**
-   * Classic's `getWarnings()`: the facade's static warnings (W1g point 11), a
-   * fresh object in latch order. Rust's channel 1 has no producer in W1
-   * (`transistor_overcurrent` is W3), so a record there means the halves
-   * were built from different contracts (`_checkRustWarnings`).
+   * Classic's `getWarnings()`: the facade's static warnings (W1g point 11)
+   * and Rust's channel 1 (`rail_ic_power_chatter`, ruling R92), a fresh
+   * object in latch order (`_latchRustWarnings`).
    */
   getWarnings(): Record<string, SimWarning> {
-    this._requireLoaded();
-    this._checkRustWarnings();
+    this._latchRustWarnings();
     return this._warnings.all();
   }
 
@@ -1265,8 +1264,7 @@ export class CoreEngine implements EngineReadout {
    * announced again; one gone before it was drained never is.
    */
   takeNewWarnings(): SimWarning[] {
-    this._requireLoaded();
-    this._checkRustWarnings();
+    this._latchRustWarnings();
     return this._warnings.takeNew();
   }
 
@@ -1384,15 +1382,25 @@ export class CoreEngine implements EngineReadout {
     return decodeRecords(raw);
   }
 
-  /** Channel 1 has no producer in W1 (W1g point 11): a record there means the two halves disagree. */
-  private _checkRustWarnings(): void {
-    const records = this._collectRecords(CORE_RECORD_CHANNEL.warnings);
-    if (records.length > 0) {
-      throw new CoreInitError(
-        `brownout/core: bo_engine_records returned ${records.length} warning record(s), but this package's TS ` +
-          "front end has no Rust warning producer in W1 (core/README.md, W1g point 11). The TS and Rust halves " +
-          "ship in one npm package and must be rebuilt together.",
-      );
+  /**
+   * Channel 1 into the ledger, each record through `latch`: a warning Rust
+   * still holds keeps its place and its `since` and is announced once, as
+   * classic's `_latchWarning` does. Rust clears its latches with
+   * `resetFailures` and rolls them back with a failed instant or a restored
+   * snapshot, as the ledger does its own. A record of a code with no Rust
+   * producer means the TS and Rust halves were built from different
+   * contracts (they ship in one npm package and must be rebuilt together).
+   */
+  private _latchRustWarnings(): void {
+    const compiled = this._requireLoaded();
+    for (const record of this._collectRecords(CORE_RECORD_CHANNEL.warnings)) {
+      let decoded: ReturnType<typeof warningFromRecord>;
+      try {
+        decoded = warningFromRecord(record, compiled);
+      } catch (error) {
+        throw new CoreInitError(`brownout/core: bo_engine_records channel 1: ${(error as Error).message} (core/README.md, W1g point 11)`);
+      }
+      this._warnings.latch(decoded.key, decoded.warning);
     }
   }
 

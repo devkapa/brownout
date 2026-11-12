@@ -49,10 +49,15 @@ export const CORE_FAILURE_KIND_BY_CODE: ReadonlyMap<number, CoreFailureKind> = n
   [4, "output_sag"],
 ]);
 
-/** Warning codes on channel 1. `missing_flyback` is reserved: the facade derives it (W1g point 11). */
+/**
+ * Warning codes on channel 1. `missing_flyback` is reserved: the facade
+ * derives it (W1g point 11). `rail_ic_power_chatter` is a chip sliding along
+ * its power floor (ruling R92, R53), classic R89's code.
+ */
 export const CORE_WARNING_CODE_BY_CODE: ReadonlyMap<number, SimWarningCode> = new Map([
   [1, "transistor_overcurrent"],
   [2, "missing_flyback"],
+  [3, "rail_ic_power_chatter"],
 ]);
 
 /** The one PTC code on channel 2. */
@@ -146,6 +151,20 @@ export function outputSagMessage(componentId: string, pinId: string, high: boole
   return `${componentId}.${pinId} is commanded ${high ? "HIGH" : "LOW"} but sits at ${actual.toFixed(2)} V under the present load. The finite-strength output is outside its own package family's ${high ? "HIGH" : "LOW"} input-guarantee band; connected receivers may have different requirements.`;
 }
 
+/**
+ * `rail_ic_power_chatter` (ruling R92, R53; the text Dev approved, shared
+ * with classic's R89 diagnostic): the chip, its floor and, when its rail is
+ * a PSU at its current limit, that limit; with no limit (a cell, or a PSU in
+ * CV through a series part) the second clause is left out. Volts and
+ * milliamps to three significant figures, as classic R89 prints its level.
+ */
+export function railIcPowerChatterMessage(componentId: string, floor: number, limit: number): string {
+  const volts = Number(floor.toPrecision(3));
+  const head = `${componentId} can't power up: its supply sits at its ${volts} V floor`;
+  if (!Number.isFinite(limit)) return head;
+  return `${head}, the supply at its ${Number((limit * 1000).toPrecision(3))} mA limit`;
+}
+
 // ─── Failures ───────────────────────────────────────────────────────────────
 
 /**
@@ -216,6 +235,32 @@ export function ptcTrippedFromRecords(records: readonly CoreSlowRecord[], names:
     out.add(deviceIdOf(names, record));
   }
   return out;
+}
+
+/**
+ * One channel 1 record as classic's `SimWarning`, keyed by `warningKey`. Only
+ * `rail_ic_power_chatter` has a Rust producer; a record of a reserved code
+ * means the two halves were built from different contracts, so it throws.
+ * `value` is the chip's floor (V), as classic R89 sets it; the record's
+ * `limit` (A) is a supply's, not the floor's rating, so it is in the message
+ * only.
+ */
+export function warningFromRecord(record: CoreSlowRecord, names: RecordNames): { key: string; warning: SimWarning } {
+  const code = CORE_WARNING_CODE_BY_CODE.get(record.code);
+  if (code !== "rail_ic_power_chatter") {
+    throw new Error(`records: warning code ${record.code} (${code ?? "unknown"}) has no Rust producer`);
+  }
+  const componentId = deviceIdOf(names, record);
+  return {
+    key: warningKey(code, componentId),
+    warning: {
+      componentId,
+      code,
+      since: record.since,
+      value: record.value,
+      message: railIcPowerChatterMessage(componentId, record.value, record.limit),
+    },
+  };
 }
 
 // ─── Thermal readout ────────────────────────────────────────────────────────

@@ -913,7 +913,9 @@ since, value, limit, aux`.
 - **Failure codes** (channels 0 and 3): `1 resistor_overload`,
   `2 fuse_tripped`, `3 led_failed`, `4 output_sag`. **Warning codes**
   (channel 1): `1 transistor_overcurrent` (W3), `2 missing_flyback`
-  (reserved: the facade derives it, W1g point 11). **PTC** (channel 2):
+  (reserved: the facade derives it, W1g point 11), `3
+  rail_ic_power_chatter` (a chip sliding along its power floor, W1c point
+  1a: `value` the floor in V, `limit` the PSU's limit in A or `NaN`). **PTC** (channel 2):
   `1 ptc_tripped`, with `since` the trip time and `value = limit = aux = 0`.
   A PTC trip is never a failure or a warning (Q-O45).
 - `aux` is the `output_sag` direction (`1` HIGH, `0` LOW), and `0`
@@ -1534,7 +1536,7 @@ message builders live in `src/core/failures.ts`, which the facade calls):
   - `led_failed`: `` `${id} exceeded its ${(limit * 1000).toFixed(1)} mA LED rating with ${(value * 1000).toFixed(1)} mA long enough to fail open.` `` (SC:508);
   - `output_sag`: the SE:6333 template, `HIGH` or `LOW` from `aux`.
 - **`getWarnings()`, `takeNewWarnings()`**: the facade's static warnings
-  (W1g point 11) plus channel 1 (empty in W1), keyed by classic's
+  (W1g point 11) plus channel 1 (`rail_ic_power_chatter`), keyed by classic's
   `warningKey`. The announce queue lives in TS and works as classic's
   (SE:2372-2381, 5536-5544): a warning is queued once when it latches, a
   still-true warning keeps its `since` and is not queued again, and a key
@@ -1924,6 +1926,54 @@ their own, and the source KCL does with W1a point 2's branch fold.
    (`a_held_off_ic_on_an_ideal_supply_stamps_reads_and_commits_nothing_and_its_hold_rolls_back`),
    the procedure in `solve/rail_tests.rs`, listed under Equivalence harness
    rules, the power-gate ping-pong.
+
+   **The slide** (ruling R92, R53; `hold.rs`, `HoldKind::Duty`). Since
+   R92 the hold is the procedure's answer only where no state fits for
+   another reason. A single starving rail IC whose edge **attracts**
+   (powered, its supply leaves its window; held unpowered, it comes back:
+   on a CC rail capacitor's segment, powered the segment falls and
+   unpowered it rises, ruling R44 (a)'s case) slides along that edge
+   instead of being held: it is powered, its logic runs, and every output
+   drive (and so its supply draw) is scaled by a duty `x` in `[0, 1]`,
+   Filippov's convex combination of its powered and unpowered stamps (an
+   unpowered chip stamps nothing). `x` is the extra unknown that pins its
+   supply at the edge: solved within the instant by the rail loop off a
+   segment (the supply at the edge), and on a segment by the aim below.
+   A chip whose supply reads low both ways is still held (ruling D2 (a)),
+   one that carries itself is free, one fed by a foreign edge (F5V2's
+   pulse-fed gate) is held each phase, and a self-fed chip (below) never
+   slides. While it slides (`keep_sliding`) its duty is solved again at an
+   instant that changed a driver or a source and once its supply has
+   drifted `slide_drift` (W0) off the edge, a `Rail` watch on both levels;
+   a slide that needs more than `SLIDE_FOLLOW_MAX` re-solves in a host step
+   is held as before R92 for that host step and re-entered at the next
+   (`hold::reenter_slides`). A slide is no hold: stats 25 and 26 do not
+   count it. It is dropped with
+   every hold at a `set_params`, `seed_memory` or `resetFailures`, and rolls
+   back with a failed instant. Exact mode does not slide yet: its chips
+   are held as before.
+
+   **The warning** (ruling R92, R53; `slow::warnings`). A chip sliding along
+   its power floor is a board that cannot power that chip, which classic
+   reports by declining (R89's `rail_ic_power_chatter`). The core runs on
+   and says so: at the end of each rail loop every chip still sliding at its
+   floor is latched once on `bo_engine_records` channel 1 as code 3
+   (`rail_ic_power_chatter`, classic R89's code): `since` the instant,
+   `value` the floor (V), `limit` the PSU's current limit (A) when the rail
+   is a PSU in CC there, else `NaN` (a cell, or a PSU in CV through a
+   series part), `pin` -1, `aux` 0. Latched where the loop has settled,
+   so a slide a probe or a retry tried and gave back latches nothing, and
+   through the slow state's journal, so a failed instant, a restored
+   snapshot and `resetFailures` treat it as they treat a failure (a slide
+   still running after a reset latches again at the next loop's end). The
+   facade builds Dev's text from it: `U1 can't power up: its supply sits at
+   its 1.8 V floor, the supply at its 72 mA limit`, the second clause only
+   where a limit applies, both numbers to three significant figures, the
+   same message classic R89 gives. A slide at the ceiling latches nothing
+   until its message is worded. Pins:
+   `a_chip_sliding_along_its_floor_latches_its_warning_once_naming_its_floor_and_the_supplys_limit`
+   (`solve/rail_tests.rs`) and `test/core/ic-engine.test.ts`'s
+   `rail_ic_power_chatter`.
 
    **The chatter entry** (rulings R92, R95 (b), R97 (b); `hold.rs`). A
    chip whose draw reaches its supply through a capacitor that carries it
@@ -5640,8 +5690,11 @@ Constants:
       cool, and it recovers 2.0 s after the trip, not after the later drop.
     - Readout: channel 2 and `bo_engine_device_state`.
 
-11. **Warnings** (§9.7). No Rust producer exists in W1:
-    `transistor_overcurrent` is W3, and `missing_flyback` is a static
+11. **Warnings** (§9.7). One Rust producer exists: `rail_ic_power_chatter`
+    (code 3), a chip sliding along its power floor (W1c point 1a, the
+    warning; ruling R92). The facade latches channel 1's records into its
+    ledger at each `getWarnings()` and `takeNewWarnings()`, as classic's
+    `_latchWarning` does. `transistor_overcurrent` is W3, and `missing_flyback` is a static
     topology check (SE:5581-5627) over nets, kinds and the inductance param,
     run at `load()` and `resetFailures()`. So the facade derives it with
     classic's own logic, through a pure helper exported from classic's

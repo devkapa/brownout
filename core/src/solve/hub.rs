@@ -1649,6 +1649,9 @@ impl PartitionedSolver {
         // A host's edit is this instant's only (ruling R89 (a)).
         let result = self.rail_loop_passes(now, drivers, readers);
         self.host_edit = false;
+        if result.is_ok() {
+            self.latch_slide_warnings(now);
+        }
         result
     }
 

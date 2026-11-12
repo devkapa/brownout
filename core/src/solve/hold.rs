@@ -1855,6 +1855,45 @@ impl PartitionedSolver {
         rails::REACHED_REL * edge.abs().max(1.0)
     }
 
+    /// Ruling R92's user warning (R53, Dev's text; `slow::warnings`,
+    /// `rail_ic_power_chatter`, classic R89's code): every chip still
+    /// sliding along its power floor when a rail loop ends is latched on
+    /// channel 1, once while it stays latched (classic's `_latchWarning`),
+    /// with its floor and, when its rail is a PSU in CC, the PSU's limit
+    /// (`NaN` otherwise: a cell, or a PSU in CV through a series part).
+    /// Read where the loop has settled, so a slide a probe or a retry tried
+    /// and gave back latches nothing, and through the slow state's journal,
+    /// so a failed instant takes its latch with it. A slide at the ceiling
+    /// latches nothing yet: its message is still to be worded.
+    pub(super) fn latch_slide_warnings(&mut self, now: f64) {
+        if self.holds_active == 0 {
+            return;
+        }
+        let Some(hub) = self.hub.as_ref() else { return };
+        let limit = match (hub.state.reg, hub.psu_setpoint()) {
+            (crate::devices::sources::Regime::Cc, Some((_, i_limit))) => i_limit,
+            _ => f64::NAN,
+        };
+        let mut fresh = Vec::new();
+        for &pos in &hub.rail_ics {
+            let (d, ref ic) = self.ics[pos as usize];
+            if !matches!(self.power_hold(d).kind, HoldKind::Duty(_)) {
+                continue;
+            }
+            let (floor, _) = digital::levels::power_window(ic);
+            if self.slide_edge(d) != floor {
+                continue;
+            }
+            let rec = crate::slow::LatchRecord { device: d as u32, code: crate::slow::warnings::WarningKind::RailIcPowerChatter as u32, pin: -1, since: now, value: floor, limit, aux: 0.0 };
+            if !self.slow.warnings().iter().any(|w| w.key() == rec.key()) {
+                fresh.push(rec);
+            }
+        }
+        for rec in fresh {
+            self.sw().latch_warning(rec);
+        }
+    }
+
     /// Ruling R92: after passes that settled, each rail IC sliding is kept
     /// on its edge: its duty solved again once its supply has drifted from
     /// the edge by more than W0 ([`slide_drift`]), as what it sees moves (a
