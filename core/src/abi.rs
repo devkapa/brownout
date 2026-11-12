@@ -690,7 +690,9 @@ pub extern "C" fn bo_engine_charge_arm(h: u32, devices: *const f64, n: u32) -> i
 
 /// W2b piece 4: takes the charge since the last take into the engine's
 /// buffer, `[t0, t1, then per armed device its charge and its channel
-/// slots' in channel order]`, and returns its length in f64 (`2`, `[t, t]`,
+/// slots' in channel order, then per armed device the time its charge is
+/// final to]` (`t1` but after a yield, for a device a stepped partition
+/// publishes: its last commit), and returns its length in f64 (`2`, `[t, t]`,
 /// when nothing is armed), or `-5` for an unusable handle. Read it with
 /// [`bo_engine_charge_ptr`].
 #[no_mangle]
@@ -1404,10 +1406,11 @@ mod tests {
         assert_eq!(bo_engine_charge_arm(h, devices.as_ptr(), 2), 0);
         assert_eq!(bo_engine_advance(h, 2.5e-3), 0);
         let len = bo_engine_take_charge(h);
-        assert_eq!(len, 2 + 2, "the span, then a slot per device");
+        assert_eq!(len, 2 + 2 + 2, "the span, a slot per device, a final time per device");
         let got = unsafe { std::slice::from_raw_parts(bo_engine_charge_ptr(h), len as usize) }.to_vec();
         let i = with_engine(h, Vec::new(), |e| e.currents().to_vec());
         assert_eq!(&got[..2], &[0.0, 2.5e-3]);
+        assert_eq!(&got[4..], &[2.5e-3, 2.5e-3], "both final to t1");
         // A static divider: its current held over the span.
         assert_eq!(got[2], i[2] * 2.5e-3);
         assert!((got[3] - i[0] * 2.5e-3).abs() <= 1e-12 * got[3].abs(), "the source by KCL: {} against {}", got[3], i[0] * 2.5e-3);

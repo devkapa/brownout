@@ -241,6 +241,10 @@ export class CoreEngine implements EngineReadout {
   private _reportedUnknownParamIds = new Set<string>();
   /** Bumped at every load() call, so a snapshot knows whether the program it was taken on is still the one loaded (W2a). */
   private _loadSerial = 0;
+  /** W2b: the nets the observer samples, in take order (`null`: disarmed); a load disarms. */
+  private _acquired: readonly string[] | null = null;
+  /** W2b piece 4: the components whose charge is armed, in take order, with each one's channel count (`null`: disarmed); a load disarms. */
+  private _charged: { readonly ids: readonly string[]; readonly channels: readonly number[] } | null = null;
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -480,6 +484,10 @@ export class CoreEngine implements EngineReadout {
     // program is loaded here to restore onto.
     this._loadSerial++;
     this._compiled = null;
+    // A load disarms the observer and the charge (core/README.md,
+    // "Acquisition", "Charge"): the host arms them again for the new program.
+    this._acquired = null;
+    this._charged = null;
     this._netV = {};
     this._elementI = {};
     this._digitalState = {};
@@ -1371,6 +1379,121 @@ export class CoreEngine implements EngineReadout {
   }
 
   /**
+   * W2b (core/README.md, "Acquisition"): samples the nets `netIds` at
+   * `origin + k * interval` seconds (`k` whole) from the engine's time on,
+   * each sample the model's value there, read without moving a step. At most
+   * `limit` samples are held between takes (`0`: 2^20); past that the newest
+   * are dropped and counted. Re-arming drops what was not taken; `interval`
+   * 0 disarms. A `load()` disarms. Throws `RangeError` for an unknown or
+   * repeated net or a bad grid, `CoreLoadError` on a core built before W2b.
+   */
+  acquire(netIds: readonly string[], origin: number, interval: number, limit = 0): void {
+    const compiled = this._requireLoaded();
+    if (!Number.isFinite(origin) || !Number.isFinite(interval) || interval < 0) {
+      throw new RangeError(`CoreEngine.acquire: origin ${origin} and interval ${interval} must be finite, the interval not negative.`);
+    }
+    if (!Number.isInteger(limit) || limit < 0 || limit > 0xffffffff) {
+      throw new RangeError(`CoreEngine.acquire: limit must be a whole number of samples, got ${limit}.`);
+    }
+    const nodes = indicesOf(netIds, (id) => compiled.nodeOfNet.get(id), "acquire", "net");
+    coreCall((exports) => {
+      if (typeof exports.bo_engine_acquire !== "function") {
+        throw new CoreLoadError("CoreEngine.acquire: this brownout core module has no acquisition exports (built before W2b).");
+      }
+      const code = withF64Buffer(exports, nodes, (ptr) => exports.bo_engine_acquire!(this._handle, ptr, nodes.length, origin, interval, limit));
+      if (code !== 0) {
+        throw new CoreLoadError(`bo_engine_acquire failed (code ${code}): ${readCoreErrorMessage(exports)}`);
+      }
+    });
+    this._acquired = interval > 0 ? [...netIds] : null;
+  }
+
+  /**
+   * W2b: every sample final since the last take, in time order, and the
+   * queue emptied; `null` while disarmed. `maxSpan` is the widest step a
+   * stepped net's samples were interpolated across, `fallbacks` per net the
+   * samples read linear where R104's solve failed.
+   */
+  takeSamples(): CoreSamples | null {
+    this._requireLoaded();
+    const nets = this._acquired;
+    if (!nets) return null;
+    const raw = coreCall((exports) => {
+      const len = exports.bo_engine_acquire_take!(this._handle);
+      if (len < 0) throw new CoreLoadError(`bo_engine_acquire_take failed (code ${len}): ${readCoreErrorMessage(exports)}`);
+      return copyF64(exports, exports.bo_engine_acquire_ptr!(this._handle) >>> 0, len);
+    });
+    const count = raw[0]!;
+    const head = 4 + nets.length;
+    const values: Record<string, Float64Array> = {};
+    const fallbacks: Record<string, number> = {};
+    nets.forEach((id, j) => {
+      fallbacks[id] = raw[4 + j]!;
+      values[id] = raw.slice(head + count * (1 + j), head + count * (2 + j));
+    });
+    return { t: raw.slice(head, head + count), values, maxSpan: raw[1]!, overflowed: raw[2] !== 0, dropped: raw[3]!, fallbacks };
+  }
+
+  /**
+   * W2b piece 4 (core/README.md, "Charge"): integrates each component's
+   * published current, and each of its channels' (an LED family part's),
+   * from the engine's time on; a light mean is a charge over its span.
+   * Re-arming drops what was not taken; an empty list disarms. A `load()`
+   * disarms. Throws `RangeError` for an unknown or repeated component,
+   * `CoreLoadError` on a core built before W2b piece 4.
+   */
+  armCharge(componentIds: readonly string[]): void {
+    const compiled = this._requireLoaded();
+    const deviceOf = new Map<string, number>();
+    compiled.devices.forEach((device, i) => deviceOf.set(device.componentId, i));
+    const devices = indicesOf(componentIds, (id) => deviceOf.get(id), "armCharge", "component");
+    coreCall((exports) => {
+      if (typeof exports.bo_engine_charge_arm !== "function") {
+        throw new CoreLoadError("CoreEngine.armCharge: this brownout core module has no charge exports (built before W2b piece 4).");
+      }
+      const code = withF64Buffer(exports, devices, (ptr) => exports.bo_engine_charge_arm!(this._handle, ptr, devices.length));
+      if (code !== 0) {
+        throw new CoreLoadError(`bo_engine_charge_arm failed (code ${code}): ${readCoreErrorMessage(exports)}`);
+      }
+    });
+    const channelCount = new Map<string, number>();
+    for (const [id] of compiled.channelSlots) channelCount.set(id, (channelCount.get(id) ?? 0) + 1);
+    this._charged = devices.length > 0 ? { ids: [...componentIds], channels: componentIds.map((id) => channelCount.get(id) ?? 0) } : null;
+  }
+
+  /**
+   * W2b piece 4: each armed component's charge (coulombs) and its channels'
+   * over `[t0, t1]` since the last take (or the arming), the sums cleared;
+   * `null` while disarmed. `finalUpTo` is how far each one's charge is
+   * final: `t1` after `advance()`, and after a yield of `advanceFor` a part a
+   * stepped partition publishes is final only to that partition's last
+   * step, the rest coming with a later take.
+   */
+  takeCharge(): CoreCharge | null {
+    this._requireLoaded();
+    const armed = this._charged;
+    if (!armed) return null;
+    const raw = coreCall((exports) => {
+      const len = exports.bo_engine_take_charge!(this._handle);
+      if (len < 0) throw new CoreLoadError(`bo_engine_take_charge failed (code ${len}): ${readCoreErrorMessage(exports)}`);
+      return copyF64(exports, exports.bo_engine_charge_ptr!(this._handle) >>> 0, len);
+    });
+    const charge: Record<string, number> = {};
+    const channelCharge: Record<string, number[]> = {};
+    const finalUpTo: Record<string, number> = {};
+    let slot = 2;
+    const slots = raw.length - 2 - armed.ids.length;
+    armed.ids.forEach((id, k) => {
+      const n = armed.channels[k]!;
+      charge[id] = raw[slot]!;
+      if (n > 0) channelCharge[id] = Array.from(raw.subarray(slot + 1, slot + 1 + n));
+      slot += 1 + n;
+      finalUpTo[id] = raw[2 + slots + k]!;
+    });
+    return { t0: raw[0]!, t1: raw[1]!, charge, channelCharge, finalUpTo };
+  }
+
+  /**
    * A whole-engine snapshot (W2a; core/README.md, "Snapshots"): the Rust
    * engine's state, copied into its handle's table, plus this facade's own
    * clock, convergence flag and warnings ledger with its announce queue.
@@ -1404,6 +1527,8 @@ export class CoreEngine implements EngineReadout {
       simTime: this._simTime,
       lastConverged: this._lastConverged,
       warnings: this._warnings.copy(),
+      acquired: this._acquired,
+      charged: this._charged,
       disposed: false,
     });
     coreSnapshotFinalizer.register(snapshot, { handle: this._handle, generation: this._generation, id }, snapshot);
@@ -1437,6 +1562,10 @@ export class CoreEngine implements EngineReadout {
     this._simTime = state.simTime;
     this._lastConverged = state.lastConverged;
     this._warnings = state.warnings.copy();
+    // The observer and the charge are engine state: the core's came back
+    // with the snapshot, so their arming does too.
+    this._acquired = state.acquired;
+    this._charged = state.charged;
     this._publishReadouts();
   }
 
@@ -1518,6 +1647,8 @@ interface SnapshotState {
   readonly simTime: number;
   readonly lastConverged: boolean;
   readonly warnings: WarningLedger;
+  readonly acquired: readonly string[] | null;
+  readonly charged: { readonly ids: readonly string[]; readonly channels: readonly number[] } | null;
   disposed: boolean;
 }
 
@@ -1561,4 +1692,55 @@ function carrySnapshot(circuit: SimCircuit): SimCircuit {
     components: circuit.components.map((c) => ({ ...c, params: { ...c.params }, pins: c.pins.map((p) => ({ ...p })) })),
     wires: [],
   };
+}
+
+/** W2b: one {@link CoreEngine.takeSamples}. */
+export interface CoreSamples {
+  /** The sample times, ascending. */
+  readonly t: Float64Array;
+  /** Net id -> its value at each of `t`. */
+  readonly values: Readonly<Record<string, Float64Array>>;
+  /** The widest step a stepped net's samples were interpolated across since the last take (0 when none). */
+  readonly maxSpan: number;
+  /** Whether the queue filled, and how many samples were dropped (the newest; the oldest are kept). */
+  readonly overflowed: boolean;
+  readonly dropped: number;
+  /** Net id -> its samples read linear where R104's solve failed. */
+  readonly fallbacks: Readonly<Record<string, number>>;
+}
+
+/** W2b piece 4: one {@link CoreEngine.takeCharge}. */
+export interface CoreCharge {
+  readonly t0: number;
+  readonly t1: number;
+  /** Component id -> coulombs of its published current over the span. */
+  readonly charge: Readonly<Record<string, number>>;
+  /** Component id -> each channel's charge, in channel order (LED family parts). */
+  readonly channelCharge: Readonly<Record<string, number[]>>;
+  /** Component id -> how far its charge is final (`t1` unless a yield left its stepped partition's step pending). */
+  readonly finalUpTo: Readonly<Record<string, number>>;
+}
+
+/** The index of each id, refusing an unknown or repeated one. */
+function indicesOf(ids: readonly string[], index: (id: string) => number | undefined, method: string, what: string): number[] {
+  const seen = new Set<string>();
+  return ids.map((id) => {
+    const i = index(id);
+    if (i === undefined) throw new RangeError(`CoreEngine.${method}: no ${what} "${id}" in the loaded circuit.`);
+    if (seen.has(id)) throw new RangeError(`CoreEngine.${method}: ${what} "${id}" is listed twice.`);
+    seen.add(id);
+    return i;
+  });
+}
+
+/** Runs `call` with `values` copied into a core buffer (0 for none), freed after. */
+function withF64Buffer(exports: CoreExports, values: readonly number[], call: (ptr: number) => number): number {
+  if (values.length === 0) return call(0);
+  const ptr = exports.bo_alloc(values.length) >>> 0;
+  try {
+    new Float64Array(exports.memory.buffer, ptr, values.length).set(values);
+    return call(ptr);
+  } finally {
+    exports.bo_free(ptr, values.length);
+  }
 }

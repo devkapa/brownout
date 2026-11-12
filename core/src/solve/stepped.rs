@@ -3189,6 +3189,12 @@ impl SteppedSolver {
         }
     }
 
+    /// W2b piece 4: the instant partition `p_idx`'s last commit reached,
+    /// how far its charge is final.
+    pub(crate) fn committed_time(&self, p_idx: usize) -> Option<f64> {
+        self.partitions.get(&p_idx).map(|part| part.t)
+    }
+
     /// The instant partition `p_idx` has been committed to (tests look at it).
     #[cfg(test)]
     pub(crate) fn time_of(&self, p_idx: usize) -> Option<f64> {

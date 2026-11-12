@@ -4,8 +4,11 @@
 //! A host arms a list of devices; from then on each one's published current
 //! is integrated over time, and each of its channel slots (an LED family
 //! device's), until the host takes them: `[t0, t1, then per device its
-//! charge and its channels' in channel order]`, the span `[t0, t1]` they
-//! cover, and the sums cleared. A light mean is a charge over its span.
+//! charge and its channels' in channel order, then per device the time its
+//! charge is final to]`, the span `[t0, t1]` they cover, and the sums
+//! cleared. A light mean is a charge over its span. A device's final time is
+//! `t1` except a stepped one's after a yield (below): its charge then runs
+//! from its previous take's final time to this one's.
 //!
 //! Each charge is exact in the model of the solver that publishes the
 //! current, read off what that solver already holds, never by stepping or
@@ -102,6 +105,8 @@ pub(crate) struct SourceTerms {
     /// The CC stretch's own charge, `-dir iLimit` times its length.
     cc_q: f64,
     cc_device: Option<usize>,
+    /// The dynamic partitions its terms sit in.
+    parts: Vec<usize>,
     /// Whether the hub PSU was in CC when the last fold left it: the steps
     /// committed since then were taken in that regime.
     cc_prev: bool,
@@ -260,10 +265,12 @@ impl PartitionedSolver {
         }
         rel[0] = false;
         let rel_nodes: Vec<usize> = (0..n).filter(|&k| rel[k]).collect();
+        let mut own_parts: Vec<usize> = Vec::new();
         let mut note = |owner: Option<usize>, nodes: &[usize]| {
             line_nodes.extend_from_slice(nodes);
             if let Some(p) = owner.filter(|&p| self.partition_kinds[p] != PartitionKind::Static) {
                 parts.push(p);
+                own_parts.push(p);
                 reads.entry(p).or_default().extend_from_slice(nodes);
             }
         };
@@ -302,7 +309,9 @@ impl PartitionedSolver {
             }
         }
         let cc_device = self.hub.as_ref().map(|h| h.device).or(self.exact.as_ref().map(|e| e.device));
-        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, cc_prev: false })
+        own_parts.sort_unstable();
+        own_parts.dedup();
+        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, parts: own_parts, cc_prev: false })
     }
 
     /// A held class's current and channels on the present voltages, if it
@@ -753,9 +762,20 @@ impl PartitionedSolver {
                 }
             }
         }
+        // How far each device's charge is final: `t1`, but a stepped
+        // partition's steps only to its last commit (a yield leaves a step
+        // pending; its charge comes with the take after it commits), and a
+        // source's as far as every stepped partition its walk reads.
+        let stepped_final = |p: usize| if self.partition_kinds[p] == PartitionKind::Stepped { self.stepped.committed_time(p).map_or(t1, |t| t.min(t1)) } else { t1 };
+        let src_final = st.src.as_ref().map_or(t1, |s| s.parts.iter().fold(t1, |m, &p| m.min(stepped_final(p))));
         out.clear();
         out.extend([st.t0, t1]);
         out.extend_from_slice(&st.q);
+        out.extend(st.devs.iter().map(|d| match d.class {
+            ChargeClass::Part(p) => stepped_final(p as usize),
+            ChargeClass::Source => src_final,
+            _ => t1,
+        }));
         st.q.iter_mut().for_each(|x| *x = 0.0);
         st.t0 = t1;
         st.cursor = t1;
@@ -812,6 +832,7 @@ impl crate::snapshot::HeapBytes for SourceTerms {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.lq, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.parts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_prev, w); }
         n
     }

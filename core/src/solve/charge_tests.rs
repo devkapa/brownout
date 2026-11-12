@@ -25,11 +25,13 @@ fn charge(p: &Program, devices: &[u32], steps: &[f64]) -> (Engine, Vec<f64>) {
         let b = e.take_charge().to_vec();
         assert_eq!((b[0], b[1]), (t_prev, s), "each take covers the span since the last");
         t_prev = s;
+        let slots = b.len() - 2 - devices.len();
         if q.is_empty() {
-            q = vec![0.0; b.len() - 2];
+            q = vec![0.0; slots];
         }
-        assert_eq!(b.len() - 2, q.len(), "one slot per device and channel");
-        for (k, &x) in b[2..].iter().enumerate() {
+        assert_eq!(slots, q.len(), "one slot per device and channel");
+        assert!(b[2 + slots..].iter().all(|&f| f == s), "after advance every charge is final to t1: {:?}", &b[2 + slots..]);
+        for (k, &x) in b[2..2 + slots].iter().enumerate() {
             q[k] += x;
         }
     }
@@ -246,11 +248,11 @@ fn arming_takes_and_disarming_follow_the_engine_time() {
     e.charge_arm(&[2]).unwrap();
     e.advance(2e-3).unwrap();
     let b = e.take_charge().to_vec();
-    assert_eq!((b[0], b[1], b.len()), (1e-3, 2e-3, 3), "armed at 1 ms: the span starts there");
+    assert_eq!((b[0], b[1], b.len(), b[3]), (1e-3, 2e-3, 4, 2e-3), "armed at 1 ms: the span starts there; final to t1");
     let (vinf, tau) = rc_truth();
     let v = |t: f64| vinf * (1.0 - (-t / tau).exp());
     close("capacitor from the arming", b[2], 1e-6 * (v(2e-3) - v(1e-3)), 1e-11 * 1e-6 * v(1e-3));
-    assert_eq!(e.take_charge(), &[2e-3, 2e-3, 0.0], "taken: cleared, the next span from 2 ms");
+    assert_eq!(e.take_charge(), &[2e-3, 2e-3, 0.0, 2e-3], "taken: cleared, the next span from 2 ms");
     e.charge_arm(&[]).unwrap();
     assert_eq!(e.take_charge(), &[2e-3, 2e-3], "disarmed");
 }
@@ -269,4 +271,176 @@ fn a_555_and_a_cc_rail_charge_by_kcl() {
     let i = e.currents();
     let sign = (i[0] / -(i[1] + i[2] + i[4] + G * e.voltages()[1])).signum();
     close("PSU", q[0], -sign * (q[1] + q[2] + q[3]), G * 5.0 * 60e-3 + 1e-9 * q[1].abs());
+}
+
+// ---- piece 5: yields, snapshots, failed advances, live edits ----------------
+
+use crate::kernel::Budget;
+
+/// One take of both: `(samples, charge)`, each the take's raw buffer.
+fn take_both(e: &mut Engine) -> (Vec<f64>, Vec<f64>) {
+    (e.acquire_take().to_vec(), e.take_charge().to_vec())
+}
+
+/// `p` with the observer on `nodes` at 100 kHz and the charge on every
+/// device, advanced through `steps`: by `advance`, or by `advance_for` on a
+/// clock that moves 1 ms a read against a 2 ms budget (a yield every few
+/// instants), taking at each host step's end only, or at each yield too.
+fn yielding(p: &Program, nodes: &[u32], steps: &[f64], how: &str) -> (Vec<(Vec<f64>, Vec<f64>)>, u32) {
+    let mut e = Engine::load(p).unwrap();
+    e.acquire(nodes, 0.0, 1e-5, 0).unwrap();
+    let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+    e.charge_arm(&all).unwrap();
+    let (mut takes, mut yields) = (Vec::new(), 0);
+    for &s in steps {
+        if how == "advance" {
+            e.advance(s).unwrap();
+        } else {
+            let mut now = 0.0;
+            let mut clock = || {
+                now += 1.0;
+                now
+            };
+            while !e.advance_for(s, Some(Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+                yields += 1;
+                if how == "take at yields" {
+                    takes.push(take_both(&mut e));
+                }
+            }
+        }
+        takes.push(take_both(&mut e));
+    }
+    (takes, yields)
+}
+
+#[test]
+fn a_yielding_run_samples_and_charges_as_one_advance() {
+    let steps = [0.37e-3, 1e-3, 1.7e-3];
+    let mut partials = 0;
+    for (name, p, nodes) in [("led rc", led_rc(), [2u32, 3]), ("555", astable(), [3, 5]), ("edges", edges(), [2, 4]), ("cc rail", cc_rail(), [1, 3]), ("stepped rc", stepped(rc(), true), [1, 2])] {
+        let (plain, _) = yielding(&p, &nodes, &steps, "advance");
+        let (split, yields) = yielding(&p, &nodes, &steps, "take at host steps");
+        assert!(yields > 3, "{name}: the clock yields ({yields})");
+        // Taken at the same points, the yields leave no trace.
+        let bits = |t: &[(Vec<f64>, Vec<f64>)]| t.iter().map(|(a, b)| (a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), b.iter().map(|x| x.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>();
+        assert_eq!(bits(&plain), bits(&split), "{name}");
+        // Taken at every yield too: the samples are the same in order, the
+        // charges sum to the same, each slot's span joins, and a stepped
+        // device's charge says how far it is final.
+        let (each, _) = yielding(&p, &nodes, &steps, "take at yields");
+        let n = nodes.len();
+        let samples = |t: &[(Vec<f64>, Vec<f64>)]| {
+            let mut out = vec![Vec::new(); n + 1];
+            for (b, _) in t {
+                let count = b[0] as usize;
+                let h = crate::observe::TAKE_HEADER + n;
+                out[0].extend_from_slice(&b[h..h + count]);
+                for j in 0..n {
+                    out[j + 1].extend_from_slice(&b[h + count * (1 + j)..h + count * (2 + j)]);
+                }
+            }
+            out
+        };
+        assert_eq!(samples(&each), samples(&plain), "{name}: the samples");
+        let d = p.devices.len();
+        let slots = plain[0].1.len() - 2 - d;
+        let total = |t: &[(Vec<f64>, Vec<f64>)]| (0..slots).map(|k| t.iter().map(|(_, c)| c[2 + k]).sum::<f64>()).collect::<Vec<f64>>();
+        let (want, got) = (total(&plain), total(&each));
+        let scale = want.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        for k in 0..slots {
+            assert!((got[k] - want[k]).abs() <= 1e-12 * scale, "{name}: slot {k} {} against {}", got[k], want[k]);
+        }
+        let mut partial = 0;
+        let mut t_prev = 0.0;
+        for (_, c) in &each {
+            assert_eq!(c[0], t_prev, "{name}: the spans join");
+            t_prev = c[1];
+            for &f in &c[2 + slots..] {
+                assert!(f <= c[1], "{name}: final {f} past t1 {}", c[1]);
+                partial += usize::from(f < c[1]);
+            }
+        }
+        partials += partial;
+    }
+    // Where two stepped partitions step apart (the 555's timing and CV
+    // capacitors), a yield after one's commit finds the other's pending.
+    assert!(partials > 0, "a take at a yield finds a step pending");
+}
+
+#[test]
+fn a_restore_brings_back_the_observer_and_the_charge() {
+    // Decided: the observer's queue and the charge's sums are engine state,
+    // in the snapshot; a host that restores retakes from there.
+    for (name, p) in [("led rc", led_rc()), ("edges", edges()), ("cc rail", cc_rail())] {
+        let mut e = Engine::load(&p).unwrap();
+        e.acquire(&[2], 0.0, 1e-5, 0).unwrap();
+        let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+        e.charge_arm(&all).unwrap();
+        e.advance(0.6e-3).unwrap();
+        let snap = e.snapshot();
+        e.advance(1.3e-3).unwrap();
+        let first = take_both(&mut e);
+        e.restore(&snap);
+        e.advance(1.3e-3).unwrap();
+        let again = take_both(&mut e);
+        assert_eq!(first, again, "{name}: the same samples and charge from 0 to 1.3 ms");
+    }
+}
+
+#[test]
+fn a_failed_advance_keeps_what_was_final_and_adds_nothing() {
+    // A stepped LED RC whose Newton is made to fail: the advance stops at its
+    // last completed instant, the samples and charge already final stay, the
+    // failed instant adds nothing, and the run then goes on as one that never
+    // failed.
+    let p = led_rc();
+    let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+    let run = |fail: bool| {
+        let mut e = Engine::load(&p).unwrap();
+        e.acquire(&[2, 3], 0.0, 1e-5, 0).unwrap();
+        e.charge_arm(&all).unwrap();
+        e.advance(0.5e-3).unwrap();
+        let mut takes = vec![take_both(&mut e)];
+        if fail {
+            let _guard = super::newton::hooks::force_unconverged(u32::MAX);
+            assert!(e.advance(1.5e-3).is_err(), "the forced failure");
+            takes.push(take_both(&mut e));
+        }
+        e.advance(2e-3).unwrap();
+        takes.push(take_both(&mut e));
+        takes
+    };
+    let (failed, plain) = (run(true), run(false));
+    let samples = |t: &[(Vec<f64>, Vec<f64>)]| t.iter().flat_map(|(s, _)| s[crate::observe::TAKE_HEADER + 2..].to_vec()).collect::<Vec<f64>>();
+    let times = |t: &[(Vec<f64>, Vec<f64>)]| t.iter().flat_map(|(s, _)| s[crate::observe::TAKE_HEADER + 2..crate::observe::TAKE_HEADER + 2 + s[0] as usize].to_vec()).collect::<Vec<f64>>();
+    assert_eq!(times(&failed), times(&plain), "the same sample times");
+    assert_eq!(samples(&failed), samples(&plain), "and values, bit for bit");
+    let n = 5;
+    for k in 0..n {
+        let sum = |t: &[(Vec<f64>, Vec<f64>)]| t.iter().map(|(_, c)| c[2 + k]).sum::<f64>();
+        let (a, b) = (sum(&failed), sum(&plain));
+        assert!((a - b).abs() <= 1e-12 * b.abs().max(1e-12), "device {k}: {a:e} against {b:e}");
+    }
+    assert!(failed[1].1[1] >= failed[0].1[1] && failed[1].1[1] < 1.5e-3, "the failed take ends where the run stopped: {}", failed[1].1[1]);
+}
+
+#[test]
+fn a_live_edit_refolds_the_held_currents_at_its_instant() {
+    // A divider on a 10 V source set to 4 V at 1 ms: each resistor's charge
+    // is its current before the set over 1 ms and after it over 1 ms, the
+    // source's by KCL.
+    let p = program(3, vec![dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![10.0]), dev(kinds::RESISTOR, 1, 1, 2, vec![1000.0]), dev(kinds::RESISTOR, 2, 2, 0, vec![1000.0])]);
+    let mut e = Engine::load(&p).unwrap();
+    e.charge_arm(&[1, 2, 0]).unwrap();
+    e.advance(1e-3).unwrap();
+    let before = e.currents().to_vec();
+    e.set_params(&[(0, 0, 4.0)]).unwrap();
+    let after = e.currents().to_vec();
+    assert!((after[1] - 0.4 * before[1]).abs() < 1e-9, "the set moved the divider: {} then {}", before[1], after[1]);
+    e.advance(2e-3).unwrap();
+    let c = e.take_charge().to_vec();
+    for (slot, d) in [(2, 1), (3, 2), (4, 0)] {
+        let hand = (before[d] + after[d]) * 1e-3;
+        close(&format!("device {d}"), c[slot], hand, 1e-12 * hand.abs());
+    }
 }

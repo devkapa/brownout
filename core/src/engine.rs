@@ -810,9 +810,13 @@ impl Engine {
     }
 
     /// `bo_engine_take_charge` (W2b piece 4): `[t0, t1, then per armed
-    /// device its charge and its channel slots' in channel order]` over the
-    /// span `[t0, t1]` since the last take (or the arming), and the sums
-    /// cleared; `[t, t]` at the engine's time when nothing is armed.
+    /// device its charge and its channel slots' in channel order, then per
+    /// armed device the time its charge is final to]` over the span `[t0,
+    /// t1]` since the last take (or the arming), and the sums cleared; `[t,
+    /// t]` at the engine's time when nothing is armed. A final time is `t1`
+    /// after `advance`; after a yield (`advance_for`), a device a stepped
+    /// partition publishes is final only to that partition's last commit, and
+    /// its charge since then comes with a later take.
     pub fn take_charge(&mut self) -> &[f64] {
         let now = self.kernel.time();
         let mut out = std::mem::take(&mut self.charge_buf);
