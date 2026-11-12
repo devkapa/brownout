@@ -17027,6 +17027,170 @@ fn exact_mode_solves_the_rails_partition_block_by_block_as_it_solves_it_whole() 
     assert!((whole.last().unwrap().0[1] - 5.0).abs() < 1e-3, "the rail at the setpoint by 20 ms: {}", whole.last().unwrap().0[1]);
 }
 
+/// R105's 40 branches off a CC rail (each 470 ohm into its own capacitor,
+/// every fourth an LED across it) and a 25 Hz clock through 1 kohm into the
+/// first, whose edges meet the 60 Hz host stops every 0.1 s.
+fn forty_branches_and_a_clock() -> Program {
+    let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), capacitor(1, 1, 0, 1.5e-9, 0.0)];
+    let mut ci = 2;
+    for k in 0..40 {
+        let node = 2 + k;
+        devices.push(resistor(ci, 1, node, 470.0));
+        devices.push(capacitor(ci + 1, node, 0, 1e-6 * (1.0 + k as f64 * 0.1), 0.0));
+        ci += 2;
+        if k % 4 == 0 {
+            devices.push(led(ci, node, 0));
+            ci += 1;
+        }
+    }
+    devices.push(clock(ci, 42, 0, 25.0, 0.5, 1));
+    devices.push(resistor(ci + 1, 42, 2, 1000.0));
+    program(43, devices)
+}
+
+#[test]
+fn exact_mode_blocks_and_whole_agree_within_each_paths_conditioning() {
+    // Ruling R111 (a), amending R105 part 2's check on a board with clock
+    // edges. Factored block by block over the rail or whole, the rail's
+    // partition takes the same steps, and the two solves' crossing
+    // refinements land a rounding apart, which the slopes carry: voltages
+    // within a thousandth of W0 over the whole run. A device's current can
+    // resolve only to its path's conductance times that voltage rounding:
+    // a capacitor's companion after a step of 1 ps is 1e6 S per uF (R109:
+    // the battery SAP-1's C4 read 2.4 nA apart at its clock edges). So
+    // each current within 1e-9 of the reading plus g x the voltage bound,
+    // g the device's own: 1/R, a capacitor's C/h over the last step, an
+    // LED's |i|/(n Vt), a source's every conductance at its node.
+    let p = exact(forty_branches_and_a_clock());
+    let vbound = |v: f64| 1e-3 * (1e-4 + 1e-3 * v.abs());
+    let run = |off: bool| {
+        crate::lu::hub_seam::OFF.with(|c| c.set(off));
+        let mut rig = Rig::load(&p).unwrap();
+        let mut out = Vec::new();
+        for k in 1..=60 {
+            rig.advance(k as f64 / 60.0).unwrap();
+            let last = rig.s().stepped.exact_commit_log.last().unwrap();
+            let h = last.mid.as_ref().map_or(last.t - last.t0, |m| last.t - m.0);
+            out.push((rig.s().voltages().to_vec(), rig.s().currents().to_vec(), h));
+        }
+        crate::lu::hub_seam::OFF.with(|c| c.set(false));
+        (out, rig.s().stepped.exact_commit_log.len())
+    };
+    let (whole, n_whole) = run(true);
+    let (blocks, n_blocks) = run(false);
+    assert_eq!(n_whole, n_blocks, "the same steps");
+    let (mut v_worst, mut i_worst, mut short) = (0.0f64, (0.0f64, String::new()), 0.0f64);
+    for (k, ((v1, i1, h1), (v2, i2, h2))) in whole.iter().zip(&blocks).enumerate() {
+        let h = h1.min(*h2);
+        short = short.max(1.0 / h);
+        for (a, b) in v1.iter().zip(v2) {
+            v_worst = v_worst.max((a - b).abs() / vbound(a.abs().max(b.abs())));
+        }
+        for (d, dev) in p.devices.iter().enumerate() {
+            let vb = dev.pins.iter().map(|pin| vbound(v1[pin.node].abs().max(v2[pin.node].abs()))).fold(0.0f64, f64::max);
+            let g = match dev.kind {
+                kinds::RESISTOR => 1.0 / dev.params[0],
+                kinds::CAPACITOR => dev.params[0] / h,
+                kinds::LED => i1[d].abs().max(i2[d].abs()) / (2.0 * 0.0257) + 1e-12,
+                // A source's current is its node's KCL: every conductance there.
+                _ => p.devices.iter().filter(|o| o.kind == kinds::RESISTOR && o.pins.iter().any(|q| dev.pins.iter().any(|r| r.node == q.node && r.node != 0))).map(|o| 1.0 / o.params[0]).sum::<f64>()
+                    + p.devices.iter().filter(|o| o.kind == kinds::CAPACITOR && o.pins.iter().any(|q| dev.pins.iter().any(|r| r.node == q.node && r.node != 0))).map(|o| o.params[0] / h).sum::<f64>(),
+            };
+            let allowed = 1e-9 * i1[d].abs().max(i2[d].abs()) + g * vb;
+            let r = (i1[d] - i2[d]).abs() / allowed;
+            if r > i_worst.0 {
+                i_worst = (r, format!("frame {} device {d} (kind {}) {:e} against {:e}, g {g:e} S", k + 1, dev.kind, i1[d], i2[d]));
+            }
+        }
+    }
+    eprintln!("exact blocks against whole, 1 s: voltages {v_worst:.3e} of their bound (1e-3 W0); currents {:.3e} of theirs, worst at {}; shortest last step {:.3e} s", i_worst.0, i_worst.1, 1.0 / short);
+    assert!(v_worst <= 1.0, "voltages within 1e-3 of W0");
+    assert!(i_worst.0 <= 1.0, "currents within their paths' conditioning: {}", i_worst.1);
+}
+
+/// [`forty_branches_and_a_clock`] without its LEDs: a linear partition.
+fn forty_rc_branches_and_a_clock() -> Program {
+    let mut devices = vec![psu(0, 1, 0, 5.0, 0.1), capacitor(1, 1, 0, 1.5e-9, 0.0)];
+    let mut ci = 2;
+    for k in 0..40 {
+        let node = 2 + k;
+        devices.push(resistor(ci, 1, node, 470.0));
+        devices.push(capacitor(ci + 1, node, 0, 1e-6 * (1.0 + k as f64 * 0.1), 0.0));
+        ci += 2;
+    }
+    devices.push(clock(ci, 42, 0, 25.0, 0.5, 1));
+    devices.push(resistor(ci + 1, 42, 2, 1000.0));
+    program(43, devices)
+}
+
+#[test]
+fn a_published_capacitor_current_is_the_branch_formulations_at_its_step() {
+    // Rulings R110, R111 (3), R112 (a). A stepped partition publishes each
+    // capacitor's companion current over its last committed step; the
+    // branch formulation (`stepped::branch_currents`: each capacitor a
+    // source of its charge, its current an unknown of the network at the
+    // step's solution) gives the same current where the step's system is
+    // solved exactly. In a linear partition it is: one LU, and the two agree
+    // within 1e-9 of the reading and 1e-15 A at every committed step. An
+    // iterated partition's step (an LED junction, a free IC supply) stops at
+    // Newton's tolerance, `NEWTON_ABS + NEWTON_REL |v|`; the companion is the
+    // integrator's own current there and the branch formulation reads KCL at
+    // that not-quite solution, so they differ by the conductance at the
+    // capacitor's nodes times that tolerance, and no more (R112's probe:
+    // with Newton's tolerance a thousand times tighter the differences shrank
+    // about a thousand times). Both stand equally far from a fine
+    // reference's C dv/dt. The hook records committed steps only (computed
+    // when a plan is accepted, recorded when that trial commits): R110's
+    // first audit hooked every solve and read 0.49 relative on rejected
+    // step-doubling trials and crossing bisections, which are never
+    // published.
+    for (name, p) in [
+        ("exact, 40 branches", exact(forty_branches_and_a_clock())),
+        ("default, 40 branches", forty_branches_and_a_clock()),
+        ("exact, CC ramp", exact(cc_ramp_into_an_ic_floor(1e-6, 0.06, led(2, 2, 3)))),
+        ("exact, 40 RC branches", exact(forty_rc_branches_and_a_clock())),
+    ] {
+        stepped::branch_audit::PAIRS.with(|v| v.borrow_mut().clear());
+        stepped::branch_audit::ON.with(|c| c.set(true));
+        let mut e = Engine::load(&p).unwrap();
+        for k in 1..=30 {
+            e.advance(k as f64 / 60.0).unwrap();
+        }
+        stepped::branch_audit::ON.with(|c| c.set(false));
+        let records = stepped::branch_audit::PAIRS.with(|v| std::mem::take(&mut *v.borrow_mut()));
+        let (mut linear, mut iterated, mut linear_past, mut iterated_past) = (0u32, 0u32, 0u32, 0u32);
+        let (mut worst_linear, mut worst_iterated) = (0.0f64, 0.0f64);
+        let (mut iter_abs, mut iter_strict) = (0.0f64, 0u32);
+        for &(companion, branch, iter, bound) in &records {
+            let d = (companion - branch).abs();
+            if iter {
+                iter_abs = iter_abs.max(d);
+                if d > 1e-9 * companion.abs().max(branch.abs()) + 1e-15 {
+                    iter_strict += 1;
+                }
+            }
+            if iter {
+                iterated += 1;
+                worst_iterated = worst_iterated.max(d / bound.max(1e-300));
+                if d > bound + 1e-15 {
+                    iterated_past += 1;
+                }
+            } else {
+                linear += 1;
+                let m = companion.abs().max(branch.abs());
+                worst_linear = worst_linear.max(d / (1e-9 * m + 1e-15));
+                if d > 1e-9 * m + 1e-15 {
+                    linear_past += 1;
+                }
+            }
+        }
+        eprintln!("{name}: committed readings {linear} linear (worst {worst_linear:.3e} of 1e-9 + 1e-15 A, {linear_past} past), {iterated} iterated (worst {worst_iterated:.3e} of G x Newton's tolerance, {iterated_past} past; {iter_strict} past 1e-9 + 1e-15 A, largest {iter_abs:.3e} A)");
+        assert!(linear + iterated > 200, "{name}: committed steps audited");
+        assert_eq!(linear_past, 0, "{name}: linear partitions publish the branch formulation's current");
+        assert_eq!(iterated_past, 0, "{name}: iterated partitions within G x Newton's tolerance");
+    }
+}
+
 #[test]
 fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
     // Ruling R86 (a): a budgeted advance yields only between completed

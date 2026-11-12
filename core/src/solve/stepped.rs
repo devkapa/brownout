@@ -1310,6 +1310,17 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
     if vc_from.iter().all(|&v| v == 0.0) {
         return;
     }
+    let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
+    branch_currents(shape, live_params, ic_ctx, bnd, exact, size, x, vc_from, &charged, i);
+}
+
+/// The capacitors' currents in the branch formulation, as
+/// [`seed_branch_currents`] solves them: each capacitor an ideal source of
+/// its charge `vc` in series with its esr, its current an unknown of the
+/// solve, the rest of the network linearised at `x`. Only the capacitors
+/// `which` names take the solve's current; a singular system keeps `i`.
+#[allow(clippy::too_many_arguments)]
+fn branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], which: &[bool], i: &mut [f64]) {
     let (n, m) = (shape.n, shape.capacitors.len());
     let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
     stamp_linear_base(shape, size, &mut a, &mut b, live_params, bnd);
@@ -1347,10 +1358,27 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
     }
     if let Ok(sol) = crate::lu::solve(mna, dim, rhs) {
         for k in 0..m {
-            if vc_from[k] != 0.0 && sol[n + k].is_finite() {
+            if which[k] && sol[n + k].is_finite() {
                 i[k] = sol[n + k];
             }
         }
+    }
+}
+
+/// Test hook (rulings R110, R111): each committed step's capacitor
+/// currents, the companion's it publishes against the branch
+/// formulation's at the same solution and charges, recorded while `ON`.
+/// Computed when a plan is accepted and kept with the pending trial, then
+/// recorded only when that trial commits: a rejected step-doubling trial,
+/// a half step or a crossing bisection's trial is never published, and
+/// solved to Newton's tolerance from wherever it started, its two currents
+/// can disagree (R110's first audit, which hooked every solve, read 0.49
+/// relative on such trials where every published reading agreed).
+#[cfg(test)]
+pub(crate) mod branch_audit {
+    thread_local! {
+        pub static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub static PAIRS: std::cell::RefCell<Vec<(f64, f64, bool, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 }
 
@@ -2227,6 +2255,10 @@ pub struct SteppedSolver {
     /// solved with, so a test can work out the source's current at it.
     #[cfg(test)]
     pub(crate) exact_commit_log: Vec<ExactCommit>,
+    /// The pending trial's audited currents per partition
+    /// ([`branch_audit`]), recorded at its commit.
+    #[cfg(test)]
+    audit_pend: HashMap<usize, Vec<(f64, f64, bool, f64)>>,
 }
 
 impl SteppedSolver {
@@ -2361,6 +2393,8 @@ impl SteppedSolver {
             resolve_log: Vec::new(),
             #[cfg(test)]
             exact_commit_log: Vec::new(),
+            #[cfg(test)]
+            audit_pend: HashMap::new(),
         }
     }
 
@@ -3198,6 +3232,10 @@ impl SteppedSolver {
     /// sensitivity at it (a stepped hub partition contributes afresh at each
     /// committed step, Rails point 4).
     fn commit_partition(&mut self, p: usize, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(pairs) = self.audit_pend.remove(&p) {
+            branch_audit::PAIRS.with(|v| v.borrow_mut().extend(pairs));
+        }
         let part = &self.partitions[&p];
         let mut two = None;
         if part.hub && self.rail.is_some() {
@@ -4847,6 +4885,42 @@ impl SteppedSolver {
         {
             part.pend_mid = half.map(|mid| (part.t + h / 2.0, mid.x, mid.i));
         }
+        #[cfg(test)]
+        if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() {
+            let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, part.t + h);
+            let exact_here = ic_ctx.exact.filter(|e| e.partition == p_idx);
+            let n = part.shape.n;
+            let mut branch = accepted.i.clone();
+            branch_currents(&part.shape, live_params, &ic_ctx, &bnd, exact_here.as_ref(), n, &accepted.x, &accepted.vc, &vec![true; accepted.vc.len()], &mut branch);
+            // The conductance at each capacitor's nodes, everything but its
+            // own companion: the diagonal of the step's own system there
+            // (a TR-BDF2 step's last stage is a backward Euler solve over
+            // `h_2` from its history).
+            let (h_s, vc_s, i_s, m_s) = match accepted.stage.as_deref() {
+                Some(st) => (st.h_2, st.vh.clone(), vec![0.0; accepted.vc.len()], Method::Be),
+                None => (h, vc0.clone(), i_prev.clone(), method),
+            };
+            let (mut a, mut rhs) = (vec![0.0; n * n], vec![0.0; n]);
+            stamp_step(&part.shape, live_params, h_s, &vc_s, &i_s, m_s, &ic_ctx, &bnd, n, &accepted.x, &mut a, &mut rhs);
+            let records: Vec<(f64, f64, bool, f64)> = part
+                .shape
+                .capacitors
+                .iter()
+                .enumerate()
+                .map(|(k, cap)| {
+                    let own = companion(cap, h_s, vc_s[k], i_s[k], m_s).conductance;
+                    let (mut g, mut v) = (0.0, 0.0f64);
+                    for pin in &cap.pins {
+                        if let Some(l) = bnd.local(pin).filter(|&l| l < n) {
+                            g += a[l * n + l] - own;
+                            v = v.max(accepted.x[l].abs());
+                        }
+                    }
+                    (accepted.i[k], branch[k], ic_ctx.iterated, g * (newton::NEWTON_ABS + newton::NEWTON_REL * v))
+                })
+                .collect();
+            self.audit_pend.insert(p_idx, records);
+        }
         part.pend_x = accepted.x;
         part.pend_vc = accepted.vc;
         part.pend_i = accepted.i;
@@ -6303,6 +6377,7 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.commit_log, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.resolve_log, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact_commit_log, w); }
+        #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.audit_pend, w); }
         n
     }
 }

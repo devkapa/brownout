@@ -4891,6 +4891,30 @@ Constants, all from P3:35-38 unless marked new:
      of the whole's (8e-4 of W0) and its capacitor currents within 0.5 of
      W0's 1 nA, not growing. Its CPU there: 23.4 s to 4.0 s for 0.05 s
      (running), 12.1 to 3.6 s (frozen), measured on a loaded machine.
+   - **What a capacitor current resolves to** (rulings R109, R111, R112).
+     A capacitor current through a path of conductance `g` is resolvable
+     only to about `g` times the voltage rounding: on very stiff paths
+     W0's 1 nA floor is below that. A capacitor's published current is its
+     companion's over its last committed step, whose conductance is `C /
+     h`: after a step of 1 ps at a clock edge that is 1e6 S per uF, and the
+     battery SAP-1's C4 read 2.4 nA apart between two solves a rounding
+     apart (block elimination against the whole LU; the four instants were
+     each a 1 ps step, `|di| = C / h |dv|` within the ulps). So blocks and
+     whole are held to each current within 1e-9 of the reading plus `g`
+     times the voltage bound, a thousandth of W0, with `g` the device's
+     own path (`exact_mode_blocks_and_whole_agree_within_each_paths_conditioning`).
+     The companion current is the right one to publish: at a committed
+     step of a linear partition it is the branch formulation's (each
+     capacitor a source of its charge, `stepped::branch_currents`) within
+     1e-9 and 1e-15 A, and in an iterated partition within the conductance
+     at its nodes times Newton's tolerance, the two standing equally far
+     from a fine reference (`a_published_capacitor_current_is_the_branch_formulations_at_its_step`).
+     At an instant where a waveform source steps (a clock edge) the
+     published current is the right-hand limit, the current after the
+     edge: a fine reference read as `C dv/dt` backward over its last
+     microsecond reads the left-hand one there (5 mA against 50 nA on a 1
+     kohm clock feed), so a comparison at an edge reads the reference from
+     the right.
 
 ### Sources
 
