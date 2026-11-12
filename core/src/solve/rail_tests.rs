@@ -18086,3 +18086,144 @@ fn a_chatter_slide_leaves_where_its_edge_stops_attracting_at_every_host_cadence(
         w0_volts(rig.u(), 3.0 + i_limit * r_feed, &format!("{name}: the rail at the end"));
     }
 }
+
+#[test]
+fn a_slide_solved_flat_at_its_edge_is_solved_there_again_only_when_its_inputs_move() {
+    // R99W's 2575 tpl 2 failures (R53-P11, ruling R113 (1)): solved flat
+    // at its 1.8 V edge on its 11.9 nF CC segment, the 555's rail settled 4
+    // uV off it and its own aim brought it back within two reached widths
+    // (3.6e-12 V) 0.44 us later, at C17's next step, where `keep_sliding`
+    // solved it flat again, at each step of C17's decay: under R99's
+    // ramp-following segment 170 solves in 77 us, the follow cap, the
+    // fallback, and the 555 Off at the 4.98 V setpoint for the rest of the
+    // run, where a rail 2e-12 V further off rode the W0 band: a slide's
+    // outcome hung on 1e-11 V. A flat solve's inputs are the draw's excess
+    // at the edge it left and the board's draw since: solved again at the
+    // edge only where it did not leave the segment flat or the draw has
+    // moved by more than drifts the rail W0/2 over the slide's span (a
+    // discrete flip is solved again anyway). Here C17's decay moves the
+    // draw a microampere per step, 3e-5 V of drift over the 0.34 us span.
+    // Measured at `a_555_sliding_on_a_cc_rail_through_a_capacitor_s_transient_slides_alike_at_any_host_cadence`'s
+    // schedules after switch 14 opens at 30.08 ms: before, 1 ms stops took
+    // 101 re-solves by 35 ms, 56 of them in one host step, 114 by 0.2 s
+    // against STOPS_2575's 61 (`drafts/r53-logs/p11-sp/edge-failfirst.log`).
+    // No closed form counts re-solves: the bound is the schedules' own
+    // spread, within a quarter of the least, each still sliding at 0.2 s.
+    let p = cold_2575_tpl2();
+    let open14 = 0.030082069747425742;
+    let grid = |h: f64| (1..).map(move |k| k as f64 * h).take_while(|&t| t < 0.2 - 1e-12).collect::<Vec<f64>>();
+    let base: Vec<f64> = STOPS_2575.iter().copied().filter(|&t| t < 0.2).collect();
+    let mut counts = Vec::new();
+    for (name, st) in [("STOPS_2575", base.clone()), ("STOPS_2575 + 30.1 ms", base.iter().copied().chain([0.0301]).collect()), ("0.1 ms", grid(1e-4)), ("1 ms", grid(1e-3)), ("10 ms", grid(1e-2))] {
+        let mut stops: Vec<f64> = st.into_iter().chain([open14, 0.2]).collect();
+        stops.sort_by(f64::total_cmp);
+        stops.dedup();
+        let mut rig = Rig::load(&p).unwrap();
+        let mut toggled = false;
+        let c0 = hold::SLIDE_SOLVE_COUNT.with(|c| c.get());
+        for &stop in &stops {
+            rig.advance(stop).unwrap_or_else(|e| panic!("{name}: {e:?} at {}", rig.k.time()));
+            if !toggled && stop >= open14 {
+                rig.k.apply_params_as_event(&[(14, 0, 0.0)]).unwrap();
+                rig.k.solver_mut().prepare_readout();
+                toggled = true;
+            }
+        }
+        assert!(matches!(rig.s().power_hold(6).kind, digital::power::HoldKind::Duty(_)), "{name}: sliding at 0.2 s");
+        counts.push((name, hold::SLIDE_SOLVE_COUNT.with(|c| c.get()) - c0));
+    }
+    let least = counts.iter().map(|c| c.1).min().unwrap();
+    for &(name, n) in &counts {
+        assert!(n as f64 <= 1.25 * least as f64, "{name}: {n} re-solves to 0.2 s against the least, {least}: {counts:?}");
+    }
+}
+
+#[test]
+fn hg1s_cc_ramp_solves_its_slide_flat_at_the_edge_until_the_segment_is_flat() {
+    // Ruling R113 (1)'s other side: a solve at the edge that did not leave
+    // the segment flat is new input, solved again at the next arrival. HG1's
+    // CC ramp (`a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_until_the_supply_carries_it`)
+    // enters its slide at the floor crossing, 1.442159 ms, with the aim's
+    // duty 0.039; the rail crosses the edge 1.05e-14 s later and is solved
+    // there again (0.5195), and again at each crossing, each halving the
+    // draw's excess, to the flat duty x = 1.8182 / 5.0597 = 0.359346 by hand
+    // (the RC's draw at the edge over the LED's powered current) within 2
+    // ns. Left at W0/2 of the segment's offset (`excess / g`), as for a draw
+    // that moved, it stopped at 0.359662 (3.2e-4 off); at `EDGE_FLAT` of
+    // W0, 0.3593472. To 1e-5 (the hand value's sixth digit and its band).
+    let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
+    let mut rig = Rig::load(&p).unwrap();
+    let mut entry: Option<(f64, f64)> = None;
+    let mut second = None;
+    while rig.k.time() < 1.6e-3 {
+        let t = rig.k.next_event_time().min(1.6e-3);
+        rig.advance(t).unwrap();
+        let hold = rig.s().power_hold(1);
+        let digital::power::HoldKind::Duty(_) = hold.kind else { continue };
+        match entry {
+            None => entry = Some((t, hold.kind.weight())),
+            Some((t0, _)) if second.is_none() && t > t0 => second = Some((t - t0, hold.kind.weight())),
+            Some((t0, _)) if t > t0 + 2e-9 => break,
+            _ => {}
+        }
+    }
+    let ((t0, x0), (dt, x1)) = (entry.expect("slid"), second.expect("solved again"));
+    close(t0, 1.442159e-3, 1e-9, "slid at the floor crossing");
+    assert!(dt < 1e-13 && x1 != x0, "solved again at the next crossing, {dt:e} s on: {x0} then {x1}");
+    close(rig.s().power_hold(1).kind.weight(), 0.359346, 1e-5, "the flat duty within 2 ns");
+}
+
+/// [`a_chip_held_where_no_slide_was_possible_slides_once_its_edge_attracts`]'s
+/// board: a 74LS00 on a {5 V, 8 mA} PSU's 1 uF rail, 1y into 200 ohm, and a
+/// pulse (3 V, rising from 1 ms over 10 ms to 5 V) through 100 ohm onto the
+/// rail.
+fn rising_pulse_rail_board() -> Program {
+    let logic = [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5];
+    program(7, vec![psu(0, 1, 0, 5.0, 0.008), capacitor(1, 1, 0, 1e-6, 0.0), ls00(2, 1, 0, logic, 10e-9, 0), resistor(3, 2, 0, 200.0), pulse(4, 6, 0, [3.0, 5.0, 1e-3, 10e-3, 20e-3, 5e-3, 1.0], 4), resistor(5, 6, 1, 100.0)])
+}
+
+#[test]
+fn a_chip_held_where_no_slide_was_possible_slides_once_its_edge_attracts() {
+    // Ruling R113 (2), R53-P11: a chip held on a CC rail capacitor's
+    // segment is retried only once ruling R44 (a)'s draw threshold passes,
+    // and that test reads the draw at the release level (CC) or the setpoint
+    // (CV) with nothing but its own draw on the way to the edge. Under
+    // R99's ramp-following segment the dragged-rail board was held at the
+    // attraction's first instant, where no duty yet brackets, and stayed
+    // off at 4.38 to 5 V for good. Here the hold is taken with slides off
+    // (`NoSlide`) until 5 ms, as the procedure takes it for a chip that may
+    // not slide, and then may slide: each host step it is retried as a
+    // slide where Filippov's condition holds at the segment's ends
+    // (`chatter_end_rates`), and kept where it slides.
+    //
+    // By hand: with the rail at the 4.275 V floor the PSU's 8 mA and the
+    // pulse's (Vp - 4.275) / 100 meet the chip's draw x D_1, D_1 = 4.275 /
+    // (4.275 / 0.032 + 200) = 12.815 mA fully on, so the flat duty is (8 mA
+    // + (Vp - 4.275) / 100) / D_1, the edge attracting for Vp between 3.475
+    // V and 4.7565 V (1 to 11 ms: Vp = 3 + 0.2 V per ms). Held at the floor
+    // at 4.05 ms (with slides off), R44 (a)'s threshold (the draw at the floor, (4.275 -
+    // Vp) / 100, plus D_1, under 8 mA) passes only at 9.78 ms. From the
+    // first host step after 5 ms it slides, at 6 to 9 ms within W0 of the
+    // floor and its duty within what W0 of the rail moves it by, W0 / (100
+    // ohm D_1) = 3.4e-3 (the slide's centring and the ramp's draw rate move
+    // it within that); before, it sat off to 9.78 ms.
+    let (floor, d1) = (0.9 * 4.75, 0.9 * 4.75 / (0.9 * 4.75 / 0.032 + 200.0));
+    let w0 = 1e-4 + 1e-3 * floor;
+    let mut rig = Rig::load(&rising_pulse_rail_board()).unwrap();
+    {
+        let _no_slide = hold::NoSlide::arm();
+        for k in 1..=5 {
+            rig.advance(k as f64 * 1e-3).unwrap();
+        }
+    }
+    assert_eq!(rig.s().power_hold(2).kind, digital::power::HoldKind::Off, "held at 5 ms with slides off");
+    for k in 6..=9 {
+        let t = k as f64 * 1e-3;
+        rig.advance(t).unwrap();
+        let hold = rig.s().power_hold(2);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t}: sliding, not {hold:?}");
+        close(rig.u(), floor, w0, &format!("at {t}: the rail at the floor"));
+        let vp = 3.0 + 0.2 * (t - 1e-3) / 1e-3;
+        close(hold.kind.weight(), (0.008 + (vp - floor) / 100.0) / d1, w0 / (100.0 * d1), &format!("at {t}: the flat duty by hand"));
+    }
+}

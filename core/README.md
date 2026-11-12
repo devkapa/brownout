@@ -2207,6 +2207,44 @@ their own, and the source KCL does with W1a point 2's branch fold.
    107,684 events and 3,574 slide solves against 78,832 and 3,543, the
    extra events in switch 21's pulse phase (0.38 to 1.1 s).
 
+   **Solving again at the edge** (ruling R113 (1), R53-P11; `keep_sliding`'s
+   `at_edge`, `Episode::solved_imbalance`, `EDGE_FLAT`). A slide on a CC
+   rail capacitor's segment whose supply is back at its edge is solved
+   flat there again only where the flat solve's inputs changed: the last
+   solve left the segment off flat by more than `EDGE_FLAT` (1e-2) of W0,
+   read as the offset its excess draw holds the segment at (`excess / g`,
+   `g` the rail draw's conductance), or the draw has moved by W0/2 of it
+   since (a discrete flip is solved again anyway). A rail its own aim
+   brings back is no new input: cold 2575 tpl 2 under R99's
+   ramp-following segment was solved flat at each of C17's 0.44 us steps
+   (0.2 uA of excess against 0.0577 S, 3.5 uV), 170 solves in 77 us, to
+   the follow cap and a fallback left Off at the 4.98 V setpoint, and
+   whether its rail landed within two reached widths of the edge, a
+   difference of 1e-11 V, decided it; 1 ms host steps took 114 re-solves
+   to 0.2 s against STOPS_2575's 61, now 57 to 58 at every schedule. HG1's
+   CC ramp, whose solves at the edge each halve the draw's excess, still
+   converges to its flat duty 0.359346 within 2 ns (0.3593472; stopped at
+   W0/2 it sat at 0.359662). Pins:
+   `a_slide_solved_flat_at_its_edge_is_solved_there_again_only_when_its_inputs_move`,
+   `hg1s_cc_ramp_solves_its_slide_flat_at_the_edge_until_the_segment_is_flat`.
+
+   **A hold retried as a slide** (ruling R113 (2), `hold::reenter_slides`).
+   A chip held on a CC rail capacitor's segment is retried only once ruling
+   R44 (a)'s draw threshold passes, which reads the draw at the release
+   level (or the setpoint in CV) with only the chip's own draw on the way
+   to the edge. Where it would slide (not self-fed) and its edge attracts
+   at the segment's ends (`chatter_end_rates`), it is retried each host
+   step: past its release level it is freed, as R51 (b)'s retry frees a
+   chip, and the segment carries its rail down to the edge where the
+   procedure slides it; at or short of it, its slide is solved from the
+   hold (`slide_on_rail`) and kept only where it slides. A rail held by a
+   pulse through 100 ohm while slides were off sat Off from 4.05 ms to
+   9.78 ms with its edge attracting; now it slides from the next host step,
+   at the hand duty `(8 mA + (Vp - 4.275) / 100) / 12.815 mA` within W0
+   (`a_chip_held_where_no_slide_was_possible_slides_once_its_edge_attracts`).
+   Freed and left to the passes instead, cold 757 tpl 0's 555 reloaded at
+   0.25 s (W2c) went free under its floor and stayed free at 0.3 s.
+
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
    supply out of its window; held off, the supply comes back) is held,
