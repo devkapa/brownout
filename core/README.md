@@ -4862,7 +4862,6 @@ Constants, all from P3:35-38 unless marked new:
      against 0.14 s in default mode, about 200-300 s of CPU per simulated
      second. The exact-mode fixes since (FX1-FX5, EX1) moved it within noise
      (8.5-9.0 s frozen, 12.5-13.5 s running).
-
 ### Sources
 
 1. **Identity rules** are the compiler's (Battery record): explicit uid
@@ -7080,11 +7079,10 @@ failures and warnings (W1g)"):
   19.2365 ms). A host stopping at each instant and one yielding there read
   the same, bit for bit, so this is accuracy, not host cadence (D6).
   `zz_r101_2575_cadence_against_fine` (ignored) re-measures it.
-  Exact mode's esr-0 rail capacitor belongs here too: when its seed's branch
-  solve is singular (W2c's capacitor currents, `seed_branch_currents`), the
-  seed keeps the 1 ps companion's current, so the CC step at an exit seed
-  overshoots the setpoint (corpus 47 publishes about 1e8 A there, at
-  26ed5ee and after W2c alike).
+  Exact mode's esr-0 rail capacitor at a CC exit (corpus 47 at 1 ms
+  host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
+  about 1e8 A) is closed: a CC rail past its setpoint within the shortest
+  step leaves CC there (Rails point 9, ruling R102 (a)).
 - **Threshold-aware battery rail cadence** (rulings R105, R108). A cell's
   rail re-solves at every 10 uV of its coupled path's motion
   (`RAIL_DRIFT_V`), about 32,000 times a simulated second on the battery
@@ -7104,6 +7102,28 @@ failures and warnings (W1g)"):
   re-solve wherever a watched IC's rail-borne threshold could be crossed
   within it. Variants A, B, C and C2 and their numbers: drafts
   `battery-rail-cadence.md`; patches in int-acc-logs/r105.
+- **Exact-mode coarse step accuracy** (ruling R102 (a), measured on
+  wip/exact at 3cefe1d). Exact mode at the cold sweep's host stops (1-800,
+  hub 2, its own exact-mode boards) against its own fine reference (exact
+  mode at 1 us host steps, scored at the coarse stops): of the 276 boards
+  R102 moved, 42 still read past W0 somewhere (79 did before it), worst
+  first: 254/0 97,024, 467/4 5,640 (`-4`), 249/5 812, 289/2 650, 741/3 470,
+  744/2 78, 450/1 65, 454/0 32, 447/5 13.5, 758/2 9.7, 88/2 7.1, 375/5 6.6,
+  434/5 5.8, 782/3 5.4, 191/5 4.3, 175/5 3.3, 293/0 3.1, 616/5 2.9 (`-7`),
+  93/0 2.9, 274/3 2.1, 493/0 2.0, 504/3 1.9, 500/5 1.9, 107/3 1.9, 639/4
+  1.8, 224/0 1.8, 761/3 1.6, 679/5 1.5, 109/5 1.5, 24/3 1.4, 469/3 1.4,
+  522/5 1.4, 376/3 1.4, 336/0 1.4, 676/4 1.4, 781/4 1.3, 498/5 1.2, 770/5
+  1.2, 391/3 1.1, 238/3 1.1, 466/1 1.1, 342/3 1.05 W0 (the sweep and its
+  scoring: drafts/exact-logs/r102b-cmp-x.final.txt, r102d-cmp-x-12.txt).
+  The boards the R102 work looked at fall in three classes: (1) step
+  placement on a node a clock or pulse swings (224/0, 1.2 to 1.8 W0 at
+  different stops on both builds); (2) R53's no-slide domain, a chip
+  chattering at its floor whose held-off phases a stop can land in (467/4,
+  the PSU in CV at its setpoint there); (3) step error that was there
+  before any cut, the same reading at the same stop on both builds (249/5,
+  289/2 and 744/2 at the first stop, 254/0, 450/1), or lowered by R102 but
+  not to W0 (741/3 582 to 470, 758/2 117 to 9.7, 88/2 70 to 7.1). The rest
+  are not classified yet.
 
 ## Deferred past 1.0.0
 
