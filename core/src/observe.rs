@@ -88,7 +88,7 @@ impl Observer {
     }
 
     /// Reads every sample whose time is before `t_limit` (at or before it with
-    /// `inclusive`), in order, while `value(node, t)` gives each probed node's
+    /// `inclusive`), in order, while `value(j, t)` gives probed node `j`'s
     /// value there with the span of the stepped commits it lay between (0 for
     /// none) and whether it fell back to linear; the first sample a node
     /// cannot give yet (its later commit not made) stops the reading, to be
@@ -116,7 +116,7 @@ impl Observer {
             }
             let mut span = 0.0f64;
             for j in 0..self.nodes.len() {
-                match value(self.nodes[j], t) {
+                match value(j, t) {
                     Some((v, s, fallback)) => {
                         self.row[j] = v;
                         self.row_fallback[j] = fallback;
@@ -184,9 +184,10 @@ mod tests {
     #[test]
     fn a_sample_a_node_cannot_give_yet_stops_the_reading_and_comes_back() {
         let mut o = Observer::new(vec![1, 2], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
-        o.read_until(5.0, true, |n, t| if n == 2 && t > 1.0 { None } else { Some((t + n as f64, 0.5, false)) });
+        // `j` indexes the probed nodes: node 1 is 0, node 2 is 1.
+        o.read_until(5.0, true, |j, t| if j == 1 && t > 1.0 { None } else { Some((t + (j + 1) as f64, 0.5, false)) });
         assert_eq!(o.next_time(), 2.0);
-        o.read_until(5.0, true, |n, t| Some((t + n as f64, 0.0, false)));
+        o.read_until(5.0, true, |j, t| Some((t + (j + 1) as f64, 0.0, false)));
         let mut out = Vec::new();
         o.take(&mut out);
         assert_eq!(&out[..6], &[6.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
@@ -211,9 +212,9 @@ mod tests {
     #[test]
     fn a_fallback_is_counted_per_node_and_rewound() {
         let mut o = Observer::new(vec![1, 2], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
-        o.read_until(1.0, true, |n, _| Some((0.0, 0.0, n == 2)));
+        o.read_until(1.0, true, |j, _| Some((0.0, 0.0, j == 1)));
         let m = o.mark();
-        o.read_until(3.0, true, |n, _| Some((0.0, 0.0, n == 2)));
+        o.read_until(3.0, true, |j, _| Some((0.0, 0.0, j == 1)));
         o.rewind(m);
         let mut out = Vec::new();
         o.take(&mut out);

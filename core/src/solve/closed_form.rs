@@ -1445,14 +1445,20 @@ impl ClosedFormSolver {
         }
     }
 
-    /// W2b: `node`'s value at `t` on its partition's present segment, as
-    /// [`Self::publish_at`] would publish it there (its sums in its order;
-    /// [`Self::node_at`] sums as `handle_crossing` reads), computing that one
-    /// node; `None` for a node of no running segment (not settled yet, or a
-    /// parked copy whose stepped twin runs).
-    pub(crate) fn sample_at(&self, node: usize, t: f64) -> Option<f64> {
+    /// Where `node` is, `(slot, local)`, for `sample_located`: the
+    /// observer looks it up once between instants, not at each sample.
+    pub(crate) fn locate(&self, node: usize) -> Option<(usize, usize)> {
         let &(p, l) = self.node_owner.get(&node)?;
-        let part = &self.parts[self.slot(p)?];
+        Some((self.slot(p)?, l))
+    }
+
+    /// W2b: a node's value at `t` on its partition's present segment, at
+    /// where [`Self::locate`] found it, as [`Self::publish_at`] would publish
+    /// it there (its sums in its order; [`Self::node_at`] sums as
+    /// `handle_crossing` reads), computing that one node; `None` for a node
+    /// of no running segment (not settled yet).
+    pub(crate) fn sample_located(&self, (slot, l): (usize, usize), t: f64) -> Option<f64> {
+        let part = &self.parts[slot];
         let seg = part.seg.as_ref()?;
         let vc = vc_of(part, t);
         let tau = t - part.seg_t0;

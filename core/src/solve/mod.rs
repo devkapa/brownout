@@ -2576,6 +2576,16 @@ impl Clone for HoldsFlag {
     }
 }
 
+/// W2b: where the observer reads a probed node between two instants
+/// ([`PartitionedSolver::sample_target_of`]).
+pub(crate) enum SampleTarget<'a> {
+    Rail,
+    Fixed(usize),
+    Held(usize),
+    Line((f64, f64)),
+    Dynamic(Option<(usize, usize)>, Option<stepped::Located<'a>>),
+}
+
 /// The composite solver `engine.rs`'s `Engine::load` builds and boxes as
 /// `Box<dyn PartitionSolver>` (`solve::PartitionedSolver::build`).
 #[derive(Clone)]
@@ -3287,33 +3297,48 @@ impl PartitionedSolver {
         Ok(solver)
     }
 
-    /// W2b: `node`'s value at `t` on the model the solver holds, read
-    /// without moving anything, with the span of the stepped commits it lies
-    /// between (0 elsewhere) and whether it fell back to linear where R104's
-    /// solve was due; `None` while that value is not final. Called
-    /// only for `t` at or after the last completed instant (the kernel's
-    /// hooks): a fixed node holds its value there unless a running ramp moves
-    /// it, a static partition's node holds, a closed-form node is its
-    /// segment's exact value.
-    pub(crate) fn sample_node(&self, node: usize, t: f64) -> Option<(f64, f64, bool)> {
-        // The hub rail and what follows it between events (Rails points 3,
-        // 4): the rail's model, a static hub node's line in it.
-        let moving = self.rail_moving();
-        let rail = self.rail_at(t);
+    /// Where the observer reads `node` between two instants, found once for
+    /// all its samples there (`moving` is `rail_moving()`, fixed between
+    /// them): the hub rail, a fixed node, a static node (on its line in the
+    /// rail while that moves), or a dynamic one's closed form or stepped copy.
+    pub(crate) fn sample_target_of(&self, node: usize, moving: bool) -> SampleTarget<'_> {
         if moving && self.hub.as_ref().is_some_and(|h| h.node == node) {
-            return rail.map(|(u, model)| (u, 0.0, !model));
+            return SampleTarget::Rail;
         }
         match self.local_index[node] {
-            None => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0, false)),
+            None => SampleTarget::Fixed(node),
             Some((p, _)) => match self.partition_kinds[p] {
-                PartitionKind::Static => match self.static_solver.hub_node_line(node).filter(|_| moving) {
-                    Some((a, s)) => rail.map(|(u, model)| (a + s * u, 0.0, !model)),
-                    None => Some((self.voltages[node], 0.0, false)),
+                PartitionKind::Static => match moving.then(|| self.static_solver.hub_node_line(node)).flatten() {
+                    Some(line) => SampleTarget::Line(line),
+                    None => SampleTarget::Held(node),
                 },
-                _ => match self.closed_form.sample_at(node, t) {
-                    Some(v) => Some((v, 0.0, false)),
-                    None => self.stepped.node_at(node, t, rail.map(|r| r.0)).map(|(v, span, fallback)| (v, span, fallback || rail.is_some_and(|r| !r.1) && self.stepped.on_rail(node))),
-                },
+                _ => SampleTarget::Dynamic(self.closed_form.locate(node), self.stepped.locate(node)),
+            },
+        }
+    }
+
+    /// A sample at `t` of a node [`Self::sample_target_of`] found: its value
+    /// with the span of the stepped commits it lies between (0 elsewhere) and
+    /// whether it fell back to linear where R104's solve was due; `None`
+    /// while that value is not final. Called only for `t` at or after the
+    /// last completed instant (the kernel's hooks): a fixed node holds its
+    /// value there unless a running ramp moves it, a static partition's node
+    /// holds, a closed-form node is its segment's exact value, the rail its
+    /// model between events (Rails points 3, 4) and a static hub node its
+    /// line in it.
+    pub(crate) fn sample_target(&self, target: &SampleTarget<'_>, t: f64) -> Option<(f64, f64, bool)> {
+        match target {
+            SampleTarget::Rail => self.rail_at(t).map(|(u, model)| (u, 0.0, !model)),
+            &SampleTarget::Fixed(node) => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0, false)),
+            &SampleTarget::Held(node) => Some((self.voltages[node], 0.0, false)),
+            &SampleTarget::Line((a, s)) => self.rail_at(t).map(|(u, model)| (a + s * u, 0.0, !model)),
+            SampleTarget::Dynamic(cf, st) => match cf.and_then(|at| self.closed_form.sample_located(at, t)) {
+                Some(v) => Some((v, 0.0, false)),
+                None => {
+                    let at = st.as_ref()?;
+                    let rail = if at.on_rail { self.rail_at(t) } else { None };
+                    self.stepped.node_at_located(at, t, rail.map(|r| r.0)).map(|(v, span, fallback)| (v, span, fallback || rail.is_some_and(|r| !r.1)))
+                }
             },
         }
     }
@@ -5001,8 +5026,7 @@ impl PartitionSolver for PartitionedSolver {
     fn arm_observer(&mut self, observer: Option<crate::observe::Observer>) {
         // The stepped partitions holding a probed node keep their committed
         // steps until read past (`stepped::DenseSeg`).
-        let parts: Option<Vec<usize>> = observer.as_ref().map(|o| o.nodes().iter().filter_map(|&n| self.local_index.get(n).copied().flatten().map(|(p, _)| p)).collect());
-        self.stepped.set_dense(parts.as_deref(), observer.as_ref().map(|o| o.grid()));
+        self.stepped.set_dense(observer.as_ref().map(|o| o.nodes()), observer.as_ref().map(|o| o.grid()));
         self.observer = observer.map(Box::new);
         self.w_observer = None;
         self.rail_log.clear();
@@ -5020,7 +5044,9 @@ impl PartitionSolver for PartitionedSolver {
             keep = keep.min(self.charge_rail_from(now));
         }
         if let Some(mut obs) = self.observer.take() {
-            obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
+            let moving = self.rail_moving();
+            let targets: Vec<SampleTarget<'_>> = obs.nodes().iter().map(|&n| self.sample_target_of(n, moving)).collect();
+            obs.read_until(t, inclusive, |j, ts| self.sample_target(&targets[j], ts));
             self.stepped.prune_dense(obs.next_time());
             keep = keep.min(obs.next_time());
             self.observer = Some(obs);
