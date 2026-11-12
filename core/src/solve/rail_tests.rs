@@ -699,6 +699,44 @@ fn a_sliding_gates_algebraic_load_sits_at_its_powered_or_unpowered_solve_weighte
 }
 
 #[test]
+fn the_charge_of_an_led_beside_a_sliding_gate_is_its_two_solves_weighted_by_the_duty() {
+    // Ruling R103 (b) read by W2b's charge. HG1's CC ramp slides its 74LS00
+    // at 4.275 V from 1.442 ms to about 1.64 ms (the tests above): the LED
+    // on 1y carries i_on (5.06 mA at the edge) in the gate's powered solve
+    // and nothing in its unpowered one, and publishes x i_on. Its charge over
+    // [1.47, 1.60] ms is by hand the PSU's limit less what the rest of the
+    // rail took (KCL at the rail and node 4, each capacitor's charge its C
+    // dV): 0.02 T - 10 uF (v4(b) - v4(a)) - 1 uF (u(b) - u(a)), the node
+    // shunts (1e-12 S) aside; the 330 ohm in series with it carries the
+    // same. Within W0 of a current over the span: (1e-9 + 1e-3 I) T. Read
+    // by the LED's law at the published (blended) voltages, x of the way
+    // from nothing to 1.88 V across it, it charged next to nothing.
+    let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
+    let (a, b) = (1.47e-3, 1.60e-3);
+    let mut e = Engine::load(&p).unwrap();
+    while e.time() < a {
+        let t = e.next_event_time().min(a);
+        e.advance(t).unwrap();
+    }
+    e.charge_arm(&[2, 3]).unwrap();
+    let _ = e.take_charge();
+    let (ua, v4a) = (e.voltages()[1], e.voltages()[4]);
+    let mut t = a;
+    while t < b {
+        t = (t + 0.5e-6).min(b);
+        e.advance(t).unwrap();
+    }
+    let q = e.take_charge().to_vec();
+    assert_eq!((q[0], q[1]), (a, b), "the take covers the span");
+    let (ub, v4b) = (e.voltages()[1], e.voltages()[4]);
+    let span = b - a;
+    let hand = 0.02 * span - 1e-5 * (v4b - v4a) - 1e-6 * (ub - ua);
+    let tol = (1e-9 + 1e-3 * hand.abs() / span) * span;
+    close(q[2], hand, tol, "the LED's charge against the rail's KCL by hand");
+    close(q[3], hand, tol, "the 330 ohm's charge against the rail's KCL by hand");
+}
+
+#[test]
 fn a_slide_on_its_rails_own_capacitor_holds_the_rails_mean_over_whole_ripple_cycles_at_its_edge() {
     // The orchestrator's ruling on R53-P8's Q1 (R103 (b)): the slide's goal
     // is the rail's time-mean at the edge. HG1's CC ramp slides its 74LS00
@@ -14861,7 +14899,7 @@ pub(super) fn cold_757_tpl0() -> Program {
     p
 }
 
-const STOPS_757: [f64; 34] = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25, 0.3, 0.33];
+pub(super) const STOPS_757: [f64; 34] = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25, 0.3, 0.33];
 
 /// Cold 757 tpl 0 advanced to each of `stops`: from `from` on, the 555
 /// slides at each stop, its rail within `band` of its 1.8 V floor, the PSU

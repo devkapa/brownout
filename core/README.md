@@ -1413,6 +1413,20 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
   it); when the next solve comes, the rail's mean there, linear between the
   two solves, corrects it. Measured: 1.5e-8 W0 from the linear rail over 5 ms
   and 1/60 s (cell rail, stepped; 0.94 W0 before the correction).
+- **Beside a sliding chip** (rulings R92 and R103 (b)). An LED, a 555's
+  OUT, a junction or a sliding chip's own pins in a partition the chip
+  touches are read, in every class above and in a source's KCL walk, as
+  their publish reads them: the two solves' values weighted by the duty
+  (`led_readout_at`, `ne555_out_current`), not the device's law at the
+  blended voltages; a held LED's key carries the duty and the two solves'
+  junction voltages. Measured on HG1's CC ramp
+  (`the_charge_of_an_led_beside_a_sliding_gate_is_its_two_solves_weighted_by_the_duty`):
+  the LED's charge over [1.47, 1.60] ms within W0 of the rail's KCL by
+  hand (read by its law at the blended voltages it charged 1.02e-7 C
+  against 4.48e-7). In a capacitor-free stepped partition the two solves
+  are the partition's last committed ones carried along the rail, so a
+  point inside a step reads them as at its end (the duty is constant
+  within a step; what else moves is a running ramp over one step).
 - **A failed LED-family channel** reads NaN (absent, as classic's) and
   carries no current: it adds nothing, the charge before the failure stays
   (W2bV: the take's channel charges went NaN).

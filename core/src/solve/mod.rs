@@ -4120,26 +4120,28 @@ impl PartitionedSolver {
             if !digital::is_ne555(ic.kind) {
                 continue;
             }
-            let power = digital::power::ic_power_held(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(*device_index));
-            let committed = self.ic_driver_ids[pos].iter().map(|&id| &drivers[id as usize]).find(|d| d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
-            // Ruling R103 (b): OUT's node beside a sliding chip in a static
-            // hub partition carries the powered solve's voltage there, the
-            // unpowered state no current.
-            let out = ic.logic[digital::NE555_OUT].node;
-            let v_out = match (power.weight < 1.0).then(|| self.two_state_node(&self.voltages, out)).flatten() {
-                Some((_, on, _)) => on,
-                None => self.voltages[out],
-            };
-            currents[*device_index] = match (power.powered, committed) {
-                (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(
-                    level == Mode::High,
-                    power.vs,
-                    v_out,
-                    self.voltages[ic.gnd.node],
-                    self.voltages[ic.vcc.node],
-                ) * power.weight,
-                _ => 0.0,
-            };
+            currents[*device_index] = self.ne555_out_current(pos, &self.voltages, drivers);
+        }
+    }
+
+    /// The 555 at `pos`'s `elementI` on voltages `v`
+    /// ([`Self::publish_ne555_currents`]; W2b's charge reads it on its own
+    /// voltages, so both read a sliding 555 alike).
+    pub(super) fn ne555_out_current(&self, pos: usize, v: &[f64], drivers: &[Driver]) -> f64 {
+        let (device_index, ic) = &self.ics[pos];
+        let power = digital::power::ic_power_held(ic, v[ic.vcc.node], v[ic.gnd.node], self.power_hold(*device_index));
+        let committed = self.ic_driver_ids[pos].iter().map(|&id| &drivers[id as usize]).find(|d| d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
+        // Ruling R103 (b): OUT's node beside a sliding chip in a static
+        // hub partition carries the powered solve's voltage there, the
+        // unpowered state no current.
+        let out = ic.logic[digital::NE555_OUT].node;
+        let v_out = match (power.weight < 1.0).then(|| self.two_state_node(v, out)).flatten() {
+            Some((_, on, _)) => on,
+            None => v[out],
+        };
+        match (power.powered, committed) {
+            (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(level == Mode::High, power.vs, v_out, v[ic.gnd.node], v[ic.vcc.node]) * power.weight,
+            _ => 0.0,
         }
     }
 
@@ -4157,22 +4159,28 @@ impl PartitionedSolver {
             // W1g point 12: the real `led_failed` flag, which takes `burnt`'s
             // path (`elementI` 0, `NaN` channels).
             let failed = self.slow.is_failed(e.device_index);
-            match self.led_two_state(e) {
-                // Ruling R103 (b): beside a sliding chip, its two solves'
-                // readouts at the chip's duty.
-                Some((w, on, off)) if !failed => {
-                    let (mut i_on, mut i_off) = (0.0, 0.0);
-                    let mut ch_off = vec![0.0; own.len()];
-                    led::readout(&e.device, &e.junctions, &off, false, &mut i_off, &mut ch_off);
-                    led::readout(&e.device, &e.junctions, &on, false, &mut i_on, own);
-                    for (c, off) in own.iter_mut().zip(&ch_off) {
-                        *c = w * *c + (1.0 - w) * off;
-                    }
-                    element_i = w * i_on + (1.0 - w) * i_off;
-                }
-                _ => led::readout(&e.device, &e.junctions, &self.voltages, failed, &mut element_i, own),
-            }
+            self.led_readout_at(e, &self.voltages, failed, &mut element_i, own);
             currents[e.device_index] = element_i;
+        }
+    }
+
+    /// LED-family device `e`'s readout on voltages `v` (`led::readout`), or
+    /// beside a sliding chip its two solves' readouts at the chip's duty
+    /// (ruling R103 (b)). The publish and W2b's charge both read it, so a
+    /// charge over a slide is the published current's.
+    pub(super) fn led_readout_at(&self, e: &LedDevice, v: &[f64], failed: bool, element_i: &mut f64, own: &mut [f64]) {
+        match self.led_two_state_at(e, v) {
+            Some((w, on, off)) if !failed => {
+                let (mut i_on, mut i_off) = (0.0, 0.0);
+                let mut ch_off = vec![0.0; own.len()];
+                led::readout(&e.device, &e.junctions, &off, false, &mut i_off, &mut ch_off);
+                led::readout(&e.device, &e.junctions, &on, false, &mut i_on, own);
+                for (c, off) in own.iter_mut().zip(&ch_off) {
+                    *c = w * *c + (1.0 - w) * off;
+                }
+                *element_i = w * i_on + (1.0 - w) * i_off;
+            }
+            _ => led::readout(&e.device, &e.junctions, v, failed, element_i, own),
         }
     }
 
@@ -4193,10 +4201,15 @@ impl PartitionedSolver {
     /// duty and the published voltages with that partition at its powered
     /// and at its unpowered solve.
     pub(super) fn led_two_state(&self, e: &LedDevice) -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        self.led_two_state_at(e, &self.voltages)
+    }
+
+    /// [`Self::led_two_state`] on voltages `v`.
+    pub(super) fn led_two_state_at(&self, e: &LedDevice, v: &[f64]) -> Option<(f64, Vec<f64>, Vec<f64>)> {
         if self.holds_active == 0 {
             return None;
         }
-        e.junctions.iter().find_map(|j| self.two_state_view(&self.voltages, j.anode).or_else(|| self.two_state_view(&self.voltages, j.cathode)))
+        e.junctions.iter().find_map(|j| self.two_state_view(v, j.anode).or_else(|| self.two_state_view(v, j.cathode)))
     }
 
     /// Re-derives `ic_driver_ids` when the driver table's length is not the one

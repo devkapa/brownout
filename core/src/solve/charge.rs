@@ -534,8 +534,9 @@ impl PartitionedSolver {
                 let failed = self.slow.is_failed(e.device_index);
                 let mut key: Vec<u64> = e.junctions.iter().flat_map(|j| [v[j.anode].to_bits(), v[j.cathode].to_bits()]).collect();
                 key.push(u64::from(failed));
+                self.led_two_bits(e, v, &mut key);
                 let mut i = 0.0;
-                Self::charge_led_readout(e, v, failed, &mut i, ch);
+                self.charge_led_readout(e, v, failed, &mut i, ch);
                 (Some((i, ch.to_vec())), key)
             }
             ChargeClass::Held555(pos) => {
@@ -565,7 +566,12 @@ impl PartitionedSolver {
                         return true;
                     }
                 }
-                it.next() != Some(&u64::from(self.slow.is_failed(e.device_index)))
+                if it.next() != Some(&u64::from(self.slow.is_failed(e.device_index))) {
+                    return true;
+                }
+                let mut two = Vec::new();
+                self.led_two_bits(e, v, &mut two);
+                it.ne(two.iter())
             }
             ChargeClass::Held555(pos) => dev.key[0] != self.ne555_current_on(pos as usize, v, drivers).to_bits(),
             ChargeClass::Line(_) => {
@@ -607,13 +613,7 @@ impl PartitionedSolver {
 
     /// `publish_ne555_currents` for one 555, on `v`.
     fn ne555_current_on(&self, pos: usize, v: &[f64], drivers: &[Driver]) -> f64 {
-        let (device_index, ic) = &self.ics[pos];
-        let power = digital::power::ic_power_held(ic, v[ic.vcc.node], v[ic.gnd.node], self.power_hold(*device_index));
-        let committed = self.ic_driver_ids[pos].iter().map(|&id| &drivers[id as usize]).find(|d| d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
-        match (power.powered, committed) {
-            (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(level == Mode::High, power.vs, v[ic.logic[digital::NE555_OUT].node], v[ic.gnd.node], v[ic.vcc.node]),
-            _ => 0.0,
-        }
+        self.ne555_out_current(pos, v, drivers)
     }
 
     /// A fixed-pair capacitor's mean current over `[a, b]`: `C dvc` on its
@@ -637,9 +637,20 @@ impl PartitionedSolver {
     /// An LED-family device's readout for the charge: a failed (absent)
     /// channel reads NaN, as classic's, and carries no current, so it adds
     /// nothing (W2bV finding 6 (b): it made the take's channel charges NaN).
-    fn charge_led_readout(e: &LedDevice, v: &[f64], failed: bool, i: &mut f64, ch: &mut [f64]) {
-        led::readout(&e.device, &e.junctions, v, failed, i, ch);
+    fn charge_led_readout(&self, e: &LedDevice, v: &[f64], failed: bool, i: &mut f64, ch: &mut [f64]) {
+        self.led_readout_at(e, v, failed, i, ch);
         ch.iter_mut().filter(|c| c.is_nan()).for_each(|c| *c = 0.0);
+    }
+
+    /// What a held LED's readout is read from beyond its junctions' node
+    /// bits and its failure: beside a sliding chip (ruling R103 (b)) its
+    /// duty and its two solves' junction voltages, which can move while
+    /// the published ones do not.
+    fn led_two_bits(&self, e: &LedDevice, v: &[f64], out: &mut Vec<u64>) {
+        if let Some((w, on, off)) = self.led_two_state_at(e, v) {
+            out.push(w.to_bits());
+            out.extend(e.junctions.iter().flat_map(|j| [on[j.anode].to_bits(), on[j.cathode].to_bits(), off[j.anode].to_bits(), off[j.cathode].to_bits()]));
+        }
     }
 
     /// A rail capacitor's share of the rail capacitors' current, `C_k /
@@ -671,7 +682,7 @@ impl PartitionedSolver {
         if let Some(k) = dev.led {
             let e = &self.led_devices[k as usize];
             let mut i = 0.0;
-            Self::charge_led_readout(e, v, self.slow.is_failed(e.device_index), &mut i, ch);
+            self.charge_led_readout(e, v, self.slow.is_failed(e.device_index), &mut i, ch);
             return i;
         }
         if let Some(pos) = dev.ne555 {
@@ -723,7 +734,13 @@ impl PartitionedSolver {
             if (self.slow.may_have_failed() && self.slow.is_failed(j.device)) || !include(self.owner_of(j.anode, j.cathode), on(j.anode) || on(j.cathode)) {
                 continue;
             }
-            add(j.anode, j.cathode, junction_branch_current(j, v));
+            // Ruling R103 (b): beside a sliding chip, its two solves'
+            // currents at the chip's duty, as `recompute_source_currents`.
+            let two = if self.holds_active > 0 { self.two_state_view(v, j.anode).or_else(|| self.two_state_view(v, j.cathode)) } else { None };
+            add(j.anode, j.cathode, match two {
+                Some((w, on, off)) => w * junction_branch_current(j, &on) + (1.0 - w) * junction_branch_current(j, &off),
+                None => junction_branch_current(j, v),
+            });
         }
         for &pos in &src.ics {
             let (device_index, ic) = &self.ics[pos as usize];
@@ -733,12 +750,20 @@ impl PartitionedSolver {
             }
             // An IC on the rail drives at the rail's power.
             let supply = on(ic.vcc.node) || on(ic.gnd.node);
+            // Ruling R103 (b): a sliding chip's stamps (scaled by its duty)
+            // carry current only in its powered state, so a pin beside it
+            // in a two-state partition reads that state's voltage, as
+            // `recompute_source_currents`.
+            let pin_v = |node: usize| match (power.weight < 1.0).then(|| self.two_state_node(v, node)).flatten() {
+                Some((_, on, _)) => on,
+                None => v[node],
+            };
             for &id in &self.ic_driver_ids[pos as usize] {
                 let driver = &drivers[id as usize];
                 for branch in ic_driver_branches(&power, driver, ic) {
                     let Some((target, g)) = branch else { continue };
                     if include(self.owner_of(driver.node, target), supply || on(driver.node) || on(target)) {
-                        add(driver.node, target, g * (v[driver.node] - v[target]));
+                        add(driver.node, target, g * (pin_v(driver.node) - pin_v(target)));
                     }
                 }
             }
@@ -747,7 +772,7 @@ impl PartitionedSolver {
                     continue;
                 }
                 if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, t) {
-                    add(pin.node, 0, g * (v[pin.node] - target_v));
+                    add(pin.node, 0, g * (pin_v(pin.node) - target_v));
                 }
             }
         }
@@ -965,9 +990,11 @@ impl PartitionedSolver {
         let e = &self.led_devices[j];
         let v = &self.voltages;
         let failed = self.slow.is_failed(e.device_index);
+        let mut two = Vec::new();
+        self.led_two_bits(e, v, &mut two);
         let matches = |key: &[u64]| {
             let mut it = key.iter();
-            e.junctions.iter().all(|jn| it.next() == Some(&v[jn.anode].to_bits()) && it.next() == Some(&v[jn.cathode].to_bits())) && it.next() == Some(&u64::from(failed))
+            e.junctions.iter().all(|jn| it.next() == Some(&v[jn.anode].to_bits()) && it.next() == Some(&v[jn.cathode].to_bits())) && it.next() == Some(&u64::from(failed)) && it.eq(two.iter())
         };
         if let Some(m) = dev.memo.iter().position(|m| matches(&m.0)) {
             let entry = &mut dev.memo[m];
@@ -978,7 +1005,7 @@ impl PartitionedSolver {
             #[cfg(debug_assertions)]
             {
                 let (mut i, mut c) = (0.0, vec![0.0; dev.ch.len()]);
-                Self::charge_led_readout(e, v, failed, &mut i, &mut c);
+                self.charge_led_readout(e, v, failed, &mut i, &mut c);
                 debug_assert!(i.to_bits() == dev.i.to_bits() && c.iter().zip(&dev.ch).all(|(a, b)| a.to_bits() == b.to_bits()), "charge: an LED's memo differs from its readout");
             }
             if m != 0 {
@@ -990,7 +1017,8 @@ impl PartitionedSolver {
         next.0.clear();
         next.0.extend(e.junctions.iter().flat_map(|jn| [v[jn.anode].to_bits(), v[jn.cathode].to_bits()]));
         next.0.push(u64::from(failed));
-        Self::charge_led_readout(e, v, failed, &mut next.1, &mut next.2);
+        next.0.extend_from_slice(&two);
+        self.charge_led_readout(e, v, failed, &mut next.1, &mut next.2);
         let left = (std::mem::replace(&mut dev.key, next.0), std::mem::replace(&mut dev.i, next.1), std::mem::replace(&mut dev.ch, next.2));
         dev.memo.insert(0, left);
     }
