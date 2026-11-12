@@ -160,6 +160,11 @@ pub(crate) struct ChargeState {
     has_interval: bool,
     has_line: bool,
     reads_rail: bool,
+    /// Per node: the hub rail, or a static hub partition's node on its line.
+    line_flag: Vec<bool>,
+    /// The stepped hub partition whose steps carry the rail, as the last fold
+    /// found it (`charge_rail_carrier`): its steps fold the rail's lines.
+    carrier: Option<usize>,
 }
 
 impl ChargeState {
@@ -318,7 +323,9 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None };
+        st.line_flag = (0..self.voltages.len()).map(|n| rail == Some(n) || (self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static) && self.static_solver.hub_node_line(n).is_some())).collect();
+        st.carrier = self.charge_rail_carrier();
         st.has_interval = st.src.is_some() || st.devs.iter().any(|d| matches!(d.class, ChargeClass::Mean(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_)));
         st.has_line = st.devs.iter().any(|d| matches!(d.class, ChargeClass::Line(_)));
         st.reads_rail = self.hub.is_some() && (st.src.is_some() || st.devs.iter().any(|d| matches!(d.class, ChargeClass::Line(_) | ChargeClass::Mean(_))));
@@ -493,6 +500,24 @@ impl PartitionedSolver {
         }
     }
 
+    /// Whether a device's current follows the hub rail: a line, or a mean
+    /// with a node on the rail.
+    fn charge_on_line(&self, dev: &ArmedDev, line: &[bool]) -> bool {
+        match dev.class {
+            ChargeClass::Line(_) => true,
+            ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].nodes.iter().any(|&n| line[n]),
+            ChargeClass::Mean(None) => match (dev.led, dev.ne555) {
+                (Some(k), _) => self.led_devices[k as usize].junctions.iter().any(|j| line[j.anode] || line[j.cathode]),
+                (_, Some(pos)) => {
+                    let ic = &self.ics[pos as usize].1;
+                    line[ic.vcc.node] || line[ic.gnd.node] || line[ic.logic[digital::NE555_OUT].node]
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// A line's or a mean's current on `v`: a resistor's or switch's
     /// contacts, an LED's readout (its channels into `ch`) or a 555's.
     fn line_current_on(&self, dev: &ArmedDev, v: &[f64], drivers: &[Driver], ch: &mut [f64]) -> f64 {
@@ -563,8 +588,11 @@ impl PartitionedSolver {
     /// the partition they sit in (`None`: between fixed nodes), the
     /// capacitors' currents from `cap`.
     #[allow(clippy::too_many_arguments)]
-    fn charge_leaving(&self, src: &mut SourceTerms, bucket: usize, v: &[f64], cap: &dyn Fn(usize) -> f64, include: &dyn Fn(Option<usize>) -> bool, t: f64, w: f64, drivers: &[Driver]) {
+    fn charge_leaving(&self, src: &mut SourceTerms, bucket: usize, v: &[f64], cap: &dyn Fn(usize) -> f64, include: &dyn Fn(Option<usize>, bool) -> bool, line: &[bool], t: f64, w: f64, drivers: &[Driver]) {
         let rel = std::mem::take(&mut src.rel);
+        // Whether a term follows the hub rail: one of its nodes is the rail
+        // or on a static hub partition's line in it.
+        let on = |n: usize| line.get(n).copied().unwrap_or(false);
         let lq = &mut src.lq[bucket];
         let mut add = |u: usize, x: usize, i: f64| {
             if rel[u] {
@@ -577,25 +605,25 @@ impl PartitionedSolver {
         for &k in &src.kcl {
             let kd = &self.kcl_devices[k as usize];
             for &(u, x, g) in &kd.contributions {
-                if (rel[u] || rel[x]) && include(self.owner_of(u, x)) {
+                if (rel[u] || rel[x]) && include(self.owner_of(u, x), on(u) || on(x)) {
                     add(u, x, g * (v[u] - v[x]));
                 }
             }
         }
-        if include(None) {
-            for &n in &src.rel_nodes {
+        for &n in &src.rel_nodes {
+            if include(None, on(n)) {
                 add(n, 0, static_part::NODE_RSHUNT_G * v[n]);
             }
         }
         for &k in &src.caps {
             let (d, u, x) = self.cap_devices[k as usize];
-            if include(self.owner_of(u, x)) {
+            if include(self.owner_of(u, x), on(u) || on(x)) {
                 add(u, x, cap(d));
             }
         }
         for &k in &src.junctions {
             let j = &self.junctions[k as usize];
-            if (self.slow.may_have_failed() && self.slow.is_failed(j.device)) || !include(self.owner_of(j.anode, j.cathode)) {
+            if (self.slow.may_have_failed() && self.slow.is_failed(j.device)) || !include(self.owner_of(j.anode, j.cathode), on(j.anode) || on(j.cathode)) {
                 continue;
             }
             add(j.anode, j.cathode, junction_branch_current(j, v));
@@ -606,17 +634,19 @@ impl PartitionedSolver {
             if !power.powered {
                 continue;
             }
+            // An IC on the rail drives at the rail's power.
+            let supply = on(ic.vcc.node) || on(ic.gnd.node);
             for &id in &self.ic_driver_ids[pos as usize] {
                 let driver = &drivers[id as usize];
                 for branch in ic_driver_branches(&power, driver, ic) {
                     let Some((target, g)) = branch else { continue };
-                    if include(self.owner_of(driver.node, target)) {
+                    if include(self.owner_of(driver.node, target), supply || on(driver.node) || on(target)) {
                         add(driver.node, target, g * (v[driver.node] - v[target]));
                     }
                 }
             }
             for pin in &ic.logic {
-                if !rel[pin.node] || !include(self.owner_of(pin.node, pin.node)) {
+                if !rel[pin.node] || !include(self.owner_of(pin.node, pin.node), supply || on(pin.node)) {
                     continue;
                 }
                 if let Some((g, target_v)) = ic_pull_target(ic, &power, pin, t) {
@@ -637,6 +667,9 @@ impl PartitionedSolver {
         self.charge_fold_held(&mut st, now);
         self.charge_line_regime(&mut st, now);
         self.charge_resolve_rail(&mut st);
+        if st.reads_rail {
+            st.carrier = self.charge_rail_carrier();
+        }
         if t > st.cursor {
             let a = st.cursor;
             self.charge_fold_interval(&mut st, a, t);
@@ -646,6 +679,26 @@ impl PartitionedSolver {
             s.cc_prev = self.cc_hub_current().is_some();
         }
         self.charge = Some(st);
+    }
+
+    /// The stepped hub partition whose steps carry the rail, if one does: a
+    /// PSU in CC with no rail capacitor, its rail set by the one stepped hub
+    /// partition's draws and solved at each point of its steps. The rail's
+    /// lines then fold at that partition's points with its weights, as its
+    /// own draws do, so the PSU's `-dir iLimit` is the KCL of what leaves the
+    /// rail. With several stepped hub partitions each step solves the rail
+    /// against the others' draws held where they last committed, so no one
+    /// trajectory exists: the lines then fold linear between the rail's
+    /// solves (`RailPending`), and the PSU's KCL holds only to the steps'
+    /// coupling error.
+    pub(crate) fn charge_rail_carrier(&self) -> Option<usize> {
+        if !self.rail_unmodelled() || self.cc_hub_current().is_none() {
+            return None;
+        }
+        match self.stepped.hub_partitions()[..] {
+            [p] => Some(p),
+            _ => None,
+        }
     }
 
     /// Whether the charge reads the hub rail's notes (`log_rail`).
@@ -763,7 +816,7 @@ impl PartitionedSolver {
             return;
         }
         let mut q = std::mem::take(&mut st.q);
-        let unmodelled = self.rail_unmodelled() && !st.line_nodes.is_empty();
+        let unmodelled = self.rail_unmodelled() && !st.line_nodes.is_empty() && st.carrier.is_none();
         if !unmodelled {
             self.charge_interval_pass(st, a, b, 0.0, &mut q, None);
             st.q = q;
@@ -884,6 +937,9 @@ impl PartitionedSolver {
         let mut chs = std::mem::take(&mut st.chs);
         for k in 0..st.devs.len() {
             let dev = &st.devs[k];
+            if st.carrier.is_some() && self.charge_on_line(dev, &st.line_flag) {
+                continue;
+            }
             let i = match dev.class {
                 ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
                 ChargeClass::Line(Some(kd)) if st.line_moving => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
@@ -922,9 +978,12 @@ impl PartitionedSolver {
             // Static partitions and fixed nodes, and the closed forms that
             // published (a stepped partition's terms come with its steps).
             let kinds = &self.partition_kinds;
-            let here = |o: Option<usize>| o.is_none_or(|p| kinds[p] == PartitionKind::Static || published.contains(&p));
+            // A line whose rail a stepped partition carries folds with its
+            // steps instead.
+            let carried = st.carrier.is_some();
+            let here = |o: Option<usize>, line: bool| !(carried && line) && o.is_none_or(|p| kinds[p] == PartitionKind::Static || published.contains(&p));
             let cap_i = |d: usize| sc[d];
-            self.charge_leaving(&mut src, lq.unwrap_or(bucket), &v, &cap_i, &here, mid, dt, &drivers);
+            self.charge_leaving(&mut src, lq.unwrap_or(bucket), &v, &cap_i, &here, &st.line_flag, mid, dt, &drivers);
             st.src = Some(src);
         }
         st.published = published;
@@ -981,7 +1040,29 @@ impl PartitionedSolver {
                     sc[c.device_index] = i[j] + c.leak_g * (va - vb);
                 }
                 publish_stamped_currents(shape, &v, &self.live_params, &mut sc);
+                // The partition carrying the rail: the rail's static lines at
+                // this point's rail, and what follows them weighed here too.
+                let carries = st.carrier == Some(p);
+                if carries {
+                    if let Some(u) = self.hub.as_ref().map(|h| v[h.node]) {
+                        for &n in &st.line_nodes {
+                            if let Some((a0, s)) = self.static_solver.hub_node_line(n) {
+                                Self::charge_put(&mut saved, &mut v, n, a0 + s * u);
+                            }
+                        }
+                    }
+                }
                 for dev in &st.devs {
+                    if carries && self.charge_on_line(dev, &st.line_flag) {
+                        chs.clear();
+                        chs.resize(dev.nch, 0.0);
+                        let cur = self.line_current_on(dev, &v, &drivers, &mut chs);
+                        st.q[dev.slot] += wk * cur;
+                        for (c, &value) in chs.iter().enumerate() {
+                            st.q[dev.slot + 1 + c] += wk * value;
+                        }
+                        continue;
+                    }
                     if !matches!(dev.class, ChargeClass::Part(q) if q as usize == p) {
                         continue;
                     }
@@ -994,11 +1075,12 @@ impl PartitionedSolver {
                     }
                 }
                 if let Some(s) = src.as_mut() {
-                    let own = |o: Option<usize>| o == Some(p);
+                    let kinds = &self.partition_kinds;
+                    let own = |o: Option<usize>, line: bool| o == Some(p) || (carries && line && o.is_none_or(|q| kinds[q] == PartitionKind::Static));
                     let cap_i = |d: usize| sc[d];
                     // A floating pull at the step's start: the step stamped
                     // it there (a bucket edge is an instant, which cuts it).
-                    self.charge_leaving(s, bucket, &v, &cap_i, &own, step.t0, wk, &drivers);
+                    self.charge_leaving(s, bucket, &v, &cap_i, &own, &st.line_flag, step.t0, wk, &drivers);
                 }
                 Self::charge_restore(&mut saved, &mut v);
             }
@@ -1160,6 +1242,8 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.has_interval, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.has_line, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reads_rail, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.line_flag, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.carrier, w); }
         n
     }
 }

@@ -1360,12 +1360,21 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
   cell rail 1.4e-7 W0; cell rail stepped 0.72 W0 and a CC rail with no
   capacitor, stepped, 0.84 W0, both the integrators' own trajectory
   differences (a stepped capacitor's charge is exact `C dvc` of either run).
-- **Open item.** On a CC rail with no capacitor, a static line's charge
-  follows the rail linear between its solves while the stepped draws take
-  their steps' backward Euler points, so the PSU's exact `iLimit t` and the
-  KCL of its rail's neighbours part by 1.29 W0 at 20 ms (each charge within
-  W0 of the fine reference; `a_psus_cc_charge_matches_the_kcl_of_its_rail_with_no_capacitor`,
-  ignored).
+- **A CC rail with no capacitor** is set by the stepped hub partition's
+  draws, solved at each point of its steps. With one stepped hub partition
+  the rail's lines (a static hub partition's nodes, what reads the rail)
+  fold at that partition's points with its weights, as its draws do, so
+  the PSU's `-dir iLimit t` is the KCL of what leaves the rail (was 1.29 W0
+  apart with the lines linear between the rail's solves). A line's charge
+  then carries the steps' own quadrature error, as the draws' does: on the
+  test board 2.3 W0 from the fine run's, which is the PSU's and the stepped
+  resistor's own gap from theirs (the coarse run leaves CC at its own
+  instant). With several stepped hub partitions each step solves the rail
+  against the others' draws held where they last committed, so no one rail
+  trajectory exists: the lines fold linear between the rail's solves, and
+  KCL holds to the steps' coupling error (measured 1.88 W0, where the
+  stepped capacitors' own exact charges are 2.1-2.3 W0 from the fine run's;
+  `charge_rail_carrier`).
 
 ## Readouts
 
