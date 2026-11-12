@@ -4826,7 +4826,14 @@ Constants, all from P3:35-38 unless marked new:
      guard inside that host step, at 0.1893 s before); and cold 149 tpl 5's
      CC rail ran a 7 ms clamp step past its 9.42 V setpoint, the CV
      re-solve at the commit leaving its timing node 0.6 V off the fine
-     reference (299 W0; cut, 0.001 W0).
+     reference (299 W0; cut, 0.001 W0). A CC rail already past its
+     setpoint within the shortest step is an exit there: the step is that
+     shortest one (corpus 47 at 1 ms host steps: the 5 ms stop landed a
+     few ulps short of the setpoint, still CC, and the next step ran the
+     esr-free capacitor to 6 V, its exit seed publishing C dV / 1 ps = 1e8
+     A from the PSU). A chip's edge within the shortest step is left
+     uncut: a chip sitting on its edge would step at the floor (cold 701
+     tpl 2 ran 4.7 times its wall that way).
    - **A hold at a step's start** (ruling R106 (a)). A stepped partition
      whose step from an instant holds a chip off there (point 1a inside the
      stepped solver, `stepped::hold_around` at the floor) leaves that step

@@ -750,6 +750,40 @@ fn a_cc_switch_partitions_capacitor_is_taken_once_from_the_solver_running_it() {
 }
 
 #[test]
+fn exact_mode_leaves_cc_where_an_esr_free_rail_capacitor_reaches_the_setpoint() {
+    // Corpus 47 in exact mode (ruling R102 (a); the brief's note from W2c's
+    // seed-current work): 5 V, 100 mA into 100 uF with no esr, so the rail
+    // is the charge, 1000 V/s, and reaches the setpoint at 5 ms. At 1 ms
+    // host steps the stop at 5 ms landed a few ulps short of it, still CC,
+    // and the next 1 ms step, cut only for a crossing inside it, ran the
+    // capacitor on to 6 V in CC; the CV re-solve at 6 ms pinned the rail at
+    // 5 V and its seed published the capacitor's 1 V over a 1 ps companion,
+    // C dV / 1 ps = 1e8 A from the PSU. The crossing lies within the
+    // shortest step there, so the step is that one: the PSU leaves CC at
+    // the setpoint and the charge stays at it.
+    let devices = vec![
+        Device { kind: kinds::BENCH_PSU, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0, 0.1], blob: vec![] },
+        Device { kind: kinds::CAPACITOR, component_index: 1, pins: vec![pin(1), pin(0)], params: vec![1e-4, 0.0, 0.0], blob: vec![] },
+    ];
+    let mut p = Program { carry: Vec::new(), node_count: 2, options: Options::default(), digital_slot_count: 0, channel_slot_count: 0, devices };
+    p.options.no_rail_shortcut = true;
+    let mut e = Engine::load(&p).unwrap();
+    let w0 = |got: f64, want: f64, abs: f64| (got - want).abs() <= abs + 1e-3 * got.abs().max(want.abs());
+    for k in 1..=10 {
+        let t = k as f64 * 1e-3;
+        e.advance(t).unwrap();
+        let (rail, i_psu) = (e.voltages()[1], e.currents()[0]);
+        let vc = one(&take(&mut e), carry::FAMILY_CAPACITOR, 1).values[0];
+        let hand = 5.0f64.min(1000.0 * t);
+        eprintln!("corpus 47 exact at {t:.3}: rail {rail:.9} vc {vc:.9} psu {i_psu:.4e} A");
+        assert!(w0(rail, hand, 1e-4), "at {t}: rail {rail} against {hand}");
+        assert!(w0(vc, hand, 1e-4), "at {t}: the capacitor's charge {vc} against {hand}");
+        let i_hand = if t < 5e-3 - 1e-12 { -0.1 } else if t > 5e-3 + 1e-12 { 0.0 } else { i_psu };
+        assert!(w0(i_psu, i_hand, 1e-9), "at {t}: the PSU's current {i_psu} against {i_hand}");
+    }
+}
+
+#[test]
 fn a_reload_exactly_on_a_cc_exit_runs_on_as_the_fine_reference() {
     // Corpus 47: 5 V, 100 mA into 100 uF (no esr) from 0 V. In CC the rail
     // is the charge, 1000 V/s, so it reaches the setpoint at 5 ms exactly and

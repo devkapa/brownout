@@ -4633,8 +4633,27 @@ impl SteppedSolver {
                 };
                 let f_hi0 = past(&accepted.x);
                 if !crossed.is_empty() && f_hi0 > 0.0 && h > 2.0 * H_MIN {
-                    let first = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).map(|step| past(&step.x));
-                    if let Some(f_first) = first.ok().filter(|&f| f < 0.0) {
+                    let first = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).ok().map(|step| (past(&step.x), step));
+                    // A CC rail past its setpoint within the shortest step
+                    // already: the step is that one, the exit at its end
+                    // (fixture 47: a CC rail landed on its setpoint a few
+                    // ulps short at a host stop, and the next 1 ms step ran
+                    // its esr-free capacitor to 6 V in CC, the exit seed
+                    // publishing C dV / 1 ps = 1e8 A). A chip's edge within
+                    // the shortest step is left uncut: a chip sitting on its
+                    // edge would step at the floor (cold 701 tpl 2, 4.7x the
+                    // wall).
+                    let setpoint_past = |x: &[f64]| crossed.iter().any(|c| matches!(*c, Cross::Setpoint(l, dir, v) if dir * x[l] - v >= 0.0));
+                    let first = match first {
+                        Some((f, step)) if f >= 0.0 && setpoint_past(&step.x) => {
+                            h = H_MIN;
+                            accepted = step;
+                            half = None;
+                            None
+                        }
+                        other => other.map(|(f, _)| f),
+                    };
+                    if let Some(f_first) = first.filter(|&f| f < 0.0) {
                         let (mut lo, mut f_lo) = (H_MIN, f_first);
                         let (mut hi, mut f_hi) = (h, f_hi0);
                         let mut far = f_hi;
