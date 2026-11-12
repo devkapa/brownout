@@ -613,3 +613,65 @@ fn a_sample_at_a_host_edits_time_reads_after_the_edit() {
     assert_eq!(k.t, vec![0.0, 1e-3]);
     assert_eq!(k.dropped, 3.0, "2, 3 and 4 ms dropped once each");
 }
+
+#[test]
+fn a_step_planned_before_arming_samples_by_its_capacitors_hermite() {
+    // W2bV finding 6 (a): armed while a step was in flight (after a yield),
+    // the samples in that step read linear between its ends (it kept no
+    // points), up to 1.4 W0 off a fine reference (11.4 W0 off a run armed
+    // from the start). Its ends' capacitor currents give the Hermite its
+    // plates read; an iterated partition's other nodes stay linear there
+    // (their scratch solves need the step's own context, gone by then). 5 V through 470 ohm into 220 nF (node 2) and
+    // a red LED to 100 ohm and 47 nF (node 3): a TR-BDF2 partition whose
+    // probed nodes are both plates.
+    use crate::kernel::Budget;
+    let mut p = program(4, vec![
+        dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+        dev(kinds::RESISTOR, 1, 1, 2, vec![470.0]),
+        Device { kind: kinds::LED, component_index: 2, pins: vec![pin(2), pin(3)], params: vec![2.0, 2.0, 0.02, 0.0, 0.0, 0.0], blob: vec![] },
+        dev(kinds::RESISTOR, 3, 3, 0, vec![100.0]),
+        dev(kinds::CAPACITOR, 4, 2, 0, vec![2.2e-7, 0.0, 0.0]),
+        dev(kinds::CAPACITOR, 5, 3, 0, vec![4.7e-8, 0.0, 0.0]),
+    ]);
+    p.options.force_stepped = true;
+    let run = |arm_after: Option<u32>| {
+        let mut e = Engine::load(&p).unwrap();
+        if arm_after.is_none() {
+            e.acquire(&[2, 3], 1e-5, 3.1e-6, 0).unwrap();
+        }
+        let mut now = 0.0;
+        let mut clock = || {
+            now += 1.0;
+            now
+        };
+        let mut yields = 0;
+        while !e.advance_for(2e-3, Some(Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+            yields += 1;
+            if Some(yields) == arm_after {
+                e.acquire(&[2, 3], 1e-5, 3.1e-6, 0).unwrap();
+            }
+        }
+        assert!(arm_after.is_none_or(|a| a <= yields), "armed after {arm_after:?} of {yields} yields");
+        take(&mut e, 2)
+    };
+    let all = run(None);
+    let mut worst = 0.0f64;
+    for arm in [3, 11, 25] {
+        let late = run(Some(arm));
+        assert!(!late.t.is_empty());
+        let k0 = all.t.iter().position(|&t| t == late.t[0]).expect("the same grid");
+        for (s, &t) in late.t.iter().enumerate().take(40) {
+            assert_eq!(all.t[k0 + s], t);
+            for j in 0..2 {
+                let (got, want) = (late.v[j][s], all.v[j][k0 + s]);
+                let share = (got - want).abs() / (1e-4 + 1e-3 * want.abs());
+                worst = worst.max(share);
+            }
+        }
+    }
+    // W0 for a voltage as the verifier read it, 100 uV + 1e-3 |v|. Measured:
+    // 0.49 (the cathode's turn-on curve, which one Hermite across a TR-BDF2
+    // step overshoots by 50 uV); linear between the ends, 11.4.
+    eprintln!("armed mid-step against armed from the start: worst {worst:.3e} W0");
+    assert!(worst <= 1.0, "the first step's samples follow its capacitors: {worst} W0");
+}

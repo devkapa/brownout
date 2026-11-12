@@ -2296,8 +2296,11 @@ impl SteppedSolver {
         let PendDense { mut knots, solved, .. } = std::mem::take(&mut self.partitions.get_mut(&p).expect("a committing partition").pend_dense);
         let part = &self.partitions[&p];
         if knots.is_empty() {
-            // Planned before the observer read it: its ends only.
-            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: None });
+            // Planned before the observer read it: its ends only, which hold
+            // each capacitor's voltage and current, so its plates read the
+            // cubic Hermite across the whole step (W2bV finding 6 (a):
+            // linear, they ran up to 1.4 W0 off).
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: true, stage: false, u: None, rail_i: None });
         }
         // A linear partition with one capacitor: every node an affine map of
         // its voltage when nothing it reads moves within the step (R104:

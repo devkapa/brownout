@@ -1297,7 +1297,11 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
   scratch solve at the Hermite charges (R104 (b); a failed solve reads linear
   and counts as a fallback). On an instant a sample reads the state after it
   (D2). A stepped node's sample waits for its later commit, so a yield can
-  leave samples pending; the horizon clamp flushes them.
+  leave samples pending; the horizon clamp flushes them. A step planned
+  before the observer armed kept no points: its plates read the cubic
+  Hermite across the whole step from its ends' capacitor currents, an
+  iterated partition's other nodes linear (W2bV: linear, 11.4 W0 off a run
+  armed from the start; Hermite 0.49).
 - **Passive.** Nothing is stepped, cut or re-solved for a sample (an
   iterated partition's scratch solve keeps nothing): a probed run is the
   unprobed run bit for bit.
