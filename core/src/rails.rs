@@ -187,6 +187,16 @@ pub struct CellDrive {
 /// `u` is the same exponential as `q`: `k = alpha G / C_rail`. At `esr_eff =
 /// 0`, `alpha = 1` and `beta = 0` exactly, so `q` is `u` bit for bit.
 ///
+/// A running ramp that moves the direct devices' draws (a pulse source's
+/// edge through a switch onto the rail) moves `A0` at `adot` and the
+/// asymptote with it, at `ramp = -adot / G` (R99 (3)). Then `q(τ) = q0 +
+/// (slope / alpha - ramp) φ_k(τ) + ramp τ` and `u = alpha q + beta + (1 -
+/// alpha) ramp τ`, so `u(τ) = u0 + (slope - alpha ramp) φ_k(τ) + ramp τ`:
+/// the exponential settles onto a line the rail follows, not a level it
+/// lags. Held frozen instead, cold 2575 tpl 2's rail lagged its 12 kV/s
+/// ramp by up to 19 mV between rail solves, as far as a host stop happened
+/// to land from the last one.
+///
 /// With closed-form hub partitions on the rail the segment is their coupled
 /// path instead (`modes`, ruling R15 (a)): the rail and their capacitors
 /// advance together, so nothing is frozen and nothing is owed at the next
@@ -202,6 +212,9 @@ pub struct CapSeg {
     pub slope: f64,
     pub alpha: f64,
     pub beta: f64,
+    /// The asymptote's rate under a running ramp, `-adot / G` (V/s); 0
+    /// without one. Not with `modes`.
+    pub ramp: f64,
     /// `sum b vc` of the closed-form hub partitions at `t0`: the part of
     /// their draws the segment holds where it stood, while their capacitors
     /// move on, so the next solve charges the difference. 0 with `modes`.
@@ -218,6 +231,7 @@ impl CapSeg {
     pub fn charge_at(&self, t: f64) -> f64 {
         match &self.modes {
             Some(m) => m.charge(self.u0, t - self.t0),
+            None if self.ramp != 0.0 => (self.at(t) - self.beta - (1.0 - self.alpha) * self.ramp * (t - self.t0)) / self.alpha,
             None => (self.at(t) - self.beta) / self.alpha,
         }
     }
@@ -226,6 +240,7 @@ impl CapSeg {
     pub fn charge_slope_at(&self, t: f64) -> f64 {
         match &self.modes {
             Some(m) => m.charge_slope(t - self.t0),
+            None if self.ramp != 0.0 => (self.slope_at(t) - (1.0 - self.alpha) * self.ramp) / self.alpha,
             None => self.slope_at(t) / self.alpha,
         }
     }
@@ -238,6 +253,10 @@ impl CapSeg {
         let dt = t - self.t0;
         if let Some(m) = &self.modes {
             return self.u0 + m.du(dt);
+        }
+        if self.ramp != 0.0 {
+            let phi = if self.k * dt < RAIL_CAP_LINEAR { dt } else { exp_integral(-self.k, dt) };
+            return self.u0 + (self.slope - self.alpha * self.ramp) * phi + self.ramp * dt;
         }
         if self.k * dt < RAIL_CAP_LINEAR {
             self.u0 + self.slope * dt
@@ -255,6 +274,10 @@ impl CapSeg {
         if let Some(m) = &self.modes {
             return self.u0 + m.modes.iter().map(|&(k, s)| s * (phi_integral(k, tb) - phi_integral(k, ta))).sum::<f64>() / dt;
         }
+        if self.ramp != 0.0 {
+            let phi = if self.k * tb < RAIL_CAP_LINEAR { 0.5 * (ta + tb) } else { (phi_integral(self.k, tb) - phi_integral(self.k, ta)) / dt };
+            return self.u0 + (self.slope - self.alpha * self.ramp) * phi + self.ramp * 0.5 * (ta + tb);
+        }
         if self.k * tb < RAIL_CAP_LINEAR {
             self.u0 + self.slope * 0.5 * (ta + tb)
         } else {
@@ -266,6 +289,10 @@ impl CapSeg {
         let dt = t - self.t0;
         if let Some(m) = &self.modes {
             return m.slope(dt);
+        }
+        if self.ramp != 0.0 {
+            let e = if self.k * dt < RAIL_CAP_LINEAR { 1.0 } else { (-self.k * dt).exp() };
+            return (self.slope - self.alpha * self.ramp) * e + self.ramp;
         }
         if self.k * dt < RAIL_CAP_LINEAR {
             self.slope
@@ -282,8 +309,17 @@ impl CapSeg {
                 let dt = t - self.t0;
                 m.modes.iter().map(|&(k, s)| (k, s * (-k * dt).exp())).collect()
             }
+            None if self.ramp != 0.0 => vec![(self.k, self.slope_at(t) - self.ramp), (0.0, self.ramp)],
             None => vec![(self.k, self.slope_at(t))],
         }
+    }
+
+    /// The segment's own motion as a path a watch takes its passages from,
+    /// when a ramp moves it (R99 (3)): an exponential onto a line, which
+    /// turns where the two oppose, so [`Motion::Seg`]'s one-way log does not
+    /// hold for it.
+    pub fn ramp_path(&self) -> Option<RailModes> {
+        (self.modes.is_none() && self.ramp != 0.0).then(|| RailModes { modes: vec![(self.k, self.slope - self.alpha * self.ramp), (0.0, self.ramp)], q0: self.charge_at(self.t0), esr: None })
     }
 }
 
@@ -2266,6 +2302,7 @@ impl Motion {
                 }
             }
             Motion::Seg(seg) => {
+                debug_assert!(seg.ramp == 0.0, "a ramping segment is watched as its path");
                 if seg.slope == 0.0 {
                     return f64::INFINITY;
                 }
@@ -2704,7 +2741,7 @@ mod tests {
 
     #[test]
     fn the_cap_segment_is_a_line_then_an_exponential() {
-        let seg = CapSeg { t0: 0.0, u0: 0.0, u_inf: 1e11, k: 1e-8, slope: 1000.0, alpha: 1.0, beta: 0.0, cf_frozen: 0.0, cf_count: 0, modes: None };
+        let seg = CapSeg { t0: 0.0, u0: 0.0, u_inf: 1e11, k: 1e-8, slope: 1000.0, alpha: 1.0, beta: 0.0, ramp: 0.0, cf_frozen: 0.0, cf_count: 0, modes: None };
         assert_eq!(seg.at(1e-3), 1.0);
         let w = Watch { value: 0.0, thresholds: vec![5.0], cap: None, terms: vec![Motion::Seg(seg.clone())] };
         let t = w.next();
@@ -2718,7 +2755,7 @@ mod tests {
         // rail is the series `slope (dt - k dt^2 / 2 + k^2 dt^3 / 6)` (the
         // next term is 1e-27 of it) to an ulp of 5 V.
         let (u0, slope, k) = (4.98, 1000.0, 7.0e-5);
-        let seg = CapSeg { t0: 0.0, u0, u_inf: u0 + slope / k, k, slope, alpha: 1.0, beta: 0.0, cf_frozen: 0.0, cf_count: 0, modes: None };
+        let seg = CapSeg { t0: 0.0, u0, u_inf: u0 + slope / k, k, slope, alpha: 1.0, beta: 0.0, ramp: 0.0, cf_frozen: 0.0, cf_count: 0, modes: None };
         let dt = 2e-5;
         assert!(k * dt >= RAIL_CAP_LINEAR);
         let want = u0 + slope * (dt - k * dt * dt / 2.0 + k * k * dt * dt * dt / 6.0);
@@ -3052,6 +3089,7 @@ impl crate::snapshot::HeapBytes for CapSeg {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.alpha, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.beta, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ramp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cf_frozen, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cf_count, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.modes, w); }

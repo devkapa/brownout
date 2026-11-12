@@ -2155,7 +2155,7 @@ impl PartitionedSolver {
         if sigma == 0.0 {
             return None;
         }
-        if exact && seg.modes.is_none() && seg.k > 0.0 {
+        if exact && seg.modes.is_none() && seg.k > 0.0 && seg.ramp == 0.0 {
             // `u = u0 + slope φ_k(t - t0)`, as a ramp from `c + σ u0`: its
             // asymptote `u0 + slope/k` can lie far past where CV ends the
             // segment, and `a + b e^(-s/tau)` would cancel (W1gV3).

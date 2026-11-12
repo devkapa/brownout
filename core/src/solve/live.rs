@@ -184,6 +184,23 @@ impl RampEval {
         Some((slope, end))
     }
 
+    /// [`Self::node_ramp`] with the span the slope holds over: the latest
+    /// start and the earliest end of the ramps along the stack (R99 (3)).
+    pub(crate) fn node_ramp_span(&self, node: usize) -> Option<(f64, f64, f64)> {
+        if !self.ramping.get(node).copied().unwrap_or(false) {
+            return None;
+        }
+        let r = &self.resolved[self.fixer[node] as usize];
+        let (mut slope, mut start, mut end) = self.node_ramp_span(r.parent_node).unwrap_or((0.0, f64::NEG_INFINITY, f64::INFINITY));
+        if let Some(ramp) = self.wave_of.get(r.device_index).filter(|&&w| w != u32::MAX).and_then(|&w| self.sources[w as usize].ramp) {
+            let s = (ramp.v_to - ramp.v_from) / ramp.len;
+            slope += if r.parent_is_pos { -s } else { s };
+            start = start.max(ramp.t0);
+            end = end.min(ramp.t0 + ramp.len);
+        }
+        Some((slope, start, end))
+    }
+
     /// A forest source's value at `t`.
     pub(crate) fn source_value(&self, device: usize, t: f64) -> f64 {
         match self.wave_of[device] {

@@ -285,6 +285,20 @@ fn crawl_events() -> u32 {
 /// within one time constant of it; when the rail last moved in this stint;
 /// and `crawling` once they promote.
 /// Journaled with the window and in the snapshot.
+/// How running ramps move the direct devices' draw ([`PartitionedSolver::
+/// direct_ramp`], R99 (3)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DirectRamp {
+    /// The draw at the instant asked for, less the one the published nodes
+    /// give.
+    pub offset: f64,
+    /// Its rate, A/s.
+    pub adot: f64,
+    /// The span over which every ramp it follows runs.
+    pub from: f64,
+    pub until: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CcCrawl {
     pub promoted_at: f64,
@@ -977,6 +991,88 @@ impl PartitionedSolver {
         (i, g)
     }
 
+    /// How running ramps move the direct devices' draw at rail `u` (R99
+    /// (3)): each direct device to a node a ramp moves draws `g (u - v)` to
+    /// first order, `g` its slope in that node as [`Self::direct_at`] takes
+    /// it, so the draw moves at `adot = -sum g dv/dt`. Returns `(offset,
+    /// adot, from, until)`: what the draw at `now` differs from the one the
+    /// published nodes give (they may have been published at another
+    /// instant), its rate, and the span every one of those ramps runs over.
+    /// `None` when no direct device reaches a running ramp.
+    pub(super) fn direct_ramp(&self, now: f64, u: f64) -> Option<DirectRamp> {
+        if !self.wave.any_ramping() {
+            return None;
+        }
+        let hub = self.hub.as_ref()?;
+        // Most rails reach no running ramp: `direct_nodes` holds every node
+        // the rail equation reads outside a partition.
+        let ramping = &self.wave.ramping;
+        if !hub.direct_nodes.iter().zip(ramping).any(|(&d, &r)| d && r) {
+            return None;
+        }
+        let rail = hub.node;
+        let v = &self.voltages;
+        let mut out = DirectRamp { offset: 0.0, adot: 0.0, from: f64::NEG_INFINITY, until: f64::INFINITY };
+        let mut any = false;
+        let mut term = |g: f64, node: usize| {
+            let Some((slope, from, until)) = self.wave.node_ramp_span(node) else { return };
+            let now_v = self.wave.value(node, now, v).expect("a ramping node has a value");
+            any = true;
+            out.offset -= g * (now_v - v[node]);
+            out.adot -= g * slope;
+            out.from = out.from.max(from);
+            out.until = out.until.min(until);
+        };
+        for &(k, c) in &hub.direct_contacts {
+            let (a, b, gc) = self.kcl_devices[k as usize].contributions[c as usize];
+            term(gc, if a == rail { b } else { a });
+        }
+        for &(gl, other) in &hub.direct_leaks {
+            term(gl, other);
+        }
+        for &k in &hub.direct_junctions {
+            let j = &self.junctions[k as usize];
+            if self.slow.may_have_failed() && self.slow.is_failed(j.device) {
+                continue;
+            }
+            let (vd, far) = if j.anode == rail { (u - v[j.cathode], j.cathode) } else { (v[j.anode] - u, j.anode) };
+            if ramping[far] {
+                term(j.law.companion(vd).0, far);
+            }
+        }
+        // An IC driver between the rail and a node a ramp moves (a powered
+        // chip's output into a source): its conductance at `u`. Only a chip
+        // with a pin on such a node can have one.
+        let free = |n: usize| n != rail && !self.fixed_node[n];
+        for &pos in &hub.rail_ics {
+            let (d, ic) = &self.ics[pos as usize];
+            if ![&ic.vcc, &ic.gnd].into_iter().chain(&ic.logic).any(|pin| ramping[pin.node]) {
+                continue;
+            }
+            let held = |node: usize| if node == rail { u } else { v[node] };
+            if !digital::power::verdict(ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d)) {
+                continue;
+            }
+            let mut power = digital::power::ic_power(ic, held(ic.vcc.node), held(ic.gnd.node));
+            digital::power::hold_onto(&mut power, ic, held(ic.vcc.node), held(ic.gnd.node), self.power_hold(*d));
+            for &id in &self.ic_driver_ids[pos as usize] {
+                let Some(driver) = self.driver_snapshot.get(id as usize) else { continue };
+                for (target, gd) in ic_driver_branches(&power, driver, ic).into_iter().flatten() {
+                    let (a, b) = (driver.node, target);
+                    if free(a) || free(b) || a == b {
+                        continue;
+                    }
+                    if a == rail {
+                        term(gd, b);
+                    } else if b == rail {
+                        term(gd, a);
+                    }
+                }
+            }
+        }
+        (any && out.adot != 0.0).then_some(out)
+    }
+
     /// Each rail capacitor's `(position in fixed_pair_capacitors, sign, far
     /// node)`: `sign` is `+1` when its `pins[0]` is on the rail, so `sign *
     /// vc` is its charge measured from the far node to the rail.
@@ -1254,6 +1350,13 @@ impl PartitionedSolver {
         // The CC segment's rail and charge as this solve finds them, before
         // it re-aims the segment: what a CC exit compares and keeps.
         let seg_found = cap_seg.as_ref().map(|s| (s.at(now), handed.unwrap_or_else(|| s.charge_at(now) - cf_drift)));
+        // A running ramp moving a PSU's direct draws (R99 (3)): they are
+        // read at `now`, wherever the ramp's nodes were last published (a
+        // `Rail` event publishes none: cold 2575 tpl 2's CV rail was solved
+        // 18 A of draw short of the CC entry its watch had found), and a CC
+        // rail capacitor's segment follows the ramp from there.
+        let ramp = if hub.psu().is_some() { self.direct_ramp(now, old_u) } else { None };
+        let a_p = ramp.map_or(a_p, |r| a_p + r.offset);
         let solve_in = |reg: Regime, cap_seg: &mut Option<CapSeg>, u_from: f64| -> Result<f64, String> {
             match (&hub.kind, reg) {
                 (HubKind::Battery(m), _) => {
@@ -1296,6 +1399,9 @@ impl PartitionedSolver {
                             })
                         };
                         let coupled = modes.is_some();
+                        // The coupled path takes no ramp yet: the README's R99
+                        // item.
+                        let ramp = if coupled { 0.0 } else { ramp.map_or(0.0, |r| -r.adot / g) };
                         *cap_seg = Some(CapSeg {
                             t0: now,
                             u0: u,
@@ -1304,6 +1410,7 @@ impl PartitionedSolver {
                             slope,
                             alpha,
                             beta: alpha * e * (dl - a0),
+                            ramp,
                             cf_frozen: if coupled { 0.0 } else { cf_frozen },
                             cf_count: if coupled { 0 } else { cf_parts.len() as u32 },
                             modes,
@@ -1403,7 +1510,7 @@ impl PartitionedSolver {
                 let coupled: Option<Vec<rails::Coupled>> = cf_parts.iter().map(|&p| self.closed_form.coupling(p, now, u)).collect();
                 coupled.and_then(|c| rails::cell_modes(cd.kappa, cd.rho, &c)).map(|modes| {
                     let slope = modes.iter().map(|m| m.1).sum();
-                    CapSeg { t0: now, u0: u, u_inf: u, k: 0.0, slope, alpha: 1.0, beta: 0.0, cf_frozen: 0.0, cf_count: 0, modes: Some(Rc::new(RailModes { modes, q0: u, esr: None })) }
+                    CapSeg { t0: now, u0: u, u_inf: u, k: 0.0, slope, alpha: 1.0, beta: 0.0, ramp: 0.0, cf_frozen: 0.0, cf_count: 0, modes: Some(Rc::new(RailModes { modes, q0: u, esr: None })) }
                 })
             }
             _ => None,
@@ -2101,7 +2208,12 @@ impl PartitionedSolver {
             let u = hub.state.u;
             let (i_d, g_d) = self.direct_at(u);
             let edges = if cap.is_some() { self.rail_power_edges() } else { Vec::new() };
-            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all: a_p + i_d - g_d * u, g_all: g_p + g_d, own, cap, edges })
+            // The direct draws at `now` and how running ramps move them, as
+            // the rail solve reads them (R99 (3)).
+            let ramp = self.direct_ramp(now, u);
+            let a_all = ramp.map_or(a_p + i_d - g_d * u, |r| a_p + i_d - g_d * u + r.offset);
+            let (a_rate, a_from, a_until) = ramp.map_or((0.0, now, now), |r| (r.adot, r.from, r.until));
+            Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all, g_all: g_p + g_d, a_rate, t_a: now, a_from, a_until, own, cap, edges })
         });
         self.stepped.cc = cc;
     }
@@ -2336,6 +2448,15 @@ impl PartitionedSolver {
                 let dir = direction(*v);
                 let mut f = dir * (a0 + g * v);
                 let mut motions = cf_motion(dir);
+                // A running ramp moving the direct draws moves the supply's
+                // current with it, and so the CC entry (R99 (3)): watched
+                // only through the other terms, cold 2575 tpl 2's falling
+                // ramp entered CC at whatever stop came next, its rail 0.1 V
+                // above the truth there.
+                if let Some(r) = self.direct_ramp(now, *v) {
+                    f += dir * r.offset;
+                    motions.push(Motion::Line { rate: dir * r.adot });
+                }
                 // The draw the CV -> CC test reads includes what a rail
                 // capacitor short of the setpoint takes there (Rails point
                 // 5); at esr > 0 that decays with esr C, a moving term of its
@@ -2395,7 +2516,14 @@ impl PartitionedSolver {
                         // them made every event close on a threshold
                         // geometrically, and a fast inrush ran out of time
                         // resolution short of it.
-                        watches.push(Watch { value: u, thresholds: th, cap: None, terms: vec![Motion::Seg(seg.clone())] });
+                        // A segment a ramp moves is an exponential onto a line,
+                        // which may turn: its passages are its path's (R99
+                        // (3)).
+                        let motion = match seg.ramp_path() {
+                            Some(path) => Motion::Path(Rc::new(path)),
+                            None => Motion::Seg(seg.clone()),
+                        };
+                        watches.push(Watch { value: u, thresholds: th, cap: None, terms: vec![motion] });
                         // The closed forms follow the segment exactly, and the
                         // segment holds their draws where they stood: a bound
                         // on what their motion does to the rail solves it
@@ -2408,10 +2536,20 @@ impl PartitionedSolver {
                         }
                     }
                     None => {
+                        // A running ramp moves both with the direct draws
+                        // (R99 (3), as in CV).
+                        let ramp = self.direct_ramp(now, u);
+                        let a0 = ramp.map_or(a0, |r| a0 + r.offset);
                         let u_star = (dir * i_limit - a0) / g;
-                        watches.push(Watch { value: u_star, thresholds: windows, cap: Some(rails::RAIL_DRIFT_V), terms: cf_motion(-1.0 / g) });
+                        let mut terms_u = cf_motion(-1.0 / g);
+                        let mut terms_f = cf_motion(dir);
+                        if let Some(r) = ramp {
+                            terms_u.push(Motion::Line { rate: -r.adot / g });
+                            terms_f.push(Motion::Line { rate: dir * r.adot });
+                        }
+                        watches.push(Watch { value: u_star, thresholds: windows, cap: Some(rails::RAIL_DRIFT_V), terms: terms_u });
                         let f = dir * (a0 + g * v);
-                        watches.push(Watch { value: f, thresholds: vec![*i_limit], cap: None, terms: cf_motion(dir) });
+                        watches.push(Watch { value: f, thresholds: vec![*i_limit], cap: None, terms: terms_f });
                     }
                 }
             }
@@ -2691,6 +2829,14 @@ impl PartitionedSolver {
         // restart there as after any discontinuity (Sources point 3).
         if edge.moves_boundary && (was_ramping || edge.ramp.is_some()) {
             dirty.extend(self.wave_parts[w].iter().map(|&p| PartitionId(p as u32)));
+            // A PSU's rail follows a ramp on a direct device's far node
+            // (`direct_ramp`, R99 (3)), so it solves again where the slope
+            // changes, the value there unchanged or not.
+            let entries = &self.wave_entries[w];
+            let corner = entries.iter().any(|&k| self.hub.as_ref().is_some_and(|h| h.psu().is_some() && h.direct_nodes[self.wave.resolved[k as usize].child_node]));
+            if corner {
+                self.hub.as_mut().unwrap().dirty = true;
+            }
         }
         dirty.sort_unstable();
         dirty.dedup();
@@ -3980,6 +4126,18 @@ impl crate::snapshot::HeapBytes for ExactHub {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_last, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_saved, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DirectRamp {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.offset, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.adot, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.from, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.until, w); }
         n
     }
 }

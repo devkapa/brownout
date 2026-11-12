@@ -177,6 +177,19 @@ struct StepResult {
     /// Ruling R113 (3): the step of a partition holding a sliding chip's
     /// supply, in its two states ([`solve_own_two_state`]).
     own: Option<Rc<OwnStep>>,
+    /// On a CC rail a running ramp moves (`CcStep::a_rate`), how far the
+    /// step's rail moves per amp of the rest's draw, `-du/da_o` (R99 (3)):
+    /// [`coupling_ratio`] takes the ramp's own share of the rail's move out.
+    rail_gain: Option<f64>,
+}
+
+/// `-du/da_o` of a CC step's solve, its rail unknown `rail` of `size`,
+/// through the full system's factors: the rail row's diagonal entry of the
+/// inverse, since `a_o` enters only that row's right-hand side (R99 (3)).
+fn rail_gain(factors: &LuFactorization, size: usize, rail: usize) -> Option<f64> {
+    let mut e = vec![0.0; size];
+    e[rail] = 1.0;
+    factors.solve(&mut e).ok().map(|()| e[rail]).filter(|g| g.is_finite())
 }
 
 /// Ruling R103 (b) in a stepped hub partition with no capacitor (stepped
@@ -500,6 +513,13 @@ pub(crate) struct CcRail {
     /// rail solve, and each stepped hub partition's own share of it.
     pub a_all: f64,
     pub g_all: f64,
+    /// How running ramps move the direct devices' share of `a_all` (R99
+    /// (3)): `a_all` is the draw at `t_a`, moving at `a_rate` over `[a_from,
+    /// a_until]`, where the ramps run; 0 and the sync's instant without one.
+    pub a_rate: f64,
+    pub t_a: f64,
+    pub a_from: f64,
+    pub a_until: f64,
     pub own: Vec<(usize, f64, f64)>,
     /// The rail capacitors, when there are any (ruling R68): stepped with
     /// the partition as a companion on its rail row ([`CapStep`]).
@@ -604,7 +624,7 @@ impl CcRail {
         });
         let edge_up = self.edges.iter().copied().find(|&e| e > u0).unwrap_or(f64::INFINITY);
         let edge_dn = self.edges.iter().rev().copied().find(|&e| e < u0).unwrap_or(f64::NEG_INFINITY);
-        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, u0, coupled, seed: false, cv: false, cap, edge_up, edge_dn }
+        CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, a_rate: self.a_rate, t_a: self.t_a, a_from: self.a_from, a_until: self.a_until, u0, coupled, seed: false, cv: false, cap, edge_up, edge_dn }
     }
 }
 
@@ -676,6 +696,12 @@ struct CcStep {
     v: f64,
     a_o: f64,
     g_o: f64,
+    /// [`CcRail::a_rate`] and its span: the rest's draw at a step's own end
+    /// is [`CcStep::a_o_at`] there.
+    a_rate: f64,
+    t_a: f64,
+    a_from: f64,
+    a_until: f64,
     u0: f64,
     /// Another stepped hub partition shares the rail: it holds this one's
     /// draw where this one last committed, so the rail's move across this
@@ -695,6 +721,17 @@ struct CcStep {
 }
 
 impl CcStep {
+    /// The rest's draw at `t` (R99 (3)): `a_o` moved by the running ramps
+    /// to `t`, read inside their span, as the step reads its own boundary
+    /// at its own instant (`Bnd::at_time`). Held where the rail last solved,
+    /// a step on cold 2575 tpl 2's rail followed its pulse ramp in stairs.
+    fn a_o_at(&self, t: f64) -> f64 {
+        if self.a_rate == 0.0 {
+            return self.a_o;
+        }
+        self.a_o + self.a_rate * (t.clamp(self.a_from, self.a_until) - self.t_a)
+    }
+
     /// How far `u` is past the setpoint in the supply's direction (the CC
     /// exit, Rails point 5, is at 0).
     fn beyond(&self, u: f64) -> f64 {
@@ -973,7 +1010,7 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None })
 }
 
 /// Ruling R103 (b): the one IC beside stepped hub partition `ic_ctx.p_idx`
@@ -1320,6 +1357,7 @@ fn solve_own_two_state(
         stage: None,
         two: None,
         own: Some(Rc::new(OwnStep { device, w, x_on, x_off, sens, exit: None })),
+        rail_gain: None,
     })
 }
 
@@ -1377,6 +1415,7 @@ fn solve_two_state(
         u,
         rail_q,
         stage: None,
+        rail_gain: on.rail_gain,
         two: Some(Rc::new(TwoStep { w, device, on, off })),
         own: None,
     })
@@ -1459,7 +1498,7 @@ fn take_cc_two_state(
             }
             _ => {
                 a[row + 2 * n] += cc.g_o;
-                b[2 * n] += cc.dl - cc.a_o;
+                b[2 * n] += cc.dl - cc.a_o_at(at);
                 if let Some((g, q)) = cap.and_then(|c| c.companion((!cc.seed).then_some(h), method)) {
                     a[row + 2 * n] += g;
                     b[2 * n] += g * q;
@@ -1468,11 +1507,12 @@ fn take_cc_two_state(
         }
     };
     let z0: Vec<f64> = x_from[..n].iter().chain(&x_from[..n]).copied().chain(std::iter::once(if cv { cc.v } else { cc.u0 })).collect();
-    let (result, _) = newton::solve_keeping_factors(size, size, &z0, linear, true, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+    let (result, factors) = newton::solve_keeping_factors(size, size, &z0, linear, true, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
     *newton_iters += result.iterations as u64;
     if !linear && !result.converged {
         return Err(StepError::NoConverge);
     }
+    let gain = (cc.a_rate != 0.0 && !cv).then(|| rail_gain(&factors, size, 2 * n)).flatten();
     let z = result.x;
     let u = z[2 * n];
     // Each state's sensitivity solves through its own node block at the
@@ -1486,9 +1526,10 @@ fn take_cc_two_state(
         } else {
             None
         };
-        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None })
+        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None })
     };
-    let on = finish(ctx_on, &bnd_on, &z[..n])?;
+    let mut on = finish(ctx_on, &bnd_on, &z[..n])?;
+    on.rail_gain = gain;
     let off = finish(ctx_off, &bnd_off, &z[n..2 * n])?;
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
     Ok((on, off, Some(u), rail_q))
@@ -1549,7 +1590,7 @@ fn take_cc_step(
                     }
                     _ => {
                         a[row + n] += cc.g_o;
-                        b[n] += cc.dl - cc.a_o;
+                        b[n] += cc.dl - cc.a_o_at(at);
                         if let Some((g, q)) = cap.and_then(|c| c.companion((!cc.seed).then_some(h), method)) {
                             a[row + n] += g;
                             b[n] += g * q;
@@ -1590,6 +1631,7 @@ fn take_cc_step(
         Ok((z, factors))
     };
     let (mut z, factors) = solve(newton_iters)?;
+    let gain = (cc.a_rate != 0.0 && !cv).then(|| rail_gain(&factors, size, n)).flatten();
     let mut vc = vec![0.0; shape.capacitors.len()];
     let mut i_new = vec![0.0; shape.capacitors.len()];
     for (idx, cap) in shape.capacitors.iter().enumerate() {
@@ -1623,7 +1665,7 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain })
 }
 
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
@@ -4100,7 +4142,7 @@ impl SteppedSolver {
                     // tpl 3: 1.33 mF from the rail to a node 5.5 uF holds,
                     // 5.2e-7 A over the row's draw, the loop's rail 1.4 uV
                     // under the seed's for 50 passes).
-                    sens.i = cc.dl - cc.a_o - cc.g_o * u - seed_cap.flatten().unwrap_or(0.0);
+                    sens.i = cc.dl - cc.a_o_at(now) - cc.g_o * u - seed_cap.flatten().unwrap_or(0.0);
                 } else if let Some((caps, nodes)) = rail_capacitors(&part.shape, &bnd) {
                     let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
                     sens.i = ChargeBalance { caps, nodes }.draw(&part.shape, live_params, SEED_H, &vc_from, &ic_ctx, &bnd, &z);
@@ -4866,7 +4908,7 @@ impl SteppedSolver {
             let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
             match attempt {
                 Ok((step, r, mid, ringing, rest)) => {
-                    let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method);
+                    let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method, part.t + 0.5 * h, part.t + h);
                     ratio = r.max(coupling);
                     let mut smooth = rest.max(coupling);
                     if ic_ctx.cc.is_some() && part.cc_switch {
@@ -5607,11 +5649,17 @@ fn attempt_step(
 /// error is first order in `h`, so it enters as its square for backward
 /// Euler (the cube for the trapezoid), which [`next_step_factor`] turns back
 /// into `0.9 / move`.
-fn coupling_ratio(cc: Option<CcStep>, end: &StepResult, mid: Option<&StepResult>, method: Method) -> f64 {
-    let (Some(_), Some(u_end), Some(u_mid)) = (cc.filter(|c| c.coupled), end.u, mid.and_then(|m| m.u)) else {
+fn coupling_ratio(cc: Option<CcStep>, end: &StepResult, mid: Option<&StepResult>, method: Method, t_mid: f64, t_end: f64) -> f64 {
+    let (Some(cc), Some(u_end), Some(u_mid)) = (cc.filter(|c| c.coupled), end.u, mid.and_then(|m| m.u)) else {
         return 0.0;
     };
-    let moved = 2.0 * (u_end - u_mid).abs() / (ABS_VOLTAGE + REL_TOL * u_end.abs().max(u_mid.abs()));
+    // A running ramp moves the rail through the rest's draw, which the step
+    // reads at its own instant (`CcStep::a_o_at`): no part held, no error
+    // (R99 (3)). Counted, cold 2575 tpl 2's two stepped partitions on a rail
+    // a 1 mohm switch ties to its pulse ramp took 6x the steps, each held
+    // to the ramp's W0 in 30 ns.
+    let ramp = end.rail_gain.map_or(0.0, |g| (cc.a_o_at(t_end) - cc.a_o_at(t_mid)) * g);
+    let moved = 2.0 * (u_end - u_mid + ramp).abs() / (ABS_VOLTAGE + REL_TOL * u_end.abs().max(u_mid.abs()));
     match method {
         Method::Be => moved * moved,
         Method::Trap => moved * moved * moved,
@@ -6553,6 +6601,7 @@ impl crate::snapshot::HeapBytes for StepResult {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stage, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_gain, w); }
         n
     }
 }
@@ -6668,6 +6717,10 @@ impl crate::snapshot::HeapBytes for CcRail {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.v, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_all, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g_all, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_rate, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_a, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_from, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_until, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cap, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.edges, w); }
@@ -6733,6 +6786,10 @@ impl crate::snapshot::HeapBytes for CcStep {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.v, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_o, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g_o, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_rate, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_a, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_from, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_until, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.coupled, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.seed, w); }

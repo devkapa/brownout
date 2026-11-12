@@ -7292,6 +7292,39 @@ failures and warnings (W1g)"):
   19.2365 ms). A host stopping at each instant and one yielding there read
   the same, bit for bit, so this is accuracy, not host cadence (D6).
   `zz_r101_2575_cadence_against_fine` (ignored) re-measures it.
+  Three causes (R99 diagnosis, 2026-11-13):
+  (1) CC steps take backward Euler (R96 left them so), and its error piles
+  up past the per-step W0 control: the entries, the exit, the second load,
+  and node 6 of 2575 tpl 2 decaying through C17 after each pulse ramp
+  (`cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth`, an expected
+  failure, 24.8 W0 at 24.5 ms against the truth `TRUTH_2575`, pinned no
+  farther than 0898801's 27.5). Left to do: TR-BDF2 on CC steps, the rail
+  capacitors' `CapStep` with its BDF2 history, under a step rule matched to
+  its order and a cost gate.
+  (2) Several stepped hub partitions on one CC rail each solve the rail
+  against the others' draws held (the branches): left to do, stepping them
+  together with the rail as a shared unknown.
+  (3) A pulse ramp moving a direct device's draw (2575 tpl 2's switch 14,
+  1 mohm from the rail to the ramping source) was held where the rail last
+  solved, by the rail capacitor's segment and by the stepped partitions'
+  CC steps, and a `Rail` event, which publishes no ramp, read it stale.
+  Fixed (R99 (3)): the direct draws are read at the solve's instant
+  (`direct_ramp`), the segment follows the ramp onto a line
+  (`CapSeg::ramp`), a CC step reads the rest's draw at its own end
+  (`CcStep::a_o_at`), the CV and CC watches move with it, the rail solves
+  again at each ramp corner, and the coupling bound leaves the ramp's own
+  rail motion out (`coupling_ratio`). Through both of 2575 tpl 2's ramps
+  every reading is within W0 of the truth at every host cadence tried
+  (`a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_
+  the_host_stops`, 684 W0 at 0898801), but that test is ignored until R53's
+  exit for a slide whose edge stops attracting lands: with the rail
+  following the falling ramp, the 555 enters a chatter slide at its 1.8 V
+  edge inside a host step and the ramp drags it 1.2 V under it, its duty
+  halving at each W0, and at 1 and 5 us host stops no progress is made
+  where the rail crosses 0 V. Not yet ramp-aware: a CC rail capacitor's
+  coupled path (closed-form hub partitions on the rail, `modes`) and a
+  static hub partition whose boundary a ramp moves, which hold their
+  draws as before.
   Exact mode's esr-0 rail capacitor at a CC exit (corpus 47 at 1 ms
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest

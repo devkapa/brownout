@@ -17983,6 +17983,117 @@ fn zz_r101_2575_cadence_against_fine() {
     eprintln!("R101 worst over {} instants: stop {worst_stop:.2} W0, yield {worst_yield:.2} W0 off the fine reference; yield against stop {worst_between:.2} W0", times.len());
 }
 
+/// R99 (3): cold 2575 tpl 2 from `STOPS_2575[1]`, read at each of
+/// [`TRUTH_2575`]'s instants that `pick` keeps, by a host that also stops at
+/// `grid`; or, with `fresh`, at each third of them from a run of its own
+/// advanced there at once. Each reading with its worst W0 off the truth.
+fn readings_2575(grid: &[f64], fresh: bool, pick: fn(f64) -> bool) -> Vec<(f64, f64)> {
+    let p = cold_2575_tpl2();
+    let rows: Vec<&(f64, &[f64])> = TRUTH_2575.iter().filter(|r| pick(r.0)).collect();
+    let start = || {
+        let mut rig = Rig::load(&p).unwrap();
+        for &b in &STOPS_2575[..2] {
+            rig.advance(b).unwrap();
+        }
+        rig
+    };
+    let off = |rig: &Rig, truth: &[f64]| worst_w0(&[rig.s().voltages().to_vec()], &[truth.to_vec()]);
+    if fresh {
+        return rows.iter().step_by(3).map(|&&(t, truth)| {
+            let mut rig = start();
+            rig.advance(t).unwrap_or_else(|e| panic!("one advance to {t}: {e:?}"));
+            (t, off(&rig, truth))
+        }).collect();
+    }
+    let mut stops: Vec<f64> = grid.iter().copied().chain(rows.iter().map(|r| r.0)).collect();
+    stops.sort_by(f64::total_cmp);
+    stops.dedup();
+    let mut rig = start();
+    let mut out = Vec::new();
+    for &t in &stops {
+        rig.advance(t).unwrap_or_else(|e| panic!("at {t}: {e:?}"));
+        if let Some(r) = rows.get(out.len()).filter(|r| r.0 == t) {
+            out.push((t, off(&rig, r.1)));
+        }
+    }
+    assert_eq!(out.len(), rows.len(), "every instant read");
+    out
+}
+
+/// R99 (3): through cold 2575 tpl 2's pulse ramps, rise and fall (19.225 -
+/// 20.340 ms and 22.452 - 23.567 ms), from 0.2 ms before each to 33 us past
+/// its end.
+fn in_ramp_2575(t: f64) -> bool {
+    (0.0192..=0.0204).contains(&t) || (0.0224..=0.0236).contains(&t)
+}
+
+/// The worst of `got`, `(W0, t)`.
+fn worst_of(got: &[(f64, f64)]) -> (f64, f64) {
+    got.iter().map(|r| (r.1, r.0)).fold((0.0, 0.0), |a, b| if b.0 > a.0 { b } else { a })
+}
+
+#[test]
+#[ignore = "needs the R53 non-attracting exit"]
+fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_stops() {
+    // R99 (3), the open item "default-mode CC-rail accuracy". Cold 2575 tpl
+    // 2 in CC: the pulse source on node 3 ramps -2.776 -> 10.62 V and back
+    // over 1.11 ms each way, through switch 14's 1 mohm onto the 4.98 V,
+    // 0.107 A PSU's rail (node 1, its capacitor device 9, 11.9 nF), and C17
+    // (0.27 uF, rail to node 6, a stepped partition stepped with the rail
+    // capacitor, ruling R68) carries the ramp into node 6. The switch is a
+    // direct device, whose draw was held where the rail last solved: by the
+    // rail capacitor's segment between rail solves, and by C17's steps
+    // against the rail between commits; and a `Rail` event publishes no
+    // ramp, so a CV rail solved at one read its draw 18 A short of the CC
+    // entry the falling ramp had reached. The rail lagged the ramp by up to
+    // 19 mV and node 6 followed a rail that moved in stairs; how far
+    // depended on where the host stopped (R101: 31.9 W0 off a fine
+    // reference at 19.414 ms; node 6 3.4 W0 off with 10 us host stops, 1.05
+    // with 1 us ones; the CC entry 0.1 V and 502 W0 off at 22.93 ms on a 10
+    // us host step). Against the truth (exact mode, trapezoid, 0.25 and
+    // 0.125 us, extrapolated), every reading through each ramp within W0,
+    // for a host stopping only at the instants, every 1, 3.7 and 33 us, and
+    // in one advance to each third instant from a run of its own.
+    //
+    // Ignored: once the rail follows the falling ramp between stops, the
+    // 555 crosses its 1.8 V edge inside a host step and enters a chatter
+    // slide (ruling R95 (b)) that the ramp drags 1.2 V under the edge, its
+    // duty halving at each W0 of rail (4e-254 at 23.336 ms), and at 1 and 5
+    // us host stops the run makes no progress where the rail crosses 0 V.
+    // R53's exit for a slide whose edge no longer attracts ends it.
+    let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
+    let mut worst_all = (0.0f64, 0.0, "");
+    for (name, stops, fresh) in [("the instants", Vec::new(), false), ("1 us", grid(1e-6), false), ("3.7 us", grid(3.7e-6), false), ("33 us", grid(33e-6), false), ("one advance", Vec::new(), true)] {
+        let got = readings_2575(&stops, fresh, in_ramp_2575);
+        let worst = worst_of(&got);
+        eprintln!("2575 tpl 2, {name}: worst {:.3} W0 off the truth at {} s ({} instants)", worst.0, worst.1, got.len());
+        if worst.0 > worst_all.0 {
+            worst_all = (worst.0, worst.1, name);
+        }
+    }
+    assert!(worst_all.0 <= 1.0, "2575 tpl 2, {}: {:.2} W0 off the truth at {} s", worst_all.2, worst_all.0, worst_all.1);
+}
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth() {
+    // R99 (1): after each of cold 2575 tpl 2's pulse ramps (see the test
+    // above), node 6 decays through C17 on the CC rail by backward Euler,
+    // whose error piles up: 25 W0 off the truth at 24.5 ms. An expected
+    // failure until CC steps take TR-BDF2, pinned no farther from the truth
+    // than at 0898801 (WORST_2575_AFTER, read with a host stopping at the
+    // instants).
+    let got = readings_2575(&[], false, |t| !in_ramp_2575(t));
+    let (worst, at) = worst_of(&got);
+    eprintln!("2575 tpl 2 after its ramps: worst {worst:.3} W0 off the truth at {at} s ({:.3} at 0898801)", WORST_2575_AFTER);
+    assert!(worst <= WORST_2575_AFTER + 1e-3, "2575 tpl 2 after its ramps: {worst:.3} W0 off the truth at {at} s, farther than 0898801's {WORST_2575_AFTER:.3}");
+    assert!(worst <= 1.0, "2575 tpl 2 after its ramps: {worst:.2} W0 off the truth at {at} s");
+}
+
+/// [`cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth`]'s worst at
+/// 0898801, at 24.5 ms.
+const WORST_2575_AFTER: f64 = 27.463;
+
 /// Ruling R92's class A and B board: a 74LS00 on a 5 V, 20 mA CC rail
 /// (node 1), 1a and 1b on the rail so 1y (node 2) is LOW, sinking from the
 /// rail through 50 ohm; a 10k leak across the rail; 2y-4y HIGH into nodes
