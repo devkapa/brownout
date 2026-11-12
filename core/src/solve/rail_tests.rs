@@ -17994,3 +17994,95 @@ fn a_555_sliding_on_a_cc_rail_through_a_capacitor_s_transient_slides_alike_at_an
         }
     }
 }
+
+// ---- R53-P11 (R99W's defect): a chatter slide's exit ----------------------
+
+/// A 74LS00 on a {5 V, 8 mA} PSU's rail (node 1, 1 uF), 1y into 200 ohm,
+/// and a pulse source (node 6) through 100 ohm onto the rail: 3 V, rising
+/// from 1 ms over 10 ms to 5 V, 5 ms high, falling over 20 ms to 3 V (16 to
+/// 36 ms). The pulse drags the rail across the chip's 4.275 V floor and
+/// back, as cold 2575 tpl 2's pulse through switch 14 drags its 555's rail
+/// under R99W's ramp-following CC segment.
+fn dragged_rail_board() -> Program {
+    let logic = [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5];
+    program(7, vec![psu(0, 1, 0, 5.0, 0.008), capacitor(1, 1, 0, 1e-6, 0.0), ls00(2, 1, 0, logic, 10e-9, 0), resistor(3, 2, 0, 200.0), pulse(4, 6, 0, [3.0, 5.0, 1e-3, 10e-3, 20e-3, 5e-3, 1.0], 4), resistor(5, 6, 1, 100.0)])
+}
+
+#[test]
+fn a_chatter_slide_leaves_where_its_edge_stops_attracting_at_every_host_cadence() {
+    // R99W's defect (R53-P11): a chatter slide (ruling R95 (b)) had no exit
+    // but its bracket's ends; dragged through its edge by a source whatever
+    // its duty, its corrections halved the duty at each W0 of the drag
+    // (cold 2575 tpl 2 under R99W: 3e-128 by 0.59 V, 636 W0 under) and the
+    // run crawled, then stalled as the rail crossed 0 V. Filippov: the slide
+    // exists only while the field fully on carries the supply out of its
+    // window and fully off back in (`chatter_attracts`, on the segment's
+    // flat residual at duty 0 and 1 at the edge); where both carry it the
+    // same way it leaves, free (inside) or to the hold procedure (outside).
+    // Forced to chatter here (`ForceChatter`: on this segment the class-B
+    // slide would take it), the slide's corrections and exit are the
+    // chatter machinery's own.
+    //
+    // By hand, with the rail on its segment at the floor (4.275 V), its
+    // charge `C u' = 8 mA + (Vp - 4.275) / 100 - D`, the chip drawing D_1
+    // = 4.275 / (4.275 / 0.032 + 200) = 12.815 mA fully on and nothing off:
+    // the edge attracts while 8 mA + (Vp - 4.275) / 100 lies between 0 and
+    // D_1, Vp between 3.475 V and 4.75650 V: the rise passes 3.475 V at
+    // 3.375 ms and 4.75650 V at 9.7825 ms, the fall 4.75650 V at 18.435 ms
+    // and 3.475 V at 31.25 ms. Past either level no stop finds the chip
+    // sliding: the exit comes at the first instant past it (a stop, or an
+    // event; a pulse's ramp is not watched between instants, as for a
+    // class-B slide, so it lags by up to a host step there). Run at R53V2's
+    // cadences (20 us, 200 us, 1 ms, 1/60 s, 0.1 s, geometric from 1 us)
+    // and with 20 us stops starting at 15 ms and at 18 ms (stop histories
+    // that start before and inside the fall's slide), each run in under a
+    // second of wall time and none declining.
+    let _chatter = hold::ForceChatter::arm();
+    let (floor, i_limit, r_feed) = (0.9 * 4.75, 0.008, 100.0);
+    let d1 = floor / (floor / 0.032 + 200.0);
+    let (vp_lo, vp_hi) = (floor - i_limit * r_feed, floor + (d1 - i_limit) * r_feed);
+    let vp = |t: f64| if t < 1e-3 { 3.0 } else if t < 11e-3 { 3.0 + 2.0 * (t - 1e-3) / 10e-3 } else if t < 16e-3 { 5.0 } else if t < 36e-3 { 5.0 - 2.0 * (t - 16e-3) / 20e-3 } else { 3.0 };
+    close(vp_hi, 4.75650, 1e-5, "where the rise stops attracting");
+    let t_end = 0.04f64;
+    let mut cadences: Vec<(String, Vec<f64>)> = Vec::new();
+    for (name, step) in [("20us", 20e-6f64), ("200us", 200e-6), ("1ms", 1e-3), ("1/60s", 1.0 / 60.0), ("0.1s", 0.1)] {
+        let n = (t_end / step).ceil() as usize;
+        cadences.push((name.to_string(), (1..=n).map(|k| (k as f64 * step).min(t_end)).collect()));
+    }
+    let mut geo = Vec::new();
+    let (mut t, mut s) = (0.0f64, 1e-6);
+    while t < t_end {
+        t = (t + s).min(t_end);
+        geo.push(t);
+        s = (s * 1.7).min(2e-3);
+    }
+    cadences.push(("geometric".to_string(), geo));
+    for from in [15e-3f64, 18e-3] {
+        let n = ((t_end - from) / 20e-6).ceil() as usize;
+        let mut stops = vec![1e-3, 5e-3, from];
+        stops.extend((1..=n).map(|k| (from + k as f64 * 20e-6).min(t_end)));
+        cadences.push((format!("20us from {from}"), stops));
+    }
+    for (name, stops) in &cadences {
+        let mut rig = Rig::load(&dragged_rail_board()).unwrap();
+        let wall = std::time::Instant::now();
+        let mut slid = false;
+        for &t in stops {
+            rig.advance(t).unwrap_or_else(|e| panic!("{name}: {e:?} at {t}"));
+            let hold = rig.s().power_hold(2);
+            let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
+            slid |= sliding;
+            let v = vp(t);
+            assert!(!(sliding && (v < vp_lo || v > vp_hi)), "{name} at {t}: sliding where its edge no longer attracts (the pulse at {v} V): {hold:?}, the rail {}", rig.u());
+            assert!(!(hold.kind == digital::power::HoldKind::Off && rig.u() > floor + 2.0 * (1e-4 + 1e-3 * floor)), "{name} at {t}: held off over its floor, the rail {}", rig.u());
+        }
+        assert!(wall.elapsed().as_secs_f64() < 1.0, "{name}: {} s of wall", wall.elapsed().as_secs_f64());
+        if stops.len() > 1000 {
+            assert!(slid, "{name}: a chatter slide to leave");
+        }
+        // Past the fall: free, its rail the pulse's 3 V plus the limit's
+        // 0.8 V through 100 ohm, unpowered.
+        assert!(rig.s().power_hold(2).is_free(), "{name}: free at the end");
+        w0_volts(rig.u(), 3.0 + i_limit * r_feed, &format!("{name}: the rail at the end"));
+    }
+}

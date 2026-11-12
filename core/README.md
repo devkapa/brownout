@@ -2059,7 +2059,37 @@ their own, and the source KCL does with W1a point 2's branch fold.
    the band's level (1.9 V/s over 83 ns took 757's duty to 1). The drift is
    measured across driver changes, which a chip toggling as it slides makes
    at its own pace. A chip that, fully powered, still drifts as held (or off,
-   as powered) leaves the slide. 757 tpl 0 slid so from its third hold;
+   as powered) leaves the slide. On a CC rail capacitor's segment that is
+   checked directly (`hold::chatter_attracts`, R53-P11, R99W's defect): at
+   the entry and at every correction the segment's flat residual is probed
+   at duty 0 and at duty 1, each end's draw read at the edge with the
+   stepped hub partitions' draw over the span, as the class-B exit reads
+   them; the slide holds only while fully on carries the supply out of its
+   window and fully off back in, and leaves (freed, as any exit, the hold
+   procedure deciding from there) where both carry it the same way. Each
+   end's turning point is kept as a threshold on the duty's draw at the
+   edge (each end's residual moves with it volt for volt), watched as a
+   class-B slide's draw exits are and checked at each instant, so the exit
+   comes as the board crosses it and not at the next correction. Unchecked,
+   cold 2575 tpl 2 under R99W's ramp-following CC segment entered a chatter
+   slide at 23.187 ms as switch 14's pulse dragged the rail through the
+   555's 1.8 V floor whatever the duty, its corrections halved the duty at
+   each W0 of the fall (3e-128 at 0.59 V, 636 W0 under, a correction and a
+   `Rail` event at each), and the run crawled a microsecond of simulated
+   time per 1.4 ms of wall until it stalled at 0 V; now every stop history
+   (1 to 33 us stops from 19.2 or 22.4 ms, and event by event) runs the fall
+   in under 0.2 s of wall, its slides within 1.0 W0 at every stop. A
+   chatter slide's corrections also count per simulated time toward the
+   follow cap (`SLIDE_FOLLOW_MAX` per `SLIDE_FOLLOW_SPAN`,
+   `Episode::corrections`),
+   whatever the host step, so one the exit does not catch is given up as
+   any slide that cannot be followed, never a hang. Pin:
+   `a_chatter_slide_leaves_where_its_edge_stops_attracting_at_every_host_cadence`
+   (a pulse dragging a PSU's rail across a 74LS00's floor both ways, the
+   slide forced to chatter by the `ForceChatter` seam: the exits at the
+   pulse's 3.475 V and 4.7565 V by hand, at the first instant past them,
+   at R53V2's cadences and two stop histories). Off a segment the measured
+   drift alone decides, as before. 757 tpl 0 slid so from its third hold;
    since open item (c) it slides on its capacitor's segment from its first
    (0.17284 s, x 0.741), runs to 1.2 s at x = 0.643 against 0.6443 by hand,
    then 0.78 once its PTC fuse trips at 0.338 s (0.787 by hand), its rail

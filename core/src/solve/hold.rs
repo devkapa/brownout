@@ -130,6 +130,35 @@ impl Drop for NoSlide {
 
 #[cfg(test)]
 thread_local! {
+    static FORCE_CHATTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the guard lives a rail chip entering a slide solved
+/// within the instant on a CC rail capacitor's segment slides as a chatter
+/// slide instead (ruling R95 (b), `force_chatter`): the chatter slide's own
+/// machinery, its corrections and its exit, on a board whose segment the
+/// class-B slide would otherwise take (R99W's cold 2575 tpl 2 entered a
+/// chatter slide only with the CC segment following its pulse's ramp).
+#[cfg(test)]
+pub(super) struct ForceChatter;
+
+#[cfg(test)]
+impl ForceChatter {
+    pub(super) fn arm() -> ForceChatter {
+        FORCE_CHATTER.with(|c| c.set(true));
+        ForceChatter
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForceChatter {
+    fn drop(&mut self) {
+        FORCE_CHATTER.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
     static FOLLOW_CAP: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
@@ -530,6 +559,14 @@ pub(crate) struct Episode {
     /// edge since the last correction (which took it at W0's band), or its
     /// drift's measure started within the band.
     pub(crate) inside: bool,
+    /// While a chatter slide runs: its corrections counted since
+    /// `corrections_from`, at most `SLIDE_FOLLOW_SPAN` ago (`keep_sliding`'s
+    /// backstop per simulated time).
+    pub(crate) corrections: u32,
+    pub(crate) corrections_from: f64,
+    /// While a chatter slide runs: its bracket's ends' flat residuals at
+    /// the edge at the last check (`chatter_attracts`; infinite: none).
+    pub(crate) end_residuals: (f64, f64),
 }
 
 impl Default for Episode {
@@ -559,6 +596,9 @@ impl Default for Episode {
             side: 0,
             drift_from: (0.0, 0.0),
             inside: false,
+            corrections: 0,
+            corrections_from: f64::NEG_INFINITY,
+            end_residuals: (f64::INFINITY, f64::INFINITY),
         }
     }
 }
@@ -888,6 +928,10 @@ impl PartitionedSolver {
             if attracting && !self_fed && sliding_allowed() && !self.episode(d).unfollowed && self.slide_on_rail(now, drivers, readers, d, &err)? {
                 let episode = self.episode(d).held(now);
                 self.set_episode(d, episode)?;
+                #[cfg(test)]
+                if FORCE_CHATTER.with(|c| c.get()) {
+                    self.force_chatter(now, drivers, d)?;
+                }
                 self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
                 return Ok(());
             }
@@ -961,7 +1005,6 @@ impl PartitionedSolver {
             self.back_to(cp);
             return Ok(false);
         }
-        readers.extend(probe_readers);
         let mut episode = self.episode(d).held(now);
         episode.chatter = true;
         (episode.chatter_held, episode.chatter_powered) = ((0.0, rates.0), (1.0, rates.1));
@@ -970,6 +1013,14 @@ impl PartitionedSolver {
         episode.inside = (episode.drift_from.1 - self.slide_edge(d)).abs() < slide_drift(self.slide_edge(d));
         episode.solved_at = now;
         self.set_episode(d, episode)?;
+        // Its exits from the start (`chatter_attracts`). An entry where the
+        // edge no longer attracts (cold 2575 tpl 2 under R99W: the pulse's
+        // ramp carrying the rail through the 555's floor whatever the duty)
+        // is left to the first correction, which exits: refused here, the
+        // hold procedure held the chip and chattered it to the episode
+        // guard's `-4` within 4 us.
+        self.chatter_attracts(now, drivers, d)?;
+        readers.extend(probe_readers);
         self.hub.as_mut().expect("a hub").state.held_draw.retain(|e| e.0 != d);
         readers.push(DeviceId(d as u32));
         self.schedule_rail_event(now);
@@ -992,6 +1043,11 @@ impl PartitionedSolver {
     /// the chip, already fully powered (off), still drifts as held
     /// (powered): no duty keeps the supply at the edge.
     fn correct_chatter_slide(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, off: f64) -> Result<bool, String> {
+        // Filippov's exit, checked at every correction before the bracket
+        // is narrowed: an edge that no longer attracts holds no slide.
+        if self.chatter_attracts(now, drivers, d)? == Some(false) {
+            return Ok(false);
+        }
         let episode = self.episode(d);
         let (t0, s0) = episode.drift_from;
         let span = now - t0;
@@ -1054,9 +1110,117 @@ impl PartitionedSolver {
         episode.drift_from = (now, supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages));
         episode.solved_at = now;
         self.set_episode(d, episode)?;
+        self.set_chatter_exits(now, d)?;
         readers.push(DeviceId(d as u32));
         self.schedule_rail_event(now);
         Ok(true)
+    }
+
+    /// Filippov's condition for chatter slide `d` (ruling R92, R95 (b)) on a
+    /// CC rail capacitor's segment: whether its edge still attracts, the
+    /// segment's motion with the chip fully on (duty 1) carrying its supply
+    /// out of its window and fully off (duty 0) back in. Each end is read
+    /// as the segment's flat residual, the draw at the edge past the limit
+    /// with the stepped hub partitions' draw over the span (`slide_shift`,
+    /// open item (c)), as the class-B exit reads it: a chatter slide's duty
+    /// moves the rail through a capacitor, which the draw over the span
+    /// shows and the draw at the instant does not. `None` off a segment, or
+    /// where a probe does not solve (the measured drift decides, as
+    /// before); the state is put back bit for bit either way, the hold as it
+    /// was. R99W's defect (cold 2575 tpl 2 with the CC segment following
+    /// its pulse's ramp): the pulse, through switch 14 onto the rail, drags
+    /// it down through the 555's 1.8 V floor whatever the duty; the
+    /// corrections halved the duty at each W0 of the fall (3e-128 by 0.59
+    /// V, 636 W0 under) and the rail's events at each one stalled the run as
+    /// the rail crossed 0 V.
+    fn chatter_attracts(&mut self, now: f64, drivers: &[Driver], d: usize) -> Result<Option<bool>, String> {
+        let Some(((r0, r1), res)) = self.chatter_end_rates(now, drivers, d)? else { return Ok(None) };
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        // Outward: down past a floor, up past a ceiling.
+        let (lo, _) = digital::levels::power_window(ic);
+        let outward = if self.slide_edge(d) == lo { -1.0 } else { 1.0 };
+        let attracts = outward * r1 > 0.0 && outward * r0 < 0.0;
+        let mut episode = self.episode(d);
+        episode.end_residuals = if attracts { res } else { (f64::INFINITY, f64::INFINITY) };
+        self.set_episode(d, episode)?;
+        self.set_chatter_exits(now, d)?;
+        Ok(Some(attracts))
+    }
+
+    /// Where each end of chatter slide `d`'s bracket stops bracketing as
+    /// the board moves its draw (`chatter_attracts`): an end's flat residual
+    /// at the edge moves with the duty's own draw there volt for volt (the
+    /// duty's share is constant at a fixed duty), so it turns at the duty's
+    /// draw less that residual. Read at the duty in place (each correction
+    /// moves the duty's draw by its share, the residuals by nothing);
+    /// watched as a class-B slide's are (`slide_draw_watches`) and checked
+    /// at each instant (`keep_sliding`), so the exit comes as the board
+    /// crosses it, not at the next correction a W0 or more later.
+    fn set_chatter_exits(&mut self, now: f64, d: usize) -> Result<(), String> {
+        let mut episode = self.episode(d);
+        let (res0, res1) = episode.end_residuals;
+        episode.draw_exits = match self.slide_draw_at_edge(now, d) {
+            Some(w) if res0.is_finite() && res1.is_finite() => ((w - res0).min(w - res1), (w - res0).max(w - res1)),
+            _ => (f64::NEG_INFINITY, f64::INFINITY),
+        };
+        self.set_episode(d, episode)
+    }
+
+    /// [`Self::chatter_attracts`]'s reading: the rate (V/s) at which the
+    /// segment carries chip `d`'s supply with the chip fully off and fully
+    /// on, `C u' = dir (I - D)` with `D - I` the flat residual at each end,
+    /// the supply following the rail on its vcc pin and against it on its
+    /// ground pin. `None` off a segment or where a probe does not solve.
+    #[allow(clippy::type_complexity)]
+    fn chatter_end_rates(&mut self, now: f64, drivers: &[Driver], d: usize) -> Result<Option<((f64, f64), (f64, f64))>, String> {
+        let Some((v, _)) = self.hub.as_ref().and_then(|h| h.psu_setpoint()) else { return Ok(None) };
+        if self.segment_draw(now).is_none() {
+            return Ok(None);
+        }
+        let hold = self.power_hold(d);
+        let err = rails::loop_unsettled();
+        let mut cp = Some(self.checkpoint());
+        let mut probe_readers = Vec::new();
+        // Each end's draw read at the edge itself, where Filippov's fields
+        // are compared, not at the supply the slide has drifted to (on a
+        // ramp the draw moves with the rail: read 15 W0 under the floor it
+        // turned 68 mV of the ramp late), with the stepped hub partitions'
+        // draw over the span.
+        let mut at_end = |s: &mut Self, x: f64, cp: &mut Option<Checkpoint>| -> Option<f64> {
+            s.slide_probe(now, drivers, &mut probe_readers, d, &err, cp, x).ok()?;
+            let (_, i_limit) = s.hub.as_ref().and_then(|h| h.psu_setpoint())?;
+            Some(s.slide_draw_at_edge(now, d)? + s.slide_shift(now, d) - i_limit)
+        };
+        let r0 = at_end(self, 0.0, &mut cp).ok_or(());
+        let r1 = r0.as_ref().ok().map(|_| at_end(self, 1.0, &mut cp).ok_or(()));
+        self.back_to(cp.take().expect("a checkpoint"));
+        self.write_power_hold(d, hold);
+        let (Ok(r0), Some(Ok(r1))) = (r0, r1) else { return Ok(None) };
+        let hub = self.hub.as_ref().expect("a hub");
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        let follows = if ic.vcc.node == hub.node { 1.0 } else { -1.0 };
+        let rate = |r: f64| -follows * crate::devices::sources::direction(v) * r / hub.c_rail;
+        Ok(Some(((rate(r0), rate(r1)), (r0, r1))))
+    }
+
+    /// Test seam [`ForceChatter`]: rail chip `d`, just entered on a slide
+    /// solved within the instant, made a chatter slide (ruling R95 (b)) at
+    /// the duty that solve found, its bracket's ends the segment's rates at
+    /// duty 0 and 1 (`chatter_end_rates`), as its chatter's held and
+    /// powered phases would show them.
+    #[cfg(test)]
+    fn force_chatter(&mut self, now: f64, drivers: &[Driver], d: usize) -> Result<(), String> {
+        let Some(((r0, r1), _)) = self.chatter_end_rates(now, drivers, d)? else { return Ok(()) };
+        let mut episode = self.episode(d);
+        episode.chatter = true;
+        (episode.chatter_held, episode.chatter_powered) = ((0.0, r0), (1.0, r1));
+        (episode.held_side, episode.powered_side, episode.side) = (episode.chatter_held, episode.chatter_powered, 0);
+        episode.drift_from = (now, supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages));
+        episode.inside = (episode.drift_from.1 - self.slide_edge(d)).abs() < slide_drift(self.slide_edge(d));
+        episode.solved_at = now;
+        (episode.exits, episode.draw_exits) = ((f64::NEG_INFINITY, f64::INFINITY), (f64::NEG_INFINITY, f64::INFINITY));
+        self.set_episode(d, episode)?;
+        self.chatter_attracts(now, drivers, d).map(|_| ())
     }
 
     /// Ruling R51 (b), after rail passes that solved (an event re-solve) or
@@ -1519,7 +1683,7 @@ impl PartitionedSolver {
         hub.rail_ics
             .iter()
             .map(|&pos| self.ics[pos as usize].0)
-            .filter(|&d| matches!(self.power_hold(d).kind, HoldKind::Duty(_)) && !self.episode(d).chatter)
+            .filter(|&d| matches!(self.power_hold(d).kind, HoldKind::Duty(_)))
             .filter_map(|d| {
                 let (lo, hi) = self.episode(d).draw_exits;
                 let thresholds: Vec<f64> = [lo, hi].into_iter().filter(|t| t.is_finite()).collect();
@@ -2017,12 +2181,16 @@ impl PartitionedSolver {
             // its duty taken to 1). Driver changes do not restart it: a chip
             // that toggles on its own as it slides (22 tpl 2's 555, its OUT
             // on its TRIG) drifts at its duty's average across its toggles.
+            // Past a level where an end of a chatter slide's bracket stops
+            // bracketing (Filippov's exit, `chatter_attracts`): corrected
+            // now, which checks.
+            let turned = self.episode(d).chatter && self.slide_draw_at_edge(now, d).is_some_and(|w| w <= self.episode(d).draw_exits.0 || w >= self.episode(d).draw_exits.1);
             if self.episode(d).chatter {
                 let mut episode = self.episode(d);
                 let band = slide_drift(edge);
                 let off0 = episode.drift_from.1 - edge;
                 let inside = episode.inside || off * off0 <= 0.0;
-                if off.abs() <= band || !(inside || off.abs() >= off0.abs() + band) {
+                if !turned && (off.abs() <= band || !(inside || off.abs() >= off0.abs() + band)) {
                     if inside != episode.inside {
                         episode.inside = inside;
                         self.set_episode(d, episode)?;
@@ -2042,7 +2210,7 @@ impl PartitionedSolver {
             // On a capacitor's segment, past a draw where an end stops
             // bracketing (`slide_draw_watches`).
             let (exits, draw_exits) = (self.episode(d).exits, self.episode(d).draw_exits);
-            let past_end = !chatter && (off + edge <= exits.0 || off + edge >= exits.1 || self.slide_draw_at_edge(now, d).is_some_and(|w| w <= draw_exits.0 || w >= draw_exits.1));
+            let past_end = turned || !chatter && (off + edge <= exits.0 || off + edge >= exits.1 || self.slide_draw_at_edge(now, d).is_some_and(|w| w <= draw_exits.0 || w >= draw_exits.1));
             if !changed && !at_edge && !past_end && off.abs() <= slide_drift(edge) {
                 continue;
             }
@@ -2064,7 +2232,22 @@ impl PartitionedSolver {
             if self.slide_solves > solves_max {
                 return Err(format!("power slide: IC (device {d}) had its duty solved again {} times in one host step, its supply drifting past W0 from its edge each time (ruling R92)", self.slide_solves));
             }
-            if self.slide_solves > follow_max {
+            // A chatter slide's corrections also count per simulated time
+            // (`SLIDE_FOLLOW_MAX` per `SLIDE_FOLLOW_SPAN`), whatever the host
+            // step: each is a `Rail` event, and at 1 us host steps cold 2575
+            // tpl 2's (R99W's) took six a host step, never the cap, crawling
+            // a microsecond of its fall per 1.4 ms of wall until it stalled.
+            let mut chatter_over = false;
+            if self.episode(d).chatter {
+                let mut episode = self.episode(d);
+                if !(now - episode.corrections_from <= SLIDE_FOLLOW_SPAN) {
+                    (episode.corrections, episode.corrections_from) = (0, now);
+                }
+                episode.corrections += 1;
+                chatter_over = episode.corrections > SLIDE_FOLLOW_MAX;
+                self.set_episode(d, episode)?;
+            }
+            if self.slide_solves > follow_max || chatter_over {
                 // Given up: free, and the passes find it alternating again,
                 // where the hold procedure holds it as before the ruling.
                 let mut episode = self.episode(d);
@@ -2419,6 +2602,9 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.side, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.drift_from, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.inside, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.corrections, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.corrections_from, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.end_residuals, w); }
         n
     }
 }
