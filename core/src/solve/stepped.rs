@@ -2340,13 +2340,21 @@ impl SteppedSolver {
         if self.keep_dense {
             return;
         }
-        let mut latest: HashMap<usize, usize> = HashMap::new();
-        for (k, seg) in self.dense.iter().enumerate() {
-            latest.insert(seg.p, k);
+        // Nothing ends before `t` (the common case between two samples).
+        if self.dense.iter().all(|seg| seg.end() >= t) {
+            return;
+        }
+        // Each partition's latest segment, by a scan from the newest (few
+        // partitions are probed).
+        let mut latest: Vec<(usize, usize)> = Vec::new();
+        for (k, seg) in self.dense.iter().enumerate().rev() {
+            if !latest.iter().any(|&(p, _)| p == seg.p) {
+                latest.push((seg.p, k));
+            }
         }
         let mut k = 0;
         self.dense.retain(|seg| {
-            let keep = seg.end() >= t || latest.get(&seg.p) == Some(&k);
+            let keep = seg.end() >= t || latest.contains(&(seg.p, k));
             k += 1;
             keep
         });

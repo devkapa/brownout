@@ -5047,9 +5047,14 @@ impl PartitionSolver for PartitionedSolver {
             keep = keep.min(self.charge_rail_from(now));
         }
         if let Some(mut obs) = self.observer.take() {
-            let moving = self.rail_moving();
-            let targets: Vec<SampleTarget<'_>> = obs.nodes().iter().map(|&n| self.sample_target_of(n, moving)).collect();
-            obs.read_until(t, inclusive, |j, ts| self.sample_target(&targets[j], ts));
+            // Most instants fall between two grid times: then nothing is read
+            // and nothing is located.
+            let next = obs.next_time();
+            if next < t || (inclusive && next == t) {
+                let moving = self.rail_moving();
+                let targets: Vec<SampleTarget<'_>> = obs.nodes().iter().map(|&n| self.sample_target_of(n, moving)).collect();
+                obs.read_until(t, inclusive, |j, ts| self.sample_target(&targets[j], ts));
+            }
             self.stepped.prune_dense(obs.next_time());
             keep = keep.min(obs.next_time());
             self.observer = Some(obs);

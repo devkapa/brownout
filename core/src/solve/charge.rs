@@ -147,6 +147,10 @@ pub(crate) struct ChargeState {
     /// the power holds taken and released when last noted.
     node_start: Vec<u32>,
     node_deps: Vec<u32>,
+    /// The nodes some held device reads, as a bitset, and whether any held
+    /// device publishes a current of its own.
+    watched: Vec<u64>,
+    any_held_dev: bool,
     dev_held: Vec<u32>,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
@@ -162,6 +166,11 @@ pub(crate) struct ChargeState {
     reads_rail: bool,
     /// Per node: the hub rail, or a static hub partition's node on its line.
     line_flag: Vec<bool>,
+    /// The devices an interval folds (means, lines, fixed-pair capacitors,
+    /// dynamic partitions' devices), and the fixed-pair capacitors it reads
+    /// (armed, or a source term's), so an interval walks only those.
+    interval_devs: Vec<u32>,
+    fixed_caps: Vec<u32>,
     /// The stepped hub partition whose steps carry the rail, as the last fold
     /// found it (`charge_rail_carrier`): its steps fold the rail's lines.
     carrier: Option<usize>,
@@ -179,18 +188,21 @@ impl ChargeState {
     /// is due a refold (so a fold costs what the instant changed, not what is
     /// armed), every held 555 where a power hold came or went.
     pub(crate) fn note_instant(&mut self, v_log: &[(u32, u64)], i_log: &[(u32, u64)], holds: [f64; 2]) {
+        // A bitset first: most logged nodes are no held device's.
         for &(node, _) in v_log {
             let n = node as usize;
-            if n + 1 < self.node_start.len() {
+            if self.watched.get(n / 64).is_some_and(|w| w >> (n % 64) & 1 != 0) {
                 for k in self.node_start[n]..self.node_start[n + 1] {
                     let d = self.node_deps[k as usize];
                     Self::mark(&mut self.dirty, &mut self.is_dirty, d);
                 }
             }
         }
-        for &(device, _) in i_log {
-            if let Some(&d) = self.dev_held.get(device as usize).filter(|&&d| d != u32::MAX) {
-                Self::mark(&mut self.dirty, &mut self.is_dirty, d);
+        if self.any_held_dev {
+            for &(device, _) in i_log {
+                if let Some(&d) = self.dev_held.get(device as usize).filter(|&&d| d != u32::MAX) {
+                    Self::mark(&mut self.dirty, &mut self.is_dirty, d);
+                }
             }
         }
         if holds != self.holds_seen {
@@ -323,7 +335,14 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), any_held_dev: false, dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new() };
+        st.interval_devs = (0..st.devs.len() as u32).filter(|&k| matches!(st.devs[k as usize].class, ChargeClass::Mean(_) | ChargeClass::Line(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))).collect();
+        st.fixed_caps = (0..self.fixed_pair_capacitors.len() as u32)
+            .filter(|&k| {
+                let cap = &self.fixed_pair_capacitors[k as usize];
+                st.devs.iter().any(|d| matches!(d.class, ChargeClass::FixedCap(j) if j == k)) || rel_of(&st.src, cap.nodes.0) || rel_of(&st.src, cap.nodes.1)
+            })
+            .collect();
         st.line_flag = (0..self.voltages.len()).map(|n| rail == Some(n) || (self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static) && self.static_solver.hub_node_line(n).is_some())).collect();
         st.carrier = self.charge_rail_carrier();
         st.has_interval = st.src.is_some() || st.devs.iter().any(|d| matches!(d.class, ChargeClass::Mean(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_)));
@@ -355,6 +374,13 @@ impl PartitionedSolver {
                 _ => {}
             }
         }
+        st.watched = vec![0; per_node.len().div_ceil(64)];
+        for (n, list) in per_node.iter().enumerate() {
+            if !list.is_empty() {
+                st.watched[n / 64] |= 1 << (n % 64);
+            }
+        }
+        st.any_held_dev = st.dev_held.iter().any(|&d| d != u32::MAX);
         st.node_start.push(0);
         for list in &per_node {
             st.node_deps.extend_from_slice(list);
@@ -928,15 +954,13 @@ impl PartitionedSolver {
                 published.push(p);
             }
         }
-        for (k, cap) in self.fixed_pair_capacitors.iter().enumerate() {
-            let used = st.devs.iter().any(|d| matches!(d.class, ChargeClass::FixedCap(j) if j as usize == k)) || rel_of(&st.src, cap.nodes.0) || rel_of(&st.src, cap.nodes.1);
-            if used {
-                sc[cap.device_index] = self.fixed_cap_mean(k, a, b, &v);
-            }
+        for &k in &st.fixed_caps {
+            let cap = &self.fixed_pair_capacitors[k as usize];
+            sc[cap.device_index] = self.fixed_cap_mean(k as usize, a, b, &v);
         }
         let mut chs = std::mem::take(&mut st.chs);
-        for k in 0..st.devs.len() {
-            let dev = &st.devs[k];
+        for &k in &st.interval_devs {
+            let dev = &st.devs[k as usize];
             if st.carrier.is_some() && self.charge_on_line(dev, &st.line_flag) {
                 continue;
             }
@@ -1234,6 +1258,8 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_start, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_deps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.watched, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.any_held_dev, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dev_held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dirty, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.is_dirty, w); }
@@ -1243,6 +1269,8 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.has_line, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reads_rail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.line_flag, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.interval_devs, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carrier, w); }
         n
     }
