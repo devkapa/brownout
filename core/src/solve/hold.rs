@@ -926,7 +926,14 @@ impl PartitionedSolver {
                 }
                 None => before[k],
             };
-            seed.extend(self.set_power_hold(d, hold).into_iter().map(|p| p.0 as usize));
+            // One held off as the procedure began and held off again is the
+            // same hold, its release level refreshed: written uncounted (stat
+            // 25 counts holds taken), as `retry_on_rail` puts a hold back.
+            // Counted, cold 552 tpl 2's gate, probed again at the next flip
+            // back once HG1's count is kept across a call that takes nothing,
+            // read as held twice within one instant.
+            let parts = if before[k].kind == HoldKind::Off && hold.kind == HoldKind::Off { self.write_power_hold(d, hold) } else { self.set_power_hold(d, hold) };
+            seed.extend(parts.into_iter().map(|p| p.0 as usize));
         }
         self.rail_settle(now, drivers, readers, seed, &err)?;
         // Where the held solve left each supply: the chatter's measure of

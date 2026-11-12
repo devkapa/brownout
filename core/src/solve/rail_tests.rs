@@ -14954,6 +14954,38 @@ fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_within_the_r
     }
 }
 
+#[test]
+fn a_chase_the_hold_procedure_leaves_free_goes_on_counting_so_the_slide_enters_within_two_cycles() {
+    // HG1's chase count across instants (W1c point 1a, ruling R82 (B')):
+    // cold 757 tpl 0's 555 flips at its 1.8 V floor once a cycle of node
+    // 2's capacitor, about 170 us (11 to 13 regrowth steps between flips,
+    // `CHASE_REGROWTH`), and the hold procedure runs at the second flip
+    // back. At the power-up flip its OUT has not committed, the passes
+    // settle with it free, and the procedure takes nothing: counted afresh
+    // after that, the next flip was a first again, and at 50 us stops the
+    // slide entered at 0.17475 s, 13 cycles after the rail first reaches
+    // its floor at 0.1723 s (the fine reference, exact mode at 1 us). Kept
+    // when the procedure took nothing, the count reaches two again at the
+    // next flip back: entered within two cycles of the floor and seen at
+    // the next stop, 0.1723 + 2 x 170 us + 50 us = 0.17269 s at the
+    // latest, at 100, 50 and 20 us stops (measured 0.1726, 0.17255 and
+    // 0.17238).
+    for dt in [100e-6f64, 50e-6, 20e-6] {
+        let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
+        let mut first = None;
+        for k in 1..=(0.175 / dt).round() as usize {
+            let t = k as f64 * dt;
+            rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+            if matches!(rig.s().power_hold(10).kind, digital::power::HoldKind::Duty(_)) {
+                first = Some(t);
+                break;
+            }
+        }
+        let first = first.unwrap_or_else(|| panic!("{dt:e} s stops: no slide by 0.175 s"));
+        assert!(first <= 0.17269, "{dt:e} s stops: the slide entered at {first} s, past 0.17269 s");
+    }
+}
+
 /// tpl=0 hub=2 e=8.919 psu ilim=0.113 V2=0.22 CLK3 -0.3..6.1 stacked4-3 1.7 C6-0=4.0e-6 555 vcc1 gnd0 [1, 3, 5, 1, 1, 1] C6-0=1.1e-4 C0-0=4.5e-5 LED1-4 R4-5=8.0 C6-1=1.4e-2 R0-6=2.8 LED6-5+R1-6=553 R4-3=149201.7 C4-0=1.5e-4
 fn cold_766_tpl0() -> Program {
     let devices = vec![
@@ -15331,9 +15363,12 @@ fn a_555_whose_dis_feeds_its_own_thr_declines_at_its_floor_as_the_fine_reference
     // 1.637 to 1.811 V) and declines at 0.011842 s. Allowed to slide, the
     // chip took 2 holds, carried itself, and the rail climbed to the
     // setpoint by 0.038 s, which the fine reference never does. The decline
-    // instant is pinned: 0.012095436 s, 0.253 ms after the fine reference's
-    // (0.011909 s before INT-ACC's trapezoid fallback moved this
-    // trapezoid-option board).
+    // instant is pinned: 0.0120922832 s, 0.250 ms after the fine
+    // reference's (0.011909 s before INT-ACC's trapezoid fallback moved this
+    // trapezoid-option board; 0.012095436 s before HG1's count was kept
+    // across a hold procedure that takes nothing, which runs the procedure
+    // at the next flip back rather than two flips on, so the 51 short
+    // holds come 3.15 us sooner).
     assert!(PartitionedSolver::build(&cold_688_tpl5()).unwrap().self_fed[0], "688 tpl 5's 555 feeds itself through DIS and THR");
     let mut e = Engine::load(&cold_688_tpl5()).unwrap();
     let (mut from, mut declined) = (0.0, None);
@@ -15350,7 +15385,7 @@ fn a_555_whose_dis_feeds_its_own_thr_declines_at_its_floor_as_the_fine_reference
     assert_eq!(er.code, -4, "{}", er.message);
     assert!(er.message.contains("ruling R97"), "{}", er.message);
     assert!(from < 0.011842 && 0.011842 <= to, "the fine reference's decline in the same advance ({from} to {to} s)");
-    rel(e.time(), 0.012095436370395774, 1e-9, "the decline instant");
+    rel(e.time(), 0.01209228318088, 1e-9, "the decline instant");
 }
 
 #[test]

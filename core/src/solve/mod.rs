@@ -4942,7 +4942,7 @@ impl PartitionedSolver {
         if let Some(a) = gates.and_then(|g| self.count_gate_flip(g, !is_crossing)) {
             let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());
             self.on_error(result)?;
-            self.hub.as_mut().unwrap().state.gate_flips = 0;
+            self.end_answered_chase(&a);
         }
         // W1c step 2b lifted `partition.rs`'s former decline, so an IC CAN
         // now touch a dynamic partition: `handle_crossing`/`handle_step`

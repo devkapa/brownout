@@ -2500,7 +2500,7 @@ impl PartitionedSolver {
         }
         if let Some(a) = self.count_gate_flip(gates, false) {
             self.hold_on_rail(t_end, drivers, readers, &a, rails::loop_unsettled())?;
-            self.hub.as_mut().unwrap().state.gate_flips = 0;
+            self.end_answered_chase(&a);
         }
         Ok(())
     }
@@ -2525,7 +2525,7 @@ impl PartitionedSolver {
             // at this one.
             let result = self.hold_on_rail(now, &drivers, &mut readers, &a, rails::loop_unsettled());
             self.on_error(result)?;
-            self.hub.as_mut().unwrap().state.gate_flips = 0;
+            self.end_answered_chase(&a);
         }
         let published = self.finish_publish(now);
         self.on_error(published)?;
@@ -2585,6 +2585,19 @@ impl PartitionedSolver {
         state.gates_after = after;
         state.quiet_steps = 0;
         (state.gate_flips >= 2).then(|| self.rail_ic_devices(&flipped))
+    }
+
+    /// After the hold procedure ran on the chase's rail ICs `a`: the count
+    /// starts again once it held or slid one of them. One that it left
+    /// free answered nothing (the passes settled with each free, as at the
+    /// power-up flip of cold 757 tpl 0's 555 before its OUT commits), and
+    /// the chase it was called for goes on: counted afresh, the next flip
+    /// was a first again and the one after it the second, a whole cycle
+    /// (about 170 us there) before the procedure ran again.
+    pub(super) fn end_answered_chase(&mut self, a: &[usize]) {
+        if a.iter().any(|&d| !self.power_hold(d).is_free()) {
+            self.hub.as_mut().unwrap().state.gate_flips = 0;
+        }
     }
 
     /// An event other than `Rail` changed what the rail sees: a rail that

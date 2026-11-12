@@ -6961,7 +6961,16 @@ failures and warnings (W1g)"):
   1.336 W0 at 1, 0.5 and 0.1 ms stops, within W0 from 0.19 s (1.0004 W0
   at 0.92 s at 10 ms stops). Re-solving
   more often (a band of 0.2 to 0.5 W0), a trapezoid aim and a span of the
-  fast mode (0.9 ms) were measured and do not hold it. An aim at zero rail
+  fast mode (0.9 ms) were measured and do not hold it. The same run-on
+  takes node 2 past its own W0 (1.856 mV at 1.756 V) at single stops in
+  the steady window after the rail is back within W0: against the hand
+  1.75593 V over 0.2-0.33 s it peaks at 1.18 W0 (0.2125 s, 0.1 ms
+  stops), 1.02 (1 ms), 0.95 (0.5 ms), its mean +0.42 to +0.59 W0.
+  Centring alone does not fix it: the band's centring aim (a = -W0 / 2,
+  R53-P9's option B) on this slide too takes node 2's mean to -0.03 to
+  -0.06 W0 but its peaks to 1.09-1.21 W0, with 2 to 4 times the
+  re-solves, 766 tpl 0 to 0.99984 W0 at 1 ms stops, and the duty 0.024
+  off its hand value at 0.25 s; it is not taken. An aim at zero rail
   velocity at the edge, from node 2's trajectory in the trial, would.
   `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor`
   is its expected failure, pinned at 1.6 W0 over all four schedules
