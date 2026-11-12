@@ -188,8 +188,10 @@ pub(crate) struct ChargeState {
     /// (`charge_rail_jump`); `None` while nothing folds them on a segment.
     rail_q: Option<f64>,
     /// Per armed device, the time its charge was last delivered to (its
-    /// final time in the take that delivered it).
+    /// final time in the take that delivered it), and a take's scratch:
+    /// its final time now, `None` while withheld.
     delivered: Vec<f64>,
+    fin: Vec<Option<f64>>,
 }
 
 impl ChargeState {
@@ -367,7 +369,7 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new(), rail_q: None, delivered: Vec::new() };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new(), rail_q: None, delivered: Vec::new(), fin: Vec::new() };
         st.delivered = vec![now; st.devs.len()];
         st.interval_devs = (0..st.devs.len() as u32).filter(|&k| matches!(st.devs[k as usize].class, ChargeClass::Mean(_) | ChargeClass::Line(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))).collect();
         st.fixed_caps = (0..self.fixed_pair_capacitors.len() as u32)
@@ -1345,17 +1347,15 @@ impl PartitionedSolver {
         let carried_final = st.carrier.map_or(t1, stepped_final);
         let src_whole = st.src.as_ref().is_some_and(|s| s.parts.iter().fold(if s.on_rail.is_empty() { t1 } else { carried_final }, |m, &p| m.min(stepped_final(p))) >= t1 && !st.pending.iter().any(|p| !p.lq.is_empty()));
         let held = |slots: std::ops::Range<usize>| st.pending.iter().any(|p| p.slots.iter().any(|&(k, _)| slots.contains(&(k as usize))));
-        let fin: Vec<Option<f64>> = st
-            .devs
-            .iter()
-            .map(|d| match d.class {
-                ChargeClass::Source => src_whole.then_some(t1),
-                _ if held(d.slot..d.slot + 1 + d.nch) => None,
-                ChargeClass::Part(p) => Some(stepped_final(p as usize)),
-                _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => Some(carried_final),
-                _ => Some(t1),
-            })
-            .collect();
+        let mut fin = std::mem::take(&mut st.fin);
+        fin.clear();
+        fin.extend(st.devs.iter().map(|d| match d.class {
+            ChargeClass::Source => src_whole.then_some(t1),
+            _ if held(d.slot..d.slot + 1 + d.nch) => None,
+            ChargeClass::Part(p) => Some(stepped_final(p as usize)),
+            _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => Some(carried_final),
+            _ => Some(t1),
+        }));
         if let (Some(src), true) = (st.src.as_mut(), src_whole) {
             // The walk, `recompute_source_currents`'s over the charges, once
             // per regime: in CC the hub PSU is its own charge.
@@ -1408,6 +1408,7 @@ impl PartitionedSolver {
         if let (Some(s), true) = (st.src.as_mut(), src_whole) {
             s.approximate = false;
         }
+        st.fin = fin;
         st.t0 = t1;
         st.cursor = t1;
         self.charge = Some(st);
@@ -1509,6 +1510,7 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carrier, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.delivered, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fin, w); }
         n
     }
 }
