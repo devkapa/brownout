@@ -670,6 +670,8 @@ export interface SimWarning {
   value?: number;
   /** The rating the measurement was held against, in the same unit as value. */
   limit?: number;
+  /** A short line with the numbers behind the message, for a host's hover or detail view. */
+  detail?: string;
 }
 
 export interface SolverDiagnosticsSnapshot {

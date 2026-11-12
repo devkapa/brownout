@@ -152,17 +152,22 @@ export function outputSagMessage(componentId: string, pinId: string, high: boole
 }
 
 /**
- * `rail_ic_power_chatter` (ruling R92, R53; the text Dev approved, shared
- * with classic's R89 diagnostic): the chip, its floor and, when its rail is
- * a PSU at its current limit, that limit; with no limit (a cell, or a PSU in
- * CV through a series part) the second clause is left out. Volts and
+ * `rail_ic_power_chatter` (ruling R92, R53): the text Dev approved, shared
+ * with classic's R89 diagnostic, in this one place. The message names the
+ * chip; the detail line (a host's hover) carries the numbers: its floor
+ * and, when its rail is a PSU at its current limit, that limit, left out
+ * with no limit (a cell, or a PSU in CV through a series part). Volts and
  * milliamps to three significant figures, as classic R89 prints its level.
  */
-export function railIcPowerChatterMessage(componentId: string, floor: number, limit: number): string {
-  const volts = Number(floor.toPrecision(3));
-  const head = `${componentId} can't power up: its supply sits at its ${volts} V floor`;
+export function railIcPowerChatterMessage(componentId: string): string {
+  return `${componentId} isn't getting enough power to work properly.`;
+}
+
+/** `rail_ic_power_chatter`'s detail line: see {@link railIcPowerChatterMessage}. */
+export function railIcPowerChatterDetail(floor: number, limit: number): string {
+  const head = `Supply stuck at ${Number(floor.toPrecision(3))} V`;
   if (!Number.isFinite(limit)) return head;
-  return `${head}, the supply at its ${Number((limit * 1000).toPrecision(3))} mA limit`;
+  return `${head} (limit ${Number((limit * 1000).toPrecision(3))} mA)`;
 }
 
 // ─── Failures ───────────────────────────────────────────────────────────────
@@ -242,8 +247,8 @@ export function ptcTrippedFromRecords(records: readonly CoreSlowRecord[], names:
  * `rail_ic_power_chatter` has a Rust producer; a record of a reserved code
  * means the two halves were built from different contracts, so it throws.
  * `value` is the chip's floor (V), as classic R89 sets it; the record's
- * `limit` (A) is a supply's, not the floor's rating, so it is in the message
- * only.
+ * `limit` (A) is a supply's, not the floor's rating, so it is in the detail
+ * line only.
  */
 export function warningFromRecord(record: CoreSlowRecord, names: RecordNames): { key: string; warning: SimWarning } {
   const code = CORE_WARNING_CODE_BY_CODE.get(record.code);
@@ -258,7 +263,8 @@ export function warningFromRecord(record: CoreSlowRecord, names: RecordNames): {
       code,
       since: record.since,
       value: record.value,
-      message: railIcPowerChatterMessage(componentId, record.value, record.limit),
+      message: railIcPowerChatterMessage(componentId),
+      detail: railIcPowerChatterDetail(record.value, record.limit),
     },
   };
 }

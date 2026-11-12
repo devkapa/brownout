@@ -562,7 +562,8 @@ describe("a chip sliding along its power floor (ruling R92, R53): rail_ic_power_
       code: "rail_ic_power_chatter",
       since: warning!.since,
       value: 0.9 * 4.75,
-      message: "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
+      message: "u1 isn't getting enough power to work properly.",
+      detail: "Supply stuck at 4.28 V (limit 20 mA)",
     });
     expect(warning!.since).toBeGreaterThan(1.4e-3);
     expect(warning!.since).toBeLessThan(1.5e-3);

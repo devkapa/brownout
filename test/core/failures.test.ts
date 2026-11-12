@@ -18,6 +18,7 @@ import {
   ledFailedMessage,
   outputSagMessage,
   ptcTrippedFromRecords,
+  railIcPowerChatterDetail,
   railIcPowerChatterMessage,
   resistorOverloadMessage,
   thermalReadout,
@@ -273,18 +274,17 @@ describe("decoding records", () => {
 // ─── Thermal readout ────────────────────────────────────────────────────────
 
 describe("rail_ic_power_chatter: a chip sliding along its power floor (ruling R92, R53)", () => {
-  it("builds Dev's text, the limit clause only where a current limit applies", () => {
+  it("builds Dev's text, the numbers on the detail line, its limit clause only where a current limit applies", () => {
     // Dev's approved wording, character for character, at its own example.
-    expect(railIcPowerChatterMessage("U1", 1.8, 0.072)).toBe(
-      "U1 can't power up: its supply sits at its 1.8 V floor, the supply at its 72 mA limit",
-    );
+    expect(railIcPowerChatterMessage("U1")).toBe("U1 isn't getting enough power to work properly.");
+    expect(railIcPowerChatterDetail(1.8, 0.072)).toBe("Supply stuck at 1.8 V (limit 72 mA)");
     // A cell, or a PSU in CV through a series part: no limit, no clause.
-    expect(railIcPowerChatterMessage("U1", 1.8, Number.NaN)).toBe("U1 can't power up: its supply sits at its 1.8 V floor");
+    expect(railIcPowerChatterDetail(1.8, Number.NaN)).toBe("Supply stuck at 1.8 V");
     // Three significant figures, as classic R89 prints its level: a
-    // 74LS00's 0.9 x 4.75 V floor on a 20 mA PSU.
-    expect(railIcPowerChatterMessage("u1", 0.9 * 4.75, 0.02)).toBe(
-      "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
-    );
+    // 74LS00's 0.9 x 4.75 V floor on a 20 mA PSU, and cold 757 tpl 0's
+    // 71.76 mA limit.
+    expect(railIcPowerChatterDetail(0.9 * 4.75, 0.02)).toBe("Supply stuck at 4.28 V (limit 20 mA)");
+    expect(railIcPowerChatterDetail(1.8, 0.07175978736463227)).toBe("Supply stuck at 1.8 V (limit 71.8 mA)");
   });
 
   it("decodes a channel 1 record as classic's SimWarning and refuses a code with no Rust producer", () => {
@@ -296,7 +296,8 @@ describe("rail_ic_power_chatter: a chip sliding along its power floor (ruling R9
         code: "rail_ic_power_chatter",
         since: 1.442159e-3,
         value: 4.275,
-        message: "u1 can't power up: its supply sits at its 4.28 V floor, the supply at its 20 mA limit",
+        message: "u1 isn't getting enough power to work properly.",
+        detail: "Supply stuck at 4.28 V (limit 20 mA)",
       },
     });
     expect(() => warningFromRecord(record(1, 1, -1, 0, 0, 0), names)).toThrow(/no Rust producer/);

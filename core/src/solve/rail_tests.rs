@@ -649,9 +649,9 @@ fn warning_records(rig: &mut Rig) -> Vec<[f64; 7]> {
 
 #[test]
 fn a_chip_sliding_along_its_floor_latches_its_warning_once_naming_its_floor_and_the_supplys_limit() {
-    // Ruling R92's user warning (R53; Dev's text, "U1 can't power up: its
-    // supply sits at its 1.8 V floor, the supply at its 72 mA limit", built
-    // by the facade from this record): device, code 3
+    // Ruling R92's user warning (R53; Dev's text, "U1 isn't getting enough
+    // power to work properly.", with the detail line "Supply stuck at 1.8 V
+    // (limit 72 mA)", built by the facade from this record): device, code 3
     // (`rail_ic_power_chatter`), pin -1, since, the floor (V), the PSU's
     // limit (A) when its rail is in CC, else NaN, aux 0.
     // HG1's CC ramp: the gate slides at its floor 0.9 x 4.75 = 4.275 V from

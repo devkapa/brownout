@@ -1966,10 +1966,12 @@ their own, and the source KCL does with W1a point 2's branch fold.
    through the slow state's journal, so a failed instant, a restored
    snapshot and `resetFailures` treat it as they treat a failure (a slide
    still running after a reset latches again at the next loop's end). The
-   facade builds Dev's text from it: `U1 can't power up: its supply sits at
-   its 1.8 V floor, the supply at its 72 mA limit`, the second clause only
-   where a limit applies, both numbers to three significant figures, the
-   same message classic R89 gives. A slide at the ceiling latches nothing
+   facade builds Dev's text from it (`failures.ts`,
+   `railIcPowerChatterMessage`, the one place it is worded): the message
+   `U1 isn't getting enough power to work properly.` and the warning's
+   `detail` line `Supply stuck at 1.8 V (limit 72 mA)`, its limit clause
+   only where a limit applies, both numbers to three significant figures;
+   classic R89 is to give the same. A slide at the ceiling latches nothing
    until its message is worded. Pins:
    `a_chip_sliding_along_its_floor_latches_its_warning_once_naming_its_floor_and_the_supplys_limit`
    (`solve/rail_tests.rs`) and `test/core/ic-engine.test.ts`'s
