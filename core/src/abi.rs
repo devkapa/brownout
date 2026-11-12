@@ -634,8 +634,9 @@ pub extern "C" fn bo_engine_acquire(h: u32, nodes: *const f64, n: u32, origin: f
 }
 
 /// W2b: takes every final sample since the last take into the engine's
-/// buffer, `[count, maxSpan, overflowed, dropped, t x count, then node-major
-/// values]`, and returns its length in f64 (`4` when nothing is armed), or
+/// buffer, `[count, maxSpan, overflowed, dropped, fallbacks x nodes, t x
+/// count, then node-major values]`, and returns its length in f64 (`4` when
+/// nothing is armed), or
 /// `-5` for an unusable handle. Read it with [`bo_engine_acquire_ptr`].
 #[no_mangle]
 pub extern "C" fn bo_engine_acquire_take(h: u32) -> i32 {
@@ -1313,14 +1314,14 @@ mod tests {
         assert_eq!(bo_engine_acquire(h, nodes.as_ptr(), 2, 0.0, 1e-3, 0), 0);
         assert_eq!(bo_engine_advance(h, 2.5e-3), 0);
         let len = bo_engine_acquire_take(h);
-        assert_eq!(len, 4 + 3 * 3, "0, 1 and 2 ms, two nodes");
+        assert_eq!(len, 4 + 2 + 3 * 3, "0, 1 and 2 ms, two nodes, a fallback count each");
         let got = unsafe { std::slice::from_raw_parts(bo_engine_acquire_ptr(h), len as usize) }.to_vec();
         // The divider's tap holds the readout (just under 5 V: the node
         // shunt, `NODE_RSHUNT_G`).
         let tap = with_engine(h, f64::NAN, |e| e.voltages()[2]);
         assert!((tap - 5.0).abs() < 1e-8);
-        assert_eq!(got, vec![3.0, 0.0, 0.0, 0.0, 0.0, 1e-3, 2e-3, tap, tap, tap, 10.0, 10.0, 10.0]);
-        assert_eq!(bo_engine_acquire_take(h), 4, "taken");
+        assert_eq!(got, vec![3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1e-3, 2e-3, tap, tap, tap, 10.0, 10.0, 10.0]);
+        assert_eq!(bo_engine_acquire_take(h), 4 + 2, "taken: the header and the two counts");
         for (ptr, n, origin, interval, why) in [
             (nodes.as_ptr(), 1, 0.0, -1.0, "must be finite"),
             (nodes.as_ptr(), 1, f64::NAN, 1.0, "must be finite"),

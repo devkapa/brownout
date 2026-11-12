@@ -22,7 +22,8 @@
 /// R104's default queue length, in samples (each a value per probed node).
 pub const DEFAULT_LIMIT: usize = 1 << 20;
 
-/// The words before a take's times: `count, maxSpan, overflowed, dropped`.
+/// The words before a take's per-node fallback counts and its times:
+/// `count, maxSpan, overflowed, dropped`.
 pub const TAKE_HEADER: usize = 4;
 
 #[derive(Clone, Debug)]
@@ -40,16 +41,21 @@ pub struct Observer {
     /// The widest span between the two stepped commits a sample was read
     /// between, since the last take (0 when none was).
     max_span: f64,
+    /// Per probed node, the samples that fell back to linear where R104's
+    /// solve was due (its Newton failed), since the last take.
+    fallbacks: Vec<u64>,
     row: Vec<f64>,
+    row_fallback: Vec<bool>,
 }
 
 /// Where an instant's window found the queue, to put it back on a rollback.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Mark {
     len: usize,
     next: u64,
     dropped: u64,
     max_span: f64,
+    fallbacks: Vec<u64>,
 }
 
 impl Observer {
@@ -64,7 +70,12 @@ impl Observer {
             next -= 1;
         }
         let n = nodes.len();
-        Observer { nodes, origin, interval, next, times: Vec::new(), values: Vec::new(), limit: limit.max(1), dropped: 0, max_span: 0.0, row: vec![0.0; n] }
+        Observer { nodes, origin, interval, next, times: Vec::new(), values: Vec::new(), limit: limit.max(1), dropped: 0, max_span: 0.0, fallbacks: vec![0; n], row: vec![0.0; n], row_fallback: vec![false; n] }
+    }
+
+    /// The grid, `(origin, interval)`.
+    pub fn grid(&self) -> (f64, f64) {
+        (self.origin, self.interval)
     }
 
     pub fn nodes(&self) -> &[usize] {
@@ -79,9 +90,10 @@ impl Observer {
     /// Reads every sample whose time is before `t_limit` (at or before it with
     /// `inclusive`), in order, while `value(node, t)` gives each probed node's
     /// value there with the span of the stepped commits it lay between (0 for
-    /// none); the first sample a node cannot give yet (its later commit not
-    /// made) stops the reading, to be read again later.
-    pub fn read_until(&mut self, t_limit: f64, inclusive: bool, mut value: impl FnMut(usize, f64) -> Option<(f64, f64)>) {
+    /// none) and whether it fell back to linear; the first sample a node
+    /// cannot give yet (its later commit not made) stops the reading, to be
+    /// read again later.
+    pub fn read_until(&mut self, t_limit: f64, inclusive: bool, mut value: impl FnMut(usize, f64) -> Option<(f64, f64, bool)>) {
         loop {
             let t = self.next_time();
             if t > t_limit || (!inclusive && t == t_limit) {
@@ -105,8 +117,9 @@ impl Observer {
             let mut span = 0.0f64;
             for j in 0..self.nodes.len() {
                 match value(self.nodes[j], t) {
-                    Some((v, s)) => {
+                    Some((v, s, fallback)) => {
                         self.row[j] = v;
+                        self.row_fallback[j] = fallback;
                         span = span.max(s);
                     }
                     None => return,
@@ -114,17 +127,22 @@ impl Observer {
             }
             self.times.push(t);
             self.values.extend_from_slice(&self.row);
+            for (f, &b) in self.fallbacks.iter_mut().zip(&self.row_fallback) {
+                *f += u64::from(b);
+            }
             self.max_span = self.max_span.max(span);
             self.next += 1;
         }
     }
 
-    /// `[count, maxSpan, overflowed, dropped, t x count, then node-major
-    /// values (nodes x count)]`, and an empty queue after it.
+    /// `[count, maxSpan, overflowed, dropped, fallbacks x nodes, t x count,
+    /// then node-major values (nodes x count)]`, and an empty queue after it.
     pub fn take(&mut self, out: &mut Vec<f64>) {
         let (count, n) = (self.times.len(), self.nodes.len());
         out.clear();
         out.extend([count as f64, self.max_span, f64::from(u8::from(self.dropped > 0)), self.dropped as f64]);
+        out.extend(self.fallbacks.iter().map(|&f| f as f64));
+        self.fallbacks.iter_mut().for_each(|f| *f = 0);
         out.extend_from_slice(&self.times);
         for j in 0..n {
             out.extend((0..count).map(|s| self.values[s * n + j]));
@@ -136,7 +154,7 @@ impl Observer {
     }
 
     pub fn mark(&self) -> Mark {
-        Mark { len: self.times.len(), next: self.next, dropped: self.dropped, max_span: self.max_span }
+        Mark { len: self.times.len(), next: self.next, dropped: self.dropped, max_span: self.max_span, fallbacks: self.fallbacks.clone() }
     }
 
     /// Puts the queue back to `mark` (a rolled-back instant read nothing).
@@ -144,6 +162,7 @@ impl Observer {
         self.times.truncate(mark.len);
         self.values.truncate(mark.len * self.nodes.len());
         (self.next, self.dropped, self.max_span) = (mark.next, mark.dropped, mark.max_span);
+        self.fallbacks = mark.fallbacks;
     }
 }
 
@@ -155,50 +174,65 @@ mod tests {
     fn the_grid_starts_at_now_and_reads_in_order_up_to_a_limit() {
         let mut o = Observer::new(vec![3], 0.0, 0.25, DEFAULT_LIMIT, 0.5);
         assert_eq!(o.next_time(), 0.5, "a grid time at now is the first");
-        o.read_until(1.0, false, |_, t| Some((t * 10.0, 0.0)));
-        o.read_until(1.0, true, |_, t| Some((t * 10.0, 0.0)));
+        o.read_until(1.0, false, |_, t| Some((t * 10.0, 0.0, false)));
+        o.read_until(1.0, true, |_, t| Some((t * 10.0, 0.0, false)));
         let mut out = Vec::new();
         o.take(&mut out);
-        assert_eq!(out, vec![3.0, 0.0, 0.0, 0.0, 0.5, 0.75, 1.0, 5.0, 7.5, 10.0]);
+        assert_eq!(out, vec![3.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.75, 1.0, 5.0, 7.5, 10.0]);
     }
 
     #[test]
     fn a_sample_a_node_cannot_give_yet_stops_the_reading_and_comes_back() {
         let mut o = Observer::new(vec![1, 2], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
-        o.read_until(5.0, true, |n, t| if n == 2 && t > 1.0 { None } else { Some((t + n as f64, 0.5)) });
+        o.read_until(5.0, true, |n, t| if n == 2 && t > 1.0 { None } else { Some((t + n as f64, 0.5, false)) });
         assert_eq!(o.next_time(), 2.0);
-        o.read_until(5.0, true, |n, t| Some((t + n as f64, 0.0)));
+        o.read_until(5.0, true, |n, t| Some((t + n as f64, 0.0, false)));
         let mut out = Vec::new();
         o.take(&mut out);
-        assert_eq!(&out[..4], &[6.0, 0.5, 0.0, 0.0]);
-        assert_eq!(&out[4..10], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
-        assert_eq!(&out[10..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(&out[..6], &[6.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&out[6..12], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(&out[12..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]
     fn a_full_queue_keeps_the_oldest_and_counts_the_dropped() {
         let mut o = Observer::new(vec![0], 0.0, 0.1, 3, 0.0);
-        o.read_until(1.0, true, |_, t| Some((t, 0.0)));
+        o.read_until(1.0, true, |_, t| Some((t, 0.0, false)));
         let mut out = Vec::new();
         o.take(&mut out);
-        assert_eq!(&out[..4], &[3.0, 0.0, 1.0, 8.0], "0, 0.1, 0.2 kept; 0.3 .. 1.0 dropped");
-        assert_eq!(&out[4..7], &[0.0, 0.1, 0.2]);
-        o.read_until(1.25, true, |_, t| Some((t, 0.0)));
+        assert_eq!(&out[..5], &[3.0, 0.0, 1.0, 8.0, 0.0], "0, 0.1, 0.2 kept; 0.3 .. 1.0 dropped");
+        assert_eq!(&out[5..8], &[0.0, 0.1, 0.2]);
+        o.read_until(1.25, true, |_, t| Some((t, 0.0, false)));
         o.take(&mut out);
         assert_eq!(out[0], 2.0, "after a take it reads again: 1.1, 1.2");
         assert_eq!(out[3], 0.0);
     }
 
     #[test]
-    fn a_rewind_forgets_what_a_rolled_back_instant_read() {
-        let mut o = Observer::new(vec![0], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
-        o.read_until(2.0, true, |_, t| Some((t, 0.0)));
+    fn a_fallback_is_counted_per_node_and_rewound() {
+        let mut o = Observer::new(vec![1, 2], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
+        o.read_until(1.0, true, |n, _| Some((0.0, 0.0, n == 2)));
         let m = o.mark();
-        o.read_until(5.0, true, |_, t| Some((t, 1.0)));
+        o.read_until(3.0, true, |n, _| Some((0.0, 0.0, n == 2)));
         o.rewind(m);
         let mut out = Vec::new();
         o.take(&mut out);
-        assert_eq!(&out[..], &[3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0]);
+        assert_eq!(&out[..6], &[2.0, 0.0, 0.0, 0.0, 0.0, 2.0], "node 2 fell back at 0 and 1");
+        o.read_until(2.0, true, |_, _| Some((0.0, 0.0, false)));
+        o.take(&mut out);
+        assert_eq!(&out[4..6], &[0.0, 0.0], "a take clears them");
+    }
+
+    #[test]
+    fn a_rewind_forgets_what_a_rolled_back_instant_read() {
+        let mut o = Observer::new(vec![0], 0.0, 1.0, DEFAULT_LIMIT, 0.0);
+        o.read_until(2.0, true, |_, t| Some((t, 0.0, false)));
+        let m = o.mark();
+        o.read_until(5.0, true, |_, t| Some((t, 1.0, false)));
+        o.rewind(m);
+        let mut out = Vec::new();
+        o.take(&mut out);
+        assert_eq!(&out[..], &[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0]);
         assert_eq!(o.next_time(), 3.0);
     }
 }
@@ -218,7 +252,9 @@ impl crate::snapshot::HeapBytes for Observer {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.limit, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dropped, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.max_span, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fallbacks, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.row, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.row_fallback, w); }
         n
     }
 }
@@ -231,6 +267,7 @@ impl crate::snapshot::HeapBytes for Mark {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.next, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dropped, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.max_span, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fallbacks, w); }
         n
     }
 }

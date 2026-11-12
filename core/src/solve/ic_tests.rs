@@ -2320,7 +2320,7 @@ fn gap1_a_supply_re_solve_re_aims_the_dependent_watch_to_an_earlier_crossing() {
 
 /// An `ne555` with no catalog window (2-18 V): pins in the record's order,
 /// `logic` in TRIG/OUT/RST/CV/THR/DIS order, digital slot base 0.
-fn ne555_dev(ci: usize, vcc: usize, gnd: usize, logic: [usize; 6]) -> Device {
+pub(super) fn ne555_dev(ci: usize, vcc: usize, gnd: usize, logic: [usize; 6]) -> Device {
     let mut p = vec![0.0; ic_param::COUNT];
     p[ic_param::VCC_MIN] = 2.0;
     p[ic_param::VCC_MAX] = 18.0;

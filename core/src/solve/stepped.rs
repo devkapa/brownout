@@ -189,6 +189,167 @@ struct TrBdf2Stage {
     vh: Vec<f64>,
 }
 
+/// W2b: a point of a committed step: its time, nodes, capacitor voltages and
+/// currents, and whether the interval ending here is interpolated by cubic
+/// Hermite (a trapezoidal step or a TR-BDF2 stage) or linearly (backward
+/// Euler).
+#[derive(Debug, Clone)]
+pub(crate) struct Knot {
+    t: f64,
+    x: Vec<f64>,
+    vc: Vec<f64>,
+    i: Vec<f64>,
+    hermite: bool,
+    /// The end of a TR-BDF2 step's trapezoidal stage.
+    stage: bool,
+}
+
+/// W2b: a pending trial's knots after its start, and an iterated
+/// partition's nodes solved at the grid times within it ([`DenseSeg`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendDense {
+    knots: Vec<Knot>,
+    solved: Vec<(f64, Option<Vec<f64>>)>,
+}
+
+impl PendDense {
+    fn clear(&mut self) {
+        self.knots.clear();
+        self.solved.clear();
+    }
+}
+
+/// W2b: one committed step of a partition the observer reads, from its
+/// start state through its knots, or a seed (no knots: a point).
+#[derive(Debug, Clone)]
+pub(crate) struct DenseSeg {
+    p: usize,
+    t0: f64,
+    x0: Vec<f64>,
+    vc0: Vec<f64>,
+    i0: Vec<f64>,
+    knots: Vec<Knot>,
+    /// Nothing it reads moves within the step (no running ramp, no rail).
+    steady: bool,
+    /// Steady, linear, with one capacitor: every node an affine map of it.
+    affine: bool,
+    /// An iterated partition's nodes solved at the observer's grid times in
+    /// the step (`None`: the solve failed, the sample is linear), R104 as
+    /// ruled for a node no capacitor's voltage gives.
+    solved: Vec<(f64, Option<Vec<f64>>)>,
+}
+
+impl DenseSeg {
+    fn end(&self) -> f64 {
+        self.knots.last().map_or(self.t0, |k| k.t)
+    }
+
+    /// Every capacitor's voltage at `t`: Hermite over a Hermite interval,
+    /// else linear.
+    fn vc_at(&self, shape: &DynShape, t: f64) -> Vec<f64> {
+        let (mut ta, mut vca, mut ia) = (self.t0, &self.vc0, &self.i0);
+        for k in &self.knots {
+            if t <= k.t {
+                let tau = k.t - ta;
+                if !(tau > 0.0) {
+                    return k.vc.clone();
+                }
+                let s = (t - ta) / tau;
+                let (s2, s3) = (s * s, s * s * s);
+                return (0..vca.len())
+                    .map(|j| {
+                        if !k.hermite {
+                            return vca[j] + (k.vc[j] - vca[j]) * s;
+                        }
+                        let c = shape.capacitors[j].c;
+                        (2.0 * s3 - 3.0 * s2 + 1.0) * vca[j] + (s3 - 2.0 * s2 + s) * tau * ia[j] / c + (-2.0 * s3 + 3.0 * s2) * k.vc[j] + (s3 - s2) * tau * k.i[j] / c
+                    })
+                    .collect();
+            }
+            (ta, vca, ia) = (k.t, &k.vc, &k.i);
+        }
+        vca.clone()
+    }
+
+    fn span(&self) -> f64 {
+        self.end() - self.t0
+    }
+
+    /// Local node `l` at `t` within the segment, and whether it fell back to
+    /// linear where a solve was due.
+    fn value(&self, shape: &DynShape, l: usize, t: f64) -> (f64, bool) {
+        let plate = plate_of(shape, l);
+        if plate.is_none() {
+            if let Some((_, solved)) = self.solved.iter().find(|s| s.0 == t) {
+                return match solved {
+                    Some(x) => (x[l], false),
+                    None => (self.interpolate(shape, l, t, None), true),
+                };
+            }
+        }
+        (self.interpolate(shape, l, t, plate), false)
+    }
+
+    fn interpolate(&self, shape: &DynShape, l: usize, t: f64, plate: Option<(usize, f64)>) -> f64 {
+        let (mut ta, mut xa, mut vca, mut ia) = (self.t0, &self.x0, &self.vc0, &self.i0);
+        for k in &self.knots {
+            if t <= k.t {
+                let tau = k.t - ta;
+                if !(tau > 0.0) {
+                    return k.x[l];
+                }
+                let s = (t - ta) / tau;
+                let linear = xa[l] + (k.x[l] - xa[l]) * s;
+                if !k.hermite || !self.steady {
+                    return linear;
+                }
+                // Cubic Hermite on a capacitor's voltage, its slope i / C at
+                // each end.
+                let (s2, s3) = (s * s, s * s * s);
+                let hermite = |j: usize| {
+                    let c = shape.capacitors[j].c;
+                    (2.0 * s3 - 3.0 * s2 + 1.0) * vca[j] + (s3 - 2.0 * s2 + s) * tau * ia[j] / c + (-2.0 * s3 + 3.0 * s2) * k.vc[j] + (s3 - s2) * tau * k.i[j] / c
+                };
+                // The node from the charges where that is cheap: a plate of
+                // a capacitor with no ESR whose other plate is a fixed node
+                // is that capacitor's voltage plus a constant; every node of
+                // a linear partition with one capacitor is an affine map of
+                // its voltage, which the two ends fix. Otherwise linear in
+                // time (an iterated partition's other nodes are solved).
+                if let Some((j, sign)) = plate {
+                    return xa[l] + sign * (hermite(j) - vca[j]);
+                }
+                if !self.affine {
+                    return linear;
+                }
+                let dv = k.vc[0] - vca[0];
+                if !(dv.abs() > 1e-12 * (1.0 + vca[0].abs())) {
+                    return linear;
+                }
+                return xa[l] + (k.x[l] - xa[l]) * (hermite(0) - vca[0]) / dv;
+            }
+            (ta, xa, vca, ia) = (k.t, &k.x, &k.vc, &k.i);
+        }
+        xa[l]
+    }
+}
+
+// Test builds can make every dense-output solve fail, to check the
+// fallback to linear and its count.
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_DENSE_SOLVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Local node `l` as a plate of a capacitor with no ESR whose other plate is
+/// a fixed node: that capacitor, and `1` or `-1` as the node is its first
+/// or second plate.
+fn plate_of(shape: &DynShape, l: usize) -> Option<(usize, f64)> {
+    shape.capacitors.iter().enumerate().find_map(|(j, cap)| match (cap.esr == 0.0, cap.pins[0].local, cap.pins[1].local) {
+        (true, Some(a), None) if a == l => Some((j, 1.0)),
+        (true, None, Some(b)) if b == l => Some((j, -1.0)),
+        _ => None,
+    })
+}
+
 /// A bench PSU in CC with no rail capacitor, as the stepped hub partitions
 /// see it (README, Rails point 3, FXF): the rail is set by the draws alone,
 /// `Σ draws(u) = dir·iLimit`, so it moves with this partition's own state
@@ -1327,6 +1488,10 @@ struct Partition {
     /// Whether it is a `cc_switch` partition (set at its first promotion):
     /// its CC steps take `CC_STEP_TOL_SCALE`.
     cc_switch: bool,
+    /// W2b: the pending trial's knots after its start, while the observer
+    /// reads the partition ([`SteppedSolver::set_dense`]): each solved
+    /// sub-step's end and each TR-BDF2 stage's, the last at `pend_t`.
+    pend_dense: PendDense,
     /// Test builds keep the pending trial's first half step, `(its end, x,
     /// capacitor currents)`, for [`ExactCommit`].
     #[cfg(test)]
@@ -1434,6 +1599,7 @@ impl Partition {
             parked: false,
             cc_exited: false,
             cc_switch: false,
+            pend_dense: PendDense::default(),
             #[cfg(test)]
             pend_mid: None,
         }
@@ -1496,6 +1662,7 @@ struct PartitionSnapshot {
     pend_i_src: f64,
     pend_rail_q: Option<(f64, f64)>,
     rail_q: Option<(f64, f64, f64)>,
+    pend_dense: PendDense,
     #[cfg(test)]
     pend_mid: MidHalf,
 }
@@ -1536,6 +1703,7 @@ impl PartitionSnapshot {
         self.pend_i_src = part.pend_i_src;
         self.pend_rail_q = part.pend_rail_q;
         self.rail_q = part.rail_q;
+        self.pend_dense.clone_from(&part.pend_dense);
         #[cfg(test)]
         self.pend_mid.clone_from(&part.pend_mid);
     }
@@ -1554,6 +1722,7 @@ impl PartitionSnapshot {
         part.pend_i_src = self.pend_i_src;
         part.pend_rail_q = self.pend_rail_q;
         part.rail_q = self.rail_q;
+        part.pend_dense.clone_from(&self.pend_dense);
         #[cfg(test)]
         part.pend_mid.clone_from(&self.pend_mid);
     }
@@ -1673,6 +1842,18 @@ pub struct SteppedSolver {
     /// (keyed by partition) and check, at the window's end, that a partition
     /// the journal does not hold is unchanged, and after a rollback that all
     /// of them are back.
+    /// W2b: the partitions the observer reads (by index), and each committed
+    /// step and seed of theirs since its next sample ([`DenseSeg`]), oldest
+    /// first; `w_dense` is how many the open window found.
+    dense_on: Vec<bool>,
+    dense: Vec<DenseSeg>,
+    w_dense: usize,
+    /// The observer's grid `(origin, interval)`, for the solved samples.
+    dense_grid: Option<(f64, f64)>,
+    /// Test builds can keep every segment (no pruning), to check samples
+    /// against the knots around them.
+    #[cfg(test)]
+    pub(crate) keep_dense: bool,
     #[cfg(test)]
     w_saved: Option<std::collections::BTreeMap<usize, String>>,
     /// Test builds record every committed step, `(partition, instant)`, so a
@@ -1803,6 +1984,12 @@ impl SteppedSolver {
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
             trail_reads: Vec::new(),
+            dense_on: Vec::new(),
+            dense: Vec::new(),
+            w_dense: 0,
+            dense_grid: None,
+            #[cfg(test)]
+            keep_dense: false,
             #[cfg(test)]
             w_saved: None,
             #[cfg(test)]
@@ -1929,10 +2116,106 @@ impl SteppedSolver {
         found
     }
 
-    /// W2b: `node`'s value at `t` between the two commits around it, with
-    /// their span (W2b piece 2); until then never final.
-    pub(crate) fn node_at(&self, node: usize, t: f64) -> Option<(f64, f64)> {
-        let _ = (node, t);
+    /// W2b: the partitions the observer reads (`None`: none), from which
+    /// each commit and seed is kept as a [`DenseSeg`] until read past.
+    pub(crate) fn set_dense(&mut self, parts: Option<&[usize]>, grid: Option<(f64, f64)>) {
+        self.dense.clear();
+        self.dense_on.clear();
+        self.dense_grid = grid;
+        for &p in parts.unwrap_or(&[]) {
+            if self.partitions.contains_key(&p) {
+                if self.dense_on.len() <= p {
+                    self.dense_on.resize(p + 1, false);
+                }
+                self.dense_on[p] = true;
+            }
+        }
+        for (&p, part) in self.partitions.iter_mut() {
+            if !self.dense_on.get(p).copied().unwrap_or(false) {
+                part.pend_dense.clear();
+            }
+        }
+    }
+
+    /// Partition `p`'s pending step as it commits, from its committed state
+    /// (`pend` true), or its committed state alone.
+    fn dense_seg(&self, p: usize, pend: bool) -> DenseSeg {
+        let part = &self.partitions[&p];
+        let (mut knots, solved) = if pend { (part.pend_dense.knots.clone(), part.pend_dense.solved.clone()) } else { (Vec::new(), Vec::new()) };
+        if pend && knots.is_empty() {
+            // Planned before the observer read it: its ends only.
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false });
+        }
+        // A linear partition with one capacitor: every node an affine map of
+        // its voltage when nothing it reads moves within the step (R104:
+        // recomputed from the charge where cheap).
+        let steady = !part.hub && self.ramps.is_none();
+        let affine = steady && part.shape.capacitors.len() == 1 && !part.iterated();
+        DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine }
+    }
+
+    /// Drops what no sample at or after `t` needs: each partition's latest
+    /// segment stays. Outside a window only (a rollback truncates).
+    pub(crate) fn prune_dense(&mut self, t: f64) {
+        if self.window || self.dense.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        if self.keep_dense {
+            return;
+        }
+        let mut latest: HashMap<usize, usize> = HashMap::new();
+        for (k, seg) in self.dense.iter().enumerate() {
+            latest.insert(seg.p, k);
+        }
+        let mut k = 0;
+        self.dense.retain(|seg| {
+            let keep = seg.end() >= t || latest.get(&seg.p) == Some(&k);
+            k += 1;
+            keep
+        });
+    }
+
+    /// Every kept segment of `node`'s partition as its points, `(t, node,
+    /// whether the interval ending there is Hermite)`, the start first (tests).
+    #[cfg(test)]
+    pub(crate) fn debug_knots(&self, node: usize) -> Vec<Vec<(f64, f64, bool)>> {
+        let Some(&(p, l)) = self.node_owner.get(&node) else { return Vec::new() };
+        self.dense.iter().filter(|s| s.p == p).map(|s| std::iter::once((s.t0, s.x0[l], false)).chain(s.knots.iter().map(|k| (k.t, k.x[l], k.hermite))).collect()).collect()
+    }
+
+    /// How many TR-BDF2 stage ends the kept segments of `node`'s partition
+    /// hold (tests).
+    #[cfg(test)]
+    pub(crate) fn debug_stage_knots(&self, node: usize) -> usize {
+        let Some(&(p, _)) = self.node_owner.get(&node) else { return 0 };
+        self.dense.iter().filter(|s| s.p == p).map(|s| s.knots.iter().filter(|k| k.stage).count()).sum()
+    }
+
+    /// W2b: `node`'s value at `t` from the committed steps around it (R104:
+    /// cubic Hermite on each capacitor's voltage over a trapezoidal step or
+    /// TR-BDF2 stage, from its currents at both ends; linear over a backward
+    /// Euler step), with the step's span; `None` while its partition has not
+    /// committed past `t`, or reads the rail (W2b piece 3).
+    pub(crate) fn node_at(&self, node: usize, t: f64) -> Option<(f64, f64, bool)> {
+        let &(p, l) = self.node_owner.get(&node)?;
+        let part = self.partitions.get(&p)?;
+        if part.hub && self.rail.is_some() {
+            return None;
+        }
+        let mut latest = true;
+        for seg in self.dense.iter().rev().filter(|s| s.p == p) {
+            if t > seg.end() {
+                // Past the partition's last commit: not final. Past an older
+                // one: a later segment started at or before it, so it read t.
+                return if latest { None } else { Some((seg.value(&part.shape, l, seg.end()).0, seg.span(), false)) };
+            }
+            latest = false;
+            if t >= seg.t0 {
+                let (v, fallback) = seg.value(&part.shape, l, t);
+                return Some((v, seg.span(), fallback));
+            }
+        }
         None
     }
 
@@ -2288,6 +2571,10 @@ impl SteppedSolver {
             self.bills.push((self.partitions[&p].pend_t, charge));
         }
         let reseeded = !self.partitions[&p].has_prev;
+        if self.dense_on.get(p).copied().unwrap_or(false) {
+            let seg = self.dense_seg(p, true);
+            self.dense.push(seg);
+        }
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
@@ -2529,6 +2816,11 @@ impl SteppedSolver {
                 // Euler, whose bill reads only its end current (`plan_step`).
                 part.x = seed.x;
                 part.i_prev = seed.i;
+                if self.dense_on.get(p_idx).copied().unwrap_or(false) {
+                    // A seed is the partition's state from its instant on
+                    // (a discontinuity: right-continuous, D2).
+                    self.dense.push(DenseSeg { p: p_idx, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots: Vec::new(), solved: Vec::new(), steady: false, affine: false });
+                }
                 // A seed holds the rail capacitors' charge where it stands
                 // (ruling R68): the next step starts from it. Read from the
                 // segment at a later step's start instead, a step from before
@@ -2733,6 +3025,7 @@ impl SteppedSolver {
     /// Opens the rollback window (see the field): nothing is copied yet.
     pub(crate) fn begin_window(&mut self) {
         self.window = true;
+        self.w_dense = self.dense.len();
         self.window_scheduled.clone_from(&self.scheduled);
         self.window_rail_charge = self.rail_charge;
         #[cfg(test)]
@@ -2791,6 +3084,7 @@ impl SteppedSolver {
     /// The window's instant failed: every partition it touched, and the queue
     /// of steps to schedule, go back to what the window found.
     pub(crate) fn rollback_window(&mut self) {
+        self.dense.truncate(self.w_dense);
         self.trail.clear();
         self.scheduled.clone_from(&self.window_scheduled);
         self.rail_charge = self.window_rail_charge;
@@ -2878,6 +3172,7 @@ impl SteppedSolver {
                             pend_i_src: part.pend_i_src,
                             pend_rail_q: part.pend_rail_q,
                             rail_q: part.rail_q,
+                            pend_dense: part.pend_dense.clone(),
                             #[cfg(test)]
                             pend_mid: part.pend_mid.clone(),
                         },
@@ -2930,6 +3225,7 @@ impl SteppedSolver {
                 part.pend_i_src = s.pend_i_src;
                 part.pend_rail_q = s.pend_rail_q;
                 part.rail_q = s.rail_q;
+                part.pend_dense = s.pend_dense;
                 #[cfg(test)]
                 {
                     part.pend_mid = s.pend_mid;
@@ -3653,6 +3949,60 @@ impl SteppedSolver {
                 }
                 None => sub(t0, h, &vc0, &i_prev, i_start, &accepted),
             };
+        }
+        part.pend_dense.clear();
+        if self.dense_on.get(p_idx).copied().unwrap_or(false) {
+            let t0 = part.t;
+            let push_sub = |knots: &mut Vec<Knot>, t_s: f64, vc_s: &[f64], t_e: f64, end: &StepResult| {
+                match &end.stage {
+                    Some(st) => {
+                        // The stage's capacitor voltages from the BDF2 history
+                        // `vh = k vc_g - m vc_s`.
+                        let g = TRBDF2_GAMMA;
+                        let k = 1.0 / (g * (2.0 - g));
+                        let m = (1.0 - g) * (1.0 - g) * k;
+                        let vc_g = st.vh.iter().zip(vc_s).map(|(vh, v0)| (vh + m * v0) / k).collect();
+                        knots.push(Knot { t: t_s + st.h_g, x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), hermite: true, stage: true });
+                        knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: true, stage: false });
+                    }
+                    None => knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: method == Method::Trap, stage: false }),
+                }
+            };
+            let mut knots = Vec::new();
+            match &half {
+                Some(mid) => {
+                    push_sub(&mut knots, t0, &vc0, t0 + h / 2.0, mid);
+                    push_sub(&mut knots, t0 + h / 2.0, &mid.vc, t0 + h, &accepted);
+                }
+                None => push_sub(&mut knots, t0, &vc0, t0 + h, &accepted),
+            }
+            // An iterated partition's nodes at each grid time in the step,
+            // solved at the capacitors' Hermite voltages there under the
+            // step's own boundary and drivers (R104 as ruled, option (b)): a
+            // scratch solve, which nothing keeps but its values.
+            let mut solved = Vec::new();
+            if let (true, Some((origin, interval))) = (part.iterated() && !part.hub && ramps.is_none(), self.dense_grid) {
+                let seg = DenseSeg { p: p_idx, t0, x0: x0.clone(), vc0: vc0.clone(), i0: i_prev.clone(), knots: knots.clone(), solved: Vec::new(), steady: true, affine: false };
+                let mut k = ((t0 - origin) / interval).floor().max(0.0) as u64;
+                loop {
+                    let ts = origin + k as f64 * interval;
+                    k += 1;
+                    if ts <= t0 {
+                        continue;
+                    }
+                    if ts > t0 + h {
+                        break;
+                    }
+                    let vc_ts = seg.vc_at(&part.shape, ts);
+                    let x_lin: Vec<f64> = (0..x0.len()).map(|l| seg.interpolate(&part.shape, l, ts, None)).collect();
+                    let ctx = IcStampCtx { now: ts, keep_lu: false, ..ic_ctx };
+                    let x = solve_initial_x(&part.shape, live_params, &vc_ts, &x_lin, &ctx).ok().map(|r| r.x);
+                    #[cfg(test)]
+                    let x = x.filter(|_| !FAIL_DENSE_SOLVE.with(|f| f.get()));
+                    solved.push((ts, x));
+                }
+            }
+            part.pend_dense = PendDense { knots, solved };
         }
         #[cfg(test)]
         {
@@ -4756,6 +5106,47 @@ impl crate::snapshot::HeapBytes for TrBdf2Stage {
     }
 }
 
+impl crate::snapshot::HeapBytes for Knot {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hermite, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stage, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for PendDense {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DenseSeg {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.p, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.steady, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.affine, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for CcRail {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -4892,6 +5283,7 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.parked, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_exited, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_dense, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_mid, w); }
         n
     }
@@ -4958,6 +5350,7 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_i_src, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_dense, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_mid, w); }
         n
     }
@@ -5000,6 +5393,11 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_probes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_parts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_reads, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dense_on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dense, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_dense, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.dense_grid, w); }
+        #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.keep_dense, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_saved, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.commit_log, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.resolve_log, w); }

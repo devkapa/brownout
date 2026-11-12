@@ -261,7 +261,7 @@ export interface CoreExports {
    * interval. Optional, detected by its presence (ruling R100 (a)).
    */
   bo_engine_acquire?(h: number, nodesPtr: number, n: number, origin: number, interval: number, limit: number): number;
-  /** Take the final samples, `[count, maxSpan, overflowed, dropped, t x count, node-major values]`; the length in f64, or `-5`. */
+  /** Take the final samples, `[count, maxSpan, overflowed, dropped, fallbacks x nodes, t x count, node-major values]`; the length in f64, or `-5`. */
   bo_engine_acquire_take?(h: number): number;
   /** The buffer from the last {@link CoreExports.bo_engine_acquire_take}, valid until the next call on this engine. */
   bo_engine_acquire_ptr?(h: number): number;

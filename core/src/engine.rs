@@ -774,8 +774,10 @@ impl Engine {
     }
 
     /// `bo_engine_acquire_take` (W2b): `[count, maxSpan, overflowed,
-    /// dropped, t x count, node-major values]`, every final sample since the
-    /// last take, and the queue emptied; the four zeros when disarmed.
+    /// dropped, fallbacks x nodes, t x count, node-major values]`, every
+    /// final sample since the last take, and the queue emptied; the four
+    /// zeros when disarmed. A node's fallbacks are its samples read linear
+    /// where R104's solve was due and failed.
     pub fn acquire_take(&mut self) -> &[f64] {
         let mut out = std::mem::take(&mut self.samples_buf);
         if !self.kernel.solver_mut().take_samples(&mut out) {
@@ -841,6 +843,13 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn debug_solver(&self) -> &PartitionedSolver {
         unsafe { &*((&**self.kernel.solver()) as *const dyn PartitionSolver as *const PartitionedSolver) }
+    }
+
+    /// The solver behind the kernel's box, mutably (W2b's dense-output tests),
+    /// under [`Self::debug_solver`]'s assumption.
+    #[cfg(test)]
+    pub(crate) fn debug_solver_concrete_mut(&mut self) -> &mut PartitionedSolver {
+        unsafe { &mut *((&mut **self.kernel.solver_mut()) as *mut dyn PartitionSolver as *mut PartitionedSolver) }
     }
 
     /// The kernel's solver through its trait (W2b's window tests).

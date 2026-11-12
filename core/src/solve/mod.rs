@@ -3252,21 +3252,22 @@ impl PartitionedSolver {
 
     /// W2b: `node`'s value at `t` on the model the solver holds, read
     /// without moving anything, with the span of the stepped commits it lies
-    /// between (0 elsewhere); `None` while that value is not final. Called
+    /// between (0 elsewhere) and whether it fell back to linear where R104's
+    /// solve was due; `None` while that value is not final. Called
     /// only for `t` at or after the last completed instant (the kernel's
     /// hooks): a fixed node holds its value there unless a running ramp moves
     /// it, a static partition's node holds, a closed-form node is its
     /// segment's exact value.
-    pub(crate) fn sample_node(&self, node: usize, t: f64) -> Option<(f64, f64)> {
+    pub(crate) fn sample_node(&self, node: usize, t: f64) -> Option<(f64, f64, bool)> {
         if self.rail_moves_between_events(node) {
             return None;
         }
         match self.local_index[node] {
-            None => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0)),
+            None => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0, false)),
             Some((p, _)) => match self.partition_kinds[p] {
-                PartitionKind::Static => Some((self.voltages[node], 0.0)),
+                PartitionKind::Static => Some((self.voltages[node], 0.0, false)),
                 _ => match self.closed_form.sample_at(node, t) {
-                    Some(v) => Some((v, 0.0)),
+                    Some(v) => Some((v, 0.0, false)),
                     None => self.stepped.node_at(node, t),
                 },
             },
@@ -4954,6 +4955,10 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn arm_observer(&mut self, observer: Option<crate::observe::Observer>) {
+        // The stepped partitions holding a probed node keep their committed
+        // steps until read past (`stepped::DenseSeg`).
+        let parts: Option<Vec<usize>> = observer.as_ref().map(|o| o.nodes().iter().filter_map(|&n| self.local_index.get(n).copied().flatten().map(|(p, _)| p)).collect());
+        self.stepped.set_dense(parts.as_deref(), observer.as_ref().map(|o| o.grid()));
         self.observer = observer.map(Box::new);
         self.w_observer = None;
     }
@@ -4961,6 +4966,7 @@ impl PartitionSolver for PartitionedSolver {
     fn observe(&mut self, t: f64, inclusive: bool) {
         if let Some(mut obs) = self.observer.take() {
             obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
+            self.stepped.prune_dense(obs.next_time());
             self.observer = Some(obs);
         }
     }
