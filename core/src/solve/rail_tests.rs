@@ -698,6 +698,50 @@ fn a_sliding_gates_algebraic_load_sits_at_its_powered_or_unpowered_solve_weighte
     }
 }
 
+#[test]
+fn a_slide_on_its_rails_own_capacitor_holds_the_rails_mean_over_whole_ripple_cycles_at_its_edge() {
+    // The orchestrator's ruling on R53-P8's Q1 (R103 (b)): the slide's goal
+    // is the rail's time-mean at the edge. HG1's CC ramp slides its 74LS00
+    // at its floor, 0.9 x 4.75 = 4.275 V (W0 = 1e-4 + 1e-3 x 4.275 = 4.375
+    // mV), the rail's own 1 uF carrying the segment `C u' = I - D` (no
+    // stepped partition, no settling span). The RC's draw (u - v4) / 100
+    // decays with 100 ohm x 10 uF = 1 ms, against about 30 us between
+    // re-solves: across one drift D falls linearly, so from a flat solve
+    // (u' = 0) the rail rises as (t / T)^2 from where the solve left it,
+    // `a`, to the band at +W0, its mean a + (W0 - a) / 3. Aimed at the edge
+    // (a = 0) that is W0 / 3, measured 0.359 W0 with the approach. Aimed at
+    // a = -W0 / 2 the drift's mean is 0; the approach back from +W0 (at
+    // duty 1, the end that turns the segment back fastest, about 3 us of
+    // each 32 us cycle) averages about (W0 + a) / 2 = W0 / 4, so the whole
+    // cycle's mean is about W0 / 4 x 3 / 32 = 0.023 W0 up (measured 0.035).
+    // Bound 0.08 W0 (the orchestrator's): the PSU's 20 mA splits as (u -
+    // v4) / 100 + x i_on, so a rail mean d up takes d / 100 from the LED,
+    // the duty d / (100 x 5.0597 mA) low and 1y (x 3.599 V) 7.1 d low:
+    // 0.08 W0 is 2.5 mV on 1y, inside its W0 at 2.48 V (2.58 mV). Whole
+    // cycles: from the first re-solve at the band (the rail more than 3/4
+    // of W0 off as it is solved again; the solves at the aim sit at about
+    // W0 / 2) to the last one, host steps of 0.05 us from 1.44 to 1.63 ms.
+    let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
+    let w0 = 1e-4 + 1e-3 * 4.275;
+    let mut rig = Rig::load(&p).unwrap();
+    while rig.k.time() < 1.44e-3 {
+        let t = rig.k.next_event_time().min(1.44e-3);
+        rig.advance(t).unwrap();
+    }
+    let mut t = 1.44e-3f64;
+    let mut rows = vec![(t, rig.u() - 4.275, rig.s().power_hold(1).kind.weight())];
+    while t < 1.63e-3 - 1e-15 {
+        t = (t + 0.05e-6).min(1.63e-3);
+        rig.advance(t).unwrap();
+        rows.push((t, rig.u() - 4.275, rig.s().power_hold(1).kind.weight()));
+    }
+    let bands: Vec<usize> = (1..rows.len()).filter(|&k| rows[k].2 != rows[k - 1].2 && rows[k - 1].1.abs() > 0.75 * w0).map(|k| k - 1).collect();
+    assert!(bands.len() >= 4, "re-solves at the band: {bands:?}");
+    let (a, b) = (bands[0], *bands.last().unwrap());
+    let mean = (a..b).map(|k| 0.5 * (rows[k].1 + rows[k + 1].1) * (rows[k + 1].0 - rows[k].0)).sum::<f64>() / (rows[b].0 - rows[a].0);
+    assert!(mean.abs() <= 0.08 * w0, "the rail's mean over whole cycles [{:e}, {:e}] s: {:+.4} W0 off the edge", rows[a].0, rows[b].0, mean / w0);
+}
+
 /// Channel 1 of `bo_engine_records` at the rig's time, record by record.
 fn warning_records(rig: &mut Rig) -> Vec<[f64; 7]> {
     let now = rig.k.time();

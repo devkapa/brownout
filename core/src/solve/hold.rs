@@ -480,6 +480,14 @@ pub(crate) struct Episode {
     /// the span its solve aims over, the rail's own settling
     /// (`rail_settling`; 0: none yet).
     pub(crate) aim_until: f64,
+    /// While the IC slides on a capacitor's segment: the offset from its
+    /// edge its duty aims the supply at, so the band's re-solves centre the
+    /// supply's mean on the edge (`centred_aim`; 0 at entry).
+    pub(crate) aim_off: f64,
+    /// While the IC slides on a capacitor's segment: its supply's offset
+    /// from its edge as its duty was last solved, where the drift that
+    /// `centred_aim` measures starts.
+    pub(crate) solved_off: f64,
     pub(crate) span: f64,
     /// While the IC slides off a capacitor's segment: the supply levels,
     /// lower then upper, past which one end of its duty's bracket stops
@@ -534,6 +542,8 @@ impl Default for Episode {
             slope: 0.0,
             solved_at: 0.0,
             aim_until: f64::NEG_INFINITY,
+            aim_off: 0.0,
+            solved_off: 0.0,
             span: 0.0,
             exits: (f64::NEG_INFINITY, f64::INFINITY),
             draw_exits: (f64::NEG_INFINITY, f64::INFINITY),
@@ -1304,6 +1314,7 @@ impl PartitionedSolver {
         if slid {
             let mut episode = self.episode(d);
             episode.solved_at = now;
+            episode.solved_off = supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages) - self.slide_edge(d);
             episode.aim_until = now + span;
             self.set_episode(d, episode)?;
         }
@@ -1645,7 +1656,8 @@ impl PartitionedSolver {
         if let (Some(draw), Some((v, i_limit))) = (self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
             let hub = self.hub.as_ref().expect("a hub");
             let ic = &self.ics[self.ic_position[d] as usize].1;
-            let off = supply(ic, &self.voltages) - self.slide_edge(d);
+            // Aimed at the edge shifted by the centring offset (`centred_aim`).
+            let off = supply(ic, &self.voltages) - self.slide_edge(d) - self.episode(d).aim_off;
             // Back over the time the supply took to drift off since the last
             // solve (a host step at most): the board's own pace, so the
             // segment reaches the edge before the drift that carried it off
@@ -1894,6 +1906,36 @@ impl PartitionedSolver {
         }
     }
 
+    /// The orchestrator's ruling on R53-P8's Q1 (R103 (b)): a slide's goal
+    /// is its supply's time-mean at the edge, not its value at each
+    /// re-solve. Where the rail's own capacitor carries the segment (no
+    /// settling span, `rail_settling`), a solve that leaves the segment flat
+    /// zeroes the supply's velocity, and the draw then moves smoothly, so
+    /// the supply leaves its solve level `a` quadratically and reaches the
+    /// band W0 on the side it drifted to: its mean over that drift is `a +
+    /// (W0 - a) / 3`, zero for `a = -W0 / 2`. A re-solve at the band whose
+    /// supply drifted at least half of W0 since the last solve aims it there,
+    /// half of W0 back past the edge (HG1's CC ramp: the RC's draw decays,
+    /// the rail climbs from each flat solve, and aimed at the edge its mean
+    /// sat 0.36 W0, 1.57 mV, up: 15.7 uA more through the 100 ohm, taken
+    /// from the LED's 5.06 mA, the duty 0.0031 low and 1y, the duty times
+    /// 3.599 V, 11 mV, 4.3 of its W0). A rail that a stepped partition
+    /// carries over a settling span keeps moving after a flat solve
+    /// (relative degree 2: so aimed, cold 757 tpl 0 ran 2.4 W0 past its aim
+    /// and lost its slide): aimed at the edge, as is a re-solve a driver
+    /// change or an exit takes.
+    fn centred_aim(&mut self, now: f64, d: usize, off: f64) -> Result<(), String> {
+        let mut episode = self.episode(d);
+        let band = slide_drift(self.slide_edge(d));
+        let delta = off - episode.solved_off;
+        episode.aim_off = if !(episode.span > 0.0) && now > episode.solved_at && delta.abs() >= 0.5 * band {
+            -0.5 * band * delta.signum()
+        } else {
+            0.0
+        };
+        self.set_episode(d, episode)
+    }
+
     /// Ruling R92: after passes that settled, each rail IC sliding is kept
     /// on its edge: its duty solved again once its supply has drifted from
     /// the edge by more than W0 ([`slide_drift`]), as what it sees moves (a
@@ -1955,7 +1997,8 @@ impl PartitionedSolver {
             // watch on the edge itself): solved flat.
             let eta = rails::REACHED_REL * edge.abs().max(1.0);
             let chatter = self.episode(d).chatter;
-            let at_edge = !chatter && off.abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw + self.slide_shift(now, d) - i_limit).abs() > self.slide_tolerance(now, d));
+            let aim_off = self.episode(d).aim_off;
+            let at_edge = !chatter && (off - aim_off).abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw + self.slide_shift(now, d) - i_limit).abs() > self.slide_tolerance(now, d));
             // Past a level where an end of its duty's bracket stops
             // bracketing (off a capacitor's segment, `slide_exits`, its
             // `Rail` watch): solved again, which decides.
@@ -1975,7 +2018,7 @@ impl PartitionedSolver {
             // draw still under the limit, and published 1.07 W0 off at 0.38146
             // s.
             if let (false, false, false, false, Some(draw), Some((_, i_limit))) = (chatter, changed, at_edge, past_end, self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
-                if (off > 0.0) == (draw > i_limit) && (off > 0.0) == (draw + self.slide_shift(now, d) > i_limit) {
+                if (off > aim_off) == (draw > i_limit) && (off > aim_off) == (draw + self.slide_shift(now, d) > i_limit) {
                     continue;
                 }
             }
@@ -2004,6 +2047,9 @@ impl PartitionedSolver {
                     continue;
                 }
             } else {
+                if !changed && !at_edge && !past_end && self.segment_draw(now).is_some() {
+                    self.centred_aim(now, d, off)?;
+                }
                 let err = rails::loop_unsettled();
                 let from = self.power_hold(d).kind.weight();
                 if self.slide_from(now, drivers, readers, d, &err, Some(from))? {
@@ -2319,6 +2365,8 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.aim_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.aim_off, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_off, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.span, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.draw_exits, w); }

@@ -2244,7 +2244,8 @@ impl PartitionedSolver {
                             windows.push(vg + episode.drift_from.1 + off0.signum() * band);
                         }
                     } else {
-                        windows.extend([vg + edge - band, vg + edge, vg + edge + band]);
+                        // The level its aim brings it to (`centred_aim`), solved flat there.
+                        windows.extend([vg + edge - band, vg + edge + episode.aim_off, vg + edge + band]);
                         // Off a capacitor's segment, also where an end of its
                         // duty's bracket stops bracketing (Filippov's exit,
                         // `slide_exits`), which the re-solve there decides.
