@@ -533,7 +533,7 @@ impl PartitionedSolver {
                 let mut key: Vec<u64> = e.junctions.iter().flat_map(|j| [v[j.anode].to_bits(), v[j.cathode].to_bits()]).collect();
                 key.push(u64::from(failed));
                 let mut i = 0.0;
-                led::readout(&e.device, &e.junctions, v, failed, &mut i, ch);
+                Self::charge_led_readout(e, v, failed, &mut i, ch);
                 (Some((i, ch.to_vec())), key)
             }
             ChargeClass::Held555(pos) => {
@@ -632,6 +632,14 @@ impl PartitionedSolver {
         series + cap.leak_g * cap.d_v
     }
 
+    /// An LED-family device's readout for the charge: a failed (absent)
+    /// channel reads NaN, as classic's, and carries no current, so it adds
+    /// nothing (W2bV finding 6 (b): it made the take's channel charges NaN).
+    fn charge_led_readout(e: &LedDevice, v: &[f64], failed: bool, i: &mut f64, ch: &mut [f64]) {
+        led::readout(&e.device, &e.junctions, v, failed, i, ch);
+        ch.iter_mut().filter(|c| c.is_nan()).for_each(|c| *c = 0.0);
+    }
+
     /// A rail capacitor's share of the rail capacitors' current, `C_k /
     /// C_rail` with the sign of the rail at its first pin; `None` for any
     /// other fixed-pair capacitor.
@@ -661,7 +669,7 @@ impl PartitionedSolver {
         if let Some(k) = dev.led {
             let e = &self.led_devices[k as usize];
             let mut i = 0.0;
-            led::readout(&e.device, &e.junctions, v, self.slow.is_failed(e.device_index), &mut i, ch);
+            Self::charge_led_readout(e, v, self.slow.is_failed(e.device_index), &mut i, ch);
             return i;
         }
         if let Some(pos) = dev.ne555 {
@@ -968,7 +976,7 @@ impl PartitionedSolver {
             #[cfg(debug_assertions)]
             {
                 let (mut i, mut c) = (0.0, vec![0.0; dev.ch.len()]);
-                led::readout(&e.device, &e.junctions, v, failed, &mut i, &mut c);
+                Self::charge_led_readout(e, v, failed, &mut i, &mut c);
                 debug_assert!(i.to_bits() == dev.i.to_bits() && c.iter().zip(&dev.ch).all(|(a, b)| a.to_bits() == b.to_bits()), "charge: an LED's memo differs from its readout");
             }
             if m != 0 {
@@ -980,7 +988,7 @@ impl PartitionedSolver {
         next.0.clear();
         next.0.extend(e.junctions.iter().flat_map(|jn| [v[jn.anode].to_bits(), v[jn.cathode].to_bits()]));
         next.0.push(u64::from(failed));
-        led::readout(&e.device, &e.junctions, v, failed, &mut next.1, &mut next.2);
+        Self::charge_led_readout(e, v, failed, &mut next.1, &mut next.2);
         let left = (std::mem::replace(&mut dev.key, next.0), std::mem::replace(&mut dev.i, next.1), std::mem::replace(&mut dev.ch, next.2));
         dev.memo.insert(0, left);
     }

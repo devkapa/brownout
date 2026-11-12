@@ -1391,6 +1391,9 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
   it); when the next solve comes, the rail's mean there, linear between the
   two solves, corrects it. Measured: 1.5e-8 W0 from the linear rail over 5 ms
   and 1/60 s (cell rail, stepped; 0.94 W0 before the correction).
+- **A failed LED-family channel** reads NaN (absent, as classic's) and
+  carries no current: it adds nothing, the charge before the failure stays
+  (W2bV: the take's channel charges went NaN).
 - **A floating pull's target** moves only at its bucket edges, which are
   instants, and a step is stamped at its start: exact.
 - **Arming inside a step** weighs the straddling step's quadrature by the

@@ -801,3 +801,40 @@ fn a_take_carries_each_devices_charge_exactly_to_its_final_time() {
     }
     assert!(partial > 0, "some take finds a device short of t1");
 }
+
+#[test]
+fn an_rgb_led_failing_mid_run_keeps_the_charge_its_channels_had() {
+    // W2bV finding 6 (b): a failed RGB LED's channels read NaN (absent, as
+    // classic's), and its channel charges went NaN for the take. A failed
+    // channel carries no current: it adds nothing, the charge before the
+    // failure stays. 5 V through 8 ohm into each anode: overdriven, it fails
+    // within a quarter second.
+    let mut p = program(5, vec![
+        dev(kinds::VOLTAGE_SOURCE, 0, 1, 0, vec![5.0]),
+        dev(kinds::RESISTOR, 1, 1, 2, vec![8.0]),
+        dev(kinds::RESISTOR, 2, 1, 3, vec![8.0]),
+        dev(kinds::RESISTOR, 3, 1, 4, vec![8.0]),
+        Device { kind: kinds::RGB_LED, component_index: 4, pins: vec![pin(2), pin(3), pin(4), pin(0)], params: vec![1.8, 2.0, 3.0, 0.02, 0.02, 0.0], blob: vec![0.0] },
+    ]);
+    p.channel_slot_count = 3;
+    let mut e = Engine::load(&p).unwrap();
+    e.charge_arm(&[4]).unwrap();
+    let (mut before, mut failed_at) = (None, None);
+    for k in 1..=100 {
+        e.advance(k as f64 * 0.01).unwrap();
+        let b = e.take_charge().to_vec();
+        let q = &b[2..6];
+        assert!(q.iter().all(|x| x.is_finite()), "take {k}: {q:?}");
+        let failed = e.debug_solver().slow.is_failed(4);
+        if failed && failed_at.is_none() {
+            failed_at = Some(k);
+            // The take holding the failure: its channels up to it, then 0.
+            assert!(q[1] > 0.0 && q[1] < before.unwrap_or(f64::INFINITY), "take {k}: the red channel up to its failure: {q:?}");
+        } else if failed {
+            assert_eq!(&q[1..], &[0.0; 3], "take {k}: a failed channel adds nothing");
+        } else {
+            before = Some(q[1]);
+        }
+    }
+    assert!(failed_at.is_some_and(|k| k > 1), "it fails mid-run ({failed_at:?})");
+}
