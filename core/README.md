@@ -1050,6 +1050,13 @@ so a run split by yields is bit for bit the same run as one without
 Any host input ends the host step: `set_params`, `seed_memory`,
 `set_option` and `reset_failures`.
 
+The facade's `CoreEngine.advanceFor(tEnd, budgetMs)` (W2h) returns
+`"reached"` (as `advance`), `"yielded"` (`simTime` read back, readouts of
+that instant, `lastConverged` still true) or `"failed"` (`-4`/`-7` exactly
+as `advance` takes them, with `lastAdvanceFailure` naming the code and the
+core's message; never a yield). A module without the export runs `advance`
+instead and warns once per engine, since a plain advance cannot yield.
+
 Two checks decline with `-7`, the livelock's code, keeping the last
 completed instant:
 - **without a clock** (`bo_engine_advance`, or a budget that is off): a host

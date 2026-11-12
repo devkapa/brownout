@@ -83,6 +83,20 @@ export interface CoreEngineLoadOptions extends CompileOptions {
 }
 
 /** One `CoreEngine.setParams` change: every named param in `params` is applied to the device compiled for `componentId`. */
+/**
+ * What one {@link CoreEngine.advanceFor} call did: `"reached"` the target,
+ * `"yielded"` short of it at an instant when its wall budget ran out (call
+ * again with the same target), or `"failed"`: a non-convergent advance
+ * (-4, -7) handled exactly as {@link CoreEngine.advance} handles one.
+ */
+export type CoreAdvanceOutcome = "reached" | "yielded" | "failed";
+
+/** The code and the core's message of the last failed advance (-4 solve failed, -7 no progress or livelock). */
+export interface CoreAdvanceFailure {
+  readonly code: number;
+  readonly message: string;
+}
+
 export interface CoreParamChange {
   readonly componentId: string;
   readonly params: Readonly<Record<string, number | string>>;
@@ -239,6 +253,9 @@ export class CoreEngine implements EngineReadout {
   private _eepromImages = new Map<string, Uint8Array>();
   /** Component ids `setParams` has already reported as unknown, so a host retrying the same stale id every frame logs it once (ruling R41). Per engine, kept across loads. */
   private _reportedUnknownParamIds = new Set<string>();
+  /** Whether advanceFor has already warned that this core has no `bo_engine_advance_for` (logged once per engine). */
+  private _warnedNoAdvanceFor = false;
+  private _lastAdvanceFailure: CoreAdvanceFailure | null = null;
   /** Bumped at every load() call, so a snapshot knows whether the program it was taken on is still the one loaded (W2a). */
   private _loadSerial = 0;
   /** W2b: the nets the observer samples, in take order (`null`: disarmed); a load disarms. */
@@ -484,6 +501,7 @@ export class CoreEngine implements EngineReadout {
     // program is loaded here to restore onto.
     this._loadSerial++;
     this._compiled = null;
+    this._lastAdvanceFailure = null;
     // A load disarms the observer and the charge (core/README.md,
     // "Acquisition", "Charge"): the host arms them again for the new program.
     this._acquired = null;
@@ -601,6 +619,7 @@ export class CoreEngine implements EngineReadout {
       // for IS the value now current.
       this._simTime = tEnd;
       this._lastConverged = true;
+      this._lastAdvanceFailure = null;
       this._publishReadouts();
       return;
     }
@@ -610,12 +629,101 @@ export class CoreEngine implements EngineReadout {
       );
     }
     if (code === -4 || code === -7) {
-      this._simTime = coreCall((exports) => exports.bo_engine_time(this._handle));
-      this._lastConverged = false;
+      this._failAdvance(code);
       return;
     }
     const message = coreCall((exports) => readCoreErrorMessage(exports));
     throw new CoreLoadError(`bo_engine_advance failed (code ${code}): ${message}`);
+  }
+
+  /**
+   * The yielding advance (ruling R86, core/README.md "A yielding advance"):
+   * {@link advance} toward `tEnd` for about `budgetMs` of wall time on the
+   * loader's clock (`env.bo_host_now_ms`, {@link coreImports}).
+   *
+   * - `"reached"`: as `advance`'s success (`simTime === tEnd`, readouts
+   *   published).
+   * - `"yielded"`: not an error. The core stopped at an instant short of
+   *   `tEnd` when the budget ran out; `simTime` is that instant (read back),
+   *   `lastConverged` stays true and the readouts are that instant's. Call
+   *   again with the SAME `tEnd` and the core goes on with the same host
+   *   step, so the run is the unsplit one bit for bit; a different target or
+   *   any input in between (`setParams`, a load, a restore...) starts a new
+   *   host step.
+   * - `"failed"`: `-4`/`-7` exactly as `advance` makes them (`lastConverged`
+   *   false, `simTime` read back, readouts left at the last good call), with
+   *   {@link lastAdvanceFailure} saying which and why. Never a yield.
+   *
+   * A non-finite `tEnd`, a non-finite or negative `budgetMs`, or a `tEnd` in
+   * the past throws `RangeError`, as `advance` does. A budget of 0 never
+   * yields. A core built without `bo_engine_advance_for` runs `advance`
+   * instead (which cannot yield, so a long one blocks the caller) and warns
+   * once per engine.
+   */
+  advanceFor(tEnd: number, budgetMs: number): CoreAdvanceOutcome {
+    this._requireLoaded();
+    if (!Number.isFinite(tEnd)) {
+      throw new RangeError(`CoreEngine.advanceFor: tEnd must be a finite number, got ${String(tEnd)}.`);
+    }
+    if (!Number.isFinite(budgetMs) || budgetMs < 0) {
+      throw new RangeError(`CoreEngine.advanceFor: budgetMs must be a finite number >= 0, got ${String(budgetMs)}.`);
+    }
+    const code = coreCall((exports) =>
+      typeof exports.bo_engine_advance_for === "function" ? exports.bo_engine_advance_for(this._handle, tEnd, budgetMs) : null,
+    );
+    if (code === null) {
+      if (!this._warnedNoAdvanceFor) {
+        this._warnedNoAdvanceFor = true;
+        console.warn(
+          "CoreEngine.advanceFor: this brownout core module has no bo_engine_advance_for (built before R86); " +
+            "running a plain advance, which cannot yield and blocks until it reaches the target.",
+        );
+      }
+      this.advance(tEnd);
+      return this._lastConverged ? "reached" : "failed";
+    }
+    if (code === 0) {
+      this._simTime = tEnd;
+      this._lastConverged = true;
+      this._lastAdvanceFailure = null;
+      this._publishReadouts();
+      return "reached";
+    }
+    if (code === 1) {
+      // The core published the readouts of the instant it stopped at.
+      this._simTime = coreCall((exports) => exports.bo_engine_time(this._handle));
+      this._lastConverged = true;
+      this._lastAdvanceFailure = null;
+      this._publishReadouts();
+      return "yielded";
+    }
+    if (code === -6) {
+      throw new RangeError(
+        `CoreEngine.advanceFor(${tEnd}): time cannot move backwards (current simTime is ${this._simTime}).`,
+      );
+    }
+    if (code === -4 || code === -7) {
+      this._failAdvance(code);
+      return "failed";
+    }
+    const message = coreCall((exports) => readCoreErrorMessage(exports));
+    throw new CoreLoadError(`bo_engine_advance_for failed (code ${code}): ${message}`);
+  }
+
+  /**
+   * The last failed advance's code and the core's message, or `null` when
+   * the last `advance`/`advanceFor` did not fail. A load clears it.
+   */
+  get lastAdvanceFailure(): CoreAdvanceFailure | null {
+    return this._lastAdvanceFailure;
+  }
+
+  /** A non-convergent advance (-4, -7): the state of the last completed instant, its time read back, the readouts left as they were. */
+  private _failAdvance(code: number): void {
+    const message = coreCall((exports) => readCoreErrorMessage(exports));
+    this._simTime = coreCall((exports) => exports.bo_engine_time(this._handle));
+    this._lastConverged = false;
+    this._lastAdvanceFailure = { code, message };
   }
 
   /**
@@ -1569,6 +1677,8 @@ export class CoreEngine implements EngineReadout {
     });
     this._simTime = state.simTime;
     this._lastConverged = state.lastConverged;
+    // The failure's message is not engine state: a restore is a fresh start.
+    this._lastAdvanceFailure = null;
     this._warnings = state.warnings.copy();
     // The observer and the charge are engine state: the core's came back
     // with the snapshot, so their arming does too.

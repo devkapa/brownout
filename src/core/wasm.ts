@@ -254,6 +254,14 @@ export interface CoreExports {
   /** The buffer from the last {@link CoreExports.bo_engine_carry_take}, valid until the next call on this engine. */
   bo_engine_carry_ptr?(h: number): number;
   /**
+   * Ruling R86: advance toward `tEnd` for about `budgetMs` of the host's wall
+   * time (the `env.bo_host_now_ms` import, {@link coreImports}): `0` reached,
+   * `1` yielded short of it at an instant (call again with the same `tEnd`),
+   * or a negative error code as `bo_engine_advance`'s. Optional: a module
+   * without it is driven by `bo_engine_advance` (CoreEngine.advanceFor).
+   */
+  bo_engine_advance_for?(h: number, tEnd: number, budgetMs: number): number;
+  /**
    * W2b (core/README.md, "Acquisition"): sample the `n` nodes at `nodesPtr`
    * (f64 indices) at `origin + k * interval` from the engine's time on, at
    * most `limit` held between takes (`0`: 2^20); `interval` 0 disarms. `0`;
