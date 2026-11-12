@@ -469,7 +469,7 @@ pub(super) fn psu_dev(ci: usize, pos: usize, v: f64, i_limit: f64) -> Device {
     Device { kind: kinds::BENCH_PSU, component_index: ci, pins: vec![pin(pos), pin(0)], params: vec![v, i_limit], blob: vec![] }
 }
 
-fn cell_dev(ci: usize, pos: usize, e: f64, r: f64) -> Device {
+pub(super) fn cell_dev(ci: usize, pos: usize, e: f64, r: f64) -> Device {
     use crate::kinds::battery_param as b;
     let mut params = vec![0.0; b::COUNT];
     params[b::OCV_SCALE] = 1.0;

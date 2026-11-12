@@ -1324,8 +1324,12 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   an `advance_for` yield a device a stepped partition publishes is final to
   that partition's last commit (the rest of its step comes with a later
   take), a source to the last commit of every stepped partition its walk
-  reads, and a device on a rail nothing models until the rail's next solve
-  (below). A host divides by the span its device is final over, never
+  reads, and what a carrier folds (below) to the carrier's last commit. An
+  interval on a rail nothing models is in the take at the rail as last
+  solved and counts as reached; its correction comes with the take after
+  the rail's next solve (below; W2bV: held back to the interval's start, the
+  final time understated the charge's reach, a cell's mean after a yield up
+  to 2x high). A host divides by the span its device is final over, never
   assumes `t1`.
 - **Cost** (ruling R107 (a)). The static solver's copy and the boundary
   writer mark the held devices whose nodes or currents they write, and only

@@ -1352,17 +1352,17 @@ impl PartitionedSolver {
         out.clear();
         out.extend([st.t0, t1]);
         out.extend_from_slice(&st.q);
-        // An interval still folded at a held rail is final only to its start.
-        let held_from = |slots: std::ops::Range<usize>| st.pending.iter().filter(|p| p.slots.iter().any(|&(k, _)| slots.contains(&(k as usize)))).fold(t1, |m, p| m.min(p.a));
-        let src_held = st.pending.iter().filter(|p| !p.lq.is_empty()).fold(t1, |m, p| m.min(p.a));
-        out.extend(st.devs.iter().map(|d| {
-            let f = match d.class {
-                ChargeClass::Part(p) => stepped_final(p as usize),
-                ChargeClass::Source => src_final.min(src_held),
-                _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => carried_final,
-                _ => t1,
-            };
-            f.min(held_from(d.slot..d.slot + 1 + d.nch))
+        // An interval folded at a held rail (ruling (a), waiting for the
+        // rail's next solve) is in the take at the rail as last solved,
+        // within its bound; its correction comes with the take after that
+        // solve. So it counts as reached: a final time is how far the charge
+        // in the take reaches, which a host divides by (W2bV: held back to
+        // the interval's start, a cell's mean after a yield ran up to 2x).
+        out.extend(st.devs.iter().map(|d| match d.class {
+            ChargeClass::Part(p) => stepped_final(p as usize),
+            ChargeClass::Source => src_final,
+            _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => carried_final,
+            _ => t1,
         }));
         // `kcl_approximate`: a source whose walk reads the rail, in a span
         // where an interval closed it only approximately.

@@ -718,3 +718,67 @@ fn a_device_armed_alone_charges_as_it_does_armed_with_everything() {
         }
     }
 }
+
+/// A 5 V, 8 ohm cell (node 1) into 47 ohm and 4.7 uF (node 2) feeding a red
+/// LED, 33 ohm and 100 nF (node 3): a stepped hub partition whose draws move
+/// the cell's rail between its solves with nothing to model it (ruling (a)).
+fn cell_led() -> Program {
+    let mut p = program(4, vec![
+        super::observe_tests::cell_dev(0, 1, 5.0, 8.0),
+        dev(kinds::RESISTOR, 1, 1, 2, vec![47.0]),
+        dev(kinds::CAPACITOR, 2, 2, 0, vec![4.7e-6, 0.0, 0.0]),
+        Device { kind: kinds::LED, component_index: 3, pins: vec![pin(2), pin(3)], params: vec![1.9, 2.0, 0.02, 0.0, 0.0, 0.0], blob: vec![] },
+        dev(kinds::RESISTOR, 4, 3, 0, vec![33.0]),
+        dev(kinds::CAPACITOR, 5, 3, 0, vec![1e-7, 0.0, 0.0]),
+    ]);
+    p.digital_slot_count = 2;
+    p
+}
+
+#[test]
+fn a_takes_final_time_is_how_far_its_charge_reaches_after_a_yield() {
+    // W2bV finding 3: after a yield the cell's charge reached t1 while its
+    // final time said an interval folded at the held rail was not final,
+    // up to 7 % of the span short, so a host's mean ran high. Each take's
+    // running sum against an advance to the final time it gives, within W0.
+    let p = cell_led();
+    let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+    let mut e = Engine::load(&p).unwrap();
+    e.charge_arm(&all).unwrap();
+    let mut now = 0.0;
+    let mut clock = || {
+        now += 1.0;
+        now
+    };
+    let mut cum = vec![0.0; all.len()];
+    let mut rows = Vec::new();
+    while !e.advance_for(2e-3, Some(Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
+        let b = e.take_charge().to_vec();
+        for k in 0..all.len() {
+            cum[k] += b[2 + k];
+        }
+        rows.push((b[1], b[2 + all.len()..2 + 2 * all.len()].to_vec(), cum.clone()));
+    }
+    assert!(rows.len() > 20, "the clock yields ({})", rows.len());
+    let mut checked = 0;
+    for (n, (t1, fin, cum)) in rows.iter().enumerate() {
+        if n % 7 != 0 {
+            continue;
+        }
+        for k in [0usize, 1] {
+            let f = fin[k];
+            assert!(f <= *t1);
+            if f <= 0.0 {
+                continue;
+            }
+            let mut r = Engine::load(&p).unwrap();
+            r.charge_arm(&[k as u32]).unwrap();
+            r.advance(f).unwrap();
+            let truth = r.take_charge()[2];
+            let w0 = (1e-9 + 1e-3 * (truth / f).abs()) * f;
+            assert!((cum[k] - truth).abs() <= w0, "take {n} (t1 {t1:e}): device {k} final to {f:e}: {:e} against {truth:e} there ({:.3} W0)", cum[k], (cum[k] - truth).abs() / w0);
+            checked += 1;
+        }
+    }
+    assert!(checked > 4);
+}
