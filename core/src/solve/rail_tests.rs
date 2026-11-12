@@ -3270,6 +3270,10 @@ fn a_reader_of_a_static_hub_partition_flips_at_the_next_scan_within_the_scan_ban
     );
     let mut e = Engine::load(&p).unwrap();
     assert!(e.voltages()[3] < 1.7 && e.digital_slots()[0] == 1.0, "the midpoint starts below 1.7 V, 1y high");
+    // The load's rail solve moves the rail off its open-circuit guess (5 V
+    // to 4.545 V) and scans, but the guess was never published: a read
+    // there (the midpoint at 1.79 V, past 1.7) is no flip.
+    assert_eq!(e.stat(20), 0.0, "the load's scan counts no flip");
     let mut flip = None;
     while flip.is_none() {
         let t = e.next_event_time();
@@ -3287,7 +3291,11 @@ fn a_reader_of_a_static_hub_partition_flips_at_the_next_scan_within_the_scan_ban
     eprintln!("scan: flip at {t:.6e}, u {u:.6} (crossed at {u_cross:.6}, {late:.3e} V late), scans {}, flips {}, moves {}, rail events {}", e.stat(17), e.stat(20), e.stat(14), e.stat(18));
     assert!(x >= 1.7, "never early: {x}");
     assert!(late <= rails::RAIL_SCAN_V + rails::RAIL_DRIFT_V, "at most a scan band and a move late: {late:e}");
-    assert_eq!(e.stat(20), 1.0, "the flip is counted once");
+    // Stat 20 counts a read a scan changes. At 10 uV a rail event the
+    // divider republishes past 1.7 V between scans, so the scan that queues
+    // the reader finds its read already changed and counts nothing; the one
+    // count this test saw before R108 was the load's guess.
+    assert_eq!(e.stat(20), 0.0, "no scan finds the read changing");
     assert!(e.stat(17) >= 10.0, "the rail rose through about 11 scan bands: {}", e.stat(17));
 }
 

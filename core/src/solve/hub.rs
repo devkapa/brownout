@@ -1436,7 +1436,11 @@ impl PartitionedSolver {
             (u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
         };
         if scan {
-            let pre: Vec<(DeviceId, Vec<bool>)> = self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect();
+            // The load's own solve moves the rail off its open-circuit guess,
+            // which was never published: reads there are no state a flip
+            // could leave, so a scan at the load's instant takes none (R108).
+            let first = !(now > self.start_time);
+            let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
             let hub = self.hub.as_mut().unwrap();
             hub.state.u_scan = u;
             hub.stats.scans += 1;
