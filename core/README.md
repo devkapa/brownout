@@ -1320,6 +1320,10 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   reads, and a device on a rail nothing models until the rail's next solve
   (below). A host divides by the span its device is final over, never
   assumes `t1`.
+- **Cost.** A completed instant marks the held devices its window's logs
+  name (the nodes their readout reads, the currents they publish), and only
+  those refold, so the charge costs what an instant changes, not what is
+  armed (a debug build checks that no unmarked device moved).
 - **Folding.** At the kernel's `observe` calls, between instants: the steps
   committed since, the held currents the last instant changed, and the
   interval up to the next instant on the state the last one left. A step
@@ -1335,7 +1339,7 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
 |---|---|---|
 | In a static partition, or across fixed nodes | its published current, held between instants, times the time it held (refolded only when it moves) | exact |
 | A resistor or switch across fixed nodes, one on a running ramp | its current at the interval's mean voltages (the ramp's midpoint) | exact (affine) |
-| A resistor, switch, LED or 555 on the hub rail or a static hub partition's line in it | its current at the rail model's mean (the CC segment's or cell path's integral, `CapSeg::mean`) | exact for a resistor or switch; an LED or 555, nonlinear, by `I''/8 (dV)^2` with `dV` the line's move over the interval (within W0 while `dV` stays under about `0.09 n Vt`, 4.6 mV at n = 2) |
+| A resistor, switch, LED or 555 on the hub rail or a static hub partition's line in it | held while the rail holds between its events; while it moves, its current at the rail model's mean (the CC segment's or cell path's integral, `CapSeg::mean`) | exact for a resistor or switch; an LED or 555, nonlinear, by `I''/8 (dV)^2` with `dV` the line's move over the interval (within W0 while `dV` stays under about `0.09 n Vt`, 4.6 mV at n = 2) |
 | In a closed form | each current at the analytic means of `vc`, the rail's move `du` and the ramp's time (all affine); the capacitor `C dvc` | exact; a draining cell's held and curved terms and a curved segment's `vc du` by composite five-point Gauss-Legendre, at most `4e-10` of the term (panels of two time constants) |
 | In a stepped partition | its integrator's own quadrature over the step's points: backward Euler's end, the trapezoid's two ends, TR-BDF2's `k (gamma h / 2)(i_0 + i_g) + h_2 i_1`, each point read against the boundary and the CC rail the step solved with; a capacitor's is `C dvc` to rounding | exact; an iterated partition's points meet KCL to its Newton tolerance (measured 2e-7 to 5e-7 of the charge at an LED's nodes) |
 | A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge | exact |
