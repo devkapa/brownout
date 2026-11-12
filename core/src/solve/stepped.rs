@@ -2281,12 +2281,12 @@ impl SteppedSolver {
         self.partitions.get(&p).map(|part| &part.shape)
     }
 
-    /// Partition `p`'s pending step as it commits, from its committed state
-    /// (`pend` true), or its committed state alone.
-    fn dense_seg(&self, p: usize, pend: bool) -> DenseSeg {
+    /// Partition `p`'s pending step as it commits, from its committed state,
+    /// its knots taken from the trial.
+    fn dense_seg_taken(&mut self, p: usize) -> DenseSeg {
+        let PendDense { mut knots, solved, .. } = std::mem::take(&mut self.partitions.get_mut(&p).expect("a committing partition").pend_dense);
         let part = &self.partitions[&p];
-        let (mut knots, solved) = if pend { (part.pend_dense.knots.clone(), part.pend_dense.solved.clone()) } else { (Vec::new(), Vec::new()) };
-        if pend && knots.is_empty() {
+        if knots.is_empty() {
             // Planned before the observer read it: its ends only.
             knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None });
         }
@@ -2779,13 +2779,15 @@ impl SteppedSolver {
             self.bills.push((self.partitions[&p].pend_t, charge));
         }
         let reseeded = !self.partitions[&p].has_prev;
-        if self.dense_on.get(p).copied().unwrap_or(false) {
-            let seg = self.dense_seg(p, true);
-            self.dense.push(seg);
-        }
+        // The charge copies the trial's knots; the observer, last, takes
+        // them (the next plan starts afresh).
         if self.charge_on.get(p).copied().unwrap_or(false) {
             let step = self.charge_step(p, voltages);
             self.charge_steps.push(step);
+        }
+        if self.dense_on.get(p).copied().unwrap_or(false) {
+            let seg = self.dense_seg_taken(p);
+            self.dense.push(seg);
         }
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {

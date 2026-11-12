@@ -86,6 +86,10 @@ pub(crate) struct ArmedDev {
     ne555: Option<u32>,
     /// A line's nodes, what its held value is read from.
     nodes: Vec<usize>,
+    /// A held LED's last states left, `(key, current, channels)`: a logic
+    /// output toggling it re-solves its partition to the same bits, so its
+    /// readout comes back without its exponential.
+    memo: Vec<(Vec<u64>, f64, Vec<f64>)>,
     /// The held classes: the current and channels published since `since`,
     /// and what they were read from, to tell when they change.
     i: f64,
@@ -149,14 +153,12 @@ pub(crate) struct ChargeState {
     /// What can move a held class: per node (`node_deps[node_start[n] ..
     /// node_start[n + 1]]`) the held LEDs and 555s reading it, per device the
     /// held device publishing it (`u32::MAX`: none); the ones an instant
-    /// moved, refolded at the next fold (`ChargeState::note_instant`), and
+    /// moved, refolded at the next fold (`ChargeState::note_node`), and
     /// the power holds taken and released when last noted.
     node_start: Vec<u32>,
     node_deps: Vec<u32>,
-    /// The nodes some held device reads, as a bitset, and whether any held
-    /// device publishes a current of its own.
+    /// The nodes some held device reads, as a bitset.
     watched: Vec<u64>,
-    any_held_dev: bool,
     dev_held: Vec<u32>,
     dirty: Vec<u32>,
     is_dirty: Vec<bool>,
@@ -189,28 +191,31 @@ impl ChargeState {
         matches!(class, ChargeClass::Held | ChargeClass::HeldLed(_) | ChargeClass::Held555(_)) || (matches!(class, ChargeClass::Line(_)) && !self.line_moving)
     }
 
-    /// At the end of a completed instant, before its window's logs go: each
-    /// held class reading a node it wrote or publishing a current it wrote
-    /// is due a refold (so a fold costs what the instant changed, not what is
-    /// armed), every held 555 where a power hold came or went.
-    pub(crate) fn note_instant(&mut self, v_log: &[(u32, u64)], i_log: &[(u32, u64)], holds: [f64; 2]) {
-        // A bitset first: most logged nodes are no held device's.
-        for &(node, _) in v_log {
-            let n = node as usize;
-            if self.watched.get(n / 64).is_some_and(|w| w >> (n % 64) & 1 != 0) {
-                for k in self.node_start[n]..self.node_start[n + 1] {
-                    let d = self.node_deps[k as usize];
-                    Self::mark(&mut self.dirty, &mut self.is_dirty, d);
-                }
+    /// A static or boundary node's published value moved (`copy_in_static`,
+    /// `write_boundary`, the only writers of the nodes a held device reads):
+    /// the held devices reading it refold, so a fold costs what changed, not
+    /// what is armed. A mark from an instant that then rolls back only asks
+    /// for a refold that finds nothing moved. A debug build checks at every
+    /// fold that no unmarked held device moved.
+    pub(crate) fn note_node(&mut self, n: usize) {
+        if self.watched.get(n / 64).is_some_and(|w| w >> (n % 64) & 1 != 0) {
+            for k in self.node_start[n]..self.node_start[n + 1] {
+                let d = self.node_deps[k as usize];
+                Self::mark(&mut self.dirty, &mut self.is_dirty, d);
             }
         }
-        if self.any_held_dev {
-            for &(device, _) in i_log {
-                if let Some(&d) = self.dev_held.get(device as usize).filter(|&&d| d != u32::MAX) {
-                    Self::mark(&mut self.dirty, &mut self.is_dirty, d);
-                }
-            }
+    }
+
+    /// A static device's published current moved (`copy_in_static`).
+    pub(crate) fn note_device(&mut self, device: usize) {
+        if let Some(&d) = self.dev_held.get(device).filter(|&&d| d != u32::MAX) {
+            Self::mark(&mut self.dirty, &mut self.is_dirty, d);
         }
+    }
+
+    /// At the end of a completed instant: a power hold taken or released
+    /// moves every held 555's power.
+    pub(crate) fn note_holds(&mut self, holds: [f64; 2]) {
         if holds != self.holds_seen {
             self.holds_seen = holds;
             for k in 0..self.devs.len() {
@@ -330,7 +335,7 @@ impl PartitionedSolver {
             }
             let nch = led.map_or(0, |k| self.led_devices[k].channel_count);
             let nodes = if matches!(class, ChargeClass::Line(_)) { nodes.unwrap_or_default() } else { Vec::new() };
-            devs.push(ArmedDev { device: d, slot, nch, class, led: led.map(|k| k as u32), ne555, nodes, i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
+            devs.push(ArmedDev { device: d, slot, nch, class, led: led.map(|k| k as u32), ne555, nodes, memo: Vec::new(), i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
             slot += 1 + nch;
         }
         let src = self.source_terms(devices, &mut parts, &mut reads, &mut line_nodes);
@@ -341,7 +346,7 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), any_held_dev: false, dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new() };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new() };
         st.interval_devs = (0..st.devs.len() as u32).filter(|&k| matches!(st.devs[k as usize].class, ChargeClass::Mean(_) | ChargeClass::Line(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))).collect();
         st.fixed_caps = (0..self.fixed_pair_capacitors.len() as u32)
             .filter(|&k| {
@@ -354,7 +359,7 @@ impl PartitionedSolver {
         st.has_interval = st.src.is_some() || st.devs.iter().any(|d| matches!(d.class, ChargeClass::Mean(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_)));
         st.has_line = st.devs.iter().any(|d| matches!(d.class, ChargeClass::Line(_)));
         st.reads_rail = self.hub.is_some() && (st.src.is_some() || st.devs.iter().any(|d| matches!(d.class, ChargeClass::Line(_) | ChargeClass::Mean(_))));
-        // What can move each held class (`ChargeState::note_instant`).
+        // What can move each held class (`ChargeState::note_node`).
         let mut per_node: Vec<Vec<u32>> = vec![Vec::new(); self.voltages.len()];
         st.dev_held = vec![u32::MAX; self.currents.len()];
         for (k, dev) in st.devs.iter().enumerate() {
@@ -386,7 +391,6 @@ impl PartitionedSolver {
                 st.watched[n / 64] |= 1 << (n % 64);
             }
         }
-        st.any_held_dev = st.dev_held.iter().any(|&d| d != u32::MAX);
         st.node_start.push(0);
         for list in &per_node {
             st.node_deps.extend_from_slice(list);
@@ -815,14 +819,21 @@ impl PartitionedSolver {
             if !st.held(&st.devs[k].class) || !self.held_moved(&st.devs[k], &drivers) {
                 continue;
             }
-            let mut ch = std::mem::take(&mut st.devs[k].ch);
-            let dev = &st.devs[k];
-            let (slot, dt) = (dev.slot, (now - dev.since).max(0.0));
-            st.q[slot] += dev.i * dt;
-            for (c, &value) in ch.iter().enumerate() {
-                st.q[slot + 1 + c] += value * dt;
+            {
+                let dev = &st.devs[k];
+                let (slot, dt) = (dev.slot, (now - dev.since).max(0.0));
+                st.q[slot] += dev.i * dt;
+                for (c, &value) in dev.ch.iter().enumerate() {
+                    st.q[slot + 1 + c] += value * dt;
+                }
             }
-            let (value, key) = self.held_now(dev, &mut ch, &drivers);
+            if let ChargeClass::HeldLed(j) = st.devs[k].class {
+                self.charge_led_state(&mut st.devs[k], j as usize);
+                st.devs[k].since = st.devs[k].since.max(now);
+                continue;
+            }
+            let mut ch = std::mem::take(&mut st.devs[k].ch);
+            let (value, key) = self.held_now(&st.devs[k], &mut ch, &drivers);
             let dev = &mut st.devs[k];
             if let Some((i, chs)) = value {
                 dev.i = i;
@@ -832,6 +843,45 @@ impl PartitionedSolver {
             dev.key = key;
             dev.since = dev.since.max(now);
         }
+    }
+
+    /// A held LED's new state, `(key, current, channels)`, without
+    /// allocating: back from its memo when its node bits come back (a logic
+    /// output toggling it re-solves its partition to the same bits, the same
+    /// readout), else its readout into the memo's oldest buffers; the state
+    /// it leaves goes to the memo's front.
+    fn charge_led_state(&self, dev: &mut ArmedDev, j: usize) {
+        let e = &self.led_devices[j];
+        let v = &self.voltages;
+        let failed = self.slow.is_failed(e.device_index);
+        let matches = |key: &[u64]| {
+            let mut it = key.iter();
+            e.junctions.iter().all(|jn| it.next() == Some(&v[jn.anode].to_bits()) && it.next() == Some(&v[jn.cathode].to_bits())) && it.next() == Some(&u64::from(failed))
+        };
+        if let Some(m) = dev.memo.iter().position(|m| matches(&m.0)) {
+            let entry = &mut dev.memo[m];
+            std::mem::swap(&mut dev.key, &mut entry.0);
+            std::mem::swap(&mut dev.i, &mut entry.1);
+            std::mem::swap(&mut dev.ch, &mut entry.2);
+            // The same bits in, the same readout out (a debug build checks).
+            #[cfg(debug_assertions)]
+            {
+                let (mut i, mut c) = (0.0, vec![0.0; dev.ch.len()]);
+                led::readout(&e.device, &e.junctions, v, failed, &mut i, &mut c);
+                debug_assert!(i.to_bits() == dev.i.to_bits() && c.iter().zip(&dev.ch).all(|(a, b)| a.to_bits() == b.to_bits()), "charge: an LED's memo differs from its readout");
+            }
+            if m != 0 {
+                dev.memo.swap(0, m);
+            }
+            return;
+        }
+        let mut next = if dev.memo.len() >= 2 { dev.memo.pop().expect("two kept") } else { (Vec::new(), 0.0, vec![0.0; dev.ch.len()]) };
+        next.0.clear();
+        next.0.extend(e.junctions.iter().flat_map(|jn| [v[jn.anode].to_bits(), v[jn.cathode].to_bits()]));
+        next.0.push(u64::from(failed));
+        led::readout(&e.device, &e.junctions, v, failed, &mut next.1, &mut next.2);
+        let left = (std::mem::replace(&mut dev.key, next.0), std::mem::replace(&mut dev.i, next.1), std::mem::replace(&mut dev.ch, next.2));
+        dev.memo.insert(0, left);
     }
 
     /// Every held class up to `t`, its current and channels times the time
@@ -1248,6 +1298,7 @@ impl crate::snapshot::HeapBytes for ArmedDev {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.led, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ne555, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.memo, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.since, w); }
@@ -1298,7 +1349,6 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_start, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.node_deps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.watched, w); }
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.any_held_dev, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dev_held, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dirty, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.is_dirty, w); }

@@ -1604,6 +1604,10 @@ impl PartitionedSolver {
                 self.v_log.push((node as u32, self.voltages[node].to_bits()));
             }
             self.voltages[node] = value;
+            // W2b: the held devices reading it refold.
+            if let Some(st) = self.charge.as_mut() {
+                st.note_node(node);
+            }
         }
         fold_bound(&mut self.v_hint, value);
     }

@@ -3781,6 +3781,10 @@ impl PartitionedSolver {
                 self.voltages[node] = new;
                 // W1g point 2: what this node's move concerns the settle with.
                 settle::note_static_node(&mut self.slow_scratch, &self.slow_model, node);
+                // W2b: the held devices reading it refold.
+                if let Some(st) = self.charge.as_mut() {
+                    st.note_node(node);
+                }
             }
             fold_bound(&mut self.v_hint, new);
         }
@@ -3793,6 +3797,9 @@ impl PartitionedSolver {
                     self.i_log.push((d as u32, old_bits));
                 }
                 self.currents[d] = new;
+                if let Some(st) = self.charge.as_mut() {
+                    st.note_device(d);
+                }
             }
         }
         #[cfg(debug_assertions)]
@@ -5291,11 +5298,12 @@ impl PartitionSolver for PartitionedSolver {
     fn end_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
         checkpoint.downcast::<WindowToken>().expect("a checkpoint made by this solver's begin_instant");
         debug_assert!(self.window, "end_instant without an open window");
-        // W2b piece 4: the held currents this instant moved, off its logs.
+        // W2b piece 4: a power hold this instant took or released moves the
+        // held 555s (the nodes and currents note themselves as written).
         if self.charge.is_some() {
             let holds = self.hold_counts();
             if let Some(st) = self.charge.as_mut() {
-                st.note_instant(&self.v_log, &self.i_log, holds);
+                st.note_holds(holds);
             }
         }
         #[cfg(test)]
