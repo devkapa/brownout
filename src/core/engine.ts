@@ -139,6 +139,17 @@ export interface CoreEngineStats {
  * fallback, because there is no "elsewhere" to route an already-running
  * program to.
  */
+/**
+ * W2c: a carry take's failure (`bo_engine_carry_take`), as a load's: its
+ * clamp's `-4`/`-7` route the reload as a load-time solve failure or
+ * livelock does (to classic, whose own load carries), reason prefixed
+ * `carry:`.
+ */
+function carryFailure(code: number, message: string): CoreUnsupportedError | CoreLoadError {
+  const mapped = mapLoadFailure(code, message);
+  return mapped instanceof CoreUnsupportedError ? new CoreUnsupportedError(mapped.reasons.map((r) => `carry:${r}`)) : new CoreLoadError(`bo_engine_carry_take failed (code ${code}): ${message}`);
+}
+
 function mapLoadFailure(code: number, message: string): CoreUnsupportedError | CoreLoadError {
   if (code === -3) {
     return new CoreUnsupportedError([`topology:${message}`]);
@@ -353,7 +364,10 @@ export class CoreEngine implements EngineReadout {
    * survive, none announced again. The program goes to the core as v4 with
    * its `CARRY` block. A load given a time (another engine's, or a cold
    * start), a core without the carry exports, and {@link coldLoad} carry
-   * nothing.
+   * nothing. A carry the core fails to take (bringing the old program to its
+   * time, `-4`/`-7`) throws `CoreUnsupportedError` with `carry:`-prefixed
+   * reasons, the engine left with no program as after any failed load: the
+   * host routes it as a load-time failure, or calls {@link coldLoad}.
    *
    * `options`' other fields (`integrationMethod`, and the exactness switches)
    * pass straight through to `compileCircuit` (compile/index.js's
@@ -404,20 +418,23 @@ export class CoreEngine implements EngineReadout {
    * and every EEPROM's current image (the dirty ones drained here: the
    * records carry their dirty flags, so the new program still reports them
    * to the host). `null` when nothing is loaded, or the core has no carry
-   * exports (R100 (a): an older core loads cold), or its take failed (the
-   * reload is then cold, as on such a core).
+   * exports (R100 (a): an older core loads cold). A take that fails (its
+   * clamp to the engine's time: `-4`, `-7`) is the error `_load` throws once
+   * it has cleared the program, as a load-time failure: a reload that
+   * silently went cold would drop the charges, registers and latches the
+   * user edited around.
    */
-  private _takeCarry(): { records: CarryRecord[]; from: { circuit: SimCircuit; compiled: CompiledCircuit } } | null {
+  private _takeCarry(): { records: CarryRecord[]; from: { circuit: SimCircuit; compiled: CompiledCircuit } } | Error | null {
     const compiled = this._compiled;
     const circuit = this._loadedAs;
     if (!compiled || !circuit) return null;
     const raw = coreCall((exports) => {
       if (typeof exports.bo_engine_carry_take !== "function" || typeof exports.bo_engine_carry_ptr !== "function") return null;
       const len = exports.bo_engine_carry_take(this._handle);
-      if (len < 0) return null;
+      if (len < 0) return carryFailure(len, readCoreErrorMessage(exports));
       return copyF64(exports, exports.bo_engine_carry_ptr(this._handle) >>> 0, len);
     });
-    if (raw === null) return null;
+    if (raw === null || raw instanceof Error) return raw;
     this._drainEepromImages(compiled);
     return { records: decodeCarry(raw), from: { circuit, compiled } };
   }
@@ -451,7 +468,7 @@ export class CoreEngine implements EngineReadout {
     // does. Not when the caller seeds the clock (`options.simTime`: another
     // engine's time, or a cold start), since the carry is this engine's own,
     // at its own time.
-    const carried = carrying && requestedSimTime === undefined ? this._takeCarry() : null;
+    const taken = carrying && requestedSimTime === undefined ? this._takeCarry() : null;
     const previousWarnings = this._warnings;
 
     // Clear the PROGRAM state now. Every throw from this point on leaves the
@@ -471,6 +488,10 @@ export class CoreEngine implements EngineReadout {
     this._circuit = null;
     this._loadedAs = null;
     this._warnings = new WarningLedger();
+    if (taken instanceof Error) {
+      throw taken;
+    }
+    const carried = taken;
 
     // `options`' other fields pass straight through: compileCircuit's
     // `CompileOptions` only reads integrationMethod/noSolutionCache/

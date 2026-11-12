@@ -14,6 +14,7 @@ import { compileCircuit } from "../../src/core/compile/index.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
 import { BUNDLED_DEFAULT_PARTS } from "../../src/parts/part-library.js";
 import { CoreEngine } from "../../src/core/engine.js";
+import { CoreUnsupportedError } from "../../src/core/errors.js";
 import { decodeProgram, withCarryBlock } from "../../src/core/format.js";
 import { coreCall, initCore, verifyCoreExports, __installCoreForTest, __resetCoreForTest, type CoreExports } from "../../src/core/wasm.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
@@ -280,6 +281,38 @@ describe("R100 (a): program v4 on ABI 2", () => {
     expect(carried.voltages[x]).toBe(4);
     // A record on the wrong kind is a malformed program.
     expect(rawRun(asV4(s.compiled.program, [deviceOf(s, "r1"), CARRY_FAMILY.capacitor, CARRY_VERSION, 1, 4]), 0).code).toBe(-1);
+  });
+
+  it("a carry take that fails is the host's to see: the reload throws as a load-time solve failure would, never a silent cold load", () => {
+    // The take brings a copy of the engine to its time (the clamp); that can
+    // fail as any advance can (-4, -7). Simulated here: the export answers
+    // -4 with a message, as the core does.
+    const real = coreCall((x) => x);
+    let failNext = false;
+    const failing = verifyCoreExports({
+      ...(real as unknown as Record<string, unknown>),
+      memory: real.memory,
+      bo_engine_carry_take: (h: number) => (failNext ? -4 : real.bo_engine_carry_take!(h)),
+    });
+    __installCoreForTest(failing);
+    const core = new CoreEngine();
+    core.load(rc());
+    core.advance(1e-3);
+    failNext = true;
+    let thrown: unknown;
+    try {
+      core.load(rc());
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CoreUnsupportedError);
+    expect((thrown as CoreUnsupportedError).reasons[0]).toMatch(/^carry:solve-failed:/);
+    // As after any failed load: no program, the clock kept, and a cold load
+    // is the host's call.
+    expect(() => core.advance(2e-3)).toThrow();
+    failNext = false;
+    core.coldLoad(rc());
+    core.dispose();
   });
 
   it("a host whose core has no carry exports still loads and runs", () => {
