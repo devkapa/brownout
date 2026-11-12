@@ -36,7 +36,6 @@
 import { compileCircuit, LIVE_PARAM_SPECS, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
 import { decodeCarry, eepromCarryImages, encodeCarry, mapCarry, type CarryRecord } from "./carry.js";
 import { withCarryBlock } from "./format.js";
-import { eepromImageBytes } from "../sim/engine/sim-engine.js";
 import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
 import {
@@ -524,9 +523,11 @@ export class CoreEngine implements EngineReadout {
       const kindAfter = new Map(circuit.components.map((c) => [c.id, c.kind]));
       this._warnings = previousWarnings.carryOnto((id) => kindBefore.get(id) !== undefined && kindBefore.get(id) === kindAfter.get(id));
     }
-    this._eepromImages = loadedEepromImages(circuit, eepromImages);
+    // The images a load put in the ROM blobs that are not the authored
+    // contents (carried ones); an EEPROM absent here holds its authoring.
+    this._eepromImages = new Map(eepromImages ?? []);
     this._circuit = circuit;
-    this._loadedAs = structuredClone(circuit);
+    this._loadedAs = carrySnapshot(circuit);
     // Since START_TIME, as classic's load evaluates them at its simTime.
     this._warnings.evaluateStatic(circuit, compiled.nets, previousSimTime);
     this._publishReadouts();
@@ -1525,14 +1526,18 @@ function dropSnapshot(token: SnapshotToken): void {
 /** Frees a snapshot collected without a `dispose()`: the core sets no cap, and WASM memory never shrinks. */
 const coreSnapshotFinalizer = new FinalizationRegistry<SnapshotToken>(dropSnapshot);
 
-/** The EEPROMs' images a load put in their ROM blobs: a carried one, else the authored `contents` (W2c). */
-function loadedEepromImages(circuit: SimCircuit, carried: ReadonlyMap<string, Uint8Array> | undefined): Map<string, Uint8Array> {
-  const out = new Map<string, Uint8Array>();
-  for (const component of circuit.components) {
-    const size = component.kind === "28c16" ? 2048 : component.kind === "28c256" ? 32768 : 0;
-    if (size === 0) continue;
-    const image = carried?.get(component.id);
-    out.set(component.id, image?.length === size ? image : eepromImageBytes(size, String(component.params.contents ?? "")));
-  }
-  return out;
+/**
+ * What a reload's carry reads of the circuit it replaces (`src/core/carry.ts`:
+ * each component's id, kind, catalog part, params and pins), copied at the
+ * load so a host's in-place edit before the reload does not show through.
+ * Not `structuredClone`: the circuit's wires and the strings in its params
+ * (a ROM image runs to 44 KB of base64) need no copy, and a whole clone cost
+ * 1 ms of an 11 ms SAP-1 load, cold loads included.
+ */
+function carrySnapshot(circuit: SimCircuit): SimCircuit {
+  return {
+    ...circuit,
+    components: circuit.components.map((c) => ({ ...c, params: { ...c.params }, pins: c.pins.map((p) => ({ ...p })) })),
+    wires: [],
+  };
 }

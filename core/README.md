@@ -1139,8 +1139,13 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
 - **Cost** (2026-11-12, against 26ed5ee, 5 interleaved reps on a quiet
   machine). A carrying reload of the SAP-1 takes 14.7 ms (ideal) and 18.1
   ms (battery) of CPU against 11.7 and 15.5 ms for a cold one before W2c
-  (the take, the map and the seed); a cold reload is unchanged (10.9 and
-  15.2 ms). The rated SAP-1 run (R43) is unchanged within noise: battery at
+  (the take, the map and the seed). A cold reload does no carry work: the
+  facade keeps only a component-level copy of the circuit for the next
+  reload (a whole `structuredClone` had cost 1 ms of an SAP-1 load) and
+  decodes no EEPROM image, and the core's load is unchanged natively (0.035
+  ms on fixture 03 against 0.035). Cold SAP-1 reload 9.8 ms against 9.7 ms
+  before W2c, fixture 03 0.64 against 0.61 ms (3 reps each, not in a quiet
+  window). The rated SAP-1 run (R43) is unchanged within noise: battery at
   steady state +0.9 % running and -0.9 % frozen (7 paired reps, 30 s
   warm-up). The wasm grows 6.4 % (6.2 % gzipped).
 - **Take.** `bo_engine_carry_take(h) -> i32` collects the records and
