@@ -860,6 +860,12 @@ export lands in its list in the same change that adds it.
 | `bo_engine_snapshot_bytes` | `(h) -> f64` | The handle's snapshot table in bytes, each shared memory image counted once; `NaN` for an unusable handle. | v2 (W2a) |
 | `bo_engine_carry_take` | `(h) -> i32` | Collect every device's carry records ("Carry" below) and return their length in f64; `-5` for an unusable handle, `-4`/`-7` when bringing the partitions to the engine's time fails. Optional, detected by presence. | v2 (W2c) |
 | `bo_engine_carry_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2c) |
+| `bo_engine_acquire` | `(h, nodes: *const f64, n: u32, origin: f64, interval: f64, limit: u32) -> i32` | Arm the observer on `n` node indices, sampling at `origin + k * interval` from the engine's time ("Acquisition" below); `interval` 0 disarms, `limit` 0 holds 2^20. `-8` for a bad node, origin or interval, `-5` for an unusable handle. Optional. | v2 (W2b) |
+| `bo_engine_acquire_take` | `(h) -> i32` | Take every final sample, `[count, maxSpan, overflowed, dropped, fallbacks x n, t x count, node-major values]`; the length in f64 (`4` disarmed), `-5` for an unusable handle. Optional. | v2 (W2b) |
+| `bo_engine_acquire_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2b) |
+| `bo_engine_charge_arm` | `(h, devices: *const f64, n: u32) -> i32` | Arm the charge on `n` device indices from the engine's time ("Charge" below); `n` 0 disarms. `-8` for a bad device, `-5` for an unusable handle. Optional. | v2 (W2b) |
+| `bo_engine_take_charge` | `(h) -> i32` | Take the charge, `[t0, t1, per device its charge then its channels', per device its final time]`, the sums cleared; the length in f64 (`2` disarmed), `-5` for an unusable handle. Optional. | v2 (W2b) |
+| `bo_engine_charge_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2b) |
 
 **`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
 through W1e. Exact mode makes the rail node free and merges every partition
@@ -1257,6 +1263,105 @@ event like every set, which ends the host step in flight (R86).
 - **A failed set** (`-4`, `-7`) rolls back with its instant: the source,
   the nodes it fixed and the static solver's folded bases.
 - A battery or a bench PSU stays a reload.
+
+## Acquisition (W2b)
+
+A scope reads the model's trajectory on a grid without moving it (rulings
+R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
+
+- **Arm.** `bo_engine_acquire(h, nodes, n, origin, interval, limit)`
+  samples the nodes at `origin + k * interval` for whole `k` (the times
+  computed so, never summed), from the first at or after the engine's time.
+  Re-arming drops what was pending, `interval` 0 disarms, a load disarms.
+- **Take.** `[count, maxSpan, overflowed, dropped, fallbacks x n, t x count,
+  node-major values]`, every sample whose value is final, in time order;
+  taking empties the queue. At most `limit` samples are held (2^20 by
+  default): past that the newest are dropped and counted, the oldest kept.
+  `maxSpan` is the widest stepped step a sample was read across.
+- **A sample** at `t_s` between two completed instants is the model's state
+  there, read off what the solver holds: a fixed node's value (a running
+  ramp's line), a static node held, a closed-form node its segment's exact
+  value, the hub rail its model between events (the CC segment, the cell
+  path, the CV setpoint; where nothing models it, linear between its solves,
+  ruling (a)) and a static hub node its line in it, a stepped node between
+  the two commits around it: linear over a backward Euler step, cubic
+  Hermite on each capacitor's charge over a trapezoidal step or TR-BDF2
+  stage, the node from the charges where cheap (a plate on a fixed node, a
+  linear partition with one capacitor), else, for an iterated partition, a
+  scratch solve at the Hermite charges (R104 (b); a failed solve reads linear
+  and counts as a fallback). On an instant a sample reads the state after it
+  (D2). A stepped node's sample waits for its later commit, so a yield can
+  leave samples pending; the horizon clamp flushes them.
+- **Passive.** Nothing is stepped, cut or re-solved for a sample (an
+  iterated partition's scratch solve keeps nothing): a probed run is the
+  unprobed run bit for bit.
+- **Interactions.** A rolled-back instant reads no sample. A run split by
+  `advance_for` yields reads the same samples. A snapshot carries the queue
+  and the arming (a restore retakes from there). A live V set is an instant:
+  samples on and after it see the new value.
+
+## Charge (W2b)
+
+Light means: the integral of each armed device's published current, and of
+each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
+`solve/charge_tests.rs`). A mean is a charge over its span.
+
+- **Arm.** `bo_engine_charge_arm(h, devices, n)`, from the engine's time on;
+  re-arming drops what was not taken, `n` 0 disarms, a load disarms.
+  Unarmed, nothing runs but an `Option` test at each instant; a charged run
+  is the uncharged run bit for bit.
+- **Take.** `[t0, t1, then per device its charge and its channel slots' in
+  channel order, then per device the time its charge is final to]`, over
+  `[t0, t1]` since the last take, the sums cleared. A final time is `t1`
+  after `advance` (the horizon clamp commits every partition there). After
+  an `advance_for` yield a device a stepped partition publishes is final to
+  that partition's last commit (the rest of its step comes with a later
+  take), a source to the last commit of every stepped partition its walk
+  reads, and a device on a rail nothing models until the rail's next solve
+  (below). A host divides by the span its device is final over, never
+  assumes `t1`.
+- **Folding.** At the kernel's `observe` calls, between instants: the steps
+  committed since, the held currents the last instant changed, and the
+  interval up to the next instant on the state the last one left. A step
+  commits inside its instant's window and goes with it on a rollback, so a
+  rolled-back instant adds nothing; the interval before a failed instant is
+  final and stays.
+
+Each solver's charge is exact in its own model. Where it is not, the
+error is bounded below against W0's current tolerance over the span, `(1
+nA + 1e-3 |I|) t`, which is the charge's W0.
+
+| Device | Charge | Bound |
+|---|---|---|
+| In a static partition, or across fixed nodes | its published current, held between instants, times the time it held (refolded only when it moves) | exact |
+| A resistor or switch across fixed nodes, one on a running ramp | its current at the interval's mean voltages (the ramp's midpoint) | exact (affine) |
+| A resistor, switch, LED or 555 on the hub rail or a static hub partition's line in it | its current at the rail model's mean (the CC segment's or cell path's integral, `CapSeg::mean`) | exact for a resistor or switch; an LED or 555, nonlinear, by `I''/8 (dV)^2` with `dV` the line's move over the interval (within W0 while `dV` stays under about `0.09 n Vt`, 4.6 mV at n = 2) |
+| In a closed form | each current at the analytic means of `vc`, the rail's move `du` and the ramp's time (all affine); the capacitor `C dvc` | exact; a draining cell's held and curved terms and a curved segment's `vc du` by composite five-point Gauss-Legendre, at most `4e-10` of the term (panels of two time constants) |
+| In a stepped partition | its integrator's own quadrature over the step's points: backward Euler's end, the trapezoid's two ends, TR-BDF2's `k (gamma h / 2)(i_0 + i_g) + h_2 i_1`, each point read against the boundary and the CC rail the step solved with; a capacitor's is `C dvc` to rounding | exact; an iterated partition's points meet KCL to its Newton tolerance (measured 2e-7 to 5e-7 of the charge at an LED's nodes) |
+| A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge | exact |
+| A voltage source, PSU or anything else the forest fixes a node with | KCL over the charges of what leaves the nodes it fixes, walked as `recompute_source_currents` walks; a PSU in CC is `-dir iLimit` for as long as it is | exact; see the open item below |
+
+- **A rail nothing models** (a cell or CC rail moved by stepped draws between
+  its solves; ruling (a)). The interval is folded at the rail as last solved
+  with its sensitivity to the rail kept (every term on the line is affine in
+  it); when the next solve comes, the rail's mean there, linear between the
+  two solves, corrects it. Measured: 1.5e-8 W0 from the linear rail over 5 ms
+  and 1/60 s (cell rail, stepped; 0.94 W0 before the correction).
+- **A floating pull's target** moves only at its bucket edges, which are
+  instants, and a step is stamped at its start: exact.
+- **Arming inside a step** weighs the straddling step's quadrature by the
+  part of it after the arming (a step planned before arming kept no points:
+  its end over that part), within one step's charge.
+- Measured against fine references (host steps of 0.5 us, the same boards):
+  cell rail 1.4e-7 W0; cell rail stepped 0.72 W0 and a CC rail with no
+  capacitor, stepped, 0.84 W0, both the integrators' own trajectory
+  differences (a stepped capacitor's charge is exact `C dvc` of either run).
+- **Open item.** On a CC rail with no capacitor, a static line's charge
+  follows the rail linear between its solves while the stepped draws take
+  their steps' backward Euler points, so the PSU's exact `iLimit t` and the
+  KCL of its rail's neighbours part by 1.29 W0 at 20 ms (each charge within
+  W0 of the fine reference; `a_psus_cc_charge_matches_the_kcl_of_its_rail_with_no_capacitor`,
+  ignored).
 
 ## Readouts
 

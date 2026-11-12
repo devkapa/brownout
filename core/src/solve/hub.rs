@@ -2694,6 +2694,12 @@ impl PartitionedSolver {
         }
     }
 
+    /// W2b piece 4: whether the rail moves between its solves with nothing
+    /// to model it (ruling (a)).
+    pub(super) fn rail_unmodelled(&self) -> bool {
+        self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_none() && h.state.cell_path.is_none()) && !self.rail_fixed_between_solves()
+    }
+
     /// Whether the rail holds between its solves when no segment or path
     /// models it: a PSU's CV setpoint, or no hub partition stepping (and no
     /// cell drive).

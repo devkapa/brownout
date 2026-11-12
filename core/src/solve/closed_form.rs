@@ -1492,14 +1492,16 @@ impl ClosedFormSolver {
         // drive's and the ramp's responses by their charges, and a draining
         // cell's held and curved terms (no closed charge) by Gauss-Legendre.
         let base_a = vc_at(f, part.seg_inf, part.seg_vc0, part.seg_t0, a);
+        // The fastest exponential the Gauss-Legendre terms hold.
+        let rate = part.drive.as_ref().map_or(0.0, |d| d.modes.iter().fold(f.abs(), |m, mode| m.max(mode.k.abs())));
         let mut int_vc = if f == 0.0 { part.seg_vc0 * dt } else { part.seg_inf * dt + (base_a - part.seg_inf) * rails::exp_integral(f, dt) };
         if let Some(d) = part.drive.as_ref().filter(|d| d.follows()) {
             int_vc += d.jw_charge(f, tb) - d.jw_charge(f, ta);
             if d.held && d.modes.iter().any(|m| m.we != 0.0) {
-                int_vc += gauss_legendre(ta, tb, |tau| (f * tau).exp() * d.sum(|m| m.we * rails::phi_integral(m.k, tau)));
+                int_vc += gauss_legendre(ta, tb, rate, |tau| (f * tau).exp() * d.sum(|m| m.we * rails::phi_integral(m.k, tau)));
             }
             if d.cell_we != 0.0 {
-                int_vc += gauss_legendre(ta, tb, |tau| d.cell_we * 0.5 * tau * tau * (f * tau).exp());
+                int_vc += gauss_legendre(ta, tb, rate, |tau| d.cell_we * 0.5 * tau * tau * (f * tau).exp());
             }
         }
         if let Some(r) = part.ramp.as_ref().filter(|r| r.w != 0.0) {
@@ -1515,7 +1517,7 @@ impl ClosedFormSolver {
                 // `dxdu` is `dx0du + dx1du vc` on a curved segment: its mean
                 // against `du` is the mean of the product.
                 let vcdu = match (&h.curve, part.drive.as_ref()) {
-                    (Some(_), Some(d)) => gauss_legendre(a, b, |t| vc_of(part, t) * d.du(t - part.seg_t0)) / dt,
+                    (Some(_), Some(d)) => gauss_legendre(a, b, rate, |t| vc_of(part, t) * d.du(t - part.seg_t0)) / dt,
                     _ => 0.0,
                 };
                 for (l, &node) in part.shape.nodes.iter().enumerate() {
@@ -2536,14 +2538,22 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
     lo
 }
 
-/// `∫ g` over `[a, b]` by five-point Gauss-Legendre: exact to rounding for
-/// the smooth, slowly varying terms it is used on within one interval
-/// between instants (W2b piece 4).
-fn gauss_legendre(a: f64, b: f64, g: impl Fn(f64) -> f64) -> f64 {
+/// `∫ g` over `[a, b]` by five-point Gauss-Legendre on panels at most two
+/// of `1 / rate` long (`rate` the fastest exponential in `g`), at most 64
+/// (W2b piece 4): a panel's error is at most `4e-13 (rate h)^10` of `g`'s
+/// largest value times `h`, so `4e-10` of it at two time constants.
+fn gauss_legendre(a: f64, b: f64, rate: f64, g: impl Fn(f64) -> f64) -> f64 {
     const X: [f64; 5] = [0.0, -0.538_469_310_105_683_1, 0.538_469_310_105_683_1, -0.906_179_845_938_664, 0.906_179_845_938_664];
     const W: [f64; 5] = [0.568_888_888_888_888_9, 0.478_628_670_499_366_5, 0.478_628_670_499_366_5, 0.236_926_885_056_189_1, 0.236_926_885_056_189_1];
-    let (m, h) = (0.5 * (a + b), 0.5 * (b - a));
-    X.iter().zip(W).map(|(&x, w)| w * g(m + h * x)).sum::<f64>() * h
+    let panels = (rate.abs() * (b - a) / 2.0).ceil().clamp(1.0, 64.0) as usize;
+    let h = (b - a) / panels as f64;
+    (0..panels)
+        .map(|k| {
+            let (lo, hi) = (a + k as f64 * h, if k + 1 == panels { b } else { a + (k + 1) as f64 * h });
+            let (m, r) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+            X.iter().zip(W).map(|(&x, w)| w * g(m + r * x)).sum::<f64>() * r
+        })
+        .sum()
 }
 
 fn vc_of(part: &Partition, t: f64) -> f64 {

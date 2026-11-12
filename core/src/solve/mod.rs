@@ -5009,16 +5009,23 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn observe(&mut self, t: f64, inclusive: bool, now: f64) {
+        if self.observer.is_none() && self.charge.is_none() {
+            return;
+        }
+        self.log_rail(now, inclusive);
+        // The rail notes the observer and the charge still read.
+        let mut keep = f64::INFINITY;
         if self.charge.is_some() {
             self.charge_observe(t, now);
+            keep = keep.min(self.charge_rail_from(now));
         }
         if let Some(mut obs) = self.observer.take() {
-            self.log_rail(now, inclusive);
             obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
             self.stepped.prune_dense(obs.next_time());
-            self.prune_rail_log(obs.next_time());
+            keep = keep.min(obs.next_time());
             self.observer = Some(obs);
         }
+        self.prune_rail_log(keep);
     }
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {

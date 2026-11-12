@@ -100,8 +100,9 @@ pub(crate) struct SourceTerms {
     caps: Vec<u32>,
     junctions: Vec<u32>,
     ics: Vec<u32>,
-    /// `∫ leaving` by node, outside and inside a CC stretch of the hub PSU.
-    lq: [Vec<f64>; 2],
+    /// `∫ leaving` by node, outside and inside a CC stretch of the hub PSU,
+    /// and a scratch for a held-rail interval's own (`charge_fold_interval`).
+    lq: [Vec<f64>; 3],
     /// The CC stretch's own charge, `-dir iLimit` times its length.
     cc_q: f64,
     cc_device: Option<usize>,
@@ -133,6 +134,21 @@ pub(crate) struct ChargeState {
     chs: Vec<f64>,
     steps: Vec<ChargeStep>,
     published: Vec<usize>,
+    /// Intervals folded at a held rail, waiting for the rail's next solve.
+    pending: Vec<RailPending>,
+}
+
+/// An interval `[a, b]` folded at the rail `u_held` where nothing models the
+/// rail between its solves, with each slot's and leaving charge's
+/// sensitivity to the rail's mean (per volt; exact, as every term on the
+/// rail's line is affine in it).
+#[derive(Debug, Clone)]
+pub(crate) struct RailPending {
+    a: f64,
+    b: f64,
+    u_held: f64,
+    slots: Vec<(u32, f64)>,
+    lq: Vec<(u8, u32, f64)>,
 }
 
 /// Whether the walk reads a node, or none.
@@ -230,7 +246,7 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new() };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new() };
         if let Some(s) = st.src.as_mut() {
             s.cc_prev = self.cc_hub_current().is_some();
         }
@@ -311,7 +327,7 @@ impl PartitionedSolver {
         let cc_device = self.hub.as_ref().map(|h| h.device).or(self.exact.as_ref().map(|e| e.device));
         own_parts.sort_unstable();
         own_parts.dedup();
-        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, parts: own_parts, cc_prev: false })
+        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, parts: own_parts, cc_prev: false })
     }
 
     /// A held class's current and channels on the present voltages, if it
@@ -492,6 +508,7 @@ impl PartitionedSolver {
         debug_assert!(!self.window, "the charge folds between instants");
         self.charge_fold_steps(&mut st);
         self.charge_fold_held(&mut st, now);
+        self.charge_resolve_rail(&mut st);
         if t > st.cursor {
             let a = st.cursor;
             self.charge_fold_interval(&mut st, a, t);
@@ -501,6 +518,12 @@ impl PartitionedSolver {
             s.cc_prev = self.cc_hub_current().is_some();
         }
         self.charge = Some(st);
+    }
+
+    /// The earliest time the charge still reads the rail's notes at: its
+    /// oldest interval waiting on the rail, else `now`.
+    pub(crate) fn charge_rail_from(&self, now: f64) -> f64 {
+        self.charge.as_ref().map_or(now, |st| st.pending.iter().fold(now, |m, p| m.min(p.a)))
     }
 
     /// Refolds each held class whose published value moved, at `now`.
@@ -546,14 +569,88 @@ impl PartitionedSolver {
     }
 
     /// The interval `[a, b]` between instants, on the state the last one
-    /// left: the closed forms at their means, the ramped lines at theirs,
-    /// the fixed-pair capacitors on their exponentials, and the source terms
-    /// outside stepped partitions.
+    /// left: the closed forms at their means, the lines (ramped, or on the
+    /// hub rail) at theirs, the fixed-pair capacitors on their exponentials,
+    /// and the source terms outside stepped partitions. Where the rail moves
+    /// with nothing to model it (ruling (a): linear between its solves), the
+    /// interval is folded at the rail as last solved and its sensitivity to
+    /// the rail kept until the next solve gives the rail's mean there
+    /// (`charge_resolve_rail`).
     fn charge_fold_interval(&mut self, st: &mut ChargeState, a: f64, b: f64) {
         let any = st.devs.iter().any(|d| matches!(d.class, ChargeClass::Mean(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))) || st.src.is_some();
         if !any {
             return;
         }
+        let mut q = std::mem::take(&mut st.q);
+        let unmodelled = self.rail_unmodelled() && !st.line_nodes.is_empty();
+        if !unmodelled {
+            self.charge_interval_pass(st, a, b, 0.0, &mut q, None);
+            st.q = q;
+            return;
+        }
+        // Twice: at the rail as solved and a volt above it, each into its own
+        // sums; the first is added now, their difference waits for the rail.
+        let n = q.len();
+        let (mut q0, mut q1) = (vec![0.0; n], vec![0.0; n]);
+        let u_held = self.rail_mean(a, b).unwrap_or(0.0);
+        let bucket = self.charge_interval_pass(st, a, b, 0.0, &mut q0, Some(2));
+        let lq0 = st.src.as_mut().map(|s| {
+            let n = s.lq[0].len();
+            std::mem::replace(&mut s.lq[2], vec![0.0; n])
+        });
+        self.charge_interval_pass(st, a, b, 1.0, &mut q1, Some(2));
+        let mut pending = RailPending { a, b, u_held, slots: Vec::new(), lq: Vec::new() };
+        for k in 0..n {
+            q[k] += q0[k];
+            if q1[k] != q0[k] {
+                pending.slots.push((k as u32, q1[k] - q0[k]));
+            }
+        }
+        if let (Some(src), Some(lq0), Some(bucket)) = (st.src.as_mut(), lq0, bucket) {
+            let lq1 = std::mem::take(&mut src.lq[2]);
+            for (node, (&x0, &x1)) in lq0.iter().zip(&lq1).enumerate() {
+                src.lq[bucket][node] += x0;
+                if x1 != x0 {
+                    pending.lq.push((bucket as u8, node as u32, x1 - x0));
+                }
+            }
+            src.lq[2] = vec![0.0; lq1.len()];
+        }
+        st.q = q;
+        st.pending.push(pending);
+    }
+
+    /// Applies each held-rail interval's correction once the rail's solves
+    /// bracket it: the rail's mean there, linear between them, against the
+    /// rail it was folded at.
+    fn charge_resolve_rail(&self, st: &mut ChargeState) {
+        if st.pending.is_empty() {
+            return;
+        }
+        let mut keep = Vec::new();
+        for p in std::mem::take(&mut st.pending) {
+            match (self.rail_at(p.a), self.rail_at(p.b)) {
+                (Some((ua, _)), Some((ub, _))) => {
+                    let du = 0.5 * (ua + ub) - p.u_held;
+                    for &(k, d) in &p.slots {
+                        st.q[k as usize] += d * du;
+                    }
+                    if let Some(src) = st.src.as_mut() {
+                        for &(bucket, node, d) in &p.lq {
+                            src.lq[bucket as usize][node as usize] += d * du;
+                        }
+                    }
+                }
+                _ => keep.push(p),
+            }
+        }
+        st.pending = keep;
+    }
+
+    /// One pass over `[a, b]` with the hub rail and its lines `shift` volts
+    /// above their means, into `q` and the source terms' bucket (`lq`: the
+    /// CC regime's, or the one given); returns the regime's bucket.
+    fn charge_interval_pass(&mut self, st: &mut ChargeState, a: f64, b: f64, shift: f64, q: &mut [f64], lq: Option<usize>) -> Option<usize> {
         let dt = b - a;
         let mid = 0.5 * (a + b);
         let drivers = Rc::clone(&self.driver_snapshot);
@@ -572,6 +669,7 @@ impl PartitionedSolver {
         // on their lines in it.
         if self.rail_moving() {
             if let Some(u) = self.rail_mean(a, b) {
+                let u = u + shift;
                 for &n in &st.line_nodes {
                     if rail == Some(n) {
                         Self::charge_put(&mut saved, &mut v, n, u);
@@ -607,34 +705,36 @@ impl PartitionedSolver {
             let dev = &st.devs[k];
             let i = match dev.class {
                 ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
+                ChargeClass::FixedCap(j) => sc[self.fixed_pair_capacitors[j as usize].device_index],
                 ChargeClass::Mean(None) => {
                     chs.clear();
                     chs.resize(dev.nch, 0.0);
                     let i = self.charge_current_on(dev, &v, &sc, &drivers, &mut chs);
                     for (c, &value) in chs.iter().enumerate() {
-                        st.q[dev.slot + 1 + c] += value * dt;
+                        q[dev.slot + 1 + c] += value * dt;
                     }
                     i
                 }
-                ChargeClass::FixedCap(j) => sc[self.fixed_pair_capacitors[j as usize].device_index],
                 ChargeClass::Part(p) if published.contains(&(p as usize)) => {
                     chs.clear();
                     chs.resize(dev.nch, 0.0);
                     let i = self.charge_current_on(dev, &v, &sc, &drivers, &mut chs);
                     for (c, &value) in chs.iter().enumerate() {
-                        st.q[dev.slot + 1 + c] += value * dt;
+                        q[dev.slot + 1 + c] += value * dt;
                     }
                     i
                 }
                 _ => continue,
             };
-            st.q[dev.slot] += i * dt;
+            q[dev.slot] += i * dt;
         }
         st.chs = chs;
+        let mut regime = None;
         if let Some(mut src) = st.src.take() {
             let cc = self.cc_hub_current();
             let bucket = usize::from(cc.is_some());
-            if let Some((_, i)) = cc {
+            regime = Some(bucket);
+            if let (Some((_, i)), 0.0) = (cc, shift) {
                 src.cc_q += i * dt;
             }
             // Static partitions and fixed nodes, and the closed forms that
@@ -642,7 +742,7 @@ impl PartitionedSolver {
             let kinds = &self.partition_kinds;
             let here = |o: Option<usize>| o.is_none_or(|p| kinds[p] == PartitionKind::Static || published.contains(&p));
             let cap_i = |d: usize| sc[d];
-            self.charge_leaving(&mut src, bucket, &v, &cap_i, &here, mid, dt, &drivers);
+            self.charge_leaving(&mut src, lq.unwrap_or(bucket), &v, &cap_i, &here, mid, dt, &drivers);
             st.src = Some(src);
         }
         st.published = published;
@@ -650,6 +750,7 @@ impl PartitionedSolver {
         self.voltages = v;
         st.saved = saved;
         st.sc = sc;
+        regime
     }
 
     /// The steps the stepped partitions committed since the last fold, each
@@ -686,7 +787,7 @@ impl PartitionedSolver {
                 if wk == 0.0 {
                     continue;
                 }
-                let (t, x, i) = if k == 0 { (step.t0, &step.x0, &step.i0) } else { (step.knots[k - 1].t, &step.knots[k - 1].x, &step.knots[k - 1].i) };
+                let (x, i) = if k == 0 { (&step.x0, &step.i0) } else { (&step.knots[k - 1].x, &step.knots[k - 1].i) };
                 for (r, &n) in reads.iter().enumerate() {
                     Self::charge_put(&mut saved, &mut v, n, step.vals[k * reads.len() + r]);
                 }
@@ -713,7 +814,9 @@ impl PartitionedSolver {
                 if let Some(s) = src.as_mut() {
                     let own = |o: Option<usize>| o == Some(p);
                     let cap_i = |d: usize| sc[d];
-                    self.charge_leaving(s, bucket, &v, &cap_i, &own, t, wk, &drivers);
+                    // A floating pull at the step's start: the step stamped
+                    // it there (a bucket edge is an instant, which cuts it).
+                    self.charge_leaving(s, bucket, &v, &cap_i, &own, step.t0, wk, &drivers);
                 }
                 Self::charge_restore(&mut saved, &mut v);
             }
@@ -734,6 +837,7 @@ impl PartitionedSolver {
         let Some(mut st) = self.charge.take() else { return false };
         self.charge_fold_steps(&mut st);
         self.charge_fold_held(&mut st, now);
+        self.charge_resolve_rail(&mut st);
         let t1 = st.cursor.max(now);
         Self::charge_close_held(&mut st, t1);
         if let Some(src) = st.src.as_mut() {
@@ -771,10 +875,16 @@ impl PartitionedSolver {
         out.clear();
         out.extend([st.t0, t1]);
         out.extend_from_slice(&st.q);
-        out.extend(st.devs.iter().map(|d| match d.class {
-            ChargeClass::Part(p) => stepped_final(p as usize),
-            ChargeClass::Source => src_final,
-            _ => t1,
+        // An interval still folded at a held rail is final only to its start.
+        let held_from = |slots: std::ops::Range<usize>| st.pending.iter().filter(|p| p.slots.iter().any(|&(k, _)| slots.contains(&(k as usize)))).fold(t1, |m, p| m.min(p.a));
+        let src_held = st.pending.iter().filter(|p| !p.lq.is_empty()).fold(t1, |m, p| m.min(p.a));
+        out.extend(st.devs.iter().map(|d| {
+            let f = match d.class {
+                ChargeClass::Part(p) => stepped_final(p as usize),
+                ChargeClass::Source => src_final.min(src_held),
+                _ => t1,
+            };
+            f.min(held_from(d.slot..d.slot + 1 + d.nch))
         }));
         st.q.iter_mut().for_each(|x| *x = 0.0);
         st.t0 = t1;
@@ -855,6 +965,20 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.chs, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.steps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.published, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for RailPending {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.a, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.b, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_held, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slots, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.lq, w); }
         n
     }
 }

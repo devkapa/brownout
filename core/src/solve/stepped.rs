@@ -187,6 +187,8 @@ struct TrBdf2Stage {
     /// The BDF2 stage as a backward Euler solve: its length and history.
     h_2: f64,
     vh: Vec<f64>,
+    /// On a CC rail, the rail the stage solved at its end (W2b's charge).
+    u_g: Option<f64>,
 }
 
 /// W2b: a point of a committed step: its time, nodes, capacitor voltages and
@@ -202,6 +204,9 @@ pub(crate) struct Knot {
     hermite: bool,
     /// The end of a TR-BDF2 step's trapezoidal stage.
     stage: bool,
+    /// On a CC rail, the rail solved with this point (W2b's charge reads the
+    /// step's devices against it).
+    u: Option<f64>,
 }
 
 /// W2b piece 4: one committed step of a partition whose devices' charge is
@@ -268,6 +273,9 @@ impl ChargeStep {
 pub(crate) struct PendDense {
     knots: Vec<Knot>,
     solved: Vec<(f64, Option<Vec<f64>>)>,
+    /// On a CC rail, the rail the trial starts from: its capacitors' charge,
+    /// or with none the rail as last solved.
+    u0: Option<f64>,
 }
 
 impl PendDense {
@@ -745,7 +753,7 @@ fn take_step(
         let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
         let h_2 = h * (1.0 - g) / (2.0 - g);
         let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
-        b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh }));
+        b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
         return Ok(b);
     }
     solve_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, false)
@@ -2262,7 +2270,7 @@ impl SteppedSolver {
         let (mut knots, solved) = if pend { (part.pend_dense.knots.clone(), part.pend_dense.solved.clone()) } else { (Vec::new(), Vec::new()) };
         if pend && knots.is_empty() {
             // Planned before the observer read it: its ends only.
-            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false });
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None });
         }
         // A linear partition with one capacitor: every node an affine map of
         // its voltage when nothing it reads moves within the step (R104:
@@ -2280,20 +2288,24 @@ impl SteppedSolver {
     fn charge_step(&self, p: usize, voltages: &[f64]) -> ChargeStep {
         let part = &self.partitions[&p];
         let mut knots = part.pend_dense.knots.clone();
+        let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
         if ends_only {
-            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false });
+            knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None });
         }
         let reads = self.charge_reads(p);
+        // On a CC rail each point at the rail it was solved with (the end's
+        // where a point did not report one).
         let rail = match (part.hub, self.rail, part.pend_cc) {
-            (true, Some(r), Some(_)) => Some((r, part.pend_u)),
+            (true, Some(r), Some(_)) => Some(r),
             _ => None,
         };
         let mut vals = Vec::with_capacity(reads.len() * (knots.len() + 1));
-        for t in std::iter::once(part.t).chain(knots.iter().map(|k| k.t)) {
+        let points = std::iter::once((part.t, u0)).chain(knots.iter().map(|k| (k.t, k.u)));
+        for (t, u) in points {
             let bnd = Bnd::new(voltages).at_time(self.ramps.as_deref(), t);
             vals.extend(reads.iter().map(|&n| match rail {
-                Some((r, u)) if r == n => u,
+                Some(r) if r == n => u.unwrap_or(part.pend_u),
                 _ => bnd.get(n),
             }));
         }
@@ -4144,10 +4156,10 @@ impl SteppedSolver {
                         let k = 1.0 / (g * (2.0 - g));
                         let m = (1.0 - g) * (1.0 - g) * k;
                         let vc_g = st.vh.iter().zip(vc_s).map(|(vh, v0)| (vh + m * v0) / k).collect();
-                        knots.push(Knot { t: t_s + st.h_g, x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), hermite: true, stage: true });
-                        knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: true, stage: false });
+                        knots.push(Knot { t: t_s + st.h_g, x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), hermite: true, stage: true, u: st.u_g });
+                        knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: true, stage: false, u: end.u });
                     }
-                    None => knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: method == Method::Trap, stage: false }),
+                    None => knots.push(Knot { t: t_e, x: end.x.clone(), vc: end.vc.clone(), i: end.i.clone(), hermite: method == Method::Trap, stage: false, u: end.u }),
                 }
             };
             let mut knots = Vec::new();
@@ -4184,7 +4196,8 @@ impl SteppedSolver {
                     solved.push((ts, x));
                 }
             }
-            part.pend_dense = PendDense { knots, solved };
+            let u0 = ic_ctx.cc.map(|c| c.cap.map_or(c.u0, |cap| cap.q));
+            part.pend_dense = PendDense { knots, solved, u0 };
         }
         #[cfg(test)]
         {
@@ -5284,6 +5297,7 @@ impl crate::snapshot::HeapBytes for TrBdf2Stage {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_g, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.h_2, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vh, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_g, w); }
         n
     }
 }
@@ -5298,6 +5312,7 @@ impl crate::snapshot::HeapBytes for Knot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hermite, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stage, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         n
     }
 }
@@ -5323,6 +5338,7 @@ impl crate::snapshot::HeapBytes for PendDense {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         n
     }
 }

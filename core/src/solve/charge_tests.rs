@@ -444,3 +444,94 @@ fn a_live_edit_refolds_the_held_currents_at_its_instant() {
         close(&format!("device {d}"), c[slot], hand, 1e-12 * hand.abs());
     }
 }
+
+// ---- piece 6: the approximations, against fine references (W0) -------------
+
+/// Each device's charge over `steps` and over host steps of `dt` to the
+/// same end, and the worst gap as a share of W0 for a current (1 nA plus
+/// 1e-3 of its mean) over the run.
+fn against_fine_charge(name: &str, p: &Program, devices: &[u32], steps: &[f64], dt: f64) -> f64 {
+    let (_, q) = charge(p, devices, steps);
+    let t = *steps.last().unwrap();
+    let n = (t / dt).round() as usize;
+    let fine: Vec<f64> = (1..=n).map(|k| if k == n { t } else { k as f64 * dt }).collect();
+    let (_, qf) = charge(p, devices, &fine);
+    let mut worst = 0.0f64;
+    for k in 0..q.len() {
+        let w0 = (1e-9 + 1e-3 * (qf[k] / t).abs()) * t;
+        let share = (q[k] - qf[k]).abs() / w0;
+        eprintln!("{name}: slot {k}: {:e} against the fine {:e}: {share:.3e} W0", q[k], qf[k]);
+        worst = worst.max(share);
+    }
+    worst
+}
+
+#[test]
+fn an_unmodelled_moving_rail_folded_held_stays_within_w0() {
+    // Ruling (a)'s rail: a cell whose loads step, moving between its solves
+    // with nothing to model it; the charge holds it at its last solve.
+    let p = stepped(cell_rail(), false);
+    let w = against_fine_charge("cell rail, stepped", &p, &[0, 1, 2, 3, 4], &STEPS, 0.5e-6);
+    assert!(w <= 1.0, "within W0: {w}");
+    // The fold alone, in the same run: the static divider's lower resistor
+    // (node 3 to ground, on the rail's line) against the trapezoid of its
+    // node's samples every 1 us, which the observer reads linear between
+    // the rail's solves.
+    for t in [5e-3, 1.0 / 60.0] {
+        let mut e = Engine::load(&p).unwrap();
+        e.acquire(&[3], 0.0, 1e-6, 0).unwrap();
+        e.charge_arm(&[4]).unwrap();
+        e.advance(t).unwrap();
+        let b = e.acquire_take().to_vec();
+        let n = b[0] as usize;
+        let v = &b[crate::observe::TAKE_HEADER + 1 + n..];
+        let tl = (n - 1) as f64 * 1e-6;
+        let linear: f64 = (1..n).map(|k| 0.5 * (v[k - 1] + v[k]) * 1e-6).sum::<f64>() / 1000.0 + v[n - 1] * (t - tl) / 1000.0;
+        let held = e.take_charge()[2];
+        let share = (held - linear).abs() / ((1e-9 + 1e-3 * (linear / t).abs()) * t);
+        eprintln!("held rail against linear to {t}: {held:e} against {linear:e}: {share:.3e} W0");
+        assert!(share <= 1e-6, "the fold follows the rail linear between its solves: {share} W0");
+    }
+}
+
+/// `cc_rail` without its rail capacitor and limited to 5 mA, stepped: in CC
+/// the rail is set by the stepped hub partition's draws alone, solved with
+/// each step, until the 10 uF charges and the PSU leaves CC.
+fn cc_rail_no_cap() -> Program {
+    let mut p = cc_rail();
+    p.devices.remove(1);
+    p.devices[0].params[1] = 0.005;
+    p.options.force_stepped = true;
+    p
+}
+
+#[test]
+fn a_stepped_hub_on_a_cc_rail_with_no_capacitor_read_at_its_step_end_rail_stays_within_w0() {
+    // 0 the PSU, 1 1k 1-2, 2 1k 2-0, 3 1k 1-3, 4 10 uF 3-0.
+    let p = cc_rail_no_cap();
+    let steps = [0.37e-3, 1e-3, 2e-3, 5e-3, 20e-3];
+    let w = against_fine_charge("cc rail, no capacitor, stepped", &p, &[0, 1, 2, 3, 4], &steps, 0.5e-6);
+    assert!(w <= 1.0, "within W0: {w}");
+}
+
+#[test]
+#[ignore = "open item (W2b piece 6): a static line on a CC rail with no capacitor is folded linear between the rail's solves, where the stepped draws take their steps' backward Euler points; 1.29 W0 at 20 ms"]
+fn a_psus_cc_charge_matches_the_kcl_of_its_rail_with_no_capacitor() {
+    // The PSU's charge (its own -dir iLimit while in CC) against the KCL of
+    // what leaves its rail: each within W0 of the fine reference above, but
+    // the PSU's exact iLimit and its neighbours' sum part by more.
+    let p = cc_rail_no_cap();
+    let (_, q) = charge(&p, &[0, 1, 3], &[0.37e-3, 1e-3, 2e-3, 5e-3, 20e-3]);
+    let t = 20e-3;
+    let kcl = q[1] + q[2];
+    let share = (q[0].abs() - kcl - G * 5.0 * t).abs() / ((1e-9 + 1e-3 * (kcl / t).abs()) * t);
+    assert!(share <= 1.0, "within W0: {share}");
+}
+
+#[test]
+fn a_closed_form_on_a_draining_cell_charges_within_w0() {
+    // The cell's coupled path: the closed form's held and curved terms are
+    // integrated by Gauss-Legendre.
+    let w = against_fine_charge("cell rail", &cell_rail(), &[0, 1, 2, 3, 4], &STEPS, 0.5e-6);
+    assert!(w <= 1.0, "within W0: {w}");
+}
