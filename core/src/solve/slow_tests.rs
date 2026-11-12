@@ -1446,7 +1446,9 @@ fn stats_21_to_24_move() {
     assert_eq!(r.stat(23), 1.0, "one latch");
     // Stat 27 (INT-ACC, R81 (1)): trapezoid fallbacks, none here.
     assert_eq!(e.stat(27), 0.0, "no fallback");
-    assert!(e.stat(28).is_nan(), "past the table");
+    // Stat 28 (W2b): approximate charge closures, none with nothing armed.
+    assert_eq!(e.stat(28), 0.0, "no charge");
+    assert!(e.stat(29).is_nan(), "past the table");
 }
 
 // ---- rollback ------------------------------------------------------------------

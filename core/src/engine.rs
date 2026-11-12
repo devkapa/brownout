@@ -67,7 +67,7 @@ pub const STAT_MULTI_CAPACITOR_LINEAR_PARTITIONS: u32 = 15;
 /// plan row B2's "W1b reports the count of multi-capacitor linear
 /// partitions in the corpus". The `bo_engine_stat` export list itself is
 /// unaffected either way (it already accepts any `u32` index).
-const STAT_COUNT: usize = 28;
+const STAT_COUNT: usize = 29;
 
 /// The placeholder evaluator every `Engine::load` installs a `Kernel` with
 /// FIRST, before any `Driver` exists — `devices::ics::register` needs a live
@@ -333,6 +333,8 @@ impl Engine {
             25..=26 => self.kernel.solver().hold_stats()[i as usize - 25],
             // INT-ACC (R81): trapezoidal partitions fallen back to backward Euler.
             27 => self.kernel.solver().trap_fallbacks(),
+            // W2b: charge intervals whose source KCL closes only approximately.
+            28 => self.kernel.solver().charge_kcl_approximate(),
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }
@@ -811,7 +813,9 @@ impl Engine {
 
     /// `bo_engine_take_charge` (W2b piece 4): `[t0, t1, then per armed
     /// device its charge and its channel slots' in channel order, then per
-    /// armed device the time its charge is final to]` over the span `[t0,
+    /// armed device the time its charge is final to, then per armed device
+    /// `1` where its charge's KCL closed only approximately in the span (a
+    /// source on a CC rail several stepped hub partitions carry), else `0`]` over the span `[t0,
     /// t1]` since the last take (or the arming), and the sums cleared; `[t,
     /// t]` at the engine's time when nothing is armed. A final time is `t1`
     /// after `advance`; after a yield (`advance_for`), a device a stepped

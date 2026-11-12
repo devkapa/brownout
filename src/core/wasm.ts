@@ -273,7 +273,7 @@ export interface CoreExports {
    * presence (ruling R100 (a)).
    */
   bo_engine_charge_arm?(h: number, devicesPtr: number, n: number): number;
-  /** Take the charge, `[t0, t1, then per device its charge and its channels' in channel order, then per device the time its charge is final to]`, the sums cleared; the length in f64, or `-5`. */
+  /** Take the charge, `[t0, t1, then per device its charge and its channels' in channel order, then per device the time its charge is final to, then per device 1 where its KCL closed only approximately]`, the sums cleared; the length in f64, or `-5`. */
   bo_engine_take_charge?(h: number): number;
   /** The buffer from the last {@link CoreExports.bo_engine_take_charge}, valid until the next call on this engine. */
   bo_engine_charge_ptr?(h: number): number;

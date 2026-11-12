@@ -112,6 +112,12 @@ pub(crate) struct SourceTerms {
     cc_device: Option<usize>,
     /// The dynamic partitions its terms sit in.
     parts: Vec<usize>,
+    /// Per armed source, whether the hub rail is in its walk; and whether an
+    /// interval since the last take closed such a source's KCL only
+    /// approximately (several stepped hub partitions on a CC rail with no
+    /// capacitor: `charge_rail_carrier`).
+    on_rail: Vec<usize>,
+    approximate: bool,
     /// Whether the hub PSU was in CC when the last fold left it: the steps
     /// committed since then were taken in that regime.
     cc_prev: bool,
@@ -467,7 +473,24 @@ impl PartitionedSolver {
         let cc_device = self.hub.as_ref().map(|h| h.device).or(self.exact.as_ref().map(|e| e.device));
         own_parts.sort_unstable();
         own_parts.dedup();
-        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, parts: own_parts, cc_prev: false })
+        // The armed sources whose walk reads the hub rail.
+        let on_rail = match self.hub.as_ref().map(|h| h.node) {
+            Some(rail) => armed
+                .iter()
+                .filter(|a| {
+                    let mut mine = vec![false; n];
+                    for r in self.resolved.iter() {
+                        if r.device_index == a.device_index || (r.parent_node != 0 && mine[r.parent_node]) {
+                            mine[r.child_node] = true;
+                        }
+                    }
+                    mine[rail]
+                })
+                .map(|a| a.device_index)
+                .collect(),
+            None => Vec::new(),
+        };
+        Some(SourceTerms { rel, rel_nodes, kcl, caps, junctions, ics, lq: [vec![0.0; n], vec![0.0; n], vec![0.0; n]], cc_q: 0.0, cc_device, parts: own_parts, on_rail, approximate: false, cc_prev: false })
     }
 
     /// A held class's current and channels on the present voltages, if it
@@ -999,6 +1022,13 @@ impl PartitionedSolver {
             if let (Some((_, i)), 0.0) = (cc, shift) {
                 src.cc_q += i * dt;
             }
+            // Several stepped hub partitions carry a CC rail with no
+            // capacitor: no one rail trajectory closes the KCL (README,
+            // "Charge"); said in the take and counted (stat 28).
+            if shift == 0.0 && cc.is_some() && st.carrier.is_none() && self.rail_unmodelled() && !src.on_rail.is_empty() {
+                src.approximate = true;
+                self.charge_kcl_approx += 1;
+            }
             // Static partitions and fixed nodes, and the closed forms that
             // published (a stepped partition's terms come with its steps).
             let kinds = &self.partition_kinds;
@@ -1174,6 +1204,13 @@ impl PartitionedSolver {
             };
             f.min(held_from(d.slot..d.slot + 1 + d.nch))
         }));
+        // `kcl_approximate`: a source whose walk reads the rail, in a span
+        // where an interval closed it only approximately.
+        let approximate = st.src.as_ref().filter(|s| s.approximate);
+        out.extend(st.devs.iter().map(|d| f64::from(u8::from(matches!(d.class, ChargeClass::Source) && approximate.is_some_and(|s| s.on_rail.contains(&d.device))))));
+        if let Some(s) = st.src.as_mut() {
+            s.approximate = false;
+        }
         st.q.iter_mut().for_each(|x| *x = 0.0);
         st.t0 = t1;
         st.cursor = t1;
@@ -1233,6 +1270,8 @@ impl crate::snapshot::HeapBytes for SourceTerms {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_device, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.parts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.on_rail, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.approximate, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_prev, w); }
         n
     }

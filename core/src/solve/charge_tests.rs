@@ -25,12 +25,12 @@ fn charge(p: &Program, devices: &[u32], steps: &[f64]) -> (Engine, Vec<f64>) {
         let b = e.take_charge().to_vec();
         assert_eq!((b[0], b[1]), (t_prev, s), "each take covers the span since the last");
         t_prev = s;
-        let slots = b.len() - 2 - devices.len();
+        let slots = b.len() - 2 - 2 * devices.len();
         if q.is_empty() {
             q = vec![0.0; slots];
         }
         assert_eq!(slots, q.len(), "one slot per device and channel");
-        assert!(b[2 + slots..].iter().all(|&f| f == s), "after advance every charge is final to t1: {:?}", &b[2 + slots..]);
+        assert!(b[2 + slots..2 + slots + devices.len()].iter().all(|&f| f == s), "after advance every charge is final to t1: {:?}", &b[2 + slots..]);
         for (k, &x) in b[2..2 + slots].iter().enumerate() {
             q[k] += x;
         }
@@ -248,11 +248,11 @@ fn arming_takes_and_disarming_follow_the_engine_time() {
     e.charge_arm(&[2]).unwrap();
     e.advance(2e-3).unwrap();
     let b = e.take_charge().to_vec();
-    assert_eq!((b[0], b[1], b.len(), b[3]), (1e-3, 2e-3, 4, 2e-3), "armed at 1 ms: the span starts there; final to t1");
+    assert_eq!((b[0], b[1], b.len(), b[3], b[4]), (1e-3, 2e-3, 5, 2e-3, 0.0), "armed at 1 ms: the span starts there; final to t1; KCL not approximate");
     let (vinf, tau) = rc_truth();
     let v = |t: f64| vinf * (1.0 - (-t / tau).exp());
     close("capacitor from the arming", b[2], 1e-6 * (v(2e-3) - v(1e-3)), 1e-11 * 1e-6 * v(1e-3));
-    assert_eq!(e.take_charge(), &[2e-3, 2e-3, 0.0, 2e-3], "taken: cleared, the next span from 2 ms");
+    assert_eq!(e.take_charge(), &[2e-3, 2e-3, 0.0, 2e-3, 0.0], "taken: cleared, the next span from 2 ms");
     e.charge_arm(&[]).unwrap();
     assert_eq!(e.take_charge(), &[2e-3, 2e-3], "disarmed");
 }
@@ -343,7 +343,7 @@ fn a_yielding_run_samples_and_charges_as_one_advance() {
         };
         assert_eq!(samples(&each), samples(&plain), "{name}: the samples");
         let d = p.devices.len();
-        let slots = plain[0].1.len() - 2 - d;
+        let slots = plain[0].1.len() - 2 - 2 * d;
         let total = |t: &[(Vec<f64>, Vec<f64>)]| (0..slots).map(|k| t.iter().map(|(_, c)| c[2 + k]).sum::<f64>()).collect::<Vec<f64>>();
         let (want, got) = (total(&plain), total(&each));
         let scale = want.iter().fold(0.0f64, |m, x| m.max(x.abs()));
@@ -355,7 +355,7 @@ fn a_yielding_run_samples_and_charges_as_one_advance() {
         for (_, c) in &each {
             assert_eq!(c[0], t_prev, "{name}: the spans join");
             t_prev = c[1];
-            for &f in &c[2 + slots..] {
+            for &f in &c[2 + slots..2 + slots + d] {
                 assert!(f <= c[1], "{name}: final {f} past t1 {}", c[1]);
                 partial += usize::from(f < c[1]);
             }
@@ -578,5 +578,25 @@ fn two_stepped_hubs_on_a_cc_rail_with_no_capacitor_fold_its_lines_linear_between
     // This guards the measurement; one rail trajectory would need the steps
     // solved together.
     assert!(gap <= 2.0, "the PSU's KCL within the coupling's gap: {gap} W0");
+    // Said loudly: each take's flag on the PSU's charge, and stat 28.
+    let mut e = Engine::load(&p).unwrap();
+    e.charge_arm(&all).unwrap();
+    let mut flagged = 0;
+    for &s in &steps {
+        e.advance(s).unwrap();
+        let b = e.take_charge().to_vec();
+        let flags = &b[b.len() - all.len()..];
+        assert!(flags[1..].iter().all(|&f| f == 0.0), "only a source is flagged: {flags:?}");
+        flagged += usize::from(flags[0] == 1.0);
+    }
+    assert!(flagged > 0, "the PSU's charge says its KCL is approximate");
+    assert!(e.stat(28) > 0.0, "stat 28 counts the intervals: {}", e.stat(28));
+    // One stepped hub carries the rail: nothing approximate.
+    let mut one = Engine::load(&cc_rail_no_cap()).unwrap();
+    one.charge_arm(&[0, 1, 3]).unwrap();
+    one.advance(20e-3).unwrap();
+    let b = one.take_charge().to_vec();
+    assert_eq!(b[b.len() - 3..], [0.0, 0.0, 0.0], "one stepped hub: exact KCL");
+    assert_eq!(one.stat(28), 0.0);
     assert!((q[0] - qf[0]).abs() <= w0(qf[0]), "the PSU's CC charge");
 }

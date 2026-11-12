@@ -85,6 +85,7 @@ describe("CoreEngine.armCharge / takeCharge", () => {
     // The source by KCL: the resistor's and the shunt's, with its sign.
     expect(Math.abs(Math.abs(c.charge.vs!) - (hand + 1e-12 * 5 * 2e-3))).toBeLessThanOrEqual(1e-12 * hand);
     expect(c.finalUpTo).toEqual({ c1: 2e-3, r1: 2e-3, vs: 2e-3 });
+    expect(c.kclApproximate).toEqual({ c1: false, r1: false, vs: false });
     expect(c.channelCharge).toEqual({});
     const next = engine.takeCharge()!;
     expect([next.t0, next.t1, next.charge.c1]).toEqual([2e-3, 2e-3, 0]);

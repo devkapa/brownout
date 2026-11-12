@@ -1481,16 +1481,19 @@ export class CoreEngine implements EngineReadout {
     const charge: Record<string, number> = {};
     const channelCharge: Record<string, number[]> = {};
     const finalUpTo: Record<string, number> = {};
+    const kclApproximate: Record<string, boolean> = {};
     let slot = 2;
-    const slots = raw.length - 2 - armed.ids.length;
+    const devices = armed.ids.length;
+    const slots = raw.length - 2 - 2 * devices;
     armed.ids.forEach((id, k) => {
       const n = armed.channels[k]!;
       charge[id] = raw[slot]!;
       if (n > 0) channelCharge[id] = Array.from(raw.subarray(slot + 1, slot + 1 + n));
       slot += 1 + n;
       finalUpTo[id] = raw[2 + slots + k]!;
+      kclApproximate[id] = raw[2 + slots + devices + k] === 1;
     });
-    return { t0: raw[0]!, t1: raw[1]!, charge, channelCharge, finalUpTo };
+    return { t0: raw[0]!, t1: raw[1]!, charge, channelCharge, finalUpTo, kclApproximate };
   }
 
   /**
@@ -1719,6 +1722,8 @@ export interface CoreCharge {
   readonly channelCharge: Readonly<Record<string, number[]>>;
   /** Component id -> how far its charge is final (`t1` unless a yield left its stepped partition's step pending). */
   readonly finalUpTo: Readonly<Record<string, number>>;
+  /** Component id -> whether its KCL closed only approximately in the span: a source on a CC rail with no capacitor that several stepped hub partitions carry (core/README.md, "Charge"; stat 28). */
+  readonly kclApproximate: Readonly<Record<string, boolean>>;
 }
 
 /** The index of each id, refusing an unknown or repeated one. */

@@ -864,7 +864,7 @@ export lands in its list in the same change that adds it.
 | `bo_engine_acquire_take` | `(h) -> i32` | Take every final sample, `[count, maxSpan, overflowed, dropped, fallbacks x n, t x count, node-major values]`; the length in f64 (`4` disarmed), `-5` for an unusable handle. Optional. | v2 (W2b) |
 | `bo_engine_acquire_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2b) |
 | `bo_engine_charge_arm` | `(h, devices: *const f64, n: u32) -> i32` | Arm the charge on `n` device indices from the engine's time ("Charge" below); `n` 0 disarms. `-8` for a bad device, `-5` for an unusable handle. Optional. | v2 (W2b) |
-| `bo_engine_take_charge` | `(h) -> i32` | Take the charge, `[t0, t1, per device its charge then its channels', per device its final time]`, the sums cleared; the length in f64 (`2` disarmed), `-5` for an unusable handle. Optional. | v2 (W2b) |
+| `bo_engine_take_charge` | `(h) -> i32` | Take the charge, `[t0, t1, per device its charge then its channels', per device its final time, per device its KCL flag]`, the sums cleared; the length in f64 (`2` disarmed), `-5` for an unusable handle. Optional. | v2 (W2b) |
 | `bo_engine_charge_ptr` | `(h) -> *const f64` | The buffer from the last take, valid until the next call on that engine. Optional. | v2 (W2b) |
 
 **`NO_RAIL_SHORTCUT` is load-time only from W1f** (W1f Q10). It was live
@@ -967,7 +967,10 @@ rail sensitivity computations (pec3's `railSens`), `17` rail scans (pec3's
 reader flips found at a rail scan, `21` slow interval closes, `22` slow
 events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
 `26` power holds released, `27` stepped partitions fallen back from the
-trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a).
+trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a),
+`28` the charge's intervals whose source KCL closed only approximately
+(W2b, "Charge": several stepped hub partitions on a CC rail with no
+capacitor).
 Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
@@ -1311,7 +1314,8 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   Unarmed, nothing runs but an `Option` test at each instant; a charged run
   is the uncharged run bit for bit.
 - **Take.** `[t0, t1, then per device its charge and its channel slots' in
-  channel order, then per device the time its charge is final to]`, over
+  channel order, then per device the time its charge is final to, then per
+  device its `kcl_approximate` flag]`, over
   `[t0, t1]` since the last take, the sums cleared. A final time is `t1`
   after `advance` (the horizon clamp commits every partition there). After
   an `advance_for` yield a device a stepped partition publishes is final to
@@ -1374,7 +1378,10 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
   trajectory exists: the lines fold linear between the rail's solves, and
   KCL holds to the steps' coupling error (measured 1.88 W0, where the
   stepped capacitors' own exact charges are 2.1-2.3 W0 from the fine run's;
-  `charge_rail_carrier`).
+  `charge_rail_carrier`). Said loudly: the take flags `kcl_approximate` (`1`)
+  on each armed source whose walk reads the rail, for a span holding such an
+  interval, and stat `28` counts the intervals. Bound: the coupling error of
+  the steps, 1.88 W0 measured; a must-close item.
 
 ## Readouts
 
@@ -6616,6 +6623,14 @@ failures and warnings (W1g)"):
   point 9).
 
 ## Open items (must close before 1.0.0)
+
+- **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
+  partitions on a CC rail with no capacitor each solve the rail against the
+  others' draws held, so no one rail trajectory exists and a source's charge
+  closes its KCL only to the steps' coupling error (measured 1.88 W0 on
+  `two_stepped_hubs_on_a_cc_rail_with_no_capacitor_fold_its_lines_linear_between_its_solves`),
+  flagged `kcl_approximate` in the take and counted in stat 28. Closing it
+  needs the stepped hub partitions on such a rail solved together.
 
 - **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
   A backward Euler stepped partition's step-doubling bounds its node

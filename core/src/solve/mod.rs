@@ -204,6 +204,12 @@ pub trait PartitionSolver {
         0.0
     }
 
+    /// W2b: the charge's intervals whose source KCL closed only
+    /// approximately (stat `28`; core/README.md, "Charge").
+    fn charge_kcl_approximate(&self) -> f64 {
+        0.0
+    }
+
     /// Newton iterations run so far, summed across every stepped step and,
     /// from W1e, every iteration of an iterated static partition, the polish
     /// included (contract stat `11`).
@@ -794,6 +800,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn trap_fallbacks(&self) -> f64 {
         (**self).trap_fallbacks()
+    }
+
+    fn charge_kcl_approximate(&self) -> f64 {
+        (**self).charge_kcl_approximate()
     }
 
     fn newton_iterations(&self) -> f64 {
@@ -2880,8 +2890,10 @@ pub struct PartitionedSolver {
     rail_log: Vec<(f64, f64)>,
     /// The stepped hub commits counted at the last note.
     rail_log_commits: u64,
-    /// W2b piece 4: the armed charge (`charge.rs`).
+    /// W2b piece 4: the armed charge (`charge.rs`), and how many of its
+    /// intervals closed a source's KCL only approximately (stat `28`).
     charge: Option<Box<charge::ChargeState>>,
+    charge_kcl_approx: u64,
     kind_log: Vec<(u32, PartitionKind)>,
     /// The switch's own state (`hub::CcCrawl`), and its value when the
     /// window opened.
@@ -3265,6 +3277,7 @@ impl PartitionedSolver {
             rail_log: Vec::new(),
             rail_log_commits: 0,
             charge: None,
+            charge_kcl_approx: 0,
             kind_log: Vec::new(),
             cc_crawl: hub::CcCrawl::default(),
             w_cc_crawl: hub::CcCrawl::default(),
@@ -4942,6 +4955,10 @@ impl PartitionSolver for PartitionedSolver {
 
     fn trap_fallbacks(&self) -> f64 {
         self.stepped.trap_fallbacks()
+    }
+
+    fn charge_kcl_approximate(&self) -> f64 {
+        self.charge_kcl_approx as f64
     }
 
     fn newton_iterations(&self) -> f64 {
@@ -6894,6 +6911,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log_commits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.charge, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.charge_kcl_approx, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_crawl, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_cc_crawl, w); }
