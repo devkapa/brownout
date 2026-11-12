@@ -1324,10 +1324,22 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   reads, and a device on a rail nothing models until the rail's next solve
   (below). A host divides by the span its device is final over, never
   assumes `t1`.
-- **Cost.** A completed instant marks the held devices its window's logs
-  name (the nodes their readout reads, the currents they publish), and only
+- **Cost** (ruling R107 (a)). The static solver's copy and the boundary
+  writer mark the held devices whose nodes or currents they write, and only
   those refold, so the charge costs what an instant changes, not what is
-  armed (a debug build checks that no unmarked device moved).
+  armed (a debug build checks at every fold that no unmarked device moved);
+  a held LED's last two states are kept, so a logic output toggling it costs
+  no exponential (a debug build checks each memo hit against the readout).
+  The observer reads and locates its nodes only at an instant with a grid
+  time due. Measured on the rated SAP-1 (ideal, running; 20 simulated
+  seconds a case, 5 interleaved reps, quiet machine, 4c532a1;
+  `pnpm run bench:probe-cost`): unarmed 13.52 ms per simulated second, 2
+  probes at 10 kS/s +5.0 %, the means (its 83 LEDs and 4 displays) +7.0 %,
+  4 probes at 10 kS/s with the means +12.3 %. Unarmed, the core is gated
+  within noise of its base (the sap1-cost gate; +0.7 % measured against
+  2f62f88); armed, the budget case must stay within +15 %
+  (`bench:probe-cost -- --gate`). What remains at 10 kS/s is a floor per
+  instant and per take, not per sample (an optimisation item below).
 - **Folding.** At the kernel's `observe` calls, between instants: the steps
   committed since, the held currents the last instant changed, and the
   interval up to the next instant on the state the last one left. A step
@@ -6679,6 +6691,13 @@ failures and warnings (W1g)"):
   26ed5ee and after W2c alike).
 
 ## Deferred past 1.0.0
+
+- **The observer's and the charge's per-take floor** (W2b, ruling R107
+  (a)). A host taking samples and charge once a frame pays a fixed cost per
+  take and per instant (the take's buffer through the ABI, the facade's
+  records, the next-time check), about +5 % on the rated SAP-1 at 10 kS/s
+  whatever the rate. Batching takes across frames should come with the next
+  host-API revision.
 
 - Hysteresis at the IC supply floor, a classic change too: the W1c fixed point
   returns -4 (fallback to classic) when a free supply sits near the power
