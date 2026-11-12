@@ -170,6 +170,36 @@ struct StepResult {
     rail_q: Option<(f64, f64)>,
     /// A TR-BDF2 step's first stage (R96), for the charge bill's quadrature.
     stage: Option<Box<TrBdf2Stage>>,
+    /// Ruling R103 (b): the solve with the sliding chip beside the
+    /// partition powered and unpowered, of which this one is the blend at
+    /// its duty ([`solve_two_state`]).
+    two: Option<Rc<TwoStep>>,
+}
+
+/// Ruling R103 (b) in a stepped hub partition with no capacitor (stepped
+/// only because it reads a running ramp, `partition::build`): an algebraic
+/// partition beside a sliding chip sits at the chip's powered solve or its
+/// unpowered one, never between, as a static one does
+/// (`StaticPartitionSolver::solve_hub_two_state`). The solve under each,
+/// and the chip's duty `w` that weights them.
+#[derive(Debug, Clone)]
+struct TwoStep {
+    w: f64,
+    device: usize,
+    on: StepResult,
+    off: StepResult,
+}
+
+/// A committed two-state step's states (ruling R103 (b)): the duty, and
+/// each state's nodes and sensitivity, carried to the blend's rail `u_p`
+/// as the published blend is (`SteppedSolver::two_state_view`).
+#[derive(Debug, Clone, PartialEq)]
+struct TwoSens {
+    w: f64,
+    on: StepSens,
+    off: StepSens,
+    x_on: Vec<f64>,
+    x_off: Vec<f64>,
 }
 
 /// TR-BDF2's `gamma`: the trapezoidal stage ends at `gamma h`, `2 - sqrt(2)`,
@@ -837,6 +867,9 @@ fn solve_step_noting(
     polish: bool,
     mut noting: Option<Noting>,
 ) -> Result<StepResult, StepError> {
+    if let Some((device, w)) = two_state_of(shape, ic_ctx) {
+        return solve_two_state(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, polish, noting, device, w);
+    }
     if let Some(cc) = ic_ctx.cc {
         return take_cc_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, cc, cc.cv);
     }
@@ -925,7 +958,206 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None })
+}
+
+/// Ruling R103 (b): the one IC beside stepped hub partition `ic_ctx.p_idx`
+/// (a pin in it) that slides at a duty strictly between 0 and 1, with its
+/// duty, when the partition holds no capacitor and the solve keeps its
+/// factors (a hub partition's seed or step). `None` with none, with more
+/// than one (two would need four states), or with a capacitor: a stepped
+/// partition's capacitors integrate the convex combination of currents,
+/// the averaged stamps (README point 1a, "Two states beside a slide").
+fn two_state_of(shape: &DynShape, ic_ctx: &IcStampCtx) -> Option<(usize, f64)> {
+    if !shape.capacitors.is_empty() || !ic_ctx.keep_lu || ic_ctx.bnd.holds.is_empty() {
+        return None;
+    }
+    let local = |node: usize| ic_ctx.node_owner.get(&node).is_some_and(|&(p, _)| p == ic_ctx.p_idx);
+    let mut found = None;
+    for (d, ic) in ic_ctx.ics.iter() {
+        let kind = ic_ctx.bnd.hold(*d).kind;
+        if !matches!(kind, digital::power::HoldKind::Duty(_)) {
+            continue;
+        }
+        let w = kind.weight();
+        if w > 0.0 && w < 1.0 && (local(ic.vcc.node) || local(ic.gnd.node) || ic.logic.iter().any(|pin| local(pin.node))) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some((*d, w));
+        }
+    }
+    found
+}
+
+/// `table` with `device` powered (`on`, duty 1) or unpowered.
+fn two_state_table(table: &[digital::power::PowerHold], device: usize, on: bool) -> Vec<digital::power::PowerHold> {
+    let mut table = table.to_vec();
+    if table.len() <= device {
+        table.resize(device + 1, digital::power::PowerHold::FREE);
+    }
+    table[device] = if on { digital::power::PowerHold::duty(1.0) } else { digital::power::PowerHold::off() };
+    table
+}
+
+/// Ruling R103 (b): [`solve_step_noting`] of a capacitor-free stepped hub
+/// partition beside sliding IC `device` at duty `w` ([`two_state_of`]):
+/// solved with the chip powered and unpowered, each under that hold, and
+/// the duty's blend of the two. On a CC rail ([`CcRail`]) the two states
+/// share the one rail the step solves ([`take_cc_two_state`]); off one,
+/// each is the ordinary solve at the rail as published. The noted
+/// verdicts are the powered solve's.
+#[allow(clippy::too_many_arguments)]
+fn solve_two_state(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+    polish: bool,
+    noting: Option<Noting>,
+    device: usize,
+    w: f64,
+) -> Result<StepResult, StepError> {
+    let (table_on, table_off) = (two_state_table(ic_ctx.bnd.holds, device, true), two_state_table(ic_ctx.bnd.holds, device, false));
+    let ctx_on = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table_on), ..*ic_ctx };
+    let ctx_off = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table_off), ..*ic_ctx };
+    let (on, off, u, rail_q) = match ic_ctx.cc {
+        Some(cc) => take_cc_two_state(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, &ctx_on, &ctx_off, at, cc, w)?,
+        None => {
+            let on = solve_step_noting(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, &ctx_on, at, polish, noting)?;
+            let off = solve_step_noting(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, &ctx_off, at, polish, None)?;
+            (on, off, None, None)
+        }
+    };
+    let mix = |a: f64, b: f64| w * a + (1.0 - w) * b;
+    Ok(StepResult {
+        x: on.x.iter().zip(&off.x).map(|(&a, &b)| mix(a, b)).collect(),
+        vc: on.vc.clone(),
+        i: on.i.clone(),
+        lu: None,
+        u,
+        rail_q,
+        stage: None,
+        two: Some(Rc::new(TwoStep { w, device, on, off })),
+    })
+}
+
+/// Ruling R103 (b): [`take_cc_step`] of a capacitor-free partition in two
+/// states on one CC rail, Filippov's form exact: unknowns both states'
+/// nodes (`ctx_on`'s, then `ctx_off`'s) and the one rail; each state's node
+/// rows its own stamp at its own nodes and the rail, the rail row the
+/// duty `w`'s weighting of the two states' rail rows plus the rest of the
+/// rail's draw, its capacitors and the limit, as [`take_cc_step`] closes
+/// it. Solving each state on a CC rail row of its own put two rails 6.5 mV
+/// apart over a 10 ns step (cold 2575 tpl 2), and the draw the rail loop
+/// then read at the rail as published drifted off the limit between its
+/// solves: the slide solved flat again every 58 us through each recovery
+/// of C17 after a source pulse, 2.3 times the events. Returns the two
+/// states (each with its node block's factors for its sensitivity, at the
+/// shared rail), the rail and the rail capacitors' end state.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn take_cc_two_state(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ctx_on: &IcStampCtx,
+    ctx_off: &IcStampCtx,
+    at: f64,
+    cc: CcStep,
+    w: f64,
+) -> Result<(StepResult, StepResult, Option<f64>, Option<(f64, f64)>), StepError> {
+    let n = shape.n;
+    let (part, size) = (n + 1, 2 * n + 1);
+    let cv = cc.cv;
+    let (bnd_on, bnd_off) = (ctx_on.bnd.at_time(ctx_on.ramps, at).with_ext(cc.rail, n).hold_power_at(cc.u0), ctx_off.bnd.at_time(ctx_off.ramps, at).with_ext(cc.rail, n).hold_power_at(cc.u0));
+    let linear = !ctx_on.iterated;
+    let cap = cc.cap.filter(|_| !cv);
+    // One state's rows at its nodes `z_s` and the rail: its `n + 1` system.
+    let state = |ctx: &IcStampCtx, bnd: &Bnd, z_s: &[f64]| {
+        let (mut a, mut b) = (vec![0.0; part * part], vec![0.0; part]);
+        stamp_step(shape, live_params, h, vc_from, i_prev, method, ctx, bnd, part, z_s, &mut a, &mut b);
+        (a, b)
+    };
+    let stamp = |z: &[f64], a: &mut [f64], b: &mut [f64]| {
+        let u = z[2 * n];
+        let z_on: Vec<f64> = z[..n].iter().copied().chain(std::iter::once(u)).collect();
+        let z_off: Vec<f64> = z[n..2 * n].iter().copied().chain(std::iter::once(u)).collect();
+        let (a_on, b_on) = state(ctx_on, &bnd_on, &z_on);
+        let (a_off, b_off) = state(ctx_off, &bnd_off, &z_off);
+        for (k, (a_s, b_s)) in [(&a_on, &b_on), (&a_off, &b_off)].into_iter().enumerate() {
+            for r in 0..n {
+                for c in 0..n {
+                    a[(k * n + r) * size + k * n + c] = a_s[r * part + c];
+                }
+                a[(k * n + r) * size + 2 * n] = a_s[r * part + n];
+                b[k * n + r] = b_s[r];
+            }
+        }
+        let row = 2 * n * size;
+        if cv {
+            a[row + 2 * n] = 1.0;
+            b[2 * n] = cc.v;
+            return;
+        }
+        for c in 0..n {
+            a[row + c] = w * a_on[n * part + c];
+            a[row + n + c] = (1.0 - w) * a_off[n * part + c];
+        }
+        a[row + 2 * n] = w * a_on[n * part + n] + (1.0 - w) * a_off[n * part + n];
+        b[2 * n] = w * b_on[n] + (1.0 - w) * b_off[n];
+        match cap {
+            // A seed on an esr-0 rail capacitor: the rail is its charge.
+            Some(c) if cc.seed && c.companion(None, method).is_none() => {
+                a[row..row + size].fill(0.0);
+                a[row + 2 * n] = 1.0;
+                b[2 * n] = c.q;
+            }
+            _ => {
+                a[row + 2 * n] += cc.g_o;
+                b[2 * n] += cc.dl - cc.a_o;
+                if let Some((g, q)) = cap.and_then(|c| c.companion((!cc.seed).then_some(h), method)) {
+                    a[row + 2 * n] += g;
+                    b[2 * n] += g * q;
+                }
+            }
+        }
+    };
+    let z0: Vec<f64> = x_from[..n].iter().chain(&x_from[..n]).copied().chain(std::iter::once(if cv { cc.v } else { cc.u0 })).collect();
+    let (result, _) = newton::solve_keeping_factors(size, size, &z0, linear, true, stamp).map_err(|e| StepError::Failed(format!("stepped: {e}")))?;
+    *newton_iters += result.iterations as u64;
+    if !linear && !result.converged {
+        return Err(StepError::NoConverge);
+    }
+    let z = result.x;
+    let u = z[2 * n];
+    // Each state's sensitivity solves through its own node block at the
+    // shared rail, restamped at the solution (as `take_cc_step`'s).
+    let finish = |ctx: &IcStampCtx, bnd: &Bnd, x: &[f64]| -> Result<StepResult, StepError> {
+        let z_s: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+        let lu = if ctx.keep_lu {
+            let (a, _) = state(ctx, bnd, &z_s);
+            let block: Vec<f64> = (0..n).flat_map(|r| a[r * part..r * part + n].to_vec()).collect();
+            Some(crate::lu::lu_factor(block, n).map_err(|_| StepError::Failed("stepped: singular or non-finite pivot in a Newton iteration".to_string()))?)
+        } else {
+            None
+        };
+        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None })
+    };
+    let on = finish(ctx_on, &bnd_on, &z[..n])?;
+    let off = finish(ctx_off, &bnd_off, &z[n..2 * n])?;
+    let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
+    Ok((on, off, Some(u), rail_q))
 }
 
 /// [`take_step`] on a CC rail ([`CcRail`]): the rail is unknown `n`, its row
@@ -1057,7 +1289,7 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None })
 }
 
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
@@ -1547,6 +1779,11 @@ struct Partition {
     /// commits: its factors, the rail and the instant it read, its `h` and
     /// method.
     pend_lu: Option<Rc<LuFactorization>>,
+    /// Ruling R103 (b): the pending trial's two states beside a sliding
+    /// chip ([`solve_two_state`]), and the committed step's
+    /// ([`TwoSens`]), which it publishes the blend of.
+    pend_two: Option<Rc<TwoStep>>,
+    two: Option<Rc<TwoSens>>,
     pend_u: f64,
     pend_now: f64,
     pend_h: f64,
@@ -1679,6 +1916,8 @@ impl Partition {
             rail_ic: false,
             sens: None,
             pend_lu: None,
+            pend_two: None,
+            two: None,
             pend_u: 0.0,
             pend_now: t0,
             pend_h: 0.0,
@@ -1745,6 +1984,8 @@ struct PartitionSnapshot {
     stress_watch: bool,
     sens: Option<Rc<StepSens>>,
     pend_lu: Option<Rc<LuFactorization>>,
+    pend_two: Option<Rc<TwoStep>>,
+    two: Option<Rc<TwoSens>>,
     pend_u: f64,
     pend_now: f64,
     pend_h: f64,
@@ -1786,6 +2027,8 @@ impl PartitionSnapshot {
         self.stress_watch = part.stress_watch;
         self.sens.clone_from(&part.sens);
         self.pend_lu.clone_from(&part.pend_lu);
+        self.pend_two.clone_from(&part.pend_two);
+        self.two.clone_from(&part.two);
         self.pend_u = part.pend_u;
         self.pend_now = part.pend_now;
         self.pend_h = part.pend_h;
@@ -1805,6 +2048,8 @@ impl PartitionSnapshot {
     fn restore_w1f(&self, part: &mut Partition) {
         part.sens.clone_from(&self.sens);
         part.pend_lu.clone_from(&self.pend_lu);
+        part.pend_two.clone_from(&self.pend_two);
+        part.two.clone_from(&self.two);
         part.pend_u = self.pend_u;
         part.pend_now = self.pend_now;
         part.pend_h = self.pend_h;
@@ -2698,6 +2943,8 @@ impl SteppedSolver {
         part.version += 1;
         part.sens = None;
         part.pend_lu = None;
+        part.pend_two = None;
+        part.two = None;
         part.i_src = 0.0;
         part.pend_i_src = 0.0;
     }
@@ -2758,14 +3005,107 @@ impl SteppedSolver {
             iterated: part.iterated(),
             free_supply: part.holds_free_ic_supply,
         };
-        let mut iterations = 0u64;
-        let step = solve_step_noting(&part.shape, live_params, h, &part.vc, &part.x, &part.i_prev, Method::Be, &mut iterations, &ic_ctx, at, false, None).ok()?;
-        // The rail row's residual at the step's end, the rail an unknown
-        // (`with_ext`): the current leaving the rail into the partition.
-        let bnd = Bnd::new(&values).with_holds(holds).at_time(ramps, at).with_ext(rail, n);
-        let z: Vec<f64> = step.x.iter().copied().chain(std::iter::once(u)).collect();
-        let r = crate::solve::stamp_residual(n + 1, &z, |a, b| stamp_step(&part.shape, live_params, h, &part.vc, &part.i_prev, Method::Be, &ic_ctx, &bnd, n + 1, &z, a, b));
-        r.get(n).copied().filter(|d| d.is_finite())
+        let draw = |holds: &[digital::power::PowerHold]| -> Option<f64> {
+            let ic_ctx = IcStampCtx { bnd: Bnd::new(&values).with_holds(holds).at_time(ramps, at), ..ic_ctx };
+            let mut iterations = 0u64;
+            let step = solve_step_noting(&part.shape, live_params, h, &part.vc, &part.x, &part.i_prev, Method::Be, &mut iterations, &ic_ctx, at, false, None).ok()?;
+            // The rail row's residual at the step's end, the rail an unknown
+            // (`with_ext`): the current leaving the rail into the partition.
+            let bnd = Bnd::new(&values).with_holds(holds).at_time(ramps, at).with_ext(rail, n);
+            let z: Vec<f64> = step.x.iter().copied().chain(std::iter::once(u)).collect();
+            let r = crate::solve::stamp_residual(n + 1, &z, |a, b| stamp_step(&part.shape, live_params, h, &part.vc, &part.i_prev, Method::Be, &ic_ctx, &bnd, n + 1, &z, a, b));
+            r.get(n).copied().filter(|d| d.is_finite())
+        };
+        // Ruling R103 (b): beside a sliding chip a capacitor-free partition
+        // draws its powered and its unpowered solve's draw, weighted by the
+        // duty (`solve_two_state`).
+        match two_state_of(&part.shape, &IcStampCtx { keep_lu: true, ..ic_ctx }) {
+            Some((device, w)) => Some(w * draw(&two_state_table(holds, device, true))? + (1.0 - w) * draw(&two_state_table(holds, device, false))?),
+            None => draw(holds),
+        }
+    }
+
+    /// Ruling R103 (b): when `node` sits in a stepped hub partition beside a
+    /// sliding chip ([`TwoSens`]), the chip's duty and `base` twice over,
+    /// that partition's nodes at its powered and at its unpowered solve,
+    /// each carried to `base`'s rail as the published blend is
+    /// (`StaticPartitionSolver::two_state_view`).
+    pub(crate) fn two_state_view(&self, base: &[f64], node: usize) -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        let &(p, _) = self.node_owner.get(&node)?;
+        let part = self.partitions.get(&p)?;
+        let two = part.two.as_ref()?;
+        let du = base[self.rail?] - two.on.u_p;
+        let fill = |x: &[f64], sens: &StepSens| {
+            let mut v = base.to_vec();
+            for (l, &n) in part.shape.nodes.iter().enumerate() {
+                v[n] = x[l] + sens.s[l] * du;
+            }
+            v
+        };
+        Some((two.w, fill(&two.x_on, &two.on), fill(&two.x_off, &two.off)))
+    }
+
+    /// [`Self::two_state_view`] for one node: the duty and the node's
+    /// voltage at the powered and at the unpowered solve.
+    pub(crate) fn two_state_node(&self, base: &[f64], node: usize) -> Option<(f64, f64, f64)> {
+        let &(p, l) = self.node_owner.get(&node)?;
+        let two = self.partitions.get(&p)?.two.as_ref()?;
+        let du = base[self.rail?] - two.on.u_p;
+        Some((two.w, two.x_on[l] + two.on.s[l] * du, two.x_off[l] + two.off.s[l] * du))
+    }
+
+    /// The hold table every stamp reads (empty while nothing is held).
+    fn hold_table(&self) -> &[digital::power::PowerHold] {
+        if self.holds_on {
+            &self.holds
+        } else {
+            &[]
+        }
+    }
+
+    /// Ruling R103 (b): hub partition `p`'s sensitivity at a two-state
+    /// solve `step` ([`solve_two_state`]): each state's at its own solve,
+    /// under its own hold, at the rail it solved (on a CC rail the one both
+    /// share, else `u_p`), carried to the blend's rail `u_p`, `x + s (u_p -
+    /// u)`, and blended at the duty: the nodes, their slopes, the draw and
+    /// its slope. Its band is the narrower of the two. Also the states, for
+    /// the partition's readouts ([`TwoSens`]).
+    #[allow(clippy::too_many_arguments)]
+    fn two_state_sens(
+        &self,
+        p: usize,
+        drivers: &[Driver],
+        live_params: &HashMap<usize, Vec<f64>>,
+        voltages: &[f64],
+        step: &TwoStep,
+        vc_from: &[f64],
+        i_prev: &[f64],
+        h: f64,
+        method: Method,
+        stamp_now: f64,
+        at: f64,
+        u_p: f64,
+        power_u: f64,
+    ) -> Result<(StepSens, TwoSens), String> {
+        let state = |on: bool| -> Result<(StepSens, Vec<f64>), String> {
+            let solve = if on { &step.on } else { &step.off };
+            let table = two_state_table(self.hold_table(), step.device, on);
+            let lu = solve.lu.as_ref().ok_or_else(|| format!("stepped partition {p}: a two-state solve kept no factors"))?;
+            let u = solve.u.unwrap_or(u_p);
+            let sens = self.step_sens(p, drivers, live_params, voltages, &solve.x, vc_from, i_prev, h, method, stamp_now, at, u, if solve.u.is_some() { u } else { power_u }, lu, &table)?;
+            let du = u_p - u;
+            let x: Vec<f64> = solve.x.iter().zip(&sens.s).map(|(&x, &s)| x + s * du).collect();
+            Ok((StepSens { i: sens.i + sens.g * du, u_p, ..sens }, x))
+        };
+        let ((on, x_on), (off, x_off)) = (state(true)?, state(false)?);
+        let w = step.w;
+        let mix = |a: f64, b: f64| w * a + (1.0 - w) * b;
+        let band = match (on.band, off.band) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let sens = StepSens { s: on.s.iter().zip(&off.s).map(|(&a, &b)| mix(a, b)).collect(), i: mix(on.i, off.i), g: mix(on.g, off.g), u_p, band };
+        Ok((sens, TwoSens { w, on, off, x_on, x_off }))
     }
 
     /// The sensitivity of hub partition `p` at state `x`, solved with the
@@ -2790,6 +3130,7 @@ impl SteppedSolver {
         u_p: f64,
         power_u: f64,
         lu: &LuFactorization,
+        holds: &[digital::power::PowerHold],
     ) -> Result<StepSens, String> {
         let rail = self.rail.expect("a hub partition implies a rail");
         let part = &self.partitions[&p];
@@ -2800,7 +3141,7 @@ impl SteppedSolver {
             drivers,
             ics: &self.ics,
             node_owner: &self.node_owner,
-            bnd: Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }),
+            bnd: Bnd::new(voltages).with_holds(holds),
             ramps,
             keep_lu: false,
             exact: None,
@@ -2809,7 +3150,7 @@ impl SteppedSolver {
             iterated: part.iterated(),
             free_supply: part.holds_free_ic_supply,
         };
-        let bnd = Bnd::new(voltages).with_holds(if self.holds_on { &self.holds } else { &[] }).at_time(ramps, at).with_ext(rail, n).hold_power_at(power_u);
+        let bnd = Bnd::new(voltages).with_holds(holds).at_time(ramps, at).with_ext(rail, n).hold_power_at(power_u);
         let z: Vec<f64> = if part.curved() { x.iter().copied().chain(std::iter::once(u_p)).collect() } else { Vec::new() };
         let ic = (part.curved() && !part.holds_free_ic_supply).then(|| {
             let ic = crate::solve::ic_rail_terms(stamp_now, drivers, &self.ics, &self.node_owner, &bnd, p, &z, n);
@@ -2840,14 +3181,30 @@ impl SteppedSolver {
     /// committed step, Rails point 4).
     fn commit_partition(&mut self, p: usize, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<(), String> {
         let part = &self.partitions[&p];
+        let mut two = None;
         if part.hub && self.rail.is_some() {
-            if let Some(lu) = part.pend_lu.clone() {
+            if let Some(step) = part.pend_two.clone() {
+                let (vc_from, i_prev) = (part.vc.clone(), part.i_prev.clone());
+                let (h, method, now, at, u) = (part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u);
+                let (sens, states) = self.two_state_sens(p, drivers, live_params, voltages, &step, &vc_from, &i_prev, h, method, now, at, u, u)?;
+                self.sensitivities += 1;
+                self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
+                let part = self.partitions.get_mut(&p).unwrap();
+                part.pend_x = states.x_on.iter().zip(&states.x_off).map(|(&a, &b)| states.w * a + (1.0 - states.w) * b).collect();
+                part.sens = Some(Rc::new(sens));
+                two = Some(Rc::new(states));
+            } else if let Some(lu) = part.pend_lu.clone() {
                 let (x, vc_from, i_prev) = (part.pend_x.clone(), part.vc.clone(), part.i_prev.clone());
-                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu)?;
+                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu, self.hold_table())?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
                 self.partitions.get_mut(&p).unwrap().sens = Some(Rc::new(sens));
             }
+        }
+        {
+            let part = self.partitions.get_mut(&p).unwrap();
+            part.two = two;
+            part.pend_two = None;
         }
         let charge = self.partitions[&p].pend_charge;
         if self.defer == Some(p) {
@@ -3076,6 +3433,7 @@ impl SteppedSolver {
             };
             let seed_sens;
             let seed_u;
+            let seed_two;
             let taken;
             {
                 let part = self.partitions.get_mut(&p_idx).unwrap();
@@ -3121,6 +3479,8 @@ impl SteppedSolver {
                 }
                 seed_sens = seed.lu;
                 seed_u = seed.u;
+                seed_two = seed.two;
+                part.two = None;
             }
             // A hub partition's seed is a solve too: its sensitivity at the
             // seed's own system (Rails point 3), at the rail it solved on a
@@ -3129,7 +3489,7 @@ impl SteppedSolver {
             // the CV -> CC test too
             // (G2bv's bc 453 hub 2 at 17.8 ms, 2.8e-7 A off, CC and CV in
             // turn for 50 passes).
-            if let (Some(lu), Some(rail)) = (seed_sens, self.rail.filter(|_| hub)) {
+            if let (true, Some(rail)) = (seed_sens.is_some() || seed_two.is_some(), self.rail.filter(|_| hub)) {
                 let part = &self.partitions[&p_idx];
                 let (x, vc_from) = (part.x.clone(), part.vc.clone());
                 let zeros = vec![0.0; vc_from.len()];
@@ -3143,7 +3503,20 @@ impl SteppedSolver {
                 // for 50 passes. Judged as solved, the draw meets the rail
                 // row at `u`, the loop moves the rail there, and the flip
                 // re-seeds it as any other (H8).
-                let mut sens = self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, voltages[rail], &lu)?;
+                // Ruling R103 (b): beside a sliding chip, each state's at its
+                // own solve, blended (`two_state_sens`).
+                let (mut sens, two) = match (&seed_two, &seed_sens) {
+                    (Some(step), _) => {
+                        let (sens, states) = self.two_state_sens(p_idx, drivers, live_params, voltages, step, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, voltages[rail])?;
+                        (sens, Some(states))
+                    }
+                    (None, Some(lu)) => (self.step_sens(p_idx, drivers, live_params, voltages, &x, &vc_from, &zeros, SEED_H, Method::Be, now, now, u, voltages[rail], lu, self.hold_table())?, None),
+                    (None, None) => unreachable!("a seed's factors or its two states"),
+                };
+                let x = match &two {
+                    Some(states) => states.x_on.iter().zip(&states.x_off).map(|(&a, &b)| states.w * a + (1.0 - states.w) * b).collect(),
+                    None => x,
+                };
                 let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, now).with_ext(rail, x.len()).hold_power_at(voltages[rail]);
                 // With rail capacitors (ruling R68) the row also holds their
                 // current at the seed, `(u - q) / esr`; at `esr = 0` the row
@@ -3166,7 +3539,12 @@ impl SteppedSolver {
                 }
                 self.sensitivities += 1;
                 self.hub_updates.push((p_idx, Contrib { active: true, i: sens.i, g: sens.g, u_p: u, b: None }));
-                self.partitions.get_mut(&p_idx).unwrap().sens = Some(Rc::new(sens));
+                let part = self.partitions.get_mut(&p_idx).unwrap();
+                if let Some(states) = two {
+                    part.x = x;
+                    part.two = Some(Rc::new(states));
+                }
+                part.sens = Some(Rc::new(sens));
             }
             if !taken.is_empty() {
                 // Held in this copy at once, so the plan from the seed steps
@@ -3459,6 +3837,8 @@ impl SteppedSolver {
                             stress_watch: part.stress_watch,
                             sens: part.sens.clone(),
                             pend_lu: part.pend_lu.clone(),
+                            pend_two: part.pend_two.clone(),
+                            two: part.two.clone(),
                             pend_u: part.pend_u,
                             pend_now: part.pend_now,
                             pend_h: part.pend_h,
@@ -3512,6 +3892,8 @@ impl SteppedSolver {
                 part.stress_watch = s.stress_watch;
                 part.sens = s.sens;
                 part.pend_lu = s.pend_lu;
+                part.pend_two = s.pend_two;
+                part.two = s.two;
                 part.pend_u = s.pend_u;
                 part.pend_now = s.pend_now;
                 part.pend_h = s.pend_h;
@@ -4313,6 +4695,7 @@ impl SteppedSolver {
         part.pend_vc = accepted.vc;
         part.pend_i = accepted.i;
         part.pend_lu = accepted.lu.map(Rc::new);
+        part.pend_two = accepted.two;
         part.pend_u = accepted.u.unwrap_or_else(|| rail.map_or(0.0, |r| voltages[r]));
         part.pend_now = part.t;
         part.pend_h = h;
@@ -5390,6 +5773,32 @@ impl crate::snapshot::HeapBytes for StepResult {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stage, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for TwoStep {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.off, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for TwoSens {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.off, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x_on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x_off, w); }
         n
     }
 }
@@ -5594,6 +6003,8 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_ic, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sens, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_lu, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_two, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }
@@ -5664,6 +6075,8 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_watch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sens, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_lu, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_two, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }

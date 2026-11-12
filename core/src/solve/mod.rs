@@ -4029,7 +4029,7 @@ impl PartitionedSolver {
             }
             // Ruling R103 (b): beside a sliding chip, its two solves'
             // currents at the chip's duty.
-            let two = if self.holds_active > 0 { self.static_solver.two_state_view(&self.voltages, j.anode).or_else(|| self.static_solver.two_state_view(&self.voltages, j.cathode)) } else { None };
+            let two = if self.holds_active > 0 { self.two_state_view(&self.voltages, j.anode).or_else(|| self.two_state_view(&self.voltages, j.cathode)) } else { None };
             let i = match two {
                 Some((w, on, off)) => w * junction_branch_current(j, &on) + (1.0 - w) * junction_branch_current(j, &off),
                 None => junction_branch_current(j, &self.voltages),
@@ -4045,7 +4045,7 @@ impl PartitionedSolver {
             // Ruling R103 (b): a sliding chip's stamps (scaled by its duty)
             // carry current only in its powered state, so a pin beside it
             // in a two-state partition reads that state's voltage.
-            let pin_v = |node: usize| match (power.weight < 1.0).then(|| self.static_solver.two_state_node(&self.voltages, node)).flatten() {
+            let pin_v = |node: usize| match (power.weight < 1.0).then(|| self.two_state_node(&self.voltages, node)).flatten() {
                 Some((_, on, _)) => on,
                 None => self.voltages[node],
             };
@@ -4126,7 +4126,7 @@ impl PartitionedSolver {
             // hub partition carries the powered solve's voltage there, the
             // unpowered state no current.
             let out = ic.logic[digital::NE555_OUT].node;
-            let v_out = match (power.weight < 1.0).then(|| self.static_solver.two_state_node(&self.voltages, out)).flatten() {
+            let v_out = match (power.weight < 1.0).then(|| self.two_state_node(&self.voltages, out)).flatten() {
                 Some((_, on, _)) => on,
                 None => self.voltages[out],
             };
@@ -4176,6 +4176,18 @@ impl PartitionedSolver {
         }
     }
 
+    /// Ruling R103 (b): when `node` sits in a static or a stepped hub
+    /// partition beside a sliding chip, the chip's duty and `base` with that
+    /// partition at its powered and at its unpowered solve.
+    pub(super) fn two_state_view(&self, base: &[f64], node: usize) -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        self.static_solver.two_state_view(base, node).or_else(|| self.stepped.two_state_view(base, node))
+    }
+
+    /// [`Self::two_state_view`] for one node.
+    pub(super) fn two_state_node(&self, base: &[f64], node: usize) -> Option<(f64, f64, f64)> {
+        self.static_solver.two_state_node(base, node).or_else(|| self.stepped.two_state_node(base, node))
+    }
+
     /// Ruling R103 (b): LED-family device `e` beside a sliding chip (a
     /// junction in a static hub partition the chip touches): the chip's
     /// duty and the published voltages with that partition at its powered
@@ -4184,7 +4196,7 @@ impl PartitionedSolver {
         if self.holds_active == 0 {
             return None;
         }
-        e.junctions.iter().find_map(|j| self.static_solver.two_state_view(&self.voltages, j.anode).or_else(|| self.static_solver.two_state_view(&self.voltages, j.cathode)))
+        e.junctions.iter().find_map(|j| self.two_state_view(&self.voltages, j.anode).or_else(|| self.two_state_view(&self.voltages, j.cathode)))
     }
 
     /// Re-derives `ic_driver_ids` when the driver table's length is not the one

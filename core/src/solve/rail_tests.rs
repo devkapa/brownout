@@ -15833,12 +15833,19 @@ fn a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_re_enters_af
     // whose draw there is the limit (R53's proposal: the R91 row retired).
     // By hand, with f = 0.1 / 1.8 (OUT's headroom split, 20 ohm) and DIS x /
     // 10 S: switch 14 open (21 and 12 open), OUT LOW on node 2 behind 105.7
-    // ohm from the rail, x 1.8 / 10 + v2 x (1 - f) / 20 = I, v2 = 1.8 (1 /
-    // 105.7 + x f / 20) / (1 / 105.7 + x / 20): x = 0.51665 (v2 0.5557 V),
-    // once C17 (0.27 uF into node 6) has settled; switch 21 closed (node 2
-    // on the source at -2.776 V between its pulses), (1.8 + 2.776) / 105.7 +
-    // x (1.8 / 10 + f / 20 x 4.576) = I: x = 0.328264; switch 12 closed too
-    // (node 2 on ground), x = 0.483920. The duty sits within the rail's band
+    // ohm from the rail, and node 2, holding no capacitor, at the 555's
+    // powered solve or its unpowered one weighted by the duty (ruling R103
+    // (b), the test below): powered, v2 = 1.8 (1/105.7 + f/20) / (1/105.7 +
+    // 1/820463 + 1/20) = 0.370484 V and the draw 1.8/10 + (1.8 - v2)
+    // (1/105.7 + f/20) = 197.4955 mA; unpowered, 2.19 uA through 105.7 ohm
+    // and 820.5 kohm; so x = (I - 0.0000022) / (0.1974955 - 0.0000022) =
+    // 0.539526 (node 2 1.0286 V; through the averaged stamp, the drive
+    // scaled by x, it was 0.51665 and 0.5557 V), once C17 (0.27 uF into
+    // node 6) has settled; switch 21 closed (node 2 on the source at -2.776
+    // V between its pulses: both states put it there, so the duty is the
+    // averaged stamp's), (1.8 + 2.776) / 105.7 + x (1.8 / 10 + f / 20 x
+    // 4.576) = I: x = 0.328264; switch 12 closed too (node 2 on ground),
+    // x = 0.483920. The duty sits within the rail's band
     // of these: the rail anywhere within W0 (1.9 mV) of the edge moves the
     // draw by g W0, g = dD/du (0.042 to 0.059 S here), so x by g W0 over the
     // draw's slope in x (0.185 to 0.2 A): 6.1e-4 at most.
@@ -15880,7 +15887,7 @@ fn a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_re_enters_af
                 // is the draw's only other part).
                 let x_hand = match k {
                     _ if rig.v(6).abs() > 1e-3 => None,
-                    0 | 2 => Some(0.51665),
+                    0 | 2 => Some(0.539526),
                     1 if source_low => Some(0.328264),
                     3 => Some(0.483920),
                     _ => None,
@@ -15919,6 +15926,60 @@ fn a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_re_enters_af
     // s, every 89.7 ms, to 1.0056 s), and each of a pulse's two 1.11 ms
     // edges can outrun the slide once: 16 held stops at most.
     assert!(slid > 100 && held <= 16, "{slid} sliding stops, {held} held");
+}
+
+#[test]
+fn a_capacitor_free_stepped_partition_beside_a_sliding_555_sits_at_its_powered_or_unpowered_solve_weighted_by_the_duty() {
+    // Ruling R103 (b) in a stepped partition. Cold 2575 tpl 2's node 2 holds
+    // no capacitor: 105.7 ohm from the rail, 820.5 kohm to ground, switches
+    // 12 and 21, and the sliding 555's OUT. It is stepped only because
+    // switch 21 reads the pulse source's ramp (`partition::build`). In the
+    // resolved chatter it sits at the 555's powered solve or its unpowered
+    // one, never between: with switches 12 and 21 open and C17 settled,
+    // at the rail u, f = 0.1 / 1.8 (OUT LOW's headroom split, 20 ohm),
+    //   powered:   v_on = u (1/105.7 + f/20) / (1/105.7 + 1/820463 + 1/20),
+    //              D_on = u/10 (DIS) + (u - v_on)/105.7 + f/20 (u - v_on),
+    //   unpowered: v_off = u (1/105.7) / (1/105.7 + 1/820463),
+    //              D_off = (u - v_off)/105.7,
+    // so at the 1.8 V edge v_on = 0.370484 V, D_on = 197.4955 mA, v_off =
+    // 1.799768 V, D_off = 2.1936 uA, and the duty whose weighted draw is
+    // the 106.555 mA limit is x = (I - D_off) / (D_on - D_off) = 0.539526,
+    // node 2 at x v_on + (1 - x) v_off = 1.028632 V. Through the averaged
+    // stamp (the drive scaled by x into node 2) the duty was 0.516649 and
+    // node 2 0.555693 V, 419 W0 under. Node 2 within W0 of the weighted
+    // value at the published rail and duty, at every stop of the slide
+    // with the switches open and C17 settled (node 6 within 1 mV of
+    // ground), before switch 21 closes at 0.3166 s, and the duty within
+    // 6.1e-4 of 0.539526 (the rail's band, as in the test above).
+    let p = cold_2575_tpl2();
+    let (u_edge, d555) = (1.8, 6);
+    let mut rig = Rig::load(&p).unwrap();
+    let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
+    let mut toggled = false;
+    let mut checked = 0;
+    for &stop in STOPS_2575.iter().filter(|&&t| t < 0.3166121668293984) {
+        rig.advance(stop).unwrap_or_else(|e| panic!("{e:?} at {}", rig.k.time()));
+        if !toggled && stop >= 0.030082069747425742 {
+            state[14] = 1.0 - state[14];
+            rig.k.apply_params_as_event(&[(14, 0, state[14])]).unwrap();
+            rig.k.solver_mut().prepare_readout();
+            toggled = true;
+            continue;
+        }
+        let hold = rig.s().power_hold(d555);
+        if !toggled || stop < 0.0312 || !matches!(hold.kind, digital::power::HoldKind::Duty(_)) || rig.v(6).abs() > 1e-3 {
+            continue;
+        }
+        let (x, u) = (hold.kind.weight(), rig.u());
+        let (g10, g2, f) = (1.0 / 105.69729298224514, 1.0 / 820463.1551430054, 0.1 / 1.8);
+        let v_on = u * (g10 + f / 20.0) / (g10 + g2 + 1.0 / 20.0);
+        let v_off = u * g10 / (g10 + g2);
+        w0_volts(rig.v(2), x * v_on + (1.0 - x) * v_off, &format!("at {stop} s: node 2 at x {x}"));
+        close(x, 0.539526, 6.1e-4, &format!("at {stop} s: the duty against 0.539526 by hand"));
+        close(u, u_edge, 1e-4 + 1e-3 * u_edge, &format!("at {stop} s: the rail at the edge"));
+        checked += 1;
+    }
+    assert!(checked >= 20, "{checked} sliding stops checked");
 }
 
 /// tpl=1 hub=2 e=9.038 psu ilim=0.189 V2=-2.24 F2-0=0.06/0.64 R2-4=8388.0 R0-2=16.0 C4-0=3.0e-6 P3-0 R1-2=1.1 R2-3=43338.1 SW0-4(0)+R4-0=160 555 vcc1 gnd0 [2, 4, 1, 2, 1, 2] R1-4=21.9 R4-3=391.7 R0-1=6.2 R1-2=5.9 R3-4=203.8 R4-0=1.4 span=9.038178759358374

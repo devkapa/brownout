@@ -1969,9 +1969,25 @@ their own, and the source KCL does with W1a point 2's branch fold.
    current and channels, an IC's driver and pull currents and a 555's OUT
    (the chip's stamps carry current only powered), an LED's stress peak
    and latch value and its thermal power. Its band is the narrower of the
-   two. A partition beside two sliding chips keeps the averaged stamps;
-   a stepped or closed-form partition keeps them too, the convex
-   combination of currents its capacitors integrate. HG1's CC ramp: the
+   two. A stepped hub partition with no capacitor of its own (stepped
+   only because it reads a running ramp) is algebraic too, and is solved
+   the same way at each seed and step (`stepped.rs`, `solve_two_state`),
+   its sensitivity per state at commit, its draw in a slide's trial per
+   state. On a CC rail the two states share the one rail the step solves:
+   both states' nodes and the rail are the unknowns, the rail row the
+   duty's weighting of the two states' rail rows with the rest of the
+   rail's draw, its capacitors and the limit (`take_cc_two_state`), which
+   is Filippov's form exactly. Each state solved on a CC rail row of its
+   own put two rails 6.5 mV apart over a 10 ns step on cold 2575 tpl 2,
+   and the blended draw the rail loop read drifted off the limit between
+   its solves (2.3 times the events, the slide given up after one source
+   pulse). Cold 2575 tpl 2's node 2 (105.7 ohm from the rail, 820 kohm
+   to ground, OUT LOW of the sliding 555) slides at x 0.539526, node 2
+   1.028632 V, both the hand values (0.516649 and 0.5557 V through the
+   averaged stamp, 419 W0 under), at 78.8k events and 3545 slide solves
+   to 1.2 s against 78.7k and 3570. A partition beside two sliding chips
+   keeps the averaged stamps; one with a capacitor keeps them too, the
+   convex combination of currents its capacitors integrate. HG1's CC ramp: the
    duty that keeps the rail at 4.275 V is 0.359346 (1.8182 / 5.0597 mA,
    the LED's powered current; 0.135077 through the averaged stamp), and
    1y reads 2.29 V over 1.50-1.55 ms against the fine reference's 2.32 V
