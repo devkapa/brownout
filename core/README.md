@@ -2137,7 +2137,14 @@ their own, and the source KCL does with W1a point 2's branch fold.
    contribution, in the residual, the flat solve, the exit thresholds, the
    at-edge check and the "on its way" check alike. The span is the rail's
    own settling `C_eff / g_eff`, read once as the slide enters from the
-   rail's admittance over 10 ms and 10 us (fitted to `g + C / T`), at least
+   rail's admittance over 10 ms and 10 us (fitted to `g + C / T`), the chip
+   at the duty its entry solved (read with the chip still at its unpowered
+   probe, cold 2575 tpl 2's rail had 1e-12 S of its own and the fit took
+   C17's 0.73 ms RC for the rail's 0.34 us: the slide could not follow
+   C17's decay, and whether a re-entry slid depended on where the host
+   stopped; `a_555_sliding_on_a_cc_rail_through_a_capacitor_s_transient_
+   slides_alike_at_any_host_cadence`; a fit at the duty that is not
+   positive keeps the entry's reading), at least
    `H_MIN`, and not bounded by the host step (757 tpl 0 at 0.1 ms stops,
    bounded: an aim over 0.1 ms no duty meets, the chip free from 0.1733 s to
    0.8 s, 4 s of wall; unbounded it slides from 0.1726 s, 0.25 s of wall);
@@ -2152,7 +2159,9 @@ their own, and the source KCL does with W1a point 2's branch fold.
    0.993 W0 at 1 ms stops), re-solves about 1.8 ms apart (270 from 0.25 to
    1 s at 1 ms stops); its flat-at-an-end run 0.30 W0 at 0.5 s (1.55
    before). 2575 tpl 2: 78,733 events against 91,057, wall 2.05 s
-   against 2.00 s.
+   against 2.00 s; with the entry's settling read at the duty (R53-P10)
+   107,684 events and 3,574 slide solves against 78,832 and 3,543, the
+   extra events in switch 21's pulse phase (0.38 to 1.1 s).
 
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the

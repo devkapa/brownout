@@ -17462,3 +17462,86 @@ fn a_slide_that_falls_back_costs_one_hold_procedure_a_host_step_at_most() {
     eprintln!("2575 tpl 2: {total} re-entries");
     assert!(total >= 8, "a re-entry after each pulse's fallback: {total}");
 }
+
+#[test]
+fn a_555_sliding_on_a_cc_rail_through_a_capacitor_s_transient_slides_alike_at_any_host_cadence() {
+    // R53-P10's find (the R101/R86 principle: an outcome that depends on
+    // where the host stops is a defect). Cold 2575 tpl 2 after switch 14
+    // opens at 30.08 ms: the 106.6 mA limit ramps the 11.9 nF rail to its
+    // 555's 1.8 V floor, where it slides (see `a_cc_rail_freed_by_a_switch_
+    // slides_its_555_at_the_power_edge_and_re_enters_after_each_fallback`).
+    // C17, 0.27 uF from the rail into node 6 (about 2.7 kohm to ground
+    // through the 555's CTRL side), keeps the charge the rail's swing put on
+    // it: +4.58 V on node 6 as the rail rose from the source's -2.776 V to
+    // 1.8 V, decaying with C17 times that 2.7 kohm, about 0.73 ms, and
+    // drawing up to 1.6 mA of the rail's current as it goes. The slide's
+    // aim span (`rail_settling`) was read with the 555 at its unpowered
+    // probe: the rail's conductance 1e-12 S, so the fit's C_eff / g_eff was
+    // C17's 19.3 nF / 26.5 uS = 0.73 ms, and aimed over it the draw sat 1 to
+    // 1.5 mA past the limit, the rail running off at 1e5 V/s to the follow
+    // cap within 1.1 us. Whether a re-entry landed where C17's transient had
+    // nearly cancelled (each re-entry from the 4.98 V setpoint puts -3.18 V
+    // on it) decided the run: STOPS_2575 re-entered at 30.37 ms and slid; a
+    // host stop at 30.1 ms re-entered with node 6 at 3.94 V at the edge and
+    // was held at the setpoint through 0.18 s, 19 holds. Read at the duty
+    // solved (DIS x / 10 S and OUT LOW on the rail: g 0.0577 S), the span is
+    // the rail's own 19.3 nF / 0.0577 S = 0.34 us, and the slide follows
+    // C17's decay. By hand, once C17 has settled (node 6 within 1 mV of
+    // ground) with switches 12 and 21 open, x = 0.539526 (the test above:
+    // two-state node 2, the draw at the 1.8 V edge equal to the limit), the
+    // rail within W0 = 1e-4 + 1e-3 x 1.8 = 1.9 mV of the edge, and the duty
+    // within the rail's band of it, 6.1e-4. Every schedule, among them
+    // STOPS_2575, the stop at 30.1 ms, three stops inside C17's transient,
+    // and even 0.1, 1 and 10 ms host steps, slides at each stop from 35 ms
+    // (five C17 time constants) to 0.2 s, and at 50, 100, 150 and 200 ms its
+    // rail sits within W0 of the edge and of STOPS_2575's rail there, and
+    // its duty within 6.1e-4 of 0.539526.
+    let p = cold_2575_tpl2();
+    let (edge, d555, open14) = (1.8, 6, 0.030082069747425742);
+    let w0 = 1e-4 + 1e-3 * edge;
+    let checks = [0.05, 0.1, 0.15, 0.2];
+    let grid = |h: f64| (1..).map(move |k| k as f64 * h).take_while(|&t| t < 0.2 - 1e-12).collect::<Vec<f64>>();
+    let base: Vec<f64> = STOPS_2575.iter().copied().filter(|&t| t < 0.2).collect();
+    let schedules: Vec<(&str, Vec<f64>)> = vec![
+        ("STOPS_2575", base.clone()),
+        ("STOPS_2575 + 30.1 ms", base.iter().copied().chain([0.0301]).collect()),
+        ("STOPS_2575 + 30.1, 30.11, 30.2 ms", base.iter().copied().chain([0.0301, 0.03011, 0.0302]).collect()),
+        ("0.1 ms", grid(1e-4)),
+        ("1 ms", grid(1e-3)),
+        ("10 ms", grid(1e-2)),
+    ];
+    let mut at_base: Vec<f64> = Vec::new();
+    for (name, stops) in schedules {
+        let mut stops: Vec<f64> = stops.into_iter().chain(checks).chain([open14]).collect();
+        stops.sort_by(f64::total_cmp);
+        stops.dedup();
+        let mut rig = Rig::load(&p).unwrap();
+        let mut toggled = false;
+        let mut at: Vec<f64> = Vec::new();
+        for &stop in &stops {
+            rig.advance(stop).unwrap_or_else(|e| panic!("{name}: {e:?} at {}", rig.k.time()));
+            if !toggled && stop >= open14 {
+                rig.k.apply_params_as_event(&[(14, 0, 0.0)]).unwrap();
+                rig.k.solver_mut().prepare_readout();
+                toggled = true;
+            }
+            let hold = rig.s().power_hold(d555);
+            if stop >= 0.035 {
+                assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{name}: at {stop} s sliding, not {hold:?}");
+            }
+            if checks.contains(&stop) {
+                assert!(rig.v(6).abs() < 1e-3, "{name}: C17 settled at {stop} s (node 6 at {} V)", rig.v(6));
+                close(rig.u(), edge, w0, &format!("{name}: at {stop} s the rail at the edge"));
+                close(hold.kind.weight(), 0.539526, 6.1e-4, &format!("{name}: at {stop} s the duty against 0.539526 by hand"));
+                at.push(rig.u());
+            }
+        }
+        if at_base.is_empty() {
+            at_base = at;
+        } else {
+            for (k, (u, u0)) in at.iter().zip(&at_base).enumerate() {
+                close(*u, *u0, w0, &format!("{name}: at {} s the rail against STOPS_2575's", checks[k]));
+            }
+        }
+    }
+}

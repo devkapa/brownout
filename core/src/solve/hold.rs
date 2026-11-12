@@ -1291,13 +1291,42 @@ impl PartitionedSolver {
         // the long one's trial put the residual under the limit at every
         // duty, so the slide left and entered again each 2.5 us to the
         // episode guard.
-        if self.segment_draw(now).is_some() && !(self.episode(d).span > 0.0) {
+        let entering = self.segment_draw(now).is_some() && !(self.episode(d).span > 0.0);
+        if entering {
             let mut episode = self.episode(d);
             episode.span = self.rail_settling(now, d);
             self.set_episode(d, episode)?;
         }
-        let span = self.slide_span(now, d);
+        let mut span = self.slide_span(now, d);
         let mut slid = self.slide_solve(now, drivers, readers, d, err, from)?;
+        // R53-P10: the settling is the rail's admittance with the chip at
+        // the duty it slides at, its own conductance part of it: read as it
+        // enters, the chip still at its unpowered probe, cold 2575 tpl 2's
+        // rail read 1e-12 S, and the fit took C17's RC (19.3 nF over 26.5
+        // uS, 0.73 ms) for the rail's settling, not the rail's own 0.34 us
+        // with the 555's DIS and OUT on it (0.0577 S). Aimed over 0.73 ms,
+        // the draw sat 1 to 1.5 mA past the limit while C17's charge decayed,
+        // the rail ran off at 1e5 V/s to the follow cap within 1.1 us, and
+        // whether a re-entry slid depended on where the host had stopped.
+        // Read again at the duty solved, and solved once more over it when
+        // it differs (the duty moves little, the settling with it less). A
+        // fit at the duty that is not positive reads no settling and leaves
+        // the one read as it entered: cold 2575 tpl 2 re-entering at 0.647 s
+        // on its source's pulse, node 2's two-state trial at the duty fitted
+        // no capacitance, the span fell back to the time since the last solve
+        // (none at an entry), no duty solved, and the 555 held at a low
+        // source for a second host step.
+        if entering && slid {
+            let at_duty = self.rail_settling(now, d);
+            if at_duty > 0.0 && at_duty != self.episode(d).span {
+                let mut episode = self.episode(d);
+                episode.span = at_duty;
+                self.set_episode(d, episode)?;
+                span = self.slide_span(now, d);
+                let x = self.power_hold(d).kind.weight();
+                slid = self.slide_solve(now, drivers, readers, d, err, Some(x))?;
+            }
+        }
         if !slid && self.segment_draw(now).is_some() {
             // No duty aims the segment back that fast, yet one holds it flat:
             // the duty at the end that turns it back fastest, the chip off
@@ -1752,7 +1781,8 @@ impl PartitionedSolver {
 
     /// Open item (c): the span a slide on a capacitor's segment aims over,
     /// the rail's own fastest settling `C_eff / g_eff` at sliding IC `d`'s
-    /// edge, from the rail's admittance over two spans, `T1` =
+    /// edge, with `d` at the hold it has (its duty, once solved: R53-P10,
+    /// `slide_from`), from the rail's admittance over two spans, `T1` =
     /// `SLIDE_FOLLOW_SPAN` (10 ms) and a thousandth of it, `T2` = 10 us:
     /// `Y(T) = g + c_rail / T + dI/du` of each
     /// stepped hub partition's trial over `T` (`trial_rail_draw` a W0 apart),
