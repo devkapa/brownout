@@ -4826,7 +4826,14 @@ Constants, all from P3:35-38 unless marked new:
      guard inside that host step, at 0.1893 s before); and cold 149 tpl 5's
      CC rail ran a 7 ms clamp step past its 9.42 V setpoint, the CV
      re-solve at the commit leaving its timing node 0.6 V off the fine
-     reference (299 W0; cut, 0.001 W0). A CC rail already past its
+     reference (299 W0; cut, 0.001 W0). The independent verification of
+     R102, R105 and R106 (EXACTV) found no defect and recorded two costs of
+     the cut: on a CC rail, a chip at its power edge now reaches the edge
+     where it chatters, so exact mode, which has no slide yet (R53's
+     exact-mode piece), declines through R54 (a)'s guard earlier than
+     before (757/0, 648/5, 733/3, 735/3, the fine reference with it); and
+     on boards with a tiny rail, up to 2.2 times the Newton iterations per
+     step, with no crawl. A CC rail already past its
      setpoint within the shortest step is an exit there: the step is that
      shortest one (corpus 47 at 1 ms host steps: the 5 ms stop landed a
      few ulps short of the setpoint, still CC, and the next step ran the
