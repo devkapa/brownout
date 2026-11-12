@@ -1279,7 +1279,10 @@ R57 D1-D3 (a), R104; `core/src/observe.rs`, `solve/observe_tests.rs`).
 - **Take.** `[count, maxSpan, overflowed, dropped, fallbacks x n, t x count,
   node-major values]`, every sample whose value is final, in time order;
   taking empties the queue. At most `limit` samples are held (2^20 by
-  default): past that the newest are dropped and counted, the oldest kept.
+  default): past that the newest are dropped and counted, the oldest kept;
+  every index, a full queue's skip and the first after arming too, is
+  decided by the grid times themselves, not by a rounded quotient (W2bV),
+  and an interval too fine for `u64` indices saturates rather than wraps.
   `maxSpan` is the widest stepped step a sample was read across.
 - **A sample** at `t_s` between two completed instants is the model's state
   there, read off what the solver holds: a fixed node's value (a running

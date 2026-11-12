@@ -26,6 +26,34 @@ pub const DEFAULT_LIMIT: usize = 1 << 20;
 /// `count, maxSpan, overflowed, dropped`.
 pub const TAKE_HEADER: usize = 4;
 
+/// The grid's first index past `t`: the least `k >= 0` whose time `origin +
+/// k * interval` (computed so, as everywhere on the grid) is after `t`, or at
+/// or after it without `inclusive`. The quotient `(t - origin) / interval`
+/// only estimates it, a rounding either side (W2bV: `floor` of 4.999.. lost
+/// the grid time at `t`), so the estimate is corrected against the times
+/// themselves. Past 2^52 neighbouring indices' times no longer differ and
+/// the estimate stands, held below `u64`'s range (a tiny interval
+/// overflowed `as u64 + 1`).
+fn grid_end(origin: f64, interval: f64, t: f64, inclusive: bool) -> u64 {
+    const EXACT: f64 = (1u64 << 52) as f64;
+    let past = |k: u64| {
+        let tk = origin + k as f64 * interval;
+        if inclusive { tk > t } else { tk >= t }
+    };
+    let q = ((t - origin) / interval).floor();
+    if !(q < EXACT) {
+        return if q.is_nan() { 0 } else { (q.min(2.0 * EXACT)) as u64 };
+    }
+    let mut k = q.max(0.0) as u64;
+    while k > 0 && past(k - 1) {
+        k -= 1;
+    }
+    while !past(k) {
+        k += 1;
+    }
+    k
+}
+
 #[derive(Clone, Debug)]
 pub struct Observer {
     nodes: Vec<usize>,
@@ -62,13 +90,7 @@ impl Observer {
     /// Armed at `now`: the first sample is the first grid time at or after
     /// `now`.
     pub fn new(nodes: Vec<usize>, origin: f64, interval: f64, limit: usize, now: f64) -> Self {
-        let first = ((now - origin) / interval).ceil().max(0.0);
-        let mut next = first as u64;
-        // `ceil` of a quotient can land one index past a grid time equal to
-        // `now` by rounding; step back while the earlier time is not before it.
-        while next > 0 && origin + (next - 1) as f64 * interval >= now {
-            next -= 1;
-        }
+        let next = grid_end(origin, interval, now, false);
         let n = nodes.len();
         Observer { nodes, origin, interval, next, times: Vec::new(), values: Vec::new(), limit: limit.max(1), dropped: 0, max_span: 0.0, fallbacks: vec![0; n], row: vec![0.0; n], row_fallback: vec![false; n] }
     }
@@ -102,15 +124,8 @@ impl Observer {
             if self.times.len() >= self.limit {
                 // Full: every sample up to the limit is dropped and counted,
                 // without reading the model.
-                let last = if inclusive { ((t_limit - self.origin) / self.interval).floor() } else { ((t_limit - self.origin) / self.interval).ceil() - 1.0 };
-                let mut end = (last.max(self.next as f64 - 1.0) as u64) + 1;
-                while end > self.next && self.origin + (end - 1) as f64 * self.interval > t_limit {
-                    end -= 1;
-                }
-                while !inclusive && end > self.next && self.origin + (end - 1) as f64 * self.interval == t_limit {
-                    end -= 1;
-                }
-                self.dropped += end - self.next;
+                let end = grid_end(self.origin, self.interval, t_limit, inclusive).max(self.next);
+                self.dropped = self.dropped.saturating_add(end - self.next);
                 self.next = end;
                 return;
             }
@@ -207,6 +222,55 @@ mod tests {
         o.take(&mut out);
         assert_eq!(out[0], 2.0, "after a take it reads again: 1.1, 1.2");
         assert_eq!(out[3], 0.0);
+    }
+
+    #[test]
+    fn a_full_queue_drops_by_the_grid_rule_to_the_last_index() {
+        // W2bV finding 4: the full queue's skip took `floor((t - origin) /
+        // interval)`, which lands one index low where the quotient rounds
+        // down (origin 0.37 ms, interval 0.25 ms, t the grid's own fifth
+        // time: 4.999..), so the grid time at `t` was neither read nor
+        // counted. The skip ends where the grid rule says, `origin + k *
+        // interval` against `t`, as the reading loop does.
+        let mut rng = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut low = 0;
+        for _ in 0..20000 {
+            let origin = [0.0, 0.37e-3, -1e-3, 5e-4, 1.0 / 3.0][(next() % 5) as usize];
+            let interval = [1e-4, 2.5e-4, 1e-3, 3.3e-5, 1.0 / 60.0, 1e-7][(next() % 6) as usize];
+            let k = 1 + next() % 5000;
+            let t = origin + k as f64 * interval;
+            low += usize::from(((t - origin) / interval).floor() < k as f64);
+            for inclusive in [true, false] {
+                let mut o = Observer::new(vec![0], origin, interval, 1, origin);
+                o.read_until(t, inclusive, |_, t| Some((t, 0.0, false)));
+                let want = if inclusive { k + 1 } else { k };
+                assert_eq!(o.next, want, "origin {origin} interval {interval} k {k} inclusive {inclusive}");
+                assert_eq!(o.dropped, want - 1, "every grid time after the kept one counted");
+            }
+        }
+        assert!(low > 0, "some quotients round below their index");
+    }
+
+    #[test]
+    fn a_tiny_interval_neither_overflows_nor_reads_forever() {
+        // `as u64 + 1` overflowed where the quotient passed u64's range.
+        for interval in [1e-300, 1e-30, 5e-324] {
+            let mut o = Observer::new(vec![0], 0.0, interval, 1, 0.0);
+            o.read_until(1.0, true, |_, t| Some((t, 0.0, false)));
+            let mut out = Vec::new();
+            o.take(&mut out);
+            assert_eq!(out[0], 1.0);
+            assert!(out[3] > 0.0, "the rest counted as dropped");
+            o.read_until(2.0, true, |_, t| Some((t, 0.0, false)));
+            o.take(&mut out);
+            assert_eq!(out[0], 1.0, "{interval}: one more read, the limit's");
+        }
     }
 
     #[test]
