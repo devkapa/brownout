@@ -14676,20 +14676,56 @@ pub(super) fn cold_757_tpl0() -> Program {
     p
 }
 
+const STOPS_757: [f64; 34] = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25, 0.3, 0.33];
+
+/// Cold 757 tpl 0 advanced to each of `stops`: from `from` on, the 555
+/// slides at each stop, its rail within `band` of its 1.8 V floor, the PSU
+/// at its limit, and from 0.25 s, when `x_by_hand`, the duty within 0.01 of
+/// the hand value (`a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor`).
+fn cold_757_slide(stops: &[f64], from: f64, band: f64, x_by_hand: bool) {
+    let i_limit = 0.07175978736463227;
+    let x_hand = (i_limit - 0.018338) / 0.082920;
+    let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
+    for &t in stops {
+        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+        if t < from {
+            continue;
+        }
+        let hold = rig.s().power_hold(10);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t} s: sliding, not {hold:?}");
+        close(rig.u(), 1.8, band, &format!("at {t} s: the rail at the 555's floor"));
+        close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("at {t} s: the PSU at its limit"));
+        if x_by_hand && t >= 0.25 {
+            close(hold.kind.weight(), x_hand, 0.01, &format!("at {t} s: the duty against {x_hand} by hand"));
+        }
+    }
+}
+
 #[test]
-fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_from_its_chatter() {
-    // Cold 757 tpl 0 (rulings R82 (B'), R95 (b)): a 555 held in reset
-    // (RESET at 0) on a {12.56 V, 71.76 mA} PSU's rail with 1.13 mF (3.49
-    // ohm) on it; its OUT pin, LOW, sinks from node 2, which a 0.6364 ohm
-    // fuse and 18.49 ohm tie to the rail (0.6152 ohm together) and 4.94 mF
-    // holds. Powered, the rail settles near 1.41 V, under the chip's 1.8 V
-    // floor; off, it climbs past it: no power state holds, and the rail
-    // slides at 1.8 V. Node 2's capacitor carries the chip's sink within any
-    // instant, so neither end of the slide's own solve moves the rail
-    // (piece 2: held 51 times, `-4` at 0.181 s); the chatter shows the edge,
-    // and from its third hold (0.17326 s) the chip slides at the powered
-    // fraction of the last cycle (0.694), corrected across instants until
-    // the rail stops drifting.
+// Must-close item "relative-degree-2 slide aim (zero rail velocity at the
+// edge)" (README): the duty reaches this rail only through node 2's 4.94
+// mF behind the fuse, and an aim at the edge over the rail's settling, not
+// at zero rail velocity there, lets the rail run on past W0 as the slide
+// enters (1.114 W0 at 0.17746 s at these stops). An expected failure while
+// that item stands; when it closes, `should_panic` fails the gate and this
+// attribute comes off. The pin below holds its band.
+#[should_panic(expected = "the rail at the 555's floor")]
+fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor() {
+    // Cold 757 tpl 0 (rulings R82 (B'), R95 (b), R92 open item (c)): a 555
+    // held in reset (RESET at 0) on a {12.56 V, 71.76 mA} PSU's rail with
+    // 1.13 mF (3.49 ohm) on it; its OUT pin, LOW, sinks from node 2, which a
+    // 0.6364 ohm fuse and 18.49 ohm tie to the rail (0.6152 ohm together)
+    // and 4.94 mF holds. Powered, the rail settles near 1.41 V, under the
+    // chip's 1.8 V floor; off, it climbs past it: no power state holds, and
+    // the rail slides at 1.8 V. Node 2's capacitor carries the chip's sink
+    // within any instant, so neither end of the slide's own solve moves the
+    // rail at once (piece 2: held 51 times, `-4` at 0.181 s). Its aim counts
+    // node 2's pull over the rail's own settling, C_eff / g_eff = 1.138 mF
+    // / 0.384 S = 2.96 ms (`trial_rail_draw` over 10 ms and 10 us), so it
+    // slides from its first hold (0.17284 s, the rail 0.39 mV under the
+    // edge) at x 0.741, solved again at 0.672, 0.646 and 0.618 as the rail
+    // runs on to 2.57 mV under the edge (1.35 W0, 0.17567 s), then within
+    // W0 from 0.19 s at 0.643 to the PTC trip at 0.338 s.
     //
     // By hand, the zero-drift duty with every capacitor at rest: node 2
     // carries what the PSU delivers less the rail's own 38.2 kohm (0.047 mA
@@ -14713,22 +14749,23 @@ fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_from_its_cha
     // declines 11 us later, its chatter averaging 1.80003 V: this run's rail
     // is still on its ramp there, 0.7 mV (0.37 W0) under it, and on the
     // ramp 1.12 mV (0.59 W0) behind it at 0.162 s, both within W0.
-    let stops = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2, 0.25, 0.3, 0.33];
-    let (i_limit, w0) = (0.07175978736463227, 1e-4 + 1e-3 * 1.8);
-    let x_hand = (i_limit - 0.018338) / 0.082920;
-    let mut rig = Rig::load(&cold_757_tpl0()).unwrap();
-    for &t in &stops {
-        rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
-        if t < 0.17 {
-            continue;
-        }
-        let hold = rig.s().power_hold(10);
-        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t} s: sliding, not {hold:?}");
-        close(rig.u(), 1.8, w0, &format!("at {t} s: the rail at the 555's floor"));
-        close(rig.i(0), -i_limit, 1e-9 + 1e-3 * i_limit, &format!("at {t} s: the PSU at its limit"));
-        if t >= 0.25 {
-            close(hold.kind.weight(), x_hand, 0.01, &format!("at {t} s: the duty against {x_hand} by hand"));
-        }
+    cold_757_slide(&STOPS_757, 0.17, 1e-4 + 1e-3 * 1.8, true);
+}
+
+#[test]
+fn a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_within_the_relative_degree_2_band() {
+    // The pin while the relative-degree-2 aim stands (above): the rail runs
+    // on past W0 only as the slide enters, by 1.114 W0 at the test's stops
+    // (0.17746 s), 1.304 at 1 ms stops (0.175 s), 1.363 at 0.5 ms stops
+    // (0.1755 s) and 1.336 at 0.1 ms stops (0.1749 s), and within W0 at
+    // every stop after, the PTC trip at 0.338 s included: 1.6 W0, so it
+    // cannot get worse. From the first stop that slides at each schedule
+    // (0.173 s, 0.1726 s at 0.1 ms) to 0.5 s.
+    let band = 1.6 * (1e-4 + 1e-3 * 1.8);
+    cold_757_slide(&STOPS_757, 0.17, band, true);
+    for dt in [1e-3f64, 0.5e-3, 0.1e-3] {
+        let stops: Vec<f64> = (1..=(0.5 / dt).round() as usize).map(|k| k as f64 * dt).collect();
+        cold_757_slide(&stops, 0.1735, band, false);
     }
 }
 
@@ -14789,12 +14826,11 @@ fn cold_766_trap_run(stops: &[f64]) -> Result<Vec<(f64, digital::power::PowerHol
 
 /// R53V (cold 766 tpl 0 under the trapezoid): the 555 slides at its 1.8 V
 /// floor from 0.19 s, its rail loop solving its duty again each time the
-/// rail drifts W0 off, about every 0.3 to 0.6 ms (its aim sees the rail's
-/// 2.66 uF, not C17's 13.5 mF to node 6, which ties the rail to ground
-/// through 2.82 ohm and 105 uF over such a span: open item (c)). At 1 ms
-/// stops that is a few re-solves a host step; across the 0.2 to 0.25 s host
-/// step about 160, past `SLIDE_FOLLOW_MAX`'s 100 a host step, so the slide
-/// was given up there and held, and the hold, kept from the release-level
+/// rail drifts W0 off. Before open item (c) its aim saw the rail's 2.66 uF,
+/// not C17's 13.5 mF to node 6 (2.82 ohm and 105 uF to ground), and it
+/// re-solved every 0.3 to 0.6 ms: across the 0.2 to 0.25 s host step about
+/// 160 times, past `SLIDE_FOLLOW_MAX`'s 100 a host step, so the slide was
+/// given up there and held, and the hold, kept from the release-level
 /// retry, stayed off for the rest of each 50 ms host step while the rail
 /// climbed to 2.3 to 3.6 V: a wrong answer where before ruling R92 the
 /// board declined. The cap also allows 100 re-solves per 10 ms of the host
@@ -14818,78 +14854,75 @@ fn cold_766_trap_schedules(band: f64) {
 }
 
 #[test]
-// Open item (c), R53's own: the aim, short of the rail's capacitance in a
-// stepped hub partition, lets the rail run on past W0 between re-solves.
-// An expected failure while it does; when (c) closes, `should_panic` fails
-// the gate and this attribute comes off.
-#[should_panic(expected = "the rail at the 555's floor")]
 fn a_slide_is_followed_alike_at_long_host_steps_within_w0() {
+    // With open item (c) the aim counts C17's pull over the span (its
+    // stepped partition's backward Euler trial, `trial_rail_draw`), so a
+    // re-solve aims the rail back at the edge over the rail's own settling
+    // rather than leaving it at the band's edge: the duty holds the rail
+    // W0 between re-solves where it ran on to 2.2 W0 (4.2 mV at 1 ms
+    // stops), and they come about 1.8 ms apart (418 from 0.25 to 1.0 s at
+    // the long stops, 270 at 1 ms stops) instead of 0.3 to 0.6 ms. Within
+    // W0 at every schedule (measured worst 0.935, 0.712, 0.310 and 0.993
+    // W0 at the long, 0.1 s, 0.2 s and 1 ms stops).
     cold_766_trap_schedules(1e-4 + 1e-3 * 1.8);
 }
 
-#[test]
-fn a_slide_is_followed_alike_at_long_host_steps_within_open_item_cs_band() {
-    // The pin while open item (c) stands: the rail loop solves the duty
-    // again once the rail is W0 off, aimed back at the edge; the aim, short
-    // by (c), lets the rail run on past W0 until the next re-solve turns it,
-    // by up to 2.2 W0 at any of these schedules (4.2 mV at 1 ms stops, 3.1
-    // mV at 0.1 s stops; 8434bf3's BE run at 0.4 s, 2.6 mV): 2.5 W0, so it
-    // cannot get worse.
-    cold_766_trap_schedules(2.5 * (1e-4 + 1e-3 * 1.8));
-}
-
-#[test]
-fn a_slide_given_up_is_retried_at_its_release_level_and_declines_as_before_the_ruling() {
-    // R53V's wrong answer, its own guard: with the per-time allowance off
-    // (`hold::NoFollowPerTime`) cold 766 tpl 0 under the trapezoid gives its
-    // slide up across the 0.2 to 0.25 s host step. The slide given up is
-    // held as before ruling R92, its release level retried within the host
-    // step as any hold's: it never publishes its rail past that level with
-    // the chip held off (kept from that retry, the rail climbed to 2.3 to
-    // 3.6 V), and it declines through the episode guard (`-4`), as at
-    // 8434bf3.
-    let _off = hold::NoFollowPerTime::arm();
+/// Cold 766 tpl 0 under the trapezoid with the follow cap at 2 re-solves a
+/// host step (`hold::FollowCap`), advanced through 0.01, 0.05, ... 1.0 s:
+/// each stop reached, its 555's hold and rail, then the failure.
+fn cold_766_given_up() -> (Vec<(f64, digital::power::HoldKind, f64)>, Option<String>) {
+    let _cap = hold::FollowCap::arm(2);
     let mut p = cold_766_tpl0();
     p.options.integration = 1;
     let mut rig = Rig::load(&p).unwrap();
-    let mut declined = None;
+    let mut out = Vec::new();
     for &t in &[0.01, 0.05, 0.1, 0.15, 0.19, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0] {
         match rig.advance(t) {
-            Ok(()) => {
-                let hold = rig.s().power_hold(7);
-                if let Some(r) = hold.release.filter(|_| hold.kind == digital::power::HoldKind::Off) {
-                    assert!(!hold::passed(r, rig.u()), "at {t} s: held off with the rail at {} V, past its release level {}", rig.u(), r.level);
-                }
-            }
-            Err(e) => {
-                declined = Some(format!("{e:?}"));
-                break;
-            }
+            Ok(()) => out.push((t, rig.s().power_hold(7).kind, rig.u())),
+            Err(e) => return (out, Some(format!("{e:?}"))),
         }
     }
-    let declined = declined.expect("without the per-time allowance the board declines");
+    (out, None)
+}
+
+#[test]
+fn a_slide_given_up_declines_as_before_the_ruling() {
+    // R53V's wrong answer, its own guard: with the follow cap at 2
+    // re-solves a host step cold 766 tpl 0 under the trapezoid gives its
+    // slide up within its first host step of sliding (before open item (c)
+    // it did so at the real cap's 100, across the 0.2 to 0.25 s host step,
+    // and was held off for the rest of each 50 ms host step while its rail
+    // climbed to 2.3 to 3.6 V). The slide given up is held as before ruling
+    // R92, and the board declines through the episode guard (`-4`) in the
+    // next host step, as at 8434bf3.
+    let (_, declined) = cold_766_given_up();
+    let declined = declined.expect("with its slides given up the board declines");
     assert!(declined.contains("held 51 times in one sliding episode"), "{declined}");
 }
 
 #[test]
-// Open item (c), R53's own: at 0.5 s the rail sits 1.55 W0 under the floor
-// (1.79705 V), the aim short of C17's capacitance letting it run on past W0
-// between re-solves. Within W0 at 8434bf3 only because its stops then gave
-// the slide up across a host step and re-entered it on another trajectory.
-// An expected failure while (c) stands; the pin below holds its band.
-#[should_panic(expected = "the rail at the 555's floor")]
-fn a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end() {
-    cold_766_flat_at_an_end(1e-4 + 1e-3 * 1.8);
+fn a_slide_given_up_publishes_what_the_hold_published_before_the_ruling() {
+    // The same run's stops against 8434bf3's (before ruling R92, the board
+    // as it then ran, drafts/r53-logs/p18-pre766.log): the chip free to
+    // 0.15 s, the rail climbing to 1.626 V; at 0.19 s held off, its rail
+    // 2.0124 V past its 1.8 V release level, the given-up slide held as the
+    // pre-ruling hold was (R44 (a)'s draw threshold keeps a chip held on a
+    // CC rail capacitor's segment: powered it turns the segment down); then
+    // the decline at the 0.2 s stop. The same hold and the rail within W0
+    // of 8434bf3's at every stop, and nothing past 0.19 s.
+    use digital::power::HoldKind;
+    let before = [(0.01, HoldKind::Free, 0.4535771696979229), (0.05, HoldKind::Free, 0.7777231946139586), (0.1, HoldKind::Free, 1.2464433178674625), (0.15, HoldKind::Free, 1.626329603186103), (0.19, HoldKind::Off, 2.0123903547391158)];
+    let (stops, declined) = cold_766_given_up();
+    assert_eq!(stops.len(), before.len(), "stops reached: {stops:?}, then {declined:?}");
+    for ((t, kind, u), (t0, kind0, u0)) in stops.into_iter().zip(before) {
+        assert_eq!(t, t0);
+        assert_eq!(kind, kind0, "at {t} s: the hold");
+        close(u, u0, 1e-4 + 1e-3 * u0.abs(), &format!("at {t} s: the rail against 8434bf3's"));
+    }
 }
 
 #[test]
-fn a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_within_open_item_cs_band() {
-    // The pin while open item (c) stands: 2.5 W0, as derived for the same
-    // board's schedules under the trapezoid above.
-    cold_766_flat_at_an_end(2.5 * (1e-4 + 1e-3 * 1.8));
-}
-
-fn cold_766_flat_at_an_end(band: f64) {
+fn a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end() {
     // Cold 766 tpl 0 (ruling R95 (iv)): a 555 on a {8.92 V, 113 mA} PSU's
     // rail, its OUT against a clock, slides at its 1.8 V
     // floor (ruling R92). Its duty is solved again 10 ns apart where the
@@ -14900,7 +14933,9 @@ fn cold_766_flat_at_an_end(band: f64) {
     // which the board's own motion carries back to the edge, where it is
     // solved flat again. Exiting there instead (piece 2), the chip was held,
     // freed and held again, 51 times to the guard's `-4` at 0.191 s; with
-    // the end kept it slides to 0.5 s.
+    // the end kept it slides to 0.5 s, its rail within W0 of the floor
+    // there (0.30 W0; 1.55 W0 before open item (c), its aim short of C17's
+    // pull, the rail running on past W0 between re-solves).
     let stops = [0.006272881316202867, 0.006592239574557807, 0.006747974487588678, 0.009302569904999277, 0.011591259429672991, 0.012891930838384202, 0.013102337317568288, 0.017121114509552525, 0.01776977393624156, 0.017903256799721563, 0.018573567296525255, 0.019190791809711928, 0.027283241124519846, 0.03633238334655953, 0.03655508559102963, 0.05375819776730538, 0.053907005655440196, 0.05434366018173479, 0.05471144162919912, 0.05481549907582625, 0.058867174158759854, 0.09774042128506163, 0.13711284835022985, 0.1677137943913277, 0.16946598153329615, 0.17000367281961773, 0.17010636113855684, 0.17089289690872514, 0.2191317906044945, 0.22246539709907526, 0.22689536571424207, 0.2271144421500335, 0.25424151981471377, 0.2546238277775797, 0.2710727463304922, 0.27129307569300326, 0.28499382276150725, 0.2855188431517161, 0.2861424232586671, 0.3093323047182759, 0.324302244677687, 0.32446900395433265, 0.34039419607263716, 0.34427362694576674, 0.37214510234434706, 0.3730873691773048, 0.3737265355732723, 0.3742685747092929, 0.37465525493761176, 0.37480753065700917, 0.39492720918502816, 0.4182941417763242, 0.42037993834465476, 0.42059268601733263, 0.43781200950730526, 0.4379382404627846, 0.4394875796097216, 0.44197203244170324, 0.44320833929044123, 0.444283064174736, 0.4450314638403273, 0.47089326118430774, 0.5];
     let mut rig = Rig::load(&cold_766_tpl0()).unwrap();
     for &t in &stops {
@@ -14908,7 +14943,36 @@ fn cold_766_flat_at_an_end(band: f64) {
     }
     let hold = rig.s().power_hold(7);
     assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "sliding at 0.5 s, not {hold:?}");
-    close(rig.v(1), 1.8, band, "the rail at the 555's floor");
+    close(rig.v(1), 1.8, 1e-4 + 1e-3 * 1.8, "the rail at the 555's floor");
+}
+
+#[test]
+fn a_slides_trial_steps_leave_no_trace() {
+    // Open item (c)'s trials (`SteppedSolver::trial_rail_draw`) are solves
+    // only: computed once more and thrown away before each one used
+    // (`hold::TrialsTwice`), cold 757 tpl 0 and 766 tpl 0 run
+    // bit for bit as without, every node, every current, the holds and the
+    // engine's counts at every stop.
+    let run = |p: &Program, stops: &[f64]| {
+        let mut rig = Rig::load(p).unwrap();
+        let mut out = Vec::new();
+        for &t in stops {
+            rig.advance(t).unwrap_or_else(|e| panic!("advance to {t}: {e:?}"));
+            rig.k.solver_mut().prepare_readout();
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+            out.push((bits(rig.s().voltages()), bits(rig.k.solver().currents()), rig.s().hold_counts().map(f64::to_bits), rig.k.stats().events_processed, rig.s().stepped_steps()));
+        }
+        out
+    };
+    let uniform = |dt: f64, end: f64| (1..=(end / dt).round() as usize).map(|k| k as f64 * dt).collect::<Vec<f64>>();
+    for (name, p, stops) in [("757 tpl 0", cold_757_tpl0(), uniform(0.01, 0.4)), ("766 tpl 0", cold_766_tpl0(), uniform(0.05, 0.6))] {
+        let once = run(&p, &stops);
+        let twice = {
+            let _twice = hold::TrialsTwice::arm();
+            run(&p, &stops)
+        };
+        assert!(once == twice, "{name}: a trial computed and thrown away changed the run");
+    }
 }
 
 #[test]

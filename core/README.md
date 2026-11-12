@@ -1951,10 +1951,13 @@ their own, and the source KCL does with W1a point 2's branch fold.
    the band's level (1.9 V/s over 83 ns took 757's duty to 1). The drift is
    measured across driver changes, which a chip toggling as it slides makes
    at its own pace. A chip that, fully powered, still drifts as held (or off,
-   as powered) leaves the slide. 757 tpl 0 runs to 1.2 s at x = 0.640-0.649
-   against 0.6443 by hand, then 0.785 once its PTC fuse trips (0.787 by
-   hand), its rail within W0 of 1.8 V except at the trip (2 W0, the further
-   watch). On a capacitor's segment whose aim back at the edge needs more
+   as powered) leaves the slide. 757 tpl 0 slid so from its third hold;
+   since open item (c) it slides on its capacitor's segment from its first
+   (0.17284 s, x 0.741), runs to 1.2 s at x = 0.643 against 0.6443 by hand,
+   then 0.78 once its PTC fuse trips at 0.338 s (0.787 by hand), its rail
+   within W0 of 1.8 V from 0.19 s, the trip included, at 0.1 to 1 ms stops
+   (1.0004 W0 at 0.92 s at 10 ms stops); as it enters, 1.11 to 1.36 W0 (the
+   relative-degree-2 must-close item). On a capacitor's segment whose aim back at the edge needs more
    than the limit leaves at any duty, yet one holds it flat, the slide takes
    the end that turns it back fastest (off under the edge, on over it); cold
    766 tpl 0 then slides to 0.507 s instead of 0.191 s. **A chip with a
@@ -2025,6 +2028,37 @@ their own, and the source KCL does with W1a point 2's branch fold.
    re-entered and followed to its cap at each pulse edge, 13 holds against
    4 and 124 sliding stops against 1); 627 tpl 4 (13 re-solves against 12),
    766 tpl 0, 757 tpl 0, 175 tpl 2 and 696 tpl 2 run as before.
+
+   **The aim through a stepped partition** (open item (c), closed; ruling
+   R92, `hold::stepped_draw_over`, `hold::rail_settling`,
+   `SteppedSolver::trial_rail_draw`). A stepped hub partition's capacitors
+   carry the rail over a span its contribution (companions `C / h` at its
+   own nanosecond step) does not show: cold 766 tpl 0's C17, 13.5 mF to a
+   node 2.82 ohm and 105 uF hold to ground, read as the rail's own 2.66 uF,
+   left the aim a thousand times short, a re-solve every 0.3 to 0.6 ms and
+   the rail up to 2.2 W0 past the edge between them. The aim now reads each
+   such partition's draw at the end of one backward Euler step over the
+   span with the rail held at the edge, the chip at its duty (a trial: no
+   state changes, `a_slides_trial_steps_leave_no_trace`), in place of its
+   contribution, in the residual, the flat solve, the exit thresholds, the
+   at-edge check and the "on its way" check alike. The span is the rail's
+   own settling `C_eff / g_eff`, read once as the slide enters from the
+   rail's admittance over 10 ms and 10 us (fitted to `g + C / T`), at least
+   `H_MIN`, and not bounded by the host step (757 tpl 0 at 0.1 ms stops,
+   bounded: an aim over 0.1 ms no duty meets, the chip free from 0.1733 s to
+   0.8 s, 4 s of wall; unbounded it slides from 0.1726 s, 0.25 s of wall);
+   with no such partition, the span since the last solve, a host step at
+   most, as before. A re-solve at an instant the slide's own commits
+   changed aims over what is left of the last span (757: 2 mV off 10 ns
+   after a solve, the residual at duty 0 was 224 A). "On its way" past the
+   band needs the rail heading back now (the draw against the limit) as
+   well as over the span: over the span alone, 2575 tpl 2's 11.9 nF rail,
+   solved at -1.9 mV at a pulse edge, ran on to +2.3 mV 0.16 us later.
+   766 tpl 0 under the trapezoid: within W0 at every schedule (worst
+   0.993 W0 at 1 ms stops), re-solves about 1.8 ms apart (270 from 0.25 to
+   1 s at 1 ms stops); its flat-at-an-end run 0.30 W0 at 0.5 s (1.55
+   before). 2575 tpl 2: 78,733 events against 91,057, wall 2.05 s
+   against 2.00 s.
 
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
@@ -3233,7 +3267,7 @@ Constants, all from P3:35-38 unless marked new:
 | `slide_drift(edge)` | `1e-4 + 1e-3·abs(edge)` V (new, ruling R92) | W0's voltage tolerance at a sliding chip's edge: its duty is solved again once its supply drifts this far, and a `Rail` watch sits on both levels (W1c point 1a, the slide) |
 | `SLIDE_FOLLOW_MAX` | `100` per host step, or per `SLIDE_FOLLOW_SPAN` (10 ms) of a longer one, whichever allows more (new, ruling R92; per time since R53V) | duties solved again in one host step before a slide is given up as one that cannot be followed: the chip is held as before the ruling for that host step only, and the next host step's retry runs the hold procedure for it again (`hold::reenter_slides`), which slides it again or puts the solver back (held until the circuit changed, cold 2575 tpl 2's 555 sat unpowered in CV for 0.63 s after one source ramp). Cold 230 tpl 2 (a stepped hub partition on a CC rail moving the rail past W0 at each 210 ns step), 559 tpl 0 and `a_rail_ic_at_its_power_edge_on_a_cc_rail_capacitor_is_held_as_on_the_segment` ran under the hold and declined through `SLIDE_SOLVES_MAX` without it; G's boards (175/2, 696/2, 627/4) take at most 42 |
 | `SLIDE_SOLVES_MAX` | `1000` per host step (new, ruling R92), scaled with `SLIDE_FOLLOW_MAX` | the backstop past which a slide's re-solves decline `-4` (never reached while `SLIDE_FOLLOW_MAX` gives a slide up first) |
-| `SLIDE_FOLLOW_SPAN` | `10e-3` s (new, R53V) | the simulated time per 100 re-solves a long host step may also make (`hold::slide_follow_cap`). The cap was set at the app's cadence, a host step a frame (1/60 s): 100 re-solves in 16.7 ms, one per 167 us. Counted per host step only, it gave a slide up at long host steps that frame steps followed: cold 766 tpl 0 under the trapezoid re-solves its duty every 0.3 to 0.6 ms (open item (c)), about 160 times across a 50 ms host step, and lost its slide at 0.25 s at stops 0.2, 0.25, ... 1.0 s, kept at 1 ms stops. Per 10 ms the allowance at any host step is never below the frame cadence's pace (one per 100 us). A slide given up is held as before ruling R92 and retried at its release level within the host step as any hold (kept from that retry, 766's chip sat off while its rail climbed to 2.3 to 3.6 V) |
+| `SLIDE_FOLLOW_SPAN` | `10e-3` s (new, R53V) | the simulated time per 100 re-solves a long host step may also make (`hold::slide_follow_cap`). The cap was set at the app's cadence, a host step a frame (1/60 s): 100 re-solves in 16.7 ms, one per 167 us. Counted per host step only, it gave a slide up at long host steps that frame steps followed: cold 766 tpl 0 under the trapezoid re-solved its duty every 0.3 to 0.6 ms (before open item (c) closed), about 160 times across a 50 ms host step, and lost its slide at 0.25 s at stops 0.2, 0.25, ... 1.0 s, kept at 1 ms stops. Per 10 ms the allowance at any host step is never below the frame cadence's pace (one per 100 us). A slide given up is held as before ruling R92 and retried at its release level within the host step as any hold (kept from that retry, 766's chip sat off while its rail climbed to 2.3 to 3.6 V) |
 
 ### Rails
 
@@ -6525,10 +6559,10 @@ W1f adds (rails and sources, "Kernel semantics: rails and sources (W1f)"):
     sinking 82.8 mA through a 71.8 mA supply chattered at its 1.8 V floor
     every 170 µs, 11 to 13 steps between flips and no hold, 6,805 steps in a
     45 ms host step; it then declined through the guard, and since ruling
-    R95 (b) it slides from its chatter, W1c point 1a; off a segment cold 108
+    R95 (b) it slides, since open item (c) from its first hold, W1c point 1a; off a segment cold 108
     tpl 5's 74LS00 throws a capacitorless rail to 7.1 V and back at its
     floor, which exact mode runs through:
-    `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_from_its_chatter`,
+    `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor`,
     `a_rail_ic_flipping_off_a_rail_capacitor_is_not_counted_across_its_steps`).
     A source edge ends it too, and so does another partition's event when
     the rail solves again in that call (a clock swinging a load across a
@@ -6820,21 +6854,21 @@ failures and warnings (W1g)"):
   it. Closing it needs the step's knots kept (or the step re-planned
   passively) whenever it may be armed into.
 
-- (c) A slide's aim back at its edge sees only the rail's own capacitors to
-  fixed nodes and the conductance of its direct and static parts (ruling
-  R92, (b3)): capacitance a stepped hub partition carries is not in it. Cold
-  766 tpl 0's rail carries C17, 13.5 mF to node 6, which 2.82 ohm and 105 uF
-  tie to ground: over a re-solve's span (0.3 to 0.6 ms) about 0.35 S and
-  104 uF against the 2.66 uF the aim reads, so its aim current is about a
-  thousand times short and each re-solve leaves the rail at the band's
-  edge. The rail runs on past W0 until the next turns it, by up to 2.2 W0
-  (4.2 mV at 1 ms stops), and the duty is solved again every 0.3 to 0.6 ms
-  where a full aim would space its re-solves out. An aim that counts the
-  stepped hub partitions' admittance at the rail over the span (R53-P4's
-  derived effective capacitance) would close it. R53's own: in scope
-  before R53 lands; `a_slide_whose_aim_back_is_out_of_reach_holds_its_segment_flat_at_an_end`
-  and `a_slide_is_followed_alike_at_long_host_steps_within_w0` are its
-  expected failures, pinned at 2.5 W0 meanwhile.
+- **Relative-degree-2 slide aim** (zero rail velocity at the edge; R53,
+  open item (c)'s successor). A slide's aim brings the rail back to its edge
+  over the rail's settling, a backward Euler trial's end-of-span draw, but
+  sets no condition on the rail's velocity there. Where the duty reaches
+  the rail only through a capacitor (cold 757 tpl 0: the 555's sink on
+  node 2, 4.94 mF behind a 0.64 ohm fuse), the rail runs on past W0 as the
+  slide enters: 1.114 W0 at the test's stops (0.17746 s), 1.304, 1.363 and
+  1.336 W0 at 1, 0.5 and 0.1 ms stops, within W0 from 0.19 s (1.0004 W0
+  at 0.92 s at 10 ms stops). Re-solving
+  more often (a band of 0.2 to 0.5 W0), a trapezoid aim and a span of the
+  fast mode (0.9 ms) were measured and do not hold it. An aim at zero rail
+  velocity at the edge, from node 2's trajectory in the trial, would.
+  `a_rail_ic_whose_draw_reaches_its_rail_through_a_capacitor_slides_at_its_floor`
+  is its expected failure, pinned at 1.6 W0 over all four schedules
+  (`..._slides_within_the_relative_degree_2_band`).
 - **BE stepped capacitor-current error control** (INT-ACC, rulings R93, R96).
   A backward Euler stepped partition's step-doubling bounds its node
   voltages to W0 per step but never its capacitors' series currents, a

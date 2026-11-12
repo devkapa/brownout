@@ -130,27 +130,54 @@ impl Drop for NoSlide {
 
 #[cfg(test)]
 thread_local! {
-    static NO_FOLLOW_PER_TIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FOLLOW_CAP: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
-/// Test seam: while the guard lives the follow cap counts per host step
-/// only ([`slide_follow_cap`]'s per-time allowance off), so a test can give
-/// a slide up at a long host step and watch its fallback hold.
+/// Test seam: while the guard lives the follow cap is `cap` re-solves a
+/// host step, with no per-time allowance ([`slide_follow_cap`]), so a test
+/// can give a slide up and watch its fallback hold.
 #[cfg(test)]
-pub(super) struct NoFollowPerTime;
+pub(super) struct FollowCap;
 
 #[cfg(test)]
-impl NoFollowPerTime {
-    pub(super) fn arm() -> NoFollowPerTime {
-        NO_FOLLOW_PER_TIME.with(|c| c.set(true));
-        NoFollowPerTime
+impl FollowCap {
+    pub(super) fn arm(cap: u32) -> FollowCap {
+        FOLLOW_CAP.with(|c| c.set(Some(cap)));
+        FollowCap
     }
 }
 
 #[cfg(test)]
-impl Drop for NoFollowPerTime {
+impl Drop for FollowCap {
     fn drop(&mut self) {
-        NO_FOLLOW_PER_TIME.with(|c| c.set(false));
+        FOLLOW_CAP.with(|c| c.set(None));
+    }
+}
+
+
+#[cfg(test)]
+thread_local! {
+    static TRIALS_TWICE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the guard lives each trial step of a slide's aim
+/// (`SteppedSolver::trial_rail_draw`) is computed once more first and that
+/// result thrown away, so a test can show the trials leave no trace.
+#[cfg(test)]
+pub(super) struct TrialsTwice;
+
+#[cfg(test)]
+impl TrialsTwice {
+    pub(super) fn arm() -> TrialsTwice {
+        TRIALS_TWICE.with(|c| c.set(true));
+        TrialsTwice
+    }
+}
+
+#[cfg(test)]
+impl Drop for TrialsTwice {
+    fn drop(&mut self) {
+        TRIALS_TWICE.with(|c| c.set(false));
     }
 }
 
@@ -362,9 +389,11 @@ pub(crate) const SLIDE_FOLLOW_SPAN: f64 = 10e-3;
 /// times the cap.
 pub(crate) fn slide_follow_cap(host_step: f64) -> (u32, u32) {
     let scale = if host_step.is_finite() { (host_step / SLIDE_FOLLOW_SPAN).max(1.0) } else { 1.0 };
-    #[cfg(test)]
-    let scale = if NO_FOLLOW_PER_TIME.with(|c| c.get()) { 1.0 } else { scale };
     let cap = |n: u32| (n as f64 * scale).min(u32::MAX as f64 / 2.0) as u32;
+    #[cfg(test)]
+    if let Some(follow) = FOLLOW_CAP.with(|c| c.get()) {
+        return (follow, SLIDE_SOLVES_MAX);
+    }
     (cap(SLIDE_FOLLOW_MAX), cap(SLIDE_SOLVES_MAX))
 }
 
@@ -446,6 +475,12 @@ pub(crate) struct Episode {
     /// While the IC slides: when its duty was last solved (`-inf`: never),
     /// the span its segment is aimed back over (`slide_residual`).
     pub(crate) solved_at: f64,
+    /// While the IC slides on a capacitor's segment: the end of the span
+    /// its last solve aimed back over (`slide_span`; `-inf`: none), and
+    /// the span its solve aims over, the rail's own settling
+    /// (`rail_settling`; 0: none yet).
+    pub(crate) aim_until: f64,
+    pub(crate) span: f64,
     /// While the IC slides off a capacitor's segment: the supply levels,
     /// lower then upper, past which one end of its duty's bracket stops
     /// bracketing, Filippov's exit (`slide_exits`; infinite: none).
@@ -498,6 +533,8 @@ impl Default for Episode {
             stepped: false,
             slope: 0.0,
             solved_at: 0.0,
+            aim_until: f64::NEG_INFINITY,
+            span: 0.0,
             exits: (f64::NEG_INFINITY, f64::INFINITY),
             draw_exits: (f64::NEG_INFINITY, f64::INFINITY),
             unfollowed: false,
@@ -1231,6 +1268,18 @@ impl PartitionedSolver {
     /// keeping a slide probes its ends only when its duty has moved that far.
     fn slide_from(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, d: usize, err: &str, from: Option<f64>) -> Result<bool, String> {
         let off = supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages) - self.slide_edge(d);
+        // The rail's settling, read once as the slide enters and kept while
+        // it lasts: read again at each re-solve, on cold 2575 tpl 2's source
+        // ramp it came out 1.6 us at the entry and 4.8 ms 2.5 us later, and
+        // the long one's trial put the residual under the limit at every
+        // duty, so the slide left and entered again each 2.5 us to the
+        // episode guard.
+        if self.segment_draw(now).is_some() && !(self.episode(d).span > 0.0) {
+            let mut episode = self.episode(d);
+            episode.span = self.rail_settling(now, d);
+            self.set_episode(d, episode)?;
+        }
+        let span = self.slide_span(now, d);
         let mut slid = self.slide_solve(now, drivers, readers, d, err, from)?;
         if !slid && self.segment_draw(now).is_some() {
             // No duty aims the segment back that fast, yet one holds it flat:
@@ -1255,6 +1304,7 @@ impl PartitionedSolver {
         if slid {
             let mut episode = self.episode(d);
             episode.solved_at = now;
+            episode.aim_until = now + span;
             self.set_episode(d, episode)?;
         }
         Ok(slid)
@@ -1373,13 +1423,18 @@ impl PartitionedSolver {
             // left to the W0 re-solves, as a watch already past would fire at
             // once and the re-solve keep it again (cold 766 tpl 0: held 51
             // times by 0.219 s).
+            // The watched draw is the duty's own at the edge; the residual
+            // also carries the stepped hub partitions' draw over the span in
+            // place of their contributions (open item (c)), which the
+            // thresholds take off as it stands at the solve.
             let r_x = self.slide_residual(now, d);
             let w_x = self.slide_draw_at_edge(now, d).unwrap_or(f64::NAN);
-            if let Some(added) = r[1].map(|r1| r1 - r_x).filter(|&a| a > 0.0 && w_x > i_limit - a) {
-                episode.draw_exits.0 = i_limit - added;
+            let shift = self.slide_shift(now, d);
+            if let Some(added) = r[1].map(|r1| r1 - r_x).filter(|&a| a > 0.0 && w_x > i_limit - a - shift) {
+                episode.draw_exits.0 = i_limit - added - shift;
             }
-            if let Some(added) = r[0].map(|r0| r0 - r_x).filter(|&a| a < 0.0 && w_x < i_limit - a) {
-                episode.draw_exits.1 = i_limit - added;
+            if let Some(added) = r[0].map(|r0| r0 - r_x).filter(|&a| a < 0.0 && w_x < i_limit - a - shift) {
+                episode.draw_exits.1 = i_limit - added - shift;
             }
         } else {
             let ic = &self.ics[self.ic_position[d] as usize].1;
@@ -1597,11 +1652,9 @@ impl PartitionedSolver {
             // carries it past the band again, where it is solved flat
             // (`keep_sliding`). Aimed back over a whole host step, cold 175
             // tpl 2's rail never left the band's edge, a solve every 60 us.
-            let host = if self.host_step.is_finite() && self.host_step > 0.0 { self.host_step } else { 1.0 };
-            let since = now - self.episode(d).solved_at;
-            let span = if since > 0.0 { since.min(host) } else { host };
+            let span = self.slide_span(now, d);
             if self.slide_flat {
-                return draw - i_limit;
+                return draw + self.slide_shift(now, d) - i_limit;
             }
             // The draw at the edge, not at the supply: the rail's own
             // conductance `G = dD/du` (a sliding 555's DIS, x / 10 S) pulls
@@ -1616,14 +1669,24 @@ impl PartitionedSolver {
             // apart, 20 million events without progress.
             let dir = crate::devices::sources::direction(v);
             if off.abs() > 2.0 * slide_drift(self.slide_edge(d)) {
-                return draw - i_limit - dir * hub.c_rail * off / span;
+                return draw + self.slide_shift(now, d) - i_limit - dir * hub.c_rail * off / span;
             }
             // The draw's line at the supply carried to the edge (the
             // linearised segment's own `w`): read at the edge itself across
             // a kink of the draw (cold 766 tpl 0) it swung the duty between
             // its ends at each W0 crossing.
             let g = self.rail_draw_slope(hub.state.u);
-            let at_edge = draw - dir * g * off;
+            let mut at_edge = draw - dir * g * off;
+            // Open item (c): a stepped hub partition's own capacitors carry
+            // the rail over the span, which its contribution (its
+            // companions at its own nanosecond step) does not show: its draw
+            // there is a backward Euler step over the span with the rail at
+            // the edge (`SteppedSolver::trial_rail_draw`), in place of its
+            // contribution at the supply. Its pull read as a conductance of
+            // the rail's own (2.66 uF) left cold 766 tpl 0's aim a thousand
+            // times short of C17's 13.5 mF behind 2.82 ohm and 105 uF, the
+            // rail running on past W0 by up to 2.2 W0 between re-solves.
+            at_edge += self.slide_shift(now, d);
             return at_edge - i_limit - segment_aim(off, span, hub.c_rail, g, dir);
         }
         let ic = &self.ics[self.ic_position[d] as usize].1;
@@ -1634,6 +1697,132 @@ impl PartitionedSolver {
         } else {
             s - hi
         }
+    }
+
+    /// The span a slide on a capacitor's segment aims back over: its
+    /// rail's own fastest settling (`Episode::span`, `rail_settling`, read
+    /// as the slide enters), or what is left of the span the last solve aimed
+    /// over, when longer. A solve again at an instant the slide's own
+    /// commits changed, nanoseconds after the last, otherwise aimed the
+    /// supply back over those nanoseconds, which no duty does once its pull
+    /// on the rail runs through a capacitor (cold 757 tpl 0: 2 mV off, 10 ns
+    /// after a solve, the residual at duty 0 224 A).
+    fn slide_span(&self, now: f64, d: usize) -> f64 {
+        let host = if self.host_step.is_finite() && self.host_step > 0.0 { self.host_step } else { 1.0 };
+        let episode = self.episode(d);
+        if !(episode.span > 0.0) {
+            // No stepped hub partition carries the rail (`rail_settling`
+            // none): the span since the last solve, a host step at most.
+            let since = now - episode.solved_at;
+            return if since > 0.0 { since.min(host) } else { host };
+        }
+        // Not bounded by the host step: the settling is the rail's own,
+        // not the host's cadence. Bounded, cold 757 tpl 0 at 0.1 ms stops
+        // aimed its relative-degree-2 rail back over 0.1 ms, which no duty
+        // does: no slide at its hold, a chatter seed at duty 1 that left it
+        // 2 W0 out, and the chip free from 0.1733 s to 0.8 s (4 s of wall);
+        // unbounded it slides from 0.1726 s throughout (0.25 s of wall).
+        let span = episode.span;
+        let left = episode.aim_until - now;
+        if left > span {
+            left
+        } else {
+            span
+        }
+    }
+
+    /// Open item (c): the span a slide on a capacitor's segment aims over,
+    /// the rail's own fastest settling `C_eff / g_eff` at sliding IC `d`'s
+    /// edge, from the rail's admittance over two spans, `T1` =
+    /// `SLIDE_FOLLOW_SPAN` (10 ms) and a thousandth of it, `T2` = 10 us:
+    /// `Y(T) = g + c_rail / T + dI/du` of each
+    /// stepped hub partition's trial over `T` (`trial_rail_draw` a W0 apart),
+    /// fitted to `g_eff + C_eff / T`. At least a step's floor
+    /// (`stepped::H_MIN`: no step resolves a shorter one), and not bounded
+    /// by the host step (`slide_span`; bounded at the entry, an
+    /// event-stepped run's 30 ps host step held 2575 tpl 2's aim to 30 ps
+    /// for the whole episode, its duty banging 0 to 1 every 20 ps). 0 (the
+    /// span since the last solve, as without) when no stepped hub partition
+    /// carries the rail or the fit is not positive. A duty
+    /// promises the rail only over a span on which the fast and the slow
+    /// paths from it agree: aimed over a host step (40 ms) on cold 766 tpl 0,
+    /// the trial's end-of-span draw balanced the limit while the rail's
+    /// direct draw, 175 mA against 113 mA, took the rail 5 mV down within a
+    /// microsecond.
+    fn rail_settling(&self, now: f64, d: usize) -> f64 {
+        let floor = super::stepped::H_MIN;
+        let hub = self.hub.as_ref().expect("a hub");
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        let edge = self.slide_edge(d);
+        let off = supply(ic, &self.voltages) - edge;
+        let u = hub.state.u;
+        let u_edge = if ic.vcc.node == hub.node { u - off } else { u + off };
+        let delta = slide_drift(edge);
+        let g = self.rail_draw_slope(u);
+        let parts: Vec<usize> = self.stepped.hub_partitions().into_iter().filter(|&p| hub.contrib.get(p).is_some_and(|c| c.active && c.b.is_none())).collect();
+        if parts.is_empty() {
+            return 0.0;
+        }
+        let admittance = |span: f64| -> Option<f64> {
+            let mut y = g + hub.c_rail / span;
+            for &p in &parts {
+                let at = self.stepped.trial_rail_draw(p, now, span, u_edge, &self.driver_snapshot, &self.live_params, &self.voltages)?;
+                let past = self.stepped.trial_rail_draw(p, now, span, u_edge + delta, &self.driver_snapshot, &self.live_params, &self.voltages)?;
+                y += (past - at) / delta;
+            }
+            Some(y)
+        };
+        // Spans fixed in simulated time, not the host's: read over a host
+        // step the settling moved with the host's cadence, and a run split
+        // by budget yields left the run unsplit.
+        let (t1, t2) = (SLIDE_FOLLOW_SPAN, 1e-3 * SLIDE_FOLLOW_SPAN);
+        let (Some(y1), Some(y2)) = (admittance(t1), admittance(t2)) else { return 0.0 };
+        let c_eff = (y2 - y1) / (1.0 / t2 - 1.0 / t1);
+        let g_eff = y1 - c_eff / t1;
+        if !(c_eff > 0.0 && g_eff > 0.0) {
+            return 0.0;
+        }
+        (c_eff / g_eff).max(floor)
+    }
+
+    /// Open item (c): sliding IC `d`'s aim's shift, `dir` signed, of the
+    /// stepped hub partitions' draw at the edge from their contributions to
+    /// their draw over the span (`stepped_draw_over`); 0 with none.
+    fn slide_shift(&self, now: f64, d: usize) -> f64 {
+        let hub = self.hub.as_ref().expect("a hub");
+        let Some((v, _)) = hub.psu_setpoint() else { return 0.0 };
+        let off = supply(&self.ics[self.ic_position[d] as usize].1, &self.voltages) - self.slide_edge(d);
+        let dir = crate::devices::sources::direction(v);
+        self.stepped_draw_over(now, self.slide_span(now, d), hub.state.u, off, d).map_or(0.0, |shift| dir * shift)
+    }
+
+    /// Open item (c): what the stepped hub partitions draw at the end of a
+    /// backward Euler step over `span` with the rail at sliding IC `d`'s
+    /// edge (its supply `off` past it at the rail `u`), less what their
+    /// contributions draw at `u` now. `None` when there is none, or a
+    /// trial does not solve (the aim then reads the contributions, as
+    /// before).
+    fn stepped_draw_over(&self, now: f64, span: f64, u: f64, off: f64, d: usize) -> Option<f64> {
+        let hub = self.hub.as_ref().expect("a hub");
+        let ic = &self.ics[self.ic_position[d] as usize].1;
+        // The rail at the edge: under the supply by `off` on the VCC side,
+        // over it on the ground side.
+        let u_edge = if ic.vcc.node == hub.node { u - off } else { u + off };
+        let parts: Vec<usize> = self.stepped.hub_partitions().into_iter().filter(|&p| hub.contrib.get(p).is_some_and(|c| c.active && c.b.is_none())).collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let mut shift = 0.0;
+        for p in parts {
+            let c = hub.contrib[p];
+            #[cfg(test)]
+            if TRIALS_TWICE.with(|t| t.get()) {
+                let _ = self.stepped.trial_rail_draw(p, now, span, u_edge, &self.driver_snapshot, &self.live_params, &self.voltages);
+            }
+            let over = self.stepped.trial_rail_draw(p, now, span, u_edge, &self.driver_snapshot, &self.live_params, &self.voltages)?;
+            shift += over - (c.i + c.g * (u - c.u_p));
+        }
+        Some(shift)
     }
 
     /// The window edge a sliding IC `d`'s supply sits at (the nearer one).
@@ -1727,7 +1916,7 @@ impl PartitionedSolver {
             // watch on the edge itself): solved flat.
             let eta = rails::REACHED_REL * edge.abs().max(1.0);
             let chatter = self.episode(d).chatter;
-            let at_edge = !chatter && off.abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw - i_limit).abs() > self.slide_tolerance(now, d));
+            let at_edge = !chatter && off.abs() <= 2.0 * eta && self.segment_draw(now).zip(self.hub.as_ref().and_then(|h| h.psu_setpoint())).is_some_and(|(draw, (_, i_limit))| (draw + self.slide_shift(now, d) - i_limit).abs() > self.slide_tolerance(now, d));
             // Past a level where an end of its duty's bracket stops
             // bracketing (off a capacitor's segment, `slide_exits`, its
             // `Rail` watch): solved again, which decides.
@@ -1740,8 +1929,14 @@ impl PartitionedSolver {
             }
             // On a capacitor's segment already aimed back at the edge: on its
             // way (the next solve comes inside the band, or at the far one).
+            // Heading back both now (the draw against the limit) and over the
+            // span (with the stepped hub partitions' draw over it, open item
+            // (c)): over the span alone, cold 2575 tpl 2's 11.9 nF rail, solved
+            // at -1.9 mV at a pulse edge, ran on to +2.3 mV 0.16 us later, its
+            // draw still under the limit, and published 1.07 W0 off at 0.38146
+            // s.
             if let (false, false, false, false, Some(draw), Some((_, i_limit))) = (chatter, changed, at_edge, past_end, self.segment_draw(now), self.hub.as_ref().and_then(|h| h.psu_setpoint())) {
-                if (off > 0.0) == (draw > i_limit) {
+                if (off > 0.0) == (draw > i_limit) && (off > 0.0) == (draw + self.slide_shift(now, d) > i_limit) {
                     continue;
                 }
             }
@@ -2084,6 +2279,8 @@ impl crate::snapshot::HeapBytes for Episode {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slope, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved_at, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.aim_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.span, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.draw_exits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.unfollowed, w); }

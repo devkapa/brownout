@@ -2719,6 +2719,55 @@ impl SteppedSolver {
         Ok(part.vc.clone())
     }
 
+    /// Ruling R92, open item (c): hub partition `p`'s draw from the rail at
+    /// the end of one backward Euler step from its committed state to `now
+    /// + span`, the rail held at `u` throughout and every IC stamped under
+    /// the hold table as it stands (a sliding chip at its duty). What a
+    /// slide's aim needs of a partition whose capacitors carry the rail over
+    /// the span (cold 766 tpl 0's C17, 13.5 mF to a node 2.82 ohm and 105 uF
+    /// hold to ground; cold 757 tpl 0's node 2, 4.94 mF behind a 0.64 ohm
+    /// fuse): its contribution at its own step reads them as companions
+    /// `C / h` of a nanosecond step, nothing like their pull over the
+    /// span. A trial only: it changes no state and counts nothing (its
+    /// Newton iterations are its own). `None` when the step does not solve.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn trial_rail_draw(&self, p: usize, now: f64, span: f64, u: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Option<f64> {
+        let rail = self.rail?;
+        let part = self.partitions.get(&p)?;
+        let n = part.shape.n;
+        let at = now + span;
+        let h = at - part.t;
+        if !(h > 0.0 && h.is_finite()) {
+            return None;
+        }
+        let mut values = voltages.to_vec();
+        values[rail] = u;
+        let holds: &[digital::power::PowerHold] = if self.holds_on { &self.holds } else { &[] };
+        let ramps = self.ramps.as_deref();
+        let ic_ctx = IcStampCtx {
+            now: at,
+            drivers,
+            ics: &self.ics,
+            node_owner: &self.node_owner,
+            bnd: Bnd::new(&values).with_holds(holds).at_time(ramps, at),
+            ramps,
+            keep_lu: false,
+            exact: None,
+            cc: None,
+            p_idx: p,
+            iterated: part.iterated(),
+            free_supply: part.holds_free_ic_supply,
+        };
+        let mut iterations = 0u64;
+        let step = solve_step_noting(&part.shape, live_params, h, &part.vc, &part.x, &part.i_prev, Method::Be, &mut iterations, &ic_ctx, at, false, None).ok()?;
+        // The rail row's residual at the step's end, the rail an unknown
+        // (`with_ext`): the current leaving the rail into the partition.
+        let bnd = Bnd::new(&values).with_holds(holds).at_time(ramps, at).with_ext(rail, n);
+        let z: Vec<f64> = step.x.iter().copied().chain(std::iter::once(u)).collect();
+        let r = crate::solve::stamp_residual(n + 1, &z, |a, b| stamp_step(&part.shape, live_params, h, &part.vc, &part.i_prev, Method::Be, &ic_ctx, &bnd, n + 1, &z, a, b));
+        r.get(n).copied().filter(|d| d.is_finite())
+    }
+
     /// The sensitivity of hub partition `p` at state `x`, solved with the
     /// step `(h, method)` from `(vc_from, i_prev)` at rail `u_p` and instant
     /// `stamp_now`, through `lu` (README, Rails point 3), its rail ICs'
