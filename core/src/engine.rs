@@ -245,6 +245,8 @@ pub struct Engine {
     records_buf: Vec<f64>,
     /// The last `bo_engine_carry_take` collect (W2c), likewise.
     carry_buf: Vec<f64>,
+    /// The last `bo_engine_acquire_take` (W2b), likewise.
+    samples_buf: Vec<f64>,
     /// What [`Self::stat`] adds to each live counter so the stats stay
     /// monotonic across a W2a restore (W2 design 2.3: the stats are
     /// telemetry and are not restored). The counters themselves go back with
@@ -751,6 +753,44 @@ impl Engine {
         self.kernel.evaluator().carry_take(self.kernel.drivers(), out);
     }
 
+    /// `bo_engine_acquire` (W2b; core/README.md, "Acquisition"): samples
+    /// `nodes` at `origin + k * interval` from the engine's time on, at most
+    /// `limit` held between takes (`0`: R104's 2^20). Re-arming discards what
+    /// was pending; `interval == 0` disarms. `-8` for a node out of range, a
+    /// non-finite origin, or an interval negative or not finite.
+    pub fn acquire(&mut self, nodes: &[u32], origin: f64, interval: f64, limit: u32) -> Result<(), BoError> {
+        if let Some(&n) = nodes.iter().find(|&&n| n as usize >= self.node_count) {
+            return Err(BoError::invalid_argument(format!("acquire: node {n} out of range")));
+        }
+        if !origin.is_finite() || !interval.is_finite() || interval < 0.0 {
+            return Err(BoError::invalid_argument(format!("acquire: origin {origin} and interval {interval} must be finite, the interval not negative")));
+        }
+        let observer = (interval > 0.0).then(|| {
+            let limit = if limit == 0 { crate::observe::DEFAULT_LIMIT } else { limit as usize };
+            crate::observe::Observer::new(nodes.iter().map(|&n| n as usize).collect(), origin, interval, limit, self.kernel.time())
+        });
+        self.kernel.solver_mut().arm_observer(observer);
+        Ok(())
+    }
+
+    /// `bo_engine_acquire_take` (W2b): `[count, maxSpan, overflowed,
+    /// dropped, t x count, node-major values]`, every final sample since the
+    /// last take, and the queue emptied; the four zeros when disarmed.
+    pub fn acquire_take(&mut self) -> &[f64] {
+        let mut out = std::mem::take(&mut self.samples_buf);
+        if !self.kernel.solver_mut().take_samples(&mut out) {
+            out.clear();
+            out.resize(crate::observe::TAKE_HEADER, 0.0);
+        }
+        self.samples_buf = out;
+        &self.samples_buf
+    }
+
+    /// The buffer from the last [`Self::acquire_take`].
+    pub fn samples_buffer(&self) -> &[f64] {
+        &self.samples_buf
+    }
+
     /// The buffer from the last [`Self::carry_take`].
     pub fn carry_buffer(&self) -> &[f64] {
         &self.carry_buf
@@ -801,6 +841,12 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn debug_solver(&self) -> &PartitionedSolver {
         unsafe { &*((&**self.kernel.solver()) as *const dyn PartitionSolver as *const PartitionedSolver) }
+    }
+
+    /// The kernel's solver through its trait (W2b's window tests).
+    #[cfg(test)]
+    pub(crate) fn debug_solver_mut(&mut self) -> &mut dyn PartitionSolver {
+        &mut **self.kernel.solver_mut()
     }
 
     /// Empties the test builds' instrumentation logs (size checks only).
@@ -873,6 +919,7 @@ impl Engine {
             state_buf: Vec::new(),
             records_buf: Vec::new(),
             carry_buf: Vec::new(),
+            samples_buf: Vec::new(),
             stat_base: [0.0; STAT_COUNT],
         };
         // The settle above already queued every IC's initial digital-slot
@@ -1831,6 +1878,7 @@ impl crate::snapshot::HeapBytes for Engine {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.state_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.records_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carry_buf, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.samples_buf, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stat_base, w); }
         n
     }

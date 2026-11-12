@@ -2641,6 +2641,13 @@ impl PartitionedSolver {
         Ok((dirty, readers))
     }
 
+    /// W2b: whether `node` is the hub rail while it moves between its
+    /// events (a CC rail capacitor's segment, a draining cell, a cell's
+    /// coupled path): its samples wait for the rail model (W2b piece 3).
+    pub(super) fn rail_moves_between_events(&self, node: usize) -> bool {
+        self.hub.as_ref().is_some_and(|h| h.node == node && (h.state.cap_seg.is_some() || h.state.cell_path.is_some() || h.state.cell.is_some()))
+    }
+
     /// W2c, live V (ruling R57 D12 (a)): a `voltage_source`'s new `V` as a
     /// source edge at `now`. Every node the source fixes, and every node a
     /// source stacked on it fixes, takes its new value in the published array

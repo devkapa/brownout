@@ -16,6 +16,7 @@
 //! - [`readout`]: digital and channel slots and the harness trace.
 //! - [`carry`]: W2c's load carry-forward records.
 //! - [`snapshot`]: W2a's whole-engine snapshots behind opaque ids.
+//! - [`observe`]: W2b's scope acquisition queue.
 //! - [`abi`]: the thin `extern "C"` shim. No physics lives there.
 
 pub mod carry;
@@ -28,6 +29,7 @@ pub mod events;
 pub mod kernel;
 pub mod kinds;
 pub mod lu;
+pub mod observe;
 pub mod partition;
 pub mod program;
 pub mod rails;

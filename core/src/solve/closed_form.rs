@@ -1445,6 +1445,31 @@ impl ClosedFormSolver {
         }
     }
 
+    /// W2b: `node`'s value at `t` on its partition's present segment, as
+    /// [`Self::publish_at`] would publish it there (its sums in its order;
+    /// [`Self::node_at`] sums as `handle_crossing` reads), computing that one
+    /// node; `None` for a node of no running segment (not settled yet, or a
+    /// parked copy whose stepped twin runs).
+    pub(crate) fn sample_at(&self, node: usize, t: f64) -> Option<f64> {
+        let &(p, l) = self.node_owner.get(&node)?;
+        let part = &self.parts[self.slot(p)?];
+        let seg = part.seg.as_ref()?;
+        let vc = vc_of(part, t);
+        let tau = t - part.seg_t0;
+        let x0 = if seg.hub.is_some() { part.aim_x0[l] } else { seg.x0[l] };
+        let dx = part.dx()[l];
+        // The same sums in the same order as `publish_at_vc`, so a sample at
+        // `t_end` is that readout bit for bit.
+        let mut v = match (part.drive.as_ref().map(|d| d.du(tau)), seg.hub.as_ref()) {
+            (Some(du), Some(h)) => x0 + part.dxdu(h, l, vc) * du + dx * vc,
+            _ => x0 + dx * vc,
+        };
+        if let Some(r) = &part.ramp {
+            v += r.rate_x[l] * tau;
+        }
+        Some(v)
+    }
+
     fn partition_snapshot(part: &Partition) -> PartitionSnapshot {
         PartitionSnapshot {
             seg: part.seg.clone(),

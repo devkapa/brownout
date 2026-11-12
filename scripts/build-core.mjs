@@ -87,6 +87,10 @@ const EXPECTED_FUNCTION_EXPORTS = [
   // W2c: load carry-forward (core/README.md, "Carry").
   "bo_engine_carry_take",
   "bo_engine_carry_ptr",
+  // W2b: the observer (core/README.md, "Acquisition").
+  "bo_engine_acquire",
+  "bo_engine_acquire_take",
+  "bo_engine_acquire_ptr",
 ];
 
 function fail(message) {

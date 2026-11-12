@@ -41,6 +41,8 @@ mod carry_tests;
 #[cfg(test)]
 mod live_v_tests;
 #[cfg(test)]
+mod observe_tests;
+#[cfg(test)]
 mod snapshot_tests;
 #[cfg(test)]
 mod window_tests;
@@ -243,6 +245,24 @@ pub trait PartitionSolver {
     fn param_value(&self, device_index: usize, param_index: usize) -> Option<f64> {
         let _ = (device_index, param_index);
         None
+    }
+
+    /// W2b: arms the observer (`None` disarms it).
+    fn arm_observer(&mut self, observer: Option<crate::observe::Observer>) {
+        let _ = observer;
+    }
+
+    /// W2b: reads every sample due before `t` (at or before it with
+    /// `inclusive`) whose value is final, off the state the solver holds.
+    fn observe(&mut self, t: f64, inclusive: bool) {
+        let _ = (t, inclusive);
+    }
+
+    /// W2b: the observer's queue as `observe::Observer::take` writes it,
+    /// emptied; `false` (and `out` untouched) when it is not armed.
+    fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
+        let _ = out;
+        false
     }
 
     /// W2c, live V (ruling R57 D12 (a)): the `voltage_source` triples of a
@@ -776,6 +796,18 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn apply_source_params(&mut self, triples: &[(usize, usize, f64)], now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
         (**self).apply_source_params(triples, now)
+    }
+
+    fn arm_observer(&mut self, observer: Option<crate::observe::Observer>) {
+        (**self).arm_observer(observer)
+    }
+
+    fn observe(&mut self, t: f64, inclusive: bool) {
+        (**self).observe(t, inclusive)
+    }
+
+    fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
+        (**self).take_samples(out)
     }
 
     fn dynamic_snapshot(&self) -> Box<dyn std::any::Any> {
@@ -2802,6 +2834,10 @@ pub struct PartitionedSolver {
     /// the window's log of their kind switches, `(partition, kind before)`
     /// in order (a rollback undoes them newest first).
     cc_switch: crate::shared::Shared<[usize]>,
+    /// W2b: the armed observer (`crate::observe`), and where the open
+    /// window found its queue (a rolled-back instant reads no sample).
+    observer: Option<Box<crate::observe::Observer>>,
+    w_observer: Option<crate::observe::Mark>,
     kind_log: Vec<(u32, PartitionKind)>,
     /// The switch's own state (`hub::CcCrawl`), and its value when the
     /// window opened.
@@ -3180,6 +3216,8 @@ impl PartitionedSolver {
             host_step: f64::INFINITY,
             changes: hold::Changes::None,
             cc_switch: cc_switch.into(),
+            observer: None,
+            w_observer: None,
             kind_log: Vec::new(),
             cc_crawl: hub::CcCrawl::default(),
             w_cc_crawl: hub::CcCrawl::default(),
@@ -3210,6 +3248,29 @@ impl PartitionedSolver {
             }
         }
         Ok(solver)
+    }
+
+    /// W2b: `node`'s value at `t` on the model the solver holds, read
+    /// without moving anything, with the span of the stepped commits it lies
+    /// between (0 elsewhere); `None` while that value is not final. Called
+    /// only for `t` at or after the last completed instant (the kernel's
+    /// hooks): a fixed node holds its value there unless a running ramp moves
+    /// it, a static partition's node holds, a closed-form node is its
+    /// segment's exact value.
+    pub(crate) fn sample_node(&self, node: usize, t: f64) -> Option<(f64, f64)> {
+        if self.rail_moves_between_events(node) {
+            return None;
+        }
+        match self.local_index[node] {
+            None => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0)),
+            Some((p, _)) => match self.partition_kinds[p] {
+                PartitionKind::Static => Some((self.voltages[node], 0.0)),
+                _ => match self.closed_form.sample_at(node, t) {
+                    Some(v) => Some((v, 0.0)),
+                    None => self.stepped.node_at(node, t),
+                },
+            },
+        }
     }
 
     /// W1c contract point 4's own reader rule, closing the production gap
@@ -4892,6 +4953,28 @@ impl PartitionSolver for PartitionedSolver {
         self.source_params_at(triples, now)
     }
 
+    fn arm_observer(&mut self, observer: Option<crate::observe::Observer>) {
+        self.observer = observer.map(Box::new);
+        self.w_observer = None;
+    }
+
+    fn observe(&mut self, t: f64, inclusive: bool) {
+        if let Some(mut obs) = self.observer.take() {
+            obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
+            self.observer = Some(obs);
+        }
+    }
+
+    fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
+        match self.observer.as_mut() {
+            Some(obs) => {
+                obs.take(out);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Contract point 7 ("A failed advance"/"A failed set_params"): beyond
     /// `closed_form`/`stepped`'s own committed state, this must ALSO carry
     /// `static_solver`'s own private `(voltages, currents)` — distinct from
@@ -5069,6 +5152,7 @@ impl PartitionSolver for PartitionedSolver {
             e.w_saved = Some((e.reg, e.battery, e.t_last, e.held));
         }
         self.w_wave = Some(Rc::clone(&self.wave));
+        self.w_observer = self.observer.as_ref().map(|o| o.mark());
         if self.live_caps {
             self.w_caps.clear();
             self.w_caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)));
@@ -5105,6 +5189,9 @@ impl PartitionSolver for PartitionedSolver {
     fn rollback_instant(&mut self, checkpoint: Box<dyn std::any::Any>) {
         checkpoint.downcast::<WindowToken>().expect("a checkpoint made by this solver's begin_instant");
         debug_assert!(self.window, "rollback_instant without an open window");
+        if let (Some(obs), Some(mark)) = (self.observer.as_mut(), self.w_observer.take()) {
+            obs.rewind(mark);
+        }
         for &(node, bits) in self.v_log.iter().rev() {
             self.voltages[node as usize] = f64::from_bits(bits);
         }
@@ -6688,6 +6775,8 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hub, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.observer, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_observer, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_crawl, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_cc_crawl, w); }

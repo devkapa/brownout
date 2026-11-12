@@ -598,6 +598,61 @@ pub extern "C" fn bo_engine_carry_ptr(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.carry_buffer().as_ptr())
 }
 
+/// W2b (core/README.md, "Acquisition"): arms the observer on the `n` node
+/// indices at `nodes` (f64 whole numbers), sampling at `origin + k *
+/// interval` from the engine's time on, at most `limit` samples held between
+/// takes (`0`: 2^20). `interval == 0` disarms. `0`, or `-5` for an unusable
+/// handle, `-8` for a malformed node buffer, a node out of range, a
+/// non-finite origin, or an interval negative or not finite.
+#[no_mangle]
+pub extern "C" fn bo_engine_acquire(h: u32, nodes: *const f64, n: u32, origin: f64, interval: f64, limit: u32) -> i32 {
+    let handles = HANDLES.get();
+    let engine = match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, _)) => engine,
+        _ => return fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    };
+    let raw: &[f64] = if n == 0 {
+        &[]
+    } else if nodes.is_null() {
+        return fail(&BoError::invalid_argument("bo_engine_acquire: node pointer is null".to_string()));
+    } else {
+        // SAFETY: as `bo_engine_set_params`'s buffer: `n` live, initialized
+        // f64s in this instance's memory for the duration of this call.
+        unsafe { std::slice::from_raw_parts(nodes, n as usize) }
+    };
+    let mut list = Vec::with_capacity(raw.len());
+    for &v in raw {
+        match whole_index(v) {
+            Some(i) => list.push(i),
+            None => return fail(&BoError::invalid_argument(format!("bo_engine_acquire: node index {v} is not a whole number"))),
+        }
+    }
+    match engine.acquire(&list, origin, interval, limit) {
+        Ok(()) => 0,
+        Err(err) => fail(&err),
+    }
+}
+
+/// W2b: takes every final sample since the last take into the engine's
+/// buffer, `[count, maxSpan, overflowed, dropped, t x count, then node-major
+/// values]`, and returns its length in f64 (`4` when nothing is armed), or
+/// `-5` for an unusable handle. Read it with [`bo_engine_acquire_ptr`].
+#[no_mangle]
+pub extern "C" fn bo_engine_acquire_take(h: u32) -> i32 {
+    let handles = HANDLES.get();
+    match slot_mut(handles, h) {
+        Some(HandleState::Loaded(engine, _)) => engine.acquire_take().len() as i32,
+        _ => fail(&BoError::bad_handle(format!("engine handle {h}: unknown or no program loaded"))),
+    }
+}
+
+/// The buffer from the last [`bo_engine_acquire_take`], valid until the next
+/// call on that engine.
+#[no_mangle]
+pub extern "C" fn bo_engine_acquire_ptr(h: u32) -> *const f64 {
+    with_engine(h, std::ptr::null(), |e| e.samples_buffer().as_ptr())
+}
+
 /// Copies the whole engine into its snapshot table (W2a; core/README.md,
 /// "Snapshots") and returns the snapshot's id, or `0` with the message in
 /// [`bo_error_ptr`] for an unknown handle or one with no program loaded.
@@ -1245,6 +1300,40 @@ mod tests {
             let h = loaded(&rail_options(exact), 2.0, &[battery_record(0.0, 1.0, 0.0, 5.0, 0.9, 0.8, 2.0), resistor_record(1.0, 1.0, 0.0, 200.0)]);
             assert_eq!(device_state(h, 0), Ok(vec![1.0, 4.0, 1.8, 3600.0, 0.0, 0.0]), "exact {exact}");
         }
+    }
+
+    // --- bo_engine_acquire (W2b) -------------------------------------------
+
+    #[test]
+    fn acquire_samples_through_the_abi_and_validates_its_arguments() {
+        let _guard = lock();
+        let h = bo_engine_create();
+        assert_eq!(load(h, &divider_program()), 0);
+        let nodes = [2.0, 1.0];
+        assert_eq!(bo_engine_acquire(h, nodes.as_ptr(), 2, 0.0, 1e-3, 0), 0);
+        assert_eq!(bo_engine_advance(h, 2.5e-3), 0);
+        let len = bo_engine_acquire_take(h);
+        assert_eq!(len, 4 + 3 * 3, "0, 1 and 2 ms, two nodes");
+        let got = unsafe { std::slice::from_raw_parts(bo_engine_acquire_ptr(h), len as usize) }.to_vec();
+        // The divider's tap holds the readout (just under 5 V: the node
+        // shunt, `NODE_RSHUNT_G`).
+        let tap = with_engine(h, f64::NAN, |e| e.voltages()[2]);
+        assert!((tap - 5.0).abs() < 1e-8);
+        assert_eq!(got, vec![3.0, 0.0, 0.0, 0.0, 0.0, 1e-3, 2e-3, tap, tap, tap, 10.0, 10.0, 10.0]);
+        assert_eq!(bo_engine_acquire_take(h), 4, "taken");
+        for (ptr, n, origin, interval, why) in [
+            (nodes.as_ptr(), 1, 0.0, -1.0, "must be finite"),
+            (nodes.as_ptr(), 1, f64::NAN, 1.0, "must be finite"),
+            ([3.0].as_ptr(), 1, 0.0, 1.0, "out of range"),
+            ([1.5].as_ptr(), 1, 0.0, 1.0, "not a whole number"),
+            (std::ptr::null(), 1, 0.0, 1.0, "null"),
+        ] {
+            assert_eq!(bo_engine_acquire(h, ptr, n, origin, interval, 0), -8, "{why}");
+            assert!(last_error().contains(why), "{why}: {}", last_error());
+        }
+        assert_eq!(bo_engine_acquire(h, std::ptr::null(), 0, 0.0, 0.0, 0), 0, "disarm, no nodes");
+        assert_eq!(bo_engine_acquire(99, nodes.as_ptr(), 1, 0.0, 1.0, 0), -5);
+        assert_eq!(bo_engine_acquire_take(99), -5);
     }
 
     #[test]

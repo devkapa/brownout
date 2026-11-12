@@ -1929,6 +1929,13 @@ impl SteppedSolver {
         found
     }
 
+    /// W2b: `node`'s value at `t` between the two commits around it, with
+    /// their span (W2b piece 2); until then never final.
+    pub(crate) fn node_at(&self, node: usize, t: f64) -> Option<(f64, f64)> {
+        let _ = (node, t);
+        None
+    }
+
     pub(crate) fn sensitivities(&self) -> u64 {
         self.sensitivities
     }
