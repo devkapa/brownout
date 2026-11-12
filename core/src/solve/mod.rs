@@ -1463,7 +1463,10 @@ pub(crate) struct ExactStamp {
 pub(crate) enum ExactKind {
     Norton { g: f64, inject: f64 },
     Row { value: f64 },
-    Inject { current: f64 },
+    /// A PSU in CC: its limit into the rail, and its setpoint `V`, where the
+    /// regime leaves CC (Rails point 5; a stepped step is cut there, ruling
+    /// R102 (a)).
+    Inject { current: f64, setpoint: f64 },
 }
 
 impl ExactKind {
@@ -1493,7 +1496,7 @@ impl ExactStamp {
                 a[l * size + l] = 1.0;
                 b[l] = value;
             }
-            ExactKind::Inject { current } => b[l] += current,
+            ExactKind::Inject { current, .. } => b[l] += current,
         }
     }
 }
@@ -6861,7 +6864,7 @@ impl crate::snapshot::HeapBytes for ExactKind {
         match self {
             ExactKind::Norton { g, inject } => crate::snapshot::HeapBytes::heap_bytes(g, w) + crate::snapshot::HeapBytes::heap_bytes(inject, w),
             ExactKind::Row { value } => crate::snapshot::HeapBytes::heap_bytes(value, w),
-            ExactKind::Inject { current } => crate::snapshot::HeapBytes::heap_bytes(current, w),
+            ExactKind::Inject { current, setpoint } => crate::snapshot::HeapBytes::heap_bytes(current, w) + crate::snapshot::HeapBytes::heap_bytes(setpoint, w),
         }
     }
 }

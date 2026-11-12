@@ -16865,6 +16865,106 @@ fn traced_run(p: &Program, toggles: &[(f64, usize)], stops: &[f64], budget_ms: O
 }
 
 #[test]
+fn exact_mode_cuts_a_step_where_a_chips_supply_reaches_its_power_edge() {
+    // Ruling R102 (a), cold 757 tpl 0 in exact mode at the host stops of
+    // the budget-split test below (13 ms apart near the edge). A 555 (VCC
+    // on the rail, 1.13 mF) is off until its supply reaches its 1.8 V
+    // floor (0.9 x VCC_MIN 2 V); the PSU's 71.8 mA limit charges the rail
+    // towards it at about 9 V/s. The stepped rail partition's Newton judges
+    // the chip at each step's end for the whole step (W1c point 3), so
+    // uncut, a step from 1.728 V at 0.1642 s ended at the 0.1775 s stop at
+    // 1.840 V, past the floor by 21 W0, the chip judged off all the way and
+    // powered only there (the fine reference, exact mode at 1 us host
+    // steps, sits at the floor, 1.80000 V, from about 0.172 s). Cut where
+    // the supply reaches the edge, the chip powers at its floor: the first
+    // instant it reads powered, the rail is within W0 of 1.8 V (1.800035 V
+    // at 0.172308 s; uncut, 1.842 V at 0.177111 s). Stepped event by event
+    // inside the same host stops (no hold before that instant, so the run
+    // is the one the stops make). After it the chip chatters at its floor,
+    // and exact mode on this base has no slide (R53's exact-mode piece
+    // brings one): the run declines through ruling R54 (a)'s episode guard
+    // inside the 0.1775 s host step, where uncut it declined at 0.1893 s,
+    // its rail already 40 mV past the floor. That earlier `-4` is expected.
+    let p = exact(cold_757_tpl0());
+    let stops = [0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407];
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(0.12783188484706418).unwrap();
+    assert!(!rig.s().ic_powered(10) && rig.v(1) < 1.5, "off below its floor: {} V", rig.v(1));
+    let mut first = None;
+    'stops: for &stop in &stops {
+        loop {
+            let t = rig.k.next_event_time().min(stop);
+            rig.advance(t).unwrap();
+            if rig.s().ic_powered(10) {
+                first = Some((t, rig.v(1)));
+                break 'stops;
+            }
+            if t >= stop {
+                break;
+            }
+        }
+    }
+    let (t, rail) = first.expect("the 555 powers by the 0.1775 s stop");
+    eprintln!("exact 757 tpl 0: the 555 first powered at {t:.9} s, rail {rail:.6} V");
+    w0_volts(rail, 1.8, "the rail where the 555 first powers");
+}
+
+#[test]
+fn exact_mode_cuts_a_cc_step_where_its_rail_reaches_the_setpoint() {
+    // Ruling R102 (a), cold 149 tpl 5 in exact mode at the cold sweep's host
+    // stops: a {9.42 V, 522 mA} PSU charges its rail capacitors in CC (2.3
+    // mF to a -5.04 V source, 2.1 mF behind a 0.73 ohm fuse), a 555 on the
+    // rail and its timing node 3 (0.4 uF to the source, 3.6 kohm from the
+    // rail) following it. The CC rail reaches the setpoint at about 70.6 ms
+    // and the PSU leaves CC there (Rails point 5), at a commit. The stepped
+    // rail partition did not cut its step at that crossing: the host's
+    // 36.6 -> 74.1 ms step ended in a 7.2 ms clamp step from 66.9 ms past
+    // the setpoint, the CV re-solve at its commit pulled the rail back, and
+    // node 3 read 2.4957 V at 74.1 ms against the fine reference's 1.8976 V
+    // (exact mode at 1 us host steps), 299 W0 (at 0cf96d7, whose steps
+    // happened to end at the exit, 1.8998 V). Cut where the rail reaches the
+    // setpoint, the PSU leaves CC there and node 3 is within W0.
+    let devices = vec![
+    fz(21, 0, &[1, 0], vec![9.421669454390393, 0.522003104759384], vec![]),
+    fz(2, 1, &[2, 0], vec![-5.043097102114948], vec![]),
+    fz(1, 2, &[3, 0], vec![164255.62137673402], vec![]),
+    fz(1, 3, &[4, 0], vec![805358.8062224775], vec![]),
+    fz(3, 4, &[3, 2], vec![4.0177725424458826e-7, 0.0, 0.0], vec![]),
+    fz(40, 5, &[1, 0, 2, 1, 1, 3, 3, 1], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    fz(1, 6, &[1, 1], vec![1588.7164715054632], vec![]),
+    fz(1, 7, &[1, 3], vec![3618.7844469013626], vec![]),
+    fz(3, 8, &[3, 0], vec![2.5094442607398368e-8, 0.0, 0.0], vec![]),
+    fz(1, 9, &[1, 4], vec![210.03420454021318], vec![]),
+    fz(1, 10, &[4, 0], vec![13192.260472804614], vec![]),
+    fz(1, 11, &[3, 2], vec![3356.8917624376377], vec![]),
+    fz(4, 12, &[4, 2], vec![1.0], vec![]),
+    fz(1, 13, &[2, 0], vec![2530.2121679212737], vec![]),
+    fz(3, 14, &[0, 4], vec![0.0020739196176286106, 0.0, 0.0], vec![]),
+    fz(3, 15, &[2, 1], vec![0.0022534559241196668, 0.0, 0.0], vec![]),
+    fz(10, 16, &[0, 1], vec![0.7304171757560137, 0.07913228992580044], vec![]),
+    fz(4, 17, &[0, 2], vec![1.0], vec![]),
+    fz(1, 18, &[2, 0], vec![7.722429197319812], vec![]),
+    fz(30, 19, &[4, 2], vec![2.732244506352764, 1.7794345125660302, 0.009446162179031471, 0.0, 0.0, 0.0], vec![]),
+    fz(90, 6, &[], vec![6.0, 0.0015863164030921904, 1588.7164715054632], vec![]),
+    fz(90, 7, &[], vec![7.0, 0.009061351677299477, 3618.7844469013626], vec![]),
+    fz(90, 9, &[], vec![9.0, 0.14964563668934494, 210.03420454021318], vec![]),
+    fz(90, 13, &[], vec![13.0, 0.0013168638952729527, 2530.2121679212737], vec![]),
+    fz(90, 18, &[], vec![18.0, 0.4943261540843779, 7.722429197319812], vec![]),
+    ];
+    let mut p = program(5, devices);
+    p.digital_slot_count = 32;
+    let p = exact(p);
+    let stops = [0.006272879928091435, 0.011054149920370312, 0.028304442873859317, 0.029506333366578825, 0.03336701894299056, 0.03657338409800934, 0.07410691026960581];
+    let mut rig = Rig::load(&p).unwrap();
+    for &t in &stops {
+        rig.advance(t).unwrap();
+    }
+    eprintln!("exact 149 tpl 5 at 74.1 ms: rail {:.6} V, node 3 {:.6} V", rig.v(1), rig.v(3));
+    w0_volts(rig.v(1), 9.421669454390393, "the rail in CV at the setpoint");
+    w0_volts(rig.v(3), 1.897632, "the timing node against the fine reference");
+}
+
+#[test]
 fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
     // Ruling R86 (a): a budgeted advance yields only between completed
     // instants and resumes the same host step, so on boards that exercise

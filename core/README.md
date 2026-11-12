@@ -4807,6 +4807,26 @@ Constants, all from P3:35-38 unless marked new:
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
      the rail). A back-fed PSU in CV sinks without limit, as classic's model
      does; a supply that cannot sink is not modelled.
+   - **A step cut at every regime crossing** (ruling R102 (a)). A
+     stepped partition's Newton judges each free chip whose supply it
+     holds at the step's end, for the whole step (W1c point 3), and a PSU
+     in CC leaves it only at a commit whose rail reached the setpoint
+     (point 5's exit, `dir u >= |V|`). So a step whose end crosses a chip's
+     power-window edge, or a CC rail's setpoint, is cut where it lands,
+     just past it (`CROSS_TOLERANCE_V`), by regula falsi on the step length
+     over the farthest crossing's signed distance, as a CC step on rail
+     capacitors is cut at its setpoint and its rail ICs' edges in default
+     mode (ruling R68). The verdict flips, or the PSU leaves CC, at that
+     commit. A chip held (point 1a) watches nothing here: its release is
+     the owner's retry. The CC stamp carries the setpoint for it
+     (`ExactKind::Inject`). Uncut, coarse cold 757 tpl 0 carried its rail
+     to 1.840 V across a 13 ms step, a 555 judged off until 21 W0 past its
+     1.8 V floor (cut, it powers at 1.800035 V; the board then chatters at
+     the floor and, with no slide on this base, declines through R54 (a)'s
+     guard inside that host step, at 0.1893 s before); and cold 149 tpl 5's
+     CC rail ran a 7 ms clamp step past its 9.42 V setpoint, the CV
+     re-solve at the commit leaving its timing node 0.6 V off the fine
+     reference (299 W0; cut, 0.001 W0).
    - **A hold at a step's start** (ruling R106 (a)). A stepped partition
      whose step from an instant holds a chip off there (point 1a inside the
      stepped solver, `stepped::hold_around` at the floor) leaves that step

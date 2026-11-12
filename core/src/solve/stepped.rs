@@ -4566,6 +4566,122 @@ impl SteppedSolver {
             }
         }
 
+        // Exact mode (Rails point 9, ruling R102 (a)): every regime crossing
+        // a step can see is cut where it lands, just past it, as a CC step
+        // on rail capacitors is cut at its setpoint and its rail ICs' edges
+        // (ruling R68, above). A free IC whose supply sits in this partition
+        // is powered or not by its window (W1c point 1), and the step's
+        // Newton judges it at the step's end for the whole step (W1c point
+        // 3); a PSU in CC leaves it once the rail reaches its setpoint
+        // (Rails point 5), at a commit. Uncut, coarse cold 757 tpl 0 carried
+        // its rail 40 mV past a 555's 1.8 V floor with the chip judged off
+        // across a 13 ms step, then powered at 1.840 V (21 W0 past it); and
+        // cold 149 tpl 5's CC rail ran a 7 ms host-clamp step past its 9.42
+        // V setpoint, the CV re-solve at the commit pulling it back with the
+        // timing node 0.6 V off (299 W0). Cut, the verdict flips, or the PSU
+        // leaves CC, at that commit, and the steps after it go on from there.
+        if exact.is_some() && ic_ctx.cc.is_none() {
+            let gated: Vec<(usize, &digital::IcRecord)> = ics.iter().filter(|(d, ic)| !held(*d) && !ic.vcc.open && !ic.gnd.open && (in_p(ic.vcc.node) || in_p(ic.gnd.node))).map(|(d, ic)| (*d, ic)).collect();
+            {
+                let supply = |x: &[f64], ic: &digital::IcRecord| {
+                    let v = |node: usize| match node_owner.get(&node) {
+                        Some(&(q, l)) if q == p_idx => x[l],
+                        _ => ic_ctx.bnd.get(node),
+                    };
+                    v(ic.vcc.node) - v(ic.gnd.node)
+                };
+                // Each regime crossing the step's end has made, as a signed
+                // distance past it: a chip's nearest window edge between its
+                // supply at the step's start and at its end, and the CC
+                // PSU's setpoint, `dir u - |V|` (Rails point 5's exit).
+                enum Cross<'c> {
+                    Edge(&'c digital::IcRecord, f64, bool),
+                    Setpoint(usize, f64, f64),
+                }
+                let mut crossed: Vec<Cross> = gated
+                    .iter()
+                    .filter_map(|&(_, ic)| {
+                        let (s0, s1) = (supply(&x0, ic), supply(&accepted.x, ic));
+                        let (lo, hi) = digital::levels::power_window(ic);
+                        let edges = [lo, hi];
+                        if s1 > s0 {
+                            edges.iter().copied().filter(|&e| s0 < e && e <= s1).fold(None, |m: Option<f64>, e| Some(m.map_or(e, |m| m.min(e)))).map(|e| Cross::Edge(ic, e, true))
+                        } else {
+                            edges.iter().copied().filter(|&e| s1 < e && e <= s0).fold(None, |m: Option<f64>, e| Some(m.map_or(e, |m| m.max(e)))).map(|e| Cross::Edge(ic, e, false))
+                        }
+                    })
+                    .collect();
+                if let Some(e) = exact.filter(|e| e.partition == p_idx) {
+                    if let crate::solve::ExactKind::Inject { setpoint, .. } = e.kind {
+                        let dir = if setpoint < 0.0 { -1.0 } else { 1.0 };
+                        let beyond = |x: &[f64]| dir * x[e.local] - setpoint.abs();
+                        if beyond(&x0) < 0.0 && beyond(&accepted.x) > 0.0 {
+                            crossed.push(Cross::Setpoint(e.local, dir, setpoint.abs()));
+                        }
+                    }
+                }
+                // How far the farthest crossing is past its level, signed: its
+                // root is the first crossing.
+                let past = |x: &[f64]| {
+                    crossed
+                        .iter()
+                        .map(|c| match *c {
+                            Cross::Edge(ic, e, rising) => if rising { supply(x, ic) - e } else { e - supply(x, ic) },
+                            Cross::Setpoint(l, dir, v) => dir * x[l] - v,
+                        })
+                        .fold(f64::NEG_INFINITY, f64::max)
+                };
+                let f_hi0 = past(&accepted.x);
+                if !crossed.is_empty() && f_hi0 > 0.0 && h > 2.0 * H_MIN {
+                    let first = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).map(|step| past(&step.x));
+                    if let Some(f_first) = first.ok().filter(|&f| f < 0.0) {
+                        let (mut lo, mut f_lo) = (H_MIN, f_first);
+                        let (mut hi, mut f_hi) = (h, f_hi0);
+                        let mut far = f_hi;
+                        let mut best = None;
+                        let mut side = 0i8;
+                        for _ in 0..CROSS_REFINE_MAX_ITERS {
+                            if far <= CROSS_TOLERANCE_V || hi - lo <= H_MIN * 1e-3 {
+                                break;
+                            }
+                            let frac = (-f_lo / (f_hi - f_lo)).clamp(1e-3, 1.0 - 1e-3);
+                            let h_try = lo + frac * (hi - lo);
+                            let step = match take_step(&part.shape, live_params, h_try, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + h_try) {
+                                Ok(step) => step,
+                                // A trial that does not converge is no bracket:
+                                // shorter is tried, as a rejected step is.
+                                Err(StepError::NoConverge) => {
+                                    hi = h_try;
+                                    continue;
+                                }
+                                Err(StepError::Failed(message)) => return Err(message),
+                            };
+                            let f = past(&step.x);
+                            if f > 0.0 {
+                                (hi, f_hi, far) = (h_try, f, f);
+                                best = Some(step);
+                                if side == 1 {
+                                    f_lo *= 0.5;
+                                }
+                                side = 1;
+                            } else {
+                                (lo, f_lo) = (h_try, f);
+                                if side == -1 {
+                                    f_hi *= 0.5;
+                                }
+                                side = -1;
+                            }
+                        }
+                        if let Some(step) = best {
+                            h = hi;
+                            accepted = step;
+                            half = None;
+                        }
+                    }
+                }
+            }
+        }
+
         // Ruling R90 (a): a stressed device's ratio over the step as taken.
         if !probes.is_empty() && !held_here && held_table.get().is_none() && cuts < STRESS_CUTS && h > 2.0 * H_MIN {
             let t1 = part.t + h;

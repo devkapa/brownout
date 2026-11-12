@@ -216,7 +216,7 @@ impl ExactHub {
         let kind = match (&self.kind, self.reg) {
             (HubKind::Battery(m), _) => ExactKind::battery(m, self.battery.soc),
             (HubKind::Psu { v, .. }, Regime::Cv) => ExactKind::Row { value: *v },
-            (HubKind::Psu { v, i_limit }, Regime::Cc) => ExactKind::Inject { current: direction(*v) * i_limit },
+            (HubKind::Psu { v, i_limit }, Regime::Cc) => ExactKind::Inject { current: direction(*v) * i_limit, setpoint: *v },
         };
         ExactStamp { partition: self.partition, local: self.local, kind }
     }
