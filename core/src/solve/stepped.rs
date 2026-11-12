@@ -233,6 +233,8 @@ pub(crate) struct DenseSeg {
     steady: bool,
     /// Steady, linear, with one capacitor: every node an affine map of it.
     affine: bool,
+    /// A hub partition's sensitivity to the rail at the step, `(s, u_p)`.
+    sens: Option<(Vec<f64>, f64)>,
     /// An iterated partition's nodes solved at the observer's grid times in
     /// the step (`None`: the solve failed, the sample is linear), R104 as
     /// ruled for a node no capacitor's voltage gives.
@@ -2151,7 +2153,8 @@ impl SteppedSolver {
         // recomputed from the charge where cheap).
         let steady = !part.hub && self.ramps.is_none();
         let affine = steady && part.shape.capacitors.len() == 1 && !part.iterated();
-        DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine }
+        let sens = part.sens.as_ref().map(|s| (s.s.clone(), s.u_p));
+        DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine, sens }
     }
 
     /// Drops what no sample at or after `t` needs: each partition's latest
@@ -2184,6 +2187,12 @@ impl SteppedSolver {
         self.dense.iter().filter(|s| s.p == p).map(|s| std::iter::once((s.t0, s.x0[l], false)).chain(s.knots.iter().map(|k| (k.t, k.x[l], k.hermite))).collect()).collect()
     }
 
+    /// Whether `node`'s partition reads the rail (a hub partition, with a
+    /// rail).
+    pub(crate) fn on_rail(&self, node: usize) -> bool {
+        self.rail.is_some() && self.node_owner.get(&node).and_then(|&(p, _)| self.partitions.get(&p)).is_some_and(|part| part.hub)
+    }
+
     /// How many TR-BDF2 stage ends the kept segments of `node`'s partition
     /// hold (tests).
     #[cfg(test)]
@@ -2197,23 +2206,28 @@ impl SteppedSolver {
     /// TR-BDF2 stage, from its currents at both ends; linear over a backward
     /// Euler step), with the step's span; `None` while its partition has not
     /// committed past `t`, or reads the rail (W2b piece 3).
-    pub(crate) fn node_at(&self, node: usize, t: f64) -> Option<(f64, f64, bool)> {
+    pub(crate) fn node_at(&self, node: usize, t: f64, rail_u: Option<f64>) -> Option<(f64, f64, bool)> {
         let &(p, l) = self.node_owner.get(&node)?;
         let part = self.partitions.get(&p)?;
-        if part.hub && self.rail.is_some() {
-            return None;
-        }
+        // A hub partition publishes its rail-corrected value, `x + s (u -
+        // u_p)` with its step's sensitivity (Rails point 3), at the rail's
+        // model there.
+        let on_rail = |seg: &DenseSeg, x: f64| match (part.hub && self.rail.is_some(), &seg.sens) {
+            (false, _) => Some(x),
+            (true, Some((s, u_p))) => rail_u.map(|u| x + s[l] * (u - u_p)),
+            (true, None) => Some(x),
+        };
         let mut latest = true;
         for seg in self.dense.iter().rev().filter(|s| s.p == p) {
             if t > seg.end() {
                 // Past the partition's last commit: not final. Past an older
                 // one: a later segment started at or before it, so it read t.
-                return if latest { None } else { Some((seg.value(&part.shape, l, seg.end()).0, seg.span(), false)) };
+                return if latest { None } else { on_rail(seg, seg.value(&part.shape, l, seg.end()).0).map(|v| (v, seg.span(), false)) };
             }
             latest = false;
             if t >= seg.t0 {
                 let (v, fallback) = seg.value(&part.shape, l, t);
-                return Some((v, seg.span(), fallback));
+                return on_rail(seg, v).map(|v| (v, seg.span(), fallback));
             }
         }
         None
@@ -2224,6 +2238,12 @@ impl SteppedSolver {
     }
 
     /// The hub partitions, ascending.
+    /// Whether any hub partition steps (W2b: the rail then moves with its
+    /// draws between solves).
+    pub(crate) fn any_hub_stepping(&self) -> bool {
+        self.partitions.values().any(|p| p.hub && !p.parked)
+    }
+
     pub(crate) fn hub_partitions(&self) -> Vec<usize> {
         let mut out: Vec<usize> = self.partitions.iter().filter(|(_, p)| p.hub && !p.parked).map(|(&p, _)| p).collect();
         out.sort_unstable();
@@ -2819,7 +2839,7 @@ impl SteppedSolver {
                 if self.dense_on.get(p_idx).copied().unwrap_or(false) {
                     // A seed is the partition's state from its instant on
                     // (a discontinuity: right-continuous, D2).
-                    self.dense.push(DenseSeg { p: p_idx, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots: Vec::new(), solved: Vec::new(), steady: false, affine: false });
+                    self.dense.push(DenseSeg { p: p_idx, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots: Vec::new(), solved: Vec::new(), steady: false, affine: false, sens: None });
                 }
                 // A seed holds the rail capacitors' charge where it stands
                 // (ruling R68): the next step starts from it. Read from the
@@ -3982,7 +4002,7 @@ impl SteppedSolver {
             // scratch solve, which nothing keeps but its values.
             let mut solved = Vec::new();
             if let (true, Some((origin, interval))) = (part.iterated() && !part.hub && ramps.is_none(), self.dense_grid) {
-                let seg = DenseSeg { p: p_idx, t0, x0: x0.clone(), vc0: vc0.clone(), i0: i_prev.clone(), knots: knots.clone(), solved: Vec::new(), steady: true, affine: false };
+                let seg = DenseSeg { p: p_idx, t0, x0: x0.clone(), vc0: vc0.clone(), i0: i_prev.clone(), knots: knots.clone(), solved: Vec::new(), steady: true, affine: false, sens: None };
                 let mut k = ((t0 - origin) / interval).floor().max(0.0) as u64;
                 loop {
                     let ts = origin + k as f64 * interval;
@@ -5142,6 +5162,7 @@ impl crate::snapshot::HeapBytes for DenseSeg {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.knots, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.steady, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.affine, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.sens, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
         n
     }

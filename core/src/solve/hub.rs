@@ -2641,11 +2641,32 @@ impl PartitionedSolver {
         Ok((dirty, readers))
     }
 
-    /// W2b: whether `node` is the hub rail while it moves between its
-    /// events (a CC rail capacitor's segment, a draining cell, a cell's
-    /// coupled path): its samples wait for the rail model (W2b piece 3).
-    pub(super) fn rail_moves_between_events(&self, node: usize) -> bool {
-        self.hub.as_ref().is_some_and(|h| h.node == node && (h.state.cap_seg.is_some() || h.state.cell_path.is_some() || h.state.cell.is_some()))
+    /// W2b: the hub rail at `t` between its events (Rails point 4) and
+    /// whether that is its model: the CC rail capacitor's segment, a draining
+    /// cell's coupled path, or the rail as solved where nothing moves it
+    /// between solves (a PSU's CV setpoint, no hub partition stepping).
+    /// Otherwise the rail moves with its stepped partitions' draws between
+    /// its solves (a cell, or CC with no rail capacitor), or with a cell off
+    /// its path (R16's fallback),
+    /// and nothing models it there: the rail as last solved, flagged (each
+    /// such sample is a counted fallback, pending a ruling). `None` with no
+    /// hub.
+    pub(super) fn rail_at(&self, t: f64) -> Option<(f64, bool)> {
+        let hub = self.hub.as_ref()?;
+        let st = &hub.state;
+        if let Some(seg) = st.cap_seg.as_ref() {
+            return Some((seg.at(t), true));
+        }
+        if let Some(path) = st.cell_path.as_ref() {
+            return Some((path.at(t), true));
+        }
+        let fixed = matches!(hub.kind, HubKind::Psu { .. }) && st.reg == Regime::Cv || !self.stepped.any_hub_stepping();
+        Some((self.voltages[hub.node], fixed && st.cell.is_none()))
+    }
+
+    /// W2b: whether the hub rail can move between its events.
+    pub(super) fn rail_moving(&self) -> bool {
+        self.rail_at(f64::NAN).is_some_and(|(_, model)| !model) || self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_some() || h.state.cell_path.is_some())
     }
 
     /// W2c, live V (ruling R57 D12 (a)): a `voltage_source`'s new `V` as a

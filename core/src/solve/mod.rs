@@ -3259,16 +3259,23 @@ impl PartitionedSolver {
     /// it, a static partition's node holds, a closed-form node is its
     /// segment's exact value.
     pub(crate) fn sample_node(&self, node: usize, t: f64) -> Option<(f64, f64, bool)> {
-        if self.rail_moves_between_events(node) {
-            return None;
+        // The hub rail and what follows it between events (Rails points 3,
+        // 4): the rail's model, a static hub node's line in it.
+        let moving = self.rail_moving();
+        let rail = self.rail_at(t);
+        if moving && self.hub.as_ref().is_some_and(|h| h.node == node) {
+            return rail.map(|(u, model)| (u, 0.0, !model));
         }
         match self.local_index[node] {
             None => Some((self.wave.value(node, t, &self.voltages).unwrap_or(self.voltages[node]), 0.0, false)),
             Some((p, _)) => match self.partition_kinds[p] {
-                PartitionKind::Static => Some((self.voltages[node], 0.0, false)),
+                PartitionKind::Static => match self.static_solver.hub_node_line(node).filter(|_| moving) {
+                    Some((a, s)) => rail.map(|(u, model)| (a + s * u, 0.0, !model)),
+                    None => Some((self.voltages[node], 0.0, false)),
+                },
                 _ => match self.closed_form.sample_at(node, t) {
                     Some(v) => Some((v, 0.0, false)),
-                    None => self.stepped.node_at(node, t),
+                    None => self.stepped.node_at(node, t, rail.map(|r| r.0)).map(|(v, span, fallback)| (v, span, fallback || rail.is_some_and(|r| !r.1) && self.stepped.on_rail(node))),
                 },
             },
         }

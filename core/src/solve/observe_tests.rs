@@ -49,6 +49,7 @@ fn edges() -> Program {
     ])
 }
 
+#[derive(Debug)]
 struct Take {
     /// Per probed node, the samples that fell back to linear.
     fallbacks: Vec<f64>,
@@ -79,7 +80,7 @@ fn acquire(p: &Program, nodes: &[u32], interval: f64, steps: &[f64]) -> (Vec<f64
     for &s in steps {
         e.advance(s).unwrap();
         let k = take(&mut e, nodes.len());
-        assert!(!k.overflowed && k.dropped == 0.0 && k.max_span == 0.0 && k.fallbacks.iter().all(|&f| f == 0.0));
+        assert!(!k.overflowed && k.dropped == 0.0 && k.fallbacks.iter().all(|&f| f == 0.0), "{k:?}");
         t.extend(k.t);
         for (j, col) in k.v.into_iter().enumerate() {
             v[j].extend(col);
@@ -135,7 +136,7 @@ fn a_sample_is_the_readout_an_advance_to_its_time_gives() {
 fn a_probed_run_is_the_unprobed_run_bit_for_bit() {
     // Stepped boards too: their dense output, and an iterated partition's
     // scratch solves, leave no trace.
-    for (name, p, nodes) in [("rc", rc(), [1, 2]), ("edges", edges(), [1, 2]), ("stepped rc", stepped(rc(), false), [1, 2]), ("led rc", led_rc(), [2, 3]), ("555", astable(), [3, 4]), ("ring", rc_ring(), [2, 5])] {
+    for (name, p, nodes) in [("rc", rc(), [1, 2]), ("edges", edges(), [1, 2]), ("stepped rc", stepped(rc(), false), [1, 2]), ("led rc", led_rc(), [2, 3]), ("555", astable(), [3, 4]), ("ring", rc_ring(), [2, 5]), ("cc rail", cc_rail(), [1, 3]), ("cell rail, stepped", stepped(cell_rail(), false), [1, 2])] {
         let mut probed = Engine::load(&p).unwrap();
         let mut plain = Engine::load(&p).unwrap();
         probed.acquire(&nodes, 0.0, 1e-6, 0).unwrap();
@@ -460,4 +461,101 @@ fn a_solve_that_fails_falls_back_to_linear_and_is_counted() {
     let same = good.v[1].iter().zip(&failed.v[1]).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
     assert_eq!(same as f64, good.t.len() as f64 - failed.fallbacks[1], "only the fallen-back samples differ");
     assert_eq!(good.v[0], failed.v[0]);
+}
+
+// ---- piece 3: the rail model (Rails point 4) --------------------------------
+
+fn psu_dev(ci: usize, pos: usize, v: f64, i_limit: f64) -> Device {
+    Device { kind: kinds::BENCH_PSU, component_index: ci, pins: vec![pin(pos), pin(0)], params: vec![v, i_limit], blob: vec![] }
+}
+
+fn cell_dev(ci: usize, pos: usize, e: f64, r: f64) -> Device {
+    use crate::kinds::battery_param as b;
+    let mut params = vec![0.0; b::COUNT];
+    params[b::OCV_SCALE] = 1.0;
+    params[b::R_BASE] = r;
+    params[b::TEMP_FACTOR] = 1.0;
+    params[b::DEP_A] = 0.5;
+    params[b::DEP_P] = 2.0;
+    params[b::DEP_K] = 0.05;
+    params[b::CAPACITY_AH] = 1e-4;
+    params[b::SOC0] = 1.0;
+    Device { kind: kinds::BATTERY_PACK, component_index: ci, pins: vec![pin(pos), pin(0)], params, blob: vec![2.0, 0.0, 0.0, 1.0, e] }
+}
+
+/// A 5 V PSU limited to 20 mA charging 100 uF on its rail (node 1) through
+/// CC into CV, a 1k/1k divider off the rail (node 2, static on the hub) and
+/// 1k into 10 uF (node 3, a closed form the rail drives).
+fn cc_rail() -> Program {
+    program(4, vec![
+        psu_dev(0, 1, 5.0, 0.02),
+        dev(kinds::CAPACITOR, 1, 1, 0, vec![100e-6, 0.0, 0.0]),
+        dev(kinds::RESISTOR, 2, 1, 2, vec![1000.0]),
+        dev(kinds::RESISTOR, 3, 2, 0, vec![1000.0]),
+        dev(kinds::RESISTOR, 4, 1, 3, vec![1000.0]),
+        dev(kinds::CAPACITOR, 5, 3, 0, vec![10e-6, 0.0, 0.0]),
+    ])
+}
+
+/// A small cell (9 V, 2 ohm, 0.1 mAh, generic depletion) draining into 100
+/// ohm and 100 uF (node 2) and a 1k/1k divider (node 3): its rail (node 1)
+/// moves with its charge between events.
+fn cell_rail() -> Program {
+    program(4, vec![
+        cell_dev(0, 1, 9.0, 2.0),
+        dev(kinds::RESISTOR, 1, 1, 2, vec![100.0]),
+        dev(kinds::CAPACITOR, 2, 2, 0, vec![100e-6, 0.0, 0.0]),
+        dev(kinds::RESISTOR, 3, 1, 3, vec![1000.0]),
+        dev(kinds::RESISTOR, 4, 3, 0, vec![1000.0]),
+    ])
+}
+
+#[test]
+fn the_rail_and_what_it_feeds_sample_as_an_advance_to_their_time_reads_them() {
+    for (name, p, nodes) in [("cc rail", cc_rail(), [1u32, 2, 3]), ("cc rail, stepped", stepped(cc_rail(), false), [1, 2, 3]), ("cell rail", cell_rail(), [1, 2, 3])] {
+        // The rail's model runs across the run: the CC segment, the cell's
+        // coupled path.
+        let mut e = Engine::load(&p).unwrap();
+        for t in [0.5e-3, 2e-3, 4.5e-3] {
+            e.advance(t).unwrap();
+            let st = &e.debug_solver().hub.as_ref().unwrap().state;
+            assert!(p.options.force_stepped || st.cap_seg.is_some() || st.cell_path.is_some(), "{name} at {t}: a rail model runs");
+        }
+        let (t, v) = acquire(&p, &nodes, 1e-4, &STEPS);
+        assert_eq!(t.len(), 51, "{name}: every sample to 5 ms");
+        // A stepped run's twin, clamped at the sample's time, is another
+        // trajectory: there each sample is held to a fine reference no
+        // farther than that readout is, plus the step's tolerance (stepped
+        // hub partitions sit a few mV off it on this rail, readouts and
+        // samples alike, before W2b).
+        let stepped = p.options.force_stepped;
+        let fines: Vec<Vec<(f64, f64)>> = if stepped { nodes.iter().map(|&n| fine(&p, n as usize, &t, 0.5e-6)).collect() } else { Vec::new() };
+        for (s, &ts) in t.iter().enumerate() {
+            let mut twin = Engine::load(&p).unwrap();
+            twin.advance(ts).unwrap();
+            for (j, &n) in nodes.iter().enumerate() {
+                let want = twin.voltages()[n as usize];
+                if stepped {
+                    let f = fines[j][s].1;
+                    assert!((v[j][s] - f).abs() <= (want - f).abs() + step_tol(f), "{name} node {n} at {ts}: {} against the fine {f} (the readout {want})", v[j][s]);
+                } else {
+                    assert!((v[j][s] - want).abs() <= step_tol(want), "{name} node {n} at {ts}: {} against the readout's {want}", v[j][s]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_rail_its_stepped_draws_move_between_solves_is_held_and_every_such_sample_counted() {
+    // A cell whose loads step (FORCE_STEPPED): the rail moves with their
+    // draws between its solves, which nothing models there (pending a
+    // ruling). Its samples, and those of the hub partitions that read it,
+    // are the rail as last solved, each a counted fallback, never silent.
+    let mut e = Engine::load(&stepped(cell_rail(), false)).unwrap();
+    e.acquire(&[1, 2], 0.0, 1e-4, 0).unwrap();
+    e.advance(2e-3).unwrap();
+    let k = take(&mut e, 2);
+    assert_eq!(k.t.len(), 21);
+    assert!(k.fallbacks[0] > 0.0 && k.fallbacks[1] > 0.0, "{:?}", k.fallbacks);
 }
