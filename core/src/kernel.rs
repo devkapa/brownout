@@ -1903,7 +1903,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
 
             // W2b: the samples before this instant are final on the state
             // the last one left (one exactly at `t` reads after it, D2).
-            self.solver.observe(t, false);
+            self.solver.observe(t, false, self.time);
             let previous_time = self.time;
             let window = self.open_window();
 
@@ -1953,7 +1953,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // the identical snapshot/rollback envelope as any other instant: a
         // stepped partition's forced step can fail to converge exactly as an
         // ordinary one can.
-        self.solver.observe(t_end, false);
+        self.solver.observe(t_end, false, self.time);
         let previous_time = self.time;
         let window = self.open_window();
 
@@ -2002,7 +2002,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                 self.close_window(window);
                 self.publish_settled();
                 // W2b: a sample at `t_end` is this readout (D2).
-                self.solver.observe(t_end, true);
+                self.solver.observe(t_end, true, t_end);
                 Ok(Advanced::Reached)
             }
             Err(e) => {

@@ -2644,13 +2644,12 @@ impl PartitionedSolver {
     /// W2b: the hub rail at `t` between its events (Rails point 4) and
     /// whether that is its model: the CC rail capacitor's segment, a draining
     /// cell's coupled path, or the rail as solved where nothing moves it
-    /// between solves (a PSU's CV setpoint, no hub partition stepping).
-    /// Otherwise the rail moves with its stepped partitions' draws between
-    /// its solves (a cell, or CC with no rail capacitor), or with a cell off
-    /// its path (R16's fallback),
-    /// and nothing models it there: the rail as last solved, flagged (each
-    /// such sample is a counted fallback, pending a ruling). `None` with no
-    /// hub.
+    /// between solves (a PSU's CV setpoint, no hub partition stepping). Where
+    /// stepped draws move it between solves (a cell, or CC with no rail
+    /// capacitor) or a cell runs off its path (R16's fallback), ruling (a):
+    /// linear between its solves with fresh draws (`rail_log`), a sample
+    /// past the last waiting for the next, as a stepped partition's sample
+    /// waits for its next commit. `None` with no hub, or while waiting.
     pub(super) fn rail_at(&self, t: f64) -> Option<(f64, bool)> {
         let hub = self.hub.as_ref()?;
         let st = &hub.state;
@@ -2660,13 +2659,76 @@ impl PartitionedSolver {
         if let Some(path) = st.cell_path.as_ref() {
             return Some((path.at(t), true));
         }
-        let fixed = matches!(hub.kind, HubKind::Psu { .. }) && st.reg == Regime::Cv || !self.stepped.any_hub_stepping();
-        Some((self.voltages[hub.node], fixed && st.cell.is_none()))
+        if self.rail_fixed_between_solves() {
+            return Some((st.u, true));
+        }
+        // Ruling (a): linear between its solves (`rail_log`), a sample past
+        // the last one waiting for the next, as a stepped partition's for its
+        // next commit. One before the log (not yet reachable) holds, counted.
+        let log = &self.rail_log;
+        let Some(&(t_last, u_last)) = log.last() else { return Some((st.u, false)) };
+        if t > t_last {
+            return None;
+        }
+        if t == t_last {
+            return Some((u_last, true));
+        }
+        let k = log.partition_point(|&(tk, _)| tk <= t);
+        if k == 0 {
+            return Some((log[0].1, false));
+        }
+        let ((ta, ua), (tb, ub)) = (log[k - 1], log[k]);
+        Some((ua + (ub - ua) * (t - ta) / (tb - ta), true))
+    }
+
+    /// Whether the rail holds between its solves when no segment or path
+    /// models it: a PSU's CV setpoint, or no hub partition stepping (and no
+    /// cell drive).
+    fn rail_fixed_between_solves(&self) -> bool {
+        let Some(hub) = self.hub.as_ref() else { return true };
+        let st = &hub.state;
+        st.cell.is_none() && (matches!(hub.kind, HubKind::Psu { .. }) && st.reg == Regime::Cv || !self.stepped.any_hub_stepping())
+    }
+
+    /// W2b, ruling (a): notes the rail at `now` where nothing models it
+    /// between solves, when it moved since the last note, and at the clamp
+    /// (`always`), whose solve ends the host step.
+    pub(super) fn log_rail(&mut self, now: f64, always: bool) {
+        let Some(hub) = self.hub.as_ref() else { return };
+        if hub.state.cap_seg.is_some() || hub.state.cell_path.is_some() || self.rail_fixed_between_solves() {
+            self.rail_log.clear();
+            return;
+        }
+        // The rail as solved (`state.u`): the published array can lag it
+        // within a host step (the readout is brought up to date at its end).
+        let u = hub.state.u;
+        // A solve with the stepped draws fresh: a hub partition committed
+        // since the last note. Between such solves the rail's own events
+        // re-solve it on the draws held from the last commit, which drift
+        // off where the partitions are (a cell's rail slid 10 uV an event
+        // down while its charging loads' draws fell and the rail rose).
+        let commits = self.stepped.hub_commits();
+        let fresh = commits != self.rail_log_commits;
+        self.rail_log_commits = commits;
+        match self.rail_log.last_mut() {
+            Some(last) if last.0 == now => last.1 = u,
+            Some(_) if !(always || fresh) => {}
+            _ => self.rail_log.push((now, u)),
+        }
+    }
+
+    /// Drops the notes no sample at or after `t` reads: all but the last at
+    /// or before it, and those after.
+    pub(super) fn prune_rail_log(&mut self, t: f64) {
+        let k = self.rail_log.partition_point(|&(tk, _)| tk <= t);
+        if k > 1 {
+            self.rail_log.drain(..k - 1);
+        }
     }
 
     /// W2b: whether the hub rail can move between its events.
     pub(super) fn rail_moving(&self) -> bool {
-        self.rail_at(f64::NAN).is_some_and(|(_, model)| !model) || self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_some() || h.state.cell_path.is_some())
+        self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_some() || h.state.cell_path.is_some()) || !self.rail_fixed_between_solves()
     }
 
     /// W2c, live V (ruling R57 D12 (a)): a `voltage_source`'s new `V` as a

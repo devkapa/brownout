@@ -198,15 +198,15 @@ fn a_rolled_back_instant_reads_no_sample() {
     e.advance(1e-3).unwrap();
     let solver = e.debug_solver_mut();
     solver.arm_observer(Some(crate::observe::Observer::new(vec![2], 0.0, 1e-4, 100, 1e-3)));
-    solver.observe(1.25e-3, true);
+    solver.observe(1.25e-3, true, 1e-3);
     let token = solver.begin_instant();
-    solver.observe(1.55e-3, true);
+    solver.observe(1.55e-3, true, 1e-3);
     solver.rollback_instant(token);
     let mut out = Vec::new();
     assert!(solver.take_samples(&mut out));
     assert_eq!(out[0], 3.0, "1, 1.1 and 1.2 ms; the window's reads went back with it");
     let token = solver.begin_instant();
-    solver.observe(1.55e-3, true);
+    solver.observe(1.55e-3, true, 1e-3);
     solver.end_instant(token);
     assert!(solver.take_samples(&mut out));
     assert_eq!(out[0], 3.0, "1.3 .. 1.5 ms read again, and kept");
@@ -547,15 +547,25 @@ fn the_rail_and_what_it_feeds_sample_as_an_advance_to_their_time_reads_them() {
 }
 
 #[test]
-fn a_rail_its_stepped_draws_move_between_solves_is_held_and_every_such_sample_counted() {
+fn a_rail_its_stepped_draws_move_between_solves_samples_linear_between_its_solves() {
     // A cell whose loads step (FORCE_STEPPED): the rail moves with their
-    // draws between its solves, which nothing models there (pending a
-    // ruling). Its samples, and those of the hub partitions that read it,
-    // are the rail as last solved, each a counted fallback, never silent.
-    let mut e = Engine::load(&stepped(cell_rail(), false)).unwrap();
-    e.acquire(&[1, 2], 0.0, 1e-4, 0).unwrap();
-    e.advance(2e-3).unwrap();
-    let k = take(&mut e, 2);
-    assert_eq!(k.t.len(), 21);
-    assert!(k.fallbacks[0] > 0.0 && k.fallbacks[1] > 0.0, "{:?}", k.fallbacks);
+    // draws between its solves, which no model holds there. Ruling (a): the
+    // rail is linear between its solves, its samples waiting for the next
+    // one, as a stepped partition's wait for its next commit; so are the hub
+    // partitions that read it. Each sample within a fine reference (host
+    // steps of 0.5 us) as near as the readout an advance there gives, plus
+    // the step's tolerance; none falls back.
+    let p = stepped(cell_rail(), false);
+    let nodes = [1u32, 2, 3];
+    let (t, v) = acquire(&p, &nodes, 1e-4, &STEPS);
+    assert_eq!(t.len(), 51, "every sample to 5 ms");
+    for (j, &n) in nodes.iter().enumerate() {
+        let table = fine(&p, n as usize, &t, 0.5e-6);
+        for (s, &ts) in t.iter().enumerate() {
+            let mut twin = Engine::load(&p).unwrap();
+            twin.advance(ts).unwrap();
+            let (f, want) = (table[s].1, twin.voltages()[n as usize]);
+            assert!((v[j][s] - f).abs() <= (want - f).abs() + step_tol(f), "node {n} at {ts}: {} against the fine {f} (the readout {want})", v[j][s]);
+        }
+    }
 }

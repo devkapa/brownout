@@ -2240,6 +2240,12 @@ impl SteppedSolver {
     /// The hub partitions, ascending.
     /// Whether any hub partition steps (W2b: the rail then moves with its
     /// draws between solves).
+    /// How many steps the hub partitions have committed (W2b: a rail solve
+    /// after one has their draws fresh).
+    pub(crate) fn hub_commits(&self) -> u64 {
+        self.partitions.values().filter(|p| p.hub).map(|p| p.steps_taken).sum()
+    }
+
     pub(crate) fn any_hub_stepping(&self) -> bool {
         self.partitions.values().any(|p| p.hub && !p.parked)
     }

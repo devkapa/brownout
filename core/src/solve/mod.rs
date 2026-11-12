@@ -253,9 +253,11 @@ pub trait PartitionSolver {
     }
 
     /// W2b: reads every sample due before `t` (at or before it with
-    /// `inclusive`) whose value is final, off the state the solver holds.
-    fn observe(&mut self, t: f64, inclusive: bool) {
-        let _ = (t, inclusive);
+    /// `inclusive`) whose value is final, off the state the solver holds,
+    /// which is the state at `now` (the last completed instant, or the
+    /// clamp's `t_end`).
+    fn observe(&mut self, t: f64, inclusive: bool, now: f64) {
+        let _ = (t, inclusive, now);
     }
 
     /// W2b: the observer's queue as `observe::Observer::take` writes it,
@@ -802,8 +804,8 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).arm_observer(observer)
     }
 
-    fn observe(&mut self, t: f64, inclusive: bool) {
-        (**self).observe(t, inclusive)
+    fn observe(&mut self, t: f64, inclusive: bool, now: f64) {
+        (**self).observe(t, inclusive, now)
     }
 
     fn take_samples(&mut self, out: &mut Vec<f64>) -> bool {
@@ -2838,6 +2840,12 @@ pub struct PartitionedSolver {
     /// window found its queue (a rolled-back instant reads no sample).
     observer: Option<Box<crate::observe::Observer>>,
     w_observer: Option<crate::observe::Mark>,
+    /// W2b, ruling (a): the hub rail at each instant it moved since the
+    /// observer's next sample, `(t, u)`, where nothing models it between its
+    /// solves; read linear between them (`hub::rail_at`).
+    rail_log: Vec<(f64, f64)>,
+    /// The stepped hub commits counted at the last note.
+    rail_log_commits: u64,
     kind_log: Vec<(u32, PartitionKind)>,
     /// The switch's own state (`hub::CcCrawl`), and its value when the
     /// window opened.
@@ -3218,6 +3226,8 @@ impl PartitionedSolver {
             cc_switch: cc_switch.into(),
             observer: None,
             w_observer: None,
+            rail_log: Vec::new(),
+            rail_log_commits: 0,
             kind_log: Vec::new(),
             cc_crawl: hub::CcCrawl::default(),
             w_cc_crawl: hub::CcCrawl::default(),
@@ -4968,12 +4978,15 @@ impl PartitionSolver for PartitionedSolver {
         self.stepped.set_dense(parts.as_deref(), observer.as_ref().map(|o| o.grid()));
         self.observer = observer.map(Box::new);
         self.w_observer = None;
+        self.rail_log.clear();
     }
 
-    fn observe(&mut self, t: f64, inclusive: bool) {
+    fn observe(&mut self, t: f64, inclusive: bool, now: f64) {
         if let Some(mut obs) = self.observer.take() {
+            self.log_rail(now, inclusive);
             obs.read_until(t, inclusive, |node, ts| self.sample_node(node, ts));
             self.stepped.prune_dense(obs.next_time());
+            self.prune_rail_log(obs.next_time());
             self.observer = Some(obs);
         }
     }
@@ -6790,6 +6803,8 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.observer, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_observer, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_log_commits, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind_log, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_crawl, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_cc_crawl, w); }
