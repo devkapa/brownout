@@ -1318,19 +1318,26 @@ each of its channel slots, over time (ruling R57 D4 (a); `solve/charge.rs`,
   is the uncharged run bit for bit.
 - **Take.** `[t0, t1, then per device its charge and its channel slots' in
   channel order, then per device the time its charge is final to, then per
-  device its `kcl_approximate` flag]`, over
-  `[t0, t1]` since the last take, the sums cleared. A final time is `t1`
-  after `advance` (the horizon clamp commits every partition there). After
-  an `advance_for` yield a device a stepped partition publishes is final to
-  that partition's last commit (the rest of its step comes with a later
-  take), a source to the last commit of every stepped partition its walk
-  reads, and what a carrier folds (below) to the carrier's last commit. An
-  interval on a rail nothing models is in the take at the rail as last
-  solved and counts as reached; its correction comes with the take after
-  the rail's next solve (below; W2bV: held back to the interval's start, the
-  final time understated the charge's reach, a cell's mean after a yield up
-  to 2x high). A host divides by the span its device is final over, never
-  assumes `t1`.
+  device its `kcl_approximate` flag]`. A take carries each device's charge
+  from the final time of the take that last delivered it to its final time
+  now, exactly, and nothing past it: no later take corrects what one
+  delivered. A final time is `t1` after `advance` (the horizon clamp
+  commits every partition there and solves the rail). After an
+  `advance_for` yield a device a stepped partition publishes is final to
+  that partition's last commit (its charge is its committed steps; the rest
+  of its step comes with a later take), and what a carrier folds (below) to
+  the carrier's last commit. Two kinds are withheld whole, their final time
+  left where their last delivery put it and their charge `0` in the take,
+  until a take can deliver them exactly: a device with an interval on a rail
+  nothing models (folded at the rail as last solved, waiting for the next
+  solve to correct it, below), and a source until every term its walk sums
+  reaches `t1` (its stepped partitions and the carrier committed there, no
+  such interval waiting): a step of one partition straddles another's
+  commit, so its walk has no earlier time it reaches whole. W2bV: the final
+  time had stopped at a held interval's start while its charge (at the held
+  rail) reached `t1`, a cell's mean after a yield up to 2x high. A host
+  divides each device's charge by the span from its previous final time to
+  this one, never assumes `[t0, t1]`, and reads no mean from a zero span.
 - **Cost** (ruling R107 (a)). The static solver's copy and the boundary
   writer mark the held devices whose nodes or currents they write, and only
   those refold, so the charge costs what an instant changes, not what is

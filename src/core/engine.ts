@@ -1463,11 +1463,14 @@ export class CoreEngine implements EngineReadout {
 
   /**
    * W2b piece 4: each armed component's charge (coulombs) and its channels'
-   * over `[t0, t1]` since the last take (or the arming), the sums cleared;
-   * `null` while disarmed. `finalUpTo` is how far each one's charge is
-   * final: `t1` after `advance()`, and after a yield of `advanceFor` a part a
-   * stepped partition publishes is final only to that partition's last
-   * step, the rest coming with a later take.
+   * from its previous `finalUpTo` (or the arming) to its `finalUpTo` now,
+   * exactly, and nothing past it; `null` while disarmed. `finalUpTo` is `t1`
+   * after `advance()`. After a yield of `advanceFor` a part a stepped
+   * partition publishes reaches that partition's last step, and a part
+   * waiting on a rail's next solve, or a source until every term it sums
+   * reaches `t1`, is withheld (charge 0, `finalUpTo` unchanged) and comes
+   * whole with a later take. A mean is the charge over the span between the
+   * two `finalUpTo`s, none from a zero span.
    */
   takeCharge(): CoreCharge | null {
     this._requireLoaded();
@@ -1720,9 +1723,9 @@ export interface CoreCharge {
   readonly charge: Readonly<Record<string, number>>;
   /** Component id -> each channel's charge, in channel order (LED family parts). */
   readonly channelCharge: Readonly<Record<string, number[]>>;
-  /** Component id -> how far its charge is final (`t1` unless a yield left its stepped partition's step pending). */
+  /** Component id -> the time its charge reaches: it covers the span from the previous take's value to this one (`t1` unless a yield left a step pending or withheld the part). */
   readonly finalUpTo: Readonly<Record<string, number>>;
-  /** Component id -> whether its KCL closed only approximately in the span: a source on a CC rail with no capacitor that several stepped hub partitions carry (core/README.md, "Charge"; stat 28). */
+  /** Component id -> whether its KCL closed only approximately in the span: a source on a CC rail that several stepped hub partitions step (core/README.md, "Charge"; stat 28). */
   readonly kclApproximate: Readonly<Record<string, boolean>>;
 }
 

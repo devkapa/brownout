@@ -736,49 +736,68 @@ fn cell_led() -> Program {
 }
 
 #[test]
-fn a_takes_final_time_is_how_far_its_charge_reaches_after_a_yield() {
-    // W2bV finding 3: after a yield the cell's charge reached t1 while its
-    // final time said an interval folded at the held rail was not final,
-    // up to 7 % of the span short, so a host's mean ran high. Each take's
-    // running sum against an advance to the final time it gives, within W0.
-    let p = cell_led();
-    let all: Vec<u32> = (0..p.devices.len() as u32).collect();
-    let mut e = Engine::load(&p).unwrap();
-    e.charge_arm(&all).unwrap();
-    let mut now = 0.0;
-    let mut clock = || {
-        now += 1.0;
-        now
-    };
-    let mut cum = vec![0.0; all.len()];
-    let mut rows = Vec::new();
-    while !e.advance_for(2e-3, Some(Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap() {
-        let b = e.take_charge().to_vec();
-        for k in 0..all.len() {
-            cum[k] += b[2 + k];
+fn a_take_carries_each_devices_charge_exactly_to_its_final_time() {
+    // W2bV finding 3: after a yield a cell's charge reached t1 while its
+    // final time stopped at an interval folded at the held rail, so a host's
+    // mean ran up to 2x high. The contract: a take carries a device's charge
+    // up to its final time and no further, exact (a held-rail interval waits
+    // for the rail's next solve, a source for every term it sums), so each
+    // take's running sum is the charge of an advance to that final time, and
+    // all the takes sum to one advance's.
+    let mut partial = 0;
+    for (name, p) in [("cell, stepped led", cell_led()), ("555", astable()), ("cc rail, no capacitor", cc_rail_no_cap())] {
+        let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+        let n = all.len();
+        let t_end = 2e-3;
+        let mut e = Engine::load(&p).unwrap();
+        e.charge_arm(&all).unwrap();
+        let mut now = 0.0;
+        let mut clock = || {
+            now += 1.0;
+            now
+        };
+        let mut cum = vec![0.0; n];
+        let mut rows: Vec<(f64, Vec<f64>, Vec<f64>)> = Vec::new();
+        let mut done = false;
+        while !done {
+            done = e.advance_for(t_end, Some(Budget { clock: &mut clock, budget_ms: 2.0, check_every: 1 })).unwrap();
+            let b = e.take_charge().to_vec();
+            assert_eq!(b.len(), 2 + 3 * n, "{name}: no channel slots");
+            for k in 0..n {
+                cum[k] += b[2 + k];
+            }
+            rows.push((b[1], b[2 + n..2 + 2 * n].to_vec(), cum.clone()));
         }
-        rows.push((b[1], b[2 + all.len()..2 + 2 * all.len()].to_vec(), cum.clone()));
-    }
-    assert!(rows.len() > 20, "the clock yields ({})", rows.len());
-    let mut checked = 0;
-    for (n, (t1, fin, cum)) in rows.iter().enumerate() {
-        if n % 7 != 0 {
-            continue;
-        }
-        for k in [0usize, 1] {
-            let f = fin[k];
-            assert!(f <= *t1);
-            if f <= 0.0 {
+        assert!(rows.len() > 10, "{name}: the clock yields ({})", rows.len());
+        let exact = |f: f64| {
+            let mut r = Engine::load(&p).unwrap();
+            r.charge_arm(&all).unwrap();
+            r.advance(f).unwrap();
+            r.take_charge()[2..2 + n].to_vec()
+        };
+        let close12 = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs() + 1e-24;
+        for (row, (t1, fin, cum)) in rows.iter().enumerate() {
+            partial += fin.iter().filter(|&&f| f < *t1).count();
+            if row % 5 != 0 {
                 continue;
             }
-            let mut r = Engine::load(&p).unwrap();
-            r.charge_arm(&[k as u32]).unwrap();
-            r.advance(f).unwrap();
-            let truth = r.take_charge()[2];
-            let w0 = (1e-9 + 1e-3 * (truth / f).abs()) * f;
-            assert!((cum[k] - truth).abs() <= w0, "take {n} (t1 {t1:e}): device {k} final to {f:e}: {:e} against {truth:e} there ({:.3} W0)", cum[k], (cum[k] - truth).abs() / w0);
-            checked += 1;
+            let mut times: Vec<f64> = fin.iter().copied().filter(|&f| f > 0.0).collect();
+            times.sort_by(f64::total_cmp);
+            times.dedup();
+            for f in times {
+                let q = exact(f);
+                for k in (0..n).filter(|&k| fin[k] == f) {
+                    assert!(close12(cum[k], q[k]), "{name}: take {row} (t1 {t1:e}): device {k} final to {f:e}: {:e} against {:e} there", cum[k], q[k]);
+                }
+            }
+        }
+        let (last_t1, last_fin, total) = rows.last().unwrap();
+        assert_eq!(*last_t1, t_end);
+        assert!(last_fin.iter().all(|&f| f == t_end), "{name}: the clamp delivers everything: {last_fin:?}");
+        let q = exact(t_end);
+        for k in 0..n {
+            assert!(close12(total[k], q[k]), "{name}: device {k}: the takes sum to {:e}, one advance {:e}", total[k], q[k]);
         }
     }
-    assert!(checked > 4);
+    assert!(partial > 0, "some take finds a device short of t1");
 }

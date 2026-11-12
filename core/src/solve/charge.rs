@@ -187,6 +187,9 @@ pub(crate) struct ChargeState {
     /// re-aims the segment from a stepped hub partition's commit
     /// (`charge_rail_jump`); `None` while nothing folds them on a segment.
     rail_q: Option<f64>,
+    /// Per armed device, the time its charge was last delivered to (its
+    /// final time in the take that delivered it).
+    delivered: Vec<f64>,
 }
 
 impl ChargeState {
@@ -364,7 +367,8 @@ impl PartitionedSolver {
         line_nodes.retain(|&n| rail == Some(n) || self.local_index[n].is_some_and(|(p, _)| self.partition_kinds[p] == PartitionKind::Static));
         let stepped: Vec<(usize, Vec<usize>)> = parts.iter().map(|&p| (p, reads.remove(&p).unwrap_or_default())).collect();
         self.stepped.set_charge(Some(&stepped));
-        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new(), rail_q: None };
+        let mut st = ChargeState { devs, q: vec![0.0; slot], t0: now, cursor: now, t_arm: now, parts, line_nodes, src, sc: vec![0.0; self.currents.len()], saved: Vec::new(), chs: Vec::new(), steps: Vec::new(), published: Vec::new(), pending: Vec::new(), node_start: Vec::new(), node_deps: Vec::new(), watched: Vec::new(), dev_held: Vec::new(), dirty: Vec::new(), is_dirty: Vec::new(), holds_seen: self.hold_counts(), line_moving: self.rail_moving(), has_interval: false, has_line: false, reads_rail: false, line_flag: Vec::new(), carrier: None, interval_devs: Vec::new(), fixed_caps: Vec::new(), rail_q: None, delivered: Vec::new() };
+        st.delivered = vec![now; st.devs.len()];
         st.interval_devs = (0..st.devs.len() as u32).filter(|&k| matches!(st.devs[k as usize].class, ChargeClass::Mean(_) | ChargeClass::Line(_) | ChargeClass::FixedCap(_) | ChargeClass::Part(_))).collect();
         st.fixed_caps = (0..self.fixed_pair_capacitors.len() as u32)
             .filter(|&k| {
@@ -1315,7 +1319,36 @@ impl PartitionedSolver {
         self.charge_rail_jump(&mut st);
         let t1 = st.cursor.max(now);
         Self::charge_close_held(&mut st, t1);
-        if let Some(src) = st.src.as_mut() {
+        // How far each device's charge is final, and whether the take
+        // delivers it (W2bV finding 3, the coordinator's contract: what a take
+        // carries for a device is exactly its charge up to its final time,
+        // never a value a later take corrects). A stepped partition's device
+        // reaches its partition's last commit (its charge is its committed
+        // steps), and what a carrier folds its carrier's; the rest reach
+        // `t1`. Withheld, a device's charge stays to be delivered whole, and
+        // its final time stays where its last delivery left it:
+        // - one with an interval folded at a held rail (ruling (a), waiting
+        //   for the rail's next solve to correct it), until that solve;
+        // - a source, until every term its walk sums reaches `t1` (its
+        //   stepped partitions and the carrier committed there, no interval
+        //   held): a step of one partition straddles another's commit, so
+        //   its walk has no earlier time it reaches whole.
+        let stepped_final = |p: usize| if self.partition_kinds[p] == PartitionKind::Stepped { self.stepped.committed_time(p).map_or(t1, |t| t.min(t1)) } else { t1 };
+        let carried_final = st.carrier.map_or(t1, stepped_final);
+        let src_whole = st.src.as_ref().is_some_and(|s| s.parts.iter().fold(if s.on_rail.is_empty() { t1 } else { carried_final }, |m, &p| m.min(stepped_final(p))) >= t1 && !st.pending.iter().any(|p| !p.lq.is_empty()));
+        let held = |slots: std::ops::Range<usize>| st.pending.iter().any(|p| p.slots.iter().any(|&(k, _)| slots.contains(&(k as usize))));
+        let fin: Vec<Option<f64>> = st
+            .devs
+            .iter()
+            .map(|d| match d.class {
+                ChargeClass::Source => src_whole.then_some(t1),
+                _ if held(d.slot..d.slot + 1 + d.nch) => None,
+                ChargeClass::Part(p) => Some(stepped_final(p as usize)),
+                _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => Some(carried_final),
+                _ => Some(t1),
+            })
+            .collect();
+        if let (Some(src), true) = (st.src.as_mut(), src_whole) {
             // The walk, `recompute_source_currents`'s over the charges, once
             // per regime: in CC the hub PSU is its own charge.
             let sc = &mut st.sc;
@@ -1341,37 +1374,32 @@ impl PartitionedSolver {
                 }
             }
         }
-        // How far each device's charge is final: `t1`, but a stepped
-        // partition's steps only to its last commit (a yield leaves a step
-        // pending; its charge comes with the take after it commits), and a
-        // source's as far as every stepped partition its walk reads.
-        let stepped_final = |p: usize| if self.partition_kinds[p] == PartitionKind::Stepped { self.stepped.committed_time(p).map_or(t1, |t| t.min(t1)) } else { t1 };
-        // What the rail's carrier folds is final to its last commit too.
-        let carried_final = st.carrier.map_or(t1, stepped_final);
-        let src_final = st.src.as_ref().map_or(t1, |s| s.parts.iter().fold(carried_final, |m, &p| m.min(stepped_final(p))));
         out.clear();
         out.extend([st.t0, t1]);
-        out.extend_from_slice(&st.q);
-        // An interval folded at a held rail (ruling (a), waiting for the
-        // rail's next solve) is in the take at the rail as last solved,
-        // within its bound; its correction comes with the take after that
-        // solve. So it counts as reached: a final time is how far the charge
-        // in the take reaches, which a host divides by (W2bV: held back to
-        // the interval's start, a cell's mean after a yield ran up to 2x).
-        out.extend(st.devs.iter().map(|d| match d.class {
-            ChargeClass::Part(p) => stepped_final(p as usize),
-            ChargeClass::Source => src_final,
-            _ if st.carrier.is_some() && self.charge_on_line(d, &st.line_flag) => carried_final,
-            _ => t1,
-        }));
+        for (d, f) in st.devs.iter().zip(&fin) {
+            let slots = d.slot..d.slot + 1 + d.nch;
+            match f {
+                Some(_) => {
+                    out.extend_from_slice(&st.q[slots.clone()]);
+                    st.q[slots].iter_mut().for_each(|x| *x = 0.0);
+                }
+                None => out.extend(std::iter::repeat_n(0.0, slots.len())),
+            }
+        }
+        for (k, f) in fin.iter().enumerate() {
+            if let Some(f) = *f {
+                st.delivered[k] = f;
+            }
+        }
+        out.extend_from_slice(&st.delivered);
         // `kcl_approximate`: a source whose walk reads the rail, in a span
-        // where an interval closed it only approximately.
-        let approximate = st.src.as_ref().filter(|s| s.approximate);
+        // where an interval closed it only approximately (said with the
+        // charge it is about).
+        let approximate = st.src.as_ref().filter(|s| s.approximate && src_whole);
         out.extend(st.devs.iter().map(|d| f64::from(u8::from(matches!(d.class, ChargeClass::Source) && approximate.is_some_and(|s| s.on_rail.contains(&d.device))))));
-        if let Some(s) = st.src.as_mut() {
+        if let (Some(s), true) = (st.src.as_mut(), src_whole) {
             s.approximate = false;
         }
-        st.q.iter_mut().for_each(|x| *x = 0.0);
         st.t0 = t1;
         st.cursor = t1;
         self.charge = Some(st);
@@ -1472,6 +1500,7 @@ impl crate::snapshot::HeapBytes for ChargeState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.carrier, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.delivered, w); }
         n
     }
 }
