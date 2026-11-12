@@ -4027,7 +4027,13 @@ impl PartitionedSolver {
             if self.slow.may_have_failed() && self.slow.is_failed(j.device) {
                 continue;
             }
-            let i = junction_branch_current(j, &self.voltages);
+            // Ruling R103 (b): beside a sliding chip, its two solves'
+            // currents at the chip's duty.
+            let two = if self.holds_active > 0 { self.static_solver.two_state_view(&self.voltages, j.anode).or_else(|| self.static_solver.two_state_view(&self.voltages, j.cathode)) } else { None };
+            let i = match two {
+                Some((w, on, off)) => w * junction_branch_current(j, &on) + (1.0 - w) * junction_branch_current(j, &off),
+                None => junction_branch_current(j, &self.voltages),
+            };
             leaving[j.anode] += i;
             leaving[j.cathode] -= i;
         }
@@ -4036,11 +4042,18 @@ impl PartitionedSolver {
             if !power.powered {
                 continue;
             }
+            // Ruling R103 (b): a sliding chip's stamps (scaled by its duty)
+            // carry current only in its powered state, so a pin beside it
+            // in a two-state partition reads that state's voltage.
+            let pin_v = |node: usize| match (power.weight < 1.0).then(|| self.static_solver.two_state_node(&self.voltages, node)).flatten() {
+                Some((_, on, _)) => on,
+                None => self.voltages[node],
+            };
             for &id in &self.ic_driver_ids[pos] {
                 let driver = &drivers[id as usize];
                 for branch in ic_driver_branches(&power, driver, ic) {
                     let Some((target, g)) = branch else { continue };
-                    let i = g * (self.voltages[driver.node] - self.voltages[target]);
+                    let i = g * (pin_v(driver.node) - pin_v(target));
                     leaving[driver.node] += i;
                     leaving[target] -= i;
                 }
@@ -4054,7 +4067,7 @@ impl PartitionedSolver {
                     // the symmetric term is simply omitted rather than added
                     // to a slot nothing consumes — unlike the driver loop
                     // above, whose `target` is a real, possibly-fixed node.
-                    let i = g * (self.voltages[pin.node] - target_v);
+                    let i = g * (pin_v(pin.node) - target_v);
                     leaving[pin.node] += i;
                 }
             }
@@ -4109,11 +4122,19 @@ impl PartitionedSolver {
             }
             let power = digital::power::ic_power_held(ic, self.voltages[ic.vcc.node], self.voltages[ic.gnd.node], self.power_hold(*device_index));
             let committed = self.ic_driver_ids[pos].iter().map(|&id| &drivers[id as usize]).find(|d| d.stage == DriverStage::Ne555Out).and_then(|d| d.committed());
+            // Ruling R103 (b): OUT's node beside a sliding chip in a static
+            // hub partition carries the powered solve's voltage there, the
+            // unpowered state no current.
+            let out = ic.logic[digital::NE555_OUT].node;
+            let v_out = match (power.weight < 1.0).then(|| self.static_solver.two_state_node(&self.voltages, out)).flatten() {
+                Some((_, on, _)) => on,
+                None => self.voltages[out],
+            };
             currents[*device_index] = match (power.powered, committed) {
                 (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(
                     level == Mode::High,
                     power.vs,
-                    self.voltages[ic.logic[digital::NE555_OUT].node],
+                    v_out,
                     self.voltages[ic.gnd.node],
                     self.voltages[ic.vcc.node],
                 ) * power.weight,
@@ -4135,9 +4156,35 @@ impl PartitionedSolver {
             let own = &mut channels[e.channel_base..e.channel_base + e.channel_count];
             // W1g point 12: the real `led_failed` flag, which takes `burnt`'s
             // path (`elementI` 0, `NaN` channels).
-            led::readout(&e.device, &e.junctions, &self.voltages, self.slow.is_failed(e.device_index), &mut element_i, own);
+            let failed = self.slow.is_failed(e.device_index);
+            match self.led_two_state(e) {
+                // Ruling R103 (b): beside a sliding chip, its two solves'
+                // readouts at the chip's duty.
+                Some((w, on, off)) if !failed => {
+                    let (mut i_on, mut i_off) = (0.0, 0.0);
+                    let mut ch_off = vec![0.0; own.len()];
+                    led::readout(&e.device, &e.junctions, &off, false, &mut i_off, &mut ch_off);
+                    led::readout(&e.device, &e.junctions, &on, false, &mut i_on, own);
+                    for (c, off) in own.iter_mut().zip(&ch_off) {
+                        *c = w * *c + (1.0 - w) * off;
+                    }
+                    element_i = w * i_on + (1.0 - w) * i_off;
+                }
+                _ => led::readout(&e.device, &e.junctions, &self.voltages, failed, &mut element_i, own),
+            }
             currents[e.device_index] = element_i;
         }
+    }
+
+    /// Ruling R103 (b): LED-family device `e` beside a sliding chip (a
+    /// junction in a static hub partition the chip touches): the chip's
+    /// duty and the published voltages with that partition at its powered
+    /// and at its unpowered solve.
+    pub(super) fn led_two_state(&self, e: &LedDevice) -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        if self.holds_active == 0 {
+            return None;
+        }
+        e.junctions.iter().find_map(|j| self.static_solver.two_state_view(&self.voltages, j.anode).or_else(|| self.static_solver.two_state_view(&self.voltages, j.cathode)))
     }
 
     /// Re-derives `ic_driver_ids` when the driver table's length is not the one

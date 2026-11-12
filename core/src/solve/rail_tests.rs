@@ -381,15 +381,20 @@ fn an_ic_whose_own_draw_sags_the_rail_back_across_its_power_window_slides_along_
     }
     // Ruling R92 (R53, Q2): the edge attracts (powered the rail sags to
     // 4.2602 V, off it is E), so the gate slides along its 4.275 V floor:
-    // the cell delivers (4.279 - 4.275)/5 = 0.8 mA, all of it through 1y's
-    // HIGH stage at its duty, x / R_out with R_out = 4.275 / (4 ioMax) =
-    // 133.59 ohm, into the 1 kohm: R_out / x + 1000 = 4.275 / 0.0008, x =
-    // 0.030755, 1y at 0.8 V (the other outputs drive nothing but their
-    // node shunts).
+    // the cell delivers (4.279 - 4.275)/5 = 0.8 mA, all of it through 1y.
+    // 1y and its 1 kohm are an algebraic partition, which sits at its
+    // powered solve or its unpowered one, never between (ruling R103 (b)):
+    // powered, 1y's HIGH stage (R_out = 4.275 / (4 ioMax) = 133.59 ohm)
+    // into 1 kohm draws 4.275 / 1133.59 = 3.77121 mA; unpowered, nothing.
+    // So x = 0.8 / 3.77121 = 0.212133, and 1y's mean x times 3.77121 V,
+    // 0.8 V (the other outputs drive nothing but their node shunts).
+    // (Through the averaged stamp, R_out / x + 1000 = 4.275 / 0.0008, the
+    // duty was 0.030755, 1y the same 0.8 V: through a linear load the two
+    // agree on the mean, not on the duty.)
     let mut rig = Rig::load(&p).unwrap();
     let (v_e, r_out) = (4.275, 4.275 / 0.032);
     let i = (4.279 - v_e) / 5.0;
-    let x_hand = r_out / (v_e / i - 1000.0);
+    let x_hand = i / (v_e / (r_out + 1000.0));
     for t in [0.0, 1e-3] {
         if t > 0.0 {
             rig.advance(t).unwrap();
@@ -417,12 +422,13 @@ fn a_gate_that_feeds_another_of_its_own_with_no_way_back_is_not_self_fed_and_sli
     // is a function of, directly or through its other outputs. Before, any
     // input counted. The 4.279 V cell of the test above (5 ohm, a 74LS00
     // with 1A and 1B on the datum, so 1Y HIGH into 1 kohm) slides at its
-    // 4.275 V floor at x = 0.030755. Wire 1Y to 2A and 2B as well and leave
+    // 4.275 V floor at x = 0.212133. Wire 1Y to 2A and 2B as well and leave
     // 2Y open: 1Y is a function of 1A and 1B only (`digital::output_inputs`)
     // and 2Y goes nowhere, so there is no loop. It read as self-fed and
     // chattered its 10 ns holds to the episode guard's decline. It slides
-    // as the plain cell does: 2A and 2B draw nothing and 2Y loads nothing
-    // but its node shunt, so it settles at the same duty.
+    // as the plain cell does: 2A and 2B draw nothing (they read 1Y's 0.8 V
+    // mean LOW, at VIL, so 2Y drives HIGH) and 2Y loads nothing but its
+    // node shunt, so it settles at the same duty.
     //
     // The loops still count: 1Y through 10 k onto its own 1A and 1B (100 k
     // to the datum), and 1Y to 2A, 2B with 2Y back on 1A, 1B, a loop through
@@ -445,7 +451,7 @@ fn a_gate_that_feeds_another_of_its_own_with_no_way_back_is_not_self_fed_and_sli
         assert_eq!(fed(p), want, "{name}: self-fed");
     }
     let (v_e, r_out) = (4.275, 4.275 / 0.032);
-    let x_hand = r_out / (v_e / ((4.279 - v_e) / 5.0) - 1000.0);
+    let x_hand = ((4.279 - v_e) / 5.0) / (v_e / (r_out + 1000.0));
     for (name, p) in [("plain", plain), ("1Y on 2A, 2B, 2Y open", chain)] {
         let mut rig = Rig::load(&p).unwrap();
         rig.advance(1e-3).unwrap_or_else(|e| panic!("{name}: {e:?}"));
@@ -532,14 +538,17 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_u
     // C2 / (C1 + C2) = 1.818182 V (their transient, tau 90.9 us, long gone),
     // so the RC takes 18.1818 mA and the rail capacitor 1.8182 mA; the rail
     // reaches 4.275 V at (u (C1 + C2) - C2 d) / I = 1.442159 ms. Flat, the
-    // LED takes the 1.8182 mA left: the gate's 1y drives it through R_out /
-    // x (R_out = u / (4 x 8 mA) = 133.59 ohm, the drive scaled by the duty),
-    // the LED at 2 + 0.051384 ln(i / 20 mA) = 1.87678 V and 330 ohm, so
-    // R_out / x = (4.275 - 1.87678) / 1.8182e-3 - 330 = 989.0 ohm, x =
-    // 0.135077. (Its first five solves, picoseconds apart, swing it from
-    // 0.011 to 0.232: each aims the segment back at the edge over the
-    // picoseconds since the last, the reached widths it landed past. It
-    // settles within a nanosecond.) Held at the edge, the 10 uF relaxes
+    // LED takes the 1.8182 mA left. 1y, the LED and the 330 ohm are an
+    // algebraic partition, at its powered solve or its unpowered one, never
+    // between (ruling R103 (b)): powered, 1y's HIGH stage (R_out = u / (4 x
+    // 8 mA) = 133.59 ohm) into the LED (2 + 0.051384 ln(i / 20 mA)) and 330
+    // ohm, u = i (R_out + 330) + 2 + 0.051384 ln(i / 0.02): 5.0597 mA;
+    // unpowered, nothing. So x = 1.8182 / 5.0597 = 0.359346 (through the
+    // averaged stamp, R_out / x in series, it was 0.135077). (Its first
+    // solves, picoseconds apart, swing it between 0.039 and 0.52: each aims
+    // the segment back at the edge over the picoseconds since the last, the
+    // reached widths it landed past. It settles within a nanosecond.) Held
+    // at the edge, the 10 uF relaxes
     // with tau = 100 ohm x 10 uF = 1 ms, so the RC's draw falls as
     // 18.1818 exp(-t / tau) mA and the duty rises; duty 1 (1y into the LED
     // at 4.275 V: 5.0597 mA) stops bracketing once the RC's draw is 20 -
@@ -592,7 +601,7 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_u
     assert!(!held, "never held");
     assert_eq!(rig.s().hold_counts(), [0.0, 0.0]);
     close(t_slid, t_floor, 1e-9, "slid at the floor crossing");
-    close(x0, 0.135077, 2e-4, "the flat duty");
+    close(x0, 0.359346, 2e-4, "the flat duty");
     assert!(t_one >= t_exit - 0.6e-6 && t_one <= t_exit, "duty 1 where it stops bracketing, {t_exit:e} s by hand: {t_one:e}");
     assert!(t_freed >= t_one && t_freed < t_one + 25e-6, "freed at the next W0 re-solve: {t_freed:e}");
     assert!(rig.u() > 0.9 * 4.75 && rig.v(2) > 3.0, "powered by 3 ms: rail {} V, 1y {} V", rig.u(), rig.v(2));
@@ -637,6 +646,56 @@ fn a_cc_ramp_whose_ic_load_turns_the_rail_back_under_its_floor_slides_the_gate_u
     }
     assert!(flips > rails::RAIL_LOOP_MAX, "{flips} crossings of the floor");
     eprintln!("clocked rail: {flips} crossings of the floor in {n} events to 1.5 ms");
+}
+
+/// The powered current of [`cc_ramp_into_an_ic_floor`]'s 1y partition at
+/// supply `u`, by hand: 1y's HIGH stage (`R_out = u / (4 x 8 mA)`) into the
+/// LED (2 V at 20 mA, n 2: `2 + 0.051384 ln(i / 0.02)`) and 330 ohm, `u =
+/// i (R_out + 330) + 2 + 0.051384 ln(i / 0.02)`, by bisection.
+fn cc_ramp_led_on(u: f64) -> f64 {
+    let (mut lo, mut hi) = (1e-9, 0.05);
+    for _ in 0..200 {
+        let i = 0.5 * (lo + hi);
+        if i * (u / 0.032 + 330.0) + 2.0 + 0.051384 * (i / 0.02).ln() > u {
+            hi = i;
+        } else {
+            lo = i;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+#[test]
+fn a_sliding_gates_algebraic_load_sits_at_its_powered_or_unpowered_solve_weighted_by_the_duty() {
+    // Ruling R103 (b). HG1's CC ramp slides its gate from 1.442159 ms to
+    // about 1.64 ms (the slide test above). 1y, the LED and the 330 ohm hold
+    // no capacitor: in the resolved chatter they sit at the powered solve or
+    // the unpowered one (nothing: an unpowered gate stamps nothing), never
+    // between. So at duty x each reads x times its powered value at the
+    // supply u: 1y x (u - R_out i_on), node 3 x 330 i_on, the LED x i_on,
+    // with i_on = `cc_ramp_led_on(u)` (5.0597 mA at 4.275 V), each to W0.
+    // The rail sees the same weighted draw, so the PSU publishes its 20 mA
+    // limit (KCL). Through the averaged stamp (the drive scaled by x into
+    // the LED) 1y read 3.005 V at 1.52 ms where the weighted value is 2.32
+    // V, 280 W0 over (R53V; the fine reference, exact mode resolving the
+    // chatter, reads the powered fraction 0.6458 there and the weighted
+    // value, drafts/r53-logs/p19-ccramp-ev.log).
+    let p = cc_ramp_into_an_ic_floor(1e-6, 0.02, led(2, 2, 3));
+    let mut rig = Rig::load(&p).unwrap();
+    for t_stop in [1.47e-3, 1.50e-3, 1.55e-3, 1.60e-3] {
+        while rig.k.time() < t_stop {
+            let t = rig.k.next_event_time().min(t_stop);
+            rig.advance(t).unwrap();
+        }
+        let hold = rig.s().power_hold(1);
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "at {t_stop:e}: sliding, not {hold:?}");
+        let (x, u) = (hold.kind.weight(), rig.u());
+        let i_on = cc_ramp_led_on(u);
+        w0_volts(rig.v(2), x * (u - u / 0.032 * i_on), &format!("at {t_stop:e}: 1y at x {x}"));
+        w0_volts(rig.v(3), x * 330.0 * i_on, &format!("at {t_stop:e}: node 3"));
+        w0_amps(rig.i(2), x * i_on, &format!("at {t_stop:e}: the LED"));
+        w0_amps(-rig.i(0), 0.02, &format!("at {t_stop:e}: the PSU at its limit"));
+    }
 }
 
 /// Channel 1 of `bo_engine_records` at the rig's time, record by record.
@@ -724,12 +783,17 @@ fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_sliding_then_powered() {
     // instant (which ends HG1's count, `end_gate_chase`): on 076be49 the
     // `Rail` events alternated 5.3 and 9.4 fs apart past any event cap, and
     // until F5 the no-progress guard declined it with -4. Ruling R92: the
-    // first gate slides at its floor as above, never held, and its 1y at
-    // the flat duty is the LED's 1.87678 V and 330 ohm x 1.8182 mA, 2.4768
-    // V, rising with the duty, over the reader's 2.0 V VIH: the reader's 1y
-    // goes LOW at the floor crossing (the gate powered in that instant,
-    // before the slide) and stays LOW to 3 ms, 1y HIGH once it is freed.
-    // With the reader's own 10 ns delay, LOW 10 ns later.
+    // first gate slides at its floor as above, never held. Its 1y is the
+    // duty's share of its powered 3.5991 V (ruling R103 (b)), 1.2933 V at
+    // the flat duty 0.359346, rising with the duty: in the reader's dead
+    // band (0.8 to 2.0 V), where an LS input reads its floating model, HIGH,
+    // and over VIH from x = 2.0 / 3.5991 = 0.5557. So the reader's 1y goes
+    // LOW at the floor crossing (the gate powered in that instant, before
+    // the slide) and stays LOW to 3 ms, 1y HIGH once it is freed, except
+    // within the slide's first solves, picoseconds apart, whose duty swings
+    // down to 0.039 (1y 0.14 V, under VIL) before it settles: a reader with
+    // no delay of its own follows them. With the reader's own 10 ns delay,
+    // LOW 10 ns later and from then on.
     for (delay, low_from) in [(0.0, 1.442159e-3), (10e-9, 1.442169e-3)] {
         let p = cc_floor_with_a_reader(delay, 0.02);
         let (err, n, spans, rig) = hold_intervals(&p, 3e-3, 50_000, 1);
@@ -743,9 +807,9 @@ fn a_zero_delay_reader_of_a_ping_ponging_gate_reads_it_sliding_then_powered() {
         while rig.k.time() < 3e-3 {
             let t = rig.k.next_event_time().min(3e-3);
             rig.advance(t).unwrap();
-            if let Some(t_low) = low {
-                assert!(rig.v(6) < 0.5, "the reader's 1y LOW from {t_low:e} on, {} V at {t:e}", rig.v(6));
-            } else if rig.v(6) < 0.5 {
+            if let Some(t_low) = low.filter(|&t_low| t > t_low + 1e-9) {
+                assert!(rig.v(6) < 0.5, "the reader's 1y LOW from a nanosecond past {t_low:e} on, {} V at {t:e}", rig.v(6));
+            } else if low.is_none() && rig.v(6) < 0.5 {
                 low = Some(t);
             }
         }
@@ -10939,11 +11003,14 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
     // 0.675676 V; `s1b` vcc 4.635577 V, 1y 4.893268 V, 2y 0.632661 V.
     // Ruling R92: on the cell's rail the gate slides at the load instead,
     // its supply at its 4.275 V floor and the cell's 16.25 mA, (4.6 -
-    // 4.275) / 20, its draw: 1y into P through R_out / x (R_out = 4.275 /
-    // 0.032 = 133.59 ohm, the drive scaled by the duty) and 60 ohm, less
-    // what 2y (HIGH, its inputs on P) takes back from the 5 V source through
-    // 1 kohm, 4.275 / (R_out / x + 60) - 0.725 / (1000 + R_out / x) =
-    // 16.25 mA: x = 0.6900585. P's rise steps at its midpoint, 1.0005 ms,
+    // 4.275) / 20, its draw. 1y's and 2y's nodes are algebraic partitions,
+    // each at its powered solve or its unpowered one (ruling R103 (b)), so
+    // the draw is the duty's share of the powered one: 1y into P (0 V)
+    // through R_out (4.275 / 0.032 = 133.59 ohm) and 60 ohm, 22.0823 mA,
+    // less what 2y (HIGH, its inputs on P) takes back from the 5 V source
+    // through 1 kohm, its node at (0.032 + 0.005) / (1 / R_out + 1e-3) =
+    // 4.36044 V, 0.6396 mA: x = 16.25 / 21.4428 = 0.7578313524 (0.6900585
+    // through the averaged stamp). P's rise steps at its midpoint, 1.0005 ms,
     // which takes 1y's draw away, so no duty keeps the supply at the floor
     // and it is freed there, never held; from then on it runs as classic's.
     // On `s1` (an iterated static partition, whose slide is a later piece)
@@ -10953,10 +11020,15 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
         let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("load: {}", er.message));
         assert_eq!(e.stat(25), if cell { 0.0 } else { 1.0 }, "cell {cell}: held off at the load on `s1` only");
         if cell {
-            let mut rig = Rig::load(&p).unwrap();
+            // With no solution cache, so each state is solved at the rail
+            // itself: a cached state replays a probe's solve along its
+            // first-order line (Rails point 3), 1.7e-7 under the hand duty
+            // here, within the W0 band the later phases of
+            // `the_stale_hold_boards_run_a_second_of_pulses` are held to.
+            let mut rig = Rig::load(&no_cache(stale_hold_board(cell))).unwrap();
             let hold = rig.s().power_hold(2);
             assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "sliding at the load: {hold:?}");
-            close(hold.kind.weight(), 0.6900585, 1e-8, "the duty at the load");
+            close(hold.kind.weight(), 0.7578313524, 1e-8, "the duty at the load");
             close(rig.u(), 4.275, 1e-4 + 1e-3 * 4.275, "the supply at the floor");
             let freed = loop {
                 let t = rig.k.next_event_time();
@@ -10965,7 +11037,7 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
                 if hold.is_free() {
                     break t;
                 }
-                close(hold.kind.weight(), 0.6900585, 1e-8, "the duty until P's step");
+                close(hold.kind.weight(), 0.7578313524, 1e-8, "the duty until P's step");
             };
             close(freed, 1.0005e-3, 1e-15, "freed at P's step");
         }
@@ -11124,28 +11196,30 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
     // change, so each hold is an episode of its own; R51's ratio rule
     // declined both at 0.4955 s. Ruling R92: on the cell's rail it slides
     // instead, at load and from each fall of P (its step at the fall's
-    // midpoint) to the next rise, each time at x = 0.6900585 by hand (the
+    // midpoint) to the next rise, each time at x = 0.7578313524 by hand (the
     // cell's 16.25 mA at the 4.275 V floor, as at the load in
     // `a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone`:
     // the cell's EMF and resistance are constants), and is freed at each
     // rise: 101 slides, never held. At each fall 2y is still LOW for its 10
-    // ns delay, so the duty first balances 1y alone, 4.275 / (R_out / x +
-    // 60) = 16.25 mA, x = 0.657848; 2y's commit then moves it back. That
-    // re-solve leaves 1y's and 2y's nodes (a curved static hub partition,
-    // their drive following the supply) on the first-order line their last
-    // solve published (Rails point 3), whose band keeps every quantity it
-    // publishes within W0, the draw included: x = 0.6900570 there, 1.5e-6
-    // under the hand value, KCL at those nodes off by 3e-8 A (solved afresh
-    // at the rail, 0.6900585008 and 1e-12 A). So the later phases are held
-    // to W0 of the draw over its slope in the duty, (1e-4 + 1e-3 x 16.25 mA)
-    // / 0.018506 A = 6.28e-3, the load to 1e-8. On `s1` (an iterated static
-    // partition, whose slide is a later piece) it is held each low phase as
-    // before.
+    // ns delay, sinking the 5 V source's current to ground, so the duty
+    // first balances 1y alone, x 4.275 / (R_out + 60) = 16.25 mA, x =
+    // 0.735885; 2y's commit then moves it back. Its nodes are algebraic
+    // partitions beside the sliding gate, each at its powered solve or its
+    // unpowered one (ruling R103 (b)), so the draw is linear in the duty,
+    // its slope the powered draw, 21.443 mA: a phase whose re-solve leaves
+    // a node on the first-order line its last solve published (Rails point
+    // 3, a band within W0 of every quantity, the draw included) is held to
+    // W0 of the draw over that slope, (1e-4 + 1e-3 x 16.25 mA) / 0.021443 A
+    // = 5.42e-3; the load to 1e-8. On `s1` (an iterated static partition,
+    // whose slide is a later piece) it is held each low phase as before.
     for cell in [false, true] {
         let mut rig = Rig::load(&stale_hold_board(cell)).unwrap();
         let mut slides = u32::from(matches!(rig.s().power_hold(2).kind, digital::power::HoldKind::Duty(_)));
         if cell {
-            close(rig.s().power_hold(2).kind.weight(), 0.6900585, 1e-8, "the duty at the load");
+            // Solved at the rail itself (no solution cache): to the hand
+            // value. The run below replays cached states along their lines.
+            let fresh = Rig::load(&no_cache(stale_hold_board(cell))).unwrap();
+            close(fresh.s().power_hold(2).kind.weight(), 0.7578313524, 1e-8, "the duty at the load");
         }
         let mut was = slides == 1;
         for k in 1..=2000 {
@@ -11155,17 +11229,23 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
             let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
             if sliding {
                 let x = hold.kind.weight();
-                close(x, 0.6900585, 6.28e-3, &format!("cell {cell}: the duty at {t}"));
-                // The mechanism: KCL at 1y's node (R_out / x from the
-                // supply, 60 ohm to P) and 2y's (R_out / x from the supply,
-                // 1 kohm from the 5 V source) holds to W0 of the current.
+                close(x, 0.7578313524, 5.42e-3, &format!("cell {cell}: the duty at {t}"));
+                // The mechanism, ruling R103 (b): the mean current through
+                // the 60 ohm is the duty's share of the powered one (1y's
+                // HIGH stage R_out = u / 0.032 into 60 ohm and P at 0 V;
+                // unpowered 1y follows P and carries nothing), and through
+                // the 1 kohm the duty's share of what flows into 2y's
+                // powered node, (u / R_out + 5 / 1000) / (1 / R_out + 1 /
+                // 1000) (unpowered it sits at the source's 5 V): each to
+                // W0 of the current.
                 let (u, v3, v4, v5) = (rig.v(1), rig.v(3), rig.v(4), rig.v(5));
-                let g = x * 0.032 / u;
+                let r_out = u / 0.032;
                 let w0 = |i: f64| 1e-4 + 1e-3 * i.abs();
                 let i60 = (v3 - v4) / 60.0;
                 let i1k = (5.0 - v5) / 1000.0;
-                assert!(((u - v3) * g - i60).abs() <= w0(i60), "cell {cell}: KCL at 1y's node at {t}");
-                assert!((i1k - (v5 - u) * g).abs() <= w0(i1k), "cell {cell}: KCL at 2y's node at {t}");
+                let v5_on = (u / r_out + 5.0 / 1000.0) / (1.0 / r_out + 1.0 / 1000.0);
+                assert!((x * (u - v4) / (r_out + 60.0) - i60).abs() <= w0(i60), "cell {cell}: KCL at 1y's node at {t}");
+                assert!((x * (5.0 - v5_on) / 1000.0 - i1k).abs() <= w0(i1k), "cell {cell}: KCL at 2y's node at {t}");
             }
             slides += u32::from(sliding && !was);
             was = sliding;
@@ -17142,13 +17222,16 @@ fn sliding_gate(rail_cap: bool) -> Program {
 }
 
 /// The slide's duty on [`sliding_gate`], by hand: at the floor `v_e` the
-/// gate's LOW stage is `R_out / x` ohm (`R_out = v_e / (4 io_max)`) in
-/// series with the 50 ohm, and the leak takes `v_e / 10k`; the two draw the
-/// PSU's 20 mA: `x = R_out / (v_e / (0.02 - v_e / 1e4) - 50)`.
+/// leak takes `v_e / 10k` and 1y's partition (the 50 ohm into the gate's
+/// LOW stage, `R_out = v_e / (4 io_max)`) sits at its powered solve, `v_e /
+/// (50 + R_out)` = 23.2851 mA, or its unpowered one, nothing (ruling R103
+/// (b)); the two draw the PSU's 20 mA: `x = (0.02 - v_e / 1e4) / (v_e /
+/// (50 + R_out))` = 0.840559 (through the averaged stamp, `R_out / x` in
+/// series with the 50 ohm, it was 0.793224).
 fn sliding_gate_duty_by_hand() -> (f64, f64) {
     let v_e = 4.275;
     let r_out = v_e / (4.0 * 0.008);
-    (v_e, r_out / (v_e / (0.02 - v_e / 1e4) - 50.0))
+    (v_e, (0.02 - v_e / 1e4) / (v_e / (50.0 + r_out)))
 }
 
 #[test]

@@ -186,6 +186,23 @@ struct HubSolve {
     g: f64,
     u_p: f64,
     band: Option<f64>,
+    /// A partition beside a sliding chip (ruling R103 (b)): its solves with
+    /// the chip powered and unpowered, of which this solve is the blend at
+    /// the chip's duty.
+    states: Option<Box<HubStates>>,
+}
+
+/// Ruling R103 (b): a static hub partition beside a sliding chip, solved
+/// with the chip powered (`on`, duty 1) and unpowered (`off`), each its own
+/// cached solve. An algebraic partition sits at one solution or the other,
+/// never between them, so the chip's duty `w` weights the two: the
+/// published voltages, the draw and slope the rail sees, and the device
+/// currents (`StaticPartitionSolver::two_state_view`).
+#[derive(Debug, Clone, PartialEq)]
+struct HubStates {
+    w: f64,
+    on: HubSolve,
+    off: HubSolve,
 }
 
 /// A hub partition's IC stamps that are no fixed conductance, by what its
@@ -2832,6 +2849,76 @@ impl StaticPartitionSolver {
     /// contribution; otherwise the partition solves, its sensitivity and
     /// band follow through the same factors, and the entry is stored.
     fn solve_hub(&mut self, p: usize, now: f64, drivers: &[Driver], changed: &mut Vec<usize>) -> Result<(), String> {
+        let solve = match self.sliding_ic_of(p) {
+            Some((device, w)) => self.solve_hub_two_state(p, now, drivers, device, w)?,
+            None => self.solve_hub_once(p, now, drivers)?,
+        };
+        self.set_hub_solve(p, solve, changed);
+        Ok(())
+    }
+
+    /// The one IC touching hub partition `p` that slides (ruling R92) at a
+    /// duty strictly between 0 and 1, with its duty. `None` with none, or
+    /// with more than one (the averaged stamps then stand: two would need
+    /// four states).
+    fn sliding_ic_of(&self, p: usize) -> Option<(usize, f64)> {
+        if !self.holds_on {
+            return None;
+        }
+        let hub = self.hubs[p].as_ref()?;
+        let mut found = None;
+        for (device, _) in &hub.touch_ics {
+            let kind = digital::power::hold_of(&self.holds, *device).kind;
+            if let digital::power::HoldKind::Duty(_) = kind {
+                let w = kind.weight();
+                if w > 0.0 && w < 1.0 {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((*device, w));
+                }
+            }
+        }
+        found
+    }
+
+    /// Ruling R103 (b): hub partition `p` solved with sliding IC `device`
+    /// powered and unpowered, the two blended at its duty `w`. Each is the
+    /// ordinary solve under that hold, cache included (neither depends on
+    /// the duty, so a slide's re-solves replay them); the hold table is the
+    /// owner's again afterwards. The band is the narrower of the two.
+    fn solve_hub_two_state(&mut self, p: usize, now: f64, drivers: &[Driver], device: usize, w: f64) -> Result<HubSolve, String> {
+        let owner = std::rc::Rc::clone(&self.holds);
+        let mut table: Vec<digital::power::PowerHold> = (*owner).clone();
+        table[device] = digital::power::PowerHold::duty(1.0);
+        self.holds = std::rc::Rc::new(table.clone());
+        let on = self.solve_hub_once(p, now, drivers);
+        table[device] = digital::power::PowerHold::off();
+        self.holds = std::rc::Rc::new(table);
+        let off = self.solve_hub_once(p, now, drivers);
+        self.holds = owner;
+        let (on, off) = (on?, off?);
+        let mix = |a: f64, b: f64| w * a + (1.0 - w) * b;
+        let band = match (on.band, off.band) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        Ok(HubSolve {
+            x: on.x.iter().zip(&off.x).map(|(&a, &b)| mix(a, b)).collect(),
+            s: on.s.iter().zip(&off.s).map(|(&a, &b)| mix(a, b)).collect(),
+            i: mix(on.i, off.i),
+            g: mix(on.g, off.g),
+            u_p: on.u_p,
+            band,
+            states: Some(Box::new(HubStates { w, on, off })),
+        })
+    }
+
+    /// Hub partition `p`'s solve at the present rail under the hold table as
+    /// it stands (`solve_hub`'s, once): from the cache within its band of
+    /// its stored rail, or solved, its sensitivity and band through the
+    /// same factors, and stored.
+    fn solve_hub_once(&mut self, p: usize, now: f64, drivers: &[Driver]) -> Result<HubSolve, String> {
         let rail = self.rail.expect("a hub partition implies a rail");
         let u = self.voltages[rail];
         let free_supply = self.holds_free_ic_supply[p];
@@ -2844,8 +2931,7 @@ impl StaticPartitionSolver {
             if let Some(e) = self.caches[p].find_hub(hash, &self.key_scratch, |h| (u - h.u_p).abs() <= rule.band(h.band)) {
                 let solve = (**self.caches[p].entries[e].hub.as_ref().expect("a hub entry")).clone();
                 self.cache_hits += 1.0;
-                self.set_hub_solve(p, solve, changed);
-                return Ok(());
+                return Ok(solve);
             }
         }
         let iterated = free_supply || !self.junctions[p].is_empty();
@@ -2895,12 +2981,11 @@ impl StaticPartitionSolver {
                 HubIc::Supply(ic) => crate::solve::curvature::supply_band(&hub.shape, &self.switch_params, &bnd, &x, u, &sens, &ic, floors),
             }
         };
-        let solve = HubSolve { x, s: sens.s, i: sens.i, g: sens.g, u_p: u, band };
+        let solve = HubSolve { x, s: sens.s, i: sens.i, g: sens.g, u_p: u, band, states: None };
         if let Some(hash) = key_hash {
             self.caches[p].insert(hash, &self.key_scratch, &solve.x, Some(Box::new(solve.clone())));
         }
-        self.set_hub_solve(p, solve, changed);
-        Ok(())
+        Ok(solve)
     }
 
     /// [`PartitionSolver::resolve_dirty`]'s body; `changed` collects every
@@ -3040,12 +3125,60 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Ruling R103 (b): when `node` sits in a hub partition beside a sliding
+    /// chip, the chip's duty and `base` twice over, that partition's nodes
+    /// at its powered and at its unpowered solve, each carried to `base`'s
+    /// rail as the published blend is. A device in it carries the duty's
+    /// weighting of its two currents, not the current of the blended
+    /// voltages: the partition sits at one solve or the other.
+    pub(crate) fn two_state_view(&self, base: &[f64], node: usize) -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        let (p, _) = self.local_index.get(node).copied().flatten()?;
+        let states = self.hubs.get(p)?.as_ref()?.solve.as_ref()?.states.as_ref()?;
+        let rail = self.rail?;
+        let du = base[rail] - states.on.u_p;
+        let fill = |solve: &HubSolve| {
+            let mut v = base.to_vec();
+            for (l, &n) in self.partitions[p].iter().enumerate() {
+                v[n] = solve.x[l] + solve.s[l] * du;
+            }
+            v
+        };
+        Some((states.w, fill(&states.on), fill(&states.off)))
+    }
+
+    /// [`Self::two_state_view`] for one node: the duty and the node's
+    /// voltage at the powered and at the unpowered solve.
+    pub(crate) fn two_state_node(&self, base: &[f64], node: usize) -> Option<(f64, f64, f64)> {
+        let (p, l) = self.local_index.get(node).copied().flatten()?;
+        let states = self.hubs.get(p)?.as_ref()?.solve.as_ref()?.states.as_ref()?;
+        let du = base[self.rail?] - states.on.u_p;
+        Some((states.w, states.on.x[l] + states.on.s[l] * du, states.off.x[l] + states.off.s[l] * du))
+    }
+
+    /// A junction's branch current: at the published voltages, or beside a
+    /// sliding chip its two solves' currents at the chip's duty (ruling
+    /// R103 (b)).
+    fn junction_current_at(&self, j: &led::Junction, voltages: &[f64]) -> f64 {
+        match self.two_state_view(voltages, j.anode).or_else(|| self.two_state_view(voltages, j.cathode)) {
+            Some((w, on, off)) => w * junction_branch_current(j, &on) + (1.0 - w) * junction_branch_current(j, &off),
+            None => junction_branch_current(j, voltages),
+        }
+    }
+
     /// The junction's branch current at the published voltages, from its
     /// memo when neither end's voltage bits moved since it was computed.
     fn memo_junction_current(&mut self, k: usize) -> f64 {
         // A failed LED stamps no junction at all (W1g point 12), GMIN included.
         if !self.kcl_active[k] {
             return 0.0;
+        }
+        let jk = &self.kcl_junctions[k];
+        if self.two_state_view(&self.voltages, jk.anode).or_else(|| self.two_state_view(&self.voltages, jk.cathode)).is_some() {
+            // Its two solves move with the duty, which the voltages' bits
+            // need not show: never from the memo.
+            let current = self.junction_current_at(&self.kcl_junctions[k], &self.voltages);
+            self.junction_memo[k].valid = false;
+            return current;
         }
         let j = &self.kcl_junctions[k];
         let (va, vk) = (self.voltages[j.anode].to_bits(), self.voltages[j.cathode].to_bits());
@@ -3205,7 +3338,7 @@ impl StaticPartitionSolver {
             if !self.kcl_active[k] {
                 continue;
             }
-            let i = junction_branch_current(j, &self.voltages);
+            let i = self.junction_current_at(j, &self.voltages);
             leaving[j.anode] += i;
             leaving[j.cathode] -= i;
         }
@@ -3978,6 +4111,18 @@ impl crate::snapshot::HeapBytes for HubSolve {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_p, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.band, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.states, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for HubStates {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.on, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.off, w); }
         n
     }
 }

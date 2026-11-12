@@ -2257,8 +2257,20 @@ impl PartitionedSolver {
             }
             _ => {
                 let Some(e) = sd.led.map(|e| &self.led_devices[e]) else { return out };
+                // Ruling R103 (b): beside a sliding chip its peak current
+                // and power are its two solves' at the chip's duty, each read
+                // at its own voltages, not at the blend's.
+                let two = self.led_two_state(e);
+                let peak_now = |v: &[f64]| led::peak_current(&e.device, &e.junctions, v);
+                let peak = |me: &Self| match &two {
+                    Some((w, on, off)) => w * peak_now(on) + (1.0 - w) * peak_now(off),
+                    None => peak_now(&me.voltages),
+                };
                 if !failed {
-                    let below = led_below_safe(&self.slow_model, &self.voltages, i);
+                    let below = match &two {
+                        Some((_, on, _)) => led_below_safe(&self.slow_model, on, i),
+                        None => led_below_safe(&self.slow_model, &self.voltages, i),
+                    };
                     out.stress = Some(if below {
                         // Every junction at or under the voltage where it
                         // carries `ifMax`: `peakI <= ifMax`, so the rate is
@@ -2268,12 +2280,12 @@ impl PartitionedSolver {
                         // level, a step from 3 ifMax^2 to 0.5 gained 0.82 for
                         // 0.12), so it alone pays for the peak current here.
                         let q = match led::if_max(&e.device) {
-                            Some(m) if m > 0.0 && sd.class == Class::Stepped => failures::led_q(led::peak_current(&e.device, &e.junctions, &self.voltages), m),
+                            Some(m) if m > 0.0 && sd.class == Class::Stepped => failures::led_q(peak(self), m),
                             _ => -1.0,
                         };
                         StressDrive::Constant { rate: 0.0, recovery: failures::LED_RECOVERY, zero: 1.0, q }
                     } else {
-                        let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
+                        let peak = peak(self);
                         let if_max = led::if_max(&e.device).unwrap_or(0.0);
                         let d = failures::led_failed(peak, if_max);
                         StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::led_q(peak, if_max) }
@@ -2282,11 +2294,15 @@ impl PartitionedSolver {
                 if sd.thermal {
                     // `max(0, V I(V))` at the held law, 0 once failed or while
                     // burnt (point 3); a burnt `led` has no junction.
+                    let power_at = |volts: &[f64], j: &led::Junction| {
+                        let v = volts[j.anode] - volts[j.cathode];
+                        (v * j.law.current(v)).max(0.0)
+                    };
                     let p = match e.junctions.first() {
-                        Some(j) if !failed && !e.absent() => {
-                            let v = self.voltages[j.anode] - self.voltages[j.cathode];
-                            (v * j.law.current(v)).max(0.0)
-                        }
+                        Some(j) if !failed && !e.absent() => match &two {
+                            Some((w, on, off)) => w * power_at(on, j) + (1.0 - w) * power_at(off, j),
+                            None => power_at(&self.voltages, j),
+                        },
                         _ => 0.0,
                     };
                     out.power = Some(PowerDrive::Constant(p));
@@ -2312,7 +2328,10 @@ impl PartitionedSolver {
             }
             _ => {
                 let e = &self.led_devices[sd.led.expect("an LED-family slow device")];
-                let peak = led::peak_current(&e.device, &e.junctions, &self.voltages);
+                let peak = match self.led_two_state(e) {
+                    Some((w, on, off)) => w * led::peak_current(&e.device, &e.junctions, &on) + (1.0 - w) * led::peak_current(&e.device, &e.junctions, &off),
+                    None => led::peak_current(&e.device, &e.junctions, &self.voltages),
+                };
                 (FailureKind::LedFailed, peak, led::if_max(&e.device).unwrap_or(0.0))
             }
         }

@@ -1953,6 +1953,32 @@ their own, and the source KCL does with W1a point 2's branch fold.
    back with a failed instant. Exact mode does not slide yet: its chips
    are held as before.
 
+   **Two states beside a slide** (ruling R103 (b); `static_part.rs`,
+   `two_state_view`). The averaged stamp is Filippov's average for what
+   the chip's draw does to its supply, but not for a node with no
+   capacitor beside it: in the resolved chatter such a node sits at the
+   chip's powered solve or its unpowered one, never between, so its mean
+   is the duty's weighting of the two, not the solve of the averaged
+   stamp. A static hub partition touching one sliding chip (duty strictly
+   between 0 and 1) is therefore solved twice, the chip held at duty 1 and
+   held off, each the ordinary cached solve under that hold (neither
+   depends on the duty, so a slide's re-solves replay them), and publishes
+   the duty's blend of the two: its voltages and sensitivities, the draw
+   and slope the rail sees, and every current through it from each
+   state's own voltages, the junctions in both KCL walks, an LED's
+   current and channels, an IC's driver and pull currents and a 555's OUT
+   (the chip's stamps carry current only powered), an LED's stress peak
+   and latch value and its thermal power. Its band is the narrower of the
+   two. A partition beside two sliding chips keeps the averaged stamps;
+   a stepped or closed-form partition keeps them too, the convex
+   combination of currents its capacitors integrate. HG1's CC ramp: the
+   duty that keeps the rail at 4.275 V is 0.359346 (1.8182 / 5.0597 mA,
+   the LED's powered current; 0.135077 through the averaged stamp), and
+   1y reads 2.29 V over 1.50-1.55 ms against the fine reference's 2.32 V
+   (exact mode resolving the chatter, its powered fraction 0.6458; 3.005 V
+   through the averaged stamp, 280 W0 over). The cell of the slide test
+   slides at 0.212133 (0.030755), 1y's mean 0.8 V either way.
+
    **The warning** (ruling R92, R53; `slow::warnings`). A chip sliding along
    its power floor is a board that cannot power that chip, which classic
    reports by declining (R89's `rail_ic_power_chatter`). The core runs on
