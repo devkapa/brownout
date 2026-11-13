@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { encodeRamContents } from "../../src/circuit/types.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
 export const DEFAULT_GENERATOR = "/Users/dev/Documents/DEVOLTProject/brownout-core-prototype/bench/gen-sap1.mjs";
@@ -80,6 +81,22 @@ export function loadSap1(file: string): Sap1Circuit {
 /** RAM contents of the 74ls189 pair: the program byte for address a, split into its low and high nibble. */
 export function programNibbles(program: Readonly<Record<string, number>>, shift: 0 | 4): number[] {
   return Array.from({ length: 16 }, (_, a) => ((program[String(a)] ?? 0xff) >> shift) & 0xf);
+}
+
+/**
+ * `circuit` with its program saved in the two RAM chips' own
+ * `params.contents` (a power-on preload, src/circuit/types.ts RAM_KINDS): the
+ * board then runs the program from load on either engine, with no
+ * setMemoryContents and no pokeClassicRam. A copy; `circuit` is untouched.
+ */
+export function withProgramInRam(circuit: Sap1Circuit): Sap1Circuit {
+  const board = structuredClone(circuit);
+  for (const [id, shift] of [[board.bench.ramLo, 0], [board.bench.ramHi, 4]] as const) {
+    const ram = board.components.find((c) => c.id === id);
+    if (!ram || ram.kind !== "74ls189") throw new Error(`withProgramInRam: ${id} is not a 74ls189 on this board`);
+    ram.params.contents = encodeRamContents("74ls189", programNibbles(board.bench.program, shift));
+  }
+  return board;
 }
 
 /**
