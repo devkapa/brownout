@@ -19018,3 +19018,346 @@ fn a_chip_sliding_on_a_capacitor_slides_from_the_instant_of_a_reload_and_of_a_cu
     }
     assert_eq!(powered_at, slid_at, "powered at {powered_at:?}, sliding from {slid_at:?}");
 }
+
+// ---- R53-P13: chips sharing a fed supply node (ruling R114 (a)) ----
+
+/// Ruling R114 (a)'s boards: `sp_board`'s feed from the 4.3 V cell of 5 ohm
+/// (node 1) through 100 ohm to node 4, with 2.2 uF on node 4 (`variant`
+/// 'a') or without ('b'), supplying several 74LS00s on node 4, each with
+/// every input on ground so every output is HIGH. Chip `j` of `chips` (its
+/// `VCC_MIN`, so its floor is 0.9 of it, and its 1y load) drives 1y on node
+/// `5 + 4 j` into that load, its other outputs open on the next three
+/// nodes, its digital slots from `4 j`. `order` is the chips' device order:
+/// chip `order[0]` first, each followed by its load.
+fn group_board(variant: char, chips: &[(f64, f64)], order: &[usize]) -> Program {
+    let mut devs = vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 4, 100.0)];
+    if variant == 'a' {
+        devs.push(capacitor(2, 4, 0, 2.2e-6, 0.0));
+    }
+    for &j in order {
+        let y = 5 + 4 * j;
+        let mut chip = ls00(10 + 2 * j, 4, 0, [0, 0, y, 0, 0, y + 1, 0, 0, y + 2, 0, 0, y + 3], 10e-9, 4 * j);
+        chip.params[ic_param::VCC_MIN] = chips[j].0;
+        devs.push(chip);
+        devs.push(resistor(11 + 2 * j, y, 0, chips[j].1));
+    }
+    program(5 + 4 * chips.len(), devs)
+}
+
+/// Chip `j`'s device index on [`group_board`].
+fn group_chip(variant: char, order: &[usize], j: usize) -> usize {
+    let base = if variant == 'a' { 3 } else { 2 };
+    base + 2 * order.iter().position(|&o| o == j).expect("a chip of the board")
+}
+
+/// By hand, a 74LS00's draw with its supply at `v` and 1y into `r_load`:
+/// 1y's HIGH stage, `R_out = v / (4 x 8 mA)`, in series with the load
+/// (`sp_i_on` at the 3.96 V floor).
+fn group_i_on(v: f64, r_load: f64) -> f64 {
+    v / (v / 0.032 + r_load)
+}
+
+/// The feed into node 4 with node 4 at `v`: `(4.3 - v) / (5 + 100)`.
+fn group_feed(v: f64) -> f64 {
+    (4.3 - v) / 105.0
+}
+
+#[test]
+fn two_chips_on_one_fed_supply_slide_as_one_at_their_common_duty() {
+    // R53V3 F1, ruling R114 (a): two identical chips (floor 0.9 x 4.4 =
+    // 3.96 V, 1y into 1 kohm each) on one supply node fed through 105 ohm.
+    // Either powered alone pulls node 4 under the floor (I_on = 3.96 /
+    // 1123.75 = 3.523915 mA against I_feed = 0.34 / 105 = 3.238095 mA);
+    // both unpowered it sits at 4.3 V: the edge attracts both. Held off
+    // both, the R-only board sat at 4.300 V, 0.34 V over the floor (a silent
+    // wrong state), and the RC board declined -4 (each chip held 51 times
+    // in one episode). Chips on one supply node with the same edge form ONE
+    // slide: two states, all of them powered and all of them unpowered, the
+    // supply pinned at the floor in each, and one duty that balances the
+    // supply node's KCL between them, x = I_feed / sum(I_on) = 3.238095 /
+    // 7.047831 = 0.4594456. Published: both chips at that one duty (bit for
+    // bit), the supply at the floor (to 1e-9 V), each 1y the blend x R_load
+    // I_on = R_load I_feed / 2 = 1.619048 V and the cell's terminal 4.3 - 5
+    // I_feed = 4.283810 V, to W0; never held.
+    let floor = 0.9 * 4.4;
+    let i_feed = group_feed(floor);
+    let chips = [(4.4, 1000.0), (4.4, 1000.0)];
+    for variant in ['a', 'b'] {
+        let order = [0, 1];
+        let mut rig = Rig::load(&group_board(variant, &chips, &order)).unwrap();
+        let stops: &[f64] = if variant == 'b' { &[1e-6, 1e-3, 0.01, 0.1, 0.3] } else { &[2e-3, 0.01, 0.1, 0.3] };
+        for &t in stops {
+            rig.advance(t).unwrap_or_else(|e| panic!("({variant}): {e:?} at {t}"));
+            let what = format!("({variant}) at {t}");
+            let x0 = sp_sliding(&rig, group_chip(variant, &order, 0), &format!("{what}: chip 0"));
+            let x1 = sp_sliding(&rig, group_chip(variant, &order, 1), &format!("{what}: chip 1"));
+            assert_eq!(x0.to_bits(), x1.to_bits(), "{what}: one duty, {x0} and {x1}");
+            close(x0, i_feed / (2.0 * group_i_on(floor, 1000.0)), 1e-6, &format!("{what}: the duty by hand"));
+            close(x0, 0.4594456, 1e-6, &format!("{what}: the duty"));
+            close(rig.v(4), floor, 1e-9, &format!("{what}: the supply at the floor"));
+            for j in 0..2 {
+                w0_volts(rig.v(5 + 4 * j), 1000.0 * i_feed / 2.0, &format!("{what}: chip {j}'s 1y"));
+            }
+            w0_volts(rig.v(1), 4.3 - 5.0 * i_feed, &format!("{what}: the cell's terminal"));
+        }
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "({variant}): never held");
+    }
+}
+
+#[test]
+fn two_chips_on_one_fed_supply_slide_as_one_at_every_host_cadence() {
+    // Ruling R114 (a), R53V2's cadence set (20 us, 200 us, 1 ms, 16.7 ms,
+    // 100 ms and geometric host steps) on both of
+    // `two_chips_on_one_fed_supply_slide_as_one_at_their_common_duty`'s
+    // boards: at each checkpoint (2, 10, 50.3 and 60 ms) both chips at one
+    // duty, the hand x = I_feed / (2 I_on) = 0.4594456 within what W0 of 1y
+    // moves it by (1y = x R_load I_on, so 1 / (1000 I_on) = 0.28378 per
+    // volt), the supply at the floor and each 1y at R_load I_feed / 2 =
+    // 1.619048 V, to W0; and no silent wrong state at any stop past 12 ms
+    // (held off over the edge, sliding off it by more than 2 W0, or free
+    // under it).
+    let floor = 0.9 * 4.4;
+    let w0 = 1e-4 + 1e-3 * floor;
+    let i_feed = group_feed(floor);
+    let x_hand = i_feed / (2.0 * group_i_on(floor, 1000.0));
+    let y = 1000.0 * i_feed / 2.0;
+    let slope = 1.0 / (1000.0 * group_i_on(floor, 1000.0));
+    let cps = [0.002, 0.01, 0.0503, 0.06];
+    let chips = [(4.4, 1000.0), (4.4, 1000.0)];
+    let order = [0, 1];
+    for variant in ['a', 'b'] {
+        for kind in 0..6 {
+            let mut stops: Vec<f64> = Vec::new();
+            let mut t = 0.0f64;
+            match kind {
+                0..=4 => {
+                    let step = [20e-6, 200e-6, 1e-3, 1.0 / 60.0, 0.1][kind];
+                    while t < 0.06 {
+                        t += step;
+                        stops.push(t.min(0.06));
+                    }
+                }
+                _ => {
+                    let mut s = 1e-6;
+                    while t < 0.06 {
+                        t += s;
+                        stops.push(t.min(0.06));
+                        s = (s * 1.7).min(0.02);
+                    }
+                }
+            }
+            stops.extend_from_slice(&cps);
+            stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            stops.dedup_by(|a, b| (*a - *b).abs() < 1e-13);
+            let mut rig = Rig::load(&group_board(variant, &chips, &order)).unwrap();
+            for &t in &stops {
+                let what = format!("({variant}) cadence {kind} at {t}");
+                rig.advance(t).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let vs = rig.v(4);
+                for j in 0..2 {
+                    let hold = rig.s().power_hold(group_chip(variant, &order, j));
+                    if t > 0.012 {
+                        let off = hold.kind == digital::power::HoldKind::Off && vs > floor + 2.0 * w0;
+                        let slid = matches!(hold.kind, digital::power::HoldKind::Duty(_)) && (vs - floor).abs() > 2.0 * w0;
+                        let free = hold.is_free() && vs < floor - 2.0 * w0;
+                        assert!(!(off || slid || free), "{what}: chip {j} {hold:?} with the supply at {vs}");
+                    }
+                }
+                if cps.iter().any(|&c| (c - t).abs() < 1e-13) {
+                    let x0 = sp_sliding(&rig, group_chip(variant, &order, 0), &format!("{what}: chip 0"));
+                    let x1 = sp_sliding(&rig, group_chip(variant, &order, 1), &format!("{what}: chip 1"));
+                    assert_eq!(x0.to_bits(), x1.to_bits(), "{what}: one duty, {x0} and {x1}");
+                    close(x0, x_hand, slope * (1e-4 + 1e-3 * y), &format!("{what}: the duty"));
+                    w0_volts(vs, floor, &format!("{what}: the supply"));
+                    for j in 0..2 {
+                        w0_volts(rig.v(5 + 4 * j), y, &format!("{what}: chip {j}'s 1y"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn chips_on_one_fed_supply_slide_as_one_only_with_their_edges_within_the_same_edge_tolerance() {
+    // Ruling R114 (a): chips on one supply node slide as one where their
+    // edges are the same, within `hold::SAME_EDGE_W0` (W0 / 2) of the
+    // edge's voltage; W0 at the 3.96 V floor is 1e-4 + 3.96e-3 = 4.06e-3
+    // V. Chip 0's floor is 3.96 V, chip 1's lower by `gap`, each 1y into 1
+    // kohm on `group_board`.
+    // - `gap` W0 / 4 (1.015 mV, chip 1's floor 3.958985 V): one slide, both
+    //   chips at one duty, pinned at the floor of the two nearer the supply
+    //   (`hold::group_edge`), the lower one on both boards: the RC board's
+    //   node charges past it first, and the R-only board's slide is entered
+    //   from its provisional duty 0.5, whose solve puts node 4 at 4.3 - 105
+    //   I_on = 3.929989 V, under both. Both chips powered there in the
+    //   powered state: x = I_feed / (2 I_on), I_feed = (4.3 - 3.958985) /
+    //   105 = 3.247762 mA, I_on = 3.958985 / (3.958985 / 0.032 + 1000) =
+    //   3.523112 mA, x = 0.4609224.
+    // - `gap` 2 W0 (8.12 mV, chip 1's floor 3.95188 V): two levels, taken
+    //   from the top. At 3.96 V chip 1 fully on draws I_on(3.96) = 3.523915
+    //   mA, more than the feed there (3.238095 mA): the feed does not cover
+    //   it, so chip 0 is held off on the R-only board (the feed's balance
+    //   with chip 1 on sits at 3.932294 V, under its floor; on the RC board
+    //   the node charging from 0 V never reaches chip 0's floor, and chip 0
+    //   stays free, dark) and the level drops to chip 1's floor, where chip
+    //   1 alone slides at x = I_feed(f1) / I_on(f1), with
+    //   I_feed(f1) = (4.3 - 3.95188) / 105 = 3.315429 mA and I_on(f1) =
+    //   3.95188 / (3.95188 / 0.032 + 1000) = 3.517478 mA: x = 0.9425569.
+    let floor = 0.9 * 4.4;
+    let w0 = 1e-4 + 1e-3 * floor;
+    assert_eq!(hold::SAME_EDGE_W0, 0.5, "the same edge: W0 / 2");
+    for variant in ['a', 'b'] {
+        let order = [0, 1];
+        let near = [(4.4, 1000.0), ((floor - w0 / 4.0) / 0.9, 1000.0)];
+        let mut rig = Rig::load(&group_board(variant, &near, &order)).unwrap();
+        for t in [2e-3, 0.01, 0.1] {
+            rig.advance(t).unwrap_or_else(|e| panic!("({variant}) W0 / 4: {e:?} at {t}"));
+            let what = format!("({variant}) W0 / 4 apart at {t}");
+            let x0 = sp_sliding(&rig, group_chip(variant, &order, 0), &format!("{what}: chip 0"));
+            let x1 = sp_sliding(&rig, group_chip(variant, &order, 1), &format!("{what}: chip 1"));
+            assert_eq!(x0.to_bits(), x1.to_bits(), "{what}: one duty, {x0} and {x1}");
+            let pin = floor - w0 / 4.0;
+            close(rig.v(4), pin, 1e-9, &format!("{what}: the supply at the lower floor"));
+            close(x0, group_feed(pin) / (2.0 * group_i_on(pin, 1000.0)), 1e-6, &format!("{what}: the duty by hand"));
+            close(x0, 0.4609224, 1e-6, &format!("{what}: the duty"));
+        }
+        let f1 = floor - 2.0 * w0;
+        let apart = [(4.4, 1000.0), (f1 / 0.9, 1000.0)];
+        let mut rig = Rig::load(&group_board(variant, &apart, &order)).unwrap();
+        for t in [2e-3, 0.01, 0.1] {
+            rig.advance(t).unwrap_or_else(|e| panic!("({variant}) 2 W0: {e:?} at {t}"));
+            let what = format!("({variant}) 2 W0 apart at {t}");
+            let top = rig.s().power_hold(group_chip(variant, &order, 0));
+            assert!(!matches!(top.kind, digital::power::HoldKind::Duty(_)) && !rig.s().ic_powered(group_chip(variant, &order, 0)), "{what}: chip 0 dark, not {top:?}");
+            let x1 = sp_sliding(&rig, group_chip(variant, &order, 1), &format!("{what}: chip 1"));
+            close(x1, group_feed(f1) / group_i_on(f1, 1000.0), 1e-6, &format!("{what}: chip 1's duty by hand"));
+            close(x1, 0.9425569, 1e-6, &format!("{what}: chip 1's duty"));
+            close(rig.v(4), f1, 1e-9, &format!("{what}: the supply at chip 1's floor"));
+            w0_volts(rig.v(5), 0.0, &format!("{what}: chip 0's 1y dark"));
+            w0_volts(rig.v(9), 1000.0 * group_feed(f1), &format!("{what}: chip 1's 1y"));
+        }
+    }
+}
+
+#[test]
+fn chips_on_one_fed_supply_with_unequal_floors_slide_from_the_top() {
+    // Ruling R114 (a), unequal floors on one node: the level is chosen from
+    // the top. The highest floor slides where the feed covers the
+    // lower-floor chips fully on; the chips below ride along fully on.
+    // Otherwise the highest floor's chips are held off and the level drops
+    // to the next floor. Chip 0: floor 3.96 V, 1y into 1 kohm; chip 1: a
+    // lower floor and load, on `group_board`.
+    // - Covered: chip 1's floor 3.86 V, into 4.7 kohm. Both powered, node 4
+    //   balances at 3.854796 V (under both floors: both starve); chip 0
+    //   unpowered and chip 1 on, at 4.208539 V (over chip 0's floor, which
+    //   attracts). So chip 0 slides at 3.96 V with chip 1 powered: x =
+    //   (I_feed - I_on1) / I_on0, I_feed = 3.238095 mA, I_on1 = 3.96 /
+    //   (123.75 + 4700) = 0.820939 mA, I_on0 = 3.523915 mA: x = 0.6859294.
+    //   Chip 1 free and powered, its 1y at 4700 I_on1 = 3.858413 V.
+    // - Not covered: chip 1's floor 3.66 V, into 1 kohm. With chip 0
+    //   unpowered and chip 1 on, node 4 sits where the feed meets chip 1's
+    //   draw, (4.3 - v) / 105 = v / (v / 0.032 + 1000), v = 3.932294 V:
+    //   under chip 0's floor, so chip 0 is held off and the level drops to
+    //   3.66 V, where chip 1 does not starve (it is powered at 3.932294
+    //   V): no slide, chip 0 dark, chip 1 free and powered, node 4 at
+    //   3.932294 V (to W0).
+    let floor = 0.9 * 4.4;
+    let order = [0, 1];
+    for variant in ['a', 'b'] {
+        let covered = [(4.4, 1000.0), (3.86 / 0.9, 4700.0)];
+        let mut rig = Rig::load(&group_board(variant, &covered, &order)).unwrap();
+        let i_on1 = group_i_on(floor, 4700.0);
+        for t in [2e-3, 0.01, 0.1] {
+            rig.advance(t).unwrap_or_else(|e| panic!("({variant}) covered: {e:?} at {t}"));
+            let what = format!("({variant}) covered at {t}");
+            let x0 = sp_sliding(&rig, group_chip(variant, &order, 0), &format!("{what}: chip 0"));
+            close(x0, (group_feed(floor) - i_on1) / group_i_on(floor, 1000.0), 1e-6, &format!("{what}: chip 0's duty by hand"));
+            close(x0, 0.6859294, 1e-6, &format!("{what}: chip 0's duty"));
+            let low = rig.s().power_hold(group_chip(variant, &order, 1));
+            assert!(low.is_free() && rig.s().ic_powered(group_chip(variant, &order, 1)), "{what}: chip 1 rides along powered, not {low:?}");
+            close(rig.v(4), floor, 1e-9, &format!("{what}: the supply at chip 0's floor"));
+            w0_volts(rig.v(9), 4700.0 * i_on1, &format!("{what}: chip 1's 1y"));
+        }
+        let short = [(4.4, 1000.0), (3.66 / 0.9, 1000.0)];
+        let mut rig = Rig::load(&group_board(variant, &short, &order)).unwrap();
+        let v = {
+            let (mut lo, mut hi) = (3.0f64, 4.3f64);
+            for _ in 0..200 {
+                let m = 0.5 * (lo + hi);
+                if group_feed(m) > group_i_on(m, 1000.0) {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+        for t in [2e-3, 0.01, 0.1] {
+            rig.advance(t).unwrap_or_else(|e| panic!("({variant}) not covered: {e:?} at {t}"));
+            let what = format!("({variant}) not covered at {t}");
+            let top = rig.s().power_hold(group_chip(variant, &order, 0));
+            assert!(!matches!(top.kind, digital::power::HoldKind::Duty(_)) && !rig.s().ic_powered(group_chip(variant, &order, 0)), "{what}: chip 0 dark, not {top:?}");
+            let low = rig.s().power_hold(group_chip(variant, &order, 1));
+            assert!(low.is_free() && rig.s().ic_powered(group_chip(variant, &order, 1)), "{what}: chip 1 powered, not {low:?}");
+            w0_volts(rig.v(4), v, &format!("{what}: node 4 where the feed meets chip 1's draw"));
+            w0_volts(rig.v(5), 0.0, &format!("{what}: chip 0's 1y dark"));
+        }
+    }
+}
+
+#[test]
+fn chips_sliding_as_one_slide_alike_in_every_device_order() {
+    // Ruling R114 (a): a group's slide does not depend on its chips' device
+    // order. The same `group_board` with the chips' devices permuted gives
+    // the same result: every node and each chip's hold to 1e-12 (bit for
+    // bit, or within what reordered sums round to). Boards: two chips
+    // (floor 3.96 V, 1y into 1 kohm and 470 ohm) both ways; three chips at
+    // 3.96 V (1 kohm, 2 kohm, 470 ohm) in all six orders, x = I_feed /
+    // sum(I_on) = 3.238095 / (3.523915 + 1.864626 + 6.669474) mA =
+    // 0.2685430; three chips, two at 3.96 V (1 kohm, 2 kohm) and one with a
+    // 3.66 V floor into 10 kohm riding along powered (all three powered,
+    // node 4 balances at 3.726041 V, over its floor), in all six orders, x
+    // = (I_feed - 3.96 / 10123.75) / (3.523915 + 1.864626) mA = 0.5283314.
+    let floor = 0.9 * 4.4;
+    let perms3: Vec<[usize; 3]> = vec![[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    let sets: Vec<(&str, Vec<(f64, f64)>, Vec<Vec<usize>>, f64)> = vec![
+        ("two chips", vec![(4.4, 1000.0), (4.4, 470.0)], vec![vec![0, 1], vec![1, 0]], group_feed(floor) / (group_i_on(floor, 1000.0) + group_i_on(floor, 470.0))),
+        ("three chips", vec![(4.4, 1000.0), (4.4, 2000.0), (4.4, 470.0)], perms3.iter().map(|p| p.to_vec()).collect(), group_feed(floor) / (group_i_on(floor, 1000.0) + group_i_on(floor, 2000.0) + group_i_on(floor, 470.0))),
+        ("three chips, one riding along", vec![(4.4, 1000.0), (4.4, 2000.0), (3.66 / 0.9, 10000.0)], perms3.iter().map(|p| p.to_vec()).collect(), (group_feed(floor) - group_i_on(floor, 10000.0)) / (group_i_on(floor, 1000.0) + group_i_on(floor, 2000.0))),
+    ];
+    for variant in ['a', 'b'] {
+        for (name, chips, orders, x_hand) in &sets {
+            let mut first: Option<Vec<(Vec<f64>, Vec<digital::power::PowerHold>)>> = None;
+            for order in orders {
+                let mut rig = Rig::load(&group_board(variant, chips, order)).unwrap();
+                let mut seen = Vec::new();
+                for t in [1e-3, 2e-3, 0.01, 0.05] {
+                    let what = format!("({variant}) {name} in order {order:?} at {t}");
+                    rig.advance(t).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    let v: Vec<f64> = (0..5 + 4 * chips.len()).map(|n| rig.v(n)).collect();
+                    let holds: Vec<digital::power::PowerHold> = (0..chips.len()).map(|j| rig.s().power_hold(group_chip(variant, order, j))).collect();
+                    if t >= 2e-3 {
+                        let x = sp_sliding(&rig, group_chip(variant, order, 0), &what);
+                        close(x, *x_hand, 1e-6, &format!("{what}: the duty by hand"));
+                    }
+                    seen.push((v, holds));
+                }
+                match &first {
+                    None => first = Some(seen),
+                    Some(base) => {
+                        for (k, ((v, h), (v0, h0))) in seen.iter().zip(base).enumerate() {
+                            for (n, (a, b)) in v.iter().zip(v0).enumerate() {
+                                assert!((a - b).abs() <= 1e-12, "({variant}) {name} in order {order:?}, stop {k}: node {n} {a:e} against {b:e}");
+                            }
+                            for (j, (a, b)) in h.iter().zip(h0).enumerate() {
+                                assert_eq!(std::mem::discriminant(&a.kind), std::mem::discriminant(&b.kind), "({variant}) {name} in order {order:?}, stop {k}: chip {j} {a:?} against {b:?}");
+                                assert!((a.kind.weight() - b.kind.weight()).abs() <= 1e-12, "({variant}) {name} in order {order:?}, stop {k}: chip {j} {a:?} against {b:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

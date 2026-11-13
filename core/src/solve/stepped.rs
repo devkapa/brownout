@@ -916,8 +916,8 @@ fn solve_step_noting(
     polish: bool,
     mut noting: Option<Noting>,
 ) -> Result<StepResult, StepError> {
-    if let Some((device, ic)) = own_slide_of(ic_ctx) {
-        return solve_own_two_state(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, device, ic, ic_ctx.rail);
+    if let Some(group) = own_slide_of(ic_ctx) {
+        return solve_own_two_state(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, &group, ic_ctx.rail);
     }
     if let Some((device, w)) = two_state_of(shape, ic_ctx) {
         return solve_two_state(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, polish, noting, device, w);
@@ -1052,36 +1052,44 @@ fn two_state_of(shape: &DynShape, ic_ctx: &IcStampCtx) -> Option<(usize, f64)> {
 /// step in R103 (b)'s two states ([`solve_own_two_state`]): the duty `w`
 /// it solved, each state's nodes, and, for a hub partition, the step's
 /// sensitivity (the blend's and each state's). `exit`: Filippov's exit,
-/// the hold the chip takes instead (the step was solved under it).
+/// the hold the chip takes instead (the step was solved under it). Ruling
+/// R114 (a): `devices`, the chips on that supply node sliding as one, at
+/// one duty, ascending; `exit` holds each one's hold, in that order.
 #[derive(Debug, Clone)]
 struct OwnStep {
-    device: usize,
+    devices: Vec<usize>,
     w: f64,
     x_on: Vec<f64>,
     x_off: Vec<f64>,
     sens: Option<(StepSens, StepSens, StepSens)>,
-    exit: Option<digital::power::PowerHold>,
+    exit: Option<Vec<digital::power::PowerHold>>,
 }
 
-/// The one IC with a supply node in partition `ic_ctx.p_idx` that slides
-/// there (ruling R113 (3), `Duty` under `ic_ctx`'s holds and allowed to
-/// slide), with its record. `None` with none, or with more than one.
-fn own_slide_of<'a>(ic_ctx: &IcStampCtx<'a>) -> Option<(usize, &'a digital::IcRecord)> {
+/// The ICs with a supply node in partition `ic_ctx.p_idx` that slide there
+/// (ruling R113 (3), `Duty` under `ic_ctx`'s holds and allowed to slide),
+/// with their records, ascending by device: ruling R114 (a)'s group, the
+/// chips on one supply node sliding as one. `None` with none, or with
+/// sliding chips on two supply nodes.
+#[allow(clippy::type_complexity)]
+fn own_slide_of<'a>(ic_ctx: &IcStampCtx<'a>) -> Option<Vec<(usize, &'a digital::IcRecord)>> {
     if ic_ctx.bnd.holds.is_empty() || !ic_ctx.free_supply {
         return None;
     }
     let local = |node: usize| ic_ctx.node_owner.get(&node).is_some_and(|&(p, _)| p == ic_ctx.p_idx);
-    let mut found = None;
+    let mut found: Vec<(usize, &'a digital::IcRecord)> = Vec::new();
     for (d, ic) in ic_ctx.ics.iter() {
         if !matches!(ic_ctx.bnd.hold(*d).kind, digital::power::HoldKind::Duty(_)) || !ic_ctx.slides.get(*d).copied().unwrap_or(false) || !(local(ic.vcc.node) || local(ic.gnd.node)) {
             continue;
         }
-        if found.is_some() {
-            return None;
+        if let Some(&(_, first)) = found.first() {
+            if (first.vcc.node, first.gnd.node) != (ic.vcc.node, ic.gnd.node) {
+                return None;
+            }
         }
-        found = Some((*d, ic));
+        found.push((*d, ic));
     }
-    found
+    found.sort_unstable_by_key(|&(d, _)| d);
+    (!found.is_empty()).then_some(found)
 }
 
 /// Ruling R113 (3): a step of a partition holding the supply of sliding IC
@@ -1111,8 +1119,7 @@ fn solve_own_two_state(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     at: f64,
-    device: usize,
-    ic: &digital::IcRecord,
+    group: &[(usize, &digital::IcRecord)],
     rail: Option<usize>,
 ) -> Result<StepResult, StepError> {
     use digital::power::PowerHold;
@@ -1120,7 +1127,12 @@ fn solve_own_two_state(
     let part = n + 1;
     let cc = ic_ctx.cc;
     let ext = cc.map(|c| c.rail).or(rail);
-    let (table_on, table_off) = (two_state_table(ic_ctx.bnd.holds, device, true), two_state_table(ic_ctx.bnd.holds, device, false));
+    // Ruling R114 (a): the group's chips share one supply, read and pinned
+    // through its first, at the edge a supply leaving their windows meets
+    // first; both states hold all of them.
+    let (device, ic) = group[0];
+    let devices: Vec<usize> = group.iter().map(|g| g.0).collect();
+    let (table_on, table_off) = (group_table(ic_ctx.bnd.holds, &devices, true), group_table(ic_ctx.bnd.holds, &devices, false));
     let ctx_on = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table_on), ..*ic_ctx };
     let ctx_off = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table_off), ..*ic_ctx };
     fn bnd_of<'b>(b: Bnd<'b>, ramps: Option<&'b RampEval>, at: f64, ext: Option<usize>, n: usize, cc: Option<CcStep>) -> Bnd<'b> {
@@ -1137,10 +1149,11 @@ fn solve_own_two_state(
     let (bnd_on, bnd_off) = (bnd_of(ctx_on.bnd, ic_ctx.ramps, at, ext, n, cc), bnd_of(ctx_off.bnd, ic_ctx.ramps, at, ext, n, cc));
     let local = |node: usize| ic_ctx.node_owner.get(&node).filter(|&&(p, _)| p == ic_ctx.p_idx).map(|&(_, l)| l);
     let read = |x: &[f64], node: usize| local(node).map_or_else(|| bnd_on.get(node), |l| x[l]);
-    let (lo, hi) = digital::levels::power_window(ic);
+    let lo = group.iter().map(|g| digital::levels::power_window(g.1).0).fold(f64::NEG_INFINITY, f64::max);
+    let hi = group.iter().map(|g| digital::levels::power_window(g.1).1).fold(f64::INFINITY, f64::min);
     let start = read(x_from, ic.vcc.node) - read(x_from, ic.gnd.node);
     let floor = ic_ctx.entry_floor.unwrap_or((start - lo).abs() <= (start - hi).abs());
-    let edge = if floor { lo } else { hi };
+    let edge = crate::solve::hold::group_edge(group.iter().map(|g| g.1), floor, start);
     // The pin: `z[row] - z[other] = rhs`.
     let (row, other, rhs) = match (local(ic.vcc.node), local(ic.gnd.node)) {
         (Some(v), Some(g)) => (v, Some(g), edge),
@@ -1283,8 +1296,8 @@ fn solve_own_two_state(
     let (on_in, off_out) = (r_on * inward > 0.0, r_off * inward < 0.0);
     let w = if r_on == 0.0 && r_off == 0.0 { w0 } else { w.clamp(0.0, 1.0) };
     if on_in || off_out {
-        let hold = if on_in {
-            PowerHold::FREE
+        let holds: Vec<PowerHold> = if on_in {
+            vec![PowerHold::FREE; group.len()]
         } else {
             let mut supply = |table: &[PowerHold]| -> Result<f64, StepError> {
                 let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(table), ..*ic_ctx };
@@ -1292,15 +1305,19 @@ fn solve_own_two_state(
                 Ok(read(&solved.x, ic.vcc.node) - read(&solved.x, ic.gnd.node))
             };
             let mut probed = ic_ctx.bnd.holds.to_vec();
-            probed[device] = crate::solve::hold::probe(true);
+            for &d in &devices {
+                probed[d] = crate::solve::hold::probe(true);
+            }
             let (v_on, v_off) = (supply(&probed)?, supply(&table_off)?);
-            crate::solve::hold::held_off(ic, v_on, v_off, ic_ctx.now)
+            group.iter().map(|g| crate::solve::hold::held_off(g.1, v_on, v_off, ic_ctx.now)).collect()
         };
         let mut table = ic_ctx.bnd.holds.to_vec();
-        table[device] = hold;
+        for (&d, &hold) in devices.iter().zip(&holds) {
+            table[d] = hold;
+        }
         let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table), ..*ic_ctx };
         let mut solved = solve_step_noting(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, &ctx, at, false, None)?;
-        solved.own = Some(Rc::new(OwnStep { device, w, x_on: Vec::new(), x_off: Vec::new(), sens: None, exit: Some(hold) }));
+        solved.own = Some(Rc::new(OwnStep { devices, w, x_on: Vec::new(), x_off: Vec::new(), sens: None, exit: Some(holds) }));
         return Ok(solved);
     }
     let mix = |a: f64, b: f64| w * a + (1.0 - w) * b;
@@ -1356,9 +1373,22 @@ fn solve_own_two_state(
         rail_q,
         stage: None,
         two: None,
-        own: Some(Rc::new(OwnStep { device, w, x_on, x_off, sens, exit: None })),
+        own: Some(Rc::new(OwnStep { devices, w, x_on, x_off, sens, exit: None })),
         rail_gain: None,
     })
+}
+
+/// `table` with every one of `devices` powered (`on`, duty 1) or
+/// unpowered (ruling R114 (a)'s group, [`two_state_table`] for each).
+fn group_table(table: &[digital::power::PowerHold], devices: &[usize], on: bool) -> Vec<digital::power::PowerHold> {
+    let mut table = table.to_vec();
+    for &device in devices {
+        if table.len() <= device {
+            table.resize(device + 1, digital::power::PowerHold::FREE);
+        }
+        table[device] = if on { digital::power::PowerHold::duty(1.0) } else { digital::power::PowerHold::off() };
+    }
+    table
 }
 
 /// `table` with `device` powered (`on`, duty 1) or unpowered.
@@ -2063,6 +2093,19 @@ fn seed_on_edge(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[
         if (s - edge).abs() > CROSS_TOLERANCE_V {
             continue;
         }
+        // Ruling R114 (a): it slides with the free chips on its supply node
+        // whose edge is its own (`hold::edge_levels`), at their edge.
+        let floor = edge == lo;
+        let mates: Vec<(usize, &digital::IcRecord)> = ic_ctx
+            .ics
+            .iter()
+            .filter(|(m, mic)| ic_ctx.bnd.hold(*m).is_free() && ic_ctx.slides.get(*m).copied().unwrap_or(false) && !mic.vcc.open && !mic.gnd.open && (mic.vcc.node, mic.gnd.node) == (ic.vcc.node, ic.gnd.node))
+            .map(|(m, mic)| (*m, mic))
+            .collect();
+        let edges: Vec<f64> = mates.iter().map(|&(_, mic)| if floor { digital::levels::power_window(mic).0 } else { digital::levels::power_window(mic).1 }).collect();
+        let level = crate::solve::hold::edge_levels(&edges, floor).into_iter().find(|l| l.iter().any(|&i| mates[i].0 == d)).unwrap_or_default();
+        let group: Vec<usize> = level.iter().map(|&i| mates[i].0).collect();
+        let edge = crate::solve::hold::group_edge(level.iter().map(|&i| mates[i].1), floor, s);
         // The supply's capacitors to a node off the partition, at the edge.
         let v_edge = edge + v_gnd;
         let mut vc_edge = vc.to_vec();
@@ -2075,16 +2118,18 @@ fn seed_on_edge(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[
             }
         }
         let mut table = ic_ctx.bnd.holds.to_vec();
-        if table.len() <= d {
-            table.resize(d + 1, digital::power::PowerHold::FREE);
+        for &m in &group {
+            if table.len() <= m {
+                table.resize(m + 1, digital::power::PowerHold::FREE);
+            }
+            table[m] = digital::power::PowerHold::duty(0.5);
         }
-        table[d] = digital::power::PowerHold::duty(0.5);
-        let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table), entry_floor: Some(edge == lo), ..*ic_ctx };
+        let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table), entry_floor: Some(floor), ..*ic_ctx };
         let solved = seed_noting(shape, live_params, &vc_edge, &seed.x, &ctx, None);
         let Ok(solved) = solved else { continue };
         if let Some(own) = solved.own.as_ref().filter(|o| o.exit.is_none()) {
             let duty = digital::power::PowerHold::duty(own.w);
-            return Some((solved, vec![(d, duty)]));
+            return Some((solved, group.iter().map(|&m| (m, duty)).collect()));
         }
     }
     None
@@ -2158,30 +2203,22 @@ fn hold_around(ic_ctx: &IcStampCtx, solve: &mut dyn FnMut(&IcStampCtx, Option<No
         table[d] = hold::probe(false);
     }
     let Some(off) = under(&table, None) else { return Err(StepError::NoConverge) };
-    // Ruling R92 (R53's sliding hold): one starving chip whose edge
-    // attracts (held unpowered, its supply comes back inside its window)
-    // has no hold that fits: it slides along the edge, powered at the duty
-    // that puts its supply there at the solve's end. Every exact-mode
-    // sliding decline of the cold sweep (1-800) chattered here, a step's
-    // Newton holding the chip and the retry at the next step freeing it,
-    // 10 to 40 ns a hold (cold 757 tpl 0, 2575 tpl 2 forced exact).
-    if let [(d, v_on)] = starving[..] {
-        let ic = gated.iter().find(|g| g.0 == d).expect("a starving IC is gated").1;
-        let may = ic_ctx.slides.get(d).copied().unwrap_or(false) && hold::sliding_allowed();
-        if may && digital::power::powered(ic, supply(&off.x, ic), 0.0) {
-            // Entered at a provisional duty: the step's two-state solve
-            // (`solve_own_two_state`) solves the one that balances the
-            // supply's current between the states (ruling R113 (3)).
-            table[d] = digital::power::PowerHold::duty(0.5);
-            if let Some(solved) = under(&table, Some(v_on < digital::levels::power_window(ic).0)) {
-                if let Some(own) = solved.own.as_ref().filter(|o| o.exit.is_none()) {
-                    let duty = digital::power::PowerHold::duty(own.w);
-                    table[d] = duty;
-                    return Ok((solved, Some((table, vec![(d, duty)]))));
-                }
-            }
-            table[d] = hold::probe(false);
-        }
+    // Ruling R92 (R53's sliding hold): a starving chip whose edge attracts
+    // (held unpowered, its supply comes back inside its window) has no hold
+    // that fits: it slides along the edge, powered at the duty that puts its
+    // supply there at the solve's end. Every exact-mode sliding decline of
+    // the cold sweep (1-800) chattered here, a step's Newton holding the
+    // chip and the retry at the next step freeing it, 10 to 40 ns a hold
+    // (cold 757 tpl 0, 2575 tpl 2 forced exact). Ruling R114 (a): the
+    // starving chips on one supply node, with the free ones there that may
+    // slide, by levels of one edge each from the first a supply leaving
+    // their windows meets, as the static solver takes them
+    // (`StaticPartitionSolver::slide_levels`): a level whose edge attracts
+    // with the levels above it held off and those below powered slides as
+    // one, the levels below riding along powered; one whose edge does not
+    // is held off and the next tried; one that carries itself is freed.
+    if let Some(entered) = slide_levels_step(ic_ctx, &gated, &starving, &table, &off, &mut under) {
+        return Ok(entered);
     }
     let mut taken = Vec::new();
     for &(d, v_on) in &starving {
@@ -2192,6 +2229,124 @@ fn hold_around(ic_ctx: &IcStampCtx, solve: &mut dyn FnMut(&IcStampCtx, Option<No
     }
     let Some(solved) = under(&table, None) else { return Err(StepError::NoConverge) };
     Ok((solved, Some((table, taken))))
+}
+
+/// [`hold_around`]'s levels (ruling R92, R114 (a)): `starving` (device,
+/// supply held powered), `off_table` the table every starving chip is
+/// held unpowered under and `off` its solve. `None` where nothing is
+/// entered (the caller holds every starving chip off). One starving chip
+/// alone slides or not on `off` alone, as before the ruling.
+#[allow(clippy::type_complexity)]
+fn slide_levels_step(
+    ic_ctx: &IcStampCtx,
+    gated: &[(usize, &digital::IcRecord)],
+    starving: &[(usize, f64)],
+    off_table: &[digital::power::PowerHold],
+    off: &StepResult,
+    under: &mut dyn FnMut(&[digital::power::PowerHold], Option<bool>) -> Option<StepResult>,
+) -> Option<(StepResult, Option<(Vec<digital::power::PowerHold>, Vec<(usize, digital::power::PowerHold)>)>)> {
+    use crate::solve::hold;
+    use digital::power::{HoldKind, PowerHold};
+    if !hold::sliding_allowed() {
+        return None;
+    }
+    let ic_of = |d: usize| gated.iter().find(|g| g.0 == d).expect("a starving IC is gated").1;
+    let lead = ic_of(starving[0].0);
+    let node = (lead.vcc.node, lead.gnd.node);
+    let floor = starving[0].1 < digital::levels::power_window(lead).0;
+    let may = |d: usize, ic: &digital::IcRecord| (ic.vcc.node, ic.gnd.node) == node && ic_ctx.slides.get(d).copied().unwrap_or(false);
+    let is_starving = |d: usize| starving.iter().any(|s| s.0 == d);
+    if !starving.iter().all(|&(d, v)| may(d, ic_of(d)) && (v < digital::levels::power_window(ic_of(d)).0) == floor) {
+        return None;
+    }
+    let cand: Vec<usize> = gated.iter().filter(|&&(d, ic)| is_starving(d) || (ic_ctx.bnd.hold(d).is_free() && may(d, ic))).map(|g| g.0).collect();
+    let edges: Vec<f64> = cand
+        .iter()
+        .map(|&d| {
+            let (lo, hi) = digital::levels::power_window(ic_of(d));
+            if floor {
+                lo
+            } else {
+                hi
+            }
+        })
+        .collect();
+    let levels: Vec<Vec<usize>> = hold::edge_levels(&edges, floor).into_iter().map(|l| l.into_iter().map(|i| cand[i]).collect()).collect();
+    let top = levels.iter().position(|l| l.iter().any(|&d| is_starving(d)))?;
+    let level_of = |d: usize| levels.iter().position(|l| l.contains(&d));
+    let supply = |x: &[f64]| {
+        let v = |node: usize| match ic_ctx.node_owner.get(&node) {
+            Some(&(p, l)) if p == ic_ctx.p_idx => x[l],
+            _ => ic_ctx.bnd.get(node),
+        };
+        v(lead.vcc.node) - v(lead.gnd.node)
+    };
+    let within = |level: &[usize], v: f64| level.iter().all(|&d| digital::power::powered(ic_of(d), v, 0.0));
+    let riding = |d: usize| {
+        let hold = ic_ctx.bnd.hold(d);
+        if hold.kind == HoldKind::Off {
+            PowerHold::FREE
+        } else {
+            hold
+        }
+    };
+    // The final table: the levels from `top` to `at` held off (each from
+    // its powered and unpowered supply), level `at` as `mid`, the levels
+    // below riding along powered, the rest as `off_table` has them.
+    let final_of = |held: &[(f64, f64)], at: usize, mid: Option<PowerHold>| -> Vec<PowerHold> {
+        let mut t = off_table.to_vec();
+        for &(d, ic) in gated {
+            match level_of(d) {
+                Some(l) if l >= top && l < at => {
+                    let (v_on, v_off) = held[l - top];
+                    t[d] = hold::held_off(ic, v_on, v_off, ic_ctx.now);
+                }
+                Some(l) if l == at => t[d] = mid.unwrap_or_else(|| riding(d)),
+                Some(l) if l > at => t[d] = riding(d),
+                _ => {}
+            }
+        }
+        t
+    };
+    let taken_of = |t: &[PowerHold]| -> Vec<(usize, PowerHold)> { gated.iter().filter(|&&(d, _)| t[d] != ic_ctx.bnd.hold(d)).map(|&(d, _)| (d, t[d])).collect() };
+    let mut v_on = starving[0].1;
+    let mut held: Vec<(f64, f64)> = Vec::new();
+    for at in top..levels.len() {
+        if at > top && within(&levels[at], v_on) {
+            let t = final_of(&held, at, None);
+            let solved = under(&t, None)?;
+            let taken = taken_of(&t);
+            return Some((solved, Some((t, taken))));
+        }
+        // Its unpowered state: the levels from the top to it unpowered,
+        // those below powered.
+        let mut t = off_table.to_vec();
+        for &(d, _) in gated {
+            match level_of(d) {
+                Some(l) if l >= top && l <= at => t[d] = hold::probe(false),
+                Some(l) if l > at => t[d] = hold::probe(true),
+                _ => {}
+            }
+        }
+        let v_off = if t[..] == off_table[..] { supply(&off.x) } else { supply(&under(&t, None)?.x) };
+        if within(&levels[at], v_off) {
+            // Entered at a provisional duty: the step's two-state solve
+            // (`solve_own_two_state`) solves the one that balances the
+            // supply's current between the states (ruling R113 (3)).
+            let mut t = final_of(&held, at, Some(PowerHold::duty(0.5)));
+            let solved = under(&t, Some(floor))?;
+            let own = solved.own.as_ref().filter(|o| o.exit.is_none())?;
+            let duty = PowerHold::duty(own.w);
+            for &d in &levels[at] {
+                t[d] = duty;
+            }
+            let taken = taken_of(&t);
+            return Some((solved, Some((t, taken))));
+        }
+        held.push((v_on, v_off));
+        v_on = v_off;
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -3763,14 +3918,16 @@ impl SteppedSolver {
             };
             two = Some(Rc::new(TwoSens { w: own.w, on, off, x_on: own.x_on.clone(), x_off: own.x_off.clone() }));
             // The duty, into this copy and to the owner, with its states.
-            let (d, duty, at) = (own.device, digital::power::PowerHold::duty(own.w), self.partitions[&p].pend_t);
+            let (duty, at) = (digital::power::PowerHold::duty(own.w), self.partitions[&p].pend_t);
             let table = Rc::make_mut(&mut self.holds);
-            if table.len() <= d {
-                table.resize(d + 1, digital::power::PowerHold::FREE);
-            }
-            if table[d] != duty {
-                table[d] = duty;
-                self.hold_requests.push((d, duty, at));
+            for &d in &own.devices {
+                if table.len() <= d {
+                    table.resize(d + 1, digital::power::PowerHold::FREE);
+                }
+                if table[d] != duty {
+                    table[d] = duty;
+                    self.hold_requests.push((d, duty, at));
+                }
             }
         } else if part.hub && self.rail.is_some() {
             if let Some(step) = part.pend_two.clone() {
@@ -4090,7 +4247,9 @@ impl SteppedSolver {
             // owner as a hold the seed took.
             let own_slide = seed_own.as_ref().filter(|own| own.exit.is_none()).cloned();
             if let Some(own) = &seed_own {
-                taken.push((own.device, own.exit.unwrap_or(digital::power::PowerHold::duty(own.w))));
+                for (j, &d) in own.devices.iter().enumerate() {
+                    taken.push((d, own.exit.as_ref().map_or(digital::power::PowerHold::duty(own.w), |e| e[j])));
+                }
             }
             if let Some(own) = &own_slide {
                 let n = self.partitions[&p_idx].shape.n;
@@ -5511,16 +5670,18 @@ impl SteppedSolver {
         // copy and to the owner, at the step's end (no hold at its start,
         // ruling R106 (a)'s `pend_held`); a slide's duty goes to the owner
         // at its commit (`commit_partition`), with the states it weights.
-        let own_hold = accepted.own.as_ref().and_then(|own| own.exit.map(|hold| (own.device, hold)));
-        if let Some((d, hold)) = own_hold {
+        let own_hold: Option<Vec<(usize, digital::power::PowerHold)>> = accepted.own.as_ref().and_then(|own| own.exit.as_ref().map(|holds| own.devices.iter().copied().zip(holds.iter().copied()).collect()));
+        if let Some(holds) = own_hold {
             part.pend_be_next = true;
             let table = Rc::make_mut(&mut self.holds);
-            if table.len() <= d {
-                table.resize(d + 1, digital::power::PowerHold::FREE);
-            }
-            if table[d] != hold {
-                table[d] = hold;
-                self.hold_requests.push((d, hold, part.t + h));
+            for (d, hold) in holds {
+                if table.len() <= d {
+                    table.resize(d + 1, digital::power::PowerHold::FREE);
+                }
+                if table[d] != hold {
+                    table[d] = hold;
+                    self.hold_requests.push((d, hold, part.t + h));
+                }
             }
             self.holds_on = table.iter().any(|h| !h.is_free());
         }
@@ -6805,7 +6966,7 @@ impl crate::snapshot::HeapBytes for OwnStep {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.devices, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.x_on, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.x_off, w); }

@@ -2300,8 +2300,39 @@ their own, and the source KCL does with W1a point 2's branch fold.
    `a_chip_behind_an_rc_and_a_second_resistor_slides_as_its_capacitor_relaxes`,
    `a_chip_fed_through_an_led_slides_at_the_duty_its_output_load_sets`,
    `a_chip_sliding_in_its_supplys_own_partition_slides_alike_at_every_host_cadence`.
-   Open: two chips sliding in one partition would need four states, and
-   neither is solved in two (`own_slide_of` finds none), so each keeps
+   **Chips on one supply node** (ruling R114 (a), R53V3's F1;
+   `hold::SAME_EDGE_W0`, `hold::edge_levels`,
+   `StaticPartitionSolver::slide_levels`, `stepped::slide_levels_step`).
+   Two identical chips on one fed node starved together, and the hold
+   procedure, which slid one starving chip only, held both off: the R-only
+   board (4.3 V / 5 ohm cell, 100 ohm, floor 3.96 V, each 1y into 1 kohm)
+   sat at 4.300 V, 0.34 V over the floor, a silent wrong state, and the RC
+   board declined at the episode guard. Chips on one supply node with the
+   same edge, their edges within `SAME_EDGE_W0` (W0 / 2) of the edge's
+   voltage, now form one slide: two states, all of them powered and all
+   unpowered, the supply pinned at their edge in each (of their edges the
+   one nearest the supply: an RC feed charging past the lower of two
+   floors W0 / 4 apart slides there), and one duty, `x = I_feed / sum(I_on)`
+   (3.238095 / 7.047831 mA = 0.459446 on that board), every chip at it.
+   Unequal floors on one node are taken from the top: the starving chips
+   and the free ones that may slide there form levels of one edge each,
+   from the first a falling supply meets. A level slides where its edge
+   attracts with the levels above it held off and those below powered
+   (the feed covers the lower-floor chips fully on), the chips below
+   riding along powered; else it is held off and the level drops to the
+   next floor; a level whose powered state carries its own supply is
+   freed. One starving chip alone takes the same solves it took before
+   the ruling. The levels and the group are sets of devices, so the
+   result does not depend on device order (bit for bit, or within 1e-12
+   where reordered sums round, on two chips swapped and three in all six
+   orders). Pins:
+   `two_chips_on_one_fed_supply_slide_as_one_at_their_common_duty`,
+   `two_chips_on_one_fed_supply_slide_as_one_at_every_host_cadence`,
+   `chips_on_one_fed_supply_slide_as_one_only_with_their_edges_within_the_same_edge_tolerance`,
+   `chips_on_one_fed_supply_with_unequal_floors_slide_from_the_top`,
+   `chips_sliding_as_one_slide_alike_in_every_device_order`. Open: chips
+   sliding on two supply nodes of one partition would need four states,
+   and neither is solved in two (`own_slide_of` finds none), so each keeps
    the duty it entered at, averaged stamps, as two chips beside one
    partition do.
 

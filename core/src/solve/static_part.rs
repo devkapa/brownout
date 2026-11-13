@@ -2044,26 +2044,32 @@ impl StaticPartitionSolver {
     }
 
     /// Ruling R113 (3), R103 (b)'s two states for a chip whose supply is
-    /// this partition's own (R53-P12): the one gated IC of partition `p`
-    /// that slides here (`Duty` in this solver's copy, `slide_ok`), its
-    /// position in `ics` and device. `None` with none, or with more than
-    /// one (two would need four states).
-    fn own_slide_of(&self, p: usize) -> Option<(u32, usize)> {
+    /// this partition's own (R53-P12), and ruling R114 (a)'s group: the
+    /// gated ICs of partition `p` that slide here (`Duty` in this solver's
+    /// copy, `slide_ok`), each its position in `ics` and device, ascending.
+    /// Chips on one supply node slide as one, at one duty (the hold
+    /// procedure enters them so). `None` with none, or with sliding chips
+    /// on two supply nodes (two slides would need four states).
+    fn own_slide_of(&self, p: usize) -> Option<Vec<(u32, usize)>> {
         if !self.holds_on || !self.holds_free_ic_supply.get(p).copied().unwrap_or(false) {
             return None;
         }
-        let mut found = None;
+        let mut found: Vec<(u32, usize)> = Vec::new();
         for k in self.gated_ics(p) {
             let d = self.ics[k as usize].0;
             if !self.slide_ok.get(d).copied().unwrap_or(false) || !matches!(digital::power::hold_of(self.holds_slice(), d).kind, digital::power::HoldKind::Duty(_)) {
                 continue;
             }
-            if found.is_some() {
-                return None;
+            if let Some(&(k0, _)) = found.first() {
+                let (a, b) = (&self.ics[k0 as usize].1, &self.ics[k as usize].1);
+                if (a.vcc.node, a.gnd.node) != (b.vcc.node, b.gnd.node) {
+                    return None;
+                }
             }
-            found = Some((k, d));
+            found.push((k, d));
         }
-        found
+        found.sort_unstable_by_key(|&(_, d)| d);
+        (!found.is_empty()).then_some(found)
     }
 
     /// The pin of IC `k`'s supply at `edge` in partition `p` (its `vcc`
@@ -2148,10 +2154,16 @@ impl StaticPartitionSolver {
     /// out), and the partition is solved as any other. `hub`: the rail;
     /// `hint`: the partition's solve that entered the slide.
     #[allow(clippy::too_many_arguments)]
-    fn own_two_state(&mut self, p: usize, now: f64, drivers: &[Driver], k: u32, d: usize, hub: Option<f64>, hint: Option<&[f64]>) -> Result<OwnSolve, String> {
+    fn own_two_state(&mut self, p: usize, now: f64, drivers: &[Driver], group: &[(u32, usize)], hub: Option<f64>, hint: Option<&[f64]>) -> Result<OwnSolve, String> {
         use digital::power::{HoldKind, PowerHold};
+        // Ruling R114 (a): the group's chips share one supply (`own_slide_of`),
+        // read and pinned through its first; its edge is the first a supply
+        // leaving their windows meets.
+        let (k, d) = group[0];
         let ic = self.ics[k as usize].1.clone();
-        let (lo, hi) = digital::levels::power_window(&ic);
+        let members: Vec<digital::IcRecord> = group.iter().map(|&(k, _)| self.ics[k as usize].1.clone()).collect();
+        let windows: Vec<(f64, f64)> = members.iter().map(digital::levels::power_window).collect();
+        let (lo, hi) = (windows.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max), windows.iter().map(|w| w.1).fold(f64::INFINITY, f64::min));
         // The edge it slides on: the one the hold procedure entered it at
         // (`entry_edge`: its powered supply past it), else the one nearer
         // its supply as published, or as the solve that entered the slide
@@ -2161,22 +2173,24 @@ impl StaticPartitionSolver {
             None => self.voltages[ic.vcc.node] - self.voltages[ic.gnd.node],
         };
         let floor = match self.entry_edge.take() {
-            Some((at, floor)) if at == d => floor,
+            Some((at, floor)) if group.iter().any(|&(_, d)| d == at) => floor,
             other => {
                 self.entry_edge = other;
                 (published - lo).abs() <= (published - hi).abs()
             }
         };
-        let edge = if floor { lo } else { hi };
+        let edge = crate::solve::hold::group_edge(members.iter(), floor, published);
         let pin = self.own_pin(p, k, edge);
         let gated = self.gated_ics(p);
         let owner = std::rc::Rc::clone(&self.holds);
         let state = |this: &mut Self, on: bool| -> Result<(HubSolve, f64, f64, f64), String> {
             let mut table: Vec<PowerHold> = (*owner).clone();
-            if table.len() <= d {
-                table.resize(d + 1, PowerHold::FREE);
+            for &(_, d) in group {
+                if table.len() <= d {
+                    table.resize(d + 1, PowerHold::FREE);
+                }
+                table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
             }
-            table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
             this.holds = std::rc::Rc::new(table);
             this.pin = Some(pin);
             let solved = match hub {
@@ -2210,11 +2224,12 @@ impl StaticPartitionSolver {
             let mix = |a: f64, b: f64| x * a + (1.0 - x) * b;
             let x_b: Vec<f64> = on.x.iter().zip(&off.x).map(|(&a, &b)| mix(a, b)).collect();
             if !self.trial {
-                let old = digital::power::hold_of(self.holds_slice(), d);
                 let duty = PowerHold::duty(x);
-                if old != duty {
-                    self.set_local_hold(d, duty);
-                    self.hold_requests.push((d, duty, now));
+                for &(_, d) in group {
+                    if digital::power::hold_of(self.holds_slice(), d) != duty {
+                        self.set_local_hold(d, duty);
+                        self.hold_requests.push((d, duty, now));
+                    }
                 }
             }
             let solve = match hub {
@@ -2251,15 +2266,17 @@ impl StaticPartitionSolver {
         if self.trial {
             return Ok(OwnSolve::Exit);
         }
-        let hold = if on_in {
-            PowerHold::FREE
+        let holds: Vec<PowerHold> = if on_in {
+            vec![PowerHold::FREE; group.len()]
         } else {
             // Held off where it starves either way: its release from its
-            // supply powered and unpowered, unpinned.
+            // supply powered and unpowered (the whole group), unpinned.
             let owner = std::rc::Rc::clone(&self.holds);
             let supply = |this: &mut Self, on: bool| -> Result<f64, String> {
                 let mut table: Vec<PowerHold> = (*owner).clone();
-                table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
+                for &(_, d) in group {
+                    table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
+                }
                 this.holds = std::rc::Rc::new(table);
                 let (x, _) = this.solve_once(p, now, drivers, &gated, None, hub)?;
                 Ok(this.supply_at(k, p, &x))
@@ -2267,11 +2284,14 @@ impl StaticPartitionSolver {
             let v_on = supply(self, true);
             let v_off = supply(self, false);
             self.holds = owner;
-            crate::solve::hold::held_off(&ic, v_on?, v_off?, now)
+            let (v_on, v_off) = (v_on?, v_off?);
+            members.iter().map(|ic| crate::solve::hold::held_off(ic, v_on, v_off, now)).collect()
         };
-        debug_assert!(hold.is_free() || hold.kind == HoldKind::Off);
-        self.set_local_hold(d, hold);
-        self.hold_requests.push((d, hold, now));
+        for (&(_, d), &hold) in group.iter().zip(&holds) {
+            debug_assert!(hold.is_free() || hold.kind == HoldKind::Off);
+            self.set_local_hold(d, hold);
+            self.hold_requests.push((d, hold, now));
+        }
         Ok(OwnSolve::Exit)
     }
 
@@ -2328,44 +2348,14 @@ impl StaticPartitionSolver {
             self.set_local_hold(devices[k], hold::probe(false));
         }
         let Ok((x, _)) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) else { return fail(self) };
-        // Ruling R92 (R53's sliding hold): one starving chip whose edge
-        // attracts (held unpowered, its supply comes back inside its window)
-        // slides along it, at the duty that puts its supply there, the rest
-        // as they were. Not a chip on default mode's hub rail, whose slide
-        // is the rail loop's (`PartitionedSolver::hold_on_rail`).
-        if let [(k, v_on)] = starving[..] {
-            let d = devices[k];
-            let ic = self.ics[gated[k] as usize].1.clone();
-            let on_rail = self.rail.is_some_and(|r| ic.vcc.node == r || ic.gnd.node == r);
-            let may = !on_rail && self.slide_ok.get(d).copied().unwrap_or(false) && hold::sliding_allowed();
-            if may && digital::power::powered(&ic, self.supply_at(gated[k], p_idx, &x), 0.0) {
-                for (j, &dj) in devices.iter().enumerate() {
-                    if j != k {
-                        self.set_local_hold(dj, before[j]);
-                    }
-                }
-                // Entered at a provisional duty, solved averaged: the solve
-                // that follows (`Self::own_two_state`) puts it at the duty
-                // that balances the two states (ruling R113 (3)).
-                let duty = digital::power::PowerHold::duty(0.5);
-                self.set_local_hold(d, duty);
-                self.entry_edge = Some((d, v_on < digital::levels::power_window(&ic).0));
-                if let Ok(solved) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) {
-                    self.hold_requests.push((d, duty, now));
-                    for (j, &dj) in devices.iter().enumerate() {
-                        if j != k && before[j] != digital::power::hold_of(&saved.0, dj) {
-                            self.hold_requests.push((dj, before[j], now));
-                        }
-                    }
-                    return Ok(solved);
-                }
-                for (j, &dj) in devices.iter().enumerate() {
-                    if j != k {
-                        self.set_local_hold(dj, hold::probe(a.contains(&j) || flips.last(j).unwrap_or(false)));
-                    }
-                }
-                self.set_local_hold(d, hold::probe(false));
-            }
+        // Ruling R92 (R53's sliding hold), R114 (a): starving chips whose
+        // edge attracts (held unpowered, the supply comes back inside their
+        // windows) slide along it, at the duty that puts their supply there,
+        // the rest as they were; chips on one supply node with the same edge
+        // as one (`slide_levels`). Not a chip on default mode's hub rail,
+        // whose slide is the rail loop's (`PartitionedSolver::hold_on_rail`).
+        if let Some(solved) = self.slide_levels(p_idx, now, drivers, gated, &devices, &before, &saved.0, &starving, &x, polish_at) {
+            return Ok(solved);
         }
         let mut taken = Vec::new();
         for (k, &d) in devices.iter().enumerate() {
@@ -2385,6 +2375,160 @@ impl StaticPartitionSolver {
             }
             Err(_) => fail(self),
         }
+    }
+
+    /// Ruling R92 and R114 (a), for [`Self::hold_in`]: the starving chips
+    /// (`starving`, positions in `gated` with their supply held powered),
+    /// when all of them may slide and share one supply node, taken into a
+    /// slide by levels. The chips on that node that may slide and are free,
+    /// the starving ones among them, form levels of one edge each
+    /// (`hold::edge_levels`, within `SAME_EDGE_W0` of W0), taken from the
+    /// first one holding a starving chip, the one a supply leaving their
+    /// windows meets first (floors from the top). A level's powered state
+    /// has it and the levels below it powered and the levels above held
+    /// off; its unpowered state has it off too. Where the unpowered state
+    /// puts the supply inside the level's windows (its edge attracts), the
+    /// level slides as one, at a provisional duty (the solve that follows,
+    /// `Self::own_two_state`, puts it at the duty that balances the two
+    /// states, ruling R113 (3)), the levels below riding along powered and
+    /// those above held off; else the feed does not cover the levels below
+    /// fully on, the level is held off, and the next one down is tried. A
+    /// level whose powered state carries its supply inside its windows
+    /// starves no more: it and those below are freed, those above held off.
+    /// `x` is the partition solved with every starving chip unpowered (the
+    /// copy as the caller left it), the last level's unpowered state; one
+    /// starving chip alone slides or not on that solve alone, as before
+    /// the ruling. `None` (the copy as it was) where nothing is entered,
+    /// for the caller to hold every starving chip off.
+    #[allow(clippy::too_many_arguments)]
+    fn slide_levels(&mut self, p_idx: usize, now: f64, drivers: &[Driver], gated: &[u32], devices: &[usize], before: &[digital::power::PowerHold], saved: &std::rc::Rc<Vec<digital::power::PowerHold>>, starving: &[(usize, f64)], x: &[f64], polish_at: Option<f64>) -> Option<(Vec<f64>, lu::LuFactorization)> {
+        use crate::solve::hold;
+        use digital::power::PowerHold;
+        if !hold::sliding_allowed() {
+            return None;
+        }
+        let ic_of = |this: &Self, k: usize| this.ics[gated[k] as usize].1.clone();
+        let lead = ic_of(self, starving[0].0);
+        let node = (lead.vcc.node, lead.gnd.node);
+        let floor = starving[0].1 < digital::levels::power_window(&lead).0;
+        let may = |this: &Self, k: usize| {
+            let ic = &this.ics[gated[k] as usize].1;
+            let on_rail = this.rail.is_some_and(|r| ic.vcc.node == r || ic.gnd.node == r);
+            (ic.vcc.node, ic.gnd.node) == node && !on_rail && this.slide_ok.get(devices[k]).copied().unwrap_or(false)
+        };
+        let is_starving = |k: usize| starving.iter().any(|&(s, _)| s == k);
+        if !starving.iter().all(|&(k, v)| may(self, k) && (v < digital::levels::power_window(&ic_of(self, k)).0) == floor) {
+            return None;
+        }
+        let cand: Vec<usize> = (0..gated.len()).filter(|&k| is_starving(k) || (before[k].is_free() && may(self, k))).collect();
+        let edges: Vec<f64> = cand
+            .iter()
+            .map(|&k| {
+                let (lo, hi) = digital::levels::power_window(&ic_of(self, k));
+                if floor {
+                    lo
+                } else {
+                    hi
+                }
+            })
+            .collect();
+        let levels: Vec<Vec<usize>> = hold::edge_levels(&edges, floor).into_iter().map(|l| l.into_iter().map(|i| cand[i]).collect()).collect();
+        let top = levels.iter().position(|l| l.iter().any(|&k| is_starving(k)))?;
+        let level_of = |k: usize| levels.iter().position(|l| l.contains(&k));
+        // The copy `x` was solved under, restored where nothing is entered.
+        let probes: Vec<PowerHold> = devices.iter().map(|&d| digital::power::hold_of(self.holds_slice(), d)).collect();
+        let restore = |this: &mut Self| {
+            for (k, &d) in devices.iter().enumerate() {
+                this.set_local_hold(d, probes[k]);
+            }
+        };
+        let within = |this: &Self, level: &[usize], v: f64| level.iter().all(|&k| digital::power::powered(&this.ics[gated[k] as usize].1, v, 0.0));
+        let supply = |this: &Self, x: &[f64]| this.supply_at(gated[starving[0].0], p_idx, x);
+        // The final copy: the levels from `top` to `held` held off (each
+        // from its powered and unpowered supply), level `at` as `mid`, the
+        // levels below it riding along powered, the rest as they were.
+        let settle = |this: &mut Self, held: &[(f64, f64)], at: usize, mid: Option<PowerHold>| -> Option<(Vec<f64>, lu::LuFactorization)> {
+            let mut finals = Vec::with_capacity(devices.len());
+            for k in 0..devices.len() {
+                let hold = match level_of(k) {
+                    Some(l) if l >= top && l < at => {
+                        let (v_on, v_off) = held[l - top];
+                        hold::held_off(&this.ics[gated[k] as usize].1, v_on, v_off, now)
+                    }
+                    Some(l) if l == at => mid.unwrap_or(if before[k].kind == digital::power::HoldKind::Off { PowerHold::FREE } else { before[k] }),
+                    Some(l) if l > at => {
+                        if before[k].kind == digital::power::HoldKind::Off {
+                            PowerHold::FREE
+                        } else {
+                            before[k]
+                        }
+                    }
+                    _ => before[k],
+                };
+                finals.push(hold);
+            }
+            for (k, &d) in devices.iter().enumerate() {
+                this.set_local_hold(d, finals[k]);
+            }
+            if mid.is_some() {
+                this.entry_edge = Some((devices[levels[at][0]], floor));
+            }
+            match this.solve_once(p_idx, now, drivers, gated, None, polish_at) {
+                Ok(solved) => {
+                    for (k, &d) in devices.iter().enumerate() {
+                        if finals[k] != digital::power::hold_of(saved, d) {
+                            this.hold_requests.push((d, finals[k], now));
+                        }
+                    }
+                    Some(solved)
+                }
+                Err(_) => None,
+            }
+        };
+        let mut v_on = starving[0].1;
+        let mut held: Vec<(f64, f64)> = Vec::new();
+        for at in top..levels.len() {
+            if at > top && within(self, &levels[at], v_on) {
+                let solved = settle(self, &held, at, None);
+                if solved.is_none() {
+                    restore(self);
+                }
+                return solved;
+            }
+            // Its unpowered state: the levels from the top to it unpowered,
+            // those below powered.
+            let mut table = probes.clone();
+            for (k, hold) in table.iter_mut().enumerate() {
+                match level_of(k) {
+                    Some(l) if l >= top && l <= at => *hold = hold::probe(false),
+                    Some(l) if l > at => *hold = hold::probe(true),
+                    _ => {}
+                }
+            }
+            let v_off = if table == probes {
+                supply(self, x)
+            } else {
+                for (k, &d) in devices.iter().enumerate() {
+                    self.set_local_hold(d, table[k]);
+                }
+                let solved = self.solve_once(p_idx, now, drivers, gated, None, polish_at);
+                restore(self);
+                match solved {
+                    Ok((x_off, _)) => supply(self, &x_off),
+                    Err(_) => return None,
+                }
+            };
+            if within(self, &levels[at], v_off) {
+                let solved = settle(self, &held, at, Some(PowerHold::duty(0.5)));
+                if solved.is_none() {
+                    restore(self);
+                }
+                return solved;
+            }
+            held.push((v_on, v_off));
+            v_on = v_off;
+        }
+        None
     }
 
     /// Whether the horizon clamp's retry (ruling R51 (b)) of partition
@@ -3220,17 +3364,17 @@ impl StaticPartitionSolver {
     /// Filippov's exit its ordinary solve with the chip freed or held off.
     /// `None` with no such chip.
     fn own_hub(&mut self, p: usize, now: f64, drivers: &[Driver], hint: Option<&[f64]>) -> Result<Option<HubSolve>, String> {
-        let Some((k, d)) = self.own_slide_of(p) else { return Ok(None) };
+        let Some(group) = self.own_slide_of(p) else { return Ok(None) };
         let u = self.voltages[self.rail.expect("a hub partition implies a rail")];
-        if let OwnSolve::Slide(solve) = self.own_two_state(p, now, drivers, k, d, Some(u), hint)? {
+        if let OwnSolve::Slide(solve) = self.own_two_state(p, now, drivers, &group, Some(u), hint)? {
             return Ok(Some(solve));
         }
         // Filippov's exit: solved as any other, which may take it into a
         // slide again (`hold_in`), solved in its two states once more.
         let solve = self.solve_hub_once(p, now, drivers)?;
-        let Some((k, d)) = self.own_slide_of(p) else { return Ok(Some(solve)) };
+        let Some(group) = self.own_slide_of(p) else { return Ok(Some(solve)) };
         let hint = solve.x.clone();
-        match self.own_two_state(p, now, drivers, k, d, Some(u), Some(&hint))? {
+        match self.own_two_state(p, now, drivers, &group, Some(u), Some(&hint))? {
             OwnSolve::Slide(solve) => Ok(Some(solve)),
             OwnSolve::Exit => self.solve_hub_once(p, now, drivers).map(Some),
         }
@@ -3242,8 +3386,8 @@ impl StaticPartitionSolver {
     /// ([`Self::two_state_view`]).
     fn own_or_iterated(&mut self, p: usize, now: f64, drivers: &[Driver]) -> Result<Vec<f64>, String> {
         let own = |this: &mut Self, hint: Option<&[f64]>| -> Result<Option<Vec<f64>>, String> {
-            let Some((k, d)) = this.own_slide_of(p) else { return Ok(None) };
-            match this.own_two_state(p, now, drivers, k, d, None, hint)? {
+            let Some(group) = this.own_slide_of(p) else { return Ok(None) };
+            match this.own_two_state(p, now, drivers, &group, None, hint)? {
                 OwnSolve::Slide(solve) => {
                     let x = solve.x.clone();
                     this.set_own(p, Some(solve));

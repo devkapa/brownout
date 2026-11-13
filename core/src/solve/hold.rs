@@ -439,6 +439,58 @@ pub(crate) fn slide_drift(edge: f64) -> f64 {
     1e-4 + 1e-3 * edge.abs()
 }
 
+/// Ruling R114 (a) (R53V3 F1): chips on one supply node whose power edges
+/// lie within this fraction of W0 ([`slide_drift`]) of the edge's voltage
+/// share that edge, and slide along it as one, at one duty.
+pub(crate) const SAME_EDGE_W0: f64 = 0.5;
+
+/// Ruling R114 (a): the edges of chips on one supply node (`edges`, their
+/// floors, or their ceilings where `floor` is false) in levels, the first
+/// the one a supply leaving their windows meets first (floors from the
+/// top, ceilings from the bottom); each level the chips whose edge lies
+/// within [`SAME_EDGE_W0`] of W0 of the level's first edge. Each level is
+/// its positions in `edges`, ascending, so a level does not depend on the
+/// order the chips come in.
+pub(crate) fn edge_levels(edges: &[f64], floor: bool) -> Vec<Vec<usize>> {
+    let key = |i: usize| if floor { -edges[i] } else { edges[i] };
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
+    let mut levels: Vec<Vec<usize>> = Vec::new();
+    let mut first = f64::NAN;
+    for i in order {
+        if levels.is_empty() || (edges[i] - first).abs() > SAME_EDGE_W0 * slide_drift(first) {
+            first = edges[i];
+            levels.push(Vec::new());
+        }
+        levels.last_mut().expect("a level").push(i);
+    }
+    for level in &mut levels {
+        level.sort_unstable();
+    }
+    levels
+}
+
+/// The edge a group of chips sliding as one on one supply node (ruling
+/// R114 (a)) slides on: of their floors (`floor`) or ceilings, the one
+/// nearest the supply `near` (the highest floor, the lowest ceiling, on a
+/// tie). Their edges lie within [`SAME_EDGE_W0`] of W0 of each other, so
+/// any of them is the group's edge to W0; the nearest is the one a supply
+/// a capacitor holds reached (an RC feed charging past the lower of two
+/// floors W0 / 4 apart slides at that one, where pinned at the higher its
+/// capacitor's node would have had to jump).
+pub(crate) fn group_edge<'a>(ics: impl Iterator<Item = &'a digital::IcRecord>, floor: bool, near: f64) -> f64 {
+    let mut best = f64::NAN;
+    for ic in ics {
+        let (lo, hi) = digital::levels::power_window(ic);
+        let e = if floor { lo } else { hi };
+        let better = |a: f64, b: f64| (a - near).abs() < (b - near).abs() || ((a - near).abs() == (b - near).abs() && if floor { a > b } else { a < b });
+        if best.is_nan() || better(e, best) {
+            best = e;
+        }
+    }
+    best
+}
+
 /// How far, as a fraction of W0, a solve at a slide's edge may leave the
 /// segment off flat (the offset its excess draw holds it at, `excess / g`)
 /// and count as flat (ruling R113 (1), `keep_sliding`'s `at_edge`). HG1's CC
