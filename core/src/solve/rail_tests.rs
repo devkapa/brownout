@@ -18033,6 +18033,30 @@ fn worst_of(got: &[(f64, f64)]) -> (f64, f64) {
 }
 
 #[test]
+fn a_pulse_ramp_through_a_resistor_onto_a_cc_rail_capacitor_moves_its_segment_with_it() {
+    // R99 (3) with nothing stepped on the rail: a {5 V, 8 mA} PSU, 1 uF on
+    // its rail and 1k to ground, and a pulse source (node 3) through 100 ohm
+    // onto the rail, ramping -3 -> 5 V over 10 ms from 1 ms. The rail sits
+    // in CC some 0.08 V over the source, its draw moving at 8 V/s / 100
+    // ohm. Held where the rail last solved, the segment's draws let the
+    // published rail lag the ramp (8f39271: 43 W0 off the truth at 1.2 ms, a
+    // host stopping every 0.2 ms; frozen on this tree, 80 W0, and 55 every
+    // 37 us); with the segment
+    // following the draws' rate (`CapSeg::ramp`) every reading is within W0
+    // of the truth (exact mode, 0.1 us host steps), at every cadence.
+    let p = program(4, vec![psu(0, 1, 0, 5.0, 0.008), capacitor(1, 1, 0, 1e-6, 0.0), resistor(2, 1, 0, 1000.0), pulse(3, 3, 0, [-3.0, 5.0, 1e-3, 10e-3, 20e-3, 5e-3, 1.0], 0), resistor(4, 3, 1, 100.0)]);
+    let ts: Vec<f64> = (1..=40).map(|k| 1e-3 + k as f64 * 0.2e-3).collect();
+    let (truth, _, _) = sampled(&exact(p.clone()), &ts, 0.1e-6);
+    for (name, h) in [("the instants", 0.0), ("37 us", 37e-6), ("0.25 ms", 0.25e-3)] {
+        let (got, _, _) = sampled(&p, &ts, h);
+        for (k, &t) in ts.iter().enumerate() {
+            let w = worst_w0(std::slice::from_ref(&got[k]), std::slice::from_ref(&truth[k]));
+            assert!(w <= 1.0, "{name}: {w:.2} W0 off the truth at {t} s: rail {} against {}", got[k][1], truth[k][1]);
+        }
+    }
+}
+
+#[test]
 fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_stops() {
     // R99 (3), the open item "default-mode CC-rail accuracy". Cold 2575 tpl
     // 2 in CC: the pulse source on node 3 ramps -2.776 -> 10.62 V and back

@@ -1400,7 +1400,15 @@ impl PartitionedSolver {
                         // R113 (2)'s board slid 4.7e-3 off its flat duty at 6
                         // ms (allowed 3.4e-3).
                         let sliding = hub.rail_ics.iter().any(|&pos| matches!(self.power_hold(self.ics[pos as usize].0).kind, digital::power::HoldKind::Duty(_)));
-                        let ramp = if coupled || sliding { 0.0 } else { ramp.map_or(0.0, |r| -r.adot / g) };
+                        // Nor where stepped hub partitions step the rail
+                        // capacitors (ruling R68): each step follows the ramp
+                        // itself (`CcStep::a_o_at`) and hands the charge over
+                        // at its commit, and the segment's ramp only moved the
+                        // rail across its thresholds between commits: on cold
+                        // 2575 tpl 2, 19,000 more rail events than without it
+                        // to 1.2 s (+16 % wall), every reading the same.
+                        let carried = self.stepped.any_hub_stepping();
+                        let ramp = if coupled || sliding || carried { 0.0 } else { ramp.map_or(0.0, |r| -r.adot / g) };
                         *cap_seg = Some(CapSeg {
                             t0: now,
                             u0: u,
@@ -2538,13 +2546,17 @@ impl PartitionedSolver {
                         // (R99 (3), as in CV).
                         let ramp = self.direct_ramp(u);
                         let u_star = (dir * i_limit - a0) / g;
-                        let mut terms_u = cf_motion(-1.0 / g);
                         let mut terms_f = cf_motion(dir);
                         if let Some(r) = ramp {
-                            terms_u.push(Motion::Line { rate: -r.adot / g });
                             terms_f.push(Motion::Line { rate: dir * r.adot });
+                            // Its own watch, with no drift cap: the rail is the
+                            // draws' algebraic point, which the ramp moves along
+                            // a line any solve finds again. Under the cap a rail
+                            // following a 6 kV/s ramp solved every 10 uV (cold
+                            // 27 tpl 3: 1.2 million events in 50 ms).
+                            watches.push(Watch { value: u_star, thresholds: windows.clone(), cap: None, terms: vec![Motion::Line { rate: -r.adot / g }] });
                         }
-                        watches.push(Watch { value: u_star, thresholds: windows, cap: Some(rails::RAIL_DRIFT_V), terms: terms_u });
+                        watches.push(Watch { value: u_star, thresholds: windows, cap: Some(rails::RAIL_DRIFT_V), terms: cf_motion(-1.0 / g) });
                         let f = dir * (a0 + g * v);
                         watches.push(Watch { value: f, thresholds: vec![*i_limit], cap: None, terms: terms_f });
                     }

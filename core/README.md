@@ -7311,8 +7311,11 @@ failures and warnings (W1g)"):
   Fixed (R99 (3)): a `Rail` event publishes the running ramps at its
   instant, the segment follows the ramp's draw rate (`direct_ramp`) onto a
   line (`CapSeg::ramp`; not while a chip slides on the rail, whose duty
-  holds it), a CC step reads the rest's draw at its own end
-  (`CcStep::a_o_at`), the CV and CC watches move with it, the rail solves
+  holds it, nor where stepped hub partitions step the rail capacitors,
+  which follow the ramp in their steps), a CC step reads the rest's draw at
+  its own end (`CcStep::a_o_at`), the CV and CC watches move with it (a
+  capacitor-free CC rail's line in a watch of its own, outside the drift
+  cap, which re-solved it every 10 uV of a ramp), the rail solves
   again at each ramp corner, and the coupling bound leaves the ramp's own
   rail motion out (`coupling_ratio`). Through both of 2575 tpl 2's ramps
   every reading is within W0 of the truth at every host cadence tried
