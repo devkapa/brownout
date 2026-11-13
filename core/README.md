@@ -7318,9 +7318,12 @@ failures and warnings (W1g)"):
   cap, which re-solved it every 10 uV of a ramp), the rail solves
   again at each ramp corner, and the coupling bound leaves the ramp's own
   rail motion out (`coupling_ratio`). Through both of 2575 tpl 2's ramps
-  every reading is within W0 of the truth at every host cadence tried
+  every reading is within W0 of the truth with 1 us host stops
   (`a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_
-  the_host_stops`, 0.83 W0 at worst; 684 W0 at 0898801), with R53's exit
+  the_host_stops`; 684 W0 at 0898801); at coarser stops C17's backward
+  Euler steps still read node 6 up to 1.67 W0 off during the rise, cause
+  (1), expected failures pinned per cadence (`..._at_coarser_host_stops`),
+  with R53's exit
   for a slide whose edge stops attracting (the falling ramp drags the 555's
   rail through its 1.8 V edge inside a host step). Not yet ramp-aware: a CC rail capacitor's
   coupled path (closed-form hub partitions on the rail, `modes`) and a

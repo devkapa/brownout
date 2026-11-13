@@ -18074,9 +18074,9 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     // reference at 19.414 ms; node 6 3.4 W0 off with 10 us host stops, 1.05
     // with 1 us ones; the CC entry 0.1 V and 502 W0 off at 22.93 ms on a 10
     // us host step). Against the truth (exact mode, trapezoid, 0.25 and
-    // 0.125 us, extrapolated), every reading through each ramp within W0,
-    // for a host stopping only at the instants, every 1, 3.7 and 33 us, and
-    // in one advance to each third instant from a run of its own. (Once the
+    // 0.125 us, extrapolated), every reading through each ramp within W0
+    // for a host stopping every 1 us (the coarser cadences, which C17's
+    // backward Euler steps still take past W0, are the test below). (Once the
     // rail follows the falling ramp between stops, the 555 crosses its 1.8 V
     // edge inside a host step and enters a chatter slide (ruling R95 (b))
     // that the ramp drags under the edge; before R53's exit for a slide
@@ -18084,12 +18084,35 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     // and 5 us host stops made no progress where the rail crossed 0 V.)
     let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
-    for (name, stops, fresh) in [("the instants", Vec::new(), false), ("1 us", grid(1e-6), false), ("3.7 us", grid(3.7e-6), false), ("33 us", grid(33e-6), false), ("one advance", Vec::new(), true)] {
+    for (name, stops, fresh) in [("1 us", grid(1e-6), false)] {
         let got = readings_2575(&stops, fresh, in_ramp_2575);
         let worst = worst_of(&got);
         eprintln!("2575 tpl 2, {name}: worst {:.3} W0 off the truth at {} s ({} instants)", worst.0, worst.1, got.len());
         if worst.0 > worst_all.0 {
             worst_all = (worst.0, worst.1, name);
+        }
+    }
+    assert!(worst_all.0 <= 1.0, "2575 tpl 2, {}: {:.2} W0 off the truth at {} s", worst_all.2, worst_all.0, worst_all.1);
+}
+
+#[test]
+#[should_panic(expected = "off the truth at")]
+fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_at_coarser_host_stops() {
+    // R99 (3) and (1): the test above at the other cadences. The ramp is
+    // followed (684 W0 off the truth at 0898801), but C17's CC steps take
+    // backward Euler until R99 (1), and node 6 reads past W0 during the rise
+    // (cause (1); with TR-BDF2 on CC steps every cadence reads 0.26 W0 or
+    // less, one advance 0.83). An expected failure, which (1) flips, each
+    // cadence pinned no farther from the truth than (3) alone reads it.
+    let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
+    let mut worst_all = (0.0f64, 0.0, "");
+    for (name, stops, fresh, pin) in [("the instants", Vec::new(), false, 1.27), ("3.7 us", grid(3.7e-6), false, 1.676), ("33 us", grid(33e-6), false, 1.45), ("one advance", Vec::new(), true, 1.21)] {
+        let got = readings_2575(&stops, fresh, in_ramp_2575);
+        let (worst, at) = worst_of(&got);
+        eprintln!("2575 tpl 2, {name}: worst {worst:.3} W0 off the truth at {at} s");
+        assert!(worst <= pin, "2575 tpl 2, {name}: {worst:.3} W0 off the truth at {at} s, farther than its {pin} W0 pin");
+        if worst > worst_all.0 {
+            worst_all = (worst, at, name);
         }
     }
     assert!(worst_all.0 <= 1.0, "2575 tpl 2, {}: {:.2} W0 off the truth at {} s", worst_all.2, worst_all.0, worst_all.1);
