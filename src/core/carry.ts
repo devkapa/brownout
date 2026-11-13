@@ -19,6 +19,7 @@
  * A family or version this side does not know is dropped (the new device
  * starts cold).
  */
+import { isRamKind, ramPreloadWords } from "../circuit/types.js";
 import type { CompiledCircuit } from "./compile/index.js";
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import { authoredBatteryCharge, netPairKey } from "../sim/engine/sim-engine.js";
@@ -90,6 +91,15 @@ const KNOWN = new Set<number>(Object.values(CARRY_FAMILY));
 
 function isEeprom(kind: string): boolean {
   return kind === "28c16" || kind === "28c256";
+}
+
+/** Whether two versions of a RAM hold the same preload (`params.contents`, decoded as both engines load it), none on both sides included. */
+function samePreload(a: SimCircuit["components"][number] | undefined, b: SimCircuit["components"][number] | undefined): boolean {
+  if (!a || !b || !isRamKind(a.kind) || a.kind !== b.kind) return false;
+  const before = ramPreloadWords(a.kind, a.params.contents);
+  const after = ramPreloadWords(a.kind, b.params.contents);
+  if (!before || !after) return before === after;
+  return before.every((word, i) => word === after[i]);
 }
 
 /** An EEPROM's authored image, as classic's load hashes it (`String(params.contents ?? "")`). */
@@ -178,7 +188,14 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
         // `contentsHash`, SE:3260): the host then loads the old engine's
         // image as the new ROM blob (`eepromCarryImages`), which the core
         // checks by hash before seeding the write cycle.
-        if (sameKind && (!isEeprom(old.kind) || authoredContents(componentOf(from, id)) === authoredContents(componentOf(to, id)))) {
+        // A RAM likewise only onto the preload it was loaded from (classic's
+        // load(), `ramStateHoldsPreload`): onto other contents it starts
+        // from them, drivers included.
+        if (
+          sameKind &&
+          (!isEeprom(old.kind) || authoredContents(componentOf(from, id)) === authoredContents(componentOf(to, id))) &&
+          (!isRamKind(old.kind) || samePreload(componentOf(from, id), componentOf(to, id)))
+        ) {
           out.push({ ...r, device: at });
         }
         break;

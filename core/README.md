@@ -226,7 +226,7 @@ the resistor's and the fuse's absent-param defaults, Q-O27 and W1g Q3),
 | 40 | `ne555` | `8` (vcc), `1` (gnd), then `2 3 4 5 6 7` (by id; NE555 record below) | the 13 IC params, with 7-9, 11 and 12 set to 0 | `[slotBase, 0 x 6]` | W1e |
 | 50-59, 61 | the 11 combinational ICs: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245` | `vcc`, `gnd` (the pins classic's `supplyPinsForComponent` resolves), then the kind's logic pins in `icPinMap(kind)` order, by id (table below) | the 13 IC params below, then the kind's delay tail (74ls157: 1 pair, 74ls245: 2 pairs, the other nine: none) | `[slotBase, pinFlags x L]`, `L` the logic-pin count | W1c; tail W1d |
 | 70-72 | `74ls161`, `74ls173`, `74hc74` | `vcc`, `gnd`, then the kind's logic pins by id (sequential table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
-| 80 | `74ls189` | `vcc`, `gnd`, then the memory logic pins by id (memory table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]` | W1d |
+| 80 | `74ls189` | `vcc`, `gnd`, then the memory logic pins by id (memory table below) | the 13 IC params, then the kind's delay tail | `[slotBase, pinFlags x L]`, or that and `nibble x 16` (RAM preload below) | W1d |
 | 81, 82 | `28c16`, `28c256` | `vcc`, `gnd`, then the memory logic pins by id | the 13 IC params, the delay tail, then `tWC` and `sdp` | `[slotBase, pinFlags x L, word x W]` (ROM image below) | W1d |
 | 90 | `rating` (synthetic) | none | `[device, pMax, rPower]` (Rating record below) | empty | W1g |
 | 91 | `thermal` (synthetic) | none | `[device, rThetaJA, tauS, hasShutdown, tripC, restartC]` (Thermal record below) | empty | W1g |
@@ -279,7 +279,7 @@ pin function is in `FLOATING_INPUT_FUNCTIONS`, or the `icPinMap` role is
 input, clock or control), bit 1 `OPEN_COLLECTOR` (catalog function
 `open_collector`: the 74ls47 segments). No other bit is used. The pin-flag
 check covers `blob[1..=L]` only; an EEPROM's ROM words follow and are checked
-as words.
+as words, and a 74ls189's preload nibbles as nibbles.
 
 **Sequential and memory IC logic pins**, after `vcc` and `gnd` (catalog pin
 ids; `r` read, `o` driven). `74hc74` follows `icPinMap`; `74ls161`,
@@ -354,6 +354,27 @@ compiler reads it; classic keeps `prop_delay_ns` and the family prefix.
   little-endian, an exact integer in `[0, 2^32)`, built with shifts and
   `>>> 0`, never a host-endian view. The reader checks every word.
 - Rust never sees base64, a short image, or the contents hash.
+
+**RAM preload** (74ls189; coordinator ruling 2026-11-13). A 189 whose
+component has `params.contents` carries sixteen more blob values after its
+pin flags: value `a` is the nibble stored at address `a` in true sense
+(classic's `mem{a}`; the `/o` pins show its complement), an integer in
+`[0, 15]`. It is what the chip holds when it powers up (memories point 2a),
+not a non-volatile image.
+- TS decodes `params.contents` with `ramPreloadWords`
+  (`src/circuit/types.ts`), which classic's `load()` also starts the chip
+  from: `atob(String(params.contents ?? ""))`, one byte per address, the low
+  four bits of each; an address a short image does not reach is 0xF, bytes
+  past the sixteenth are dropped, and a value `atob` refuses is sixteen 0xF.
+  An absent or empty value is no preload.
+- **Optional, by presence** (ruling R100's rule for an addition). With no
+  preload the blob ends at the pin flags, `1 + L` values, so a program with
+  no preloaded RAM is byte for byte what it was before the field and every
+  core since W1d reads it; the version does not move. The reader takes
+  `1 + L` or `1 + L + 16` values and nothing between (`BlobShape::Either`),
+  and checks every nibble. A core from before the field refuses a record
+  with a preload as `-1` (a blob of the wrong length).
+- Rust never sees base64 or a short image.
 
 **LED and display records** (codes 30-34).
 - **Pins.** A pin id the component lacks maps to node 0 with `OPEN` set (Pins
@@ -1015,7 +1036,10 @@ add no code.
   the device is re-evaluated in a delta cycle there, its readout shows the new
   word at once, and an output the new word changes requests it with the
   `addrO` pair. `-4` or `-7` rolls the contents back with the instant.
-- A later load rebuilds every 189 at 0xF. Classic has no counterpart; the
+- A later load rebuilds every 189 at its preload, or at 0xF with none
+  (memories point 2a), unless the load carries its words (Carry). A seed is
+  a write: it changes the live nibbles and never the preload, so a power
+  loss brings the preload back over it. Classic has no counterpart; the
   harness keeps writing classic's `icState` (test-only).
 
 **`bo_engine_take_eeprom_updates`** (W1d). It collects, in device order,
@@ -1219,7 +1243,12 @@ nets' fingerprint, each kind-gated), and the new program's `CARRY` block
   takes its write cycle only onto the same image (hash and length); the
   image is the program's ROM blob, so a host carries a written image by
   loading it there, and onto another image the IC starts afresh, drivers
-  included, as classic's does. A record whose counts do not fit its IC
+  included, as classic's does. A 74ls189 takes its words only onto the same
+  preload (the host's rule, `mapCarry`: the two components' `contents`
+  decode to the same sixteen nibbles, or both have none), so a reload that
+  leaves the chip alone keeps what was written to it and one that changes
+  its contents starts from them, drivers included; the preload itself is in
+  the program, never in the carry. A record whose counts do not fit its IC
   makes the load `-1`. The settle then runs as on a cold load, except that
   a carried driver is no first observation: its transitions take their
   real delays, not the settle's zero override, as classic's seed solve
@@ -2774,10 +2803,34 @@ References are to spec §4.2.4-4.2.5.
    driven and also read (sampled at a latch), so they follow the 74ls245
    rule: never crossing-watched, and a dynamic partition holding one is
    stepped (W1c point 3).
-2. **State at load.** 189: `mem[0..15] = 0xF`, `lastWE = 1`. EEPROM: the
+2. **State at load.** 189: `mem[0..15] = 0xF`, or its preload when the
+   record carries one (point 2a), and `lastWE = 1`. EEPROM: the
    blob's image, `lastWeHigh = lastCeHigh = true`, no pending write,
    `pollReads = 0`, SDP locked at step 0, `dirty = false`. So the settle's edge
    pass sees no write edge (no phantom write, as classic).
+
+   2a. **RAM preload** (coordinator ruling 2026-11-13; "RAM preload" under
+   Kind codes and records). A 189 with a preload starts with `mem` equal to
+   it and keeps it beside `mem` for good. It is volatile: a write (or
+   `bo_engine_seed_memory`) changes `mem` only, and a power loss puts the
+   preload back, so the chip reads it at the next power-up and the write is
+   gone. The power loss is the device's unpowered evaluation with edges
+   live (W1c points 1 and 1a: its supply outside its window, or a power
+   hold; a chip sliding on its edge is powered). It changes `mem` and
+   nothing else: `lastWE`, `lastReads` and the drivers freeze as point 9 of
+   W1c has them, so `/we` reading HIGH at power-up after an outage that
+   found it LOW is still a write edge. The load settle's frozen passes are
+   not a power loss, though their first evaluates every IC before any supply
+   is solved: a carried 189 keeps its carried words (a test pins it, and
+   fails with the guard removed). Classic clears at the committed pass that
+   finds the chip unpowered (`ls189Model.updateDigital`): the first
+   accepted step whose solution has the supply outside its window. A 189 with **no** preload
+   is unchanged: its `mem` freezes through an outage like every other IC
+   state (sequential point 3), on both engines, as before the field. So "a
+   RAM loses its contents with its power" holds only for a chip that has
+   `contents`; whether a bare 189 should clear to 0xF too is an open
+   question for the coordinator (it would change every existing board that
+   browns out, and the identity gate).
 3. **74ls189**, one powered evaluation, in order:
    1. `csLow = !/cs`, `weHigh = /we`.
    2. Write, with edges live only: when `csLow && weHigh && lastWE == 0`,
@@ -2831,8 +2884,9 @@ References are to spec §4.2.4-4.2.5.
    the readouts. The EEPROM image is shared copy-on-write, so the per-instant
    evaluator snapshot never copies 32 KiB; only a completion writes it.
 8. **Reload.** Nothing carries across `bo_engine_load` in W1: RAM returns to
-   0xF and the EEPROM to its contents image. Classic's carry rules (189 by
-   id; EEPROM by contents hash and size) are W2's load carry-forward.
+   0xF (or its preload) and the EEPROM to its contents image. Classic's carry
+   rules (189 by id and onto the same preload; EEPROM by contents hash and
+   size) are W2's load carry-forward.
 
 ## Kernel semantics: LEDs and displays (W1e)
 

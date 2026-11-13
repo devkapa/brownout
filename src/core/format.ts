@@ -130,12 +130,14 @@ function optionValueError(key: number, value: number): string | null {
  */
 function blobCountOk(shape: CoreRecordShape["blob"], count: number): boolean {
   if ("exact" in shape) return count === shape.exact;
+  if ("either" in shape) return shape.either.includes(count);
   if ("atLeast" in shape) return count >= shape.atLeast;
   return count >= 1 && count % 2 === 1;
 }
 
 function blobExpectation(shape: CoreRecordShape["blob"]): string {
   if ("exact" in shape) return `exactly ${shape.exact}`;
+  if ("either" in shape) return `exactly ${shape.either[0]} or ${shape.either[1]}`;
   if ("atLeast" in shape) return `at least ${shape.atLeast}`;
   return "1 + 2n (a table)";
 }

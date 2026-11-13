@@ -31,11 +31,16 @@ pub enum MemState {
 }
 
 /// The 74ls189's 16 nibbles, true sense (the `/o` pins show the complement),
-/// and the write path's edge history.
+/// the write path's edge history, and the preload the record carried, if any
+/// (memories point 2a): what `mem` held at power-on and holds again after a
+/// power loss. The preload never changes after [`MemState::power_on`]; it
+/// sits here, with the words it restores, so a snapshot or a cloned engine
+/// needs nothing else to bring it back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ram189State {
     mem: [u8; 16],
     last_we: bool,
+    preload: Option<[u8; 16]>,
 }
 
 /// A 28c16/28c256's byte image and write-cycle state machine.
@@ -72,11 +77,14 @@ impl MemState {
     /// Power-on values (memories section point 2): 189 `mem[0..15] = 0xF`,
     /// `lastWE = 1`; EEPROM the blob's image, `lastWeHigh = lastCeHigh =
     /// true`, no pending write, `pollReads = 0`, SDP locked at step 0,
-    /// `dirty = false`. `rom` is the device's own ROM image (`devices::ics`'s
-    /// blob decode, core/README.md's "ROM image"), empty for a 74ls189.
+    /// `dirty = false`. `rom` is the device's own blob tail (`devices::ics`'s
+    /// decode): an EEPROM's ROM image (core/README.md's "ROM image"), and for
+    /// a 74ls189 its preload, sixteen nibbles or none (memories point 2a).
+    /// With a preload `mem` starts as it; with none, at 0xF as before.
     pub fn power_on(ic: &IcRecord, rom: &[u32]) -> Self {
         if ic.kind == kinds::IC_74LS189 {
-            MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true })
+            let preload: Option<[u8; 16]> = (rom.len() == 16).then(|| std::array::from_fn(|a| (rom[a] & 0xF) as u8));
+            MemState::Ram189(Ram189State { mem: preload.unwrap_or([0xF; 16]), last_we: true, preload })
         } else {
             MemState::Eeprom(EepromState {
                 image: Rc::new(words_to_bytes(rom)),
@@ -90,6 +98,21 @@ impl MemState {
                 prev_read_cycle: false,
             })
         }
+    }
+}
+
+/// Power loss (memories point 2a): a 74ls189 that has a preload holds it
+/// again, so a write does not survive the outage; `lastWE` stays frozen, as
+/// every unpowered IC's edge history does. A 189 with no preload and an
+/// EEPROM are untouched (their state freezes, sequential point 3). Returns
+/// whether a word changed.
+pub fn power_lost(state: &mut MemState) -> bool {
+    match state {
+        MemState::Ram189(Ram189State { mem, preload: Some(preload), .. }) if mem != preload => {
+            *mem = *preload;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -679,7 +702,7 @@ mod tests {
     #[test]
     fn write_occurs_on_the_trailing_edge_of_we_while_selected() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0xF; 16], last_we: false };
+        let mut state = Ram189State { mem: [0xF; 16], last_we: false, preload: None };
         let before = reads189(0b0101, 0b1010, true, false); // selected, write mode
         let _ = evaluate_189(&ic, &mut state, &before, None, true);
         assert_eq!(state.mem[0b0101], 0xF, "no write yet: /we has not risen");
@@ -692,7 +715,7 @@ mod tests {
     #[test]
     fn write_ignored_while_cs_high_but_last_we_still_updates() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0xF; 16], last_we: false };
+        let mut state = Ram189State { mem: [0xF; 16], last_we: false, preload: None };
         let before = reads189(2, 5, false, false); // deselected, write mode
         let after = reads189(2, 5, false, true); // /we rises, still deselected
         let _ = evaluate_189(&ic, &mut state, &before, None, true);
@@ -704,7 +727,7 @@ mod tests {
     #[test]
     fn inverted_outputs_drive_high_for_a_zero_bit_and_low_for_a_one_bit() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0b0101; 16], last_we: true };
+        let mut state = Ram189State { mem: [0b0101; 16], last_we: true, preload: None };
         let reads = reads189(0, 0, true, true);
         let out = evaluate_189(&ic, &mut state, &reads, None, true);
         assert_eq!(out.requests[0].0, Mode::Low); // bit0=1
@@ -716,7 +739,7 @@ mod tests {
     #[test]
     fn outputs_go_hiz_outside_selected_read_mode() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let mut state = Ram189State { mem: [0; 16], last_we: true, preload: None };
         let deselected = reads189(0, 0, false, true);
         let out = evaluate_189(&ic, &mut state, &deselected, None, true);
         assert!(out.requests.iter().all(|&(m, _)| m == Mode::Hiz), "deselected");
@@ -729,7 +752,7 @@ mod tests {
     #[test]
     fn slots_publish_in_write_mode_too_but_not_when_deselected() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0b0011; 16], last_we: true };
+        let mut state = Ram189State { mem: [0b0011; 16], last_we: true, preload: None };
         let write_mode = reads189(0, 0, true, false);
         let out = evaluate_189(&ic, &mut state, &write_mode, None, true);
         assert!(out.slots.iter().all(|v| !v.is_nan()), "slots publish while selected, write mode included");
@@ -742,7 +765,7 @@ mod tests {
     #[test]
     fn address_change_alone_picks_addro_for_a_level_to_level_transition() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let mut state = Ram189State { mem: [0; 16], last_we: true, preload: None };
         let before = reads189(0, 0, true, true);
         let _ = evaluate_189(&ic, &mut state, &before, None, true);
         let after = reads189(1, 0, true, true);
@@ -753,7 +776,7 @@ mod tests {
     #[test]
     fn cs_falling_alone_selects_csenable_for_the_enable_pair() {
         let ic = ic_189();
-        let mut state = Ram189State { mem: [0; 16], last_we: true };
+        let mut state = Ram189State { mem: [0; 16], last_we: true, preload: None };
         let before = reads189(0, 0, false, true); // deselected
         let _ = evaluate_189(&ic, &mut state, &before, None, true);
         let after = reads189(0, 0, true, true); // /cs falls, address unchanged
@@ -927,6 +950,75 @@ mod tests {
         assert_eq!(state, snapshot, "edges_live = false: no latch, no history update, no state change");
     }
 
+    // ---- the 74ls189's preload (memories point 2a) --------------------------
+
+    fn preload_words() -> Vec<u32> {
+        (0..16).map(|a| (7 * a + 3) & 0xF).collect()
+    }
+
+    #[test]
+    fn a_189_powers_on_holding_its_preload_and_remembers_it() {
+        let words = preload_words();
+        let expected: [u8; 16] = std::array::from_fn(|a| words[a] as u8);
+        // The live words start as the preload, and the preload is kept
+        // beside them for the next power loss.
+        assert_eq!(MemState::power_on(&ic_189(), &words), MemState::Ram189(Ram189State { mem: expected, last_we: true, preload: Some(expected) }));
+    }
+
+    #[test]
+    fn a_189_with_no_preload_powers_on_blank_and_holds_none() {
+        // Point 2, unchanged: 0xF at every address, lastWE = 1.
+        assert_eq!(MemState::power_on(&ic_189(), &[]), MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true, preload: None }));
+    }
+
+    #[test]
+    fn a_power_loss_puts_the_preload_back_and_leaves_the_edge_history() {
+        let mut state = MemState::power_on(&ic_189(), &preload_words());
+        let fresh = state.clone();
+        // /we LOW, then HIGH with D = 9 at address 5: writes 9 over the preloaded 6.
+        let low = reads189(5, 9, true, false);
+        let high = reads189(5, 9, true, true);
+        let _ = evaluate(&ic_189(), &mut state, &low, None, true, 0.0);
+        let _ = evaluate(&ic_189(), &mut state, &high, Some(&low), true, 0.0);
+        assert_ne!(state, fresh, "the write landed");
+        assert!(power_lost(&mut state), "a word changed back");
+        // lastWE is 1 after the write and 1 at power-on, so the whole state
+        // equals the fresh one: the 9 is gone, nothing else moved.
+        assert_eq!(state, fresh);
+        assert!(!power_lost(&mut state), "already the preload: nothing to change");
+    }
+
+    #[test]
+    fn a_power_loss_leaves_lastwe_frozen_where_the_outage_found_it() {
+        // /we LOW when the power goes: lastWE stays 0 (Q-O4), so /we reading
+        // HIGH at power-up is a rising edge and writes, as it does today.
+        let mut state = MemState::power_on(&ic_189(), &preload_words());
+        let low = reads189(5, 9, true, false);
+        let _ = evaluate(&ic_189(), &mut state, &low, None, true, 0.0);
+        power_lost(&mut state);
+        match &state {
+            MemState::Ram189(st) => assert!(!st.last_we, "the outage did not touch lastWE"),
+            MemState::Eeprom(_) => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn a_power_loss_changes_nothing_of_a_189_with_no_preload_or_of_an_eeprom() {
+        let mut ram = MemState::power_on(&ic_189(), &[]);
+        let low = reads189(5, 9, true, false);
+        let high = reads189(5, 9, true, true);
+        let _ = evaluate(&ic_189(), &mut ram, &low, None, true, 0.0);
+        let _ = evaluate(&ic_189(), &mut ram, &high, Some(&low), true, 0.0);
+        let written = ram.clone();
+        assert!(!power_lost(&mut ram));
+        assert_eq!(ram, written, "no preload: the state freezes, the written 9 included");
+
+        let mut rom = MemState::power_on(&ic_28c16(), &vec![0u32; 512]);
+        let before = rom.clone();
+        assert!(!power_lost(&mut rom));
+        assert_eq!(rom, before, "an EEPROM is non-volatile");
+    }
+
     #[test]
     fn cloning_a_28c256_state_does_not_copy_the_image() {
         let ic = ic_28c256(1.0);
@@ -963,7 +1055,7 @@ mod tests {
     #[test]
     fn seed_validates_every_word_before_changing_anything() {
         let ic = ic_189();
-        let mut state = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true });
+        let mut state = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true, preload: None });
         let mut bad = vec![0.0; 16];
         bad[15] = 16.0; // out of range
         let err = seed(&ic, &mut state, &bad).unwrap_err();
@@ -997,7 +1089,7 @@ mod tests {
         }
         assert!(take_update(&mut state).is_none(), "not dirty: nothing to report");
 
-        let mut ram = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true });
+        let mut ram = MemState::Ram189(Ram189State { mem: [0xF; 16], last_we: true, preload: None });
         assert!(take_update(&mut ram).is_none(), "a 74ls189 never reports a dirty EEPROM image");
     }
     #[test]
@@ -1085,6 +1177,7 @@ impl crate::snapshot::HeapBytes for Ram189State {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.mem, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.last_we, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.preload, w); }
         n
     }
 }

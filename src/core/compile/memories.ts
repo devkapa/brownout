@@ -8,8 +8,10 @@
  * icPinMap entry (so every pin order is hardcoded from the README's own
  * table), the EEPROMs carry two more params (`tWC`, `sdp`) after their delay
  * tail, and the EEPROMs' blob carries the ROM image words after the pin
- * flags (the 74ls189 has no ROM — its 16 nibbles are seeded at runtime via
- * `bo_engine_seed_memory`, never compiled into the program).
+ * flags. The 74ls189 has no ROM; when it has `params.contents` (a power-on
+ * preload, src/circuit/types.ts RAM_KINDS) its blob carries the sixteen
+ * preload nibbles there instead (README's "RAM preload"), and with none its
+ * blob ends at the pin flags, as every program before the field did.
  *
  * PIN ORDER (README's "Sequential and memory IC logic pins" table): controls,
  * then data, then outputs in bit order; bit 0 of every bus is its first pin
@@ -35,6 +37,7 @@
  * `Uint32Array` view onto the byte buffer.
  */
 
+import { ramPreloadWords } from "../../circuit/types.js";
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { eepromImageBytes, specsForComponent, supplyPinsForComponent } from "../../sim/engine/sim-engine.js";
 import { EEPROM_T_WC } from "../../sim/engine/devices/digital-ics.js";
@@ -125,7 +128,7 @@ export type MemoryCompileResult =
       pinFlags: readonly number[];
       /** The finished digital-slot key list, in slot order. */
       digitalSlotKeys: readonly string[];
-      /** The ROM image's little-endian words (empty for 74ls189, which has no ROM in the program — it is seeded at runtime). */
+      /** The blob's tail after the pin flags: an EEPROM's ROM image as little-endian words; a 74ls189's sixteen preload nibbles, or nothing when it has no contents. */
       romWords: readonly number[];
     }
   | { ok: false; reason: string };
@@ -189,6 +192,13 @@ export function compileMemoryIc(
     }
     const size = CORE_EEPROM_SIZE[kind]!;
     words = carriedImage?.length === size ? wordsOf(carriedImage) : romWords(size, String(component.params.contents ?? ""));
+  }
+
+  if (kind === "74ls189") {
+    // README's "RAM preload": classic's own decode (`ramPreloadWords`, which
+    // its load() starts the chip from), one nibble per address in true
+    // sense; null (no contents) adds nothing to the blob.
+    words = ramPreloadWords(kind, component.params.contents) ?? [];
   }
 
   const part = resolveComponentPart(component);

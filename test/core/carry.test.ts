@@ -17,6 +17,7 @@ import { CoreEngine } from "../../src/core/engine.js";
 import { CoreUnsupportedError } from "../../src/core/errors.js";
 import { decodeProgram, withCarryBlock } from "../../src/core/format.js";
 import { coreCall, initCore, verifyCoreExports, __installCoreForTest, __resetCoreForTest, type CoreExports } from "../../src/core/wasm.js";
+import { encodeRamContents } from "../../src/circuit/types.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
 type Component = SimCircuit["components"][number];
@@ -148,6 +149,37 @@ describe("mapCarry: classic's reload rules", () => {
     const r = rec(u1, CARRY_FAMILY.ic, [81, 3, 1, 2048, 1, 1, NaN, NaN, NaN, 0, 0, 0, 0, 0, -1, 8, ...Array(8).fill(NaN), 8, ...Array(24).fill(0)]);
     expect(mapCarry([r], from, src(eeprom("")))).toHaveLength(1);
     expect(mapCarry([r], from, src(eeprom("EQ==")))).toEqual([]);
+  });
+
+  it("carries a RAM's state only onto the same preload, as an EEPROM's onto the same contents", () => {
+    const ram = (contents?: string): SimCircuit => {
+      const c = rc();
+      const def = BUNDLED_DEFAULT_PARTS.find((d) => d.kind === "74ls189")!;
+      c.components.push({ id: "u1", kind: "74ls189", catalogUid: def.uid, pins: def.pin_layout.map((p) => ({ id: p.id })), params: contents === undefined ? {} : { contents } } as Component);
+      return c;
+    };
+    const kinds = new Set([...CORE_IMPLEMENTED_KINDS, "74ls189"]);
+    const src = (c: SimCircuit): CarrySource => {
+      const result = compileCircuit(c, kinds);
+      if (!result.ok) throw new Error(`compile: ${JSON.stringify(result.reasons)}`);
+      return { circuit: c, compiled: result.compiled };
+    };
+    const countUp = encodeRamContents("74ls189", Array.from({ length: 16 }, (_, i) => i));
+    const countDown = encodeRamContents("74ls189", Array.from({ length: 16 }, (_, i) => 15 - i));
+    const r = (from: CarrySource) => rec(deviceOf(from, "u1"), CARRY_FAMILY.ic, [80, 2, ...Array(16).fill(9), 1]);
+    // No contents before and after: the plain carry by id and kind, as before the field existed.
+    const blank = src(ram());
+    expect(mapCarry([r(blank)], blank, src(ram()))).toHaveLength(1);
+    expect(mapCarry([r(blank)], blank, src(ram("")))).toHaveLength(1);
+    // The same preload: the live words carry.
+    const up = src(ram(countUp));
+    expect(mapCarry([r(up)], up, src(ram(countUp)))).toHaveLength(1);
+    // Another preload, a preload added, a preload removed: the chip starts from its new contents.
+    expect(mapCarry([r(up)], up, src(ram(countDown)))).toEqual([]);
+    expect(mapCarry([r(blank)], blank, src(ram(countUp)))).toEqual([]);
+    expect(mapCarry([r(up)], up, src(ram()))).toEqual([]);
+    // Two spellings of one preload (base64 with and without a line break) are the same contents.
+    expect(mapCarry([r(up)], up, src(ram(`${countUp.slice(0, 8)}\n${countUp.slice(8)}`)))).toHaveLength(1);
   });
 
   it("carries a battery's state only onto the same authored charge and catalog part", () => {

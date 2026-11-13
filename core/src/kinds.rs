@@ -69,6 +69,11 @@ pub const THERMAL: u32 = 91;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobShape {
     Exact(usize),
+    /// One of two exact lengths: a record with an optional tail (the
+    /// 74ls189's preload), absent or whole. A program written before the
+    /// tail existed has the first length and still loads (ruling R100's
+    /// rule for an addition).
+    Either(usize, usize),
     /// Variable length with a floor, for contents such as ROM bytes.
     AtLeast(usize),
     /// `blob[0] = n`, then `n` pairs: length exactly `1 + 2n` with `n >= 1`
@@ -266,6 +271,16 @@ pub fn eeprom_words(kind: u32) -> usize {
     }
 }
 
+/// Words in a 74ls189's optional preload, which follows its pin flags in the
+/// blob (core/README.md, "RAM preload"): one value per address, each the
+/// nibble stored there in true sense. 0 for any other kind.
+pub fn ram_preload_words(kind: u32) -> usize {
+    match kind {
+        IC_74LS189 => 16,
+        _ => 0,
+    }
+}
+
 /// The sequential and memory kinds (codes 70-82) on top of [`ic_check`]:
 /// classic reads them with no Schmitt branch and drives them push-pull, so
 /// `schmitt` and `OPEN_COLLECTOR` must be clear; every delay-tail value is
@@ -302,6 +317,18 @@ fn eeprom_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), St
     let words_from = 1 + pin_count.saturating_sub(2);
     if let Some(bad) = blob.get(words_from..).unwrap_or(&[]).iter().find(|v| !(v.fract() == 0.0 && (0.0..4_294_967_296.0).contains(*v))) {
         return Err(format!("ROM words must be integers in [0, 2^32), got {bad}"));
+    }
+    Ok(())
+}
+
+/// The 74ls189 (code 80) on top of [`seq_check`]: every preload value after
+/// the pin flags (none, or sixteen; the reader checks the count) is an
+/// integer in `[0, 15]`.
+fn ram_189_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    seq_check(pin_count, params, blob)?;
+    let words_from = 1 + pin_count.saturating_sub(2);
+    if let Some(bad) = blob.get(words_from..).unwrap_or(&[]).iter().find(|v| !is_code_in(**v, 15)) {
+        return Err(format!("preload words must be integers in [0, 15], got {bad}"));
     }
     Ok(())
 }
@@ -674,7 +701,10 @@ macro_rules! ic_shape {
 /// `vcc` and `gnd`, `params` in all (13 + the tail + any extras), `blob`
 /// values in all, and `slots` digital slots.
 macro_rules! w1d_shape {
-    ($code:expr, $name:expr, $logic:expr, $params:expr, $blob:expr, $slots:expr, $check:expr) => {{
+    ($code:expr, $name:expr, $logic:expr, $params:expr, $blob:expr, $slots:expr, $check:expr) => {
+        w1d_shape!($code, $name, $logic, $params, BlobShape::Exact($blob), $slots, $check, shaped)
+    };
+    ($code:expr, $name:expr, $logic:expr, $params:expr, $blob:expr, $slots:expr, $check:expr, shaped) => {{
         fn slots(_: usize) -> usize {
             $slots
         }
@@ -684,7 +714,7 @@ macro_rules! w1d_shape {
             pins: 2 + $logic,
             pins_max: 2 + $logic,
             params: $params,
-            blob: BlobShape::Exact($blob),
+            blob: $blob,
             check: $check,
             live_params: &[],
             digital_slots: slots,
@@ -730,7 +760,7 @@ const SHAPES: &[KindShape] = &[
     w1d_shape!(IC_74LS161, "74ls161", 14, 21, 1 + 14, 5, seq_check),
     w1d_shape!(IC_74LS173, "74ls173", 14, 21, 1 + 14, 4, seq_check),
     w1d_shape!(IC_74HC74, "74hc74", 12, 17, 1 + 12, 4, seq_check),
-    w1d_shape!(IC_74LS189, "74ls189", 14, 23, 1 + 14, 4, seq_check),
+    w1d_shape!(IC_74LS189, "74ls189", 14, 23, BlobShape::Either(1 + 14, 1 + 14 + 16), 4, ram_189_check, shaped),
     w1d_shape!(IC_28C16, "28c16", 22, eeprom_param::COUNT, 1 + 22 + 2048 / 4, 8, eeprom_28c16_check),
     w1d_shape!(IC_28C256, "28c256", 26, eeprom_param::COUNT, 1 + 26 + 32768 / 4, 8, eeprom_check),
     KindShape { code: RATING, name: "rating", pins: 0, pins_max: 0, params: rating_param::COUNT, blob: BlobShape::Exact(0), check: rating_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },

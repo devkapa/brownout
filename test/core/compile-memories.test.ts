@@ -34,6 +34,7 @@ import {
 } from "../../src/core/kinds.js";
 import { BUNDLED_DEFAULT_PARTS, resetPartLibrary, setPartLibrary } from "../../src/parts/part-library.js";
 import type { PartDefinition } from "../../src/circuit/types.js";
+import { encodeRamContents, ramPreloadWords } from "../../src/circuit/types.js";
 
 type SimComponent = SimCircuit["components"][number];
 
@@ -112,6 +113,19 @@ function wordsToBytesLE(words: readonly number[]): Uint8Array {
   words.forEach((w, k) => view.setUint32(k * 4, w, true));
   return bytes;
 }
+
+/** FNV-1a (32-bit) over a program's f64s as little-endian bytes. */
+function fnv1aOfProgram(program: ArrayLike<number>): number {
+  const view = new DataView(new ArrayBuffer(8));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < program.length; i++) {
+    view.setFloat64(0, program[i]!, true);
+    for (let b = 0; b < 8; b++) h = Math.imul(h ^ view.getUint8(b), 0x01000193) >>> 0;
+  }
+  return h;
+}
+/** The bare-189 circuit of the "byte for byte" case below, compiled at ee9396d (the commit before the core compiled a preload). */
+const NO_PRELOAD_PROGRAM_FNV = 3340331966;
 
 afterAll(() => resetPartLibrary());
 
@@ -317,6 +331,46 @@ it("74ls189 compiles no ROM words at all — its blob is exactly [slotBase, pinF
   const decoded = decodeProgram(compiled.program);
   const dev = decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls189"])!;
   expect(dev.blob).toHaveLength(1 + 14);
+});
+
+// ---- the 74ls189's preload (core/README.md, "RAM preload") -----------------
+
+describe("74ls189 preload", () => {
+  const blobOf = (params: Record<string, number | string>): number[] => {
+    const comp = icComponent("u1", partsFor("74ls189")[0]!, params);
+    const decoded = decodeProgram(compileOk(poweredIcCircuit(comp, 5)).program);
+    return decoded.devices.find((d) => d.kindCode === CORE_KIND_CODE["74ls189"])!.blob;
+  };
+  const countUp = Array.from({ length: 16 }, (_, i) => i);
+
+  it("contents add sixteen nibbles after the pin flags, address 0 first, in true sense", () => {
+    // base64 of bytes 00..0F: the word at address a is a.
+    const blob = blobOf({ contents: encodeRamContents("74ls189", countUp) });
+    expect(blob).toHaveLength(1 + 14 + 16);
+    expect(blob.slice(15)).toEqual(countUp);
+  });
+
+  it("empty contents are no preload: the blob is the one every program before the field carried", () => {
+    expect(blobOf({ contents: "" })).toEqual(blobOf({}));
+    expect(blobOf({})).toHaveLength(1 + 14);
+  });
+
+  it("the nibbles are exactly what classic loads (ramPreloadWords), malformed values included", () => {
+    // A short image (rest blank at 0xF), a byte wider than a nibble (low four bits), and a value atob refuses (all blank).
+    for (const contents of [btoa("\x01\x02\x03"), btoa("\xa5"), "!!!not base64!!!"]) {
+      expect(blobOf({ contents }).slice(15)).toEqual(ramPreloadWords("74ls189", contents));
+    }
+    expect(blobOf({ contents: btoa("\xa5") })[15]).toBe(0x5);
+    expect(blobOf({ contents: "!!!not base64!!!" }).slice(15)).toEqual(new Array<number>(16).fill(0xf));
+  });
+
+  it("a program with no preload is byte for byte the program compiled before the field existed", () => {
+    // Golden: this circuit's whole program, hashed at the commit before the preload was compiled (ee9396d).
+    // Any change to a 189 record without contents moves this.
+    const comp = icComponent("u1", partsFor("74ls189")[0]!);
+    const program = compileOk(poweredIcCircuit(comp, 5)).program;
+    expect(fnv1aOfProgram(program)).toBe(NO_PRELOAD_PROGRAM_FNV);
+  });
 });
 
 // ---- digital slot keys ------------------------------------------------------

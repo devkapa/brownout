@@ -606,6 +606,14 @@ impl Program {
                     )));
                 }
             }
+            BlobShape::Either(short, long) => {
+                if blob_count != short && blob_count != long {
+                    return Err(BoError::malformed(format!(
+                        "device[{index}] ({}): expected exactly {short} or {long} blob value(s), got {blob_count}",
+                        shape.name
+                    )));
+                }
+            }
             BlobShape::AtLeast(min) => {
                 if blob_count < min {
                     return Err(BoError::malformed(format!(
@@ -1403,6 +1411,47 @@ mod tests {
         let rec = w1d_record(kinds::IC_28C16, 22, &eeprom_tail(), &[10e-3, 1.0], 1.0, &vec![0.0; 512]);
         let err = Program::parse(&build_full(3.0, &[], 8.0, 0.0, &[rec])).unwrap_err();
         assert!(err.message.contains("28c16"), "{}", err.message);
+    }
+
+    // --- the 74ls189's optional preload (coordinator ruling 2026-11-13) -------
+
+    /// A 74ls189 record whose blob carries `preload` after the pin flags.
+    fn ram_record(preload: &[f64]) -> Vec<f64> {
+        w1d_record(kinds::IC_74LS189, 14, &eeprom_tail(), &[], 1.0, preload)
+    }
+
+    #[test]
+    fn a_74ls189_record_carries_no_preload_or_sixteen_nibbles() {
+        // No preload: the blob every program before the field carried, 1 +
+        // 14 values, so an older program still loads (R100's rule).
+        let p = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ram_record(&[])])).expect("no preload");
+        assert_eq!(p.devices[0].blob.len(), 15);
+        // A preload: sixteen more values, address 0 first, each a nibble.
+        let nibbles: Vec<f64> = (0..16).map(|k| k as f64).collect();
+        let p = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ram_record(&nibbles)])).expect("sixteen nibbles");
+        assert_eq!(p.devices[0].blob[15..].to_vec(), nibbles);
+    }
+
+    #[test]
+    fn a_74ls189_preload_of_any_other_length_is_malformed() {
+        // 1, 15 and 17 values are neither "none" nor "one per address".
+        for n in [1usize, 15, 17] {
+            let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ram_record(&vec![0.0; n])])).unwrap_err();
+            assert_eq!(err.code, -1, "{n} preload value(s): {}", err.message);
+            assert!(err.message.contains("blob"), "{n} preload value(s): {}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_74ls189_preload_value_that_is_not_a_nibble_is_malformed() {
+        // 16 is one past the largest 4-bit word; 1.5 and -1 are not words.
+        for bad in [16.0, 1.5, -1.0] {
+            let mut nibbles = vec![0.0; 16];
+            nibbles[9] = bad;
+            let err = Program::parse(&build_full(3.0, &[], 4.0, 0.0, &[ram_record(&nibbles)])).unwrap_err();
+            assert_eq!(err.code, -1, "{bad}: {}", err.message);
+            assert!(err.message.contains("preload"), "{bad}: {}", err.message);
+        }
     }
 
     // --- W1e: LEDs, displays and the NE555 ------------------------------------

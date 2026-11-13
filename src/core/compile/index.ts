@@ -750,9 +750,9 @@ export function compileCircuit(
       // The 3 W1d memory ICs (README's "Kind codes and records", codes
       // 80-82), one shared compiler (compile/memories.ts). The EEPROMs'
       // blob additionally carries the ROM image words after the pin flags
-      // (README's "ROM image"); the 189 compiles an empty `romWords`, since
-      // its 16 nibbles are seeded at runtime, never compiled into the
-      // program.
+      // (README's "ROM image"); the 189's carries its sixteen preload
+      // nibbles there when it has `params.contents` (README's "RAM
+      // preload"), and nothing otherwise.
       case "74ls189":
       case "28c16":
       case "28c256": {

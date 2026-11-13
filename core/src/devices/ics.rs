@@ -505,6 +505,18 @@ impl IcEvaluator {
             // come from driver levels at `on_settled` time, not from a
             // stored readout, so there is nothing of its own to blank here.
             if !matches!(entry.family, Family::Combinational { .. }) {
+                // Memories point 2a: a RAM with a preload holds it again
+                // from its power loss. The loss is taken with edges live
+                // only, as a write is: the load settle's frozen passes
+                // evaluate every IC before any supply is solved, and a chip
+                // that reads unpowered there has lost nothing (a carried
+                // 189 must keep its carried words). The journal above saved
+                // the pre-image, so a failed instant puts the words back.
+                if acting_on_edges {
+                    if let Family::Memory(state) = &mut entry.family {
+                        digital::memory::power_lost(state);
+                    }
+                }
                 for s in entry.family_slots.iter_mut() {
                     slots_changed |= set_slot(s, f64::NAN);
                 }
@@ -692,12 +704,13 @@ fn store_slots(family_slots: &mut [f64], readout: &[f64]) -> bool {
     changed
 }
 
-/// A memory device's ROM image, decoded from its blob tail (core/README.md,
-/// "ROM image": blob is `[slotBase, pinFlags x L, word x W]`) — empty for a
-/// 74ls189 (no ROM: `kinds::eeprom_words` is 0 for that kind).
+/// A memory device's blob tail, decoded: an EEPROM's ROM image
+/// (core/README.md, "ROM image") or a 74ls189's preload nibbles
+/// ("RAM preload"), which the record carries whole or not at all. Empty
+/// for a 189 with no preload.
 fn rom_words(device: &Device, kind: u32, logic_len: usize) -> Vec<u32> {
     let words_from = 1 + logic_len;
-    let words_count = kinds::eeprom_words(kind);
+    let words_count = if kind == kinds::IC_74LS189 { device.blob.len().saturating_sub(words_from).min(kinds::ram_preload_words(kind)) } else { kinds::eeprom_words(kind) };
     device.blob[words_from..words_from + words_count].iter().map(|&w| w as u32).collect()
 }
 
@@ -1940,6 +1953,165 @@ mod tests {
         engine.set_params(&[(1, 0, 0.0)]).unwrap();
         engine.advance(engine.time() + 1e-6).unwrap();
         assert_eq!(engine.digital_slots()[0], 1.0, "powered again: the committed level shows again");
+    }
+
+    // ---- the 74ls189's preload (coordinator ruling 2026-11-13) --------------
+    //
+    // One bench for every case. 0=gnd, 1=rail (5 V), 2=the chip's vcc (spdt 1:
+    // sel 0 the rail, sel 1 gnd), 3=/we (spdt 2: sel 0 the rail, sel 1 gnd),
+    // 4..7=/o1../o4, each with 10k to the rail. /cs is on gnd. The address
+    // pins spell 5 and the data pins 9, so a /we pulse writes 9 at address 5.
+    // The preload's word at address a is (7a + 3) mod 16, so address 5 holds
+    // 6, the complement of 9.
+
+    const RAM_ADDR: usize = 5;
+    const RAM_WRITE: u8 = 9;
+
+    fn ram_preload() -> [u8; 16] {
+        std::array::from_fn(|a| ((7 * a + 3) & 0xF) as u8)
+    }
+
+    /// The bench, the 189 at device 3 with `preload` (when given) after its
+    /// pin flags.
+    fn ram_bench(preload: Option<[u8; 16]>) -> Program {
+        let level = |high: bool| if high { 1 } else { 0 };
+        let bit = |word: usize, k: usize| level((word >> k) & 1 == 1);
+        // a0..a3 d1..d4 /cs /we | /o1../o4
+        let logic = [bit(RAM_ADDR, 0), bit(RAM_ADDR, 1), bit(RAM_ADDR, 2), bit(RAM_ADDR, 3), bit(RAM_WRITE as usize, 0), bit(RAM_WRITE as usize, 1), bit(RAM_WRITE as usize, 2), bit(RAM_WRITE as usize, 3), 0, 3, 4, 5, 6, 7];
+        let mut ram = w1d_ic(kinds::IC_74LS189, 3, 2, 0, 14, w1d_params(5, &[]), 0);
+        for (i, &node) in logic.iter().enumerate() {
+            ram.pins[2 + i] = pin(node);
+        }
+        if let Some(words) = preload {
+            ram.blob.extend(words.iter().map(|&w| f64::from(w)));
+        }
+        let mut devices = vec![source(0, 1, 0, 5.0), spdt(1, 2, 1, 0, 0.0), spdt(2, 3, 1, 0, 0.0), ram];
+        for k in 0..4 {
+            devices.push(resistor(4 + k, 4 + k, 1, 10_000.0));
+        }
+        program(8, 4, devices)
+    }
+
+    /// The word the 189's four slots show, un-inverted (slot k is 1 when
+    /// bit k of the word is 0), or `None` while they are NaN.
+    fn ram_word(engine: &Engine) -> Option<u8> {
+        let slots = &engine.digital_slots()[..4];
+        if slots.iter().any(|s| s.is_nan()) {
+            return None;
+        }
+        Some(slots.iter().enumerate().fold(0u8, |w, (k, &s)| if s == 0.0 { w | 1 << k } else { w }))
+    }
+
+    /// Sets param 0 of `device` (a switch's `sel`) and runs 1 us on.
+    fn flip(engine: &mut Engine, device: u32, sel: f64) {
+        engine.set_params(&[(device, 0, sel)]).unwrap();
+        engine.advance(engine.time() + 1e-6).unwrap();
+    }
+
+    /// One /we pulse: LOW, then HIGH, whose trailing edge writes.
+    fn write_pulse(engine: &mut Engine) {
+        flip(engine, 2, 1.0);
+        flip(engine, 2, 0.0);
+    }
+
+    #[test]
+    fn a_189_with_a_preload_shows_it_from_load() {
+        // Address 5 of the preload is 6: read at load, with no seed call.
+        let engine = Engine::load(&ram_bench(Some(ram_preload()))).unwrap();
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]));
+        assert_eq!(ram_preload()[RAM_ADDR], 6, "the bench's own arithmetic: (7 * 5 + 3) mod 16");
+    }
+
+    #[test]
+    fn a_189_with_no_preload_shows_the_blank_word_from_load() {
+        // Memories point 2: mem[0..15] = 0xF, as before the field existed.
+        let engine = Engine::load(&ram_bench(None)).unwrap();
+        assert_eq!(ram_word(&engine), Some(0xF));
+    }
+
+    #[test]
+    fn a_write_replaces_a_189s_preloaded_word() {
+        let mut engine = Engine::load(&ram_bench(Some(ram_preload()))).unwrap();
+        write_pulse(&mut engine);
+        // D = 9 at address 5 on /we's rise: the live word is 9, not the 6 it loaded with.
+        assert_eq!(ram_word(&engine), Some(RAM_WRITE));
+    }
+
+    #[test]
+    fn a_189_with_a_preload_holds_it_again_after_an_outage_and_the_write_is_gone() {
+        let mut engine = Engine::load(&ram_bench(Some(ram_preload()))).unwrap();
+        write_pulse(&mut engine);
+        assert_eq!(ram_word(&engine), Some(RAM_WRITE));
+        flip(&mut engine, 1, 1.0);
+        assert!(engine.voltages()[2].abs() < 0.1, "vcc collapsed to {}", engine.voltages()[2]);
+        assert_eq!(ram_word(&engine), None, "unpowered: every slot NaN");
+        flip(&mut engine, 1, 0.0);
+        // /we stayed HIGH through the outage, so nothing was written again:
+        // the word is the preloaded 6, and the 9 is gone.
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]));
+    }
+
+    #[test]
+    fn a_189_with_no_preload_keeps_a_written_word_through_an_outage() {
+        // Sequential point 3: an unpowered device's state freezes. A 189
+        // with no preload still does exactly that.
+        let mut engine = Engine::load(&ram_bench(None)).unwrap();
+        write_pulse(&mut engine);
+        flip(&mut engine, 1, 1.0);
+        assert_eq!(ram_word(&engine), None);
+        flip(&mut engine, 1, 0.0);
+        assert_eq!(ram_word(&engine), Some(RAM_WRITE));
+    }
+
+    #[test]
+    fn a_seed_replaces_the_live_words_and_an_outage_brings_the_preload_back() {
+        // bo_engine_seed_memory writes the live nibbles only: it is a write,
+        // not a new preload.
+        let mut engine = Engine::load(&ram_bench(Some(ram_preload()))).unwrap();
+        engine.seed_memory(3, &[1.0; 16]).unwrap();
+        assert_eq!(ram_word(&engine), Some(1));
+        flip(&mut engine, 1, 1.0);
+        flip(&mut engine, 1, 0.0);
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]));
+    }
+
+    #[test]
+    fn a_carried_189_keeps_its_live_word_and_a_cold_one_starts_from_the_preload() {
+        // A reload that keeps the chip: the carry seeds the written 9 before
+        // the settle, whose first pass evaluates every IC before any supply
+        // is solved (each reads unpowered there). That pass is frozen (no
+        // edges), so it must not count as a power loss.
+        let p = ram_bench(Some(ram_preload()));
+        let mut engine = Engine::load(&p).unwrap();
+        write_pulse(&mut engine);
+        let t = engine.time();
+        let carry = engine.carry_take().unwrap().to_vec();
+        let reload = |carry: &[f64]| {
+            let mut q = p.clone();
+            q.options.start_time = t;
+            q.carry = carry.to_vec();
+            Engine::load(&q).unwrap()
+        };
+        assert_eq!(ram_word(&reload(&carry)), Some(RAM_WRITE), "carried: the live word");
+        assert_eq!(ram_word(&reload(&[])), Some(ram_preload()[RAM_ADDR]), "cold: the preload");
+    }
+
+    #[test]
+    fn a_snapshot_from_before_an_outage_brings_back_the_written_word_and_still_knows_the_preload() {
+        // The preload sits in the 189's state beside the live words, so a
+        // snapshot holds both: restoring one taken before an outage brings
+        // the written word back, and the next outage clears it again.
+        let mut engine = Engine::load(&ram_bench(Some(ram_preload()))).unwrap();
+        write_pulse(&mut engine);
+        let before = engine.snapshot();
+        flip(&mut engine, 1, 1.0);
+        flip(&mut engine, 1, 0.0);
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]));
+        engine.restore(&before);
+        assert_eq!(ram_word(&engine), Some(RAM_WRITE), "the snapshot holds the live word");
+        flip(&mut engine, 1, 1.0);
+        flip(&mut engine, 1, 0.0);
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]), "and still knows the preload");
     }
 
     #[test]

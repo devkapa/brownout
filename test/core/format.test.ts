@@ -488,6 +488,33 @@ describe("decodeProgram validation — each check the contract requires", () => 
     }
   });
 
+  it("a 74ls189's blob is its slot base and pin flags, or those and sixteen preload nibbles, and no other length", () => {
+    // 14 logic pins after vcc and gnd; 23 params (13 IC params and a five-pair delay tail).
+    const ram = (blobLength: number): Float64Array => {
+      const writer = new ProgramWriter(1);
+      writer.addDevice({
+        kindCode: CORE_KIND_CODE["74ls189"],
+        componentIndex: 0,
+        pins: Array.from({ length: 16 }, () => pin(0)),
+        params: new Array<number>(23).fill(0),
+        blob: new Array<number>(blobLength).fill(0),
+      });
+      return writer.finish(4, 0);
+    };
+    // 15: no preload, the record every program before the field carried. 31: with one.
+    expect(decodeProgram(ram(15)).devices[0]!.blob).toHaveLength(15);
+    expect(decodeProgram(ram(31)).devices[0]!.blob).toHaveLength(31);
+    // A partial preload is neither.
+    expect(() => ram(16)).toThrow(/blob of exactly 15 or 31 value\(s\), got 16/);
+    expect(() => ram(32)).toThrow(/blob of exactly 15 or 31 value\(s\), got 32/);
+    // The reader refuses the same lengths. blobCount sits after the header (magic, version, N, D, option count,
+    // S, C: 7 values), the record's kind, component index and pin count (3), 16 pins of 4, the param count and 23 params.
+    const blobCountAt = 7 + 3 + 16 * 4 + 1 + 23;
+    const good = ram(15);
+    expect(good[blobCountAt]).toBe(15);
+    expect(() => decodeProgram(mutated(good, blobCountAt, 16))).toThrow(/blobCount 16, expected exactly 15 or 31/);
+  });
+
   it("rejects the wrong blobCount for a kind", () => {
     // Offset 22 is the baseline resistor's blobCount (shape: exact 0).
     expect(() => decodeProgram(mutated(buildBaselineProgram(), 22, 1))).toThrow(/blobCount 1, expected exactly 0/);

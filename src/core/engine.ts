@@ -851,11 +851,12 @@ export class CoreEngine implements EngineReadout {
 
   /**
    * Seeds a 74ls189's 16 stored nibbles through `bo_engine_seed_memory`
-   * (core/README.md's ABI v2, W1d, owner decision 2) — the runtime
-   * counterpart to `params.contents` for the EEPROM kinds: a 189 has no
-   * compiled contents at all (its RAM always powers on at 0xF, README's
-   * memories kernel semantics point 2), so this is the only way to give it a
-   * starting word.
+   * (core/README.md's ABI v2, W1d, owner decision 2): a write to the live
+   * words from outside the circuit. A 189 powers on at 0xF, or holding its
+   * `params.contents` when it has them (a power-on preload, README's
+   * memories point 2a); a seed replaces what it holds now and never the
+   * preload, so a power loss brings the preload back over a seed as it does
+   * over a write.
    *
    * `nibbles[i]` is the nibble stored at address `i`, in TRUE sense
    * (classic's `mem{i}`; the `/o` pins show its complement) — an integer in

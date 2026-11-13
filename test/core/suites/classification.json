@@ -7195,6 +7195,140 @@
           "reason": "W3 (orchestrator ruling, W1g round 2): missing_flyback moves to W3. Every case switches its winding with a W3 transistor (bjt_npn or nmos), so none can join at W1h, whatever the inductor (W1h) or the relay and dc_motor (later waves) do; the diode in some cases is not in the W1 plan's kind table either. The facade path ships in W1g (W1g point 11)."
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/ram-preload.test.ts",
+      "cases": [
+        {
+          "describe": "74LS189 preload: read back",
+          "name": "shows the preloaded word at every address, inverted on the /O pins",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189"
+          ],
+          "reason": "New file (RAM preload, coordinator ruling 2026-11-13; core/README.md memories point 2a). Sixteen loads, one per tied address, /WE tied HIGH: the core reads the preload from the record's blob tail at load, with no seed call. Verified by running on both engines."
+        },
+        {
+          "describe": "74LS189 preload: read back",
+          "name": "with no contents every address reads the blank word 0xF, as before the field existed",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189"
+          ],
+          "reason": "Pins memories point 2 for a record with no preload (blob of 15 values). Passes on both engines before and after the preload landed."
+        },
+        {
+          "describe": "74LS189 preload: read back",
+          "name": "reads contents that are not base64 as the blank word",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189"
+          ],
+          "reason": "The compiler carries classic's own decode (ramPreloadWords), so a value atob refuses is sixteen 0xF nibbles on both engines."
+        },
+        {
+          "describe": "74LS189 preload: a write, then a read",
+          "name": "a write replaces the preloaded word at its address",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "/WE from a one-shot RC edge inside one load (the mechanism sequential-memory-ics.test.ts uses): the trailing edge writes D over the preloaded word."
+        },
+        {
+          "describe": "74LS189 preload: power loss, then power-up",
+          "name": "restores the preload and drops the write",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "The chip's own supply is a voltage_source whose live `voltage` the case edits in place (5 -> 0 -> 5); the adapter delivers it through setParams, as eeprom-write.test.ts's edits. The core's event evaluates the 189 unpowered with edges live, which is where the preload returns (memories point 2a)."
+        },
+        {
+          "describe": "74LS189 preload: power loss, then power-up",
+          "name": "with no contents the written word is still there after the same outage, as before the field existed",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "Pins sequential point 3 for a 189 with no preload: its state freezes through an outage on both engines. Passes before and after the preload landed."
+        },
+        {
+          "describe": "74LS189 preload: power loss, then power-up",
+          "name": "a blank preload (contents that are not base64) comes back as 0xF after an outage",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "The blank image is a preload like any other on both engines."
+        },
+        {
+          "describe": "74LS189 preload: power loss, then power-up",
+          "name": "a supply that sags to 3 V and recovers is a power loss too",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor",
+            "pulse_source"
+          ],
+          "reason": "The chip's supply is a one-shot pulse_source ramping 5 V -> 3 V -> 5 V inside one load: the core sees the outage through the ramp's own events on a fixed node, with no setParams. 3 V is under the power window (0.9 x vccMin)."
+        },
+        {
+          "describe": "74LS189 preload: reloads",
+          "name": "a reload that leaves the chip alone keeps the live word, not the preload",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "A second load() of an edited copy (one pull-up's resistance): W2c's carry seeds the 189's words before the settle, whose frozen first pass reads every IC unpowered; that pass is not a power loss (memories point 2a), so the written word survives."
+        },
+        {
+          "describe": "74LS189 preload: reloads",
+          "name": "a reload with other contents starts from them",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189",
+            "capacitor"
+          ],
+          "reason": "mapCarry drops a RAM's IC record onto another preload, as classic's load() starts the chip from its new contents."
+        },
+        {
+          "describe": "74LS189 with no contents: classic's state is untouched",
+          "name": "keeps exactly the slots it had before the field existed",
+          "status": "classic-only",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "74ls189"
+          ],
+          "reason": "Reads classic's icState slot names through getIcState; the core keeps the 189's words in its evaluator, with no such record."
+        }
+      ]
     }
   ]
 }

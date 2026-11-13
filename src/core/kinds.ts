@@ -168,11 +168,13 @@ export interface CoreRecordShape {
   pinsMax: number;
   params: number;
   /**
-   * Exact blob length, a floor for variable-length contents, or a table:
-   * `blob[0] = n` and the blob holds `1 + 2n` values (core/src/kinds.rs
-   * `BlobShape::Table`, the battery's OCV table).
+   * Exact blob length, one of two exact lengths (a record with an optional
+   * tail, absent or whole: the 74ls189's preload, `BlobShape::Either`), a
+   * floor for variable-length contents, or a table: `blob[0] = n` and the
+   * blob holds `1 + 2n` values (core/src/kinds.rs `BlobShape::Table`, the
+   * battery's OCV table).
    */
-  blob: { exact: number } | { atLeast: number } | { table: true };
+  blob: { exact: number } | { either: readonly [number, number] } | { atLeast: number } | { table: true };
   /** Param indices `bo_engine_set_params` may change after load (owner decision 1). */
   liveParams: readonly number[];
   /** Digital readout slots a record publishes, starting at `blob[0]` (core/README.md, "Slot indices"). 0 or absent: none. */
@@ -227,6 +229,9 @@ export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = 
 /** The EEPROMs' params after their delay tail (core/src/kinds.rs `eeprom_param`). */
 export const CORE_EEPROM_PARAM = { tWC: 23, sdp: 24 } as const;
 export const CORE_EEPROM_PARAM_COUNT = 25;
+
+/** Words in a 74ls189's optional preload, which follows its pin flags in the blob, one nibble per address (core/README.md, "RAM preload"; core/src/kinds.rs `ram_preload_words`). */
+export const CORE_RAM_189_PRELOAD_WORDS = 16;
 
 /** EEPROM image sizes in bytes; the blob carries `size / 4` little-endian words (core/README.md, "ROM image"). */
 export const CORE_EEPROM_SIZE: Readonly<Record<string, number>> = { "28c16": 2048, "28c256": 32768 };
@@ -359,7 +364,8 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74ls161"], w1dShape(14, 21, 1 + 14, 5)],
   [CORE_KIND_CODES["74ls173"], w1dShape(14, 21, 1 + 14, 4)],
   [CORE_KIND_CODES["74hc74"], w1dShape(12, 17, 1 + 12, 4)],
-  [CORE_KIND_CODES["74ls189"], w1dShape(14, 23, 1 + 14, 4)],
+  // The 189's blob is `[slotBase, pinFlags x 14]`, or that and its sixteen preload nibbles.
+  [CORE_KIND_CODES["74ls189"], { ...w1dShape(14, 23, 1 + 14, 4), blob: { either: [1 + 14, 1 + 14 + CORE_RAM_189_PRELOAD_WORDS] } }],
   [CORE_KIND_CODES["28c16"], w1dShape(22, CORE_EEPROM_PARAM_COUNT, 1 + 22 + 2048 / 4, 8)],
   [CORE_KIND_CODES["28c256"], w1dShape(26, CORE_EEPROM_PARAM_COUNT, 1 + 26 + 32768 / 4, 8)],
   // W1g synthetic records (core/README.md, "Rating record", "Thermal record"): no pins, no blob. Their
