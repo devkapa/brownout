@@ -1,11 +1,15 @@
 /**
  * `brownout/core`: the Rust/WASM partitioned event-driven transient engine
- * (core/README.md). EXPERIMENTAL and opt-in in W0 — it implements a static
- * slice (`ground`, `resistor`, grounded ideal `voltage_source`) and nothing
- * is yet cleared to actually run a real host's circuits through it
- * (`CORE_SUPPORTED_KINDS` is empty; see kinds.ts for the implemented-vs-
- * supported distinction). Nothing in this entry is re-exported from the
- * main `"brownout"` barrel (src/index.ts) — reach it explicitly:
+ * (core/README.md). Opt-in: it runs the kinds in `CORE_IMPLEMENTED_KINDS`
+ * (passives and switches, fuses, the sources, LEDs and displays, the NE555,
+ * the 74-series logic and memory parts listed there), and a circuit with any
+ * other kind is declined with `CoreUnsupportedError` so a host can run it on
+ * the classic engine instead. `CORE_SUPPORTED_KINDS`, the kinds brownout's own
+ * hosts route to the core without being told to, is still empty (see kinds.ts
+ * for the implemented-vs-supported distinction), so `HeadlessRunner` and the
+ * analyses use the core only for the kinds a caller passes as
+ * `coreSupportedKinds`. Nothing in this entry is re-exported from the main
+ * `"brownout"` barrel (src/index.ts) — reach it explicitly:
  *
  *   import { initCore, CoreEngine } from "brownout/core";
  *
