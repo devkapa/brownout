@@ -1027,8 +1027,28 @@ function failureKeyComponentId(key: string): string | null {
 // disjoint, so the keys cannot collide), which gives warnings the identical
 // snapshot/rollback, load carry-forward (failureKeyComponentId) and reset
 // semantics without a second accumulator.
-/** The sources a rail_ic_power_chatter warning names as a chip's rail. */
-const POWER_CHATTER_SUPPLY_KINDS = new Set<string>(["bench_psu", "battery_pack", "voltage_source"]);
+/**
+ * `rail_ic_power_chatter`'s message, the text Dev approved (rulings R89 and
+ * R92), in this one place for both engines: the core's facade
+ * (src/core/failures.ts) builds its warning from these two functions. The
+ * message names the chip; the detail line (a host's hover) carries the
+ * numbers.
+ */
+export function railIcPowerChatterMessage(componentId: string): string {
+  return `${componentId} isn't getting enough power to work properly.`;
+}
+
+/**
+ * `rail_ic_power_chatter`'s detail line: the level the chip's supply is stuck
+ * at and, when its rail is a current-limited supply at its limit, that limit;
+ * a `limit` that is not finite (a cell, an ideal source) leaves the clause
+ * out. Volts and milliamps to three significant figures.
+ */
+export function railIcPowerChatterDetail(floor: number, limit: number): string {
+  const head = `Supply stuck at ${Number(floor.toPrecision(3))} V`;
+  if (!Number.isFinite(limit)) return head;
+  return `${head} (limit ${Number((limit * 1000).toPrecision(3))} mA)`;
+}
 
 function warningKey(code: SimWarningCode, componentId: string, pinId = ""): string {
   return `${code}\x00${componentId}\x00${pinId}`;
@@ -6485,8 +6505,10 @@ export class SimEngine {
   /**
    * rail_ic_power_chatter: each part of `chatter` (id -> its power-on level)
    * alternated at the hosts' floor with no state that holds. The warning
-   * names the part and its rail: the supply on its vcc net when there is
-   * one, else the net.
+   * names the part; its detail line gives the level and, when a
+   * current-limited bench supply sits on the part's vcc net, that supply's
+   * limit: a part starved on such a rail has the supply at its limit, since
+   * below the limit the supply would hold the rail at its setpoint.
    */
   private _latchPowerChatter(chatter: ReadonlyMap<string, number>): void {
     for (const [id, level] of chatter) {
@@ -6495,17 +6517,22 @@ export class SimEngine {
       const { vccPin } = supplyPinsForComponent(comp);
       const netId = vccPin ? this._netIdForPin(id, vccPin) : null;
       const pins = netId ? this.nets.find((net) => net.id === netId)?.pins ?? [] : [];
-      const supply = pins.find(([cid]) => cid !== id && POWER_CHATTER_SUPPLY_KINDS.has(this._componentById.get(cid)?.kind ?? ""));
-      const rail = supply ? `${supply[0]}'s rail` : netId ? `net ${netId}` : "its supply";
-      const volts = Number(level.toPrecision(3));
+      let limit = Number.NaN;
+      for (const [cid] of pins) {
+        const other = cid === id ? undefined : this._componentById.get(cid);
+        const iLimit = other?.kind === "bench_psu" ? Number(other.params.iLimit ?? 0) : 0;
+        if (iLimit > 0 && Number.isFinite(iLimit)) {
+          limit = iLimit;
+          break;
+        }
+      }
       this._latchWarning(warningKey("rail_ic_power_chatter", id), {
         componentId: id,
         code: "rail_ic_power_chatter",
         since: this.simTime,
         value: level,
-        message:
-          `${id} cannot power up on ${rail}: at its ${volts} V power-on level its own pins load the supply back below it, ` +
-          `and unpowered the supply rises past it again, so no state holds and the simulation cannot advance.`,
+        message: railIcPowerChatterMessage(id),
+        detail: railIcPowerChatterDetail(level, limit),
       });
     }
   }

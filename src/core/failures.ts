@@ -14,6 +14,8 @@
 import type { Net } from "../sim/engine/graph.js";
 import {
   missingFlybackWarning,
+  railIcPowerChatterDetail,
+  railIcPowerChatterMessage,
   type FlybackTopology,
   type SimCircuit,
   type SimFailure,
@@ -151,24 +153,10 @@ export function outputSagMessage(componentId: string, pinId: string, high: boole
   return `${componentId}.${pinId} is commanded ${high ? "HIGH" : "LOW"} but sits at ${actual.toFixed(2)} V under the present load. The finite-strength output is outside its own package family's ${high ? "HIGH" : "LOW"} input-guarantee band; connected receivers may have different requirements.`;
 }
 
-/**
- * `rail_ic_power_chatter` (ruling R92, R53): the text Dev approved, shared
- * with classic's R89 diagnostic, in this one place. The message names the
- * chip; the detail line (a host's hover) carries the numbers: its floor
- * and, when its rail is a PSU at its current limit, that limit, left out
- * with no limit (a cell, or a PSU in CV through a series part). Volts and
- * milliamps to three significant figures, as classic R89 prints its level.
- */
-export function railIcPowerChatterMessage(componentId: string): string {
-  return `${componentId} isn't getting enough power to work properly.`;
-}
-
-/** `rail_ic_power_chatter`'s detail line: see {@link railIcPowerChatterMessage}. */
-export function railIcPowerChatterDetail(floor: number, limit: number): string {
-  const head = `Supply stuck at ${Number(floor.toPrecision(3))} V`;
-  if (!Number.isFinite(limit)) return head;
-  return `${head} (limit ${Number((limit * 1000).toPrecision(3))} mA)`;
-}
+// `rail_ic_power_chatter`'s text (ruling R92, R53) is classic's, as every
+// string here is: sim-engine.ts holds the two builders and both engines call
+// them. Re-exported for the callers that read them from this module.
+export { railIcPowerChatterDetail, railIcPowerChatterMessage };
 
 // ─── Failures ───────────────────────────────────────────────────────────────
 

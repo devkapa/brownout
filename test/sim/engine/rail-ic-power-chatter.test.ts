@@ -9,7 +9,8 @@
  * their 10 ns floor and stopped the clock (the cold fuzz's 2575 tpl 2 on the
  * core, its rail freed by a switch, stalled the same way at 1.81 V). The
  * engine still stops there, since no physical state lets it go on, but it now
- * says why: a warning naming the chip and the rail.
+ * says why: a warning naming the chip, with the level its supply is stuck at
+ * and the supply's limit on a detail line.
  */
 import { describe, expect, it } from "vitest";
 import { HeadlessRunner } from "../../../src/host/headless.js";
@@ -101,10 +102,14 @@ describe("a rail IC that cannot power up on its own current-limited rail", () =>
     const [warning] = warnings;
     expect(warning!.code).toBe("rail_ic_power_chatter");
     expect(warning!.componentId).toBe("timer");
-    expect(warning!.message).toContain("timer");
-    expect(warning!.message).toContain("psu");
-    expect(warning!.message).toContain("its own pins load");
+    // One text on both engines (the core's railIcPowerChatterMessage and
+    // Detail): the message names the chip, the detail line carries the level
+    // its supply is stuck at and the limit of the supply on its rail.
+    expect(warning!.message).toBe("timer isn't getting enough power to work properly.");
+    expect(warning!.detail).toBe("Supply stuck at 4.05 V (limit 100 mA)");
     expect(warning!.value).toBeCloseTo(powerOn, 9);
+    // The supply's limit is not the level's rating, so it is in the detail line only, as on the core.
+    expect(warning!.limit).toBeUndefined();
 
     // It stays stopped, and the warning is not announced again.
     const again = runner.run({ durationS: 1e-3 });
