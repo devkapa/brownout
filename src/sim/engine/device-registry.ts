@@ -257,6 +257,12 @@ export interface DeviceContext {
    * full contract these rows obey.
    */
   internalNode(compId: string, name: string): number;
+  /**
+   * True when this component is an ideal voltage source (bench_psu,
+   * voltage_source) wired across the same node pair as another one, which
+   * is a singular system unless one of them carries a series resistance.
+   */
+  sharesIdealSourceNodePair(compId: string): boolean;
   /** Voltage at a matrix row in a solution/guess vector (0 for ground). */
   vAt(x: Float64Array, row: number): number;
   /**
@@ -711,7 +717,9 @@ export interface AcDeviceContext {
   vsrcRow(key: string): number | undefined;
   /** MNA row of an internalNodes() row (same alias as DeviceContext's);
    *  opVoltage() accepts it like any node row. */
-  internalNode(compId: string, name: string): number;
+internalNode(compId: string, name: string): number;
+  /** Same as DeviceContext.sharesIdealSourceNodePair. */
+  sharesIdealSourceNodePair(compId: string): boolean;
 
   // ── Held operating-point solution ────────────────────────────────────────
   /** OP node voltage at a matrix row (0 for ground / branch rows). */

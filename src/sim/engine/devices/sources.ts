@@ -200,6 +200,102 @@ export const batteryPackModel: DeviceModel = {
   },
 };
 
+// A linear bench supply's output stage is a series pass element: it sources
+// current and has no path to sink it beyond its own output capacitor and
+// bleeder, which classic does not model. Driven above its setpoint by another
+// source, it lets go of the output (committed regime 3, branch current pinned
+// to zero) and takes the output back once the output falls below the
+// setpoint. The regime is frozen for a Newton solve and decided on a
+// converged point: the dc operating point re-solves until it settles, the
+// load seed re-solves once per switch, and a transient step that crosses
+// into the other regime is split at the crossing (SimEngine._solveSegment).
+// A supply wired across the same node pair as another ideal source (two
+// supplies in parallel) also gets a 1 uohm series resistance in CV: two ideal
+// sources on one node pair are a singular system that never converged.
+// 1 uohm moves a reading by 1 uV per amp; a supply on its own stays ideal.
+const BENCH_PSU_R_OUT = 1e-6;
+/** Sink current above which a supply at its setpoint is being driven off. */
+const BENCH_PSU_SINK_ENTRY_A = 1e-6;
+export const BENCH_PSU_BACKDRIVEN = 3;
+
+interface BenchPsuReading {
+  k: number;
+  /** Setpoint magnitude (scaled during source stepping). */
+  setpoint: number;
+  /** Output voltage in the source's own direction. */
+  output: number;
+  /** Branch current in the source's own direction, positive when sinking. */
+  sink: number;
+  reg: number;
+  /** Output tolerance below the setpoint. */
+  tol: number;
+}
+
+function readBenchPsu(ctx: DeviceContext, comp: DeviceComponent, x: Float64Array): BenchPsuReading | null {
+  const pins = comp.pins;
+  if (pins.length < 2) return null;
+  const k = ctx.vsrcRow(comp.id);
+  if (k === undefined) return null;
+  const v = ctx.independentSourceMagnitude(Number(comp.params.voltage ?? 5));
+  const dir = v < 0 ? -1 : 1;
+  const st = ctx.state.icState.get(comp.id);
+  return {
+    k,
+    setpoint: Math.abs(v),
+    output: dir * (ctx.vAt(x, ctx.pinNode(comp.id, pins[0].id)) - ctx.vAt(x, ctx.pinNode(comp.id, pins[1].id))),
+    sink: dir * (x[k] ?? 0),
+    reg: st ? (st.reg ?? 0) : 0,
+    tol: 1e-6 * Math.max(1, Math.abs(v)),
+  };
+}
+
+/**
+ * The let-go / take-back regime a converged solution asks for, or null when
+ * the committed one stands. Source-stepping rungs are not physical states
+ * (every setpoint is scaled toward 0 V), so no switch is asked there.
+ */
+export function benchPsuSinkRegimeWanted(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  x: Float64Array,
+): 0 | 3 | null {
+  if (ctx.independentSourceMagnitude(1) !== 1) return null;
+  const r = readBenchPsu(ctx, comp, x);
+  if (!r) return null;
+  if (r.reg === BENCH_PSU_BACKDRIVEN) return r.output < r.setpoint - r.tol ? 0 : null;
+  if (r.reg === 2) return null;
+  return r.sink > BENCH_PSU_SINK_ENTRY_A && r.output >= r.setpoint - r.tol ? BENCH_PSU_BACKDRIVEN : null;
+}
+
+/**
+ * Where in a step from x0 to x1 the supply crossed into the wanted regime,
+ * as a fraction of the step: where its branch current crossed into sinking
+ * (let-go), or where its output fell through the setpoint (take-back). 0 when
+ * it was already past the crossing at the start.
+ */
+export function benchPsuCrossingFraction(
+  ctx: DeviceContext,
+  comp: DeviceComponent,
+  want: 0 | 3,
+  x0: Float64Array | null,
+  x1: Float64Array,
+): number {
+  const r1 = readBenchPsu(ctx, comp, x1);
+  const r0 = x0 && x0.length === x1.length ? readBenchPsu(ctx, comp, x0) : null;
+  if (!r0 || !r1) return 0;
+  const [a, b, level] = want === BENCH_PSU_BACKDRIVEN
+    ? [r0.sink, r1.sink, BENCH_PSU_SINK_ENTRY_A]
+    : [-r0.output, -r1.output, -(r1.setpoint - r1.tol)];
+  if (a >= level || b === a) return 0;
+  return Math.min(1, Math.max(0, (level - a) / (b - a)));
+}
+
+/** Commit a let-go / take-back switch decided by the engine. */
+export function setBenchPsuSinkRegime(ctx: DeviceContext, comp: DeviceComponent, reg: 0 | 3): void {
+  if (reg === 0 && !(Number(comp.params.iLimit ?? 0) > 0)) ctx.state.icState.delete(comp.id);
+  else ctx.state.icState.set(comp.id, { reg });
+}
+
 export const benchPsuModel: DeviceModel = {
   kinds: ["bench_psu"],
   branchRows: (comp, _ctx) => [comp.id],
@@ -207,8 +303,6 @@ export const benchPsuModel: DeviceModel = {
     // W5.1: bench_psu gains optional constant-current fold.
     // When params.iLimit is present and > 0, the committed-regime pattern
     // is used (CV mode = ideal vsource; CC mode = branch current pinned to iLimit).
-    // When iLimit is absent or <= 0, behaviour is byte-identical to the ideal
-    // vsource path above — no icState entry is created, no regime logic runs.
     const pins = comp.pins;
     if (pins.length < 2) return;
     const kPsu = ctx.vsrcRow(comp.id);
@@ -217,25 +311,34 @@ export const benchPsuModel: DeviceModel = {
     // see one consistent per-rung setpoint during source stepping.
     const Vpsu = ctx.independentSourceMagnitude(Number(comp.params.voltage ?? 5));
     const iLimitPsu = Number(comp.params.iLimit ?? 0);
+    const posNode = ctx.pinNode(comp.id, pins[0].id);
+    const negNode = ctx.pinNode(comp.id, pins[1].id);
+    const sourceDirection = Vpsu < 0 ? -1 : 1;
+    const stPsu = ctx.state.icState.get(comp.id);
+    const regPsu = stPsu ? (stPsu.reg ?? 0) : 0;
+
+    if (regPsu === BENCH_PSU_BACKDRIVEN) {
+      // Let go: keep the KCL incidence, pin the branch current to zero.
+      if (posNode >= 0) ctx.mna.add(posNode, kPsu, 1);
+      if (negNode >= 0) ctx.mna.add(negNode, kPsu, -1);
+      ctx.mna.add(kPsu, kPsu, 1);
+      return;
+    }
 
     if (iLimitPsu > 0) {
       // iLimit is active — check committed regime (0=CV, 2=CC).
-      const stPsu = ctx.state.icState.get(comp.id);
-      const regPsu = stPsu ? (stPsu.reg ?? 0) : 0;
-
-      const posNode = ctx.pinNode(comp.id, pins[0].id);
-      const negNode = ctx.pinNode(comp.id, pins[1].id);
-      const sourceDirection = Vpsu < 0 ? -1 : 1;
-      const activeSetKey = `bench_psu:${comp.id}`;
-      const entryClamp = regPsu !== 2 && ctx.useCurrentLimitEntryClamp(
-        activeSetKey,
-        xGuess[kPsu] ?? 0,
-        iLimitPsu,
-      );
-      const currentLimited = regPsu === 2 || entryClamp;
       const outputMagnitudeGuess = sourceDirection * (
         ctx.vAt(xGuess, posNode) - ctx.vAt(xGuess, negNode)
       );
+      const activeSetKey = `bench_psu:${comp.id}`;
+      const entryClamp = regPsu !== 2 && ctx.useCurrentLimitEntryClamp(
+        activeSetKey,
+        // Only delivered current counts against the limit; a sinking supply
+        // lets go instead (see BENCH_PSU_BACKDRIVEN).
+        Math.max(0, -sourceDirection * (xGuess[kPsu] ?? 0)),
+        iLimitPsu,
+      );
+      const currentLimited = regPsu === 2 || entryClamp;
       // CV takes over only once the CC candidate reaches the setpoint itself,
       // not the shared band just under it. With a capacitor on the rail an
       // overloaded supply's CC candidate falls only (excess current) * h / C
@@ -268,42 +371,43 @@ export const benchPsuModel: DeviceModel = {
         // both voltage and delivery-current direction.
         ctx.mna.add(kPsu, kPsu, 1);
         ctx.mna.addB(kPsu, -sourceDirection * iLimitPsu);
-      } else {
-        // CV mode, or the same-step compliance branch selected from a
-        // provisional CC candidate. The ordinary voltage-source branch
-        // current is the actual terminal current, so source power and
-        // telemetry never retain the stale full CC current after recovery.
-        stampVSource(
-          ctx.mna,
-          posNode,
-          negNode,
-          kPsu,
-          Vpsu,
-        );
+        return;
       }
+    }
+    // CV mode, or the same-step compliance branch selected from a
+    // provisional CC candidate. The ordinary voltage-source branch current
+    // is the actual terminal current, so source power and telemetry never
+    // retain the stale full CC current after recovery.
+    if (ctx.sharesIdealSourceNodePair(comp.id)) {
+      stampVSourceSeriesR(ctx.mna, posNode, negNode, kPsu, Vpsu, BENCH_PSU_R_OUT);
     } else {
-      // No current limit — ideal voltage source (legacy behaviour).
-      stampVSource(
-        ctx.mna,
-        ctx.pinNode(comp.id, pins[0].id),
-        ctx.pinNode(comp.id, pins[1].id),
-        kPsu,
-        Vpsu,
-      );
+      stampVSource(ctx.mna, posNode, negNode, kPsu, Vpsu);
     }
   },
   commitState: (ctx, comp, x, _h) => {
+    const kBpsu = ctx.vsrcRow(comp.id);
+    if (kBpsu === undefined) return;
+    const Vpsu = ctx.independentSourceMagnitude(Number(comp.params.voltage ?? 5));
+    const sourceDirection = Vpsu < 0 ? -1 : 1;
+    const stBpsu = ctx.state.icState.get(comp.id);
+    const prevRegBpsu = stBpsu ? (stBpsu.reg ?? 0) : 0;
+    // The dc operating point decides let-go / take-back on each converged
+    // solve and re-solves until the picture settles. Transient and the load
+    // seed leave it to the engine (see benchPsuSinkRegimeWanted).
+    let newRegBpsu = prevRegBpsu;
+    if (ctx.dcSolveMode()) {
+      const want = benchPsuSinkRegimeWanted(ctx, comp, x);
+      if (want !== null) newRegBpsu = want;
+    }
     // W5.1 — bench_psu iLimit commit: only when iLimit is active.
     const iLimitBpsu = Number(comp.params.iLimit ?? 0);
-    if (iLimitBpsu > 0) {
-      const kBpsu = ctx.vsrcRow(comp.id);
-      if (kBpsu === undefined) return;
-      const stBpsu = ctx.state.icState.get(comp.id);
-      const prevRegBpsu = stBpsu ? (stBpsu.reg ?? 0) : 0;
+    if (newRegBpsu !== BENCH_PSU_BACKDRIVEN && iLimitBpsu > 0) {
       const iBpsu = x[kBpsu] ?? 0;  // negative when delivering current (MNA convention)
-      let newRegBpsu: number;
       const activeSetKeyBpsu = `bench_psu:${comp.id}`;
-      if (
+      if (prevRegBpsu === BENCH_PSU_BACKDRIVEN) {
+        // Just taken back: start in CV; an overload enters CC on the next solve.
+        newRegBpsu = 0;
+      } else if (
         ctx.currentLimitEntryClampActive(activeSetKeyBpsu)
         && !ctx.currentLimitComplianceClampActive(activeSetKeyBpsu)
       ) {
@@ -321,10 +425,14 @@ export const benchPsuModel: DeviceModel = {
         // other step.
         newRegBpsu = ctx.currentLimitComplianceClampActive(activeSetKeyBpsu) ? 0 : 2;
       } else {
-        // In CV: enter CC if the supplied current exceeds the limit.
-        // x[k] is negative (source delivers current); |iBpsu| is the magnitude.
-        newRegBpsu = Math.abs(iBpsu) > iLimitBpsu ? 2 : 0;
+        // In CV: enter CC if the delivered current exceeds the limit.
+        newRegBpsu = -sourceDirection * iBpsu > iLimitBpsu ? 2 : 0;
       }
+    }
+    if (newRegBpsu === 0 && iLimitBpsu <= 0) {
+      // An unlimited supply keeps no regime entry while in CV.
+      ctx.state.icState.delete(comp.id);
+    } else {
       ctx.state.icState.set(comp.id, { reg: newRegBpsu });
     }
   },
@@ -333,26 +441,27 @@ export const benchPsuModel: DeviceModel = {
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // Linearize at the committed regime: CV is an ideal AC short (branch row
-    // with V = 0, or 1 for the designated input); a committed CC fold pins
-    // the branch current, so its small-signal current is exactly zero and no
-    // drive can inject through it.
+    // with V = 0, or 1 for the designated input); a committed CC fold or a
+    // let-go output pins the branch current, so its small-signal current is
+    // exactly zero and no drive can inject through it.
     const pins = comp.pins;
     if (pins.length < 2) return;
     const k = ctx.vsrcRow(comp.id);
     if (k === undefined) return;
     const posNode = ctx.pinNode(comp.id, pins[0].id);
     const negNode = ctx.pinNode(comp.id, pins[1].id);
-    const iLimit = Number(comp.params.iLimit ?? 0);
     const st = ctx.state.icState.get(comp.id);
-    const reg = iLimit > 0 && st ? (st.reg ?? 0) : 0;
-    if (reg === 2) {
-      // Committed CC: keep the KCL coupling incidence, constrain dI = 0.
+    const reg = st ? (st.reg ?? 0) : 0;
+    if (reg === 2 || reg === BENCH_PSU_BACKDRIVEN) {
+      // Keep the KCL coupling incidence, constrain dI = 0.
       ac.addAc(posNode, k, 1, 0);
       ac.addAc(negNode, k, -1, 0);
       ac.addAc(k, k, 1, 0);
       return;
     }
     stampAcVoltageSourceRow(ac, posNode, negNode, k, ctx.acInputMagnitude(comp.id), 0);
+    // The same 1 uohm the transient CV stamp carries.
+    if (ctx.sharesIdealSourceNodePair(comp.id)) ac.addAc(k, k, -BENCH_PSU_R_OUT, 0);
   },
 };
 

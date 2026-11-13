@@ -79,6 +79,11 @@ import {
 // declares sideEffects:false, which licenses bundlers to prune import-only
 // edges — pruning here would silently unregister every builtin device.
 import { registerBuiltinDeviceModels } from "./devices/index.js";
+import {
+  benchPsuCrossingFraction,
+  benchPsuSinkRegimeWanted,
+  setBenchPsuSinkRegime,
+} from "./devices/sources.js";
 registerBuiltinDeviceModels();
 
 export type { Net };
@@ -1022,6 +1027,9 @@ function failureKeyComponentId(key: string): string | null {
 // disjoint, so the keys cannot collide), which gives warnings the identical
 // snapshot/rollback, load carry-forward (failureKeyComponentId) and reset
 // semantics without a second accumulator.
+/** The sources a rail_ic_power_chatter warning names as a chip's rail. */
+const POWER_CHATTER_SUPPLY_KINDS = new Set<string>(["bench_psu", "battery_pack", "voltage_source"]);
+
 function warningKey(code: SimWarningCode, componentId: string, pinId = ""): string {
   return `${code}\x00${componentId}\x00${pinId}`;
 }
@@ -1145,6 +1153,11 @@ export function regulatorQuiescentCurrent(comp: SimComponent): number {
   if (!exactPart || exactPart.uid !== comp.catalogUid) return 0;
   return REGULATOR_QUIESCENT_CURRENT_A[exactPart.uid] ?? 0;
 }
+
+// bench_psu let-go / take-back crossings per transient interval, and the
+// latest point in an interval a crossing is placed (see _solveSegment).
+const BENCH_PSU_MAX_SPLITS = 4;
+const BENCH_PSU_SPLIT_MAX_FRAC = 0.98;
 
 const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
   "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
@@ -1856,6 +1869,11 @@ export class SimEngine {
   // HOST_MIN_STEP_S, for every solve inside it (a 555's split sub-steps
   // included, whatever their own length).
   private _stepAtHostFloor = false;
+  // The supply-gated parts whose power reading alternated through a solve at
+  // the hosts' floor that the hold procedure could not settle, each with its
+  // power-on level (V): a step that ends unconverged latches
+  // rail_ic_power_chatter for them (_latchPowerChatter).
+  private _powerChatter: Map<string, number> | null = null;
   // While a step() runs: when it started, and each supply-gated part's power
   // reading at that moment (the first iterate of the step's first solve).
   // A 555's split re-solves the step from that moment, then from points
@@ -1989,9 +2007,13 @@ export class SimEngine {
   private _hasHcsr04 = false;
   private _ne555Components: SimComponent[] = [];
   private _mcuComponents: SimComponent[] = [];
+  /** Ideal voltage sources sharing a node pair with another (load-time). */
+  private _parallelIdealSourceIds = new Set<string>();
   /** Set when a commit switches a Pico regulator's regime; load() re-solves
    *  its seed so the published operating point is in the committed regime. */
   private _picoRegimeFlipped = false;
+  /** bench_psu components, compiled at load (let-go / take-back crossings). */
+  private _benchPsuComponents: SimComponent[] = [];
   /** Boards with an MCU supply absolute maximum (MCU_SUPPLY_ABS_MAX). */
   private _supplyRatedComponents: SimComponent[] = [];
   private _stateUpdateComponents: SimComponent[] = [];
@@ -2299,6 +2321,7 @@ export class SimEngine {
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
+      sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
       vAt: (x, row) => engine._vAt(x, row),
       get mna() {
         return engine.mna;
@@ -2821,6 +2844,23 @@ export class SimEngine {
     this.nets = buildNets(circuit);
     this._buildMatrix();
     this._compileRuntimeMetadata(circuit);
+    // Ideal voltage-source branches that share one node pair: a singular
+    // system unless one of them has a series resistance (see bench_psu).
+    this._parallelIdealSourceIds = new Set();
+    const byNodePair = new Map<string, string[]>();
+    for (const c of circuit.components) {
+      if ((c.kind !== "bench_psu" && c.kind !== "voltage_source") || c.pins.length < 2) continue;
+      const a = this._pinNode(c.id, c.pins[0]!.id);
+      const b = this._pinNode(c.id, c.pins[1]!.id);
+      if (a === b) continue;
+      const pair = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const ids = byNodePair.get(pair);
+      if (ids) ids.push(c.id);
+      else byNodePair.set(pair, [c.id]);
+    }
+    for (const ids of byNodePair.values()) {
+      if (ids.length > 1) for (const id of ids) this._parallelIdealSourceIds.add(id);
+    }
     this._compileIsolatedSectionAnchors(circuit);
 
     // Drop program-driven micro:bit pin drives for boards deleted from the
@@ -3313,11 +3353,15 @@ export class SimEngine {
     const initializedIndsV = new Map(this.state.indsV);
     this._picoRegimeFlipped = false;
     this._solve(1e-12);
-    // A Pico regulator's regime is committed from a solve, so a supply
-    // back-feeding its 3V3 pin is only seen after the seed solve; solve the
-    // seed again from the authored initial conditions in the committed
-    // regime. Bounded: each pass can only switch a regulator off or on.
-    for (let pass = 0; pass < 2 && this._picoRegimeFlipped && this.lastConverged; pass++) {
+    // A Pico regulator's or a bench supply's let-go regime is decided on a
+    // converged solve, so a supply back-feeding it is only seen after the
+    // seed solve; solve the seed again from the authored initial conditions
+    // in the decided regime. Bounded: each pass switches a regulator or a
+    // supply off or on, and a chain of parallel supplies settles in a few.
+    for (let pass = 0; pass < 4 && this.lastConverged; pass++) {
+      const psuSwitches = this._lastX ? this._benchPsuSwitches(this._lastX) : [];
+      if (!this._picoRegimeFlipped && psuSwitches.length === 0) break;
+      for (const { comp, want } of psuSwitches) setBenchPsuSinkRegime(this._deviceCtx, comp, want);
       this._picoRegimeFlipped = false;
       this.state.caps = new Map(initializedCaps);
       this.state.inds = new Map(initializedInds);
@@ -3606,15 +3650,31 @@ export class SimEngine {
   private _dcRegimeSettle(maxOuterRegimeIters: number, counters: DcOpCounters): boolean {
     this._homotopyGminG = 0;
     this._homotopySourceScale = 1;
+    let psuSettled = true;
     for (let outer = 0; outer < maxOuterRegimeIters; outer++) {
       const before = this._dcCommittedRegimeSignature();
+      const psuBefore = this._benchPsuRegimeSignature();
       this._solve(DC_OP_COMPANION_H);
       counters.iterations += this.lastIters;
       counters.regimeIterations += 1;
       if (!this.lastConverged) return false;
       if (this._dcCommittedRegimeSignature() === before) return true;
+      psuSettled = this._benchPsuRegimeSignature() === psuBefore;
     }
-    return true;
+    // A bench supply still letting go and taking back at the cap has no
+    // operating point at this stage (unlike an astable latch, whose last
+    // phase is self-consistent): decline it rather than accept a supply
+    // caught mid-switch.
+    return psuSettled;
+  }
+
+  /** Committed let-go / CC / CV regime of every bench supply. */
+  private _benchPsuRegimeSignature(): string {
+    let sig = "";
+    for (const comp of this._benchPsuComponents) {
+      sig += `${comp.id}=${this.state.icState.get(comp.id)?.reg ?? 0};`;
+    }
+    return sig;
   }
 
   /**
@@ -4383,9 +4443,12 @@ export class SimEngine {
     // h, not about the shorter sub-steps the 555 split solves within it.
     this._stepAtHostFloor = h <= HOST_MIN_STEP_S;
     this._stepStart = { time: this.simTime, power: null };
+    this._powerChatter = null;
     try {
       this._stepSolves(h);
+      if (!this.lastConverged && this._powerChatter !== null) this._latchPowerChatter(this._powerChatter);
     } finally {
+      this._powerChatter = null;
       this._stepAtHostFloor = false;
       this._stepStart = null;
     }
@@ -4397,7 +4460,7 @@ export class SimEngine {
     const has555 = this._hasNe555;
 
     if (!has555) {
-      this._solve(h, true);
+      this._solveSegment(h);
       if (!this.lastConverged) return;
       this.simTime += h;
       this._advanceMcusAfterAcceptedSolve(h);
@@ -4412,7 +4475,7 @@ export class SimEngine {
     const preNe555s = new Map(this.state.ne555s);
     const snap = this.saveState();
 
-    this._solve(h, true);
+    this._solveSegment(h);
 
     // A failed electrical trial is not a physical interval. In particular, do
     // not sample inputs or advance an external CPU that saveState cannot rewind.
@@ -4433,7 +4496,7 @@ export class SimEngine {
     this.restoreState(snap);
     this.simTime = snap.simTime;
 
-    this._solve(h * frac, true);
+    this._solveSegment(h * frac);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4453,7 +4516,7 @@ export class SimEngine {
         // The split is clamped to 98% of the step, so a crossing in the last
         // 2% leaves the first sub-step short of it. Carry on to one guard
         // short of the step end and let the switch land there instead.
-        this._solve(rest - guard, true);
+        this._solveSegment(rest - guard);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4463,7 +4526,7 @@ export class SimEngine {
       }
       if (this._ne555Switched(preNe555s)) {
         this._stepBreakpoints.push({ time: this.simTime, netV: { ...this.netV } });
-        this._solve(guard, true);
+        this._solveSegment(guard);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4474,7 +4537,7 @@ export class SimEngine {
       }
     }
 
-    if (rest > 0) this._solve(rest, true);
+    if (rest > 0) this._solveSegment(rest);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4482,6 +4545,83 @@ export class SimEngine {
     this.simTime = snap.simTime + h;
     this._advanceMcusAfterAcceptedSolve(h);
     this._beNextStep = false;
+  }
+
+  /** bench_psu let-go / take-back switches a converged solution asks for. */
+  private _benchPsuSwitches(x: Float64Array): { comp: SimComponent; want: 0 | 3 }[] {
+    const out: { comp: SimComponent; want: 0 | 3 }[] = [];
+    for (const comp of this._benchPsuComponents) {
+      const want = benchPsuSinkRegimeWanted(this._deviceCtx, comp, x);
+      if (want !== null) out.push({ comp, want });
+    }
+    return out;
+  }
+
+  /**
+   * One transient interval of length h, solved with every bench supply's
+   * let-go regime frozen. When the converged endpoint asks a supply to let go
+   * or take back its output, that is a crossing inside the interval, not a
+   * switch at its end: roll back, solve up to the earliest crossing in the
+   * old regime, switch the supplies crossing there, and solve the rest in
+   * the new one (backward Euler across the discontinuity, as the 555 split
+   * does). Up to BENCH_PSU_MAX_SPLITS crossings per interval; a further one
+   * waits for the next interval. simTime is back at its entry value on
+   * return, as after a plain _solve, and nothing outside the electrical
+   * state is advanced, so a rolled-back trial stays firmware-neutral.
+   */
+  private _solveSegment(h: number): void {
+    if (this._benchPsuComponents.length === 0) {
+      this._solve(h, true);
+      return;
+    }
+    const t0 = this.simTime;
+    let remaining = h;
+    // The interval's entry state. Once a split has committed its first
+    // segment and switched a supply, a later failed solve must roll all of it
+    // back, as _restoreFailedSplitTrial does for the 555 split, so a failed
+    // trial keeps the last trusted state for direct step() callers too.
+    let entry: StateSnapshot | null = null;
+    try {
+      for (let split = 0; ; split++) {
+        const x0 = this._lastX ? new Float64Array(this._lastX) : null;
+        const snap = split < BENCH_PSU_MAX_SPLITS ? this.saveState() : null;
+        entry ??= snap;
+        this._solve(remaining, true);
+        if (!this.lastConverged) {
+          if (split > 0 && entry) this._restoreFailedSplitTrial(entry);
+          return;
+        }
+        if (!snap) return;
+        const x1 = this._lastX!;
+        const switches = this._benchPsuSwitches(x1);
+        if (switches.length === 0) return;
+        let frac = 1;
+        const fracs = switches.map(({ comp, want }) =>
+          benchPsuCrossingFraction(this._deviceCtx, comp, want, x0, x1));
+        for (const f of fracs) frac = Math.min(frac, f);
+        // Leave the new regime some of the interval, as the 555 split does.
+        frac = Math.min(frac, BENCH_PSU_SPLIT_MAX_FRAC);
+        const simTimeBefore = this.simTime;
+        this.restoreState(snap);
+        this.simTime = simTimeBefore;
+        const first = remaining * frac;
+        if (first > 0) {
+          this._solve(first, true);
+          if (!this.lastConverged) {
+            this._restoreFailedSplitTrial(entry!);
+            return;
+          }
+          this.simTime += first;
+          remaining -= first;
+        }
+        switches.forEach(({ comp, want }, i) => {
+          if (fracs[i]! <= frac + 1e-9) setBenchPsuSinkRegime(this._deviceCtx, comp, want);
+        });
+        this._beNextStep = true;
+      }
+    } finally {
+      this.simTime = t0;
+    }
   }
 
   /**
@@ -4850,6 +4990,7 @@ export class SimEngine {
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
+      sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
       opVoltage: (row) =>
         engine._lastX ? engine._vAt(engine._lastX, row) : 0,
       opPinVoltage: (compId, pinId) =>
@@ -5528,6 +5669,7 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    this._benchPsuComponents = circuit.components.filter((component) => component.kind === "bench_psu");
     this._supplyRatedComponents = circuit.components.filter((component) => component.kind in MCU_SUPPLY_ABS_MAX);
     // H11 readback: nets only change on load(), so the per-load candidate
     // scan (and its diagnostics counter) restart here.
@@ -6340,6 +6482,34 @@ export class SimEngine {
     this._unannouncedWarnings.push(key);
   }
 
+  /**
+   * rail_ic_power_chatter: each part of `chatter` (id -> its power-on level)
+   * alternated at the hosts' floor with no state that holds. The warning
+   * names the part and its rail: the supply on its vcc net when there is
+   * one, else the net.
+   */
+  private _latchPowerChatter(chatter: ReadonlyMap<string, number>): void {
+    for (const [id, level] of chatter) {
+      const comp = this._componentById.get(id);
+      if (!comp) continue;
+      const { vccPin } = supplyPinsForComponent(comp);
+      const netId = vccPin ? this._netIdForPin(id, vccPin) : null;
+      const pins = netId ? this.nets.find((net) => net.id === netId)?.pins ?? [] : [];
+      const supply = pins.find(([cid]) => cid !== id && POWER_CHATTER_SUPPLY_KINDS.has(this._componentById.get(cid)?.kind ?? ""));
+      const rail = supply ? `${supply[0]}'s rail` : netId ? `net ${netId}` : "its supply";
+      const volts = Number(level.toPrecision(3));
+      this._latchWarning(warningKey("rail_ic_power_chatter", id), {
+        componentId: id,
+        code: "rail_ic_power_chatter",
+        since: this.simTime,
+        value: level,
+        message:
+          `${id} cannot power up on ${rail}: at its ${volts} V power-on level its own pins load the supply back below it, ` +
+          `and unpowered the supply rises past it again, so no state holds and the simulation cannot advance.`,
+      });
+    }
+  }
+
   private _pruneUnannouncedWarnings(): void {
     this._unannouncedWarnings = this._unannouncedWarnings.filter((key) => this.state.warnings.has(key));
   }
@@ -6646,6 +6816,18 @@ export class SimEngine {
       const starved = alternating.filter((comp) => !this._icPowerInfo(comp, onProbe.x).powered);
       if (starved.length === 0) {
         this._holdOffCounts.partsHold += 1;
+        // At the floor there is no shorter step to try: powered at an
+        // instant the part holds its supply, but over the shortest step its
+        // own draw takes the supply back under its power-on level, and
+        // unpowered the supply rises past it again. No state holds, and
+        // holding the part either way would be a state the circuit cannot
+        // be in, so the step fails as before and the engine says why.
+        if (this._stepAtHostFloor) {
+          this._powerChatter ??= new Map();
+          for (const comp of alternating) {
+            this._powerChatter.set(comp.id, 0.9 * (specsForComponent(comp)?.vcc_range?.min ?? 2.0));
+          }
+        }
         return null;
       }
       const offPower = new Map(probePower);
