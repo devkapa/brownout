@@ -77,6 +77,7 @@ import { evalCD4511 } from "../digital.js";
 import {
   defaultHd44780State,
   defaultIcState,
+  ramStateAfterPowerLoss,
   N_LED,
   type EepromState,
   type IcPowerInfo,
@@ -723,7 +724,16 @@ export const ls189Model: DeviceModel = {
   },
   updateDigital: (ctx, comp, x, _h) => {
     const power = ctx.icPowerInfo(comp, x);
-    if (!power.powered) return;
+    if (!power.powered) {
+      // Power loss. A chip with a preload (params.contents) loses what was
+      // written to it and holds the preload again from here, so it reads it
+      // at the next power-up. One with no contents keeps its words frozen,
+      // as every unpowered IC's state is.
+      const held = ctx.state.icState.get(comp.id);
+      const cleared = held ? ramStateAfterPowerLoss("74ls189", held) : null;
+      if (cleared) ctx.state.icState.set(comp.id, cleared);
+      return;
+    }
     const st = ctx.state.icState.get(comp.id) ?? defaultIcState("74ls189");
     const csLow = !ctx.logicHigh(comp, "/cs", x, power);
     const weHigh = ctx.logicHigh(comp, "/we", x, power);

@@ -62,6 +62,7 @@ import {
 } from "../thermal-physics.js";
 import type { DisplayInfo, Hcsr04EchoEvent } from "../messages.js";
 import type { ComponentKind, ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
+import { RAM_CONTENTS_SHAPE, isRamKind, ramPreloadWords, type RamKind } from "../../circuit/types.js";
 import {
   getDeviceModel,
   type AcDeviceContext,
@@ -1523,6 +1524,53 @@ export interface IcPowerInfo {
   thresholds: LogicThresholds;
   outputResistance: number;
   propagationDelay: number;
+}
+
+// A RAM's power-on preload (`params.contents`, src/circuit/types.ts RAM_KINDS;
+// coordinator ruling 2026-11-13). The decoded words ride in the chip's own
+// icState as `preload0..`, written once at load: the model then needs no
+// lookup, snapshot and rollback copy them with the live words, and load()
+// tells a reload onto the same contents (carry the live words) from one onto
+// other contents (start from them) without trusting the old circuit object,
+// which a host may have edited in place. A chip with no contents has no such
+// slot, so its state is exactly what it was before the field existed.
+const RAM_PRELOAD_SLOT = "preload";
+
+/** A RAM's state as it powers up: the kind's defaults, with the preload (when it has one) in the live words and in the preload slots. */
+function ramPowerOnState(kind: RamKind, preload: readonly number[] | null): Record<string, number> {
+  const st = defaultIcState(kind);
+  preload?.forEach((word, i) => {
+    st[`mem${i}`] = word;
+    st[`${RAM_PRELOAD_SLOT}${i}`] = word;
+  });
+  return st;
+}
+
+/** Whether `st` was loaded from `preload` (null: from no contents). */
+function ramStateHoldsPreload(st: Readonly<Record<string, number>>, preload: readonly number[] | null): boolean {
+  if (!preload) return st[`${RAM_PRELOAD_SLOT}0`] === undefined;
+  return preload.every((word, i) => st[`${RAM_PRELOAD_SLOT}${i}`] === word);
+}
+
+/**
+ * A RAM losing power: the state with its live words back at the preload, or
+ * null when there is nothing to change (no preload, or the words already
+ * match). Called from the committed pass that finds the chip unpowered, so
+ * the words are already the preload when the solve that powers the chip up
+ * stamps its outputs. Everything else in the state (the /WE history, the
+ * output delay slots) is left frozen, as an unpowered chip's always was.
+ * Exported for the RAM models (devices/digital-ics.ts).
+ */
+export function ramStateAfterPowerLoss(kind: RamKind, st: Readonly<Record<string, number>>): Record<string, number> | null {
+  if (st[`${RAM_PRELOAD_SLOT}0`] === undefined) return null;
+  let next: Record<string, number> | null = null;
+  for (let i = 0; i < RAM_CONTENTS_SHAPE[kind].words; i++) {
+    const word = st[`${RAM_PRELOAD_SLOT}${i}`];
+    if (word === undefined || st[`mem${i}`] === word) continue;
+    next ??= { ...st };
+    next[`mem${i}`] = word;
+  }
+  return next;
 }
 
 // Exported for migrated device modules that fall back to per-kind defaults
@@ -3248,7 +3296,19 @@ export class SimEngine {
         const carried = oldKindById.get(c.id) === c.kind
           ? prevIcState.get(c.id)
           : undefined;
-        this.state.icState.set(c.id, carried ?? defaultIcState(c.kind));
+        if (isRamKind(c.kind)) {
+          // A RAM carries its live words only onto the contents it was
+          // loaded from, as an EEPROM carries its image only onto the same
+          // contentsHash below; onto other contents (or none) it starts from
+          // them. With no contents before and after this is the plain carry.
+          const preload = ramPreloadWords(c.kind, c.params.contents);
+          this.state.icState.set(
+            c.id,
+            carried && ramStateHoldsPreload(carried, preload) ? carried : ramPowerOnState(c.kind, preload),
+          );
+        } else {
+          this.state.icState.set(c.id, carried ?? defaultIcState(c.kind));
+        }
       }
       // W5.1 — bench_psu iLimit: initialise icState only when limiting is active.
       // When iLimit is absent or <= 0 the bench_psu behaves as an ideal voltage
