@@ -5066,7 +5066,12 @@ impl SteppedSolver {
         // V setpoint, the CV re-solve at the commit pulling it back with the
         // timing node 0.6 V off (299 W0). Cut, the verdict flips, or the PSU
         // leaves CC, at that commit, and the steps after it go on from there.
-        if exact.is_some() && ic_ctx.cc.is_none() {
+        // Default mode cuts a partition holding a free chip's supply at the
+        // chip's edge alike (ruling R113 4 (a)): uncut, the RC-fed chip of
+        // `sp_board` (a) charged from a 0.3 ms host stop over a 157 us step
+        // to 4.10 V judged off, and slid from 1.13 ms where 20 us stops slid
+        // from 0.70 ms; cut, both enter at the floor's crossing.
+        if (exact.is_some() || part.holds_free_ic_supply) && ic_ctx.cc.is_none() {
             let gated: Vec<(usize, &digital::IcRecord)> = ics.iter().filter(|(d, ic)| !held(*d) && !ic.vcc.open && !ic.gnd.open && (in_p(ic.vcc.node) || in_p(ic.gnd.node))).map(|(d, ic)| (*d, ic)).collect();
             {
                 let supply = |x: &[f64], ic: &digital::IcRecord| {

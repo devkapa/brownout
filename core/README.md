@@ -2303,9 +2303,29 @@ their own, and the source KCL does with W1a point 2's branch fold.
    Open: two chips sliding in one partition would need four states, and
    neither is solved in two (`own_slide_of` finds none), so each keeps
    the duty it entered at, averaged stamps, as two chips beside one
-   partition do; a default-mode stepped step is not cut at a free chip's
-   power edge, so where a slide enters depends on the step that crossed it
-   (ruling R113 4 (a)).
+   partition do.
+
+   **Entry at the crossing** (ruling R113 4 (a), R102 (a)'s cut in default
+   mode; `stepped.rs`). A step of a stepped partition holding a free chip's
+   supply is cut where that supply crosses a window edge, by regula falsi
+   on the step as exact mode's is: the chip's verdict flips at that commit
+   and the step after it, whose Newton finds the edge attracting, enters
+   the slide. Uncut, `sp_board` (a) from a 0.3 ms host stop took a 157 us
+   step to 4.10 V judged off and slid from 1.13 ms (20 us stops: 0.70 ms);
+   cut, they enter at 0.587808 ms and 0.593997 ms, 1.7 and 7.9 us after
+   the floor's crossing at 0.586145 ms (within the 31 us a powered supply
+   takes to fall W0 under the floor), the supply within W0 at entry
+   (`an_rc_fed_chip_enters_its_slide_where_its_supply_crosses_its_floor_at_every_host_cadence`).
+   The 7.9 us is the coarse schedule's own charge-up, not the cut: each cut
+   lands on its schedule's crossing to the cut's tolerance and the slide
+   enters 10 ns later at 3.959998701 V on both; the 5 ohm cell's drop held
+   at the last commit over a stepped hub partition's step (Rails point 4)
+   leaves the coarse charge-up 11.3 mV (2.8 W0) behind the analytic curve
+   at its crossing (15.8 mV at worst; 1.1 mV from an ideal source), an
+   open item of its own. Cost (SAP-1, `--gate`, 3 reps, against 8c9b11e):
+   steady ideal +0.7 % frozen and running, battery -0.8 % and -0.3 %;
+   start-up within -1.7 % to +1.3 %; the SAP-1 publishes bit for bit, its
+   partitions crossing no free chip's edge.
 
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the

@@ -18753,3 +18753,50 @@ fn a_chip_sliding_in_its_supplys_own_partition_slides_alike_at_every_host_cadenc
         }
     }
 }
+
+#[test]
+fn an_rc_fed_chip_enters_its_slide_where_its_supply_crosses_its_floor_at_every_host_cadence() {
+    // Ruling R113 4 (a): R102 (a)'s power-edge cut in default mode. On
+    // `sp_board` (a) the chip's supply node (2.2 uF, fed from the 4.3 V cell
+    // through 5 + 100 ohm) charges unpowered from 0 V, 4.3 (1 - exp(-t /
+    // tau)), tau = 105 x 2.2 uF = 231 us, and reaches the 3.96 V floor at
+    // t_c = tau ln(4.3 / 0.34) = 0.586145 ms. Powered there its draw, 3.96 /
+    // (123.75 + 1000) = 3.523915 mA, exceeds the feed, 0.34 / 105 =
+    // 3.238095 mA, so the edge attracts and it slides from t_c. A
+    // default-mode step was not cut at the edge: from a 0.3 ms host stop
+    // the partition took a 157 us step to 4.10 V with the chip judged off,
+    // powered it there and slid from 1.13 ms, where 20 us stops slid from
+    // 0.70 ms. Cut at the edge (regula falsi on the step, as exact mode's),
+    // the step ends just past the floor, the chip powers at that commit, and
+    // the step after it, whose Newton finds the edge attracting, enters the
+    // slide (`hold_around`). Powered over that one step the supply falls
+    // from the floor at (3.523915 - 3.238095) mA / 2.2 uF = 129.9 V/s, so an
+    // entry within W0 / 129.9 V/s = 31.25 us of t_c keeps the supply within
+    // W0 of the floor throughout. Both cadences enter there, no earlier
+    // than the crossing (less the crossing's own W0 in time, W0 over the
+    // charging rate 0.34 / 231 us: 2.76 us), with the supply within W0 of
+    // the floor at the entry, within 31.25 us of each other; and at 3 ms
+    // both slide at the floor at the hand duty I_feed / I_on = 0.9188913.
+    let floor = 0.9 * 4.4;
+    let w0 = 1e-4 + 1e-3 * floor;
+    let tau = 105.0 * 2.2e-6;
+    let t_c = tau * (4.3f64 / (4.3 - floor)).ln();
+    let early = w0 / ((4.3 - floor) / tau);
+    let late = w0 / ((sp_i_on(1000.0) - (4.3 - floor) / 105.0) / 2.2e-6);
+    let fine: Vec<f64> = (1..=150).map(|k| k as f64 * 20e-6).collect();
+    let coarse: Vec<f64> = std::iter::once(3e-4).chain((1..=3).map(|k| k as f64 * 1e-3)).collect();
+    let mut entries = Vec::new();
+    for (name, stops) in [("20 us", fine), ("0.3 ms then 1 ms", coarse)] {
+        let (rig, trace, err) = hold_trace(&sp_board('a'), &[], &stops, 3);
+        assert!(err.is_none(), "{name}: {err:?}");
+        let entry = trace.iter().find(|t| matches!(t.1.kind, digital::power::HoldKind::Duty(_))).unwrap_or_else(|| panic!("{name}: a slide: {trace:?}"));
+        assert!(entry.0 >= t_c - early && entry.0 <= t_c + late, "{name}: entered at {} s, the floor's crossing at {t_c} s ({early:e} early, {late:e} late)", entry.0);
+        assert!((entry.2 - floor).abs() <= w0, "{name}: the supply {} at the entry", entry.2);
+        let x = sp_sliding(&rig, 3, name);
+        close(rig.v(4), floor, 1e-9, &format!("{name}: the supply at 3 ms"));
+        close(x, 0.9188913, 1e-6, &format!("{name}: the duty at 3 ms"));
+        entries.push(entry.0);
+    }
+    eprintln!("entries at {entries:?} s, the crossing at {t_c} s");
+    assert!((entries[0] - entries[1]).abs() <= late, "entries {entries:?}");
+}
