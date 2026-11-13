@@ -18800,3 +18800,66 @@ fn an_rc_fed_chip_enters_its_slide_where_its_supply_crosses_its_floor_at_every_h
     eprintln!("entries at {entries:?} s, the crossing at {t_c} s");
     assert!((entries[0] - entries[1]).abs() <= late, "entries {entries:?}");
 }
+
+#[test]
+fn a_chip_sliding_on_a_capacitor_slides_from_the_instant_of_a_reload_and_of_a_cut() {
+    // R53V3 F2 (ruling R113 (3)): a reload mid-slide (W2c: hold and slide
+    // state are not carried, power is judged afresh at settle) carries the
+    // capacitor at the edge, and the seed found the chip powered there, the
+    // capacitor holding its supply through the seed: `sp_board` (a)
+    // published 1y powered, 3.523915 V (1000 I_on, I_on = 3.96 / 1123.75 A),
+    // against the slide's blend 3.238095 V (1000 I_feed, I_feed = 0.34 /
+    // 105 A), 0.286 V or 85.9 W0, until the step after. A seed whose free
+    // chip's supply sits on its edge takes the two-state test there and
+    // slides from that instant: 1y within W0 of the continuous run 0.1 us
+    // after the reload, and every node within W0. The boards: (a), (c), an
+    // RC feed through a closed switch, and (a) driving a second chip's
+    // inputs (fed from its own 5 V source) from 1y through 1 kohm.
+    let chip = |ci: usize, vcc: usize, slot: usize, logic: [usize; 12]| {
+        let mut g = ls00(ci, vcc, 0, logic, 10e-9, slot);
+        g.params[ic_param::VCC_MIN] = 4.4;
+        g
+    };
+    let a0 = [0, 0, 2, 0, 0, 3, 0, 0, 6, 0, 0, 5];
+    let boards = vec![
+        ("(a)", sp_board('a')),
+        ("(c)", sp_board('c')),
+        ("switched RC feed", program(10, vec![battery(0, 1, 0, 4.3, 5.0), switch(1, 1, 9, true), resistor(2, 9, 4, 100.0), capacitor(3, 4, 0, 2.2e-6, 0.0), chip(4, 4, 0, a0), resistor(5, 2, 0, 1000.0)])),
+        ("driving a chip", program(12, vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 4, 100.0), capacitor(2, 4, 0, 2.2e-6, 0.0), chip(3, 4, 0, a0), resistor(4, 2, 0, 1000.0), source(5, 7, 0, 5.0), ls00(6, 7, 0, [2, 2, 8, 0, 0, 9, 0, 0, 10, 0, 0, 11], 10e-9, 1), resistor(7, 8, 0, 1000.0)])),
+    ];
+    let w0 = |v: f64| 1e-4 + 1e-3 * v.abs();
+    for (name, p) in &boards {
+        for t_y in [0.002, 0.02] {
+            let mut cont = Engine::load(p).unwrap();
+            cont.advance(t_y).unwrap();
+            let mut q = p.clone();
+            q.carry = cont.carry_take().unwrap().to_vec();
+            q.options.start_time = t_y;
+            let mut re = Engine::load(&q).unwrap();
+            for dt in [1e-7, 1e-6, 1e-4, 1e-3] {
+                let t = t_y + dt;
+                cont.advance(t).unwrap();
+                re.advance(t).unwrap();
+                for (n, (a, b)) in cont.voltages().iter().zip(re.voltages()).enumerate() {
+                    assert!((a - b).abs() <= w0(*a), "{name}: reloaded at {t_y}, node {n} at {t}: {b} against {a} run on");
+                }
+            }
+        }
+    }
+    // The commit a cut at the floor ends on (ruling R113 4 (a)): the chip
+    // slides from that instant, never published powered under or at the
+    // edge before it.
+    let mut rig = Rig::load(&sp_board('a')).unwrap();
+    let (mut powered_at, mut slid_at) = (None, None);
+    while rig.k.time() < 1e-3 && slid_at.is_none() {
+        let t = rig.k.next_event_time().min(1e-3);
+        rig.advance(t).unwrap();
+        if powered_at.is_none() && rig.s().ic_powered(3) {
+            powered_at = Some(t);
+        }
+        if matches!(rig.s().power_hold(3).kind, digital::power::HoldKind::Duty(_)) {
+            slid_at = Some(t);
+        }
+    }
+    assert_eq!(powered_at, slid_at, "powered at {powered_at:?}, sliding from {slid_at:?}");
+}

@@ -2322,7 +2322,16 @@ their own, and the source KCL does with W1a point 2's branch fold.
    at the last commit over a stepped hub partition's step (Rails point 4)
    leaves the coarse charge-up 11.3 mV (2.8 W0) behind the analytic curve
    at its crossing (15.8 mV at worst; 1.1 mV from an ideal source), an
-   open item of its own. Cost (SAP-1, `--gate`, 3 reps, against 8c9b11e):
+   open item of its own. A seed whose free chip's supply sits on its edge
+   (within the cut's tolerance, read from its capacitor's charge where one
+   holds it) takes the two-state test there and slides from that instant
+   (`stepped::seed_on_edge`, R53V3's F2): the commit a cut ends on, and a
+   reload mid-slide, which W2c seeds with power judged afresh. Seeded
+   powered there, the capacitor holding the supply through the seed,
+   `sp_board` (a) reloaded at its slide published 1y powered, 85.9 W0 over
+   the blend, until the step after
+   (`a_chip_sliding_on_a_capacitor_slides_from_the_instant_of_a_reload_and_of_a_cut`).
+   Cost (SAP-1, `--gate`, 3 reps, against 8c9b11e):
    steady ideal +0.7 % frozen and running, battery -0.8 % and -0.3 %;
    start-up within -1.7 % to +1.3 %; the SAP-1 publishes bit for bit, its
    partitions crossing no free chip's edge.

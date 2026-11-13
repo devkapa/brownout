@@ -1970,7 +1970,82 @@ fn seed_holding(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[
         return solve_initial_x(shape, live_params, vc, x_from, ic_ctx).map(|s| (s, Vec::new()));
     }
     let mut solve = |ctx: &IcStampCtx, noting: Option<Noting>| seed_noting(shape, live_params, vc, x_from, ctx, noting);
-    hold_around(ic_ctx, &mut solve).map(|(seed, held)| (seed, held.map_or_else(Vec::new, |h| h.1))).map_err(StepError::into_message)
+    let (seed, held) = hold_around(ic_ctx, &mut solve).map(|(seed, held)| (seed, held.map_or_else(Vec::new, |h| h.1))).map_err(StepError::into_message)?;
+    // Held off at its edge by the procedure (a capacitor holding the supply
+    // there through the seed reads unpowered either way), or not held: the
+    // two-state test decides.
+    if held.iter().all(|(_, h)| h.kind == digital::power::HoldKind::Off) {
+        if let Some(entered) = seed_on_edge(shape, live_params, vc, ic_ctx, &seed) {
+            return Ok(entered);
+        }
+    }
+    Ok((seed, held))
+}
+
+/// Ruling R113 (3), F2 (R53V3): a seed that leaves a free chip's supply on
+/// its edge, within `CROSS_TOLERANCE_V` (a reload mid-slide, W2c judging its
+/// power afresh with the capacitor carried at the edge; the commit a cut at
+/// the edge ends on, ruling R113 4 (a)), takes the two-state test there:
+/// where the edge attracts the chip slides from that instant. Its
+/// capacitors at the supply are read at the edge itself, so the seed's
+/// companion (`C / SEED_H`) does not turn the cut's last nanovolt into
+/// milliamps; its states start from the seed's own solution (from the
+/// carried start of a reload the joint system met a singular pivot). Seeded
+/// powered instead, the capacitor holding its supply
+/// through the seed, `sp_board` (a) reloaded at its slide published 1y
+/// powered, 0.286 V (85.9 W0) over the blend, until the step after.
+fn seed_on_edge(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], ic_ctx: &IcStampCtx, seed: &StepResult) -> Option<(StepResult, Vec<(usize, digital::power::PowerHold)>)> {
+    if !crate::solve::hold::sliding_allowed() {
+        return None;
+    }
+    let local = |node: usize| ic_ctx.node_owner.get(&node).filter(|&&(p, _)| p == ic_ctx.p_idx).map(|&(_, l)| l);
+    let read = |x: &[f64], node: usize| local(node).map_or_else(|| ic_ctx.bnd.get(node), |l| x[l]);
+    for (d, ic) in ic_ctx.ics.iter() {
+        let d = *d;
+        if !ic_ctx.bnd.hold(d).is_free() || !ic_ctx.slides.get(d).copied().unwrap_or(false) || ic.vcc.open || ic.gnd.open || local(ic.vcc.node).is_none() {
+            continue;
+        }
+        // Where its capacitor holds it, the supply is that capacitor's
+        // charge (the seed moves it by the feed over `SEED_H`, 1.5e-9 V on
+        // `sp_board` (a), past the cut's tolerance); else the seed's.
+        let row = local(ic.vcc.node);
+        let v_gnd = read(&seed.x, ic.gnd.node);
+        let charged = shape.capacitors.iter().zip(vc).find_map(|(cap, &q)| match (cap.pins[0].local.filter(|&l| l < shape.n), cap.pins[1].local.filter(|&l| l < shape.n)) {
+            (Some(l), None) if Some(l) == row => Some(q + ic_ctx.bnd.get(cap.pins[1].node)),
+            (None, Some(l)) if Some(l) == row => Some(ic_ctx.bnd.get(cap.pins[0].node) - q),
+            _ => None,
+        });
+        let s = charged.unwrap_or_else(|| read(&seed.x, ic.vcc.node)) - v_gnd;
+        let (lo, hi) = digital::levels::power_window(ic);
+        let edge = if (s - lo).abs() <= (s - hi).abs() { lo } else { hi };
+        if (s - edge).abs() > CROSS_TOLERANCE_V {
+            continue;
+        }
+        // The supply's capacitors to a node off the partition, at the edge.
+        let v_edge = edge + v_gnd;
+        let mut vc_edge = vc.to_vec();
+        for (k, cap) in shape.capacitors.iter().enumerate() {
+            let (a, b) = (cap.pins[0].local.filter(|&l| l < shape.n), cap.pins[1].local.filter(|&l| l < shape.n));
+            match (a, b) {
+                (Some(l), None) if Some(l) == row => vc_edge[k] = v_edge - ic_ctx.bnd.get(cap.pins[1].node),
+                (None, Some(l)) if Some(l) == row => vc_edge[k] = ic_ctx.bnd.get(cap.pins[0].node) - v_edge,
+                _ => {}
+            }
+        }
+        let mut table = ic_ctx.bnd.holds.to_vec();
+        if table.len() <= d {
+            table.resize(d + 1, digital::power::PowerHold::FREE);
+        }
+        table[d] = digital::power::PowerHold::duty(0.5);
+        let ctx = IcStampCtx { bnd: ic_ctx.bnd.with_holds(&table), entry_floor: Some(edge == lo), ..*ic_ctx };
+        let solved = seed_noting(shape, live_params, &vc_edge, &seed.x, &ctx, None);
+        let Ok(solved) = solved else { continue };
+        if let Some(own) = solved.own.as_ref().filter(|o| o.exit.is_none()) {
+            let duty = digital::power::PowerHold::duty(own.w);
+            return Some((solved, vec![(d, duty)]));
+        }
+    }
+    None
 }
 
 /// Whether a solve under `ic_ctx` runs W1c point 1a around its Newton
