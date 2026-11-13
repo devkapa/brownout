@@ -34,7 +34,9 @@
     "",
     "W1f added battery-engine-physics.test.ts and the bench_psu cases of wave5-regulators.test.ts (its regulator cases are W3 and unlisted), reclassified the eleven not-yet cases its kinds unblocked, and added waveform-sources-supplemental.test.ts for clock_gen, pulse_gen and pulse_source, which no classic suite builds from implemented kinds alone. digital-pulse.test.ts and waveform.test.ts build no circuit (they test classic's waveform functions directly), so they have nothing to run on the core and are not wired in.",
     "",
-    "W1g (G4) wired in led-damage-limit-irated, wave3-protection's ptc_fuse cases, the 0.6.1 fixes' own tests (output-sag-direction, resistor-default-overload, thermal-cold-start-warnings, ls47-released-segment-sag) and engine-warnings, reclassified failure-states, thermal-engine-physics and catalog-identity (W1g point 19.3), and moved the four rows that cited the removed led-thermal decline. A case that reloads mid-failure, or needs saveState, is W2 (W1g point 15, Q8); the op-amp, 7805, lm393 and transistor cases are W3; missing_flyback moves to W3 (W1g round 2 ruling): every case switches its winding with a W3 transistor."
+    "W1g (G4) wired in led-damage-limit-irated, wave3-protection's ptc_fuse cases, the 0.6.1 fixes' own tests (output-sag-direction, resistor-default-overload, thermal-cold-start-warnings, ls47-released-segment-sag) and engine-warnings, reclassified failure-states, thermal-engine-physics and catalog-identity (W1g point 19.3), and moved the four rows that cited the removed led-thermal decline. A case that reloads mid-failure, or needs saveState, is W2 (W1g point 15, Q8); the op-amp, 7805, lm393 and transistor cases are W3; missing_flyback moves to W3 (W1g round 2 ruling): every case switches its winding with a W3 transistor.",
+    "",
+    "W2i reclassified the cases W2 unblocked (W2 design section 6). eeprom-write's fifteen went with W2c piece 5 (578a518). The other thirteen went here: the ten that reload and need the carry (the four 74HC14 dead-band cases and the 74ls47 delay case in wave2-combinational, the two 74HC74 capture cases in wave2-sequential, battery's warm load, failure-states' failed-open branch and wave3-protection's PTC recovery) and the three that need the snapshot (battery's rollback, thermal's rollback, extended-integration's 555 chaser, for which the adapter's saveState() returns the published readouts too). step-breakpoints' four are classic-only by ruling D18 (a). What stays not-yet waits for a kind: W1h (cd4511, cd4017, cd4060, 74hc595, potentiometer and the other unported kinds), W3 (the analog parts) or W6 (DC-OP and small-signal AC). wave5-regulators' two 'first accepted step' cases read classic's saveState().failureStress map, which the core's snapshot does not expose, and stay not-yet as they were (they were not among the 28)."
   ],
   "suites": [
     {
@@ -1016,24 +1018,24 @@
         {
           "describe": "74HC14 — Schmitt hysteresis dead band",
           "name": "holds LOW output when input is in dead band approached from above",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc14"
           ],
-          "reason": "Empirically fails on the built core: expected the output to stay LOW across the reload (the Schmitt-held input level carried forward from before), got the opposite. core/README.md rule 5 (Kernel semantics: partitions and dynamic solves) states plainly that \"carrying charge across a reload is W2\" for capacitors; the same is true for a digital IC's per-pin Schmitt hold-state and in-flight delay-FSM timers (classic's icState, sim-engine.ts:1043's own comment: \"74HC14 icState carries per-input Schmitt hysteresis level\"; carried forward by component id at every classic load(), sim-engine.ts:2808) — bo_engine_load has no per-id state carry-forward at all in W1, so every reload starts the IC's Schmitt/delay state fresh. This is a known, explicitly-documented W1 limitation (load carry-forward is W2, decision 1), not a core bug; not-yet until W2 lands."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). The reload carries the 74HC14's per-input Schmitt level by component id, so the dead-band input keeps the output LOW. It failed before the carry (the output flipped on the reload) and passes on the built core now."
         },
         {
           "describe": "74HC14 — Schmitt hysteresis dead band",
           "name": "holds HIGH output when input is in dead band approached from below",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc14"
           ],
-          "reason": "Passes on the built core TODAY, but only by coincidence, not because the mechanism is correct: with no reload carry-forward (see the \"approached from above\" sibling case's reason — core/README.md rule 5, \"carrying charge across a reload is W2\", generalised to digital IC state), a freshly-reloaded IC's Schmitt hold-state defaults to LOW (core/README.md rule 4, \"in between it holds its per-pin state (default LOW)\"), which happens to equal the state this direction of approach needs anyway. Classifying this \"portable\" would be exactly the vacuous/coincidental pass gate 1's own no-silent-fallback design (adapter.ts's header, section 3.6 risk 3) exists to catch: it is not proving digital identity for the right reason, and would silently stop proving anything the day the default or classic's own default diverge. not-yet, for the same W2 load-carry-forward reason as its sibling."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). It used to pass only because a reloaded Schmitt input started LOW; the carried level is what holds the output HIGH now, and the 'approached from above' sibling, which the old default could not pass, proves the carry."
         },
         {
           "describe": "74HC14 — Schmitt hysteresis dead band",
@@ -2468,24 +2470,24 @@
         {
           "describe": "74LS47 — Schmitt commit semantics (74HC14)",
           "name": "dead-band input from above: output stays LOW across 20 steps",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc14"
           ],
-          "reason": "Empirically fails on the built core: expected the output to stay LOW across the reload (the Schmitt-held input level carried forward from before), got the opposite. core/README.md rule 5 (Kernel semantics: partitions and dynamic solves) states plainly that \"carrying charge across a reload is W2\" for capacitors; the same is true for a digital IC's per-pin Schmitt hold-state and in-flight delay-FSM timers (classic's icState, sim-engine.ts:1043's own comment: \"74HC14 icState carries per-input Schmitt hysteresis level\"; carried forward by component id at every classic load(), sim-engine.ts:2808) — bo_engine_load has no per-id state carry-forward at all in W1, so every reload starts the IC's Schmitt/delay state fresh. This is a known, explicitly-documented W1 limitation (load carry-forward is W2, decision 1), not a core bug; not-yet until W2 lands."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). Same carried Schmitt level as the 'approached from above' case; failed before the carry, passes on the built core now."
         },
         {
           "describe": "74LS47 — Schmitt commit semantics (74HC14)",
           "name": "dead-band input from below: output stays HIGH across 20 steps",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc14"
           ],
-          "reason": "Passes on the built core TODAY, but only by coincidence, not because the mechanism is correct: with no reload carry-forward (see the \"approached from above\" sibling case's reason — core/README.md rule 5, \"carrying charge across a reload is W2\", generalised to digital IC state), a freshly-reloaded IC's Schmitt hold-state defaults to LOW (core/README.md rule 4, \"in between it holds its per-pin state (default LOW)\"), which happens to equal the state this direction of approach needs anyway. Classifying this \"portable\" would be exactly the vacuous/coincidental pass gate 1's own no-silent-fallback design (adapter.ts's header, section 3.6 risk 3) exists to catch: it is not proving digital identity for the right reason, and would silently stop proving anything the day the default or classic's own default diverge. not-yet, for the same W2 load-carry-forward reason as its sibling."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). Same as the 'approached from below' case: the carried Schmitt level holds the output, not the reload default; its 'from above' sibling proves the carry."
         },
         {
           "describe": "infrastructure — CMOS-4000 thresholds (fabricated spec)",
@@ -2551,13 +2553,13 @@
         {
           "describe": "infrastructure — catalog prop_delay_ns override",
           "name": "74ls47 uses catalog-declared prop_delay_ns=35 — output delay observable",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74ls47"
           ],
-          "reason": "Empirically fails on the built core: expected digitalState to still show the OLD committed value 25 ns after a reload changed the BCD input (less than the 35 ns catalog prop delay), got the NEW value already committed. Same root cause as the 74HC14 Schmitt dead-band cases above: bo_engine_load carries no per-id digital state forward (core/README.md rule 5's \"carrying charge across a reload is W2\", generalised) so the delay FSM treats every pin as a fresh first observation on reload, and \"first observation has zero delay\" (core/README.md's events section, mirroring classic's own §2.4 rule) commits the new value immediately instead of respecting the in-flight 35 ns timer a live (non-reloaded) transition would get. Not a core bug -- a known, documented W1 limitation (load carry-forward is W2, decision 1). The 74hc14 prop_delay_ns=15 case above does NOT prove the core's own delay-FSM timing either (review finding 15: it loads with the input already at its final level, so its load-time settle resolves before any delay could be observed). combinational-ics.test.ts's \"a genuinely observed propagation delay\" case (a continuous RC threshold crossing, never a reload — sidestepping this exact W2 gap entirely) is the first case anywhere in this corpus that actually proves the core's delay-FSM timing on a live (non-reloaded) transition, for the 74hc14 kind — 74ls47's own 35 ns value across a RELOAD-based transition specifically is still unverified pending W2's reload carry-forward (this case's own subject)."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). The reload that changes the BCD input carries the 74ls47's committed outputs, so the new value is an ordinary transition that waits the catalog's 35 ns, and 25 ns after the reload digitalState still shows the old one. It failed before the carry (a reload was a first observation with zero delay)."
         }
       ]
     },
@@ -2654,12 +2656,12 @@
         {
           "describe": "session-only failure states",
           "name": "removes a failed-open branch instead of coupling high-impedance nodes through 1 GΩ",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor"
           ],
-          "reason": "W2. Verified by running against the core (W1g): the latch and the open hold, then the case reloads the circuit mid-failure and fails with 'expected [] to deeply equal [ resistor_overload ]': a reload carries classic's failure, stress, PTC and thermal state forward by id and kind (SE:2690-2733, 2829-2850); the core's load starts every slow device fresh (W1g point 15, Q8), so this is W2's carry-forward (D25)."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). The mid-failure reload carries the latched resistor_overload and the open branch by id and kind, as classic's does. It failed before the carry with 'expected [] to deeply equal [ resistor_overload ]'."
         },
         {
           "describe": "session-only failure states",
@@ -2990,13 +2992,13 @@
         {
           "describe": "74HC74 — D captured on rising edge only",
           "name": "D=0 is captured when CLK goes LOW→HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc74"
           ],
-          "reason": "Verified by running against the core: FAILS (expected q1 > 4V, observed 0.031V -- LOW). This is the known load-carry-forward gap (a core reload re-runs the zero-delay load settle with no per-id carry-forward, W2 scope): the case first reloads once to capture D=1 (Q=1, by the same phantom-edge mechanism as the sibling \"D=1 is captured\" case), asserts Q=1, then reloads a SECOND time (D changes to 0, CLK stays LOW) expecting Q to HOLD at the previously captured 1. On the core the second reload resets the register to its power-on value (Q=0) instead of carrying the prior Q=1 forward, and CLK now reads LOW at that reload's edge pass (no phantom edge either), so Q stays at the freshly-reset 0 rather than holding 1. classic carries `delay:/pending:/due:`-style per-id state across load() by id; the core does not yet (W2)."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). The reloads that move D and CLK carry the 74HC74's latch and its clock level, so a reload is no longer a phantom first observation and the flip-flop captures D only on the real rising edge. It failed before the carry (q1 read 0.031 V)."
         },
         {
           "describe": "74HC74 — D captured on rising edge only",
@@ -3012,13 +3014,13 @@
         {
           "describe": "74HC74 — D captured on rising edge only",
           "name": "state holds with CLK high (no second capture)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc74"
           ],
-          "reason": "Verified by running against the core: FAILS (expected q1 > 4V, observed 0.031V -- LOW). Same load-carry-forward gap as the sibling \"D=0 is captured\" case, and worse: after the first reload's phantom edge captures D=1 (Q=1), a SECOND reload changes D to 0 while CLK stays at the SAME already-HIGH level (no fresh edge on a real part, so classic holds Q=1). On the core the second reload both (a) resets the register to power-on (Q=0) instead of carrying the prior Q=1 forward, AND (b) treats the still-HIGH clock as a brand-new phantom rising edge (every reload's edge pass runs with lastClk forced to 0, core/README.md point 7), which captures the NEW D=0 -> Q=0. So the core does not merely fail to preserve the old Q=1, it actively re-triggers a clock edge on every reload -- a direct consequence of the same W2-scope gap."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). Same carried latch and clock level as the 'D=0 is captured' sibling: the second reload changes D with CLK held high and Q does not move. It failed before the carry."
         },
         {
           "describe": "74HC74 — async /PRE and /CLR overrides",
@@ -5595,7 +5597,7 @@
         {
           "describe": "corpus isolation — pre-A6 fixtures stay bitwise deterministic (Wave A6)",
           "name": "555 chaser: two fresh engines replay 200 steps bit-identically",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74ls161",
             "bench_psu",
@@ -5606,7 +5608,7 @@
             "resistor",
             "spdt_switch"
           ],
-          "reason": "Verified by running against the core (W1f): the circuit loads, and the case fails with TypeError: engine.saveState is not a function. It compares saveState() snapshots of two engines; state save and restore through the host is W2."
+          "reason": "W2i: portable since W2a. The case serialises saveState() after each of 200 steps and compares two fresh engines' frames. The core's snapshot is an opaque handle, so the adapter's saveState() also returns every readout published at the save (time, node voltages, device and channel currents, digital state, failures, warnings, displays); the comparison is over those, bit for bit, and the 200 frames are all different (adapter.test.ts proves a frame moves with the state). Classic's internal fields (the Newton iterate, capacitor history) have no core counterpart and are not compared."
         }
       ]
     },
@@ -6391,50 +6393,50 @@
         {
           "describe": "SimEngine step breakpoints",
           "name": "records the state on both sides of each 555 switch, inside the step that switched",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "capacitor",
             "ne555",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+          "reason": "Classic-only by ruling D18 (a), W2 design section 5: step breakpoints are not ported. They record classic's state on both sides of a 555 switch inside the fixed step that contained it; the core has no fixed step to split (it lands on the 555's commit instant exactly) and CoreEngine has no takeStepBreakpoints. What the breakpoints were for, the light and the waveform between samples, is the core's acquisition and charge (core/README.md, Acquisition and Charge), which gate 2 covers."
         },
         {
           "describe": "SimEngine step breakpoints",
           "name": "records nothing unless asked",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "capacitor",
             "ne555",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+          "reason": "Classic-only by ruling D18 (a), W2 design section 5: step breakpoints are not ported. They record classic's state on both sides of a 555 switch inside the fixed step that contained it; the core has no fixed step to split (it lands on the 555's commit instant exactly) and CoreEngine has no takeStepBreakpoints. What the breakpoints were for, the light and the waveform between samples, is the core's acquisition and charge (core/README.md, Acquisition and Charge), which gate 2 covers."
         },
         {
           "describe": "SimEngine step breakpoints",
           "name": "drops the breakpoints of a rolled-back trial",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "capacitor",
             "ne555",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+          "reason": "Classic-only by ruling D18 (a), W2 design section 5: step breakpoints are not ported. They record classic's state on both sides of a 555 switch inside the fixed step that contained it; the core has no fixed step to split (it lands on the 555's commit instant exactly) and CoreEngine has no takeStepBreakpoints. What the breakpoints were for, the light and the waveform between samples, is the core's acquisition and charge (core/README.md, Acquisition and Charge), which gate 2 covers."
         },
         {
           "describe": "SimEngine step breakpoints",
           "name": "changes the trajectory only by the guard sub-step",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "capacitor",
             "ne555",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: the ne555 astable loads and steps on the core, then the case fails with 'TypeError: takeStepBreakpoints is not a function'. Step breakpoints (the state on both sides of a 555 switch, recorded inside the step) are W2, and the adapter has no takeStepBreakpoints."
+          "reason": "Classic-only by ruling D18 (a), W2 design section 5: step breakpoints are not ported. They record classic's state on both sides of a 555 switch inside the fixed step that contained it; the core has no fixed step to split (it lands on the 555's commit instant exactly) and CoreEngine has no takeStepBreakpoints. What the breakpoints were for, the light and the waveform between samples, is the core's acquisition and charge (core/README.md, Acquisition and Charge), which gate 2 covers."
         }
       ]
     },
@@ -6525,12 +6527,12 @@
         {
           "describe": "engine package thermal coupling",
           "name": "restores thermal energy exactly across a rejected/adaptive trial",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "voltage_source"
           ],
-          "reason": "W2. Verified by running against the core (W1g): fails with TypeError: engine.saveState is not a function. Snapshots through the host are W2 (W1g point 19.3)."
+          "reason": "W2i: portable since W2a's whole-engine snapshot: the adapter maps saveState/restoreState to it, and the case re-runs 2.5 s from the restored state and reads the same thermal state from the core. It failed before with 'engine.saveState is not a function'."
         },
         {
           "describe": "engine package thermal coupling",
@@ -6655,22 +6657,22 @@
         {
           "describe": "battery chemistry integration",
           "name": "counts delivered coulombs, lowers SoC, and rolls back exactly",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "battery_pack",
             "resistor"
           ],
-          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function. The SoC and coulomb half would run; the case then restores a saveState() snapshot and checks the battery state rolled back. Rollback through the host is W2."
+          "reason": "W2i: portable since W2a's whole-engine snapshot (core/README.md, Snapshots): the adapter maps saveState/restoreState to it, and the case reads the cell's SoC and coulombs back from the core after the restore. It failed before with 'engine.saveState is not a function'."
         },
         {
           "describe": "battery chemistry integration",
           "name": "preserves runtime depletion across warm loads and resets on authored charge edit",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "battery_pack",
             "resistor"
           ],
-          "reason": "Verified by running against the core (W1f): fails, expected 1 to be close to 0.7698. A warm load() of the same circuit carries classic's depleted SoC forward; the core's load starts from the authored charge (F3b2: same-id SoC carry across a reload is W2)."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). A warm load of the same circuit carries the cell's depleted SoC, and an authored charge edit resets it, as on classic. It failed before the carry (SoC back at 1)."
         },
         {
           "describe": "battery chemistry integration",
@@ -6861,12 +6863,12 @@
         {
           "describe": "ptc_fuse — recovery after 2s below iHold/2",
           "name": "stays tripped after 1s at low current, recovers after 2.5s",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "ptc_fuse"
           ],
-          "reason": "W2. Verified by running against the core (W1g): fails with 'expected false to be true' at 'still tripped at load time': the case reloads to carry the trip, and a reload carries classic's failure, stress, PTC and thermal state forward by id and kind (SE:2690-2733, 2829-2850); the core's load starts every slow device fresh (W1g point 15, Q8), so this is W2's carry-forward (D25). The recovery itself is gate 2c's PTC fixture."
+          "reason": "W2i: portable since W2c's load carry-forward (core/README.md, Carry). The reload carries the PTC's trip and its recovery timer, so it is still tripped at load time and recovers after 2.5 s. It failed before the carry at 'still tripped at load time'."
         },
         {
           "describe": "ptc_fuse — resetFailures clears PTC trip state",
