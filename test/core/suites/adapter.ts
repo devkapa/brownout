@@ -61,9 +61,12 @@
  * the circuit object it loaded (classic re-reads that reference every step):
  * live params through `setParams`, anything else as a thrown
  * `CoreSuiteEditNotDeliverableError` until W2c's carry and live V land.
- * Nothing else on classic `SimEngine` (saveState/restoreState/
- * captureErrorState/setMicrobitDrive/the dozens of kind-specific setters,
- * ...) is implemented: no case in classification.json currently needs any of
+ * `saveState`/`restoreState` (W2a) map to the core's snapshot; the snapshot
+ * also carries the readouts published at the save, so a case that compares
+ * two snapshots compares something (see `saveState`).
+ * Nothing else on classic `SimEngine` (captureErrorState/setMicrobitDrive/
+ * takeStepBreakpoints/the dozens of kind-specific setters, ...) is
+ * implemented: no case in classification.json currently needs any of
  * them, and inventing behaviour for a method no allowlisted test calls would
  * be exactly the kind of unverified guess the W1 plan's risk 15 warns about.
  * A suite file that needs one fails with a plain "not a function" TypeError,
@@ -144,6 +147,23 @@ export class CoreSuiteEditNotDeliverableError extends Error {
     this.name = "CoreSuiteEditNotDeliverableError";
     this.reason = reason;
   }
+}
+
+/** What the adapter's `saveState()` returns: see that method. */
+export interface CoreSuiteSnapshot {
+  readonly core: CoreSnapshot;
+  readonly delivered: SimCircuit | undefined;
+  readonly published: {
+    readonly simTime: number;
+    readonly lastConverged: boolean;
+    readonly netV: Record<string, number>;
+    readonly elementI: Record<string, number>;
+    readonly elementChannelI: Record<string, number[]>;
+    readonly digitalState: Record<string, number>;
+    readonly failures: Record<string, SimFailure>;
+    readonly warnings: Record<string, SimWarning>;
+    readonly displayState: Record<string, DisplayInfo>;
+  };
 }
 
 export interface CoreSuiteEngineOptions {
@@ -383,17 +403,39 @@ export class SimEngine implements EngineReadout {
   // ---- Snapshots (W2a): CoreEngine only -------------------------------------
 
   /**
-   * Classic `SimEngine.saveState()`, for eeprom-write's snapshot case: the
-   * core's snapshot (W2a) and the circuit as delivered then, since a restore
-   * puts back the params the core held at the save, and the next step must
-   * deliver the live circuit's against those.
+   * Classic `SimEngine.saveState()`: the core's snapshot (W2a) and the
+   * circuit as delivered then, since a restore puts back the params the core
+   * held at the save, and the next step must deliver the live circuit's
+   * against those.
+   *
+   * `published` is every readout the core published at the save. The core's
+   * own snapshot is an opaque handle with no fields, so a suite that compares
+   * two snapshots (extended-integration serialises one per step and asks two
+   * fresh engines for the same frames) would compare nothing without it. On
+   * the core the published state is what such a case can pin bit for bit;
+   * classic's internal fields have no counterpart to compare.
    */
-  saveState(): { readonly core: CoreSnapshot; readonly delivered: SimCircuit | undefined } {
-    return { core: this._coreEngine("saveState").saveState(), delivered: structuredClone(this._delivered) };
+  saveState(): CoreSuiteSnapshot {
+    const core = this._coreEngine("saveState");
+    return {
+      core: core.saveState(),
+      delivered: structuredClone(this._delivered),
+      published: structuredClone({
+        simTime: core.simTime,
+        lastConverged: core.lastConverged,
+        netV: core.getNetV(),
+        elementI: core.getElementI(),
+        elementChannelI: core.getElementChannelI(),
+        digitalState: core.digitalState,
+        failures: core.getFailures(),
+        warnings: core.getWarnings(),
+        displayState: core.getDisplayState(),
+      }),
+    };
   }
 
   /** Classic `SimEngine.restoreState(snapshot)`, the pair of {@link saveState}. */
-  restoreState(snapshot: { readonly core: CoreSnapshot; readonly delivered: SimCircuit | undefined }): void {
+  restoreState(snapshot: CoreSuiteSnapshot): void {
     this._coreEngine("restoreState").restoreState(snapshot.core);
     this._delivered = structuredClone(snapshot.delivered);
   }

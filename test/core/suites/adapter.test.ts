@@ -429,3 +429,53 @@ describe("adapter.ts SimEngine — takeEepromUpdates (classic's shape, from the 
     expect(() => engine.takeEepromUpdates()).toThrow(/takeEepromUpdates\(\) needs the core/);
   });
 });
+
+describe("adapter.ts SimEngine — a snapshot shows what the core published at the save", () => {
+  // extended-integration's determinism case serialises saveState() after every
+  // step and compares two engines' frames. The core's snapshot is an opaque
+  // handle, so a frame made of it alone is the same string at every step and
+  // on every circuit, and that comparison would pass while checking nothing.
+  const RC: SimCircuit = {
+    components: [
+      part("src", "voltage_source", ["pos", "neg"], { voltage: 9 }),
+      part("r1", "resistor", ["a", "b"], { resistance: 10_000 }),
+      part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+    ],
+    wires: [wire("src", "pos", "r1", "a"), wire("r1", "b", "c1", "a"), wire("c1", "b", "src", "neg")],
+  };
+
+  function frames(steps: number): string[] {
+    const engine = new SimEngine();
+    engine.load(structuredClone(RC));
+    const out: string[] = [];
+    for (let i = 0; i < steps; i++) {
+      engine.step(1e-3);
+      out.push(JSON.stringify(engine.saveState()));
+    }
+    return out;
+  }
+
+  it("a charging capacitor's frames differ from step to step, and two fresh engines agree on every one", () => {
+    const a = frames(5);
+    const b = frames(5);
+    expect(new Set(a).size).toBe(5);
+    expect(b).toEqual(a);
+  });
+
+  it("the frame holds the published readouts as they were at the save, not as they are now", () => {
+    const engine = new SimEngine();
+    engine.load(structuredClone(RC));
+    engine.step(1e-3);
+    const snapshot = engine.saveState();
+    const capNet = engine.getNetIdForPin("c1", "a")!;
+    const vAtSave = engine.getNetV()[capNet]!;
+    engine.step(5e-3);
+    expect(engine.getNetV()[capNet]).toBeGreaterThan(vAtSave + 1);
+    expect(snapshot.published.simTime).toBe(1e-3);
+    expect(snapshot.published.netV[capNet]).toBe(vAtSave);
+
+    engine.restoreState(snapshot);
+    expect(engine.simTime).toBe(1e-3);
+    expect(engine.getNetV()[capNet]).toBe(vAtSave);
+  });
+});
