@@ -46,7 +46,7 @@ export {
 } from "./core/errors.js";
 
 export { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "./core/kinds.js";
-export { unsupportedCoreKinds, unsupportedCoreKindReasons } from "./core/select.js";
+export { coreAdvanceFailureReason, coreFailureReasons, unsupportedCoreKinds, unsupportedCoreKindReasons } from "./core/select.js";
 export type { EngineChoice } from "./core/select.js";
 
 export type { EngineReadout, TelemetryEngine } from "./core/surface.js";

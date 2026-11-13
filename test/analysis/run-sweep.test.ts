@@ -689,9 +689,11 @@ describe("engine report", () => {
 // A trap, a poisoned instance or a malformed-program load code (-1/-2/-5) is
 // the core failing, not the circuit being declined. Under auto the whole run is
 // replayed on classic (a poisoned core is never reused) and the reason is
-// recorded; under an explicit core it throws; a non-converged core advance is a
-// circuit fact and is NOT retried. Injected by patching CoreEngine, as the real
-// failures need a wasm trap.
+// recorded; under an explicit core it throws. A core advance that does not
+// converge is replayed on classic under auto too (ruling R116: the core giving
+// up part-way does not show that classic would), and under an explicit core it
+// is the convergence error it always was. Injected by patching CoreEngine, as
+// the real failures need a wasm trap or a circuit the core gives up on.
 
 describe("a core failure under auto replays the run on classic", () => {
   afterEach(() => {
@@ -779,18 +781,64 @@ describe("a core failure under auto replays the run on classic", () => {
     expect(result.engine).toBe("classic");
   });
 
-  it("a mid-run non-converged core advance is rejected with the core's message and is NOT retried on classic", () => {
-    // `lastConverged` is read once per advance; report the 3rd advance as failed.
+  /** `lastConverged` is read once per advance; report the n-th advance (1-based, from now) as failed. */
+  function failAdvance(n: number): void {
+    const original = Object.getOwnPropertyDescriptor(CoreEngine.prototype, "lastConverged")!.get!;
     let reads = 0;
-    vi.spyOn(CoreEngine.prototype, "lastConverged", "get").mockImplementation(() => ++reads !== 3);
+    vi.spyOn(CoreEngine.prototype, "lastConverged", "get").mockImplementation(function (this: CoreEngine) {
+      return ++reads === n ? false : original.call(this);
+    });
+  }
+
+  it("auto: a core advance that does not converge part-way replays the whole run on classic, with the reason, same numbers", () => {
+    failAdvance(3);
+    const points: number[] = [];
+    const restarts: (readonly string[])[] = [];
+    const result = runSweepImpl(sweepSpec(), voltageDividerCircuit(), {
+      ...widened,
+      onPoint: (i) => points.push(i),
+      onRestart: (reasons) => {
+        restarts.push(reasons);
+        points.push(-1);
+      },
+    });
+    vi.restoreAllMocks();
+    // No failure record behind the patched flag, so the reason is the bare one.
+    expect(restarts).toEqual([["mid-run:advance-failed"]]);
+    expect(points.slice(points.indexOf(-1) + 1)).toEqual([0, 1, 2, 3, 4]);
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["mid-run:advance-failed"]);
+    expect(result.outputs[0]!.mean).toEqual(classicMeans());
+  });
+
+  it("auto: the reason carries the core's own code and message when it gave one", () => {
+    failAdvance(3);
+    vi.spyOn(CoreEngine.prototype, "lastAdvanceFailure", "get").mockReturnValue({ code: -7, message: "delta cycle did not settle" });
+    const result = runSweepImpl(sweepSpec(), voltageDividerCircuit(), widened);
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["mid-run:livelock:delta cycle did not settle"]);
+  });
+
+  it("an explicit core: the same failed advance is the convergence error it always was, and nothing is retried", () => {
     let restarts = 0;
     const attempt = (): unknown =>
-      runSweepImpl(sweepSpec(), voltageDividerCircuit(), { ...widened, onRestart: () => restarts++ });
+      runSweepImpl(sweepSpec({ engine: "core" }), voltageDividerCircuit(), { ...widened, onRestart: () => restarts++ });
+    failAdvance(3);
     expect(attempt).toThrow(AnalysisConvergenceError);
-    reads = 0;
+    vi.restoreAllMocks();
+    failAdvance(3);
     expect(attempt).toThrow(
       /runSweep point 0 \(x=1\) did not converge at 0\.0001 s\. The core kept its last completed instant \(.*\), this analysis point was rejected/,
     );
     expect(restarts).toBe(0);
+  });
+
+  it("the async runner replays a failed advance too", async () => {
+    failAdvance(3);
+    let restarts = 0;
+    const result = await runSweepAsyncImpl(sweepSpec(), voltageDividerCircuit(), { ...widened, onRestart: () => restarts++ });
+    expect(restarts).toBe(1);
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["mid-run:advance-failed"]);
   });
 });

@@ -39,8 +39,8 @@ export interface AnalysisEngineOptions {
 
 /**
  * The restart hook the runners' hooks types share. A run that was on the core
- * and was declined by the Rust load part-way through is replayed whole on
- * classic; `onPoint` would then count the same points twice, so a progress UI
+ * and was declined by the Rust load part-way through, or that the core failed
+ * or stopped converging in, is replayed whole on classic; `onPoint` would then count the same points twice, so a progress UI
  * is told first.
  */
 export interface AnalysisRestartHook {
@@ -106,14 +106,32 @@ export interface AnalysisEngine {
  * load declined it (a topology it does not take, a load-time livelock or solve
  * failure), or the core itself failed (a trap, a poisoned instance, a load code
  * for a malformed program). `runOnPlan` turns it into a whole-run rerun on
- * classic under `auto`. A non-converged advance is NOT this: that is the
- * circuit, and it throws AnalysisConvergenceError.
+ * classic under `auto`. A non-converged advance is NOT this: it throws
+ * AnalysisCoreStalledError, below.
  */
 export class AnalysisCoreRejectedError extends Error {
   readonly reasons: readonly string[];
   constructor(reasons: readonly string[]) {
     super(`the core could not run the circuit: ${reasons.join(", ")}`);
     this.name = "AnalysisCoreRejectedError";
+    this.reasons = reasons;
+  }
+}
+
+/**
+ * A core advance that did not converge (a failed solve or a livelock part-way
+ * through a point). It IS an AnalysisConvergenceError, so an explicit `core`
+ * run reports it exactly as it always did. Under `auto`, `runOnPlan` replays
+ * the whole run on classic and records `reasons` (ruling R116): the core
+ * giving up on a circuit does not show that classic would, and if classic
+ * cannot solve it either, classic's own AnalysisConvergenceError is the
+ * answer.
+ */
+export class AnalysisCoreStalledError extends AnalysisConvergenceError {
+  readonly reasons: readonly string[];
+  constructor(message: string, reasons: readonly string[]) {
+    super(message);
+    this.name = "AnalysisCoreStalledError";
     this.reasons = reasons;
   }
 }
@@ -262,10 +280,13 @@ function explicitCoreRejection(reasons: readonly string[]): Error {
 
 /**
  * Run `body` on the plan's engine, then dispose it. A core rejection from the
- * Rust load (the one thing compiling cannot see) discards the partial run and
- * reruns the WHOLE body on classic, so a result never mixes engines; `body`
- * receives the report current at each attempt and must put it on its result.
- * Under an explicit `core` request the rejection is an Error instead.
+ * Rust load (the one thing compiling cannot see), a core failure (a trap, a
+ * poisoned instance) or a core advance that does not converge discards the
+ * partial run and reruns the WHOLE body on classic, so a result never mixes
+ * engines; `body` receives the report current at each attempt and must put it
+ * on its result. Under an explicit `core` request nothing is rerun: a
+ * rejection is an Error naming the reasons, and a failed advance is the
+ * AnalysisConvergenceError it throws.
  * `onRestart(reasons)` is called once before the replay (see AnalysisRestartHook).
  */
 export function runOnPlan<R>(
@@ -280,6 +301,14 @@ export function runOnPlan<R>(
     if (err instanceof AnalysisCoreRejectedError) {
       const next = plan.downgrade(err.reasons);
       if (next === null) throw explicitCoreRejection(err.reasons);
+      engine.dispose();
+      onRestart?.(err.reasons);
+      return runOnPlan(next, body);
+    }
+    if (err instanceof AnalysisCoreStalledError) {
+      const next = plan.downgrade(err.reasons);
+      // An explicit `core`: the convergence error itself, as before.
+      if (next === null) throw err;
       engine.dispose();
       onRestart?.(err.reasons);
       return runOnPlan(next, body);
@@ -303,6 +332,14 @@ export async function runOnPlanAsync<R>(
     if (err instanceof AnalysisCoreRejectedError) {
       const next = plan.downgrade(err.reasons);
       if (next === null) throw explicitCoreRejection(err.reasons);
+      engine.dispose();
+      onRestart?.(err.reasons);
+      return await runOnPlanAsync(next, body);
+    }
+    if (err instanceof AnalysisCoreStalledError) {
+      const next = plan.downgrade(err.reasons);
+      // An explicit `core`: the convergence error itself, as before.
+      if (next === null) throw err;
       engine.dispose();
       onRestart?.(err.reasons);
       return await runOnPlanAsync(next, body);

@@ -25,17 +25,30 @@ import { initCore, CORE_IMPLEMENTED_KINDS } from "brownout/core";
 import { HeadlessRunner } from "brownout/host";
 
 await initCore(); // once; loads the wasm that ships in the package
-const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
 runner.load(circuit);
 runner.activeEngine; // "core", or "classic" after a fallback
 runner.engineFallbackReasons; // why, for example ["unsupported-kind:bjt_npn"]
 ```
 
-`CoreEngine` (also from `brownout/core`) is the engine itself, for a host that runs its own loop. The sweep and Monte Carlo runners take `engine: "core"` and a `coreSupportedKinds` hook option in the same way.
+`HeadlessRunner` takes three values for `engine`:
 
-**When the core cannot take a circuit**, `HeadlessRunner` loads it on classic instead and lists the reasons: `unsupported-kind:<kind>`, `unsupported-feature:<what>:<id>`, `malformed:<id>:<what>`, `topology:<message>`, `livelock:<message>`, `solve-failed:<message>`, `carry:<reason>` for an edit whose state could not be carried, and `core-not-initialized` or `core-poisoned` when the wasm is not ready. `CoreEngine.load()` throws `CoreUnsupportedError` with the same reasons.
+- `"classic"` (the default): the classic engine, always.
+- `"auto"`: the core when it can take the circuit, classic otherwise, and classic again if the core fails part-way through a run (below).
+- `"core"`: chooses at `load()` as `"auto"` does, but once a circuit is running on the core it stays there, and a failure is reported to the caller instead of being covered by classic.
 
-**When the core fails in the middle of a run**, it stops at the last instant it completed and reports `lastConverged === false`, as classic does when a step does not converge; `HeadlessRunner.run()` returns `hitMinStep: true`. It does not switch engines by itself in the middle of a run: the host decides whether to reload the circuit on classic. A crash inside the wasm throws `CoreTrapError`; the module is then unusable until `initCore()` is awaited again.
+`CoreEngine` (also from `brownout/core`) is the engine itself, for a host that runs its own loop. The sweep and Monte Carlo runners take `engine` and a `coreSupportedKinds` hook option in the same way; there `"core"` never falls back at all and throws when the core cannot run the analysis.
+
+**When the core cannot take a circuit**, `HeadlessRunner` (on `"auto"` or `"core"`) loads it on classic instead and lists the reasons: `unsupported-kind:<kind>`, `unsupported-feature:<what>:<id>`, `malformed:<id>:<what>`, `topology:<message>`, `livelock:<message>`, `solve-failed:<message>`, `carry:<reason>` for an edit whose state could not be carried, and `core-not-initialized` or `core-poisoned` when the wasm is not ready. `CoreEngine.load()` throws `CoreUnsupportedError` with the same reasons.
+
+**When the core fails in the middle of a run** (a solve that does not converge, logic that never settles, or a crash inside the wasm), what happens depends on what the host asked for:
+
+- `HeadlessRunner` on `"auto"` finishes the run on classic. No state is carried from one engine to the other, so classic starts again from the load: it loads every circuit the runner gave the core, runs again every `run()` the core had completed, then the run that failed. The readings afterwards are the ones a classic runner gives for the same calls. `activeEngine` becomes `"classic"` and `engineFallbackReasons` says why, for example `["mid-run:solve-failed:<message>", "restarted-from-load"]` or `["core-trap", "restarted-from-load"]`. The cost is the time to simulate that history a second time, and `onSample` is called at the end of each core run instead of during it.
+- A sweep or Monte Carlo run on `"auto"` is run again from its first point on classic, so one result never mixes engines. `onRestart(reasons)` is called first, and the result carries `engine: "classic"` and the reasons.
+- On an explicit `"core"`, nothing is covered. `HeadlessRunner.run()` returns `hitMinStep: true` with the readings of the last instant the core completed, an analysis throws its convergence error, and a crash throws `CoreTrapError`.
+- `CoreEngine` itself stops at the last instant it completed with `lastConverged === false` and `lastAdvanceFailure` set; it never throws for a failed solve.
+
+After a crash inside the wasm the module is unusable until `initCore()` is awaited again; until then every core request falls back with `core-poisoned`.
 
 **Things that differ on the core.**
 

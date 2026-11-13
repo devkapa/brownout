@@ -31,7 +31,9 @@
  *   existed, so it is wrapped, not re-derived. The core reports a failed
  *   advance as `lastConverged = false` with its readouts at the last trusted
  *   instant, which is the same state a rollback restores, so it maps to the
- *   same AnalysisConvergenceError.
+ *   same AnalysisConvergenceError (as its subclass AnalysisCoreStalledError,
+ *   which `runOnPlan` replays on classic under `auto`: the core giving up on a
+ *   circuit part-way is not proof that classic would, ruling R116).
  *
  * WHY the shipped gate is empty today:
  *   `auto` routes to the core only for kinds in CORE_SUPPORTED_KINDS, which is
@@ -43,20 +45,13 @@
 import type { SimCircuit, SimFailure } from "../sim/engine/sim-engine.js";
 import type { Net } from "../sim/engine/graph.js";
 import { CoreEngine } from "../core/engine.js";
-import {
-  CoreLoadError,
-  CorePoisonedError,
-  CoreStaleInstanceError,
-  CoreTrapError,
-  CoreUnsupportedError,
-} from "../core/errors.js";
 import { compileCircuit } from "../core/compile/index.js";
 import { CORE_SUPPORTED_KINDS } from "../core/kinds.js";
-import { unsupportedCoreKindReasons } from "../core/select.js";
+import { coreAdvanceFailureReason, coreFailureReasons, unsupportedCoreKindReasons } from "../core/select.js";
 import { coreReady, coreStatus } from "../core/wasm.js";
-import { AnalysisConvergenceError } from "./checked-step.js";
 import {
   AnalysisCoreRejectedError,
+  AnalysisCoreStalledError,
   classicPlan,
   sortedUnique,
   type AdvanceOptions,
@@ -71,26 +66,6 @@ import {
 export * from "./engine-base.js";
 
 // ─── Core ────────────────────────────────────────────────────────────────────
-
-/**
- * The reasons a core failure maps to, or null for an error that is not the
- * core's to answer for (a caller bug such as a RangeError, which must surface).
- *
- * A decline (`CoreUnsupportedError`) is the circuit; a trap, a poisoned or
- * stale instance and a load code for a malformed program (-1/-2/-5/-8) are the
- * CORE failing. None of them says anything about the circuit, so under `auto`
- * they all replay the run on classic. A poisoned instance is never reused:
- * the planner reads `core-poisoned` from the wasm status on the next run, and
- * the failed run's engine is disposed and not opened again.
- */
-function coreFailureReasons(err: unknown): readonly string[] | null {
-  if (err instanceof CoreUnsupportedError) return err.reasons;
-  if (err instanceof CoreTrapError) return ["core-trap"];
-  if (err instanceof CorePoisonedError) return ["core-poisoned"];
-  if (err instanceof CoreStaleInstanceError) return ["core-stale-instance"];
-  if (err instanceof CoreLoadError) return [`core-load-error:${err.message}`];
-  return null;
-}
 
 class CoreAnalysisEngine implements AnalysisEngine {
   readonly kind = "core" as const;
@@ -131,12 +106,16 @@ class CoreAnalysisEngine implements AnalysisEngine {
     }
     if (this._core.lastConverged) return;
     const context = options?.context ?? "analysis step";
-    throw new AnalysisConvergenceError(
+    // Under `auto` runOnPlan replays the whole run on classic with this reason
+    // (ruling R116); under an explicit `core` it is the convergence error it
+    // always was, message and all.
+    throw new AnalysisCoreStalledError(
       `Analysis stopped because ${context} did not converge at ${String(startTime)} s. ` +
       `The core kept its last completed instant (${String(this._core.simTime)} s), this ` +
       `analysis point was rejected, and no invalid values were used. Check for conflicting ` +
       `ideal sources, floating nodes, or extreme component values. Technical detail: ` +
       `advance to ${String(t)} s failed.`,
+      [coreAdvanceFailureReason(this._core.lastAdvanceFailure)],
     );
   }
 

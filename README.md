@@ -252,9 +252,14 @@ install.
 
 The eight curated entries from `brownout` to `brownout/mcu/rp2040` are the
 supported API and the only thing semver covers. `brownout/core` is new and
-opt-in: nothing uses it unless a host asks (`HeadlessRunner`'s `engine: "core"`
-with `coreSupportedKinds`, or a `CoreEngine` of its own), and its API can still
-change in a minor release while the remaining device kinds are ported. The `@brownout/*` npm scope is reserved for standalone host adapters —
+opt-in: nothing uses it unless a host asks (`HeadlessRunner`'s `engine: "auto"`
+or `"core"` with `coreSupportedKinds`, or a `CoreEngine` of its own), and it is
+outside the semver promise until 1.0.0: its API can still change in a minor
+release while the remaining device kinds are ported. On `"auto"` a core failure
+part-way through a run is replayed on the classic engine from the load, and the
+runner holds a core run's samples until that run has finished, so `onSample`
+is called at the end of each `run()`, not during it. A host that needs samples
+as they are produced should pick `"classic"` or `"core"` explicitly. The `@brownout/*` npm scope is reserved for standalone host adapters —
 nothing is published there yet.
 
 ### `brownout/internals/*`
