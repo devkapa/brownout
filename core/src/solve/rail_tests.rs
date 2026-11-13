@@ -15435,22 +15435,61 @@ fn a_slide_given_up_declines_as_before_the_ruling() {
 
 #[test]
 fn a_slide_given_up_publishes_what_the_hold_published_before_the_ruling() {
-    // The same run's stops against 8434bf3's (before ruling R92, the board
-    // as it then ran, drafts/r53-logs/p18-pre766.log): the chip free to
-    // 0.15 s, the rail climbing to 1.626 V; at 0.19 s held off, its rail
-    // 2.0124 V past its 1.8 V release level, the given-up slide held as the
-    // pre-ruling hold was (R44 (a)'s draw threshold keeps a chip held on a
-    // CC rail capacitor's segment: powered it turns the segment down); then
-    // the decline at the 0.2 s stop. The same hold and the rail within W0
-    // of 8434bf3's at every stop, and nothing past 0.19 s.
+    // The same run's stops: the chip free to 0.15 s, the rail climbing to
+    // 1.635 V; at 0.19 s held off past its 1.8 V release level, the given-up
+    // slide held as the pre-ruling hold was (R44 (a)'s draw threshold keeps
+    // a chip held on a CC rail capacitor's segment: powered it turns the
+    // segment down); then the decline at the 0.2 s stop. While the chip is
+    // free the rail is pinned to the truth, exact mode at 1 us host steps
+    // (2 us agrees to 1e-10 V): 0.4535772, 0.7785482, 1.2481430, 1.6345640
+    // V. It was pinned to 8434bf3's run, which read 0.7777232, 1.2464433
+    // and 1.6263296 V (0.6, 1.3 and 3.2 W0 under the truth): each clock
+    // edge's catch-up stepped the partition with the CC rail frozen
+    // (`a_source_edges_catch_up_steps_a_cc_rail_partition_on_its_cc_rail`),
+    // and the rail lost its climb over each gap. At 0.19 s the given-up
+    // slide's hold has no truth (a slide followed is what the chip does
+    // there): it is pinned to this run, 2.0230702 V, 10.7 mV over 8434bf3's
+    // 2.0123904, which entered the hold from a rail 8.2 mV under the truth.
     use digital::power::HoldKind;
-    let before = [(0.01, HoldKind::Free, 0.4535771696979229), (0.05, HoldKind::Free, 0.7777231946139586), (0.1, HoldKind::Free, 1.2464433178674625), (0.15, HoldKind::Free, 1.626329603186103), (0.19, HoldKind::Off, 2.0123903547391158)];
+    let pins = [(0.01, HoldKind::Free, 0.4535771695507), (0.05, HoldKind::Free, 0.7785482439136), (0.1, HoldKind::Free, 1.2481429577365), (0.15, HoldKind::Free, 1.6345639513784), (0.19, HoldKind::Off, 2.0230702243231)];
     let (stops, declined) = cold_766_given_up();
-    assert_eq!(stops.len(), before.len(), "stops reached: {stops:?}, then {declined:?}");
-    for ((t, kind, u), (t0, kind0, u0)) in stops.into_iter().zip(before) {
+    assert_eq!(stops.len(), pins.len(), "stops reached: {stops:?}, then {declined:?}");
+    for ((t, kind, u), (t0, kind0, u0)) in stops.into_iter().zip(pins) {
         assert_eq!(t, t0);
         assert_eq!(kind, kind0, "at {t} s: the hold");
-        close(u, u0, 1e-4 + 1e-3 * u0.abs(), &format!("at {t} s: the rail against 8434bf3's"));
+        close(u, u0, 1e-4 + 1e-3 * u0.abs(), &format!("at {t} s: the rail against its pin"));
+    }
+}
+
+#[test]
+fn a_source_edges_catch_up_steps_a_cc_rail_partition_on_its_cc_rail() {
+    // ERRCTL P1 (ruling R115). Cold 766 tpl 0: the PSU (8.92 V, 113.4 mA)
+    // sits in CC charging its rail, node 1, whose stepped hub partition
+    // (nodes 5, 6) holds C17, 13.5 mF from node 6 to the rail, so the rail
+    // climbs about 8.3 V/s and node 6 rides it. The clock on node 3
+    // (12.893 Hz) has an edge at 1 / 12.893 = 77.560 ms, inside the
+    // partition's pending CC trial (planned at its last commit, 68.03 ms
+    // under TR-BDF2, 75.23 ms under backward Euler). The edge's catch-up
+    // (W1b rule 6) stepped that gap with no CC rail, the rail a boundary
+    // frozen at its value at the last commit: 9.53 ms at 0.9275 V where the
+    // rail reaches 1.0212 V, a 93 mV step of the rail that C17 carried into
+    // node 6. Stepped on the CC rail its pending trial was planned on
+    // (`catch_up_on_cc_rail`), as at a CC exit, the gap follows the rail.
+    // The truth at 0.1 s is exact mode at 1 and 0.2 us host steps, which
+    // agree to 1 nV: 1.248143 V (R99W, int-acc-logs/r99w). Uncut by the
+    // frozen gap both integration options read it to 1e-7 V; before, the
+    // trapezoid read 1.246443 V (1.26 W0), and with R99 (1)'s TR-BDF2 CC
+    // steps, whose trial reached back to 68.03 ms, the default read
+    // 1.239927 V (6.1 W0).
+    let truth = 1.248143;
+    for integration in [0u8, 1] {
+        let mut p = cold_766_tpl0();
+        p.options.integration = integration;
+        let mut rig = Rig::load(&p).unwrap();
+        for &t in &[0.01, 0.05, 0.1] {
+            rig.advance(t).unwrap_or_else(|e| panic!("integration {integration}, advance to {t}: {e:?}"));
+        }
+        close(rig.u(), truth, 1e-4 + 1e-3 * truth, &format!("integration {integration}: the rail at 0.1 s"));
     }
 }
 

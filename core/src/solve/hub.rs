@@ -2783,10 +2783,18 @@ impl PartitionedSolver {
         let edge = self.wave.sources[w].edge(k).expect("the scheduled edge exists");
         let drivers = Rc::clone(&self.driver_snapshot);
         // The stepped partitions this source feeds catch up to the edge with
-        // the boundary they had (W1b rule 6).
+        // the boundary they had (W1b rule 6). One whose pending trial was
+        // planned on a CC rail catches up on that rail, as at a CC exit
+        // (`catch_up_on_cc_rail`): the rail is an unknown of its steps, not
+        // a boundary. Caught up with the rail frozen at its last commit,
+        // cold 766 tpl 0's partition stepped 9.53 ms to a clock edge at
+        // 0.9275 V while the CC rail climbed to 1.0212 V, and C17 (13.5 mF
+        // to the rail) carried the 93 mV step into node 6 (ERRCTL P1).
         if edge.moves_boundary {
             let stepped: Vec<usize> = self.wave_parts[w].iter().copied().filter(|&p| self.partition_kinds[p] == PartitionKind::Stepped).collect();
             if !stepped.is_empty() {
+                let on_cc = self.stepped.catch_up_on_cc_rail(&stepped, now, &drivers, &self.live_params, &self.voltages);
+                self.on_error(on_cc)?;
                 let result = self.stepped.catch_up(&stepped, now, &drivers, &self.live_params, &self.voltages);
                 self.on_error(result)?;
                 let held = self.take_stepped_holds();
