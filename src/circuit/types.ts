@@ -168,6 +168,89 @@ export function isEepromKind(kind: string): boolean {
 }
 
 /**
+ * RAM component kinds. Their optional `params.contents` is a POWER-ON PRELOAD
+ * (coordinator ruling 2026-11-13), shaped like the EEPROMs' image: base64 of
+ * one byte per word, address 0 first, each word in true sense (a 74LS189's
+ * /O pins show its complement).
+ *
+ * - It is what the RAM holds when it powers up. With no contents the RAM
+ *   starts exactly as it did before the field existed.
+ * - It is NOT non-volatile. A write changes the live contents only; when the
+ *   chip loses power they go, and the preload is back at the next power-up.
+ * - Like an EEPROM's contents it changes only through a circuit revision; it
+ *   is never live-replicated. A reload that keeps the chip and its contents
+ *   keeps the live words; one that changes the contents starts from them.
+ */
+export const RAM_KINDS = ["74ls189"] as const;
+export type RamKind = (typeof RAM_KINDS)[number];
+export function isRamKind(kind: string): kind is RamKind {
+  return kind === "74ls189";
+}
+
+/** Words, and bits per word, of each RAM kind's `params.contents` image. */
+export const RAM_CONTENTS_SHAPE: Readonly<Record<RamKind, { readonly words: number; readonly bits: number }>> = {
+  "74ls189": { words: 16, bits: 4 },
+};
+
+/**
+ * The preload both engines load from a RAM's `params.contents`, or null for
+ * none (absent or empty). It mirrors `eepromImageBytes` and never throws:
+ * the value is read through `String()`, a byte past the last address is
+ * dropped, an address the image does not reach keeps the blank word (all
+ * ones, a 74LS189's 0xF), a byte wider than the word keeps its low bits, and
+ * a value that is not base64 is a blank image. An editor checks a value with
+ * {@link ramContentsError} before saving it.
+ */
+export function ramPreloadWords(kind: RamKind, contents: unknown): number[] | null {
+  const text = String(contents ?? "");
+  if (!text) return null;
+  const { words, bits } = RAM_CONTENTS_SHAPE[kind];
+  const mask = (1 << bits) - 1;
+  const out = new Array<number>(words).fill(mask);
+  try {
+    const raw = atob(text);
+    for (let i = 0; i < words && i < raw.length; i++) out[i] = raw.charCodeAt(i) & mask;
+  } catch { /* not base64: the blank image, as an EEPROM's */ }
+  return out;
+}
+
+/**
+ * Why `contents` is not a well-formed image for `kind`, or null when it is
+ * (or is absent or empty, which is "no preload"): a base64 string of exactly
+ * one byte per word, none wider than the word. Stricter than the engines'
+ * {@link ramPreloadWords}, which loads whatever it is given.
+ */
+export function ramContentsError(kind: RamKind, contents: unknown): string | null {
+  if (contents === undefined || contents === null || contents === "") return null;
+  if (typeof contents !== "string") return `contents must be a base64 string, got ${typeof contents}`;
+  const { words, bits } = RAM_CONTENTS_SHAPE[kind];
+  let raw: string;
+  try {
+    raw = atob(contents);
+  } catch {
+    return "contents is not valid base64";
+  }
+  if (raw.length !== words) return `contents holds ${raw.length} byte(s); a ${kind} takes exactly ${words}, one per word`;
+  const max = (1 << bits) - 1;
+  for (let i = 0; i < words; i++) {
+    const word = raw.charCodeAt(i);
+    if (word > max) return `the word at address ${i} is 0x${word.toString(16).toUpperCase()}; a ${kind} word is ${bits} bits (at most 0x${max.toString(16).toUpperCase()})`;
+  }
+  return null;
+}
+
+/** `words` (address 0 first, true sense) as a RAM's `params.contents`. Throws a RangeError on a count or a word the kind cannot hold. */
+export function encodeRamContents(kind: RamKind, words: readonly number[]): string {
+  const { words: count, bits } = RAM_CONTENTS_SHAPE[kind];
+  const max = (1 << bits) - 1;
+  if (words.length !== count) throw new RangeError(`encodeRamContents: a ${kind} takes exactly ${count} words, got ${words.length}`);
+  words.forEach((word, i) => {
+    if (!Number.isInteger(word) || word < 0 || word > max) throw new RangeError(`encodeRamContents: the word at address ${i} must be an integer in [0, ${max}], got ${word}`);
+  });
+  return btoa(String.fromCharCode(...words));
+}
+
+/**
  * Electrical role of a pin, used by the AI assistant to reason about wiring
  * without inventing function from pin labels alone. Optional everywhere so
  * legacy catalog entries and instantiated component pins stay valid.
