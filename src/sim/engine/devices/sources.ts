@@ -429,8 +429,11 @@ export const benchPsuModel: DeviceModel = {
         newRegBpsu = -sourceDirection * iBpsu > iLimitBpsu ? 2 : 0;
       }
     }
-    if (newRegBpsu === 0 && iLimitBpsu <= 0) {
-      // An unlimited supply keeps no regime entry while in CV.
+    if (newRegBpsu === 0 && !(iLimitBpsu > 0)) {
+      // An unlimited supply keeps no regime entry while in CV. "Unlimited" is
+      // every iLimit that is not above 0, NaN included (an iLimit that does
+      // not parse), as the stamp's `iLimitPsu > 0` and setBenchPsuSinkRegime
+      // read it: `<= 0` is false for NaN and left such a supply a `{ reg: 0 }`.
       ctx.state.icState.delete(comp.id);
     } else {
       ctx.state.icState.set(comp.id, { reg: newRegBpsu });
