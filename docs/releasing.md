@@ -34,7 +34,11 @@ directory, not from `--manifest-path` — and asserts the active `rustc
 --version` actually matches the pin before it builds anything, so a stale
 default toolchain fails loudly instead of silently shipping the wrong wasm.
 Both workflows install the same pinned toolchain and run `cargo test --locked`
-from `core/` before the rest of their gate.
+from `core/` before the rest of their gate, then check that the generated heap
+walk is current (`python3 scripts/gen_heap_bytes.py src --check`). After the
+two vitest lanes they run `pnpm run test:core-suites`: the classic engine's own
+suites against the core, for every case `test/core/suites/classification.json`
+marks portable.
 
 ### What actually stops a bad release
 
@@ -42,7 +46,7 @@ Be precise about this, because the honest answer is shorter than it looks:
 
 | Layer | Enforced? | Notes |
 | --- | --- | --- |
-| The gate inside `release.yml` | **yes** | typecheck, build, both test lanes, a proven ngspice crossval, `check:package` — all run *before* `changesets/action`. A red tree cannot reach the publish step. This is the one that actually holds. |
+| The gate inside `release.yml` | **yes** | the Rust tests, typecheck, build, both test lanes, the core's suites, a proven ngspice crossval, `check:package` — all run *before* `changesets/action`. A red tree cannot reach the publish step. This is the one that actually holds. |
 | `ci.yml` on a PR | advisory | it reports, it does not block — see branch protection below |
 | Branch protection on `main` | **no — not configured** | `main` has no protection rule and no ruleset. A red PR merges; a direct push to main is allowed |
 | An `environment:` gate on the release job | no — deliberately absent | see "Why the workflow looks the way it does" |

@@ -86,6 +86,13 @@ jobs:
       # pin installed above instead of the runner's default toolchain.
       - run: cargo test --locked
         working-directory: core
+      # The snapshot's byte accounting walks every heap-owning struct from
+      # generated code; a field added without regenerating it would ship a
+      # wrong `bo_engine_snapshot_bytes`. --check fails when the generated
+      # sections are stale (fix: `python3 scripts/gen_heap_bytes.py src --write`).
+      - name: Check the generated heap walk is current
+        working-directory: core
+        run: python3 scripts/gen_heap_bytes.py src --check
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       # The package typechecks without DOM types, so nothing above would notice
@@ -99,6 +106,12 @@ jobs:
       # linear backend. Auto mode only engages it above 64 unknowns, so the
       # default run alone never exercises sparse on the small fixtures.
       - run: pnpm run test:sparse
+      # Gate 1 for the Rust/WASM core: the classic engine's own suites, run
+      # against the core through test/core/suites/adapter.ts, for every case
+      # classification.json marks portable. `pnpm run test` does not run them
+      # on the core, so without this step a core regression in those suites
+      # would not stop a release.
+      - run: pnpm run test:core-suites
       # A green `pnpm test` above does not prove the cross-validation ran: a
       # skipped describe block still exits 0. The summary case prints this line
       # only after all seven decks have been compared against a live ngspice,
