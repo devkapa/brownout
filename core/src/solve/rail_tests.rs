@@ -18033,7 +18033,6 @@ fn worst_of(got: &[(f64, f64)]) -> (f64, f64) {
 }
 
 #[test]
-#[ignore = "needs the R53 non-attracting exit"]
 fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_stops() {
     // R99 (3), the open item "default-mode CC-rail accuracy". Cold 2575 tpl
     // 2 in CC: the pulse source on node 3 ramps -2.776 -> 10.62 V and back
@@ -18053,14 +18052,12 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     // us host step). Against the truth (exact mode, trapezoid, 0.25 and
     // 0.125 us, extrapolated), every reading through each ramp within W0,
     // for a host stopping only at the instants, every 1, 3.7 and 33 us, and
-    // in one advance to each third instant from a run of its own.
-    //
-    // Ignored: once the rail follows the falling ramp between stops, the
-    // 555 crosses its 1.8 V edge inside a host step and enters a chatter
-    // slide (ruling R95 (b)) that the ramp drags 1.2 V under the edge, its
-    // duty halving at each W0 of rail (4e-254 at 23.336 ms), and at 1 and 5
-    // us host stops the run makes no progress where the rail crosses 0 V.
-    // R53's exit for a slide whose edge no longer attracts ends it.
+    // in one advance to each third instant from a run of its own. (Once the
+    // rail follows the falling ramp between stops, the 555 crosses its 1.8 V
+    // edge inside a host step and enters a chatter slide (ruling R95 (b))
+    // that the ramp drags under the edge; before R53's exit for a slide
+    // whose edge stops attracting, its duty halved at each W0 of rail and 1
+    // and 5 us host stops made no progress where the rail crossed 0 V.)
     let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
     for (name, stops, fresh) in [("the instants", Vec::new(), false), ("1 us", grid(1e-6), false), ("3.7 us", grid(3.7e-6), false), ("33 us", grid(33e-6), false), ("one advance", Vec::new(), true)] {

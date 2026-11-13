@@ -7307,21 +7307,19 @@ failures and warnings (W1g)"):
   (3) A pulse ramp moving a direct device's draw (2575 tpl 2's switch 14,
   1 mohm from the rail to the ramping source) was held where the rail last
   solved, by the rail capacitor's segment and by the stepped partitions'
-  CC steps, and a `Rail` event, which publishes no ramp, read it stale.
-  Fixed (R99 (3)): the direct draws are read at the solve's instant
-  (`direct_ramp`), the segment follows the ramp onto a line
-  (`CapSeg::ramp`), a CC step reads the rest's draw at its own end
+  CC steps, and a `Rail` event, which published no ramp, read it stale.
+  Fixed (R99 (3)): a `Rail` event publishes the running ramps at its
+  instant, the segment follows the ramp's draw rate (`direct_ramp`) onto a
+  line (`CapSeg::ramp`; not while a chip slides on the rail, whose duty
+  holds it), a CC step reads the rest's draw at its own end
   (`CcStep::a_o_at`), the CV and CC watches move with it, the rail solves
   again at each ramp corner, and the coupling bound leaves the ramp's own
   rail motion out (`coupling_ratio`). Through both of 2575 tpl 2's ramps
   every reading is within W0 of the truth at every host cadence tried
   (`a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_
-  the_host_stops`, 684 W0 at 0898801), but that test is ignored until R53's
-  exit for a slide whose edge stops attracting lands: with the rail
-  following the falling ramp, the 555 enters a chatter slide at its 1.8 V
-  edge inside a host step and the ramp drags it 1.2 V under it, its duty
-  halving at each W0, and at 1 and 5 us host stops no progress is made
-  where the rail crosses 0 V. Not yet ramp-aware: a CC rail capacitor's
+  the_host_stops`, 0.83 W0 at worst; 684 W0 at 0898801), with R53's exit
+  for a slide whose edge stops attracting (the falling ramp drags the 555's
+  rail through its 1.8 V edge inside a host step). Not yet ramp-aware: a CC rail capacitor's
   coupled path (closed-form hub partitions on the rail, `modes`) and a
   static hub partition whose boundary a ramp moves, which hold their
   draws as before.
