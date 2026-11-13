@@ -103,7 +103,7 @@ examples`).
 | Physics sidecars | Chemistry battery model with coulomb counting, one-pole package thermal with regulator shutdown hysteresis, servo travel/brownout, i2t failure with latched-open branches | `brownout/physics` |
 | Engine warnings | Latched, session-only advisories that never alter the solve: `transistor_overcurrent` (collector/drain current past the catalog `i_c_max`, after a 100 us dwell), `missing_flyback` (a winding switched by a transistor or switch with no diode on its switch node, from the loaded graph), and `rail_ic_power_chatter` (a supply-gated chip whose own pins load its rail back below its power-on level, so no state holds at the 10 ns floor and the clock stops there; it names the chip, and its detail line gives the level the supply is stuck at and a current-limited supply's limit). `getWarnings()` reads the latched set; `takeNewWarnings()` drains each once for a host's warning channel; `resetFailures()` clears them with failures | `sim-engine.ts`, `engine-warnings.test.ts`, `rail-ic-power-chatter.test.ts` |
 | MCU co-simulation | Cycle-accurate AVR and RP2040 with sub-step pin-event timing; firmware advances only after accepted electrical steps | `brownout/mcu` |
-| Rust/WASM core (opt-in) | A second transient engine, event-driven and partitioned, compiled to WebAssembly and shipped in the package. It runs 38 device kinds (resistors, capacitors, switches, fuses, the sources, LEDs and 7-segment displays, the NE555, 74-series logic and memory); a circuit with any other kind is declined with a reason, and the host runs it on the classic engine. Checked against the classic engine's own suites and a two-engine equivalence corpus | `brownout/core`, `pnpm run test:core-suites`, `core/README.md` |
+| Rust/WASM core (opt-in) | A second transient engine, event-driven and partitioned, compiled to WebAssembly and shipped in the package. It runs 38 device kinds (resistors, capacitors, switches, fuses, the sources, LEDs and 7-segment displays, the NE555, 74-series logic and memory), 35 of them cleared for automatic use (`CORE_SUPPORTED_KINDS`); a circuit with any other kind is declined with a reason, and the host runs it on the classic engine. Checked against the classic engine's own suites and a two-engine equivalence corpus | `brownout/core`, `pnpm run test:core-suites`, `core/README.md` |
 | Determinism | Analyses bit-reproducible; steps accepted only on converged Newton + non-singular matrix + finite values + relative residual <= 1e-8; rejected steps roll back and never advance firmware | `sim-engine.ts`, `state-rollback-derived.test.ts` |
 
 ### Cross-validation against ngspice
@@ -252,9 +252,11 @@ install.
 
 The eight curated entries from `brownout` to `brownout/mcu/rp2040` are the
 supported API and the only thing semver covers. `brownout/core` is new and
-opt-in: nothing uses it unless a host asks (`HeadlessRunner`'s `engine: "auto"`
-or `"core"` with `coreSupportedKinds`, or a `CoreEngine` of its own), and it is
-outside the semver promise until 1.0.0: its API can still change in a minor
+opt-in: nothing uses it until a host awaits `initCore()`. After that the
+analyses' default `engine: "auto"` and `HeadlessRunner`'s `engine: "auto"` run a
+circuit on the core when every kind in it is in `CORE_SUPPORTED_KINDS`, and on
+the classic engine otherwise; `HeadlessRunner`'s own default stays `"classic"`.
+The entry is outside the semver promise until 1.0.0: its API can still change in a minor
 release while the remaining device kinds are ported. On `"auto"` a core failure
 part-way through a run is replayed on the classic engine from the load, and the
 runner holds a core run's samples until that run has finished, so `onSample`

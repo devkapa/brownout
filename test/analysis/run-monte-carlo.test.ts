@@ -622,8 +622,14 @@ describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
 describe("engine report", () => {
   const spec: MonteCarloSpec = { kind: "monte-carlo", runs: 10, seed: 1, settleTimeS: 0.01, outputs: [{ netId: "n1" }] };
 
-  it("with no options the shipped gate makes the run classic and names every kind", () => {
+  it("with no options a circuit of promoted kinds runs on the core (auto, the package's own kind list)", () => {
     const result = runMonteCarloImpl(spec, voltageDividerCircuit());
+    expect(result.engine).toBe("core");
+    expect(result.fallbackReasons).toEqual([]);
+  });
+
+  it("an empty kind list makes the run classic and names every kind", () => {
+    const result = runMonteCarloImpl(spec, voltageDividerCircuit(), { coreSupportedKinds: new Set() });
     expect(result.engine).toBe("classic");
     expect(result.fallbackReasons).toEqual(["unsupported-kind:bench_psu", "unsupported-kind:resistor"]);
   });

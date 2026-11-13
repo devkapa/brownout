@@ -57,8 +57,16 @@ beforeAll(async () => {
 });
 
 describe('engine: "core" — kind-support gate', () => {
-  it("falls back to classic with unsupported-kind: reasons when coreSupportedKinds is the (empty, W0) default", () => {
+  it("lands on the core on the package's own kind list (CORE_SUPPORTED_KINDS) when the circuit's kinds are promoted", () => {
     const runner = new HeadlessRunner({ engine: "core" });
+    runner.load(DIVIDER);
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+    expect(runner.readout.getNetV()).toMatchObject({ n0: 10 });
+  });
+
+  it("falls back to classic with unsupported-kind: reasons when no kind is allowed (an empty coreSupportedKinds)", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: new Set() });
     runner.load(DIVIDER);
     expect(runner.activeEngine).toBe("classic");
     expect(runner.engineFallbackReasons).toEqual(
@@ -416,10 +424,10 @@ describe('engine: "core" — integrationMethod reaches the core (W1b gave it rea
     expect(runner.readout.getNetV().n1).toBe(trapDirect.getNetV().n1);
   });
 
-  it("the classic path is unchanged: a runner that falls back to classic (capacitor is not yet in the accuracy-cleared CORE_SUPPORTED_KINDS) still re-seeds under the requested method exactly as before this fix", () => {
-    const runner = new HeadlessRunner({ engine: "core" }); // default coreSupportedKinds: CORE_SUPPORTED_KINDS, still empty in W0
+  it("the classic path is unchanged: a runner that falls back to classic (here: no kind allowed) still re-seeds under the requested method exactly as before this fix", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: new Set() });
     runner.load(TWO_CAP_LADDER);
-    expect(runner.activeEngine).toBe("classic"); // capacitor isn't accuracy-cleared yet — always falls back
+    expect(runner.activeEngine).toBe("classic"); // nothing is allowed on the core — always falls back
     runner.run({ durationS: 1e-3, integrationMethod: "trap" });
 
     const classicDirect = new HeadlessRunner({ integrationMethod: "trap" });

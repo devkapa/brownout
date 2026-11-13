@@ -128,8 +128,8 @@ describe("the gate (assertion b)", () => {
         "shows it PASSING — a row that exists, ran on at least one entry, zero failures — across " +
         "the whole corpus. Every kind listed above failed that bar despite being in " +
         "CORE_SUPPORTED_KINDS: either the set was widened before the equivalence proof backs it " +
-        "up, or a regression broke a previously-passing kind. This assertion is VACUOUSLY TRUE in " +
-        "W0 — CORE_SUPPORTED_KINDS is empty until a kind actually clears this bar.",
+        "up, or a regression broke a previously-passing kind. Take the kind out of " +
+        "CORE_SUPPORTED_KINDS until a fixture that runs on both engines shows it passing.",
     ).toEqual([]);
   });
 

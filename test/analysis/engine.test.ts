@@ -84,8 +84,24 @@ function capNet(engine: { nets: { id: string; pins: [string, string][] }[] }): s
 }
 
 describe("planAnalysisEngine: one choice per run, made after compiling every point (D14)", () => {
-  it("auto on the shipped gate (CORE_SUPPORTED_KINDS is empty) is classic, with each kind as a reason", () => {
+  it("auto on the shipped list (CORE_SUPPORTED_KINDS) is the core for a circuit of promoted kinds", () => {
     const plan = planAnalysisEngine([rcCircuit()], { engine: "auto" });
+    expect(plan.engine).toBe("core");
+    expect(plan.fallbackReasons).toEqual([]);
+  });
+
+  it("auto on the shipped list is classic for an implemented kind that is not promoted yet, naming it", () => {
+    // spdt_switch compiles and runs on the core (CORE_IMPLEMENTED_KINDS) but has no passing row in the
+    // equivalence table yet, so it is not in CORE_SUPPORTED_KINDS (see kinds.ts).
+    const circuit = rcCircuit();
+    circuit.components.push({ id: "sw", kind: "spdt_switch", pins: [{ id: "com" }, { id: "b" }, { id: "c" }], params: { position: 0 } });
+    const plan = planAnalysisEngine([circuit], { engine: "auto" });
+    expect(plan.engine).toBe("classic");
+    expect(plan.fallbackReasons).toEqual(["unsupported-kind:spdt_switch"]);
+  });
+
+  it("auto on an empty list is classic, with each kind as a reason", () => {
+    const plan = planAnalysisEngine([rcCircuit()], { engine: "auto", coreSupportedKinds: new Set() });
     expect(plan.engine).toBe("classic");
     expect(plan.fallbackReasons).toEqual([
       "unsupported-kind:capacitor",

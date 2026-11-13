@@ -4,11 +4,11 @@
  * (passives and switches, fuses, the sources, LEDs and displays, the NE555,
  * the 74-series logic and memory parts listed there), and a circuit with any
  * other kind is declined with `CoreUnsupportedError` so a host can run it on
- * the classic engine instead. `CORE_SUPPORTED_KINDS`, the kinds brownout's own
- * hosts route to the core without being told to, is still empty (see kinds.ts
- * for the implemented-vs-supported distinction), so `HeadlessRunner` and the
- * analyses use the core only for the kinds a caller passes as
- * `coreSupportedKinds`. Nothing in this entry is re-exported from the main
+ * the classic engine instead. `CORE_SUPPORTED_KINDS` is the subset brownout's
+ * own hosts route to the core without being told which kinds to trust
+ * (`HeadlessRunner` on "auto" or "core", the analyses on "auto"): the kinds
+ * that have cleared all three accuracy gates (see kinds.ts for the
+ * implemented-vs-supported distinction). Nothing in this entry is re-exported from the main
  * `"brownout"` barrel (src/index.ts) — reach it explicitly:
  *
  *   import { initCore, CoreEngine } from "brownout/core";

@@ -77,24 +77,74 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Kinds the engine-selection flag is allowed to route to the core for an
- * actual simulation. Empty in W0, on purpose: nothing has cleared the bar
- * yet, even though `resistor`/`voltage_source`/`ground` are fully
- * implemented above.
+ * Kinds a host on "auto" routes to the core without being told to:
+ * `HeadlessRunner`'s `engine: "auto"` and `"core"`, and the analyses'
+ * `engine: "auto"`, read this list unless the caller passes its own
+ * `coreSupportedKinds`.
  *
  * A kind is added here only after it passes all three accuracy gates:
  *   1. brownout's own analytic-golden and first-principles suites, run
- *      against the core instead of the classic engine;
+ *      against the core instead of the classic engine
+ *      (`pnpm run test:core-suites`);
  *   2. the dual-engine equivalence harness (core vs. classic, same
- *      circuits, same results within tolerance);
+ *      circuits, same results within tolerance): the kind's row in the
+ *      per-kind table must read "pass", which test/core/equivalence.test.ts
+ *      checks for every kind listed here;
  *   3. the devolt sim/learn/simcore suites, green against the core.
+ *
+ * Promoted 2026-11-13 (rulings D19 and R116) on gate 1 at 327 portable
+ * cases, the per-kind table of that day and devolt's engine matrix. Three
+ * implemented kinds are NOT here, because gate 2 has no passing row for them:
+ * `74ls47` and `clock_gen` appear in no fixture of the equivalence corpus,
+ * and `spdt_switch` only in one the core cannot load (it also holds kinds
+ * that are not ported), so its row reads "untested". Each joins when a
+ * fixture that runs on both engines shows it passing. A circuit holding one
+ * of them runs on classic under "auto", with `unsupported-kind:<kind>` as
+ * the reason.
  *
  * The engine-selection flag routes a WHOLE circuit to the core only when
  * every kind that circuit uses is in this set. A circuit with even one
  * kind missing from CORE_SUPPORTED_KINDS falls back to the classic engine
  * in full — there is no per-device split between the two engines.
  */
-export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set();
+export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
+  "ground",
+  "resistor",
+  "voltage_source",
+  "switch",
+  "push_button",
+  "dip_switch",
+  "capacitor",
+  "74ls00",
+  "74ls04",
+  "74ls08",
+  "74ls32",
+  "74ls86",
+  "74ls157",
+  "74ls283",
+  "74hc138",
+  "74hc14",
+  "74ls245",
+  "74ls161",
+  "74ls173",
+  "74hc74",
+  "74ls189",
+  "28c16",
+  "28c256",
+  "led",
+  "rgb_led",
+  "bicolor_led",
+  "seg7_cc",
+  "seg7_ca",
+  "ne555",
+  "battery_pack",
+  "bench_psu",
+  "clock",
+  "pulse_source",
+  "pulse_gen",
+  "fuse",
+  "ptc_fuse",
+]);
 
 /**
  * Kind codes for program format v2, mirroring core/src/kinds.rs and the

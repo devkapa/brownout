@@ -635,8 +635,15 @@ describe("engine report", () => {
   });
   const widened = { coreSupportedKinds: CORE_IMPLEMENTED_KINDS } as const;
 
-  it("with no options the shipped gate (empty until W5) makes the run classic and names every kind", () => {
+  it("with no options a circuit of promoted kinds runs on the core (auto, the package's own kind list)", () => {
     const result = runSweepImpl(dividerSpec(), voltageDividerCircuit());
+    expect(result.engine).toBe("core");
+    expect(result.fallbackReasons).toEqual([]);
+    expect(result.outputs[0]!.mean).toEqual([1, 3, 5]);
+  });
+
+  it("an empty kind list makes the run classic and names every kind", () => {
+    const result = runSweepImpl(dividerSpec(), voltageDividerCircuit(), { coreSupportedKinds: new Set() });
     expect(result.engine).toBe("classic");
     expect(result.fallbackReasons).toEqual(["unsupported-kind:bench_psu", "unsupported-kind:resistor"]);
   });

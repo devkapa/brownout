@@ -35,11 +35,14 @@
  *   which `runOnPlan` replays on classic under `auto`: the core giving up on a
  *   circuit part-way is not proof that classic would, ruling R116).
  *
- * WHY the shipped gate is empty today:
- *   `auto` routes to the core only for kinds in CORE_SUPPORTED_KINDS, which is
- *   empty until W5 decides the default. `coreSupportedKinds` widens it for the
- *   dual-engine tests (the HeadlessRunner option of the same name); a normal
- *   host never passes it. So today every `auto` run is classic and says why.
+ * WHAT `auto` routes:
+ *   `auto` routes to the core only for kinds in CORE_SUPPORTED_KINDS, the
+ *   kinds that have cleared the three accuracy gates (kinds.ts). A run with
+ *   any other kind is classic and says why. `coreSupportedKinds` replaces the
+ *   list for the dual-engine tests (the HeadlessRunner option of the same
+ *   name); a normal host never passes it. The core must also be ready
+ *   (`initCore()` awaited): a host that never initialises it stays on classic
+ *   with `core-not-initialized`.
  */
 
 import type { SimCircuit, SimFailure } from "../sim/engine/sim-engine.js";

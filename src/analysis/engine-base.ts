@@ -31,8 +31,8 @@ export interface AnalysisEngineOptions {
   engine?: AnalysisEngineChoice;
   /**
    * Which kinds `auto` and `core` may route to the core. Defaults to
-   * CORE_SUPPORTED_KINDS (empty until W5). Passing CORE_IMPLEMENTED_KINDS
-   * routes kinds that have not cleared the accuracy gates; for tests only.
+   * CORE_SUPPORTED_KINDS, the kinds that cleared the accuracy gates. Passing
+   * CORE_IMPLEMENTED_KINDS also routes the ones that have not; for tests only.
    */
   coreSupportedKinds?: ReadonlySet<string>;
 }

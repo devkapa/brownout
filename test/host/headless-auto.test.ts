@@ -100,8 +100,30 @@ describe('engine: "auto" — the choice at load', () => {
     expect(runner.run({ durationS: 1e-3 }).hitMinStep).toBe(false);
   });
 
-  it("is classic on the package's own kind list while that list is empty, each kind a reason", () => {
+  it("uses the package's own kind list when given none: promoted kinds run on the core", () => {
     const runner = new HeadlessRunner({ engine: "auto" });
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+
+  it("on that list an implemented kind that is not promoted yet (spdt_switch) runs on classic, named", () => {
+    const base = rc();
+    const circuit: SimCircuit = {
+      components: [...base.components, part("sw", "spdt_switch", ["com", "b", "c"], { position: 0 })],
+      // Both throws on the capacitor's node: nothing floats, whichever contact is closed.
+      wires: [...base.wires.filter((w) => !(w.from_component === "r1" && w.to_component === "c1")),
+        wire("r1", "b", "sw", "com"), wire("sw", "b", "c1", "a"), wire("sw", "c", "c1", "a")],
+    };
+    const runner = new HeadlessRunner({ engine: "auto" });
+    runner.load(circuit);
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:spdt_switch"]);
+    expect(runner.run({ durationS: 1e-3 }).hitMinStep).toBe(false);
+  });
+
+  it("is classic on an empty kind list, each kind a reason", () => {
+    const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: new Set() });
     runner.load(rc());
     expect(runner.activeEngine).toBe("classic");
     expect(runner.engineFallbackReasons).toEqual([

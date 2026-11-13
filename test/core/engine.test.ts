@@ -487,9 +487,9 @@ describe("load-time delta-cycle livelock (-7) -> CoreUnsupportedError with a liv
       [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "vsrc", "neg")],
     );
     // coreSupportedKinds is widened to CORE_IMPLEMENTED_KINDS the same way
-    // test/core/suites/adapter.ts does: CORE_SUPPORTED_KINDS is empty for all
-    // of W1 (decision 15), so a default-constructed HeadlessRunner would
-    // reject resistor/voltage_source before ever attempting a core load —
+    // test/core/suites/adapter.ts does, so the kind list can never be what
+    // turns this circuit away (CORE_SUPPORTED_KINDS was empty when this was
+    // written, and still leaves some implemented kinds out) —
     // this test is about the LOAD-TIME livelock fallback, not the separate
     // "kind not supported yet" rejection.
     const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });

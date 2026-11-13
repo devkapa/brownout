@@ -15,9 +15,9 @@
  * that routing/fallback logic against the bare `CoreEngine` facade here would
  * duplicate a policy that is already written, tested (test/host/headless-core.test.ts)
  * and reviewed. `coreSupportedKinds` is deliberately NOT `CORE_SUPPORTED_KINDS`
- * (kinds.ts) -- decision 15 keeps that empty for the whole of W1, on purpose,
- * because nothing has cleared devolt's own sim/learn/simcore suites yet
- * (gate 3). Gate 1 is part of what PROVES a kind, so it must be allowed to
+ * (kinds.ts) -- that list holds only the kinds that have cleared all three
+ * gates (it was empty for the whole of W1, decision 15, and still leaves out
+ * implemented kinds whose proof is incomplete). Gate 1 is part of what PROVES a kind, so it must be allowed to
  * route kinds `CORE_SUPPORTED_KINDS` has not blessed -- exactly the widened-set
  * use case `HeadlessRunnerOptions.coreSupportedKinds`'s own doc comment
  * describes ("this package's own tests"). Defaulting to `CORE_IMPLEMENTED_KINDS`

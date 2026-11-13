@@ -2,9 +2,10 @@
  * The analysis suites' engine matrix (W2e): every suite that runs an analysis
  * runs once with the engine pinned to classic and once on `auto` with the
  * core's accuracy gate widened to everything the compiler can produce
- * (`CORE_IMPLEMENTED_KINDS`). The shipped gate (`CORE_SUPPORTED_KINDS`) is
- * empty until W5, so without widening `auto` could never reach the core and
- * the "auto" column would silently be a second classic column.
+ * (`CORE_IMPLEMENTED_KINDS`). The shipped gate (`CORE_SUPPORTED_KINDS`) leaves
+ * out the implemented kinds that are not promoted yet, so without widening a
+ * suite using one of them would never reach the core on `auto` and its
+ * "auto" column would silently be a second classic column.
  *
  * `expectedEngine` is what makes that impossible to miss: a matrix helper
  * asserts the result's `engine` against it, so a supported circuit that

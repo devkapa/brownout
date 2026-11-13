@@ -18,18 +18,23 @@ One part outside that list sends the whole circuit to the classic engine: transi
 
 On the core, a run keeps what a host expects from classic: live switch and source-voltage changes without a reload, state carried across an edit (capacitor charge, latches, battery charge, failures, EEPROM contents), snapshots, failures and warnings, the EEPROM write readback, scope samples and LED light averages.
 
-**Nothing changes until a host asks for it.** `HeadlessRunner` still defaults to the classic engine, and the analyses' `engine: "auto"` still resolves to classic, because brownout's own list of kinds cleared for automatic routing (`CORE_SUPPORTED_KINDS`) is empty in this release. A host opts in by naming the kinds it routes; `CORE_IMPLEMENTED_KINDS` is the list above:
+**The core is on where it is supported, once a host has loaded it.** A host turns the core on by awaiting `initCore()`; a host that never does runs on the classic engine exactly as before. After that:
+
+- The sweep and Monte Carlo runners default to `engine: "auto"`, so they run on the core whenever every part of the circuit is on brownout's supported list, and on classic otherwise. The result says which (`engine`) and why (`fallbackReasons`).
+- `HeadlessRunner` still defaults to `"classic"`. Ask for `"auto"` to get the same choice there:
 
 ```ts
-import { initCore, CORE_IMPLEMENTED_KINDS } from "brownout/core";
+import { initCore } from "brownout/core";
 import { HeadlessRunner } from "brownout/host";
 
 await initCore(); // once; loads the wasm that ships in the package
-const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+const runner = new HeadlessRunner({ engine: "auto" });
 runner.load(circuit);
 runner.activeEngine; // "core", or "classic" after a fallback
 runner.engineFallbackReasons; // why, for example ["unsupported-kind:bjt_npn"]
 ```
+
+The supported list (`CORE_SUPPORTED_KINDS`) is the list of parts above, less three that the core runs but whose two-engine comparison is not complete yet: `74ls47`, `clock_gen` and `spdt_switch`. A circuit with one of those runs on classic under `"auto"`, with `unsupported-kind:<kind>` as the reason. A host can pass its own list as `coreSupportedKinds`; `CORE_IMPLEMENTED_KINDS` is everything the core can run.
 
 `HeadlessRunner` takes three values for `engine`:
 

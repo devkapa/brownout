@@ -411,8 +411,8 @@ export interface HeadlessRunnerOptions {
   engine?: "classic" | "core" | "auto";
   /**
    * Overrides which kinds `engine: "core"` and `"auto"` are allowed to route to the core.
-   * Defaults to `CORE_SUPPORTED_KINDS` — empty in W0, since nothing has
-   * cleared brownout's accuracy gates yet (kinds.ts). This option exists for
+   * Defaults to `CORE_SUPPORTED_KINDS`, the kinds that have cleared
+   * brownout's accuracy gates (kinds.ts). This option exists for
    * the dual-engine equivalence harness and this package's own tests: passing
    * a wider set (e.g. `CORE_IMPLEMENTED_KINDS`) routes kinds that have NOT
    * cleared those gates to the core, which is exactly what proving them out
