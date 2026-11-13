@@ -93,14 +93,14 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
  *   3. the devolt sim/learn/simcore suites, green against the core.
  *
  * Promoted 2026-11-13 (rulings D19 and R116) on gate 1 at 327 portable
- * cases, the per-kind table of that day and devolt's engine matrix. Three
- * implemented kinds are NOT here, because gate 2 has no passing row for them:
- * `74ls47` and `clock_gen` appear in no fixture of the equivalence corpus,
- * and `spdt_switch` only in one the core cannot load (it also holds kinds
- * that are not ported), so its row reads "untested". Each joins when a
- * fixture that runs on both engines shows it passing. A circuit holding one
- * of them runs on classic under "auto", with `unsupported-kind:<kind>` as
- * the reason.
+ * cases, the per-kind table of that day and devolt's engine matrix. Today
+ * this is every implemented kind: `74ls47`, `clock_gen` and `spdt_switch`
+ * had no passing row in gate 2's table at first (no corpus fixture ran them
+ * on both engines) and joined with fixtures 66, 67 and 68
+ * (test/fixtures/core), which do. The two lists are still separate on
+ * purpose: a kind a later wave implements starts in CORE_IMPLEMENTED_KINDS
+ * only, and a circuit holding it runs on classic under "auto", with
+ * `unsupported-kind:<kind>` as the reason, until it has cleared the gates.
  *
  * The engine-selection flag routes a WHOLE circuit to the core only when
  * every kind that circuit uses is in this set. A circuit with even one
@@ -113,6 +113,7 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "voltage_source",
   "switch",
   "push_button",
+  "spdt_switch",
   "dip_switch",
   "capacitor",
   "74ls00",
@@ -124,6 +125,7 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "74ls283",
   "74hc138",
   "74hc14",
+  "74ls47",
   "74ls245",
   "74ls161",
   "74ls173",
@@ -140,6 +142,7 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "battery_pack",
   "bench_psu",
   "clock",
+  "clock_gen",
   "pulse_source",
   "pulse_gen",
   "fuse",

@@ -34,7 +34,7 @@ runner.activeEngine; // "core", or "classic" after a fallback
 runner.engineFallbackReasons; // why, for example ["unsupported-kind:bjt_npn"]
 ```
 
-The supported list (`CORE_SUPPORTED_KINDS`) is the list of parts above, less three that the core runs but whose two-engine comparison is not complete yet: `74ls47`, `clock_gen` and `spdt_switch`. A circuit with one of those runs on classic under `"auto"`, with `unsupported-kind:<kind>` as the reason. A host can pass its own list as `coreSupportedKinds`; `CORE_IMPLEMENTED_KINDS` is everything the core can run.
+The supported list (`CORE_SUPPORTED_KINDS`) is the list of parts above: every kind the core runs has cleared the two-engine comparison. The two names stay separate because a kind added to the core later is implemented (`CORE_IMPLEMENTED_KINDS`) before it is supported, and until then a circuit holding it runs on classic under `"auto"`, with `unsupported-kind:<kind>` as the reason. A host can pass its own list as `coreSupportedKinds`.
 
 `HeadlessRunner` takes three values for `engine`:
 

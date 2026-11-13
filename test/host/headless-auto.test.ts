@@ -107,7 +107,7 @@ describe('engine: "auto" — the choice at load', () => {
     expect(runner.engineFallbackReasons).toEqual([]);
   });
 
-  it("on that list an implemented kind that is not promoted yet (spdt_switch) runs on classic, named", () => {
+  it("an implemented kind the list in force leaves out (here spdt_switch) runs on classic, named", () => {
     const base = rc();
     const circuit: SimCircuit = {
       components: [...base.components, part("sw", "spdt_switch", ["com", "b", "c"], { position: 0 })],
@@ -115,7 +115,9 @@ describe('engine: "auto" — the choice at load', () => {
       wires: [...base.wires.filter((w) => !(w.from_component === "r1" && w.to_component === "c1")),
         wire("r1", "b", "sw", "com"), wire("sw", "b", "c1", "a"), wire("sw", "c", "c1", "a")],
     };
-    const runner = new HeadlessRunner({ engine: "auto" });
+    // What a kind implemented by a later wave gets until it is promoted to CORE_SUPPORTED_KINDS.
+    const withoutSpdt = new Set([...CORE_IMPLEMENTED_KINDS].filter((kind) => kind !== "spdt_switch"));
+    const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: withoutSpdt });
     runner.load(circuit);
     expect(runner.activeEngine).toBe("classic");
     expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:spdt_switch"]);

@@ -90,12 +90,13 @@ describe("planAnalysisEngine: one choice per run, made after compiling every poi
     expect(plan.fallbackReasons).toEqual([]);
   });
 
-  it("auto on the shipped list is classic for an implemented kind that is not promoted yet, naming it", () => {
-    // spdt_switch compiles and runs on the core (CORE_IMPLEMENTED_KINDS) but has no passing row in the
-    // equivalence table yet, so it is not in CORE_SUPPORTED_KINDS (see kinds.ts).
+  it("auto is classic for an implemented kind the list in force leaves out, naming it", () => {
+    // What a kind implemented by a later wave gets until it is promoted: it compiles and runs on the core
+    // (CORE_IMPLEMENTED_KINDS) but is not on the list `auto` reads. Shown here by leaving spdt_switch out.
     const circuit = rcCircuit();
     circuit.components.push({ id: "sw", kind: "spdt_switch", pins: [{ id: "com" }, { id: "b" }, { id: "c" }], params: { position: 0 } });
-    const plan = planAnalysisEngine([circuit], { engine: "auto" });
+    const withoutSpdt = new Set([...CORE_IMPLEMENTED_KINDS].filter((kind) => kind !== "spdt_switch"));
+    const plan = planAnalysisEngine([circuit], { engine: "auto", coreSupportedKinds: withoutSpdt });
     expect(plan.engine).toBe("classic");
     expect(plan.fallbackReasons).toEqual(["unsupported-kind:spdt_switch"]);
   });
