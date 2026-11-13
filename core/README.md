@@ -2245,6 +2245,68 @@ their own, and the source KCL does with W1a point 2's branch fold.
    Freed and left to the passes instead, cold 757 tpl 0's 555 reloaded at
    0.25 s (W2c) went free under its floor and stayed free at 0.3 s.
 
+   **A slide in its supply's own partition** (rulings R92, R113 (3);
+   R53-P11, R53-P12; `static_part.rs` `own_two_state`, `stepped.rs`
+   `solve_own_two_state`). A chip supplied through a series resistor, an
+   RC filter or an LED, its supply node in a static or stepped partition
+   rather than on the hub rail, slides where its edge attracts (held
+   powered its draw takes the supply out of its window; held off the
+   supply comes back) instead of declining at the episode guard (R53V2:
+   40 of its 42 fed-supply variants, "held 51 times in one sliding
+   episode"). It enters where the partition's hold procedure finds it
+   starving with its edge attracting (`hold_in`, `hold_around`) and then
+   slides with R103 (b)'s two-state duty: the partition is solved with the
+   chip powered (duty 1) and unpowered, its supply pinned at the edge in
+   each (the supply's row replaced by `v = edge`, through the Newton, the
+   hub polish, the sensitivity and the refinement), and the duty `x` is
+   the one that balances the supply node's KCL between them, `x F_on + (1
+   - x) F_off = 0` (Filippov's convex combination). The published state
+   is the blend; the device currents read each state's voltages
+   (`two_state_view`), so the chip's own stamps carry `x` times their
+   powered current. On a hub the draw, its slope and the sensitivity
+   carry the duty's own slope in the rail, `dx/du (on - off)`, and the
+   band is the narrower of the states' and of the rail moves that take
+   `x` to 0 or 1 or leave its second-order term past W0. A stepped
+   partition (a capacitor on or behind the supply) solves each step in
+   the two states at once: unknowns both states' nodes, the duty, and on
+   a CC rail the rail; a node a capacitor touches is shared by the two
+   (its charge does not jump between them), its row the duty's weighting
+   of the two states' rows, as the CC rail's is (`take_cc_two_state`);
+   the duty's row is the supply's KCL weighted alike, its capacitor's
+   current included. Where no duty in [0, 1] balances it (both states
+   carry the supply the same way) the chip is freed (powered, its supply
+   moves into its window) or held off, and the partition is solved as any
+   other. The averaged stamp the first build used (the chip's
+   conductances scaled by the duty) put the 4.3 V / 5 ohm / 100 ohm board
+   at x 0.555079; two-state it slides at I_feed / I_on = 3.238095 mA /
+   3.523915 mA = 0.918891, the output load setting it (0.485510 into 470
+   ohm). Its entry takes the edge the hold procedure found the powered
+   supply past (`entry_edge`, `entry_floor`): read from the supply alone, a
+   switch toggled under an RC-fed chip at 5.3 V took the ceiling, nearer,
+   and held the chip off above its floor (10 of 200 fuzz boards). Measured
+   at R53V2's six host cadences on the four variants (series R, R + C, RC
+   then R, LED): the supply within 1.4e-15 V of the edge at every stop, the
+   duty alike across cadences to 1e-13 on three, and on the RC then R board
+   to 5.6e-6 at 2 ms, inside its capacitor's transient (1y 46 uV), 3e-12
+   after. R53V2's rail fuzz (1,260 boards x 4 cadences): no class changes
+   against R53-P11's base. R53-P11's own-partition fuzz (200 boards x 4
+   cadences): 163 slide, 2 cadence mismatches (10 with the averaged duty),
+   7 errors (as averaged; 66 before any such slide), and no silent wrong
+   state but the probe's own false positive (32 LED-fed boards whose chip,
+   free, is unpowered under its floor). Pins:
+   `a_chip_fed_through_a_series_resistor_slides_at_the_duty_its_output_load_sets`,
+   `a_chip_on_an_rc_filtered_supply_slides_at_the_duty_its_output_load_sets`,
+   `a_chip_with_a_capacitor_on_its_supply_and_without_one_slides_at_one_duty`,
+   `a_chip_behind_an_rc_and_a_second_resistor_slides_as_its_capacitor_relaxes`,
+   `a_chip_fed_through_an_led_slides_at_the_duty_its_output_load_sets`,
+   `a_chip_sliding_in_its_supplys_own_partition_slides_alike_at_every_host_cadence`.
+   Open: two chips sliding in one partition would need four states, and
+   neither is solved in two (`own_slide_of` finds none), so each keeps
+   the duty it entered at, averaged stamps, as two chips beside one
+   partition do; a default-mode stepped step is not cut at a free chip's
+   power edge, so where a slide enters depends on the step that crossed it
+   (ruling R113 4 (a)).
+
    **The hold-episode guard** (rulings R51, permanent, and R54 (a)). A chip
    whose supply slides along its power edge (powered, its draw takes the
    supply out of its window; held off, the supply comes back) is held,

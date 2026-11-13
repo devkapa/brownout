@@ -3159,8 +3159,24 @@ impl PartitionedSolver {
         let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
         let ics = collect_ics(program);
         let self_fed = hold::self_fed(program, &ics, &fixed.iter().map(|f| f.is_some()).collect::<Vec<_>>());
+        // Ruling R92: the ICs that may slide in the partition solvers' own
+        // hold procedures, device-indexed: not a self-fed one (R97 (b)), not
+        // one on the hub rail (the rail loop's slide, `hold_on_rail`, owns
+        // it), and none in exact mode, whose chips are held as before.
+        let slide_ok: crate::shared::Shared<[bool]> = {
+            let mut ok = vec![false; device_count];
+            let on_rail = |ic: &digital::IcRecord| rail.is_some_and(|r| ic.vcc.node == r.rail || ic.gnd.node == r.rail);
+            if !program.options.no_rail_shortcut {
+                for (pos, (d, ic)) in ics.iter().enumerate() {
+                    ok[*d] = !self_fed[pos] && !on_rail(ic);
+                }
+            }
+            ok.into()
+        };
+        stepped.set_slide_ok(slide_ok.clone());
 
-        let static_solver = static_part::StaticPartitionSolver::build(program)?;
+        let mut static_solver = static_part::StaticPartitionSolver::build(program)?;
+        static_solver.set_slide_ok(slide_ok);
 
         let _ = device_count; // documents intent; `currents` is already sized from it above.
 

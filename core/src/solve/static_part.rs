@@ -205,6 +205,30 @@ struct HubStates {
     off: HubSolve,
 }
 
+/// How many ulps of its gross terms a supply node's KCL residual may sit
+/// within and count as zero (ruling R113 (3), `own_two_state`).
+const ROUND_KCL: f64 = 64.0;
+
+/// Ruling R113 (3): a sliding chip's supply pinned at its edge in its own
+/// partition's solve (`StaticPartitionSolver::own_two_state`): partition
+/// `p`'s local row `row` replaced by `z[row] - z[other] = rhs` (no `other`:
+/// `z[row] = rhs`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OwnPin {
+    p: usize,
+    row: usize,
+    other: Option<usize>,
+    rhs: f64,
+}
+
+/// What [`StaticPartitionSolver::own_two_state`] gave: the blend of the two
+/// states at the chip's duty, or Filippov's exit (the chip freed or held
+/// off, the partition to be solved as any other).
+enum OwnSolve {
+    Slide(HubSolve),
+    Exit,
+}
+
 /// A hub partition's IC stamps that are no fixed conductance, by what its
 /// band reads (Rails point 3): none (a linear partition), those that follow
 /// the rail (`curvature::hub_band`), or, holding a free IC supply, every
@@ -692,6 +716,22 @@ pub struct StaticPartitionSolver {
     /// Holds taken and released by the last resolves, for the owner to enter
     /// in its table (`PartitionedSolver::take_static_holds`).
     hold_requests: Vec<(usize, digital::power::PowerHold, f64)>,
+    /// Device-indexed: the ICs that may slide along their power edge
+    /// (ruling R92), a build-time fact the owner sets once
+    /// (`hold::self_fed`).
+    slide_ok: crate::shared::Shared<[bool]>,
+    /// Ruling R113 (3): per partition, a non-hub partition's two states
+    /// while a chip whose supply it holds slides (`Self::own_two_state`),
+    /// as a hub partition's solve carries them; journaled with the hubs'.
+    own: Vec<Option<HubSolve>>,
+    /// The supply pin of the two-state solve in progress (never set
+    /// between calls).
+    pin: Option<OwnPin>,
+    /// The edge a slide the hold procedure just entered slides on (device,
+    /// floor), for the two-state solve that follows (`Self::own_two_state`):
+    /// at entry its supply can sit nearer the other edge (cleared at each
+    /// resolve).
+    entry_edge: Option<(usize, bool)>,
     /// Exact mode's CC entry (ruling G, `PartitionedSolver::exact_cc_entry`):
     /// while set, a free-supply solve is a trial at a fixed rail, which runs
     /// no hold procedure and no release, so it takes and frees nothing.
@@ -1013,6 +1053,10 @@ impl StaticPartitionSolver {
             holds: std::rc::Rc::new(Vec::new()),
             holds_on: false,
             hold_requests: Vec::new(),
+            slide_ok: Vec::new().into(),
+            own: vec![None; partitions_len],
+            pin: None,
+            entry_edge: None,
             trial: false,
             edge_hold: Vec::new(),
             w_holds: None,
@@ -1026,6 +1070,12 @@ impl StaticPartitionSolver {
     pub(crate) fn set_power_holds(&mut self, holds: std::rc::Rc<Vec<digital::power::PowerHold>>, on: bool) {
         self.holds = holds;
         self.holds_on = on;
+    }
+
+    /// The ICs that may slide along their power edge, device-indexed
+    /// (ruling R92), set once at build.
+    pub(crate) fn set_slide_ok(&mut self, ok: crate::shared::Shared<[bool]>) {
+        self.slide_ok = ok;
     }
 
     /// Arms the next host step's retry (the horizon clamp ended this one).
@@ -1325,8 +1375,9 @@ impl StaticPartitionSolver {
         self.i_log.clear();
         for (p, solve) in self.hub_journal.drain(..).rev() {
             self.hub_journaled[p as usize] = false;
-            if let Some(hub) = self.hubs[p as usize].as_mut() {
-                hub.solve = solve;
+            match self.hubs[p as usize].as_mut() {
+                Some(hub) => hub.solve = solve,
+                None => self.own[p as usize] = solve,
             }
         }
         for (p, cache) in self.cache_journal.drain(..).rev() {
@@ -1992,6 +2043,251 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Ruling R113 (3), R103 (b)'s two states for a chip whose supply is
+    /// this partition's own (R53-P12): the one gated IC of partition `p`
+    /// that slides here (`Duty` in this solver's copy, `slide_ok`), its
+    /// position in `ics` and device. `None` with none, or with more than
+    /// one (two would need four states).
+    fn own_slide_of(&self, p: usize) -> Option<(u32, usize)> {
+        if !self.holds_on || !self.holds_free_ic_supply.get(p).copied().unwrap_or(false) {
+            return None;
+        }
+        let mut found = None;
+        for k in self.gated_ics(p) {
+            let d = self.ics[k as usize].0;
+            if !self.slide_ok.get(d).copied().unwrap_or(false) || !matches!(digital::power::hold_of(self.holds_slice(), d).kind, digital::power::HoldKind::Duty(_)) {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some((k, d));
+        }
+        found
+    }
+
+    /// The pin of IC `k`'s supply at `edge` in partition `p` (its `vcc`
+    /// row, or its `gnd` row where only that end is free here).
+    fn own_pin(&self, p: usize, k: u32, edge: f64) -> OwnPin {
+        let ic = &self.ics[k as usize].1;
+        let local = |node: usize| self.local_index.get(node).copied().flatten().filter(|&(q, _)| q == p).map(|(_, l)| l);
+        match (local(ic.vcc.node), local(ic.gnd.node)) {
+            (Some(v), Some(g)) => OwnPin { p, row: v, other: Some(g), rhs: edge },
+            (Some(v), None) => OwnPin { p, row: v, other: None, rhs: edge + self.voltages[ic.gnd.node] },
+            (None, Some(g)) => OwnPin { p, row: g, other: None, rhs: self.voltages[ic.vcc.node] - edge },
+            (None, None) => unreachable!("a gated IC has a supply node in its partition"),
+        }
+    }
+
+    /// Replaces the pinned row of partition `p`'s `size`-wide system, when
+    /// a pin is set on it ([`Self::own_two_state`]).
+    fn apply_pin(&self, p: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
+        let Some(pin) = self.pin.filter(|pin| pin.p == p) else { return };
+        let row = pin.row * size;
+        a[row..row + size].fill(0.0);
+        a[row + pin.row] = 1.0;
+        if let Some(o) = pin.other {
+            a[row + o] = -1.0;
+        }
+        b[pin.row] = pin.rhs;
+    }
+
+    /// The pinned row of a `size`-wide Jacobian term (`extra`) cleared.
+    fn clear_pin_row(&self, p: usize, size: usize, extra: &mut [f64]) {
+        if let Some(pin) = self.pin.filter(|pin| pin.p == p) {
+            extra[pin.row * size..(pin.row + 1) * size].fill(0.0);
+        }
+    }
+
+    /// KCL at the pinned row of partition `p` with nothing pinned: the
+    /// current leaving that node at state `x` (and rail `u` for a hub
+    /// partition), and for a hub partition the slope of that current in the
+    /// rail along the state's sensitivity `s` (the exact Jacobian's row, the
+    /// IC supply terms included), and its gross terms (what its rounding
+    /// scales with).
+    #[allow(clippy::too_many_arguments)]
+    fn own_kcl(&self, p: usize, now: f64, drivers: &[Driver], row: usize, x: &[f64], hub: Option<(f64, &[f64])>) -> Result<(f64, f64, f64), String> {
+        let n = x.len();
+        match hub {
+            Some((u, s)) => {
+                let size = n + 1;
+                let z: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
+                let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
+                let hub = self.hubs[p].as_ref().expect("a hub partition");
+                let rail = self.rail.expect("a hub partition implies a rail");
+                let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
+                stamp_linear_base(&hub.shape, size, &mut a, &mut b, &self.switch_params, &bnd);
+                stamp_ics_into_dyn(size, &mut a, &mut b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z);
+                stamp_junctions(&hub.shape.junctions, size, &mut a, &mut b, &z, &bnd);
+                let extra = crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z).extra_jacobian(&z, n);
+                let r = row * size;
+                let f = (0..size).map(|j| a[r + j] * z[j]).sum::<f64>() - b[row];
+                let gross = (0..size).map(|j| (a[r + j] * z[j]).abs()).sum::<f64>() + b[row].abs();
+                let df = (0..size).map(|j| (a[r + j] + extra[r + j]) * if j < n { s[j] } else { 1.0 }).sum::<f64>();
+                Ok((f, df, gross))
+            }
+            None => {
+                let (mut a, mut b) = (vec![0.0; n * n], vec![0.0; n]);
+                self.stamp_iterate(p, n, &mut a, &mut b, now, drivers, x, false)?;
+                let gross = (0..n).map(|j| (a[row * n + j] * x[j]).abs()).sum::<f64>() + b[row].abs();
+                Ok(((0..n).map(|j| a[row * n + j] * x[j]).sum::<f64>() - b[row], 0.0, gross))
+            }
+        }
+    }
+
+    /// Ruling R113 (3): partition `p`, holding the supply of IC `k`
+    /// (device `d`) that slides at its edge, solved in R103 (b)'s two
+    /// states: each with the chip powered (duty 1) and unpowered, its
+    /// supply pinned at the edge (`OwnPin`), the duty `x` the one that
+    /// balances the supply node's KCL between them, `x F_on + (1 - x)
+    /// F_off = 0` (Filippov's convex combination). Published: the blend at
+    /// `x`; for a hub partition its draw, slope and sensitivity carry the
+    /// duty's own slope in the rail, `dx/du (on - off)`. Where no duty in
+    /// [0, 1] balances it (Filippov's exit) the chip is freed (powered, its
+    /// supply moves into its window) or held off (powered or not, it moves
+    /// out), and the partition is solved as any other. `hub`: the rail;
+    /// `hint`: the partition's solve that entered the slide.
+    #[allow(clippy::too_many_arguments)]
+    fn own_two_state(&mut self, p: usize, now: f64, drivers: &[Driver], k: u32, d: usize, hub: Option<f64>, hint: Option<&[f64]>) -> Result<OwnSolve, String> {
+        use digital::power::{HoldKind, PowerHold};
+        let ic = self.ics[k as usize].1.clone();
+        let (lo, hi) = digital::levels::power_window(&ic);
+        // The edge it slides on: the one the hold procedure entered it at
+        // (`entry_edge`: its powered supply past it), else the one nearer
+        // its supply as published, or as the solve that entered the slide
+        // left it (`hint`, not yet published).
+        let published = match hint {
+            Some(x) => self.supply_at(k, p, x),
+            None => self.voltages[ic.vcc.node] - self.voltages[ic.gnd.node],
+        };
+        let floor = match self.entry_edge.take() {
+            Some((at, floor)) if at == d => floor,
+            other => {
+                self.entry_edge = other;
+                (published - lo).abs() <= (published - hi).abs()
+            }
+        };
+        let edge = if floor { lo } else { hi };
+        let pin = self.own_pin(p, k, edge);
+        let gated = self.gated_ics(p);
+        let owner = std::rc::Rc::clone(&self.holds);
+        let state = |this: &mut Self, on: bool| -> Result<(HubSolve, f64, f64, f64), String> {
+            let mut table: Vec<PowerHold> = (*owner).clone();
+            if table.len() <= d {
+                table.resize(d + 1, PowerHold::FREE);
+            }
+            table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
+            this.holds = std::rc::Rc::new(table);
+            this.pin = Some(pin);
+            let solved = match hub {
+                Some(u) => this.solve_once(p, now, drivers, &gated, None, Some(u)).and_then(|(x, factors)| this.hub_finish(p, now, drivers, x, &factors, u, None)),
+                None => this.solve_once(p, now, drivers, &gated, None, None).map(|(x, _)| HubSolve { s: vec![0.0; x.len()], x, i: 0.0, g: 0.0, u_p: 0.0, band: None, states: None }),
+            };
+            this.pin = None;
+            let solved = solved?;
+            let (f, df, gross) = this.own_kcl(p, now, drivers, pin.row, &solved.x, hub.map(|u| (u, &solved.s[..])))?;
+            Ok((solved, f, df, gross))
+        };
+        let on = state(self, true);
+        let off = on.as_ref().ok().map(|_| state(self, false));
+        self.holds = owner;
+        let ((on, f_on, df_on, g_on), (off, f_off, df_off, g_off)) = (on?, off.expect("solved after the powered state")?);
+        // A residual within its own rounding is no direction: the supply sits
+        // on the edge in that state (at V*, where the feed is the powered
+        // draw itself, FXDv's hairline boards read -8.7e-19 A against 3.5e-3
+        // A of gross terms, a sign rounding sets).
+        let at_edge = |f: f64, gross: f64| if f.abs() <= ROUND_KCL * f64::EPSILON * gross { 0.0 } else { f };
+        let (f_on, f_off) = (at_edge(f_on, g_on), at_edge(f_off, g_off));
+        // The sign of KCL's residual (current leaving the supply node) that
+        // moves the supply into the window: down from a ceiling, up from a
+        // floor.
+        let inward = if floor { -1.0 } else { 1.0 };
+        let (on_in, off_out) = (f_on * inward > 0.0, f_off * inward < 0.0);
+        if !on_in && !off_out {
+            // Both on the edge: the duty stays as it was.
+            let den = f_off - f_on;
+            let x = if den == 0.0 { digital::power::hold_of(self.holds_slice(), d).kind.weight() } else { f_off / den };
+            let mix = |a: f64, b: f64| x * a + (1.0 - x) * b;
+            let x_b: Vec<f64> = on.x.iter().zip(&off.x).map(|(&a, &b)| mix(a, b)).collect();
+            if !self.trial {
+                let old = digital::power::hold_of(self.holds_slice(), d);
+                let duty = PowerHold::duty(x);
+                if old != duty {
+                    self.set_local_hold(d, duty);
+                    self.hold_requests.push((d, duty, now));
+                }
+            }
+            let solve = match hub {
+                None => HubSolve { s: vec![0.0; x_b.len()], x: x_b, i: 0.0, g: 0.0, u_p: 0.0, band: None, states: Some(Box::new(HubStates { w: x, on, off })) },
+                Some(u) => {
+                    // The duty's slope in the rail, and the second-order
+                    // term its linear publish leaves (each residual linear
+                    // in the rail, `x = (a + b du) / (c + d du)`: x'' = -2
+                    // (d / c) x'), within W0 of every node and of the draw,
+                    // and the rail where the duty reaches 0 or 1.
+                    let (dxdu, ddxdu) = if den == 0.0 {
+                        (0.0, 0.0)
+                    } else {
+                        let dxdu = (f_off * df_on - f_on * df_off) / (den * den);
+                        (dxdu, -2.0 * ((df_off - df_on) / den) * dxdu)
+                    };
+                    let s: Vec<f64> = (0..x_b.len()).map(|l| mix(on.s[l], off.s[l]) + dxdu * (on.x[l] - off.x[l])).collect();
+                    let (i, g) = (mix(on.i, off.i), mix(on.g, off.g) + dxdu * (on.i - off.i));
+                    let w0 = |v: f64| 1e-4 + 1e-3 * v.abs();
+                    let spread = x_b.iter().zip(on.x.iter().zip(&off.x)).map(|(&v, (&a, &b))| (a - b).abs() / w0(v)).fold((on.i - off.i).abs() / w0(i), f64::max);
+                    let curved = (2.0 / (ddxdu.abs() * spread)).sqrt();
+                    let exits = x.min(1.0 - x) / dxdu.abs();
+                    // The owner's table holds the duty solved at `u`, which
+                    // the publish along `s` does not move: re-solved before
+                    // it drifts past W0 of a duty (1e-4 + 1e-3 x).
+                    let held = (1e-4 + 1e-3 * x) / dxdu.abs();
+                    let own = [curved, exits, held, rails::RAIL_RESOLVE_V].into_iter().filter(|b| b.is_finite()).fold(rails::RAIL_RESOLVE_V, f64::min).max(0.0);
+                    let band = [on.band, off.band, Some(own)].into_iter().flatten().reduce(f64::min);
+                    HubSolve { x: x_b, s, i, g, u_p: u, band, states: Some(Box::new(HubStates { w: x, on, off })) }
+                }
+            };
+            return Ok(OwnSolve::Slide(solve));
+        }
+        if self.trial {
+            return Ok(OwnSolve::Exit);
+        }
+        let hold = if on_in {
+            PowerHold::FREE
+        } else {
+            // Held off where it starves either way: its release from its
+            // supply powered and unpowered, unpinned.
+            let owner = std::rc::Rc::clone(&self.holds);
+            let supply = |this: &mut Self, on: bool| -> Result<f64, String> {
+                let mut table: Vec<PowerHold> = (*owner).clone();
+                table[d] = if on { PowerHold::duty(1.0) } else { PowerHold::off() };
+                this.holds = std::rc::Rc::new(table);
+                let (x, _) = this.solve_once(p, now, drivers, &gated, None, hub)?;
+                Ok(this.supply_at(k, p, &x))
+            };
+            let v_on = supply(self, true);
+            let v_off = supply(self, false);
+            self.holds = owner;
+            crate::solve::hold::held_off(&ic, v_on?, v_off?, now)
+        };
+        debug_assert!(hold.is_free() || hold.kind == HoldKind::Off);
+        self.set_local_hold(d, hold);
+        self.hold_requests.push((d, hold, now));
+        Ok(OwnSolve::Exit)
+    }
+
+    /// A non-hub partition's own two states (ruling R113 (3)), journaled as
+    /// a hub partition's solve is.
+    fn set_own(&mut self, p: usize, own: Option<HubSolve>) {
+        if self.own[p].is_none() && own.is_none() {
+            return;
+        }
+        if self.window && !self.hub_journaled[p] {
+            self.hub_journaled[p] = true;
+            self.hub_journal.push((p as u32, self.own[p].clone()));
+        }
+        self.own[p] = own;
+    }
+
     /// W1c point 1a in an iterated partition, after its Newton failed with
     /// the gated ICs at positions `a` of `gated` alternating: probed held
     /// powered (the rest at their last iterate's reading), the ones reading
@@ -2032,6 +2328,45 @@ impl StaticPartitionSolver {
             self.set_local_hold(devices[k], hold::probe(false));
         }
         let Ok((x, _)) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) else { return fail(self) };
+        // Ruling R92 (R53's sliding hold): one starving chip whose edge
+        // attracts (held unpowered, its supply comes back inside its window)
+        // slides along it, at the duty that puts its supply there, the rest
+        // as they were. Not a chip on default mode's hub rail, whose slide
+        // is the rail loop's (`PartitionedSolver::hold_on_rail`).
+        if let [(k, v_on)] = starving[..] {
+            let d = devices[k];
+            let ic = self.ics[gated[k] as usize].1.clone();
+            let on_rail = self.rail.is_some_and(|r| ic.vcc.node == r || ic.gnd.node == r);
+            let may = !on_rail && self.slide_ok.get(d).copied().unwrap_or(false) && hold::sliding_allowed();
+            if may && digital::power::powered(&ic, self.supply_at(gated[k], p_idx, &x), 0.0) {
+                for (j, &dj) in devices.iter().enumerate() {
+                    if j != k {
+                        self.set_local_hold(dj, before[j]);
+                    }
+                }
+                // Entered at a provisional duty, solved averaged: the solve
+                // that follows (`Self::own_two_state`) puts it at the duty
+                // that balances the two states (ruling R113 (3)).
+                let duty = digital::power::PowerHold::duty(0.5);
+                self.set_local_hold(d, duty);
+                self.entry_edge = Some((d, v_on < digital::levels::power_window(&ic).0));
+                if let Ok(solved) = self.solve_once(p_idx, now, drivers, gated, None, polish_at) {
+                    self.hold_requests.push((d, duty, now));
+                    for (j, &dj) in devices.iter().enumerate() {
+                        if j != k && before[j] != digital::power::hold_of(&saved.0, dj) {
+                            self.hold_requests.push((dj, before[j], now));
+                        }
+                    }
+                    return Ok(solved);
+                }
+                for (j, &dj) in devices.iter().enumerate() {
+                    if j != k {
+                        self.set_local_hold(dj, hold::probe(a.contains(&j) || flips.last(j).unwrap_or(false)));
+                    }
+                }
+                self.set_local_hold(d, hold::probe(false));
+            }
+        }
         let mut taken = Vec::new();
         for (k, &d) in devices.iter().enumerate() {
             let held = match starving.iter().find(|&&(s, _)| s == k) {
@@ -2247,6 +2582,7 @@ impl StaticPartitionSolver {
                     b.fill(0.0);
                     stamp_error = Some(e);
                 }
+                self.apply_pin(p_idx, size, a, b);
             });
             if let Some(e) = stamp_error {
                 return Err(first_err.unwrap_or(e));
@@ -2410,14 +2746,17 @@ impl StaticPartitionSolver {
     }
 
     /// Every hub partition's solve, for a whole snapshot.
+    /// Every hub partition's solve, and a non-hub partition's own two
+    /// states (ruling R113 (3)) in its place.
     pub(crate) fn hub_snapshot(&self) -> Vec<Option<HubSolveSnapshot>> {
-        self.hubs.iter().map(|h| h.as_ref().and_then(|h| h.solve.clone()).map(HubSolveSnapshot)).collect()
+        self.hubs.iter().zip(&self.own).map(|(h, own)| match h { Some(h) => h.solve.clone(), None => own.clone() }.map(HubSolveSnapshot)).collect()
     }
 
     pub(crate) fn hub_restore(&mut self, snap: Vec<Option<HubSolveSnapshot>>) {
-        for (hub, saved) in self.hubs.iter_mut().zip(snap) {
-            if let Some(hub) = hub {
-                hub.solve = saved.map(|s| s.0);
+        for ((hub, own), saved) in self.hubs.iter_mut().zip(self.own.iter_mut()).zip(snap) {
+            match hub {
+                Some(hub) => hub.solve = saved.map(|s| s.0),
+                None => *own = saved.map(|s| s.0),
             }
         }
     }
@@ -2496,7 +2835,8 @@ impl StaticPartitionSolver {
         });
         let supply = self.holds_free_ic_supply[p].then(|| {
             let ic = crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z);
-            let extra = ic.extra_jacobian(&z, n);
+            let mut extra = ic.extra_jacobian(&z, n);
+            self.clear_pin_row(p, n + 1, &mut extra);
             (ic, extra)
         });
         let sens = rail_sensitivity(n, x, u, factors, ic.as_ref().map(|(_, e)| &e[..]), supply.as_ref().map(|(_, e)| &e[..]), |z, a, b| self.hub_residual_stamp(p, now, drivers, u, z, a, b))
@@ -2522,6 +2862,7 @@ impl StaticPartitionSolver {
         stamp_linear_base(&hub.shape, n + 1, a, b, &self.switch_params, &bnd);
         stamp_ics_into_dyn(n + 1, a, b, now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z);
         stamp_junctions(&hub.shape.junctions, n + 1, a, b, z, &bnd);
+        self.apply_pin(p, n + 1, a, b);
     }
 
     /// Takes hub partition `p`'s iterated solve `x` (an iterate that passed
@@ -2620,7 +2961,9 @@ impl StaticPartitionSolver {
             self.hub_residual_stamp(p, now, drivers, u, &z, &mut a, &mut b);
             let extra = free_supply.then(|| {
                 let bnd = Bnd::new(&self.voltages).with_holds(self.holds_slice()).with_ext(rail, n).hold_power_at(u);
-                crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z).extra_jacobian(&z, n)
+                let mut extra = crate::solve::ic_supply_terms(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, &z).extra_jacobian(&z, n);
+                self.clear_pin_row(p, size, &mut extra);
+                extra
             });
             let mut step = residual_step(&a, &b, &z);
             let q = scaled_residual(&step, &a, n);
@@ -2765,7 +3108,12 @@ impl StaticPartitionSolver {
             add(l, i);
             pairs.push((Some(l), None, ulps * i.abs()));
         }
-        (acc.into_iter().map(|(s, c)| s + c).collect(), pairs)
+        let mut r: Vec<f64> = acc.into_iter().map(|(s, c)| s + c).collect();
+        // A pinned supply's row is its pin (ruling R113 (3)).
+        if let Some(pin) = self.pin.filter(|pin| pin.p == p) {
+            r[pin.row] = z[pin.row] - pin.other.map_or(0.0, |o| z[o]) - pin.rhs;
+        }
+        (r, pairs)
     }
 
     /// Mixed-precision iterative refinement of hub partition `p`'s solve `x`
@@ -2850,12 +3198,74 @@ impl StaticPartitionSolver {
     /// contribution; otherwise the partition solves, its sensitivity and
     /// band follow through the same factors, and the entry is stored.
     fn solve_hub(&mut self, p: usize, now: f64, drivers: &[Driver], changed: &mut Vec<usize>) -> Result<(), String> {
-        let solve = match self.sliding_ic_of(p) {
-            Some((device, w)) => self.solve_hub_two_state(p, now, drivers, device, w)?,
-            None => self.solve_hub_once(p, now, drivers)?,
+        let solve = match self.own_hub(p, now, drivers, None)? {
+            Some(solve) => solve,
+            None => {
+                let solve = match self.sliding_ic_of(p) {
+                    Some((device, w)) => self.solve_hub_two_state(p, now, drivers, device, w)?,
+                    None => self.solve_hub_once(p, now, drivers)?,
+                };
+                // A slide this solve's hold procedure entered (`hold_in`)
+                // is solved in its two states at once.
+                let hint = solve.x.clone();
+                self.own_hub(p, now, drivers, Some(&hint))?.unwrap_or(solve)
+            }
         };
         self.set_hub_solve(p, solve, changed);
         Ok(())
+    }
+
+    /// Hub partition `p` in its own two states while a chip whose supply
+    /// it holds slides (ruling R113 (3), [`Self::own_two_state`]); at
+    /// Filippov's exit its ordinary solve with the chip freed or held off.
+    /// `None` with no such chip.
+    fn own_hub(&mut self, p: usize, now: f64, drivers: &[Driver], hint: Option<&[f64]>) -> Result<Option<HubSolve>, String> {
+        let Some((k, d)) = self.own_slide_of(p) else { return Ok(None) };
+        let u = self.voltages[self.rail.expect("a hub partition implies a rail")];
+        if let OwnSolve::Slide(solve) = self.own_two_state(p, now, drivers, k, d, Some(u), hint)? {
+            return Ok(Some(solve));
+        }
+        // Filippov's exit: solved as any other, which may take it into a
+        // slide again (`hold_in`), solved in its two states once more.
+        let solve = self.solve_hub_once(p, now, drivers)?;
+        let Some((k, d)) = self.own_slide_of(p) else { return Ok(Some(solve)) };
+        let hint = solve.x.clone();
+        match self.own_two_state(p, now, drivers, k, d, Some(u), Some(&hint))? {
+            OwnSolve::Slide(solve) => Ok(Some(solve)),
+            OwnSolve::Exit => self.solve_hub_once(p, now, drivers).map(Some),
+        }
+    }
+
+    /// [`Self::iterated_solve`] of a non-hub partition holding a free IC
+    /// supply, in its own two states while a chip whose supply it holds
+    /// slides (ruling R113 (3)), kept for the device currents
+    /// ([`Self::two_state_view`]).
+    fn own_or_iterated(&mut self, p: usize, now: f64, drivers: &[Driver]) -> Result<Vec<f64>, String> {
+        let own = |this: &mut Self, hint: Option<&[f64]>| -> Result<Option<Vec<f64>>, String> {
+            let Some((k, d)) = this.own_slide_of(p) else { return Ok(None) };
+            match this.own_two_state(p, now, drivers, k, d, None, hint)? {
+                OwnSolve::Slide(solve) => {
+                    let x = solve.x.clone();
+                    this.set_own(p, Some(solve));
+                    Ok(Some(x))
+                }
+                OwnSolve::Exit => Ok(None),
+            }
+        };
+        if let Some(x) = own(self, None)? {
+            return Ok(x);
+        }
+        let x = self.iterated_solve(p, now, drivers)?;
+        let entered = self.own_slide_of(p).is_some();
+        if let Some(x) = own(self, Some(&x))? {
+            return Ok(x);
+        }
+        self.set_own(p, None);
+        // Entered and left at once: solved under the hold it left with.
+        if entered {
+            return self.iterated_solve(p, now, drivers);
+        }
+        Ok(x)
     }
 
     /// The one IC touching hub partition `p` that slides (ruling R92) at a
@@ -2868,7 +3278,12 @@ impl StaticPartitionSolver {
         }
         let hub = self.hubs[p].as_ref()?;
         let mut found = None;
-        for (device, _) in &hub.touch_ics {
+        for (device, ic) in &hub.touch_ics {
+            // A chip whose supply is this partition's own slides here, its
+            // duty solved by this partition's solve (`keep_in`), not beside it.
+            if self.in_partition(ic.vcc.node, p) || self.in_partition(ic.gnd.node, p) {
+                continue;
+            }
             let kind = digital::power::hold_of(&self.holds, *device).kind;
             if let digital::power::HoldKind::Duty(_) = kind {
                 let w = kind.weight();
@@ -2940,7 +3355,7 @@ impl StaticPartitionSolver {
         // sensitivity solves its own exact Jacobian, not through `factors`,
         // so they need not follow the polish. A free IC supply's polish is
         // inside W1c point 1a's procedure.
-        let (mut x, factors) = if free_supply {
+        let (x, factors) = if free_supply {
             self.free_supply_solve(p, now, drivers, Some(u))?
         } else if iterated {
             let (x, factors) = self.iterated_solve_factored(p, now, drivers)?;
@@ -2948,7 +3363,16 @@ impl StaticPartitionSolver {
         } else {
             self.direct_solve_factored(p, now, drivers)?
         };
-        let (mut sens, mut ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
+        self.hub_finish(p, now, drivers, x, &factors, u, key_hash)
+    }
+
+    /// Hub partition `p`'s solve `x` at rail `u` (its last factors
+    /// `factors`) completed: its sensitivity and band, refined where its
+    /// floor asks, and stored under `key_hash` when given.
+    #[allow(clippy::too_many_arguments)]
+    fn hub_finish(&mut self, p: usize, now: f64, drivers: &[Driver], mut x: Vec<f64>, factors: &lu::LuFactorization, u: f64, key_hash: Option<u64>) -> Result<HubSolve, String> {
+        let rail = self.rail.expect("a hub partition implies a rail");
+        let (mut sens, mut ic) = self.hub_sensitivity(p, now, drivers, &x, u, factors)?;
         self.sensitivities += 1;
         // A curved partition's band counts the solve's own distance from
         // the solution (`curvature::Floors`), from its residual at `x`
@@ -2963,7 +3387,7 @@ impl StaticPartitionSolver {
                 if floors.worst_w0 > REFINE_GATE {
                     let (refined, r, pairs) = self.refine_hub(p, now, drivers, x, u, &lu_j)?;
                     x = refined;
-                    (sens, ic) = self.hub_sensitivity(p, now, drivers, &x, u, &factors)?;
+                    (sens, ic) = self.hub_sensitivity(p, now, drivers, &x, u, factors)?;
                     let lu_j = sens.lu.take().ok_or_else(|| format!("partition {p}: a refined hub solve without its Jacobian's factors"))?;
                     floors = self.hub_floors(p, &x, u, &sens, &lu_j, &r, &vec![0.0; n], &pairs)?;
                     #[cfg(test)]
@@ -2996,6 +3420,7 @@ impl StaticPartitionSolver {
         // W1f: the boundary and the hub corrections move first, so every
         // solve below reads them; they queue no reader of their own.
         self.apply_pending_boundary(changed);
+        self.entry_edge = None;
         let silent_len = changed.len();
         self.silent_len = silent_len;
         for &partition in dirty {
@@ -3015,7 +3440,7 @@ impl StaticPartitionSolver {
                 // (junctions or not, W1e LEDs point 7): every solve restamps
                 // from the iterate, and the result goes straight to
                 // `self.voltages`.
-                let x = self.iterated_solve(p_idx, now, drivers)?;
+                let x = self.own_or_iterated(p_idx, now, drivers)?;
                 self.publish_partition(p_idx, &x, changed);
             } else {
                 let mut key_hash = None;
@@ -3134,9 +3559,7 @@ impl StaticPartitionSolver {
     /// voltages: the partition sits at one solve or the other.
     pub(crate) fn two_state_view(&self, base: &[f64], node: usize) -> Option<(f64, Vec<f64>, Vec<f64>)> {
         let (p, _) = self.local_index.get(node).copied().flatten()?;
-        let states = self.hubs.get(p)?.as_ref()?.solve.as_ref()?.states.as_ref()?;
-        let rail = self.rail?;
-        let du = base[rail] - states.on.u_p;
+        let (states, du) = self.states_of(p, base)?;
         let fill = |solve: &HubSolve| {
             let mut v = base.to_vec();
             for (l, &n) in self.partitions[p].iter().enumerate() {
@@ -3147,12 +3570,24 @@ impl StaticPartitionSolver {
         Some((states.w, fill(&states.on), fill(&states.off)))
     }
 
+    /// Partition `p`'s two states, beside a sliding chip or holding its
+    /// supply (ruling R113 (3)), and the rail's move since they were solved
+    /// (none off the hub).
+    fn states_of(&self, p: usize, base: &[f64]) -> Option<(&HubStates, f64)> {
+        match self.hubs.get(p)?.as_ref() {
+            Some(hub) => {
+                let states = hub.solve.as_ref()?.states.as_ref()?;
+                Some((states, base[self.rail?] - states.on.u_p))
+            }
+            None => Some((self.own.get(p)?.as_ref()?.states.as_ref()?, 0.0)),
+        }
+    }
+
     /// [`Self::two_state_view`] for one node: the duty and the node's
     /// voltage at the powered and at the unpowered solve.
     pub(crate) fn two_state_node(&self, base: &[f64], node: usize) -> Option<(f64, f64, f64)> {
         let (p, l) = self.local_index.get(node).copied().flatten()?;
-        let states = self.hubs.get(p)?.as_ref()?.solve.as_ref()?.states.as_ref()?;
-        let du = base[self.rail?] - states.on.u_p;
+        let (states, du) = self.states_of(p, base)?;
         Some((states.w, states.on.x[l] + states.on.s[l] * du, states.off.x[l] + states.off.s[l] * du))
     }
 
@@ -4128,6 +4563,18 @@ impl crate::snapshot::HeapBytes for HubStates {
     }
 }
 
+impl crate::snapshot::HeapBytes for OwnPin {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.p, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.row, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.other, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rhs, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for HubSolveSnapshot {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -4237,6 +4684,10 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_on, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hold_requests, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_ok, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pin, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.entry_edge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trial, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.edge_hold, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w_holds, w); }

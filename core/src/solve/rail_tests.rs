@@ -8851,7 +8851,7 @@ fn fx_on_psu(b: &mut D7Board, v: f64) -> Result<Rig, BoError> {
 /// neither holds, and a published solve is wrong whichever it is held to;
 /// `-4` is the answer there (FXDv: 49-66 % of CC-ramp fed-supply boards,
 /// ruling R23 (iii)).
-fn fx_power_hairline(b: &mut D7Board, rs: f64, lo: f64) -> (usize, usize, f64, String) {
+fn fx_power_hairline(b: &mut D7Board, rs: f64, lo: f64, slide: &dyn Fn(f64, f64) -> (Vec<f64>, f64)) -> (usize, usize, f64, String) {
     let floor = 0.9 * lo;
     let (mut a, mut z) = (floor, 20.0);
     assert!((b.exact)(z).0[0] >= floor, "{}: no power edge below 20 V", b.name);
@@ -8895,6 +8895,17 @@ fn fx_power_hairline(b: &mut D7Board, rs: f64, lo: f64) -> (usize, usize, f64, S
                 let held = rig.s().power_hold(gate).kind == digital::power::HoldKind::Off;
                 if held || off[0] <= floor + 1e-6 || off[0] >= top - 1e-6 {
                     states.push(off);
+                }
+                // A gate sliding at its floor (ruling R92, R53-P11: since the
+                // static partition's slide, every load the hold held off
+                // between the floor and V*) publishes its two states' blend
+                // at its duty (ruling R113 (3)), the duty by hand at the
+                // published rail.
+                let hold = rig.s().power_hold(gate);
+                if let digital::power::HoldKind::Duty(_) = hold.kind {
+                    let (state, x) = slide(u_p, hold.kind.weight());
+                    close(hold.kind.weight(), x, 1e-6, &format!("{}: V* {d:+e}: the duty by hand", b.name));
+                    states.push(state);
                 }
                 let published: Vec<f64> = b.nodes.iter().map(|&n| x[rig.s().local_index[n].unwrap().1]).collect();
                 let dist = states.iter().map(|xs| published.iter().zip(xs).fold(0.0f64, |a, (p, q)| a.max((p - q).abs()))).fold(f64::INFINITY, f64::min);
@@ -9096,16 +9107,55 @@ fn a_published_solve_at_a_power_edge_is_a_solution_of_the_state_it_publishes() {
     // 1.6e-9 V off), and within 1e-6 V (0.01 W0) where the gate drives an
     // LED alone (the iterate a stall keeps sits up to 7e-9 V off, inside the
     // polish's rounding floor of 2.2e-7 V there).
-    let mut boards = vec![
-        (fx_fed_gate_into_r_and_an_off_chain(150.0, 0.004, 1000.0, 1.0), 150.0, 1.0, 1e-12),
-        (fx_fed_gate_into_r_and_an_off_chain(60.0, 0.004, 200.0, 3.0), 60.0, 3.0, 1e-12),
-        (fx_fed_gate_into_r_and_an_off_chain(20.0, 0.004, 200.0, 2.0), 20.0, 2.0, 1e-12),
-        (fx_fed_gate_into_an_led(40.94005929443432, 0.016, 72.39521148039215, 1.0), 40.94005929443432, 1.0, 1e-6),
-        (fx_fed_gate_into_an_led(260.10858729957744, 0.004, 56.385405604028385, 1.0), 260.10858729957744, 1.0, 1e-6),
-        (one_gate_on_a_fed_supply(5.632455568787591, 60.754768860798805, 0.004, (2.0, 6.0), false, 0.0), 5.632455568787591, 2.0, 1e-12),
+    //
+    // Since the static partition's slide (ruling R92, R53-P11) the loads
+    // between the floor and V* that were held off slide, in ruling R113
+    // (3)'s two states: the network with the supply pinned at the floor
+    // `v`, the gate powered (its conductance `g(v)`) and unpowered, which
+    // `slide` below solves from the boards' own equations (as each board's
+    // `exact`); the published state is their blend at the duty, and the
+    // duty the one that balances the supply's KCL, `F_off / (F_off -
+    // F_on)` with `F = (v - u) / rs + g (v - o) + shunt` at rail `u`.
+    let gs = static_part::NODE_RSHUNT_G;
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let jf = move |v: f64| law.current(v) + led::GMIN_D * v;
+    // The two states of a gate whose output `o` (with `rest`, the nodes
+    // past it) solves `rows(g, v, y)` at supply `v`, blended.
+    fn two_states(u: f64, x: f64, v: f64, rs: f64, g_on: f64, y0: Vec<f64>, rows: &dyn Fn(f64, &[f64]) -> Vec<f64>) -> (Vec<f64>, f64) {
+        let gs = static_part::NODE_RSHUNT_G;
+        let (on, off) = (newton_fd(y0.clone(), &|y: &[f64]| rows(g_on, y)), newton_fd(y0, &|y: &[f64]| rows(0.0, y)));
+        let f = |g: f64, o: f64| (v - u) / rs + g * (v - o) + gs * v;
+        let (f_on, f_off) = (f(g_on, on[0]), f(0.0, off[0]));
+        (std::iter::once(v).chain(on.iter().zip(&off).map(|(a, b)| x * a + (1.0 - x) * b)).collect(), f_off / (f_off - f_on))
+    }
+    let chain = move |rs: f64, io: f64, r: f64, lo: f64| move |u: f64, x: f64| {
+        let v = 0.9 * lo;
+        two_states(u, x, v, rs, gate_g(v, io), vec![0.5 * v, 0.25 * v], &|g, y| {
+            let (o, a) = (y[0], y[1]);
+            vec![g * (o - v) + o / r + jf(o - a) + gs * o, -jf(o - a) + jf(a) + gs * a]
+        })
+    };
+    let into_led = move |rs: f64, io: f64, r: f64, lo: f64| move |u: f64, x: f64| {
+        let v = 0.9 * lo;
+        two_states(u, x, v, rs, gate_g(v, io), vec![0.5 * v, 0.3 * v], &|g, y| {
+            let (o, a) = (y[0], y[1]);
+            vec![g * (o - v) + (o - a) / r + gs * o, (a - o) / r + jf(a) + gs * a]
+        })
+    };
+    let one = move |rs: f64, io: f64, r: f64, lo: f64| move |u: f64, x: f64| {
+        let v = 0.9 * lo;
+        two_states(u, x, v, rs, gate_g(v, io), vec![0.3], &|g, y| vec![g * (y[0] - v) + y[0] / r + gs * y[0]])
+    };
+    let mut boards: Vec<(D7Board, f64, f64, f64, Box<dyn Fn(f64, f64) -> (Vec<f64>, f64)>)> = vec![
+        (fx_fed_gate_into_r_and_an_off_chain(150.0, 0.004, 1000.0, 1.0), 150.0, 1.0, 1e-12, Box::new(chain(150.0, 0.004, 1000.0, 1.0))),
+        (fx_fed_gate_into_r_and_an_off_chain(60.0, 0.004, 200.0, 3.0), 60.0, 3.0, 1e-12, Box::new(chain(60.0, 0.004, 200.0, 3.0))),
+        (fx_fed_gate_into_r_and_an_off_chain(20.0, 0.004, 200.0, 2.0), 20.0, 2.0, 1e-12, Box::new(chain(20.0, 0.004, 200.0, 2.0))),
+        (fx_fed_gate_into_an_led(40.94005929443432, 0.016, 72.39521148039215, 1.0), 40.94005929443432, 1.0, 1e-6, Box::new(into_led(40.94005929443432, 0.016, 72.39521148039215, 1.0))),
+        (fx_fed_gate_into_an_led(260.10858729957744, 0.004, 56.385405604028385, 1.0), 260.10858729957744, 1.0, 1e-6, Box::new(into_led(260.10858729957744, 0.004, 56.385405604028385, 1.0))),
+        (one_gate_on_a_fed_supply(5.632455568787591, 60.754768860798805, 0.004, (2.0, 6.0), false, 0.0), 5.632455568787591, 2.0, 1e-12, Box::new(one(5.632455568787591, 0.004, 60.754768860798805, 2.0))),
     ];
-    for (b, rs, lo, tol) in boards.iter_mut() {
-        let (loads, failed, worst, at) = fx_power_hairline(b, *rs, *lo);
+    for (b, rs, lo, tol, slide) in boards.iter_mut() {
+        let (loads, failed, worst, at) = fx_power_hairline(b, *rs, *lo, slide.as_ref());
         eprintln!("{}: {failed} of {loads} loads failed -4; the published worst {worst:e} V from a solution ({at})", b.name);
         assert!(loads - failed >= 30, "{}: {failed} of {loads} failed", b.name);
         assert!(worst <= *tol, "{}: {at}", b.name);
@@ -9776,9 +9826,27 @@ fn an_iterated_partition_alternating_a_555s_power_gate_holds_it_off_while_its_lo
     // takes the load away, so it powers there (until F5k it stayed dark to
     // the end). Powered, its latch meets NE555 point 11's zero-delay loop,
     // which declines `-7` at that instant (ruling R49 (d), classic's
-    // fallback), as it would have at the load had it powered then.
+    // fallback), as it would have at the load had it powered then. That is
+    // the procedure for a chip that may not slide, pinned under the
+    // `NoSlide` seam. Sliding (ruling R92, R113 (3): its edge attracts, its
+    // supply in its own static partition), the 555 draws the feed (12.4346
+    // - 1.8) / 144.424 = 73.6 mA through device 16, a resistor whose fuse
+    // (device 27) is rated 2.24 mA: the fuse blows 23 us into the slide, the
+    // supply falls to 0 V (586 kohm to ground), and the 555, starving
+    // either way, is held off (Filippov's exit): dark from then on, no
+    // latch loop at the clock's rise.
     let p = { let mut p = program(8, cold_12_tpl4()); p.digital_slot_count = 32; p };
     let stops = [0.006272879619865001, 0.006418236135522505, 0.006653719691401212, 0.04368244956136634, 0.043851961234653535, 0.06987367313960807, 0.07058263333052203, 0.096299810615255, 0.11091739978284508, 0.13294549546641507, 0.15];
+    {
+        let (rig, trace, err) = hold_trace(&p, &[], &stops, 15);
+        assert!(err.is_none(), "{err:?}");
+        let slid = trace.iter().find(|t| matches!(t.1.kind, digital::power::HoldKind::Duty(_))).unwrap_or_else(|| panic!("a slide: {trace:?}"));
+        assert!(slid.0 > 0.0146 && slid.0 < 0.0148 && (slid.2 - 1.8).abs() < 1e-9, "sliding from the clock's fall at its floor: {slid:?}");
+        let (held, _) = holds_and_releases(&trace);
+        assert!(held.len() == 1 && held[0].0 > slid.0 && held[0].0 < slid.0 + 1e-4 && held[0].2.abs() < 1e-3, "held off once its fuse blew: {trace:?}");
+        assert!(rig.v(2).abs() < 1e-3, "dark at 0.15 s, its supply {} V", rig.v(2));
+    }
+    let _no_slide = hold::NoSlide::arm();
     let (rig, trace, err) = hold_trace(&p, &[], &stops, 15);
     let (held, freed) = holds_and_releases(&trace);
     eprintln!("cold 12: held {held:?}, freed {freed:?}, {err:?}");
@@ -9880,12 +9948,31 @@ fn the_fed_gate_on_a_cc_ramp_is_held_at_its_floor_and_released_at_the_next_re_so
     // Held off there (W1c point 1a), it is released at the partition's
     // first re-solve past its release level (on a static partition, the
     // release is checked at each re-solve): the rail band's 25 mV later,
-    // 25 us on this ramp.
+    // 25 us on this ramp. That is the procedure for a chip that may not
+    // slide, pinned under the `NoSlide` seam. Sliding (ruling R92, R113
+    // (3): unpowered its supply follows the rail, inside the window), it
+    // slides from the floor's crossing at 0.9 ms and is freed within a
+    // picosecond: at 0.9 V 1y's draw through 56.25 ohm, 791 ohm and the LED
+    // (all but off at 0.9 V) is a few pA, so the duty I_feed / I_on, I_feed
+    // = (u - 0.9) / 8.43, reaches 1 within 1e-11 V of the floor, which the
+    // 1000 V/s ramp passes in 1e-14 s.
     let mut devs = d7_supply(true);
     devs.extend([resistor(2, 1, 2, 8.433658904889839), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.004, 1.0, 6.0), resistor(4, 3, 4, 791.0671698769225), led(5, 4, 0)]);
     let mut p = no_cache(program(5, devs));
     p.digital_slot_count = p.digital_slot_count.max(8);
     let stops: Vec<f64> = (1..=3000).map(|k| 12e-3 * k as f64 / 3000.0).collect();
+    {
+        let (rig, trace, err) = hold_trace(&p, &[], &stops, 3);
+        assert!(err.is_none(), "{err:?}");
+        let (held, _) = holds_and_releases(&trace);
+        assert!(held.is_empty(), "never held: {trace:?}");
+        let first = trace.iter().position(|t| matches!(t.1.kind, digital::power::HoldKind::Duty(_))).unwrap_or_else(|| panic!("a slide: {trace:?}"));
+        let freed = trace[first..].iter().find(|t| t.1.is_free()).unwrap_or_else(|| panic!("freed: {trace:?}"));
+        assert!((trace[first].0 - 0.9e-3).abs() < 1e-6 && freed.0 - trace[first].0 < 1e-12, "slid at 0.9 ms, freed {:e} s later: {trace:?}", freed.0 - trace[first].0);
+        assert!(trace[first..].iter().take_while(|t| !t.1.is_free()).all(|t| (t.2 - 0.9).abs() < 1e-9), "the supply at the floor while sliding: {trace:?}");
+        assert!(rig.v(2) > 4.0 && rig.v(3) > 2.0, "powered and high at 12 ms: supply {} V, 1y {} V", rig.v(2), rig.v(3));
+    }
+    let _no_slide = hold::NoSlide::arm();
     let (rig, trace, err) = hold_trace(&p, &[], &stops, 3);
     assert!(err.is_none(), "{err:?}");
     let (held, freed) = holds_and_releases(&trace);
@@ -9970,10 +10057,23 @@ fn the_fxdv_edge_board_loads_held_off_between_its_floor_and_its_carrying_rail() 
     // ioMax 16 mA) whose supply (node 2) hangs off a stiff PSU through 5.36
     // ohm, its 1y into 48.7 ohm. Every load from 2.7001 V to 2.8467 V
     // declined: powered its 1y draw takes its supply under the 2.7 V floor.
-    // Each now loads with the gate held off, its supply at the rail (less
-    // the node shunt's share), and its release level the floor plus that
-    // drop and two reached widths, past the rail: never reached. Above
-    // 2.8467 V it carries itself and loads powered with no hold.
+    // Each loaded with the gate held off, its supply at the rail and its
+    // release level past the rail, never reached. Ruling R92 (R53-P11): the
+    // edge attracts (unpowered the supply sits at the rail, inside its
+    // window), so the gate slides in its static partition instead, its
+    // supply at the floor. By hand, in ruling R113 (3)'s two states (R103
+    // (b)), each with the supply pinned at the 2.7 V floor: powered, 1y's
+    // HIGH stage `R_out` = 2.7 / (4 x 16 mA) = 42.19 ohm, clamped to its 50
+    // ohm floor, in series with 48.7 ohm draws I_on = 2.7 / 98.7 = 27.3556
+    // mA; unpowered it draws nothing (2y to 4y sit on ground, whose fixed
+    // node no stage stamps into; the node shunts' 3e-12 A aside). The feed
+    // I_feed = (v - 2.7) / 5.36 (the PSU's node is stiff, its 1e9 ohm
+    // beside it) balances the supply's KCL at x = I_feed / I_on: 6.82007e-4
+    // at 2.7001 V, 0.341003 at 2.75 V, 0.954809 at 2.84 V, to 1e-6; the
+    // supply pinned, to 1e-9 V; 1y the blend, x 48.7 I_on; never held.
+    // Above 2.8467 V it carries itself and loads powered with no hold. The
+    // hold the board took before is the procedure's for a chip that may not
+    // slide, pinned under the `NoSlide` seam.
     let board = |v: f64| {
         let mut p = no_cache(program(4, vec![psu(0, 1, 0, v, 20.0), resistor(1, 1, 0, 1e9), resistor(2, 1, 2, 5.36), gate_io(3, 2, 0, [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0.016, 3.0, 6.0), resistor(4, 3, 0, 48.7)]));
         p.digital_slot_count = p.digital_slot_count.max(8);
@@ -9982,10 +10082,24 @@ fn the_fxdv_edge_board_loads_held_off_between_its_floor_and_its_carrying_rail() 
     for v in [2.7001, 2.75, 2.84] {
         let rig = Rig::load(&board(v)).unwrap_or_else(|e| panic!("{v} V: {}", e.message));
         let hold = rig.s().power_hold(3);
-        assert_eq!(hold.kind, digital::power::HoldKind::Off, "{v} V");
-        close(rig.v(2), v, 1e-9, &format!("{v} V: the supply at the rail"));
-        assert!(rig.v(3).abs() < 1e-6, "{v} V: 1y dark");
-        assert!(hold.release.unwrap().level > v, "{v} V: {hold:?}");
+        assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{v} V: sliding, not {hold:?}");
+        let (i_on, i_feed) = (2.7 / 98.7, (v - 2.7) / 5.36);
+        close(rig.v(2), 2.7, 1e-9, &format!("{v} V: the supply at the floor"));
+        close(hold.kind.weight(), i_feed / i_on, 1e-6, &format!("{v} V: the duty by hand"));
+        close(hold.kind.weight(), [6.82007e-4, 0.341003, 0.954809][[2.7001, 2.75, 2.84].iter().position(|&w| w == v).unwrap()], 1e-6, &format!("{v} V: the duty"));
+        w0_volts(rig.v(3), hold.kind.weight() * 48.7 * i_on, &format!("{v} V: 1y, the two states' blend"));
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "{v} V: never held");
+    }
+    {
+        let _no_slide = hold::NoSlide::arm();
+        for v in [2.7001, 2.75, 2.84] {
+            let rig = Rig::load(&board(v)).unwrap_or_else(|e| panic!("{v} V: {}", e.message));
+            let hold = rig.s().power_hold(3);
+            assert_eq!(hold.kind, digital::power::HoldKind::Off, "{v} V");
+            close(rig.v(2), v, 1e-9, &format!("{v} V: the supply at the rail"));
+            assert!(rig.v(3).abs() < 1e-6, "{v} V: 1y dark");
+            assert!(hold.release.unwrap().level > v, "{v} V: {hold:?}");
+        }
     }
     let rig = Rig::load(&board(2.86)).unwrap();
     assert!(rig.s().power_hold(3).is_free() && rig.v(2) > 2.7 && rig.v(3) > 1.0, "2.86 V: powered, supply {} V, 1y {} V", rig.v(2), rig.v(3));
@@ -11011,7 +11125,10 @@ fn a_static_release_in_an_instant_that_then_fails_is_undone_with_it() {
     // its iterated partition passes the release and solves it powered
     // (`release_in`). That solve failing undoes the release in the copy as
     // well as in the owner's table: left freed in the copy alone, the run
-    // again would solve the gate powered while the owner holds it off.
+    // again would solve the gate powered while the owner holds it off. The
+    // hold's own machinery: on this board the chip would slide (ruling
+    // R113 (3)), so it is pinned under the `NoSlide` seam.
+    let _no_slide = hold::NoSlide::arm();
     let logic = [0, 0, 3, 4, 4, 5, 0, 0, 6, 0, 0, 7];
     let devs = vec![
         pulse(0, 2, 0, [4.5, 5.5, 1e-3, 1e-6, 1e-6, 4e-3, 1e-2], 0),
@@ -11153,6 +11270,25 @@ fn stale_hold_board(cell: bool) -> Program {
     program(8, devs)
 }
 
+/// By hand, `s1`'s duty while P is at 0 V (ruling R113 (3), R53-P12: the
+/// two states of its iterated static partition, the gate's supply pinned at
+/// its 4.275 V floor in each): powered, 1y's HIGH stage `R_out` = 4.275 /
+/// 0.032 = 133.59375 ohm into 60 ohm and P draws 4.275 / 193.59375 =
+/// 22.0823 mA, less what 2y (HIGH, its inputs on P) takes back from the 5 V
+/// source through 1 kohm, its node at (4.275 / R_out + 0.005) / (1 / R_out
+/// + 1e-3) = 4.360441 V, 0.639563 mA: I_on = 21.44277 mA; unpowered it
+/// draws nothing (1y follows P, 2y's node sits at the source). The feed
+/// I_feed = (5 - 4.275) / 100 = 7.25 mA: x = I_feed / I_on = 0.3381094.
+/// Returns the duty, and 1y's and 2y's nodes in the powered state.
+fn s1_two_state() -> (f64, f64, f64) {
+    let u = 4.275;
+    let r_out = u / 0.032;
+    let g = 1.0 / r_out;
+    let v5 = (u * g + 5.0 / 1000.0) / (g + 1.0 / 1000.0);
+    let i_on = u / (r_out + 60.0) + g * (u - v5);
+    ((5.0 - u) / 100.0 / i_on, u * 60.0 / (r_out + 60.0), v5)
+}
+
 #[test]
 fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
     // Ruling R51 (b). At the load 1y's draw into P at 0 V takes the
@@ -11179,12 +11315,31 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
     // through the averaged stamp). P's rise steps at its midpoint, 1.0005 ms,
     // which takes 1y's draw away, so no duty keeps the supply at the floor
     // and it is freed there, never held; from then on it runs as classic's.
-    // On `s1` (an iterated static partition, whose slide is a later piece)
-    // it is still held at the load and released at P's edge.
+    // On `s1` (its supply in an iterated static partition, R53-P11) it
+    // slides at the load too, its supply at the floor and the 5 V source's
+    // (5 - 4.275) / 100 = 7.25 mA its draw, in the partition's own two
+    // states (ruling R113 (3)): x = 0.3381094 (`s1_two_state`; 0.2711841
+    // through the averaged stamps), freed at P's step alike.
     for (cell, vcc, y, y2) in [(false, 5.0, 5.0, 0.675676), (true, 4.635577, 4.893268, 0.632661)] {
         let p = stale_hold_board(cell);
         let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("load: {}", er.message));
-        assert_eq!(e.stat(25), if cell { 0.0 } else { 1.0 }, "cell {cell}: held off at the load on `s1` only");
+        assert_eq!(e.stat(25), 0.0, "cell {cell}: never held");
+        if !cell {
+            let mut rig = Rig::load(&p).unwrap();
+            let hold = rig.s().power_hold(2);
+            assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "`s1` sliding at the load: {hold:?}");
+            close(rig.v(1), 4.275, 1e-9, "`s1`: the supply at the floor");
+            close(hold.kind.weight(), s1_two_state().0, 1e-6, "`s1`: the duty at the load");
+            close(hold.kind.weight(), 0.3381094, 1e-6, "`s1`: the duty at the floor");
+            let freed = loop {
+                let t = rig.k.next_event_time();
+                rig.advance(t).unwrap();
+                if rig.s().power_hold(2).is_free() {
+                    break t;
+                }
+            };
+            close(freed, 1.0005e-3, 1e-15, "`s1` freed at P's step");
+        }
         if cell {
             // With no solution cache, so each state is solved at the rail
             // itself: a cached state replays a probe's solve along its
@@ -11215,7 +11370,7 @@ fn a_gate_held_at_load_is_retried_and_powers_once_its_load_is_gone() {
             w0_volts(v[3], y, "1y");
             w0_volts(v[5], y2, "2y, the gate powered");
         }
-        assert_eq!((e.stat(25), e.stat(26)), if cell { (0.0, 0.0) } else { (1.0, 1.0) }, "cell {cell}: one hold on `s1`, released at the edge; none on the cell");
+        assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0), "cell {cell}: never held");
     }
 }
 
@@ -11341,7 +11496,40 @@ fn a_gate_fed_from_a_pulse_is_held_each_low_phase_and_runs() {
     // phase is an episode of its own. R51's ratio rule chained them (each
     // back within 100 holds' lengths) and declined at the 51st, 0.4955 s.
     // At 0.5 ms host steps each hold is also longer than a host step; at
-    // 20 ms only the foreign edge ends the episode.
+    // 20 ms only the foreign edge ends the episode. That is the procedure
+    // for a chip that may not slide, pinned under the `NoSlide` seam.
+    //
+    // Sliding (ruling R92, R113 (3): unpowered its supply is the pulse's,
+    // inside the window), it slides at load and from each fall instead and
+    // is freed at each rise: 101 slides, never held. By hand, in each low
+    // phase its supply is pinned at 4.275 V in both states; powered 1y's
+    // HIGH stage, R_out = 4.275 / 0.032 = 133.59 ohm, into 60 ohm draws
+    // I_on = 4.275 / 193.59 = 22.0823 mA (2y, its inputs on the 5 V source,
+    // is LOW and sinks to ground, off the supply); the feed I_feed = (4.5 -
+    // 4.275) / 30 = 7.5 mA: x = I_feed / I_on = 0.3396382, to 1e-6.
+    {
+        let mut rig = Rig::load(&pulse_fed_gate()).unwrap();
+        let mut slides = u32::from(matches!(rig.s().power_hold(3).kind, digital::power::HoldKind::Duty(_)));
+        let mut was = slides == 1;
+        for k in 1..=2000 {
+            let t = k as f64 * 5e-4;
+            rig.advance(t).unwrap_or_else(|er| panic!("{er:?} at {t}"));
+            let hold = rig.s().power_hold(3);
+            let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
+            // In a low phase (5 to 11 ms of each 10 ms period), off its edges.
+            let phase = (t - 1e-3).rem_euclid(1e-2);
+            if phase > 4.1e-3 && phase < 9.9e-3 {
+                assert!(sliding, "sliding at {t}: {hold:?}");
+                close(hold.kind.weight(), 0.3396382, 1e-6, &format!("the duty at {t}"));
+                close(rig.v(1), 4.275, 1e-9, &format!("the supply at {t}"));
+            }
+            slides += u32::from(sliding && !was);
+            was = sliding;
+        }
+        assert_eq!(slides, 101, "a slide at load and at each of the 100 falls to 0.995 s");
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "never held");
+    }
+    let _no_slide = hold::NoSlide::arm();
     for step in [5e-4f64, 2e-2] {
         let mut e = Engine::load(&pulse_fed_gate()).unwrap_or_else(|er| panic!("load: {}", er.message));
         let n = (1.0 / step).round() as usize;
@@ -11376,8 +11564,12 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
     // a node on the first-order line its last solve published (Rails point
     // 3, a band within W0 of every quantity, the draw included) is held to
     // W0 of the draw over that slope, (1e-4 + 1e-3 x 16.25 mA) / 0.021443 A
-    // = 5.42e-3; the load to 1e-8. On `s1` (an iterated static partition,
-    // whose slide is a later piece) it is held each low phase as before.
+    // = 5.42e-3; the load to 1e-8. On `s1` (its supply in an iterated static
+    // partition, R53-P11) it slides alike, at load and from each fall, in
+    // the partition's own two states (ruling R113 (3)): the supply pinned at
+    // the floor (to 1e-9 V), the duty `s1_two_state`'s 0.3381094 (to 1e-6),
+    // 1y's and 2y's nodes the duty's blend of the powered solve and the
+    // unpowered one (P's 0 V and the source's 5 V), to W0.
     for cell in [false, true] {
         let mut rig = Rig::load(&stale_hold_board(cell)).unwrap();
         let mut slides = u32::from(matches!(rig.s().power_hold(2).kind, digital::power::HoldKind::Duty(_)));
@@ -11393,7 +11585,14 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
             rig.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {er:?} at {t}"));
             let hold = rig.s().power_hold(2);
             let sliding = matches!(hold.kind, digital::power::HoldKind::Duty(_));
-            if sliding {
+            if sliding && !cell && rig.v(4) == 0.0 {
+                let (x, v3_on, v5_on) = s1_two_state();
+                close(rig.v(1), 4.275, 1e-9, &format!("`s1`: the supply at the floor at {t}"));
+                close(hold.kind.weight(), x, 1e-6, &format!("`s1`: the duty at {t}"));
+                w0_volts(rig.v(3), x * v3_on, &format!("`s1`: 1y at {t}"));
+                w0_volts(rig.v(5), x * v5_on + (1.0 - x) * 5.0, &format!("`s1`: 2y at {t}"));
+            }
+            if sliding && cell {
                 let x = hold.kind.weight();
                 close(x, 0.7578313524, 5.42e-3, &format!("cell {cell}: the duty at {t}"));
                 // The mechanism, ruling R103 (b): the mean current through
@@ -11421,13 +11620,8 @@ fn the_stale_hold_boards_run_a_second_of_pulses() {
             let t = k as f64 * 5e-4;
             e.advance(t).unwrap_or_else(|er| panic!("cell {cell}: {} at {}", er.message, e.time()));
         }
-        if cell {
-            assert_eq!(slides, 101, "a slide at load and at each of the 100 falls to 0.995 s");
-            assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0), "never held");
-        } else {
-            assert_eq!(slides, 0, "`s1`: no slide");
-            assert_eq!((e.stat(25), e.stat(26)), (101.0, 100.0), "`s1`: a hold each low phase, each released");
-        }
+        assert_eq!(slides, 101, "cell {cell}: a slide at load and at each of the 100 falls to 0.995 s");
+        assert_eq!((e.stat(25), e.stat(26)), (0.0, 0.0), "cell {cell}: never held");
     }
 }
 
@@ -18225,5 +18419,337 @@ fn a_chip_held_where_no_slide_was_possible_slides_once_its_edge_attracts() {
         close(rig.u(), floor, w0, &format!("at {t}: the rail at the floor"));
         let vp = 3.0 + 0.2 * (t - 1e-3) / 1e-3;
         close(hold.kind.weight(), (0.008 + (vp - floor) / 100.0) / d1, w0 / (100.0 * d1), &format!("at {t}: the flat duty by hand"));
+    }
+}
+
+// ---- R53-P11, R53-P12: a chip whose supply sits in its own partition ----
+
+/// R53-P11's boards: a 74LS00 (its window scaled by `VCC_MIN` 4.4, so its
+/// floor is 0.9 x 4.4 = 3.96 V) supplied on node 4 from a 4.3 V cell of 5
+/// ohm (node 1, the hub rail) through `feed`, its inputs on ground so every
+/// output is HIGH: 1y on node 2 into `r_load`, the other three open (nodes
+/// 3, 6, 5). `feed` is (a) 100 ohm with 2.2 uF on node 4, (b) 100 ohm alone,
+/// (c) 50 ohm to node 7, 2.2 uF there, 50 ohm on to node 4, (d) a 6 V cell
+/// (5 ohm) through 100 ohm and an LED (node 7) to node 4.
+fn sp_board_load(variant: char, r_load: f64) -> Program {
+    let mut chip = ls00(3, 4, 0, [0, 0, 2, 0, 0, 3, 0, 0, 6, 0, 0, 5], 10e-9, 0);
+    chip.params[ic_param::VCC_MIN] = 4.4;
+    let load = resistor(5, 2, 0, r_load);
+    match variant {
+        'a' => program(7, vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 4, 100.0), capacitor(2, 4, 0, 2.2e-6, 0.0), chip, load]),
+        'b' => program(7, vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 4, 100.0), chip, load]),
+        'c' => program(8, vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 7, 50.0), capacitor(2, 7, 0, 2.2e-6, 0.0), resistor(6, 7, 4, 50.0), chip, load]),
+        _ => program(8, vec![battery(0, 1, 0, 6.0, 5.0), resistor(1, 1, 7, 100.0), led(2, 7, 4), chip, load]),
+    }
+}
+
+fn sp_board(variant: char) -> Program {
+    sp_board_load(variant, 1000.0)
+}
+
+/// The chip's device index on [`sp_board`].
+fn sp_chip(variant: char) -> usize {
+    match variant {
+        'b' => 2,
+        'c' => 4,
+        _ => 3,
+    }
+}
+
+/// By hand, the chip's draw in R103 (b)'s powered state with its supply
+/// pinned at the 3.96 V floor (ruling R113 (3)): 1y's HIGH stage, `R_out`
+/// = 3.96 / (4 x 8 mA) = 123.75 ohm, in series with its load; the open
+/// outputs carry only their 1e-12 S node shunts (4e-12 A each, under 1e-9
+/// of the draw). Unpowered it draws nothing, so the duty that balances the
+/// supply node's KCL is `x = I_feed / I_on`.
+fn sp_i_on(r_load: f64) -> f64 {
+    3.96 / (123.75 + r_load)
+}
+
+/// The LED feed's current on [`sp_board`] (d) with its cathode at `vs`, by
+/// bisection on the LED's own law (vf 2.0 V at 20 mA, n 2, 25 C, GMIN_D
+/// beside it): `6 - 105 i - v = vs` with `i = I(v)`.
+fn sp_led_feed(vs: f64) -> f64 {
+    let law = led::JunctionLaw::at(2.0, 0.02, 2.0, None, 25.0);
+    let (mut lo, mut hi) = (0.0f64, 6.0 - vs);
+    for _ in 0..200 {
+        let v = 0.5 * (lo + hi);
+        let i = law.current(v) + led::GMIN_D * v;
+        if 6.0 - 105.0 * i - v > vs {
+            lo = v;
+        } else {
+            hi = v;
+        }
+    }
+    let v = 0.5 * (lo + hi);
+    law.current(v) + led::GMIN_D * v
+}
+
+fn sp_sliding(rig: &Rig, d: usize, what: &str) -> f64 {
+    let hold = rig.s().power_hold(d);
+    assert!(matches!(hold.kind, digital::power::HoldKind::Duty(_)), "{what}: sliding, not {hold:?}");
+    hold.kind.weight()
+}
+
+#[test]
+fn a_chip_fed_through_a_series_resistor_slides_at_the_duty_its_output_load_sets() {
+    // R53-P11 (b), ruling R113 (3): the chip's supply node is in a static
+    // hub partition (no capacitor). Powered it pulls node 4 under its 3.96 V
+    // floor; unpowered node 4 sits at the cell's 4.3 V: the edge attracts,
+    // so it slides (ruling R92) instead of being held off. The constraint is
+    // algebraic, so no chatter: the partition is solved in its two states,
+    // the supply pinned at the floor in each, and the duty balances the
+    // supply node's KCL between them. By hand, I_feed = (4.3 - 3.96) / (5 +
+    // 100) = 3.238095 mA in both states (the pinned supply fixes it), I_on
+    // = `sp_i_on`: 3.96 / 1123.75 = 3.523915 mA into 1 kohm, x = 0.9188913;
+    // 3.96 / 593.75 = 6.669474 mA into 470 ohm, x = 0.4855099 (the output
+    // load sets the duty). Published: the supply at the floor (to 1e-9 V),
+    // 1y the blend, x R_load I_on = R_load I_feed (3.238095 V, 1.521905 V),
+    // the cell's terminal 4.3 - 5 I_feed = 4.283810 V and the load's current
+    // I_feed, each to W0; never held.
+    let floor = 0.9 * 4.4;
+    let i_feed = (4.3 - floor) / 105.0;
+    for (r_load, x_hand) in [(1000.0, 0.9188913), (470.0, 0.4855099)] {
+        let mut rig = Rig::load(&sp_board_load('b', r_load)).unwrap();
+        for t in [1e-6, 1e-3, 0.1, 0.3] {
+            rig.advance(t).unwrap_or_else(|e| panic!("{r_load} ohm: {e:?} at {t}"));
+            let what = format!("{r_load} ohm at {t}");
+            let x = sp_sliding(&rig, sp_chip('b'), &what);
+            close(x, i_feed / sp_i_on(r_load), 1e-6, &format!("{what}: the duty by hand"));
+            close(x, x_hand, 1e-6, &format!("{what}: the duty"));
+            close(rig.v(4), floor, 1e-9, &format!("{what}: the supply at the floor"));
+            w0_volts(rig.v(2), r_load * i_feed, &format!("{what}: 1y"));
+            w0_volts(rig.v(1), 4.3 - 5.0 * i_feed, &format!("{what}: the cell's terminal"));
+            w0_amps(rig.i(3), i_feed, &format!("{what}: the load's current"));
+        }
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "{r_load} ohm: never held");
+        if r_load == 1000.0 {
+            // Its warning (ruling R92, R53): latched once, the floor its
+            // value, no PSU limit (the feed is a series path).
+            let records = warning_records(&mut rig);
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0][..3], [sp_chip('b') as f64, 3.0, -1.0]);
+            assert_eq!(records[0][4], floor);
+            assert!(records[0][5].is_nan(), "{records:?}");
+        }
+    }
+}
+
+#[test]
+fn a_chip_on_an_rc_filtered_supply_slides_at_the_duty_its_output_load_sets() {
+    // R53-P11 (a), R53V2's "C RC feed" (each cadence declined -4 there,
+    // "held 51 times in one sliding episode"), ruling R113 (3): 2.2 uF on the
+    // chip's supply node puts it in a stepped partition. From the cell the
+    // node charges with tau = 105 x 2.2 uF = 231 us and the chip, unpowered,
+    // draws nothing; past the floor it powers, its draw pulls the node back,
+    // and the edge attracts. Each step is solved in the two states at once,
+    // the capacitor's node shared between them (its charge does not jump)
+    // and pinned at the floor, its KCL the duty's weighting of the two
+    // states' (Filippov's convex combination, the capacitor's current
+    // included). At rest the capacitor carries nothing and the duty is the
+    // static board's: I_feed = (4.3 - 3.96) / 105 = 3.238095 mA, x = I_feed
+    // / I_on, 0.9188913 into 1 kohm and 0.4855099 into 470 ohm (`sp_i_on`).
+    // R53V2's own board (3y on the supply node itself, so a HIGH 3y stamps
+    // nothing) and the clean one alike.
+    let floor = 0.9 * 4.4;
+    let i_feed = (4.3 - floor) / 105.0;
+    let verifier = {
+        let mut chip = ls00(3, 4, 0, [0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5], 10e-9, 0);
+        chip.params[ic_param::VCC_MIN] = 4.4;
+        program(6, vec![battery(0, 1, 0, 4.3, 5.0), resistor(1, 1, 4, 100.0), capacitor(2, 4, 0, 2.2e-6, 0.0), chip, resistor(5, 2, 0, 1000.0)])
+    };
+    for (name, p, r_load, x_hand) in [("verifier", verifier, 1000.0, 0.9188913), ("1 kohm", sp_board('a'), 1000.0, 0.9188913), ("470 ohm", sp_board_load('a', 470.0), 470.0, 0.4855099)] {
+        let mut rig = Rig::load(&p).unwrap();
+        // Unpowered while the node charges (4.3 (1 - exp(-t / 231 us)), the
+        // floor at 0.52 ms): free and dark at 0.3 ms.
+        rig.advance(3e-4).unwrap();
+        assert!(rig.s().power_hold(3).is_free() && rig.v(2).abs() < 1e-6 && rig.v(4) < floor, "{name}: dark while charging");
+        for k in 2..=300 {
+            let t = k as f64 * 1e-3;
+            rig.advance(t).unwrap_or_else(|e| panic!("{name}: {e:?} at {t}"));
+            let what = format!("{name} at {t}");
+            let x = sp_sliding(&rig, 3, &what);
+            close(rig.v(4), floor, 1e-9, &format!("{what}: the supply at the floor"));
+            close(x, i_feed / sp_i_on(r_load), 1e-6, &format!("{what}: the duty by hand"));
+            close(x, x_hand, 1e-6, &format!("{what}: the duty"));
+            w0_volts(rig.v(2), r_load * i_feed, &format!("{what}: 1y"));
+        }
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "{name}: never held");
+    }
+}
+
+#[test]
+fn a_chip_with_a_capacitor_on_its_supply_and_without_one_slides_at_one_duty() {
+    // Ruling R113 (3): boards (a) and (b) of `sp_board` differ only by the
+    // 2.2 uF on the supply node, which carries nothing once the supply sits
+    // at the floor: both slide at x = I_feed / I_on, I_feed = (4.3 - 3.96)
+    // / 105 = 3.238095 mA (0.9188913 into 1 kohm, 0.4855099 into 470 ohm).
+    // They agree within the W0 equivalent of the duty: what W0 of the
+    // supply (1e-4 + 1e-3 x 3.96 V) moves the hand duty `x(v) = ((4.3 - v)
+    // / 105) / (v / (v / 0.032 + R_load))` by, 2.909 per volt into 1 kohm
+    // (0.011811), taken here by central difference.
+    let floor = 0.9 * 4.4;
+    let w0 = 1e-4 + 1e-3 * floor;
+    for r_load in [1000.0, 470.0] {
+        let duty = |v: f64| ((4.3 - v) / 105.0) / (v / (v / 0.032 + r_load));
+        let band = w0 * (duty(floor + 1e-6) - duty(floor - 1e-6)).abs() / 2e-6;
+        let (mut a, mut b) = (Rig::load(&sp_board_load('a', r_load)).unwrap(), Rig::load(&sp_board_load('b', r_load)).unwrap());
+        for t in [2e-3, 0.01, 0.05, 0.3] {
+            a.advance(t).unwrap();
+            b.advance(t).unwrap();
+            let what = format!("{r_load} ohm at {t}");
+            let (xa, xb) = (sp_sliding(&a, sp_chip('a'), &what), sp_sliding(&b, sp_chip('b'), &what));
+            assert!((xa - xb).abs() <= band, "{what}: with the capacitor {xa}, without {xb} (W0 equivalent {band:e})");
+        }
+    }
+}
+
+#[test]
+fn a_chip_behind_an_rc_and_a_second_resistor_slides_as_its_capacitor_relaxes() {
+    // R53-P11 (c), ruling R113 (3): the capacitor upstream of a second
+    // resistor (cell, 50 ohm, 2.2 uF on node 7, 50 ohm to the chip's node
+    // 4). The chip's node has no capacitor: in each state it is pinned at
+    // the floor, and node 7, shared by the two states, relaxes on its own:
+    // KCL at node 7, C v' = (4.3 - v) / 55 - (v - 3.96) / 50 (the cell's 5
+    // ohm in series with the first 50), an exponential toward (4.3 x 50 +
+    // 3.96 x 55) / 105 = 4.121905 V with tau = C (55 || 50) = 57.62 us. At
+    // each instant I_feed = (v7 - 3.96) / 50 and x = I_feed / I_on (`sp_i_on`,
+    // 3.523915 mA into 1 kohm); at rest I_feed = 3.238095 mA, x = 0.9188913,
+    // and into 470 ohm 0.4855099. Node 7 checked over 200 us from a sliding
+    // instant read off the run, to W0, and the duty to the W0 equivalent of
+    // node 7 (W0 of v7 over 50 I_on: the duty is the last committed step's
+    // and a host stop inside a step reads node 7 between the step's ends);
+    // at rest, to 1e-6.
+    let floor = 0.9 * 4.4;
+    let d = sp_chip('c');
+    let mut rig = Rig::load(&sp_board('c')).unwrap();
+    rig.advance(5e-4).unwrap();
+    let mut t0 = 5e-4;
+    while !matches!(rig.s().power_hold(d).kind, digital::power::HoldKind::Duty(_)) {
+        t0 += 1e-5;
+        rig.advance(t0).unwrap();
+        assert!(t0 < 2e-3, "slides by 2 ms");
+    }
+    t0 += 1e-5;
+    rig.advance(t0).unwrap();
+    let v_inf = (4.3 * 50.0 + floor * 55.0) / 105.0;
+    let tau = 2.2e-6 * (55.0 * 50.0 / 105.0);
+    let v0 = rig.v(7);
+    for k in 1..=20 {
+        let t = t0 + k as f64 * 1e-5;
+        rig.advance(t).unwrap();
+        let x = sp_sliding(&rig, d, &format!("at {t}"));
+        close(rig.v(4), floor, 1e-9, &format!("at {t}: the supply at the floor"));
+        w0_volts(rig.v(7), v_inf + (v0 - v_inf) * (-(t - t0) / tau).exp(), &format!("at {t}: node 7 relaxing"));
+        close(x, (rig.v(7) - floor) / 50.0 / sp_i_on(1000.0), (1e-4 + 1e-3 * rig.v(7)) / (50.0 * sp_i_on(1000.0)), &format!("at {t}: the duty by hand"));
+    }
+    for (r_load, x_hand) in [(1000.0, 0.9188913), (470.0, 0.4855099)] {
+        let mut rig = Rig::load(&sp_board_load('c', r_load)).unwrap();
+        for t in [0.01, 0.3] {
+            rig.advance(t).unwrap();
+            let what = format!("{r_load} ohm at {t}");
+            let x = sp_sliding(&rig, d, &what);
+            w0_volts(rig.v(7), v_inf, &format!("{what}: node 7 at rest"));
+            close(x, x_hand, 1e-6, &format!("{what}: the duty at rest"));
+        }
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "{r_load} ohm: never held");
+    }
+}
+
+#[test]
+fn a_chip_fed_through_an_led_slides_at_the_duty_its_output_load_sets() {
+    // R53-P11 (d), ruling R113 (3): a 6 V cell (5 ohm) through 100 ohm and
+    // an LED to the chip's node 4, a nonlinear static partition (the
+    // junction is stamped, so each state's solve is Newton's). With node 4
+    // pinned at the floor in both states the LED carries the same feed in
+    // both: I_feed solves 6 - 105 I_feed - V_led(I_feed) = 3.96 on the LED's
+    // law (`sp_led_feed`: 1.6130 mA), and x = I_feed / I_on (`sp_i_on`):
+    // 0.4577381 into 1 kohm, 0.2418525 into 470 ohm. Published: 1y R_load
+    // I_feed and the LED's current I_feed, to W0; never held.
+    let floor = 0.9 * 4.4;
+    let i_feed = sp_led_feed(floor);
+    let d = sp_chip('d');
+    for (r_load, x_hand) in [(1000.0, 0.4577381), (470.0, 0.2418525)] {
+        let mut rig = Rig::load(&sp_board_load('d', r_load)).unwrap();
+        for t in [1e-3, 0.1] {
+            rig.advance(t).unwrap();
+            let what = format!("{r_load} ohm at {t}");
+            let x = sp_sliding(&rig, d, &what);
+            close(rig.v(4), floor, 1e-9, &format!("{what}: the supply at the floor"));
+            close(x, i_feed / sp_i_on(r_load), 1e-6, &format!("{what}: the duty by hand"));
+            close(x, x_hand, 1e-6, &format!("{what}: the duty"));
+            w0_volts(rig.v(2), r_load * i_feed, &format!("{what}: 1y"));
+            w0_amps(rig.i(2), i_feed, &format!("{what}: the LED's current"));
+        }
+        assert_eq!(rig.s().hold_counts(), [0.0, 0.0], "{r_load} ohm: never held");
+    }
+}
+
+#[test]
+fn a_chip_sliding_in_its_supplys_own_partition_slides_alike_at_every_host_cadence() {
+    // R53-P11 (2), R53V2's cadence set (20 us, 200 us, 1 ms, 16.7 ms, 100
+    // ms and geometric host steps) on each variant: the same outcome within
+    // W0 at each checkpoint (the supply, 1y's node, the duty within what W0
+    // of 1y moves it by: two-state, 1y is x R_load I_on, so the duty moves
+    // by 1 / (1000 I_on) = 1123.75 / 3960 = 0.28378 per volt of 1y), and no
+    // silent wrong state at any stop past 12 ms (held off over the edge,
+    // sliding off it by more than 2 W0, or free under it). Checkpoints: 2,
+    // 10, 50.3 and 60 ms.
+    let floor = 0.9 * 4.4;
+    let w0 = 1e-4 + 1e-3 * floor;
+    let cps = [0.002, 0.01, 0.0503, 0.06];
+    let slope = 1.0 / (1000.0 * sp_i_on(1000.0));
+    for v in ['a', 'b', 'c', 'd'] {
+        let d = sp_chip(v);
+        let mut seen: Vec<Vec<(f64, f64, f64)>> = Vec::new();
+        for kind in 0..6 {
+            let mut stops: Vec<f64> = Vec::new();
+            let mut t = 0.0f64;
+            match kind {
+                0..=4 => {
+                    let step = [20e-6, 200e-6, 1e-3, 1.0 / 60.0, 0.1][kind];
+                    while t < 0.06 {
+                        t += step;
+                        stops.push(t.min(0.06));
+                    }
+                }
+                _ => {
+                    let mut s = 1e-6;
+                    while t < 0.06 {
+                        t += s;
+                        stops.push(t.min(0.06));
+                        s = (s * 1.7).min(0.02);
+                    }
+                }
+            }
+            stops.extend_from_slice(&cps);
+            stops.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            stops.dedup_by(|a, b| (*a - *b).abs() < 1e-13);
+            let mut rig = Rig::load(&sp_board(v)).unwrap();
+            let mut at = Vec::new();
+            for &t in &stops {
+                rig.advance(t).unwrap_or_else(|e| panic!("{v} cadence {kind}: {e:?} at {t}"));
+                let hold = rig.s().power_hold(d);
+                let vs = rig.v(4);
+                if t > 0.012 {
+                    let off = hold.kind == digital::power::HoldKind::Off && vs > floor + 2.0 * w0;
+                    let slid = matches!(hold.kind, digital::power::HoldKind::Duty(_)) && (vs - floor).abs() > 2.0 * w0;
+                    let free = hold.is_free() && vs < floor - 2.0 * w0;
+                    assert!(!(off || slid || free), "{v} cadence {kind} at {t}: {hold:?} with the supply at {vs}");
+                }
+                if cps.iter().any(|&c| (c - t).abs() < 1e-13) {
+                    at.push((vs, rig.v(2), sp_sliding(&rig, d, &format!("{v} cadence {kind} at {t}"))));
+                }
+            }
+            seen.push(at);
+        }
+        for k in 0..cps.len() {
+            let col: Vec<(f64, f64, f64)> = seen.iter().map(|s| s[k]).collect();
+            let spread = |f: &dyn Fn(&(f64, f64, f64)) -> f64| col.iter().map(f).fold(f64::NEG_INFINITY, f64::max) - col.iter().map(f).fold(f64::INFINITY, f64::min);
+            assert!(spread(&|c| c.0) <= w0, "{v} at {}: the supply across cadences {col:?}", cps[k]);
+            let y = col[0].1;
+            assert!(spread(&|c| c.1) <= 1e-4 + 1e-3 * y, "{v} at {}: 1y across cadences {col:?}", cps[k]);
+            assert!(spread(&|c| c.2) <= slope * (1e-4 + 1e-3 * y), "{v} at {}: the duty across cadences {col:?}", cps[k]);
+        }
     }
 }

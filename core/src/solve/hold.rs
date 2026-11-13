@@ -217,7 +217,7 @@ impl Drop for TrialsTwice {
 }
 
 #[inline]
-fn sliding_allowed() -> bool {
+pub(super) fn sliding_allowed() -> bool {
     #[cfg(test)]
     if NO_SLIDE.with(|c| c.get()) {
         return false;
@@ -2157,17 +2157,21 @@ impl PartitionedSolver {
         if self.holds_active == 0 {
             return;
         }
-        let Some(hub) = self.hub.as_ref() else { return };
-        let limit = match (hub.state.reg, hub.psu_setpoint()) {
-            (crate::devices::sources::Regime::Cc, Some((_, i_limit))) => i_limit,
-            _ => f64::NAN,
-        };
+        let hub = self.hub.as_ref();
+        let cc_limit = hub.and_then(|hub| match (hub.state.reg, hub.psu_setpoint()) {
+            (crate::devices::sources::Regime::Cc, Some((_, i_limit))) => Some(i_limit),
+            _ => None,
+        });
         let mut fresh = Vec::new();
-        for &pos in &hub.rail_ics {
-            let (d, ref ic) = self.ics[pos as usize];
+        // Every sliding chip: one on the hub rail, and one whose supply sits
+        // in a static or stepped partition (R53-P11), whose feed is a series
+        // path, never the PSU's limit itself.
+        for (pos, &(d, ref ic)) in self.ics.iter().enumerate() {
             if !matches!(self.power_hold(d).kind, HoldKind::Duty(_)) {
                 continue;
             }
+            let on_rail = hub.is_some_and(|h| h.rail_ics.contains(&(pos as u32)));
+            let limit = cc_limit.filter(|_| on_rail).unwrap_or(f64::NAN);
             let (floor, _) = digital::levels::power_window(ic);
             if self.slide_edge(d) != floor {
                 continue;
@@ -2564,8 +2568,16 @@ impl PartitionedSolver {
         for (d, hold, now) in requests {
             let old = self.power_hold(d);
             let _ = self.set_power_hold(d, hold);
+            // A slide a step freed (ruling R92, Filippov's exit at duty 1):
+            // its episode released, as at any release.
+            if hold.is_free() {
+                result = result.and(self.release_episode(d, now));
+                continue;
+            }
             let mut episode = self.episode(d);
-            if old.kind != HoldKind::Off {
+            // A slide's duty solved again, or its exit to a hold, goes on
+            // in its episode (ruling R113 (3)), as in the static solver's.
+            if old.kind != HoldKind::Off && !matches!(old.kind, HoldKind::Duty(_)) {
                 episode = episode.held(now);
             }
             episode.stepped = true;
@@ -2635,10 +2647,13 @@ impl PartitionedSolver {
         for (d, hold, now) in self.static_solver.take_hold_requests() {
             let old = self.power_hold(d);
             let _ = self.set_power_hold(d, hold);
+            // A slide (ruling R92) is in its episode as a hold is: entered
+            // from free it starts one, entered from a hold or held from it
+            // goes on in it, and freed it is released.
             match (old.kind, hold.kind) {
-                (HoldKind::Off, HoldKind::Off) => {}
-                (HoldKind::Off, _) => result = result.and(self.release_episode(d, now)),
-                (_, HoldKind::Off) => {
+                (HoldKind::Off, HoldKind::Off) | (HoldKind::Off | HoldKind::Duty(_), HoldKind::Duty(_)) | (HoldKind::Duty(_), HoldKind::Off) => {}
+                (HoldKind::Off | HoldKind::Duty(_), _) => result = result.and(self.release_episode(d, now)),
+                (_, HoldKind::Off | HoldKind::Duty(_)) => {
                     let episode = self.episode(d).held(now);
                     result = result.and(self.set_episode(d, episode));
                 }
