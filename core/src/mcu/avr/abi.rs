@@ -4,7 +4,7 @@
 //! core/README.md; the integration ABI comes with package AVR4. Same shape
 //! as the RP2040 port's `rp_*` exports.
 
-use super::harness::{state_record, Machine, ScheduledIrq, STATE_WORDS};
+use super::harness::{state_record, Input, Machine, ScheduledInput, STATE_WORDS};
 use super::instr::decode;
 use super::interrupt::Interrupt;
 
@@ -72,9 +72,9 @@ pub unsafe extern "C" fn avr_schedule_irq(
     constant: u32,
     inverse_flag: u32,
 ) {
-    machine(m).irqs.push(ScheduledIrq {
+    machine(m).inputs.push(ScheduledInput {
         at_cycle: at_cycle as u64,
-        interrupt: Interrupt {
+        input: Input::Irq(Interrupt {
             address: address as u8,
             flag_register: flag_register as u16,
             flag_mask: flag_mask as u8,
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn avr_schedule_irq(
             enable_mask: enable_mask as u8,
             constant: constant != 0,
             inverse_flag: inverse_flag != 0,
-        },
+        }),
     });
 }
 
@@ -138,4 +138,74 @@ pub unsafe extern "C" fn avr_decode_name(opcode: u32, out: *mut u8, cap: u32) ->
     let n = name.len().min(cap as usize);
     std::ptr::copy_nonoverlapping(name.as_ptr(), out, n);
     n as u32
+}
+
+/// Constructs ports B, C, D, timers 0-2 and the ADC, as `new ArduinoMcu` does.
+///
+/// # Safety
+/// `m` from `avr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_attach(m: *mut Machine) {
+    machine(m).cpu.attach_arduino_peripherals();
+}
+
+/// Whether `addr` is a register the ported peripherals model.
+#[no_mangle]
+pub extern "C" fn avr_is_ported(addr: u32) -> u32 {
+    super::gpio::is_ported_register(addr as u16) as u32
+}
+
+/// Schedules `port.setPin(pin, level)` (port 0 B, 1 C, 2 D).
+///
+/// # Safety
+/// `m` from `avr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_schedule_pin(m: *mut Machine, at_cycle: f64, port: u32, pin: u32, level: u32) {
+    machine(m).inputs.push(ScheduledInput {
+        at_cycle: at_cycle as u64,
+        input: Input::Pin { port: port as u8, pin: pin as u8, level: level != 0 },
+    });
+}
+
+/// Schedules `adc.channelValues[channel] = volts`.
+///
+/// # Safety
+/// `m` from `avr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_schedule_adc(m: *mut Machine, at_cycle: f64, channel: u32, volts: f64) {
+    machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::Adc { channel: channel as u8, volts } });
+}
+
+/// Moves the GPIO write-listener events recorded so far into `out` (up to
+/// `cap` records of 5 f64s: port, cycle, value, prev, the eight pin states
+/// packed two bits each) and returns how many it wrote.
+///
+/// # Safety
+/// `m` from `avr_create`; `out` valid for `cap * 5` f64s.
+#[no_mangle]
+pub unsafe extern "C" fn avr_drain_events(m: *mut Machine, out: *mut f64, cap: u32) -> u32 {
+    let ev = &mut machine(m).cpu.p.events;
+    let n = ev.len().min(cap as usize);
+    let buf = std::slice::from_raw_parts_mut(out, n * 5);
+    for (i, e) in ev.drain(..n).enumerate() {
+        let mut packed = 0u32;
+        for (b, s) in e.states.iter().enumerate() {
+            packed |= (*s as u32) << (2 * b);
+        }
+        buf[i * 5] = e.port as f64;
+        buf[i * 5 + 1] = e.cycle as f64;
+        buf[i * 5 + 2] = e.value as f64;
+        buf[i * 5 + 3] = e.prev as f64;
+        buf[i * 5 + 4] = packed as f64;
+    }
+    n as u32
+}
+
+/// Schedules `cpu.writeData(addr, value)`.
+///
+/// # Safety
+/// `m` from `avr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_schedule_write(m: *mut Machine, at_cycle: f64, addr: u32, value: u32) {
+    machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::Write { addr: addr as u16, value: value as u8 } });
 }

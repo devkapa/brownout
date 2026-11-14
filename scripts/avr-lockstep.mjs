@@ -127,26 +127,70 @@ const rustDecode = (op) => {
   return s;
 };
 
-// ---- the recorded input script: interrupt flags at fixed cycle counts ---------------
-// TIMER0_OVF (vector 16, word 0x20, TIFR0 0x35 bit 0, TIMSK0 0x6e bit 0) every
-// 1024 cycles from cycle 2000 and TIMER2_OVF (vector 9, word 0x12, TIFR2 0x37,
-// TIMSK2 0x70) every 6000 from 3500: what the two overflow timers would raise,
-// so the sketches' millis ISR runs and two sources are sometimes pending at once.
+// ---- the recorded input scripts -----------------------------------------------------
+// Both sides consume the same sorted event list, each event applied before the
+// first instruction that starts at or after its cycle.
+//  cpu mode (no peripherals): interrupt flags, as before: TIMER0_OVF (vector
+//   word 0x20, TIFR0 0x35 bit 0, TIMSK0 0x6e bit 0) every 1024 cycles from
+//   cycle 2000 and TIMER2_OVF (0x12, TIFR2 0x37, TIMSK2 0x70) every 6000 from 3500.
+//  peripheral modes: pin levels (INT0 on PD2, PB0, PC3, INT1/OC2B on PD3, the
+//   timer 0 clock pin PD4), ADC channel volts, and register writes that put
+//   the timers and interrupt controllers through modes no sketch reaches
+//   (phase-correct and fast PWM, CTC, toggle outputs, force compare, INT0/INT1
+//   and pin-change enables, ADC conversions), so the lock-step covers more of
+//   the peripherals than the sketches do.
 const IRQ_SOURCES = [
-  { address: 0x20, flagRegister: 0x35, flagMask: 1, enableRegister: 0x6e, enableMask: 1, constant: false, inverseFlag: false, first: 2000, every: 1024 },
-  { address: 0x12, flagRegister: 0x37, flagMask: 1, enableRegister: 0x70, enableMask: 1, constant: false, inverseFlag: false, first: 3500, every: 6000 },
+  { kind: "irq", address: 0x20, flagRegister: 0x35, flagMask: 1, enableRegister: 0x6e, enableMask: 1, first: 2000, every: 1024 },
+  { kind: "irq", address: 0x12, flagRegister: 0x37, flagMask: 1, enableRegister: 0x70, enableMask: 1, first: 3500, every: 6000 },
 ];
-// Lazily generated, in cycle order, identical on both sides.
-class IrqScript {
-  constructor() { this.next = IRQ_SOURCES.map((s) => s.first); }
+const PERIPH_SOURCES = [
+  { kind: "pin", port: 2, pin: 2, first: 3000, every: 4001 },
+  { kind: "pin", port: 0, pin: 0, first: 5000, every: 7919 },
+  { kind: "pin", port: 1, pin: 3, first: 6100, every: 9973 },
+  { kind: "pin", port: 2, pin: 3, first: 9000, every: 12011 },
+  { kind: "pin", port: 2, pin: 4, first: 2500, every: 997 },
+  { kind: "adc", channel: 0, first: 20000, every: 30011 },
+  { kind: "adc", channel: 1, first: 25000, every: 41011 },
+  { kind: "adc", channel: 3, first: 31000, every: 50021 },
+];
+// [cycle, address, value]: written in this order, each once.
+const POKES = [
+  [50_000, 0x69, 0x07], [50_100, 0x3d, 0x03], [60_000, 0x68, 0x07], [60_100, 0x6d, 0xff], [60_200, 0x6b, 0xff], [60_300, 0x6c, 0x0f],
+  [100_000, 0xb0, 0x21], [100_050, 0xb4, 0x40], [100_100, 0xb1, 0x03], [100_200, 0x70, 0x07],
+  [200_000, 0x80, 0x81], [200_050, 0x89, 0x00], [200_060, 0x88, 0x80], [200_100, 0x81, 0x01], [200_200, 0x6f, 0x07],
+  [300_000, 0x44, 0x42], [300_050, 0x47, 0x7f], [300_100, 0x45, 0x03], [300_200, 0x6e, 0x07],
+  [400_000, 0x80, 0x00], [400_050, 0x81, 0x0b], [400_100, 0x89, 0x10], [400_110, 0x88, 0x00], [400_200, 0x6f, 0x02],
+  [500_000, 0x7c, 0x40], [500_100, 0x7a, 0xcf], [520_000, 0x7a, 0xc7], [540_000, 0x7c, 0xc3], [540_100, 0x7a, 0xc7],
+  [600_000, 0x44, 0xa3], [600_050, 0x45, 0x01], [600_100, 0x47, 0x40], [600_110, 0x48, 0x90], [600_200, 0x81, 0x1a],
+  [700_000, 0x44, 0x10], [700_050, 0x45, 0x41], [700_100, 0x45, 0x05],
+  [800_000, 0x80, 0x23], [800_010, 0x81, 0x19], [800_020, 0x87, 0x01], [800_030, 0x86, 0x00], [800_040, 0x89, 0x00], [800_050, 0x88, 0x40],
+  [900_000, 0xb0, 0x13], [900_050, 0xb1, 0x0d], [900_100, 0xb3, 0x80], [900_200, 0xb4, 0x20],
+  [1_000_000, 0x45, 0x06], [1_000_100, 0x45, 0x07], [1_100_000, 0x81, 0x06], [1_100_100, 0x81, 0x01],
+  [1_200_000, 0x84, 0x10], [1_200_010, 0x85, 0x01], [1_300_000, 0x46, 0xfa], [1_400_000, 0xb2, 0xf0],
+  [1_500_000, 0x7a, 0x00], [1_500_100, 0x7a, 0x87], [1_500_200, 0x7a, 0xc7],
+  [2_000_000, 0x3d, 0x00], [2_000_100, 0x69, 0x00], [2_000_200, 0x3d, 0x03],
+];
+// Lazily generated in cycle order (ties: sources in listed order, then pokes).
+class InputScript {
+  constructor(mode) {
+    this.sources = mode === "cpu" ? IRQ_SOURCES : PERIPH_SOURCES;
+    this.next = this.sources.map((s) => s.first);
+    this.k = this.sources.map(() => 0);
+    this.pokes = mode === "cpu" ? [] : POKES.slice();
+  }
   due(cycles) {
     const out = [];
     for (;;) {
-      let best = -1;
-      for (let i = 0; i < this.next.length; i++) if (this.next[i] <= cycles && (best < 0 || this.next[i] < this.next[best])) best = i;
+      let best = -1, bestAt = Infinity;
+      for (let i = 0; i < this.next.length; i++) if (this.next[i] <= cycles && this.next[i] < bestAt) { best = i; bestAt = this.next[i]; }
+      const poke = this.pokes.length && this.pokes[0][0] <= cycles && this.pokes[0][0] < bestAt ? this.pokes[0] : null;
+      if (poke) { this.pokes.shift(); out.push({ at: poke[0], kind: "write", addr: poke[1], value: poke[2] }); continue; }
       if (best < 0) return out;
-      out.push(IRQ_SOURCES[best]);
-      this.next[best] += IRQ_SOURCES[best].every;
+      const s = this.sources[best], k = this.k[best]++;
+      this.next[best] += s.every;
+      if (s.kind === "pin") out.push({ at: bestAt, kind: "pin", port: s.port, pin: s.pin, level: k % 2 === 0 });
+      else if (s.kind === "adc") out.push({ at: bestAt, kind: "adc", channel: s.channel, volts: Math.min(5, Math.max(0, ((k * 0.737 + s.channel) % 5.4) )) });
+      else out.push({ at: bestAt, kind: "irq", ...s });
     }
   }
 }
@@ -158,25 +202,53 @@ function fnv1a(bytes) {
 }
 
 // ---- the two machines ----------------------------------------------------------------
+// `cpu`: a bare CPU, as in AVR1. `trap` / `full`: ports B, C, D, timers 0-2 and the ADC
+// built as `new ArduinoMcu` does; `trap` stops after the first access to a register no
+// ported peripheral models, `full` runs on with those as plain memory.
+const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrite", "dataHash", "clockEvents", "wdr",
+  ...Array.from({ length: 32 }, (_, i) => `r${i}`), "pend0", "pend1", "pend2", "pend3", "clockEventHash",
+  ...[0, 1, 2].flatMap((t) => ["tcnt", "lastCycle", "ocrA", "ocrB", "icr", "divider", "flags", "nextOcrA", "nextOcrB", "tcntNext"].map((n) => `t${t}.${n}`)),
+  ...[0, 1, 2].flatMap((p) => ["pinValue", "lastValue", "lastDdr", "lastPin", "overrideMask", "overrideValue"].map((n) => `port${"BCD"[p]}.${n}`)),
+  "adc.converting", "adc.conversionCycles", "events"];
+
 class JsSide {
-  constructor(flash, trap, irq) {
+  constructor(flash, mode, withInputs) {
     this.cpu = new avr.CPU(new Uint16Array(flash.buffer.slice(0)));
-    this.trap = trap; this.hit = null; this.steps = 0; this.wd = 0; this.irqTaken = 0;
-    this.script = irq ? new IrqScript() : null;
+    this.mode = mode; this.hit = null; this.steps = 0; this.wd = 0; this.irqTaken = 0; this.events = [];
+    this.script = withInputs ? new InputScript(mode) : null;
     this.cpu.onWatchdogReset = () => { this.wd++; };
-    if (trap) {
+    const cpu = this.cpu;
+    if (mode !== "cpu") {
+      this.ports = [avr.portBConfig, avr.portCConfig, avr.portDConfig].map((c) => new avr.AVRIOPort(cpu, c));
+      this.timers = [avr.timer0Config, avr.timer1Config, avr.timer2Config].map((c) => new avr.AVRTimer(cpu, c));
+      this.adc = new avr.AVRADC(cpu, avr.adcConfig);
+      this.ports.forEach((port, pi) => port.addListener((value, prev) => {
+        let packed = 0;
+        for (let b = 0; b < 8; b++) packed += port.pinState(b) * 4 ** b;
+        this.events.push([pi, cpu.cycles, value, prev, packed]);
+      }));
+    }
+    if (mode === "cpu" || mode === "trap") {
       for (let a = 0x20; a < 0x100; a++) {
         if (a >= 0x5b && a <= 0x5f) continue;
-        this.cpu.readHooks[a] = (addr) => { if (!this.hit) this.hit = { address: addr, write: false }; return this.cpu.data[addr]; };
-        this.cpu.writeHooks[a] = (_v, _old, addr) => { if (!this.hit) this.hit = { address: addr, write: true }; return false; };
+        if (mode === "trap" && wasm.avr_is_ported(a)) continue;
+        cpu.readHooks[a] = (addr) => { if (!this.hit) this.hit = { address: addr, write: false }; return cpu.data[addr]; };
+        cpu.writeHooks[a] = (_v, _old, addr) => { if (!this.hit) this.hit = { address: addr, write: true }; return false; };
       }
     }
+  }
+  apply(ev) {
+    const cpu = this.cpu;
+    if (ev.kind === "irq") cpu.setInterruptFlag({ address: ev.address, flagRegister: ev.flagRegister, flagMask: ev.flagMask, enableRegister: ev.enableRegister, enableMask: ev.enableMask, constant: false, inverseFlag: false });
+    else if (ev.kind === "pin") this.ports[ev.port].setPin(ev.pin, ev.level);
+    else if (ev.kind === "adc") this.adc.channelValues[ev.channel] = ev.volts;
+    else cpu.writeData(ev.addr, ev.value);
   }
   run(n) {
     const cpu = this.cpu, instr = avr.avrInstruction;
     let done = 0;
     while (done < n && !this.hit) {
-      if (this.script) for (const s of this.script.due(cpu.cycles)) cpu.setInterruptFlag(s);
+      if (this.script) for (const ev of this.script.due(cpu.cycles)) this.apply(ev);
       instr(cpu);
       const c1 = cpu.cycles;
       cpu.tick();
@@ -190,84 +262,116 @@ class JsSide {
     s[0] = c.pc; s[1] = c.data[95]; s[2] = c.SP; s[3] = c.cycles; s[4] = c.nextInterrupt;
     s[5] = this.hit ? this.hit.address : -1; s[6] = this.hit && this.hit.write ? 1 : 0;
     s[7] = fnv1a(c.data);
-    let n = 0; for (let e = c.nextClockEvent; e; e = e.next) n++;
-    s[8] = n; s[9] = this.wd;
+    let n = 0, h = 0x811c9dc5;
+    for (let e = c.nextClockEvent; e; e = e.next) { n++; h ^= e.cycles >>> 0; h = Math.imul(h, 0x01000193); }
+    s[8] = n; s[9] = this.wd; s[46] = h >>> 0;
     for (let i = 0; i < 32; i++) s[10 + i] = c.data[i];
+    for (let i = 0; i < 128; i++) if (c.pendingInterrupts[i]) s[42 + (i >> 5)] += 2 ** (i & 31);
+    if (this.timers) {
+      this.timers.forEach((t, i) => {
+        const b = 47 + i * 10;
+        s[b] = t.tcnt; s[b + 1] = t.lastCycle; s[b + 2] = t.ocrA; s[b + 3] = t.ocrB; s[b + 4] = t.icr; s[b + 5] = t.divider;
+        s[b + 6] = (t.countingUp ? 1 : 0) | (t.tcntUpdated ? 2 : 0) | (t.updateDivider ? 4 : 0);
+        s[b + 7] = t.nextOcrA; s[b + 8] = t.nextOcrB; s[b + 9] = t.tcntNext;
+      });
+      this.ports.forEach((p, i) => {
+        const b = 77 + i * 6;
+        s[b] = p.pinValue; s[b + 1] = p.lastValue; s[b + 2] = p.lastDdr; s[b + 3] = p.lastPin; s[b + 4] = p.overrideMask; s[b + 5] = p.overrideValue;
+      });
+      s[95] = this.adc.converting ? 1 : 0; s[96] = this.adc.conversionCycles;
+    }
+    s[97] = this.events.length;
     return s;
   }
+  drainEvents() { const e = this.events; this.events = []; return e; }
   data() { return this.cpu.data; }
 }
 
 class RustSide {
-  constructor(flash, trap, irq) {
+  constructor(flash, mode, withInputs) {
     const ptr = wasm.avr_alloc(flash.length);
     new Uint8Array(wasm.memory.buffer, ptr, flash.length).set(flash);
     this.m = wasm.avr_create(ptr, flash.length);
     wasm.avr_free(ptr, flash.length);
-    wasm.avr_set_io_trap(this.m, trap ? 1 : 0);
-    this.script = irq ? new IrqScript() : null;
+    if (mode !== "full") wasm.avr_set_io_trap(this.m, 1);
+    if (mode !== "cpu") wasm.avr_attach(this.m);
+    this.script = withInputs ? new InputScript(mode) : null;
     this.steps = 0;
     this.out = wasm.avr_alloc(STATE_WORDS * 8);
-    this.irqOn = irq;
-    // The Rust machine applies scheduled interrupts itself, so the whole script
-    // up to a horizon is scheduled up front; see run().
-    this.horizon = 0;
+    this.evBuf = wasm.avr_alloc(4096 * 5 * 8);
+    this.horizon = -1;
   }
   schedule(upToCycle) {
-    if (!this.irqOn) return;
-    for (let i = 0; i < IRQ_SOURCES.length; i++) {
-      const s = IRQ_SOURCES[i];
-      this.next ??= IRQ_SOURCES.map((x) => x.first);
-      while (this.next[i] <= upToCycle) {
-        wasm.avr_schedule_irq(this.m, this.next[i], s.address, s.flagRegister, s.flagMask, s.enableRegister, s.enableMask, s.constant ? 1 : 0, s.inverseFlag ? 1 : 0);
-        this.next[i] += s.every;
-      }
+    if (!this.script) return;
+    for (const ev of this.script.due(upToCycle)) {
+      if (ev.kind === "irq") wasm.avr_schedule_irq(this.m, ev.at, ev.address, ev.flagRegister, ev.flagMask, ev.enableRegister, ev.enableMask, 0, 0);
+      else if (ev.kind === "pin") wasm.avr_schedule_pin(this.m, ev.at, ev.port, ev.pin, ev.level ? 1 : 0);
+      else if (ev.kind === "adc") wasm.avr_schedule_adc(this.m, ev.at, ev.channel, ev.volts);
+      else wasm.avr_schedule_write(this.m, ev.at, ev.addr, ev.value);
     }
   }
   run(n) {
-    // An instruction takes at most 5 cycles, so scheduling 6 cycles per
-    // instruction ahead of the current count always covers the run; the Rust
-    // side applies each input before the first instruction at or after it, and
-    // a source that falls due in the same cycle order is applied in the order
-    // scheduled (due-time order, as IrqScript yields them).
-    this.schedule(this.cycles() + 6 * n + 8);
+    // An instruction takes at most 5 cycles (an interrupt adds 2), so scheduling 8
+    // cycles per instruction ahead of the current count always covers the run.
+    this.schedule(this.cycles() + 8 * n + 16);
     const done = wasm.avr_run(this.m, n);
     this.steps += done;
     return done;
   }
   cycles() { wasm.avr_state(this.m, this.out); return new Float64Array(wasm.memory.buffer, this.out, STATE_WORDS)[3]; }
   state() { wasm.avr_state(this.m, this.out); return Float64Array.from(new Float64Array(wasm.memory.buffer, this.out, STATE_WORDS)); }
+  drainEvents() {
+    const all = [];
+    for (;;) {
+      const n = wasm.avr_drain_events(this.m, this.evBuf, 4096);
+      const v = new Float64Array(wasm.memory.buffer, this.evBuf, n * 5);
+      for (let i = 0; i < n; i++) all.push(Array.from(v.subarray(i * 5, i * 5 + 5)));
+      if (n < 4096) return all;
+    }
+  }
   data() { return new Uint8Array(wasm.memory.buffer, wasm.avr_data_ptr(this.m), wasm.avr_data_len(this.m)); }
-  free() { wasm.avr_destroy(this.m); wasm.avr_free(this.out, STATE_WORDS * 8); }
+  free() { wasm.avr_destroy(this.m); wasm.avr_free(this.out, STATE_WORDS * 8); wasm.avr_free(this.evBuf, 4096 * 5 * 8); }
 }
 
-const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrite", "dataHash", "clockEvents", "wdr", ...Array.from({ length: 32 }, (_, i) => `r${i}`)];
 function diffStates(a, b) {
   const d = [];
-  for (let i = 0; i < STATE_WORDS; i++) if (a[i] !== b[i]) d.push(`${FIELDS[i]}: js=${a[i]} rust=${b[i]}`);
+  for (let i = 0; i < STATE_WORDS; i++) if (a[i] !== b[i] && FIELDS[i] !== "events") d.push(`${FIELDS[i]}: js=${a[i]} rust=${b[i]}`);
   return d;
+}
+function diffEvents(a, b) {
+  if (a.length !== b.length) return [`GPIO listener calls: js=${a.length} rust=${b.length}`];
+  for (let i = 0; i < a.length; i++) if (a[i].some((x, j) => x !== b[i][j])) return [`GPIO listener call ${i}: js=[${a[i]}] rust=[${b[i]}] (port, cycle, value, prev, pin states)`];
+  return [];
 }
 const hex = (n, w = 4) => "0x" + (n >>> 0).toString(16).padStart(w, "0");
 
-function make(flash, trap) { return [new JsSide(flash, trap, opt.irq), new RustSide(flash, trap, opt.irq)]; }
+function make(flash, mode) { return [new JsSide(flash, mode, opt.irq), new RustSide(flash, mode, opt.irq)]; }
+
+function compare(js, rs) {
+  const ej = js.drainEvents(), er = rs.drainEvents();
+  const sj = js.state(), sr = rs.state();
+  sj[97] = 0; sr[97] = 0; // both drained
+  return [...diffEvents(ej, er), ...diffStates(sj, sr)];
+}
 
 // Replays both sides from a fresh start to `upTo`, then steps single
 // instructions to the first difference.
-function bisect(flash, trap, upTo, k) {
-  const [js, rs] = make(flash, trap);
+function bisect(flash, mode, upTo, k) {
+  const [js, rs] = make(flash, mode);
   js.run(upTo); rs.run(upTo);
+  js.drainEvents(); rs.drainEvents();
+  const words = new Uint16Array(flash.buffer.slice(0));
   for (let i = 0; i < k + 1; i++) {
-    const preJs = js.state(), preRs = rs.state();
+    const preJs = js.state();
     const pcBefore = preJs[0];
-    const word = new Uint16Array(flash.buffer.slice(0))[pcBefore] ?? 0;
+    const word = words[pcBefore] ?? 0;
     js.run(1); rs.run(1);
-    const sj = js.state(), sr = rs.state();
-    const d = diffStates(sj, sr);
+    const d = compare(js, rs);
     if (d.length) {
       console.log(`  first divergence at instruction ${upTo + i + 1} (pc ${hex(pcBefore)}, opcode ${hex(word)})`);
       console.log(`  decode: avr8js=${jsDecode(word)}  rust=${rustDecode(word)}`);
-      console.log(`  state before: ${diffStates(preJs, preRs).length ? "ALREADY DIFFERED " : "equal: "}pc=${hex(pcBefore)} sreg=${hex(preJs[1], 2)} sp=${hex(preJs[2])} cycles=${preJs[3]}`);
-      for (const line of d) console.log("    " + line);
+      console.log(`  state before: pc=${hex(pcBefore)} sreg=${hex(preJs[1], 2)} sp=${hex(preJs[2])} cycles=${preJs[3]}`);
+      for (const line of d.slice(0, 12)) console.log("    " + line);
       const dj = js.data(), dr = rs.data();
       let shown = 0;
       for (let a = 0; a < Math.min(dj.length, dr.length) && shown < 12; a++) if (dj[a] !== dr[a]) { console.log(`    data[${hex(a)}]: js=${dj[a]} rust=${dr[a]}`); shown++; }
@@ -280,23 +384,26 @@ function bisect(flash, trap, upTo, k) {
   rs.free();
 }
 
-function runImage(file, flash, trap) {
-  const label = `${path.basename(file)} [${trap ? "trap" : "plain"}${opt.irq ? "+irq" : ""}]`;
-  const [js, rs] = make(flash, trap);
-  const target = trap ? 5_000_000 : opt.steps;
-  let done = 0, ok = true, checks = 0;
+function runImage(file, flash, mode) {
+  const label = `${path.basename(file)} [${mode}${opt.irq ? "+inputs" : ""}]`;
+  const [js, rs] = make(flash, mode);
+  const target = opt.steps;
+  let done = 0, ok = true, checks = 0, eventsSeen = 0, pins = new Set();
   const t0 = Date.now();
   while (done < target) {
     const n = Math.min(opt.k, target - done);
     const a = js.run(n), b = rs.run(n);
     done += a;
     checks++;
-    const d = a !== b ? [`instructions run: js=${a} rust=${b}`] : diffStates(js.state(), rs.state());
+    const ejs = js.events.length;
+    eventsSeen += ejs;
+    for (const e of js.events) pins.add(e[0]);
+    const d = a !== b ? [`instructions run: js=${a} rust=${b}`] : compare(js, rs);
     if (d.length) {
       ok = false;
       console.log(`DIVERGED ${label} within instructions ${done - a + 1}..${done}`);
       for (const line of d.slice(0, 8)) console.log("    " + line);
-      bisect(flash, trap, done - a, a);
+      bisect(flash, mode, done - a, a);
       break;
     }
     if (js.hit) break;
@@ -305,18 +412,18 @@ function runImage(file, flash, trap) {
   const ms = Date.now() - t0;
   if (ok) {
     const stop = js.hit
-      ? `stopped after instruction ${done}: first ${js.hit.write ? "write to" : "read of"} peripheral register ${hex(js.hit.address, 2)} at pc ${hex(s[0])} (same on both sides)`
+      ? `stopped after instruction ${done}: first ${js.hit.write ? "write to" : "read of"} ${mode === "cpu" ? "peripheral" : "unported"} register ${hex(js.hit.address, 2)} at pc ${hex(s[0])} (same on both sides)`
       : `ran ${done} instructions, ${s[3]} cycles, ${js.irqTaken} interrupts taken, to pc ${hex(s[0])}`;
-    console.log(`OK       ${label}: ${stop}; ${checks} checkpoints (K=${opt.k}), ${ms} ms`);
+    console.log(`OK       ${label}: ${stop}; ${checks} checkpoints (K=${opt.k})${mode === "cpu" ? "" : `, ${eventsSeen} GPIO listener calls compared`}, ${ms} ms`);
   }
   rs.free();
-  return { ok, done, hit: js.hit, pc: s[0], cycles: s[3] };
+  return { ok, done, hit: js.hit, pc: s[0], cycles: s[3], events: eventsSeen };
 }
 
 // ---- the decode sweep: all 65536 opcode words -------------------------------------------
 let failed = false;
 console.log(`avr8js ${avrVersion} (${avrDir}); wasm ${opt.wasm} (${wasmBytes.length} bytes)`);
-if (opt.sweep) {
+if (opt.sweep && !opt.bench) {
   let bad = 0;
   for (let op = 0; op < 0x10000; op++) {
     const j = jsDecode(op), r = rustDecode(op);
@@ -326,18 +433,21 @@ if (opt.sweep) {
   if (bad) failed = true;
 }
 if (opt.bench) {
-  // Instructions per second, each side alone, on the first image (plain memory, no interrupts).
+  // Instructions per second, each side alone, on the first image, built as ArduinoMcu builds it
+  // (peripherals attached, no scripted inputs).
   const flash = parseIntelHex(fs.readFileSync(opt.images[0], "utf8"));
-  const js = new JsSide(flash, false, false), rs = new RustSide(flash, false, false);
-  let t = process.hrtime.bigint(); js.run(opt.bench);
-  const tj = Number(process.hrtime.bigint() - t) / 1e9;
-  t = process.hrtime.bigint(); rs.run(opt.bench);
-  const tr = Number(process.hrtime.bigint() - t) / 1e9;
-  console.log(`bench ${path.basename(opt.images[0])}: ${opt.bench} instructions; avr8js ${(opt.bench / tj / 1e6).toFixed(1)} M/s, rust wasm ${(opt.bench / tr / 1e6).toFixed(1)} M/s`);
+  for (const mode of ["cpu", "full"]) {
+    const js = new JsSide(flash, mode, false), rs = new RustSide(flash, mode, false);
+    let t = process.hrtime.bigint(); js.run(opt.bench);
+    const tj = Number(process.hrtime.bigint() - t) / 1e9;
+    t = process.hrtime.bigint(); rs.run(opt.bench);
+    const tr = Number(process.hrtime.bigint() - t) / 1e9;
+    console.log(`bench ${path.basename(opt.images[0])} [${mode}]: ${opt.bench} instructions; avr8js ${(opt.bench / tj / 1e6).toFixed(1)} M/s, rust wasm ${(opt.bench / tr / 1e6).toFixed(1)} M/s`);
+  }
 }
+const modes = opt.mode === "both" ? ["cpu", "trap", "full"] : [opt.mode];
 for (const file of opt.bench ? [] : opt.images) {
   const flash = parseIntelHex(fs.readFileSync(file, "utf8"));
-  if (opt.mode === "trap" || opt.mode === "both") { if (!runImage(file, flash, true).ok) failed = true; }
-  if (opt.mode === "plain" || opt.mode === "both") { if (!runImage(file, flash, false).ok) failed = true; }
+  for (const mode of modes) if (!runImage(file, flash, mode).ok) failed = true;
 }
 process.exit(failed ? 1 : 0);

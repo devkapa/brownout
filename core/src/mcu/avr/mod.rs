@@ -22,6 +22,8 @@ pub mod timer;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod periph_tests;
+#[cfg(test)]
 mod upstream_tests;
 #[cfg(test)]
 mod upstream_periph_tests;
