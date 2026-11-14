@@ -34,12 +34,15 @@ pub mod periph;
 pub mod ppb;
 pub mod rtc;
 pub mod sio;
+pub mod ssi;
 pub mod timer;
 
 #[cfg(test)]
 mod r2_tests;
 #[cfg(test)]
 mod r2_upstream_tests;
+#[cfg(test)]
+mod r3_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

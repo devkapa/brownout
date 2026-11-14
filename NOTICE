@@ -123,7 +123,7 @@ file).
    Files: core/src/mcu/rp2040/*.rs, ported from rp2040js's
    src/{cortex-m0-core,rp2040,simulator,sio,interpolator,irq}.ts,
    src/peripherals/{ppb,peripheral,clocks,xosc,reset,psm,tbman,syscfg,
-   sysinfo,busctrl,timer,watchdog,rtc,io,pads}.ts, src/gpio-pin.ts,
+   sysinfo,busctrl,timer,watchdog,rtc,io,pads,ssi}.ts, src/gpio-pin.ts,
    src/clock/simulation-clock.ts and src/utils/timer32.ts, and its test
    suites src/instructions.spec.ts, src/rp2040.spec.ts, src/sio.spec.ts and
    src/peripherals/timer.spec.ts (tag v1.3.3, commit 7701ee0).

@@ -41,6 +41,7 @@ pub enum Block {
     Rosc,
     Vreg,
     Tbman,
+    Ssi,
 }
 
 impl Block {
@@ -66,6 +67,7 @@ impl Block {
             "ROSC_BASE" => Block::Rosc,
             "VREG_AND_CHIP_RESET_BASE" => Block::Vreg,
             "TBMAN_BASE" => Block::Tbman,
+            "SSI" => Block::Ssi,
             _ => return None,
         })
     }
@@ -253,6 +255,7 @@ pub struct Periph {
     pub watchdog: super::timer::Watchdog,
     pub rtc: super::rtc::Rtc,
     pub io: super::gpiobank::GpioBank,
+    pub ssi: super::ssi::Ssi,
 }
 
 impl Default for Periph {
@@ -276,6 +279,7 @@ impl Periph {
             watchdog: super::timer::Watchdog::new(),
             rtc: super::rtc::Rtc::new(),
             io: super::gpiobank::GpioBank::new(),
+            ssi: super::ssi::Ssi::default(),
         }
     }
 }
@@ -361,6 +365,7 @@ impl Rp2040 {
                     _ => self.base_read(),
                 }
             }
+            Block::Ssi => self.ssi_read(offset),
             Block::Timer => self.timer_read(offset),
             Block::Watchdog => self.watchdog_read(offset),
             Block::Rtc => self.rtc_read(offset),
@@ -427,6 +432,7 @@ impl Rp2040 {
                     _ => self.base_write(),
                 }
             }
+            Block::Ssi => self.ssi_write(offset, value),
             Block::Timer => self.timer_write(offset, value, raw),
             Block::Watchdog => self.watchdog_write(offset, value),
             Block::Rtc => self.rtc_write(offset, value),

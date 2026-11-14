@@ -6,7 +6,7 @@
 use super::{Rp2040, ScheduledInput, Stop};
 
 /// Words in the state record `rp_state` writes, all as f64.
-pub const STATE_WORDS: usize = 90;
+pub const STATE_WORDS: usize = 91;
 
 #[no_mangle]
 pub extern "C" fn rp_alloc(len: u32) -> *mut u8 {
@@ -66,6 +66,25 @@ pub unsafe extern "C" fn rp_flash_write(m: *mut Rp2040, offset: u32, ptr: *const
     }
     mach.flash[off..off + bytes.len()].copy_from_slice(bytes);
     0
+}
+
+/// brownout's `loadUF2IntoFlash` over `len` bytes of a UF2 image; returns the
+/// blocks applied.
+///
+/// # Safety
+/// `m` from `rp_create`; `ptr` valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rp_load_uf2(m: *mut Rp2040, ptr: *const u8, len: u32) -> u32 {
+    machine(m).load_uf2(std::slice::from_raw_parts(ptr, len as usize))
+}
+
+/// FNV-1a over flash (16 MB): a checkpoint-rate comparison, not per step.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_flash_hash(m: *mut Rp2040) -> u32 {
+    machine(m).flash_hash()
 }
 
 /// Copies bytes into SRAM at `offset` (synthetic images).
@@ -285,6 +304,7 @@ fn r2_state(mach: &mut Rp2040, s: &mut [f64]) {
     s[83] = p.nmi_mask as f64;
     s[84] = fnv(p.busctrl.perf_ctr.into_iter().chain(p.busctrl.perf_sel)) as f64;
     s[88] = (p.watchdog.alarm.enabled as u32 | ((p.watchdog.timer.enabled as u32) << 1)) as f64;
+    s[90] = p.ssi.digest() as f64;
     s[89] = (p.io.voltage_select[0] | (p.io.voltage_select[1] << 1)) as f64;
     s[85] = fnv(mach.sio.gpio.iter().map(|p| p.pad_value)) as f64;
     s[86] = fnv(mach.sio.qspi.iter().flat_map(|p| [p.pad_value, p.ctrl, p.irq_status])) as f64;

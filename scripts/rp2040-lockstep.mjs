@@ -47,7 +47,7 @@ const bootromPath = path.join(repoRoot, "src", "sim", "engine", "rp2040-bootrom.
 // UTC, so the reference runs in UTC.
 process.env.TZ = "UTC";
 
-const STATE_WORDS = 90;
+const STATE_WORDS = 91;
 const STATE_NAMES = [
   ...Array.from({ length: 13 }, (_, i) => `r${i}`), "sp", "lr", "pc",
   "xPSR", "MSP", "PSP", "PRIMASK", "CONTROL", "cycles", "nanos", "waiting", "eventRegistered",
@@ -60,7 +60,7 @@ const STATE_NAMES = [
   "clocks.sysCtrl", "clocks.refCtrl", "clocks.digest", "xosc.ctrl", "xosc.status", "xosc.dormant", "xosc.startup",
   "xosc.count", "psm.frceOn", "psm.frceOff", "psm.wdsel", "watchdog.ctrl", "watchdog.reason", "watchdog.scratch",
   "watchdog.tick", "watchdog.triggers", "rtc.ctrl", "rtc.setup0", "rtc.setup1", "rtc.rtc1", "rtc.rtc0", "syscfg.nmiMask",
-  "busctrl.digest", "pads.bank0", "pads.qspi", "io.digest", "watchdog.enables", "pads.voltage",
+  "busctrl.digest", "pads.bank0", "pads.qspi", "io.digest", "watchdog.enables", "pads.voltage", "ssi.digest",
 ];
 const STOP_KINDS = ["running", "peripheral", "usb-dpram", "unaligned-read", "out-of-range", "break", "idle"];
 
@@ -357,8 +357,8 @@ const IMAGES = {
     steps: 2_000_000,
     setup(s) {
       s.bootrom(loadBootrom());
-      for (const [off, bytes] of uf2Blocks(fs.readFileSync(uf2Path))) s.flash(off, bytes);
-      s.reg(15, 0x10000000);
+      s.uf2(fs.readFileSync(uf2Path)); // the wrapper's loadFirmware
+      s.reg(15, 0x10000000); // then core.PC = FLASH_XIP_BASE
     },
   },
   // A real reset: the boot ROM's reset vector, with MicroPython in flash.
@@ -367,7 +367,7 @@ const IMAGES = {
     steps: 2_000_000,
     setup(s) {
       s.bootrom(loadBootrom());
-      for (const [off, bytes] of uf2Blocks(fs.readFileSync(uf2Path))) s.flash(off, bytes);
+      s.uf2(fs.readFileSync(uf2Path));
     },
   },
   // MicroPython's application entry (its vector table after boot2 at
@@ -378,7 +378,7 @@ const IMAGES = {
     setup(s) {
       s.bootrom(loadBootrom());
       const blocks = uf2Blocks(fs.readFileSync(uf2Path));
-      for (const [off, bytes] of blocks) s.flash(off, bytes);
+      s.uf2(fs.readFileSync(uf2Path));
       const flash = new Uint8Array(0x200);
       for (const [off, bytes] of blocks) if (off < 0x200) flash.set(bytes.subarray(0, Math.min(bytes.length, 0x200 - off)), off);
       const dv = new DataView(flash.buffer);
@@ -670,6 +670,7 @@ function rustSide() {
       bootrom: (words) => withBytes(new Uint8Array(words.buffer, words.byteOffset, words.byteLength), (p) => x.rp_load_bootrom(m, p, words.byteLength)),
       flash: (off, bytes) => withBytes(bytes, (p) => x.rp_flash_write(m, off, p, bytes.length)),
       sram: (off, bytes) => withBytes(bytes, (p) => x.rp_sram_write(m, off, p, bytes.length)),
+      uf2: (bytes) => withBytes(bytes, (p) => x.rp_load_uf2(m, p, bytes.length)),
       reg: (n, v) => x.rp_set_reg(m, n, v >>> 0),
       input: (atCycle, pin, level) => x.rp_schedule_input(m, atCycle, pin, level),
     },
@@ -680,6 +681,7 @@ function rustSide() {
       return Array.from(new Float64Array(x.memory.buffer, stateBuf, STATE_WORDS));
     },
     ramHash: () => x.rp_ram_hash(m) >>> 0,
+    flashHash: () => x.rp_flash_hash(m) >>> 0,
     stop() {
       const kind = x.rp_stop_kind(m);
       const n = x.rp_stop_name(m, nameBuf, 64);
@@ -752,6 +754,9 @@ function jsSide() {
       bootrom: (words) => rp.loadBootrom(words),
       flash: (off, bytes) => rp.flash.set(bytes, off),
       sram: (off, bytes) => rp.sram.set(bytes, off),
+      uf2: (bytes) => {
+        for (const [off, b] of uf2Blocks(bytes)) rp.flash.set(b, off);
+      },
       reg: (n, v) => {
         core.registers[n] = v >>> 0;
       },
@@ -868,11 +873,19 @@ function jsSide() {
       s[86] = fnv(rp.qspi.flatMap((p) => [p.padValue, p.ctrl, p.irqStatus]));
       s[87] = fnv(rp.gpio.flatMap((p) => [p.ctrl, p.irqStatus, p.irqEnableMask, p.irqForceMask]));
       s[88] = (wd.alarm.enable ? 1 : 0) | (wd.timer.enable ? 2 : 0);
+      const ssi = per[0x18000];
+      s[90] = fnv([ssi.dr0, ssi.txflr, ssi.rxflr, ssi.baudr, ssi.crtlr0, ssi.crtlr1, ssi.ssienr, ssi.spictlr0, ssi.rxsampldly, ssi.txddriveedge]);
       s[89] = u(per[0x4001c].voltageSelect) | (u(per[0x40020].voltageSelect) << 1);
       return s;
     },
     ramHash() {
       const w = new Uint32Array(rp.sram.buffer, rp.sram.byteOffset, rp.sram.byteLength / 4);
+      let h = 0x811c9dc5;
+      for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
+      return h;
+    },
+    flashHash() {
+      const w = new Uint32Array(rp.flash.buffer, rp.flash.byteOffset, rp.flash.byteLength / 4);
       let h = 0x811c9dc5;
       for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
       return h;
@@ -968,12 +981,16 @@ function sameEvents(a, b) {
   return true;
 }
 
-function compare(rust, js, withRam) {
+function compare(rust, js, withRam, withFlash = false) {
   const d = diffState(rust.state(), js.state());
   if (rust.steps() !== js.steps()) d.unshift(`steps: rust ${rust.steps()} js ${js.steps()}`);
   if (withRam) {
     const hr = rust.ramHash(), hj = js.ramHash();
     if (hr !== hj) d.push(`sram hash: rust ${hex(hr)} js ${hex(hj)}`);
+  }
+  if (withFlash) {
+    const fr = rust.flashHash(), fj = js.flashHash();
+    if (fr !== fj) d.push(`flash hash: rust ${hex(fr)} js ${hex(fj)}`);
   }
   if (!sameEvents(rust.pinEvents(), js.pinEvents())) d.push(`pin events: rust ${JSON.stringify(rust.pinEvents())} js ${JSON.stringify(js.pinEvents())}`);
   return d;
@@ -1020,7 +1037,9 @@ function runImage(name, image, steps, k) {
     const nj = js.run(nr);
     total += nr;
     checkpoints++;
-    const d = compare(rust, js, true);
+    // Flash is 16 MB: hashed on the first, every 32nd and the last checkpoint.
+    const last = nr < want || total >= steps;
+    const d = compare(rust, js, true, checkpoints === 1 || checkpoints % 32 === 0 || last);
     if (nj !== nr && d.length === 0) d.push(`reference stopped early: ${JSON.stringify(js.stop())}`);
     if (d.length) {
       console.log(`${name}: DIVERGED between steps ${good} and ${total}`);

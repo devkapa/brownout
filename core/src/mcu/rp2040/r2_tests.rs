@@ -120,7 +120,7 @@ fn blocks_the_reference_stubs_out_answer_all_ones_and_never_stop() {
 #[test]
 fn ports_not_yet_ported_still_stop_by_name() {
     for (addr, name) in [
-        (0x1800_0000u32, "SSI"),
+        (0x4004_8000u32, "I2C1"),
         (0x4003_4000, "UART0"),
         (0x4003_8000, "UART1"),
         (0x4003_c000, "SPI0"),
