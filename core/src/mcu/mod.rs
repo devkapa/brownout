@@ -1,0 +1,6 @@
+//! Microcontroller emulators ported from their JavaScript references (W7).
+//! Compiled only with a cargo feature (`avr`, `rp2040`); see plan-1.0.0
+//! section 4.
+
+#[cfg(feature = "avr")]
+pub mod avr;

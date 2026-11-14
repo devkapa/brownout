@@ -23,3 +23,9 @@ codegen-units = 1
 # profile) keeps the default unwind strategy its harness needs.
 panic = "abort"
 strip = "debuginfo"
+
+[features]
+# W7: the AVR emulator port (core/src/mcu/avr, a port of avr8js 0.21.0) and
+# its lock-step test exports. Off by default: the shipped wasm is built
+# without it and stays byte-identical to a build that has no mcu module.
+avr = []
