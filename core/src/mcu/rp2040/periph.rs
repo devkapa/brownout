@@ -52,6 +52,8 @@ pub enum Block {
     Uart1,
     Spi0,
     Spi1,
+    I2c0,
+    I2c1,
 }
 
 impl Block {
@@ -88,6 +90,8 @@ impl Block {
             "UART1" => Block::Uart1,
             "SPI0" => Block::Spi0,
             "SPI1" => Block::Spi1,
+            "I2C0" => Block::I2c0,
+            "I2C1" => Block::I2c1,
             _ => return None,
         })
     }
@@ -288,6 +292,9 @@ pub struct Periph {
     pub spi: [super::spi::Spi; 2],
     /// Words transmitted by the SPI blocks, for the host to drain.
     pub spi_events: Vec<super::spi::SpiEvent>,
+    pub i2c: [super::i2c::I2c; 2],
+    /// Host callbacks the I2C blocks made, for the host to drain.
+    pub i2c_events: Vec<super::i2c::I2cEvent>,
     /// The pending `setTimeout(() => run(), 0)` callbacks of the PIO blocks,
     /// oldest first, each the index of the block that armed it.
     pub pio_timers: Vec<u8>,
@@ -339,6 +346,8 @@ impl Periph {
             uart_events: Vec::new(),
             spi: [super::spi::Spi::new(), super::spi::Spi::new()],
             spi_events: Vec::new(),
+            i2c: [super::i2c::I2c::new(), super::i2c::I2c::new()],
+            i2c_events: Vec::new(),
             pio_timers: Vec::new(),
         }
     }
@@ -430,6 +439,14 @@ impl Rp2040 {
             Block::Dma => self.dma_read(offset),
             Block::Pio0 => self.pio_read(0, offset),
             Block::Pio1 => self.pio_read(1, offset),
+            Block::I2c0 => match self.i2c_read(0, offset) {
+                Some(v) => v,
+                None => self.base_read(),
+            },
+            Block::I2c1 => match self.i2c_read(1, offset) {
+                Some(v) => v,
+                None => self.base_read(),
+            },
             Block::Spi0 => match self.spi_read(0, offset) {
                 Some(v) => v,
                 None => self.base_read(),
@@ -525,6 +542,12 @@ impl Rp2040 {
             Block::Dma => self.dma_write(offset, value, raw),
             Block::Pio0 => self.pio_write(0, offset, value, raw),
             Block::Pio1 => self.pio_write(1, offset, value, raw),
+            Block::I2c0 | Block::I2c1 => {
+                let i = (block == Block::I2c1) as usize;
+                if !self.i2c_write(i, offset, value) {
+                    self.base_write();
+                }
+            }
             Block::Spi0 | Block::Spi1 => {
                 let i = (block == Block::Spi1) as usize;
                 if !self.spi_write(i, offset, value) {

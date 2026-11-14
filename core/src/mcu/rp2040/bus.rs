@@ -31,7 +31,7 @@ const SIO_END: u32 = SIO_START + 0x1000_0000;
 /// The reference's peripheral table, keyed by `(address >>> 14) << 2`.
 /// R2 ports most of these (`periph.rs`); an access to one it does not port
 /// halts the machine.
-const PERIPHERALS: &[(u32, &str)] = &[
+pub(crate) const PERIPHERALS: &[(u32, &str)] = &[
     (0x18000, "SSI"),
     (0x40000, "SYSINFO_BASE"),
     (0x40004, "SYSCFG"),

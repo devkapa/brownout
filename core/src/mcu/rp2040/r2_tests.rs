@@ -118,14 +118,14 @@ fn blocks_the_reference_stubs_out_answer_all_ones_and_never_stop() {
 }
 
 #[test]
-fn ports_not_yet_ported_still_stop_by_name() {
-    for (addr, name) in [
-        (0x4004_8000u32, "I2C1"),
-        (0x4004_4000, "I2C0"),
-    ] {
+fn every_peripheral_in_the_table_is_ported() {
+    // R6 ported the last blocks (UARTs, SPI, I2C, ADC, PWM): no bus address
+    // stops the machine by name any more.
+    for &(key, name) in super::bus::PERIPHERALS {
+        assert!(periph::Block::from_name(name).is_some(), "{name}");
         let mut m = Rp2040::new();
-        m.read_u32(addr);
-        assert_eq!(m.stop, Some(Stop::Peripheral { name, address: addr, write: false }), "{name}");
+        m.read_u32(key << 12);
+        assert_eq!(m.stop, None, "{name}");
     }
 }
 

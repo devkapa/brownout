@@ -31,6 +31,7 @@ pub mod clock;
 pub mod core;
 pub mod dma;
 pub mod gpiobank;
+pub mod i2c;
 pub mod interp;
 pub mod periph;
 pub mod pio;

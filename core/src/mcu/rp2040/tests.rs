@@ -873,18 +873,7 @@ fn memory_map_regions() {
 }
 
 #[test]
-fn unported_peripherals_stop_the_machine_at_first_access() {
-    for (addr, name, write) in [
-        (0x4004_4000, "I2C0", true),
-    ] {
-        let mut m = Rp2040::new();
-        if write {
-            m.write_u32(addr, 1);
-        } else {
-            m.read_u32(addr);
-        }
-        assert_eq!(m.stop, Some(Stop::Peripheral { name, address: addr, write }));
-    }
+fn the_usb_dpram_hook_and_misaligned_reads_stop_the_machine() {
     // R4: the USB DPRAM stores the word and runs the controller's hook.
     let mut m = Rp2040::new();
     m.write_u32(0x5010_0000, 1);

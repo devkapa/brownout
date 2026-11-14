@@ -823,3 +823,278 @@ mod spi {
         assert_eq!(rd(&mut m, SPI0 + IMSC), 0xffff /* datasheet: 0xf */);
     }
 }
+
+mod i2c {
+    use super::super::i2c::I2cHost;
+    use super::*;
+
+    const I2C0: u32 = 0x4004_4000;
+    const I2C1: u32 = 0x4004_8000;
+    const CON: u32 = 0x00;
+    const TAR: u32 = 0x04;
+    const SAR: u32 = 0x08;
+    const DATA_CMD: u32 = 0x10;
+    const INTR_STAT: u32 = 0x2c;
+    const INTR_MASK: u32 = 0x30;
+    const RAW_INTR_STAT: u32 = 0x34;
+    const RX_TL: u32 = 0x38;
+    const TX_TL: u32 = 0x3c;
+    const CLR_INTR: u32 = 0x40;
+    const CLR_RX_UNDER: u32 = 0x44;
+    const CLR_TX_ABRT: u32 = 0x54;
+    const CLR_STOP_DET: u32 = 0x60;
+    const ENABLE: u32 = 0x6c;
+    const STATUS: u32 = 0x70;
+    const TXFLR: u32 = 0x74;
+    const RXFLR: u32 = 0x78;
+    const TX_ABRT_SOURCE: u32 = 0x80;
+    const SPKLEN: u32 = 0xa0;
+
+    const CMD_READ: u32 = 1 << 8;
+    const STOP: u32 = 1 << 9;
+    const R_RX_UNDER: u32 = 1;
+    const R_RX_FULL: u32 = 1 << 2;
+    const R_TX_OVER: u32 = 1 << 3;
+    const R_TX_EMPTY: u32 = 1 << 4;
+    const R_TX_ABRT: u32 = 1 << 6;
+    const R_START_DET: u32 = 1 << 10;
+    const R_STOP_DET: u32 = 1 << 9;
+
+    fn kinds(m: &Rp2040) -> Vec<(u8, u32)> {
+        m.periph.i2c_events.iter().map(|e| (e.kind, e.value)).collect()
+    }
+
+    fn setup(m: &mut Rp2040, base: u32, target: u32) {
+        wr(m, base + ENABLE, 0);
+        wr(m, base + TAR, target);
+        wr(m, base + ENABLE, 1);
+    }
+
+    #[test]
+    fn reset_values_and_ids() {
+        // Datasheet 4.3.17: IC_CON 0x65 (master, fast mode, restart enable,
+        // slave disable), SCL counts 0x28/0x2f (standard) and 0x6/0xd (fast),
+        // IC_STATUS 0x6 (TFE, TFNF), IC_SDA_HOLD 1, version and type words.
+        let mut m = Rp2040::new();
+        for b in [I2C0, I2C1] {
+            assert_eq!(rd(&mut m, b + CON), 0x65);
+            assert_eq!(rd(&mut m, b + 0x14), 0x28);
+            assert_eq!(rd(&mut m, b + 0x18), 0x2f);
+            assert_eq!(rd(&mut m, b + 0x1c), 6);
+            assert_eq!(rd(&mut m, b + 0x20), 0xd);
+            assert_eq!(rd(&mut m, b + STATUS), 0x6);
+            assert_eq!(rd(&mut m, b + 0x7c), 1);
+            assert_eq!(rd(&mut m, b + 0xf8), 0x3230_312a);
+            assert_eq!(rd(&mut m, b + 0xfc), 0x4457_0140);
+            assert_eq!(rd(&mut m, b + SAR), 0x55);
+            assert_eq!(rd(&mut m, b + ENABLE), 0);
+        }
+    }
+
+    #[test]
+    fn a_scan_of_an_empty_bus_nacks_the_address() {
+        // Datasheet 4.3.10.1: a NACKed 7-bit address aborts the transfer with
+        // ABRT_7B_ADDR_NOACK (bit 0), raises TX_ABRT and STOP_DET, and flushes the TX FIFO.
+        let mut m = Rp2040::new();
+        setup(&mut m, I2C0, 0x3c);
+        wr(&mut m, I2C0 + DATA_CMD, CMD_READ | STOP);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_ABRT, R_TX_ABRT);
+        assert_ne!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_START_DET, 0);
+        assert_ne!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_STOP_DET, 0);
+        // Bit 0 plus the flush count (bits 31:23): the queued command was dropped.
+        assert_eq!(rd(&mut m, I2C0 + TX_ABRT_SOURCE), 1 | (1 << 23));
+        assert_eq!(rd(&mut m, I2C0 + STATUS) & 1, 0, "bus idle again");
+        assert_eq!(rd(&mut m, I2C0 + TXFLR), 0);
+        assert_eq!(kinds(&m), [(0, 0), (1, 0x3c | 0x10000), (4, 0)]);
+    }
+
+    #[test]
+    fn a_device_receives_a_write() {
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Device { address: 0x3c, next_read: 0 };
+        setup(&mut m, I2C0, 0x3c);
+        wr(&mut m, I2C0 + DATA_CMD, 0xaa);
+        wr(&mut m, I2C0 + DATA_CMD, 0xbb | STOP);
+        assert_eq!(kinds(&m), [(0, 0), (1, 0x3c), (2, 0xaa), (2, 0xbb), (4, 0)]);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_ABRT, 0);
+        assert_ne!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_STOP_DET, 0);
+        assert_ne!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_EMPTY, 0);
+        assert_eq!(rd(&mut m, I2C0 + STATUS) & 0x6, 0x6, "TFE and TFNF");
+    }
+
+    #[test]
+    fn a_device_answers_a_read() {
+        let mut m = Rp2040::new();
+        m.periph.i2c[1].host = I2cHost::Device { address: 0x50, next_read: 0x40 };
+        setup(&mut m, I2C1, 0x50);
+        wr(&mut m, I2C1 + RX_TL, 0);
+        wr(&mut m, I2C1 + DATA_CMD, CMD_READ);
+        wr(&mut m, I2C1 + DATA_CMD, CMD_READ | STOP);
+        assert_eq!(rd(&mut m, I2C1 + RXFLR), 2);
+        assert_ne!(rd(&mut m, I2C1 + STATUS) & (1 << 3), 0, "RFNE");
+        assert_eq!(rd(&mut m, I2C1 + DATA_CMD) & 0xff, 0x40);
+        assert_eq!(rd(&mut m, I2C1 + DATA_CMD) & 0xff, 0x41);
+        assert_eq!(rd(&mut m, I2C1 + RXFLR), 0);
+        // The address goes out as a read.
+        assert_eq!(kinds(&m)[1], (1, 0x50 | 0x10000));
+        assert_eq!(m.cpu.pending_interrupts & (1 << 24), 0, "IRQ 24 = I2C1, unmasked");
+    }
+
+    #[test]
+    fn nothing_starts_while_the_block_is_disabled() {
+        let mut m = Rp2040::new();
+        wr(&mut m, I2C0 + DATA_CMD, 0x11);
+        assert_eq!(rd(&mut m, I2C0 + TXFLR), 1);
+        assert!(m.periph.i2c_events.is_empty());
+        wr(&mut m, I2C0 + ENABLE, 1);
+        assert!(!m.periph.i2c_events.is_empty(), "enabling starts the queued command");
+        // Disabling flushes both FIFOs (datasheet 4.3.10.3).
+        let mut m = Rp2040::new();
+        wr(&mut m, I2C0 + DATA_CMD, 0x11);
+        wr(&mut m, I2C0 + ENABLE, 0);
+        assert_eq!(rd(&mut m, I2C0 + TXFLR), 0);
+    }
+
+    #[test]
+    fn tx_fifo_has_sixteen_entries_and_overflow_is_flagged() {
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Manual;
+        setup(&mut m, I2C0, 0x20);
+        for i in 0..16 {
+            wr(&mut m, I2C0 + DATA_CMD, i);
+        }
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_OVER, 0);
+        assert_eq!(rd(&mut m, I2C0 + TXFLR), 16);
+        assert_eq!(rd(&mut m, I2C0 + STATUS) & (1 << 1), 0, "TFNF clear");
+        wr(&mut m, I2C0 + DATA_CMD, 16);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_OVER, R_TX_OVER);
+    }
+
+    #[test]
+    fn empty_rx_read_raises_rx_under() {
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, I2C0 + DATA_CMD), 0);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_RX_UNDER, 1);
+        assert_eq!(rd(&mut m, I2C0 + INTR_STAT), 0, "masked: the mask is 0");
+        rd(&mut m, I2C0 + CLR_RX_UNDER);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & 1, 0);
+    }
+
+    #[test]
+    fn reference_quirk_interrupt_mask_is_not_writable() {
+        // Datasheet: IC_INTR_MASK resets to 0x8ff and is read-write. The
+        // reference has no write case for it (the write only warns), so the
+        // mask stays 0 and no I2C interrupt ever reaches the CPU.
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, I2C0 + INTR_MASK), 0 /* datasheet: 0x8ff */);
+        wr(&mut m, I2C0 + INTR_MASK, 0xffff);
+        assert_eq!(rd(&mut m, I2C0 + INTR_MASK), 0 /* datasheet: 0x8ff...0xffff */);
+        rd(&mut m, I2C0 + DATA_CMD);
+        assert_eq!(rd(&mut m, I2C0 + INTR_STAT), 0);
+        assert_eq!(m.cpu.pending_interrupts & (1 << 23), 0);
+    }
+
+    #[test]
+    fn thresholds_are_capped_at_the_fifo_size() {
+        let mut m = Rp2040::new();
+        wr(&mut m, I2C0 + RX_TL, 0xff);
+        wr(&mut m, I2C0 + TX_TL, 0xff);
+        assert_eq!(rd(&mut m, I2C0 + RX_TL), 16);
+        assert_eq!(rd(&mut m, I2C0 + TX_TL), 16);
+    }
+
+    #[test]
+    fn speed_field_zero_is_invalid() {
+        let mut m = Rp2040::new();
+        wr(&mut m, I2C0 + CON, 0x61);
+        assert_eq!((rd(&mut m, I2C0 + CON) >> 1) & 3, 3, "an invalid speed becomes high speed");
+        assert_eq!(m.periph.i2c[0].scl_low_period(), 0xd);
+        wr(&mut m, I2C0 + CON, 0x63);
+        assert_eq!(m.periph.i2c[0].scl_low_period(), 0x2f);
+    }
+
+    #[test]
+    fn user_abort_during_a_transfer() {
+        // IC_ENABLE.ABORT while a transfer is active: ABRT_USER_ABRT (bit 16).
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Manual;
+        setup(&mut m, I2C0, 0x20);
+        wr(&mut m, I2C0 + DATA_CMD, 0x01);
+        wr(&mut m, I2C0 + ENABLE, 3);
+        assert_ne!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_TX_ABRT, 0);
+        assert_ne!(rd(&mut m, I2C0 + TX_ABRT_SOURCE) & (1 << 16), 0);
+    }
+
+    #[test]
+    fn reference_quirk_clear_registers_read_one() {
+        // Datasheet: reading IC_CLR_* returns 0. The reference returns 1 when
+        // the read cleared a pending bit.
+        let mut m = Rp2040::new();
+        setup(&mut m, I2C0, 0x3c);
+        wr(&mut m, I2C0 + DATA_CMD, CMD_READ | STOP);
+        assert_eq!(rd(&mut m, I2C0 + CLR_STOP_DET), 1 /* datasheet: 0 */);
+        assert_eq!(rd(&mut m, I2C0 + CLR_STOP_DET), 0);
+        assert_eq!(rd(&mut m, I2C0 + CLR_INTR), 1);
+        assert_eq!(rd(&mut m, I2C0 + CLR_TX_ABRT), 0);
+    }
+
+    #[test]
+    fn reference_quirk_a_new_abort_clears_the_old_reasons() {
+        // Datasheet: abort reasons accumulate until IC_CLR_TX_ABRT is read. The
+        // reference's flush-count mask (0x1ff) wipes the low nine bits first.
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Manual;
+        setup(&mut m, I2C0, 0x20);
+        wr(&mut m, I2C0 + DATA_CMD, 0x01);
+        m.i2c_complete_connect(0, false, 0); // ABRT_7B_ADDR_NOACK (bit 0)
+        wr(&mut m, I2C0 + DATA_CMD, 0x01);
+        m.i2c_complete_connect(0, true, 0);
+        m.i2c_complete_write(0, false); // ABRT_TXDATA_NOACK (bit 3)
+        assert_eq!(rd(&mut m, I2C0 + TX_ABRT_SOURCE), (1 << 3) | (1 << 23) /* datasheet: (1 << 3) | 1 | (1 << 23) */);
+    }
+
+    #[test]
+    fn reference_quirk_a_data_read_clears_rx_full_even_above_the_threshold() {
+        // Datasheet: RX_FULL stays set while the RX FIFO level exceeds RX_TL.
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Device { address: 0x20, next_read: 1 };
+        setup(&mut m, I2C0, 0x20);
+        wr(&mut m, I2C0 + DATA_CMD, CMD_READ);
+        wr(&mut m, I2C0 + DATA_CMD, CMD_READ | STOP);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_RX_FULL, R_RX_FULL);
+        rd(&mut m, I2C0 + DATA_CMD);
+        assert_eq!(rd(&mut m, I2C0 + RXFLR), 1);
+        assert_eq!(rd(&mut m, I2C0 + RAW_INTR_STAT) & R_RX_FULL, 0 /* datasheet: set */);
+    }
+
+    #[test]
+    fn reference_quirk_first_data_byte_is_bit_10() {
+        // Datasheet: IC_DATA_CMD bit 11 is FIRST_DATA_BYTE (bit 10 is RESTART).
+        // The reference flags the first received byte in bit 10.
+        let mut m = Rp2040::new();
+        m.periph.i2c[0].host = I2cHost::Device { address: 0x20, next_read: 0x10 };
+        setup(&mut m, I2C0, 0x20);
+        wr(&mut m, I2C0 + DATA_CMD, CMD_READ | STOP);
+        assert_eq!(rd(&mut m, I2C0 + DATA_CMD), 0x10 | (1 << 10) /* datasheet: 0x10 | (1 << 11) */);
+    }
+
+    #[test]
+    fn reference_quirk_target_address_resets_to_0x55() {
+        // Datasheet: IC_TAR resets to 0x10.
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, I2C0 + TAR), 0x55 /* datasheet: 0x10 */);
+    }
+
+    #[test]
+    fn reference_quirk_spike_length_tests_the_written_bit_0() {
+        // Datasheet: IC_FS_SPKLEN is writable only while IC_ENABLE.ENABLE is 0.
+        // The reference tests bit 0 of the written value instead.
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, I2C0 + SPKLEN), 7);
+        wr(&mut m, I2C0 + SPKLEN, 0x11);
+        assert_eq!(rd(&mut m, I2C0 + SPKLEN), 7 /* datasheet: 0x11 */);
+        wr(&mut m, I2C0 + SPKLEN, 0x10);
+        assert_eq!(rd(&mut m, I2C0 + SPKLEN), 0x10);
+        let _ = TX_TL;
+    }
+}
