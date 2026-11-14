@@ -20475,3 +20475,37 @@ fn the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadenc
         }
     }
 }
+
+#[test]
+fn a_logic_input_on_a_static_hub_divider_is_a_rail_threshold_at_its_level() {
+    // R121: between solves a static hub node does not move with the rail, so
+    // a logic input on one is a rail threshold of its own, the rail value
+    // where the input meets its level (else its flip waits up to the drift
+    // cap, about 1 mV of rail, for the next solve). A 74LS00 on a cell's rail
+    // (the coupled RC: E 5, r 1, R 1k, C 1 uF), one input on a 500 / 333.55
+    // divider off the rail, publishing a + s u. TTL levels are fixed (VIL
+    // 0.8, VIH 2.0 V against its ground), so the input meets VIH at
+    // u* = (2 - a) / s, 9 mV above the rail at load: the watch's thresholds
+    // hold it to rounding (the level's motion is found by one difference).
+    let mut logic = [0usize; 12];
+    logic[0] = 3;
+    logic[1] = 3;
+    logic[2] = 4;
+    let p = program(5, vec![
+        battery(0, 1, 0, 5.0, 1.0),
+        resistor(1, 1, 2, 1000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0),
+        resistor(3, 1, 3, 500.0),
+        resistor(4, 3, 0, 333.55),
+        ls00(5, 1, 0, logic, 1e-9, 0),
+        resistor(6, 4, 0, 10000.0),
+    ]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(1e-6).unwrap();
+    let u = rig.u();
+    let (a, s) = rig.s().static_solver.hub_node_line(3).expect("the divider is a static hub partition");
+    let want = (2.0 - a) / s;
+    let got = rig.s().logic_crossings(u);
+    eprintln!("u {u:.7}, input line {a:.6} + {s:.6} u, VIH at u* {want:.7}; watch {got:?}");
+    assert!(got.iter().any(|&x| (x - want).abs() <= 1e-9 * want), "VIH's rail value {want} among {got:?}");
+}

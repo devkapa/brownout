@@ -960,7 +960,7 @@ impl PartitionedSolver {
     /// the root. Between solves the published input does not move with the
     /// rail, so without these a flip waited for the next solve or the 20 mV
     /// scan.
-    fn logic_crossings(&self, u: f64) -> Vec<f64> {
+    pub(super) fn logic_crossings(&self, u: f64) -> Vec<f64> {
         let mut out = Vec::new();
         let Some(hub) = self.hub.as_ref() else { return out };
         let du = 1e-3;
