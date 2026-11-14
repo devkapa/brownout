@@ -1183,9 +1183,11 @@ export class HeadlessRunner {
             hold,
           );
       if (!result.hitMinStep) {
-        if (onSample) for (const sample of held) onSample(sample);
+        // Recorded before delivery: the core has run it, so a callback that
+        // throws must not leave it out of a later replay.
         const { onSample: _unused, ...replayable } = options;
         this._coreHistory.push({ kind: "run", options: replayable });
+        if (onSample) for (const sample of held) onSample(sample);
         return result;
       }
       reasons = [coreAdvanceFailureReason(engine.lastAdvanceFailure)];

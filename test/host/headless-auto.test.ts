@@ -281,6 +281,24 @@ describe('engine: "auto" — a core failure in the middle of a run replays on cl
     expect(samples[9]!.simTime).toBeCloseTo(1e-3, 15);
   });
 
+  it("an onSample that throws after the core completed the run: that run is still in the replay", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    expect(() => runner.run({ durationS: 1e-3, onSample: () => { throw new Error("host bug"); } })).toThrow("host bug");
+    expect(runner.simTime).toBeCloseTo(1e-3, 12); // the core had run it
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+
+    const classic = classicReference((r) => {
+      r.load(rc());
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3 });
+    });
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.simTime).toBe(classic.simTime);
+    expect(capV(runner)).toBe(capV(classic));
+  });
+
   it("after a fallback the runner stays on classic: the next load carries classic's state, bit for bit, and says why", () => {
     const runner = new HeadlessRunner(AUTO);
     const classic = new HeadlessRunner();
