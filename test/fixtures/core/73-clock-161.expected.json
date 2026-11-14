@@ -1,0 +1,24 @@
+{
+  "$comment": [
+    "A clock (1 kHz, 50 % duty, 0 to 5 V) on the clock of a 74LS161 that is enabled and neither cleared nor loaded: fixture 67 with the clock kind in place of clock_gen.",
+    "By hand: the clock is HIGH for the first half of each 1 ms period, so it is high at load and rises again at t = 1 ms, 2 ms, 3 ms and so on: 21 rising edges in the 21.2 ms the digital check reads.",
+    "Both engines take a clock that is already high at the first evaluation as a rising edge (core/spec/w1-classic-semantics.md, 'Initial edges'), so the counter reads 1 from load and (1 + floor(t / 1 ms)) mod 16 after, with the clock high in the first half of each period.",
+    "The harness's four samples (0, 5.3, 10.6 and 21.2 ms) read 1, 6, 11 and 6; RCO is high only at count 15, from 14 ms to 15 ms.",
+    "test/core/promoted-kinds-fixtures.test.ts checks these values on both engines."
+  ],
+  "status": "pass",
+  "durationS": 0.0212,
+  "digital": {
+    "clockKey": "clk",
+    "projection": [
+      "u1"
+    ],
+    "anchor": {
+      "u1": 1
+    },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 18,
+    "traceDurationS": 0.0212,
+    "clockEdge": "falling"
+  }
+}
