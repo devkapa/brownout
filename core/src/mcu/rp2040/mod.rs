@@ -28,6 +28,8 @@ pub mod sio;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upstream_tests;
 
 use self::clock::Clock;
 use self::core::Cpu;
@@ -73,6 +75,16 @@ impl Stop {
     }
 }
 
+/// The write a halting peripheral access would have made: the register
+/// offset within the block, the atomic alias (0 normal, 1 XOR, 2 SET,
+/// 3 CLEAR) and the 32-bit value the reference passes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeripheralWrite {
+    pub offset: u32,
+    pub atomic: u32,
+    pub value: u32,
+}
+
 /// A host input applied at a fixed cycle count (clock nanos / 8), before the
 /// first step that starts at or after it, on both sides of the harness.
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +112,7 @@ pub struct Rp2040 {
     pub ppb: Ppb,
     pub sio: Sio,
     pub stop: Option<Stop>,
+    pub peripheral_write: Option<PeripheralWrite>,
     /// Count of accesses the reference only logs a warning for (invalid
     /// addresses, unimplemented opcodes). Not part of the compared state.
     pub warnings: u64,
@@ -128,6 +141,7 @@ impl Rp2040 {
             ppb: Ppb::new(),
             sio: Sio::new(),
             stop: None,
+            peripheral_write: None,
             warnings: 0,
             steps: 0,
             inputs: Vec::new(),

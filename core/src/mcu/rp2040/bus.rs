@@ -8,7 +8,7 @@
 //! wrapping of addresses to 32 bits.
 
 use super::core::SIO_START;
-use super::{Rp2040, Stop, DPRAM_BYTES, FLASH_BYTES, SRAM_BYTES};
+use super::{PeripheralWrite, Rp2040, Stop, DPRAM_BYTES, FLASH_BYTES, SRAM_BYTES};
 
 pub const BOOTROM_END: u32 = 4 * 1024 * 4;
 pub const FLASH_START: u32 = 0x1000_0000;
@@ -143,7 +143,7 @@ impl Rp2040 {
 
     pub fn write_u32(&mut self, address: u32, value: u32) {
         if let Some(name) = find_peripheral(address) {
-            self.halt(Stop::Peripheral { name, address, write: true });
+            self.halt_on_peripheral_write(name, address, value);
         } else if address < BOOTROM_END {
             // A misaligned index is a non-integer property on a typed array,
             // which JavaScript ignores.
@@ -185,7 +185,9 @@ impl Rp2040 {
         let aligned = address & 0xffff_fffc;
         let offset = address & 3;
         if let Some(name) = find_peripheral(address) {
-            self.halt(Stop::Peripheral { name, address, write: true });
+            // A peripheral sees the byte in all four lanes of the word.
+            let b = value & 0xff;
+            self.halt_on_peripheral_write(name, aligned, b | (b << 8) | (b << 16) | (b << 24));
             return;
         }
         let original = self.read_u32(aligned);
@@ -207,7 +209,9 @@ impl Rp2040 {
         let aligned = address & 0xffff_fffc;
         let offset = address & 3;
         if let Some(name) = find_peripheral(address) {
-            self.halt(Stop::Peripheral { name, address, write: true });
+            // A peripheral sees the halfword in both halves of the word.
+            let h = value & 0xffff;
+            self.halt_on_peripheral_write(name, aligned, h | (h << 16));
             return;
         }
         let original = self.read_u32(aligned);
@@ -219,6 +223,19 @@ impl Rp2040 {
         let shift = 8 * offset;
         let new_value = (original & !(0xffff << shift)) | ((value & 0xffff) << shift);
         self.write_u32(aligned, new_value);
+    }
+
+    /// Halts on a write to a peripheral R1 does not port, recording what
+    /// the reference would hand that peripheral's `writeUint32Atomic`.
+    fn halt_on_peripheral_write(&mut self, name: &'static str, address: u32, value: u32) {
+        if self.stop.is_none() {
+            self.peripheral_write = Some(PeripheralWrite {
+                offset: address & 0xfff,
+                atomic: (address & 0x3000) >> 12,
+                value,
+            });
+        }
+        self.halt(Stop::Peripheral { name, address, write: true });
     }
 
     /// A side-effect-free read of plain memory, for the harness's decodes.
