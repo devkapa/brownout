@@ -40,3 +40,13 @@ pub mod snapshot;
 pub mod solve;
 
 mod abi;
+
+// W7: the MCU emulator ports (AVR, behind its own cargo feature, off by
+// default), so the shipped module carries none of them.
+#[cfg(feature = "avr")]
+pub mod mcu;
+
+// W7: the RP2040 port, behind its own cargo feature, off by default. A build
+// with `rp2040` alone still needs the mcu module the line above gates.
+#[cfg(all(feature = "rp2040", not(feature = "avr")))]
+pub mod mcu;
