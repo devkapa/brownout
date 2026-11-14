@@ -104,9 +104,6 @@ impl Pin {
     fn input_enable(&self) -> bool {
         self.pad_value & 0x40 != 0
     }
-    fn function_select(&self) -> u32 {
-        self.ctrl & 0x1f
-    }
     fn input_value(&self) -> bool {
         apply_override(self.raw_input_value && self.input_enable(), (self.ctrl >> 16) & 0x3)
     }
@@ -169,35 +166,6 @@ impl Sio {
             interp1: Interpolator::new(1),
             gpio,
             qspi,
-        }
-    }
-
-    /// `GPIOPin.value`. Only the SIO function can drive a pin in R1 (PWM
-    /// and PIO are R5/R6, and nothing in R1 can select them).
-    pub fn pin_value(&self, pin: &Pin) -> u32 {
-        let bit = 1u32 << (pin.index & 31);
-        let sio = pin.function_select() == FUNCTION_SIO;
-        let raw_oe = sio && self.gpio_output_enable & bit != 0;
-        let raw_out = sio && self.gpio_value & bit != 0;
-        let output_enable = apply_override(raw_oe, (pin.ctrl >> 12) & 0x3);
-        if output_enable {
-            if apply_override(raw_out, (pin.ctrl >> 8) & 0x3) {
-                PIN_HIGH
-            } else {
-                PIN_LOW
-            }
-        } else {
-            let pulldown = pin.pad_value & 4 != 0;
-            let pullup = pin.pad_value & 8 != 0;
-            if pulldown && pullup {
-                PIN_INPUT_BUSKEEPER
-            } else if pulldown {
-                PIN_INPUT_PULLDOWN
-            } else if pullup {
-                PIN_INPUT_PULLUP
-            } else {
-                PIN_INPUT
-            }
         }
     }
 
@@ -368,16 +336,16 @@ impl Rp2040 {
     /// `GPIOPin.checkForUpdates`: a changed drive state reaches the pin's
     /// listeners, which the harness records as pin events.
     pub(crate) fn gpio_check_for_updates(&mut self, i: usize) {
-        let value = self.sio.pin_value(&self.sio.gpio[i]);
+        let value = self.pin_state(&self.sio.gpio[i]);
         if value != self.sio.gpio[i].last_value {
             self.sio.gpio[i].last_value = value;
             self.pin_events.push(PinEvent { pin: i as u32, state: value, nanos: self.clock.nanos });
         }
     }
 
-    /// `GPIOPin.setInputValue`, for the GPIOs a host drives. (The PWM and PIO
-    /// hooks it also calls cannot fire in R1: no pin can select PWM, and no
-    /// state machine runs.)
+    /// `GPIOPin.setInputValue`, for the GPIOs a host drives or a pad
+    /// re-reads. The PIO hook (a machine waiting on the pin) runs last, as
+    /// in the reference.
     pub fn set_input_value(&mut self, pin: u32, value: bool) {
         let i = pin as usize;
         if i >= NUM_GPIO {
@@ -396,6 +364,7 @@ impl Rp2040 {
         if p.irq_value() != prev_irq {
             self.update_io_interrupt();
         }
+        self.pio_pin_input_changed(i);
     }
 
     /// `RP2040.updateIOInterrupt`.

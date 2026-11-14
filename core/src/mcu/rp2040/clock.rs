@@ -17,6 +17,8 @@ pub enum AlarmId {
     UsbWrite(u8),
     UsbReset,
     UsbSof,
+    /// A DMA channel's `transfer` alarm.
+    Dma(u8),
 }
 
 pub struct Clock {

@@ -43,6 +43,9 @@ pub enum Block {
     Tbman,
     Ssi,
     Usb,
+    Dma,
+    Pio0,
+    Pio1,
 }
 
 impl Block {
@@ -70,6 +73,9 @@ impl Block {
             "TBMAN_BASE" => Block::Tbman,
             "SSI" => Block::Ssi,
             "USB" => Block::Usb,
+            "DMA" => Block::Dma,
+            "PIO0" => Block::Pio0,
+            "PIO1" => Block::Pio1,
             _ => return None,
         })
     }
@@ -260,6 +266,11 @@ pub struct Periph {
     pub ssi: super::ssi::Ssi,
     pub usb: super::usb::Usb,
     pub cdc: super::usb::Cdc,
+    pub dma: super::dma::Dma,
+    pub pio: [super::pio::Pio; 2],
+    /// The pending `setTimeout(() => run(), 0)` callbacks of the PIO blocks,
+    /// oldest first, each the index of the block that armed it.
+    pub pio_timers: Vec<u8>,
 }
 
 impl Default for Periph {
@@ -286,6 +297,23 @@ impl Periph {
             ssi: super::ssi::Ssi::default(),
             usb: super::usb::Usb::new(),
             cdc: super::usb::Cdc::new(),
+            dma: {
+                let mut d = super::dma::Dma::new();
+                // Each PIO state machine's constructor raises its TX line (the
+                // FIFO is not full) and lowers its RX line (it is empty).
+                for p in 0..2u32 {
+                    for m in 0..4u32 {
+                        d.dreq[(super::dma::dreq::PIO0_TX0 + p * 8 + m) as usize] = true;
+                    }
+                }
+                // The SPI blocks' constructors do the same for their TX FIFOs
+                // (R6 ports the blocks; the lines are already up).
+                d.dreq[super::dma::dreq::SPI0_TX as usize] = true;
+                d.dreq[super::dma::dreq::SPI1_TX as usize] = true;
+                d
+            },
+            pio: [super::pio::Pio::new(), super::pio::Pio::new()],
+            pio_timers: Vec::new(),
         }
     }
 }
@@ -373,6 +401,9 @@ impl Rp2040 {
             }
             Block::Ssi => self.ssi_read(offset),
             Block::Usb => self.usb_read(offset),
+            Block::Dma => self.dma_read(offset),
+            Block::Pio0 => self.pio_read(0, offset),
+            Block::Pio1 => self.pio_read(1, offset),
             Block::Timer => self.timer_read(offset),
             Block::Watchdog => self.watchdog_read(offset),
             Block::Rtc => self.rtc_read(offset),
@@ -441,6 +472,9 @@ impl Rp2040 {
             }
             Block::Ssi => self.ssi_write(offset, value),
             Block::Usb => self.usb_write(offset, value, raw),
+            Block::Dma => self.dma_write(offset, value, raw),
+            Block::Pio0 => self.pio_write(0, offset, value, raw),
+            Block::Pio1 => self.pio_write(1, offset, value, raw),
             Block::Timer => self.timer_write(offset, value, raw),
             Block::Watchdog => self.watchdog_write(offset, value),
             Block::Rtc => self.rtc_write(offset, value),

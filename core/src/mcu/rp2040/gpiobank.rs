@@ -8,7 +8,11 @@
 //! pins' CTRL and interrupt registers stay at their reset values; only the
 //! QSPI pads reach them.
 
-use super::sio::{Pin, FUNCTION_SIO, NUM_GPIO, NUM_QSPI};
+use super::pio::{FUNCTION_PIO0, FUNCTION_PIO1};
+use super::sio::{
+    Pin, FUNCTION_SIO, NUM_GPIO, NUM_QSPI, PIN_HIGH, PIN_INPUT, PIN_INPUT_BUSKEEPER, PIN_INPUT_PULLDOWN,
+    PIN_INPUT_PULLUP, PIN_LOW,
+};
 use super::Rp2040;
 
 const GPIO_CTRL_LAST: u32 = 0x0ec;
@@ -81,14 +85,62 @@ impl Rp2040 {
         self.set_interrupt(IRQ_IO_BANK0, any);
     }
 
-    /// `GPIOPin.status` (datasheet 2.19.6). Only the SIO function drives or
-    /// enables a pin here: PWM and PIO sit at their reset state until their
-    /// packages arrive, where the reference reads them as zero.
-    fn pin_status(&self, p: &Pin) -> u32 {
+    /// `rawOutputEnable` and `rawOutputValue`: what the pin's selected
+    /// function drives. PWM is package R6; no function but SIO and the two
+    /// PIOs drives a pin before it.
+    fn pin_raw_output(&self, p: &Pin) -> (bool, bool) {
         let bit = 1u32 << (p.index & 31);
-        let sio = p.ctrl & 0x1f == FUNCTION_SIO;
-        let raw_oe = sio && self.sio.gpio_output_enable & bit != 0;
-        let raw_out = sio && self.sio.gpio_value & bit != 0;
+        match p.ctrl & 0x1f {
+            FUNCTION_SIO => (self.sio.gpio_output_enable & bit != 0, self.sio.gpio_value & bit != 0),
+            FUNCTION_PIO0 => (self.periph.pio[0].pin_directions & bit != 0, self.periph.pio[0].pin_values & bit != 0),
+            FUNCTION_PIO1 => (self.periph.pio[1].pin_directions & bit != 0, self.periph.pio[1].pin_values & bit != 0),
+            _ => (false, false),
+        }
+    }
+
+    /// `GPIOPin.value`: the pin's drive state.
+    pub(crate) fn pin_state(&self, p: &Pin) -> u32 {
+        let (raw_oe, raw_out) = self.pin_raw_output(p);
+        if apply_override(raw_oe, (p.ctrl >> 12) & 0x3) {
+            if apply_override(raw_out, (p.ctrl >> 8) & 0x3) {
+                PIN_HIGH
+            } else {
+                PIN_LOW
+            }
+        } else {
+            let pulldown = p.pad_value & 4 != 0;
+            let pullup = p.pad_value & 8 != 0;
+            if pulldown && pullup {
+                PIN_INPUT_BUSKEEPER
+            } else if pulldown {
+                PIN_INPUT_PULLDOWN
+            } else if pullup {
+                PIN_INPUT_PULLUP
+            } else {
+                PIN_INPUT
+            }
+        }
+    }
+
+    /// `GPIOPin.inputValue` of a GPIO.
+    pub(crate) fn pin_input_value(&self, index: usize) -> bool {
+        input_value(&self.sio.gpio[index])
+    }
+
+    /// `RP2040.gpioValues`: the input value of every GPIO as one word.
+    pub(crate) fn gpio_values(&self) -> u32 {
+        let mut result = 0u32;
+        for (i, p) in self.sio.gpio.iter().enumerate() {
+            if input_value(p) {
+                result |= 1 << i;
+            }
+        }
+        result
+    }
+
+    /// `GPIOPin.status` (datasheet 2.19.6).
+    fn pin_status(&self, p: &Pin) -> u32 {
+        let (raw_oe, raw_out) = self.pin_raw_output(p);
         let oe = apply_override(raw_oe, (p.ctrl >> 12) & 0x3);
         let out = apply_override(raw_out, (p.ctrl >> 8) & 0x3);
         (if irq_value(p) { 1 << 26 } else { 0 })
@@ -221,7 +273,7 @@ impl Rp2040 {
                 let old_ie = input_enable(&self.sio.qspi[index]);
                 self.sio.qspi[index].pad_value = value;
                 // `checkForUpdates`: nothing listens to a QSPI pin.
-                let state = self.sio.pin_value(&self.sio.qspi[index]);
+                let state = self.pin_state(&self.sio.qspi[index]);
                 self.sio.qspi[index].last_value = state;
                 if old_ie != input_enable(&self.sio.qspi[index]) {
                     let raw = self.sio.qspi[index].raw_input_value;

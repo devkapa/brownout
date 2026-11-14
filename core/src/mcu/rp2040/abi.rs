@@ -6,7 +6,7 @@
 use super::{Rp2040, ScheduledInput, Stop};
 
 /// Words in the state record `rp_state` writes, all as f64.
-pub const STATE_WORDS: usize = 98;
+pub const STATE_WORDS: usize = 108;
 
 #[no_mangle]
 pub extern "C" fn rp_alloc(len: u32) -> *mut u8 {
@@ -107,6 +107,16 @@ pub unsafe extern "C" fn rp_flash_dirty_hash(m: *mut Rp2040) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rp_cdc_hold_reads(m: *mut Rp2040, on: u32) {
     machine(m).periph.cdc.hold_reads = on != 0;
+}
+
+/// Sets the number of completed steps between the host's event-loop turns
+/// (`Rp2040::pio_host_turn`); 0 leaves the turn to the caller.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_set_host_turn(m: *mut Rp2040, steps: f64) {
+    machine(m).host_turn_steps = steps as u64;
 }
 
 /// Feeds REPL bytes to the CDC host at a fixed cycle count.
@@ -374,6 +384,24 @@ fn r2_state(mach: &mut Rp2040, s: &mut [f64]) {
     s[76] = mach.watchdog_read(0x2c) as f64;
     s[81] = mach.rtc_read(0x18) as f64;
     s[82] = mach.rtc_read(0x1c) as f64;
+    r5_state(mach, s);
+}
+
+/// R5: the DMA channels and request lines, both PIO blocks and the pending
+/// host-loop timers (slots 98..108).
+fn r5_state(mach: &Rp2040, s: &mut [f64]) {
+    let d = &mach.periph.dma;
+    s[98] = d.channel_digest() as f64;
+    s[99] = d.irq_digest() as f64;
+    s[100] = d.dreq_digest() as f64;
+    for p in 0..2 {
+        let pio = &mach.periph.pio[p];
+        s[101 + 3 * p] = pio.machine_digest() as f64;
+        s[102 + 3 * p] = pio.fifo_digest() as f64;
+        s[103 + 3 * p] = pio.reg_digest() as f64;
+    }
+    // The reference's queue holds opaque callbacks: only the count compares.
+    s[107] = fnv([mach.periph.pio_timers.len() as u32]) as f64;
 }
 
 /// FNV-1a over the interpolators' registers, in a fixed order the harness
@@ -423,6 +451,26 @@ pub unsafe extern "C" fn rp_peek32(m: *mut Rp2040, address: u32) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn rp_steps(m: *mut Rp2040) -> f64 {
     machine(m).steps as f64
+}
+
+/// Pin events from index `from` on, three f64s each (pin, state, nanos),
+/// written to `out` up to `cap` events; returns the total count so far. The
+/// harness reads only the events since its last checkpoint.
+///
+/// # Safety
+/// `m` from `rp_create`; `out` valid for `3 * cap` f64s.
+#[no_mangle]
+pub unsafe extern "C" fn rp_pin_events_from(m: *mut Rp2040, from: u32, out: *mut f64, cap: u32) -> u32 {
+    let mach = machine(m);
+    let from = (from as usize).min(mach.pin_events.len());
+    let n = (mach.pin_events.len() - from).min(cap as usize);
+    let s = std::slice::from_raw_parts_mut(out, 3 * n);
+    for (i, e) in mach.pin_events[from..].iter().take(n).enumerate() {
+        s[3 * i] = e.pin as f64;
+        s[3 * i + 1] = e.state as f64;
+        s[3 * i + 2] = e.nanos;
+    }
+    mach.pin_events.len() as u32
 }
 
 /// Pin events so far, three f64s each (pin, state, nanos), written to `out`

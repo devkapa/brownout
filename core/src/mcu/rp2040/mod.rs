@@ -28,9 +28,11 @@ pub mod abi;
 pub mod bus;
 pub mod clock;
 pub mod core;
+pub mod dma;
 pub mod gpiobank;
 pub mod interp;
 pub mod periph;
+pub mod pio;
 pub mod ppb;
 pub mod rtc;
 pub mod sio;
@@ -46,6 +48,8 @@ mod r2_upstream_tests;
 mod r3_tests;
 #[cfg(test)]
 mod r4_tests;
+#[cfg(test)]
+mod r5_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -152,6 +156,10 @@ pub struct Rp2040 {
     pub inputs: Vec<ScheduledInput>,
     pub repl_inputs: Vec<ScheduledRepl>,
     pub pin_events: Vec<PinEvent>,
+    /// When non-zero, [`Rp2040::pio_host_turn`] runs after every this-many
+    /// completed steps: the stand-in for the host event loop the harness
+    /// uses on both sides (0: the host calls it itself).
+    pub host_turn_steps: u64,
 }
 
 impl Default for Rp2040 {
@@ -182,7 +190,9 @@ impl Rp2040 {
             inputs: Vec::new(),
             repl_inputs: Vec::new(),
             pin_events: Vec::new(),
+            host_turn_steps: 0,
         };
+        m.dma_reset_channels();
         m.ppb_construct();
         m.reset();
         // Nothing listens to the pins while the reference constructs itself.
@@ -266,7 +276,7 @@ impl Rp2040 {
                     Some(c) if c * CYCLE_NANOS > self.clock.nanos => {
                         let dn = c * CYCLE_NANOS - self.clock.nanos;
                         self.clock_tick(dn);
-                        self.steps += 1;
+                        self.finish_step();
                         return;
                     }
                     _ => {
@@ -291,7 +301,16 @@ impl Rp2040 {
             }
             self.clock_tick(cycles as f64 * CYCLE_NANOS);
         }
+        self.finish_step();
+    }
+
+    /// Counts a completed step and, when the host turn is automatic, takes
+    /// it at the step boundary.
+    fn finish_step(&mut self) {
         self.steps += 1;
+        if self.host_turn_steps != 0 && self.steps % self.host_turn_steps == 0 {
+            self.pio_host_turn();
+        }
     }
 
     /// Runs up to `max_steps` steps; returns how many completed.
@@ -327,6 +346,7 @@ impl Rp2040 {
             clock::AlarmId::UsbWrite(i) => self.usb_write_alarm_fired(i as usize),
             clock::AlarmId::UsbReset => self.usb_reset_alarm_fired(),
             clock::AlarmId::UsbSof => self.usb_generate_sof(),
+            clock::AlarmId::Dma(i) => self.dma_transfer_alarm_fired(i as usize),
         }
     }
 }

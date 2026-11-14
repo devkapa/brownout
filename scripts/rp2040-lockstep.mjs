@@ -47,7 +47,7 @@ const bootromPath = path.join(repoRoot, "src", "sim", "engine", "rp2040-bootrom.
 // UTC, so the reference runs in UTC.
 process.env.TZ = "UTC";
 
-const STATE_WORDS = 98;
+const STATE_WORDS = 108;
 const STATE_NAMES = [
   ...Array.from({ length: 13 }, (_, i) => `r${i}`), "sp", "lr", "pc",
   "xPSR", "MSP", "PSP", "PRIMASK", "CONTROL", "cycles", "nanos", "waiting", "eventRegistered",
@@ -62,7 +62,16 @@ const STATE_NAMES = [
   "watchdog.tick", "watchdog.triggers", "rtc.ctrl", "rtc.setup0", "rtc.setup1", "rtc.rtc1", "rtc.rtc0", "syscfg.nmiMask",
   "busctrl.digest", "pads.bank0", "pads.qspi", "io.digest", "watchdog.enables", "pads.voltage", "ssi.digest",
   "usb.regs", "usb.dpramHash", "usb.endpointAlarms", "cdc.state", "cdc.wrapper", "serial.count", "serial.hash",
+  "dma.channels", "dma.irq", "dma.dreq", "pio0.machines", "pio0.fifos", "pio0.regs", "pio1.machines", "pio1.fifos",
+  "pio1.regs", "host.pioTimers",
 ];
+
+// The reference runs a PIO block 1000 steps at a time from `setTimeout(0)`
+// callbacks, so its progress depends on the host's event loop. Both sides take
+// that loop's turn every HOST_TURN_STEPS completed steps instead: the port
+// through `rp_set_host_turn`, the reference by holding the timers it asks for
+// in a queue this script drains at the same step boundary.
+const HOST_TURN_STEPS = 1000;
 const STOP_KINDS = ["running", "peripheral", "usb-dpram", "unaligned-read", "out-of-range", "break", "idle"];
 
 // ---- args -------------------------------------------------------------------
@@ -342,6 +351,95 @@ function r2SetBase(asm, rb, n, alias, k) {
   if (k) asm.op(T.movs(4, k), T.lsls(4, 4, 7), T.reg(0b0001100, rb, rb, 4));
 }
 
+// ---- R5 image helpers ---------------------------------------------------------
+
+/** rt = v, in one to seven instructions (no literal pool, so any code length). */
+function c32(asm, rt, v) {
+  v >>>= 0;
+  const b = [v >>> 24, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  let i = 0;
+  while (i < 3 && b[i] === 0) i++;
+  asm.op(T.movs(rt, b[i]));
+  for (let j = i + 1; j < 4; j++) {
+    asm.op(T.lsls(rt, rt, 8));
+    if (b[j]) asm.op(T.adds8(rt, b[j]));
+  }
+}
+
+/** *addr = v (r0 and r1 as scratch). */
+function wr32(asm, addr, v) {
+  c32(asm, 0, addr);
+  c32(asm, 1, v);
+  asm.op(T.strImm(1, 0, 0));
+}
+
+/** r3 += *addr (r0 and r2 as scratch): a read whose side effects and value both show. */
+function rd32(asm, addr) {
+  c32(asm, 0, addr);
+  asm.op(T.ldrImm(2, 0, 0), T.reg(0b0001100, 3, 3, 2));
+}
+
+let spinId = 0;
+/** About 2n steps of nothing (r4 as the counter). */
+function spin(asm, n) {
+  const l = `spin${spinId++}`;
+  c32(asm, 4, n);
+  asm.label(l).op(T.subs8(4, 1)).b(l, 1);
+}
+
+/** VTOR = RAM and the interrupt lines of the PIOs (7..10) and DMA (11, 12). */
+function r5Prologue(asm) {
+  wr32(asm, 0xe000ed08, RAM);
+  wr32(asm, 0xe000e100, 0x1f80);
+}
+
+const DMA_BASE = 0x50000000;
+const PIO_BASE = [0x50200000, 0x50300000];
+
+/** The one handler of the R5 images: clear what interrupts, silence what cannot be cleared. */
+function r5Handler(asm) {
+  asm.label("handler");
+  wr32(asm, DMA_BASE + 0x400, 0xfff); // INTR
+  wr32(asm, DMA_BASE + 0x408, 0); // INTF0
+  wr32(asm, DMA_BASE + 0x418, 0); // INTF1
+  wr32(asm, DMA_BASE + 0x404, 0); // INTE0
+  wr32(asm, DMA_BASE + 0x414, 0); // INTE1
+  for (const b of PIO_BASE) {
+    for (const off of [0x12c, 0x130, 0x138, 0x13c]) wr32(asm, b + off, 0);
+    wr32(asm, b + 0x30, 0xff); // IRQ flags
+  }
+  asm.op(T.bx(14));
+}
+
+function r5Vectors(side, asm) {
+  const vt = new Uint8Array(4 * 48);
+  const dv = new DataView(vt.buffer);
+  const handler = asm.labels.get("handler") | 1;
+  for (let n = 0; n < 48; n++) dv.setUint32(4 * n, handler, true);
+  side.sram(0, vt);
+}
+
+/** A random PIO instruction that cannot recurse: no MOV EXEC, no OUT EXEC. */
+function pioInstr(r) {
+  const op = pick(r, 0x10000);
+  const cls = op >> 13;
+  const dest = (op >> 5) & 7;
+  if (cls === 5 && dest === 4) return op & ~(1 << 7) | (1 << 5); // MOV EXEC -> MOV Y
+  if (cls === 3 && dest === 7) return op & ~(1 << 7); // OUT EXEC -> OUT PINDIRS
+  return op;
+}
+
+
+/** A REPL session: each block is pasted in paste mode (Ctrl-E ... Ctrl-D), 100 ms of simulated time apart, from 300 ms on. */
+function replSession(blocks, gapCycles = 12_500_000, firstCycle = 37_500_000) {
+  const inputs = [{ atCycle: 25_000_000, repl: "\r\n" }];
+  blocks.forEach((text, i) => {
+    const body = text.split("\n").join("\r\n");
+    inputs.push({ atCycle: firstCycle + i * gapCycles, repl: text.includes("\n") ? `\x05${body}\r\n\x04` : `${text}\r\n` });
+  });
+  return inputs;
+}
+
 // ---- images -------------------------------------------------------------------
 
 const RAM = 0x20000000;
@@ -601,6 +699,225 @@ const IMAGES = {
       s.reg(15, asm.labels.get("start"));
     },
   },
+  // R5: DMA at the configuration level. Random channels (every register
+  // layout and trigger alias, byte, halfword and word, rings, byte swap,
+  // chaining, the pacing timers, PIO request lines, an unraised UART line),
+  // random aborts and multi-triggers, interrupts into a clearing handler,
+  // PIO FIFOs fed and drained through SMx_INSTR so the request lines move.
+  "r5-dma": {
+    k: 500,
+    steps: 1_000_000,
+    setup(s) {
+      const r = rng(0xe5);
+      const asm = new Asm(RAM + 0x200);
+      const SCRATCH = RAM + 0x30000;
+      r5Prologue(asm);
+      for (let i = 0; i < 64; i++) wr32(asm, SCRATCH + 4 * i, Math.floor(r() * 4294967296));
+      const treqs = [0x3f, 0x3f, 0x3f, 0x3f, 0x3b, 0x3c, 0x3d, 0x3e, 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 20, 0x3f];
+      const layouts = [
+        { r: 0x00, w: 0x04, c: 0x08, ctrl: 0x0c, trig: "ctrl" },
+        { r: 0x14, w: 0x18, c: 0x1c, ctrl: 0x10, trig: "count" },
+        { r: 0x28, w: 0x2c, c: 0x24, ctrl: 0x20, trig: "write" },
+        { r: 0x3c, w: 0x34, c: 0x38, ctrl: 0x30, trig: "read" },
+      ];
+      for (let it = 0; it < 1500; it++) {
+        const ev = r();
+        if (ev < 0.7) {
+          const ch = pick(r, 12);
+          const base = DMA_BASE + 0x40 * ch;
+          const L = layouts[pick(r, 4)];
+          const treq = treqs[pick(r, treqs.length)];
+          // A channel keeps one transfer size: chained triggers reuse the
+          // addresses it left, and a misaligned word access throws in the reference.
+          const size = ch % 3;
+          const toPio = treq < 4 || treq === 8;
+          const fromPio = (treq >= 4 && treq < 8) || treq === 12;
+          const pioBase = PIO_BASE[treq >= 8 && treq < 16 ? 1 : 0];
+          const src = fromPio ? pioBase + 0x20 + 4 * (treq & 3) : SCRATCH + 4 * pick(r, 0x3000);
+          const dst = toPio ? pioBase + 0x10 + 4 * (treq & 3) : SCRATCH + 4 * pick(r, 0x3000);
+          const count = pick(r, 40) === 0 ? 0 : 1 + pick(r, 24);
+          let ctrl = 1 | (size << 2) | (treq << 15) | (pick(r, 4) ? 0 : 1 << 21) | (pick(r, 5) ? 0 : 1 << 22);
+          ctrl |= (fromPio ? 0 : pick(r, 4) ? 1 << 4 : 0) | (toPio ? 0 : pick(r, 4) ? 1 << 5 : 0);
+          if (pick(r, 4) === 0) ctrl |= (1 + pick(r, 6)) << 6 | (pick(r, 2) << 10); // ring
+          ctrl |= (pick(r, 3) === 0 ? pick(r, 12) : ch) << 11; // chain
+          wr32(asm, base + L.r, src & 3 && !toPio && !fromPio ? src & ~3 : src);
+          wr32(asm, base + L.w, dst);
+          if (L.trig !== "count") wr32(asm, base + L.c, count);
+          if (L.trig !== "ctrl") wr32(asm, base + L.ctrl, ctrl);
+          // The trigger register goes last.
+          if (L.trig === "ctrl") wr32(asm, base + L.ctrl, ctrl);
+          else if (L.trig === "count") wr32(asm, base + L.c, count);
+          else if (L.trig === "write") wr32(asm, base + L.w, dst);
+          else wr32(asm, base + L.r, src);
+        } else if (ev < 0.8) {
+          wr32(asm, DMA_BASE + 0x420 + 4 * pick(r, 4), (pick(r, 5) << 16) | pick(r, 9));
+        } else if (ev < 0.87) {
+          wr32(asm, DMA_BASE + 0x444, pick(r, 4096)); // CHAN_ABORT
+        } else if (ev < 0.91) {
+          wr32(asm, DMA_BASE + 0x430, pick(r, 4096)); // MULTI_CHAN_TRIGGER
+        } else if (ev < 0.95) {
+          const reg = [0x404, 0x408, 0x414, 0x418, 0x400][pick(r, 5)];
+          wr32(asm, DMA_BASE + reg, pick(r, 4096));
+        } else {
+          // Feed or drain a PIO FIFO by a machine instruction: PULL (0x8080) or PUSH (0x8000).
+          const p = pick(r, 2);
+          wr32(asm, PIO_BASE[p] + 0xd8 + 0x18 * pick(r, 4), pick(r, 2) ? 0x8080 : 0x8000);
+        }
+        if (pick(r, 6) === 0) rd32(asm, DMA_BASE + [0x400, 0x40c, 0x41c, 0x448, 0x804, 0x0c, 0x4c][pick(r, 7)]);
+        spin(asm, 3 + pick(r, 50));
+      }
+      for (let ch = 0; ch < 12; ch++) for (const off of [0, 4, 8, 0xc]) rd32(asm, DMA_BASE + 0x40 * ch + off);
+      asm.op(T.bkpt(0x55));
+      r5Handler(asm);
+      s.sram(0x200, asm.finish());
+      r5Vectors(s, asm);
+      s.reg(13, RAM + 0x40000);
+      s.reg(15, RAM + 0x200);
+    },
+  },
+  // R5: PIO instruction fuzz. Rounds of a random 32-word program per block,
+  // random per-machine configuration (wrap, shift control, pin control, side-set,
+  // status, jmp pin), FIFO traffic, IRQ flags and forces, interrupt enables
+  // into a silencing handler, instructions through SMx_INSTR, a random enable
+  // mask with restarts, then a stretch of steps for the 1000-step batches to
+  // run in; the pads and function selects of GPIO0-15 give the pins to the
+  // blocks and a script of input edges drives the waits.
+  "r5-pio": {
+    k: 500,
+    steps: 700_000,
+    inputs: (() => {
+      const r = rng(0x77);
+      const list = [];
+      let at = 500;
+      for (let i = 0; i < 300; i++) {
+        at += 200 + pick(r, 4000);
+        list.push({ atCycle: at, pin: pick(r, 16), level: pick(r, 2) });
+      }
+      return list;
+    })(),
+    setup(s) {
+      const r = rng(0xf6);
+      const asm = new Asm(RAM + 0x200);
+      r5Prologue(asm);
+      // GPIO0-7 to PIO0, 8-15 to PIO1, with the input buffers on.
+      for (let pin = 0; pin < 16; pin++) {
+        wr32(asm, 0x4001c000 + 4 + 4 * pin, 0x40 | 0x16);
+        wr32(asm, 0x40014000 + 8 * pin + 4, pin < 8 ? 6 : 7);
+      }
+      for (let round = 0; round < 70; round++) {
+        const p = round % 2;
+        const b = PIO_BASE[p];
+        if (pick(r, 4) === 0) wr32(asm, b, 0); // stop the block
+        for (let i = 0; i < 32; i++) wr32(asm, b + 0x48 + 4 * i, pioInstr(r));
+        for (let m = 0; m < 4; m++) {
+          const sm = b + 0xc8 + 0x18 * m;
+          wr32(asm, sm, (pick(r, 100) << 16) | (pick(r, 256) << 8));
+          wr32(asm, sm + 4, pick(r, 16) | (pick(r, 2) << 4) | (pick(r, 32) << 7) | (pick(r, 32) << 12) | (pick(r, 32) << 24) | (pick(r, 2) << 29) | (pick(r, 4) === 0 ? 1 << 30 : 0));
+          wr32(asm, sm + 8, (pick(r, 4) << 16) | (pick(r, 4) << 18) | (pick(r, 32) << 20) | (pick(r, 32) << 25) | (pick(r, 4) << 30));
+          wr32(asm, sm + 0x14, (pick(r, 4) === 0 ? pick(r, 8) : pick(r, 6)) << 29 | (pick(r, 6) << 26) | (pick(r, 34) << 20) | (pick(r, 16) << 15) | (pick(r, 16) << 10) | (pick(r, 16) << 5) | pick(r, 16));
+        }
+        for (let i = 0; i < 6; i++) wr32(asm, b + 0x10 + 4 * pick(r, 4), Math.floor(r() * 4294967296));
+        if (pick(r, 2)) wr32(asm, b + 0x34, pick(r, 256)); // IRQ_FORCE
+        if (pick(r, 3) === 0) wr32(asm, b + 0x30, pick(r, 256)); // clear IRQ flags
+        wr32(asm, b + 0x12c, pick(r, 4) === 0 ? pick(r, 4096) : 0); // IRQ0_INTE
+        wr32(asm, b + 0x138, pick(r, 4) === 0 ? pick(r, 4096) : 0); // IRQ1_INTE
+        for (let i = 0; i < 4; i++) wr32(asm, b + 0xd8 + 0x18 * pick(r, 4), pioInstr(r) & 0xffff);
+        const mask = pick(r, 5) === 0 ? 0 : 1 + pick(r, 15);
+        wr32(asm, b, mask | (pick(r, 3) === 0 ? pick(r, 16) << 4 : 0) | (pick(r, 4) === 0 ? pick(r, 16) << 8 : 0));
+        spin(asm, 500 + pick(r, 1500));
+        for (const off of [0x04, 0x08, 0x0c, 0x30, 0x3c, 0x40, 0x128, 0x134, 0xd4, 0xec, 0x104, 0x11c]) rd32(asm, b + off);
+        for (let i = 0; i < 3; i++) rd32(asm, b + 0x20 + 4 * pick(r, 4)); // RXF: pops
+        spin(asm, 300 + pick(r, 1000));
+      }
+      asm.op(T.bkpt(0x56));
+      r5Handler(asm);
+      s.sram(0x200, asm.finish());
+      r5Vectors(s, asm);
+      s.reg(13, RAM + 0x40000);
+      s.reg(15, RAM + 0x200);
+    },
+  },
+  // R5: the wrapper's boot, then rp2.StateMachine programs typed at the REPL:
+  // a square wave, a FIFO echo, a side-set, an IRQ with a Python handler, a
+  // wait on a pin; then DMA set up through machine.mem32 (memory to memory,
+  // memory into a state machine's FIFO paced by its request line).
+  "mpy-pio": {
+    k: 5000,
+    steps: 30_000_000,
+    inputs: replSession([
+      "import rp2, machine, uctypes\nfrom machine import Pin, mem32",
+      `@rp2.asm_pio(set_init=rp2.PIO.OUT_LOW)
+def sq():
+    wrap_target()
+    set(pins, 1) [3]
+    set(pins, 0) [3]
+    wrap()`,
+      "sm0 = rp2.StateMachine(0, sq, freq=2000, set_base=Pin(16))\nsm0.active(1)",
+      "sm0.active(0)",
+      `@rp2.asm_pio()
+def echo():
+    pull()
+    mov(isr, osr)
+    push()`,
+      "sm1 = rp2.StateMachine(1, echo, freq=100000)\nsm1.active(1)\nsm1.put(0x1234)\nprint(hex(sm1.get()))",
+      `@rp2.asm_pio(sideset_init=rp2.PIO.OUT_LOW)
+def ss():
+    wrap_target()
+    nop().side(1) [1]
+    nop().side(0) [1]
+    wrap()`,
+      "sm2 = rp2.StateMachine(2, ss, freq=4000, sideset_base=Pin(18))\nsm2.active(1)",
+      `@rp2.asm_pio()
+def irqp():
+    irq(0)
+    wait(1, irq, 0)
+    wrap_target()
+    nop() [7]
+    wrap()`,
+      "sm3 = rp2.StateMachine(3, irqp, freq=50000)\nsm3.irq(lambda sm: print('irq', sm))\nsm3.active(1)",
+      "sm3.active(0)\nsm2.active(0)\nsm1.active(0)",
+      `@rp2.asm_pio()
+def waitp():
+    wait(1, gpio, 5)
+    set(pins, 1)
+    wrap_target()
+    jmp(pin, "done")
+    nop()
+    label("done")
+    wrap()`,
+      "sm4 = rp2.StateMachine(4, waitp, freq=10000, set_base=Pin(20), jmp_pin=Pin(6))\nsm4.active(1)",
+      "p=Pin(5, Pin.IN)\nprint(p.value())",
+      "sm4.active(0)",
+      "s=bytearray(32)\nd=bytearray(32)\nfor i in range(32): s[i]=i+1\nb=0x50000000\nmem32[b]=uctypes.addressof(s)\nmem32[b+4]=uctypes.addressof(d)\nmem32[b+8]=8\nmem32[b+12]=(1<<0)|(1<<4)|(1<<5)|(2<<2)|(0x3f<<15)\nprint(d)",
+      "mem32[b+0x40]=uctypes.addressof(s)\nmem32[b+0x44]=0x50200010+4\nmem32[b+0x48]=6\nmem32[b+0x4c]=(1<<0)|(1<<4)|(2<<2)|(1<<15)|(1<<11)\nprint(hex(mem32[0x5020000c]), hex(mem32[0x50000048]))",
+      `@rp2.asm_pio(sideset_init=rp2.PIO.OUT_HIGH, out_init=rp2.PIO.OUT_HIGH, out_shiftdir=rp2.PIO.SHIFT_RIGHT)
+def uart_tx():
+    pull()
+    set(x, 7).side(0) [7]
+    label("bitloop")
+    out(pins, 1) [6]
+    jmp(x_dec, "bitloop") [6]
+    nop().side(1) [6]`,
+      "u = rp2.StateMachine(5, uart_tx, freq=76800, sideset_base=Pin(22), out_base=Pin(22))\nu.active(1)\nfor c in b'Hi!': u.put(c)",
+      `@rp2.asm_pio(autopush=True, push_thresh=8, in_shiftdir=rp2.PIO.SHIFT_RIGHT)
+def cnt():
+    mov(x, invert(null))
+    label("again")
+    in_(pins, 1)
+    jmp(x_dec, "again")`,
+      "c = rp2.StateMachine(6, cnt, freq=20000, in_base=Pin(8))\nc.active(1)\nprint(c.rx_fifo(), c.get())\nc.active(0)\nu.active(0)",
+    ]).concat([
+      // After "p=Pin(5, Pin.IN)" (200 ms into the session, so the pad's input is on).
+      { atCycle: 203_000_000, pin: 5, level: 1 },
+      { atCycle: 204_000_000, pin: 6, level: 1 },
+      { atCycle: 214_000_000, pin: 8, level: 1 },
+      { atCycle: 214_400_000, pin: 8, level: 0 },
+      { atCycle: 214_900_000, pin: 8, level: 1 },
+    ]),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
   // R2, directed: interrupts and long sleeps. Timer alarms wake the core out
   // of WFI (the clock jumps to each alarm: tens of simulated minutes pass in a
   // few steps), the RTC rolls over a year end, the 64-bit timer passes 2^32 us,
@@ -667,6 +984,7 @@ function rustSide() {
   const x = inst.exports;
   const m = x.rp_create();
   x.rp_cdc_hold_reads(m, 1); // the wrapper's read-holding policy
+  x.rp_set_host_turn(m, HOST_TURN_STEPS);
   const mem = () => new Uint8Array(x.memory.buffer);
   const withBytes = (bytes, fn) => {
     const p = x.rp_alloc(bytes.length);
@@ -709,10 +1027,13 @@ function rustSide() {
       const name = new TextDecoder().decode(new Uint8Array(x.memory.buffer, nameBuf, n));
       return { kind: STOP_KINDS[kind], address: x.rp_stop_address(m) >>> 0, write: !!x.rp_stop_write(m), name };
     },
-    pinEvents() {
-      const total = x.rp_pin_events(m, 0, 0);
+    pinEventCount: () => x.rp_pin_events(m, 0, 0),
+    /** The events from index `from` on. */
+    pinEvents(from = 0) {
+      const total = x.rp_pin_events(m, 0, 0) - from;
+      if (total <= 0) return [];
       const p = x.rp_alloc(24 * total + 8);
-      x.rp_pin_events(m, p, total);
+      x.rp_pin_events_from(m, from, p, total);
       const f = new Float64Array(x.memory.buffer, p, 3 * total);
       const out = [];
       for (let i = 0; i < total; i++) out.push([f[3 * i], f[3 * i + 1], f[3 * i + 2]]);
@@ -725,6 +1046,19 @@ function rustSide() {
 }
 
 function jsSide() {
+  // The reference's only timers in play are the PIO blocks' run() re-arms
+  // (the Simulator's own pacer is never started here): hold them for the
+  // host turn.
+  const timers = [];
+  globalThis.setTimeout = (fn) => {
+    timers.push(fn);
+    return timers.length;
+  };
+  globalThis.clearTimeout = () => {};
+  const hostTurn = () => {
+    const batch = timers.splice(0);
+    for (const fn of batch) fn();
+  };
   const sim = new Simulator();
   const rp = sim.rp2040;
   rp.logger = new ConsoleLogger(LogLevel.Error, true);
@@ -767,6 +1101,27 @@ function jsSide() {
     held.clear();
     for (const [endpoint, byteCount] of h) rp.usbCtrl.onEndpointRead?.(endpoint, byteCount);
   };
+  // --stats: how much the reference's DMA and PIO actually did.
+  const stats = { dmaTransfers: 0, pioInstructions: 0, pioByOpcode: [0, 0, 0, 0, 0, 0, 0, 0] };
+  if (flag("stats")) {
+    for (const ch of rp.dma.channels) {
+      for (const name of ["transfer8", "transfer16", "transferSwap16", "transfer32", "transferSwap32"]) {
+        const f = ch[name];
+        ch[name] = () => {
+          stats.dmaTransfers++;
+          f();
+        };
+      }
+      ch.reset();
+    }
+    const proto = Object.getPrototypeOf(rp.pio[0].machines[0]);
+    const exec = proto.executeInstruction;
+    proto.executeInstruction = function (op) {
+      stats.pioInstructions++;
+      stats.pioByOpcode[(op >>> 13) & 7]++;
+      return exec.call(this, op);
+    };
+  }
   const events = [];
   rp.gpio.forEach((pin, i) => pin.addListener((state) => events.push([i, state, sim.clock.nanos])));
   const inputs = [];
@@ -806,6 +1161,7 @@ function jsSide() {
         if (next !== null && next * 8 > sim.clock.nanos) {
           sim.clock.tick(next * 8 - sim.clock.nanos);
           steps++;
+          if (steps % HOST_TURN_STEPS === 0) hostTurn();
           return true;
         }
         stop = { kind: "idle" };
@@ -820,9 +1176,15 @@ function jsSide() {
         stop = { kind: "threw", message: String(e.message || e) };
         return false;
       }
-      sim.clock.tick(cycles * 8);
+      try {
+        sim.clock.tick(cycles * 8);
+      } catch (e) {
+        stop = { kind: "threw", message: String(e.message || e) };
+        return false;
+      }
     }
     steps++;
+    if (steps % HOST_TURN_STEPS === 0) hostTurn();
     if (breakCode !== null) stop = { kind: "break", address: breakCode };
     return true; // a step completed (a breaking one included)
   }
@@ -983,6 +1345,33 @@ function jsSide() {
       s[96] = serial.length;
       s[97] = fnv(serial);
       s[89] = u(per[0x4001c].voltageSelect) | (u(per[0x40020].voltageSelect) << 1);
+      // R5: DMA and PIO.
+      const dma = rp.dma;
+      const fnJs = (f, ch) => [ch.transfer8, ch.transfer16, ch.transferSwap16, ch.transfer32, ch.transferSwap32].indexOf(f);
+      s[98] = fnv(
+        dma.channels.flatMap((c) => [
+          c.ctrl, c.readAddr, c.writeAddr, c.transCount, c.transCountReload, c.dreqCounter, c.treqValue, c.dataSize,
+          c.chainTo, c.ringMask, fnJs(c.transferFn, c),
+        ]),
+      );
+      s[99] = fnv([dma.intRaw, dma.intEnable0, dma.intForce0, dma.intEnable1, dma.intForce1, dma.timer0, dma.timer1, dma.timer2, dma.timer3]);
+      s[100] = fnv(Array.from({ length: 64 }, (_, i) => i).filter((i) => dma.dreq[i]));
+      rp.pio.forEach((pio, p) => {
+        s[101 + 3 * p] = fnv(
+          pio.machines.flatMap((m) => [
+            m.enabled ? 1 : 0, m.x, m.y, m.pc, m.inputShiftReg, m.inputShiftCount, m.outputShiftReg, m.outputShiftCount, m.cycles,
+            m.execOpcode, m.execValid ? 1 : 0, m.updatePC ? 1 : 0, m.clockDivInt, m.clockDivFrac, m.execCtrl, m.shiftCtrl, m.pinCtrl,
+            m.outPinValues, m.outPinDirection, m.waiting ? 1 : 0, m.waitType, m.waitIndex, m.waitPolarity ? 1 : 0, m.waitDelay,
+          ]),
+        );
+        s[102 + 3 * p] = fnv(pio.machines.flatMap((m) => [m.txFIFO.itemCount, ...m.txFIFO.items, m.rxFIFO.itemCount, ...m.rxFIFO.items]));
+        s[103 + 3 * p] = fnv([
+          pio.stopped ? 1 : 0, pio.fdebug, pio.txStall, pio.rxStall, pio.inputSyncBypass, pio.irq, pio.pinValues, pio.pinDirections,
+          pio.oldPinValues, pio.oldPinDirections, pio.irq0IntEnable, pio.irq0IntForce, pio.irq1IntEnable, pio.irq1IntForce,
+          ...pio.instructions,
+        ]);
+      });
+      s[107] = fnv([timers.length]);
       return s;
     },
     ramHash() {
@@ -1006,7 +1395,9 @@ function jsSide() {
       dirtyFlash.clear();
       return h;
     },
-    pinEvents: () => events,
+    pinEventCount: () => events.length,
+    pinEvents: (from = 0) => events.slice(from),
+    stats: () => stats,
     peek(a) {
       a = a & ~3;
       if (a < 0x4000) return rp.bootrom[a / 4] >>> 0;
@@ -1100,7 +1491,8 @@ function sameEvents(a, b) {
   return true;
 }
 
-function compare(rust, js, withRam, flash = "dirty") {
+/** `seen`: how many pin events earlier checkpoints already matched (updated on a match). */
+function compare(rust, js, withRam, flash = "dirty", seen = { n: 0 }) {
   const d = diffState(rust.state(), js.state());
   if (rust.steps() !== js.steps()) d.unshift(`steps: rust ${rust.steps()} js ${js.steps()}`);
   if (withRam) {
@@ -1111,7 +1503,11 @@ function compare(rust, js, withRam, flash = "dirty") {
     const fr = rust.flashHash(flash === "full"), fj = js.flashHash(flash === "full");
     if (fr !== fj) d.push(`flash hash: rust ${hex(fr)} js ${hex(fj)}`);
   }
-  if (!sameEvents(rust.pinEvents(), js.pinEvents())) d.push(`pin events: rust ${JSON.stringify(rust.pinEvents())} js ${JSON.stringify(js.pinEvents())}`);
+  const nr = rust.pinEventCount(), nj = js.pinEventCount();
+  if (nr !== nj || !sameEvents(rust.pinEvents(seen.n), js.pinEvents(seen.n))) {
+    const show = (side) => JSON.stringify(side.pinEvents(Math.max(0, seen.n - 2)).slice(0, 12));
+    d.push(`pin events (from #${seen.n}, ${nr} vs ${nj} in all): rust ${show(rust)} js ${show(js)}`);
+  } else seen.n = nr;
   return d;
 }
 
@@ -1120,12 +1516,14 @@ function bisect(image, good) {
   const { rust, js } = make(image);
   rust.run(good);
   js.run(good);
+  // The events up to the last good checkpoint matched; step from there.
+  const seen = { n: Math.min(rust.pinEventCount(), js.pinEventCount()) };
   for (let i = good; ; i++) {
     const pc = rust.state()[15];
     const before = [decodeAt(rust, pc), decodeAt(js, js.state()[15])];
     const nr = rust.run(1);
     const nj = js.run(1);
-    const d = compare(rust, js, true);
+    const d = compare(rust, js, true, "dirty", seen);
     if (nr !== nj && d.length === 0) d.push(`completed: rust ${nr} js ${nj}`);
     if (d.length) {
       console.log(`  first differing step: ${i + 1} (after ${i} matching steps)`);
@@ -1147,6 +1545,7 @@ function runImage(name, image, steps, k) {
   let good = 0;
   let total = 0;
   let checkpoints = 0;
+  const seen = { n: 0 };
   for (;;) {
     const want = Math.min(k, steps - total);
     if (want <= 0) break;
@@ -1159,7 +1558,7 @@ function runImage(name, image, steps, k) {
     // Flash is 16 MB: hashed in full at the first and the last checkpoint,
     // and between them only the pages written since the previous one.
     const last = nr < want || total >= steps;
-    const d = compare(rust, js, true, checkpoints === 1 || last ? "full" : "dirty");
+    const d = compare(rust, js, true, checkpoints === 1 || last ? "full" : "dirty", seen);
     if (nj !== nr && d.length === 0) d.push(`reference stopped early: ${JSON.stringify(js.stop())}`);
     if (d.length) {
       console.log(`${name}: DIVERGED between steps ${good} and ${total}`);
@@ -1185,6 +1584,7 @@ function runImage(name, image, steps, k) {
     where += `; stopped: ${what}`;
     if (st.kind !== "idle") where += ` (instruction ${decodeAt(rust, pc)})`;
   }
+  if (flag("stats")) console.log(`  reference activity: ${JSON.stringify(js.stats())}`);
   const serialRust = rust.serial();
   const state = rust.state();
   console.log(
