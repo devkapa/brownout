@@ -96,6 +96,21 @@ file).
 
    Copyright (c) 2019-2025 Uri Shaked
 
+6. rp2040js 1.3.3 — ported source and tests (Rust, behind the `rp2040`
+   cargo feature)
+   Files: core/src/mcu/rp2040/*.rs, ported from rp2040js's
+   src/{cortex-m0-core,rp2040,simulator,sio,interpolator,irq}.ts,
+   src/peripherals/ppb.ts, src/clock/simulation-clock.ts and
+   src/utils/timer32.ts, and its test suites src/instructions.spec.ts,
+   src/rp2040.spec.ts and src/sio.spec.ts (tag v1.3.3, commit 7701ee0).
+   Each ported file names its upstream file and version in its header.
+   The shipped module is built without the feature and contains none of it.
+   https://github.com/wokwi/rp2040js
+
+   The MIT License (MIT)
+
+   Copyright (c) 2021 Uri Shaked
+
    Permission is hereby granted, free of charge, to any person obtaining a
    copy of this software and associated documentation files (the
    "Software"), to deal in the Software without restriction, including

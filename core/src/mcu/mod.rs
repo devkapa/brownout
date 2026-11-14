@@ -4,3 +4,5 @@
 
 #[cfg(feature = "avr")]
 pub mod avr;
+#[cfg(feature = "rp2040")]
+pub mod rp2040;
