@@ -20295,3 +20295,27 @@ fn a_cell_feeding_a_stepped_hub_partition_keeps_the_10_uv_band() {
     };
     assert_eq!(run(false), run(true), "a stepped hub partition's cell runs as on the 10 uV band");
 }
+
+#[test]
+fn a_cells_charge_integrates_its_current_along_the_path_between_solves() {
+    // R121: a generic cell (OCV 5 soc, 0.9 ohm) into 200 ohm, with a 1 nF RC
+    // on the rail so its closed form rides the coupled path. The RC's charge
+    // (5 nC) is nothing beside W0, so soc = e^(-5 t / (200.9 x 3600 C_ah))
+    // as in the device-state test. W0 on the cell's current, 1e-3 of
+    // 5 soc / 200.9 A over 1 s, allows `w0_soc` of state of charge; the
+    // charge integrated along the path keeps within a hundredth of it
+    // (5e-4 W0 measured). With the draws held at each solve, R121's cadence
+    // took 0.06 W0 (the 10 uV band 0.003).
+    for cap_ah in [1e-4, 1e-3, 1.0] {
+        let p = program(3, vec![generic_battery(0, 1, 0, 5.0, 0.9, cap_ah), resistor(1, 1, 0, 200.0), resistor(2, 1, 2, 1000.0), capacitor(3, 2, 0, 1e-9, 0.0)]);
+        let mut e = Engine::load(&p).unwrap();
+        for k in 1..=10 {
+            e.advance(k as f64 * 0.1).unwrap();
+        }
+        let st = e.device_state(0).unwrap().to_vec();
+        let soc = (-5.0 / (200.9 * 3600.0 * cap_ah)).exp();
+        let w0_soc = 1e-3 * (5.0 * soc / 200.9) / (3600.0 * cap_ah);
+        eprintln!("{cap_ah:e} Ah: soc {:.12} against {soc:.12}, {:.4} W0, rail events {}", st[0], (st[0] - soc).abs() / w0_soc, e.stat(18));
+        close(st[0], soc, 0.01 * w0_soc, &format!("{cap_ah:e} Ah's state of charge against the exact ODE"));
+    }
+}

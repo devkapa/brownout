@@ -1459,7 +1459,7 @@ impl PartitionedSolver {
             let hub = self.hub.as_mut().expect("a hub");
             if let HubKind::Battery(m) = &hub.kind {
                 let dt = now - hub.state.t_last;
-                hub.state.battery = rails::advance_soc(m, &hub.state.battery, hub.state.held_i, &hub.state.held_cf, dt);
+                hub.state.battery = cell_soc_after(m, &hub.state, dt);
             }
             hub.state.t_last = now;
         }
@@ -3508,7 +3508,7 @@ impl PartitionedSolver {
         }
         let (model, state) = if let Some(hub) = self.hub.as_ref().filter(|h| h.device == device) {
             let m = hub.battery()?;
-            (m, rails::advance_soc(m, &hub.state.battery, hub.state.held_i, &hub.state.held_cf, now - hub.state.t_last))
+            (m, cell_soc_after(m, &hub.state, now - hub.state.t_last))
         } else if let Some(ex) = self.exact.as_ref().filter(|h| h.device == device) {
             let HubKind::Battery(m) = &ex.kind else { return None };
             (m, m.advance(&ex.battery, ex.held * (now - ex.t_last).max(0.0)).state)
@@ -4394,6 +4394,30 @@ fn sort_dedup_memo(site: usize, mut v: Vec<f64>) -> Vec<f64> {
         out.extend_from_slice(&v);
         v
     })
+}
+
+/// A cell's state `dt` after its last solve (R121, R105 C2). On its coupled
+/// path the rail between solves is known, `u0 + sum s phi_k`, and so is the
+/// cell's own current, `(E - u) / r`, with `E` on the drain's line: the
+/// charge is its integral. The draws held at the solve erred by their slope
+/// times the rail's motion, which R121's cadence lets reach a millivolt (a
+/// 0.1 mAh cell into 200 ohm read 0.06 W0 off the exact ODE's state of
+/// charge after 1 s, 0.003 on the 10 uV band). Off the path, or with no
+/// internal resistance or with an esr pole, the held draws as before.
+fn cell_soc_after(m: &BatteryModel, state: &rails::RailState, dt: f64) -> crate::devices::battery::BatteryState {
+    let soc = state.battery.soc;
+    let r = m.resistance(soc);
+    if let (Some((u0, modes)), true) = (state.cell_path.as_ref().and_then(|p| p.modes.as_deref().map(|modes| (p.u0, modes))), r > 0.0 && dt > 0.0) {
+        if modes.esr.is_none() {
+            let i0 = (m.emf(soc) - u0) / r;
+            let (de, _) = rails::soc_slopes(m, soc);
+            let e_dot = -de * i0.max(0.0) / m.capacity_coulombs();
+            let du: f64 = modes.modes.iter().map(|&(k, s)| s * rails::phi_integral(k, dt)).sum();
+            let q = i0 * dt + (0.5 * e_dot * dt * dt - du) / r;
+            return m.advance(&state.battery, q).state;
+        }
+    }
+    rails::advance_soc(m, &state.battery, state.held_i, &state.held_cf, dt)
 }
 
 /// Whether `driver` of `ic` can have a branch [`PartitionedSolver::direct_at`]
