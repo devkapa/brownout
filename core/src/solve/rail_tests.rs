@@ -4562,7 +4562,11 @@ fn stats_14_and_16_to_20_count_the_rail_and_the_sources_and_stay_0_in_exact_mode
     e.advance(5e-3).unwrap();
     let stats: Vec<f64> = (14..=20).filter(|&i| i != 15).map(|i| e.stat(i)).collect();
     eprintln!("stats 14, 16-20 after 5 ms: {stats:?}");
-    assert!(e.stat(14) > 100.0 && e.stat(18) > 100.0, "rail moves and events");
+    // R121: the rail's own reading binds (no static hub partition, no direct
+    // draw), 10 uV + 0.2 W0(5 V) = 1.03 mV a solve, and the rail climbs
+    // about 5 mV in 5 ms: a handful of events (4) where the 10 uV band took
+    // over 100. This counts events; the coupled-RC tests check the values.
+    assert!(e.stat(18) >= 1.0 && e.stat(18) <= 25.0, "rail events: {}", e.stat(18));
     assert!(e.stat(16) >= 1.0, "sensitivities");
     assert_eq!(e.stat(19), 10.0, "ten clock edges");
     // Since round 14 the horizon clamp solves a cell whose closed-form
@@ -20199,4 +20203,95 @@ fn a_bench_supplys_direction_is_its_programs_and_an_edit_that_flips_it_reloads()
         assert!(err.message.contains("would sink 3.9499") || err.message.contains("would sink 3.95"), "{what}: the 39.5 mA sink: {}", err.message);
         close(decline_instant(&err), 1e-3, 0.0, &format!("{what}: declined at the reload's instant"));
     }
+}
+
+#[test]
+fn a_cells_rail_re_solves_where_its_readings_allow_not_every_10_uv_of_its_motion() {
+    // R121: on a draining cell's coupled path the rail solves again where a
+    // reading it moves could leave its slack, not every 10 uV of its motion
+    // (the battery SAP-1 did so about 32,000 times a simulated second, most
+    // of its cost). The coupled RC of the rail-event test: E 5, r 1, R 1k,
+    // C 1 uF, no static hub partition and no direct draw, so the rail's own
+    // reading binds: RAIL_DRIFT_V + 0.2 W0(5 V) = 10 uV + 0.2 x 5.1 mV =
+    // 1.03 mV a solve. The rail climbs (5 - 4.995) = 5 mV over 5 tau', so
+    // about 5 solves where the 10 uV band took 469; 25 leaves room for the
+    // thresholds' own events. The rail and vc stay on the coupled closed form
+    // within W0 at every host stop (each re-solves the rail).
+    let (e, r, big_r, c) = (5.0, 1.0, 1000.0, 1e-6);
+    let p = program(3, vec![battery(0, 1, 0, e, r), resistor(1, 1, 2, big_r), capacitor(2, 2, 0, c, 0.0)]);
+    let tau = (big_r + r) * c;
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        let mut worst: f64 = 0.0;
+        for k in 1..=50 {
+            let t = 5.0 * tau * k as f64 / 50.0;
+            rig.advance(t).unwrap();
+            let vc = e * (1.0 - (-t / tau).exp());
+            let u = e - (e - vc) * r / (big_r + r);
+            worst = worst.max((rig.v(1) - u).abs() / (1e-4 + 1e-3 * u.abs())).max((rig.v(2) - vc).abs() / (1e-4 + 1e-3 * vc.abs()));
+        }
+        rails::force_fixed_cell_band(false);
+        (rig.hub().stats.events, worst)
+    };
+    let (fixed_events, _) = run(true);
+    let (events, worst) = run(false);
+    eprintln!("R121 coupled RC: {events} rail events over 5 tau' ({fixed_events} on the 10 uV band), worst {worst:.3} W0 off the coupled closed form");
+    assert!(worst <= 1.0, "{worst:.3} W0 off the coupled closed form");
+    assert!(events <= 25, "{events} rail events for a 5 mV climb");
+}
+
+#[test]
+fn a_cells_rail_under_a_static_hub_divider_re_solves_within_the_dividers_slack() {
+    // R121: a static hub partition's reading caps the drift. A 1k/1k divider
+    // off the rail publishes x = u/2 + ..., s = 1/2, so its node allows
+    // 10 uV + 0.2 W0(2.5 V) / 0.5 = 10 uV + 0.2 x 2.6 mV x 2 = 1.05 mV, and its
+    // draw (i = u/2k, g = 1/2k) allows 10 uV + 0.2 (1e-9 + 1e-3 i) / g =
+    // 10 uV + 0.2 x 1e-3 x 5 V = 1.01 mV: the cap the solve sets is the least,
+    // 1.01 mV (to the bit of the rail's own, 1.03 mV, it is not).
+    let p = program(4, vec![battery(0, 1, 0, 5.0, 1.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 1000.0), resistor(4, 3, 0, 1000.0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(2e-3).unwrap();
+    let u = rig.u();
+    let i = u / 2000.0;
+    let want = rails::RAIL_DRIFT_V + rails::CELL_READING_SLACK * (1e-9 + 1e-3 * i) * 2000.0;
+    let got = rig.hub().state.cad_d;
+    eprintln!("R121 divider: drift cap {got:e} (draw's {want:e})");
+    rel(got, want, 1e-3, "the divider's draw sets the drift cap");
+}
+
+#[test]
+fn a_cells_rail_with_a_direct_junction_holds_its_drift_to_half_a_millivolt() {
+    // R121: a junction straight on the rail is linearised at each solve, its
+    // current's second-order term i d^2 / (2 (n vt)^2) under 0.2 of its W0
+    // (1e-3 i) for d <= 0.02 n vt: CELL_JUNCTION_DRIFT_V, 0.5 mV.
+    // A 2.2 V, 10 ohm cell drives the LED straight to ground (its other end
+    // fixed), so the junction is a direct device of the rail.
+    let p = program(3, vec![battery(0, 1, 0, 2.2, 10.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), led(3, 1, 0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(2e-3).unwrap();
+    let got = rig.hub().state.cad_d;
+    eprintln!("R121 direct junction: drift cap {got:e}");
+    assert!(got <= rails::CELL_JUNCTION_DRIFT_V && got >= rails::RAIL_DRIFT_V, "{got:e}");
+}
+
+#[test]
+fn a_cell_feeding_a_stepped_hub_partition_keeps_the_10_uv_band() {
+    // R121 (3): a stepped hub partition reads the rail as a boundary at its
+    // plan, so until stale-rail work lands its cell keeps the 10 uV band:
+    // the run is the band's to the bit. An RC through an LED is stepped.
+    let p = program(5, vec![battery(0, 1, 0, 5.0, 1.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 330.0), led(4, 3, 4), capacitor(5, 4, 0, 1e-6, 0.0)]);
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        assert!(!rig.s().stepped.hub_partitions().is_empty(), "the LED's partition is a stepped hub partition");
+        let mut out = Vec::new();
+        for k in 1..=20 {
+            rig.advance(1e-4 * k as f64).unwrap();
+            out.extend((0..5).map(|n| rig.v(n).to_bits()));
+        }
+        rails::force_fixed_cell_band(false);
+        (out, rig.hub().stats.events)
+    };
+    assert_eq!(run(false), run(true), "a stepped hub partition's cell runs as on the 10 uV band");
 }

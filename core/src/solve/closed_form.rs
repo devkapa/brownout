@@ -1318,6 +1318,12 @@ impl ClosedFormSolver {
 
     /// The earliest instant a driven partition's coupling band runs out in
     /// time (`couple_band`), when the rail must solve and aim it again.
+    /// The capacitance of every closed-form hub partition (R121: each
+    /// one's current follows the rail's slope, `C du/dt`).
+    pub(crate) fn hub_caps(&self) -> Vec<f64> {
+        self.parts.iter().filter(|p| !p.parked && p.seg.as_ref().is_some_and(|s| s.hub.is_some())).map(|p| p.cap.c).collect()
+    }
+
     pub(crate) fn couple_expiry(&self) -> f64 {
         self.parts.iter().filter(|p| !p.parked).filter_map(|p| p.drive.as_ref().map(|d| d.expiry)).fold(f64::INFINITY, f64::min)
     }

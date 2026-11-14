@@ -27,6 +27,46 @@ pub const RAIL_BUCKET_V: f64 = 0.05;
 /// Re-queue the readers of hub partitions once the rail has moved this far
 /// since the last scan.
 pub const RAIL_SCAN_V: f64 = 0.02;
+
+/// A draining cell's rail on its coupled path re-solves before any reading
+/// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
+/// from its last solve (R121).
+pub const CELL_DRIFT_MAX_V: f64 = 0.05;
+/// The share of a reading's W0 its drift past the 10 uV band may take: a
+/// reading `r` moved `|dr/du| d` by a rail `d` from where it was solved, and
+/// the 10 uV band already let that be `|dr/du| RAIL_DRIFT_V` (R121, the R105
+/// gate's 0.2 W0 of today's error; 0.1 W0 kept 40-43 % of the battery
+/// SAP-1's instructions where 0.2 kept 51-58 %).
+pub const CELL_READING_SLACK: f64 = 0.2;
+/// The drift cap a direct junction on the rail allows: its current's second
+/// order term `i d^2 / (2 (n vt)^2)` stays under `CELL_READING_SLACK` of its
+/// W0 (1e-3 of `i`) for `d <= 0.02 n vt`, about 0.5 mV.
+pub const CELL_JUNCTION_DRIFT_V: f64 = 5e-4;
+
+#[cfg(test)]
+thread_local! {
+    static FIXED_BAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: a cell's rail on its coupled path re-solves every
+/// `RAIL_DRIFT_V` of its motion again, as before R121, for comparisons.
+#[cfg(test)]
+pub(crate) fn force_fixed_cell_band(on: bool) {
+    FIXED_BAND.with(|c| c.set(on));
+}
+
+/// Whether a cell's coupled path takes R121's reading-aware cadence.
+#[inline]
+pub(crate) fn cell_cadence() -> bool {
+    #[cfg(test)]
+    {
+        !FIXED_BAND.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 /// A smaller change of `u` is not a move (P3:468).
 pub const RAIL_MOVE_EPS: f64 = 1e-12;
 /// The implied rail motion that schedules a rail event (Rails point 4).
@@ -1657,6 +1697,14 @@ pub struct RailState {
     /// The latest instant the rail solves again on that path: its first
     /// passage of `RAIL_DRIFT_V` either way, which its watch caps.
     pub cell_until: f64,
+    /// The drift cap the last solve set on the coupled path (R121).
+    pub cad_d: f64,
+    /// The drain line `(t0, rho)` at the solve before the last, whose change
+    /// bounds how long the line may be held straight (R121, R105 C2).
+    pub cad_rho_prev: Option<(f64, f64)>,
+    /// The latest instant the held line allows (absolute; infinite without
+    /// a line history).
+    pub cad_t: f64,
     /// Running sums over the static and stepped contributions: `sum (i - g
     /// u_p)` and `sum g`, and how many updates since the last recompute.
     pub a_run: f64,
@@ -3314,6 +3362,9 @@ impl crate::snapshot::HeapBytes for RailState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_path, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_d, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_rho_prev, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_t, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_run, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g_run, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.updates, w); }
