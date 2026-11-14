@@ -4,7 +4,7 @@
 //! capacitor, battery, PSU, PTC and thermal values to `bo_engine_device_state`,
 //! a latched failure to its record, an IC's drivers to the kernel's table.
 
-use super::rail_tests::{cc_switch_board, cell_switch_into_an_led_loop, cold_2575_tpl2, cold_757_tpl0, two_ptc_branches, STOPS_2575, STOPS_757};
+use super::rail_tests::{cc_switch_board, cell_switch_into_an_led_loop, cold_2575_tpl2, cold_2575_tpl2_capped, cold_757_tpl0, two_ptc_branches, STOPS_2575, STOPS_757};
 use super::slow_tests::{ls00_sag, ring_behind_a_fuse, rollback_rig};
 use crate::carry::{self, Record};
 use crate::digital;
@@ -37,7 +37,7 @@ fn advanced(p: &Program, stops: &[f64]) -> Engine {
 
 #[test]
 fn every_record_is_versioned_and_the_buffer_reads_back_whole() {
-    let mut e = advanced(&cold_2575_tpl2(), &STOPS_2575[..20]);
+    let mut e = advanced(&cold_2575_tpl2_capped(), &STOPS_2575[..20]);
     let buf = take(&mut e);
     let records = carry::records(&buf).unwrap();
     assert!(records.len() > 5, "{} records", records.len());
@@ -52,7 +52,7 @@ fn a_carry_holds_every_capacitors_voltage_at_the_engines_time() {
     // cell board's 7 uF one. With no esr, the charge's voltage is the one
     // across the pins.
     for (name, p, stops) in [
-        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), STOPS_2575[..25].to_vec()),
         ("two PTCs", two_ptc_branches(), vec![1e-3, 2e-3]),
         ("cell loop", cell_switch_into_an_led_loop(), vec![0.01, 0.05]),
     ] {
@@ -79,7 +79,7 @@ fn a_carry_holds_the_battery_the_psu_the_ptcs_and_the_thermal_state_as_device_st
     let battery = one(&buf, carry::FAMILY_BATTERY, 0).values.to_vec();
     assert_eq!(battery, e.device_state(0).unwrap().to_vec(), "the battery as device_state reads it");
 
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let mut e = advanced(&p, &STOPS_2575[..25]);
     let buf = take(&mut e);
     let psu = p.devices.iter().position(|d| d.kind == kinds::BENCH_PSU).unwrap();
@@ -120,7 +120,7 @@ fn a_carry_holds_each_ics_family_state_edge_history_and_drivers() {
     // 2575 tpl 2's 555 and the rollback rig's 74LS00: one record per IC,
     // its kind and family tag first, and one (committed, pending target,
     // pending due) triple per output driver, as the kernel's table holds it.
-    for (name, p, stops) in [("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()), ("rollback rig", rollback_rig(), vec![0.25, 0.5])] {
+    for (name, p, stops) in [("2575 tpl 2", cold_2575_tpl2_capped(), STOPS_2575[..25].to_vec()), ("rollback rig", rollback_rig(), vec![0.25, 0.5])] {
         let mut e = advanced(&p, &stops);
         let buf = take(&mut e);
         let ics: Vec<usize> = p.devices.iter().enumerate().filter(|(_, d)| digital::is_ic(d.kind)).map(|(i, _)| i).collect();
@@ -269,7 +269,7 @@ fn taking_a_carry_at_every_yield_leaves_the_run_bit_identical() {
     // carry at each yield and goes on equals one that never takes one.
     for (name, p, before, t_end) in [
         ("757 tpl 0", cold_757_tpl0(), vec![0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986], 0.07025570911480136),
-        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..2].to_vec(), STOPS_2575[2]),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), STOPS_2575[..2].to_vec(), STOPS_2575[2]),
     ] {
         let run = |taking: bool| {
             let mut now = 0.0;
@@ -326,7 +326,7 @@ fn a_load_seeded_from_a_carry_holds_that_carry() {
     // held junction temperature, a 74LS00) and the fuse ring (a latched
     // fuse, a 74LS04 ring); 2575's 555 carries its latch.
     for (name, p, stops) in [
-        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..25].to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), STOPS_2575[..25].to_vec()),
         ("two PTCs", two_ptc_branches(), vec![1e-3, 2e-3]),
         ("cell loop", cell_switch_into_an_led_loop(), vec![0.01, 0.05]),
         ("rollback rig", rollback_rig(), vec![0.25, 0.5]),

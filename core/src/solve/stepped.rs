@@ -5364,6 +5364,7 @@ impl SteppedSolver {
                 enum Cross<'c> {
                     Edge(&'c digital::IcRecord, f64, bool),
                     Setpoint(usize, f64, f64),
+                    Sink,
                 }
                 let mut crossed: Vec<Cross> = gated
                     .iter()
@@ -5387,20 +5388,53 @@ impl SteppedSolver {
                         }
                     }
                 }
+                // Ruling R116 (2), decline-only: a PSU in CV (its source row)
+                // whose current the step carries past sinking
+                // `BACK_DRIVE_SINK_A` is cut there, two reached-widths past
+                // it, so the commit that declines (`exact_after_publish`) is
+                // at the crossing, not at the step's end. As a signed distance
+                // in amperes: the row's current is its KCL residual at the
+                // step's solution (`source_current`), less what the rail
+                // capacitors push into it, as `exact_after_publish` reads it
+                // (a CC exit's cut leaves a capacitor a step's overshoot past
+                // the setpoint, which CV pulls back: no back-drive).
+                let sink_row = exact.filter(|e| e.partition == p_idx && matches!(e.kind, crate::solve::ExactKind::Row { psu: true, .. }));
+                let t_s = part.t;
+                let sink_past = |h_s: f64, st: &StepResult| -> f64 {
+                    let Some(e) = sink_row else { return f64::NEG_INFINITY };
+                    let crate::solve::ExactKind::Row { value, .. } = e.kind else { return f64::NEG_INFINITY };
+                    let dir = if value < 0.0 { -1.0 } else { 1.0 };
+                    let bnd = ic_ctx.bnd.at_time(ramps, t_s + h_s);
+                    let mut caps = 0.0;
+                    for (k, cap) in part.shape.capacitors.iter().enumerate() {
+                        if bnd.local(&cap.pins[0]) == Some(e.local) {
+                            caps += st.i[k];
+                        } else if bnd.local(&cap.pins[1]) == Some(e.local) {
+                            caps -= st.i[k];
+                        }
+                    }
+                    let delivered = dir * source_current(&e, &part.shape, live_params, h_s, &vc0, &i_prev, method, &ic_ctx, &bnd, &st.x) - (dir * caps).min(0.0);
+                    -(crate::solve::BACK_DRIVE_SINK_A + 2.0 * rails::REACHED_REL) - delivered
+                };
+                if sink_row.is_some() && sink_past(h, &accepted) > 0.0 {
+                    crossed.push(Cross::Sink);
+                }
                 // How far the farthest crossing is past its level, signed: its
                 // root is the first crossing.
-                let past = |x: &[f64]| {
+                let past = |h_s: f64, st: &StepResult| {
+                    let x = &st.x[..];
                     crossed
                         .iter()
                         .map(|c| match *c {
                             Cross::Edge(ic, e, rising) => if rising { supply(x, ic) - e } else { e - supply(x, ic) },
                             Cross::Setpoint(l, dir, v) => dir * x[l] - v,
+                            Cross::Sink => sink_past(h_s, st),
                         })
                         .fold(f64::NEG_INFINITY, f64::max)
                 };
-                let f_hi0 = past(&accepted.x);
+                let f_hi0 = past(h, &accepted);
                 if !crossed.is_empty() && f_hi0 > 0.0 && h > 2.0 * H_MIN {
-                    let first = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).ok().map(|step| (past(&step.x), step));
+                    let first = take_step(&part.shape, live_params, H_MIN, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, part.t + H_MIN).ok().map(|step| (past(H_MIN, &step), step));
                     // A CC rail past its setpoint within the shortest step
                     // already: the step is that one, the exit at its end
                     // (fixture 47: a CC rail landed on its setpoint a few
@@ -5410,9 +5444,15 @@ impl SteppedSolver {
                     // the shortest step is left uncut: a chip sitting on its
                     // edge would step at the floor (cold 701 tpl 2, 4.7x the
                     // wall).
-                    let setpoint_past = |x: &[f64]| crossed.iter().any(|c| matches!(*c, Cross::Setpoint(l, dir, v) if dir * x[l] - v >= 0.0));
+                    // A supply sinking past its threshold within the shortest
+                    // step likewise (ruling R116 (2)).
+                    let setpoint_past = |st: &StepResult| crossed.iter().any(|c| match *c {
+                        Cross::Setpoint(l, dir, v) => dir * st.x[l] - v >= 0.0,
+                        Cross::Sink => sink_past(H_MIN, st) >= 0.0,
+                        Cross::Edge(..) => false,
+                    });
                     let first = match first {
-                        Some((f, step)) if f >= 0.0 && setpoint_past(&step.x) => {
+                        Some((f, step)) if f >= 0.0 && setpoint_past(&step) => {
                             h = H_MIN;
                             accepted = step;
                             half = None;
@@ -5442,7 +5482,7 @@ impl SteppedSolver {
                                 }
                                 Err(StepError::Failed(message)) => return Err(message),
                             };
-                            let f = past(&step.x);
+                            let f = past(h_try, &step);
                             if f > 0.0 {
                                 (hi, f_hi, far) = (h_try, f, f);
                                 best = Some(step);

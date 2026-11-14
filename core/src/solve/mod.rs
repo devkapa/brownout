@@ -29,6 +29,22 @@ pub mod newton;
 pub mod static_part;
 pub mod stepped;
 
+/// Ruling R116 (2), decline-only: the reason a `bench_psu` a circuit drives
+/// to sink fails the advance with (`PartitionedSolver::check_back_drive`),
+/// the first word of its message, which the hosts read as their fallback
+/// reason.
+pub const BACK_DRIVE_REASON: &str = "bench-psu-back-driven";
+
+/// The sinking current past which a bench supply fails the instant:
+/// classic's `BENCH_PSU_SINK_ENTRY_A`, where it lets go.
+pub const BACK_DRIVE_SINK_A: f64 = 1e-6;
+
+/// The failure a bench supply driven to sink `sink` A at `now` gives
+/// (ruling R116 (2)): `BACK_DRIVE_REASON` first, the instant after ` at `.
+pub(crate) fn back_drive_message(device: usize, sink: f64, now: f64) -> String {
+    format!("{BACK_DRIVE_REASON}: bench_psu (device {device}) would sink {sink:e} A at {now} s; a supply sources only and lets go there, which the core does not model (ruling R116 (2))")
+}
+
 #[cfg(test)]
 mod ic_tests;
 #[cfg(test)]
@@ -1462,7 +1478,9 @@ pub(crate) struct ExactStamp {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ExactKind {
     Norton { g: f64, inject: f64 },
-    Row { value: f64 },
+    /// A source row: a PSU in CV (`psu`, its current watched for the
+    /// decline, ruling R116 (2)) or an `r = 0` cell.
+    Row { value: f64, psu: bool },
     /// A PSU in CC: its limit into the rail, and its setpoint `V`, where the
     /// regime leaves CC (Rails point 5; a stepped step is cut there, ruling
     /// R102 (a)).
@@ -1476,7 +1494,7 @@ impl ExactKind {
         if r > 0.0 {
             ExactKind::Norton { g: 1.0 / r, inject: e / r }
         } else {
-            ExactKind::Row { value: e }
+            ExactKind::Row { value: e, psu: false }
         }
     }
 }
@@ -1491,7 +1509,7 @@ impl ExactStamp {
                 a[l * size + l] += g;
                 b[l] += inject;
             }
-            ExactKind::Row { value } => {
+            ExactKind::Row { value, .. } => {
                 a[l * size..(l + 1) * size].fill(0.0);
                 a[l * size + l] = 1.0;
                 b[l] = value;
@@ -3006,6 +3024,16 @@ pub struct PartitionedSolver {
     /// Set only inside the horizon clamp: the rail loop retries there even
     /// when no pass solved.
     at_clamp: bool,
+    /// Ruling R116 (2), decline-only: every `bench_psu`, by device, with its
+    /// direction. A supply sources only, and the core models no let-go: past
+    /// `BACK_DRIVE_SINK_A` into one, the publish fails the instant
+    /// (`check_back_drive`), so the host falls back to classic, which lets
+    /// go, rather than read a sinking supply. Empty on a board with none,
+    /// where nothing of it runs.
+    back_drive: Vec<(usize, f64)>,
+    /// From the build until the first host step: the load's settle, where
+    /// every published value is the start instant's (`finish_publish_checked`).
+    back_drive_settling: bool,
     /// Set only inside a source edge and a re-solve of dirty partitions:
     /// what the rail sees changed at `now`, so a rail move there is a step,
     /// not the draws' drift (`rail_passes` brings the stepped hub
@@ -3326,6 +3354,8 @@ impl PartitionedSolver {
             slide_solves: 0,
             slide_flat: false,
             at_clamp: false,
+            back_drive: program.devices.iter().enumerate().filter(|(_, d)| d.kind == kinds::BENCH_PSU).map(|(i, d)| (i, crate::devices::sources::direction(d.params[0]))).collect(),
+            back_drive_settling: true,
             rail_jump: false,
             host_edit: false,
             host_step: f64::INFINITY,
@@ -4812,6 +4842,9 @@ impl PartitionedSolver {
     /// passes now or note that they are owed, queue the crossings and steps
     /// the partitions asked for, and check what was written is finite.
     fn finish_publish(&mut self, now: f64) -> Result<(), String> {
+        if !self.back_drive.is_empty() {
+            return self.finish_publish_checked(now, self.back_drive_settling);
+        }
         let lazy = self.publish_readout(now);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);
@@ -4820,6 +4853,93 @@ impl PartitionedSolver {
         } else {
             self.check_finite(false)
         }
+    }
+
+    /// [`Self::finish_publish`] on a board with a bench supply (ruling R116
+    /// (2), decline-only). `synced`: every published value is this
+    /// instant's (the load's settle, a horizon clamp), so each supply's
+    /// published current is read, the readout run eagerly for it. Between
+    /// host stops a closed-form partition's published nodes lag, so there
+    /// only a hub PSU's current is judged, from the rail's own terms.
+    #[inline(never)]
+    fn finish_publish_checked(&mut self, now: f64, synced: bool) -> Result<(), String> {
+        let lazy = if synced {
+            self.compute_derived(now);
+            self.derived_dirty = false;
+            false
+        } else {
+            self.publish_readout(now)
+        };
+        self.drain_scheduled();
+        self.maybe_schedule_bucket(now);
+        if lazy {
+            self.check_finite_written()?;
+        } else {
+            self.check_finite(false)?;
+        }
+        self.check_back_drive(now, synced)
+    }
+
+    /// Ruling R116 (2), decline-only: a bench supply's output stage sources
+    /// and does not sink (classic's `BENCH_PSU_BACKDRIVEN` lets go of a
+    /// back-driven rail), which the core does not model: in CV a supply here
+    /// holds its setpoint whatever drives its rail. Sinking past
+    /// `BACK_DRIVE_SINK_A` (classic's own let-go threshold) fails the
+    /// instant with `BACK_DRIVE_REASON`: the kernel rolls it back, so the
+    /// readings stay at the last good instant, and the host falls back to
+    /// classic. Judged at every publish: a hub PSU in CV from the rail's
+    /// terms (`hub_delivered`), its crossing an event of its own (the rail
+    /// watch at `-BACK_DRIVE_SINK_A`); exact mode's also at each committed
+    /// step (`exact_after_publish`); any other supply (one with no limit, an
+    /// ideal source) from its KCL with the closed-form partitions read at
+    /// `now` (`fresh_supply_currents`); every supply's published current at
+    /// a synced publish. Never silent.
+    fn check_back_drive(&mut self, now: f64, synced: bool) -> Result<(), String> {
+        if let Some((d, delivered)) = self.hub_delivered(now) {
+            if delivered < -(BACK_DRIVE_SINK_A + crate::rails::REACHED_REL) {
+                return Err(back_drive_message(d, -delivered, now));
+            }
+        }
+        let (hub_d, exact_d) = (self.hub.as_ref().map(|h| h.device), self.exact.as_ref().map(|e| e.device));
+        let own = move |d: usize| hub_d == Some(d) || exact_d == Some(d);
+        if synced {
+            for &(d, dir) in &self.back_drive {
+                let sink = dir * self.currents[d];
+                if sink > BACK_DRIVE_SINK_A {
+                    return Err(back_drive_message(d, sink, now));
+                }
+            }
+        } else if self.back_drive.iter().any(|&(d, _)| !own(d)) {
+            let fresh = self.fresh_supply_currents(now);
+            for &(d, dir) in &self.back_drive {
+                let sink = dir * fresh[d];
+                if !own(d) && sink > BACK_DRIVE_SINK_A {
+                    return Err(back_drive_message(d, sink, now));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every device's current at `now` as a synced publish would read it,
+    /// for `check_back_drive` between host stops: the closed-form partitions'
+    /// nodes and capacitors at `now` (`ClosedFormSolver::publish_at`, which a
+    /// horizon clamp publishes), then the fixed-pair capacitors and the KCL
+    /// pass, all on copies. Nothing published moves.
+    #[inline(never)]
+    fn fresh_supply_currents(&mut self, now: f64) -> Vec<f64> {
+        let (mut v, mut i) = (self.voltages.clone(), self.currents.clone());
+        self.closed_form.publish_at(now, &self.live_params, &mut v, &mut i);
+        std::mem::swap(&mut self.voltages, &mut v);
+        let drivers = Rc::clone(&self.driver_snapshot);
+        self.ensure_ic_driver_ids(&drivers);
+        let mut scratch = (self.kcl_scratch.0.take(), self.kcl_scratch.1.take());
+        self.publish_fixed_pair_capacitors(&mut i, now);
+        self.recompute_source_currents(&mut i, &mut scratch, now, &drivers);
+        self.kcl_scratch.0.put(scratch.0);
+        self.kcl_scratch.1.put(scratch.1);
+        std::mem::swap(&mut self.voltages, &mut v);
+        i
     }
 
     /// An error from a publishing entry point leaves the bounds unproven (the
@@ -5379,6 +5499,7 @@ impl PartitionSolver for PartitionedSolver {
 
     fn begin_host_step(&mut self, t_start: f64, t_end: f64) {
         self.host_step = t_end - t_start;
+        self.back_drive_settling = false;
         // A rolled-back edit restores its params through `apply_params`
         // with no rail solve after it: nothing of it reaches the next host
         // step.
@@ -5655,8 +5776,9 @@ impl PartitionSolver for PartitionedSolver {
         // Same reasoning as `handle_dynamic_event` above: the horizon clamp
         // re-publishes a dynamic partition's exact state at `t_end`, and a
         // fixed rail's own current must track that continuously, not only at
-        // the instants a driver actually commits.
-        let published = self.finish_publish(t_end);
+        // the instants a driver actually commits. Synced here: a bench
+        // supply's published current is judged (ruling R116 (2)).
+        let published = if self.back_drive.is_empty() { self.finish_publish(t_end) } else { self.finish_publish_checked(t_end, true) };
         self.on_error(published)?;
         Ok(readers)
     }
@@ -6879,7 +7001,7 @@ impl crate::snapshot::HeapBytes for ExactKind {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         match self {
             ExactKind::Norton { g, inject } => crate::snapshot::HeapBytes::heap_bytes(g, w) + crate::snapshot::HeapBytes::heap_bytes(inject, w),
-            ExactKind::Row { value } => crate::snapshot::HeapBytes::heap_bytes(value, w),
+            ExactKind::Row { value, psu } => crate::snapshot::HeapBytes::heap_bytes(value, w) + crate::snapshot::HeapBytes::heap_bytes(psu, w),
             ExactKind::Inject { current, setpoint } => crate::snapshot::HeapBytes::heap_bytes(current, w) + crate::snapshot::HeapBytes::heap_bytes(setpoint, w),
         }
     }
@@ -7095,6 +7217,8 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_solves, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slide_flat, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.at_clamp, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.back_drive, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.back_drive_settling, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_jump, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_edit, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.host_step, w); }

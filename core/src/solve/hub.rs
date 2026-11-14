@@ -215,7 +215,7 @@ impl ExactHub {
     pub(super) fn stamp(&self) -> ExactStamp {
         let kind = match (&self.kind, self.reg) {
             (HubKind::Battery(m), _) => ExactKind::battery(m, self.battery.soc),
-            (HubKind::Psu { v, .. }, Regime::Cv) => ExactKind::Row { value: *v },
+            (HubKind::Psu { v, .. }, Regime::Cv) => ExactKind::Row { value: *v, psu: true },
             (HubKind::Psu { v, i_limit }, Regime::Cc) => ExactKind::Inject { current: direction(*v) * i_limit, setpoint: *v },
         };
         ExactStamp { partition: self.partition, local: self.local, kind }
@@ -1123,6 +1123,33 @@ impl PartitionedSolver {
     /// hold the rail short of it, and the rail they hold (Rails point 5):
     /// each one's deficit is `dir (V - V_f - vc)`, read from its charge at
     /// `now`.
+    /// Ruling R116 (2), decline-only: what a hub PSU in CV delivers at its
+    /// setpoint at `now`, in its own direction, the rail equation's draw
+    /// with every rail capacitor's pull there (one past the setpoint pushes,
+    /// without bound at esr 0); `None` for any other hub or regime (CC
+    /// delivers its limit). The value the let-go watch in `rail_watches`
+    /// follows, read from the rail's own terms at `now`, so a publish
+    /// between host stops (where a closed-form partition's published nodes
+    /// lag) judges it as the rail solve does.
+    pub(super) fn hub_delivered(&self, now: f64) -> Option<(usize, f64)> {
+        let hub = self.hub.as_ref()?;
+        let HubKind::Psu { v, .. } = &hub.kind else { return None };
+        if hub.state.reg != Regime::Cv {
+            return None;
+        }
+        let (v, dir) = (*v, direction(*v));
+        let (a_p, g_p, _, _) = self.partition_totals(now);
+        let mut delivered = dir * rails::draw_at(a_p, g_p, &|u: f64| self.direct_at(u), v);
+        for (k, sign, far) in self.rail_cap_ends() {
+            let cap = &self.fixed_pair_capacitors[k];
+            let d = dir * ((v - self.voltages[far]) - sign * cap.charge(now));
+            if d != 0.0 {
+                delivered += if cap.esr > 0.0 { d / cap.esr } else { d * f64::INFINITY };
+            }
+        }
+        Some((hub.device, delivered))
+    }
+
     fn rail_cap_demand(&self, now: f64, v: f64) -> CapDemand {
         let hub = self.hub.as_ref().expect("a hub");
         let dir = direction(v);
@@ -2484,6 +2511,14 @@ impl PartitionedSolver {
                 // 5); at esr > 0 that decays with esr C, a moving term of its
                 // own. At esr = 0 a capacitor short of the setpoint has
                 // already entered CC.
+                // The decline (ruling R116 (2), decline-only): the supply's
+                // current at the setpoint, every rail capacitor's pull there
+                // with it (one past the setpoint pushes), sinking past
+                // `BACK_DRIVE_SINK_A`. A watch of its own, so the publish
+                // that fails (`check_back_drive`) is at the crossing, not at
+                // the next host stop: the CC entry's draw counts only a
+                // capacitor's demand.
+                let (mut f0, mut motions0) = (f, motions.clone());
                 for (k, sign, far) in self.rail_cap_ends() {
                     let cap = &self.fixed_pair_capacitors[k];
                     if !(cap.esr > 0.0) {
@@ -2491,12 +2526,34 @@ impl PartitionedSolver {
                     }
                     let vc = cap.vc_at(now);
                     let d = dir * ((v - self.voltages[far]) - sign * vc);
+                    let motion = Motion::Exp { coef: -dir * sign / cap.esr, vc0: vc, inf: cap.d_v, f: -1.0 / (cap.esr * cap.c) };
                     if d > 0.0 {
                         f += d / cap.esr;
-                        motions.push(Motion::Exp { coef: -dir * sign / cap.esr, vc0: vc, inf: cap.d_v, f: -1.0 / (cap.esr * cap.c) });
+                        motions.push(motion.clone());
+                    }
+                    if d != 0.0 {
+                        f0 += d / cap.esr;
+                        motions0.push(motion);
                     }
                 }
                 watches.push(Watch { value: f, thresholds: vec![*i_limit, -*i_limit], cap: None, terms: motions });
+                // Only where its terms can carry it there: the least each can
+                // move it, summed (an exponential its whole excursion, a line
+                // falling without bound). A draw that cannot reach the
+                // threshold schedules nothing, as before the decline existed.
+                let floor: f64 = f0
+                    + motions0
+                        .iter()
+                        .map(|m| match *m {
+                            Motion::Exp { coef, vc0, inf, f } if f < 0.0 => (coef * (inf - vc0)).min(0.0),
+                            Motion::Exp { coef, vc0, inf, f } if f > 0.0 && coef * (vc0 - inf) < 0.0 => f64::NEG_INFINITY,
+                            Motion::Line { rate } if rate < 0.0 => f64::NEG_INFINITY,
+                            _ => 0.0,
+                        })
+                        .sum::<f64>();
+                if !(floor > -super::BACK_DRIVE_SINK_A) {
+                    watches.push(Watch { value: f0, thresholds: vec![-super::BACK_DRIVE_SINK_A], cap: None, terms: motions0 });
+                }
             }
             (HubKind::Psu { v, i_limit }, Regime::Cc) => {
                 let dir = direction(*v);
@@ -3335,6 +3392,10 @@ impl PartitionedSolver {
         }
         let u = self.voltages[node];
         let draw = -self.exact_hub_current();
+        let caps_leaving = match self.exact.as_ref().map(|e| (&e.kind, e.reg)) {
+            Some((HubKind::Psu { .. }, Regime::Cv)) => self.exact_rail_cap_current(),
+            _ => 0.0,
+        };
         let e = self.exact.as_mut().unwrap();
         if let HubKind::Battery(m) = &e.kind {
             // Each committed step with its own charge: a call that caught the
@@ -3357,6 +3418,19 @@ impl PartitionedSolver {
         }
         e.t_last = at;
         e.held = draw;
+        // Ruling R116 (2), decline-only: a supply in CV whose current at a
+        // committed step sinks past `BACK_DRIVE_SINK_A` fails the instant,
+        // judged where the CC entry is (the step's own draw), less what the
+        // rail capacitors push into it: a CC exit's cut leaves a capacitor
+        // a step's overshoot past the setpoint (corpus 47: 10 uV on 100 uF,
+        // 0.1 A for the next 10 ns step), which CV pulls back, no back-drive.
+        if let (&HubKind::Psu { v, .. }, Regime::Cv) = (&e.kind, e.reg) {
+            let dir = direction(v);
+            let delivered = dir * draw - (dir * caps_leaving).min(0.0);
+            if delivered < -(super::BACK_DRIVE_SINK_A + rails::REACHED_REL) {
+                return Err(super::back_drive_message(e.device, -delivered, now));
+            }
+        }
         let mut transition = false;
         let mut entered = None;
         if let HubKind::Psu { v, i_limit } = e.kind {
@@ -3588,7 +3662,7 @@ impl PartitionedSolver {
         // hands them all on, the final solve moving them only from there.
         let mut moved = Vec::new();
         let excess = |this: &mut Self, w: f64, moved: &mut Vec<DeviceId>| -> Option<f64> {
-            let stamp = Some(ExactStamp { partition: p, local, kind: ExactKind::Row { value: dir * w } });
+            let stamp = Some(ExactStamp { partition: p, local, kind: ExactKind::Row { value: dir * w, psu: false } });
             if stepped {
                 this.stepped.set_exact(stamp);
             } else {
@@ -4050,6 +4124,21 @@ impl PartitionedSolver {
 
     /// The current leaving the exact rail into every other element at the
     /// published voltages: the draw, whatever the source's stamp.
+    /// The rail capacitors' summed current out of the exact rail, as
+    /// [`Self::exact_rail_draw`] counts it.
+    fn exact_rail_cap_current(&self) -> f64 {
+        let node = self.exact.as_ref().unwrap().node;
+        let mut out = 0.0;
+        for &(d, a, b) in &self.cap_devices {
+            if a == node {
+                out += self.currents[d];
+            } else if b == node {
+                out -= self.currents[d];
+            }
+        }
+        out
+    }
+
     fn exact_rail_draw(&self) -> f64 {
         let e = self.exact.as_ref().unwrap();
         let node = e.node;

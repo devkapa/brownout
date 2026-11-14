@@ -576,7 +576,7 @@ fn exact_mode_publishes_a_chip_held_off_at_a_steps_start_with_its_outputs_unpowe
     // (KCL: what the 105.7 ohm brings, the 820 kohm takes). Before the fix it
     // read the powered solution, about 0.38 V against 1.87 V, at 11,620 of
     // the 11,628 held samples to 30.2 ms.
-    let p = exact(cold_2575_tpl2());
+    let p = exact(cold_2575_tpl2_capped());
     let (r_up, r_dn, toggle) = (105.69729298224514, 820463.1551430054, 0.030082069747425742);
     let mut rig = Rig::load(&p).unwrap();
     let mut t = 0.0f64;
@@ -3270,7 +3270,7 @@ fn exact_mode_takes_e_and_r_per_step_inside_a_call_that_commits_several() {
                                     close(g, 1.0 / want.r, 1e-12 / want.r, &format!("{at}, the Norton conductance"));
                                     close(inject, want.e / want.r, 1e-12 * want.e / want.r, &format!("{at}, the Norton current"));
                                 }
-                                ExactKind::Row { value } => close(value, want.e, 1e-12 * want.e, &format!("{at}, the row's E")),
+                                ExactKind::Row { value, .. } => close(value, want.e, 1e-12 * want.e, &format!("{at}, the row's E")),
                                 ExactKind::Inject { .. } => panic!("{at}: a cell is never a current source"),
                             }
                             close(c.x[rig.s().local_index[1].unwrap().1], want.u, 1e-11 * want.u, &format!("{at}, the rail"));
@@ -9387,25 +9387,43 @@ fn psu_backfed(rail_cap: bool, exact_mode: bool) -> Program {
 }
 
 #[test]
-fn a_psu_sinking_past_its_limit_stays_cv_in_exact_mode_as_in_default() {
+fn a_psu_back_fed_past_its_limit_never_enters_cc_and_declines_in_exact_mode_as_in_default() {
     // W1gV4's bug B: the 9 V source pushes (9 - 5)/10 = 0.4 A into the rail
     // and the load takes 5 mA, so the draw at the setpoint is -0.395 A, past
     // the limit against the PSU's own direction. The CC solution, (0.1 +
     // 0.9) / (0.1 + 0.001) = 9.901 V, is past the setpoint, so the compliance
-    // clamp keeps CV (Rails point 5), as classic and default mode do: the
-    // rail at 5 V and the PSU sinking 0.395 A (elementI = -I). Exact mode
-    // entered CC on |draw| alone and held 9.901 V; with a rail capacitor it
-    // alternated CC and CV each step, the capacitor's current growing to
-    // kiloamps.
+    // clamp keeps CV (Rails point 5). Exact mode entered CC on |draw| alone
+    // and held 9.901 V; with a rail capacitor it alternated CC and CV each
+    // step, the capacitor's current growing to kiloamps. Under ruling R40
+    // both modes then held CV, the PSU sinking 0.395 A; a supply sources only
+    // (classic since c98bf73 lets go: 9 x 1000 / 1010 = 8.9109 V, 0 A), which
+    // the core does not model (ruling R116 (2), decline-only), so the board
+    // is declined at load in both modes, with and without the capacitor,
+    // with `bench-psu-back-driven` at 0 s: never CC on |draw|, never a
+    // published sink. The board is back-driven by construction (its subject
+    // is a back-feed past the limit), so it has no variant that is not.
+    // With the 1 uF capacitor (esr 0), discharged at the load, the supply
+    // starts in CC and the capacitor charges at C du/dt = 0.1 + (9 - u) / 10
+    // - u / 1000 = 1 - 0.101 u: u = (1 - e^(-0.101 t / C)) / 0.101 reaches the
+    // setpoint at t = -(C / 0.101) ln(1 - 0.505) = 6.9637 us, the CC exit,
+    // where CV would sink 0.395 A: declined there (within W0 of the rail at
+    // its 0.495 V/us there, 1e-8 s), never CC on |draw| after it.
+    let t_exit = -(1e-6 / 0.101) * (1.0f64 - 0.505).ln();
     for rail_cap in [false, true] {
         for exact_mode in [false, true] {
             let what = format!("rail capacitor {rail_cap}, exact mode {exact_mode}");
-            let mut e = Engine::load(&psu_backfed(rail_cap, exact_mode)).unwrap();
-            for t in [1e-3, 0.1, 1.0] {
-                e.advance(t).unwrap();
-                close(e.voltages()[1], 5.0, 1e-9, &format!("{what}: the rail at {t} s"));
-                close(e.currents()[0], 0.395, 1e-9, &format!("{what}: the PSU's current at {t} s"));
-                assert_eq!(e.device_state(0).unwrap(), &[Regime::Cv.code()], "{what}: CV at {t} s");
+            let err = match Engine::load(&psu_backfed(rail_cap, exact_mode)) {
+                Err(err) => err,
+                Ok(mut e) => {
+                    let err = e.advance(1e-3).err().unwrap_or_else(|| panic!("{what}: never declined"));
+                    err
+                }
+            };
+            assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{what}: {}", err.message);
+            let (want, tol) = if rail_cap { (t_exit, 1e-8) } else { (0.0, 0.0) };
+            close(decline_instant(&err), want, tol, &format!("{what}: the decline instant"));
+            if !rail_cap {
+                assert!(err.message.contains("would sink 3.9499"), "{what}: the 0.395 A sink: {}", err.message);
             }
         }
     }
@@ -9535,9 +9553,25 @@ fn a_cc_exit_a_back_driven_edge_forces_keeps_the_rail_capacitors_charge() {
     // demand against the 1.36 A back-drive, entered CC on |I| = 0.38 A past
     // the limit, and tied the capacitor at -2.29 V again on the exit that
     // followed: a back-driven total keeps CV (Rails point 5's clamp).
+    //
+    // PSU-2 (ruling R116 (2), decline-only): at 8 V the edge would have the
+    // CV supply sink (8 - 5) / 2.2 - 0.978 = 0.386 A, which the core
+    // declines (`the_back_driven_boards_decline_where_their_sources_back_drive_the_supply`).
+    // Here the pulse rises to 7 V: the CC solution at the edge, (0.1 + 7 /
+    // 2.2 + 0.110143 / 5) / (1/5 + 1/2.2) = 5.048 V, is still past the
+    // setpoint, so the edge still forces the exit, but CV then delivers the
+    // capacitor's 0.978 A demand less the source's (7 - 5) / 2.2 = 0.909 A,
+    // 0.069 A (0.031 A by 5.2 ms as the capacitor charges), and never sinks.
+    // By hand, without the RC load: the capacitor's charge q(5 ms) = 0.22 (1
+    // - e^(-5/7.2)) = 0.110143 V (CC: q relaxes to 0.1 x 2.2 V with C (esr +
+    // 2.2) = 7.2 ms), kept at the exit, then relaxes to 5 V with esr C = 5
+    // ms in CV, 0.301877 V at 5.2 ms; at the fall CC holds the rail at (0.5
+    // + q) / (1 + 5 / 2.2) = 0.245018 V. With the RC load (5 mA at 5 V) the
+    // pin keeps the original's 3 mV.
     for rc_load in [false, true] {
-        let (got, err) = rail_samples(&back_driven_rail_cap(rc_load, false), 1e-4, 0.06);
-        let (want, err_exact) = rail_samples(&back_driven_rail_cap(rc_load, true), 1e-4, 0.06);
+        let edge7 = |exact_mode: bool| topped(back_driven_rail_cap(rc_load, exact_mode), 2, 1, 7.0);
+        let (got, err) = rail_samples(&edge7(false), 1e-4, 0.06);
+        let (want, err_exact) = rail_samples(&edge7(true), 1e-4, 0.06);
         assert!(err.is_none() && err_exact.is_none(), "RC load {rc_load}: {err:?} {err_exact:?}");
         for (&(t, g), &(_, w)) in got.iter().zip(&want) {
             let what = format!("RC load {rc_load}, t {t:.4} s");
@@ -9545,8 +9579,8 @@ fn a_cc_exit_a_back_driven_edge_forces_keeps_the_rail_capacitors_charge() {
             close(g, w, 5e-4, &format!("{what}: default against exact mode"));
         }
         let at = |t: f64| got.iter().find(|s| (s.0 - t).abs() < 1e-9).unwrap().1;
-        close(at(5.1e-3), 5.0, 1e-12, &format!("RC load {rc_load}: CV while the pulse back-drives the rail"));
-        close(at(5.2e-3), 0.2446, 3e-3, &format!("RC load {rc_load}: CC again from the capacitor's own charge after the fall"));
+        close(at(5.1e-3), 5.0, 1e-12, &format!("RC load {rc_load}: CV while the pulse is high"));
+        close(at(5.2e-3), 0.245018, if rc_load { 3e-3 } else { 1e-5 }, &format!("RC load {rc_load}: CC again from the capacitor's own charge after the fall"));
     }
 }
 
@@ -9651,6 +9685,16 @@ fn the_fuzz_boards_whose_back_driven_exit_published_a_negative_rail_stay_within_
     // the switch opening at 0.458 s is `-4` (the CV -> CC clamp's CC
     // candidate, a rail Newton across the 555's power window, does not
     // converge: the class the board met at 1.0068 s before the fix).
+    //
+    // PSU-2 (ruling R116 (2), decline-only): both edges back-drive the
+    // supply, which the core declines (seed 704 at 7.167 ms, seed 985 at the
+    // clock's first rising edge; `the_back_driven_boards_decline_where_their_sources_back_drive_the_supply`).
+    // Here each source is topped under its supply's setpoint, so its edges
+    // force CC exits without a back-drive past the capacitors' demand:
+    // seed 704's pulse at 2.0 V (2.0 + 2.82 V stacked on it, under 5.058 V),
+    // seed 985's clock at 4.1 V (under 4.230 V).
+    let fuzz_board_704 = |exact_mode: bool| topped(fuzz_board_704(exact_mode), 1, 1, 2.0);
+    let fuzz_board_985 = |exact_mode: bool| topped(fuzz_board_985(exact_mode), 1, 2, 4.1);
     let v_704 = 5.057803645242242;
     let (got, err) = rail_samples(&fuzz_board_704(false), 1e-4, 0.37);
     assert!(err.is_none(), "seed 704: {err:?}");
@@ -9662,13 +9706,37 @@ fn the_fuzz_boards_whose_back_driven_exit_published_a_negative_rail_stay_within_
         let at = |s: &[(f64, f64)]| s.iter().find(|x| (x.0 - t).abs() < 1e-9).unwrap().1;
         close(at(&got), at(&want), 5e-3, &format!("seed 704: default against exact mode at {t} s"));
     }
+    // Seed 985's topped variant holds the bound in both modes; default and
+    // exact mode part by 1e-4 of the rail while the clock holds it, an
+    // expected failure of its own
+    // (`seed_985_topped_reads_default_against_exact_mode_within_1e_4`).
     let v_985 = 4.229565420957204;
-    let (got, err) = rail_samples(&fuzz_board_985(false), 1e-4, 0.45);
-    let (want, err_exact) = rail_samples(&fuzz_board_985(true), 1e-4, 0.45);
-    assert!(err.is_none() && err_exact.is_none(), "seed 985: {err:?} {err_exact:?}");
+    for exact_mode in [false, true] {
+        let (got, err) = rail_samples(&fuzz_board_985(exact_mode), 1e-4, 0.45);
+        assert!(err.is_none(), "seed 985, exact {exact_mode}: {err:?}");
+        for &(t, g) in &got {
+            assert!((0.0..=v_985).contains(&g), "seed 985, exact {exact_mode}: the rail at {g} V at {t:.4} s, outside [0, V]");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "default against exact mode")]
+fn seed_985_topped_reads_default_against_exact_mode_within_1e_4() {
+    // PSU-2: an expected failure found by the decline-only cut's variant of
+    // seed 985 (its clock topped at 4.1 V, under the 4.230 V setpoint; the
+    // original's clock back-drives the supply, which the core declines).
+    // While the clock holds the CC rail through switch 14 (1 ohm), default
+    // mode reads the rail 1e-4 of its value under exact mode (4.098829 V
+    // against 4.099239 V at 0.1 ms; 2.999164 against 2.999464 V topped at 3
+    // V), past the 1e-4 V the original board's test held both modes to, and
+    // within W0. Not the decline's: neither mode's supply is near sinking
+    // there. Flips when the two modes agree there.
+    let board = |exact_mode: bool| topped(fuzz_board_985(exact_mode), 1, 2, 4.1);
+    let (got, _) = rail_samples(&board(false), 1e-4, 0.45);
+    let (want, _) = rail_samples(&board(true), 1e-4, 0.45);
     for (&(t, g), &(_, w)) in got.iter().zip(&want) {
-        assert!((0.0..=v_985).contains(&g), "seed 985: the rail at {g} V at {t:.4} s, outside [0, V]");
-        close(g, w, 1e-4, &format!("seed 985 at {t:.4} s: default against exact mode"));
+        close(g, w, 1e-4, &format!("seed 985 topped at {t:.4} s: default against exact mode"));
     }
 }
 
@@ -11013,11 +11081,23 @@ fn a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint() {
     // crawled one ulp apart between CC and CV until the rail loop's cap (-4
     // at 1.19933 s). A capacitor with no esr is tied where the setpoint puts
     // it, as the rail is.
-    let p = { let mut p = program(6, cold_654_tpl5()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    // PSU-2 (ruling R116 (2), decline-only): the pulse (2.69 to 11.04 V)
+    // back-drives the 5.003 V supply through the closed switch from 49.14
+    // ms, where the core declines (`the_back_driven_boards_decline_where_their_sources_back_drive_the_supply`);
+    // here it is held at its low level (2.69 V: topped under the setpoint
+    // its rising edges still kick the rail past it through the capacitors),
+    // its CC exits and entries those of the 4.6 mF rail capacitor and the
+    // esr-free 12 uF.
+    let p = { let mut p = program(6, cold_654_tpl5()); p.options.integration = 1; p.digital_slot_count = 32; topped(p, 1, 1, 2.687812442540313) };
     let stops: [f64; 148] = [0.006272881060637559, 0.006591874094186496, 0.006738369798626037, 0.01140702575290447, 0.01426541570164304, 0.014494664955489392, 0.015845785419983334, 0.01604297253667917, 0.016438762835408082, 0.01694575147421005, 0.022649428698003057, 0.02878348869319501, 0.029723295666523927, 0.03362152774810005, 0.056120405102267845, 0.056229037375842415, 0.0725332780157821, 0.09744006763523005, 0.10000702248153023, 0.10247727226228409, 0.11400881604452087, 0.11420789527825603, 0.11456675316695472, 0.132036707462793, 0.13215333428541956, 0.13314856946508996, 0.1735960941288972, 0.17880237000823784, 0.20233255736292138, 0.20273060554438915, 0.20650303005521584, 0.210097432859445, 0.21125785297540947, 0.21194824409116625, 0.21236037913567732, 0.21257167696074925, 0.2143008803746772, 0.21515195493065617, 0.238197387178014, 0.2417489640715959, 0.24263016337478488, 0.27519041846173053, 0.27583175012136746, 0.3041944321362515, 0.3472853045887351, 0.3710382925502926, 0.3771699428146706, 0.37755157586408883, 0.3776649625939152, 0.37805049052767786, 0.37869952414921493, 0.38881824909745627, 0.3921186165874907, 0.3922430325869847, 0.4318378140798058, 0.43313208309999685, 0.43502070768173773, 0.4665922437066058, 0.49696122820564226, 0.4975049592904818, 0.5036637225410135, 0.5100107018458228, 0.5103263405428516, 0.5104448958744789, 0.5322078830317314, 0.5729954376478771, 0.573366169926861, 0.5735434152973795, 0.5744108985185017, 0.5756527434944542, 0.5762016580713385, 0.5775099789975596, 0.5780666419508907, 0.5812528912830027, 0.5813559918570157, 0.6186440865366273, 0.6191726812478239, 0.6621121374575532, 0.662219553428663, 0.6625228128919308, 0.704541274882496, 0.7191587413915297, 0.721870295683001, 0.7249738548269464, 0.7256339553455277, 0.7258714122915849, 0.7423166736650905, 0.7823511441505642, 0.7837148653368945, 0.7838555159946443, 0.7888559199629311, 0.7934599011306834, 0.7935851828807118, 0.8228386668695195, 0.8251574881177077, 0.8263666049622582, 0.8265915033646667, 0.8331405956540121, 0.8364759942627226, 0.8366736377837456, 0.8371085617969939, 0.845293952886047, 0.8454543233568703, 0.8456046153517915, 0.8458809980289612, 0.8461208104394647, 0.8667772615602513, 0.8671529799111006, 0.8986848692310039, 0.8991467326488936, 0.8992668336881126, 0.9003791469536602, 0.9052156567779707, 0.9370791712584148, 0.9382189336827093, 0.9402973673020084, 0.9405623311214611, 0.9466822120630486, 0.9851200944072771, 0.985380388540387, 0.9860332004496556, 0.9916966594641506, 1.00032869057813, 1.0016847447306398, 1.0047930604974566, 1.0049483954954213, 1.0052015709959516, 1.0069855087633708, 1.051445293858752, 1.0518333304858911, 1.0523505618884832, 1.053516825650964, 1.1017904675290167, 1.1024345712071053, 1.1124746686117384, 1.1131820655242126, 1.1132921477607274, 1.113597025878502, 1.1137810135798154, 1.116083225369127, 1.1185253280794436, 1.1190815339648412, 1.122016569423452, 1.161203305333806, 1.1875671808278914, 1.1880933144367918, 1.1883124925563644, 1.2];
-    let (rig, err) = run_stops(&p, &[(0.4665922437066058, 10), (1.1875671808278914, 10)], &stops);
+    // The second toggle (switch 10 closing again at 1.1876 s) kicks the rail
+    // past the setpoint through the capacitors, where the core declines
+    // too: the variant runs to the stop before it, through the first
+    // toggle's CC exits and entries.
+    let stops: Vec<f64> = stops.iter().copied().filter(|&t| t < 1.1875671808278914).collect();
+    let (rig, err) = run_stops(&p, &[(0.4665922437066058, 10)], &stops);
     assert!(err.is_none(), "{err:?}");
-    assert_eq!(rig.k.time(), 1.2);
+    assert_eq!(rig.k.time(), *stops.last().unwrap());
 }
 
 /// tpl=5 hub=2 e=5.003 psu ilim=1.122 PULSE3 2.7..11.0 tr=0e0 74LS00 vcc1 gnd0 in5,4 out3,4 C1-5=4.6e-3 C0-1=6.1e-6 SW3-5(1)+R5-0=2249 R1-5=2391.0 R2-4=233.2 C5-4=1.4e-6 C0-3=5.3e-3 C1-0=1.2e-5 span=11.043285499156779
@@ -12167,6 +12247,7 @@ fn cold_304_tpl4_switch_open() -> Program {
 }
 
 #[test]
+#[should_panic(expected = "bench-psu-back-driven")]
 fn a_crossing_inside_a_cc_step_is_aimed_at_the_threshold_on_the_steps_own_rail() {
     // On a CC rail the stepped partition solves the rail as an unknown
     // (`stepped::CcRail`), and the 555's thresholds are fractions of it.
@@ -12182,6 +12263,21 @@ fn a_crossing_inside_a_cc_step_is_aimed_at_the_threshold_on_the_steps_own_rail()
     // an edge, 11,266/s); intact, the 555 ring declines at 4.344 ms in every
     // mode (NE555 point 11, a separate item). There, aimed at the published
     // rail, 28.0 steps a period; at each trial's own, 22.0.
+    // PSU-2 (ruling R116 (2), decline-only): an expected failure until the
+    // released regime lands (wip/psu-src). The pulse's rising edge at 4.3414
+    // ms (to 7.127 V through the 0.155 ohm PTC, device 18) would have the
+    // supply sink 11.5 A, which the core declines with
+    // `bench-psu-back-driven` there (pinned in
+    // `the_back_driven_boards_decline_where_their_sources_back_drive_the_supply`);
+    // under ruling R40 the CV supply sank it and the PTC tripped, and this
+    // ring ran, from 5 to 6 ms, on the supply's rail with the pulse high.
+    // No board that is not back-driven keeps it: with the PTC tripped
+    // (wip/psu-src's variant) the 7.127 V pulse still back-drives the rail
+    // through it (60 mA past the load); topped at 5.2 V it does through the
+    // 4.56 V source stacked on it (19 mA); topped at 0.6 V the ring runs at a
+    // quarter of the rate on a rail the pulse loads (40 periods, 60.8 steps a
+    // period, against the bound of 24); held low it never rings; and the
+    // original does not ring before the edge.
     let mut p = cold_304_tpl4_switch_open();
     p.devices.retain(|d| !(d.kind == 30 && (d.component_index == 15 || d.component_index == 22)));
     let mut e = Engine::load(&p).unwrap();
@@ -12776,7 +12872,13 @@ fn a_closed_form_on_a_cc_rail_another_partition_moves_steps_with_it() {
     let stops = [0.006272879757094588, 0.006961352915624008, 0.009458814460263459, 0.01153130615462656, 0.05808507802599983, 0.058830097853103336, 0.0595741505624736, 0.05967846412462022, 0.06266170036641795, 0.07953558078788245, 0.07978378149045819, 0.08023133162152682, 0.08310892147936291, 0.08479671467796533, 0.08490146648731667, 0.09560781787769408, 0.09792275902071916, 0.0980450874315556, 0.09825769978442092, 0.1];
     let run = |k: Option<u32>| {
         let _k = hub::crawl_hook::set(k);
-        let mut e = Engine::load(&cold_72_tpl4()).unwrap();
+        // PSU-2 (ruling R116 (2), decline-only): the pulse (-2.66 to 9.80 V)
+        // back-drives the 5.368 V supply at its 6.39 ms edge, where the core
+        // declines; here it is held at its low level (topped at 5.2 V, under
+        // the setpoint, its edge still kicks the rail past it through the 13
+        // mF): node 5 follows the rail the stepped partition moves, the
+        // test's subject.
+        let mut e = Engine::load(&topped(cold_72_tpl4(), 1, 1, -2.6576602934370257)).unwrap();
         stops.iter().map(|&t| { e.advance(t).unwrap_or_else(|er| panic!("{} at {t}: {}", er.code, er.message)); e.voltages().to_vec() }).collect::<Vec<Vec<f64>>>()
     };
     let (lazy, stepped) = (run(None), run(Some(0)));
@@ -13034,7 +13136,12 @@ fn a_partition_the_cc_entrys_catch_up_brings_to_the_entry_restarts_there() {
     // panic in `step_sens`). Each partition the catch-up brings there
     // restarts at the entry, as at the exit.
     let stops = [0.006272880877141529, 0.0065927161668331785, 0.028976581614620318, 0.03553340541767844, 0.03698489478563283, 0.03901939250962618, 0.03991764293395217, 0.041271473887937844, 0.04335513173190618, 0.044337405090577084, 0.06947386681851733, 0.07123793317893146, 0.08841718232174085, 0.09182557291355894, 0.0943951507204556, 0.10422962131724346, 0.10530899188220319, 0.10542614807069964, 0.11049686736026144, 0.1445664128049566, 0.1842653151444662, 0.21422145514361743, 0.21506580900902345, 0.22663140602920362, 0.22940150856396527, 0.24083371462914918, 0.24284869237573473, 0.24320594023225206, 0.2433738608765407, 0.2530618018968624, 0.25385456921175353, 0.2547089514806105, 0.2551795896448584, 0.2553390498729086, 0.26390885075550385, 0.26597085831493583, 0.2662632641543127, 0.2690951199292167, 0.2707020403282692, 0.2724425605181134, 0.2739380883344346, 0.275636267511459, 0.2757441057945907, 0.27676400762637865, 0.27738983890471747, 0.3048682492823358, 0.3064496119541417, 0.30670732184507626, 0.30767511906567774, 0.307923329563767, 0.31650227610470705, 0.3179876336303704, 0.3180902253015938, 0.31861989438403127, 0.31880642021693695, 0.3191112189930113, 0.31923664034197746, 0.3207268780167979, 0.3455119958016315, 0.35122919965398564, 0.3527034963396514, 0.35285492273389735, 0.35387789812656595, 0.35525155709773204, 0.38344468100401163, 0.4046108419665314, 0.40531640259070945, 0.4054878471693596, 0.4055899122397323, 0.4061745636644941, 0.4160692768379551, 0.46267071196050097, 0.4638372242823546, 0.4642640595365132, 0.47179999070178674, 0.48642219398730163, 0.4907815468142124, 0.49092615333946227, 0.49108483026962063, 0.5016999107930417, 0.5018611399360423, 0.5197543654853523, 0.5357903717294508, 0.5360605955246178, 0.5361768450784467, 0.5374347983618939, 0.539529357865102, 0.5399507992463187, 0.5424389689694512, 0.5899005863701755, 0.5904900934336084, 0.5963172167538294, 0.5967046337295367, 0.6007206096537955, 0.6092686846920152, 0.644748978957318, 0.6545745069012455, 0.6604988803807474, 0.6615036525512134, 0.6616141477039709, 0.6903372916550937, 0.6904485983445836, 0.7124508598300596, 0.7128151912990386, 0.718733127888563, 0.7225306552600174, 0.7387556677500934, 0.7490736139561662, 0.7522313486629078, 0.7609420801660539, 0.7826603174339363, 0.782848177020686, 0.7829643667580773, 0.7839798744580058, 0.7864731833839732, 0.7936907989124025, 0.8019890682418442, 0.8372500697186027, 0.8819703444207859, 0.9137239136359017, 0.9155254298193632, 0.9160121321096205, 0.9162579300052882, 0.916454087304285, 0.9223516595771097, 0.934667936701408, 0.9362609527798573, 0.9452662925429353, 0.9517241413110135, 0.9522569372398517, 0.9613659576270696, 0.9617674415130101, 0.9643792673522906, 0.9951309845208647, 0.9979132929832992, 1.000725363113518, 1.0058396498610622, 1.0227008536519822, 1.0279231071210482, 1.0626795627680892, 1.0637386614818067, 1.070420631368488, 1.0705472363376314, 1.0875917492522307, 1.1187719175213746, 1.122083995447408, 1.122439804105945, 1.149227026869476, 1.149946253280575, 1.1506086266511395, 1.1510427584929321, 1.1514469826527027, 1.1873760094238954, 1.19688749429246, 1.2];
-    run_cold(&cold_574_tpl5(), &[(0.10422962131724346, 14), (0.24083371462914918, 14), (0.9643792673522906, 14)], &stops).unwrap_or_else(|e| panic!("574 tpl 5: {e}"));
+    // PSU-2 (ruling R116 (2), decline-only): the clock's rising edges kick
+    // the 12.6 V rail through its capacitors (1.2 mF to node 6) past the
+    // setpoint, where the core declines (20.43 ms); here the clock is held
+    // at 0 V (topped at 5 V its edges still kick past it), the CC entries
+    // the switch toggles make still caught up.
+    run_cold(&topped(cold_574_tpl5(), 2, 2, 0.0), &[(0.10422962131724346, 14), (0.24083371462914918, 14), (0.9643792673522906, 14)], &stops).unwrap_or_else(|e| panic!("574 tpl 5: {e}"));
 }
 
 #[test]
@@ -15039,7 +15146,11 @@ fn a_stepped_fuse_from_a_ramping_pulse_reads_the_ramp_where_its_step_ended() {
     // ramp's end on 34 mA. It carries at most 0.13 A (the fine reference
     // never blows it); R12 latches at 0.6140 s.
     let stops = [0.006272880227543187, 0.0065910248589287155, 0.014867916614019297, 0.02247516916867357, 0.02477913165122169, 0.06954196850921748, 0.07111182541939857, 0.10247305019576619, 0.10280356819085222, 0.10738325191977782, 0.1077867901845644, 0.1221920717506905, 0.12236204363621518, 0.12260746380415856, 0.12334174424164744, 0.1273048136490475, 0.13212906277969547, 0.14581643851602924, 0.14597254109246852, 0.1833211549829557, 0.18355077234677847, 0.183670941709475, 0.21897758796911235, 0.21968120316069029, 0.22780037862693625, 0.2303290091889369, 0.25237995312471795, 0.2530020183132669, 0.2544114124005052, 0.2552386079349576, 0.2557602912338444, 0.2561546390532273, 0.2595876832572605, 0.2597924154606735, 0.26293016115752604, 0.263382939612516, 0.28364187871818897, 0.29503525537631187, 0.3076887148005353, 0.3083140399727918, 0.3180467362570134, 0.3379927294836021, 0.3386843652176448, 0.341978542142703, 0.34501322866469314, 0.3454261116054774, 0.3459144100958994, 0.34608727590496435, 0.3462155919078771, 0.34799208337265547, 0.3481198766088865, 0.38745497806425394, 0.3896072068661334, 0.4086229470367869, 0.4089817918234879, 0.41728150928509256, 0.44348291361006736, 0.4438642963611351, 0.45];
-    let mut e = Engine::load(&cold_798_tpl4()).unwrap();
+    // PSU-2 (ruling R116 (2), decline-only): the pulse's rise (to 9.43 V)
+    // back-drives the 7.316 V supply at 31.22 ms, where the core declines;
+    // topped at 7.2 V, under the setpoint, its 0.4 ms ramps still feed the
+    // fuse's stepped node.
+    let mut e = Engine::load(&topped(cold_798_tpl4(), 1, 1, 7.2)).unwrap();
     for &t in stops.iter().filter(|&&t| t <= 0.45) {
         e.advance(t).unwrap();
     }
@@ -15090,7 +15201,12 @@ fn a_stepped_device_on_the_rail_reads_the_rail_its_step_ended_on() {
     // 37 ms; at acc-int the idle charge burnt R1-4 at 38.9 ms in both modes.
     // Neither latches; the fuse F4-0 does at load.
     let stops = [0.006272881200294258, 0.029185926317624438, 0.05090243353528483, 0.052432113074980094, 0.08641903179429013, 0.08676530483479943, 0.08845295232412471, 0.0966232194545737, 0.09676842900230036, 0.09764008595168698, 0.10200518723718602, 0.11187738231765108, 0.1250742335256922, 0.13596823500616897, 0.13612843922774423, 0.13718821982788126, 0.14428401983642283, 0.14779926983463293, 0.14806166704325105, 0.16117471937143518, 0.16441480437867267, 0.20747018675647133, 0.24524729216692318, 0.2497592019341911, 0.2506962616770701, 0.2827002676400363, 0.2850710912527529, 0.3031130939916753, 0.30434149265748023, 0.30473876147337786, 0.30484544036110944, 0.30702501231104895, 0.3077118642680218, 0.319701751635851, 0.320389339252393, 0.32143809234294113, 0.3399029943415494, 0.3400522633522544, 0.3496253789453974, 0.34990166714691906, 0.35088075272360636, 0.35537435103266524, 0.35783817213369123, 0.35810593131497903, 0.35950832694542834, 0.3599517891281955, 0.3601492199313351, 0.40380979432386105, 0.4041095830145945, 0.4248252630142262, 0.43516419842477766, 0.437757521867536, 0.47332291881049976, 0.4941195143223547, 0.4951099097819948, 0.4987837702401886, 0.49982306667163023, 0.5117738086529908, 0.5304884589995156, 0.5337168345779831, 0.5374129762370196, 0.5814377696080736, 0.5853161842820207, 0.5855930078962507, 0.6123469540166411, 0.6180670711233387, 0.6562068288179699, 0.6771571832801375, 0.6774591407943499, 0.6784058978990182, 0.6786746550919907, 0.6870703825433593, 0.6874254892306085, 0.6901181636343875, 0.6952404247038165, 0.6972513788504672, 0.6993011769091048, 0.7292268436948669, 0.7771728405548967, 0.7773304652492941, 0.7793462674055572, 0.7795604505748617, 0.7803101956359613, 0.7830346938701106, 0.7946227648230703, 0.7950622337371467, 0.8];
-    let mut e = Engine::load(&cold_705_tpl4()).unwrap();
+    // PSU-2 (ruling R116 (2), decline-only): the pulse's rising edge (to
+    // 10.62 V) back-drives the 4.916 V supply at 38.87 ms, where the core
+    // declines; here it is held at its low level (topped at 4.8 V its edge
+    // still kicks the rail past the setpoint through 14 mF): neither R1-4
+    // nor R8 latches on the CC rail alone, and the fuse does at load.
+    let mut e = Engine::load(&topped(cold_705_tpl4(), 1, 1, -1.6416609897440881)).unwrap();
     for &t in &stops {
         e.advance(t).unwrap();
     }
@@ -16207,6 +16323,20 @@ pub(super) fn cold_2575_tpl2() -> Program {
     p
 }
 
+/// Cold 2575 tpl 2 with its pulse source (device 1) topped under the PSU's
+/// 4.984 V setpoint, at 4.9 V in place of 10.62 V (wip/psu-src, cd11c6e):
+/// the pulse never back-drives the rail, so the supply never sinks (ruling
+/// R116 (2)), and the rail rides the CC ramps R99 (3) is about, the supply at
+/// its limit into the pulse through switch 14 even at its top. The
+/// original's pulses back-drive it through switch 14 (1 mohm) from 19.87
+/// ms, where the core declines (`cold_2575_tpl2_declines_where_its_pulse_back_drives_the_supply`);
+/// under ruling R40 the sinking supply took up to 5.6 kA there.
+pub(super) fn cold_2575_tpl2_capped() -> Program {
+    let mut p = cold_2575_tpl2();
+    p.devices[1].params[1] = 4.9;
+    p
+}
+
 pub(super) const STOPS_2575: [f64; 144] = [0.006272885454268746, 0.006722358845361651, 0.030082069747425742, 0.030305514505074526, 0.07737467669015351, 0.11079122496282161, 0.11101267854173187, 0.1113951420967517, 0.11164419206590313, 0.11180195028027584, 0.1138701213278603, 0.11650259652189927, 0.11675684593067406, 0.11692578059784811, 0.12231022624887829, 0.12242676381306818, 0.12269457187038708, 0.14557142082448843, 0.1514403471524137, 0.15217171434011573, 0.153632621076611, 0.15632653220215822, 0.17836178888619977, 0.1799941324399469, 0.18047972075070431, 0.22265137577819227, 0.25672253328407624, 0.2968355431585014, 0.3064171231383485, 0.30688352703536487, 0.3166121668293984, 0.33316069978529217, 0.35593598078893585, 0.35632858407926943, 0.3567093322188216, 0.3568610316481533, 0.3570258849223718, 0.3588561046044093, 0.3674662495607346, 0.37175636193375877, 0.37317703863544827, 0.3795858435485576, 0.3797855597249306, 0.38146413740463214, 0.4016293832812307, 0.40393609255256335, 0.4053301890226898, 0.44492194354769654, 0.4735156336506627, 0.4860672140295934, 0.5054636814031529, 0.5056213307976068, 0.506186254598784, 0.5063994240091841, 0.5065156050996727, 0.5186636110113361, 0.5200976434439157, 0.5274607808928731, 0.5378025079205805, 0.5667890865375645, 0.5670166441290978, 0.5678225549865811, 0.5687631669913571, 0.5836424522695971, 0.5848768777581916, 0.5902366435220326, 0.614503823816892, 0.6429047511219942, 0.6432247246476697, 0.6470889473414827, 0.6490163406287742, 0.6762247114388868, 0.6795320793458005, 0.6800198505890974, 0.6803932584303227, 0.6817750765335221, 0.6819841119665235, 0.6847669906360809, 0.6853687843254429, 0.6895029689998767, 0.6984460485300185, 0.7016778913941555, 0.7087958014950311, 0.7154846718803052, 0.7183619292769835, 0.7218445496130511, 0.7223110340740124, 0.7247842218978595, 0.725051741895515, 0.7262447841499476, 0.7265708656173511, 0.7268138907606634, 0.7275653545693996, 0.7384622599982188, 0.7499971678142786, 0.7691818876925283, 0.7694417255295235, 0.8026818300912854, 0.8029622039682913, 0.8047022924910198, 0.8057310874381503, 0.8064638171716066, 0.8076940084282942, 0.8156975243194418, 0.8165081417132876, 0.8166318682116716, 0.8286683076718543, 0.8308657692853977, 0.8312159213788277, 0.8315494819225858, 0.8685473107410446, 0.8691493498018293, 0.8695113574669172, 0.9054047813416228, 0.9340903172156757, 0.9521403437392756, 0.9543873550382468, 0.9656266456197006, 0.9670293630256126, 0.9674565417937, 0.9678220131197381, 0.9726532211607167, 1.0017706854196933, 1.0022022420650438, 1.009710339541874, 1.0104472581284287, 1.0335355896152079, 1.0359573122741632, 1.0372701531874613, 1.0384282283459234, 1.0389323403255502, 1.0500829132535774, 1.0991813283619407, 1.1022758598967872, 1.1025908131810065, 1.1049535032499194, 1.1050610457213186, 1.1330034529780417, 1.137007465821038, 1.1371086660730299, 1.1711438348268193, 1.1935460904267732, 1.1945409348701024, 1.2];
 
 #[test]
@@ -16253,7 +16383,7 @@ fn a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_re_enters_af
     // R89 (a)'s fix the hub partitions' trials, planned at the toggle's
     // instant before the edit, survived it, and the rail ran up the
     // capacitor past the setpoint to 749.6 V.
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let (v_set, edge, d555, i_limit) = (4.984117245919062, 1.8, 6, 0.10655500310025036);
     let w0 = 1e-4 + 1e-3 * edge;
     let toggles = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
@@ -16341,7 +16471,7 @@ fn a_capacitor_free_stepped_partition_beside_a_sliding_555_sits_at_its_powered_o
     // with the switches open and C17 settled (node 6 within 1 mV of
     // ground), before switch 21 closes at 0.3166 s, and the duty within
     // 6.1e-4 of 0.539526 (the rail's band, as in the test above).
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let (u_edge, d555) = (1.8, 6);
     let mut rig = Rig::load(&p).unwrap();
     let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
@@ -17440,7 +17570,7 @@ fn a_run_split_by_budget_yields_is_bit_identical_to_the_same_run_unsplit() {
     let stops757 = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.05323040595778528, 0.07025570911480136, 0.07068761116523894, 0.0708919775775236, 0.08304046345640247, 0.08449035536229421, 0.08933790419438906, 0.0896527633248559, 0.08980863754495291, 0.11830896264699073, 0.12138748064854432, 0.12754703876223325, 0.127694654382418, 0.12783188484706418, 0.15140082694744983, 0.15514026862023755, 0.16204267260765454, 0.16419524959068535, 0.17745987266455407, 0.18930446044733726, 0.19010673195265432, 0.1978444980497105, 0.19863167834988738, 0.19900938133228965, 0.2];
     let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>)> = vec![
         ("757 tpl 0", cold_757_tpl0(), vec![], stops757.to_vec()),
-        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575.to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), t2575.to_vec(), STOPS_2575.to_vec()),
         ("1838 tpl 1", p1838, t1838, s1838),
         ("2548 tpl 5", p2548, t2548, s2548),
         ("505 tpl 5", p505, vec![], STOPS_505.to_vec()),
@@ -17885,7 +18015,7 @@ fn cc_branches_within_w0_of_the_truth() {
 /// taken and the longest run of `Rail` events each within 2 fs of the one
 /// before it.
 fn event_stepped_2575(past: f64, t_end: f64) -> Result<(u64, u32), String> {
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let mut rig = Rig::load(&p).unwrap();
     for &stop in STOPS_2575.iter().take_while(|&&s| s < 0.030082069747425742) {
         rig.advance(stop).unwrap();
@@ -18027,7 +18157,7 @@ fn zz_r101_2575_cadence_against_fine() {
 /// `grid`; or, with `fresh`, at each third of them from a run of its own
 /// advanced there at once. Each reading with its worst W0 off the truth.
 fn readings_2575(grid: &[f64], fresh: bool, pick: fn(f64) -> bool) -> Vec<(f64, f64)> {
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let rows: Vec<&(f64, &[f64])> = TRUTH_2575.iter().filter(|r| pick(r.0)).collect();
     let start = || {
         let mut rig = Rig::load(&p).unwrap();
@@ -18121,10 +18251,19 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     // that the ramp drags under the edge; before R53's exit for a slide
     // whose edge stops attracting, its duty halved at each W0 of rail and 1
     // and 5 us host stops made no progress where the rail crossed 0 V.)
-    let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
+    // PSU-2 (ruling R116 (2), decline-only): on `cold_2575_tpl2_capped`
+    // (the original's pulses back-drive the rail from 19.87 ms, where the
+    // core declines; `TRUTH_2575` regenerated on the capped board by
+    // wip/psu-src, cd11c6e), through the rise. The capped pulse's 2.1 ms top
+    // is CC (on the original the sinking supply held CV there), where C17's
+    // CC steps take backward Euler (R99 (1)): node 6 is 24 W0 off the truth
+    // by 21.5 ms and the fall starts 7.7 W0 off at 22.4 ms, the expected
+    // failures below.
+    let in_rise = |t: f64| (0.0192..=0.0204).contains(&t);
+    let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_rise(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
     for (name, stops, fresh) in [("1 us", grid(1e-6), false)] {
-        let got = readings_2575(&stops, fresh, in_ramp_2575);
+        let got = readings_2575(&stops, fresh, |t| (0.0192..=0.0204).contains(&t));
         let worst = worst_of(&got);
         eprintln!("2575 tpl 2, {name}: worst {:.3} W0 off the truth at {} s ({} instants)", worst.0, worst.1, got.len());
         if worst.0 > worst_all.0 {
@@ -18145,7 +18284,11 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_at_coarser_host_st
     // cadence pinned no farther from the truth than (3) alone reads it.
     let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_ramp_2575(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
-    for (name, stops, fresh, pin) in [("the instants", Vec::new(), false, 1.27), ("3.7 us", grid(3.7e-6), false, 1.676), ("33 us", grid(33e-6), false, 1.45), ("one advance", Vec::new(), true, 1.21)] {
+    // PSU-2: on `cold_2575_tpl2_capped` (`TRUTH_2575`), whose CC top the
+    // fall starts from (the test above): pinned at what it reads there, as
+    // wip/psu-src (cd11c6e) measured, 7.72, 7.66, 59.48 and 7.43 W0 (the
+    // original's 1.27, 1.676, 1.45, 1.21).
+    for (name, stops, fresh, pin) in [("the instants", Vec::new(), false, 7.72), ("3.7 us", grid(3.7e-6), false, 7.662), ("33 us", grid(33e-6), false, 59.49), ("one advance", Vec::new(), true, 7.43)] {
         let got = readings_2575(&stops, fresh, in_ramp_2575);
         let (worst, at) = worst_of(&got);
         eprintln!("2575 tpl 2, {name}: worst {worst:.3} W0 off the truth at {at} s");
@@ -18162,7 +18305,9 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_at_coarser_host_st
 fn cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth() {
     // R99 (1): after each of cold 2575 tpl 2's pulse ramps (see the test
     // above), node 6 decays through C17 on the CC rail by backward Euler,
-    // whose error piles up: 25 W0 off the truth at 24.5 ms. An expected
+    // whose error piles up: 25 W0 off the truth at 24.5 ms (on
+    // `cold_2575_tpl2_capped` since PSU-2, 24.4 W0 at 21.5 ms, on the
+    // capped pulse's CC top). An expected
     // failure until CC steps take TR-BDF2, pinned no farther from the truth
     // than at 0898801 (WORST_2575_AFTER, read with a host stopping at the
     // instants).
@@ -18276,7 +18421,7 @@ fn a_slide_that_falls_back_costs_one_hold_procedure_a_host_step_at_most() {
     // `a_cc_rail_freed_by_a_switch_slides_its_555_at_the_power_edge_and_
     // re_enters_after_each_fallback`): at most one re-entry per host step,
     // and only in a host step that began with the chip given up.
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let toggles = [(0.030082069747425742, 14), (0.3166121668293984, 21), (1.009710339541874, 21), (1.0359573122741632, 12)];
     let mut rig = Rig::load(&p).unwrap();
     let mut state: Vec<f64> = p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect();
@@ -18333,7 +18478,7 @@ fn a_555_sliding_on_a_cc_rail_through_a_capacitor_s_transient_slides_alike_at_an
     // (five C17 time constants) to 0.2 s, and at 50, 100, 150 and 200 ms its
     // rail sits within W0 of the edge and of STOPS_2575's rail there, and
     // its duty within 6.1e-4 of 0.539526.
-    let p = cold_2575_tpl2();
+    let p = cold_2575_tpl2_capped();
     let (edge, d555, open14) = (1.8, 6, 0.030082069747425742);
     let w0 = 1e-4 + 1e-3 * edge;
     let checks = [0.05, 0.1, 0.15, 0.2];
@@ -18497,7 +18642,15 @@ fn a_slide_solved_flat_at_its_edge_is_solved_there_again_only_when_its_inputs_mo
     // against STOPS_2575's 61 (`drafts/r53-logs/p11-sp/edge-failfirst.log`).
     // No closed form counts re-solves: the bound is the schedules' own
     // spread, within a quarter of the least, each still sliding at 0.2 s.
-    let p = cold_2575_tpl2();
+    // PSU-2 (ruling R116 (2), decline-only): the original's pulses
+    // back-drive the supply from 19.87 ms, where the core declines. Here the
+    // pulse is topped at 4.98 V, just under the 4.984 V setpoint, the
+    // closest to the original's ramps that never back-drives. On
+    // `cold_2575_tpl2_capped` (4.9 V) the schedules spread wider, 53 to 70
+    // re-solves (1 ms to 10 ms stops), past this bound; at 4.5 V and 4.98 V
+    // they are within it.
+    let mut p = cold_2575_tpl2();
+    p.devices[1].params[1] = 4.98;
     let open14 = 0.030082069747425742;
     let grid = |h: f64| (1..).map(move |k| k as f64 * h).take_while(|&t| t < 0.2 - 1e-12).collect::<Vec<f64>>();
     let base: Vec<f64> = STOPS_2575.iter().copied().filter(|&t| t < 0.2).collect();
@@ -19397,6 +19550,314 @@ fn chips_sliding_as_one_slide_alike_in_every_device_order() {
                     }
                 }
             }
+        }
+    }
+}
+
+// ---- ruling R116 (2), decline-only: a bench supply driven to sink ----------
+
+/// `p` with device `d`'s parameter `k` set to `v`: a back-driving source's
+/// high level topped under the supply's setpoint, the non-back-driven
+/// variant of a board whose original the core declines (ruling R116 (2)).
+fn topped(mut p: Program, d: usize, k: usize, v: f64) -> Program {
+    p.devices[d].params[k] = v;
+    p
+}
+
+/// W0's voltage tolerance at `v`.
+fn w0_v(v: f64) -> f64 {
+    1e-4 + 1e-3 * v.abs()
+}
+
+/// W0's current tolerance at `i`.
+fn w0_i(i: f64) -> f64 {
+    1e-9 + 1e-3 * i.abs()
+}
+
+/// A 9 V ideal source through 100 ohm onto a 5 V bench supply's rail (node
+/// 2) with 10 kohm across it: the probe board of ruling R116 (2)
+/// (`ship-logs/a-probe-psu-backdrive.log`). `i_limit` 0 is an unlimited
+/// supply.
+fn backdriven_board(i_limit: f64) -> Program {
+    program(3, vec![source(0, 1, 0, 9.0), resistor(1, 1, 2, 100.0), psu(2, 2, 0, 5.0, i_limit), resistor(3, 2, 0, 1e4)])
+}
+
+/// The instant a `bench-psu-back-driven` failure names (`... at {now} s`).
+fn decline_instant(err: &BoError) -> f64 {
+    assert!(err.message.starts_with(crate::solve::BACK_DRIVE_REASON), "not a decline: {} {}", err.code, err.message);
+    let at = err.message.split(" at ").nth(1).expect("an instant");
+    at.split(" s").next().unwrap().parse().unwrap_or_else(|_| panic!("the instant in {}", err.message))
+}
+
+/// Every mode the decline runs in: default and exact, each with backward
+/// Euler and trapezoidal integration.
+fn decline_modes(p: &Program) -> Vec<(String, Program)> {
+    let mut out = Vec::new();
+    for exact_mode in [false, true] {
+        for integration in [0u8, 1] {
+            let mut q = if exact_mode { exact(p.clone()) } else { p.clone() };
+            q.options.integration = integration;
+            out.push((format!("exact {exact_mode}, integration {integration}"), q));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_bench_supply_back_driven_from_its_first_instant_is_declined_at_load() {
+    // R116's probe board. Held at 5 V the supply would sink (9 - 5) / 100 -
+    // 5 / 10 kohm = 39.5 mA from the first instant; a supply sources only
+    // (classic, c98bf73, lets go: 9 x 10000 / 10100 = 8.9109 V and 0 A, pinned
+    // in test/host/headless-auto.test.ts), which the core does not model, so
+    // the load fails with `bench-psu-back-driven` and the host falls back to
+    // classic. With and without a limit, every mode.
+    for i_limit in [0.0, 0.1, 1.0] {
+        for (what, p) in decline_modes(&backdriven_board(i_limit)) {
+            let err = Engine::load(&p).err().unwrap_or_else(|| panic!("iLimit {i_limit}, {what}: the probe board loads"));
+            assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "iLimit {i_limit}, {what}: {}", err.message);
+            close(decline_instant(&err), 0.0, 0.0, &format!("iLimit {i_limit}, {what}: declined at the load's instant"));
+        }
+    }
+}
+
+#[test]
+fn a_bench_supply_the_circuit_cannot_drive_to_sink_runs_as_before() {
+    // The same board with the source at 4 V: the supply delivers 5 / 10 kohm
+    // + (5 - 4) / 100 = 10.5 mA at 5 V, and 5 pA more into the rail node's
+    // own 1e-12 S shunt (published -10.500000005 mA), and never sinks.
+    for i_limit in [0.0, 0.1] {
+        for (what, mut p) in decline_modes(&backdriven_board(i_limit)) {
+            p.devices[0].params[0] = 4.0;
+            let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("iLimit {i_limit}, {what}: {}", er.message));
+            e.advance(1e-2).unwrap_or_else(|er| panic!("iLimit {i_limit}, {what}: {}", er.message));
+            close(e.voltages()[2], 5.0, 1e-9, &format!("iLimit {i_limit}, {what}: the rail"));
+            close(e.currents()[2], -(0.0105 + 5e-12), 1e-15, &format!("iLimit {i_limit}, {what}: the supply"));
+        }
+    }
+}
+
+/// The ramp board: a 0 -> 10 V pulse (1 ms delay, 10 ms rise, 5 ms high, 10
+/// ms fall, 100 ms period) through 100 ohm onto a 5 V supply's rail (node
+/// 2), 1 kohm across the rail, and an RC (100 ohm to node 3, 1 uF to
+/// ground) on it.
+fn ramp_board(i_limit: f64) -> Program {
+    program(4, vec![
+        pulse(0, 1, 0, [0.0, 10.0, 1e-3, 10e-3, 10e-3, 5e-3, 0.1], 0),
+        resistor(1, 1, 2, 100.0),
+        psu(2, 2, 0, 5.0, i_limit),
+        resistor(3, 2, 0, 1000.0),
+        resistor(4, 2, 3, 100.0),
+        capacitor(5, 3, 0, 1e-6, 0.0),
+    ])
+}
+
+/// The ramp board by hand, CV at 5 V: the source is `vg(t) = 1000 (t - 1
+/// ms)` on its rise, the RC's node relaxes to 5 V with `Rc C = 0.1 ms` from 0
+/// at the load (`e^-65` by 6.5 ms), and the supply delivers `5 GL + (5 - vg)
+/// G1 + (5 - vc) Gc` (`G1 = 1/100`, `GL = 1/1000`, `Gc = 1/100`), published
+/// negated: `(rail, vc, published current)` at `t`.
+fn ramp_cv(t: f64) -> (f64, f64, f64) {
+    let vg = if t < 1e-3 { 0.0 } else { 1000.0 * (t - 1e-3) };
+    let vc = 5.0 * (1.0 - (-t / 1e-4).exp());
+    (5.0, vc, -(5.0 * 1e-3 + (5.0 - vg) * 1e-2 + (5.0 - vc) * 1e-2))
+}
+
+/// The ramp board's decline instant by hand: the supply sinks 1 uA
+/// (`BACK_DRIVE_SINK_A`) where `5 GL + (5 - vg) G1 = -1 uA`, `vg = 5 + (5
+/// mA + 1 uA) / 10 mS = 5.5001 V`, 1 ms + 5.5001 ms.
+const RAMP_DECLINE: f64 = 1e-3 + 5.5001e-3;
+
+/// The six host cadences of the brief, to `t_end`.
+fn psu_cadences(t_end: f64) -> Vec<(&'static str, Vec<f64>)> {
+    let grid = |h: f64| (1..).map(move |k| k as f64 * h).take_while(move |&t| t < t_end - 1e-12).collect::<Vec<f64>>();
+    let geometric: Vec<f64> = (0..).map(|k| 1e-6 * 2f64.powi(k)).take_while(|&t| t < t_end).collect();
+    [("20 us", grid(20e-6)), ("200 us", grid(200e-6)), ("1 ms", grid(1e-3)), ("16.7 ms", grid(1.0 / 60.0)), ("100 ms", grid(0.1)), ("geometric", geometric)]
+        .into_iter()
+        .map(|(name, stops)| {
+            let mut stops: Vec<f64> = stops.into_iter().chain([t_end]).collect();
+            stops.sort_by(f64::total_cmp);
+            stops.dedup();
+            (name, stops)
+        })
+        .collect()
+}
+
+#[test]
+fn a_ramp_back_driving_a_limited_bench_supply_declines_at_the_closed_forms_instant_at_every_cadence() {
+    // The ramp board (`ramp_cv`): CV at 5 V until the source's ramp drives
+    // the supply to sink 1 uA at `RAMP_DECLINE`, 6.5001 ms. At each of the
+    // six host cadences, at two limits (the supply delivers at most 55 mA
+    // here, never its limit), the RC's stepped copy forced too, every mode:
+    // each stop before the decline reads the closed form within W0 and no
+    // sinking current; the advance across it fails with
+    // `bench-psu-back-driven` at the crossing itself, located as an event
+    // (the instant within W0 of the closed form's, read as current: 10 A/s
+    // of slope, so 2 nA is 0.2 ns), not at the next host stop (16.7 ms or
+    // 100 ms away); and the readings stay at the last good instant, CV.
+    // The ramp is a direct device's (the source's resistor onto the rail),
+    // which the let-go watch follows as a line (R99 (3)).
+    for i_limit in [0.1, 1.0] {
+        for force_stepped in [false, true] {
+            let mut board = ramp_board(i_limit);
+            board.options.force_stepped = force_stepped;
+            for (mode, p) in decline_modes(&board) {
+                for (name, stops) in psu_cadences(30e-3) {
+                    let what = format!("iLimit {i_limit}, stepped {force_stepped}, {mode}, {name}");
+                    let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("{what}: load {} {}", er.code, er.message));
+                    let mut declined = None;
+                    for &t in &stops {
+                        match e.advance(t) {
+                            Ok(_) => {
+                                assert!(t < RAMP_DECLINE, "{what}: the advance to {t} passed the decline");
+                                let (u, vc, i) = ramp_cv(t);
+                                // The load's transient (the RC charging from
+                                // 0 V, 105 mA at first, so in CC at 0.1 A)
+                                // is not this test's subject: read once it
+                                // has settled, from 1 ms.
+                                if t >= 1e-3 {
+                                    close(e.voltages()[2], u, w0_v(u), &format!("{what}: the rail at {t}"));
+                                    close(e.voltages()[3], vc, w0_v(vc), &format!("{what}: the RC's node at {t}"));
+                                    close(e.currents()[2], i, w0_i(i), &format!("{what}: the supply's current at {t}"));
+                                }
+                                assert!(e.currents()[2] <= crate::solve::BACK_DRIVE_SINK_A, "{what}: a sinking sample at {t}");
+                            }
+                            Err(err) => {
+                                assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{what}: {}", err.message);
+                                declined = Some((t, decline_instant(&err)));
+                                break;
+                            }
+                        }
+                    }
+                    let (stop, at) = declined.unwrap_or_else(|| panic!("{what}: never declined"));
+                    assert!(stop >= RAMP_DECLINE, "{what}: declined on the advance to {stop}");
+                    // The sinking current at the instant named, by hand,
+                    // within W0 of the threshold.
+                    let sink = ramp_cv(at).2;
+                    close(sink, crate::solve::BACK_DRIVE_SINK_A, w0_i(crate::solve::BACK_DRIVE_SINK_A), &format!("{what}: the supply's current at the decline instant {at}"));
+                    // The last good instant: CV, nothing sinking. (Between
+                    // host stops the core's published readout of a
+                    // closed-form partition lags, the RC's node and the
+                    // supply's KCL with it, so only the rail is read there.)
+                    let t = e.time();
+                    assert!(t <= at, "{what}: the engine at {t}, past the decline at {at}");
+                    close(e.voltages()[2], 5.0, w0_v(5.0), &format!("{what}: the rail kept at {t}"));
+                    assert!(e.currents()[2] <= crate::solve::BACK_DRIVE_SINK_A, "{what}: a sinking sample kept at {t}: {}", e.currents()[2]);
+                }
+            }
+        }
+    }
+}
+
+/// A 0 -> 9 V step (high from 3 ms to 8 ms, 100 ms period) through 100 ohm
+/// onto a 5 V supply's rail (node 2), 10 kohm and a 10 uF rail capacitor
+/// of `esr` across it.
+fn railcap_backdrive_board(i_limit: f64, esr: f64) -> Program {
+    program(3, vec![
+        pulse(0, 1, 0, [0.0, 9.0, 3e-3, 0.0, 0.0, 5e-3, 0.1], 0),
+        resistor(1, 1, 2, 100.0),
+        psu(2, 2, 0, 5.0, i_limit),
+        resistor(3, 2, 0, 1e4),
+        capacitor(4, 2, 0, 10e-6, esr),
+    ])
+}
+
+#[test]
+fn a_bench_supply_a_step_drives_to_sink_fails_the_advance_and_keeps_the_last_good_instant() {
+    // The rail capacitor board: CV at 5 V before 3 ms, the capacitor charged
+    // there (in CC from the load first where the limit binds: 0.1 A into 10
+    // uF, well before 2.5 ms), the supply delivering 5 / 100 + 5 / 10 kohm =
+    // 50.5 mA (published -50.5 mA) at 2.5 ms. The 9 V step at 3 ms would
+    // have it sink (9 - 5) / 100 - 5 / 10 kohm = 39.5 mA: the advance across
+    // it fails with `bench-psu-back-driven` at the edge, and the readings
+    // stay at the last good instant. Unlimited, 0.1 A and 1 A; a rail
+    // capacitor of esr 0 and 0.5 ohm; every mode.
+    for i_limit in [0.0, 0.1, 1.0] {
+        for esr in [0.0, 0.5] {
+            for (mode, p) in decline_modes(&railcap_backdrive_board(i_limit, esr)) {
+                let what = format!("iLimit {i_limit}, esr {esr}, {mode}");
+                let mut e = Engine::load(&p).unwrap_or_else(|er| panic!("{what}: load {}", er.message));
+                e.advance(2.5e-3).unwrap_or_else(|er| panic!("{what}: to 2.5 ms {}", er.message));
+                close(e.voltages()[2], 5.0, 1e-9, &format!("{what}: the rail at 2.5 ms"));
+                close(e.currents()[2], -0.0505, 1e-9, &format!("{what}: the supply at 2.5 ms"));
+                let err = e.advance(3.5e-3).err().unwrap_or_else(|| panic!("{what}: the step at 3 ms sinks"));
+                assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{what}: {}", err.message);
+                close(decline_instant(&err), 3e-3, 0.0, &format!("{what}: declined at the edge"));
+                assert!(e.time() < 3e-3, "{what}: the engine stays short of the edge, at {}", e.time());
+                close(e.voltages()[2], 5.0, 1e-9, &format!("{what}: the rail after the failed advance"));
+                close(e.currents()[2], -0.0505, 1e-9, &format!("{what}: the supply after the failed advance"));
+            }
+        }
+    }
+}
+
+#[test]
+fn the_back_driven_boards_decline_where_their_sources_back_drive_the_supply() {
+    // PSU-2 (ruling R116 (2), decline-only): every test board that a source
+    // drives to have its bench supply sink, run as its test ran it, declines
+    // with `bench-psu-back-driven` at the instant the supply would sink past
+    // 1 uA, never publishing a sinking sample (each test runs a variant that
+    // is not back-driven). The instant is the source's edge where the edge
+    // is a step (the pulse's `td`, from the boards' records), or the
+    // crossing on a ramp:
+    // - cold 2575 tpl 2: the pulse's rise (from 19.225 ms, 1.11 ms to 10.62
+    //   V) through switch 14 (1 mohm) back-drives the supply once it passes
+    //   the rail and the 555's draw there: located as an event, 19.8706 ms;
+    // - cold 304 tpl 4 (LEDs 15 and 22 out): the pulse's step to 7.127 V at
+    //   4.3414 ms through the 0.155 ohm PTC onto a 5.27 V supply;
+    // - FXI (`back_driven_rail_cap`): the pulse's step to 8 V at 5 ms
+    //   through 2.2 ohm, 0.386 A past the capacitor's 0.978 A demand;
+    // - seed 704: the pulse's step to 8.77 V at 7.167 ms;
+    // - seed 985: the clock high (5.866 V) through switch 14 at the load,
+    //   declined there;
+    // - seeds 654, 72, 705: the pulse's step at its `td` (72 tpl 4's through
+    //   its 13 mF, a step after the edge);
+    // - seed 798: the pulse's 0.45 ms ramp to 9.43 V from 30.83 ms, at its
+    //   crossing (31.22 ms);
+    // - seed 574: the clock's rising edge kicking the 12.6 V rail through
+    //   its 1.2 mF (20.43 ms).
+    // Both modes where the test ran both.
+    let edge = |t: f64| move |at: f64| at == t;
+    let after = |t: f64| move |at: f64| at >= t;
+    let mut no_led = cold_304_tpl4_switch_open();
+    no_led.devices.retain(|d| !(d.kind == 30 && (d.component_index == 15 || d.component_index == 22)));
+    let p654 = { let mut p = program(6, cold_654_tpl5()); p.options.integration = 1; p.digital_slot_count = 32; p };
+    let cases: Vec<(&str, Program, f64, Box<dyn Fn(f64) -> bool>)> = vec![
+        ("2575 tpl 2", cold_2575_tpl2(), 0.03, Box::new(|at: f64| (0.01987..0.019871).contains(&at))),
+        ("2575 tpl 2, exact", exact(cold_2575_tpl2()), 0.03, Box::new(|at: f64| (0.01987..0.019871).contains(&at))),
+        ("304 tpl 4", no_led, 0.005, Box::new(edge(0.004341408137726716))),
+        ("FXI", back_driven_rail_cap(false, false), 0.06, Box::new(edge(5e-3))),
+        ("FXI, exact", back_driven_rail_cap(false, true), 0.06, Box::new(edge(5e-3))),
+        ("FXI, RC load", back_driven_rail_cap(true, false), 0.06, Box::new(edge(5e-3))),
+        ("seed 704", fuzz_board_704(false), 0.37, Box::new(edge(0.007167128715436583))),
+        ("seed 704, exact", fuzz_board_704(true), 0.37, Box::new(edge(0.007167128715436583))),
+        ("seed 985", fuzz_board_985(false), 0.45, Box::new(edge(0.0))),
+        ("seed 985, exact", fuzz_board_985(true), 0.45, Box::new(edge(0.0))),
+        ("654 tpl 5", p654, 1.2, Box::new(edge(0.04914266660941855))),
+        ("72 tpl 4", cold_72_tpl4(), 0.1, Box::new(after(0.0063877126823550295))),
+        ("705 tpl 4", cold_705_tpl4(), 0.8, Box::new(edge(0.038872893824295845))),
+        ("798 tpl 4", cold_798_tpl4(), 0.45, Box::new(|at: f64| (0.030825375737027517..0.030825375737027517 + 0.000446139644632424).contains(&at))),
+        ("574 tpl 5", cold_574_tpl5(), 0.1, Box::new(after(0.0))),
+    ];
+    for (name, p, t_end, at_ok) in cases {
+        let (samples, err) = match Engine::load(&p) {
+            Err(err) => (Vec::new(), Some((0.0, err))),
+            Ok(_) => rail_samples(&p, 1e-4, t_end),
+        };
+        let (t, err) = err.unwrap_or_else(|| panic!("{name}: never declined"));
+        assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{name}: {}", err.message);
+        let at = decline_instant(&err);
+        assert!(at_ok(at), "{name}: declined at {at} s");
+        assert!(at <= t && (t == 0.0 || at > t - 1e-4 - 1e-12), "{name}: declined at {at} s on the advance to {t}");
+        // The supply's published current at every 0.1 ms sample before
+        // (published negated: a sink reads positive along `dir`).
+        if samples.is_empty() {
+            continue;
+        }
+        let mut e = Engine::load(&p).unwrap();
+        for &(ts, _) in &samples {
+            e.advance(ts).unwrap();
+            let dir = if p.devices[0].params[0] < 0.0 { -1.0 } else { 1.0 };
+            assert!(dir * e.currents()[0] <= crate::solve::BACK_DRIVE_SINK_A, "{name}: a sinking sample at {ts}: {}", e.currents()[0]);
         }
     }
 }

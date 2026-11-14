@@ -2111,7 +2111,12 @@ fn a_load_on_a_current_limited_rail_latches_alike_cold_or_visited_wherever_the_r
     assert_eq!(cold, hot, "default mode: the cold run latches as the visited one");
     assert_eq!(cold_devices(&a), Vec::<usize>::new(), "no device on a current-limited rail is cold");
 
-    let mut b = program(3, vec![psu(0, 1, 0, 5.0, 0.1), source(1, 2, 0, 9.0), resistor(2, 1, 2, 10.0), resistor(3, 1, 0, 1e3), rating(3, 0.085, 1e3)]);
+    // PSU-2 (ruling R116 (2), decline-only): that board's supply would sink
+    // 0.395 A from the load, which the core declines (`bench-psu-back-driven`
+    // at 0 s, pinned in rail_tests' bug B test); here the source is 4.5 V,
+    // under the setpoint, the supply delivering 5 / 1k + 0.05 = 55 mA in CV:
+    // a current-limited rail in exact mode, cold as visited.
+    let mut b = program(3, vec![psu(0, 1, 0, 5.0, 0.1), source(1, 2, 0, 4.5), resistor(2, 1, 2, 10.0), resistor(3, 1, 0, 1e3), rating(3, 0.085, 1e3)]);
     b.options.no_rail_shortcut = true;
     let (cold, hot) = records_cold_and_hot(&b, &[(10.0, vec![])]);
     assert_eq!(cold, hot, "exact mode: the cold run latches as the visited one");

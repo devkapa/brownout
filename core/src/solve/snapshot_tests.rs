@@ -5,7 +5,7 @@
 
 use super::led_tests::clocked_led;
 use super::newton::hooks;
-use super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
+use super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2_capped, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
 use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
 use crate::engine::Engine;
 use crate::error::ERR_SOLVE_FAILED;
@@ -109,7 +109,7 @@ fn a_restored_run_goes_on_bit_identically_on_the_rail_and_slow_boards() {
     let stops757: Vec<f64> = (1..=40).map(|k| k as f64 * 5e-3).collect();
     let stops474 = [0.0209, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05];
     let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>, usize)> = vec![
-        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575[..60].to_vec(), 25),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), t2575.to_vec(), STOPS_2575[..60].to_vec(), 25),
         ("1838 tpl 1", p1838, t1838, s1838.clone(), s1838.len() / 2),
         ("757 tpl 0", cold_757_tpl0(), vec![], stops757, 13),
         ("474 tpl 5", cold_474_tpl5(), vec![], stops474.to_vec(), 1),
@@ -312,7 +312,7 @@ fn a_snapshot_shares_the_eeprom_image_and_the_table_counts_it_once() {
 /// rollback rig's resistor, LED and 74LS00 before the latch.
 fn size_boards() -> Vec<(&'static str, Program, Vec<f64>)> {
     vec![
-        ("2575 tpl 2", cold_2575_tpl2(), STOPS_2575[..30].to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), STOPS_2575[..30].to_vec()),
         // From 20 ms: the fuse's trip at about 17 ms rewrites its stamps
         // (a latch, as an edit does), which the sharing check leaves out.
         ("fuse ring", ring_behind_a_fuse(), (4..=10).map(|k| k as f64 * 5e-3).collect()),
@@ -391,7 +391,7 @@ fn an_engine_restored_at_every_stop_with_its_scratch_emptied_runs_as_one_never_r
     // for bit.
     let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21)];
     let boards: Vec<(&str, Program, Vec<(f64, usize)>, Vec<f64>)> = vec![
-        ("2575 tpl 2", cold_2575_tpl2(), t2575.to_vec(), STOPS_2575[..40].to_vec()),
+        ("2575 tpl 2", cold_2575_tpl2_capped(), t2575.to_vec(), STOPS_2575[..40].to_vec()),
         ("fuse ring", ring_behind_a_fuse(), vec![], (1..=12).map(|k| k as f64 * 5e-3).collect()),
         ("287 tpl 3", cold_287_tpl3(), vec![], vec![0.006272879077239732, 0.0104, 0.0105, 0.011, 0.014446754687130081, 0.02]),
     ];
@@ -423,7 +423,7 @@ fn an_engine_restored_at_every_stop_with_its_scratch_emptied_runs_as_one_never_r
 /// match a fresh run bit for bit, and no stat may ever go down. Trimmed to
 /// run in seconds.
 mod random_restores {
-    use super::super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
+    use super::super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2_capped, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
     use super::super::slow_tests::{ring_behind_a_fuse, rollback_rig};
     use crate::engine::Engine;
     use crate::program::Program;
@@ -537,7 +537,7 @@ mod random_restores {
         let stops757 = [0.006272881300476146, 0.011116023500639817, 0.012362155978723055, 0.037731840680085206, 0.03788763379837714, 0.053120364878471986, 0.07025570911480136];
         board("757/0", &cold_757_tpl0(), &[], &stops757, None);
         let t2575 = [(0.030082069747425742, 14), (0.3166121668293984, 21)];
-        board("2575/2", &cold_2575_tpl2(), &t2575, &STOPS_2575[..32], Some((14, 0)));
+        board("2575/2", &cold_2575_tpl2_capped(), &t2575, &STOPS_2575[..32], Some((14, 0)));
         let stops287 = [0.006272879077239732, 0.0104, 0.010400001, 0.0104001, 0.0105, 0.011, 0.014446754687130081, 0.02, 0.04];
         board("287/3", &cold_287_tpl3(), &[], &stops287, None);
         board("474/5", &cold_474_tpl5(), &[], &[0.0209, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05], None);
