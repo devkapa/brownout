@@ -152,7 +152,7 @@ fn add_adc_match_the_manual_for_every_operand_pair() {
 }
 
 #[test]
-fn half_carry_reference_quirk_differs_from_the_manual() {
+fn reference_quirk_half_carry_is_bit_0_of_the_carry_chain() {
     // 0x08 + 0x08 carries out of bit 3: the manual sets H, avr8js does not.
     let mut rig = Rig::new();
     rig.set_reg(16, 8);
@@ -1209,4 +1209,104 @@ fn rig_sanity_a_tiny_program_runs_to_the_expected_state() {
     avr_instruction(&mut cpu);
     assert_eq!(cpu.pc, 4, "rjmp to itself");
     assert_eq!(cpu.cycles, 6);
+}
+
+// ---- the named departures from the manual ------------------------------------------
+// Each is one test, so the list of places the port keeps avr8js's behaviour
+// instead of the datasheet's is the list of `reference_quirk_*` tests. (Their
+// full-range versions sit in the operand sweeps above.)
+
+#[test]
+fn reference_quirk_neg_never_sets_v() {
+    // The manual: V set when the result is 0x80, i.e. NEG of 0x80.
+    let mut rig = Rig::new();
+    rig.set_reg(5, 0x80);
+    rig.set_sreg(0);
+    rig.exec(&[one_reg(0x9401, 5)]);
+    assert_eq!(rig.reg(5), 0x80);
+    assert_eq!(rig.sreg() & V, 0);
+}
+
+#[test]
+fn reference_quirk_fmulsu_sets_z_when_the_product_is_not_zero() {
+    let mut rig = Rig::new();
+    rig.set_reg(18, 2);
+    rig.set_reg(19, 3);
+    rig.exec(&[0x0388 | (2 << 4) | 3]); // FMULSU r18, r19: 2*3 << 1 = 12
+    assert_eq!(rig.pair(0), 12);
+    assert_eq!(rig.sreg() & Z, Z, "the manual: Z clear for a nonzero product");
+    rig.set_reg(18, 0);
+    rig.exec(&[0x0388 | (2 << 4) | 3]);
+    assert_eq!(rig.sreg() & Z, 0, "the manual: Z set for a zero product");
+}
+
+#[test]
+fn reference_quirk_cbi_takes_one_cycle() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.exec(&[0x9800 | (1 << 3)]), 1, "the manual: 2");
+}
+
+#[test]
+fn reference_quirk_sbc_cpc_lose_z_when_the_borrow_wraps_to_zero() {
+    // 0 - 0xff - 1 = -256: a zero byte, but the reference tests the unwrapped
+    // difference, so Z (which the manual keeps when it was set) is cleared.
+    let mut rig = Rig::new();
+    for op in [two_reg(0x0800, 16, 17), two_reg(0x0400, 16, 17), reg_imm(0x4000, 16, 0xff)] {
+        rig.set_reg(16, 0);
+        rig.set_reg(17, 0xff);
+        rig.set_sreg(Z | C);
+        rig.exec(&[op]);
+        assert_eq!(rig.sreg() & Z, 0, "op {op:#06x}");
+    }
+}
+
+#[test]
+fn reference_quirk_sbiw_writes_h() {
+    // The manual leaves H alone; the reference clears it and writes bit 0 of
+    // its carry chain (here 0 - 0 = 0: chain bit is 0, so a set H is cleared).
+    let mut rig = Rig::new();
+    rig.set_pair(24, 0);
+    rig.set_sreg(H);
+    rig.exec(&[0x9700]); // SBIW r25:r24, 0
+    assert_eq!(rig.sreg() & H, 0);
+}
+
+#[test]
+fn reference_quirk_interrupt_costs_two_cycles_and_follows_sei_at_once() {
+    // The manual: four cycles of response, and the instruction after SEI runs
+    // before any interrupt is taken. The reference takes it on the next tick.
+    let mut cpu = Cpu::new(vec![0; 0x8000], 8192);
+    cpu.set_sp(0x08ff);
+    cpu.data[0x6e] = 1;
+    cpu.set_interrupt_flag(irq(0x20));
+    cpu.prog[0] = 0x9478; // SEI
+    cpu.pc = 0;
+    avr_instruction(&mut cpu);
+    let c = cpu.cycles;
+    cpu.tick();
+    assert_eq!(cpu.pc, 0x20, "taken right after SEI");
+    assert_eq!(cpu.cycles - c, 2, "two cycles");
+}
+
+#[test]
+fn reference_quirk_out_of_range_data_reads_zero_and_writes_vanish() {
+    // JavaScript reads `undefined` past the end of the data array (which then
+    // stores as 0 or turns a program counter into NaN); the port reads 0.
+    let mut rig = Rig::new();
+    let top = rig.cpu.data.len() as u16; // first address past SRAM
+    rig.set_pair(26, top);
+    rig.set_reg(3, 0x55);
+    rig.exec(&[0x900c | (3 << 4)]); // LD r3, X
+    assert_eq!(rig.reg(3), 0);
+    rig.exec(&[0x920c | (3 << 4)]); // ST X, r3: nothing to write to
+    assert_eq!(rig.cpu.data.len() as u16, top);
+}
+
+#[test]
+fn reference_quirk_sleep_spm_and_break_do_nothing() {
+    // BREAK (0x9598) is not decoded at all; SLEEP and SPM are no-ops.
+    assert_eq!(decode(0x9598), Op::Unknown);
+    let mut rig = Rig::new();
+    assert_eq!(rig.exec(&[0x9598]), 1);
+    assert_eq!(rig.cpu.pc, 1);
 }

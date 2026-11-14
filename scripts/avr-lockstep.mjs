@@ -8,9 +8,15 @@
 // at a time to the first differing instruction, and both decodes and both
 // states are printed.
 //
-// Usage (the wasm is built with the avr feature, see --help):
-//   node scripts/avr-lockstep.mjs --wasm core/target/wasm32-unknown-unknown/release/brownout_core.wasm \
-//        [--k 256] [--steps 3000000] [--no-irq] [--mode trap|plain|both] [--no-decode-sweep] image.hex ...
+// Usage (same shape as scripts/rp2040-lockstep.mjs):
+//   node scripts/avr-lockstep.mjs --build              # build the feature wasm
+//   node scripts/avr-lockstep.mjs [--image name|path|all] [--steps N] [--k K]
+//        [--mode trap|plain|both] [--no-irq] [--no-decode-sweep]
+//   node scripts/avr-lockstep.mjs --bench [--image name] [--steps N]
+// The feature wasm goes to core/target/avr-lockstep/, apart from the shipped
+// build, which this script never touches. `all` is every hex image in the
+// repositories (brownout's test fixtures and devolt's apps/sim/lib/firmware);
+// a name is matched against those, anything else is read as a path.
 //
 // Modes: `trap` stops both sides after the first access to a peripheral
 // register (data address 0x20-0xff outside RAMPZ/EIND/SP/SREG), the expected
@@ -21,6 +27,7 @@
 //
 // Not shipped: scripts/ is outside the package `files` list.
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -30,21 +37,38 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 // ---- arguments ------------------------------------------------------------
-const args = process.argv.slice(2);
-const opt = { wasm: null, k: 256, steps: 3_000_000, irq: true, mode: "both", sweep: true, images: [] };
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (a === "--wasm") opt.wasm = args[++i];
-  else if (a === "--k") opt.k = Number(args[++i]);
-  else if (a === "--steps") opt.steps = Number(args[++i]);
-  else if (a === "--no-irq") opt.irq = false;
-  else if (a === "--mode") opt.mode = args[++i];
-  else if (a === "--no-decode-sweep") opt.sweep = false;
-  else if (a === "--bench") opt.bench = Number(args[++i]);
-  else if (a === "--help") { console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 22).join("\n")); process.exit(0); }
-  else opt.images.push(a);
+const repoRoot = path.resolve(here, "..");
+const coreDir = path.join(repoRoot, "core");
+const targetDir = path.join(coreDir, "target", "avr-lockstep");
+const defaultWasm = path.join(targetDir, "wasm32-unknown-unknown", "release", "brownout_core.wasm");
+const DEVOLT_FIRMWARE = "/Users/dev/Documents/DEVOLTProject/devolt/apps/sim/lib/firmware";
+const argv = process.argv.slice(2);
+const argOf = (name, fallback) => { const i = argv.indexOf(`--${name}`); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback; };
+const flag = (name) => argv.includes(`--${name}`);
+if (flag("help")) { console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 24).join("\n")); process.exit(0); }
+if (flag("build")) {
+  const r = spawnSync("cargo", ["build", "--release", "--target", "wasm32-unknown-unknown", "--features", "avr", "--target-dir", targetDir, "-j", process.env.CARGO_BUILD_JOBS || "3"], { cwd: coreDir, stdio: "inherit" });
+  if (r.status !== 0) { console.error("avr-lockstep: cargo build failed"); process.exit(1); }
+  if (argv.length === 1) process.exit(0);
 }
-if (!opt.wasm) { console.error("--wasm <brownout_core.wasm built with --features avr> is required"); process.exit(2); }
+function allImages() {
+  const out = [];
+  const add = (dir, tag) => { if (fs.existsSync(dir)) for (const f of fs.readdirSync(dir).sort()) if (f.endsWith(".hex")) out.push({ name: `${tag}/${f}`, file: path.join(dir, f) }); };
+  add(path.join(repoRoot, "test/sim/engine/__fixtures__"), "brownout");
+  add(DEVOLT_FIRMWARE, "devolt");
+  return out;
+}
+const opt = {
+  wasm: argOf("wasm", defaultWasm), k: Number(argOf("k", 256)), steps: Number(argOf("steps", 3_000_000)),
+  irq: !flag("no-irq"), mode: argOf("mode", "both"), sweep: !flag("no-decode-sweep"),
+  bench: flag("bench") ? Number(argOf("steps", 20_000_000)) : 0, images: [],
+};
+{
+  const sel = argOf("image", "all"), all = allImages();
+  if (sel === "all") opt.images = all.map((i) => i.file);
+  else opt.images = sel.split(",").map((n) => all.find((i) => i.name === n || path.basename(i.file) === n || i.name.endsWith("/" + n))?.file ?? n);
+}
+if (!fs.existsSync(opt.wasm)) { console.error(`avr-lockstep: no feature wasm at ${path.relative(repoRoot, opt.wasm)}; run with --build`); process.exit(2); }
 
 // ---- avr8js ------------------------------------------------------------------
 function loadAvr8js() {

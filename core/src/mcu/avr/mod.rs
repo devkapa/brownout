@@ -17,6 +17,8 @@ pub mod interrupt;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upstream_tests;
 
 pub use cpu::{Cpu, IoHit};
 pub use instr::{avr_instruction, decode, Op};
