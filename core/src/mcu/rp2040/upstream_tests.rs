@@ -834,32 +834,8 @@ fn initializes_pc_and_sp_from_the_bootrom_vector_table() {
     assert_eq!((m.cpu.sp(), m.cpu.pc()), (0x2004_1f00, 0xee));
 }
 
-// Upstream's three IO-register-write tests plant a spy peripheral at table
-// key 0x10. R1 halts on peripherals instead of running them, so the ports
-// check the value the bus hands a real one (IO_BANK0 at 0x40014000) at the
-// halt; the atomic case checks the decoded alias, since the XOR result needs
-// the peripheral's own read.
-
-#[test]
-fn io_write_replicates_8_bit_values_four_times() {
-    let mut m = Rp2040::new();
-    m.write_u8(0x4001_4123, 0x534);
-    assert_eq!(m.peripheral_write, Some(PeripheralWrite { offset: 0x120, atomic: 0, value: 0x3434_3434 }));
-}
-
-#[test]
-fn io_write_replicates_16_bit_values_twice() {
-    let mut m = Rp2040::new();
-    m.write_u16(0x4001_4123, 0x1234_5678);
-    assert_eq!(m.peripheral_write, Some(PeripheralWrite { offset: 0x120, atomic: 0, value: 0x5678_5678 }));
-}
-
-#[test]
-fn io_write_supports_atomic_register_aliases() {
-    let mut m = Rp2040::new();
-    m.write_u32(0x4001_5120, 0x0f);
-    assert_eq!(m.peripheral_write, Some(PeripheralWrite { offset: 0x120, atomic: 1, value: 0x0f }));
-}
+// Upstream's three IO-register-write tests (rp2040.spec.ts, 'IO Register
+// Writes') run in r2_upstream_tests.rs, against a block R2 ports.
 
 /// The exception tests run from flash, which the bus can write.
 fn exception_machine() -> Rp2040 {

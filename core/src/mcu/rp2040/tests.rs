@@ -875,11 +875,11 @@ fn memory_map_regions() {
 #[test]
 fn unported_peripherals_stop_the_machine_at_first_access() {
     for (addr, name, write) in [
-        (0x4000_c000u32, "RESETS_BASE", false),
-        (0x4005_8000, "WATCHDOG_BASE", true),
+        (0x4003_4000u32, "UART0", false),
+        (0x4005_0000, "PWM_BASE", true),
         (0x1800_0000, "SSI", false),
         (0x5020_0000, "PIO0", true),
-        (0x4001_4000 + 0x2000, "IO_BANK0_BASE", true), // atomic set alias
+        (0x5000_0000 + 0x2000, "DMA", true), // atomic set alias
     ] {
         let mut m = Rp2040::new();
         if write {
