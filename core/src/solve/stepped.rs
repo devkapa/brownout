@@ -5398,7 +5398,17 @@ impl SteppedSolver {
                 // capacitors push into it, as `exact_after_publish` reads it
                 // (a CC exit's cut leaves a capacitor a step's overshoot past
                 // the setpoint, which CV pulls back: no back-drive).
-                let sink_row = exact.filter(|e| e.partition == p_idx && matches!(e.kind, crate::solve::ExactKind::Row { psu: true, .. }));
+                // Only on a rail partition with no junction and no chip whose
+                // supply it holds: there the row's current is continuous in
+                // the step, so its crossing is a root. Across a junction's or
+                // a chip's branch the step's end can read a sink its commit
+                // does not (cold 151 tpl 5: a 74LS00 and two LEDs on a 2.47
+                // V rail cut 1,794 steps at a branch the commit never
+                // published, and 172 tpl 5's LED a few at each toggle: both
+                // runs moved, neither back-driven); there the decline is the
+                // commit's, at the next committed step.
+                let linear = part.shape.junctions.is_empty() && gated.is_empty();
+                let sink_row = exact.filter(|e| linear && e.partition == p_idx && matches!(e.kind, crate::solve::ExactKind::Row { psu: true, .. }));
                 let t_s = part.t;
                 let sink_past = |h_s: f64, st: &StepResult| -> f64 {
                     let Some(e) = sink_row else { return f64::NEG_INFINITY };

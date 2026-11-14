@@ -598,7 +598,10 @@ also call, bit-identical.
   - in exact mode, at each committed step of the rail's partition, where the
     CC entry is judged (`exact_after_publish`), a stepped step cut where the
     source row's current crosses the threshold (`Cross::Sink`, beside the
-    CC exit's setpoint cut, ruling R102 (a));
+    CC exit's setpoint cut, ruling R102 (a)) on a rail partition with no
+    junction and no chip's supply (there the row's current is continuous in
+    the step; across a branch the step's end can read a sink its commit
+    does not, so the decline is the commit's);
   - an unlimited supply (a fixed node) from its KCL at every publish, the
     closed-form partitions read at the instant (`fresh_supply_currents`, on
     copies), so between host stops the crossing is caught at the first
