@@ -25,6 +25,7 @@
 //! behaviour.
 
 pub mod abi;
+pub mod adc;
 pub mod bus;
 pub mod clock;
 pub mod core;
@@ -348,7 +349,8 @@ impl Rp2040 {
             clock::AlarmId::UsbSof => self.usb_generate_sof(),
             clock::AlarmId::Dma(i) => self.dma_transfer_alarm_fired(i as usize),
             clock::AlarmId::Pwm(i) => self.pwm_alarm_fired(i as usize),
-            clock::AlarmId::AdcSample | clock::AlarmId::AdcMulti => {}
+            clock::AlarmId::AdcSample => self.adc_sample_alarm_fired(),
+            clock::AlarmId::AdcMulti => self.adc_multi_alarm_fired(),
         }
     }
 }

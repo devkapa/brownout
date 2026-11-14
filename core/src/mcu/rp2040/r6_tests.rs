@@ -232,3 +232,209 @@ mod pwm {
         assert_eq!(m.periph.pwm.gpio_direction, -1);
     }
 }
+
+mod adc {
+    use super::*;
+
+    const ADC: u32 = 0x4004_c000;
+    const CS: u32 = 0x00;
+    const RESULT: u32 = 0x04;
+    const FCS: u32 = 0x08;
+    const FIFO: u32 = 0x0c;
+    const DIV: u32 = 0x10;
+    const INTR: u32 = 0x14;
+    const INTE: u32 = 0x18;
+    const INTF: u32 = 0x1c;
+    const INTS: u32 = 0x20;
+    const EN: u32 = 1;
+    const START_ONE: u32 = 1 << 2;
+    const START_MANY: u32 = 1 << 3;
+    const READY: u32 = 1 << 8;
+    const AINSEL: u32 = 12;
+    const RROBIN: u32 = 16;
+    const FCS_EN: u32 = 1;
+    const FCS_SHIFT: u32 = 1 << 1;
+    const FCS_DREQ_EN: u32 = 1 << 3;
+    const FCS_EMPTY: u32 = 1 << 8;
+    const FCS_FULL: u32 = 1 << 9;
+    const FCS_UNDER: u32 = 1 << 10;
+    const FCS_OVER: u32 = 1 << 11;
+
+    fn level(m: &mut Rp2040) -> u32 {
+        (rd(m, ADC + FCS) >> 16) & 0xf
+    }
+
+    #[test]
+    fn a_conversion_takes_two_microseconds() {
+        // Datasheet 4.9.2: 96 cycles of the 48 MHz ADC clock = 2 us per sample.
+        let mut m = Rp2040::new();
+        m.adc_set_channel(0, 1234.0);
+        wr(&mut m, ADC + CS, EN | START_ONE);
+        assert_eq!(rd(&mut m, ADC + CS) & READY, 0);
+        ns(&mut m, 1999.0);
+        assert_eq!(rd(&mut m, ADC + CS) & READY, 0);
+        ns(&mut m, 1.0);
+        assert_ne!(rd(&mut m, ADC + CS) & READY, 0);
+        assert_eq!(rd(&mut m, ADC + RESULT), 1234);
+    }
+
+    #[test]
+    fn ainsel_picks_the_channel() {
+        let mut m = Rp2040::new();
+        for c in 0..5 {
+            m.adc_set_channel(c, 100.0 + c as f64);
+        }
+        for c in 0..5u32 {
+            wr(&mut m, ADC + CS, EN | START_ONE | (c << AINSEL));
+            ns(&mut m, 2000.0);
+            assert_eq!(rd(&mut m, ADC + RESULT), 100 + c);
+        }
+    }
+
+    #[test]
+    fn fifo_collects_samples_and_shift_gives_eight_bits() {
+        // FCS.SHIFT (datasheet): right-shift samples to 8 bits.
+        let mut m = Rp2040::new();
+        m.adc_set_channel(1, 0xabc as f64);
+        wr(&mut m, ADC + FCS, FCS_EN);
+        assert_ne!(rd(&mut m, ADC + FCS) & FCS_EMPTY, 0);
+        wr(&mut m, ADC + CS, EN | START_ONE | (1 << AINSEL));
+        ns(&mut m, 2000.0);
+        assert_eq!(level(&mut m), 1);
+        assert_eq!(rd(&mut m, ADC + FCS) & FCS_EMPTY, 0);
+        assert_eq!(rd(&mut m, ADC + FIFO), 0xabc);
+        wr(&mut m, ADC + FCS, FCS_EN | FCS_SHIFT);
+        wr(&mut m, ADC + CS, EN | START_ONE | (1 << AINSEL));
+        ns(&mut m, 2000.0);
+        assert_eq!(rd(&mut m, ADC + FIFO), 0xab);
+    }
+
+    #[test]
+    fn fifo_full_and_overflow() {
+        // Four-entry FIFO; a fifth sample sets FCS.OVER (write-1-to-clear).
+        let mut m = Rp2040::new();
+        m.adc_set_channel(0, 7.0);
+        wr(&mut m, ADC + FCS, FCS_EN);
+        wr(&mut m, ADC + CS, EN | START_MANY); // DIV 0: one sample per 2 us
+        ns(&mut m, 8000.0);
+        assert_eq!(level(&mut m), 4);
+        assert_ne!(rd(&mut m, ADC + FCS) & FCS_FULL, 0);
+        assert_eq!(rd(&mut m, ADC + FCS) & FCS_OVER, 0);
+        ns(&mut m, 2000.0);
+        assert_ne!(rd(&mut m, ADC + FCS) & FCS_OVER, 0);
+        wr(&mut m, ADC + FCS, FCS_EN | FCS_OVER);
+        assert_eq!(rd(&mut m, ADC + FCS) & FCS_OVER, 0);
+    }
+
+    #[test]
+    fn reading_an_empty_fifo_sets_under() {
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, ADC + FIFO), 0);
+        assert_ne!(rd(&mut m, ADC + FCS) & FCS_UNDER, 0);
+        wr(&mut m, ADC + FCS, FCS_UNDER);
+        assert_eq!(rd(&mut m, ADC + FCS) & FCS_UNDER, 0);
+    }
+
+    #[test]
+    fn continuous_sampling_follows_the_divider() {
+        // Datasheet: one sample per (1 + INT + FRAC/256) cycles of 48 MHz.
+        // INT 191: 192 cycles = 4 us between starts; the first lands at 2 us.
+        let mut m = Rp2040::new();
+        m.adc_set_channel(0, 5.0);
+        wr(&mut m, ADC + FCS, FCS_EN);
+        wr(&mut m, ADC + DIV, 191 << 8);
+        wr(&mut m, ADC + CS, EN | START_MANY);
+        ns(&mut m, 1999.0);
+        assert_eq!(level(&mut m), 0);
+        ns(&mut m, 1.0);
+        assert_eq!(level(&mut m), 1);
+        ns(&mut m, 4000.0);
+        assert_eq!(level(&mut m), 2);
+        ns(&mut m, 3999.0);
+        assert_eq!(level(&mut m), 2);
+        ns(&mut m, 1.0);
+        assert_eq!(level(&mut m), 3);
+    }
+
+    #[test]
+    fn fifo_interrupt_follows_the_threshold() {
+        // INTR is set while the FIFO level >= THRESH; INTS = (INTR & INTE) | INTF.
+        let mut m = Rp2040::new();
+        m.adc_set_channel(0, 9.0);
+        wr(&mut m, ADC + FCS, FCS_EN | (1 << 24));
+        wr(&mut m, ADC + INTE, 1);
+        assert_eq!(rd(&mut m, ADC + INTR), 0);
+        assert_eq!(m.cpu.pending_interrupts & (1 << 22), 0);
+        wr(&mut m, ADC + CS, EN | START_ONE);
+        ns(&mut m, 2000.0);
+        assert_eq!(rd(&mut m, ADC + INTR), 1);
+        assert_eq!(rd(&mut m, ADC + INTS), 1);
+        assert_ne!(m.cpu.pending_interrupts & (1 << 22), 0, "IRQ 22 = ADC_IRQ_FIFO");
+        wr(&mut m, ADC + INTE, 0);
+        wr(&mut m, ADC + INTF, 1);
+        assert_eq!(rd(&mut m, ADC + INTS), 1);
+    }
+
+    #[test]
+    fn dreq_follows_the_fifo_level() {
+        let mut m = Rp2040::new();
+        wr(&mut m, ADC + FCS, FCS_EN | FCS_DREQ_EN | (1 << 24));
+        m.adc_set_channel(0, 1.0);
+        wr(&mut m, ADC + CS, EN | START_ONE);
+        ns(&mut m, 2000.0);
+        assert!(m.periph.dma.dreq[super::super::dma::dreq::ADC as usize]);
+        rd(&mut m, ADC + FIFO);
+        assert!(!m.periph.dma.dreq[super::super::dma::dreq::ADC as usize]);
+    }
+
+    #[test]
+    fn reference_quirk_cs_write_clears_fcs_under() {
+        // Datasheet: CS.ERR_STICKY (bit 10) is write-1-to-clear in CS and
+        // FCS.UNDER is only cleared through FCS. The reference clears the FCS
+        // bit with the same position when CS is written.
+        let mut m = Rp2040::new();
+        rd(&mut m, ADC + FIFO);
+        assert_ne!(rd(&mut m, ADC + FCS) & FCS_UNDER, 0);
+        wr(&mut m, ADC + CS, 1 << 10);
+        assert_eq!(rd(&mut m, ADC + FCS) & FCS_UNDER, 0 /* datasheet: still set */);
+    }
+
+    #[test]
+    fn reference_quirk_start_one_reads_back_set() {
+        // Datasheet: START_ONE self-clears. The reference stores it.
+        let mut m = Rp2040::new();
+        wr(&mut m, ADC + CS, EN | START_ONE);
+        assert_ne!(rd(&mut m, ADC + CS) & START_ONE, 0 /* datasheet: 0 */);
+    }
+
+    #[test]
+    fn reference_quirk_round_robin_cannot_leave_channel_zero() {
+        // Datasheet: RROBIN = channels 0,1,2 steps 0 -> 1 -> 2 -> 0. The
+        // reference masks the next channel with 12, so 1 and 2 become 0.
+        let mut m = Rp2040::new();
+        wr(&mut m, ADC + CS, EN | START_ONE | (0b111 << RROBIN));
+        ns(&mut m, 2000.0);
+        assert_eq!((rd(&mut m, ADC + CS) >> AINSEL) & 7, 0 /* datasheet: 1 */);
+        // Channel 4 survives the mask, so a round robin over {4} works.
+        let mut m = Rp2040::new();
+        wr(&mut m, ADC + CS, EN | START_ONE | (0b10000 << RROBIN));
+        ns(&mut m, 2000.0);
+        assert_eq!((rd(&mut m, ADC + CS) >> AINSEL) & 7, 4);
+    }
+
+    #[test]
+    fn reference_quirk_fifo_read_does_not_refresh_the_interrupt() {
+        // Datasheet: the FIFO interrupt deasserts when the level drops below
+        // THRESH. The reference only recomputes the line on a push or a
+        // register write, so the pending bit stays after the pull.
+        let mut m = Rp2040::new();
+        wr(&mut m, ADC + FCS, FCS_EN | (1 << 24));
+        wr(&mut m, ADC + INTE, 1);
+        wr(&mut m, ADC + CS, EN | START_ONE);
+        ns(&mut m, 2000.0);
+        assert_ne!(m.cpu.pending_interrupts & (1 << 22), 0);
+        rd(&mut m, ADC + FIFO);
+        assert_eq!(rd(&mut m, ADC + INTS), 0);
+        assert_ne!(m.cpu.pending_interrupts & (1 << 22), 0 /* datasheet: clear */);
+    }
+}
