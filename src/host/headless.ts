@@ -389,7 +389,8 @@ export interface HeadlessRunnerOptions {
    * advance is reported on the run's result (`hitMinStep`), and a trap is
    * thrown to the caller.
    *
-   * "auto" chooses at each `load()` exactly as "core" does, and also covers
+   * "auto" chooses at each `load()` exactly as "core" does (until a run has
+   * fallen back, see below), and also covers
    * the run: when the core fails part-way (an advance that does not converge,
    * a livelock, a trap or a poisoned instance), the runner finishes on
    * classic and records why. No state is carried between the two engines, so
@@ -401,7 +402,10 @@ export interface HeadlessRunnerOptions {
    * (`"mid-run:solve-failed:<message>"`, `"mid-run:livelock:<message>"`,
    * `"core-trap"`, ...) followed by `"restarted-from-load"`, and by
    * `"replay-incomplete"` if classic stopped early in one of the earlier
-   * runs. The next `load()` chooses again. To make this possible the runner
+   * runs. After that the runner stays on classic for the rest of its life:
+   * classic carries element state across `load()`, and a core load of the
+   * same circuit would start it cold. Each later `load()` records
+   * `"staying-classic-after-fallback"` as its reason. To make this possible the runner
    * keeps a copy of each circuit loaded on the core and the options of each
    * run, and it holds a run's samples until the core has finished that run,
    * so `onSample` is called at the end of a core run rather than during it.
@@ -547,6 +551,12 @@ export class HeadlessRunner {
    * replay has nothing to redo.
    */
   private _coreHistory: CoreHistoryEntry[] = [];
+  /**
+   * "auto" only: set when a run fell back to classic part-way, and never
+   * cleared. Classic carries element state across load() and the core
+   * cannot be given classic's, so every later load stays on classic.
+   */
+  private _stayClassic = false;
 
   constructor(options?: HeadlessRunnerOptions) {
     this._integrationMethod = options?.integrationMethod ?? "be";
@@ -648,7 +658,11 @@ export class HeadlessRunner {
     }
 
     if (this._engineChoice !== "classic") {
-      const fallbackReasons = this._tryLoadCore(circuit, previousEngine === "classic" ? carryTime : undefined);
+      // A runner that fell back mid-run has classic's state, which carries
+      // across loads; a core load would start the same circuit cold.
+      const fallbackReasons = this._stayClassic
+        ? ["staying-classic-after-fallback"]
+        : this._tryLoadCore(circuit, previousEngine === "classic" ? carryTime : undefined);
       if (fallbackReasons === null) {
         if (this._engineChoice === "auto") {
           // A copy: a host may edit its circuit object in place and load it
@@ -1197,6 +1211,7 @@ export class HeadlessRunner {
   private _replayOnClassic(reasons: readonly string[]): void {
     const history = this._coreHistory;
     this._coreHistory = [];
+    this._stayClassic = true;
     this._activeEngine = "classic";
     let incomplete = false;
     let seeded = false;

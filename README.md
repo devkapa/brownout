@@ -261,7 +261,7 @@ release while the remaining device kinds are ported. On `"auto"` a core failure
 part-way through a run is replayed on the classic engine from the load, and the
 runner holds a core run's samples until that run has finished, so `onSample`
 is called at the end of each `run()`, not during it. A host that needs samples
-as they are produced should pick `"classic"` or `"core"` explicitly. The replay
+as they are produced should pick `"classic"` or `"core"` explicitly. Once an `"auto"` runner has fallen back mid-run it stays on the classic engine for the rest of its life, because classic carries element state across `load()` and a core load of the same circuit would start it cold; each later `load()` records `staying-classic-after-fallback` in `engineFallbackReasons`. The replay
 costs a second simulation of everything the runner did since classic last ran,
 and the runner keeps a copy of each circuit it loaded on the core to make it
 possible, so it suits scripts and grading runs better than a long live session. The `@brownout/*` npm scope is reserved for standalone host adapters —

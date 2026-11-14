@@ -75,6 +75,11 @@ function throwOnAdvance(n: number, error: Error): void {
   });
 }
 
+/** Everything a snapshot reads, minus the wall-clock solve time. */
+const snapshotOf = (runner: HeadlessRunner): unknown => {
+  const snap = runner.snapshot();
+  return { ...snap, solver: { ...snap.solver, lastSolveUs: 0 } };
+};
 const capV = (runner: HeadlessRunner): number => runner.snapshot().netV[runner.netIdFor("c1", "a")!]!;
 
 beforeAll(async () => {
@@ -276,16 +281,60 @@ describe('engine: "auto" — a core failure in the middle of a run replays on cl
     expect(samples[9]!.simTime).toBeCloseTo(1e-3, 15);
   });
 
-  it("the next load() chooses again, and the core takes the circuit back", () => {
+  it("after a fallback the runner stays on classic: the next load carries classic's state, bit for bit, and says why", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const classic = new HeadlessRunner();
+    const same = (): void => {
+      expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+    };
+    runner.load(rc());
+    classic.load(rc());
+    runner.run({ durationS: 1e-3 });
+    classic.run({ durationS: 1e-3 });
+    expect(runner.activeEngine).toBe("core");
+    failNextAdvance();
+    expect(runner.run({ durationS: 2e-3 })).toEqual(classic.run({ durationS: 2e-3 }));
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["mid-run:advance-failed", "restarted-from-load"]);
+    same();
+
+    // The same circuit again: classic carries the capacitor across a load; a core load would start it cold.
+    runner.load(rc());
+    classic.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+    expect(capV(classic)).toBeGreaterThan(2);
+    same();
+    expect(runner.run({ durationS: 1e-3 })).toEqual(classic.run({ durationS: 1e-3 }));
+    same();
+
+    // Every later load says so again, edits included.
+    runner.load(rc(47_000));
+    classic.load(rc(47_000));
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+    same();
+  });
+
+  it("a trap's fallback stays on classic too, even once the core is re-initialised", async () => {
     const runner = new HeadlessRunner(AUTO);
     runner.load(rc());
-    failNextAdvance();
+    throwOnAdvance(1, new CoreTrapError("wasm trap"));
     runner.run({ durationS: 1e-3 });
+    expect(runner.engineFallbackReasons).toEqual(["core-trap", "restarted-from-load"]);
+    vi.restoreAllMocks();
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+  });
+
+  it("a runner that never fell back keeps choosing at each load", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rcWithDiode());
     expect(runner.activeEngine).toBe("classic");
     runner.load(rc());
     expect(runner.activeEngine).toBe("core");
     expect(runner.engineFallbackReasons).toEqual([]);
-    expect(runner.simTime).toBeCloseTo(1e-3, 12);
   });
 });
 
