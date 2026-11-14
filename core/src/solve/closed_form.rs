@@ -565,6 +565,12 @@ pub struct ClosedFormSolver {
     w_saved: Option<Vec<String>>,
 }
 
+thread_local! {
+    /// `schedule_driven_crossing`'s voltages at the aim's rail and a step
+    /// along it, kept between calls for their buffers only.
+    static DRIVEN_SCRATCH: std::cell::RefCell<(Vec<f64>, Vec<f64>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 impl ClosedFormSolver {
     /// Each table this solver shares with snapshots, by address (W2a tests).
     #[cfg(test)]
@@ -2185,9 +2191,14 @@ impl ClosedFormSolver {
         let nominal = 1e-6 * d.u_a.abs().max(1.0);
         let gap = edges.iter().map(|&e| dir * (e - d.u_a)).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
         let step = dir * (0.5 * gap).min(nominal).max(1e-3 * nominal);
-        let mut at_rail = voltages.to_vec();
+        // The two copies of the voltages live on between calls (three re-aims
+        // a rail pass on a battery SAP-1, each allocating them, were 2 % of it).
+        let (mut at_rail, mut stepped) = DRIVEN_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+        at_rail.clear();
+        at_rail.extend_from_slice(voltages);
         at_rail[rail] = d.u_a;
-        let mut stepped = at_rail.clone();
+        stepped.clear();
+        stepped.extend_from_slice(&at_rail);
         stepped[rail] = d.u_a + step;
         for &(node, a, s) in follow {
             at_rail[node] = a + s * d.u_a;
@@ -2251,6 +2262,7 @@ impl ClosedFormSolver {
                 }
             }
         }
+        DRIVEN_SCRATCH.with(|c| *c.borrow_mut() = (at_rail, stepped));
         let (t, local, cross_v, dth) = best?;
         part.cross_local = local;
         part.cross_v = cross_v;

@@ -830,8 +830,7 @@ impl PartitionedSolver {
         let (edges, follow) = if seg.is_some() {
             let mut edges = self.rail_power_edges();
             edges.extend(self.rail_kinks());
-            edges.sort_by(f64::total_cmp);
-            edges.dedup();
+            let edges = sort_dedup_memo(SORT_EDGES, edges);
             (edges, self.rail_followers())
         } else {
             (Vec::new(), Vec::new())
@@ -873,9 +872,7 @@ impl PartitionedSolver {
                 out.extend(kinks.iter().map(|k| (k - a) / b).filter(|u| u.is_finite()));
             }
         }
-        out.sort_by(f64::total_cmp);
-        out.dedup();
-        out
+        sort_dedup_memo(SORT_KINKS, out)
     }
 
     /// The IC supply nodes on static hub partitions, as `(node, a, s)`: a
@@ -2402,9 +2399,7 @@ impl PartitionedSolver {
                 windows.push(vg + hi);
             }
         }
-        windows.sort_by(f64::total_cmp);
-        windows.dedup();
-        windows
+        sort_dedup_memo(SORT_WINDOWS, windows)
     }
 
     /// The threshold functions of the implied trajectory at `now`.
@@ -4106,6 +4101,41 @@ impl PartitionedSolver {
         }
         leaving
     }
+}
+
+const SORT_WINDOWS: usize = 0;
+const SORT_KINKS: usize = 1;
+const SORT_EDGES: usize = 2;
+
+thread_local! {
+    /// Per call site, the last list [`sort_dedup_memo`] sorted, by its bits,
+    /// and what it sorted to.
+    static SORTED: std::cell::RefCell<[(Vec<u64>, Vec<f64>); 3]> = const { std::cell::RefCell::new([(Vec::new(), Vec::new()), (Vec::new(), Vec::new()), (Vec::new(), Vec::new())]) };
+}
+
+/// `v` sorted by `f64::total_cmp` and deduplicated. The rail's power edges
+/// and threshold kinks are listed again at every rail pass and rail event,
+/// and are nearly always the list the call before found (BAT-PERF: sorting
+/// them was 2 % of a battery SAP-1): a list bit-equal to the last one at the
+/// same `site` takes the last answer, which sorting it again gives to the
+/// bit.
+fn sort_dedup_memo(site: usize, mut v: Vec<f64>) -> Vec<f64> {
+    SORTED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let (key, out) = &mut cache[site];
+        if key.len() == v.len() && key.iter().zip(&v).all(|(&k, x)| k == x.to_bits()) {
+            v.clear();
+            v.extend_from_slice(out);
+            return v;
+        }
+        key.clear();
+        key.extend(v.iter().map(|x| x.to_bits()));
+        v.sort_by(f64::total_cmp);
+        v.dedup();
+        out.clear();
+        out.extend_from_slice(&v);
+        v
+    })
 }
 
 /// Whether `driver` of `ic` can have a branch [`PartitionedSolver::direct_at`]
