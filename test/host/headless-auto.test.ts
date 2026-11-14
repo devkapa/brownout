@@ -356,6 +356,93 @@ describe('engine: "auto" — a core failure in the middle of a run replays on cl
   });
 });
 
+describe('engine: "auto" — the replay history stays small', () => {
+  /** rc() plus `n` more RC branches off the same source: a circuit with 2n + 3 parts. */
+  function wide(n: number, resistance = 10_000): SimCircuit {
+    const circuit = rc(resistance);
+    for (let i = 0; i < n; i++) {
+      circuit.components.push(
+        part(`rx${i}`, "resistor", ["a", "b"], { resistance: 1000 + i }),
+        part(`cx${i}`, "capacitor", ["a", "b"], { capacitance: 1e-9 * (1 + i) }),
+      );
+      circuit.wires.push(wire("r1", "b", `rx${i}`, "a"), wire(`rx${i}`, "b", `cx${i}`, "a"), wire(`cx${i}`, "b", "vsrc", "neg"));
+    }
+    return circuit;
+  }
+  type Entry = { kind: string; circuit?: SimCircuit };
+  const historyOf = (runner: HeadlessRunner): Entry[] => (runner as unknown as { _coreHistory: Entry[] })._coreHistory;
+  const retainedComponents = (runner: HeadlessRunner): number => {
+    const seen = new Set<object>();
+    for (const entry of historyOf(runner)) for (const component of entry.circuit?.components ?? []) seen.add(component);
+    return seen.size;
+  };
+
+  it("200 loads of one circuit keep one copy of it", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const circuit = wide(100); // 203 parts
+    for (let i = 0; i < 200; i++) {
+      runner.load(circuit);
+      runner.run({ durationS: 1e-6 });
+    }
+    expect(runner.activeEngine).toBe("core");
+    expect(historyOf(runner).filter((entry) => entry.kind === "load")).toHaveLength(200);
+    expect(new Set(historyOf(runner).flatMap((entry) => (entry.circuit ? [entry.circuit] : []))).size).toBe(1);
+    expect(retainedComponents(runner)).toBe(203);
+  });
+
+  it("200 edits of one part keep one copy of every part that did not change", () => {
+    const runner = new HeadlessRunner(AUTO);
+    for (let i = 0; i < 200; i++) {
+      runner.load(wide(100, 1000 + i));
+      runner.run({ durationS: 1e-6 });
+    }
+    // 202 untouched parts once each, and r1 once per edit.
+    expect(retainedComponents(runner)).toBe(202 + 200);
+  });
+
+  it("a replay after 200 loads and runs is still bit for bit what a classic runner gives", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const classic = new HeadlessRunner();
+    for (let i = 0; i < 200; i++) {
+      // Edits that come back to an earlier value, so shared parts are reused out of order.
+      const circuit = wide(10, 1000 + (i % 7) * 500);
+      runner.load(circuit);
+      classic.load(circuit);
+      runner.run({ durationS: 1e-4 });
+      classic.run({ durationS: 1e-4 });
+    }
+    expect(runner.activeEngine).toBe("core");
+    failNextAdvance();
+    expect(runner.run({ durationS: 1e-4 })).toEqual(classic.run({ durationS: 1e-4 }));
+    expect(runner.activeEngine).toBe("classic");
+    expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+  });
+
+  it("the circuit replayed is still the one load() took when parts are shared", () => {
+    const circuit = wide(3);
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(circuit);
+    runner.run({ durationS: 1e-3 });
+    circuit.components[1]!.params.resistance = 1; // edited in place...
+    runner.load(circuit); // ...and loaded: a new part, the old one kept for the first load
+    runner.run({ durationS: 1e-3 });
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+    const classic = classicOf(() => wide(3), circuit);
+    expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+  });
+});
+
+function classicOf(first: () => SimCircuit, second: SimCircuit): HeadlessRunner {
+  const classic = new HeadlessRunner();
+  classic.load(first());
+  classic.run({ durationS: 1e-3 });
+  classic.load(second);
+  classic.run({ durationS: 1e-3 });
+  classic.run({ durationS: 1e-3 });
+  return classic;
+}
+
 describe('engine: "core" — an explicit request still reports the failure itself', () => {
   it("a failed advance is hitMinStep on the result, and the runner stays on the core", () => {
     const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });

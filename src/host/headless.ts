@@ -496,6 +496,50 @@ type CoreHistoryEntry =
   | { readonly kind: "load"; readonly circuit: SimCircuit; readonly integrationMethod: "be" | "trap"; readonly simTime: number }
   | { readonly kind: "run"; readonly options: HeadlessRunOptions };
 
+/**
+ * Structural equality for the plain data a SimCircuit is made of. Object.is on
+ * leaves, so a NaN equals itself and 0 differs from -0: two values this calls
+ * equal are the same to the engine, and anything doubtful reads as different.
+ */
+function sameData(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => sameData(item, b[i]));
+  }
+  const keysA = Object.keys(a);
+  if (keysA.length !== Object.keys(b).length) return false;
+  const recordB = b as Record<string, unknown>;
+  return keysA.every(
+    (key) => Object.prototype.hasOwnProperty.call(b, key) && sameData((a as Record<string, unknown>)[key], recordB[key]),
+  );
+}
+
+/**
+ * A private copy of `circuit` for the replay history, sharing with `previous`
+ * (the copy kept for the last load) every part, and the wires, that did not
+ * change. Reloading an unchanged circuit keeps no new copy at all and a live
+ * edit keeps only the parts it touched, so the history grows by what changed,
+ * not by the size of the circuit at each load. Nothing in a kept copy is ever
+ * edited (the replay loads a clone of it), so sharing cannot leak one load's
+ * data into another.
+ */
+function retainCircuit(previous: SimCircuit | undefined, circuit: SimCircuit): SimCircuit {
+  if (previous !== undefined && sameData(previous, circuit)) return previous;
+  const copy = structuredClone(circuit);
+  if (previous === undefined) return copy;
+  const earlier = new Map(previous.components.map((component) => [component.id, component]));
+  return {
+    ...copy,
+    components: copy.components.map((component) => {
+      const kept = earlier.get(component.id);
+      return kept !== undefined && sameData(kept, component) ? kept : component;
+    }),
+    wires: sameData(previous.wires, copy.wires) ? previous.wires : copy.wires,
+  };
+}
+
 interface StepAttempt {
   accepted: boolean;
   iters: number;
@@ -667,9 +711,16 @@ export class HeadlessRunner {
         if (this._engineChoice === "auto") {
           // A copy: a host may edit its circuit object in place and load it
           // again, and the replay must load what the core was given each time.
+          let previousCircuit: SimCircuit | undefined;
+          if (previousEngine === "core") {
+            for (let i = this._coreHistory.length - 1; i >= 0 && previousCircuit === undefined; i--) {
+              const earlier = this._coreHistory[i]!;
+              if (earlier.kind === "load") previousCircuit = earlier.circuit;
+            }
+          }
           const entry: CoreHistoryEntry = {
             kind: "load",
-            circuit: structuredClone(circuit),
+            circuit: retainCircuit(previousCircuit, circuit),
             integrationMethod: this._integrationMethod,
             simTime: (this._coreEngine as CoreEngine).simTime,
           };
@@ -1225,11 +1276,14 @@ export class HeadlessRunner {
         }
         this._integrationMethod = entry.integrationMethod;
         this._engine.setIntegrationMethod(entry.integrationMethod);
-        this._engine.load(entry.circuit);
-        this._circuit = entry.circuit;
+        // A clone: kept copies share parts with each other and are never given
+        // to an engine.
+        const circuit = structuredClone(entry.circuit);
+        this._engine.load(circuit);
+        this._circuit = circuit;
         this._adaptiveH = H_INITIAL;
         this._changing = true;
-        this._errorReplay = circuitSupportsStepReplay(entry.circuit);
+        this._errorReplay = circuitSupportsStepReplay(circuit);
       } else {
         const replayed = this.run(entry.options);
         if (replayed.hitMinStep || replayed.hitStepCap) incomplete = true;
