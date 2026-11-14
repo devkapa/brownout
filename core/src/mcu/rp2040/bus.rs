@@ -166,6 +166,8 @@ impl Rp2040 {
                 return;
             }
             self.flash[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            self.flash_dirty.insert((off >> 12) as u32);
+            self.flash_dirty.insert(((off + 3) >> 12) as u32);
         } else if (RAM_START..RAM_END).contains(&address) {
             let off = (address - RAM_START) as usize;
             if off + 4 > self.sram.len() {
@@ -175,8 +177,14 @@ impl Rp2040 {
             self.sram[off..off + 4].copy_from_slice(&value.to_le_bytes());
         } else if (DPRAM_START..DPRAM_END).contains(&address) {
             // The reference stores the word and then calls the USB
-            // controller's DPRAMUpdated, which is R4.
-            self.halt(Stop::UsbDpram { address });
+            // controller's DPRAMUpdated.
+            let off = (address - DPRAM_START) as usize;
+            if off + 4 > self.dpram.len() {
+                self.halt(Stop::OutOfRange { address });
+                return;
+            }
+            self.dpram[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            self.usb_dpram_updated(off as u32, value);
         } else if (SIO_START..SIO_END).contains(&address) {
             self.sio_write(address - SIO_START, value);
         } else if address >> 12 == 0xe000e {

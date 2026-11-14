@@ -889,9 +889,11 @@ fn unported_peripherals_stop_the_machine_at_first_access() {
         }
         assert_eq!(m.stop, Some(Stop::Peripheral { name, address: addr, write }));
     }
+    // R4: the USB DPRAM stores the word and runs the controller's hook.
     let mut m = Rp2040::new();
     m.write_u32(0x5010_0000, 1);
-    assert_eq!(m.stop, Some(Stop::UsbDpram { address: 0x5010_0000 }));
+    assert_eq!(m.stop, None);
+    assert_eq!(m.read_u32(0x5010_0000), 1);
     let mut m = Rp2040::new();
     m.read_u32(RAM_START + 2);
     assert_eq!(m.stop, Some(Stop::UnalignedRead { address: RAM_START + 2 }));

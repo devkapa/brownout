@@ -132,12 +132,39 @@ impl Rp2040 {
                     let end = (off + 32 + size as usize).min(uf2.len());
                     let src = &uf2[off + 32..end];
                     self.flash[dest..dest + src.len()].copy_from_slice(src);
+                    self.mark_flash_dirty(dest, src.len());
                     applied += 1;
                 }
             }
             off += 512;
         }
         applied
+    }
+
+    /// Marks the pages of a range written outside the bus (a loader).
+    pub fn mark_flash_dirty(&mut self, offset: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        for p in (offset >> 12)..=((offset + len - 1) >> 12) {
+            self.flash_dirty.insert(p as u32);
+        }
+    }
+
+    /// FNV-1a over the pages written since the last call, each as its index
+    /// followed by its words, in page order; clears the set. A full hash
+    /// also clears it.
+    pub fn flash_dirty_hash(&mut self) -> u32 {
+        let mut h = 0x811c_9dc5u32;
+        for &p in &self.flash_dirty {
+            h = (h ^ p).wrapping_mul(0x0100_0193);
+            let start = (p as usize) << 12;
+            for w in self.flash[start..start + 4096].chunks_exact(4) {
+                h = (h ^ u32::from_le_bytes([w[0], w[1], w[2], w[3]])).wrapping_mul(0x0100_0193);
+            }
+        }
+        self.flash_dirty.clear();
+        h
     }
 
     /// FNV-1a over flash as little-endian words.

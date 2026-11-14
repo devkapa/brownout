@@ -128,7 +128,6 @@ fn ports_not_yet_ported_still_stop_by_name() {
         (0x4004_c000, "ADC"),
         (0x4005_0000, "PWM_BASE"),
         (0x5000_0000, "DMA"),
-        (0x5011_0000, "USB"),
         (0x5020_0000, "PIO0"),
         (0x5030_0000, "PIO1"),
     ] {

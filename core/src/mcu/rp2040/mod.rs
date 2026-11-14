@@ -36,6 +36,7 @@ pub mod rtc;
 pub mod sio;
 pub mod ssi;
 pub mod timer;
+pub mod usb;
 
 #[cfg(test)]
 mod r2_tests;
@@ -43,6 +44,8 @@ mod r2_tests;
 mod r2_upstream_tests;
 #[cfg(test)]
 mod r3_tests;
+#[cfg(test)]
+mod r4_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -112,6 +115,13 @@ pub struct ScheduledInput {
     pub level: bool,
 }
 
+/// REPL bytes the host feeds the CDC at a fixed cycle count, like a pin input.
+#[derive(Clone, Debug)]
+pub struct ScheduledRepl {
+    pub at_cycle: f64,
+    pub bytes: Vec<u8>,
+}
+
 /// One change of a GPIO's drive state, as rp2040js's pin listeners see it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PinEvent {
@@ -125,6 +135,9 @@ pub struct Rp2040 {
     pub bootrom: Vec<u32>,
     pub sram: Vec<u8>,
     pub flash: Vec<u8>,
+    /// 4 KB flash pages written through the bus or a loader since the last
+    /// flash hash; the harness hashes only these between full hashes.
+    pub flash_dirty: std::collections::BTreeSet<u32>,
     pub dpram: Vec<u8>,
     pub clock: Clock,
     pub ppb: Ppb,
@@ -137,6 +150,7 @@ pub struct Rp2040 {
     pub warnings: u64,
     pub steps: u64,
     pub inputs: Vec<ScheduledInput>,
+    pub repl_inputs: Vec<ScheduledRepl>,
     pub pin_events: Vec<PinEvent>,
 }
 
@@ -155,6 +169,7 @@ impl Rp2040 {
             bootrom: vec![0; BOOTROM_WORDS],
             sram: vec![0; SRAM_BYTES],
             flash: vec![0; FLASH_BYTES],
+            flash_dirty: Default::default(),
             dpram: vec![0; DPRAM_BYTES],
             clock: Clock::new(),
             ppb: Ppb::new(),
@@ -165,6 +180,7 @@ impl Rp2040 {
             warnings: 0,
             steps: 0,
             inputs: Vec::new(),
+            repl_inputs: Vec::new(),
             pin_events: Vec::new(),
         };
         m.ppb_construct();
@@ -203,7 +219,7 @@ impl Rp2040 {
     /// Applies every scheduled input due at the current clock cycle, in the
     /// order they were scheduled.
     fn apply_due_inputs(&mut self) {
-        if self.inputs.is_empty() {
+        if self.inputs.is_empty() && self.repl_inputs.is_empty() {
             return;
         }
         let now_cycle = self.clock.nanos / CYCLE_NANOS;
@@ -216,6 +232,24 @@ impl Rp2040 {
                 i += 1;
             }
         }
+        let mut i = 0;
+        while i < self.repl_inputs.len() {
+            if self.repl_inputs[i].at_cycle <= now_cycle {
+                let inp = self.repl_inputs.remove(i);
+                self.cdc_send(&inp.bytes);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// The earliest cycle any scheduled input is due at.
+    fn next_input_cycle(&self) -> Option<f64> {
+        self.inputs
+            .iter()
+            .map(|i| i.at_cycle)
+            .chain(self.repl_inputs.iter().map(|i| i.at_cycle))
+            .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.min(c))))
     }
 
     /// One iteration of rp2040js's `Simulator.execute` loop: a waiting core
@@ -225,8 +259,21 @@ impl Rp2040 {
         self.apply_due_inputs();
         if self.cpu.waiting {
             if self.clock.alarms.is_empty() {
-                self.halt(Stop::Idle);
-                return;
+                // Nothing is scheduled, but a host input still to come wakes
+                // the machine: the clock jumps to it (the wrapper idles its
+                // time budget out the same way) and the next step applies it.
+                match self.next_input_cycle() {
+                    Some(c) if c * CYCLE_NANOS > self.clock.nanos => {
+                        let dn = c * CYCLE_NANOS - self.clock.nanos;
+                        self.clock_tick(dn);
+                        self.steps += 1;
+                        return;
+                    }
+                    _ => {
+                        self.halt(Stop::Idle);
+                        return;
+                    }
+                }
             }
             let dn = self.clock.nanos_to_next_alarm();
             self.clock_tick(dn);
@@ -276,6 +323,10 @@ impl Rp2040 {
             clock::AlarmId::Systick => self.systick_alarm_fired(),
             clock::AlarmId::Timer(i) => self.timer_alarm_fired(i as usize),
             clock::AlarmId::Watchdog => self.watchdog_alarm_fired(),
+            clock::AlarmId::UsbRead(i) => self.usb_read_alarm_fired(i as usize),
+            clock::AlarmId::UsbWrite(i) => self.usb_write_alarm_fired(i as usize),
+            clock::AlarmId::UsbReset => self.usb_reset_alarm_fired(),
+            clock::AlarmId::UsbSof => self.usb_generate_sof(),
         }
     }
 }

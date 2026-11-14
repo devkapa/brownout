@@ -13,6 +13,10 @@ pub enum AlarmId {
     Systick,
     Timer(u8),
     Watchdog,
+    UsbRead(u8),
+    UsbWrite(u8),
+    UsbReset,
+    UsbSof,
 }
 
 pub struct Clock {

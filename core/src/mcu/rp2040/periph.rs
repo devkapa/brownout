@@ -42,6 +42,7 @@ pub enum Block {
     Vreg,
     Tbman,
     Ssi,
+    Usb,
 }
 
 impl Block {
@@ -68,6 +69,7 @@ impl Block {
             "VREG_AND_CHIP_RESET_BASE" => Block::Vreg,
             "TBMAN_BASE" => Block::Tbman,
             "SSI" => Block::Ssi,
+            "USB" => Block::Usb,
             _ => return None,
         })
     }
@@ -256,6 +258,8 @@ pub struct Periph {
     pub rtc: super::rtc::Rtc,
     pub io: super::gpiobank::GpioBank,
     pub ssi: super::ssi::Ssi,
+    pub usb: super::usb::Usb,
+    pub cdc: super::usb::Cdc,
 }
 
 impl Default for Periph {
@@ -280,6 +284,8 @@ impl Periph {
             rtc: super::rtc::Rtc::new(),
             io: super::gpiobank::GpioBank::new(),
             ssi: super::ssi::Ssi::default(),
+            usb: super::usb::Usb::new(),
+            cdc: super::usb::Cdc::new(),
         }
     }
 }
@@ -366,6 +372,7 @@ impl Rp2040 {
                 }
             }
             Block::Ssi => self.ssi_read(offset),
+            Block::Usb => self.usb_read(offset),
             Block::Timer => self.timer_read(offset),
             Block::Watchdog => self.watchdog_read(offset),
             Block::Rtc => self.rtc_read(offset),
@@ -433,6 +440,7 @@ impl Rp2040 {
                 }
             }
             Block::Ssi => self.ssi_write(offset, value),
+            Block::Usb => self.usb_write(offset, value, raw),
             Block::Timer => self.timer_write(offset, value, raw),
             Block::Watchdog => self.watchdog_write(offset, value),
             Block::Rtc => self.rtc_write(offset, value),

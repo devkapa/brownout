@@ -6,7 +6,7 @@
 use super::{Rp2040, ScheduledInput, Stop};
 
 /// Words in the state record `rp_state` writes, all as f64.
-pub const STATE_WORDS: usize = 91;
+pub const STATE_WORDS: usize = 98;
 
 #[no_mangle]
 pub extern "C" fn rp_alloc(len: u32) -> *mut u8 {
@@ -65,6 +65,7 @@ pub unsafe extern "C" fn rp_flash_write(m: *mut Rp2040, offset: u32, ptr: *const
         return -1;
     }
     mach.flash[off..off + bytes.len()].copy_from_slice(bytes);
+    mach.mark_flash_dirty(off, bytes.len());
     0
 }
 
@@ -84,7 +85,59 @@ pub unsafe extern "C" fn rp_load_uf2(m: *mut Rp2040, ptr: *const u8, len: u32) -
 /// `m` from `rp_create`.
 #[no_mangle]
 pub unsafe extern "C" fn rp_flash_hash(m: *mut Rp2040) -> u32 {
-    machine(m).flash_hash()
+    let mach = machine(m);
+    mach.flash_dirty.clear();
+    mach.flash_hash()
+}
+
+/// FNV-1a over the flash pages written since the last flash hash, then
+/// forgets them.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_flash_dirty_hash(m: *mut Rp2040) -> u32 {
+    machine(m).flash_dirty_hash()
+}
+
+/// Turns the wrapper's read-holding policy on or off (off is plain USBCDC).
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_cdc_hold_reads(m: *mut Rp2040, on: u32) {
+    machine(m).periph.cdc.hold_reads = on != 0;
+}
+
+/// Feeds REPL bytes to the CDC host at a fixed cycle count.
+///
+/// # Safety
+/// `m` from `rp_create`; `ptr` valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rp_schedule_repl(m: *mut Rp2040, at_cycle: f64, ptr: *const u8, len: u32) {
+    let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+    machine(m).repl_inputs.push(super::ScheduledRepl { at_cycle, bytes });
+}
+
+/// Bytes the device has sent over CDC so far.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_serial_len(m: *mut Rp2040) -> u32 {
+    machine(m).periph.cdc.serial_out.len() as u32
+}
+
+/// Copies up to `cap` of the CDC output bytes to `out`; returns the count.
+///
+/// # Safety
+/// `m` from `rp_create`; `out` valid for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rp_serial_read(m: *mut Rp2040, out: *mut u8, cap: u32) -> u32 {
+    let s = &machine(m).periph.cdc.serial_out;
+    let n = s.len().min(cap as usize);
+    std::ptr::copy_nonoverlapping(s.as_ptr(), out, n);
+    n as u32
 }
 
 /// Copies bytes into SRAM at `offset` (synthetic images).
@@ -305,6 +358,13 @@ fn r2_state(mach: &mut Rp2040, s: &mut [f64]) {
     s[84] = fnv(p.busctrl.perf_ctr.into_iter().chain(p.busctrl.perf_sel)) as f64;
     s[88] = (p.watchdog.alarm.enabled as u32 | ((p.watchdog.timer.enabled as u32) << 1)) as f64;
     s[90] = p.ssi.digest() as f64;
+    s[91] = p.usb.digest() as f64;
+    s[92] = fnv(mach.dpram.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))) as f64;
+    s[93] = p.usb.alarm_digest() as f64;
+    s[94] = p.cdc.digest() as f64;
+    s[95] = p.cdc.wrapper_digest() as f64;
+    s[96] = p.cdc.serial_out.len() as f64;
+    s[97] = p.cdc.serial_hash() as f64;
     s[89] = (p.io.voltage_select[0] | (p.io.voltage_select[1] << 1)) as f64;
     s[85] = fnv(mach.sio.gpio.iter().map(|p| p.pad_value)) as f64;
     s[86] = fnv(mach.sio.qspi.iter().flat_map(|p| [p.pad_value, p.ctrl, p.irq_status])) as f64;

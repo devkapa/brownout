@@ -33,7 +33,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { Simulator, ConsoleLogger, LogLevel } from "rp2040js";
+import { Simulator, ConsoleLogger, LogLevel, USBCDC } from "rp2040js";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -47,7 +47,7 @@ const bootromPath = path.join(repoRoot, "src", "sim", "engine", "rp2040-bootrom.
 // UTC, so the reference runs in UTC.
 process.env.TZ = "UTC";
 
-const STATE_WORDS = 91;
+const STATE_WORDS = 98;
 const STATE_NAMES = [
   ...Array.from({ length: 13 }, (_, i) => `r${i}`), "sp", "lr", "pc",
   "xPSR", "MSP", "PSP", "PRIMASK", "CONTROL", "cycles", "nanos", "waiting", "eventRegistered",
@@ -61,6 +61,7 @@ const STATE_NAMES = [
   "xosc.count", "psm.frceOn", "psm.frceOff", "psm.wdsel", "watchdog.ctrl", "watchdog.reason", "watchdog.scratch",
   "watchdog.tick", "watchdog.triggers", "rtc.ctrl", "rtc.setup0", "rtc.setup1", "rtc.rtc1", "rtc.rtc0", "syscfg.nmiMask",
   "busctrl.digest", "pads.bank0", "pads.qspi", "io.digest", "watchdog.enables", "pads.voltage", "ssi.digest",
+  "usb.regs", "usb.dpramHash", "usb.endpointAlarms", "cdc.state", "cdc.wrapper", "serial.count", "serial.hash",
 ];
 const STOP_KINDS = ["running", "peripheral", "usb-dpram", "unaligned-read", "out-of-range", "break", "idle"];
 
@@ -354,7 +355,13 @@ const IMAGES = {
   // RP2040Mcu.boot(): boot ROM, then MicroPython's UF2 in flash, PC at boot2.
   "mpy-wrapper": {
     k: 2000,
-    steps: 2_000_000,
+    steps: 20_000_000,
+    // REPL input at fixed cycle counts (the wrapper nudges with CR LF, then
+    // the program): 200 ms and 300 ms of simulated time.
+    inputs: [
+      { atCycle: 25_000_000, repl: "\r\n" },
+      { atCycle: 37_500_000, repl: "print(1+1)\r\n" },
+    ],
     setup(s) {
       s.bootrom(loadBootrom());
       s.uf2(fs.readFileSync(uf2Path)); // the wrapper's loadFirmware
@@ -375,6 +382,10 @@ const IMAGES = {
   "mpy-app": {
     k: 2000,
     steps: 20_000_000,
+    inputs: [
+      { atCycle: 25_000_000, repl: "\r\n" },
+      { atCycle: 37_500_000, repl: "print(1+1)\r\n" },
+    ],
     setup(s) {
       s.bootrom(loadBootrom());
       const blocks = uf2Blocks(fs.readFileSync(uf2Path));
@@ -655,6 +666,7 @@ function rustSide() {
   const inst = new WebAssembly.Instance(wasmModule, { env: { bo_host_now_ms: () => performance.now() } });
   const x = inst.exports;
   const m = x.rp_create();
+  x.rp_cdc_hold_reads(m, 1); // the wrapper's read-holding policy
   const mem = () => new Uint8Array(x.memory.buffer);
   const withBytes = (bytes, fn) => {
     const p = x.rp_alloc(bytes.length);
@@ -673,6 +685,15 @@ function rustSide() {
       uf2: (bytes) => withBytes(bytes, (p) => x.rp_load_uf2(m, p, bytes.length)),
       reg: (n, v) => x.rp_set_reg(m, n, v >>> 0),
       input: (atCycle, pin, level) => x.rp_schedule_input(m, atCycle, pin, level),
+      repl: (atCycle, text) => withBytes(Buffer.from(text, "latin1"), (p) => x.rp_schedule_repl(m, atCycle, p, text.length)),
+    },
+    serial() {
+      const n = x.rp_serial_len(m);
+      const p = x.rp_alloc(n + 1);
+      x.rp_serial_read(m, p, n);
+      const out = Buffer.from(new Uint8Array(x.memory.buffer, p, n)).toString("latin1");
+      x.rp_free(p, n + 1);
+      return out;
     },
     run: (n) => x.rp_run(m, n),
     steps: () => x.rp_steps(m),
@@ -681,7 +702,7 @@ function rustSide() {
       return Array.from(new Float64Array(x.memory.buffer, stateBuf, STATE_WORDS));
     },
     ramHash: () => x.rp_ram_hash(m) >>> 0,
-    flashHash: () => x.rp_flash_hash(m) >>> 0,
+    flashHash: (full) => (full ? x.rp_flash_hash(m) : x.rp_flash_dirty_hash(m)) >>> 0,
     stop() {
       const kind = x.rp_stop_kind(m);
       const n = x.rp_stop_name(m, nameBuf, 64);
@@ -715,9 +736,51 @@ function jsSide() {
   rp.onBreak = (code) => {
     breakCode = code;
   };
+  // brownout's RP2040Mcu.boot(): USBCDC on the controller, and the wrapper's
+  // wrapping of the OUT read handler (held reads, a REPL queue).
+  const cdc = new USBCDC(rp.usbCtrl);
+  const serial = [];
+  let connected = false;
+  const held = new Map();
+  const queue = [];
+  cdc.onDeviceConnected = () => {
+    connected = true;
+  };
+  cdc.onSerialData = (buf) => {
+    for (const b of buf) serial.push(b);
+  };
+  {
+    const usb = rp.usbCtrl;
+    const answerRead = usb.onEndpointRead;
+    usb.onEndpointRead = (endpoint, byteCount) => {
+      const fifo = cdc.txFIFO;
+      const n = Math.min(fifo.size - fifo.itemCount, queue.length);
+      for (let i = 0; i < n; i++) fifo.push(queue[i]);
+      queue.splice(0, n);
+      if (cdc.txFIFO.empty) held.set(endpoint, byteCount);
+      else answerRead?.(endpoint, byteCount);
+    };
+  }
+  const replSend = (bytes) => {
+    for (const b of bytes) queue.push(b);
+    const h = [...held];
+    held.clear();
+    for (const [endpoint, byteCount] of h) rp.usbCtrl.onEndpointRead?.(endpoint, byteCount);
+  };
   const events = [];
   rp.gpio.forEach((pin, i) => pin.addListener((state) => events.push([i, state, sim.clock.nanos])));
   const inputs = [];
+  const replInputs = [];
+  const dirtyFlash = new Set();
+  const markFlash = (off, len) => {
+    for (let p = off >> 12; len > 0 && p <= (off + len - 1) >> 12; p++) dirtyFlash.add(p);
+  };
+  // Every flash write the bus makes goes through this DataView.
+  const setU32 = rp.flashView.setUint32.bind(rp.flashView);
+  rp.flashView.setUint32 = (off, v, le) => {
+    markFlash(off, 4);
+    return setU32(off, v, le);
+  };
   let steps = 0;
   let stop = null;
   const core = rp.core;
@@ -729,8 +792,22 @@ function jsSide() {
         rp.gpio[inp.pin].setInputValue(!!inp.level);
       } else i++;
     }
+    for (let i = 0; i < replInputs.length; ) {
+      if (replInputs[i].atCycle <= nowCycle) {
+        const inp = replInputs.splice(i, 1)[0];
+        replSend(Buffer.from(inp.text, "latin1"));
+      } else i++;
+    }
     if (core.waiting) {
       if (!sim.clock.nextAlarm) {
+        // Nothing scheduled: a host input still to come wakes the machine.
+        const due = [...inputs, ...replInputs].map((x) => x.atCycle);
+        const next = due.length ? Math.min(...due) : null;
+        if (next !== null && next * 8 > sim.clock.nanos) {
+          sim.clock.tick(next * 8 - sim.clock.nanos);
+          steps++;
+          return true;
+        }
         stop = { kind: "idle" };
         return false; // nothing ran
       }
@@ -752,16 +829,24 @@ function jsSide() {
   return {
     side: {
       bootrom: (words) => rp.loadBootrom(words),
-      flash: (off, bytes) => rp.flash.set(bytes, off),
+      flash: (off, bytes) => {
+        rp.flash.set(bytes, off);
+        markFlash(off, bytes.length);
+      },
       sram: (off, bytes) => rp.sram.set(bytes, off),
       uf2: (bytes) => {
-        for (const [off, b] of uf2Blocks(bytes)) rp.flash.set(b, off);
+        for (const [off, b] of uf2Blocks(bytes)) {
+          rp.flash.set(b, off);
+          markFlash(off, b.length);
+        }
       },
       reg: (n, v) => {
         core.registers[n] = v >>> 0;
       },
       input: (atCycle, pin, level) => inputs.push({ atCycle, pin, level }),
+      repl: (atCycle, text) => replInputs.push({ atCycle, text }),
     },
+    serial: () => Buffer.from(serial).toString("latin1"),
     run(n) {
       let done = 0;
       while (done < n && stop === null && step()) done++;
@@ -875,6 +960,28 @@ function jsSide() {
       s[88] = (wd.alarm.enable ? 1 : 0) | (wd.timer.enable ? 2 : 0);
       const ssi = per[0x18000];
       s[90] = fnv([ssi.dr0, ssi.txflr, ssi.rxflr, ssi.baudr, ssi.crtlr0, ssi.crtlr1, ssi.ssienr, ssi.spictlr0, ssi.rxsampldly, ssi.txddriveedge]);
+      const usbc = per[0x50110];
+      s[91] = fnv([
+        usbc.addrEndp, usbc.mainCtrl, usbc.intRaw, usbc.intEnable, usbc.intForce, usbc.sieStatus, usbc.buffStatus, usbc.sieCtrl,
+        usbc.sofFrameNumber, usbc.devAddrCtrl, usbc.intEpCtrl, usbc.usbPwr, usbc.nakPoll, usbc.epAbort, usbc.epAbortDone,
+        usbc.epStallArm, usbc.epStatusStallNak, usbc.hostMode ? 1 : 0, usbc.sofEnabled ? 1 : 0, usbc.controlDataPid, ...usbc.intEpAddrCtrl,
+      ]);
+      s[92] = fnv(new Uint32Array(rp.usbDPRAM.buffer, rp.usbDPRAM.byteOffset, rp.usbDPRAM.byteLength / 4));
+      const alarmVals = [];
+      for (const list of [usbc.endpointReadAlarms, usbc.endpointWriteAlarms]) {
+        for (const a of list) {
+          alarmVals.push(a.buffers.length);
+          for (const b of a.buffers) alarmVals.push(b.length, ...b);
+        }
+      }
+      s[93] = fnv(alarmVals);
+      s[94] = fnv([
+        cdc.initialized ? 1 : 0, cdc.descriptorsSize ?? 0xffffffff, cdc.descriptors.length, cdc.outEndpoint, cdc.inEndpoint,
+        cdc.txFIFO.itemCount, ...cdc.descriptors, ...cdc.txFIFO.items,
+      ]);
+      s[95] = fnv([connected ? 1 : 0, held.size, queue.length, ...[...held].flat(), ...queue]);
+      s[96] = serial.length;
+      s[97] = fnv(serial);
       s[89] = u(per[0x4001c].voltageSelect) | (u(per[0x40020].voltageSelect) << 1);
       return s;
     },
@@ -884,10 +991,19 @@ function jsSide() {
       for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
       return h;
     },
-    flashHash() {
+    flashHash(full) {
       const w = new Uint32Array(rp.flash.buffer, rp.flash.byteOffset, rp.flash.byteLength / 4);
       let h = 0x811c9dc5;
-      for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
+      if (full) {
+        for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
+      } else {
+        // The pages written since the last hash, each as its index and words.
+        for (const p of [...dirtyFlash].sort((a, b) => a - b)) {
+          h = Math.imul(h ^ p, 0x01000193) >>> 0;
+          for (let i = p * 1024; i < p * 1024 + 1024; i++) h = Math.imul(h ^ w[i], 0x01000193) >>> 0;
+        }
+      }
+      dirtyFlash.clear();
       return h;
     },
     pinEvents: () => events,
@@ -963,7 +1079,10 @@ function make(image) {
   const js = jsSide();
   for (const s of [rust, js]) {
     image.setup(s.side);
-    for (const inp of image.inputs ?? []) s.side.input(inp.atCycle, inp.pin, inp.level);
+    for (const inp of image.inputs ?? []) {
+      if (inp.repl !== undefined) s.side.repl(inp.atCycle, inp.repl);
+      else s.side.input(inp.atCycle, inp.pin, inp.level);
+    }
   }
   return { rust, js };
 }
@@ -981,15 +1100,15 @@ function sameEvents(a, b) {
   return true;
 }
 
-function compare(rust, js, withRam, withFlash = false) {
+function compare(rust, js, withRam, flash = "dirty") {
   const d = diffState(rust.state(), js.state());
   if (rust.steps() !== js.steps()) d.unshift(`steps: rust ${rust.steps()} js ${js.steps()}`);
   if (withRam) {
     const hr = rust.ramHash(), hj = js.ramHash();
     if (hr !== hj) d.push(`sram hash: rust ${hex(hr)} js ${hex(hj)}`);
   }
-  if (withFlash) {
-    const fr = rust.flashHash(), fj = js.flashHash();
+  if (flash) {
+    const fr = rust.flashHash(flash === "full"), fj = js.flashHash(flash === "full");
     if (fr !== fj) d.push(`flash hash: rust ${hex(fr)} js ${hex(fj)}`);
   }
   if (!sameEvents(rust.pinEvents(), js.pinEvents())) d.push(`pin events: rust ${JSON.stringify(rust.pinEvents())} js ${JSON.stringify(js.pinEvents())}`);
@@ -1037,9 +1156,10 @@ function runImage(name, image, steps, k) {
     const nj = js.run(nr);
     total += nr;
     checkpoints++;
-    // Flash is 16 MB: hashed on the first, every 32nd and the last checkpoint.
+    // Flash is 16 MB: hashed in full at the first and the last checkpoint,
+    // and between them only the pages written since the previous one.
     const last = nr < want || total >= steps;
-    const d = compare(rust, js, true, checkpoints === 1 || checkpoints % 32 === 0 || last);
+    const d = compare(rust, js, true, checkpoints === 1 || last ? "full" : "dirty");
     if (nj !== nr && d.length === 0) d.push(`reference stopped early: ${JSON.stringify(js.stop())}`);
     if (d.length) {
       console.log(`${name}: DIVERGED between steps ${good} and ${total}`);
@@ -1065,12 +1185,14 @@ function runImage(name, image, steps, k) {
     where += `; stopped: ${what}`;
     if (st.kind !== "idle") where += ` (instruction ${decodeAt(rust, pc)})`;
   }
+  const serialRust = rust.serial();
   const state = rust.state();
   console.log(
     `${name}: ZERO divergence over ${total} steps, ${checkpoints} checkpoints of <= ${k}; ` +
       `${state[21]} cycles, clock ${state[22]} ns, ${rust.pinEvents().length} pin events; ${where} ` +
       `[${((performance.now() - t0) / 1000).toFixed(1)} s]`,
   );
+  if (serialRust.length) console.log(`  CDC bytes (identical on both sides, ${serialRust.length}): ${JSON.stringify(serialRust)}`);
   rust.destroy();
   return true;
 }
