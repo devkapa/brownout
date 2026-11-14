@@ -2,12 +2,16 @@
 //! `readUint*`/`writeUint*` methods and the peripheral table of
 //! `src/rp2040.ts`.
 //!
+//! The R2 blocks (`periph.rs`) answer here; a peripheral still unported
+//! halts the machine.
+//!
 //! Each access follows the reference's order of range checks, its byte and
 //! halfword paths (direct for flash and SRAM, read-modify-write of the
 //! containing word elsewhere, with the read's side effects), and its
 //! wrapping of addresses to 32 bits.
 
 use super::core::SIO_START;
+use super::periph::Block;
 use super::{PeripheralWrite, Rp2040, Stop, DPRAM_BYTES, FLASH_BYTES, SRAM_BYTES};
 
 pub const BOOTROM_END: u32 = 4 * 1024 * 4;
@@ -25,7 +29,8 @@ const DPRAM_END: u32 = DPRAM_START + DPRAM_BYTES as u32;
 const SIO_END: u32 = SIO_START + 0x1000_0000;
 
 /// The reference's peripheral table, keyed by `(address >>> 14) << 2`.
-/// None of these is ported in R1: an access halts the machine.
+/// R2 ports most of these (`periph.rs`); an access to one it does not port
+/// halts the machine.
 const PERIPHERALS: &[(u32, &str)] = &[
     (0x18000, "SSI"),
     (0x40000, "SYSINFO_BASE"),
@@ -93,8 +98,12 @@ impl Rp2040 {
         } else if (SIO_START..SIO_END).contains(&address) {
             self.sio_read(address - SIO_START)
         } else if let Some(name) = find_peripheral(address) {
-            self.halt(Stop::Peripheral { name, address, write: false });
-            0xffff_ffff
+            if let Some(block) = Block::from_name(name) {
+                self.periph_read(block, address & 0x3fff)
+            } else {
+                self.halt(Stop::Peripheral { name, address, write: false });
+                0xffff_ffff
+            }
         } else {
             self.warnings += 1;
             0xffff_ffff
@@ -225,9 +234,14 @@ impl Rp2040 {
         self.write_u32(aligned, new_value);
     }
 
-    /// Halts on a write to a peripheral R1 does not port, recording what
-    /// the reference would hand that peripheral's `writeUint32Atomic`.
+    /// A write to a peripheral: a ported block takes it through
+    /// `writeUint32Atomic`; an unported one halts the machine, recording what
+    /// the reference would hand that peripheral.
     fn halt_on_peripheral_write(&mut self, name: &'static str, address: u32, value: u32) {
+        if let Some(block) = Block::from_name(name) {
+            self.periph_write(block, address & 0xfff, (address & 0x3000) >> 12, value);
+            return;
+        }
         if self.stop.is_none() {
             self.peripheral_write = Some(PeripheralWrite {
                 offset: address & 0xfff,

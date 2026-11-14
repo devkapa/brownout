@@ -14,18 +14,32 @@
 //! same way, and the unit tests name each such place (`tests.rs`,
 //! "reference quirk").
 //!
-//! Every peripheral R1 does not port (everything behind the APB and AHB
-//! peripheral table, the USB DPRAM hook) halts the machine at its first
-//! access with a [`Stop`] naming it, instead of guessing at its behaviour.
+//! Package R2 (the small system blocks every boot touches): clocks, xosc,
+//! resets, psm, tbman, syscfg, sysinfo, busctrl and the unimplemented stubs
+//! (`periph.rs`), the timer and watchdog (`timer.rs`), the RTC (`rtc.rs`)
+//! and the IO and pad banks (`gpiobank.rs`).
+//!
+//! Every peripheral not yet ported (SSI, the UARTs, SPI, I2C, ADC, PWM, DMA,
+//! PIO, the USB controller and its DPRAM hook) halts the machine at its
+//! first access with a [`Stop`] naming it, instead of guessing at its
+//! behaviour.
 
 pub mod abi;
 pub mod bus;
 pub mod clock;
 pub mod core;
+pub mod gpiobank;
 pub mod interp;
+pub mod periph;
 pub mod ppb;
+pub mod rtc;
 pub mod sio;
+pub mod timer;
 
+#[cfg(test)]
+mod r2_tests;
+#[cfg(test)]
+mod r2_upstream_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -33,6 +47,7 @@ mod upstream_tests;
 
 use self::clock::Clock;
 use self::core::Cpu;
+use self::periph::Periph;
 use self::ppb::Ppb;
 use self::sio::Sio;
 
@@ -111,6 +126,7 @@ pub struct Rp2040 {
     pub clock: Clock,
     pub ppb: Ppb,
     pub sio: Sio,
+    pub periph: Periph,
     pub stop: Option<Stop>,
     pub peripheral_write: Option<PeripheralWrite>,
     /// Count of accesses the reference only logs a warning for (invalid
@@ -140,6 +156,7 @@ impl Rp2040 {
             clock: Clock::new(),
             ppb: Ppb::new(),
             sio: Sio::new(),
+            periph: Periph::new(),
             stop: None,
             peripheral_write: None,
             warnings: 0,
@@ -254,6 +271,8 @@ impl Rp2040 {
     fn fire_alarm(&mut self, id: clock::AlarmId) {
         match id {
             clock::AlarmId::Systick => self.systick_alarm_fired(),
+            clock::AlarmId::Timer(i) => self.timer_alarm_fired(i as usize),
+            clock::AlarmId::Watchdog => self.watchdog_alarm_fired(),
         }
     }
 }

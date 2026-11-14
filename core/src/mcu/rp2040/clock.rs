@@ -5,11 +5,14 @@
 //! reference; every operation keeps the reference's order so the values agree
 //! to the bit.
 
-/// Every alarm a ported block can schedule. R1 has SysTick only; later
-/// packages add their own.
+/// Every alarm a ported block can schedule. R1 has SysTick; R2 adds the
+/// timer's four alarms and the watchdog's periodic alarm; later packages add
+/// their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlarmId {
     Systick,
+    Timer(u8),
+    Watchdog,
 }
 
 pub struct Clock {
