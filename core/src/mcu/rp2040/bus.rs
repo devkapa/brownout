@@ -152,7 +152,7 @@ impl Rp2040 {
 
     pub fn write_u32(&mut self, address: u32, value: u32) {
         if let Some(name) = find_peripheral(address) {
-            self.halt_on_peripheral_write(name, address, value);
+            self.halt_on_peripheral_write(name, address, value, false);
         } else if address < BOOTROM_END {
             // A misaligned index is a non-integer property on a typed array,
             // which JavaScript ignores.
@@ -196,7 +196,7 @@ impl Rp2040 {
         if let Some(name) = find_peripheral(address) {
             // A peripheral sees the byte in all four lanes of the word.
             let b = value & 0xff;
-            self.halt_on_peripheral_write(name, aligned, b | (b << 8) | (b << 16) | (b << 24));
+            self.halt_on_peripheral_write(name, aligned, b | (b << 8) | (b << 16) | (b << 24), true);
             return;
         }
         let original = self.read_u32(aligned);
@@ -220,7 +220,7 @@ impl Rp2040 {
         if let Some(name) = find_peripheral(address) {
             // A peripheral sees the halfword in both halves of the word.
             let h = value & 0xffff;
-            self.halt_on_peripheral_write(name, aligned, h | (h << 16));
+            self.halt_on_peripheral_write(name, aligned, h | (h << 16), true);
             return;
         }
         let original = self.read_u32(aligned);
@@ -237,9 +237,9 @@ impl Rp2040 {
     /// A write to a peripheral: a ported block takes it through
     /// `writeUint32Atomic`; an unported one halts the machine, recording what
     /// the reference would hand that peripheral.
-    fn halt_on_peripheral_write(&mut self, name: &'static str, address: u32, value: u32) {
+    fn halt_on_peripheral_write(&mut self, name: &'static str, address: u32, value: u32, sub_word: bool) {
         if let Some(block) = Block::from_name(name) {
-            self.periph_write(block, address & 0xfff, (address & 0x3000) >> 12, value);
+            self.periph_write(block, address & 0xfff, (address & 0x3000) >> 12, value, sub_word);
             return;
         }
         if self.stop.is_none() {

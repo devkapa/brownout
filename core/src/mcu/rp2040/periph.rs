@@ -243,6 +243,12 @@ pub struct Periph {
     /// The reference's `warn()` calls that do not stop it: unmodelled
     /// registers, unimplemented stubs. Not part of the compared state.
     pub unimplemented_accesses: u64,
+    /// Whether the word the current write carries is a signed JavaScript
+    /// number in the reference: the replicated value of a byte or halfword
+    /// store and the result of an atomic alias are built with `|`, `<<`,
+    /// `^` or `&`, which yield int32, while a plain word store hands over the
+    /// unsigned register. Only the timer's alarm arithmetic can tell.
+    pub write_signed: bool,
     pub timer: super::timer::Timer,
     pub watchdog: super::timer::Watchdog,
     pub rtc: super::rtc::Rtc,
@@ -265,6 +271,7 @@ impl Periph {
             busctrl: BusCtrl { perf_ctr: [0; 4], perf_sel: [0x1f; 4] },
             nmi_mask: 0,
             unimplemented_accesses: 0,
+            write_signed: false,
             timer: super::timer::Timer::new(),
             watchdog: super::timer::Watchdog::new(),
             rtc: super::rtc::Rtc::new(),
@@ -365,7 +372,8 @@ impl Rp2040 {
     }
 
     /// `peripheral.writeUint32Atomic(address & 0xfff, value, alias)`.
-    pub(crate) fn periph_write(&mut self, block: Block, offset: u32, atomic: u32, value: u32) {
+    pub(crate) fn periph_write(&mut self, block: Block, offset: u32, atomic: u32, value: u32, sub_word: bool) {
+        self.periph.write_signed = sub_word || atomic != ATOMIC_NORMAL;
         let new_value = if atomic != ATOMIC_NORMAL {
             let current = self.periph_read(block, offset);
             atomic_update(current, atomic, value)

@@ -6,7 +6,7 @@
 use super::{Rp2040, ScheduledInput, Stop};
 
 /// Words in the state record `rp_state` writes, all as f64.
-pub const STATE_WORDS: usize = 48;
+pub const STATE_WORDS: usize = 90;
 
 #[no_mangle]
 pub extern "C" fn rp_alloc(len: u32) -> *mut u8 {
@@ -232,6 +232,68 @@ pub unsafe extern "C" fn rp_state(m: *mut Rp2040, out: *mut f64) {
         | ((ppb.systick_timer.enabled as u32) << 3)) as f64;
     s[46] = ppb.systick_timer.counter(mach.clock.nanos) as f64;
     s[47] = interp_digest(mach) as f64;
+    r2_state(mach, s);
+}
+
+fn fnv(values: impl IntoIterator<Item = u32>) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    for v in values {
+        h = (h ^ v).wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+fn r2_state(mach: &mut Rp2040, s: &mut [f64]) {
+    let t = &mach.periph.timer;
+    let mut armed = 0u32;
+    for (i, a) in t.alarms.iter().enumerate() {
+        armed |= (a.armed as u32) << i;
+        s[49 + i] = a.target_micros as f64;
+    }
+    s[48] = armed as f64;
+    s[53] = t.int_raw as f64;
+    s[54] = t.int_enable as f64;
+    s[55] = t.int_force as f64;
+    s[56] = t.latched_time_high as f64;
+    s[57] = t.paused as u32 as f64;
+    s[58] = mach.clock.alarms.len() as f64;
+    let mut sum = 0.0;
+    for &(_, at) in &mach.clock.alarms {
+        sum += at;
+    }
+    s[59] = sum;
+    let p = &mach.periph;
+    s[60] = p.resets.reset as f64;
+    s[61] = p.resets.wdsel as f64;
+    s[62] = p.clocks.ctrl[5] as f64;
+    s[63] = p.clocks.ctrl[4] as f64;
+    s[64] = fnv((0..10).flat_map(|i| [p.clocks.ctrl[i], p.clocks.div[i]])) as f64;
+    s[65] = p.xosc.ctrl as f64;
+    s[66] = p.xosc.status_reg() as f64;
+    s[67] = p.xosc.dormant as f64;
+    s[68] = p.xosc.startup as f64;
+    s[69] = p.xosc.count as f64;
+    s[70] = p.psm.frce_on as f64;
+    s[71] = p.psm.frce_off as f64;
+    s[72] = p.psm.wdsel as f64;
+    s[74] = p.watchdog.reason as f64;
+    s[75] = fnv(p.watchdog.scratch) as f64;
+    s[77] = p.watchdog.triggers as f64;
+    s[78] = p.rtc.ctrl as f64;
+    s[79] = p.rtc.setup0 as f64;
+    s[80] = p.rtc.setup1 as f64;
+    s[83] = p.nmi_mask as f64;
+    s[84] = fnv(p.busctrl.perf_ctr.into_iter().chain(p.busctrl.perf_sel)) as f64;
+    s[88] = (p.watchdog.alarm.enabled as u32 | ((p.watchdog.timer.enabled as u32) << 1)) as f64;
+    s[89] = (p.io.voltage_select[0] | (p.io.voltage_select[1] << 1)) as f64;
+    s[85] = fnv(mach.sio.gpio.iter().map(|p| p.pad_value)) as f64;
+    s[86] = fnv(mach.sio.qspi.iter().flat_map(|p| [p.pad_value, p.ctrl, p.irq_status])) as f64;
+    s[87] = fnv(mach.sio.gpio.iter().flat_map(|p| [p.ctrl, p.irq_status, p.irq_enable_mask, p.irq_force_mask])) as f64;
+    // Reads with no side effect on these blocks.
+    s[73] = mach.watchdog_read(0x00) as f64;
+    s[76] = mach.watchdog_read(0x2c) as f64;
+    s[81] = mach.rtc_read(0x18) as f64;
+    s[82] = mach.rtc_read(0x1c) as f64;
 }
 
 /// FNV-1a over the interpolators' registers, in a fixed order the harness

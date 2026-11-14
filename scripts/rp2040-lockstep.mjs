@@ -43,7 +43,11 @@ const wasmPath = path.join(targetDir, "wasm32-unknown-unknown", "release", "brow
 const uf2Path = path.join(repoRoot, "test", "fixtures", "firmware", "pico-micropython.uf2");
 const bootromPath = path.join(repoRoot, "src", "sim", "engine", "rp2040-bootrom.ts");
 
-const STATE_WORDS = 48;
+// The reference reads the RTC through a local-time `Date`; the port computes
+// UTC, so the reference runs in UTC.
+process.env.TZ = "UTC";
+
+const STATE_WORDS = 90;
 const STATE_NAMES = [
   ...Array.from({ length: 13 }, (_, i) => `r${i}`), "sp", "lr", "pc",
   "xPSR", "MSP", "PSP", "PRIMASK", "CONTROL", "cycles", "nanos", "waiting", "eventRegistered",
@@ -51,6 +55,12 @@ const STATE_NAMES = [
   "interruptsUpdated", "VTOR", "SHPR2", "SHPR3", "handlerMode", "sio.gpioOut", "sio.gpioOE", "sio.qspiOut",
   "sio.qspiOE", "sio.spinlocks", "sio.divCSR", "sio.quotient", "sio.remainder", "systick.flags",
   "systick.counter", "interp.digest",
+  "timer.armed", "timer.alarm0", "timer.alarm1", "timer.alarm2", "timer.alarm3", "timer.intr", "timer.inte", "timer.intf",
+  "timer.latchedHigh", "timer.paused", "clock.alarmCount", "clock.alarmSum", "resets.reset", "resets.wdsel",
+  "clocks.sysCtrl", "clocks.refCtrl", "clocks.digest", "xosc.ctrl", "xosc.status", "xosc.dormant", "xosc.startup",
+  "xosc.count", "psm.frceOn", "psm.frceOff", "psm.wdsel", "watchdog.ctrl", "watchdog.reason", "watchdog.scratch",
+  "watchdog.tick", "watchdog.triggers", "rtc.ctrl", "rtc.setup0", "rtc.setup1", "rtc.rtc1", "rtc.rtc0", "syscfg.nmiMask",
+  "busctrl.digest", "pads.bank0", "pads.qspi", "io.digest", "watchdog.enables", "pads.voltage",
 ];
 const STOP_KINDS = ["running", "peripheral", "usb-dpram", "unaligned-read", "out-of-range", "break", "idle"];
 
@@ -298,6 +308,39 @@ function aluBlock(asm, r, n, avoid) {
   }
 }
 
+
+// ---- R2 image helpers ---------------------------------------------------------
+
+/** VTOR = RAM, ISER = timer IRQs 0..3 and the IO bank (IRQ 13 only in r2-seq). */
+function r2Prologue(asm, ioIrq) {
+  asm.ldr(0, 0xe000ed08).ldr(1, RAM).op(T.strImm(1, 0, 0));
+  asm.ldr(0, 0xe000e100).ldr(1, ioIrq ? 0x200f : 0xf).op(T.strImm(1, 0, 0));
+}
+
+/** The one handler: clear the timer's INTR and INTF, the IO bank's INTE, INTF and edges. */
+function r2Handler(asm) {
+  asm.ldr(0, 0x40054000).op(T.ldrImm(1, 0, 0x34 / 4), T.strImm(1, 0, 0x34 / 4), T.movs(1, 0), T.strImm(1, 0, 0x3c / 4));
+  asm.ldr(0, 0x40014100).op(T.movs(1, 0));
+  for (let i = 0; i < 8; i++) asm.op(T.strImm(1, 0, i));
+  asm.ldr(0, 0x400140f0).ldr(1, 0xcccccccc).op(T.strImm(1, 0, 0), T.strImm(1, 0, 1), T.strImm(1, 0, 2), T.strImm(1, 0, 3));
+  asm.op(T.bx(14));
+}
+
+function r2Vectors(side, asm) {
+  const vt = new Uint8Array(4 * 48);
+  const dv = new DataView(vt.buffer);
+  const handler = asm.labels.get("handler") | 1;
+  for (let n = 0; n < 48; n++) dv.setUint32(4 * n, handler, true);
+  side.sram(0, vt);
+}
+
+/** rb = 0x40000000 + (n << 14) + (alias << 12) + (k << 7), built from small immediates. */
+function r2SetBase(asm, rb, n, alias, k) {
+  asm.op(T.movs(4, n), T.lsls(4, 4, 14), T.movs(rb, 0x40), T.lsls(rb, rb, 24), T.reg(0b0001100, rb, rb, 4));
+  if (alias) asm.op(T.movs(4, alias), T.lsls(4, 4, 12), T.reg(0b0001100, rb, rb, 4));
+  if (k) asm.op(T.movs(4, k), T.lsls(4, 4, 7), T.reg(0b0001100, rb, rb, 4));
+}
+
 // ---- images -------------------------------------------------------------------
 
 const RAM = 0x20000000;
@@ -492,6 +535,110 @@ const IMAGES = {
       s.reg(15, RAM + 0x200);
     },
   },
+  // R2: random word, halfword and byte traffic (and the atomic aliases) over
+  // the small blocks: clocks, resets, psm, xosc, busctrl, timer, rtc,
+  // pads, IO bank, syscfg, the stubs. Timer alarms are armed a few
+  // microseconds ahead so their interrupts fire into a handler. The watchdog
+  // gets scratch traffic only: the reference re-fires its alarm for ever
+  // when the counter lands exactly on zero (see the port's note), so no
+  // image may enable it for long.
+  "r2-fuzz": {
+    k: 500,
+    steps: 400_000,
+    setup(s) {
+      const r = rng(0xd4);
+      const asm = new Asm(RAM + 0x200);
+      asm.label("top");
+      const BLOCKS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1b, 0x15, 0x17, 0x7, 0x5, 0x2];
+      for (let i = 0; i < 700; i++) {
+        const n = BLOCKS[pick(r, BLOCKS.length)];
+        const wd = n === 0x16;
+        const alias = pick(r, 3) === 0 ? 1 + pick(r, 3) : 0;
+        const off = wd ? 0 : pick(r, 3) === 0 ? pick(r, 4) : 0;
+        r2SetBase(asm, 5, n, alias, off);
+        const count = 1 + pick(r, 4);
+        for (let j = 0; j < count; j++) {
+          const rt = pick(r, 4);
+          const kind = pick(r, 8);
+          if (kind === 7 && n !== 0x16 && alias === 0 && off === 0 && n === 0x15) {
+            // arm alarm A at now + a few microseconds
+            asm.op(T.ldrImm(rt, 5, 0x28 / 4), T.adds8(rt, 5 + pick(r, 60)), T.strImm(rt, 5, (0x10 + 4 * pick(r, 4)) / 4));
+          } else if (kind < 3) {
+            asm.op(T.strImm(rt, 5, wd ? 3 + pick(r, 8) : pick(r, 32)));
+          } else if (kind < 5) {
+            asm.op(T.ldrImm(rt, 5, pick(r, 32)));
+          } else if (kind === 5) {
+            asm.op([T.strhImm, T.strbImm][pick(r, 2)](rt, 5, wd ? 12 + pick(r, 30) : pick(r, 32)) );
+          } else {
+            asm.op([T.ldrhImm, T.ldrbImm][pick(r, 2)](rt, 5, pick(r, 32)));
+          }
+        }
+        aluBlock(asm, r, 1 + pick(r, 3), [4, 5, 6, 7]);
+      }
+      asm.bl("top");
+      // The setup and the handler sit beside the literal pool, which the
+      // body is too long to reach.
+      asm.label("start");
+      r2Prologue(asm, false);
+      asm.bl("top");
+      asm.label("handler");
+      r2Handler(asm);
+      s.sram(0x200, asm.finish());
+      r2Vectors(s, asm);
+      seedRegs(r, s.reg, [4, 5, 6, 7]);
+      s.reg(13, RAM + 0x40000);
+      s.reg(15, asm.labels.get("start"));
+    },
+  },
+  // R2, directed: interrupts and long sleeps. Timer alarms wake the core out
+  // of WFI (the clock jumps to each alarm: tens of simulated minutes pass in a
+  // few steps), the RTC rolls over a year end, the 64-bit timer passes 2^32 us,
+  // the watchdog counts down and is forced, and pin edges raise the IO bank's
+  // interrupt.
+  "r2-seq": {
+    k: 50,
+    steps: 3000,
+    inputs: [
+      { atCycle: 400, pin: 3, level: 1 },
+      { atCycle: 700, pin: 3, level: 0 },
+      { atCycle: 2000, pin: 5, level: 1 },
+      { atCycle: 2600, pin: 5, level: 0 },
+      { atCycle: 1e12, pin: 3, level: 1 },
+      { atCycle: 2e12, pin: 5, level: 1 },
+    ],
+    setup(s) {
+      const asm = new Asm(RAM + 0x200);
+      r2Prologue(asm, true);
+      asm.ldr(0, 0x4001c000).op(T.movs(1, 0x40), T.strImm(1, 0, 4), T.strImm(1, 0, 6)); // IE on GPIO3, GPIO5
+      asm.ldr(0, 0x40014100).ldr(1, (8 << 12) | (4 << 20)).op(T.strImm(1, 0, 0)); // INTE0: GPIO3 EDGE_HIGH, GPIO5 EDGE_LOW
+      asm.ldr(4, 0x40054000).op(T.movs(1, 0xf), T.strImm(1, 4, 0x38 / 4)); // timer INTE
+      asm.ldr(7, 0x40058000).ldr(1, 0xcafe0001).op(T.strImm(1, 7, 3), T.strImm(1, 7, 10)); // watchdog scratch
+      asm.ldr(1, 0xffffff).op(T.strImm(1, 7, 1)); // LOAD
+      asm.ldr(1, (1 << 30) | (7 << 24)).op(T.strImm(1, 7, 0)); // CTRL: enable
+      asm.ldr(3, 300).label("s1").op(T.subs8(3, 1)).b("s1", 1);
+      asm.op(T.ldrImm(2, 7, 0)); // CTRL.TIME while counting
+      asm.ldr(1, 7 << 24).op(T.strImm(1, 7, 0)); // disable (see the note on zero)
+      asm.op(T.ldrImm(2, 7, 0));
+      asm.ldr(1, (1 << 31) | (7 << 24)).op(T.strImm(1, 7, 0), T.ldrImm(2, 7, 2)); // TRIGGER, then REASON
+      asm.ldr(5, 0x4005c000).ldr(1, (2023 << 12) | (12 << 8) | 31).op(T.strImm(1, 5, 1)); // RTC SETUP0
+      asm.ldr(1, (23 << 16) | (59 << 8) | 50).op(T.strImm(1, 5, 2)); // SETUP1
+      asm.op(T.movs(1, 0x10), T.strImm(1, 5, 3), T.movs(1, 1), T.strImm(1, 5, 3)); // LOAD, then ENABLE
+      asm.op(T.ldrImm(0, 4, 0x0c / 4), T.adds8(0, 100), T.strImm(0, 4, 0x10 / 4), T.wfi); // ALARM0 in 100 us
+      asm.op(T.ldrImm(2, 5, 0x1c / 4), T.ldrImm(3, 5, 0x18 / 4));
+      asm.ldr(1, 0xc0000000); // 3221 s of microseconds
+      asm.label("loop");
+      asm.op(T.ldrImm(0, 4, 0x0c / 4), T.reg(0b0001100, 0, 0, 1), T.strImm(0, 4, 0x14 / 4), T.wfi); // ALARM1
+      asm.op(T.ldrImm(0, 4, 0x0c / 4), T.reg(0b0001100, 0, 0, 1), T.strImm(0, 4, 0x18 / 4), T.wfi); // ALARM2
+      asm.op(T.ldrImm(2, 4, 0x08 / 4), T.ldrImm(2, 5, 0x1c / 4), T.ldrImm(3, 5, 0x18 / 4)); // TIMEHR, RTC
+      asm.b("loop");
+      asm.label("handler");
+      r2Handler(asm);
+      s.sram(0x200, asm.finish());
+      r2Vectors(s, asm);
+      s.reg(13, RAM + 0x40000);
+      s.reg(15, RAM + 0x200);
+    },
+  },
 };
 
 // ---- the two sides ------------------------------------------------------------
@@ -559,6 +706,10 @@ function jsSide() {
   const rp = sim.rp2040;
   rp.logger = new ConsoleLogger(LogLevel.Error, true);
   let breakCode = null;
+  let wdTriggers = 0;
+  rp.peripherals[0x40058].onWatchdogTrigger = () => {
+    wdTriggers++;
+  };
   rp.onBreak = (code) => {
     breakCode = code;
   };
@@ -654,6 +805,70 @@ function jsSide() {
         }
       }
       s[47] = h;
+      const u = (v) => v >>> 0;
+      const fnv = (vals) => {
+        let x = 0x811c9dc5;
+        for (const v of vals) x = Math.imul(x ^ (v >>> 0), 0x01000193) >>> 0;
+        return x;
+      };
+      const per = rp.peripherals;
+      const timer = per[0x40054];
+      s[48] = timer.alarms.reduce((m, a, i) => m | ((a.armed ? 1 : 0) << i), 0);
+      for (let i = 0; i < 4; i++) s[49 + i] = u(timer.alarms[i].targetMicros);
+      s[53] = u(timer.intRaw);
+      s[54] = u(timer.intEnable);
+      s[55] = u(timer.intForce);
+      s[56] = u(timer.latchedTimeHigh);
+      s[57] = timer.paused ? 1 : 0;
+      let count = 0;
+      let sum = 0;
+      for (let a = sim.clock.nextAlarm; a; a = a.next) {
+        count++;
+        sum += a.nanos;
+      }
+      s[58] = count;
+      s[59] = sum;
+      const resets = per[0x4000c];
+      s[60] = u(resets.reset);
+      s[61] = u(resets.wdsel);
+      const clk = per[0x40008];
+      s[62] = u(clk.sysCtrl);
+      s[63] = u(clk.refCtrl);
+      s[64] = fnv([
+        clk.gpout0Ctrl, clk.gpout0Div, clk.gpout1Ctrl, clk.gpout1Div, clk.gpout2Ctrl, clk.gpout2Div, clk.gpout3Ctrl, clk.gpout3Div,
+        clk.refCtrl, clk.refDiv, clk.sysCtrl, clk.sysDiv, clk.periCtrl, clk.periDiv, clk.usbCtrl, clk.usbDiv, clk.adcCtrl,
+        clk.adcDiv, clk.rtcCtrl, clk.rtcDiv,
+      ]);
+      const xosc = per[0x40024];
+      s[65] = u(xosc.ctrl);
+      s[66] = u(xosc.readUint32(4));
+      s[67] = u(xosc.dormant);
+      s[68] = u(xosc.startup);
+      s[69] = u(xosc.count);
+      const psm = per[0x40010];
+      s[70] = u(psm.frceOn);
+      s[71] = u(psm.frceOff);
+      s[72] = u(psm.wdsel);
+      const wd = per[0x40058];
+      s[73] = u(wd.readUint32(0));
+      s[74] = u(wd.reason);
+      s[75] = fnv(wd.scratchData);
+      s[76] = u(wd.readUint32(0x2c));
+      s[77] = wdTriggers;
+      const rtc = per[0x4005c];
+      s[78] = u(rtc.ctrl);
+      s[79] = u(rtc.setup0);
+      s[80] = u(rtc.setup1);
+      s[81] = u(rtc.readUint32(0x18));
+      s[82] = u(rtc.readUint32(0x1c));
+      s[83] = u(rp.core.interruptNMIMask);
+      const bus = per[0x40030];
+      s[84] = fnv([...bus.perfCtr, ...bus.perfSel]);
+      s[85] = fnv(rp.gpio.map((p) => p.padValue));
+      s[86] = fnv(rp.qspi.flatMap((p) => [p.padValue, p.ctrl, p.irqStatus]));
+      s[87] = fnv(rp.gpio.flatMap((p) => [p.ctrl, p.irqStatus, p.irqEnableMask, p.irqForceMask]));
+      s[88] = (wd.alarm.enable ? 1 : 0) | (wd.timer.enable ? 2 : 0);
+      s[89] = u(per[0x4001c].voltageSelect) | (u(per[0x40020].voltageSelect) << 1);
       return s;
     },
     ramHash() {

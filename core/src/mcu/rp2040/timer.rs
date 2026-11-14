@@ -104,7 +104,10 @@ impl Rp2040 {
         match offset {
             ALARM0..=ALARM3 if offset & 3 == 0 => {
                 let index = ((offset - ALARM0) / 4) as usize;
-                let delta_micros = js_to_u32(value as f64 - self.clock.nanos / 1000.0);
+                // A negative int32 (see `Periph::write_signed`) truncates toward zero
+                // before the modulo, one microsecond apart from its unsigned twin.
+                let js_value = if self.periph.write_signed { value as i32 as f64 } else { value as f64 };
+                let delta_micros = js_to_u32(js_value - self.clock.nanos / 1000.0);
                 let a = &mut self.periph.timer.alarms[index];
                 a.armed = true;
                 a.target_micros = value;
