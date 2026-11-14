@@ -38,6 +38,7 @@ pub mod ppb;
 pub mod pwm;
 pub mod rtc;
 pub mod sio;
+pub mod spi;
 pub mod ssi;
 pub mod timer;
 pub mod uart;

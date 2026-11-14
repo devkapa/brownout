@@ -624,3 +624,202 @@ mod uart {
         assert!(m.periph.uart[0].baud_rate().is_infinite());
     }
 }
+
+mod spi {
+    use super::super::dma::dreq;
+    use super::super::spi::SpiHost;
+    use super::*;
+
+    const SPI0: u32 = 0x4003_c000;
+    const SPI1: u32 = 0x4004_0000;
+    const CR0: u32 = 0x00;
+    const CR1: u32 = 0x04;
+    const DR: u32 = 0x08;
+    const SR: u32 = 0x0c;
+    const CPSR: u32 = 0x10;
+    const IMSC: u32 = 0x14;
+    const RIS: u32 = 0x18;
+    const MIS: u32 = 0x1c;
+    const ICR: u32 = 0x20;
+    const BSY: u32 = 1 << 4;
+    const RFF: u32 = 1 << 3;
+    const RNE: u32 = 1 << 2;
+    const TNF: u32 = 1 << 1;
+    const TFE: u32 = 1 << 0;
+    const SSE: u32 = 1 << 1;
+
+    fn sent(m: &Rp2040) -> Vec<u32> {
+        m.periph.spi_events.iter().map(|e| e.value).collect()
+    }
+
+    #[test]
+    fn reset_values_and_ids() {
+        // Datasheet 4.4.4: SSPSR resets to 0x3 (TFE, TNF); CR0, CR1, CPSR, IMSC are 0.
+        let mut m = Rp2040::new();
+        for b in [SPI0, SPI1] {
+            assert_eq!(rd(&mut m, b + SR), TFE | TNF);
+            for r in [CR0, CR1, CPSR, IMSC, MIS] {
+                assert_eq!(rd(&mut m, b + r), 0);
+            }
+            let ids: Vec<u32> = [0xfe0, 0xfe4, 0xfe8, 0xfec, 0xff0, 0xff4, 0xff8, 0xffc].iter().map(|o| rd(&mut m, b + o)).collect();
+            assert_eq!(ids, [0x22, 0x10, 0x34, 0x00, 0x0d, 0xf0, 0x05, 0xb1]);
+        }
+    }
+
+    #[test]
+    fn constructor_dma_lines() {
+        // The constructor raises each TX line (FIFO not full) and lowers RX.
+        let m = Rp2040::new();
+        let d = &m.periph.dma.dreq;
+        assert!(d[dreq::SPI0_TX as usize] && d[dreq::SPI1_TX as usize]);
+        assert!(!d[dreq::SPI0_RX as usize] && !d[dreq::SPI1_RX as usize]);
+    }
+
+    #[test]
+    fn a_word_goes_out_and_the_answer_comes_back() {
+        let mut m = Rp2040::new();
+        m.periph.spi[0].host = SpiHost::Respond(0x5a);
+        wr(&mut m, SPI0 + CR0, 7); // DSS = 8 bits
+        wr(&mut m, SPI0 + CR1, SSE);
+        wr(&mut m, SPI0 + DR, 0xa5);
+        assert_eq!(sent(&m), [0xa5]);
+        assert_ne!(rd(&mut m, SPI0 + SR) & RNE, 0);
+        assert_eq!(rd(&mut m, SPI0 + DR), 0xa5 ^ 0x5a);
+        assert_eq!(rd(&mut m, SPI0 + SR) & RNE, 0);
+        assert_eq!(rd(&mut m, SPI0 + DR), 0, "an empty FIFO reads zero");
+    }
+
+    #[test]
+    fn the_default_answer_is_zero() {
+        let mut m = Rp2040::new();
+        wr(&mut m, SPI1 + CR1, SSE);
+        wr(&mut m, SPI1 + DR, 0x12);
+        assert_eq!(rd(&mut m, SPI1 + DR), 0);
+    }
+
+    #[test]
+    fn data_size_masks_the_word() {
+        // CR0.DSS = n - 1 for an n-bit frame.
+        let mut m = Rp2040::new();
+        wr(&mut m, SPI0 + CR0, 3);
+        wr(&mut m, SPI0 + DR, 0xabcd);
+        assert_eq!(sent(&m), [0xd]);
+        wr(&mut m, SPI0 + CR0, 15);
+        wr(&mut m, SPI0 + DR, 0xabcd);
+        assert_eq!(sent(&m)[1], 0xabcd);
+    }
+
+    #[test]
+    fn fifos_are_eight_deep_with_status_flags() {
+        let mut m = Rp2040::new();
+        m.periph.spi[0].host = SpiHost::Manual;
+        wr(&mut m, SPI0 + CR0, 7);
+        wr(&mut m, SPI0 + CR1, SSE);
+        // The first word leaves for the shift register; eight more fill the FIFO.
+        for i in 0..9 {
+            assert_ne!(rd(&mut m, SPI0 + SR) & TNF, 0, "word {i}");
+            wr(&mut m, SPI0 + DR, i);
+        }
+        let sr = rd(&mut m, SPI0 + SR);
+        assert_eq!(sr & TNF, 0);
+        assert_eq!(sr & TFE, 0);
+        assert_ne!(sr & BSY, 0);
+        assert!(!m.periph.dma.dreq[dreq::SPI0_TX as usize], "TX line follows 'not full'");
+        // Answer them all: each answer starts the next word.
+        for i in 0..9 {
+            m.spi_complete_transmit(0, 100 + i);
+        }
+        assert_eq!(sent(&m), (0..9).collect::<Vec<u32>>());
+        let sr = rd(&mut m, SPI0 + SR);
+        assert_ne!(sr & TFE, 0);
+        assert_ne!(sr & RFF, 0, "eight answers kept, the ninth overran");
+        assert_ne!(rd(&mut m, SPI0 + RIS) & 1, 0, "RORRIS");
+        assert!(m.periph.dma.dreq[dreq::SPI0_RX as usize]);
+        assert_eq!(rd(&mut m, SPI0 + DR), 100);
+        wr(&mut m, SPI0 + ICR, 3);
+        assert_eq!(rd(&mut m, SPI0 + RIS) & 3, 0);
+    }
+
+    #[test]
+    fn half_full_interrupts() {
+        // Datasheet: RXRIS at RX FIFO >= half (4), TXRIS at TX FIFO <= half (4).
+        let mut m = Rp2040::new();
+        m.periph.spi[0].host = SpiHost::Manual;
+        wr(&mut m, SPI0 + CR0, 7);
+        wr(&mut m, SPI0 + IMSC, 0xc);
+        for i in 0..3 {
+            wr(&mut m, SPI0 + DR, i);
+        }
+        assert_ne!(rd(&mut m, SPI0 + RIS) & (1 << 3), 0);
+        assert_ne!(m.cpu.pending_interrupts & (1 << 18), 0, "IRQ 18 = SPI0");
+        for _ in 0..3 {
+            m.spi_complete_transmit(0, 7);
+        }
+        assert_eq!(rd(&mut m, SPI0 + RIS) & (1 << 2), 0, "3 words received: below half");
+        m.spi_complete_transmit(0, 7);
+        wr(&mut m, SPI0 + DR, 1);
+        m.spi_complete_transmit(0, 7);
+        assert_ne!(rd(&mut m, SPI0 + RIS) & (1 << 2), 0, "4 words: RXRIS");
+        assert_ne!(rd(&mut m, SPI0 + MIS) & (1 << 2), 0);
+    }
+
+    #[test]
+    fn clock_rate_and_mode() {
+        // Datasheet 4.4.3.1: FSSPCLKOUT = FSSPCLK / (CPSDVSR * (1 + SCR)).
+        let mut m = Rp2040::new();
+        wr(&mut m, SPI0 + CPSR, 2);
+        wr(&mut m, SPI0 + CR0, 3 << 8);
+        assert_eq!(m.periph.spi[0].clock_frequency(), 125e6 / 8.0);
+        assert_eq!(rd(&mut m, SPI0 + CPSR), 2);
+        wr(&mut m, SPI0 + CPSR, 7);
+        assert_eq!(rd(&mut m, SPI0 + CPSR), 6, "CPSDVSR is even");
+        for (cr0, mode) in [(0u32, 0), (1 << 7, 1), (1 << 6, 3), (3 << 6, 2)] {
+            wr(&mut m, SPI0 + CR0, cr0);
+            assert_eq!(m.periph.spi[0].spi_mode(), mode, "cr0 {cr0:#x}");
+        }
+        assert!(m.periph.spi[0].master_mode());
+        wr(&mut m, SPI0 + CR0, 1 << 2);
+        assert!(!m.periph.spi[0].master_mode());
+    }
+
+    #[test]
+    fn reference_quirk_transmit_ignores_sse() {
+        // Datasheet: nothing is transmitted while SSPCR1.SSE is 0.
+        let mut m = Rp2040::new();
+        wr(&mut m, SPI0 + CR0, 7);
+        wr(&mut m, SPI0 + DR, 0x33);
+        assert_eq!(sent(&m), [0x33] /* datasheet: [] */);
+    }
+
+    #[test]
+    fn reference_quirk_write_to_a_full_tx_fifo_is_dropped() {
+        // Datasheet: the FIFO's last entry is overwritten / the write is ignored
+        // with no flag; the reference ignores it too, which is what this pins:
+        // eleven writes, nine words leave (one in flight plus eight queued).
+        let mut m = Rp2040::new();
+        m.periph.spi[1].host = SpiHost::Manual;
+        wr(&mut m, SPI1 + CR0, 7);
+        for i in 0..11 {
+            wr(&mut m, SPI1 + DR, i);
+        }
+        for _ in 0..11 {
+            m.spi_complete_transmit(1, 0);
+        }
+        assert_eq!(sent(&m), (0..9).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn reference_quirk_tx_interrupt_starts_clear() {
+        // Datasheet 4.4.4: SSPRIS resets to 0x8 (TXRIS: the empty FIFO).
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, SPI0 + RIS), 0 /* datasheet: 0x8 */);
+    }
+
+    #[test]
+    fn reference_quirk_imsc_is_not_masked() {
+        // Datasheet: SSPIMSC has four bits.
+        let mut m = Rp2040::new();
+        wr(&mut m, SPI0 + IMSC, 0xffff);
+        assert_eq!(rd(&mut m, SPI0 + IMSC), 0xffff /* datasheet: 0xf */);
+    }
+}
