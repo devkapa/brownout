@@ -1406,6 +1406,10 @@ impl PartitionedSolver {
     fn observe_noted(&mut self, now: f64, drivers: &[Driver]) {
         if std::mem::take(&mut self.slow_scratch.cells_any) {
             self.ensure_driver_cells(drivers);
+            // An IC's power at `now`, once for its run of cells: `sag_power`
+            // reads only the supplies and the hold, which no observation
+            // changes, and an IC's cells are consecutive.
+            let mut power: Option<(usize, IcPower)> = None;
             for w in 0..self.slow_scratch.cell_bits.len() {
                 let force = std::mem::take(&mut self.slow_scratch.cell_force[w]);
                 let mut bits = std::mem::take(&mut self.slow_scratch.cell_bits[w]) | force;
@@ -1416,7 +1420,7 @@ impl PartitionedSolver {
                     if force >> b & 1 == 0 && self.gate_passes(cell) {
                         continue;
                     }
-                    self.sag_observe(cell, now, drivers);
+                    self.sag_observe(cell, now, drivers, &mut power);
                 }
             }
         }
@@ -2412,7 +2416,7 @@ impl PartitionedSolver {
     /// One scan observation of cell `cell` (point 9, "At each scan"), once a
     /// settle: its state moves only when the observation changes it, and a
     /// fresh `Pending` schedules its window's end.
-    fn sag_observe(&mut self, cell: usize, now: f64, drivers: &[Driver]) {
+    fn sag_observe(&mut self, cell: usize, now: f64, drivers: &[Driver], memo: &mut Option<(usize, IcPower)>) {
         let info = self.slow_model.cells[cell];
         let driver = drivers.get(info.driver as usize);
         let k = info.k as usize;
@@ -2457,7 +2461,14 @@ impl PartitionedSolver {
                 }
             }
         }
-        let power = self.sag_power(k, now);
+        let power = match *memo {
+            Some((at, p)) if at == k => p,
+            _ => {
+                let p = self.sag_power(k, now);
+                *memo = Some((k, p));
+                p
+            }
+        };
         let target = driver.and_then(|d| sag::driver_target(d, power.powered));
         let v = if info.cf { self.slow_voltage(info.node as usize, now) } else { self.voltages[info.node as usize] };
         let observed = sag::observed(target, v, &power);
