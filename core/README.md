@@ -4599,7 +4599,21 @@ Constants, all from P3:35-38 unless marked new:
    follow it (path or drive), so the rail node published at a frame is the
    rail they followed. The SoC integral (point 6) holds each partition's draw on its
    own exponential between solves, leaving out its response to the path,
-   whose charge over a drift-capped interval is second order. Measured
+   whose charge over a drift-capped interval is second order.
+   **R121 (BAT-PERF) replaces the 10 uV cap on this path** by the readings'
+   own: each static hub node and draw, the direct draw and the rail may
+   move `CELL_READING_SLACK` (0.2) of its W0 past what `RAIL_DRIFT_V` let it,
+   `RAIL_DRIFT_V + 0.2 W0(r) / |dr/du|` (at most `CELL_DRIFT_MAX_V`, 50 mV;
+   `CELL_JUNCTION_DRIFT_V`, 0.5 mV, with a direct junction). The watch also
+   takes every curved hub partition's band edges (static and stepped too),
+   the scan band and the levels of the logic inputs the scan reads, as
+   thresholds; and the rail solves before the held drain line could move
+   `RAIL_DRIFT_V` (`|rho_dot| tau^2 / 2`, from the line's change since the
+   solve before) or a closed-form partition's current `C du/dt` its slack.
+   The charge integrates the cell's current `(E - u) / r` along the path.
+   A board with a stepped hub partition keeps `RAIL_DRIFT_V`. Battery SAP-1:
+   412,659 -> 197,688 events and -58 % instructions; tests pin the 555's
+   triggers against a 1 us run at six host cadences. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
    `e211c55`), and the SAP-1 on its battery 45 % faster than at `3ca4004`
    (point 3, cost bars). Before it (round 14, ruling R15 (a)) each
@@ -7429,6 +7443,14 @@ failures and warnings (W1g)"):
   point 9).
 
 ## Open items (must close before 1.0.0)
+
+- **555 triggers at coarse host cadences** (R121 (iii)). Against a run
+  stopping every 1 us, a 555 on a cell off the coupled path (the cold
+  fuzz's 74/6 and 45/6, no rail shortcut) lands its triggers up to 26 of
+  their W0 bounds late from 100 us hosts on, on the 10 uV band and R121
+  alike; 2/6 on the coupled path, 7.2 at 1 ms hosts only. Pinned in
+  `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`
+  and `a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`.
 
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as
