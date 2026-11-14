@@ -10,15 +10,21 @@
 //! unit tests name each one ("reference quirk").
 
 pub mod abi;
+pub mod adc;
 pub mod cpu;
+pub mod gpio;
 pub mod harness;
 pub mod instr;
 pub mod interrupt;
+pub mod periph;
+pub mod timer;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod upstream_tests;
+#[cfg(test)]
+mod upstream_periph_tests;
 
 pub use cpu::{Cpu, IoHit};
 pub use instr::{avr_instruction, decode, Op};

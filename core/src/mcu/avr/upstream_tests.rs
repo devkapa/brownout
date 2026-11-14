@@ -85,7 +85,7 @@ fn rd_rr(base: u16, d: u16, r: u16) -> u16 {
 }
 
 /// Assembles one instruction into 16-bit words (little-endian program memory).
-fn asm_line(line: &str) -> Vec<u16> {
+pub(super) fn asm_line(line: &str) -> Vec<u16> {
     let line = line.trim();
     let (mn, rest) = match line.split_once(' ') {
         Some((m, r)) => (m, r.trim()),
@@ -129,6 +129,14 @@ fn asm_line(line: &str) -> Vec<u16> {
             let k = num(ops[1]) as u16 & 0xff;
             one(base | ((k & 0xf0) << 4) | ((reg(ops[0]) - 16) << 4) | (k & 0xf))
         }
+        "BREAK" => one(0x9598),
+        "CLR" => one(rd_rr(0x2400, reg(ops[0]), reg(ops[0]))),
+        "EOR" => one(rd_rr(0x2400, reg(ops[0]), reg(ops[1]))),
+        "ANDI" => {
+            let k = num(ops[1]) as u16 & 0xff;
+            one(0x7000 | ((k & 0xf0) << 4) | ((reg(ops[0]) - 16) << 4) | (k & 0xf))
+        }
+        "BRNE" => one(0xf400 | (((num(ops[0]) / 2) as u16 & 0x7f) << 3) | 1),
         "INC" => one(0x9403 | (reg(ops[0]) << 4)),
         "SWAP" => one(0x9402 | (reg(ops[0]) << 4)),
         "ROR" => one(0x9407 | (reg(ops[0]) << 4)),
@@ -200,7 +208,7 @@ fn asm_line(line: &str) -> Vec<u16> {
     }
 }
 
-fn load(cpu: &mut Cpu, lines: &[&str]) {
+pub(super) fn load(cpu: &mut Cpu, lines: &[&str]) {
     let mut at = 0;
     for l in lines {
         for w in asm_line(l) {

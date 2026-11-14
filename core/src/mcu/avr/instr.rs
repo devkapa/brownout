@@ -342,7 +342,7 @@ pub fn avr_instruction(cpu: &mut Cpu) {
             let b = o & 7;
             let r = cpu.read_data((a >> 3) + 32);
             let mask = 1u8 << b;
-            cpu.write_data((a >> 3) + 32, r & !mask);
+            cpu.write_data_mask((a >> 3) + 32, r & !mask, mask);
         }
         Op::Com => {
             let d = dd(o);
@@ -756,7 +756,7 @@ pub fn avr_instruction(cpu: &mut Cpu) {
             let target = (((o & 0xf8) >> 3) + 32) as i32;
             let mask = 1u8 << (o & 7);
             let v = cpu.read_data(target) | mask;
-            cpu.write_data(target, v);
+            cpu.write_data_mask(target, v, mask);
             cpu.cycles += 1;
         }
         Op::Sbic => {

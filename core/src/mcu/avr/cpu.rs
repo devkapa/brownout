@@ -14,7 +14,10 @@
 //! 0 and drops writes; the reference's NaN program counters after such an
 //! access are not modelled (no sketch gets there with a sane SP).
 
+use super::adc::Adc;
+use super::gpio::{Port, PortEvent};
 use super::interrupt::{avr_interrupt, Interrupt};
+use super::timer::Timer;
 
 pub const REGISTER_SPACE: usize = 0x100;
 pub const MAX_INTERRUPTS: usize = 128;
@@ -34,6 +37,36 @@ pub const ADDR_SREG: usize = 0x5f;
 pub struct ClockEvent {
     pub cycles: u64,
     pub id: u32,
+    /// What the reference's callback closed over (the ADC's result).
+    pub arg: u32,
+}
+
+/// First id of the events the peripherals schedule; below it ids are the
+/// caller's own (the CPU tests use small ones with `tick_with`).
+pub const EV_BASE: u32 = 0x1000;
+pub const EV_TIMER: u32 = EV_BASE; // + timer index
+pub const EV_ADC_READ: u32 = EV_BASE + 0x10;
+
+/// Peripheral state. Empty until `attach_arduino_peripherals`; the hook
+/// tables are indexed by data address and hold `(kind << 8) | index`, 0 for
+/// no hook (the reference's `readHooks`/`writeHooks`).
+#[derive(Default)]
+pub struct Periph {
+    pub attached: bool,
+    pub hook_w: Vec<u16>,
+    pub hook_r: Vec<u16>,
+    pub ports: Vec<Port>,
+    pub timers: Vec<Timer>,
+    pub adc: Option<Adc>,
+    /// Every GPIO write-listener call since the host last drained this.
+    pub events: Vec<PortEvent>,
+    /// Whether the write listener is installed (`addListener`/`removeListener`).
+    pub listening: bool,
+    /// Test support: record the timers' pin overrides and the ADC's mux inputs
+    /// (what the upstream suites spy on).
+    pub log_overrides: bool,
+    pub overrides: Vec<(usize, u8, super::gpio::PinOverride)>,
+    pub adc_reads: Vec<super::adc::MuxInput>,
 }
 
 /// The first access to a peripheral register (data address 0x20-0xff outside
@@ -66,6 +99,7 @@ pub struct Cpu {
     pub io_hit: Option<IoHit>,
     /// Count of `WDR` instructions (the reference calls `onWatchdogReset`).
     pub watchdog_resets: u64,
+    pub p: Periph,
 }
 
 impl Cpu {
@@ -84,6 +118,7 @@ impl Cpu {
             io_trap: false,
             io_hit: None,
             watchdog_resets: 0,
+            p: Periph::default(),
         };
         cpu.reset();
         cpu
@@ -184,22 +219,47 @@ impl Cpu {
         (0x20..0x100).contains(&addr) && !(ADDR_RAMPZ as i32..=ADDR_SREG as i32).contains(&addr)
     }
 
-    /// `readData`: addresses below 32 skip the peripheral hooks. The port has
-    /// no hook table yet (AVR2); with `io_trap` on, the first peripheral
-    /// address read is recorded instead.
+    /// Whether `addr` is a peripheral register no ported peripheral models
+    /// (what `io_trap` reports once peripherals are attached).
+    pub fn unported_peripheral(&self, addr: i32) -> bool {
+        Self::peripheral_address(addr) && !(self.p.attached && super::gpio::is_ported_register(addr as u16))
+    }
+
+    /// `readData`: addresses below 32 skip the read hooks.
     #[inline]
     pub fn read_data(&mut self, addr: i32) -> u8 {
-        if self.io_trap && addr >= 32 && Self::peripheral_address(addr) && self.io_hit.is_none() {
+        if self.io_trap && addr >= 32 && self.io_hit.is_none() && self.unported_peripheral(addr) {
             self.io_hit = Some(IoHit { address: addr as u16, write: false });
+        }
+        if addr >= 32 && self.p.attached {
+            let code = self.p.hook_r.get(addr as usize).copied().unwrap_or(0);
+            if code != 0 {
+                return self.run_read_hook(code, addr as usize);
+            }
         }
         self.rd(addr)
     }
 
-    /// `writeData` (the mask only matters to a peripheral hook).
+    /// `writeData` with the reference's default mask.
     #[inline]
     pub fn write_data(&mut self, addr: i32, value: u8) {
-        if self.io_trap && Self::peripheral_address(addr) && self.io_hit.is_none() {
+        self.write_data_mask(addr, value, 0xff);
+    }
+
+    /// `writeData(addr, value, mask)`: a write hook that returns true keeps
+    /// the plain store from happening.
+    pub fn write_data_mask(&mut self, addr: i32, value: u8, mask: u8) {
+        if self.io_trap && self.io_hit.is_none() && self.unported_peripheral(addr) {
             self.io_hit = Some(IoHit { address: addr as u16, write: true });
+        }
+        if addr >= 0 && self.p.attached {
+            let code = self.p.hook_w.get(addr as usize).copied().unwrap_or(0);
+            if code != 0 {
+                let old = self.rd(addr);
+                if self.run_write_hook(code, value, old, addr as usize, mask) {
+                    return;
+                }
+            }
         }
         self.wr(addr, value);
     }
@@ -271,9 +331,13 @@ impl Cpu {
 
     /// `addClockEvent(callback, cycles)`: due `max(1, cycles)` from now.
     pub fn add_clock_event(&mut self, id: u32, cycles: i64) {
+        self.add_clock_event_arg(id, 0, cycles);
+    }
+
+    pub fn add_clock_event_arg(&mut self, id: u32, arg: u32, cycles: i64) {
         let due = self.cycles + cycles.max(1) as u64;
         let at = self.clock_events.iter().position(|e| e.cycles >= due).unwrap_or(self.clock_events.len());
-        self.clock_events.insert(at, ClockEvent { cycles: due, id });
+        self.clock_events.insert(at, ClockEvent { cycles: due, id, arg });
     }
 
     /// `clearClockEvent`: drops the first event with this id.
@@ -301,10 +365,15 @@ impl Cpu {
     /// `on_event`, which may add events), then at most one pending interrupt
     /// is taken. Call it after every instruction.
     pub fn tick_with(&mut self, mut on_event: impl FnMut(&mut Cpu, u32)) {
+        self.tick_events(|cpu, ev| on_event(cpu, ev.id));
+    }
+
+    /// `tick()` with the whole event, so a handler can read its argument.
+    pub fn tick_events(&mut self, mut on_event: impl FnMut(&mut Cpu, ClockEvent)) {
         if let Some(&first) = self.clock_events.first() {
             if first.cycles <= self.cycles {
                 self.clock_events.remove(0);
-                on_event(self, first.id);
+                on_event(self, first);
             }
         }
         let next = self.next_interrupt;
@@ -318,7 +387,8 @@ impl Cpu {
         }
     }
 
+    /// `tick()`: due clock events go to the peripherals.
     pub fn tick(&mut self) {
-        self.tick_with(|_, _| {});
+        self.tick_events(|cpu, ev| cpu.dispatch_event(ev));
     }
 }
