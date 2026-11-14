@@ -34,6 +34,7 @@ pub mod interp;
 pub mod periph;
 pub mod pio;
 pub mod ppb;
+pub mod pwm;
 pub mod rtc;
 pub mod sio;
 pub mod ssi;
@@ -50,6 +51,8 @@ mod r3_tests;
 mod r4_tests;
 #[cfg(test)]
 mod r5_tests;
+#[cfg(test)]
+mod r6_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -204,12 +207,9 @@ impl Rp2040 {
     /// and zeroes its cycle count, the PWM block resets, and flash is erased.
     pub fn reset(&mut self) {
         self.core_reset();
-        // The PWM reset (R6) has one effect R1 can see: it re-evaluates
-        // GPIO1's drive state (measured on rp2040js 1.3.3: GPIO1 alone ends
-        // construction and every reset remembering its real reset state),
-        // so GPIO1's first SIO update reports no change where every other
-        // pin's reports Input -> InputPullDown.
-        self.gpio_check_for_updates(1);
+        // The real PWM reset. Its visible side effect on the pins is the
+        // reference's GPIO1 quirk (see pwm.rs).
+        self.pwm_reset();
         self.flash.fill(0xff);
     }
 
@@ -347,6 +347,8 @@ impl Rp2040 {
             clock::AlarmId::UsbReset => self.usb_reset_alarm_fired(),
             clock::AlarmId::UsbSof => self.usb_generate_sof(),
             clock::AlarmId::Dma(i) => self.dma_transfer_alarm_fired(i as usize),
+            clock::AlarmId::Pwm(i) => self.pwm_alarm_fired(i as usize),
+            clock::AlarmId::AdcSample | clock::AlarmId::AdcMulti => {}
         }
     }
 }

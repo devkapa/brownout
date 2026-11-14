@@ -126,7 +126,6 @@ fn ports_not_yet_ported_still_stop_by_name() {
         (0x4003_c000, "SPI0"),
         (0x4004_4000, "I2C0"),
         (0x4004_c000, "ADC"),
-        (0x4005_0000, "PWM_BASE"),
     ] {
         let mut m = Rp2040::new();
         m.read_u32(addr);

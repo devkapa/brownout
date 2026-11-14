@@ -46,6 +46,7 @@ pub enum Block {
     Dma,
     Pio0,
     Pio1,
+    Pwm,
 }
 
 impl Block {
@@ -76,6 +77,7 @@ impl Block {
             "DMA" => Block::Dma,
             "PIO0" => Block::Pio0,
             "PIO1" => Block::Pio1,
+            "PWM_BASE" => Block::Pwm,
             _ => return None,
         })
     }
@@ -268,6 +270,7 @@ pub struct Periph {
     pub cdc: super::usb::Cdc,
     pub dma: super::dma::Dma,
     pub pio: [super::pio::Pio; 2],
+    pub pwm: super::pwm::Pwm,
     /// The pending `setTimeout(() => run(), 0)` callbacks of the PIO blocks,
     /// oldest first, each the index of the block that armed it.
     pub pio_timers: Vec<u8>,
@@ -313,6 +316,7 @@ impl Periph {
                 d
             },
             pio: [super::pio::Pio::new(), super::pio::Pio::new()],
+            pwm: super::pwm::Pwm::new(),
             pio_timers: Vec::new(),
         }
     }
@@ -404,6 +408,10 @@ impl Rp2040 {
             Block::Dma => self.dma_read(offset),
             Block::Pio0 => self.pio_read(0, offset),
             Block::Pio1 => self.pio_read(1, offset),
+            Block::Pwm => match self.pwm_read(offset) {
+                Some(v) => v,
+                None => self.base_read(),
+            },
             Block::Timer => self.timer_read(offset),
             Block::Watchdog => self.watchdog_read(offset),
             Block::Rtc => self.rtc_read(offset),
@@ -475,6 +483,11 @@ impl Rp2040 {
             Block::Dma => self.dma_write(offset, value, raw),
             Block::Pio0 => self.pio_write(0, offset, value, raw),
             Block::Pio1 => self.pio_write(1, offset, value, raw),
+            Block::Pwm => {
+                if !self.pwm_write(offset, value) {
+                    self.base_write();
+                }
+            }
             Block::Timer => self.timer_write(offset, value, raw),
             Block::Watchdog => self.watchdog_write(offset, value),
             Block::Rtc => self.rtc_write(offset, value),

@@ -44,6 +44,7 @@ const INTERP1_BASE: u32 = 0x0c0;
 pub const NUM_GPIO: usize = 30;
 pub const NUM_QSPI: usize = 6;
 
+pub const FUNCTION_PWM: u32 = 4;
 pub const FUNCTION_SIO: u32 = 5;
 
 /// `GPIOPinState`.
@@ -363,6 +364,9 @@ impl Rp2040 {
         }
         if p.irq_value() != prev_irq {
             self.update_io_interrupt();
+        }
+        if self.sio.gpio[i].ctrl & 0x1f == FUNCTION_PWM {
+            self.pwm_gpio_on_input(i);
         }
         self.pio_pin_input_changed(i);
     }

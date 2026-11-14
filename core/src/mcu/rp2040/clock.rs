@@ -19,6 +19,13 @@ pub enum AlarmId {
     UsbSof,
     /// A DMA channel's `transfer` alarm.
     Dma(u8),
+    /// A PWM slice's alarm: `slice * 3 + k`, k = 0 compare A, 1 compare B,
+    /// 2 the wrap ("bottom").
+    Pwm(u8),
+    /// The ADC's `sampleAlarm` (a conversion finishing).
+    AdcSample,
+    /// The ADC's `multiShotAlarm` (the next conversion of a multi-shot run).
+    AdcMulti,
 }
 
 pub struct Clock {
@@ -73,6 +80,11 @@ pub fn js_round(x: f64) -> f64 {
     } else {
         f
     }
+}
+
+/// JavaScript's ToInt32 (`x | 0`).
+pub fn js_to_i32(x: f64) -> i32 {
+    js_to_u32(x) as i32
 }
 
 /// JavaScript's ToUint32 (`x >>> 0`).
@@ -177,6 +189,28 @@ impl Timer32 {
         } else {
             false
         }
+    }
+
+    /// `set prescaler`: the reference re-bases the counter, then re-enables
+    /// the timer when the OLD prescaler is non-zero (it assigns `enabled`
+    /// before it stores the new value), so setting any prescaler on a
+    /// stopped timer starts it. The caller runs the listeners.
+    pub fn set_prescaler(&mut self, value: f64, now: f64) {
+        self.base_value = self.counter(now) as f64;
+        self.base_nanos = now;
+        self.enabled = self.prescaler_value != 0.0;
+        self.prescaler_value = value;
+    }
+
+    /// `advance`: moves the base value; no listeners.
+    pub fn advance(&mut self, delta: f64) {
+        self.base_value += delta;
+    }
+
+    /// `reset`; the caller runs the listeners.
+    pub fn reset(&mut self, now: f64) {
+        self.base_nanos = now;
+        self.base_value = 0.0;
     }
 
     pub fn to_nanos(&self, cycles: f64) -> f64 {

@@ -9,6 +9,7 @@
 //! QSPI pads reach them.
 
 use super::pio::{FUNCTION_PIO0, FUNCTION_PIO1};
+use super::sio::FUNCTION_PWM;
 use super::sio::{
     Pin, FUNCTION_SIO, NUM_GPIO, NUM_QSPI, PIN_HIGH, PIN_INPUT, PIN_INPUT_BUSKEEPER, PIN_INPUT_PULLDOWN,
     PIN_INPUT_PULLUP, PIN_LOW,
@@ -86,11 +87,15 @@ impl Rp2040 {
     }
 
     /// `rawOutputEnable` and `rawOutputValue`: what the pin's selected
-    /// function drives. PWM is package R6; no function but SIO and the two
-    /// PIOs drives a pin before it.
+    /// function drives. PWM, SIO and the two PIOs drive a pin; the
+    /// UART, SPI and I2C functions drive nothing in the reference.
     fn pin_raw_output(&self, p: &Pin) -> (bool, bool) {
         let bit = 1u32 << (p.index & 31);
         match p.ctrl & 0x1f {
+            FUNCTION_PWM => (
+                self.periph.pwm.gpio_direction as u32 & bit != 0,
+                self.periph.pwm.gpio_value & bit != 0,
+            ),
             FUNCTION_SIO => (self.sio.gpio_output_enable & bit != 0, self.sio.gpio_value & bit != 0),
             FUNCTION_PIO0 => (self.periph.pio[0].pin_directions & bit != 0, self.periph.pio[0].pin_values & bit != 0),
             FUNCTION_PIO1 => (self.periph.pio[1].pin_directions & bit != 0, self.periph.pio[1].pin_values & bit != 0),
