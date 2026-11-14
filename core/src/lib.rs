@@ -40,3 +40,8 @@ pub mod snapshot;
 pub mod solve;
 
 mod abi;
+
+// W7: the MCU emulator ports (AVR, behind its own cargo feature, off by
+// default), so the shipped module carries none of them.
+#[cfg(feature = "avr")]
+pub mod mcu;
