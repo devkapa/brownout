@@ -40,6 +40,7 @@ pub mod rtc;
 pub mod sio;
 pub mod ssi;
 pub mod timer;
+pub mod uart;
 pub mod usb;
 
 #[cfg(test)]

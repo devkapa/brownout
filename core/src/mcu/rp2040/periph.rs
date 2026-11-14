@@ -48,6 +48,8 @@ pub enum Block {
     Pio1,
     Pwm,
     Adc,
+    Uart0,
+    Uart1,
 }
 
 impl Block {
@@ -80,6 +82,8 @@ impl Block {
             "PIO1" => Block::Pio1,
             "PWM_BASE" => Block::Pwm,
             "ADC" => Block::Adc,
+            "UART0" => Block::Uart0,
+            "UART1" => Block::Uart1,
             _ => return None,
         })
     }
@@ -274,6 +278,9 @@ pub struct Periph {
     pub pio: [super::pio::Pio; 2],
     pub pwm: super::pwm::Pwm,
     pub adc: super::adc::Adc,
+    pub uart: [super::uart::Uart; 2],
+    /// Bytes sent and baud changes, for the host to drain (like `pin_events`).
+    pub uart_events: Vec<super::uart::UartEvent>,
     /// The pending `setTimeout(() => run(), 0)` callbacks of the PIO blocks,
     /// oldest first, each the index of the block that armed it.
     pub pio_timers: Vec<u8>,
@@ -321,6 +328,8 @@ impl Periph {
             pio: [super::pio::Pio::new(), super::pio::Pio::new()],
             pwm: super::pwm::Pwm::new(),
             adc: super::adc::Adc::new(),
+            uart: [super::uart::Uart::new(), super::uart::Uart::new()],
+            uart_events: Vec::new(),
             pio_timers: Vec::new(),
         }
     }
@@ -412,6 +421,14 @@ impl Rp2040 {
             Block::Dma => self.dma_read(offset),
             Block::Pio0 => self.pio_read(0, offset),
             Block::Pio1 => self.pio_read(1, offset),
+            Block::Uart0 => match self.uart_read(0, offset) {
+                Some(v) => v,
+                None => self.base_read(),
+            },
+            Block::Uart1 => match self.uart_read(1, offset) {
+                Some(v) => v,
+                None => self.base_read(),
+            },
             Block::Adc => match self.adc_read(offset) {
                 Some(v) => v,
                 None => self.base_read(),
@@ -491,6 +508,12 @@ impl Rp2040 {
             Block::Dma => self.dma_write(offset, value, raw),
             Block::Pio0 => self.pio_write(0, offset, value, raw),
             Block::Pio1 => self.pio_write(1, offset, value, raw),
+            Block::Uart0 | Block::Uart1 => {
+                let i = (block == Block::Uart1) as usize;
+                if !self.uart_write(i, offset, value, raw) {
+                    self.base_write();
+                }
+            }
             Block::Adc => {
                 if !self.adc_write(offset, value) {
                     self.base_write();

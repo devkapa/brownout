@@ -438,3 +438,189 @@ mod adc {
         assert_ne!(m.cpu.pending_interrupts & (1 << 22), 0 /* datasheet: clear */);
     }
 }
+
+mod uart {
+    use super::super::dma::dreq;
+    use super::*;
+
+    const UART0: u32 = 0x4003_4000;
+    const UART1: u32 = 0x4003_8000;
+    const DR: u32 = 0x0;
+    const FR: u32 = 0x18;
+    const IBRD: u32 = 0x24;
+    const FBRD: u32 = 0x28;
+    const LCR_H: u32 = 0x2c;
+    const CR: u32 = 0x30;
+    const IMSC: u32 = 0x38;
+    const RIS: u32 = 0x3c;
+    const MIS: u32 = 0x40;
+    const ICR: u32 = 0x44;
+    const RXINTR: u32 = 1 << 4;
+    const TXINTR: u32 = 1 << 5;
+
+    // ---- src/peripherals/uart.spec.ts (both tests), ported by hand -------------
+
+    #[test]
+    fn upstream_should_correctly_return_word_length_based_on_uartlcr_h_value() {
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + LCR_H, 0x70);
+        assert_eq!(m.periph.uart[0].word_length(), 8);
+    }
+
+    #[test]
+    fn upstream_should_correctly_calculate_the_baud_rate_based_on_ibrd_fbrd() {
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + IBRD, 67); // datasheet 4.2.7.1 example values
+        wr(&mut m, UART0 + FBRD, 52);
+        assert_eq!(m.periph.uart[0].baud_rate(), 115207.0);
+    }
+
+    // ---- datasheet-derived ----------------------------------------------------------
+
+    #[test]
+    fn reset_values() {
+        // Datasheet 4.2.8: UARTFR 0x90 (TXFE, RXFE), UARTCR 0x300 (TXE, RXE),
+        // IBRD/FBRD/LCR_H/IMSC 0.
+        let mut m = Rp2040::new();
+        for base in [UART0, UART1] {
+            assert_eq!(rd(&mut m, base + FR), 0x90);
+            assert_eq!(rd(&mut m, base + CR), 0x300);
+            for r in [IBRD, FBRD, LCR_H, IMSC, RIS] {
+                assert_eq!(rd(&mut m, base + r), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn identification_registers() {
+        // Datasheet 4.2.8: PeriphID 0x11 0x10 0x34 0x00, PCellID 0x0d 0xf0 0x05 0xb1.
+        let mut m = Rp2040::new();
+        let ids: Vec<u32> = [0xfe0, 0xfe4, 0xfe8, 0xfec, 0xff0, 0xff4, 0xff8, 0xffc].iter().map(|o| rd(&mut m, UART0 + o)).collect();
+        assert_eq!(ids, [0x11, 0x10, 0x34, 0x00, 0x0d, 0xf0, 0x05, 0xb1]);
+    }
+
+    #[test]
+    fn divisor_registers_are_sixteen_and_six_bits() {
+        // IBRD is 16 bits, FBRD 6 bits (datasheet 4.2.8).
+        let mut m = Rp2040::new();
+        wr(&mut m, UART1 + IBRD, 0x12345);
+        wr(&mut m, UART1 + FBRD, 0xff);
+        assert_eq!(rd(&mut m, UART1 + IBRD), 0x2345);
+        assert_eq!(rd(&mut m, UART1 + FBRD), 0x3f);
+    }
+
+    #[test]
+    fn word_length_field_is_lcr_h_bits_6_5() {
+        let mut m = Rp2040::new();
+        for (v, bits) in [(0u32, 5), (1, 6), (2, 7), (3, 8)] {
+            wr(&mut m, UART0 + LCR_H, v << 5);
+            assert_eq!(m.periph.uart[0].word_length(), bits);
+        }
+    }
+
+    #[test]
+    fn written_bytes_go_to_the_host_in_order() {
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + DR, 0x141);
+        ns(&mut m, 8.0);
+        wr(&mut m, UART1 + DR, 0x42);
+        let ev: Vec<(u8, u8, f64, f64)> = m.periph.uart_events.iter().map(|e| (e.uart, e.kind, e.value, e.nanos)).collect();
+        assert_eq!(ev, [(0, 0, 0x41 as f64, 0.0), (1, 0, 0x42 as f64, 8.0)]);
+    }
+
+    #[test]
+    fn received_bytes_come_out_in_order_with_flags_and_interrupt() {
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + IMSC, RXINTR);
+        assert_eq!(m.cpu.pending_interrupts & (1 << 20), 0);
+        m.uart_feed_byte(0, b'a');
+        m.uart_feed_byte(0, b'b');
+        assert_eq!(rd(&mut m, UART0 + FR) & (1 << 4), 0, "RXFE clear");
+        assert_ne!(m.cpu.pending_interrupts & (1 << 20), 0, "IRQ 20 = UART0");
+        assert_eq!(rd(&mut m, UART0 + MIS) & RXINTR, RXINTR);
+        assert_eq!(rd(&mut m, UART0 + DR), b'a' as u32);
+        assert_eq!(rd(&mut m, UART0 + RIS) & RXINTR, RXINTR, "one byte still waits");
+        assert_eq!(rd(&mut m, UART0 + DR), b'b' as u32);
+        assert_eq!(rd(&mut m, UART0 + RIS) & RXINTR, 0);
+        assert_ne!(rd(&mut m, UART0 + FR) & (1 << 4), 0);
+        assert_eq!(m.cpu.pending_interrupts & (1 << 20), 0, "only RXINTR is unmasked");
+    }
+
+    #[test]
+    fn rx_fifo_holds_thirty_two_bytes() {
+        // Datasheet: 32 x 8 receive FIFO; RXFF flags it full.
+        let mut m = Rp2040::new();
+        for i in 0..40u8 {
+            m.uart_feed_byte(1, i);
+        }
+        assert_ne!(rd(&mut m, UART1 + FR) & (1 << 6), 0);
+        for i in 0..32u32 {
+            assert_eq!(rd(&mut m, UART1 + DR), i);
+        }
+        assert_ne!(rd(&mut m, UART1 + FR) & (1 << 4), 0);
+    }
+
+    #[test]
+    fn enabling_the_uart_raises_the_tx_request_line() {
+        let mut m = Rp2040::new();
+        assert!(!m.periph.dma.dreq[dreq::UART0_TX as usize]);
+        wr(&mut m, UART0 + CR, 0x301);
+        assert!(m.periph.dma.dreq[dreq::UART0_TX as usize]);
+        assert!(!m.periph.dma.dreq[dreq::UART1_TX as usize]);
+        wr(&mut m, UART0 + CR, 0x300);
+        assert!(!m.periph.dma.dreq[dreq::UART0_TX as usize]);
+    }
+
+    #[test]
+    fn baud_changes_are_reported() {
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + IBRD, 67);
+        wr(&mut m, UART0 + FBRD, 52);
+        let rates: Vec<f64> = m.periph.uart_events.iter().filter(|e| e.kind == 1).map(|e| e.value).collect();
+        // IBRD alone: 125 MHz / (67 * 16) = 116604.
+        assert_eq!(rates, [116604.0, 115207.0]);
+    }
+
+    // ---- reference quirks -----------------------------------------------------------
+
+    #[test]
+    fn reference_quirk_tx_interrupt_is_raised_by_any_interrupt_check() {
+        // Datasheet: TXRIS is set while the TX FIFO is at or below its trigger
+        // level, and clears only when the level is crossed again. The
+        // reference has no TX FIFO: every interrupt check sets it, so an ICR
+        // write cannot clear it.
+        let mut m = Rp2040::new();
+        assert_eq!(rd(&mut m, UART0 + RIS), 0);
+        wr(&mut m, UART0 + IMSC, TXINTR);
+        assert_eq!(rd(&mut m, UART0 + RIS), TXINTR);
+        wr(&mut m, UART0 + ICR, TXINTR);
+        assert_eq!(rd(&mut m, UART0 + RIS), TXINTR /* datasheet: 0 */);
+        assert_ne!(m.cpu.pending_interrupts & (1 << 20), 0);
+    }
+
+    #[test]
+    fn reference_quirk_tx_fifo_is_always_empty() {
+        // Datasheet: TXFE reflects the TX FIFO; a write makes TXFE clear until
+        // the byte is sent. The reference sends at once and always reports empty.
+        let mut m = Rp2040::new();
+        wr(&mut m, UART0 + DR, 1);
+        assert_ne!(rd(&mut m, UART0 + FR) & (1 << 7), 0);
+        assert_eq!(rd(&mut m, UART0 + FR) & (1 << 5), 0, "TXFF never set");
+    }
+
+    #[test]
+    fn reference_quirk_rx_dma_request_is_never_raised() {
+        // Datasheet 4.2.3.4: with DMACR.RXDMAE the RX request follows the RX
+        // FIFO. The reference has no UARTDMACR and never touches the RX line.
+        let mut m = Rp2040::new();
+        m.uart_feed_byte(0, 1);
+        assert!(!m.periph.dma.dreq[dreq::UART0_RX as usize]);
+        assert_eq!(rd(&mut m, UART0 + 0x48), 0xffff_ffff, "UARTDMACR is unimplemented");
+    }
+
+    #[test]
+    fn reference_quirk_zero_divisor_reports_an_infinite_baud_rate() {
+        let m = Rp2040::new();
+        assert!(m.periph.uart[0].baud_rate().is_infinite());
+    }
+}

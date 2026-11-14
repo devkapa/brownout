@@ -249,7 +249,7 @@ fn the_per_step_rollback_copies_the_core_only() {
     let mut m = Rp2040::new();
     m.write_u32(0x1000_0000, 0x1234_5678);
     let before = m.cpu.clone();
-    m.read_u32(0x4003_4000); // UART0: stops
+    m.read_u32(0x2000_0002); // unaligned: stops
     assert!(m.stop.is_some());
     assert_eq!(m.cpu.r, before.r);
     assert_eq!(m.read_u32(0x1000_0000), 0x1234_5678);
