@@ -436,7 +436,7 @@ if (opt.bench) {
   // Instructions per second, each side alone, on the first image, built as ArduinoMcu builds it
   // (peripherals attached, no scripted inputs).
   const flash = parseIntelHex(fs.readFileSync(opt.images[0], "utf8"));
-  for (const mode of ["cpu", "full"]) {
+  for (const mode of ["full"]) {
     const js = new JsSide(flash, mode, false), rs = new RustSide(flash, mode, false);
     let t = process.hrtime.bigint(); js.run(opt.bench);
     const tj = Number(process.hrtime.bigint() - t) / 1e9;
