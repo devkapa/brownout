@@ -1386,7 +1386,7 @@ impl PartitionedSolver {
                             let coupled: Option<Vec<rails::Coupled>> = cf_parts.iter().map(|&p| self.closed_form.coupling(p, now, u)).collect();
                             coupled.and_then(|c| rails::coupled_modes(hub.c_rail, e, alpha, k, slope / alpha, &c)).map(|modes| {
                                 let esr = (e > 0.0).then(|| (k + alpha / (e * hub.c_rail), slope / alpha, 1.0 / (e * hub.c_rail)));
-                                Rc::new(RailModes { modes, q0: q, esr })
+                                Rc::new(RailModes::new(modes, q, esr))
                             })
                         };
                         let coupled = modes.is_some();
@@ -1517,7 +1517,7 @@ impl PartitionedSolver {
                 let coupled: Option<Vec<rails::Coupled>> = cf_parts.iter().map(|&p| self.closed_form.coupling(p, now, u)).collect();
                 coupled.and_then(|c| rails::cell_modes(cd.kappa, cd.rho, &c)).map(|modes| {
                     let slope = modes.iter().map(|m| m.1).sum();
-                    CapSeg { t0: now, u0: u, u_inf: u, k: 0.0, slope, alpha: 1.0, beta: 0.0, ramp: 0.0, cf_frozen: 0.0, cf_count: 0, modes: Some(Rc::new(RailModes { modes, q0: u, esr: None })) }
+                    CapSeg { t0: now, u0: u, u_inf: u, k: 0.0, slope, alpha: 1.0, beta: 0.0, ramp: 0.0, cf_frozen: 0.0, cf_count: 0, modes: Some(Rc::new(RailModes::new(modes, u, None))) }
                 })
             }
             _ => None,

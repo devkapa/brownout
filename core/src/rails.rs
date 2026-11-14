@@ -319,7 +319,7 @@ impl CapSeg {
     /// turns where the two oppose, so [`Motion::Seg`]'s one-way log does not
     /// hold for it.
     pub fn ramp_path(&self) -> Option<RailModes> {
-        (self.modes.is_none() && self.ramp != 0.0).then(|| RailModes { modes: vec![(self.k, self.slope - self.alpha * self.ramp), (0.0, self.ramp)], q0: self.charge_at(self.t0), esr: None })
+        (self.modes.is_none() && self.ramp != 0.0).then(|| RailModes::new(vec![(self.k, self.slope - self.alpha * self.ramp), (0.0, self.ramp)], self.charge_at(self.t0), None))
     }
 }
 
@@ -343,14 +343,31 @@ pub struct Coupled {
 /// coupled system's modes, and the capacitors' charge, which with `esr_eff >
 /// 0` lags the rail through the esr pole: `q(t0 + τ) = q0 + r0_q φ_ke(τ) +
 /// ce sum s J(-ke, k, τ)`, `(ke, r0_q, ce)` in `esr`. At esr 0 `q` is `u`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RailModes {
     pub modes: Vec<(f64, f64)>,
     pub q0: f64,
     pub esr: Option<(f64, f64, f64)>,
+    /// The last [`Self::passages`] asked of this path, `(a, b)` by their
+    /// bits and its answer: a draining cell's rail solve asks for the drift
+    /// cap each way, and the event it schedules on the same path asks again
+    /// (BAT-PERF). A function of the fields above, so no part of equality.
+    passages_memo: std::cell::Cell<Option<PassagesMemo>>,
+}
+
+type PassagesMemo = (Option<u64>, Option<u64>, f64, f64);
+
+impl PartialEq for RailModes {
+    fn eq(&self, other: &Self) -> bool {
+        self.modes == other.modes && self.q0 == other.q0 && self.esr == other.esr
+    }
 }
 
 impl RailModes {
+    pub fn new(modes: Vec<(f64, f64)>, q0: f64, esr: Option<(f64, f64, f64)>) -> Self {
+        RailModes { modes, q0, esr, passages_memo: std::cell::Cell::new(None) }
+    }
+
     /// `u(t0 + τ) - u0`.
     pub fn du(&self, tau: f64) -> f64 {
         let mut it = self.modes.iter();
@@ -390,6 +407,18 @@ impl RailModes {
     /// calls give: the sums differ only in `c0`, so their turning points are
     /// found once. Every caller wants a move each way, at each rail event.
     pub fn passages(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
+        let key = (a.map(f64::to_bits), b.map(f64::to_bits));
+        if let Some((ka, kb, up, down)) = self.passages_memo.get() {
+            if (ka, kb) == key {
+                return (up, down);
+            }
+        }
+        let found = self.passages_fresh(a, b);
+        self.passages_memo.set(Some((key.0, key.1, found.0, found.1)));
+        found
+    }
+
+    fn passages_fresh(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
         let terms: Vec<(f64, Basis)> = self.modes.iter().map(|&(k, s)| (s, Basis::Phi(k))).collect();
         let mut zeros = None;
         let mut one = |d: Option<f64>| match d {
@@ -2815,7 +2844,7 @@ mod tests {
             let modes = coupled_modes(c_rail, esr, alpha, k_q, r0_q, &parts).expect("modes");
             // The rail and two followers are three states; the forcing adds one.
             assert_eq!(modes.len(), 4);
-            let m = RailModes { modes, q0: 0.0, esr: (esr > 0.0).then(|| (k_q + alpha / (esr * c_rail), r0_q, 1.0 / (esr * c_rail))) };
+            let m = RailModes::new(modes, 0.0, (esr > 0.0).then(|| (k_q + alpha / (esr * c_rail), r0_q, 1.0 / (esr * c_rail))));
             for (&t, &(u, q)) in times.iter().zip(&coupled_rk4(c_rail, esr, alpha, k_q, r0_q, &parts, &times, 2e-8)) {
                 let (gu, gq) = (m.du(t), m.charge(0.0, t));
                 assert!((gu - u).abs() <= 1e-8 * u.abs().max(1e-6), "esr {esr} t {t:e}: rail {gu:e} against {u:e}");
@@ -3116,6 +3145,7 @@ impl crate::snapshot::HeapBytes for RailModes {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.modes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.q0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.esr, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.passages_memo, w); }
         n
     }
 }
