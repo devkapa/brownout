@@ -4073,6 +4073,21 @@ Constants, all from P3:35-38 unless marked new:
    a PSU with no rail capacitor is the exception (point 3, the CC step): a
    step whose rail passes the setpoint is cut where it reaches it.
 
+   **The step after a rail solve** (ERRCTL P2a). On a cell with resistance
+   the rail moves with the stepped hub partitions' own draws, and each
+   commit's draw reaches it only in the rail loop that follows the commit.
+   So such a partition's next step is planned after that loop, on the rail
+   it published, not at the commit (`SteppedSolver::late_rail`,
+   `plan_late`): a commit at a `Step` event, the horizon clamp's, and a
+   re-seed's plan alike, and with it the plan of a partition whose watches
+   take a supply from one so held back. Planned at the commit, the trial
+   read the rail of the commit before as its boundary, a step stale:
+   `sp_board` (a) (2.2 uF charging through 100 ohm from a 4.3 V, 5 ohm
+   cell) held 4.2290 V through the step from a 0.3 ms host stop where the
+   rail stood at 4.2436 V. A PSU needs none of it: its CV rail is fixed
+   and its CC rail is an unknown of the step (point 3). Exact mode's rail
+   is a node (point 9).
+
    **A seed's capacitor currents** (W2c, the ruling on option (A)). A
    stepped seed (`SEED_H`: a load, a re-aim at a discontinuity, a CC
    promotion) publishes each capacitor that holds a charge at the current

@@ -19400,3 +19400,48 @@ fn chips_sliding_as_one_slide_alike_in_every_device_order() {
         }
     }
 }
+
+// ---- ERRCTL P2: a stepped hub partition on a cell's rail ----
+
+#[test]
+fn a_cells_stepped_hub_partition_plans_each_step_on_the_rail_its_commit_left() {
+    // ERRCTL P2a. On `sp_board` (a) the chip is unpowered until its supply
+    // (node 4, 2.2 uF) reaches 3.96 V at 0.586 ms, so until then node 4
+    // charges through 100 ohm from the rail (node 1), which the 4.3 V cell
+    // feeds through its 5 ohm: (4.3 - u) / 5 = (u - v4) / 100, u = (430 + 5
+    // v4) / 105. The rail so follows node 4, from 4.0952 V at v4 = 0 toward
+    // 4.3 V, and the rail loop publishes that pair after each commit.
+    //
+    // The trial pending after a commit must start from the rail published
+    // there. It was planned at the commit, before the rail loop took the
+    // commit's draw, so it held the rail of the commit before: by hand at a
+    // 0.3 ms host stop after one at 0.2 ms, v4 = 4.3 (1 - exp(-0.3 / 0.231))
+    // = 3.1266 V and u = (430 + 5 x 3.1266) / 105 = 4.2441 V, where the trial
+    // held the rail of the last commit before the stop (4.2290 V at 0.2457
+    // ms in ERRCTL's trace, 14.6 mV behind).
+    //
+    // Both planning paths: a `Step` event's commit (each stop is the
+    // kernel's next event, so no horizon clamp plans anything) and the
+    // clamp's (20 us host stops, which fall inside steps).
+    let p = sp_board('a');
+    let rail_by_hand = |v4: f64| (430.0 + 5.0 * v4) / 105.0;
+    for by_event in [true, false] {
+        let mut rig = Rig::load(&p).unwrap();
+        let part = rig.s().partition_of_node(4).expect("node 4's partition").0 as usize;
+        let mut t = 0.0f64;
+        let mut stops = 0;
+        while t < 0.5e-3 {
+            t = if by_event { rig.k.next_event_time().min(0.5e-3) } else { t + 20e-6 };
+            rig.advance(t).unwrap();
+            let what = format!("{} at {t:e}", if by_event { "by event" } else { "20 us stops" });
+            close(rig.v(1), rail_by_hand(rig.v(4)), 1e-9, &format!("{what}: the published rail by hand"));
+            let (t0, u0) = rig.s().stepped.debug_trial_rail(part).unwrap_or_else(|| panic!("{what}: a pending trial"));
+            if t0 == t {
+                close(u0, rig.v(1), 1e-12, &format!("{what}: the rail the pending trial starts from"));
+                stops += 1;
+            }
+        }
+        // Every stop but those inside a step at an event of another kind.
+        assert!(stops >= 10, "{}: {stops} trials planned at a stop", if by_event { "by event" } else { "20 us stops" });
+    }
+}
