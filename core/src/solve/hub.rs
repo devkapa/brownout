@@ -900,6 +900,26 @@ impl PartitionedSolver {
     /// (Rails point 2), each evaluated exactly at the published voltages of
     /// its other end.
     pub(super) fn direct_at(&self, u: f64) -> (f64, f64) {
+        self.direct_at_among(u, None)
+    }
+
+    /// The rail ICs (positions in `ics`, in `rail_ics` order) with a driver
+    /// [`Self::direct_at`] may count: what it filters on every call, which no
+    /// rail value changes, taken once for the iterates of one rail solve.
+    fn rail_drawing_ics(&self) -> Vec<u32> {
+        let Some(hub) = self.hub.as_ref() else { return Vec::new() };
+        let rail = hub.node;
+        let free = |n: usize| n != rail && !self.fixed_node[n];
+        hub.rail_ics.iter().copied().filter(|&pos| {
+            let ic = &self.ics[pos as usize].1;
+            self.ic_driver_ids[pos as usize].iter().any(|&id| self.driver_snapshot.get(id as usize).is_some_and(|driver| may_draw_from_rail(driver, ic, rail, &free)))
+        }).collect()
+    }
+
+    /// [`Self::direct_at`], walking only `drawing` ([`Self::rail_drawing_ics`]
+    /// at the same drivers) when given: the ICs it passes over are
+    /// the ones the walk would skip, so every sum is the walk's to the bit.
+    fn direct_at_among(&self, u: f64, drawing: Option<&[u32]>) -> (f64, f64) {
         let Some(hub) = self.hub.as_ref() else { return (0.0, 0.0) };
         let rail = hub.node;
         let v = &self.voltages;
@@ -950,10 +970,10 @@ impl PartitionedSolver {
             let up = u + rails::RAIL_DELTA;
             let free = |n: usize| n != rail && !self.fixed_node[n];
             let (mut d0, mut d1) = (0.0, 0.0);
-            for &pos in &hub.rail_ics {
+            for &pos in drawing.unwrap_or(&hub.rail_ics) {
                 let (d, ic) = &self.ics[pos as usize];
                 let ids = &self.ic_driver_ids[pos as usize];
-                if !ids.iter().any(|&id| self.driver_snapshot.get(id as usize).is_some_and(|driver| may_draw_from_rail(driver, ic, rail, &free))) {
+                if drawing.is_none() && !ids.iter().any(|&id| self.driver_snapshot.get(id as usize).is_some_and(|driver| may_draw_from_rail(driver, ic, rail, &free))) {
                     continue;
                 }
                 let held = |node: usize| if node == rail { u } else { v[node] };
@@ -1330,13 +1350,14 @@ impl PartitionedSolver {
         // Each call is at the rail Newton's next iterate (or again at its
         // last): the last three are kept for the hold's trigger.
         hub.newton_trace.set([f64::NAN; 3]);
+        let drawing = self.rail_drawing_ics();
         let direct = |u: f64| {
             let mut t = hub.newton_trace.get();
             if t[2].to_bits() != u.to_bits() {
                 t = [t[1], t[2], u];
                 hub.newton_trace.set(t);
             }
-            self.direct_at(u)
+            self.direct_at_among(u, Some(&drawing))
         };
         let old_u = hub.state.u;
         let mut reg = hub.state.reg;
