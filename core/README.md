@@ -577,6 +577,36 @@ also call, bit-identical.
   exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
   a hub candidate (Rails point 1), with device state `reg` (C ABI, device
   state).
+- **Sources only, declined** (ruling R116 (2), the decline-only cut). A
+  linear bench supply's output stage sources and does not sink: driven above
+  its setpoint it lets go (classic's `BENCH_PSU_BACKDRIVEN`, c98bf73). The
+  core models no let-go, so in CV a supply here holds its setpoint whatever
+  drives its rail. Where it would sink more than `BACK_DRIVE_SINK_A` (1 uA,
+  classic's own let-go threshold), with or without a limit, the publish
+  fails the instant with `bench-psu-back-driven` (`solve::BACK_DRIVE_REASON`),
+  a `-4` whose message starts with it and names the instant (`... at <t>
+  s`): at load the circuit is declined with that reason, part-way through a
+  run the advance fails (A failed advance), the readings stay at the last
+  good instant, and the host falls back to classic, which models the let-go.
+  Never a silent sink. How the crossing is found (`check_back_drive`):
+  - a limited supply (a hub rail in CV) from the rail's own terms at every
+    publish (`hub_delivered`: the draw at `V`, every rail capacitor's pull
+    there with it, one past the setpoint pushing), its crossing an event of
+    its own: a rail watch at `-BACK_DRIVE_SINK_A` beside the CC entry's
+    (Rails point 4), with the running ramps' lines, so the failing instant
+    is the crossing's at any host cadence;
+  - in exact mode, at each committed step of the rail's partition, where the
+    CC entry is judged (`exact_after_publish`), a stepped step cut where the
+    source row's current crosses the threshold (`Cross::Sink`, beside the
+    CC exit's setpoint cut, ruling R102 (a));
+  - an unlimited supply (a fixed node) from its KCL at every publish, the
+    closed-form partitions read at the instant (`fresh_supply_currents`, on
+    copies), so between host stops the crossing is caught at the first
+    instant past it, not located: a ramp between two instants is found at
+    the second;
+  - every supply's published current at a synced publish (the load's
+    settle, each horizon clamp).
+  A board with no bench supply runs none of it (`back_drive` empty).
 - **Validation** (`kinds.rs`, `-1`): `V` finite; `iLimit` finite and `>=
   0` (the compiler never emits a negative one).
 - Across a reload the regime is not carried but derived again at the
@@ -1053,7 +1083,10 @@ instant. The facade's `CoreEngine.takeEepromUpdates()` returns classic's
 
 **A failed advance.** When `bo_engine_advance` returns `-4` or `-7`, the
 engine keeps the state of the last instant it completed, and
-`bo_engine_time` reports that instant. The host treats this as
+`bo_engine_time` reports that instant. A `-4` whose message starts with
+`bench-psu-back-driven` is a bench supply the circuit drives to sink
+(ruling R116 (2); Kind codes, bench PSU): the hosts read it as its own
+fallback reason, and the message names the failing instant. The host treats this as
 non-convergence, as classic's `lastConverged = false`: it keeps the last
 good readouts and reports how far time actually got. It is not a load
 error. The stat counters are the exception: they keep the failed attempt's
@@ -4684,7 +4717,8 @@ Constants, all from P3:35-38 unless marked new:
      a moving term of the CV-entry watch (point 4), so a supply inside its
      limit never re-enters. A total past the limit against the PSU's
      direction (`dir·I < −iLimit`) is a source back-driving the rail, which
-     the CV supply sinks (ruling R40): the CC solution at the instant, the
+     the CV supply would sink (ruling R40; since R116 (2) it declines with
+     `bench-psu-back-driven`): the CC solution at the instant, the
      charge plus its current's drop across the esr, is past the setpoint
      there, so the clamp keeps CV without reading the charge (FXI, bug D: a
      pulse's edge through 2.2 Ω back-drove the rail by 16.6 A net of a
@@ -5049,8 +5083,9 @@ Constants, all from P3:35-38 unless marked new:
      failed outright). Such a board re-solves twice at each
      commit while its draw stays over the limit: about 2.7 s of CPU for 10
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
-     the rail). A back-fed PSU in CV sinks without limit, as classic's model
-     does; a supply that cannot sink is not modelled.
+     the rail). A back-fed PSU in CV would sink, which classic's supply no
+     longer does: the core declines it (ruling R116 (2), decline-only,
+     `bench-psu-back-driven`; Kind codes, bench PSU).
    - **A step cut at every regime crossing** (ruling R102 (a)). A
      stepped partition's Newton judges each free chip whose supply it
      holds at the step's end, for the whole step (W1c point 3), and a PSU

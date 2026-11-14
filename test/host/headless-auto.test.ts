@@ -462,3 +462,76 @@ describe('engine: "core" — an explicit request still reports the failure itsel
     expect(runner.activeEngine).toBe("core");
   });
 });
+
+describe('engine: "auto" — a bench supply driven to sink (ruling R116 (2))', () => {
+  // R116's probe board: a 9 V source through 100 ohm onto a 5 V bench
+  // supply's rail with 10 kohm across it. A supply that sources only lets go
+  // (classic, c98bf73): by hand the rail is 9 x 10000 / 10100 = 8.910891 V
+  // and the supply carries 0 A. The core models no let-go: held at 5 V the
+  // supply would sink (9 - 5) / 100 - 5 / 10000 = 39.5 mA, so it declines
+  // with `bench-psu-back-driven`, with or without a current limit, and the
+  // runner answers on classic.
+  const RAIL = 90000 / 10100;
+  function probe(source: SimComponent, iLimit: number | undefined): SimCircuit {
+    return {
+      components: [
+        source,
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part("psu", "bench_psu", ["pos", "neg"], iLimit === undefined ? { voltage: 5 } : { voltage: 5, iLimit }),
+        part("rl", "resistor", ["a", "b"], { resistance: 10_000 }),
+      ],
+      wires: [
+        wire("src", "neg", "psu", "neg"),
+        wire("rl", "b", "psu", "neg"),
+        wire("src", "pos", "r1", "a"),
+        wire("r1", "b", "psu", "pos"),
+        wire("psu", "pos", "rl", "a"),
+      ],
+    };
+  }
+  const rail = (runner: HeadlessRunner): number => runner.snapshot().netV[runner.netIdFor("psu", "pos")!]!;
+
+  for (const iLimit of [undefined, 0.1]) {
+    const which = iLimit === undefined ? "no limit" : `iLimit ${iLimit}`;
+
+    it(`classic, fed the probe board, lets go: 8.9109 V and 0 A (the fallback's answer), ${which}`, () => {
+      const runner = new HeadlessRunner({ engine: "classic" });
+      runner.load(probe(part("src", "voltage_source", ["pos", "neg"], { voltage: 9 }), iLimit));
+      runner.run({ durationS: 1e-2 });
+      expect(Math.abs(rail(runner) - RAIL)).toBeLessThan(1e-8);
+      expect(runner.snapshot().elementI["psu"]).toBe(0);
+    });
+
+    it(`declines at load with bench-psu-back-driven and answers on classic, ${which}`, () => {
+      const runner = new HeadlessRunner(AUTO);
+      runner.load(probe(part("src", "voltage_source", ["pos", "neg"], { voltage: 9 }), iLimit));
+      expect(runner.activeEngine).toBe("classic");
+      expect(runner.engineFallbackReasons).toEqual(["bench-psu-back-driven"]);
+      runner.run({ durationS: 1e-2 });
+      expect(Math.abs(rail(runner) - RAIL)).toBeLessThan(1e-8);
+      expect(runner.snapshot().elementI["psu"]).toBe(0);
+    });
+
+    it(`fails part-way with mid-run:bench-psu-back-driven where a pulse starts back-driving, and replays on classic, ${which}`, () => {
+      // 0 V until 3 ms, then 9 V: CV at 5 V on the core until the edge (the
+      // supply delivers 5 / 100 + 5 / 10000 = 50.5 mA there, within 0.1 A).
+      const board = probe(part("src", "pulse_gen", ["pos", "neg"], { v1: 0, v2: 9, td: 3e-3, tr: 0, tf: 0, pw: 0.1, per: 1 }), iLimit);
+      const runner = new HeadlessRunner(AUTO);
+      runner.load(board);
+      expect(runner.activeEngine).toBe("core");
+      runner.run({ durationS: 1e-2 });
+      expect(runner.activeEngine).toBe("classic");
+      expect(runner.engineFallbackReasons).toEqual(["mid-run:bench-psu-back-driven", "restarted-from-load"]);
+      expect(Math.abs(rail(runner) - RAIL)).toBeLessThan(1e-8);
+      expect(runner.snapshot().elementI["psu"]).toBe(0);
+      // The core, run alone, stops at the last good instant: CV at 5 V.
+      const core = new CoreEngine();
+      core.load(board);
+      core.advance(1e-2);
+      expect(core.lastConverged).toBe(false);
+      expect(core.lastAdvanceFailure?.message.startsWith("bench-psu-back-driven")).toBe(true);
+      expect(core.simTime).toBeLessThanOrEqual(3e-3);
+      expect(Math.abs(core.getNetV()[core.nets.find((n) => n.pins.some(([c, p]) => c === "psu" && p === "pos"))!.id]! - 5)).toBeLessThan(1e-12);
+    });
+  }
+});

@@ -35,6 +35,7 @@ export { CoreEngine } from "./core/engine.js";
 export type { CoreAdvanceFailure, CoreAdvanceOutcome, CoreCharge, CoreEngineStats, CoreParamChange, CoreSamples, CoreSnapshot } from "./core/engine.js";
 
 export {
+  BENCH_PSU_BACK_DRIVEN,
   CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,
