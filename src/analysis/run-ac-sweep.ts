@@ -73,7 +73,6 @@
  *   never returns mid-run and cooperative cancellation is a no-op.
  */
 
-import { SimEngine } from "../sim/engine/sim-engine.js";
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import {
   logSweepValues,
@@ -81,7 +80,26 @@ import {
   type AcSweepResult,
 } from "./jobs.js";
 import { ANALYSIS_STEP_S } from "./run-sweep.js";
-import { stepAnalysisEngine } from "./checked-step.js";
+import {
+  coldLoadPoint,
+  planAnalysisEngine,
+  planOptionsFor,
+  runOnPlan,
+  runOnPlanAsync,
+  stepToGrid,
+  type AnalysisEngine,
+  type AnalysisEngineOptions,
+  type AnalysisRestartHook,
+  type AnalysisEngineReport,
+} from "./engine.js";
+
+/**
+ * Why `auto` still means classic here. The core has no `signal_gen` until W1h
+ * Phase B (the drive is a sine whose phase the DFT reads, so it cannot be
+ * approximated by another source). Deleting this string is the switch-over:
+ * the planner then decides from the circuit's kinds like every other analysis.
+ */
+const AC_FORCED_CLASSIC_REASONS = ["ac-sweep-needs-signal-gen-on-core"] as const;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -126,7 +144,7 @@ const TWO_PI = 2 * Math.PI;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface AcSweepHooks {
+export interface AcSweepHooks extends AnalysisEngineOptions, AnalysisRestartHook {
   onPoint?: (index: number, total: number) => void;
   shouldCancel?: () => boolean;
 }
@@ -156,7 +174,7 @@ interface WindowDft {
  * on `endTime` so the window spans a whole number of cycles.
  */
 function accumulateWindow(
-  engine: SimEngine,
+  engine: AnalysisEngine,
   endTime: number,
   h: number,
   f: number,
@@ -171,32 +189,28 @@ function accumulateWindow(
   let Q_ref = 0;
   let samples = 0;
 
-  let t = engine.simTime;
-  while (t < endTime) {
-    const remaining = endTime - t;
-    const stepH = Math.min(h, remaining);
-    stepAnalysisEngine(
-      engine,
-      stepH,
-      `run-ac-sweep measure at point ${String(pointIndex)} (f=${String(f)} Hz)`,
-    );
-    t = engine.simTime;
+  stepToGrid(
+    engine,
+    endTime,
+    h,
+    `run-ac-sweep measure at point ${String(pointIndex)} (f=${String(f)} Hz)`,
+    (t) => {
+      const netV = engine.getNetV();
+      const vRef = netV[refNetId] ?? 0;
+      const sinT = Math.sin(TWO_PI * f * t);
+      const cosT = Math.cos(TWO_PI * f * t);
 
-    const netV = engine.getNetV();
-    const vRef = netV[refNetId] ?? 0;
-    const sinT = Math.sin(TWO_PI * f * t);
-    const cosT = Math.cos(TWO_PI * f * t);
+      I_ref += vRef * sinT;
+      Q_ref += vRef * cosT;
 
-    I_ref += vRef * sinT;
-    Q_ref += vRef * cosT;
-
-    for (let j = 0; j < numNets; j++) {
-      const v = netV[outputNetIds[j]!] ?? 0;
-      I_out[j] += v * sinT;
-      Q_out[j] += v * cosT;
-    }
-    samples++;
-  }
+      for (let j = 0; j < numNets; j++) {
+        const v = netV[outputNetIds[j]!] ?? 0;
+        I_out[j] += v * sinT;
+        Q_out[j] += v * cosT;
+      }
+      samples++;
+    },
+  );
 
   return { I_out, Q_out, I_ref, Q_ref, samples };
 }
@@ -222,7 +236,7 @@ function windowAmplitude(I: number, Q: number, samples: number): number {
  *   buildNets() may merge wired pins into combined nets.  The net id is
  *   only stable after the engine has run buildNets() internally.
  */
-function resolveRefNetId(engine: SimEngine, componentId: string): string {
+function resolveRefNetId(engine: AnalysisEngine, componentId: string): string {
   const net = engine.nets.find((n) =>
     n.pins.some(([c, p]) => c === componentId && p === "pos"),
   );
@@ -238,26 +252,13 @@ function resolveRefNetId(engine: SimEngine, componentId: string): string {
 // ─── Per-point runner ─────────────────────────────────────────────────────────
 
 /**
- * Run one AC sweep point at frequency `f` Hz.
- *
- * Throws on irrecoverable errors (engine failure, non-convergence, dead
- * reference net). Each attempted step is restored before a convergence error
- * escapes, so the DFT never consumes a failed iterate.
- * The worker shell converts thrown errors to error messages.
+ * The circuit for one AC point: a clone with the target signal_gen set to a
+ * sine at `f`. Amplitude, offset, rSource, and enabled are intentionally left
+ * untouched — see module-level WHY comment for the rationale.
  */
-function runAcPoint(
-  spec: AcSweepSpec,
-  circuit: SimCircuit,
-  f: number,
-  pointIndex: number,
-  outputNetIds: readonly string[],
-): AcPointResult {
+function buildAcPointCircuit(spec: AcSweepSpec, circuit: SimCircuit, f: number): SimCircuit {
   // Clone so the mutation below does not affect the caller's circuit object.
   const pointCircuit: SimCircuit = structuredClone(circuit);
-
-  // Mutate the target signal_gen: set waveform to sine at frequency f.
-  // Amplitude, offset, rSource, and enabled are intentionally left untouched —
-  // see module-level WHY comment for the rationale.
   const sg = pointCircuit.components.find((c) => c.id === spec.componentId);
   if (sg) {
     sg.params.waveform = "sine";
@@ -265,16 +266,38 @@ function runAcPoint(
     sg.params.delay = 0;
     sg.params.phaseDeg = 0;
   }
+  return pointCircuit;
+}
 
-  // Fresh engine per point — element state must not carry between frequencies.
-  const engine = new SimEngine();
-  try {
-    engine.coldLoad(pointCircuit);
-  } catch (err) {
-    throw new Error(
-      `run-ac-sweep: coldLoad failed at point ${String(pointIndex)} (f=${String(f)} Hz): ${String(err)}`,
-    );
-  }
+function* acPointCircuits(
+  spec: AcSweepSpec,
+  circuit: SimCircuit,
+  freqs: readonly number[],
+): Generator<SimCircuit> {
+  for (const f of freqs) yield buildAcPointCircuit(spec, circuit, f);
+}
+
+/**
+ * Run one AC sweep point at frequency `f` Hz.
+ *
+ * Throws on irrecoverable errors (engine failure, non-convergence, dead
+ * reference net). A non-converged step is rejected before the DFT can consume
+ * it. The worker shell converts thrown errors to error messages.
+ */
+function runAcPoint(
+  engine: AnalysisEngine,
+  spec: AcSweepSpec,
+  circuit: SimCircuit,
+  f: number,
+  pointIndex: number,
+  outputNetIds: readonly string[],
+): AcPointResult {
+  // Cold per point — element state must not carry between frequencies.
+  coldLoadPoint(
+    engine,
+    buildAcPointCircuit(spec, circuit, f),
+    `run-ac-sweep: coldLoad failed at point ${String(pointIndex)} (f=${String(f)} Hz)`,
+  );
 
   // Resolve the reference net after coldLoad() so we see the post-buildNets ids.
   const refNetId = resolveRefNetId(engine, spec.componentId);
@@ -285,18 +308,13 @@ function runAcPoint(
   // ── Settle phase: run SETTLE_CYCLES full cycles without accumulation ─────
 
   const settleEnd = SETTLE_CYCLES / f;
-  let simTime = engine.simTime;
-
-  while (simTime < settleEnd) {
-    const remaining = settleEnd - simTime;
-    const stepH = Math.min(h, remaining);
-    stepAnalysisEngine(
-      engine,
-      stepH,
-      `run-ac-sweep settle at point ${String(pointIndex)} (f=${String(f)} Hz)`,
-    );
-    simTime = engine.simTime;
-  }
+  stepToGrid(
+    engine,
+    settleEnd,
+    h,
+    `run-ac-sweep settle at point ${String(pointIndex)} (f=${String(f)} Hz)`,
+  );
+  const simTime = engine.simTime;
 
   // ── Measure phase: two consecutive whole-cycle windows (W1, W2) ──────────
   // The reported amplitude/phase come from the COMBINED 6-cycle window (DFT
@@ -426,6 +444,7 @@ function buildAcResult(
   spec: AcSweepSpec,
   acc: AcAccumulator,
   cancelled: boolean,
+  report: AnalysisEngineReport,
 ): AcSweepResult {
   return {
     spec,
@@ -438,6 +457,8 @@ function buildAcResult(
     pointFailures: acc.pointFailures,
     notSettled: acc.notSettled,
     cancelled,
+    engine: report.engine,
+    fallbackReasons: report.fallbackReasons,
   };
 }
 
@@ -459,21 +480,28 @@ export function runAcSweep(
   circuit: SimCircuit,
   hooks?: AcSweepHooks,
 ): AcSweepResult {
-  const acc = makeAcAccumulator(spec);
+  const plan = planAnalysisEngine(
+    acPointCircuits(spec, circuit, makeAcAccumulator(spec).freqs),
+    planOptionsFor(spec.engine, hooks, AC_FORCED_CLASSIC_REASONS),
+  );
 
-  for (let i = 0; i < acc.total; i++) {
-    const f = acc.freqs[i]!;
-    accumulateAcPoint(acc, f, runAcPoint(spec, circuit, f, i, acc.outputNetIds));
+  return runOnPlan(plan, (engine, report) => {
+    const acc = makeAcAccumulator(spec);
 
-    // Notify progress before the cancel check so the caller sees the completed point.
-    hooks?.onPoint?.(i, acc.total);
+    for (let i = 0; i < acc.total; i++) {
+      const f = acc.freqs[i]!;
+      accumulateAcPoint(acc, f, runAcPoint(engine, spec, circuit, f, i, acc.outputNetIds));
 
-    if (hooks?.shouldCancel?.()) {
-      return buildAcResult(spec, acc, true);
+      // Notify progress before the cancel check so the caller sees the completed point.
+      hooks?.onPoint?.(i, acc.total);
+
+      if (hooks?.shouldCancel?.()) {
+        return buildAcResult(spec, acc, true, report);
+      }
     }
-  }
 
-  return buildAcResult(spec, acc, false);
+    return buildAcResult(spec, acc, false, report);
+  }, hooks?.onRestart);
 }
 
 /**
@@ -488,22 +516,29 @@ export async function runAcSweepAsync(
   circuit: SimCircuit,
   hooks?: AcSweepHooks,
 ): Promise<AcSweepResult> {
-  const acc = makeAcAccumulator(spec);
+  const plan = planAnalysisEngine(
+    acPointCircuits(spec, circuit, makeAcAccumulator(spec).freqs),
+    planOptionsFor(spec.engine, hooks, AC_FORCED_CLASSIC_REASONS),
+  );
 
-  for (let i = 0; i < acc.total; i++) {
-    const f = acc.freqs[i]!;
-    accumulateAcPoint(acc, f, runAcPoint(spec, circuit, f, i, acc.outputNetIds));
+  return runOnPlanAsync(plan, async (engine, report) => {
+    const acc = makeAcAccumulator(spec);
 
-    hooks?.onPoint?.(i, acc.total);
+    for (let i = 0; i < acc.total; i++) {
+      const f = acc.freqs[i]!;
+      accumulateAcPoint(acc, f, runAcPoint(engine, spec, circuit, f, i, acc.outputNetIds));
 
-    // Macrotask yield — queued worker messages only dispatch between macrotasks.
-    // A microtask (resolved Promise) would not let "cancel" arrive mid-run.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      hooks?.onPoint?.(i, acc.total);
 
-    if (hooks?.shouldCancel?.()) {
-      return buildAcResult(spec, acc, true);
+      // Macrotask yield — queued worker messages only dispatch between macrotasks.
+      // A microtask (resolved Promise) would not let "cancel" arrive mid-run.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      if (hooks?.shouldCancel?.()) {
+        return buildAcResult(spec, acc, true, report);
+      }
     }
-  }
 
-  return buildAcResult(spec, acc, false);
+    return buildAcResult(spec, acc, false, report);
+  }, hooks?.onRestart);
 }

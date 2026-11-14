@@ -1,0 +1,25 @@
+[package]
+name = "brownout-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Partitioned event-driven transient circuit core, compiled to WebAssembly. See core/README.md for the contract."
+
+[lib]
+name = "brownout_core"
+# cdylib for the wasm32-unknown-unknown build; rlib so `cargo test` links and
+# runs the same source natively, exercising the physics without a wasm host.
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# A trap on wasm (WebAssembly.RuntimeError) is cheaper and more legible at the
+# host boundary than unwind machinery no wasm32-unknown-unknown host runs.
+# Contract: "The crate builds with panic = "abort"" (core/README.md, ABI v1,
+# Traps). This is a release-profile setting only, so `cargo test` (dev/test
+# profile) keeps the default unwind strategy its harness needs.
+panic = "abort"
+strip = "debuginfo"

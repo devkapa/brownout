@@ -1,0 +1,13 @@
+{
+  "$comment": [
+    "A ptc_fuse (0.5 ohm, hold 0.5 A) straight across 0.5 V: fixture 54's circuit, run in the default flow instead of the slow one.",
+    "By hand: I = 0.5 / 0.5 = 1 A, twice the hold current, so the stress rate is (I / iHold)^2 - 1 = 3 per second and the PTC trips at 0.3 / 3 = 0.1 s (classic reads 0.1018 at its step end).",
+    "Tripped it is 200 times its resistance, 100 ohm, so it carries 0.5 / 100 = 5 mA. Fixture 54 measured the recovery of this 2x trip: the PTC resets 2 s after it tripped (2.1018 s on classic) and, still overloaded, trips again at 2.2036 s.",
+    "  0 to 0.1 s       untripped  1 A through the PTC (and the source)",
+    "  0.1 s to 2.1 s   tripped    5 mA",
+    "  2.1 s to 2.2 s   recovered  1 A again, a second trip about to latch",
+    "The 2.15 s run samples 0, 0.5375, 1.075 and 2.15 s: untripped, tripped, tripped, recovered, none within 45 ms of an edge. test/core/promoted-kinds-fixtures.test.ts reads them and 0.05 s on both engines."
+  ],
+  "status": "pass",
+  "durationS": 2.15
+}

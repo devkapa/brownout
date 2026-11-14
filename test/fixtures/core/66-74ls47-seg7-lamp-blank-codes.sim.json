@@ -1,0 +1,547 @@
+{
+  "id": "core-w2-66-74ls47-seg7-lamp-blank-codes",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "v_lt",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 5,
+        "v2": 0,
+        "td": 0.0025,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.005,
+        "per": 0
+      }
+    },
+    {
+      "id": "v_bi",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 5,
+        "v2": 0,
+        "td": 0.0075,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.005,
+        "per": 0
+      }
+    },
+    {
+      "id": "v_rbi",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 5,
+        "v2": 0,
+        "td": 0.0125,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.005,
+        "per": 0
+      }
+    },
+    {
+      "id": "v_a",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0.015,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.0075,
+        "per": 0.0175
+      }
+    },
+    {
+      "id": "v_bc",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0.0225,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.015,
+        "per": 0
+      }
+    },
+    {
+      "id": "v_d",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "td": 0.0175,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "pw": 0.005,
+        "per": 0.01
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "74ls47",
+      "pins": [
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "lt_n"
+        },
+        {
+          "id": "rbo_n"
+        },
+        {
+          "id": "rbi_n"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "a"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "e_out"
+        },
+        {
+          "id": "d_out"
+        },
+        {
+          "id": "c_out"
+        },
+        {
+          "id": "b_out"
+        },
+        {
+          "id": "a_out"
+        },
+        {
+          "id": "g_out"
+        },
+        {
+          "id": "f_out"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "disp",
+      "kind": "seg7_ca",
+      "pins": [
+        {
+          "id": "g"
+        },
+        {
+          "id": "f"
+        },
+        {
+          "id": "com"
+        },
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "e"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "com2"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "dp"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r_a",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_b",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_c",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_d",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_e",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_f",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_g",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "gnd",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "disp",
+      "to_pin": "com"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "disp",
+      "to_pin": "com2"
+    },
+    {
+      "from_component": "v_lt",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_bi",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_rbi",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_a",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_bc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_d",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_lt",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "lt_n"
+    },
+    {
+      "from_component": "v_bi",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "rbo_n"
+    },
+    {
+      "from_component": "v_rbi",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "rbi_n"
+    },
+    {
+      "from_component": "v_a",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "v_bc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "b"
+    },
+    {
+      "from_component": "v_bc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "c"
+    },
+    {
+      "from_component": "v_d",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "d"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "a",
+      "to_component": "r_a",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_a",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "a_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "b",
+      "to_component": "r_b",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_b",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "b_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "c",
+      "to_component": "r_c",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_c",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "c_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "d",
+      "to_component": "r_d",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "d_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "e",
+      "to_component": "r_e",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_e",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "e_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "f",
+      "to_component": "r_f",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_f",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "f_out"
+    },
+    {
+      "from_component": "disp",
+      "from_pin": "g",
+      "to_component": "r_g",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_g",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "g_out"
+    }
+  ]
+}

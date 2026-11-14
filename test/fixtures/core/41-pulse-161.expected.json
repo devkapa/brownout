@@ -1,0 +1,59 @@
+{
+  "status": "pass",
+  "durationS": 0.0213,
+  "analytic": {
+    "kind": "pulse-rc",
+    "source": "pg",
+    "resistor": "r1",
+    "capacitor": "c1",
+    "instantsS": [
+      5e-05,
+      0.00015,
+      0.00025,
+      0.00035,
+      0.00045,
+      0.00055,
+      0.00065,
+      0.00075,
+      0.00085,
+      0.00095,
+      0.00105,
+      0.00115,
+      0.00125,
+      0.00135,
+      0.00145,
+      0.00155,
+      0.00165,
+      0.00175,
+      0.00185,
+      0.00195,
+      0.00205,
+      0.00215,
+      0.00225,
+      0.00235,
+      0.00245,
+      0.00255,
+      0.00265,
+      0.00275,
+      0.00285,
+      0.00295,
+      0.0103,
+      0.0157,
+      0.0199
+    ],
+    "sourceCurrent": true
+  },
+  "digital": {
+    "clockKey": "pg",
+    "projection": [
+      "u1"
+    ],
+    "anchor": {
+      "u1": 0
+    },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 18,
+    "traceDurationS": 0.02,
+    "clockEdge": "falling"
+  }
+}

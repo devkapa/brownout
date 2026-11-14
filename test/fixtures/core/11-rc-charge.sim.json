@@ -1,0 +1,15 @@
+{
+  "id": "core-w1b-rc-charge",
+  "components": [
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "vsrc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 100000 } },
+    { "id": "c1", "kind": "capacitor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "capacitance": 0.000001 } }
+  ],
+  "wires": [
+    { "from_component": "vsrc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vsrc", "from_pin": "pos", "to_component": "r1", "to_pin": "a" },
+    { "from_component": "r1", "from_pin": "b", "to_component": "c1", "to_pin": "a" },
+    { "from_component": "c1", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

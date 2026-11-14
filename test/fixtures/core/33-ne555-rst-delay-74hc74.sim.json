@@ -1,0 +1,379 @@
+{
+  "id": "core-w1e-33-ne555-rst-delay-74hc74",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "u1",
+      "kind": "ne555",
+      "pins": [
+        {
+          "id": "1"
+        },
+        {
+          "id": "2"
+        },
+        {
+          "id": "3"
+        },
+        {
+          "id": "4"
+        },
+        {
+          "id": "5"
+        },
+        {
+          "id": "6"
+        },
+        {
+          "id": "7"
+        },
+        {
+          "id": "8"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "ra",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "rb",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "rpot",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 0.001
+      }
+    },
+    {
+      "id": "ct",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      }
+    },
+    {
+      "id": "cv",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-8
+      }
+    },
+    {
+      "id": "rr",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100000
+      }
+    },
+    {
+      "id": "cr",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.000001
+      }
+    },
+    {
+      "id": "u2",
+      "kind": "74hc74",
+      "pins": [
+        {
+          "id": "clr1_n"
+        },
+        {
+          "id": "d1"
+        },
+        {
+          "id": "clk1"
+        },
+        {
+          "id": "pre1_n"
+        },
+        {
+          "id": "q1"
+        },
+        {
+          "id": "q1_n"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "q2_n"
+        },
+        {
+          "id": "q2"
+        },
+        {
+          "id": "pre2_n"
+        },
+        {
+          "id": "clk2"
+        },
+        {
+          "id": "d2"
+        },
+        {
+          "id": "clr2_n"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "u1",
+      "from_pin": "1",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "1",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "8",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "rr",
+      "from_pin": "a",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "rr",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "4"
+    },
+    {
+      "from_component": "cr",
+      "from_pin": "a",
+      "to_component": "u1",
+      "to_pin": "4"
+    },
+    {
+      "from_component": "cr",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "1"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "a",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "7"
+    },
+    {
+      "from_component": "rb",
+      "from_pin": "a",
+      "to_component": "u1",
+      "to_pin": "7"
+    },
+    {
+      "from_component": "rb",
+      "from_pin": "b",
+      "to_component": "rpot",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rpot",
+      "from_pin": "b",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "2",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "6",
+      "to_component": "ct",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "ct",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "1"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "5",
+      "to_component": "cv",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "cv",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "3",
+      "to_component": "u2",
+      "to_pin": "clk1"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "q1_n",
+      "to_component": "u2",
+      "to_pin": "d1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "clr1_n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "pre1_n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "clr2_n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "pre2_n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "clk2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "d2"
+    }
+  ]
+}

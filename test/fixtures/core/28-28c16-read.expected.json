@@ -1,0 +1,95 @@
+{
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 0,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 0,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 1,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 1,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    }
+  ]
+}

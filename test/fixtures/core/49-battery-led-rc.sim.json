@@ -1,0 +1,134 @@
+{
+  "id": "core-w1f-49-battery-led-rc",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "bat",
+      "kind": "battery_pack",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5,
+        "rInternal": 0.9,
+        "capacityAh": 0.001
+      }
+    },
+    {
+      "id": "r1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 220
+      }
+    },
+    {
+      "id": "d1",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "anode"
+        },
+        {
+          "id": "cathode"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "c1",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.00001
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "bat",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "bat",
+      "from_pin": "pos",
+      "to_component": "r1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r1",
+      "from_pin": "b",
+      "to_component": "d1",
+      "to_pin": "anode"
+    },
+    {
+      "from_component": "d1",
+      "from_pin": "cathode",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "bat",
+      "from_pin": "pos",
+      "to_component": "r2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r2",
+      "from_pin": "b",
+      "to_component": "c1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

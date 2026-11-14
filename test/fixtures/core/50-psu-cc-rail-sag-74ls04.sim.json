@@ -1,0 +1,217 @@
+{
+  "id": "core-w1f-50-psu-cc-rail-sag-74ls04",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "psu",
+      "kind": "bench_psu",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5,
+        "iLimit": 0.1
+      }
+    },
+    {
+      "id": "c1",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 0.0001
+      }
+    },
+    {
+      "id": "ld",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 5,
+        "v2": 0,
+        "td": 0.01,
+        "tr": 0.000001,
+        "tf": 0.000001,
+        "pw": 0.003,
+        "per": 0.01
+      }
+    },
+    {
+      "id": "rl",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 20
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "74ls04",
+      "pins": [
+        {
+          "id": "1a"
+        },
+        {
+          "id": "1y"
+        },
+        {
+          "id": "2a"
+        },
+        {
+          "id": "2y"
+        },
+        {
+          "id": "3a"
+        },
+        {
+          "id": "3y"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "4y"
+        },
+        {
+          "id": "4a"
+        },
+        {
+          "id": "5y"
+        },
+        {
+          "id": "5a"
+        },
+        {
+          "id": "6y"
+        },
+        {
+          "id": "6a"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "psu",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "psu",
+      "from_pin": "pos",
+      "to_component": "c1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ld",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "psu",
+      "from_pin": "pos",
+      "to_component": "rl",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl",
+      "from_pin": "b",
+      "to_component": "ld",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "psu",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "gnd",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "1a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "2a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "3a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "4a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "5a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "6a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

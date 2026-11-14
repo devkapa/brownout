@@ -1,0 +1,12 @@
+{
+  "$comment": [
+    "A fuse rated 0.5 mA (0.5 ohm cold) in series with 1 kohm across 5 V, which carries ten times its rating.",
+    "By hand: I = 5 / 1000.5 = 4.9975 mA, so I / iRating = 9.995 and the stress rate is (I / iRating)^2 - 1 = 98.90 per second. The fuse latches when the stress reaches 0.3 (FUSE_I2T_THRESHOLD), at 0.3 / 98.90 = 3.03 ms.",
+    "  before 3.03 ms  intact   the node between fuse and resistor is 5 * 1000 / 1000.5 = 4.9975 V, 4.9975 mA",
+    "  after 3.03 ms   blown    an open: no current, the node falls to 0 V through the resistor",
+    "The default 10 ms run samples 0, 2.5, 5 and 10 ms: intact, intact (stress 0.247 of 0.3), blown, blown, a fuse_tripped failure on both engines from the third sample.",
+    "test/core/promoted-kinds-fixtures.test.ts reads 1, 2.5 and 4, 6 ms on both engines."
+  ],
+  "status": "pass",
+  "durationS": 0.01
+}

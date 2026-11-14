@@ -82,16 +82,30 @@
       "types": "./dist/*.d.ts",
       "import": "./dist/*.js"
     },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./core.wasm": "./dist/core/brownout-core.wasm",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "rm -rf dist .tsbuildinfo && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist .tsbuildinfo && node scripts/build-core.mjs --dist && tsc -p tsconfig.build.json",
+    "build:core": "node scripts/build-core.mjs",
     "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit",
+    "typecheck:dom-consumer": "tsc -p test/types/dom-consumer/tsconfig.json",
     "test": "vitest run",
+    "test:core:rust": "cd core && cargo test --locked",
+    "test:core-suites": "vitest run -c vitest.core-suites.config.ts",
     "test:sparse": "SIMCORE_LINEAR_BACKEND=sparse vitest run",
+    "test:slow": "vitest run -c vitest.slow.config.ts",
     "bench": "tsx scripts/benchmark-linear-scale.ts",
-    "check:package": "publint && attw --pack . --profile esm-only",
+    "bench:core": "node scripts/bench-core.mjs",
+    "bench:sap1-cost": "tsx scripts/perf/sap1-cost.ts",
+    "bench:probe-cost": "tsx scripts/perf/probe-cost.ts",
+    "bench:snapshot-cost": "tsx scripts/perf/snapshot-cost.ts",
+    "check:package": "publint && attw --pack . --profile esm-only --exclude-entrypoints ./core.wasm",
     "release": "changeset publish",
     "example:rc": "tsx examples/rc-transient.ts",
     "example:bode": "tsx examples/spice-bode.ts",

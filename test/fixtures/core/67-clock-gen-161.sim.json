@@ -1,0 +1,181 @@
+{
+  "id": "core-w2-67-clock-gen-161",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "cg",
+      "kind": "clock_gen",
+      "pins": [
+        {
+          "id": "out"
+        },
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {
+        "frequency": 1000,
+        "duty": 0.5
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "74ls161",
+      "pins": [
+        {
+          "id": "/clr"
+        },
+        {
+          "id": "clk"
+        },
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "enp"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "rco"
+        },
+        {
+          "id": "qd"
+        },
+        {
+          "id": "qc"
+        },
+        {
+          "id": "qb"
+        },
+        {
+          "id": "qa"
+        },
+        {
+          "id": "/load"
+        },
+        {
+          "id": "ent"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "cg",
+      "from_pin": "gnd",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "gnd",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "cg",
+      "from_pin": "out",
+      "to_component": "u1",
+      "to_pin": "clk"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "/clr"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "/load"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "enp"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "ent"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "a",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "c",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "d",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

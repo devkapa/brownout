@@ -475,7 +475,10 @@ function commitLedOvercurrentStress(
   h: number,
 ): void {
   const specs = ctx.electricalSpecs(comp);
-  const ifMax = specs?.if_max ?? Number(comp.params.iRated ?? IRATED_LED);
+  // Same precedence as the I-V stamp (stampShockleyJunction, :374): a
+  // user-set iRated must move both the curve and the damage limit together,
+  // or a raised iRated silently keeps failing at the catalog's if_max (Q-O24).
+  const ifMax = Number(comp.params.iRated ?? specs?.if_max ?? IRATED_LED);
   let peakI = Math.abs(ctx.elementCurrent(comp.id) ?? 0);
   if (comp.kind === "bicolor_led" || comp.kind === "rgb_led") {
     // Computed at most once per failure pass and shared across handlers

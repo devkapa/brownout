@@ -1,0 +1,21 @@
+{
+  "status": "pass",
+  "durationS": 2.5,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 2.5,
+    "resetsS": [
+      1.2
+    ],
+    "checks": [
+      {
+        "check": "resistor-overload",
+        "resistor": "r1"
+      }
+    ],
+    "classicS": [
+      1.0017964825000008,
+      2.1999999999999744
+    ]
+  }
+}

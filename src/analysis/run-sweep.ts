@@ -26,6 +26,12 @@
  *   max settle 0.5 s / 5e-5 s = 10 000 steps per point, × 201 points = 2 M
  *   total steps — acceptable on a modern browser core.
  *
+ * WHY an engine abstraction (engine.ts):
+ *   The sweep steps an AnalysisEngine, not a SimEngine, so the same loop runs
+ *   on classic's checked step or on the core (advanced to each grid point).
+ *   One engine is chosen per RUN after compiling every point, and the result
+ *   reports it with the reasons for any fallback; see engine.ts.
+ *
  * WHY two run variants:
  *   runSweep (synchronous) is the testable core loop.  runSweepAsync yields a
  *   macrotask between points; the analysis worker MUST use it, because a
@@ -34,7 +40,6 @@
  *   processed and cooperative cancellation would be a no-op.
  */
 
-import { SimEngine } from "../sim/engine/sim-engine.js";
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import {
   sweepValues,
@@ -42,7 +47,18 @@ import {
   type TempSweepSpec,
   type AnalysisJobResult,
 } from "./jobs.js";
-import { stepAnalysisEngine } from "./checked-step.js";
+import {
+  coldLoadPoint,
+  planAnalysisEngine,
+  planOptionsFor,
+  runOnPlan,
+  runOnPlanAsync,
+  stepToGrid,
+  type AnalysisEngine,
+  type AnalysisEngineOptions,
+  type AnalysisRestartHook,
+  type AnalysisEngineReport,
+} from "./engine.js";
 
 // run-sweep handles dc-sweep and temp-sweep only.  AcSweepSpec is handled by
 // run-ac-sweep.ts.  Using the narrower union keeps TypeScript honest about
@@ -52,7 +68,7 @@ type DcOrTempSweepSpec = DcSweepSpec | TempSweepSpec;
 /** Fixed simulation step for analysis runs.  See module-level why comment. */
 export const ANALYSIS_STEP_S = 5e-5;
 
-export interface SweepHooks {
+export interface SweepHooks extends AnalysisEngineOptions, AnalysisRestartHook {
   onPoint?: (index: number, total: number) => void;
   shouldCancel?: () => boolean;
 }
@@ -65,23 +81,12 @@ interface PointResult {
 }
 
 /**
- * Run a single sweep point: clone the circuit, apply the mutation, cold-load
- * a fresh engine, step to settleTimeS, and tail-average the outputs.
- *
- * Errors inside a point abort the whole run with point-index context. Every
- * step is snapshotted; a thrown or non-converged solve is restored and rejected
- * before any voltage is sampled. The worker shell converts the error to a
- * user-visible message.
+ * The circuit for one sweep point: a clone with the point's mutation applied,
+ * so the mutation never bleeds into future points or the caller's circuit.
+ * Built twice per run on purpose (once for the engine choice, once to run it)
+ * rather than holding every point's clone in memory.
  */
-function runSweepPoint(
-  spec: DcOrTempSweepSpec,
-  circuit: SimCircuit,
-  xVal: number,
-  pointIndex: number,
-  outputNetIds: readonly string[],
-): PointResult {
-  // Clone the circuit so the mutation below does not bleed into future points
-  // or into the caller's original circuit object.
+function buildSweepPointCircuit(spec: DcOrTempSweepSpec, circuit: SimCircuit, xVal: number): SimCircuit {
   const pointCircuit: SimCircuit = structuredClone(circuit);
 
   // Apply the per-point mutation.
@@ -102,17 +107,44 @@ function runSweepPoint(
       pointCircuit.environment = { ...pointCircuit.environment, temperatureC: xVal };
     }
   }
+  return pointCircuit;
+}
 
-  // Fresh engine per point — element state must NOT carry across sweep points.
-  const engine = new SimEngine();
+function* sweepPointCircuits(
+  spec: DcOrTempSweepSpec,
+  circuit: SimCircuit,
+  xs: readonly number[],
+): Generator<SimCircuit> {
+  for (const xVal of xs) yield buildSweepPointCircuit(spec, circuit, xVal);
+}
 
-  try {
-    engine.coldLoad(pointCircuit);
-  } catch (err) {
-    throw new Error(
-      `runSweep: coldLoad failed at point ${String(pointIndex)} (x=${String(xVal)}): ${String(err)}`,
-    );
-  }
+/**
+ * Run a single sweep point: build the point's circuit, cold-load the run's
+ * engine, advance to settleTimeS on the analysis grid, and tail-average the
+ * outputs.
+ *
+ * Errors inside a point abort the whole run with point-index context. A
+ * non-converged step is rejected (classic restores its snapshot, the core
+ * keeps its last trusted instant) before any voltage is sampled. The worker
+ * shell converts the error to a user-visible message.
+ */
+function runSweepPoint(
+  engine: AnalysisEngine,
+  spec: DcOrTempSweepSpec,
+  circuit: SimCircuit,
+  xVal: number,
+  pointIndex: number,
+  outputNetIds: readonly string[],
+): PointResult {
+  const pointCircuit = buildSweepPointCircuit(spec, circuit, xVal);
+
+  // Cold per point — element state must NOT carry across sweep points (the
+  // core engine is reused across points, so its coldLoad is what zeroes it).
+  coldLoadPoint(
+    engine,
+    pointCircuit,
+    `runSweep: coldLoad failed at point ${String(pointIndex)} (x=${String(xVal)})`,
+  );
 
   // Threshold: start averaging in the final 20% of the settle window.
   // This discards the initial transient (the first 80%) and captures the
@@ -124,32 +156,27 @@ function runSweepPoint(
   const maxs: number[] = new Array(outputNetIds.length).fill(-Infinity);
   let tailCount = 0;
 
-  // Step loop: fixed step until simTime reaches settleTimeS.
-  let simTime = engine.simTime;
-  while (simTime < spec.settleTimeS) {
-    const remaining = spec.settleTimeS - simTime;
-    const h = Math.min(ANALYSIS_STEP_S, remaining);
-
-    stepAnalysisEngine(
-      engine,
-      h,
-      `runSweep point ${String(pointIndex)} (x=${String(xVal)})`,
-    );
-
-    simTime = engine.simTime;
-
-    // Sample during the tail window.
-    if (simTime >= tailStart) {
-      const netV = engine.getNetV();
-      for (let j = 0; j < outputNetIds.length; j++) {
-        const v = netV[outputNetIds[j]!] ?? 0;
-        sums[j] += v;
-        if (v < mins[j]!) mins[j] = v;
-        if (v > maxs[j]!) maxs[j] = v;
+  // Fixed grid until simTime reaches settleTimeS; the core is advanced to
+  // each grid point, classic steps it (see stepToGrid).
+  stepToGrid(
+    engine,
+    spec.settleTimeS,
+    ANALYSIS_STEP_S,
+    `runSweep point ${String(pointIndex)} (x=${String(xVal)})`,
+    (simTime) => {
+      // Sample during the tail window.
+      if (simTime >= tailStart) {
+        const netV = engine.getNetV();
+        for (let j = 0; j < outputNetIds.length; j++) {
+          const v = netV[outputNetIds[j]!] ?? 0;
+          sums[j] += v;
+          if (v < mins[j]!) mins[j] = v;
+          if (v > maxs[j]!) maxs[j] = v;
+        }
+        tailCount++;
       }
-      tailCount++;
-    }
-  }
+    },
+  );
 
   // Compute means; guard against degenerate zero-length tail window.
   const means: number[] = new Array(outputNetIds.length);
@@ -213,6 +240,7 @@ function buildResult(
   spec: DcOrTempSweepSpec,
   acc: SweepAccumulator,
   cancelled: boolean,
+  report: AnalysisEngineReport,
 ): AnalysisJobResult {
   return {
     spec,
@@ -225,6 +253,8 @@ function buildResult(
     })),
     pointFailures: acc.pointFailures,
     cancelled,
+    engine: report.engine,
+    fallbackReasons: report.fallbackReasons,
   };
 }
 
@@ -245,21 +275,28 @@ export function runSweep(
   circuit: SimCircuit,
   hooks?: SweepHooks,
 ): AnalysisJobResult {
-  const acc = makeAccumulator(spec);
+  const plan = planAnalysisEngine(
+    sweepPointCircuits(spec, circuit, makeAccumulator(spec).xs),
+    planOptionsFor(spec.engine, hooks),
+  );
 
-  for (let i = 0; i < acc.total; i++) {
-    const xVal = acc.xs[i]!;
-    accumulatePoint(acc, xVal, runSweepPoint(spec, circuit, xVal, i, acc.outputNetIds));
+  return runOnPlan(plan, (engine, report) => {
+    const acc = makeAccumulator(spec);
 
-    // Notify progress (before the cancel check so the caller sees the completed point).
-    hooks?.onPoint?.(i, acc.total);
+    for (let i = 0; i < acc.total; i++) {
+      const xVal = acc.xs[i]!;
+      accumulatePoint(acc, xVal, runSweepPoint(engine, spec, circuit, xVal, i, acc.outputNetIds));
 
-    if (hooks?.shouldCancel?.()) {
-      return buildResult(spec, acc, true);
+      // Notify progress (before the cancel check so the caller sees the completed point).
+      hooks?.onPoint?.(i, acc.total);
+
+      if (hooks?.shouldCancel?.()) {
+        return buildResult(spec, acc, true, report);
+      }
     }
-  }
 
-  return buildResult(spec, acc, false);
+    return buildResult(spec, acc, false, report);
+  }, hooks?.onRestart);
 }
 
 /**
@@ -274,23 +311,30 @@ export async function runSweepAsync(
   circuit: SimCircuit,
   hooks?: SweepHooks,
 ): Promise<AnalysisJobResult> {
-  const acc = makeAccumulator(spec);
+  const plan = planAnalysisEngine(
+    sweepPointCircuits(spec, circuit, makeAccumulator(spec).xs),
+    planOptionsFor(spec.engine, hooks),
+  );
 
-  for (let i = 0; i < acc.total; i++) {
-    const xVal = acc.xs[i]!;
-    accumulatePoint(acc, xVal, runSweepPoint(spec, circuit, xVal, i, acc.outputNetIds));
+  return runOnPlanAsync(plan, async (engine, report) => {
+    const acc = makeAccumulator(spec);
 
-    hooks?.onPoint?.(i, acc.total);
+    for (let i = 0; i < acc.total; i++) {
+      const xVal = acc.xs[i]!;
+      accumulatePoint(acc, xVal, runSweepPoint(engine, spec, circuit, xVal, i, acc.outputNetIds));
 
-    // Macrotask (not microtask): queued worker messages are only dispatched
-    // between macrotasks, so a resolved-promise yield would not let "cancel"
-    // arrive.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      hooks?.onPoint?.(i, acc.total);
 
-    if (hooks?.shouldCancel?.()) {
-      return buildResult(spec, acc, true);
+      // Macrotask (not microtask): queued worker messages are only dispatched
+      // between macrotasks, so a resolved-promise yield would not let "cancel"
+      // arrive.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      if (hooks?.shouldCancel?.()) {
+        return buildResult(spec, acc, true, report);
+      }
     }
-  }
 
-  return buildResult(spec, acc, false);
+    return buildResult(spec, acc, false, report);
+  }, hooks?.onRestart);
 }

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "toleranceFraction": 0.25,
+  "machine": {
+    "cpu": "Apple M5",
+    "cpus": 10,
+    "node": "v26.9.0",
+    "platform": "darwin-arm64"
+  },
+  "boards": {
+    "sap1-max-ideal-frozen": {
+      "coreCpuMsPerSimSecond": 304.653,
+      "reps": 5,
+      "measuredS": 3,
+      "recordedAt": "2026-09-30T13:04:20.042Z",
+      "commit": "2b5faf1",
+      "loadAverage1min": 5.74
+    },
+    "sap1-max-ideal-running": {
+      "coreCpuMsPerSimSecond": 434.596,
+      "reps": 5,
+      "measuredS": 3,
+      "recordedAt": "2026-09-30T13:04:27.484Z",
+      "commit": "2b5faf1",
+      "loadAverage1min": 6.24
+    }
+  }
+}

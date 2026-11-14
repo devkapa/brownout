@@ -1,0 +1,28 @@
+{
+  "id": "core-w1g-output-sag-committed-target",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "oe", "kind": "pulse_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "v1": 0, "v2": 5, "td": 0.0001, "tr": 1e-08, "tf": 1e-08, "pw": 1, "per": 2 } },
+    { "id": "u1", "kind": "74ls245", "pins": [{ "id": "dir" }, { "id": "a1" }, { "id": "a2" }, { "id": "a3" }, { "id": "a4" }, { "id": "a5" }, { "id": "a6" }, { "id": "a7" }, { "id": "a8" }, { "id": "gnd" }, { "id": "b8" }, { "id": "b7" }, { "id": "b6" }, { "id": "b5" }, { "id": "b4" }, { "id": "b3" }, { "id": "b2" }, { "id": "b1" }, { "id": "/oe" }, { "id": "vcc" }], "params": {} },
+    { "id": "load", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 30 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "oe", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u1", "to_pin": "vcc" },
+    { "from_component": "u1", "from_pin": "gnd", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u1", "to_pin": "dir" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u1", "to_pin": "a1" },
+    { "from_component": "u1", "from_pin": "a2", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a3", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a4", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a5", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a6", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a7", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "u1", "from_pin": "a8", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "oe", "from_pin": "pos", "to_component": "u1", "to_pin": "/oe" },
+    { "from_component": "u1", "from_pin": "b1", "to_component": "load", "to_pin": "a" },
+    { "from_component": "load", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

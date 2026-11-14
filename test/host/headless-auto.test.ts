@@ -1,0 +1,464 @@
+/**
+ * HeadlessRunner's `engine: "auto"` (ruling R116): the core where every kind
+ * of the circuit is supported, classic with the reasons otherwise, and a core
+ * failure in the middle of a run replayed on classic.
+ *
+ * The replay is "from load": no state is carried between the two engines
+ * (W2 design D9b (a)), so the runner loads on classic every circuit it gave
+ * the core since classic last ran, and runs again every run() the core
+ * completed. What is pinned here is that the result is the one a classic
+ * runner gives for the same calls, bit for bit, that each fallback says why,
+ * and that an explicit "core" request still reports the failure itself.
+ *
+ * The failures are injected by patching CoreEngine (a real one needs a
+ * circuit the core gives up on, or a wasm trap).
+ */
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { HeadlessRunner, type HeadlessSample } from "../../src/host/headless.js";
+import { CoreEngine } from "../../src/core/engine.js";
+import { CoreTrapError } from "../../src/core/errors.js";
+import { initCore } from "../../src/core/wasm.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
+
+type SimComponent = SimCircuit["components"][number];
+const part = (id: string, kind: string, pins: string[], params: Record<string, number> = {}): SimComponent => ({
+  id,
+  kind,
+  pins: pins.map((pin) => ({ id: pin })),
+  params,
+});
+const wire = (a: string, ap: string, b: string, bp: string) => ({ from_component: a, from_pin: ap, to_component: b, to_pin: bp });
+
+/** 9 V into R and 1 uF: a state that moves, so a replay that lost it would show. */
+function rc(resistance = 10_000): SimCircuit {
+  return {
+    components: [
+      part("vsrc", "voltage_source", ["pos", "neg"], { voltage: 9 }),
+      part("r1", "resistor", ["a", "b"], { resistance }),
+      part("c1", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
+    ],
+    wires: [wire("vsrc", "pos", "r1", "a"), wire("r1", "b", "c1", "a"), wire("c1", "b", "vsrc", "neg")],
+  };
+}
+function rcWithDiode(): SimCircuit {
+  const base = rc();
+  return {
+    components: [...base.components, part("d1", "diode", ["a", "k"])],
+    wires: [...base.wires, wire("r1", "b", "d1", "a"), wire("d1", "k", "vsrc", "neg")],
+  };
+}
+
+const AUTO = { engine: "auto", coreSupportedKinds: CORE_IMPLEMENTED_KINDS } as const;
+
+/** Reports the next `advance` whose convergence the runner reads as failed (-4/-7 without a real one). */
+function failNextAdvance(): void {
+  let armed = true;
+  const original = Object.getOwnPropertyDescriptor(CoreEngine.prototype, "lastConverged")!.get!;
+  vi.spyOn(CoreEngine.prototype, "lastConverged", "get").mockImplementation(function (this: CoreEngine) {
+    if (armed) {
+      armed = false;
+      return false;
+    }
+    return original.call(this);
+  });
+}
+
+/** Throws `error` from the n-th `advance` from now (1-based); the others are real. */
+function throwOnAdvance(n: number, error: Error): void {
+  const original = CoreEngine.prototype.advance;
+  let calls = 0;
+  vi.spyOn(CoreEngine.prototype, "advance").mockImplementation(function (this: CoreEngine, tEnd: number) {
+    calls += 1;
+    if (calls === n) throw error;
+    return original.call(this, tEnd);
+  });
+}
+
+/** Everything a snapshot reads, minus the wall-clock solve time. */
+const snapshotOf = (runner: HeadlessRunner): unknown => {
+  const snap = runner.snapshot();
+  return { ...snap, solver: { ...snap.solver, lastSolveUs: 0 } };
+};
+const capV = (runner: HeadlessRunner): number => runner.snapshot().netV[runner.netIdFor("c1", "a")!]!;
+
+beforeAll(async () => {
+  await initCore();
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('engine: "auto" — the choice at load', () => {
+  it("runs a circuit on the core when every kind is supported", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+
+  it("runs it on classic, with the reason, when one kind is not", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rcWithDiode());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:diode"]);
+    expect(runner.run({ durationS: 1e-3 }).hitMinStep).toBe(false);
+  });
+
+  it("uses the package's own kind list when given none: promoted kinds run on the core", () => {
+    const runner = new HeadlessRunner({ engine: "auto" });
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+
+  it("an implemented kind the list in force leaves out (here spdt_switch) runs on classic, named", () => {
+    const base = rc();
+    const circuit: SimCircuit = {
+      components: [...base.components, part("sw", "spdt_switch", ["com", "b", "c"], { position: 0 })],
+      // Both throws on the capacitor's node: nothing floats, whichever contact is closed.
+      wires: [...base.wires.filter((w) => !(w.from_component === "r1" && w.to_component === "c1")),
+        wire("r1", "b", "sw", "com"), wire("sw", "b", "c1", "a"), wire("sw", "c", "c1", "a")],
+    };
+    // What a kind implemented by a later wave gets until it is promoted to CORE_SUPPORTED_KINDS.
+    const withoutSpdt = new Set([...CORE_IMPLEMENTED_KINDS].filter((kind) => kind !== "spdt_switch"));
+    const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: withoutSpdt });
+    runner.load(circuit);
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["unsupported-kind:spdt_switch"]);
+    expect(runner.run({ durationS: 1e-3 }).hitMinStep).toBe(false);
+  });
+
+  it("is classic on an empty kind list, each kind a reason", () => {
+    const runner = new HeadlessRunner({ engine: "auto", coreSupportedKinds: new Set() });
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual([
+      "unsupported-kind:capacitor",
+      "unsupported-kind:resistor",
+      "unsupported-kind:voltage_source",
+    ]);
+  });
+
+  it("the default is still classic, with no fallback recorded", () => {
+    const runner = new HeadlessRunner();
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+});
+
+describe('engine: "auto" — a core failure in the middle of a run replays on classic', () => {
+  /** What a classic runner gives for the same calls. */
+  function classicReference(steps: (runner: HeadlessRunner) => void): HeadlessRunner {
+    const runner = new HeadlessRunner();
+    steps(runner);
+    return runner;
+  }
+
+  it("a failed advance: the run finishes on classic with the state classic has for the same calls, and says why", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    expect(runner.run({ durationS: 1e-3 }).hitMinStep).toBe(false);
+    expect(runner.activeEngine).toBe("core");
+
+    failNextAdvance();
+    const result = runner.run({ durationS: 1e-3 });
+
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["mid-run:advance-failed", "restarted-from-load"]);
+    expect(result.hitMinStep).toBe(false);
+    expect(result.simulatedS).toBeCloseTo(1e-3, 12);
+
+    const classic = classicReference((r) => {
+      r.load(rc());
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3 });
+    });
+    expect(runner.simTime).toBe(classic.simTime);
+    expect(capV(runner)).toBe(capV(classic));
+    // Not the fresh-state answer: a classic engine loaded at 1 ms with an empty capacitor reads far lower.
+    expect(capV(runner)).toBeGreaterThan(9 * (1 - Math.exp(-0.2)) * 0.9);
+  });
+
+  it("the failure's own code and message are in the reason when the core gave one", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    failNextAdvance();
+    vi.spyOn(CoreEngine.prototype, "lastAdvanceFailure", "get").mockReturnValue({ code: -4, message: "stepped: Newton did not converge at the minimum step" });
+    runner.run({ durationS: 1e-3 });
+    expect(runner.engineFallbackReasons).toEqual([
+      "mid-run:solve-failed:stepped: Newton did not converge at the minimum step",
+      "restarted-from-load",
+    ]);
+  });
+
+  it("a trap: the same replay, with the core's failure as the reason", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    runner.run({ durationS: 1e-3 });
+    throwOnAdvance(1, new CoreTrapError("wasm trap"));
+    const result = runner.run({ durationS: 1e-3 });
+
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["core-trap", "restarted-from-load"]);
+    expect(result.hitMinStep).toBe(false);
+    const classic = classicReference((r) => {
+      r.load(rc());
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3 });
+    });
+    expect(capV(runner)).toBe(capV(classic));
+  });
+
+  it("every circuit loaded since classic last ran is replayed, so a reload's carried charge is classic's", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc(10_000));
+    runner.run({ durationS: 2e-3 });
+    runner.load(rc(47_000)); // an edit: the core carries the capacitor's charge across it
+    expect(runner.activeEngine).toBe("core");
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+
+    const classic = classicReference((r) => {
+      r.load(rc(10_000));
+      r.run({ durationS: 2e-3 });
+      r.load(rc(47_000));
+      r.run({ durationS: 1e-3 });
+    });
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.simTime).toBe(classic.simTime);
+    expect(capV(runner)).toBe(capV(classic));
+  });
+
+  it("the circuit replayed is the one load() took, not the caller's object as edited since", () => {
+    const circuit = rc(10_000);
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(circuit);
+    runner.run({ durationS: 1e-3 });
+    circuit.components[1]!.params.resistance = 1; // edited in place, never loaded
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+    const classic = classicReference((r) => {
+      r.load(rc(10_000));
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3 });
+    });
+    expect(capV(runner)).toBe(capV(classic));
+  });
+
+  it("the failed run's samples all come from classic: none from the core's part of it, none twice", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    runner.run({ durationS: 1e-3 });
+    // Fixed grid: the core samples each point; fail the third point of this run.
+    let reads = 0;
+    const original = Object.getOwnPropertyDescriptor(CoreEngine.prototype, "lastConverged")!.get!;
+    vi.spyOn(CoreEngine.prototype, "lastConverged", "get").mockImplementation(function (this: CoreEngine) {
+      reads += 1;
+      return reads === 3 ? false : original.call(this);
+    });
+    const samples: HeadlessSample[] = [];
+    runner.run({ durationS: 1e-3, adaptive: false, fixedStepS: 1e-4, onSample: (s) => samples.push(s) });
+
+    const expected: HeadlessSample[] = [];
+    classicReference((r) => {
+      r.load(rc());
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3, adaptive: false, fixedStepS: 1e-4, onSample: (s) => expected.push(s) });
+    });
+    expect(samples).toEqual(expected);
+    for (let i = 1; i < samples.length; i++) expect(samples[i]!.simTime).toBeGreaterThan(samples[i - 1]!.simTime);
+  });
+
+  it("a run the core completes delivers its samples as before", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    const samples: HeadlessSample[] = [];
+    runner.run({ durationS: 1e-3, adaptive: false, fixedStepS: 1e-4, onSample: (s) => samples.push(s) });
+    expect(runner.activeEngine).toBe("core");
+    expect(samples).toHaveLength(10);
+    expect(samples[9]!.simTime).toBeCloseTo(1e-3, 15);
+  });
+
+  it("an onSample that throws after the core completed the run: that run is still in the replay", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    expect(() => runner.run({ durationS: 1e-3, onSample: () => { throw new Error("host bug"); } })).toThrow("host bug");
+    expect(runner.simTime).toBeCloseTo(1e-3, 12); // the core had run it
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+
+    const classic = classicReference((r) => {
+      r.load(rc());
+      r.run({ durationS: 1e-3 });
+      r.run({ durationS: 1e-3 });
+    });
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.simTime).toBe(classic.simTime);
+    expect(capV(runner)).toBe(capV(classic));
+  });
+
+  it("after a fallback the runner stays on classic: the next load carries classic's state, bit for bit, and says why", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const classic = new HeadlessRunner();
+    const same = (): void => {
+      expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+    };
+    runner.load(rc());
+    classic.load(rc());
+    runner.run({ durationS: 1e-3 });
+    classic.run({ durationS: 1e-3 });
+    expect(runner.activeEngine).toBe("core");
+    failNextAdvance();
+    expect(runner.run({ durationS: 2e-3 })).toEqual(classic.run({ durationS: 2e-3 }));
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["mid-run:advance-failed", "restarted-from-load"]);
+    same();
+
+    // The same circuit again: classic carries the capacitor across a load; a core load would start it cold.
+    runner.load(rc());
+    classic.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+    expect(capV(classic)).toBeGreaterThan(2);
+    same();
+    expect(runner.run({ durationS: 1e-3 })).toEqual(classic.run({ durationS: 1e-3 }));
+    same();
+
+    // Every later load says so again, edits included.
+    runner.load(rc(47_000));
+    classic.load(rc(47_000));
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+    same();
+  });
+
+  it("a trap's fallback stays on classic too, even once the core is re-initialised", async () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rc());
+    throwOnAdvance(1, new CoreTrapError("wasm trap"));
+    runner.run({ durationS: 1e-3 });
+    expect(runner.engineFallbackReasons).toEqual(["core-trap", "restarted-from-load"]);
+    vi.restoreAllMocks();
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("classic");
+    expect(runner.engineFallbackReasons).toEqual(["staying-classic-after-fallback"]);
+  });
+
+  it("a runner that never fell back keeps choosing at each load", () => {
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(rcWithDiode());
+    expect(runner.activeEngine).toBe("classic");
+    runner.load(rc());
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+});
+
+describe('engine: "auto" — the replay history stays small', () => {
+  /** rc() plus `n` more RC branches off the same source: a circuit with 2n + 3 parts. */
+  function wide(n: number, resistance = 10_000): SimCircuit {
+    const circuit = rc(resistance);
+    for (let i = 0; i < n; i++) {
+      circuit.components.push(
+        part(`rx${i}`, "resistor", ["a", "b"], { resistance: 1000 + i }),
+        part(`cx${i}`, "capacitor", ["a", "b"], { capacitance: 1e-9 * (1 + i) }),
+      );
+      circuit.wires.push(wire("r1", "b", `rx${i}`, "a"), wire(`rx${i}`, "b", `cx${i}`, "a"), wire(`cx${i}`, "b", "vsrc", "neg"));
+    }
+    return circuit;
+  }
+  type Entry = { kind: string; circuit?: SimCircuit };
+  const historyOf = (runner: HeadlessRunner): Entry[] => (runner as unknown as { _coreHistory: Entry[] })._coreHistory;
+  const retainedComponents = (runner: HeadlessRunner): number => {
+    const seen = new Set<object>();
+    for (const entry of historyOf(runner)) for (const component of entry.circuit?.components ?? []) seen.add(component);
+    return seen.size;
+  };
+
+  it("200 loads of one circuit keep one copy of it", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const circuit = wide(100); // 203 parts
+    for (let i = 0; i < 200; i++) {
+      runner.load(circuit);
+      runner.run({ durationS: 1e-6 });
+    }
+    expect(runner.activeEngine).toBe("core");
+    expect(historyOf(runner).filter((entry) => entry.kind === "load")).toHaveLength(200);
+    expect(new Set(historyOf(runner).flatMap((entry) => (entry.circuit ? [entry.circuit] : []))).size).toBe(1);
+    expect(retainedComponents(runner)).toBe(203);
+  });
+
+  it("200 edits of one part keep one copy of every part that did not change", () => {
+    const runner = new HeadlessRunner(AUTO);
+    for (let i = 0; i < 200; i++) {
+      runner.load(wide(100, 1000 + i));
+      runner.run({ durationS: 1e-6 });
+    }
+    // 202 untouched parts once each, and r1 once per edit.
+    expect(retainedComponents(runner)).toBe(202 + 200);
+  });
+
+  it("a replay after 200 loads and runs is still bit for bit what a classic runner gives", () => {
+    const runner = new HeadlessRunner(AUTO);
+    const classic = new HeadlessRunner();
+    for (let i = 0; i < 200; i++) {
+      // Edits that come back to an earlier value, so shared parts are reused out of order.
+      const circuit = wide(10, 1000 + (i % 7) * 500);
+      runner.load(circuit);
+      classic.load(circuit);
+      runner.run({ durationS: 1e-4 });
+      classic.run({ durationS: 1e-4 });
+    }
+    expect(runner.activeEngine).toBe("core");
+    failNextAdvance();
+    expect(runner.run({ durationS: 1e-4 })).toEqual(classic.run({ durationS: 1e-4 }));
+    expect(runner.activeEngine).toBe("classic");
+    expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+  });
+
+  it("the circuit replayed is still the one load() took when parts are shared", () => {
+    const circuit = wide(3);
+    const runner = new HeadlessRunner(AUTO);
+    runner.load(circuit);
+    runner.run({ durationS: 1e-3 });
+    circuit.components[1]!.params.resistance = 1; // edited in place...
+    runner.load(circuit); // ...and loaded: a new part, the old one kept for the first load
+    runner.run({ durationS: 1e-3 });
+    failNextAdvance();
+    runner.run({ durationS: 1e-3 });
+    const classic = classicOf(() => wide(3), circuit);
+    expect(snapshotOf(runner)).toEqual(snapshotOf(classic));
+  });
+});
+
+function classicOf(first: () => SimCircuit, second: SimCircuit): HeadlessRunner {
+  const classic = new HeadlessRunner();
+  classic.load(first());
+  classic.run({ durationS: 1e-3 });
+  classic.load(second);
+  classic.run({ durationS: 1e-3 });
+  classic.run({ durationS: 1e-3 });
+  return classic;
+}
+
+describe('engine: "core" — an explicit request still reports the failure itself', () => {
+  it("a failed advance is hitMinStep on the result, and the runner stays on the core", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    runner.load(rc());
+    failNextAdvance();
+    const result = runner.run({ durationS: 1e-3 });
+    expect(result.hitMinStep).toBe(true);
+    expect(runner.activeEngine).toBe("core");
+    expect(runner.engineFallbackReasons).toEqual([]);
+  });
+
+  it("a trap is thrown to the caller", () => {
+    const runner = new HeadlessRunner({ engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    runner.load(rc());
+    throwOnAdvance(1, new CoreTrapError("wasm trap"));
+    expect(() => runner.run({ durationS: 1e-3 })).toThrow(CoreTrapError);
+    expect(runner.activeEngine).toBe("core");
+  });
+});

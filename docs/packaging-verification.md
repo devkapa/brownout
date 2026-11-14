@@ -16,6 +16,14 @@ package cannot parse on) and one documentation defect (F2 — a stale
 the evidence and the reasoning.** Nothing here was published: no `npm publish`,
 no `npm login`, no dry-run against the registry.
 
+**Added later, not re-measured against the numbers below:** the tarball must
+also contain `dist/core/brownout-core.wasm` (the Rust core, built by
+`prepack` via `scripts/build-core.mjs --dist`) — check for it with
+`npm pack --dry-run 2>&1 | grep wasm` before trusting a new pack. The file
+counts, sizes, and checksums recorded under [The artifact](#the-artifact) are
+the 2026-07-17 snapshot and predate this file; they were already stale before
+it by ordinary releases, so this note does not attempt to reconcile them.
+
 ## What this does and does not establish
 
 It establishes that a consumer who runs `npm install brownout` can import the

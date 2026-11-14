@@ -92,7 +92,13 @@ Included:
   100 us of accepted simulated time (`transistor_overcurrent`), and an
   inductor, relay coil, or motor winding whose floating net carries a
   transistor or mechanical switch and no diode-like part (`missing_flyback`,
-  evaluated from the loaded graph). A warning is advisory: it changes no
+  evaluated from the loaded graph), and a supply-gated chip that cannot power
+  up on its rail (`rail_ic_power_chatter`): at the hosts' 10 ns floor its
+  power reading alternates with no state that holds, its own pins loading the
+  supply back below its power-on level, so the step fails and the clock
+  stops there, as it did before, now with the chip named and the level its
+  supply is stuck at on the warning's detail line. A
+  warning is advisory: it changes no
   stamp, so the trajectory is bit-identical with or without it, and it
   latches once per condition per component until `resetFailures()`. Neither
   is a damage model — no SOA, no self-heating, no observed kickback; parts

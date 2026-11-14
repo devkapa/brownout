@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "durationS": 0.02,
+  "analog": {
+    "minQuietInstants": 2,
+    "maxDelayS": 0
+  },
+  "digital": {
+    "clockKey": "u1",
+    "projection": [
+      "u1"
+    ],
+    "anchor": {
+      "u1": 0
+    },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 1
+  }
+}

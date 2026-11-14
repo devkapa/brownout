@@ -1,0 +1,15 @@
+{
+  "id": "core-w1g-led-overdrive",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 50 } },
+    { "id": "led1", "kind": "led", "pins": [{ "id": "a" }, { "id": "k" }], "params": { "vf": 1.8, "iRated": 0.02, "n": 2 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "r1", "to_pin": "a" },
+    { "from_component": "r1", "from_pin": "b", "to_component": "led1", "to_pin": "a" },
+    { "from_component": "led1", "from_pin": "k", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

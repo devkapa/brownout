@@ -1,0 +1,32 @@
+{
+  "id": "core-w1c-74ls00-power-gate-brownout",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "sw", "kind": "switch", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "closed": 1 } },
+    {
+      "id": "u1",
+      "kind": "74ls00",
+      "pins": [
+        { "id": "vcc" }, { "id": "gnd" },
+        { "id": "1a" }, { "id": "1b" }, { "id": "1y" },
+        { "id": "2a" }, { "id": "2b" }, { "id": "2y" },
+        { "id": "3a" }, { "id": "3b" }, { "id": "3y" },
+        { "id": "4a" }, { "id": "4b" }, { "id": "4y" }
+      ],
+      "params": {}
+    }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "sw", "to_pin": "a" },
+    { "from_component": "sw", "from_pin": "b", "to_component": "u1", "to_pin": "vcc" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "1a" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "1b" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "2a" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "2b" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "3a" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "3b" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "4a" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u1", "to_pin": "4b" }
+  ]
+}

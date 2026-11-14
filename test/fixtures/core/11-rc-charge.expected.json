@@ -1,0 +1,13 @@
+{
+  "status": "pass",
+  "analytic": {
+    "kind": "rc",
+    "sourceVolts": 5,
+    "seriesOhms": 100000,
+    "capacitanceF": 0.000001,
+    "esrOhms": 0,
+    "leakageOhms": 1000000000000,
+    "node": { "component": "c1", "pin": "a" },
+    "currentComponents": ["r1"]
+  }
+}

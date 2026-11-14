@@ -1,0 +1,14 @@
+{
+  "id": "core-w1g-resistor-self-heating",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "load", "kind": "resistor", "catalogUid": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 100 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "load", "to_pin": "a" },
+    { "from_component": "load", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" }
+  ],
+  "environment": { "temperatureC": 25, "lux": 100 }
+}

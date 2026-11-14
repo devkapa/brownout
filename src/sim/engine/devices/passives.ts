@@ -531,15 +531,21 @@ export const spdtSwitchModel: DeviceModel = {
     stampResistor(ctx.mna, comNode, ctx.pinNode(comp.id, activePin), 0.001);
   },
   updateCurrent: (ctx, comp, x) => {
-    // Engine _updateElementI preamble, copied per-handler (same pure reads).
-    const pins = comp.pins;
-    const a = ctx.pinNode(comp.id, pins[0].id);
-    const b = ctx.pinNode(comp.id, pins[1].id);
-    const va = ctx.vAt(x, a);
-    const vb = ctx.vAt(x, b);
-    const vd = va - vb;
-    // Report current from com pin perspective.
-    ctx.setElementCurrent(comp.id, vd / 0.001);
+    // The current through the contact in use, com to the selected throw, with
+    // the same selection as `stamp`. Reading pins[0]/pins[1] unconditionally
+    // reported com->b even at position 1, where that contact is open.
+    // Fewer than 3 declared pins: `stamp` never stamps this device (its own
+    // `pins.length < 3` guard above), so there is no contact to report a
+    // current through — publish 0 instead of measuring a node this device
+    // never actually touched (that read ~5000 A on a 1-2 pin component).
+    if (comp.pins.length < 3) { ctx.setElementCurrent(comp.id, 0); return; }
+    const pos = Number(comp.params.position ?? 0);
+    const activePin = pos === 0 ? "b" : "c";
+    const comNode = ctx.pinNode(comp.id, "com");
+    const activeNode = ctx.pinNode(comp.id, activePin);
+    const vCom = ctx.vAt(x, comNode);
+    const vActive = ctx.vAt(x, activeNode);
+    ctx.setElementCurrent(comp.id, (vCom - vActive) / 0.001);
   },
   acStamp: (ctx, comp, ac, _omega) => {
     // Only the selected throw conducts (break-before-make), same 1 mOhm.

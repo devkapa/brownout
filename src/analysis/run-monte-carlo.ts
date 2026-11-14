@@ -53,7 +53,6 @@
  *   reminder for a future runner extension.
  */
 
-import { SimEngine } from "../sim/engine/sim-engine.js";
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import type { ComponentKind } from "../circuit/types.js";
 import { resolveCatalogPart } from "../circuit/catalog-resolver.js";
@@ -62,7 +61,18 @@ import {
   type MonteCarloResult,
 } from "./jobs.js";
 import { ANALYSIS_STEP_S } from "./run-sweep.js";
-import { stepAnalysisEngine } from "./checked-step.js";
+import {
+  coldLoadPoint,
+  planAnalysisEngine,
+  planOptionsFor,
+  runOnPlan,
+  runOnPlanAsync,
+  stepToGrid,
+  type AnalysisEngine,
+  type AnalysisEngineOptions,
+  type AnalysisRestartHook,
+  type AnalysisEngineReport,
+} from "./engine.js";
 
 // ─── Deterministic PRNG ────────────────────────────────────────────────────────
 
@@ -120,7 +130,7 @@ function perturbDelta(seed: number, runIndex: number, compId: string, paramName:
 
 // ─── Hooks ─────────────────────────────────────────────────────────────────────
 
-export interface MonteCarloHooks {
+export interface MonteCarloHooks extends AnalysisEngineOptions, AnalysisRestartHook {
   /** Called after each run completes (before the cancel check). */
   onPoint?: (runIndex: number, total: number) => void;
   /** Return true to request cooperative cancellation. */
@@ -137,19 +147,12 @@ interface RunResult {
 }
 
 /**
- * Run a single Monte Carlo run: clone the circuit, perturb components, cold-load
- * a fresh engine, step to settleTimeS, and tail-average the outputs. Each step
- * is snapshotted and a non-converged iterate is restored and rejected, so it
- * can never enter the reported distribution.
+ * The circuit for one Monte Carlo run: a clone with every tolerance-bearing
+ * component perturbed, so mutations never bleed into future runs or the
+ * caller's circuit. Built twice per run (once for the engine choice, once to
+ * run it), which is cheap next to a settle window and keeps memory flat.
  */
-function runMcPoint(
-  spec: MonteCarloSpec,
-  circuit: SimCircuit,
-  runIndex: number,
-  outputNetIds: readonly string[],
-): RunResult {
-  // Clone the circuit so mutations do not bleed into future runs or the caller's
-  // original circuit object.
+function buildMcRunCircuit(spec: MonteCarloSpec, circuit: SimCircuit, runIndex: number): SimCircuit {
   const runCircuit: SimCircuit = structuredClone(circuit);
 
   // ── Apply per-component perturbations ────────────────────────────────────────
@@ -210,16 +213,31 @@ function runMcPoint(
     // override mechanism in v1.  vth_tol is metadata-only.
   }
 
-  // ── Engine run ────────────────────────────────────────────────────────────────
+  return runCircuit;
+}
 
-  const engine = new SimEngine();
-  try {
-    engine.coldLoad(runCircuit);
-  } catch (err) {
-    throw new Error(
-      `runMonteCarlo: coldLoad failed at run ${String(runIndex)}: ${String(err)}`,
-    );
-  }
+function* mcRunCircuits(spec: MonteCarloSpec, circuit: SimCircuit): Generator<SimCircuit> {
+  for (let r = 0; r < spec.runs; r++) yield buildMcRunCircuit(spec, circuit, r);
+}
+
+/**
+ * Run a single Monte Carlo run: build the perturbed circuit, cold-load the
+ * run's engine, advance to settleTimeS on the analysis grid, and tail-average
+ * the outputs. A non-converged step is rejected before it can enter the
+ * reported distribution.
+ */
+function runMcPoint(
+  engine: AnalysisEngine,
+  spec: MonteCarloSpec,
+  circuit: SimCircuit,
+  runIndex: number,
+  outputNetIds: readonly string[],
+): RunResult {
+  coldLoadPoint(
+    engine,
+    buildMcRunCircuit(spec, circuit, runIndex),
+    `runMonteCarlo: coldLoad failed at run ${String(runIndex)}`,
+  );
 
   // Tail window: average the final 20% of the settle window (mirrors run-sweep.ts).
   const tailStart = spec.settleTimeS * 0.8;
@@ -227,27 +245,21 @@ function runMcPoint(
   const sums: number[] = new Array(outputNetIds.length).fill(0);
   let tailCount = 0;
 
-  let simTime = engine.simTime;
-  while (simTime < spec.settleTimeS) {
-    const remaining = spec.settleTimeS - simTime;
-    const h = Math.min(ANALYSIS_STEP_S, remaining);
-
-    stepAnalysisEngine(
-      engine,
-      h,
-      `runMonteCarlo run ${String(runIndex)}`,
-    );
-
-    simTime = engine.simTime;
-
-    if (simTime >= tailStart) {
-      const netV = engine.getNetV();
-      for (let j = 0; j < outputNetIds.length; j++) {
-        sums[j] += netV[outputNetIds[j]!] ?? 0;
+  stepToGrid(
+    engine,
+    spec.settleTimeS,
+    ANALYSIS_STEP_S,
+    `runMonteCarlo run ${String(runIndex)}`,
+    (simTime) => {
+      if (simTime >= tailStart) {
+        const netV = engine.getNetV();
+        for (let j = 0; j < outputNetIds.length; j++) {
+          sums[j] += netV[outputNetIds[j]!] ?? 0;
+        }
+        tailCount++;
       }
-      tailCount++;
-    }
-  }
+    },
+  );
 
   const means: number[] = new Array(outputNetIds.length);
   for (let j = 0; j < outputNetIds.length; j++) {
@@ -302,6 +314,7 @@ function buildMonteCarloResult(
   runValues: number[][], // runValues[runIdx][outputIdx]
   pointFailures: string[][],
   cancelled: boolean,
+  report: AnalysisEngineReport,
 ): MonteCarloResult {
   const outputs = outputNetIds.map((netId, j) => {
     const values = runValues.map((rv) => rv[j]!);
@@ -315,6 +328,8 @@ function buildMonteCarloResult(
     outputs,
     pointFailures,
     cancelled,
+    engine: report.engine,
+    fallbackReasons: report.fallbackReasons,
   };
 }
 
@@ -337,23 +352,27 @@ export function runMonteCarlo(
   hooks?: MonteCarloHooks,
 ): MonteCarloResult {
   const outputNetIds = spec.outputs.map((o) => o.netId);
-  const runValues: number[][] = [];
-  const pointFailures: string[][] = [];
+  const plan = planAnalysisEngine(mcRunCircuits(spec, circuit), planOptionsFor(spec.engine, hooks));
 
-  for (let r = 0; r < spec.runs; r++) {
-    const { means, failureCompIds } = runMcPoint(spec, circuit, r, outputNetIds);
-    runValues.push(means);
-    pointFailures.push(failureCompIds);
+  return runOnPlan(plan, (engine, report) => {
+    const runValues: number[][] = [];
+    const pointFailures: string[][] = [];
 
-    // Notify progress before the cancel check so the caller sees the completed run.
-    hooks?.onPoint?.(r, spec.runs);
+    for (let r = 0; r < spec.runs; r++) {
+      const { means, failureCompIds } = runMcPoint(engine, spec, circuit, r, outputNetIds);
+      runValues.push(means);
+      pointFailures.push(failureCompIds);
 
-    if (hooks?.shouldCancel?.()) {
-      return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, true);
+      // Notify progress before the cancel check so the caller sees the completed run.
+      hooks?.onPoint?.(r, spec.runs);
+
+      if (hooks?.shouldCancel?.()) {
+        return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, true, report);
+      }
     }
-  }
 
-  return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, false);
+    return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, false, report);
+  }, hooks?.onRestart);
 }
 
 /**
@@ -369,24 +388,28 @@ export async function runMonteCarloAsync(
   hooks?: MonteCarloHooks,
 ): Promise<MonteCarloResult> {
   const outputNetIds = spec.outputs.map((o) => o.netId);
-  const runValues: number[][] = [];
-  const pointFailures: string[][] = [];
+  const plan = planAnalysisEngine(mcRunCircuits(spec, circuit), planOptionsFor(spec.engine, hooks));
 
-  for (let r = 0; r < spec.runs; r++) {
-    const { means, failureCompIds } = runMcPoint(spec, circuit, r, outputNetIds);
-    runValues.push(means);
-    pointFailures.push(failureCompIds);
+  return runOnPlanAsync(plan, async (engine, report) => {
+    const runValues: number[][] = [];
+    const pointFailures: string[][] = [];
 
-    hooks?.onPoint?.(r, spec.runs);
+    for (let r = 0; r < spec.runs; r++) {
+      const { means, failureCompIds } = runMcPoint(engine, spec, circuit, r, outputNetIds);
+      runValues.push(means);
+      pointFailures.push(failureCompIds);
 
-    // Macrotask yield — queued worker messages only dispatch between macrotasks.
-    // A microtask (resolved Promise) would not let "cancel" arrive mid-run.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      hooks?.onPoint?.(r, spec.runs);
 
-    if (hooks?.shouldCancel?.()) {
-      return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, true);
+      // Macrotask yield — queued worker messages only dispatch between macrotasks.
+      // A microtask (resolved Promise) would not let "cancel" arrive mid-run.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      if (hooks?.shouldCancel?.()) {
+        return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, true, report);
+      }
     }
-  }
 
-  return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, false);
+    return buildMonteCarloResult(spec, outputNetIds, runValues, pointFailures, false, report);
+  }, hooks?.onRestart);
 }

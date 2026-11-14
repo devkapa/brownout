@@ -1,0 +1,7 @@
+{
+  "status": "pass",
+  "phases": [
+    { "set": [{ "id": "sw", "params": { "closed": 1 } }], "durationS": 0.02 },
+    { "set": [{ "id": "sw", "params": { "closed": 0 } }], "durationS": 0.02 }
+  ]
+}

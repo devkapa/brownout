@@ -1,0 +1,33 @@
+{
+  "status": "pass",
+  "durationS": 0.0386,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 0.04,
+    "checks": [
+      {
+        "check": "rail-sag",
+        "rail": {
+          "kind": "psu",
+          "psu": "psu",
+          "capacitor": "c1"
+        },
+        "load": "rl",
+        "source": "ld",
+        "ic": "u1",
+        "pin": "1y",
+        "pullup": "pu",
+        "pullSource": "vin"
+      }
+    ],
+    "classicS": [
+      0.001975411274630577,
+      0.010591583888692285,
+      0.014097974608795461,
+      0.0205915838886903,
+      0.024097974608795404,
+      0.03059158388868871,
+      0.034097974608795434
+    ]
+  }
+}

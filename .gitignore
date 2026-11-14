@@ -3,3 +3,9 @@ dist/
 .tsbuildinfo
 *.tgz
 .DS_Store
+
+# Rust build output and the compiled wasm artifact it produces. Both are
+# build outputs: CI and scripts/build-core.mjs (re)build them; neither is
+# committed. See core/README.md.
+core/target/
+src/core/*.wasm

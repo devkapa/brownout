@@ -1,10 +1,12 @@
 /**
- * Structured physics telemetry assembled exclusively from SimEngine's public
- * read API. This module never reaches into private state and never turns a
+ * Structured physics telemetry assembled exclusively from an engine's public
+ * read API (`TelemetryEngine`: classic's SimEngine or the core's CoreEngine).
+ * This module never reaches into private state and never turns a
  * missing/NaN value into zero.
  */
 
-import type { SimCircuit, SimEngine } from "./engine/sim-engine.js";
+import type { SimCircuit } from "./engine/sim-engine.js";
+import type { TelemetryEngine } from "../core/surface.js";
 import type {
   ComponentPhysicsTelemetry,
   PhysicsCurrentReference,
@@ -203,7 +205,7 @@ function currentDescriptor(component: SimCircuit["components"][number]): Current
 }
 
 function pinVoltage(
-  engine: SimEngine,
+  engine: TelemetryEngine,
   componentId: string,
   pinId: string,
 ): number | undefined {
@@ -214,7 +216,7 @@ function pinVoltage(
 }
 
 function modelStateFor(
-  engine: SimEngine,
+  engine: TelemetryEngine,
   component: SimCircuit["components"][number],
 ): PhysicsModelStateTelemetry | undefined {
   switch (component.kind) {
@@ -236,7 +238,7 @@ function modelStateFor(
       };
     }
     case "dc_motor": {
-      const state = engine.getMotorState(component.id);
+      const state = engine.getMotorState?.(component.id);
       if (!state || !Number.isFinite(state.iWinding) || !Number.isFinite(state.omega)) return undefined;
       return {
         kind: "dc-motor",
@@ -246,7 +248,7 @@ function modelStateFor(
       };
     }
     case "servo": {
-      const state = engine.getServoState(component.id);
+      const state = engine.getServoState?.(component.id);
       if (
         !state ||
         !Number.isFinite(state.angle) ||
@@ -269,7 +271,7 @@ function modelStateFor(
       };
     }
     case "stepper": {
-      const state = engine.getStepperState(component.id);
+      const state = engine.getStepperState?.(component.id);
       if (
         !state ||
         !Number.isFinite(state.iA) ||
@@ -288,7 +290,7 @@ function modelStateFor(
       };
     }
     case "hcsr04": {
-      const state = engine.getHcsr04State(component.id);
+      const state = engine.getHcsr04State?.(component.id);
       if (!state || !Number.isFinite(state.vccV)) return undefined;
       return {
         kind: "hcsr04",
@@ -335,13 +337,13 @@ function modelStateFor(
  * across reloads; model state and latched stress remain valid, currents do not.
  */
 export function buildPhysicsTelemetry(
-  engine: SimEngine,
+  engine: TelemetryEngine,
   circuit: SimCircuit,
   includeElectrical: boolean,
 ): PhysicsTelemetrySnapshot {
   const components: Record<string, ComponentPhysicsTelemetry> = {};
   const currents = engine.getElementI();
-  const failuresByComponent = new Map<string, ReturnType<SimEngine["getFailures"]>[string][]>();
+  const failuresByComponent = new Map<string, ReturnType<TelemetryEngine["getFailures"]>[string][]>();
   for (const failure of Object.values(engine.getFailures())) {
     const list = failuresByComponent.get(failure.componentId) ?? [];
     list.push(failure);
