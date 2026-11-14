@@ -4812,14 +4812,6 @@ impl PartitionedSolver {
     /// passes now or note that they are owed, queue the crossings and steps
     /// the partitions asked for, and check what was written is finite.
     fn finish_publish(&mut self, now: f64) -> Result<(), String> {
-        // ERRCTL P2a: a plan held back for the rail solve by a re-solve that
-        // came after this call's last rail loop (a hold procedure's) is
-        // planned before the call returns.
-        // It publishes nothing new, so its readers have read already.
-        if self.stepped.late_rail {
-            let drivers = Rc::clone(&self.driver_snapshot);
-            self.plan_late(now, &drivers, &mut Vec::new())?;
-        }
         let lazy = self.publish_readout(now);
         self.drain_scheduled();
         self.maybe_schedule_bucket(now);

@@ -1766,26 +1766,7 @@ impl PartitionedSolver {
         if result.is_ok() {
             self.latch_slide_warnings(now);
         }
-        result.and_then(|()| self.plan_late(now, drivers, readers))
-    }
-
-    /// ERRCTL P2a: the stepped plans held back for this call's rail solve
-    /// (`SteppedSolver::late_rail`), planned on the rail it left.
-    pub(super) fn plan_late(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
-        if !self.stepped.late_rail {
-            return Ok(());
-        }
-        let ids = self.stepped.late_partitions();
-        if ids.is_empty() {
-            return Ok(());
-        }
-        self.begin_dynamic_writes_list(&ids);
-        self.sync_stepped_cc(now);
-        let planned = self.stepped.plan_late(now, drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
-        self.stepped.cc = None;
-        self.end_dynamic_writes();
-        planned?;
-        self.take_stepped_holds()
+        result
     }
 
     fn rail_loop_passes(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>) -> Result<(), String> {
@@ -2242,11 +2223,6 @@ impl PartitionedSolver {
             Some(stepped::CcRail { rail: hub.node, dl: direction(v) * i_limit, v, a_all, g_all: g_p + g_d, a_rate, t_a: now, a_from, a_until, own, cap, edges })
         });
         self.stepped.cc = cc;
-        // ERRCTL P2a: a cell with resistance moves with its draws, and its
-        // rail is solved after the call's commits (`rail_loop`). Asked only
-        // of a cell, and only where a hub partition steps (the SAP-1's cell
-        // feeds none).
-        self.stepped.late_rail = self.exact.is_none() && self.hub.as_ref().is_some_and(|hub| hub.battery().is_some_and(|m| self.stepped.any_hub_stepping() && m.resistance(hub.state.battery.soc) > 0.0));
     }
 
     /// Keeps the static solver's hub cache band with the regime (after a

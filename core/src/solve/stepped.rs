@@ -2477,10 +2477,6 @@ struct Partition {
     /// but the committed solution at `t` was solved without them (exact
     /// mode re-solves it there, ruling R106 (a): `SteppedSolver::held_at`).
     pend_held: bool,
-    /// Its plan waits for this call's rail solve (ERRCTL P2a,
-    /// [`SteppedSolver::late_rail`]): it stands at the call's instant with
-    /// no trial until [`SteppedSolver::plan_late`] plans it.
-    late: bool,
     /// Ruling R59 (1) (B): a closed-form hub partition that steps only while
     /// its PSU is in CC (`PartitionBuild::cc_switch`) is parked here in CV:
     /// nothing steps, publishes or schedules it, and its events are stale.
@@ -2604,7 +2600,6 @@ impl Partition {
             pend_i_src: 0.0,
             pend_rail_q: None,
             pend_held: false,
-            late: false,
             rail_q: None,
             parked: false,
             cc_exited: false,
@@ -2678,7 +2673,6 @@ struct PartitionSnapshot {
     rail_q: Option<(f64, f64, f64)>,
     pend_dense: PendDense,
     pend_held: bool,
-    late: bool,
     #[cfg(test)]
     pend_mid: MidHalf,
 }
@@ -2725,7 +2719,6 @@ impl PartitionSnapshot {
         self.rail_q = part.rail_q;
         self.pend_dense.clone_from(&part.pend_dense);
         self.pend_held = part.pend_held;
-        self.late = part.late;
         #[cfg(test)]
         self.pend_mid.clone_from(&part.pend_mid);
     }
@@ -2748,7 +2741,6 @@ impl PartitionSnapshot {
         part.rail_q = self.rail_q;
         part.pend_dense.clone_from(&self.pend_dense);
         part.pend_held = self.pend_held;
-        part.late = self.late;
         #[cfg(test)]
         part.pend_mid.clone_from(&self.pend_mid);
     }
@@ -2834,22 +2826,6 @@ pub struct SteppedSolver {
     /// Set while `catch_up_on_cc_rail` brings a partition to a CC exit: the
     /// CC rail its steps take in place of `cc`'s.
     cc_held: Option<CcStep>,
-    /// ERRCTL P2a: the hub rail moves with its partitions' draws and is
-    /// solved after each call's commits (a cell with resistance; not a PSU,
-    /// whose CV rail is fixed and whose CC rail is an unknown of the step,
-    /// nor exact mode, whose rail is a node). A hub partition's next step is
-    /// then planned only after that rail solve ([`Self::plan_late`]), and so
-    /// is a partition whose watches take a supply from one so held back.
-    /// Planned at its commit, before the rail loop took the commit's draw,
-    /// the trial read the rail one step stale, as a boundary held through
-    /// the step: first order in the step and the same in all three solves
-    /// of a step doubling, so its estimate never saw it (`sp_board` (a)
-    /// charging through 100 ohm from a 5 ohm cell: the step from a 0.3 ms
-    /// host stop held a rail 14.6 mV behind, 4.3 W0 behind the charge at
-    /// its end). Set by the owner with the rail's kind.
-    pub(crate) late_rail: bool,
-    /// Set while [`Self::plan_late`] plans what was held back.
-    planning_late: bool,
     /// The rail capacitors' charge `(t, q)` the latest commit of a stepped
     /// hub partition on a CC rail with capacitors stepped them to (ruling
     /// R68), for the rail solve after it in place of the segment's, which
@@ -3040,8 +3016,6 @@ impl SteppedSolver {
             sensitivities: 0,
             cc: None,
             cc_held: None,
-            late_rail: false,
-            planning_late: false,
             clamp: false,
             reaim: Vec::new(),
             trail: Vec::new(),
@@ -3426,7 +3400,7 @@ impl SteppedSolver {
     }
 
     pub(crate) fn any_hub_stepping(&self) -> bool {
-        !self.partitions.is_empty() && self.partitions.values().any(|p| p.hub && !p.parked)
+        self.partitions.values().any(|p| p.hub && !p.parked)
     }
 
     /// Every stepped hub partition, parked or not (W2b's charge: any of
@@ -4118,14 +4092,6 @@ impl SteppedSolver {
         self.partitions.get(&partition).is_some_and(|p| p.has_pend)
     }
 
-    /// Partition `p`'s pending trial as `(its start, the rail it started
-    /// from)`: the rail it read as its boundary, or as its rail unknown's
-    /// start.
-    #[cfg(test)]
-    pub(crate) fn debug_trial_rail(&self, p: usize) -> Option<(f64, f64)> {
-        self.partitions.get(&p).filter(|part| part.has_pend).map(|part| (part.pend_now, part.pend_cc.map_or(part.pend_u, |c| c.u0)))
-    }
-
     #[cfg(test)]
     pub(crate) fn debug_be_next_step(&self, partition: usize) -> Option<bool> {
         self.partitions.get(&partition).map(|p| p.be_next_step)
@@ -4542,7 +4508,6 @@ impl SteppedSolver {
     /// kept for the next window).
     pub(crate) fn end_window(&mut self) {
         debug_assert!(self.deferred.is_empty(), "a held-back plan outlived its call: {:?}", self.deferred);
-        debug_assert!(self.partitions.values().all(|part| !part.late || part.parked || part.has_pend), "a plan held back for the rail solve outlived its call: {:?}", self.late_partitions());
         debug_assert!(self.bills.is_empty(), "a committed battery step was never charged: {:?}", self.bills);
         #[cfg(test)]
         if let Some(saved) = self.w_saved.take() {
@@ -4659,7 +4624,6 @@ impl SteppedSolver {
                             rail_q: part.rail_q,
                             pend_dense: part.pend_dense.clone(),
                             pend_held: part.pend_held,
-                            late: part.late,
                             #[cfg(test)]
                             pend_mid: part.pend_mid.clone(),
                         },
@@ -4718,7 +4682,6 @@ impl SteppedSolver {
                 part.rail_q = s.rail_q;
                 part.pend_dense = s.pend_dense;
                 part.pend_held = s.pend_held;
-                part.late = s.late;
                 #[cfg(test)]
                 {
                     part.pend_mid = s.pend_mid;
@@ -4882,64 +4845,10 @@ impl SteppedSolver {
             self.hold(p_idx);
             return Ok(());
         }
-        // ERRCTL P2a: on a rail the call's rail solve is yet to move, the
-        // plan waits for it (`plan_late`), and so does the plan of a
-        // partition that would read such a partition's trial. The supplies
-        // are at `now` already, brought there above with the table in force
-        // before the event.
-        if self.late_rail && !self.planning_late {
-            let part = &self.partitions[&p_idx];
-            if (part.hub && self.rail.is_some()) || part.supply_deps.iter().any(|b| self.partitions[b].late) {
-                // A re-seed's old trial is spent, as the plan here would
-                // have replaced it.
-                let part = self.partitions.get_mut(&p_idx).unwrap();
-                part.has_pend = false;
-                part.late = true;
-                return Ok(());
-            }
-        }
         self.plan_step(p_idx, f64::INFINITY, drivers, live_params, voltages)?;
         let part = &self.partitions[&p_idx];
         self.scheduled.push((part.pend_t, p_idx, part.version));
         Ok(())
-    }
-
-    /// ERRCTL P2a: plans every step held back in this call for the rail
-    /// solve ([`Self::late_rail`]), now that the rail loop has taken the
-    /// call's commits and published the rail they leave: each trial starts
-    /// from the rail its start state stands on. A partition after the held
-    /// ones that supply it (`sync_supplies` plans those first). One that a
-    /// later re-solve already planned, or that was parked, is left as it is.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn plan_late(&mut self, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &mut [f64], currents: &mut [f64], readers: &mut Vec<DeviceId>) -> Result<(), String> {
-        let ids = self.late_partitions();
-        self.planning_late = true;
-        let mut result = Ok(());
-        for p in ids {
-            let part = self.partitions.get_mut(&p).unwrap();
-            if !part.late {
-                continue;
-            }
-            if part.parked || part.has_pend {
-                part.late = false;
-                continue;
-            }
-            debug_assert!((part.t - now).abs() <= 1e-15, "a held-back plan off its instant: partition {p} at {} against {now}", part.t);
-            self.journal(p);
-            result = self.plan_and_schedule(p, now, drivers, drivers, live_params, voltages, currents, readers);
-            if result.is_err() {
-                break;
-            }
-        }
-        self.planning_late = false;
-        result
-    }
-
-    /// The partitions whose plans wait for the rail solve, ascending.
-    pub(crate) fn late_partitions(&self) -> Vec<usize> {
-        let mut ids: Vec<usize> = self.partitions.iter().filter(|(_, part)| part.late).map(|(&p, _)| p).collect();
-        ids.sort_unstable();
-        ids
     }
 
     /// Brings every OTHER Stepped partition that supplies one of `p_idx`'s
@@ -5755,7 +5664,6 @@ impl SteppedSolver {
         part.pend_rail_q = accepted.rail_q;
         part.pend_t = part.t + h;
         part.has_pend = true;
-        part.late = false;
         part.version += 1;
         let since = part.t;
         // Ruling R113 (3): the hold a two-state step's exit took, into this
@@ -7121,7 +7029,6 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_held, w); }
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.late, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.parked, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_exited, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_switch, w); }
@@ -7198,7 +7105,6 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_q, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_dense, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_held, w); }
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.late, w); }
         #[cfg(test)] { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_mid, w); }
         n
     }
@@ -7234,8 +7140,6 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sensitivities, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cc_held, w); }
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.late_rail, w); }
-        { n += crate::snapshot::HeapBytes::heap_bytes(&self.planning_late, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.window_rail_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.clamp, w); }
