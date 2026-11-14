@@ -1008,7 +1008,7 @@ impl ExpSum<'_> {
 
     /// [`Self::first_crossing`] on the merged form `m`.
     fn first_crossing_merged(&self, m: &Merged, rising: bool, until: f64) -> Option<f64> {
-        self.first_crossing_merged_sharing(m, rising, until, &mut None)
+        self.first_crossing_merged_sharing(m, rising, until, None)
     }
 
     /// [`Self::first_crossing`], sharing with other sums of the same terms
@@ -1016,12 +1016,14 @@ impl ExpSum<'_> {
     /// it: they depend on the terms' rates and weights alone.
     fn first_crossing_sharing(&self, rising: bool, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
         match self.merged() {
-            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, zeros),
+            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, Some(zeros)),
             None => self.first_crossing_scan(rising).filter(|&t| t <= f64::INFINITY),
         }
     }
 
-    fn first_crossing_merged_sharing(&self, m: &Merged, rising: bool, until: f64, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
+    /// `zeros` is `None` where no other sum shares them: they are then
+    /// found for this one alone, with no copy kept.
+    fn first_crossing_merged_sharing(&self, m: &Merged, rising: bool, until: f64, zeros: Option<&mut Option<Vec<f64>>>) -> Option<f64> {
         let dir = if rising { 1.0 } else { -1.0 };
         let (lo, hi, margin) = m.bounds(until);
         // Each term at `τ = 0` once, for the sum and its scale alike.
@@ -1040,11 +1042,16 @@ impl ExpSum<'_> {
             return None;
         }
         let mut turns = match zeros {
-            Some(z) => z.clone(),
+            Some(Some(z)) => z.clone(),
+            Some(shared) => {
+                let mut z = Vec::new();
+                exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut z);
+                *shared = Some(z.clone());
+                z
+            }
             None => {
                 let mut z = Vec::new();
                 exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut z);
-                *zeros = Some(z.clone());
                 z
             }
         };

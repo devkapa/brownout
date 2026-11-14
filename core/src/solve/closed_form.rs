@@ -569,6 +569,8 @@ thread_local! {
     /// `schedule_driven_crossing`'s voltages at the aim's rail and a step
     /// along it, kept between calls for their buffers only.
     static DRIVEN_SCRATCH: std::cell::RefCell<(Vec<f64>, Vec<f64>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    /// Its sums' terms, likewise.
+    static DRIVEN_TERMS: std::cell::RefCell<Vec<(f64, rails::Basis)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl ClosedFormSolver {
@@ -2187,7 +2189,7 @@ impl ClosedFormSolver {
         let dir = if d.sum(|m| m.s) < 0.0 { -1.0 } else { 1.0 };
         let within = if d.held { until - t0 } else { f64::INFINITY };
         let single = d.single();
-        let mut terms: Vec<(f64, rails::Basis)> = Vec::new();
+        let mut terms: Vec<(f64, rails::Basis)> = DRIVEN_TERMS.with(|c| std::mem::take(&mut *c.borrow_mut()));
         let nominal = 1e-6 * d.u_a.abs().max(1.0);
         let gap = edges.iter().map(|&e| dir * (e - d.u_a)).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
         let step = dir * (0.5 * gap).min(nominal).max(1e-3 * nominal);
@@ -2263,6 +2265,7 @@ impl ClosedFormSolver {
             }
         }
         DRIVEN_SCRATCH.with(|c| *c.borrow_mut() = (at_rail, stepped));
+        DRIVEN_TERMS.with(|c| *c.borrow_mut() = terms);
         let (t, local, cross_v, dth) = best?;
         part.cross_local = local;
         part.cross_v = cross_v;
