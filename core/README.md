@@ -5198,7 +5198,11 @@ Constants, all from P3:35-38 unless marked new:
      edge), never `clockVoltage` of the edge time: fmod can put an edge
      instant on the wrong side (probe P8: `(0.011 % 0.001) / 0.001 =
      0.99999...`, so classic reads LOW at t = 11 ms, where the rising edge
-     is due). The two agree everywhere except on edge instants themselves.
+     is due). The two agree everywhere except on edge instants themselves. The same
+     holds for a falling edge: a 50 Hz clock sampled at exactly 10 ms reads
+     HIGH on classic (the pre-edge level, from fmod) and LOW on the core (the
+     edge's own level, the right-hand limit). Not a defect, and not a
+     registered divergence: the harness never samples on an edge instant.
    - The level at load is the level after the last edge whose time (the
      same expression as the schedule) is `<= START_TIME`, and `vLow` when
      there is none. So every edge is either in the load level or scheduled,
