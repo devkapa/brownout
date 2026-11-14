@@ -649,6 +649,16 @@ impl IcEvaluator {
             }
             entry.last_reads = seed.reads;
             entry.family_slots.copy_from_slice(seed.slots);
+            // A preloaded RAM carried while its supply was out has taken its
+            // power loss (the words are the preload again) but its outputs
+            // still hold the level of the word it lost. Seeded, they would
+            // reach the preload by the chip's real delay once it is powered;
+            // classic shows the preload at the load itself. Leaving them
+            // unseeded makes the powered load's first request a first
+            // observation, which lands at once.
+            if matches!(&entry.family, Family::Memory(state) if digital::memory::holds_preload(state)) && entry.family_slots.iter().all(|s| s.is_nan()) {
+                continue;
+            }
             drivers.extend(entry.output_drivers.iter().zip(seed.drivers).map(|(&id, (committed, pending))| (id, committed, pending)));
         }
         Ok((drivers, timers))
@@ -2002,6 +2012,17 @@ mod tests {
         Some(slots.iter().enumerate().fold(0u8, |w, (k, &s)| if s == 0.0 { w | 1 << k } else { w }))
     }
 
+    /// The word on the four /O nets (nodes 4..7, each a 10k pull-up the chip
+    /// pulls down for a 1), read from the solved voltages rather than the
+    /// slots: what a circuit connected to the chip sees.
+    fn ram_net_word(engine: &Engine) -> Option<u8> {
+        let v = &engine.voltages()[4..8];
+        if v.iter().any(|x| x.is_nan() || (*x > 1.0 && *x < 3.0)) {
+            return None;
+        }
+        Some(v.iter().enumerate().fold(0u8, |w, (k, &x)| if x < 1.0 { w | 1 << k } else { w }))
+    }
+
     /// Sets param 0 of `device` (a switch's `sel`) and runs 1 us on.
     fn flip(engine: &mut Engine, device: u32, sel: f64) {
         engine.set_params(&[(device, 0, sel)]).unwrap();
@@ -2094,6 +2115,46 @@ mod tests {
         };
         assert_eq!(ram_word(&reload(&carry)), Some(RAM_WRITE), "carried: the live word");
         assert_eq!(ram_word(&reload(&[])), Some(ram_preload()[RAM_ADDR]), "cold: the preload");
+    }
+
+    #[test]
+    fn a_reload_that_cuts_the_supply_takes_the_power_loss_at_the_load() {
+        // Classic takes it at the load that leaves the chip unpowered, so a
+        // reload that powers it again, with no live pass between, reads the
+        // preload at once. The 9 was written, the first reload cuts vcc (the
+        // chip's own spdt on gnd), the second restores it.
+        let p = ram_bench(Some(ram_preload()));
+        let mut engine = Engine::load(&p).unwrap();
+        write_pulse(&mut engine);
+        assert_eq!(ram_word(&engine), Some(RAM_WRITE));
+        let reload = |engine: &mut Engine, vcc_sel: f64| {
+            let t = engine.time();
+            let carry = engine.carry_take().unwrap().to_vec();
+            let mut q = p.clone();
+            q.devices[1].params[0] = vcc_sel;
+            q.options.start_time = t;
+            q.carry = carry;
+            *engine = Engine::load(&q).unwrap();
+        };
+        reload(&mut engine, 1.0);
+        assert_eq!(ram_word(&engine), None, "unpowered at the first reload: every slot NaN");
+        reload(&mut engine, 0.0);
+        assert_eq!(ram_word(&engine), Some(ram_preload()[RAM_ADDR]), "powered again: the preload, not the 9");
+        assert_eq!(ram_net_word(&engine), Some(ram_preload()[RAM_ADDR]), "and on the nets at the load, as classic reads it");
+        engine.advance(engine.time() + 1e-6).unwrap();
+        assert_eq!(ram_net_word(&engine), Some(ram_preload()[RAM_ADDR]), "and still after a live pass");
+    }
+
+    #[test]
+    fn a_reload_that_keeps_the_supply_keeps_the_written_word() {
+        let p = ram_bench(Some(ram_preload()));
+        let mut engine = Engine::load(&p).unwrap();
+        write_pulse(&mut engine);
+        let t = engine.time();
+        let mut q = p.clone();
+        q.options.start_time = t;
+        q.carry = engine.carry_take().unwrap().to_vec();
+        assert_eq!(ram_word(&Engine::load(&q).unwrap()), Some(RAM_WRITE));
     }
 
     #[test]

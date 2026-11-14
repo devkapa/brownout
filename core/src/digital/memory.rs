@@ -116,6 +116,12 @@ pub fn power_lost(state: &mut MemState) -> bool {
     }
 }
 
+/// Whether this is a 74ls189 with a preload whose live words are that
+/// preload, the state [`power_lost`] leaves it in.
+pub fn holds_preload(state: &MemState) -> bool {
+    matches!(state, MemState::Ram189(Ram189State { mem, preload: Some(preload), .. }) if mem == preload)
+}
+
 /// W2c's carry: this memory's IC-record tag and values (`crate::carry`'s
 /// IC layout). A 189: its sixteen nibbles and `/WE`'s last level. An EEPROM:
 /// its image by hash and length (the image itself reloads from the
