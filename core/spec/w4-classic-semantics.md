@@ -487,9 +487,8 @@ None of the W4 kinds is in `SUPPLY_GATED_KINDS` except `hd44780` and `max7219`
 - `SimWarningCode` has three members (`SE:657`): `missing_flyback` is raised
   for `relay` and `dc_motor` (and `inductor`) through
   `inductiveWindingPins` (`SE:1084-1094`): relay `coil_a`/`coil_b`, motor
-  `m1`/`m2`; the stepper is NOT checked, although its catalog note says the
-  flyback diagnostic fires for it (Q-W4-13, and the test at
-  `wave7-servo-stepper.test.ts:728-756` pins the stepper behaviour; section 5.7).
+  `m1`/`m2`; the stepper is NOT checked by the engine (its catalog note and
+  tests refer to the host's static rule engine, section 5.7, Q-W4-{stepfly}).
 - `missingFlybackWarning` (`SE:1117-1148`) is evaluated at load from the graph
   (`_evaluateStaticWarnings`, `SE:6639-6660`): it fires if a winding's two
   nets differ and one of them, not `gnd` and not holding a pin of a
@@ -499,12 +498,1188 @@ None of the W4 kinds is in `SUPPLY_GATED_KINDS` except `hd44780` and `max7219`
   spdt_switch, push_dpdt, dip_switch, `SE:1069-1072`) and no
   `FLYBACK_CLAMP_KINDS` part (diode, schottky, zener, tvs, led,
   `SE:1073-1077`). The ULN, L293D and TB6612 are in neither set, so a winding
-  on their outputs never fires (this is the "suppressed by an H-bridge with VM
-  powered" of the tests): the suppression is only that the driver is not a
-  switch kind. It does NOT check that VM is wired (see the test at
-  `wave6-hbridge.test.ts:962` "fires when L293D VM is floating", which pins
-  something else: Q-W4-14).
+  on their outputs never fires: the engine's "suppression" by a driver is only
+  that the driver is not a switch kind (`SE:1060-1068` says "a host's own rule
+  engine owns those suppression rules"). The VM-powered condition of the tests
+  (`wave6-hbridge.test.ts:916-995`, "fires when L293D VM is floating") belongs to
+  the host static diagnostics, a test-support copy at
+  `test/helpers/diagnostics/static.ts:918-969` (section 5.7), not to the
+  engine: a relay on an L293D with a floating VM raises NO engine warning
+  (Q-W4-{vmfly}).
 - The output-sag pass (`SE:7553-7690`) runs for every component whose catalog
   entry has `vcc_range`; its debounce is two consecutive sagging steps, and its
   one-pole exemption `_outputSagPole` applies only to the drivers in
   `RC_OUTPUT_IC_KINDS` (`SE:1315-1320`), which contains no W4 kind.
+
+---
+
+## 2. Relay: relay
+
+[W4-E.] `relayModel` (`EA:189-342`). A single-pole double-throw relay: an R+L
+coil and a changeover contact pair. Catalog `relay-spdt-5v` (`CAT:7263`):
+`default_params` `{coilR: 70, coilL: 0.05, vPull: 3.5, vDrop: 1.5}`,
+`electrical_specs` `vcc_range {3, 5, 12}`, `coilR_min 70`, `vPull_max 3.5`,
+`vDrop_min 1.5`. Registered with `galvanicGroups` (`EA:187`, `191`).
+
+### 2.1 Terminals and parameters
+
+Pins by id: `coil_a`, `coil_b`, `com`, `no`, `nc` (`EA:225-229`, all
+`function: "passive"`). No supply pin.
+
+| Parameter | Read at | Rule | Default | Catalog |
+|---|---|---|---|---|
+| `coilR` (ohm) | `EA:231`, `293`, `329` | `max(1, .)` | 70 | 70 |
+| `coilL` (H) | `EA:232`, `294`, `330` | `max(1e-6, .)` | 0.05 | 0.05 |
+| `vPull` (V) | `EA:295` | none (not clamped) | 3.5 | 3.5 |
+| `vDrop` (V) | `EA:296` | none (not clamped, not checked against `vPull`) | 1.5 | 1.5 |
+
+Constant: `CONTACT_R = 1e-3` ohm (`EA:263`), not authorable.
+
+Galvanic groups (`EA:187`): `[coil_a, coil_b]` and `[com, no, nc]`. The engine
+uses them when it decides which parts of the circuit are isolated sections
+(`SE:5568-5610`): the coil and the contact set are two separate sections that
+are NOT conductively joined by the part, so each isolated section gets the
+`ISOLATED_SECTION_ANCHOR_G = 1` S reference at one of its nodes (`SE:114`).
+The port's section analysis must honour the same two groups.
+
+### 2.2 Equations
+
+State per relay (`RelayEngineState`, `SE:262-266`): `iCoil` (A, the coil
+current a -> b committed from the last accepted step) and `energized`
+(boolean). Default `{iCoil: 0, energized: false}` (`EA:234`, `299`).
+
+Stamp (`EA:192-271`), per solve with step `h`:
+1. Coil, transient: `stampResistor(coil_a, coil_b, R + L/h)` and
+   `stampCurrentSource(coil_a, coil_b, -I_hist)` with
+   `G = 1/(R + L/h)`, `I_hist = G*(L/h)*iCoil` (`EA:245-253`). That is the
+   backward-Euler companion of section 1.4 with no back-EMF.
+2. Coil, DC solve (`ctx.dcSolveMode()`): `stampResistor(coil_a, coil_b, R)`
+   only (`EA:235-243`).
+3. Contacts (`EA:262-270`): `stampResistor(com, no, 1e-3)` if
+   `energized`, else `stampResistor(com, nc, 1e-3)`. The other contact is not
+   stamped: an unused `nc` (or `no`) node is held by `RSHUNT` alone.
+
+There is no coil-to-contact coupling in the MNA: the contact state is a
+committed flag.
+
+Post-solve (`commitState`, `EA:286-313`), with `x` the accepted solution and
+`prev` the committed state:
+- `vAb = V(coil_a) - V(coil_b)`;
+- `G = 1/(R + L/h)`; `I_hist = G*(L/h)*prev.iCoil`;
+- `iCoilNew = G*vAb + I_hist` (the companion formula, NOT the current in the
+  matrix: they are equal because the stamp is linear and exact);
+- `absV = |vAb|`; `energized` becomes true if `!prev.energized && absV >=
+  vPull`, becomes false if `prev.energized && absV < vDrop`, else holds
+  (`EA:303-310`).
+
+`updateCurrent` (`EA:314-320`) publishes `iCoil` (the coil current a -> b), not
+a contact current. The telemetry row for a relay is `reference: "coil"`
+(`src/sim/physics-telemetry.ts:153-154`).
+
+### 2.3 Dynamics and state
+
+- One state variable of electrical memory (`iCoil`, inductor current); time
+  constant `L/R = 0.7143 ms` at the defaults; steady current at 5 V is
+  `5/70 = 71.43 mA`.
+- Backward Euler only; no trapezoid; `h` is the solve's step including 555
+  sub-steps and the seed's `1e-12` (section 1.3).
+- `energized` is a committed boolean with a voltage hysteresis band
+  `[vDrop, vPull)`.
+- Carries across `load()` by component id (`SE:3190-3196`); snapshotted in
+  `saveState` (`relays`, `SE:2617`).
+- No contact bounce, no pull-in or drop-out time, no armature motion, no
+  contact welding, no contact current rating, no coil self-heating, no change of
+  `L` with armature position (it is the constant `coilL`).
+
+### 2.4 Newton
+
+None to speak of: every stamp is linear in `x`, so the first iterate lands on
+the answer and the second confirms (convergence test of W3 section 1.3,
+`vAbsTol 1e-6 + vRelTol 1e-3`). The relay never reads `xGuess`
+(`EA:192`: `_xGuess`). A relay sets no limiting flag.
+
+### 2.5 Regimes and events
+
+- **Energised / released**, decided after every accepted solve from `|v_coil|`
+  against `vPull` and `vDrop`, applied to the NEXT solve's contact stamp. The
+  instant is not located: classic only observes the end-of-step voltage, and
+  the step controller rejects a step in which the coarse and refined solves
+  disagree on `energized` (section 1.6), so the instant is bracketed by
+  halving to the host's minimum step.
+- The decision uses the coil VOLTAGE, not the coil current: with a
+  transistor driver whose saturation voltage is small this is equivalent, but
+  with a coil fed through a series resistor the pull-in is at `vPull` across
+  the coil, not at the datasheet's current.
+- **In the DC operating point** the relay is not held: the OP ladder runs
+  `commitState` (section 1.8), so `energized` can flip during the ladder from
+  the stage's coil voltage, and `iCoil` is then overwritten by `vCoil/coilR`
+  (`SE:4361-4373`). The first transient step after `load()` therefore starts
+  with a relay already in the regime the seed solve saw.
+- The `load()` seed solve (`SE:3437`, `h = 1e-12`) also runs `commitState`: a
+  coil driven directly by a source reads its full voltage at the seed (the
+  coil companion at `L/h = 5e10` ohm carries no current), so the relay is
+  energised before the first real step if that voltage reaches `vPull`.
+
+### 2.6 Small-signal AC
+
+`acStamp` (`EA:321-341`): the coil is the continuous admittance
+`1/(R + jwL)` stamped as `stampAcAdmittance(ac, a, b, R/den, -xl/den)` with
+`xl = w*L` and `den = R^2 + xl^2`; the committed contact pair is a
+`1/1e-3 = 1000` S conductance between `com` and `no` (energised) or `nc`; the
+other contact stamps nothing. This is written separately from the transient
+stamp: the transient coil impedance is `R + L/h`, the AC one is `R + jwL`, and
+they agree only for `w*h` small (section 1.7). The armature has no small-signal
+model.
+
+### 2.7 Diagnostics
+
+- `missing_flyback` (section 1.10): fires for a relay whose `coil_a` or `coil_b`
+  net holds a `FLYBACK_SWITCH_KINDS` pin (and not a rail or `gnd`) and no
+  diode/LED/zener/TVS pin. Tests `wave6-relay.test.ts:427-475`: fires with an
+  NPN and no diode (`:428`), does not fire with an anti-parallel diode
+  (`:451`), does not fire across a fixed supply with no switch (`:475`).
+- No failure state: a relay cannot burn out, weld or exceed a rating.
+
+### 2.8 Tests that pin it
+
+`wave6-relay.test.ts`: `:261` coil at 5 V reaches `5/70 = 71.4 mA` and energises;
+`:315` 0 V de-energises, COM-NC closed; `:355` hysteresis (a 2 V coil that was
+de-energised stays de-energised, between 1.5 and 3.5); `:388` RL time
+constant (current at 1 tau between 50 and 95 percent of steady); flyback
+diagnostics `:427-492`. `wave6-hbridge.test.ts:916-995` pin the flyback
+suppression with an L293D. `ac-isolation.test.ts:343-395` (the census).
+`state-rollback-derived.test.ts` and `optimization-equivalence.test.ts` cover
+snapshot and the bitwise oracle (not read in detail).
+
+### 2.9 Questions
+
+- **Q-W4-{relayrelease} (release voltage, recalled).** Classic releases at
+  `|v| < 1.5 V` (30 percent of the 5 V coil rating) and pulls in at 3.5 V (70
+  percent). The common SRD-05VDC-SL-C datasheet (Songle, recalled): coil 70 ohm,
+  nominal 71.4 mA, pull-in at most 75 percent of nominal (3.75 V), release at
+  least 10 percent (0.5 V). Classic's pull-in is inside that figure; its
+  release is 1.0 V above the datasheet's minimum. **Recommend** reproduce; the
+  catalog parameters are the authored values and a user can edit them.
+- **Q-W4-{relaystate} (decision from voltage, not current, and one step late).**
+  See 2.5. For a coil driven through a bipolar transistor the base-emitter and
+  saturation drops make the coil voltage a few tenths of a volt below the rail,
+  which is harmless; for a coil on a resistive divider the decision follows the
+  voltage the divider develops while the real contact follows the ampere-turns.
+  Classic also applies the new contact state one accepted step later.
+  **Recommend** reproduce for 1.0.0 (committed flag applied at the next solve
+  by the device-kernel regime commit, DK 1.5) and record the one-step lag in
+  the port's gate; an event-located instant is a post-1.0.0 improvement.
+- **Q-W4-{relaydcop} (relay not in the OP physical-time hold).** Section 2.5:
+  the relay's `commitState` runs inside the DC ladder, so the OP's regime
+  signature (W1 section 2.15, PLAN 1.3 "regime signature of the operating
+  point") includes `energized` and can differ between ladder stages.
+  **Recommend** mirror (the OP then reflects the coil voltage actually
+  solved), and add `relay` to the W6a regime signature list.
+- **Q-W4-{relaynoreverse} (contact model).** A 1 mohm contact with no rating,
+  no contact resistance variation and no dielectric: it passes any current and
+  any voltage, and a `com` left floating is held by RSHUNT only (about 1e12
+  ohm). Datasheet contact resistance is at most 100 mohm initial (SRD-05VDC,
+  recalled) and the contact is rated 10 A at 250 VAC / 30 VDC. **Recommend**
+  reproduce; a contact-rating warning would be new behaviour.
+
+---
+
+## 3. DC brushed motor: dc_motor
+
+[W4-E.] `dcMotorModel` (`EA:344-479`). Series R+L winding with a back-EMF and
+a rotor with inertia, viscous friction and a constant load torque. Catalog
+`dc-motor` (`CAT:8004`): `default_params` `{windingR: 5, windingL: 0.002, Ke:
+0.01, Kt: 0.01, inertia: 1e-5, friction: 1e-5, loadTorque: 0}`; no
+`vcc_range`.
+
+### 3.1 Terminals and parameters
+
+Pins by id: `m1` (+), `m2` (-) (`EA:382-383`; `function: "passive"`).
+
+| Parameter | Read at | Rule | Default |
+|---|---|---|---|
+| `windingR` (ohm) | `EA:375`, `427`, `467` | `max(0.001, .)` | 5 |
+| `windingL` (H) | `EA:376`, `428`, `468` | `max(1e-9, .)` | 0.002 |
+| `Ke` (V s/rad) | `EA:377`, `429` | none | 0.01 |
+| `Kt` (N m/A) | `EA:430` | none | 0.01 |
+| `inertia` J (kg m^2) | `EA:431` | `max(1e-12, .)` | 1e-5 |
+| `friction` b (N m s/rad) | `EA:432` | `max(0, .)` | 1e-5 |
+| `loadTorque` TL (N m) | `EA:433` | none | 0 |
+
+`Ke` and `Kt` are independent parameters (a lossless motor has them equal in
+SI units; classic does not enforce it).
+
+### 3.2 Equations
+
+State `MotorEngineState {iWinding, omega}` (`SE:284-287`); default
+`{iWinding: 0, omega: 0}` (`EA:379`, `435`; `SE:3201-3204`). `omega` is rad/s,
+signed.
+
+Stamp (`EA:347-410`) with the COMMITTED `omega`:
+- `Vbemf = Ke * omega` (`EA:380`);
+- transient: `G = 1/(R + L/h)`, `I_eq = G*((L/h)*iWinding - Vbemf)`,
+  `stampResistor(m1, m2, R + L/h)`, `stampCurrentSource(m1, m2, -I_eq)`
+  (`EA:397-409`);
+- DC solve: `stampResistor(m1, m2, R)` and `stampCurrentSource(m1, m2,
+  Vbemf/R)` (that is `-I_eqDc` with `I_eqDc = -Vbemf/R`, `EA:391-394`): the
+  held rotor speed's back-EMF is a Norton offset, the inductive history is
+  dropped.
+
+Commit (`commitState`, `EA:426-454`), with `h` the accepted step:
+- `G = 1/(R + L/h)`, `Vbemf = Ke*prev.omega`, `I_eq = G*((L/h)*prev.iWinding -
+  Vbemf)`;
+- `iWindingNew = G*(V(m1) - V(m2)) + I_eq` (`EA:447`);
+- `torqueNet = Kt*iWindingNew - b*prev.omega - TL` (`EA:450`);
+- `omegaNew = prev.omega + (h/J)*torqueNet` (`EA:451`): forward Euler on the
+  speed, using the NEW current and the OLD speed.
+
+`updateCurrent` publishes `iWinding` (`EA:455-461`). Telemetry
+(`physics-telemetry.ts:240-249`): `windingCurrentA`, `angularVelocityRadPerS`,
+reference `winding`.
+
+### 3.3 Dynamics and state
+
+- Electrical: one backward-Euler inductor, `L/R = 0.4 ms` at the defaults.
+- Mechanical: `J d(omega)/dt = Kt*i - b*omega - TL`, forward Euler with the
+  back-EMF in the electrical row taken from the previous step's `omega`
+  (explicit coupling). Defaults: no-load speed at 6 V is `6/(Ke + R*b/Kt) = 400
+  rad/s` with `i = 0.4 A`; the electromechanical time constant is
+  `J/(b + Kt*Ke/R) = 0.333 s`; stall current at 6 V is `6/5 = 1.2 A`. All four
+  figures are asserted by tests (section 3.8).
+- Reverse polarity gives negative `omega` (no direction clamp); there is no
+  static friction, no commutation ripple, no brush drop, no armature reaction,
+  no thermal state, no torque limit and no coupling of `omega` back to any
+  other component (the comment on `SE:270-278`: "NO mechanical coupling").
+- Stability of the explicit loop: the scheme is stable when `h*(b +
+  Kt*Ke/R)/J` is below 2 for the speed equation alone, and the lagged
+  back-EMF adds the electrical coupling term; at the defaults this is `3*h`, so
+  the worst-case 10 ms host step gives 0.03. A motor with a much smaller `J`
+  (a coreless motor, `J` near 1e-7 with `Ke = Kt = 0.05`, `R = 2`) has
+  `Kt*Ke/(R*J) = 1.25e4 /s` and an `h` limit near 1.6e-4 s, below the quiet-circuit
+  host step. Classic has no guard; the host's error control would see the
+  oscillation as a large `omega` error and shrink `h` (`ABS_SPEED = 1e-3`),
+  which is the only protection (section 1.6). See the stability question
+  below.
+- Carries across `load()` (`SE:3198-3205`); snapshotted (`motors`).
+- Held at its entry state during the OP ladder (section 1.8): `commitState` is
+  skipped, `_commitDcOperatingPointState` sets `iWinding = (vWinding -
+  Ke*omega_held)/windingR` and keeps `omega` (`SE:4375-4388`). A motor placed
+  with a source directly across it has an OP at the STALL current with
+  `omega = 0` (or its held value) and runs up from there.
+
+### 3.4 Newton
+
+Linear: no `xGuess` read (`EA:347`: `_xGuess`), no limiter. Back-EMF is
+constant within a solve.
+
+### 3.5 Regimes and events
+
+None: no regime, no event. The rotor integrates continuously; a direction
+reversal passes through `omega = 0` with no discontinuity.
+
+### 3.6 Small-signal AC
+
+`acStamp` (`EA:462-478`): only the winding admittance `1/(R + jwL)` between
+`m1` and `m2` (the same `R/den`, `-xl/den` form as the relay). The comment says
+the held `omega` makes the back-EMF "a constant term that vanishes in small
+signal; electromechanical coupling (the motional impedance) is deliberately
+outside this compact AC model". A real motor's impedance near mechanical
+resonance includes `Ke*Kt/(b + jwJ)` in series; it is absent.
+
+### 3.7 Diagnostics
+
+`missing_flyback` for `m1`/`m2` (`SE:1092-1093`, section 1.10): tests
+`wave7-dcmotor.test.ts:489` (motor switched by a bare NPN fires) and `:517`
+(motor on an L293D with VM powered is suppressed because the L293D is not a
+switch kind). No overcurrent, stall or thermal failure.
+
+### 3.8 Tests that pin it
+
+`wave7-dcmotor.test.ts`: stall current with `Ke = 0` (`:233-266`: 6 V, `i =
+1.2 A`); no-load steady state (`:268-316`: `omega` near 400 rad/s, `i` near 0.4
+A after about five mechanical time constants); back-EMF reduces current
+monotonically (`:318-367`); reverse polarity gives negative `omega`
+(`:369-397`); L293D forward and reverse drive (`:399-478`); flyback
+diagnostics (`:480-566`); convergence at `h = 50 us` for 100 steps and after a
+reversal (`:568-600`). `ac-isolation` census.
+
+### 3.9 Questions
+
+- **Q-W4-{motorload} (`loadTorque` has no sign).** `torqueNet = Kt*i - b*omega
+  - TL` subtracts `TL` for every `omega`: an unpowered motor with `TL > 0`
+  accelerates to NEGATIVE speed (`omega = -TL/b` at equilibrium, `-100 rad/s`
+  for `TL = 1e-3`, `b = 1e-5`), forever. A load torque (a gear train,
+  friction, a driven load) opposes motion: it should be `TL*sign(omega)` with a
+  stiction band, or the model should say TL is a one-way driving torque.
+  **Recommend** mirror for the port (record as a registered divergence per PLAN
+  decision 7), and open a classic fix separately; do not copy silently.
+- **Q-W4-{motorstab} (explicit back-EMF and forward-Euler speed).** Section
+  3.3. The port can integrate the mechanics implicitly (a 2x2 coupled system,
+  i and omega solved together, which is better conditioned and removes the
+  one-step back-EMF lag) or reproduce classic. **Recommend** reproduce
+  forward Euler for the gate against classic, and add the implicit form behind
+  the same state record only if a coreless-motor test shows an instability;
+  note the `h` limit in the port's diagnostics.
+- **Q-W4-{motorkt} (`Ke` and `Kt` independent).** A circuit with `Kt != Ke`
+  violates energy conservation (the motor develops more mechanical power than
+  it takes electrically, or the reverse). **Recommend** reproduce; add a
+  catalog note rather than a new rule.
+- **Q-W4-{motordc} (OP at stall).** Section 3.3: an OP with a held `omega = 0`
+  gives the stall current as the operating point; the first transient steps then
+  show the current falling as the motor spins up. For a motor in a circuit with
+  a supply limit this OP can differ from the settled behaviour (the current
+  limit may or may not hold at stall). **Recommend** mirror (it is the
+  documented DC-OP hold, `SE:765-775`).
+
+---
+
+## 4. Hobby servo: servo
+
+[W4-E.] `servoModel` (`EA:481-657`) plus the sidecar `advanceServoMotion`
+(`SP:1-66`). A rate-limited position actuator driven by a decoded PWM
+command. It is "intentionally not a rigid-body gear-train simulation:
+acceleration, backlash, load torque, stall heating and control-loop hunting
+remain outside the model" (`SP:1-9`). Catalog `servo-sg90` (`CAT:8038`):
+`default_params` `{idleR: 330, movingCurrent: 0.15, maxSpeedDegPerSecond: 600,
+nominalVoltage: 4.8, minimumOperatingVoltage: 4.5, minPulseMs: 1, maxPulseMs:
+2, minAngle: 0, maxAngle: 180}`; `electrical_specs.vcc_range {4.5, 4.8, 6}`,
+`if_max 0.7`.
+
+### 4.1 Terminals and parameters
+
+Pins by id: `sig` (`function: "input"`), `vplus` (`vcc`), `gnd` (`gnd`)
+(`EA:492-493`, `511-512`). `sig` has no stamp: it is a genuinely high-impedance
+input (`EA:487-491` and the catalog note: "no 1 Mohm pull-down is present";
+`digital-input-impedance.test.ts` pins it). Open `sig` reads its level through
+the 2.0 V threshold on a node held by RSHUNT alone, i.e. as low.
+
+| Parameter | Read at | Rule | Default |
+|---|---|---|---|
+| `idleR` (ohm) | `EA:118` | `max(1, .)` | 330 |
+| `movingCurrent` (A) | `EA:129` | `max(0, .)`; 0 means use `idleR` | 0.15 |
+| `nominalVoltage` (V) | `EA:125-128`, `607-610` | `max(0.1, param ?? vcc_range.nominal ?? 4.8)` | 4.8 |
+| `minimumOperatingVoltage` (V) | `EA:611-614` | `max(0, param ?? vcc_range.min ?? 4.5)` | 4.5 |
+| `maxSpeedDegPerSecond` (deg/s) | `EA:602-605` | `max(0, param ?? speedDegPerSecond ?? 600)` | 600 |
+| `minPulseMs`, `maxPulseMs` (ms) | `EA:520-521` | none; both unchecked | 1.0, 2.0 |
+| `minAngle`, `maxAngle` (deg) | `EA:522-523` | none (the sidecar clamps `maxAngle >= minAngle`) | 0, 180 |
+
+Constants: `SIG_THRESH = 2.0` V (`EA:515`), the TTL threshold "used
+throughout the engine"; it is an ABSOLUTE comparison of `V(sig) - V(gnd)`, not a
+fraction of the servo's own supply.
+
+### 4.2 Equations
+
+State `ServoEngineState` (`SE:315-326`): `lastSig` (0/1), `riseT` (s, NaN
+until the first rising edge), `pulseMs` (NaN until the first pulse),
+`targetAngle`, `angle`, `velocity` (deg/s), `moving`, `powered`,
+`supplyVoltage`, `loadResistance` (ohm, the value STAMPED for the accepted
+step). Default (`SE:331-344`): `lastSig 0, riseT NaN, pulseMs NaN, targetAngle
+90, angle 90, velocity 0, moving false, powered false, supplyVoltage 0,
+loadResistance NaN`.
+
+**Stamp (`EA:484-496`).** Only the supply branch: `stampResistor(vplus, gnd,
+servoLoadResistance)`, with the helper (`EA:112-131`):
+`idleR = max(1, idleR_param)`; if the state is absent, or `!moving`, or
+`|velocity| <= 1e-9`, or `!powered`, then `idleR`; otherwise
+`nominalVoltage = max(0.1, param ?? vcc_range.nominal ?? 4.8)`,
+`movingCurrent = max(0, param ?? 0.15)` and `R = movingCurrent > 0 ?
+max(0.1, nominalVoltage/movingCurrent) : idleR`. At the defaults: idle `330`
+ohm (15.2 mA at 5 V), moving `4.8/0.15 = 32` ohm (156 mA at 5 V). The load is
+chosen from committed state, so the stamp never switches inside a Newton
+iteration and lags the motion by one accepted step.
+
+**Commit (`EA:509-631`).** In order:
+1. `loadResistance = servoLoadResistance(...)` evaluated at the START of the
+   commit from the OLD state (`EA:510`); it is the value that was stamped.
+2. `vSig = V(sig) - V(gnd)`; `sampledSig = vSig >= 2.0 ? 1 : 0` (`EA:513-516`).
+3. Driver lookup: `driver = ctx.mcuEventDriverForNode(sig node)` (the shared
+   map with `includePico = true`, so Uno, Nano and Pico, section 1.5);
+   `driverMcu = state.arduinos.get(driver.compId)`; `driverPowered =
+   ctx.mcuPowered(driverComp, x)`; `driverPinEvents =
+   ctx.mcuStepPinEvents(driver.compId)` filtered to `event.pin ===
+   driver.pin && event.level !== null`; `finalDrive = driverMcu.pinDriveState(
+   driver.pin)` (`EA:529-542`).
+4. `hasEventDriver = driver && driverComp && driverMcu && driverPowered &&
+   (finalDrive is "out-high" or "out-low" or driverPinEvents.length > 0)`
+   (`EA:543-549`).
+5. If `hasEventDriver`: edges are `{level: event.level, time: bootT +
+   event.cycle/clockHz}` for each filtered event, sorted by time
+   (`EA:551-558`); else if `sampledSig !== lastSig`: ONE edge
+   `{level: sampledSig, time: ctx.simTime()}` (the step START; `EA:558-561`).
+6. `applyEdge` (`EA:563-575`) over the edges in order: an edge whose level equals
+   `lastSig` is ignored; a rising edge sets `riseT = edge.time`; a falling edge
+   with a finite `riseT` and `edge.time >= riseT` sets `measuredMs =
+   (edge.time - riseT)*1000`, `pulseMs = clamp(measuredMs, minPulse, maxPulse)`
+   and `targetAngle = minAngle + ((pulseMs - minPulse)/max(1e-9, maxPulse -
+   minPulse))*(maxAngle - minAngle)`; then `lastSig = edge.level`.
+7. Reconcile (`EA:579-589`): when the MCU is the driver, `finalLevel` is 1 for
+   `out-high`, 0 for `out-low`, `sampledSig` for any input state; if it
+   differs from `lastSig`, one more edge `{level: finalLevel, time:
+   ctx.simTime() + h}` is applied. This catches a pin that was set to its level
+   with no non-null event (after a reload or reset).
+8. `supplyVoltage = max(0, V(vplus) - V(gnd))` (`EA:592-596`).
+9. Motion: `advanceServoMotion({angleDeg: prev.angle, targetAngleDeg: target,
+   dtSeconds: h, maxSpeedDegPerSecond, supplyVoltageV, nominalSupplyVoltageV,
+   minimumOperatingVoltageV, minAngleDeg, maxAngleDeg})` (`EA:598-617`).
+10. New state: the decoded fields plus `angle = motion.angleDeg`, `velocity =
+   motion.velocityDegPerSecond`, `moving = motion.moving && |velocity| > 1e-9`,
+   `powered = motion.powered`, `supplyVoltage`, `loadResistance` (`EA:619-630`).
+
+**Sidecar `advanceServoMotion` (`SP:28-65`).** With `finite(v, fallback)`
+replacing non-finite values:
+- `minAngle = finite(minAngleDeg, 0)`; `maxAngle = max(minAngle,
+  finite(maxAngleDeg, 180))`; `angle = clamp(finite(angleDeg, 90), minAngle,
+  maxAngle)`; `target = clamp(finite(targetAngleDeg, angle), minAngle,
+  maxAngle)`;
+- `dt = max(0, finite(dtSeconds, 0))`; `nominal = max(1e-9,
+  finite(nominalSupplyVoltageV, 6))`; `minOp = max(0,
+  finite(minimumOperatingVoltageV, 3))`; `supply = max(0, finite(
+  supplyVoltageV, 0))` (the handler always passes 4.8 and 4.5, so the
+  sidecar's own defaults 6 and 3 are unused);
+- `powered = supply >= minOp`; `speedScale = powered ? clamp(supply/nominal, 0,
+  1.5) : 0`;
+- `maxSpeed = max(0, finite(maxSpeed, 0))*speedScale`; `error = target - angle`;
+  `maxTravel = maxSpeed*dt`; `travel = clamp(error, -maxTravel, maxTravel)`;
+  `nextAngle = clamp(angle + travel, minAngle, maxAngle)`; `velocity = dt > 0 ?
+  travel/dt : 0`; `moving = |target - nextAngle| > 1e-9`.
+At 5 V the speed is `600*5/4.8 = 625 deg/s`; a 0 to 180 degree move takes
+0.288 s. Travel in one step is exactly `min(|error|, maxTravel)`: no
+acceleration, no overshoot.
+
+### 4.3 Dynamics and state
+
+- The command is held between pulses ("loss of signal therefore does not
+  teleport or reset the shaft", `SE:303-307`): there is no signal-loss timeout
+  and no refresh requirement; one complete pulse commands the target
+  forever.
+- A pulse outside `[minPulse, maxPulse]` is clamped (0.5 ms reads as 0
+  degrees; 3 ms as 180).
+- The electrical supply load switches between two resistors by committed
+  `moving && powered`; the shaft motion and the load are decoupled from the
+  actual angle error (a stalled servo cannot draw more).
+- The first valid pulse needs a rising edge followed by a falling edge: a
+  signal held high from the start gives no target; the target stays at 90.
+- Held at its entry state in the OP ladder (section 1.8); carried across
+  `load()` (`SE:3206-3231`).
+
+### 4.4 Newton
+
+No `xGuess` read; the stamp is a fixed resistor per solve.
+
+### 4.5 Regimes and events
+
+- **Powered / unpowered** (`supply >= minOp`): below it `speedScale = 0` and the
+  shaft stops while the target is retained.
+- **Idle / moving** load: committed one step late (above).
+- **Edge timing.** On the event path the edge times are exact to one MCU clock
+  cycle (62.5 ns at 16 MHz, 8 ns at 125 MHz); the pulse width is independent of
+  the host step (tests `servo-engine-physics.test.ts:96`, `mcu-servo-replay.test.ts:263`).
+  On the sampled path the single edge per step is stamped at the STEP START
+  (`ctx.simTime()`), so a width measured between a rising edge seen at the end
+  of step `k` (timed at the start of step `k`) and a falling edge likewise has
+  an error of up to one step on each side but cancels to the step-quantised
+  width; with a square source whose edges the host lands on (source events,
+  `HL:1118-1135`) it is exact. A pulse shorter than one host step is lost on the
+  sampled path.
+- **Which drivers get the event path.** `includePico = true`: Uno, Nano,
+  Pico. A micro:bit does not (its pins are `setMicrobitDrive` levels, section
+  14.9) so it takes the sampled path. A servo whose `sig` net has two MCU pins
+  uses the last in `mcu.ioPins` order (last writer wins, `SE:7356`).
+
+### 4.6 Small-signal AC
+
+`acStamp` (`EA:644-656`): `1/servoLoadResistance` between `vplus` and `gnd`,
+reading the committed state (so the AC load equals the load the OP's last
+transient step stamped). `sig` stamps nothing. PWM decode and shaft motion
+have no small-signal model.
+
+### 4.7 Diagnostics
+
+The catalog has `vcc_range`, so the output-sag scan visits the servo
+(`SE:7553-7690`), but `_drivenOutputTargets` returns nothing for it; no failure
+kind exists. Telemetry (`physics-telemetry.ts:250-271`): `angleDeg`,
+`targetAngleDeg`, `velocityDegPerS`, `moving`, `powered`, `supplyVoltageV`,
+`signalHigh`, `pulseWidthMs`, `lastRiseSimTimeS`, reference `supply`.
+
+### 4.8 Tests that pin it
+
+`wave7-servo-stepper.test.ts`: idle current `5/330 = 15.15 mA` (`:212`);
+`sig` is high-impedance (`:251`: driving `sig` with 3.3 V does not disturb a 5
+V supply); decode 1.5 ms to 90 deg (`:286`), 1.0 ms to 0 and 2.0 ms to 180
+(`:361`, `:407`); target holds between pulses (`:451`); convergence (`:814`).
+`servo-engine-physics.test.ts` (`:96-186`): cycle-precision decode of an
+Arduino pulse "instead of 100 us / 18 degree steps" (`:96`), no teleport and
+supply-scaled speed (`:125`), stop below the brownout voltage while keeping the
+target (`:145`), the moving current drawn through the solved supply (`:158`),
+exact replay after adaptive rollback (`:170`). `mcu-servo-replay.test.ts`
+`:240-338` (events counted once under the 555 split; a servo and an HC-SR04 on
+one MCU). `servo-physics.test.ts:4-66` (rate limit, exact landing, supply
+scaling and brownout, angle clamps).
+
+### 4.9 Questions
+
+- **Q-W4-{servosample} (sampled-path edge quantisation).** For a PWM source
+  that is not an MCU pin (a signal generator, a 555, a clock) the servo
+  decodes at step ends, timing each edge at the step START; classic's own
+  step controller does not clamp `h` to the 1 to 2 ms pulse structure, so at
+  `h = H_MAX` the measured width is only as good as the source-event clamp
+  (`HL:1118-1135` lands steps on square-source edges but a 555 is not a
+  "source"). **Recommend** the core decodes servo `sig` from scheduled edges
+  of its driver (a logic output's event, DK 1.5) so width is exact for any
+  digital driver, and keeps the 2.0 V threshold sampling only for analog drives.
+- **Q-W4-{servothresh} (absolute 2.0 V threshold).** A servo driven from a 1.8 V
+  logic output never decodes; an SG90 accepts 3 to 5 V signals (recalled).
+  **Recommend** reproduce.
+- **Q-W4-{servoload} (load switches one step late and the stall load is
+  absent).** The 32 ohm moving load is stamped for the step after the shaft
+  starts moving and released the step after it lands; a servo that holds an
+  angle against a load, or stalls, draws the idle 15 mA. SG90 stall is about
+  650 mA and idle 10 mA (recalled). The catalog note says "stall mechanics/
+  current limiting ... are not modelled", so this is by design. **Recommend**
+  reproduce.
+- **Q-W4-{servospeed} (speed scale up to 1.5x).** `speedScale` caps at 1.5, so a
+  6 V supply gives `600*6/4.8 = 750 deg/s` (1.25x) and a 7.2 V rail the cap
+  900 deg/s; no max-voltage failure exists even though `vcc_range.max` is 6.
+  **Recommend** reproduce.
+- **Q-W4-{servoevent} (the event path needs a powered MCU and ignores the
+  signal's real voltage).** `hasEventDriver` requires `mcuPowered`; the decode
+  takes the MCU's logical level even if the net is held low by a short (the
+  electrical level never enters). **Recommend** reproduce; the board shell
+  (section 14) is the source of truth for drive.
+
+---
+
+## 5. Bipolar stepper: stepper
+
+[W4-E.] `stepperModel` (`EA:659-819`). Two independent R+L coils and a phase
+state machine on the coil currents. No rotor model. Catalog
+`stepper-bipolar-nema17` (`CAT:8088`): `default_params` `{coilR: 10, coilL:
+0.01, stepsPerRev: 200}`.
+
+### 5.1 Terminals and parameters
+
+Pins by id: `a1`, `a2` (coil A), `b1`, `b2` (coil B) (`EA:689-692`, all
+`function: "passive"`). Parameters: `coilR` `max(0.001, ., default 10)` and
+`coilL` `max(1e-9, ., default 0.01)` (`EA:684-685`, `729-730`, `800-801`);
+the catalog's `stepsPerRev` is NOT read by the engine (only the host reads it,
+`SE:365-366`: `angle = position * 360 / stepsPerRev`).
+
+### 5.2 Equations
+
+State `StepperEngineState {iA, iB, phase, lastKnownPhase, position}`
+(`SE:367-373`), default `{0, 0, -1, -1, 0}` (`EA:687`, `732`; `SE:3237-3241`).
+
+Stamp (`EA:662-714`): for each coil two elements, exactly the relay's:
+`stampResistor(a1, a2, R + L/h)`, `stampCurrentSource(a1, a2, -I_histA)` with
+`G = 1/(R + L/h)`, `I_histA = G*(L/h)*iA`, and the same for B with `iB`. DC
+solve: `stampResistor(a1, a2, R)` and `stampResistor(b1, b2, R)` only
+(`EA:694-702`). No back-EMF ("v1 omits back-EMF for simplicity",
+`EA:666-667`).
+
+Commit (`EA:728-788`): `iANew = G*(V(a1) - V(a2)) + I_histA`, `iBNew` likewise;
+`signA = 0 if |iANew| < 1e-3 else sign(iANew)` (the 1 mA `DEADBAND`, `EA:752`),
+same for B. `newPhase` from the sign pair: (+,+) 0, (-,+) 1, (-,-) 2, (+,-) 3,
+anything with a zero sign -1 (`EA:758-763`). `newLastKnownPhase = newPhase >= 0
+? newPhase : prev.lastKnownPhase` (`EA:768`). Position: if `newPhase >= 0` and
+`prev.lastKnownPhase >= 0`, `delta = (newPhase - prev.lastKnownPhase + 4) % 4`;
+`delta == 1` gives `position++`, `delta == 3` gives `position--`, `0` and `2`
+hold (`EA:770-781`). The new state is written whole (`EA:783-787`).
+
+`updateCurrent` publishes `|iA| + |iB|` (`EA:789-795`); telemetry
+`reference: "package-total"`, `aggregation: "absolute-sum"`, plus `coilCurrentAA`,
+`coilCurrentBA`, `positionSteps`, `phaseIndex` (`physics-telemetry.ts:273-290`).
+
+### 5.3 Dynamics and state
+
+- Electrical: two independent backward-Euler inductors with `tau = L/R =
+  1 ms` at the defaults; steady current per coil at 5 V is `0.5 A`.
+- The "phase" machine is instantaneous and memoryless apart from
+  `lastKnownPhase`. There is no rotor, no detent, no holding torque, no
+  step loss, no resonance and no back-EMF: a stepper driven too fast simply
+  counts every valid transition.
+- Counted transitions are only the full-step, two-coils-on Gray sequence
+  0 -> 1 -> 2 -> 3 -> 0 (forward) or the reverse. A one-coil-at-a-time (wave
+  drive) or half-step sequence passes through `phase = -1` (a zero sign) and
+  `lastKnownPhase` skips it: wave drive 0 -> (A only: -1) -> 1 counts as one
+  step 0 -> 1 across the gap, so wave drive is read as the corresponding
+  full-step motion. A repeated phase (`delta 0`) and a skip (`delta 2`) hold.
+- The first valid phase after power-on sets `lastKnownPhase` and counts
+  nothing (`prev.lastKnownPhase >= 0` is required).
+- Held in the OP ladder; the OP sets `iA`, `iB` (`SE:4389-4400`) but not the
+  phase fields.
+
+### 5.4 Newton
+
+Linear; no `xGuess` read.
+
+### 5.5 Regimes and events
+
+The phase is a committed integer evaluated each accepted step; changes are
+bracketed by the controller's exact compare of `phase`, `lastKnownPhase` and
+`position` (section 1.6). At a high step rate (the 1 mA deadband and the 1 ms
+coil constant) two transitions inside one host step count as one (`delta 2`
+holds) or are lost.
+
+### 5.6 Small-signal AC
+
+`acStamp` (`EA:796-818`): two `stampAcAdmittance(a1,a2,R/den,-xl/den)` and the
+same for B with `xl = w*L`, `den = R^2 + xl^2`: the same continuous winding
+admittance the relay and motor get; "Phase and position are step-counting
+mechanics with no small-signal model".
+
+### 5.7 Diagnostics
+
+The ENGINE raises no `missing_flyback` for the stepper: `inductiveWindingPins`
+knows only `inductor`, `relay` and `dc_motor` (`SE:1084-1094`). The stepper's
+flyback finding (key `missing-flyback:stp:coilA`) comes from the host's static
+rule engine, which the engine tests exercise through a test-support copy
+(`test/helpers/diagnostics/static.ts:1132-1175` for the stepper coils;
+header lines 1-3: "Test-support copy extracted from devolt"). That rule
+engine, not the solver, owns the H-bridge suppression: `hasHBridgeClamp`
+(`static.ts:918-969`) requires both coil nets to land on output pins of one
+`l293d` or `tb6612` AND that part's VM pin (`vcc2` / `vm`) to be on a net with
+at least two pins that holds a supply kind or a coil terminal. So the catalog
+note "suppressed by L293D/TB6612 with VM powered" is a property of the app's
+diagnostics, outside this port. (The test at
+`wave7-servo-stepper.test.ts:728-812` asserts through `runDiagnostics`, not
+through `SimEngine`.)
+
+### 5.8 Tests that pin it
+
+`wave7-servo-stepper.test.ts`: coil A reaches `V/R` (`:505-538`: 5 V, 10 ohm,
+`iA` near 0.5 A after about ten `tau_L`); `elementI = |iA| + |iB|` (`:540-571`);
+phase detection (`:573-633`: (+,+) is 0, (-,+) is 1, unenergised is -1);
+position advances by 4 over the sequence 0,1,2,3,0 (`:635-698`); convergence
+(`:700-726`); flyback diagnostics (`:728-812`).
+
+### 5.9 Questions
+
+- **Q-W4-{stepfly} (two flyback rule sets).** The engine's `missing_flyback`
+  covers inductor, relay and dc_motor (a `SimWarning`, `SE:1117`); the host's
+  static diagnostics cover relay, motor, stepper coil A/B and inductor, with
+  the H-bridge suppression (`test/helpers/diagnostics/static.ts:918`). A user of
+  the core sees the engine's warning only. **Recommend** the core ports only
+  the engine's warning (`missingFlybackWarning` is already pure, `SE:1117`, and
+  the core facade derives it from the graph, W3 section 1.7), and the stepper
+  stays host-only; record the difference so the catalog note is corrected.
+- **Q-W4-{stepmode} (half-step, wave drive and microstepping).** The counter
+  treats any sign pair with a zero as a gap and counts only the full-step
+  Gray sequence; a half-step drive (A+, A+B+, B+, ...) counts one step per
+  full-step equivalent only if intermediate phases are seen. Microstepping
+  (PWM currents) with all four signs present and changing slowly counts as
+  full steps at sign changes only. **Recommend** reproduce.
+- **Q-W4-{steprotor} (no rotor, no back-EMF).** A stepper with no back-EMF
+  draws the full `V/R` at any speed; a real NEMA17 current falls with speed
+  and a chopper driver limits it. Position leads or lags no real shaft.
+  **Recommend** reproduce; the telemetry only reports commanded steps.
+- **Q-W4-{stepdead} (1 mA deadband and sign-only phase).** Coil currents below
+  1 mA read as zero; a driver releasing a coil to HIZ with a flyback tail
+  reads zero within a few `tau`. Sign alone decides phase, so a coil at 1
+  mA and one at 500 mA are the same phase. **Recommend** reproduce.
+
+---
+
+## 6. Buzzer: buzzer
+
+[W4-A.] `buzzerModel` (`EA:1161-1308`), with its constants at `EA:1146-1159`. A
+fixed resistor plus a post-solve "is it sounding" detector; there is no audio.
+Catalog `buzzer-active-5v` (`CAT:7630`, `{type: "active", resistance: 32}`) and
+`buzzer-passive-5v` (`CAT:7659`, `{type: "passive", resistance: 32}`); neither
+has `vcc_range`.
+
+### 6.1 Terminals and parameters
+
+Pins by POSITION: `pins[0]` and `pins[1]` (ids `p1`, `p2` in the catalog); the
+handler returns immediately when `pins.length < 2` (`EA:1175`, `1206`,
+`1289`, `1298`). Voltage is `V(pins[0]) - V(pins[1])`.
+
+| Parameter | Read at | Rule | Default |
+|---|---|---|---|
+| `resistance` (ohm) | `EA:1176`, `1290`, `1299` | `max(1, .)` | 32 |
+| `type` | `EA:1210` | string; `"passive"` selects the tone detector, anything else is active | `"active"` |
+
+Constants (`EA:1146-1154`): `PASSIVE_ENV_TAU = 0.1` s, `PASSIVE_HYSTERESIS =
+0.1`, `PASSIVE_MIN_SWING = 0.05` V, `AUDIBLE_MIN_HZ = 20`, `AUDIBLE_MAX_HZ =
+20000`; the active threshold `1.5` V is a literal (`EA:1274`).
+
+### 6.2 Equations
+
+Stamp (`EA:1164-1183`): `stampResistor(pins[0], pins[1], R)` for both types
+(`R = max(1, resistance)`). Current published (`EA:1286-1294`): `(V(p1) -
+V(p2))/R`. The buzzer is a plain linear resistor to the circuit; polarity does
+not matter electrically.
+
+Detector state in `icState` (default `{lastSign: NaN, lastCrossT: NaN,
+prevCrossT: NaN, envHi: NaN, envLo: NaN, detectedHz: 0}`, `SE:1635-1641`; the
+`sounding` key is added by the first commit). Per accepted step with `v =
+V(p1) - V(p2)` (`EA:1205-1285`):
+
+**Active.** `sounding = |v| >= 1.5 ? 1 : 0` (`EA:1273-1275`); the passive fields
+are written back unchanged.
+
+**Passive** (`EA:1218-1266`), with `h` the step, `stepStart = ctx.simTime()`,
+`now = simTime + h`:
+1. Envelope: if `envHi` and `envLo` are finite, `keep = exp(-h/0.1)`, `envHi =
+   max(v, v + (prevHi - v)*keep)`, `envLo = min(v, v + (prevLo - v)*keep)`;
+   else both equal `v` (`EA:1230-1237`). The envelope jumps to each new extreme
+   and relaxes toward the signal with tau 0.1 s.
+2. `swing = envHi - envLo`. If `swing >= 0.05`:
+   - `mid = (envHi + envLo)/2`, `band = 0.1*swing`;
+   - if an envelope existed and its previous swing `prevHi - prevLo < 0.05`
+     (the drive has just started), `from = bandSide((prevHi + prevLo)/2, mid,
+     band)` and, if nonzero, `lastSign = from` (so the first edge of a drive
+     is not lost, `EA:1245-1248`);
+   - `curSign = bandSide(v, mid, band)` with `bandSide(v, m, b) = v > m + b ?
+     1 : v < m - b ? -1 : 0` (`EA:1157-1159`);
+   - if `curSign != 0`: when `lastSign == -curSign` (a crossing), and
+     `lastCrossT` is finite, `period = isFinite(prevCrossT) ? stepStart -
+     prevCrossT : 2*(stepStart - lastCrossT)` and `hz = period > 0 ? 1/period :
+     0`, `detectedHz = (20 <= hz <= 20000) ? hz : 0`; then `prevCrossT =
+     lastCrossT`, `lastCrossT = stepStart` (`EA:1251-1261`); finally
+     `lastSign = curSign`.
+3. If `detectedHz > 0` and `now - lastCrossT > 2/detectedHz`, `detectedHz = 0`
+   (`EA:1265`).
+4. `sounding = detectedHz > 0 ? 1 : 0`.
+
+The crossing time is `stepStart` (the START of the step in which the crossing
+was first seen at the step's end), by design: "Backward Euler holds a step's
+end state across the whole step, so a crossing seen at this step's end is timed
+at its start" (`EA:1220-1225`), so that a clock edge crossed by a 10 ns guard
+step and one first seen by the next full step read the same instant.
+
+### 6.3 Dynamics and state
+
+The only memory is the detector (the envelope, two crossing times, the last
+band side, the estimate). Nothing in the stamp reads it: the part's electrical
+behaviour is a constant resistor. `envHi`/`envLo` are excluded from the step
+controller's error estimate; `lastCrossT`, `prevCrossT` and `detectedHz` are
+compared with tolerance (section 1.6). Telemetry: `sounding` and, for passive,
+`toneHz = detectedHz` (`physics-telemetry.ts:306-319`), `quality:
+"behavioral-estimate"`.
+
+### 6.4 Newton
+
+Linear; no `xGuess`.
+
+### 6.5 Regimes and events
+
+Sounding / silent. The tone detector finds its crossings only at accepted-step
+ends, so a drive whose edges the host steps over is read at the sampling
+rate: at the MCU step cap `h = 1e-4` s the detector aliases above about
+`1/(2h) = 5 kHz` (PLAN 1.3, row "max7219/hd44780 replay, micro:bit edge timing, buzzer
+aliasing above ~5 kHz at 100 us"), and a tone near 4 kHz (period 2.5 steps) reads a jittering
+`hz` because each crossing is seen at the next step boundary. The test suite
+exercises a square clock source (whose edges the host lands on), not an MCU
+`tone()`.
+
+### 6.6 Small-signal AC
+
+`acStamp` (`EA:1295-1307`): `1/R` between the two pins; no motional or
+reactive part; the same for both types.
+
+### 6.7 Diagnostics
+
+None. (`vcc_range` is absent, so the output-sag scan skips it.)
+
+### 6.8 Tests that pin it
+
+`wave6-drivers-audio.test.ts`: active type sounds at 5 V and not at 0.5 V
+(`:398-460`); passive detects Hz > 0 after a 1 kHz square for 30 steps
+(`:461-517`); crossings relative to the drive's own midpoint (`:518-547`
+`it.each` at `:535`); 440 Hz held when edges are crossed by guard steps and
+full steps in turn (`:548`); stops sounding within two periods of the drive
+stopping (`:580`); one press of a button (0 to 5 V to 0) does not report a tone
+(`:591`).
+
+### 6.9 Questions
+
+- **Q-W4-{buzzalias} (detection at step ends).** Section 6.5. The core's
+  event-exact edges (PLAN W4-A, "event-exact edges remove the replay") make
+  the Schmitt detector see every logic edge at its true time, which would
+  change `detectedHz` for MCU-driven tones from a step-quantised value to the
+  exact one. **Recommend** use exact edge times for an MCU or logic driver and
+  keep the sampled Schmitt for analog drive; the gate is "closer to the analytic
+  answer" (PLAN decision 7 (b)).
+- **Q-W4-{buzzthresh} (active threshold).** A literal 1.5 V against typical
+  active buzzers that need 3 to 5.5 V and draw 25 to 35 mA (e.g. a 5 V module
+  with a built-in oscillator, recalled); classic's resistor also draws `V/32`
+  (156 mA at 5 V) while a real 5 V active buzzer draws about 30 mA, so the supply
+  sags more than reality. **Recommend** reproduce; the catalog's `resistance`
+  is authorable.
+- **Q-W4-{buzzpolar} (polarity ignored).** The active buzzer sounds for
+  `|v| >= 1.5` in either polarity; a real polarised active buzzer does not.
+  **Recommend** reproduce.
+
+---
+
+## 7. Speaker: speaker
+
+[W4-A.] `speakerModel` (`EA:1310-1402`). A fixed resistor and a 5 ms
+peak-to-peak window. Catalog `speaker-8ohm` (`CAT:7688`, `{resistance: 8}`).
+
+### 7.1 Terminals and parameters
+
+Pins by position `pins[0]`, `pins[1]` (`p1`, `p2`); `resistance` `max(1, .,
+default 8)` (`EA:1321`, `1383`, `1393`). Constants in the handler:
+`SPK_WINDOW = 0.005` s and `SPK_THRESHOLD = 0.05` V (`EA:1345-1346`).
+
+### 7.2 Equations
+
+Stamp `stampResistor(p1, p2, R)` (`EA:1313-1328`); current `(V(p1)-V(p2))/R`
+(`EA:1379-1387`). The comment says the voice-coil inductance is ignored.
+
+Detector (`commitState`, `EA:1339-1378`), state `{vPeak, vTrough, windowStart,
+peakToPeak, sounding}` (default `{NaN, NaN, NaN, 0}`, `SE:1642-1649`); with `v
+= V(p1) - V(p2)` and `now = simTime + h`:
+- first sample (`windowStart` is NaN): `windowStart = now`, `vPeak = vTrough =
+  v`;
+- else if `now - windowStart >= 0.005`: `peakToPeak = (isNaN(vPeak) ||
+  isNaN(vTrough)) ? 0 : vPeak - vTrough`; `windowStart = now`; `vPeak = vTrough
+  = v` (the current sample starts the next window and is NOT part of the
+  committed window);
+- else: running max/min of `v`.
+`sounding = peakToPeak >= 0.05 ? 1 : 0` (`EA:1370`). The committed
+`peakToPeak` is held until the next window closes.
+
+### 7.3 Dynamics and state
+
+Window-based; no relaxation. `sounding` therefore lags the signal by up to one
+window (5 ms) after it starts and persists for up to one window after it stops.
+
+### 7.4 Newton, regimes, events
+
+Linear. Two regimes (`sounding` 0/1) decided once per window.
+
+### 7.5 Small-signal AC
+
+`1/R` between the pins (`EA:1388-1401`).
+
+### 7.6 Diagnostics and tests
+
+None. Tests `wave6-drivers-audio.test.ts:609-675`: resistive stamp `I = 5/8 =
+0.625 A` (`:610`), signal present when `p2p >= 50 mV` after a 5 ms window
+(`:636`).
+
+### 7.7 Questions
+
+- **Q-W4-{spkstep} (the detector breaks for host steps of 5 ms or more).** When
+  every accepted step ends at least 5 ms after the window start
+  (`h >= 5 ms`, which a quiet circuit reaches: `H_MAX = 1e-2`, `HL:83`), the
+  window closes on every step, `vPeak` and `vTrough` were set to that single
+  previous sample, and the committed `peakToPeak` is always 0: the speaker
+  reads silent for any signal, however large. Under a changing source the
+  headless runner caps `h` at `ACTIVE_H_MAX = 2e-3` (`HL:93`), which keeps
+  several samples in a window; the cap is a host property, not the model's.
+  **Recommend** reproduce for the gate, record it as a registered divergence,
+  and make the core's window sample-count independent (an envelope on every
+  accepted step regardless of `h`).
+- **Q-W4-{spkload} (resistive only).** A real 8 ohm speaker is 6 to 7 ohm DC
+  and 8 ohm nominal at 1 kHz with `Le` of order 50 uH to 1 mH and a resonance
+  peak at tens to hundreds of Hz (recalled); classic is the DC resistance.
+  **Recommend** reproduce (the catalog note says "AC reactance ... is ignored").
+
+---
+
+## 8. Ultrasonic ranger: hcsr04
+
+[W4-A.] `hcsr04Model` (`EA:821-990`). An HC-SR04 module as an electrical
+load, a TRIG pull-down input, a push-pull ECHO output and a timing state
+machine; no acoustics. Catalog `hcsr04` (`CAT:8344`): `default_params
+{distanceCm: 50, noEcho: 0}`, `electrical_specs.vcc_range {3, 5, 5.5}`.
+
+### 8.1 Terminals and parameters
+
+Pins by id: `vcc`, `trig` (`input`), `echo` (`output`), `gnd` (`EA:829-830`,
+`847-848`, `866-867`, `878`).
+
+| Parameter | Read at | Rule | Default |
+|---|---|---|---|
+| `distanceCm` | `EA:905` | `max(2, min(400, .))` | 50 |
+| `noEcho` | `EA:906` | nonzero is true (out of range) | 0 |
+
+Constants: `TRIG_R = 1e6` ohm (`EA:828`); the supply threshold `3.0` V
+(`EA:843`, `869`, `966`, `979`); the quiescent current `0.002` A (`EA:855`,
+`966`); the TRIG logic threshold `2.0` V (`EA:901`); the schedule constants
+`250e-6` s, `58.0e-6` s per cm, `38e-3` s (`EA:914-915`); `GATE_R_OUT = 50` ohm
+for the ECHO stage (`EA:850`).
+
+### 8.2 Equations
+
+State `Hcsr04EngineState` (`SE:422-430`): `trigLevel` (0/1), `phase` (`idle`,
+`armed`, `pending`, `active`), `echoRiseAt`, `echoFallAt` (s, NaN when not
+scheduled), `echoOut` (0/1), `vccV` (committed VCC-GND), `pendingEchoEvent`.
+Default `{0, "idle", NaN, NaN, 0, 0, null}` (`SE:434-439`).
+
+**Stamp** (`EA:824-857`), from committed state:
+1. `stampResistor(trig, gnd, 1e6)` ALWAYS, powered or not (`EA:828-831`).
+2. `physicallyPowered = state && vccV >= 3.0 && !isOpenPin(vcc) &&
+   !isOpenPin(gnd)` (`EA:843-845`). If true:
+   - `stampResistor(echo, echoOut ? vcc : gnd, 50)` (`EA:846-851`): a push-pull
+     Thevenin output to the part's OWN supply node (so a 3.3 V rail gives a
+     3.3 V high, "wide-supply");
+   - `stampCurrentSource(gnd, vcc, 0.002)` (`EA:855`): by the sign convention of
+     the header, 2 mA is injected into the `gnd` node and removed from `vcc`,
+     i.e. the module draws 2 mA from VCC and returns it at GND; a constant
+     current, not a resistor, so it does not fall with the supply (the comment:
+     "stamped, rather than merely reported ... so batteries and finite-
+     impedance supplies sag").
+   When not powered neither element is stamped: ECHO is hi-Z (RSHUNT only).
+
+**Commit** (`EA:863-961`), in order:
+1. `vccVNew = V(vcc) - V(gnd)`; `vccOkNew = vccVNew >= 3.0`.
+2. If `!vccOkNew`: reset `trigLevel = 0`, `phase = "idle"`, `echoRiseAt =
+   echoFallAt = NaN`, `echoOut = 0` (`EA:873-877`); `pendingEchoEvent` is kept.
+3. Else, TRIG edges: if `ctx.mcuEventDriverForNode(trig node)` finds a powered
+   uno/nano/pico driver, the edges are that driver's non-null step events on its
+   pin, at time `bootT + cycle/clockHz`; otherwise `vTrig = V(trig) - V(gnd)`,
+   `curLevel = vTrig >= 2.0 ? 1 : 0`, and one edge `{curLevel, ctx.simTime()}`
+   if `curLevel != trigLevel` (`EA:884-903`). Note: unlike the servo, the event
+   path needs only a powered driver, not that the MCU currently drives the pin.
+4. For each edge in order: if `phase == "idle" && trigLevel == 0 && edge.level
+   == 1` then `phase = "armed"`; else if `phase == "armed" && trigLevel == 1 &&
+   edge.level == 0` then schedule: `echoRiseAt = edge.time + 250e-6`, `width =
+   noEcho ? 38e-3 : 58.0e-6*clamp(distanceCm, 2, 400)`, `echoFallAt = echoRiseAt
+   + width`, `phase = "pending"`, and, when the ECHO net also carries a
+   micro:bit edge pin (`hcsr04MicrobitBridge`, section 14.9), `pendingEchoEvent
+   = {boardComponentId, pinId, delayUs: 250, widthUs: width*1e6}`
+   (`EA:908-934`). Whatever the phase, `trigLevel = edge.level` after each
+   edge (so retriggers while `pending`/`active` are ignored but tracked).
+5. Fire: `now = ctx.simTime() + h`; if `phase == "pending" && now >=
+   echoRiseAt` then `phase = "active"`, `echoOut = 1`, `echoRiseAt = NaN`; if
+   `phase == "active" && now >= echoFallAt` then `phase = "idle"`, `echoOut =
+   0`, `echoFallAt = NaN`, `trigLevel = 0` (`EA:944-955`). Both can fire in one
+   step.
+6. Store `{trigLevel, phase, echoRiseAt, echoFallAt, echoOut, vccV: vccVNew,
+   pendingEchoEvent}`.
+
+`updateCurrent` publishes `0.002` when `vccV >= 3.0`, else 0 (`EA:962-967`);
+note it does not test the open-pin condition the stamp tests (Q below).
+
+### 8.3 Dynamics and state
+
+- All timing is event timing: the width of the echo is `58 us/cm * cm` exactly
+  (2.9 ms at 50 cm; 23.2 ms at 400 cm; 116 us at 2 cm), and the delay from
+  TRIG fall to ECHO rise is exactly 250 us, both measured in the TRIG edge's own
+  time base (the MCU cycle on the event path; the step start on the net path).
+- The sensor is a one-shot: ignored retriggers, no 60 ms measurement cycle,
+  no minimum TRIG width (any rise followed by a fall arms and schedules; a real
+  module wants at least 10 us), no maximum.
+- `noEcho` gives a 38 ms pulse (the out-of-range timeout).
+- The held state `echoOut` is the ECHO drive: 0 drives ECHO low through 50 ohm
+  (not hi-Z) whenever powered.
+- Held at its entry state in the OP ladder (`SE:781`). Carried across
+  `load()` (`SE:3253-3259`): an in-flight echo survives a live `distanceCm`
+  edit, and the new distance applies only to the next scheduled echo.
+
+### 8.4 Newton
+
+Linear: no `xGuess` read.
+
+### 8.5 Regimes and events
+
+- Phase machine `idle -> armed -> pending -> active -> idle`; `vcc < 3.0`
+  forces `idle`.
+- **The only device in W4 whose event instants classic locates.** The engine
+  exposes the scheduled times (`nextScheduledEventTime()`, `SE:5262-5290`: the
+  earliest `echoRiseAt` or `echoFallAt` greater than `simTime`, also the
+  digital due-times), and the host clamps the next step to land on it
+  (`HL:1107-1117`: `h = max(H_MIN, untilEvent)` when the event falls inside the
+  step). Because the commit fires on `simTime + h >= time`, a step that ends
+  exactly on the instant commits it; its `echoOut` then applies to the NEXT
+  solve, so ECHO changes at the event instant to within `H_MIN = 10 ns` plus
+  floating-point slack.
+- **The birth step.** A schedule created in a step has no advance warning, so
+  the host also caps every step at `HCSR04_MAX_STEP_H = 100 us` whenever an
+  hcsr04 exists (`SE:5314-5317`, `HL:1136-1137`); otherwise a step longer than
+  250 us could jump past `echoRiseAt` in its own birth step. This is part of
+  the contract: the shell requires `h <= 100 us` for any circuit containing the
+  part.
+- Because it is the cap that protects the instant, a port with event-exact
+  edges needs neither the cap nor `nextScheduledEventTime`; it needs the TRIG
+  fall time (a logic-output event) and a scheduled ECHO edge (a heap event)
+  with the delay and width constants above.
+
+### 8.6 Small-signal AC
+
+`acStamp` (`EA:968-989`): the TRIG pull-down `1/1e6` unconditionally; and, when
+`physicallyPowered` by the same committed rule, `1/GATE_R_OUT` from ECHO to the
+committed rail (VCC if `echoOut`, else GND). The 2 mA current source
+differentiates away.
+
+### 8.7 Diagnostics
+
+Catalog `vcc_range` makes the failure pass call `_icPowerInfo` (supply pins
+`vcc`/`gnd`, powered window [2.7, 6.05]) but `_drivenOutputTargets` has no
+`hcsr04` case, so no output-sag is ever raised for ECHO. Telemetry
+(`physics-telemetry.ts:292-305`): `phase`, `triggerHigh`, `echoHigh`,
+`supplyVoltageV`, `echoRiseSimTimeS`, `echoFallSimTimeS`, `quality:
+"behavioral-estimate"`, reference `supply`.
+
+### 8.8 Tests that pin it
+
+`hcsr04.test.ts`: net-threshold path (`:158-300`): arms on TRIG rise and
+schedules on the fall at EXACTLY `tFall + 250 us` and `58 us/cm` (`:159`),
+`noEcho` 38 ms (`:200`), retrigger ignored (`:214`), `VCC < 3.0` inert
+(`:236`), 2 mA only while powered (`:249`), in-flight echo survives a
+`distanceCm` reload (`:259`); event path with a real Uno hex (`:303-407`);
+Pico end to end with MicroPython `machine.time_pulse_us`, 10 cm and 100 cm
+within +-1 cm (`:408-457`); micro:bit echo-bridge event (`:458-498`).
+`mcu-servo-replay.test.ts:175-338` (HC-SR04 events counted once under the 555
+split). `ac-isolation` census.
+
+### 8.9 Questions
+
+- **Q-W4-{hcstamp} (stamp and commit disagree on the open-pin rule).** The
+  stamp requires `!isOpenPin(vcc) && !isOpenPin(gnd)`; the commit and
+  `updateCurrent` use only `V(vcc) - V(gnd) >= 3.0`. With `gnd` unwired the
+  node floats near 0 V, `vccV` reads the full rail, the state machine runs and
+  the module reports 2 mA, but nothing is drawn and ECHO is not driven.
+  **Recommend** reproduce.
+- **Q-W4-{hctrig} (no minimum TRIG width, retrigger, 60 ms cycle).**
+  Datasheet (HC-SR04, Cytron/Elecfreaks, recalled): trigger pulse at least 10 us
+  TTL, 8 x 40 kHz burst, ECHO width proportional to range, measurement cycle
+  over 60 ms, range 2 to 400 cm, ECHO 150 us to 25 ms and 38 ms when nothing is
+  detected. Classic accepts any pulse, has no cycle limit, and gives `58.0
+  us/cm` (the speed-of-sound constant used by common libraries); the 250 us delay
+  is classic's own (the real module is closer to 200 us plus the burst).
+  **Recommend** reproduce.
+- **Q-W4-{hcdraw} (echo is push-pull 50 ohm; 2 mA constant current).** The real
+  module's ECHO is a 5 V TTL push-pull with a stronger stage; the quiescent
+  draw is 15 mA typical (recalled), classic uses 2 mA "typical operating
+  current". **Recommend** reproduce (catalog note: "deliberately stamped").
+- **Q-W4-{hcstep} (the 100 us step cap).** Section 8.5. With event-exact edges
+  the cap goes away, but the MCU step cap still applies to a Uno/Nano/Pico
+  (`MCU_H_MAX`), so the observable ECHO resolution seen by firmware is bounded by
+  the MCU's `h` either way (up to 100 us, 1.7 cm, between ECHO edge and the
+  next sampling). **Recommend** that W4-A/W4-S state in the shell's contract that
+  the edge reaches the emulator at the instant it occurs (event) rather than at
+  the next step end (classic `setInputBit`).
+
+---
+
+## 9. Darlington sink arrays: uln2003, uln2803
+
+[W4-D.] `ulnModel` (`EA:992-1144`): one model for both kinds, the channel count
+chosen by `comp.kind` (`uln2003` 7, `uln2803` 8; `EA:1018`, `1071`, `1102`,
+`1130`). Seven or eight open-collector Darlington sinks with a catch diode to
+COM on each output. Catalogs `uln2003a` (`CAT:7326`) and `uln2803a`
+(`CAT:7470`): `default_params {}`; `electrical_specs {logic_family:
+"TTL-compatible", io_max: 0.5, v_input: {v_il_max: 1.5, v_ih_min: 2.5}}`; no
+`vcc_range`.
+
+### 9.1 Terminals and parameters
+
+Pins by id: `in1..inN` (`function: input`), `gnd`, `com` (`passive`), `out1..outN`
+(`open_collector`) (`EA:1022-1031`). No supply pin. No parameters are read.
+
+Constants: `ULN_RON = 5` ohm (`EA:1016`, again `1101` and `1129`),
+`ULN_TTL_VIH = 2.5` (`EA:1017`, declared and NEVER used), `ULN_VIH_COMMIT = 2.0`
+V and `ULN_VIL_COMMIT = 1.5` V (`EA:1069-1070`), the clamp-diode constants of
+section 1.4.
+
+### 9.2 Equations
+
+State in `icState`: `in1..inN`, each 1 (sinking), 0 (released) or NaN
+(uninitialised) (`SE:1631-1634`, default NaN for every channel).
+
+**Stamp** (`EA:995-1051`), for each channel `ch`:
+- `outNode = pinNode(out_ch)`; skip the channel if `outNode < 0` (the output
+  net is the reference);
+- `stampClampDiode(out, com, xGuess, vt)` ALWAYS (anode OUT, cathode COM; the
+  comment: "conducts only when an inductive turn-off lifts the output above the
+  connected supply rail"), even with COM unwired (then the cathode node is held
+  by RSHUNT only and the diode loads OUT with about 1e-12 S until OUT rises about
+  a diode drop above the floating COM node);
+- `sinking = !gndOpen && committedIn >= 0.5` (a NaN committed value gives
+  false, `EA:1038-1039`); if sinking, `stampResistor(out, gnd, 5)`.
+A released channel stamps nothing else: OUT is open-collector, hi-Z. The input
+pins stamp nothing (the model has no input load).
+
+**Commit** (`EA:1068-1093`): `gndV = V(gnd node)` (raw node voltage, `-1`
+gives 0); for each channel `vIn = V(in_ch) - gndV`; `new = 1` if `vIn >=
+2.0`; `0` if `vIn < 1.5`; else the previous value (`prev` NaN becomes 0)
+(`EA:1082-1090`); the whole `icState` record is replaced. The
+`ULN_TTL_VIH = 2.5` and the catalog's `v_ih_min = 2.5` are NOT used.
+
+**Current published** (`EA:1094-1120`): the SUM over channels of `(V(out_ch) -
+V(gnd))/5` for channels that are committed sinking and `gnd` wired, signed
+(a channel whose OUT is below GND reports negative).
+
+### 9.3 Dynamics and state
+
+Memoryless apart from the committed input latch with a 0.5 V hysteresis band.
+No delay, no base current, no storage time. Carried by the generic `icState`
+carry.
+
+### 9.4 Newton
+
+The only nonlinearity is the per-channel clamp diode (section 1.4), a guarded
+exponential with `vSat = 1.0277 V` and no pnjlim; with up to 8 diodes, each
+stamped from `xGuess`. The sink resistor is linear.
+
+### 9.5 Regimes and events
+
+- **Sinking / released** per channel, decided from the accepted step's input,
+  applied one accepted step later; brackets by halving (the `inN` keys are
+  compared exactly, section 1.6).
+- **The clamp** is a smooth device; no regime.
+- Open `gnd` forces every channel released regardless of input.
+- Open `in` pin: `V(in)` is held at about 0 V by RSHUNT, so reads as low (no
+  floating-input model is used: the ULN never calls `_stampFloatingDigitalInputs`
+  or `ctx.logicHigh`).
+
+### 9.6 Small-signal AC
+
+`acStamp` (`EA:1121-1143`): per channel `acStampClampDiode(out, com)` always, plus
+`stampAcAdmittance(out, gnd, 1/5)` if sinking. "The inputs are sampled logic;
+the sink decision is a committed latch, so no small-signal path exists from IN
+to OUT."
+
+### 9.7 Diagnostics
+
+- The `_drivenOutputTargets` ULN case (`SE:7956-7970`) reports sinking
+  channels as `{pinId: out_ch, high: false}`, but the output-sag scan is guarded by
+  `if (specs?.vcc_range)` (`SE:7576`) and neither ULN catalog entry has a
+  `vcc_range`, so the case is never reached and a ULN never raises `output_sag`
+  (the sag limit would have been `vil = 1.5 V` on the sunk output, a current of
+  300 mA through 5 ohm). `uln2003` also sits in `PASSIVE_FAILURE_UPDATE_KINDS`
+  (`SE:1417-1420`) with no failure hook (`uln2803` does not).
+- No overcurrent or thermal failure; no `missing_flyback` (the ULN is not a
+  switch kind, section 1.10).
+
+### 9.8 Tests that pin it
+
+`wave6-drivers-audio.test.ts`: single channel sinking (`:165-264`): with 5 V
+input and a pull-up the output sits at `V_out = 0.4545 V` (`:166`, the divider
+of the load and 5 ohm), released with a low input the output goes to the
+supply (`:207`), unwired GND never sinks (`:237`); channel independence
+(`:267`); ULN2803 8-channel (`:313`); the COM catch-diode transient
+(`it.each` at `:356`, `:355-396`).
+
+### 9.9 Questions
+
+- **Q-W4-{ulnron} (a 5 ohm resistor against a Darlington).** Classic gives
+  `Vce = 0.5 V` at 100 mA, 1.0 V at 200 mA, 1.75 V at 350 mA, 2.5 V at 500 mA.
+  The ULN2003A datasheet (TI, recalled): `VCE(sat)` about 0.9 V at 100 mA, 1.1
+  V at 200 mA, 1.3 V at 350 mA (typical, IB 250 to 500 uA), absolute maximum
+  collector current 500 mA per channel. Classic is below the datasheet at low
+  current and above it at 350 mA and over, and has no current limit.
+  **Recommend** reproduce (the file comment says "a deliberate
+  simplification ... a future wave can replace with a Thevenin voltage-source").
+- **Q-W4-{ulnthresh} (committed thresholds are not the catalog's).** The
+  catalog says `v_il_max 1.5`, `v_ih_min 2.5`; the commit uses `>= 2.0` for high
+  and `< 1.5` for low. ULN2003A datasheet: `VI(on)` 2.4 to 3 V at 200 to 300 mA
+  (recalled). **Recommend** reproduce; delete the unused `ULN_TTL_VIH`.
+- **Q-W4-{ulnclamp} (the clamp diode is the generic silicon fit, not the ULN
+  catch diode).** 0.7 V at 100 mA with a 25.7 mV/decade slope gives 0.73 V at 350
+  mA; the ULN2003A datasheet gives `VF` about 1.75 V at 350 mA (recalled) and
+  the diode has series resistance. A real kick therefore clamps about 1 V
+  higher. The same helper serves the L293D and TB6612. **Recommend** reproduce.
+- **Q-W4-{ulninput} (no input load).** The ULN draws nothing from its input
+  (real: about 0.9 mA at 3.85 V input, i.e. a 2.7 kohm series base resistor;
+  recalled); an MCU pin driving 8 channels sees no load. **Recommend** reproduce.
+- **Q-W4-{ulnlag} (one-step lag on the sink).** The released output of a
+  channel follows its input one accepted step late (section 9.5). At `h` up to
+  100 us (MCU circuits) or 10 ms (quiet circuits) this is visible in a fast
+  PWM. **Recommend** the shell commits driver states as events at the input
+  edge instant (DK 1.5).
