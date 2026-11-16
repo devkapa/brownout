@@ -471,34 +471,54 @@ fn r6_state(mach: &Rp2040, s: &mut [f64]) {
         v.push(p.tx_fifo.item_count() as u32);
         v.extend(p.tx_fifo.items());
         s[113 + i] = fnv(v) as f64;
-        let c = &mach.periph.i2c[i];
-        let mut v = vec![
-            c.state as u32,
-            c.busy as u32,
-            c.stop as u32,
-            c.pending_restart as u32,
-            c.first_byte as u32,
-            c.enable,
-            c.rx_threshold,
-            c.tx_threshold,
-            c.control,
-            c.ss_high,
-            c.ss_low,
-            c.fs_high,
-            c.fs_low,
-            c.target_address,
-            c.slave_address,
-            c.abort_source,
-            c.int_raw,
-            c.int_enable,
-            c.spikelen,
-            c.rx_fifo.item_count() as u32,
-        ];
-        v.extend(c.rx_fifo.items());
-        v.push(c.tx_fifo.item_count() as u32);
-        v.extend(c.tx_fifo.items());
+        let v = i2c_fields(&mach.periph.i2c[i]);
         s[115 + i] = fnv(v) as f64;
     }
+}
+
+/// The I2C digest's input, field by field (the harness diffs it on a mismatch).
+fn i2c_fields(c: &super::i2c::I2c) -> Vec<u32> {
+    let mut v = vec![
+        c.state as u32,
+        c.busy as u32,
+        c.stop as u32,
+        c.pending_restart as u32,
+        c.first_byte as u32,
+        c.enable,
+        c.rx_threshold,
+        c.tx_threshold,
+        c.control,
+        c.ss_high,
+        c.ss_low,
+        c.fs_high,
+        c.fs_low,
+        c.target_address,
+        c.slave_address,
+        c.abort_source,
+        c.int_raw,
+        c.int_enable,
+        c.spikelen,
+        c.rx_fifo.item_count() as u32,
+    ];
+    v.extend(c.rx_fifo.items());
+    v.push(c.tx_fifo.item_count() as u32);
+    v.extend(c.tx_fifo.items());
+    v
+}
+
+/// I2C block `i`'s digest fields, up to `cap`; returns how many.
+///
+/// # Safety
+/// `m` from `rp_create`; `out` valid for `cap` f64s.
+#[no_mangle]
+pub unsafe extern "C" fn rp_i2c_fields(m: *mut Rp2040, i: u32, out: *mut f64, cap: u32) -> u32 {
+    let v = i2c_fields(&machine(m).periph.i2c[i as usize & 1]);
+    let n = v.len().min(cap as usize);
+    let s = std::slice::from_raw_parts_mut(out, n);
+    for (k, x) in v.iter().take(n).enumerate() {
+        s[k] = *x as f64;
+    }
+    v.len() as u32
 }
 
 /// FNV-1a over the interpolators' registers, in a fixed order the harness

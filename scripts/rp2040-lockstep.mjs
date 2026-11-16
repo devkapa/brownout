@@ -1127,27 +1127,43 @@ def cnt():
       IMAGES["mpy-wrapper"].setup(s);
     },
   },
-  // R6: machine.SPI answering with a XOR, and machine.I2C on a bus with one
-  // scripted device (a scan, writes, reads and register reads) and on an
-  // empty bus (a scan that finds nothing).
+  // R6: machine.SPI answering with a XOR. (machine.I2C is not driven here:
+  // on the reference its constructor and scan wait on the timer without ever
+  // starting a bus transfer, so no I2C event occurs; r6-mpy-i2c uses mem32.)
   "r6-mpy-bus": {
     k: 5000,
-    steps: 40_000_000,
+    steps: 12_000_000,
     spiXor: { 0: 0x5a },
-    i2cDevices: [{ i2c: 0, address: 0x3c, next: 0x40 }],
     inputs: replSession([
-      "from machine import SPI, I2C, Pin",
+      "from machine import SPI, Pin",
       "s=SPI(0, baudrate=1000000, sck=Pin(2), mosi=Pin(3), miso=Pin(4))",
       "s.write(b'\\x01\\x02\\x03')",
       "b=bytearray(4)\ns.write_readinto(b'\\xa5\\x5a\\xff\\x00', b)\nprint(b)",
       "print(s.read(3, 0x11))",
       "s.deinit()",
-      "i=I2C(0, scl=Pin(9), sda=Pin(8), freq=400000)",
-      "print(i.scan())",
-      "i.writeto(0x3c, b'\\x00\\xaf')",
-      "print(i.readfrom(0x3c, 4))",
-      "i.writeto_mem(0x3c, 0x10, b'\\x01')\nprint(i.readfrom_mem(0x3c, 0x10, 2))",
-      "j=I2C(1, scl=Pin(7), sda=Pin(6))\nprint(j.scan())",
+    ]),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
+  // R6: both I2C blocks driven through machine.mem32 against one scripted
+  // device (0x3c on bus 0): writes, reads with a stop, a restart, a NACKed
+  // address, an empty bus, the interrupt and clear registers.
+  "r6-mpy-i2c": {
+    k: 5000,
+    steps: 30_000_000,
+    i2cDevices: [{ i2c: 0, address: 0x3c, next: 0x40 }],
+    inputs: replSession([
+      "from machine import mem32\nI=0x40044000\nJ=0x40048000",
+      "mem32[I+0x6c]=0\nmem32[I+4]=0x3c\nmem32[I+0x6c]=1\nprint(hex(mem32[I+0x70]), hex(mem32[I+0x34]), hex(mem32[I]))",
+      "mem32[I+0x10]=0xaa\nmem32[I+0x10]=0xbb|0x200\nprint(hex(mem32[I+0x34]), hex(mem32[I+0x70]), mem32[I+0x74])",
+      "mem32[I+0x10]=0x100\nmem32[I+0x10]=0x300\nprint(mem32[I+0x78], hex(mem32[I+0x34]), hex(mem32[I+0x10]), hex(mem32[I+0x10]))",
+      "mem32[I+0x10]=0x11\nmem32[I+0x10]=0x500\nmem32[I+0x10]=0x300\nprint(mem32[I+0x78], mem32[I+0x74], hex(mem32[I+0x10]), hex(mem32[I+0x10]))",
+      "mem32[I+0x38]=1\nmem32[I+0x10]=0x100\nmem32[I+0x10]=0x300\nprint(hex(mem32[I+0x34]), hex(mem32[I+0x2c]), mem32[I+0x10]&0x7ff, mem32[I+0x10]&0x7ff, hex(mem32[I+0x34]))",
+      "mem32[I+0x6c]=0\nmem32[I+4]=0x11\nmem32[I+0x6c]=1\nmem32[I+0x10]=0x300\nprint(hex(mem32[I+0x80]), hex(mem32[I+0x34]), mem32[I+0x54], hex(mem32[I+0x34]), hex(mem32[I+0x80]))",
+      "mem32[J+0x6c]=1\nmem32[J+4]=0x20\nmem32[J+0x10]=0x1\nprint(hex(mem32[J+0x80]), hex(mem32[J+0x34]), hex(mem32[J+0x70]))",
+      "print(mem32[I+0x40], mem32[I+0x60], hex(mem32[I+0x34]), hex(mem32[I+0x9c]), hex(mem32[I+0xa0]), hex(mem32[I+0xf8]), mem32[J+0x10])",
+      "mem32[I+0x6c]=0\nmem32[I+0xa0]=0x20\nmem32[I+0x3c]=3\nmem32[I+0x38]=0xff\nprint(hex(mem32[I+0xa0]), mem32[I+0x3c], mem32[I+0x38], hex(mem32[I+0x6c]))",
     ]),
     setup(s) {
       IMAGES["mpy-wrapper"].setup(s);
@@ -1243,6 +1259,13 @@ function rustSide() {
       host: (atCycle, kind, a, b) => x.rp_schedule_host(m, atCycle, kind, a, b),
       spiXor: (i, xor) => x.rp_set_spi_host(m, i, xor >>> 0),
       i2cDevice: (i, address, next) => x.rp_set_i2c_device(m, i, address, next),
+    },
+    i2cFields(i) {
+      const p = x.rp_alloc(8 * 128);
+      const n = x.rp_i2c_fields(m, i, p, 128);
+      const out = Array.from(new Float64Array(x.memory.buffer, p, n));
+      x.rp_free(p, 8 * 128);
+      return out;
     },
     /** I/O stream `which` (0 UART, 1 SPI, 2 I2C) from index `from` on: rows of four numbers. */
     ioEvents(which, from = 0) {
@@ -1517,6 +1540,16 @@ function jsSide() {
       i2cDevice: (i, address, next) => {
         i2cDev[i] = { address, next };
       },
+    },
+    i2cFields(i) {
+      const c = rp.i2c[i];
+      const b = (v) => (v ? 1 : 0);
+      return [
+        c.state, b(c.busy), b(c.stop), b(c.pendingRestart), b(c.firstByte), c.enable, c.rxThreshold, c.txThreshold,
+        c.control, c.ssClockHighPeriod, c.ssClockLowPeriod, c.fsClockHighPeriod, c.fsClockLowPeriod, c.targetAddress,
+        c.slaveAddress, c.abortSource, c.intRaw, c.intEnable, c.spikelen, c.rxFIFO.itemCount, ...c.rxFIFO.items,
+        c.txFIFO.itemCount, ...c.txFIFO.items,
+      ].map((v) => v >>> 0);
     },
     ioEvents: (which, from = 0) => ioStreams[which].slice(from),
     /** Runs `n` steps recording the peripheral reads (address -> [count, last value]). */
@@ -1912,6 +1945,12 @@ function bisect(image, good) {
       console.log(`    rust executed  ${before[0]}`);
       console.log(`    js executed    ${before[1]}`);
       for (const line of d) console.log(`    ${line}`);
+      for (const k of [0, 1]) {
+        if (!d.some((l) => l.startsWith(`i2c${k}.digest`))) continue;
+        const a = rust.i2cFields(k), c = js.i2cFields(k);
+        const names = ["state", "busy", "stop", "pendingRestart", "firstByte", "enable", "rxTL", "txTL", "control", "ssH", "ssL", "fsH", "fsL", "tar", "sar", "abortSource", "intRaw", "intEnable", "spikelen", "rxCount"];
+        for (let q = 0; q < Math.max(a.length, c.length); q++) if (a[q] !== c[q]) console.log(`    i2c${k} field ${names[q] ?? "fifo#" + q}: rust ${fmt(a[q])} js ${fmt(c[q])}`);
+      }
       return;
     }
     if (nr === 0 && nj === 0) {
