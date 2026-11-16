@@ -7,7 +7,7 @@
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
-import { assertHandBoundApplies, judge, runHandBoundEntry, type Run } from "./hand-bound.js";
+import { assertHandBoundApplies, judge, railCapacitorReading, runHandBoundEntry, type Run } from "./hand-bound.js";
 import { runCorpusEntry } from "./run-entry.js";
 import { buildKindTable } from "./table.js";
 import { loadSyntheticCorpus, type LoadedSyntheticEntry } from "./synthetic-fixtures.js";
@@ -34,10 +34,13 @@ describe("the handBound marker (ruling R122 (a))", () => {
       // Classic's distance is a divergence row with numbers, and it is outside the bound (the bound is not set to admit it).
       expect(result.knownDivergences.length, `${prefix}: classic's rows`).toBeGreaterThan(0);
       expect(result.knownDivergences.every((k) => k.divergenceId === "classic-555-on-cell-rail")).toBe(true);
-      // The rail capacitor's reading is listed, not hidden and not judged: the core reads 0, classic does not.
-      const reading = report.knownFailingReadings.find((k) => k.id === "cdec")!;
-      expect(reading.core).toBe(0);
-      expect(Math.abs(reading.classic)).toBeGreaterThan(1e-3);
+      // The rail capacitor's reading is judged at every stop against C dV/dt of the core's own rail, within W0 (it read
+      // exactly 0 before CAPI, against classic's 0.26 A / 0.55 A / 0.26 A in the first 1 ms); classic's is recorded.
+      const reading = report.railCapacitor!;
+      expect(reading.id).toBe("cdec");
+      expect(reading.stops, prefix).toBeGreaterThan(5);
+      expect(reading.coreWorstW0, `${prefix}: the rail capacitor against C dV/dt of its rail, in W0`).toBeLessThanOrEqual(1);
+      expect(Math.abs(reading.corePeak), `${prefix}: it carries current`).toBeGreaterThan(1e-9);
     }
   });
 
@@ -60,6 +63,18 @@ describe("the handBound marker (ruling R122 (a))", () => {
     const verdict = judge(run, { rises: 1, falls: 1, worstEdgeS: 0 }, spec, hand);
     expect(verdict.misses.map((m) => m.id)).toEqual(["period", "duty"]);
     expect(verdict.ratio).toBe(Infinity);
+  });
+
+  it("a rail capacitor reading off its own rail's C dV/dt is a miss, and a NaN one too", () => {
+    // What the core published at every stop before CAPI: 0 where its rail's rate says 2.2e-5 A (22 uF at 1 V/s), so
+    // 2.2e-5 / (1e-9 + 1e-3 * 2.2e-5) = 956.5 W0. A reading within W0 (1 nA + 22 nA here) passes; a NaN is a miss.
+    const run = (i: number): Run => ({ up: [], down: [], capCurrent: [2.2e-5, i], capRate: [2.2e-5, 2.2e-5] });
+    const classic: Run = { up: [], down: [], capCurrent: [0.26, 0.1] };
+    expect(railCapacitorReading("cdec", [1e-4, 1e-3], run(0), classic).coreWorstW0).toBeCloseTo(956.5, 1);
+    expect(railCapacitorReading("cdec", [1e-4, 1e-3], run(0), classic).coreWorstAtS).toBe(1e-3);
+    expect(railCapacitorReading("cdec", [1e-4, 1e-3], run(2.2e-5 + 2.2e-8), classic).coreWorstW0).toBeLessThanOrEqual(1);
+    expect(railCapacitorReading("cdec", [1e-4, 1e-3], run(NaN), classic).coreWorstW0).toBe(Infinity);
+    expect(railCapacitorReading("cdec", [1e-4, 1e-3], run(0), classic).classicPeak).toBe(0.26);
   });
 
   it("a hand value the model does not derive is a fixture error, not a verdict", () => {

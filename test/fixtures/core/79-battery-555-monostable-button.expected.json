@@ -6,7 +6,7 @@
     "Power-on: OUT starts high and C starts empty, so the first pulse is the same 109.8612 ms: OUT falls at 109.8612 ms. DIS discharges C in 10 ohm x 1 uF, 10 us.",
     "The press at 0.2 s takes TRIG to about 0 V (the contact's 1 mohm against 1 kohm): below u/3, so OUT rises at 0.2 s. It is released at 0.25 s, with the pulse running, and changes nothing. OUT falls at 0.2 + 109.8612 ms = 309.8612 ms. Edges in 0.4 s: rise at 0.2, falls at 109.8612 ms and 309.8612 ms.",
     "Rail: 2 ohm in the pack, the 555's idle draw (about 5 mA) and the charge current move it by about 10 mV; the bound used by the test is 0.25 % of the edge's time + 5 us.",
-    "The rail capacitor's published current is not judged and not excused: the core publishes 0 for a capacitor directly across a battery's rail (publish_fixed_pair_capacitors, core/src/solve/mod.rs), classic C dv/dt (CORPUS follow-up; fix in progress). The report lists it as a known failing reading."
+    "The rail capacitor's published current is judged at every stop against C dV/dt of the core's own published rail (the right-hand rate), within W0's 1 nA + 1e-3 relative (CAPI, core/README.md Rails point 7: the rail is algebraic and the capacitor follows it; before CAPI the core published 0 there). Classic's readings are recorded beside it, not gated."
   ],
   "status": "pass",
   "durationS": 0.4,

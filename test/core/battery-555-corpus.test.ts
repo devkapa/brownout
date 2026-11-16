@@ -35,6 +35,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { CoreEngine } from "../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
 import { initCore } from "../../src/core/wasm.js";
+import { capacitorOf, rightHandCapRate } from "./equivalence/hand-bound.js";
 import { HeadlessRunner } from "../../src/host/headless.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { handEdges, type HandEdges, type HandModel } from "./equivalence/hand-555.js";
@@ -227,6 +228,50 @@ describe.each(BOARDS)("$name", (board) => {
           `; core's: rises ${d(k.up, hand.up)}, falls ${d(k.down, hand.down)}`,
       );
       expect(c.down.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+/**
+ * The decoupling capacitor straight across the pack (CAPI, core/README.md Rails point 7): the rail is algebraic and the
+ * capacitor follows it, so at every host stop its published current is `C dV/dt` of the rail as the core publishes it,
+ * the right-hand rate (hand-bound.ts's `rightHandCapRate`, read on a snapshot put back), within W0's current tolerance
+ * (1 nA + 1e-3 of the value) plus that rate's resolution. Before CAPI it read exactly 0 at all 760 stops of two periods
+ * at 10 us, against up to 10.6 mA (77) and 5.5 mA (78) of `C dV/dt` taken across an edge's jump; at a stop's right-hand
+ * rate the rail's own motion is about 1 V/s, 22 uA on 77's 22 uF. Two periods from the first rise (5.0809 ms on 77,
+ * 3.4568 ms on 78, each sidecar's hand values) hold both phases and both edges.
+ */
+describe.each([
+  { name: "77-battery-555-astable-led", from: 5.0809e-3, period: 3.7834e-3 },
+  { name: "78-battery-555-clocks-161", from: 3.4568e-3, period: 2.4431e-3 },
+])("$name: the rail capacitor at 10 us stops", ({ name, from, period }) => {
+  it("reads C dV/dt of the core's own rail at every stop over two periods", () => {
+    const circuit = circuitOf(name);
+    const cap = capacitorOf(circuit, "cdec");
+    const engine = new CoreEngine();
+    try {
+      engine.load(circuit, CORE_IMPLEMENTED_KINDS);
+      let worstW0 = 0;
+      let worstAt = 0;
+      let stops = 0;
+      let peak = 0;
+      for (let k = 1; k * 1e-5 <= from + 2 * period + 1e-12; k++) {
+        const t = k * 1e-5;
+        engine.advance(t);
+        if (t < from) continue;
+        const i = engine.getElementI()["cdec"]!;
+        const { rate, resolution } = rightHandCapRate(engine, cap, t);
+        const r = Math.abs(i - rate) / (1e-9 + 1e-3 * Math.abs(rate) + resolution);
+        if (!(r <= worstW0)) [worstW0, worstAt] = [r, t];
+        peak = Math.max(peak, Math.abs(i));
+        stops++;
+      }
+      console.log(`${name}: rail capacitor at ${stops} stops, worst ${worstW0.toFixed(4)} of W0 at ${worstAt.toExponential(5)} s, peak ${peak.toExponential(3)} A`);
+      expect(stops).toBeGreaterThan(400);
+      expect(peak, "it carries current").toBeGreaterThan(1e-6);
+      expect(worstW0, `worst at ${worstAt}`).toBeLessThanOrEqual(1);
+    } finally {
+      engine.dispose();
     }
   });
 });

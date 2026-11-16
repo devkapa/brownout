@@ -12,7 +12,7 @@
     "The decoupling capacitor holds the rail to its own 2 ohm x 22 uF = 44 us, inside RAIL_TAU_MAX (1e-4 s).",
     "Bound used by the test: 0.25 % of the edge's time + 5 us against these hand values (the rail swing r dI / E = 2 ohm x 4.9 mA / 5 V = 0.2 %, plus the cap's own settling).",
     "Cadence: the core's edges at host stops of 100 us, 1 ms and 1/60 s are each within tau_w0 (the time the capacitor takes to cross W0 of its trigger level, as sap1-clock-cadence.slow.test.ts bounds them) of the 1 us run's.",
-    "The rail capacitor's published current is not judged and not excused: the core publishes 0 for a capacitor directly across a battery's rail (publish_fixed_pair_capacitors, core/src/solve/mod.rs), classic C dv/dt (CORPUS follow-up; fix in progress). The report lists it as a known failing reading."
+    "The rail capacitor's published current is judged at every stop against C dV/dt of the core's own published rail (the right-hand rate), within W0's 1 nA + 1e-3 relative (CAPI, core/README.md Rails point 7: the rail is algebraic and the capacitor follows it; before CAPI the core published 0 there). Classic's readings are recorded beside it, not gated."
   ],
   "status": "pass",
   "durationS": 0.1,

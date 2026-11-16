@@ -6,7 +6,7 @@
     "The first HIGH runs from an empty C: ln 3 (R_A + R_B) C = 2.7465 ms. The 555's OUT is high at load, and the counter's clock memory starts LOW, so the counter reads 1 from load (core/spec/w1-classic-semantics.md, 'Initial edges', as fixtures 67 and 73) and adds one at each rise. Rises at 3.4567 ms and every 2.4431 ms: 40 in 100 ms, the last at 98.7371 ms, the next past 100 ms.",
     "Final count: (1 + 40) mod 16 = 9, QD QC QB QA = 1001, with the last rise 1.3 ms before the end and the next 1.2 ms after it.",
     "The rail's sag (the 555 and the counter draw about 10 to 15 mA through 0.9 ohm) moves edges by under 0.1 % of their time; the test's bound is 0.25 % + 5 us, and the count has to be exact.",
-    "The rail capacitor's published current is not judged and not excused: the core publishes 0 for a capacitor directly across a battery's rail (publish_fixed_pair_capacitors, core/src/solve/mod.rs), classic C dv/dt (CORPUS follow-up; fix in progress). The report lists it as a known failing reading."
+    "The rail capacitor's published current is judged at every stop against C dV/dt of the core's own published rail (the right-hand rate), within W0's 1 nA + 1e-3 relative (CAPI, core/README.md Rails point 7: the rail is algebraic and the capacitor follows it; before CAPI the core published 0 there). Classic's readings are recorded beside it, not gated."
   ],
   "status": "pass",
   "durationS": 0.1,

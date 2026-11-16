@@ -773,7 +773,7 @@ export interface HandBoundSpec {
   readonly component: string;
   /** A counter clocked by the 555 whose final digitalState value is held (reads 1 from load, adds one per rise). */
   readonly counter?: string;
-  /** A capacitor across the cell's rail whose published current is listed (not judged): see HandBoundReport.knownFailingReadings. */
+  /** A capacitor across the cell's rail whose published current is judged against `C dV/dt` of the core's own rail: see HandBoundReport.railCapacitor. */
   readonly railCapacitor?: string;
   /** The hand model (hand-555.ts) that derives the edges. */
   readonly model: import("./hand-555.js").HandModel;
@@ -792,13 +792,24 @@ export interface HandBoundSpec {
   readonly justification: string;
 }
 
-/** One reading the marker does NOT excuse: listed with the numbers, never hidden. */
-export interface KnownFailingReading {
+/**
+ * The rail capacitor's published current (CAPI, core/README.md Rails point 7):
+ * at every stop the core's reading against `C dV/dt` of its own published
+ * rail, the right-hand rate read just past the stop from a snapshot that is put
+ * back, within W0's current tolerance (1 nA + 1e-3 of the value); a worse
+ * reading fails the entry. Classic's readings are recorded, not gated: its
+ * stops here are frames apart, so no rate of its own trace is instantaneous.
+ */
+export interface RailCapacitorReading {
   readonly id: string;
-  readonly quantity: "elementI";
-  readonly classic: number;
-  readonly core: number;
-  readonly note: string;
+  readonly stops: number;
+  /** The worst |reading - C dV/dt| over the stops, in units of W0's current tolerance plus the rate's resolution from the rail's move threshold (hand-bound.ts's `rightHandCapRate`; at most 1 passes). */
+  readonly coreWorstW0: number;
+  /** The stop of that worst reading, seconds. */
+  readonly coreWorstAtS: number;
+  /** The largest |reading| over the stops, signed, amps. */
+  readonly corePeak: number;
+  readonly classicPeak: number;
 }
 
 /** What a hand-judged entry measured: the core's and classic's quantities beside the hand values. */
@@ -822,5 +833,5 @@ export interface HandBoundReport {
   readonly classic: HandBoundQuantities;
   /** The core's worst quantity as a fraction of its bound (at most 1 passes). */
   readonly coreBoundRatio: number;
-  readonly knownFailingReadings: readonly KnownFailingReading[];
+  readonly railCapacitor?: RailCapacitorReading;
 }

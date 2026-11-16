@@ -14,10 +14,10 @@
  * no 555 on a battery pack's rail, and nothing here is reached by an entry
  * without the marker (run-entry.ts's first line of `runCorpusEntry`).
  *
- * The rail capacitor's published current is NOT judged and NOT excused: the
- * core reads exactly 0 for a capacitor directly across a cell's rail
- * (`publish_fixed_pair_capacitors`, core/src/solve/mod.rs; found by CORPUS,
- * fix in progress). It is listed in the report as a known failing reading.
+ * The rail capacitor's published current is judged too, against the core's
+ * own rail (types.ts's `RailCapacitorReading`): the rail is algebraic and the
+ * capacitor follows it, so it carries `C dV/dt` of the rail as published
+ * (core/README.md Rails point 7, CAPI; it read exactly 0 before).
  */
 import { CoreEngine } from "../../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
@@ -25,7 +25,7 @@ import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.j
 import { HeadlessRunner } from "../../../src/host/headless.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { handEdges, measuredQuantities, type HandEdges } from "./hand-555.js";
-import type { CorpusEntry, EntryResult, HandBoundQuantities, HandBoundReport, HandBoundSpec, KnownDivergenceHit, KnownFailingReading, Mismatch } from "./types.js";
+import type { CorpusEntry, EntryResult, HandBoundQuantities, HandBoundReport, HandBoundSpec, KnownDivergenceHit, Mismatch, RailCapacitorReading } from "./types.js";
 
 export const CLASSIC_555_ON_CELL_RAIL_ID = "classic-555-on-cell-rail";
 const DECISION_REF =
@@ -61,10 +61,57 @@ export interface Run {
   up: number[];
   down: number[];
   count?: number;
+  /** The rail capacitor's published current at each stop. */
   capCurrent: number[];
+  /** The core only: `C dV/dt` of its own published rail at each stop, the right-hand rate, and its resolution. */
+  capRate?: number[];
+  capResolution?: number[];
 }
 
-/** The stops: every frame, every phase boundary, and two early ones where the rail capacitor's reading is taken. */
+/** W0's current tolerance. */
+const w0I = (want: number): number => 1e-9 + 1e-3 * Math.abs(want);
+/**
+ * How far past a stop the core's rail is read for its right-hand rate. The rail
+ * publishes a move only past RAIL_MOVE_EPS (1e-12 V, README Rails point 3), so a
+ * difference over `h` resolves the rate to about that over `h`: at 1 ns it was
+ * 1e-3 V/s, 22 nA on 22 uF, 22 W0 of the 1 nA floor (fixture 79 at rest).
+ * At 0.5 us the three-point one-sided difference below resolves it to
+ * `5 RAIL_MOVE_EPS / (2 h)` = 5e-6 V/s and is exact to `k^2 h^2 / 3` of the rate
+ * on a mode of rate `k` (7.5e-5 for the 10 nF control-pin mode, about 33 us).
+ * A digital change inside the window (a 555 edge just after the stop, whose
+ * rail jump is no rate) shortens it fivefold until none falls inside.
+ */
+const RATE_PROBE_S = [5e-7, 1e-7, 2e-8, 4e-9];
+const RAIL_MOVE_EPS = 1e-12;
+
+/**
+ * `C dV/dt` of the core's published rail just after the stop, by `(-3 v0 + 4 v1 - v2) / (2 h)` over the rail read
+ * at `t`, `t + h` and `t + 2h` on a snapshot that is then put back, so the run is the unprobed one. Returns the rate's
+ * `C dV/dt` and the resolution it has from the rail's move threshold, `C 5 RAIL_MOVE_EPS / (2 h)`.
+ */
+export function rightHandCapRate(engine: CoreEngine, cap: { c: number; dv: (v: Record<string, number>) => number }, t: number): { rate: number; resolution: number } {
+  const v0 = cap.dv(engine.getNetV());
+  const digital = JSON.stringify(engine.digitalState);
+  let out = { rate: NaN, resolution: Infinity };
+  for (const h of RATE_PROBE_S) {
+    const snap = engine.saveState();
+    try {
+      engine.advance(t + h);
+      const v1 = cap.dv(engine.getNetV());
+      engine.advance(t + 2 * h);
+      const v2 = cap.dv(engine.getNetV());
+      const still = JSON.stringify(engine.digitalState) === digital;
+      out = { rate: (cap.c * (-3 * v0 + 4 * v1 - v2)) / (2 * h), resolution: (cap.c * 5 * RAIL_MOVE_EPS) / (2 * h) };
+      if (still) return out;
+    } finally {
+      engine.restoreState(snap);
+      snap.dispose();
+    }
+  }
+  return out;
+}
+
+/** The stops: every frame, every phase boundary, and two early ones where the rail capacitor moves most. */
 function stopsFor(endS: number, boundaries: readonly number[]): number[] {
   const set = new Set<number>([1e-4, 1e-3, endS, ...boundaries]);
   for (let k = 1; k * HOST_S < endS - 1e-12; k++) set.add(k * HOST_S);
@@ -81,13 +128,24 @@ function editsOf(entry: CorpusEntry): { t: number; id: string; params: Record<st
   return out;
 }
 
+/** `V(pins a - b)` of a capacitor on the core's published nets, and its capacitance. */
+export function capacitorOf(circuit: SimCircuit, id: string): { c: number; dv: (v: Record<string, number>) => number } {
+  const built = buildCoreNodes(circuit);
+  const net = (pin: string): string | null => built.netIdOfNode[built.pinNode.get(corePinKey(id, pin)) ?? 0] ?? null;
+  const [a, b] = [net("a"), net("b")];
+  const at = (v: Record<string, number>, n: string | null): number => (n === null ? 0 : (v[n] ?? 0));
+  const c = Number(circuit.components.find((x) => x.id === id)!.params.capacitance);
+  return { c, dv: (v) => at(v, a) - at(v, b) };
+}
+
 function coreRun(circuit: SimCircuit, spec: HandBoundSpec, endS: number, stops: readonly number[], edits: ReturnType<typeof editsOf>): Run {
   const engine = new CoreEngine();
+  const cap = spec.railCapacitor ? capacitorOf(circuit, spec.railCapacitor) : undefined;
   try {
     engine.load(circuit, CORE_IMPLEMENTED_KINDS);
     engine.enableTrace(true);
     engine.clearTrace();
-    const run: Run = { up: [], down: [], capCurrent: [] };
+    const run: Run = { up: [], down: [], capCurrent: [], capRate: [], capResolution: [] };
     const pending = edits.filter((e) => e.t > 0);
     for (const e of edits.filter((x) => x.t <= 0)) engine.setParams([{ componentId: e.id, params: e.params }]);
     for (const t of stops) {
@@ -97,7 +155,13 @@ function coreRun(circuit: SimCircuit, spec: HandBoundSpec, endS: number, stops: 
         (ev.value === 1 ? run.up : run.down).push(ev.t);
       }
       engine.clearTrace();
-      if (spec.railCapacitor && t <= 1e-3 + 1e-12) run.capCurrent.push(engine.getElementI()[spec.railCapacitor] ?? 0);
+      if (spec.railCapacitor && cap) {
+        run.capCurrent.push(engine.getElementI()[spec.railCapacitor] ?? 0);
+        const { rate, resolution } = rightHandCapRate(engine, cap, t);
+        engine.clearTrace();
+        run.capRate!.push(rate);
+        run.capResolution!.push(resolution);
+      }
       while (pending.length > 0 && pending[0]!.t <= t + 1e-12) {
         const e = pending.shift()!;
         engine.setParams([{ componentId: e.id, params: e.params }]);
@@ -137,7 +201,7 @@ function classicRun(circuit: SimCircuit, spec: HandBoundSpec, endS: number, stop
         },
       });
     }
-    if (spec.railCapacitor && t <= 1e-3 + 1e-12) run.capCurrent.push(runner.snapshot().elementI[spec.railCapacitor] ?? 0);
+    if (spec.railCapacitor) run.capCurrent.push(runner.snapshot().elementI[spec.railCapacitor] ?? 0);
     while (pending.length > 0 && pending[0]!.t <= t + 1e-12) apply(pending.shift()!);
   }
   if (spec.counter) run.count = runner.engine.digitalState[spec.counter];
@@ -282,19 +346,8 @@ export function runHandBoundEntry(entry: CorpusEntry, circuit: SimCircuit): Entr
     });
   }
 
-  const knownFailingReadings: KnownFailingReading[] = [];
-  if (spec.railCapacitor) {
-    const peak = (xs: readonly number[]): number => xs.reduce((m, x) => (Math.abs(x) > Math.abs(m) ? x : m), 0);
-    knownFailingReadings.push({
-      id: spec.railCapacitor,
-      quantity: "elementI",
-      classic: peak(classic.capCurrent),
-      core: peak(core.capCurrent),
-      note:
-        "the core publishes 0 for a capacitor directly across a battery's rail (publish_fixed_pair_capacitors, core/src/solve/mod.rs); " +
-        "not judged and not excused by the marker; fix in progress",
-    });
-  }
+  const railCapacitor = spec.railCapacitor ? railCapacitorReading(spec.railCapacitor, stops, core, classic) : undefined;
+  const capMiss = railCapacitor !== undefined && !(railCapacitor.coreWorstW0 <= 1);
 
   const report: HandBoundReport = {
     circuitClass: spec.circuitClass,
@@ -304,10 +357,10 @@ export function runHandBoundEntry(entry: CorpusEntry, circuit: SimCircuit): Entr
     core: coreQ,
     classic: classicQ,
     coreBoundRatio: coreVerdict.ratio,
-    knownFailingReadings,
+    ...(railCapacitor ? { railCapacitor } : {}),
   };
 
-  if (coreVerdict.misses.length === 0) {
+  if (coreVerdict.misses.length === 0 && !capMiss) {
     return {
       status: "pass",
       kinds: entry.kinds,
@@ -329,6 +382,17 @@ export function runHandBoundEntry(entry: CorpusEntry, circuit: SimCircuit): Entr
     coreValue: m.got,
     detail: `core ${m.got} against hand ${m.hand}: |difference| exceeds the bound ${m.allowed} (${spec.bound.relative} x value + ${spec.bound.absoluteS} s)`,
   }));
+  if (capMiss) {
+    const k = stops.indexOf(railCapacitor.coreWorstAtS);
+    mismatches.push({
+      sampleTime: railCapacitor.coreWorstAtS,
+      category: "sidecar",
+      id: `${railCapacitor.id} C dV/dt`,
+      classicValue: core.capRate![k]!,
+      coreValue: core.capCurrent[k]!,
+      detail: `the rail capacitor reads ${core.capCurrent[k]} A against C dV/dt ${core.capRate![k]} A of the core's own rail: ${railCapacitor.coreWorstW0} of W0`,
+    });
+  }
   return {
     status: "fail",
     kinds: entry.kinds,
@@ -340,9 +404,26 @@ export function runHandBoundEntry(entry: CorpusEntry, circuit: SimCircuit): Entr
     maxRelErrorAmps: 0,
     knownDivergences,
     mismatches,
-    totalMismatches: coreVerdict.misses.length,
+    totalMismatches: coreVerdict.misses.length + (capMiss ? 1 : 0),
     handBound: report,
   };
+}
+
+/** The rail capacitor's reading at every stop: the core's against its own rail's `C dV/dt`, classic's recorded. */
+export function railCapacitorReading(id: string, stops: readonly number[], core: Run, classic: Run): RailCapacitorReading {
+  const peak = (xs: readonly number[]): number => xs.reduce((m, x) => (Math.abs(x) > Math.abs(m) ? x : m), 0);
+  let worst = 0;
+  let at = stops[0] ?? 0;
+  core.capCurrent.forEach((i, k) => {
+    const want = core.capRate![k]!;
+    const r = Math.abs(i - want) / (w0I(want) + (core.capResolution?.[k] ?? 0));
+    // A NaN reading or rate is a miss, never a pass.
+    if (!(r <= worst)) {
+      worst = Number.isNaN(r) ? Infinity : r;
+      at = stops[k]!;
+    }
+  });
+  return { id, stops: core.capCurrent.length, coreWorstW0: worst, coreWorstAtS: at, corePeak: peak(core.capCurrent), classicPeak: peak(classic.capCurrent) };
 }
 
 /** The core's own value for the quantity a classic miss names, for the divergence row. */

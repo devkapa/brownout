@@ -72,7 +72,7 @@ function describeKnownDivergences(knownDivergences: readonly KnownDivergenceHit[
     .join("");
 }
 
-/** R122 (a): what a hand-judged entry measured, the core's bound ratio and classic's distance, and the readings the marker does not excuse. */
+/** R122 (a): what a hand-judged entry measured, the core's bound ratio and classic's distance, and the rail capacitor's reading against its own rail. */
 function describeHandBound(report: HandBoundReport | undefined): string {
   if (!report) return "";
   const q = (x: HandBoundReport["core"]): string =>
@@ -85,9 +85,12 @@ function describeHandBound(report: HandBoundReport | undefined): string {
     `\n  - [hand-judged: ${report.circuitClass}, R122 (a); bound ${report.bound.relative} x value + ${report.bound.absoluteS} s] hand: ${q(report.hand)}`,
     `\n  - core (${fmtNum(report.coreBoundRatio)} of the bound): ${q(report.core)}`,
     `\n  - classic (recorded, not gated): ${q(report.classic)}`,
-    ...report.knownFailingReadings.map(
-      (k) => `\n  - [known failing reading: ${k.id} ${k.quantity}] classic ${fmtNum(k.classic)}, core ${fmtNum(k.core)}; ${k.note}`,
-    ),
+    ...(report.railCapacitor
+      ? [
+          `\n  - rail capacitor ${report.railCapacitor.id}: core against C dV/dt of its own rail at ${report.railCapacitor.stops} stops, worst ${fmtNum(report.railCapacitor.coreWorstW0)} of W0 at ${fmtNum(report.railCapacitor.coreWorstAtS)} s; ` +
+            `peak core ${fmtNum(report.railCapacitor.corePeak)} A, classic ${fmtNum(report.railCapacitor.classicPeak)} A (recorded, not gated)`,
+        ]
+      : []),
   ];
   return lines.join("");
 }
