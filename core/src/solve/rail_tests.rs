@@ -20200,3 +20200,57 @@ fn a_bench_supplys_direction_is_its_programs_and_an_edit_that_flips_it_reloads()
         close(decline_instant(&err), 1e-3, 0.0, &format!("{what}: declined at the reload's instant"));
     }
 }
+
+/// The cold fuzz's 113/6 (HUB=1, `f5e gen 113 6`): a 555 astable (7.79k +
+/// 2 x 30.9k, 769 nF: 37.1 ms) on a 9.09 V, 1.26 ohm cell, trapezoidal
+/// integration, on the coupled path.
+fn cold_113_tpl6() -> Program {
+    let mut p = program(7, vec![
+        fz(20, 0, &[1, 0], vec![1.0, 1.2601656900380536, 1.0, 0.0, 2.0, 0.05, 0.00018672069093572465, 0.5739328885145183, 0.0], vec![2.0, 0.0, 6.891499223282329, 1.0, 9.086647325895282]),
+        fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        fz(1, 2, &[1, 2], vec![7787.841325381626], vec![]),
+        fz(1, 3, &[2, 3], vec![30899.12872247923], vec![]),
+        fz(3, 4, &[3, 0], vec![7.687896065169808e-7, 0.0, 0.0], vec![]),
+        fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 5], vec![468.57218183730055], vec![]),
+        fz(30, 7, &[5, 0], vec![1.7363341435354034, 1.668152232791694, 0.03727717302791106, 0.0, 0.0, 0.0], vec![]),
+        fz(90, 2, &[], vec![2.0, 0.0007280519351793407, 7787.841325381626], vec![]),
+        fz(90, 3, &[], vec![3.0, 0.0002443035911966509, 30899.12872247923], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.007013512471257548, 468.57218183730055], vec![]),
+    ]);
+    p.options.integration = 1;
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_555_trigger_on_a_cells_drain_line_alone_is_scheduled_at_every_host_cadence() {
+    // CAD-2: once a cell's coupled path has no transient left it is the
+    // drain's line alone, one mode at k = 0, which `driven_crossing` (one
+    // decaying mode) declined; the 555's trigger (its capacitor falling to a
+    // third of the rail) was then never scheduled and landed at the next
+    // solve or host stop. 113/6's seventh trigger (0.27173 s): 11.6 ms late
+    // at 60 Hz hosts and 28 ms at 100 ms hosts, on 574767b and under R121
+    // (the 10 uV band's solves caught it 0.5 ms late), and on a 1 us stop
+    // in a 1 us run. The 555's own flips (its slot's trace) at each cadence
+    // against a run stopping every 10 us, each within tau_w0 = W0_V(2.714 V)
+    // / 88.7 V/s (the capacitor's slope at the trigger, clkmeas) = 2.814 mV
+    // / 88.7 V/s = 31.7 us. Fails first from 100 us hosts on (70 us there,
+    // 2.2 tau_w0); with the line searched as a sum, within 4e-8 s (0.0012
+    // tau_w0) at every cadence.
+    let p = cold_113_tpl6();
+    let t_end = 0.3;
+    let tau_w0 = (1e-4 + 1e-3 * 2.714) / 88.7;
+    let (fine_up, fine_down) = clk_flips(&p, 8, 1e-5, t_end);
+    assert!(fine_up.len() >= 7 && fine_down.len() >= 7, "{} triggers, {} thresholds in 0.3 s", fine_up.len(), fine_down.len());
+    for host in CLK_HOSTS {
+        let (up, down) = clk_flips(&p, 8, host, t_end);
+        for (name, got, fine) in [("trigger", &up, &fine_up), ("threshold", &down, &fine_down)] {
+            assert_eq!(got.len(), fine.len(), "host {host:e}: {} {name}s against the 10 us run's {}", got.len(), fine.len());
+            let (worst, at) = got.iter().zip(fine.iter()).enumerate().map(|(i, (g, f))| ((g - f).abs(), i)).fold((0.0, 0), |m, x| if x.0 > m.0 { x } else { m });
+            eprintln!("113/6 at host {host:e}: worst {name} {worst:.3e} s (#{at}) = {:.4} tau_w0", worst / tau_w0);
+            assert!(worst <= tau_w0, "host {host:e}: {name} {at} off by {worst:.3e} s, past tau_w0 {tau_w0:.3e} s");
+        }
+    }
+}
+
