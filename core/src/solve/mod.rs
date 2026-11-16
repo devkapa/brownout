@@ -69,6 +69,8 @@ mod snapshot_tests;
 mod window_tests;
 #[cfg(test)]
 mod cap_tests;
+#[cfg(test)]
+mod crossing_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
