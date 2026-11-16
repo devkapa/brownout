@@ -2195,3 +2195,463 @@ edge counted once with and without a 555; with a clocked IC on one MCU
 - **Q-W4-{maxload} (150 ohm constant, no `Iset`).** 33 mA at 5 V against
   the catalog `icc_max 0.33` A; the real draw depends on `Iset` and the lit LEDs
   (up to 330 mA, recalled). **Recommend** reproduce.
+
+---
+
+## 14. Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit
+
+[W4-S.] The board SHELL: everything the analog engine does around an
+emulator. The emulators themselves (avr8js behind `ArduinoMcu`, rp2040js behind
+`RP2040Mcu`, and the micro:bit's client-side embedded simulator) are ported
+and verified separately (PLAN section 4). The boards have no `DeviceModel`: the
+electrical behaviour is three `case` bodies in `_stampAll` (`SE:7005-7191`) and
+helpers, so every item below is a place the port has to give a kind code.
+
+### 14.1 Terminals, parameters and supply roles
+
+| Board | Pins (catalog) | Core | Pins the engine stamps or reads |
+|---|---|---|---|
+| arduino_uno `CAT:5282` | `reset`, `io_ref`, `3v3`, `5v`, `gnd`, `gnd2`, `vin`, `a0..a5`, `aref`, `d13..d0` (28) | ATmega328P, avr8js | `5v`, `gnd` (rail pair), `d0..d13`, `a0..a5` as I/O, `a0..a5` as ADC |
+| arduino_nano `CAT:5918` | the same pin names plus `a6`, `a7` (analog-only), `reset2`, `gnd2` | same core | as the Uno plus `a6`, `a7` for the ADC |
+| raspberry_pi_pico `CAT:5534` | `gp0..gp22`, `gp26..gp28`, `gnd`..`gnd7`, `agnd`, `run`, `adc_vref`, `3v3`, `3v3_en`, `vsys`, `vbus` | RP2040, rp2040js | `3v3`, `gnd`, `gp0..gp22`, `gp26..gp28`. `gp25` (the LED) is in the core's pin set but not in the catalog, so `_pinNode` returns -1 and nothing is stamped |
+| microbit `CAT:5866` | `p0`, `p1`, `p2`, `3v`, `gnd` (the breakout dock adds `p8`, `p12..p16` to the component's live pin set) | none in the engine | `3v`, `gnd`, and any pin id the host pushed a drive for |
+
+Parameters (all `Number(comp.params.X ?? literal)`, W3 rule 1):
+
+| Param | Boards | Read at | Default |
+|---|---|---|---|
+| `usb_power` | uno, nano, pico | `SE:5692`, `5716`, `7008`, `7083`, `6030` | 1 (nonzero = USB plugged in); decides the branch row, the internal node and `_mcuPowered` for the Pico |
+| `power` | microbit | `SE:5694`, `5718`, `7139` | 1; 0 kills the pad, the idle load and the drives |
+| `vcc` | all | `SE:7015`, `7087`, `7141` | 5 (uno, nano), 3.3 (pico, microbit): the USB-side source EMF and the idle load's nominal voltage |
+| `idleCurrent` (A) | all | `SE:6417` (`_stampBoardIdleLoad`) | uno 0.045, nano 0.020, pico 0.025, microbit 0.015 (`SE:1183-1190`) |
+| `hex`, `script` | uno/nano, pico | `SE:3323-3376` | the program; an empty `hex` builds no core |
+| `breakout` | microbit | not read | (catalog 0) |
+
+There is no pin-id table the engine owns beyond the emulator cores' `PIN_MAP`
+(`AD:133-158`, `RP:49-58`). The ground pins are unioned by the graph
+(`GR:116-133`): Uno and Nano `gnd`, `gnd2`, `gnd_top` are one node; Pico
+`gnd`..`gnd7` and `agnd` are one node; micro:bit `gnd` is the reference; a Nano's
+`reset` and `reset2` are one net (`GR:168-173`). A board ground is "a fallback
+for source-less/USB-powered circuits": it becomes the circuit reference only if
+no independent source return exists (`GR:97-103`, `176-180`).
+
+Dead pins, with no stamp and no role anywhere in the engine: Uno/Nano `reset`,
+`reset2`, `io_ref`, `3v3`, `vin`, `aref`; Pico `run`, `adc_vref`, `3v3_en`,
+`vsys`, `vbus`, `agnd` (ground only), the GPIO outputs not on the header.
+`vin` is not connected to `5v` through any regulator (test `mcu-usb-power-path.
+test.ts:108`: "9 V into VIN converges with USB on and off (control)": it is a
+no-op pin). `supplyPinsForComponent` returns `3v3`/`gnd` for the Uno (first
+`vcc`-function pin, W1 section 1.3), so the generic failure pass, which runs
+for any part with `vcc_range` and calls `_icPowerInfo`, reads the (open) `3v3`
+pin and finds the board unpowered: it clears output-sag state and does
+nothing else, and `_drivenOutputTargets` has no board case anyway.
+
+### 14.2 Supply paths and idle load, board by board
+
+Every board contributes (a) an optional USB-side source, (b) a fixed
+resistive idle load, (c) pin drivers that are stamped only while the board is
+powered and has a core.
+
+**Idle load** (`_stampBoardIdleLoad`, `SE:6416-6430`): `currentA = max(0,
+idleCurrent param ?? default)`; if `<= 0` nothing; else `R = max(0.01,
+nominalV/currentA)` with `nominalV` = the `vcc` param, and `stampResistor(
+vccPin, gndPin, R)`: uno `5v-gnd` 111.1 ohm (5/0.045), nano 250 ohm, pico
+`3v3-gnd` 132 ohm, micro:bit `3v-gnd` 220 ohm. It is a RESISTOR (the draw falls
+with the rail), stamped whether or not the board is powered and whether or not
+a core exists (it comes before the `mcu`/`powered` checks, `SE:7040-7049`,
+`7098-7104`). A board with `usb_power = 0` and nothing on the rail therefore
+still loads an external supply the moment one is wired, and it loads it below the
+3 V power threshold.
+
+**Uno** (`SE:7007-7017`, `SE:1195-1213`): `usb_power != 0` allocates a branch row
+`${id}:usb` (`SE:5716`); the stamp is `stampVSourceSeriesR(5v, gnd, k,
+independentSourceMagnitude(vcc), unoUsbPathResistance(tripped))` with
+`unoUsbPathResistance = UNO_USB_HOST_R + ptcResistance(UNO_USB_PTC_R, tripped) +
+UNO_USB_FET_R = 0.2 + (0.15 or 30) + 0.07 ohm`, i.e. 0.42 ohm closed and 30.27
+ohm tripped (`PT:18-20`: the tripped resistance is `200 x`). With the idle load
+alone the rail is `5*111.11/(111.11+0.42) = 4.98117 V` (test
+`mcu-usb-power-path.test.ts:154`). VIN and its regulator, and the
+LMV358 comparator, are not modelled (`SE:1192-1195`: "T1 is always on").
+
+**Nano** (`SE:5692`, `7018-7039`, `SE:1214-1229`): `usb_power != 0` allocates a
+branch row AND an internal node `vusb` (`SE:5692-5693`); the stamp is
+`stampVSourceSeriesR(vusb, gnd, k, magnitude(vcc), 0.27)` plus a Shockley diode
+`stampDiodeShockley(vusb, 5v, vd, Is = 2.4e-6, n = 1.0, Vt = 0.025693)` with
+no `vSatOverride` (so the default `40*VtN = 1.0277 V` guard); `0.27 =
+UNO_USB_HOST_R + 0.07`, the Schottky D1 fit (MBR0520LT1, `SE:1214-1223`: 10
+mA at 0.215 V, 100 mA at 0.275 V, 60 mV/decade). `SCHOTTKY_FIT_VT_25C` is a
+CONSTANT: the diode does not follow the circuit's ambient temperature
+(`ctx.junctionVt()` is not used). USB alone gives `4.76414 V` with the 20 mA
+idle load (test `:161`). There is no polyfuse on the Nano.
+
+**Pico** (`SE:7078-7133`, `SE:1230-1242`): `usb_power != 0` allocates the branch
+row; the 3V3 pin is a regulator OUTPUT. Two committed regimes:
+- regulating: `stampVSourceSeriesR(3v3, gnd, k, magnitude(vcc), 0.01)`;
+- back-fed: `mna.add(k, k, 1)` (branch row forced to `x[k] = 0`, no current),
+  decided by `_picoRegulatorBackfed` = `icState[`${id}:usb`].backfed === 1`
+  (`SE:6391-6393`).
+`_commitPicoRegulatorRegime` (`SE:6399-6414`, run after every accepted solve,
+including OP solves, `SE:6776`): when regulating, `backfed = x[k] > 1e-3` (the
+branch current is positive INTO the source, i.e. the regulator sinking more than
+1 mA); when back-fed, it stays back-fed until `V(3v3) - V(gnd) < the setpoint
+(independentSourceMagnitude(vcc))`; a flip sets `_picoRegimeFlipped`, which makes
+`load()` re-solve its seed up to four times in the decided regime
+(`SE:3434-3447`). `VBUS`, `VSYS` and the Schottky between them are not modelled.
+USB alone gives `3.3*132/132.01 = 3.29975 V` (test `:169`).
+
+**micro:bit** (`SE:7134-7191`, `SE:1243-1258`): `power != 0` allocates the
+branch row and the internal node `3v3_if`; the stamp is
+`stampVSourceSeriesR(3v3_if, gnd, k, magnitude(vcc), 0.02)` plus the BAT60A
+Schottky `stampDiodeShockley(3v3_if, 3v, vd, Is = 3.16e-4, n = 1.352, Vt =
+0.025693)`; idle load 15 mA. USB alone is `3.3` minus the diode and path drop
+into 220 ohm (test `microbit-3v-path.test.ts:71`). The regulator is ideal (no
+published output resistance); a pad supply above `3v3_if` reverse-biases the
+Schottky.
+
+The board source scales during source stepping (the OP ladder) through
+`_independentSourceMagnitude`; the idle load keeps its authored nominal (it is
+a load; comment `SE:7143-7146`).
+
+### 14.3 The USB Schottky and path equations (summary of constants)
+
+| Quantity | Value | Where |
+|---|---|---|
+| Uno host + polyfuse + FET | 0.2, 0.15 (x200 tripped), 0.07 ohm | `SE:1204-1209` |
+| Uno polyfuse `Ihold` | 0.5 A (trip law below) | `SE:1206` |
+| Nano host | 0.27 ohm | `SE:1224` |
+| Nano D1 | `Is 2.4e-6 A`, `n 1.0`, `Vt 0.025693 V` | `SE:1225-1228` |
+| Pico regulator | 0.01 ohm; back-fed above 1 mA sunk | `SE:1240-1242` |
+| micro:bit path | 0.02 ohm; D1 `Is 3.16e-4`, `n 1.352` | `SE:1256-1258` |
+
+Uno polyfuse (`_updateUnoUsbPolyfuse`, `SE:6354-6369`; `advancePtcTrip`,
+`PT:23-62`): run after every accepted step outside the OP hold on `|x[k]|`
+(either direction). While closed: if `I >= 0.5 A`, `tripStress += (I^2 - 0.25)*h`
+and the fuse trips when `tripStress >= 3*0.25*0.1 = 0.075 A^2 s` (100 ms at 2 x
+hold); below `Ihold` the stress bleeds at `h*0.25*0.5`. While tripped: the fuse
+resets after `recoveryTime >= 2.0 s` of `I < 0.25 A` AND tripped power `I^2 * 30
+ohm < coolPower = 0.25*0.15*0.1 = 3.75 mW`, i.e. `I < 11.2 mA`; any step
+failing either restarts the timer. With USB held plugged in, the 45 mA idle load
+alone keeps it hot and tripped forever (test `:239`). With `usb_power = 0` the
+branch is absent and `advancePtcTrip` runs with `I = 0`, so it cools in 2 s
+(`:208-230`). The state is `ptcs[boardId]` (carried across `load()`,
+`SE:3271-3273`; snapshotted).
+
+### 14.4 How the emulator is stepped, and the step limits
+
+The contract (`MC:1-17`, `MC:70-118`): "one converged electrical interval is
+committed first, then its endpoint inputs are pushed through
+`setInputBit`/`setAnalogVolts` and `step()` advances the core exactly once. The
+resulting `pinDriveState()` and ordered `PinEvent`s are applied by the next MNA
+interval. Rejected electrical trials therefore never advance firmware, and each
+accepted endpoint is sampled once."
+
+`_advanceMcusAfterAcceptedSolve(h)` (`SE:4717-4745`) runs after `simTime += h`
+in `_stepSolves` (`SE:4546`, `4570`, `4626`):
+1. `_sampleArduinoInputs()` (section 14.5, 14.8);
+2. if any decoder asked for edges, start levels are recorded (`mcuPinLevels`)
+   and `_mcuEdgesPending` armed after the steps;
+3. for each `state.arduinos` entry (uno, nano, pico only): skip if the board is
+   not powered, after clearing its event list; if it has H11 readback shadows
+   (`SE:4833-4930`) step inside the shadow, else `mcu.step(h)`.
+An NE555 split step (`SE:4560-4631`) advances the MCU ONCE with the whole `h`
+after its sub-steps, not once per sub-step (test `arduino.test.ts:213`). A
+failed (non-converged) trial advances nothing (`:158`).
+
+`step(seconds)`: `ArduinoMcu` owes `seconds*16e6` cycles with the fractional
+part carried (`AD:227-247`, `_cyclesOwed`) and runs `avrInstruction(cpu);
+cpu.tick()` until `cpu.cycles` reaches the target; `RP2040Mcu` runs a nanosecond
+budget (`budget = seconds*1e9`), executing instructions at 8 ns per cycle,
+fast-forwarding to the next alarm when `core.waiting`, capped at
+`MAX_INSTRUCTIONS_PER_STEP = 8,000,000` (`RP:263-292`).
+
+**Step limits the engine applies while a board runs.** The adaptive controller
+does NOT run its trial replay for any circuit containing an `arduino_uno`,
+`arduino_nano` or `raspberry_pi_pico` (`circuitSupportsStepReplay`,
+`HL:111-117`; sim.worker.ts has the same function, `HL:23-26`); those circuits get
+the conservative controller (Newton-iteration heuristic only) with
+`circuitMaxH = MCU_H_MAX = 1e-4` s (`HL:84`, `1097`). H_MIN 1e-8, H_INITIAL
+1e-8 (`HL:81-83`). A micro:bit-only circuit keeps error control and its normal
+`H_MAX = 1e-2`. The HC-SR04 adds its own 100 us cap (section 8.5). Everything
+that lifts the cap (PLAN: "Lift `circuitSupportsStepReplay` / `MCU_H_MAX = 1e-4`,
+W4-AVR4, W7-R7") needs the emulator state in the snapshot first (section
+14.10).
+
+### 14.5 Pin electrical model as an output
+
+For each pin in `mcu.ioPins` of a powered board with a core (Uno/Nano
+`SE:7050-7076`; Pico `SE:7105-7132`), with `drive = mcu.pinDriveState(pin)` and
+`node = pinNode(board, pin)`:
+- `"input"`: nothing is stamped. The pad is high impedance with no leakage, no
+  capacitance and no clamp; the node floats on `RSHUNT` unless the circuit
+  drives it.
+- `"input-pullup"`: `stampResistor(node, 5v node (uno/nano) or 3v3 node (pico),
+  R_pull)`, `R_pull = 35 000` ohm (`AVR_PULLUP_R`, `SE:119`) for the AVR and
+  `65 000` ohm for the RP2040 (`SE:120`). The pull goes to the REAL board rail
+  node, "so external-supply sag and power-off remain physical".
+- `"input-pulldown"`: `stampResistor(node, gnd, R_pull)`. The AVR never reports it;
+  the RP2040 reports it for every undriven pin after reset (the reset default,
+  test `rp2040.test.ts:47`); so a booted Pico with a core has a 65 kohm pull-down on
+  every undriven GPIO. A "bus keeper" state is reported as `"input"`
+  (`RP:310-312`).
+- `"out-high"` / `"out-low"`: `_stampRailReferencedOutput(node, gnd, rail,
+  1 or 0, GATE_R_OUT = 50)` (`SE:6330-6341`): with fraction `f`, `stampResistor(
+  node, rail, R/f)` if `f > 1e-12` and `stampResistor(node, gnd, R/(1-f))` if `f <
+  1 - 1e-12`: so a HIGH is 50 ohm to the board's rail node (not to an ideal
+  voltage) and a LOW is 50 ohm to the board's ground node; rail and ground
+  are the real nodes `5v`/`3v3` and `gnd`.
+- `node < 0` (the pin is on the reference net) skips the output stamp (the
+  pull stamps handle -1 through `stampResistor`).
+There is no per-pin current limit, no abs-max check, no output slew, no
+tri-state delay, no ESD clamp diode to either rail and no input leakage.
+Drive strength is the single 50 ohm for every pin of every board.
+A board is "powered" for the stamp loops when `_arduinoPowered` (uno/nano:
+`V(5v) - V(gnd) > 3.0` from `xGuess`, `SE:6018-6025`) or, for the Pico,
+`usb_power != 0` (`SE:6028-6033`); an unpowered board stamps no pin and no
+pull, but its idle load remains.
+
+**PWM and the held level.** The stamp reads the drive state as of the END of
+the last MCU step and holds it for the whole next electrical interval, so
+`analogWrite` appears to the circuit as a train of levels sampled at the host
+step: with `MCU_H_MAX = 100 us` the resolution of a 490 Hz (2.04 ms) PWM is
+about 20 steps, a 980 Hz Uno pin 5 or 6 about 10, and any PWM above about 5 kHz
+aliases. Decoders (servo, HC-SR04, displays, clocked ICs) see the exact
+cycle-timestamped events instead (section 14.7). There is no PWM averaging
+device and no PWM edge in the MNA.
+
+### 14.6 Failures: supply overvoltage
+
+`_checkMcuSupplyOvervoltage(comp, x, h)` (`SE:6371-6389`), called for every
+component in `MCU_SUPPLY_ABS_MAX` after each accepted step outside the OP hold
+(`SE:6773`): `v = V(rating.pin) - V(gnd)`; if `v > maxV` (strict) and no failure
+with that key exists, it latches a `supply_overvoltage` failure keyed
+`(board, pin)` with `since = simTime + h`, `value = v`, `limit = maxV` and the
+message naming the chip and the rating. Ratings (`SE:1265-1276`): uno and nano
+`5v` pin, ATmega328P `VCC` 6.0 V; pico `3v3` pin, RP2040 `IOVDD` 3.63 V; micro:bit
+`3v` pad, nRF51822 `VDD` 3.9 V. It changes no stamp, stays latched until
+`resetFailures()`, and is carried across `load()` for a same-id same-kind
+component. Tests `mcu-rail-overvoltage.test.ts:61-95` (latches when the over
+voltage back-feeds the named pin with or without USB, quiet at the ok level
+and on USB alone, latched until failures are cleared).
+
+### 14.7 Pin events: how the emulator's edges enter the circuit
+
+Two separate flows.
+1. **Levels into the MNA**: only `pinDriveState` (section 14.5): the end-of-step
+   level.
+2. **Ordered `PinEvent`s into decoders**: section 1.5. `PinEvent {pin, level,
+   cycle}` (`AD:172`): `level` is 1 for High, 0 for Low, `null` for Hi-Z
+   (input or pull-up), `cycle` the cumulative cycle count at the register write
+   (`cpu.cycles` for the AVR; `sim.clock.nanos / 8` for the Pico). The AVR emits
+   one event per CHANGED digital pin on every PORT or DDR write (`AD:337-356`
+   `_capturePort`, compared with `_lastPinLevel`); the Pico emits one per pad
+   state change (`RP:357-392`). Users: servo, HC-SR04 (Uno, Nano, Pico), HD44780,
+   MAX7219 (Uno, Nano only), the clocked ICs through `mcuInputEdges`, and the H11
+   readback.
+
+Where the paths disagree with the MNA level: a pin written HIGH and LOW again
+inside one step shows LOW (or whatever the last write was) to the MNA while the
+decoders see both edges. A micro:bit has no events at all (section 14.9).
+
+### 14.8 Node voltages into the emulator (inputs and the ADC)
+
+`_sampleArduinoInputs` (`SE:8013-8044`), run before each MCU step for every
+powered core:
+- `supplyPin = isPico ? "3v3" : "5v"`; `vcc = max(0, V(supplyPin) - V(gnd))` or,
+  if that is exactly 0, the `vcc` param (default 5 or 3.3); `vth = 0.6*vcc`
+  (a SINGLE threshold, no hysteresis; the catalog's `v_input` 1.5 / 3.0 V is not
+  used: at 5 V the 0.6 factor equals the catalog `v_ih_min` 3.0).
+- Digital: for every `ioPins` entry whose `pinDriveState` is not `out-high` or
+  `out-low`: `v = netV[net of the pin]` (the NET voltage relative to the global
+  ground, not relative to the board's gnd), `setInputBit(pin, v >= vth ? 1 :
+  0)` (`SE:8027-8032`). Output pins are not sampled back (no contention model:
+  an externally driven output pin reads its own drive).
+- Analog: for every `analogPins` entry (Uno skips `a6`, `a7`, `SE:8036`):
+  `setAnalogVolts(pin, netV[net], vcc)` (`SE:8033-8041`). AVR: `clamp(v, 0, vcc)`
+  stored as volts in `adc.channelValues[channel]` (`AD:277-282`): avr8js converts
+  against its own reference (AVCC or AREF, neither of which the wrapper sets or
+  reads; `aref` is a dead pin; inferred, avr8js not read). RP2040: `round(clamp(v/vcc,
+  0, 1) * 4095)` counts into `rp2040.adc.channelValues` (`RP:328-334`), the
+  `3v3` rail standing in for ADC_VREF.
+The ADC has no source-impedance error, sampling capacitor, conversion time,
+offset, gain error or noise; the input is read from the net at the accepted
+endpoint, held until the next step.
+
+### 14.9 The micro:bit
+
+There is no emulator in the engine: the micro:bit runs "in the client-side
+embedded sim, not the worker" (`SE:7135`). The engine accepts pushed drives:
+`setMicrobitDrive(compId, drives)` (`SE:5176-5182`), `drives: pinId -> {mode:
+"digital" | "analog", value}`; the host clears an entry on flash, reset or
+power-off. Per accepted stamp (`SE:7173-7189`), for each drive whose pin id
+exists on the component (`_pinNode >= 0`): `fraction = digital ? (value ? 1 :
+0) : clamp(value, 0, 1023)/1023` and `_stampRailReferencedOutput(node, gnd, 3v
+node, fraction, 50)`: the pin is a Thevenin source to `V(3v)*fraction`
+through 50 ohm referenced to the actual pad node (so PWM duty is represented as
+its average level, held, with the same 50 ohm output resistance). Drives are
+pruned on `load()` for boards that disappeared and survive topology edits
+(`SE:2936-2941`, tests `microbit-integration.test.ts:92-160`). Not modelled: pin
+inputs (nothing is sampled back; no pull-ups), the ADC, any event stream, the
+reset button, the 5x5 display's current, the battery connector.
+The HC-SR04 echo bridge: `_hcsr04MicrobitBridge(comp)` (`SE:6004-6016`) looks
+at the net holding the sensor's `echo` pin for a micro:bit pin in
+`MICROBIT_EDGE_PIN_TO_SIM` (`p0 p1 p2 p8 p12 p13 p14 p15 p16` to `pin0..`,
+`SE:1291-1294`); `takeHcsr04EchoEvents()` (`SE:5324-5333`) drains the queued
+`Hcsr04EchoEvent {boardComponentId, pinId, delayUs, widthUs}` for the host to
+inject into the embedded sim as a pulse input. A micro:bit is NOT in
+`isMcuBoardKind`, so it is not in `_mcuComponents`, has no `state.arduinos`
+entry, is not in `getArduinoState`, and does not trigger the MCU step cap.
+Telemetry (`physics-telemetry.ts:177-190`): positive-draw supply current,
+`scale -1`, null when `power = 0`.
+
+### 14.10 What is snapshotted, carried and reset
+
+- In `saveState` (`SE:2608-2655`): `icState` (including the Pico regulator's
+  `backfed` flag under the key `${boardId}:usb`), `ptcs` (the Uno polyfuse),
+  `failures` (`supply_overvoltage`), `mcuEdgesPending`.
+- NOT in `saveState` (so a rolled-back step or an `estimateStepError` replay
+  cannot restore them): the emulator cores in `state.arduinos`, their pin-event
+  lists, `_mcuStepStartLevels`, `_mcuBootSimTime`, `microbitDrives`,
+  `_readbackCandidates` and the hcsr04 echo queue is inside the `hcsr04` state
+  (which IS saved). This is why MCU circuits take no trial replay (`HL:106-117`).
+- Across `load()`: a board's core persists per id when `hex` (or `script`)
+  is unchanged (`SE:3323-3376`); a changed non-empty `hex` rebuilds the core
+  (Arduino: `mcuFactory` constructs `ArduinoMcu`, which throws if avr8js is not
+  registered, `MC:121-129`); an EMPTY `hex` keeps the existing core and builds none
+  if there was none (so a blanked sketch keeps running: PLAN carried item
+  "An Arduino losing its core on a null `mcuFactory`", Q-O56); a Pico's changed
+  `script` rebuilds, and `mcuFactory` returns null until the MicroPython image
+  and the rp2040 module are registered (`MC:130-141`), in which case the old core is
+  kept (`?? existing`, `SE:3361`). `icState` and the Pico regime are rebuilt by
+  the seed solve (`SE:3434-3447`). `resetArduino(id)` (`SE:5145-5152`) calls
+  `mcu.reset()` and moves the boot baseline.
+
+### 14.11 Reset, brown-out and power loss
+
+- The RESET pin has no effect at all: no stamp, no read, `getArduinoState`
+  hard-codes `resetActive: false` (`SE:5356-5372`). The reset button in the UI
+  calls `resetArduino`.
+- There is no power-on reset and no brown-out reset. When a board stops being
+  powered (Uno/Nano `V(5v) - V(gnd) <= 3.0 V`; Pico `usb_power = 0`) the engine
+  simply stops stepping the core, clears its event list (`SE:4723-4733`) and stamps
+  no pins; the core keeps its program counter, RAM and peripheral state. When
+  power returns the firmware CONTINUES where it stopped (`mcu-display-replay.test.ts:318-355` pins the event-list part only). The ATmega328P's brown-out
+  detector (the Uno's fuses select 2.7 V, recalled) and the power-on reset are
+  absent.
+- `getArduinoState` publishes `{powered, d13High (Arduino D13 or Pico GP25 drive
+  `out-high`), resetActive false, txActivity false, rxActivity false}`.
+
+### 14.12 Dynamics, Newton, small-signal AC
+
+- Dynamics: the electrical side has no memory except the Uno polyfuse trip
+  state, the Pico regime flag and the pad Schottkys (static). The emulator holds
+  all digital memory.
+- Newton: the boards' stamps are linear except the Nano and micro:bit
+  Schottkys (guarded Shockley, `vSat = 40 VtN`, no limiting). The Pico's regime
+  and the Uno polyfuse are committed.
+- AC: no `acStamp`; `runSmallSignalAc` throws for any circuit containing a
+  board (`AA:217-226`): "running firmware has no small-signal model".
+
+### 14.13 Diagnostics
+
+`supply_overvoltage` (section 14.6) only. For `missing_flyback` all four boards
+are `FLYBACK_RAIL_KINDS` (`SE:1078-1082`): a winding net that holds a board pin
+is treated as a fixed rail and never warns from that net.
+
+### 14.14 Tests that pin it
+
+`arduino.test.ts`: `parseIntelHex` (`:17-36`), blink toggling (`:38-92`), pin sets
+(`:95-120`), commit ordering and retry (`:158-255`), Uno integration (`:256-383`
+including pull-up to the real 5 V rail `:316`, divider `:335`, unpowered pins not
+driven `:284`), Nano (`:384-445`). `mcu-usb-power-path.test.ts` (`:81-245`: the PSU
+on `5v`/`3v3`/`vin`, the polyfuse, hand values `:153-175`, the Pico regime
+`:177-206`, the polyfuse reset `:208-245`). `mcu-rail-overvoltage.test.ts`,
+`microbit-3v-path.test.ts`, `microbit-integration.test.ts`,
+`pico-integration.test.ts` (MicroPython drives GP15, `:43-64`), `rp2040.test.ts`
+(the coupling: pin sets, pull states, events, analog counts, temperature
+sensor, `:34-190`), `rp2040-idle.test.ts`, `rp2040-micropython.test.ts`,
+`rp2040-long-script.test.ts`, `mcu-clocked-ics.test.ts`, `mcu-165-readback.test.ts`,
+`mcu-display-replay.test.ts`, `mcu-servo-replay.test.ts`.
+
+### 14.15 Questions
+
+- **Q-W4-{picopower} (a Pico is powered by its flag, not by its rails).**
+  `_mcuPowered` for the Pico is `usb_power != 0` and nothing else
+  (`SE:6028-6033`): a Pico with `usb_power = 0` and 3.3 V on `3v3`, or 5 V on
+  `vsys` or `vbus`, does not run; and a Pico with `usb_power = 1` runs even if
+  something pulls its `3v3` to 0 V (the board keeps `usb_power` semantics:
+  `V(3v3)` is judged only through the regulator regime). `vsys`, `vbus`,
+  `3v3_en`, `run` are dead. **Recommend** reproduce for the gate and decide in
+  W4-S whether the shell derives "powered" from rails (a ruling for the owner,
+  because it changes which Learn circuits run; PLAN W4-S "USB and regulator
+  power paths as hub rails" implies it).
+- **Q-W4-{vindead} (dead pins).** Section 14.1: Uno/Nano `vin` and `reset`,
+  Pico `vsys`/`vbus`/`run`/`3v3_en`, `aref`, `io_ref`. Real boards regulate `vin`
+  to 5 V (7 to 12 V, recalled) and ground `reset` resets the chip. **Recommend**
+  reproduce in 1.0.0; adding a VIN regulator is new behaviour (a user powering a
+  board through VIN currently gets a dead board).
+- **Q-W4-{nobor} (no POR/BOR, state survives power loss).** Section 14.11.
+  **Recommend** add the power-on reset to the shell as a divergence (a board
+  that loses power and regains it should restart its firmware), decided with the
+  emulator ports (W4-AVR4, W7-R7), since the emulator needs a reset call.
+- **Q-W4-{pinr} (one 50 ohm output for every pin).** ATmega328P (recalled): `VOH`
+  4.2 V min at -20 mA, `VOL` 0.9 V max at 20 mA, DC 40 mA abs max, so about
+  40 to 45 ohm effective; RP2040 default 4 mA drive strength (recalled), `VOH` at
+  least `IOVDD - 0.4 V`, `VOL` 0.4 V, so about 100 ohm at 4 mA, and 2, 4, 8, 12
+  mA selectable; neither is 50 ohm. **Recommend** reproduce; add a catalog
+  param later.
+- **Q-W4-{pinclamp} (no input clamp, leakage or load).** External voltages on
+  pins above the rail or below ground have no effect (no ESD diodes, no
+  injection current); the only protection model is `supply_overvoltage` on the
+  rail pin. **Recommend** reproduce.
+- **Q-W4-{inputth} (one threshold at 0.6 Vcc).** AVR input thresholds (recalled):
+  `VIL` max 0.3 Vcc (1.5 V at 5 V), `VIH` min 0.6 Vcc (3.0 V at 5 V; for Vcc
+  of 4.5 to 5.5 V); between them is undefined. RP2040 (recalled): `VIL` max 0.3
+  `IOVDD` (0.99 V), `VIH` min 0.7 `IOVDD` (2.31 V). Classic reads a pin high at or
+  above `0.6*vcc` (1.98 V for the Pico): inside the RP2040's undefined band and
+  below `VIH` min. **Recommend** reproduce.
+- **Q-W4-{adc} (ADC semantics).** Section 14.8: absolute net voltage rather
+  than pin minus board ground (they differ if the board ground is not the
+  reference net); the Pico's `ADC_VREF` pad ignored; the AVR reference taken from
+  the wrapper's `vcc` clamp and avr8js's internal constants. **Recommend**
+  W4-S reads the AVR ADC reference from the emulator state when the avr8js port
+  lands (W4-AVR2) and decide the absolute-versus-relative question by test.
+- **Q-W4-{mcuh} (the 100 us step cap is the dominant timing quantiser).**
+  Sections 14.4 and 14.5. Every effect of an MCU on the circuit is quantised
+  to a step of at most 100 us, and no trial replay runs. **Recommend** the W4-S
+  contract is event-exact edges (PLAN W4-AVR4: "port writes become heap events
+  at their cycle's time, inputs read at the instruction that samples them"),
+  with the cap and `circuitSupportsStepReplay` lifted only once the emulator
+  state is in the snapshot.
+- **Q-W4-{mcuphase} (loop latency is one accepted step each way).** Section
+  14.4. A firmware loop `read pin -> write pin` sees the circuit's endpoint
+  and the circuit sees the write one interval later. **Recommend** reproduce
+  until W4-AVR4.
+- **Q-W4-{unofuse} (polyfuse recovery).** Section 14.3: a tripped fuse
+  never resets while a load of more than 11 mA hangs on the rail (the 45 mA
+  idle load always does), whereas a real MF-MSMF050 resets after the fault is
+  removed and the part has cooled; the real part also has a hold current that
+  falls with temperature. Also a polyfuse exists only on the Uno in classic
+  (the Nano has none, correct; a real Pico has none). **Recommend** reproduce.
+- **Q-W4-{nanoschottky} (fixed 25 C thermal voltage on the Nano and micro:bit
+  Schottkys).** `SCHOTTKY_FIT_VT_25C` is used regardless of
+  `environment.temperatureC`, while every other junction follows `ctx.junctionVt()`.
+  **Recommend** reproduce (the fit is at 25 C by design, `SE:1223`).
+- **Q-W4-{picoreg} (Pico regulator model).** 10 mohm output, no current limit,
+  no minimum input (only the `usb_power` flag), a 1 mA back-feed threshold; the
+  real RT6150B buck-boost on a Pico runs in power-save mode. **Recommend**
+  reproduce; in the core the regime becomes a hub rail regime (PLAN W4-S "Pico
+  regulator regime").
+- **Q-W4-{microbitshell} (micro:bit shell is outputs only).** Section 14.9: no
+  pin inputs, no ADC, no events; the `breakout` param is ignored (pins present in
+  the live component set are all it needs); `power` 0 kills the 3V pad. PLAN
+  W4-S says the micro:bit bridge stays in JS "for good" (a host bridge on
+  the R86 yield). **Recommend** the shell takes `setMicrobitDrive` as an
+  engine-level host call (the host owns the emulator), and its pin outputs are
+  stamped exactly as above.
+- **Q-W4-{empty-hex} (an empty hex keeps the old core).** Section 14.10.
+  **Recommend** reproduce and keep PLAN's carried item (Q-O56) with the shell.
+- **Q-W4-{seed} (OP ladder and boards).** The Pico regime commit runs in the OP
+  solves (`SE:6776` is outside the `_dcPhysicalTimeHold` guard) while the Uno
+  polyfuse update and the overvoltage check are held (`SE:6770-6775`). The seed
+  solve is repeated up to four times for a Pico back-fed from the start.
+  **Recommend** mirror.
