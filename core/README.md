@@ -4555,10 +4555,17 @@ Constants, all from P3:35-38 unless marked new:
    partitions' and direct devices' draws and the curvature of `E(soc)` and
    `R(soc)`; the SoC knot is watched on its own line. A partition's
    crossings are searched only until the path first moves `RAIL_DRIFT_V`,
-   where the rail solves and aims it again. The horizon clamp solves a
-   cell's rail whenever its closed-form partitions follow it (path or
-   drive), so the rail node published at a frame is the rail they
-   followed. The SoC integral (point 6) holds each partition's draw on its
+   where the rail solves and aims it again. A turn of the sum past that end
+   still counts (CLK): the sum is monotone up to the end, which alone says
+   whether it crosses there. Until `f18bfe5` the search dropped such a turn
+   and read the sum's limit instead, so a 555 charging to its threshold on
+   the path (rising, then pulled down by the drain's line long after) never
+   crossed and flipped at the next host stop: the battery SAP-1's clock ran
+   0.68 % slow at 10 us host stops and 48 % at 60 Hz frames; since then it is
+   the same at every cadence (`sap1-clock-cadence.slow.test.ts`). The
+   horizon clamp solves a cell's rail whenever its closed-form partitions
+   follow it (path or drive), so the rail node published at a frame is the
+   rail they followed. The SoC integral (point 6) holds each partition's draw on its
    own exponential between solves, leaving out its response to the path,
    whose charge over a drift-capped interval is second order. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at

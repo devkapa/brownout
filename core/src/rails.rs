@@ -1057,8 +1057,10 @@ impl ExpSum<'_> {
         };
         let slow = m.lam[..m.n].iter().copied().filter(|&l| l > 0.0).fold(f64::INFINITY, f64::min);
         // Past every rate's decay below the smallest double the sum is its
-        // line: a turn there is the merged form's own rounding.
-        turns.retain(|&t| t * slow < 745.0 && t < until);
+        // line: a turn there is the merged form's own rounding. A turn past
+        // `until` stays: it says the sum is still monotone at `until`, and
+        // not yet on its way to its limit (`reach_pieces`).
+        turns.retain(|&t| t * slow < 745.0);
         let fast = m.lam[..m.n].iter().copied().fold(0.0f64, f64::max);
         let start = if g0 < 0.0 {
             0.0
@@ -1087,13 +1089,21 @@ impl ExpSum<'_> {
     /// times `dir`). Past the last turn it is monotone to its limit: windows
     /// doubling from the fastest rate's time find a finite end, and past
     /// every rate's settling (`64 / slow`) the sum is its limit. Nothing
-    /// past `until` is searched.
+    /// past `until` is searched: a turn past it leaves the sum monotone on
+    /// `[a, until]`, whose end alone says whether it reaches 0 there. (Its
+    /// limit does not: the sum may rise to the turn and fall away after it,
+    /// as a 555's capacitor charging to its threshold on a draining cell's
+    /// coupled path, whose falling line turns it back long after, CLK.)
     #[allow(clippy::too_many_arguments)]
     fn reach_pieces(&self, lim: f64, turns: &[f64], dir: f64, a: f64, ga: f64, slow: f64, fast: f64, until: f64) -> Option<f64> {
         let (mut a, mut ga) = (a, ga);
         for &c in turns {
             if !(c > a) {
                 continue;
+            }
+            if c >= until {
+                let gu = dir * self.at(until);
+                return (gu >= 0.0).then(|| self.newton(dir, a, until, ga, gu));
             }
             let gc = dir * self.at(c);
             if gc >= 0.0 {
@@ -3041,6 +3051,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_bounded_crossing_search_finds_the_root_before_a_turn_past_its_end() {
+        // CLK: g(t) = 1 - 2 e^(-1000 t) - 0.01 t, a capacitor charging to its
+        // threshold while a draining cell's line pulls it down. It rises
+        // through 0 near ln 2 / 1000 and turns where its slope 2000 e^(-1000 t)
+        // meets 0.01, at ln(2e5) / 1000 = 12.2 ms, then falls to -inf. Searched
+        // until 1 ms, the turn lies past the end: the search dropped it, read
+        // the limit (-inf) as where the sum goes from 0, and found no root.
+        // By hand: t0 = ln 2 / 1000 = 693.147 us, g(t0) = -0.01 t0 =
+        // -6.931e-6, g'(t0) = 1000 - 0.01, so the root is t0 + 6.931e-6 /
+        // 999.99 = 693.154 us (the next Newton term, g'' d^2 / (2 g'), is
+        // 2.4e-14 s).
+        let terms = [(-2.0, Basis::Exp(-1000.0)), (-0.01, Basis::Phi(0.0))];
+        let s = ExpSum { c0: 1.0, terms: &terms };
+        let t0 = std::f64::consts::LN_2 / 1000.0;
+        let want = t0 + 0.01 * t0 / (1000.0 - 0.01);
+        for until in [1e-3, 0.0122, f64::INFINITY] {
+            let got = s.first_crossing_until(true, until).unwrap_or_else(|| panic!("no root until {until:e}"));
+            assert!((got - want).abs() <= 1e-13, "until {until:e}: {got:e} against {want:e}");
+        }
+        // A root past the end stays unsearched: none until 0.6 ms.
+        assert_eq!(s.first_crossing_until(true, 6e-4), None);
+        // The falling side: from the turn's far side down to 0 again, -g's
+        // first crossing; ~ (1 - 2e^(-1000 t)) / 0.01, near 100 s. Until 1 ms
+        // it is not there, and the turn past the end does not invent it.
+        assert_eq!(s.first_crossing_until(false, 1e-3), None);
     }
 }
 

@@ -19861,3 +19861,93 @@ fn the_back_driven_boards_decline_where_their_sources_back_drive_the_supply() {
         }
     }
 }
+
+/// The cold fuzz's tpl-6 board 2/6 (`f5e gen 2 6`, HUB=1): a 555 astable
+/// (R_A 2438 ohm, R_B 1014 ohm, C 468 nF) on a 4.88 V, 0.164 ohm cell, its
+/// timing capacitor riding the cell's coupled path (CLK).
+fn clk_board_2_6() -> Program {
+    let mut p = program(
+        7,
+        vec![
+            fz(20, 0, &[1, 0], vec![1.0, 0.1640507113440349, 1.0, 0.0, 2.0, 0.05, 0.025598695889249182, 0.9585130199046281, 0.0], vec![2.0, 0.0, 3.407415977924589, 1.0, 4.883729027350469]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![2438.301942991417], vec![]),
+            fz(1, 3, &[2, 3], vec![1014.4147930413523], vec![]),
+            fz(3, 4, &[3, 0], vec![4.682792894997451e-7, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![35.35779164099569], vec![]),
+            fz(30, 7, &[5, 0], vec![2.052254807262691, 2.245203483937718, 0.03275392131664288, 0.0, 0.0, 0.0], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.0006717191939111341, 2438.301942991417], vec![]),
+            fz(90, 3, &[], vec![3.0, 0.007860166314804299, 1014.4147930413523], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.545464089314505, 35.35779164099569], vec![]),
+        ],
+    );
+    p.digital_slot_count = 32;
+    p
+}
+
+/// A 555's output flips on `p` (its digital slot `slot`), each at the
+/// instant the engine records it, while a host stops every `host` (0: at
+/// every event) to `t_end`: (triggers, thresholds), its rises and falls.
+/// The trace is the engine's own, so where the host stops does not move
+/// what it reads, only what the engine computes.
+fn clk_flips(p: &Program, slot: usize, host: f64, t_end: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut e = Engine::load(p).unwrap();
+    e.trace_enable(true);
+    let (mut rises, mut falls) = (Vec::new(), Vec::new());
+    let (mut t, mut k) = (0.0, 0u64);
+    while t < t_end {
+        k += 1;
+        t = if host > 0.0 { (host * k as f64).min(t_end) } else { e.next_event_time().min(t_end).max(t + 1e-12) };
+        e.advance(t).unwrap();
+        for c in e.trace().chunks(3) {
+            if c[1] as usize == slot {
+                if c[2] == 1.0 {
+                    rises.push(c[0]);
+                } else if c[2] == 0.0 {
+                    falls.push(c[0]);
+                }
+            }
+        }
+        e.trace_clear();
+    }
+    (rises, falls)
+}
+
+/// CLK's host cadences against a run stopping every 1 us: 10 us, 100 us,
+/// 1 ms, a 60 Hz frame, 100 ms and a host that stops at every event.
+const CLK_HOSTS: [f64; 6] = [1e-5, 1e-4, 1e-3, 1.0 / 60.0, 0.1, 0.0];
+
+#[test]
+fn a_555_on_a_cells_coupled_path_lands_every_flip_at_its_own_time_at_every_host_cadence() {
+    // CLK: the threshold crossing (the capacitor charging to 2/3 of the
+    // rail) rides the coupled path, whose crossing search runs to the rail's
+    // next solve (`cell_until`); the sum's turn past that end made the search
+    // give up, and the flip waited for the next host stop. Measured at
+    // f18bfe5: 0.34 % slow at 10 us stops to 8.8 % at 100 ms, 47 triggers
+    // down to 43 in 70 ms; with the search fixed, every flip equal within
+    // 6e-13 s at every cadence.
+    //
+    // Bound, per flip and index-matched: tau_w0, the time the capacitor takes
+    // to cross W0 of its trigger level. At the trigger it discharges through
+    // R_B and DIS's 10 ohm from u / 3 = 4.821 / 3 = 1.607 V: 1.607 /
+    // (1014.4 + 10) = 1.569 mA into 468.28 nF, 3351 V/s; W0_V(1.607) =
+    // 1e-4 + 1.607e-3 = 1.707 mV, so tau_w0 = 0.509 us. (The threshold,
+    // charging through R_A + R_B at (u - 2u/3) / 3453 ohm = 0.465 mA,
+    // 994 V/s, has W0_V(3.214) / 994 = 3.33 us: the trigger's is the tighter,
+    // held for both.)
+    let p = clk_board_2_6();
+    let t_end = 0.06; // 41 periods of 1.454 ms
+    let (fine_up, fine_down) = clk_flips(&p, 8, 1e-6, t_end);
+    let tau_w0 = (1e-4 + 1e-3 * 1.607) / (1.607 / (1014.4147930413523 + 10.0) / 4.682792894997451e-7);
+    assert!(fine_up.len() >= 40 && fine_down.len() >= 40, "{} triggers, {} thresholds in 60 ms", fine_up.len(), fine_down.len());
+    for host in CLK_HOSTS {
+        let (up, down) = clk_flips(&p, 8, host, t_end);
+        for (name, got, fine) in [("trigger", &up, &fine_up), ("threshold", &down, &fine_down)] {
+            assert_eq!(got.len(), fine.len(), "host {host:e}: {} {name}s against the 1 us run's {}", got.len(), fine.len());
+            let (worst, at) = got.iter().zip(fine.iter()).enumerate().map(|(i, (g, f))| ((g - f).abs(), i)).fold((0.0, 0), |m, x| if x.0 > m.0 { x } else { m });
+            eprintln!("2/6 at host {host:e}: worst {name} {worst:.3e} s (#{at}) = {:.4} tau_w0", worst / tau_w0);
+            assert!(worst <= tau_w0, "host {host:e}: {name} {at} off by {worst:.3e} s, past tau_w0 {tau_w0:.3e} s");
+        }
+    }
+}
