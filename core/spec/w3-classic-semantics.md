@@ -1316,3 +1316,483 @@ mega-fixture. SPICE import: `spice/netlist.ts:1045-1056, 1119-1125`
   gate-drain diodes share `Is` (default 1e-14: a 0.651 V drop at 1 mA, as a
   silicon junction). A real JFET's two junctions are one structure, so this is
   reasonable. **Recommend** none; the golden pins both anchors.
+
+---
+
+## 6. SCR
+
+[W3-F, "latching regimes", needs W3-G.] `scrModel` (`MF:474-591`), kind
+`"scr"`. A committed-regime latch: the conducting/blocking decision is made
+AFTER the accepted solve from that solve's voltages, and the stamp of the NEXT
+solve uses it. No catalog entry in `default-parts.json`
+(`devolt:parts.json:2113`).
+
+### 6.1 Terminals and parameters
+
+Pins by id `a` (anode), `k` (cathode), `g` (gate) (`MF:477-480`); fewer than
+three pins returns from stamp, commit and AC.
+
+| Parameter | Read at | Clamp | Default | devolt catalog |
+|---|---|---|---|---|
+| `vgt` (V) | `MF:460` | `max(0.3, .)` | 0.7 | 0.8 |
+| `igt` (A) | `MF:461` | `max(1e-6, .)` | 0.005 | 0.0002 |
+| `ih` (A) | `MF:466` | `max(1e-6, .)` | 0.005 | 0.005 |
+| `vtm` (V, on-state intercept) | `MF:467` | `max(0.1, .)` | 1.2 | 1.25 |
+| `ron` (ohm) | `MF:468` | `max(1e-3, .)` | 0.1 | 0.1 |
+
+(`thyristorParams`, `MF:459-472`.) Derived: `isGate =
+shockleyIsFromVf(vgt, igt, N_DIODE, Vt)` (so the gate junction passes exactly
+`igt` at `vgt`); `vSatGate = raisedJunctionVSat(vgt, N_DIODE*Vt)
+= min(max(40*Vt, vgt + 5*Vt), 700*Vt)` (`MF:118-120`). Constant
+`THYRISTOR_BLOCKING_G = 1e-9` S (`MF:441`). devolt catalog `i_c_max 0.8` (not
+read).
+
+### 6.2 Equations
+
+State `on = (icState.on ?? 0) >= 0.5` (committed at the previous accepted
+solve; `defaultIcState("scr") = {on: 0}`, `SE:1672-1679`).
+- **Gate junction** (stamped in BOTH regimes, `MF:499-508`): guarded Shockley
+  diode anode `g`, cathode `k`, `Is = isGate`, `n = 1`, `Vt`, `vSat = vSatGate`,
+  at `vG - vK` of the iterate.
+- **Principal path** (`MF:509-515`): blocking: `stampResistor(a, k,
+  1/THYRISTOR_BLOCKING_G)` (1 Gohm, current `1e-9*vAK`); conducting:
+  `stampResistor(a, k, ron)` plus `stampCurrentSource(a, k, vtm/ron)` (a source
+  of `vtm/ron` INTO node `a`, out of `k`), i.e. `i(a->k) = (vAK - vtm)/ron`.
+  There is no dependence on the iterate in either regime: the principal stamp
+  is linear and fixed for the whole solve.
+- No anode-gate path, no gate-to-anode junction, no breakover (blocking holds
+  any voltage), no dv/dt triggering (devolt `model-disclosure.ts`, `scr`
+  entry).
+- Reported current (`MF:558-562`): `capCurrents[id]`, committed in
+  `commitState`, below.
+
+### 6.3 Dynamics and state
+
+State: `icState[id] = {on}` (0 or 1), plus the derived readout
+`capCurrents[id]`. `icState` is carried across `load()` for a same-id,
+same-kind component, is in the step snapshot, and is error-compared EXACTLY by
+the step controller (`on` is not in the tolerance table; section 1.5).
+`capCurrents` is snapshot-carried but excluded from the error walk
+(`MF:540-545` comment). No integration state, no turn-on or turn-off time.
+
+### 6.4 Newton
+
+Only the gate diode depends on the iterate: guarded Shockley, no limiter, the
+raised `vSatGate` (section 1.8). The principal branch is linear. So within a
+solve the circuit is a diode plus a fixed resistor; the regime cannot flip
+inside Newton. At a DC operating point the regime loop `_dcRegimeSettle`
+(`SE:3730-3756`) re-solves while the committed `icState` signature
+(`SE:3773-3796`, every `icState` slot quantised to 1e-9) changes, up to the
+caller's `maxOuterRegimeIters`, then accepts the last converged solve.
+
+### 6.5 Regimes and events
+
+Two regimes, `blocking` and `conducting`, decided in `commitState`
+(`MF:517-557`) from the ACCEPTED solution `x`:
+1. `vAk = vA - vK`.
+2. `iPrincipal = on ? (vAk - vtm)/ron : vAk*1e-9` evaluated under the regime
+   the solve was STAMPED with (the entry latch) and stored in
+   `capCurrents` (so the published current is the one the stamp carried, and a
+   series neighbour sees the same number on a flip step, `MF:536-547`).
+3. `iGate = shockleyDiodeCurrent(vG - vK, isGate, N_DIODE, Vt, vSatGate)`;
+   `gateDriven = iGate >= igt && (vG - vK) >= vgt` (both are the same
+   condition by construction of `isGate`; both asserted).
+4. Blocking: becomes conducting iff `gateDriven && vAk > vtm` (strict).
+   Conducting: becomes blocking iff `iPrincipal < ih` (strict), UNLESS
+   `gateDriven && iPrincipal > 0` (a maintained gate holds it). So a reverse-
+   biased on-state (`iPrincipal` negative, which includes every `vAk < vtm`)
+   drops at once, which is the commutation rule.
+5. `icState.set(id, {on: next})`.
+
+Latency: the stamp that follows the commit uses the new regime, so the
+principal current changes one accepted step after the gate reaches the
+threshold, and the first conducting step carries the full `(vAk - vtm)/ron`.
+Classic never locates the instant. Under the checked step (`AS`), the
+exact-compare of `on` between the full step and two half steps rejects and
+halves the step until the event time is resolved to the host floor (headless
+`H_MIN = 1e-8`, W1 section 10.15), which is bracketing, not root finding.
+A conducting SCR with `vAk < vtm` is a one-step 1.25 V source (the Norton
+`vtm/ron` term holds the anode at `vtm` above the cathode through `ron`)
+before the next commit drops it.
+
+### 6.6 Small-signal AC
+
+`MF:563-591`: `stampAcAdmittance(a, k, on ? 1/ron : 1e-9)` (the Norton offset
+differentiates away) plus the gate junction's `shockleyConductanceAtOp(vGK_OP,
+isGate, N_DIODE, Vt, vSatGate) + AC_GMIN` between `g` and `k`. It selects the
+committed regime exactly as the transient stamp does, so it is the derivative
+of the transient stamp: no disagreement.
+
+### 6.7 Diagnostics
+
+None: no failure, no warning, no entry in any kind list. The latching has no
+`IL` (latching current), no surge limit.
+
+### 6.8 Tests that pin it
+
+`extended-semis.test.ts:404-680`: the lifecycle "blocks, fires on gate, latches
+after gate removal, drops out below ih, re-blocks" (`:405`), bitwise
+determinism across two fresh runs (`:436`), no firing at half the rated gate
+current (`:442`), firing with an authored `vgt` of 2.5 V above the generic
+exponential cap (`:484`), a maintained gate sustaining conduction below `ih`
+without chatter (`:524`), series-KCL on flip steps (`:566`),
+`dcOperatingPoint` settling the latch bit-identically (`:607-629`), the
+conducting small-signal model (`:630-680`), and a same-id kind swap `scr` ->
+`triac` starting from the fresh kind's cold latch (`:681`). The census tests
+`ac-isolation.test.ts:343-395` and `extended-integration.test.ts:266-312`.
+
+### 6.9 Questions
+
+- **Q-W3-27 (latching versus the datasheet).** `vgt`/`igt` are the datasheet's
+  MAXIMUM trigger values (the part is guaranteed to fire at or below them),
+  and classic fires exactly there; `ih` likewise a maximum. A real part's
+  typical triggers are lower and it also needs the anode current to exceed the
+  latching current `IL` (about 1.5 to 2 `IH`, recalled) before the gate may be
+  removed; classic has no `IL` and latches on any anode voltage above `vtm`.
+  `vtm` is a zero-current intercept where the datasheet quotes a drop at the
+  rated current (devolt `model-disclosure.ts`: "the low-current drop is
+  overestimated"). **Recommend** reproduce; record the three omissions in the
+  disclosure the core carries.
+- **Q-W3-28 (find the instant or not).** DK 1.5 puts thyristors in the
+  regime-device class with `switching` distances `i_G - I_GT` and
+  `i_A - I_H`, cutting the step at the crossing. Classic does not (section
+  6.5): the regime changes one accepted step late. Decision 7 (b) (closer to
+  the analytic answer) would favour locating the crossing; gate 1 (identity)
+  would not. **Recommend** W3-G locates the crossing (DK 1.5) and registers
+  the divergence, since the instant the SCR fires moves the whole downstream
+  waveform by up to one host step; the lifecycle test asserts phases, not
+  times, so it still passes. This is DK's design question restated, not new.
+- **Q-W3-29 (the one-step source).** After a flip with `vAk < vtm` the
+  conducting stamp is a voltage source of `vtm` through `ron`, not a
+  device-off state. In classic that lasts exactly one accepted step; with
+  step locating it must last zero. **Recommend** the kernel's conducting
+  `eval` is `(vAk - vtm)/ron` as classic, and the regime rule drops it at the
+  next commit; a located crossing then makes the point moot.
+- **Q-W3-30 (strictness at the boundaries).** `vAk > vtm` and `iPrincipal <
+  ih` are strict, `iGate >= igt` and `vGK >= vgt` are not. The port must use
+  the same comparison operators (a golden with the gate exactly at `vgt`).
+  **Recommend** reproduce exactly.
+
+---
+
+## 7. Triac
+
+[W3-F.] `triacModel` (`MF:593-686`). The SCR's latch made bidirectional. No
+bundled catalog entry (`devolt:parts.json:2164`).
+
+### 7.1 Terminals and parameters
+
+Pins by id `mt1`, `mt2`, `g` (`MF:596-600`); the gate is referenced to `mt1`.
+Parameters are the SCR's five through the same `thyristorParams`
+(`MF:459-472`; same clamps and defaults); devolt catalog values `vgt 1`,
+`igt 0.01`, `ih 0.015`, `vtm 1.4`, `ron 0.05` (`i_c_max 4`). `isGate` and
+`vSatGate` as the SCR. Blocking conductance `1e-9` S.
+
+### 7.2 Equations
+
+State `{on, pol}` (`defaultIcState("triac") = {on: 0, pol: 1}`), `pol = +1` if
+`(st.pol ?? 1) >= 0` else `-1`. `v12 = V(mt1) - V(mt2)`.
+- **Gate** (`MF:608-612`): an anti-parallel pair of guarded Shockley diodes
+  between `g` and `mt1`: `stampDiodeShockley(g, mt1, vGate, isGate, 1, Vt,
+  vSatGate)` and `stampDiodeShockley(mt1, g, -vGate, ...)` with
+  `vGate = V(g) - V(mt1)` of the iterate. A bidirectional gate: a real triac
+  fires on either gate polarity, with no quadrant asymmetry (devolt
+  `model-disclosure.ts` states the Q4 omission).
+- **Principal** (`MF:613-621`): blocking: `stampResistor(mt1, mt2, 1e9 ohm)`;
+  conducting: `stampResistor(mt1, mt2, ron)` plus `stampCurrentSource(mt1,
+  mt2, pol*vtm/ron)`, i.e. `i(mt1->mt2) = (v12 - pol*vtm)/ron`: the `vtm` drop
+  always opposes the latched direction.
+- Reported current: `capCurrents[id]`, mt1 -> mt2 (`MF:664-668`).
+
+### 7.3 Dynamics and state
+
+`icState = {on, pol}`, both compared exactly by the step controller;
+`capCurrents` as the SCR. `pol` is frozen at trigger time and changes only at
+the next trigger.
+
+### 7.4 Newton
+
+The two gate diodes only, no limiter, raised `vSatGate`. Principal linear. A
+`dcOperatingPoint` settles the latch through the regime loop as the SCR.
+
+### 7.5 Regimes and events
+
+`commitState` (`MF:623-663`):
+1. `v12 = V(mt1) - V(mt2)`; `iPrincipal = on ? (v12 - pol*vtm)/ron : v12*1e-9`
+   under the stamped regime, into `capCurrents`.
+2. `vGate = V(g) - V(mt1)`; `iGate = shockleyDiodeCurrent(vGate, ...) -
+   shockleyDiodeCurrent(-vGate, ...)` (the pair's net current);
+   `gateDriven = |iGate| >= igt && |vGate| >= vgt`.
+3. Blocking: `on` iff `gateDriven && |v12| > vtm`; then `pol = (v12 >= 0 ? 1 :
+   -1)`. Conducting: off iff `pol*iPrincipal < ih`, unless `gateDriven &&
+   pol*iPrincipal > 0`. A reversal (`pol*iPrincipal <= 0`) always
+   commutates, and a still-driven gate re-fires the opposite polarity from the
+   blocking state at the next commit once `|v12| > vtm`.
+4. `icState.set(id, {on, pol})`.
+Same latency and no-instant-location as the SCR (section 6.5). Note that
+`pol` is derived from `v12` at the commit that fires it, one step after the
+gate threshold is met, so an AC waveform near its zero crossing may fire on
+the wrong polarity's half for one step.
+
+### 7.6 Small-signal AC
+
+`MF:669-686`: `1/ron` or `1e-9` between `mt1` and `mt2`; both anti-parallel gate
+slopes `shockleyConductanceAtOp(vGate) + shockleyConductanceAtOp(-vGate) +
+AC_GMIN` between `g` and `mt1`. Derivative of the transient stamp; no
+disagreement.
+
+### 7.7 Diagnostics
+
+None.
+
+### 7.8 Tests that pin it
+
+`extended-semis.test.ts:811-942`: "with a held gate it conducts BOTH mains
+polarities with the correct sign" (`:812`), "latches through the half-cycle
+after the gate pulse, then commutates at the zero crossing" (`:830`), "a driven
+gate cannot latch an unbiased MT pair into a phantom vtm rail" (`:853`);
+`ac-isolation.test.ts:391`; `extended-integration.test.ts`.
+
+### 7.9 Questions
+
+- **Q-W3-31 (quadrants, `IGT`, and `IH` from the datasheet).** Classic fires
+  at one `igt` in all four quadrants. A BT136-600 (recalled, WeEn/NXP):
+  `IGT` 5 to 35 mA by quadrant (Q4 up to 70 mA), `VGT` 1.5 V max, `IH`
+  6 mA typical and 15 mA max, `VT` 1.7 V at 5 A. Classic with the devolt
+  defaults fires at 10 mA everywhere. Documented omission. **Recommend**
+  reproduce.
+- **Q-W3-32 (`pol` latched from the commit step's `v12`).** When the gate
+  threshold is met just before a zero crossing the polarity latched is the
+  sign at the commit. **Recommend** reproduce (W3-G's located crossing makes
+  it follow the exact instant; same recommendation as Q-W3-28).
+- **Q-W3-33 (the commutation state `pol*iPrincipal < ih`).** Because
+  `iPrincipal` includes the `-pol*vtm/ron` offset, the hold boundary is
+  `v12 = pol*(vtm + ih*ron)` (1.4 + 0.015 * 0.05 = 1.40075 V for the devolt
+  defaults), not zero. A triac on 50 Hz mains therefore drops out `vtm`
+  before the zero crossing, as a real one does within its `IH`.
+  **Recommend** reproduce.
+
+---
+
+## 8. Optocoupler: opto_npn
+
+[W3-F; PLAN lists it with jfet as depending on W3-T.] `optoNpnModel`
+(`MF:719-883`). An input LED, an internal-node phototransistor, and a
+photocurrent from the LED's COMMITTED current. No bundled catalog entry; the
+devolt part `opto-4n35` is at `devolt:parts.json:8103`.
+
+### 8.1 Terminals and parameters
+
+Pins by id `led_a`, `led_k`, `c`, `e` (`MF:725-736`); fewer than four pins
+returns. One INTERNAL solver node `b` (`internalNodes: () => ["b"]`,
+`MF:690, 723`), allocated per load after the net rows (W1 section 7.15; DK
+1.3 "internal unknowns"); `ctx.internalNode(id, "b")`. The devolt part's
+`b` and `nc` pins are footprint pins that reach nothing: the package base is
+internal and an external base pin is only a floating net with no stamp
+(`model-disclosure.ts`, `opto_npn` excluded list). Galvanic groups
+`[led_a, led_k]`, `[c, e, b]`, `[nc]` (`MF:694`) tell the section-anchor logic
+that the input and output sides are isolated (W1 delta `bd90847`).
+
+| Parameter | Read at | Clamp | Default | devolt catalog |
+|---|---|---|---|---|
+| `ctr` (output current per LED current) | `MF:712` | `max(0, .)` | 1.0 | 1 |
+| `vf` (LED, V at `iRated`) | `MF:708` through `ctx.junctionVf` | none | 1.2 | 1.2 |
+| `iRated` (A) | `MF:709` | none | 0.02 | 0.01 |
+| `betaF` | `MF:713` | `max(1, .)` | 100 | 100 |
+| `Is` (phototransistor) | `MF:776` | none | 1e-16 | 1e-16 |
+
+`isLed = shockleyIsFromVf(vfLed, iRated, N_LED = 2, Vt)`; `vSatLed =
+raisedJunctionVSat(vfLed, N_LED*Vt) = min(max(40*N_LED*Vt, vfLed + 5*N_LED*Vt),
+700*N_LED*Vt)` (`MF:118-120, 710-715`). Specs in
+the devolt catalog (`vf 1.2`, `if_max 0.05`, `i_c_max 0.05`, `p_max 0.07`)
+are not read.
+
+### 8.2 Equations
+
+- **Input LED** (`MF:758-767`): guarded Shockley anode `led_a`, cathode `led_k`,
+  `n = 2` (LED), `Is = isLed`, `vSat = vSatLed`.
+- **Output transistor** (`MF:769-800`): Ebers-Moll NPN on `(b, c, e)` via
+  `stampBJT` with `polarity = 1`, `Is = IsT = saturationCurrentAtTemperature(
+  Is, ambient, 1)`, `betaF = p.betaF`, `betaR = 1`, `nF = nR = 1`, `Vt`,
+  `earlyVoltage = 0`; the junction laws and Jacobian are section 3.2 with
+  those constants. Newton limiting: `pnjlim` on `vBE = vB - vE` and
+  `vBC = vB - vC` with `VtN = N_DIODE*Vt`, `vCrit = vCritFor(IsT, VtN)`,
+  `prev = ctx.bjtPrevJunction(id) ?? raw` (the same per-id map the BJTs use,
+  keyed by this component id); there is no per-load cache for this kind (the
+  engine builds it for `bjt_npn`/`bjt_pnp` only), so the values are computed
+  per stamp. `markJunctionLimitedThisIteration` is called when either junction
+  is limited (`MF:789`).
+- **Photocurrent** (`MF:796-800`): `Ip = (ctr/betaF)*max(0, iLedCommitted)`
+  with `iLedCommitted = icState.i1`, the LED current of the LAST ACCEPTED solve;
+  `stampCurrentSource(b, c, Ip)`: `Ip` enters the base node and is drawn from
+  the collector node (the CB photodiode path). In forward-active operation the
+  collector collects `betaF*Ip = ctr*iLed`, and the external collector current
+  is `ctr*iLed*(1 + 1/betaF)` (one percent above `ctr*iLed` at `betaF = 100`:
+  `Ip` is drawn from the collector node as well).
+- The matrix has NO entry coupling the LED nodes to the output nodes: the
+  isolation is structural.
+- Commit (`MF:802-814`): `icState.set(id, {i1: shockleyDiodeCurrent(vLed,
+  isLed, N_LED, Vt, vSatLed)})`, the signed LED current at the accepted
+  voltages (the `max(0, .)` is taken when the next stamp reads it).
+- Reported current (`MF:815-819`): `icState.i1`, LED anode -> cathode.
+
+### 8.3 Dynamics and state
+
+State `icState = {i1}` with a deliberate name: the step controller maps `i1`
+to the ABSOLUTE current tolerance (10 nA, section 1.5) instead of the
+exact-match rule (comment at `SE:1682-1687`). Plus the internal `b` row's
+warm start from `_lastX` (`SE:6676-6702`). There are no capacitances: no LED
+or phototransistor response time (a 4N35 has `tr`, `tf` of about 7 to 10 us,
+recalled), no dark current.
+
+The ONE-STEP LAG is documented and deliberate (`MF:727-748`): a same-solve
+coupling "would add led-side columns to output-side Newton rows and change
+the sparse pattern class of every opto circuit". At a DC operating point
+`i1` settles through the regime loop (`SE:3730-3756`; a continuous slot
+quantised to 1e-9 in the signature).
+
+### 8.4 Newton
+
+LED: none (guarded Shockley). Transistor: pnjlim as the BJT. The photocurrent
+is a constant per solve (from the committed `i1`).
+
+### 8.5 Regimes and events
+
+No discrete regime; saturation is the transistor's. The coupling from the LED
+to the output is one accepted step late, so an input edge reaches the
+collector one step later (up to the host's step, 10 us at the usual
+transient; the step controller does not see a lag because `i1` differs by
+less than its tolerance only once it settles).
+
+### 8.6 Small-signal AC
+
+`MF:820-883`: LED `shockleyConductanceAtOp(vLed_OP, isLed, N_LED, Vt, vSatLed)
++ AC_GMIN` between `led_a` and `led_k`; the nine Ebers-Moll entries on
+`(b, c, e)` from `bjtLinearization` at the OP voltages (`Is` scaled, Early 0);
+and the coupling `gp = (ctr/betaF)*gdLed`: `G[b][led_a] -= gp`,
+`G[b][led_k] += gp`, `G[c][led_a] += gp`, `G[c][led_k] -= gp`
+(`MF:858-882`). **This is not the derivative of the transient stamp**: the
+transient has NO cross-isolation entries (the photocurrent is the lagged
+`i1`), so its Jacobian has `gp = 0`. The AC stamp linearises the
+instantaneous idealisation, justified by the DC settle placing `i1` at its
+fixed point (comment `MF:830-848`). The `max(0, .)` clamp on a reverse LED is
+also dropped.
+
+### 8.7 Diagnostics
+
+None.
+
+### 8.8 Tests that pin it
+
+`extended-semis.test.ts:943-1017`: `ctr*iLed` to the collector within 5
+percent at 10 mA drive (`:944`), dark with the LED unpowered (`:958`), no DC
+input-output path, "a 100 V common-mode tie carries only shunt leakage"
+(`:968`); `isolated-sections.test.ts` (galvanic groups and section anchors);
+`ac-isolation.test.ts` and `extended-integration.test.ts` (census, mega
+fixture, dense/sparse parity); `ac-small-signal.test.ts` does not exercise it.
+
+### 8.9 Questions
+
+- **Q-W3-34 (AC disagrees with transient by design).** Section 8.6. A kernel
+  that derives AC from `eval` (DK 1.4) would produce `gp = 0` unless the
+  kernel's `eval` reads the LED current in the same solve. **Recommend**
+  record an override: the opto kernel's AC stamp is hand-written as classic's,
+  and note that the transient port may also couple in-solve if W3-N allows an
+  LED-to-output coupling (it would remove the lag and change every opto
+  trajectory by one step: a divergence to register, not default).
+- **Q-W3-35 (one-step lag).** Keep (identity with classic) or couple in-solve
+  (the physics: no lag). **Recommend** keep for W3-F gate 1; decide separately
+  with the `ctr` units below.
+- **Q-W3-36 (`ctr` is the datasheet minimum, fixed).** 4N35 (recalled): CTR
+  100 percent minimum at `IF = 10 mA`, `VCE = 10 V`; typical much higher and
+  falling with `IF` and temperature; classic uses one number at all currents.
+  Documented. **Recommend** reproduce.
+- **Q-W3-37 (`vf`, `iRated` vs the catalog's `if_max`).** The kind reads
+  `iRated` (default 0.02) and ignores `electrical_specs.if_max`. The devolt
+  part carries `iRated 0.01`. Anchoring the LED at `iRated` makes `vf` the drop
+  at 10 mA for the catalog part and at 20 mA for a bare part, a 35 mV
+  difference at `n = 2`. **Recommend** reproduce.
+- **Q-W3-38 (internal node convergence).** The `b` row is convergence-tested
+  like every unknown (DK 1.3: "convergence-tested, `n` grows by `INTERNAL`").
+  Classic's start value for it is `_lastX`. **Recommend** the kernel
+  reproduces both.
+
+---
+
+## 9. Analog switch: analog_switch
+
+[W3-F.] `analogSwitchModel` (`MF:1135-1190`). A transmission gate with a
+committed control level. No bundled catalog entry (`devolt:parts.json:2215`:
+`analog-switch`, `ron 100`, `roff 1e9`, no specs).
+
+### 9.1 Terminals and parameters
+
+Pins by id `a`, `b`, `ctrl` (`MF:1140-1150`); fewer than three pins returns.
+No supply pins: the switch is "self-contained", the control level is
+ground-referenced by construction (comment `MF:1113-1119`).
+
+| Parameter | Read at | Rule | Default |
+|---|---|---|---|
+| `ron` (ohm) | `MF:1126` | `max(1e-3, .)` | 100 |
+| `roff` (ohm) | `MF:1123-1132` | `roff > 0 ? max(1, roff) : 1e9` (zero, negative or NaN falls back to the default) | 1e9 |
+
+Constants: `ANALOG_SWITCH_VIH = 2.0` V, `ANALOG_SWITCH_VIL = 0.8` V
+(`MF:1120-1121`), not authorable.
+
+### 9.2 Equations
+
+`on = (icState.on ?? 0) >= 0.5` (default 0, `defaultIcState("analog_switch")
+= {on: 0}`). Stamp: `stampResistor(a, b, on ? ron : roff)` (`MF:1137-1152`);
+the `ctrl` pin has no stamp (a pure sense input). Reported channel current
+`capCurrents[id] = (V(a) - V(b))/(prev ? ron : roff)` under the regime the solve
+was stamped with (`MF:1153-1171`), a -> b.
+
+### 9.3 Dynamics and state
+
+`icState = {on}` and `capCurrents`. No charge injection, no switching time, no
+feedthrough, no resistance variation with signal level.
+
+### 9.4 Newton
+
+None: the stamp is a fixed resistor per solve.
+
+### 9.5 Regimes and events
+
+Committed after the solve (`MF:1164-1169`): with `vCtrl = V(ctrl)` (an ABSOLUTE
+node voltage, not referenced to anything): `vCtrl >= 2.0` gives `on = true`,
+`vCtrl <= 0.8` gives `on = false`, in between keeps `prev`. A floating
+`ctrl` pin reads about 0 V through the node shunt and is off. The resistance
+changes at the NEXT solve, one accepted step after the control crosses a
+threshold; the instant is not located (bracketed by the step controller's exact
+compare of `on`, section 1.5).
+
+### 9.6 Small-signal AC
+
+`MF:1177-1190`: `1/(on ? ron : roff)` between `a` and `b`: the transient stamp
+exactly. No disagreement.
+
+### 9.7 Diagnostics and tests
+
+None. `extended-semis.test.ts:1018-1075`: ctrl high passes the divider
+through `ron` within 1 percent (`:1019`), ctrl low isolates (`:1032`), "an
+authored roff of 0 fails toward isolation" (`:1043`), a mid-run ctrl flip
+replays bitwise after a snapshot rollback (`:1059`).
+
+### 9.8 Questions
+
+- **Q-W3-39 (fixed TTL thresholds, no supply).** Devolt's
+  `model-disclosure.ts` already states the model "cannot represent a switch
+  whose threshold tracks its supply" (CD4066B thresholds scale with `VDD`;
+  74HC4066 `VIL`/`VIH` are 0.3/0.7 of `VCC`; recalled). A 3.3 V part driven
+  from a 3.3 V logic pin reaches 3.3 V >= 2.0, so it works; a 1.8 V logic does
+  not turn it on. **Recommend** reproduce; if a supplied variant is wanted it
+  is a new kind, not a change.
+- **Q-W3-40 (`ron` vs datasheet).** CD4066B `RON` about 470 ohm at `VDD =
+  5 V`, 180 ohm at 10 V, 125 ohm at 15 V (TI, recalled), 74HC4066 about 40 ohm
+  at 4.5 V; classic's 100 ohm is a mid value and does not vary with signal
+  level. **Recommend** none.
+- **Q-W3-41 (event timing of the control).** One accepted step of lag
+  between the control crossing and the resistance change. For a comparator
+  or clock driving the control that is up to one host step (10 us at the usual
+  step). **Recommend** in W3-G the located crossing (as Q-W3-28) when `ctrl`
+  is driven by a partition-boundary event; otherwise reproduce the lag.
