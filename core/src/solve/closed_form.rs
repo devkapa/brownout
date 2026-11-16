@@ -2260,9 +2260,29 @@ impl ClosedFormSolver {
                         }
                     };
                     let Some(tau) = root else { continue };
-                    let t = t0 + tau;
+                    let mut t = t0 + tau;
                     if !accepts_crossing(t, now) {
-                        continue;
+                        // On a draining cell's coupled path a root at the
+                        // instant itself is a crossing the solve there put
+                        // back: the path is the rail's model between solves,
+                        // and the solve a landing causes stands off it (the
+                        // draws held on their lines, the drain line held
+                        // straight). On SHIPV-E's `ctr` board (a 555 clocking
+                        // a 74HC74 on a 0.5 ohm, 2e-5 Ah cell) the solve at a
+                        // crossing stood 1.5e-9 V off the path, stepping the
+                        // 2/3 threshold back 1.0e-9 V across the node landed
+                        // a nudge past it, and the re-aim's root came 9.3e-16
+                        // s on: dropped, the flip waited 47 us for the next
+                        // solve (103 tau_w0 at 1 ms hosts, before R121 too).
+                        // It lands at the first instant the kernel accepts.
+                        // Solving the rail before every crossing on the path
+                        // (as a CC rail capacitor's segment does) cured it too
+                        // but cost the battery SAP-1 5.5 % of its
+                        // instructions (CAD-3).
+                        if !(d.held && t >= now) {
+                            continue;
+                        }
+                        t = (now + crate::kernel::CROSSING_ACCEPT_EPS).next_up();
                     }
                     let nudged = th.value + if th.rising { CROSS_NUDGE_V } else { -CROSS_NUDGE_V };
                     if best.is_none_or(|(bt, ..)| t < bt) {
