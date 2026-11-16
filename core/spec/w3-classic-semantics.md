@@ -1796,3 +1796,587 @@ replays bitwise after a snapshot rollback (`:1059`).
   or clock driving the control that is up to one host step (10 us at the usual
   step). **Recommend** in W3-G the located crossing (as Q-W3-28) when `ctrl`
   is driven by a partition-boundary event; otherwise reproduce the lag.
+
+---
+
+## 10. Op-amps: lm358, mcp6002, lm386
+
+[W3-O; DK 2.3 recommends the in-partition form.] Two model objects:
+`dualOpAmpModel` for `lm358` and `mcp6002` (`AR:759-1017`, two units per
+package) and `lm386Model` for `lm386` (`AR:1019-1174`, one unit). They share
+the parameter reader `opAmpModelParams` (`AR:114-137`), the step-target
+helpers (`AR:144-258`), the supply-return and quiescent helpers
+(`AR:267-299`) and the AC unit stamp (`AR:380-459`). The electrical core is
+`stampOpAmp` (`EL:1495-1554`) and the pole helpers (`EL:1349-1446`).
+
+### 10.1 Terminals and parameters
+
+**Pins** (fixed catalog ids, `AR:800-806, 855-860, 1052-1056`):
+
+| Kind | Unit | Out | In- | In+ | Supply |
+|---|---|---|---|---|---|
+| lm358, mcp6002 | 1 | `1` | `2` | `3` | V- `4` (gnd), V+ `8` (vcc) |
+| lm358, mcp6002 | 2 | `7` | `6` | `5` | same package pins |
+| lm386 | 1 | `5` | `2` | `3` | gnd `4`, vcc `6`; pins `1`, `7`, `8` passive and NOT read |
+
+Supply pins come from `supplyPinsForComponent` (catalog `vcc`/`gnd`
+functions). Each unit owns one MNA branch row, keyed `<id>:op0`, `<id>:op1`
+(`branchRows`, `AR:764, 1022`), always allocated so the matrix is never
+singular even when the part is unpowered.
+
+**Parameters** (`opAmpModelParams`, `AR:114-137`; defaults `AR:75-107`;
+`nonNegativeParam` returns the fallback for a non-finite or negative value,
+`AR:109-112`):
+
+| Parameter | lm358 | mcp6002 | lm386 | Rule |
+|---|---|---|---|---|
+| `openLoopGain` A0 | 1e5 | 1e5 | (see `gain`) | `max(1, nonNeg(.))`; lm386 uses the fixed gain |
+| `gain` (lm386 only) | | | 20 | `max(1, Number(params.gain ?? 20))` (`AR:1034`) |
+| `gbw` (Hz) | 1e6 | 1e6 | 6e6 | `nonNeg`; **0 disables the pole** (flat VCVS) |
+| `slewRate` (V/s) | 3e5 | 6e5 | 3e5 | `nonNeg`; **0 disables the slew limiter** |
+| `sourceCurrentLimit` (A) | 0.04 | 0.023 | 0.25 | `nonNeg`; **0 disables** the source limit |
+| `sinkCurrentLimit` (A) | 0.02 | 0.023 | 0.25 | `nonNeg`; **0 disables** the sink limit |
+| `outputResistance` (ohm) | 50 | 50 | 2 | `max(0.01, nonNeg(.))` |
+
+Catalog (`lm358` CAT:6469, `mcp6002` CAT:6573, `lm386` CAT:6677)
+`default_params` carry the same numbers as the table, with the lm386's `gain
+20, gbw 6e6, slewRate 3e5, source/sinkCurrentLimit 0.25, outputResistance 2`.
+Specs: `vcc_range` lm358 `{3, 5, 32}`, mcp6002 `{1.8, 5, 6}`, lm386
+`{4, 6, 12}`; `quiescent_current_a` 0.0007, 0.0002, 0.004; `p_max` 0.83, 1.18,
+1.25 W.
+
+**Power** (`ctx.icPowerInfo`, W1 section 1.3, `SE:6035-6090`): the part is
+`powered` when both supply pins are wired (not open, no `_noSupplyReturnIds`
+entry) and `0.9*min <= vSupply <= 1.1*max` of `vcc_range`: lm358 2.7 to
+35.2 V, mcp6002 1.62 to 6.6 V, lm386 3.6 to 13.2 V. `power.vcc` and
+`power.gnd` are the node voltages of the supply pins at the iterate (the
+package ground need not be 0 V).
+
+**Output limits** (absolute node volts): `vHigh = vcc - 1.5` (lm358),
+`vcc - 0.02` (mcp6002) (`AR:777-781`), `vcc - 0.5` (lm386, `AR:1043`);
+`vLow = gnd + 0.02` (lm358, mcp6002), `gnd + 0.5` (lm386). The lm386's
+`vOffset = vmid = (vcc + gnd)/2` (`AR:1040`); the dual's `vOffset = 0`.
+
+### 10.2 Equations
+
+All per unit. `u` is the dominant-pole ("internal gain stage") voltage;
+`uPrev` its committed value (section 10.3); `vd = V(in+) - V(in-)` from the
+iterate; `h` the step.
+
+1. **Pole companion** (`opAmpDominantPoleCompanion`, `EL:1349-1374`):
+   `gain = max(1e-12, |A0|)`, `poleHz = gbw/gain`; if `gbw <= 0` or `h <= 0`:
+   `{dGain = A0, hist = 0, off = 1}` (the instantaneous VCVS); else
+   `lambda = 2*pi*poleHz*h`, `denom = 1 + lambda`, `dGain = (lambda/denom)*A0`,
+   `hist = 1/denom`, `off = lambda/denom`. This is the backward-Euler step of
+   `du/dt = wp*(A0*vd + vOffset - u)` with `wp = 2*pi*gbw/A0`:
+   `u = hist*uPrev + dGain*vd + off*vOffset`. At the LM358's 10 Hz pole and
+   `h = 1 us`: `lambda = 6.283e-5`, `dGain = 6.28`, `hist = 0.99994`.
+2. **Unconstrained target** (`opAmpTransientTarget`, `EL:1377-1389`) is that
+   expression with the iterate's `vd`.
+3. **Slew limit** (`opAmpSlewLimitedTarget`, `EL:1392-1407`): if `slewRate > 0`
+   and `h > 0`: `uPrev + clamp(target - uPrev, -SR*h, +SR*h)`; else unchanged.
+4. **Rail bound**: `bounded = clamp(slewLimited, vLow, vHigh)`
+   (`opAmpStepTarget`, `AR:144-174`). `fixedTarget = bounded` if
+   `|bounded - unconstrained| > 1e-12*max(1, |unconstrained|, |bounded|)`,
+   else `null`. Slew is applied BEFORE the rail bound.
+5. **Newton active set** (`opAmpNewtonFixedTarget`, `AR:183-200`): the
+   clamp is admitted only when the iterate's implied pole voltage
+   `internalGuess = V_out_guess - Rout*x[k]_guess` lies on either
+   branch's own solution: `tol = 1e-8*max(1, |unconstrained|, |bounded|,
+   |internalGuess|)`; active iff `|internalGuess - unconstrained| <= tol` or
+   `|internalGuess - bounded| <= tol`. Otherwise the stamp stays in the
+   unconstrained (voltage-operation) form. Unpowered:
+   `fixedTarget = power.gnd` regardless.
+6. **Current constraint** (`opAmpCurrentConstraint`, `AR:218-258`), `null` if
+   unpowered. Candidate mode from `opAmpCurrentLimitMode(committedLimit,
+   x[k]_guess, srcLimit, snkLimit)` (`EL:1417-1446`): non-finite gives 0;
+   from mode -1 stay while `natural <= -0.98*src` (`src > 0`); from mode +1 stay
+   while `natural >= 0.98*snk`; else enter -1 if `natural <= -src` (inclusive)
+   or +1 if `natural >= snk`; else 0. Then admissibility, tolerance
+   `1e-8*max(1, |Vout_guess|, |compliance|)`:
+   mode -1: `constraint = -src`, `compliance = bounded + Rout*constraint`,
+   admissible iff `Vout_guess <= compliance + tol`;
+   mode +1: `constraint = +snk`, `compliance = bounded + Rout*constraint`,
+   admissible iff `Vout_guess >= compliance - tol`.
+   `naturalCurrent` uses `stampOpAmp`'s sign: `x[k]` is current entering the
+   output stage, NEGATIVE while sourcing.
+7. **Stamp** (`stampOpAmp`, `EL:1495-1554`), unit row `k`, always `add(out, k,
+   +1)`:
+   - current constraint active: `add(k, k, 1)`, `b[k] = constraint` (the row
+     pins `x[k]`), nothing else.
+   - else `add(k, out, 1)` and, if `Rout > 0`, `add(k, k, -Rout)`; then
+     - saturated (`fixedTarget` non-null): `b[k] = fixedTarget` (inputs
+       uncoupled; the absolute voltage is passed, not re-derived through the
+       gain);
+     - else linear with `transient` (always, here): `add(k, in+, -dGain)`,
+       `add(k, in-, +dGain)`, `b[k] = hist*uPrev + off*vOffset`.
+   The linear row reads `V_out = Rout*x[k] + dGain*vd + hist*uPrev +
+   off*vOffset`: with `x[k] < 0` while sourcing, `V_out = u_target - Rout*|I|`.
+8. **Supply return** (`stampOpAmpSupplyReturn`, `AR:267-282`): when powered
+   with both supply pins, `railPin = committedCurrent > 0 ? gnd : vcc` and
+   `add(railNode, k, -1)`; `committedCurrent` is `currentConstraint` if one is
+   active, else the last accepted `i1`/`i2`. The output current is debited from
+   V+ when sourcing and credited to V- when sinking, with the sign of the last
+   ACCEPTED step in voltage operation.
+9. **Quiescent current** (`stampIcQuiescentCurrent`, `AR:285-299`): when
+   powered, `analogIcQuiescentCurrent(comp)` (`SE:1707-1710`, the catalog's
+   `quiescent_current_a`, per package, not per unit) is a constant current load
+   from V+ to V-: `stampCurrentSource(gndNode, vccNode, I)`.
+10. **Seed rule** (`AR:788-792, 1037-1039`): `h <= 1e-12` AND the pole
+    state non-finite (`u1` and `u2` for the dual, `u1` for the lm386) swaps
+    `gbwHz` and `slewRate` to 0 in `stepModel` (instantaneous VCVS without slew),
+    so the load seed initialises the operating point directly instead of
+    slewing from zero. A live reload carries finite `u1/u2` and keeps full
+    dynamics.
+11. **Element current** (`AR:988-999`, `1150-1158`): `x[k]` of unit 1 only,
+    the unit-2 current is not published (`getElementChannelI` has no op-amp
+    entry). Negative while sourcing.
+
+Input pins draw no current (no `Ib`, no `Ios`, no input capacitance).
+
+### 10.3 Dynamics and state
+
+`icState[id]`: dual `{reg1, d1, u1, limit1, i1, reg2, d2, u2, limit2, i2,
+supplyV}`; lm386 `{reg1, d1, u1, limit1, i1, supplyV}`
+(`defaultIcState`, `SE:1612-1622`; `NaN` for `d*`, `u*` initially). The commit
+(`AR:910-987, 1106-1149`) REPLACES the whole record each accepted solve:
+- `d` = `V(in+) - V(in-)` accepted;
+- `u` = `!powered ? power.gnd : currentConstraint !== null ? drive.bounded :
+  V_out - Rout*x[k]` (the settled pole voltage), where `drive` and the
+  constraint are recomputed from the ACCEPTED `x`, `uPrev` and `st.limit`;
+- `limit` = 0 / -1 (source) / +1 (sink) from the constraint's sign;
+- `i` = `x[k]`;
+- `reg` = `u >= vHigh ? 1 : u <= vLow ? 2 : 0` (used only by the AC stamp);
+- `supplyV` = `power.vSupply`.
+`uPrev` at the stamp is `finite(u) ? u : power.gnd` (dual: a fresh part's pole
+starts at ITS GROUND, not at 0 V or `vmid`) and `finite(u) ? u : vmid` for the
+lm386. Integration is backward Euler in closed form (item 1); the pole is NOT
+an MNA unknown: it is a committed state advanced algebraically, with the
+output stage's row solving it implicitly through `dGain`. The step controller
+compares `u*`, `d*`, `supplyV` at 100 uV, `i*` at 10 nA, and `reg*`, `limit*`
+exactly (section 1.5).
+
+At a DC operating point the pole of a mid-slew amplifier moves `SR*1e-12 s` per
+re-solve, i.e. hundreds of 1e-9 quanta, so the regime loop's signature
+(`SE:3773-3796`) never rests and `_dcRegimeSettle` takes its accept-the-last-
+converged exit (comment `SE:3762-3771`): "the OP is the resting point GIVEN the
+carried device state, poles included".
+
+### 10.4 Newton
+
+No limiter and no per-iteration damping; convergence over every unknown
+including `x[k]` at `1e-6 + 1e-3*max`. The three clamps (rail, slew, current)
+are active-set decisions re-made from the iterate at every stamp
+(items 5 and 6), with the hysteresis only on the current mode (0.98) and none
+on rail or slew. Start values: previous node voltages; `x[k]` from the previous
+solution's row. Feedback loops close inside one Newton solve through the matrix
+(loop gain up to 1e5), which is why DK 2.3 recommends the in-partition form
+(decision 5 (a)).
+
+### 10.5 Regimes and events
+
+Five operating states per unit, none committed as a discrete event except the
+current mode and `reg`:
+- **linear** (pole): the BE row of item 7.
+- **slew-limited**: `|target - uPrev| > SR*h`: the output moves exactly
+  `SR*h` per step (a fixed target, `bounded` from the slew-limited value).
+  A step is the unit of slew: at `h = 1 us`, 0.3 V.
+- **rail** high or low: `fixedTarget = vHigh | vLow`.
+- **current-limited** source or sink: row `x[k] = -src | +snk`; the output
+  voltage falls out of KCL; hysteresis band 0.98.
+- **unpowered**: output pinned to `power.gnd`, no quiescent draw, no rail
+  routing.
+The slew/rail decision depends on the iterate and needs at least two Newton
+iterations (item 5); the current-mode decision needs the iterate's `x[k]` and
+the committed mode. Classic never locates the instant a clamp is entered or
+left; the step controller rejects a step whose coarse and refined `limit*` or
+`reg*` disagree, and recovers by halving down to the host's floor. Recovery
+from a rail "relaxes to linear, never jumps to the opposite rail" because the
+slew limit applies before the rail bound (comment `AR:139-143`).
+
+### 10.6 Small-signal AC
+
+`acStampOpAmpUnit` (`AR:380-459`) per unit, from the COMMITTED `reg`, `limit`
+and `i` slots (so it needs a prior transient or `dcOperatingPoint` commit):
+`add(out, k, 1)`; if powered, `add(railNode, k, -1)` with the rail chosen by
+the committed current sign; then
+- powered and `limit != 0`: `add(k, k, 1)` only (`dI = 0`: no admittance, no
+  drive);
+- else `add(k, out, 1)` and `add(k, k, -Rout)`;
+  - unpowered: `add(k, gnd, -1)`;
+  - `reg = 1`: `add(k, vcc, -1)`; `reg = 2`: `add(k, gnd, -1)` (the pinned stage
+    tracks its rail node with derivative 1; the inputs are uncoupled);
+  - linear: `A(jw) = A0/(1 + jw/wp)`, `wp = 2*pi*gbw/A0` (`gbw <= 0` gives the
+    flat `A0`): `ratio = w/wp`, `aRe = A0/(1 + ratio^2)`, `aIm = -A0*ratio/(1 +
+    ratio^2)`; `add(k, in+, -aRe, -aIm)`, `add(k, in-, +aRe, +aIm)`; for the lm386
+    (`midSupplyBias`) additionally `add(k, vcc, -aRe/(2*A0), -aIm/(2*A0))` and the
+    same on `gnd`.
+The slew limiter has no small-signal contribution; the quiescent source is
+constant.
+
+**Where it disagrees with the transient stamp.** The transient is the BE
+recurrence (`hist`, `dGain` depend on `h`); AC is the exact continuous pole.
+They agree only for `w*h` small: for the LM358 follower at 100 kHz, `|A|` is
+10.00 continuous and 10.17 for the BE recurrence at `h = 1 us` (10.002 at
+`h = 100 ns`) (computed). A stamp derived from the discrete kernel (DK 1.4)
+would carry that `h`-dependent error into a frequency response that classic
+computes exactly. Also, the AC stamp uses `A0/(1 + jw/wp)` for the
+instantaneous case `gbw = 0` as the flat gain, matching the transient.
+
+### 10.7 Diagnostics
+
+No engine warning or failure of its own. The failure pass includes these
+kinds (they have `vcc_range`), but `_drivenOutputTargets` has no case for them
+(`SE:7800-8004`), so no `output_sag`. Package thermal (exact uid only,
+section 1.7): `power = vSupply*Iq + sum over units of (-i)*(vcc - vout)` if
+sourcing or `i*(vout - gnd)` if sinking; the profiles have no shutdown, so
+the only product is `warnings` text and `allowedPowerW`. `rail_ic_power_chatter`
+applies to supply-gated kinds only (`SUPPLY_GATED_KINDS`), which excludes the
+op-amps.
+
+### 10.8 Tests that pin it
+
+- `wave4-opamps.test.ts`: catalog (`:36-70`), LM358 follower (`:72`: 2.0 V
+  within 10 mV), gain 2 (`:126`), inverting with mid-rail reference (`:180`),
+  saturation at `vcc - 1.5` (`:241`) and MCP6002 at `vcc - 0.02` (`:289`),
+  MCP6002 follower at 1.8 V (`:323`), LM386 DC bias (`:365`) and its
+  saturation to `VS - 0.5` (`:434`), an unpowered op-amp stays non-singular
+  (`:465`), unit independence (`:505`), accuracy at A = 1e5 (`:558`),
+  recovery from saturation (`:596`).
+- `opamp-dynamics.test.ts`: the BE recurrence satisfies the ODE exactly
+  (`:115`); slew limit and current-limit hysteresis (`:133`); real-sine
+  closed-loop bandwidth, flat below GBW and -3 dB at unity (`:145`); slew and
+  rollback (`:195`); source/sink current limiting, same-solve entry on a hard
+  load (`:225`), caps (`:276, 293`), recovery in the solve a load is removed
+  (`:320`); output energy returned to the rails (`:347`, `:360`).
+- `ac-small-signal.test.ts:626-786`: inverting amplifier flat at `-R2/R1`,
+  roll-off at `GBW/noise gain` within 5 percent (`:639`); zero AC gain at a
+  rail-saturated OP (`:740`); rail ripple through the pinned stage at
+  `RL/(RL + Rout)` (`:766`).
+- `physics-reference-benchmarks.test.ts:775`: op-amp output and quiescent
+  current withdrawn from the supply rail.
+- `dc-homotopy-pathological.test.ts:364-428`: LM358 open-loop comparator at
+  microvolt offsets lands at the rail without regime oscillation.
+- `thermal-engine-physics.test.ts`: exact-profile heating of analog ICs.
+
+### 10.9 Questions
+
+- **Q-W3-42 (pole form: in-partition internal state).** DK 1.5 and PLAN
+  decision 5 (a). Classic's pole is NOT an unknown: it is a committed state
+  folded into the output row's right-hand side (`hist*uPrev`) and gain
+  (`dGain`). A kernel with a `charge` on an internal node `p` (DK 1.5,
+  "stateful kernels") would add one unknown per unit and make the pole
+  convergence-tested; classic's `x[k]` row is the only unknown. They are the
+  same discrete equation (`u = V_out - Rout*x[k]`), so **recommend** the port
+  either keeps classic's state-in-RHS (identical floats) or adds the unknown
+  with BE `q = Cp*v`, `Cp = 1/(2*pi*poleHz*Rp)` chosen to reproduce `hist` and
+  `dGain`; DK's form is a re-derivation and must be proven bit-comparable
+  against `opamp-dynamics.test.ts:115`.
+- **Q-W3-43 (the clamps' non-smooth active set).** Items 5 and 6 are
+  heuristics tuned to the Newton path (admit the unconstrained solution first;
+  hysteresis 0.98; compliance tolerance 1e-8). A kernel with regime `eval`s
+  (DK 1.5, up to 8 flips) replaces the heuristics with a proper active-set
+  loop; results differ at the clamp boundaries within solver tolerance but not
+  in the converged state. **Recommend** port the proper loop and register it as
+  a divergence only if a gate-2 case moves.
+- **Q-W3-44 (what the instant of a clamp entry means).** Section 10.5. A
+  located crossing (DK 1.5 `switching` distances: `vd*A0 + ... - vHigh`) cuts
+  the step at the exact time the output reaches the rail; classic steps over
+  it and the controller brackets. **Recommend** locate (decision 7 (b)).
+- **Q-W3-45 (AC from the discrete kernel).** Section 10.6 and cross-cutting
+  finding 8. **Recommend** keep a recorded override: AC uses the continuous
+  `A(jw)`; DK 1.4 allows exactly this ("a recorded override").
+- **Q-W3-46 (op-amp seed rule).** `h <= 1e-12` AND non-finite poles gives the
+  instantaneous VCVS: the first accepted state is the DC solution with no
+  dynamics. **Recommend** reproduce exactly (it is what makes `dcOperatingPoint`
+  and AC start at the operating point).
+- **Q-W3-47 (LM358 relaxation oscillator does not start; PLAN BL:3854).**
+  Classic's relaxation oscillator on an LM358 stays at its seed in both
+  engines (backlog item, `brownout-core-v2.md:3870`, `:4284`: "pre-existing
+  op-amp seed quirk"). The cause is not established here. From the code the
+  candidates are: (a) no input offset or bias current, so a perfectly
+  symmetric start (`vd = 0`, capacitor at 0 V, output on the DC solution) has
+  no perturbation to leave the metastable point; (b) the seed's pole start at
+  the package ground with `vLow = gnd + 0.02` pinning the first output at
+  20 mV, which a small feedback fraction may keep below the capacitor
+  voltage. A real op-amp has a few mV of offset (LM358 `VIO` 2 mV typ, 7 mV
+  max, recalled) that starts it.
+  **Recommend** a probe in W3-O before port (one engine, `vitest --maxWorkers=1`
+  on a minimal oscillator) and a decision between "reproduce (no start)" and
+  "add a start rule: an input offset of 1 uV" under decision 7 (b); reproduce
+  until the probe says which.
+- **Q-W3-48 (swing and limits vs the datasheets, recalled).** LM358 (TI):
+  output high `V+ - 1.5 V` at 2 mA load (classic exact; `V+ - 2 V` max),
+  output low 5 mV typ at no load (classic `gnd + 20 mV`); output source 40 mA
+  typ and sink 20 mA typ at the short-circuit limit (classic exact);
+  slew 0.3 V/us (classic exact), GBW 0.7 to 1.1 MHz, unity-gain (classic
+  1 MHz); input common-mode `0` to `V+ - 1.5 V`, not modelled; `VIO` 2 mV,
+  `IB` 20 to 45 nA, not modelled. MCP6002 (Microchip): GBW 1 MHz, slew
+  0.6 V/us, output swing within 25 mV of the rails at 10 kohm, source/sink
+  23 mA at 5.5 V: classic's `vcc - 0.02` and 23 mA are in line. LM386-N:
+  gain 20 with BW 300 kHz at `V+ = 6 V` (classic exact by construction),
+  quiescent 4 mA at 6 V (classic exact), output swing within about 0.5 to
+  1 V of the rails at 250 mA (classic 0.5 V). **Recommend** none; these are
+  catalog numbers chosen from those datasheets.
+- **Q-W3-49 (lm386 gain pins and input impedance).** The catalog notes that
+  the gain is set by pins 1/8 (open = 20, 1.2 kohm = 50, capacitor = 200) but
+  the model reads only `params.gain`; pins `1`, `7`, `8` are floating nets
+  with no stamp, and the 50 kohm input impedance to ground and the internal
+  1.35 kohm feedback network are absent. **Recommend** reproduce.
+- **Q-W3-50 (supply-return sign lag).** In voltage operation the rail debited
+  uses the LAST ACCEPTED current sign, so on the step where the output current
+  changes sign the wrong supply pin carries it. KCL still holds (the branch
+  couples to both `out` and one rail) but the supply-current split between V+
+  and V- is a step stale. **Recommend** reproduce for W3-O identity; the kernel
+  form decides the rail inside the solve if it can.
+
+---
+
+## 11. Comparator: lm393
+
+[W3-C; needs W3-G.] `lm393Model` (`AR:1176-1275`). A dual open-collector
+comparator modelled as a committed two-state output per unit; NOT a
+finite-gain element and NOT a VCVS (no branch row).
+
+### 11.1 Terminals and parameters
+
+Pins: unit 1 `IN1+ = 3`, `IN1- = 2`, `OUT1 = 1`; unit 2 `IN2+ = 5`,
+`IN2- = 6`, `OUT2 = 7`; `4` gnd; `8` vcc (catalog functions
+`open_collector` for 1 and 7, `analog_in` for 2, 3, 5, 6). No params. Catalog
+specs (CAT:6781): `vcc_range {2, 5, 36}`, `io_max 0.016`, no `default_params`.
+
+Literals: `LM393_HYST = 0.001` V (`AR:1218`).
+
+Power: `icPowerInfo` (section 10.1): powered for `vSupply` in `[1.8, 39.6]` V,
+both supply pins wired. The output resistance of a sinking unit is
+`power.outputResistance = max(50, min(1000, vSupply/(io_max*4)))`
+(`SE:6071-6075`) = `vSupply/0.064` clamped: 50 ohm at 3.2 V and below,
+78.125 ohm at 5 V, 187.5 ohm at 12 V, 562.5 ohm at 36 V. It is a function of
+the iterate's supply voltage.
+
+### 11.2 Equations
+
+- **Stamp** (`AR:1195-1210`): returns if `!powered` (read from `xGuess`).
+  `st = icState ?? defaultIcState("lm393") = {out1: NaN, out2: NaN}`. For
+  each unit, if `st.outN === 0` (committed sinking):
+  `ctx.stampDigitalOutput(comp, outPin, false, power)`
+  (`SE:6299-6320`): if the gnd pin is wired, `stampResistor(outNode,
+  gndPinNode, Rout)`, else the supply-less Norton fallback
+  `g = 1/Rout` to `power.gnd + 0`. A released unit (`out = 1` or `NaN`) stamps
+  nothing: high impedance, the external pull-up defines the net.
+- **Element current** (`AR:1236-1247`): unit 1 only, when sinking and powered:
+  `(V_out1 - power.gnd)/Rout`, positive into the output pin; else 0.
+- No stamp from the input pins: the inputs draw no current and are sensed only
+  at commit.
+
+### 11.3 Dynamics and state
+
+`icState = {out1, out2}` (1 = released, 0 = sinking, `NaN` = uninitialised,
+treated as released). No propagation delay (the datasheet's 1.3 us typical
+response, recalled), no slew, no input offset or bias, no output saturation
+voltage (only the `Rout` drop).
+
+### 11.4 Newton
+
+None for the comparator: the stamp is a fixed resistor per solve given the
+committed state; the inputs do not enter the matrix. Supply gating can chatter
+across iterates when the part's own draw pulls its supply through the power
+window (the `power-off-stall` machinery of W1 section 1.3: `lm393` is in
+`SUPPLY_GATED_KINDS`, `SE:1383-1389`).
+
+### 11.5 Regimes and events
+
+Per unit, decided in `commitState` (`AR:1212-1235`) from the ACCEPTED `x`:
+unpowered gives `{out1: 1, out2: 1}` for both; else `d1 = V(3) - V(2)`
+(`d2 = V(5) - V(6)`): `d > +1 mV` gives 1 (released); `d < -1 mV` gives 0
+(sinking); inside the band keeps the previous value (NaN keeps 1). A
+`+-1 mV` hysteresis around `IN+ = IN-`. The new state is stamped from the NEXT
+solve: **one accepted step of latency**, and the crossing instant is not
+located (the step controller compares `out1`/`out2` exactly, section 1.5, so
+a flip between the coarse and refined trial rejects the step and halves it).
+The output cannot slew through intermediate values: it is binary.
+
+**Conclusion for DK question 6 / PLAN decision 5.** Classic's comparator is a
+committed latch with a one-step lag, so the cross-partition driver-commit form
+of DK 1.5 (output stage in the output's partition, inputs watched, the switch
+a driver commit) is the natural port: the output stage stamp is `Rout` to
+V-, and the only coupling from input to output is the committed bit.
+
+### 11.6 Small-signal AC
+
+`AR:1248-1274`: unpowered: nothing; else for each sinking unit the output
+conductance `1/Rout` between the output node and the gnd pin (a local
+Norton self-conductance if the gnd pin is open, `AR:1266-1270`); no
+input-to-output path; released stamps nothing. It is the derivative of the
+transient stamp (the decision is a committed latch, so there is nothing to
+derive from the input). `ac-small-signal.test.ts:838` ("a released
+open-collector output stays hi-Z in the AC system").
+
+### 11.7 Diagnostics
+
+`output_sag` (the only W3 kind that contributes): `_drivenOutputTargets`
+(`SE:7836-7845`) returns the SINKING units as `{pinId, high: false}`; the
+failure pass (`SE:7570-7660`) compares `V_out - power.gnd` with
+`vil = thresholdsFor(specs, vSupply).vil = max(0.8, 0.3*vSupply)` (the lm393
+has no `logic_family` or `v_input`) and latches `output_sag` after two
+consecutive steps (`OUTPUT_SAG_DEBOUNCE_STEPS = 2`, with the
+direction-signed counter), clearing it when the unit releases (W1 delta
+`d1dee17`). At 5 V a sink current above `0.8/78.125 = 10.2 mA` reads as a
+sag. `rail_ic_power_chatter` applies (supply-gated).
+
+### 11.8 Tests that pin it
+
+`wave4-comparator-shunt.test.ts:36-370`: catalog (`:37`), released at
+`IN+ > IN-` with the pull-up high (`:83`), sinking: `OUT1` about 39 mV from the
+78.125 ohm / 10 kohm divider (`:143`), threshold crossing flips the state
+(`:183`), hysteresis: a dither inside +-1 mV does not flip (`:238`), dual
+independence (`:288`), unpowered releases (`:342`). `ls47-released-segment-
+sag.test.ts` (the sag sweep covers open-collector outputs), `ac-small-signal`
+`:787-877`, `isolated-section-stall.test.ts`, `rail-ic-power-chatter.test.ts`.
+
+### 11.9 Questions
+
+- **Q-W3-51 (form; DK question 6).** Answered in section 11.5: latch with a
+  one-step lag, so the driver-commit form. **Recommend** accept DK's
+  recommendation for the lm393.
+- **Q-W3-52 (propagation delay).** Classic has none beyond the step lag.
+  LM393 (TI, recalled): response time 1.3 us typ for a 100 mV step with 5 mV
+  overdrive and 300 ns for a TTL-level step. The W1 accuracy standard keeps
+  classic timing for everything but registers, tri-states and memories
+  (`W1:About`); a driver commit needs SOME delay value for its event time.
+  **Recommend** schedule the commit at the instant the crossing is located
+  (zero delay), which is the physically nearest classic-equivalent timing, and
+  leave the datasheet delay as an owner option (a divergence, like W1's Q-O1).
+- **Q-W3-53 (hysteresis).** `+-1 mV` is not in the datasheet (a real LM393
+  has none; `VIO` is about 2 mV typ, 5 mV max, recalled) but is what makes
+  classic's behaviour well-defined near zero. The crossing is at `d = +1 mV`
+  rising and `-1 mV` falling, an 'effective offset' of 1 mV one way and the
+  other. **Recommend** reproduce.
+- **Q-W3-54 (sink is not current-limited).** The sinking unit is a fixed
+  resistance to V-; with a low pull-up the stage can carry far more than the
+  16 mA `io_max` (which only sizes `Rout`); the real part saturates and the
+  datasheet quotes `VOL` 250 mV typ at 4 mA, 400 mV max, and a minimum sink of
+  6 mA at `VOL <= 1.5 V` (recalled). **Recommend** reproduce.
+- **Q-W3-55 (input common-mode range).** The datasheet range is `0` to
+  `V+ - 1.5 V` (the catalog says `VCC - 2 V`); classic compares any voltage.
+  **Recommend** reproduce.
+- **Q-W3-56 (unit 2's current is not published).** Only `out1`'s current
+  appears in `elementI`. **Recommend** the same telemetry contract.
+
+---
+
+## 12. Shunt reference: tl431
+
+[PLAN lists it under W3-C with "needs W3-G". It does not.] `tl431Model`
+(`SC:1042-1164`). A single exponential VCCS from cathode to anode controlled
+by `V(ref) - V(anode)`, plus a 1 Mohm bias. No latch, no regime, no state, no
+branch row.
+
+### 12.1 Terminals and parameters
+
+Pins by id `ref`, `anode`, `cathode` (`SC:1076-1078`); if the cathode is on
+the ground node (`cathNode < 0`) the stamp returns (nothing at all, not even
+the bias resistor). No params. Catalog (CAT:7102): no `default_params`;
+`p_max 0.5` (not read). Literals (`SC:1085-1088`): `TL431_VREF = 2.495` V,
+`TL431_IK = 1e-3` A, `TL431_NZ = 0.5`, so `VtNZ = 0.5*Vt = 12.846 mV` at
+25 C and the exponential guard `vSatZ = 5*VtNZ = 64.231 mV`.
+
+### 12.2 Equations
+
+`drive = V(ref) - V(anode) - 2.495` at the iterate (`SC:1093`);
+`driveC = min(drive, vSatZ)`; `eZ = exp(driveC/VtNZ)`;
+`gPhysical = 1e-3*eZ/VtNZ`; `I_ka = 1e-3*eZ + gPhysical*max(0, drive - vSatZ)`
+(current from cathode to anode); `gZ = gPhysical + 1e-12`;
+`Ieq = I_ka - gPhysical*(V(ref) - V(anode))`.
+Stamp: `(cath, ref) += gZ`, `(cath, anode) -= gZ`, `b[cath] -= Ieq`,
+`(anode, ref) -= gZ`, `(anode, anode) += gZ`, `b[anode] += Ieq`
+(each guarded for ground rows); `stampResistor(ref, anode, 1e6)` always. The
+current does NOT depend on `V(cathode)`; the `1e-12` is a transconductance
+in the Jacobian that the companion `Ieq` omits, so the converged KCL carries
+`I_ka + 1e-12*(Vref - Vanode)` (negligible).
+
+Reported current (`SC:1123-1138`): `1e-3*exp(driveC/VtNZ) + slope*max(0, drive
+- vSatZ)`, cathode to anode, no GMIN.
+
+At 25 C: one decade of `I_ka` per 29.58 mV of `drive`; 1 mA at `drive = 0`,
+10 mA at +29.6 mV, 100 mA at +59.2 mV; the tangent starts at 148.4 mA
+(`1e-3*e^5`) with slope `11.55 S`. Dynamic resistance `VtNZ/I`: 12.8 ohm at
+1 mA, 1.28 ohm at 10 mA, 0.128 ohm at 100 mA.
+
+### 12.3 Dynamics and state
+
+None. No compensation, no capacitance (a real TL431 is conditionally stable
+with large output capacitance, recalled; not modelled), no thermal.
+
+### 12.4 Newton
+
+No limiter; the tangent guard bounds the exponential. The model is a
+transconductance whose cathode current is independent of the cathode node, so
+Newton converges through the circuit's own feedback (REF tied to a divider on
+the cathode). With the REF held by something else the cathode node is
+unconstrained (section 12.5).
+
+### 12.5 Regimes and events
+
+None discrete. **Finding: unbounded negative cathode.** Because `I_ka` does
+not depend on `V(cathode)`, a cathode fed through a resistor from a rail with
+REF only a few percent above `Vref` is driven absurdly negative
+(computed, `Vs = 12 V`, 1 kohm pull-up): REF 2.52 V gives `I_ka = 7.0 mA`,
+cathode 5.0 V; REF 2.55 V gives 72 mA, cathode -60 V; REF 2.6 V gives 619 mA,
+cathode -607 V; REF 3 V gives 5.2 A, cathode -5229 V. With a 100 kohm pull-up
+REF = 2.52 V already drives the cathode to -688 V. A real TL431 saturates
+at about 1 to 2 V above the anode with REF well above `Vref` (the datasheet
+`Vka(min)`) and clamps the current at 100 mA. Circuits that use the part as
+a comparator or crowbar trigger (REF from a divider that is not fed back from
+the cathode) are therefore wrong by hundreds of volts in classic. The shipped
+tests use only the fed-back configurations.
+
+### 12.6 Small-signal AC
+
+`SC:1140-1163`: `stampAcAdmittance(ref, anode, 1e-6)`; `gZ = 1e-3*exp(driveC/
+VtNZ)/VtNZ + AC_GMIN` and the same four VCCS entries (`cath/ref +gZ`,
+`cath/anode -gZ`, `anode/ref -gZ`, `anode/anode +gZ`) at the OP's `drive`
+(`SC:1156-1162`). The derivative of the transient stamp, GMIN included; no
+disagreement. No output conductance (the cathode current is independent of
+`V(cathode)`), so the AC output impedance of the part is infinite.
+
+### 12.7 Diagnostics
+
+None. (`p_max` is not read; there is no thermal profile.)
+
+### 12.8 Tests that pin it
+
+`wave4-comparator-shunt.test.ts:377-520`: `Vout = Vref*(1 + R1/R2)`: cathode
+4.94 to 5.10 V and 5.9 to 8.1 mA with `R1 = R2 = 10 kohm` on 12 V through
+1 kohm (`:402`: 4.99 V ideal plus about 50 mV of knee offset); REF tied to the
+cathode gives 2.495 V within 30 mV (`:459`); REF tied to ground leaves the
+cathode near 12 V (`:505`).
+
+### 12.9 Questions
+
+- **Q-W3-57 (no cathode-voltage dependence; section 12.5).** The port
+  mirrors the unbounded behaviour or adds `Vka(min)` saturation and a 100 mA
+  cap. The analytic answer (decision 7 (b)) is the saturated one: cathode
+  >= anode + about 1 to 2 V (TI TL431: 1 to 100 mA operating range, recalled).
+  A kernel with `limit` and a regime (anode-referenced saturation) is a
+  genuine fix. **Recommend** mirror classic for W3-C gate 1 and register the
+  divergence now: PLAN's decision 7 names exactly "classic is wrong or
+  absent".
+- **Q-W3-58 (anchor at 1 mA versus 10 mA).** The reference voltage is exact
+  at 1 mA; the datasheet specifies `Vref` at `Vka = Vref`, `Ik = 10 mA` (TI,
+  recalled). Classic is 29.6 mV (1.2 percent) high at 10 mA: 2.525 V. The
+  catalog note quotes `+-0.5 percent` (B grade). **Recommend** reproduce.
+- **Q-W3-59 (dynamic impedance).** Classic 1.28 ohm at 10 mA against the
+  datasheet 0.22 ohm typ (0.5 max) (recalled): the load regulation of a
+  classic TL431 is about six times worse than a real part. **Recommend**
+  reproduce; flag to Dev.
+- **Q-W3-60 (no reverse conduction).** A real part has an anode-to-cathode
+  diode; classic has none. A TL431 with its cathode below its anode conducts
+  nothing in reverse in classic (except the VCCS pull when REF is high, 12.5).
+  **Recommend** reproduce.
+- **Q-W3-61 (placement).** PLAN row W3-C lists the TL431 with the
+  comparator behind W3-G. It needs only W3-N (a three-terminal smooth kernel)
+  and could land with W3-T. **Recommend** move it.
+- **Q-W3-62 (`cathNode < 0` returns everything).** With the cathode on the
+  ground node no stamp is written, including the REF bias. **Recommend**
+  reproduce (the case is degenerate).
