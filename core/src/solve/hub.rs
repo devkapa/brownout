@@ -323,7 +323,7 @@ pub(super) struct W1fSnapshot {
     hub: Option<(RailState, Vec<Contrib>, bool)>,
     exact: Option<(Regime, crate::devices::battery::BatteryState, f64, f64)>,
     wave: Rc<RampEval>,
-    caps: Vec<(f64, f64, f64)>,
+    caps: Vec<super::CapAnchor>,
     static_hubs: Vec<Option<static_part::HubSolveSnapshot>>,
     /// R59 (1) (B): each `cc_switch` partition's kind, and the switch's
     /// state.
@@ -347,7 +347,7 @@ impl PartitionedSolver {
             hub: self.hub.as_ref().map(|h| (h.state.clone(), h.contrib.clone(), h.dirty)),
             exact: self.exact.as_ref().map(|e| (e.reg, e.battery, e.t_last, e.held)),
             wave: Rc::clone(&self.wave),
-            caps: self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)).collect(),
+            caps: self.fixed_pair_capacitors.iter().map(FixedPairCapacitor::anchor).collect(),
             static_hubs: self.static_solver.hub_snapshot(),
             kinds: self.cc_switch.iter().map(|&p| self.partition_kinds[p]).collect(),
             crawl: self.cc_crawl,
@@ -373,8 +373,8 @@ impl PartitionedSolver {
         for (w, src) in self.wave.sources.iter().enumerate() {
             self.static_solver.set_wave_level(w, src.level_index);
         }
-        for (cap, (d_v, vc0, t0)) in self.fixed_pair_capacitors.iter_mut().zip(snap.caps) {
-            (cap.d_v, cap.vc0, cap.t0) = (d_v, vc0, t0);
+        for (cap, a) in self.fixed_pair_capacitors.iter_mut().zip(snap.caps) {
+            cap.set_anchor(a);
         }
         self.static_solver.hub_restore(snap.static_hubs);
         for (k, kind) in snap.kinds.into_iter().enumerate() {
@@ -3143,7 +3143,7 @@ impl PartitionedSolver {
             // node at load) does now, so the instant rolls them back.
             if !self.live_caps && self.window {
                 self.w_caps.clear();
-                self.w_caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)));
+                self.w_caps.extend(self.fixed_pair_capacitors.iter().map(FixedPairCapacitor::anchor));
             }
             self.live_caps = true;
             for k in 0..self.fixed_pair_capacitors.len() {

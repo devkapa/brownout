@@ -1501,7 +1501,7 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
 | A resistor, switch, LED or 555 on the hub rail or a static hub partition's line in it | held while the rail holds between its events; while it moves, its current at the rail model's mean (the CC segment's or cell path's integral, `CapSeg::mean`) | exact for a resistor or switch; an LED or 555, nonlinear, by `I''/8 (dV)^2` with `dV` the line's move over the interval (within W0 while `dV` stays under about `0.09 n Vt`, 4.6 mV at n = 2) |
 | In a closed form | each current at the analytic means of `vc`, the rail's move `du` and the ramp's time (all affine); the capacitor `C dvc` | exact; a draining cell's held and curved terms and a curved segment's `vc du` by composite five-point Gauss-Legendre, at most `4e-10` of the term (panels of two time constants) |
 | In a stepped partition | its integrator's own quadrature over the step's points: backward Euler's end, the trapezoid's two ends, TR-BDF2's `k (gamma h / 2)(i_0 + i_g) + h_2 i_1`, each point read against the boundary and the CC rail the step solved with; a capacitor's is `C dvc` to rounding | exact; an iterated partition's points meet KCL to its Newton tolerance (measured 2e-7 to 5e-7 of the charge at an LED's nodes) |
-| A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge | exact |
+| A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge; a cell's rail capacitor `C ΔdV` on the coupled path, else its reading held (Rails point 7) | exact |
 | A voltage source, PSU or anything else the forest fixes a node with | KCL over the charges of what leaves the nodes it fixes, walked as `recompute_source_currents` walks; a PSU in CC is `-dir iLimit` for as long as it is | exact; see the open item below |
 
 - **A rail nothing models** (a cell or CC rail moved by stepped draws between
@@ -4945,7 +4945,8 @@ Constants, all from P3:35-38 unless marked new:
      are on fixed or rail nodes re-aims at each change: `vc` is continuous
      and the new `dV` sets its target (`esr > 0`: the exponential with
      `esr·C`; `esr = 0`: `vc = dV` at once, current 0, W1b rule 2a's known
-     divergence). An LED junction across such nodes re-publishes `I(dV)`.
+     divergence; a cell's rail capacitor publishes the rail's rate instead,
+     below). An LED junction across such nodes re-publishes `I(dV)`.
      A **rail capacitor** (one pin on the rail, the other on a fixed node)
      is this case too in CV and on a battery, with `esr` of any value (two
      corpus circuits carry `cap-ceramic` parts with `esr` 0.05 across a
@@ -4964,6 +4965,58 @@ Constants, all from P3:35-38 unless marked new:
      is (a decline added with F1 round 2, the manager informed, 2026-10-07),
      in exact mode too: the hub is classified before exact mode frees the
      rail node.
+   - **A cell's rail capacitor** (CAPI, ruling R115 Q4: a published
+     capacitor current is within W0 of the true one in every circuit). The
+     model: on a battery the rail is algebraic (point 2) and a rail
+     capacitor is not in its equation, so the solver carries no charge of
+     its own for it; the capacitor's charge follows the rail, `q = C dV`
+     with `dV` its pins' published difference, and its current is `C
+     d(dV)/dt` of the rail as published, plus its leakage. Before CAPI it
+     published the rule-2a staircase, `0` at `esr = 0` (760 of 760 stops at
+     10 us on fixtures 77 and 78, against `C dV/dt` of about 20 uA) and
+     `(dV - vc)/esr` of the rail's last move otherwise. By the rail's mode
+     at the instant (`cell_cap_rate`):
+     - on the cell's coupled path (point 4, closed-form hub partitions) the
+       path's slope from the instant: the right-hand value, so at a 555
+       edge or a switch, where the rail steps or turns, the reading is the
+       rate after it, as for edges elsewhere (exact mode, "What a capacitor
+       current resolves to");
+     - where the rail holds between its solves (no closed-form or stepped
+       hub partition moves it), `0`, the step's included;
+     - where stepped hub partitions or the fallback drive move it and
+       nothing models the motion (ruling (a), linear between its solves),
+       the rate of its last move, `C (dV_k - dV_j)/(t_k - t_j)` from the
+       last earlier instant `j` at which it moved, and `0` at an instant at
+       which it did not: the companion over the rail's last step, as a
+       stepped capacitor publishes;
+     - with any `esr`: the same. The capacitor's own `esr·C` lag is the same
+       transient as the unmodelled `r·C_rail` (both are the charge's
+       exchange with the cell), so it is left out with it; the device's
+       state (`vc`, what a reload carries) keeps the rule-2a exponential;
+     - several rail capacitors each carry their own `C_k d(dV_k)/dt`, signed
+       by their pins, the far pin on ground or on any other fixed node
+       (Rails point 1 refuses a waveform node there);
+     - the jump of the rail itself at a solve (a load step through `r`) is
+       the unmodelled `r·C_rail` transient: its charge `C ΔV` is in no
+       published current and no charge, at most `C_rail` times the jump;
+     - in exact mode the rail node is free and the capacitor is a capacitor
+       of the rail's stepped partition, published as its companion like any
+       other (point 9), `r·C_rail` included.
+     The cell's published current is the KCL of what leaves its rail
+     (`recompute_source_currents`), so it carries the capacitors' current
+     too and KCL at the rail node closes within W0 at every published
+     instant (before CAPI it was short by exactly their current). Its SoC
+     is unchanged: the charge the capacitors move is not counted there
+     (above), and no voltage moves. The charge (W2b) is the integral of the
+     published current: `C ΔdV` over each span on the coupled path (the
+     leakage at the rail's mean), the held reading otherwise. Pins:
+     `solve/cap_tests.rs` (a coupled RC and a switched load by hand, with
+     esr, two capacitors either way round and to a 1 V node, a held rail,
+     a stepped rail, exact mode, KCL, the charge) and, at 10 us stops over
+     two periods of fixtures 77 and 78 and at every hand-judged stop of 77
+     to 79, `C dV/dt` of the core's own rail read 0.5 us on from a
+     snapshot (`battery-555-corpus.test.ts`, `hand-bound.ts`): worst 2e-4
+     of W0.
    - **Watches.** A change re-aims every watch whose thresholds read the
      changed node, as a moving static supply does (W1c point 4,
      `add_watch_dependent_partitions`).

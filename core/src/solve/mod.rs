@@ -67,6 +67,8 @@ mod observe_tests;
 mod snapshot_tests;
 #[cfg(test)]
 mod window_tests;
+#[cfg(test)]
+mod cap_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -2372,7 +2374,16 @@ struct FixedPairCapacitor {
     /// node moves).
     vc0: f64,
     t0: f64,
+    /// `(t0, dV)` as they stood before the last re-aim at a later instant:
+    /// the start of the last move of `dV`, which a cell's rail capacitor
+    /// reads its rate over where nothing models the rail between its solves
+    /// ([`PartitionedSolver::cell_cap_rate`]).
+    prev: (f64, f64),
 }
+
+/// What a rollback or a snapshot carries of a [`FixedPairCapacitor`]: its
+/// target, its anchor and the move before it.
+type CapAnchor = (f64, f64, f64, (f64, f64));
 
 impl FixedPairCapacitor {
     /// Rule 2a's exact trajectory: from `vc = 0` at `START_TIME`, `vc(t) =
@@ -2425,6 +2436,11 @@ impl FixedPairCapacitor {
         if d_v.to_bits() == self.d_v.to_bits() {
             return;
         }
+        // Several re-aims inside one instant (the rail loop's passes) are one
+        // move, from where `dV` stood at the last earlier instant.
+        if now > self.t0 {
+            self.prev = (self.t0, self.d_v);
+        }
         self.vc0 = if self.esr > 0.0 { self.vc_at(now) } else { d_v };
         self.t0 = now;
         self.d_v = d_v;
@@ -2436,6 +2452,14 @@ impl FixedPairCapacitor {
         self.vc0 = vc;
         self.t0 = now;
         self.d_v = d_v;
+    }
+
+    fn anchor(&self) -> CapAnchor {
+        (self.d_v, self.vc0, self.t0, self.prev)
+    }
+
+    fn set_anchor(&mut self, a: CapAnchor) {
+        (self.d_v, self.vc0, self.t0, self.prev) = a;
     }
 }
 
@@ -2918,7 +2942,7 @@ pub struct PartitionedSolver {
     /// Whether a rule-2a capacitor sits on a live node (its anchor is then
     /// instant state).
     live_caps: bool,
-    w_caps: Vec<(f64, f64, f64)>,
+    w_caps: Vec<CapAnchor>,
     /// node -> not free (fixed, or the rail outside exact mode).
     fixed_node: crate::shared::Shared<[bool]>,
     /// device -> its kind code.
@@ -3164,6 +3188,7 @@ impl PartitionedSolver {
                             leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
                             vc0: 0.0,
                             t0: program.options.start_time,
+                            prev: (program.options.start_time, 0.0),
                         });
                     }
                 }
@@ -4015,8 +4040,38 @@ impl PartitionedSolver {
                     let sign = if cap.nodes.0 == hub.node { 1.0 } else { -1.0 };
                     currents[cap.device_index] = sign * cap.c * dq + cap.leak_g * (self.voltages[cap.nodes.0] - self.voltages[cap.nodes.1]);
                 }
+            } else if matches!(hub.kind, crate::rails::HubKind::Battery(_)) {
+                // A cell's rail capacitor follows the algebraic rail (Rails
+                // point 7, CAPI): `C dV/dt` of the rail as published.
+                for &(k, _) in &hub.caps {
+                    let cap = &self.fixed_pair_capacitors[k as usize];
+                    currents[cap.device_index] = cap.c * self.cell_cap_rate(cap, now) + cap.leak_g * cap.d_v;
+                }
             }
         }
+    }
+
+    /// `d(dV)/dt` at `now` of a rail capacitor on a cell (Rails point 7,
+    /// CAPI): the rail is algebraic and the capacitor's charge follows it, so
+    /// this is the rail's own rate as the solver publishes it, signed by the
+    /// capacitor's pins. On the cell's coupled path, the path's slope from
+    /// the instant (the right-hand value at a discontinuity of slope); where
+    /// the rail holds between its solves, 0; where stepped draws or the
+    /// fallback drive move it between solves and nothing models the motion
+    /// (ruling (a): linear between solves), the rate of its last move, from
+    /// the last earlier instant at which it moved to this one, as a stepped
+    /// capacitor publishes its companion over its last step, and 0 at an
+    /// instant at which it did not move.
+    fn cell_cap_rate(&self, cap: &FixedPairCapacitor, now: f64) -> f64 {
+        let Some(hub) = self.hub.as_ref() else { return 0.0 };
+        if let Some(path) = hub.state.cell_path.as_ref() {
+            let sign = if cap.nodes.0 == hub.node { 1.0 } else { -1.0 };
+            return sign * path.slope_at(now);
+        }
+        if self.rail_unmodelled() && cap.t0 == now && cap.t0 > cap.prev.0 {
+            return (cap.d_v - cap.prev.1) / (cap.t0 - cap.prev.0);
+        }
+        0.0
     }
 
     /// The authoritative `voltage_source` current computation for the WHOLE
@@ -4361,6 +4416,16 @@ impl PartitionedSolver {
     fn lazy_publish_ok(&mut self, now: f64) -> bool {
         if !self.lazy_static_ok || !(now >= self.start_time) {
             return false;
+        }
+        // A cell's rail capacitors publish `C dV/dt` of the rail, bounded
+        // only by the rail's own rate at `now` (CAPI).
+        if let Some(hub) = self.hub.as_ref().filter(|h| h.state.cap_seg.is_none() && matches!(h.kind, crate::rails::HubKind::Battery(_))) {
+            for &(k, _) in &hub.caps {
+                let cap = &self.fixed_pair_capacitors[k as usize];
+                if !((cap.c * self.cell_cap_rate(cap, now)).abs() <= LAZY_I_LIMIT) {
+                    return false;
+                }
+            }
         }
         // The claim the bounds rest on, checked on every call of a debug
         // build: no write has left a value above them.
@@ -5566,7 +5631,7 @@ impl PartitionSolver for PartitionedSolver {
         self.w_observer = self.observer.as_ref().map(|o| o.mark());
         if self.live_caps {
             self.w_caps.clear();
-            self.w_caps.extend(self.fixed_pair_capacitors.iter().map(|c| (c.d_v, c.vc0, c.t0)));
+            self.w_caps.extend(self.fixed_pair_capacitors.iter().map(FixedPairCapacitor::anchor));
         }
         #[cfg(test)]
         {
@@ -5685,8 +5750,8 @@ impl PartitionSolver for PartitionedSolver {
             self.rejudge_const_power();
         }
         if self.live_caps {
-            for (cap, &(d_v, vc0, t0)) in self.fixed_pair_capacitors.iter_mut().zip(&self.w_caps) {
-                (cap.d_v, cap.vc0, cap.t0) = (d_v, vc0, t0);
+            for (cap, &a) in self.fixed_pair_capacitors.iter_mut().zip(&self.w_caps) {
+                cap.set_anchor(a);
             }
         }
         // W1g point 15: the slow state, then every stamp it set this instant.
@@ -7053,6 +7118,7 @@ impl crate::snapshot::HeapBytes for FixedPairCapacitor {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.leak_g, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.prev, w); }
         n
     }
 }
