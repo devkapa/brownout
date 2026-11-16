@@ -2852,6 +2852,18 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Every static hub node's last solve as `(x, s, u_p)`: it publishes
+    /// `x + s (u - u_p)` (R121 reads its rail sensitivity `s`).
+    pub(crate) fn for_each_hub_line(&self, mut f: impl FnMut(f64, f64, f64)) {
+        for h in self.hubs.iter().flatten() {
+            if let Some(s) = h.solve.as_ref() {
+                for (x, sl) in s.x.iter().zip(&s.s) {
+                    f(*x, *sl, s.u_p);
+                }
+            }
+        }
+    }
+
     /// A node of a static hub partition that has solved, as the line it
     /// publishes on the rail (Rails point 3): `x + s (u - u_p)` as `(x - s
     /// u_p, s)`.

@@ -1316,6 +1316,20 @@ impl ClosedFormSolver {
         }
     }
 
+    /// The capacitance of every closed-form hub partition (R121: each
+    /// one's current follows the rail's slope, `C du/dt`).
+    pub(crate) fn hub_caps(&self) -> Vec<f64> {
+        self.parts.iter().filter(|p| !p.parked && p.seg.as_ref().is_some_and(|s| s.hub.is_some())).map(|p| p.cap.c).collect()
+    }
+
+    /// Whether a curved hub partition is aimed under a draining cell's
+    /// coupled path (`Drive::held`): its coupling's error, which
+    /// [`couple_band`] bounds, grows with each aim's length and is carried
+    /// into the next (R121, CAD-2).
+    pub(crate) fn curved_on_cell_path(&self) -> bool {
+        self.parts.iter().any(|p| !p.parked && p.curve().is_some() && p.drive.as_ref().is_some_and(|d| d.held))
+    }
+
     /// The earliest instant a driven partition's coupling band runs out in
     /// time (`couple_band`), when the rail must solve and aim it again.
     pub(crate) fn couple_expiry(&self) -> f64 {

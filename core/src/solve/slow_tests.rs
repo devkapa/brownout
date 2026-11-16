@@ -1088,9 +1088,20 @@ fn an_rc_with_a_ptc_behind_on_a_battery_latches_alike_however_the_host_advances(
     // (R29), and a closed-form device is visited only at its own events,
     // re-aims and anchors, so a host's chunk end that publishes the
     // partition changes nothing.
-    let p = program(4, vec![battery(0, 1, 0, 6.0, 0.2), resistor(1, 1, 2, 20.0), capacitor(2, 2, 0, 0.05), ptc(3, 2, 3, 1.0, 0.2), resistor(4, 3, 0, 30.0), rating(1, 0.3, 20.0)]);
-    let run = |step: f64| {
-        let mut e = Engine::load(&p).unwrap();
+    //
+    // R121 (2): the chunkings agree to a tenth of what W0 allows, not to
+    // 1e-11 (that pin was the 10 uV band's own number, not a closed form).
+    // W0 lets the rated resistor's current err by 1e-3 of itself (its 1 nA
+    // floor is nothing at 0.2 A), so the allowance on each quantity is how far
+    // it moves when that current moves by 1e-3: the board run again with the
+    // resistor 1e-3 higher and lower, the larger move of the two (about
+    // 8.7e-4 s on the latch time). A cell's rail re-solves where its readings
+    // allow (R121), and a host's chunk end solves it too, so the solve
+    // instants, and the heat history they integrate, depend on the chunks:
+    // 8.0e-7 s apart at 0.37 s chunks, 9e-4 of the allowance.
+    let board = |r: f64| program(4, vec![battery(0, 1, 0, 6.0, 0.2), resistor(1, 1, 2, r), capacitor(2, 2, 0, 0.05), ptc(3, 2, 3, 1.0, 0.2), resistor(4, 3, 0, 30.0), rating(1, 0.3, 20.0)]);
+    let run_on = |p: &Program, step: f64| {
+        let mut e = Engine::load(p).unwrap();
         let mut t = 0.0f64;
         while t < 6.0 {
             t = (t + step).min(6.0);
@@ -1100,13 +1111,22 @@ fn an_rc_with_a_ptc_behind_on_a_battery_latches_alike_however_the_host_advances(
         assert_eq!(r.len(), 7, "the resistor latched: {r:?}");
         (r[3], r[4], e.device_state(3).unwrap().to_vec())
     };
+    let p = board(20.0);
+    let run = |step: f64| run_on(&p, step);
     let base = run(0.01);
+    let (hi, lo) = (run_on(&board(20.0 * (1.0 + 1e-3)), 0.01), run_on(&board(20.0 * (1.0 - 1e-3)), 0.01));
+    let allow = |f: &dyn Fn(&(f64, f64, Vec<f64>)) -> f64| (f(&hi) - f(&base)).abs().max((f(&lo) - f(&base)).abs());
+    let (allow_t, allow_v) = (allow(&|r| r.0), allow(&|r| r.1));
+    eprintln!("W0 allowance: latch time {allow_t:.3e} s, latch power {allow_v:.3e} W");
+    assert!(allow_t > 1e-4, "the latch moves with the current: {allow_t:e}");
     for step in [0.37, 1.0 / 60.0, 6.0] {
         let (t, v, st) = run(step);
-        close(t, base.0, 1e-11 * base.0, &format!("the latch time at {step} s steps"));
-        close(v, base.1, 1e-11 * base.1, &format!("the latch's power at {step} s steps"));
-        for (a, b) in st.iter().zip(&base.2) {
-            close(*a, *b, 1e-11 * (1.0 + b.abs()), &format!("the PTC's state at {step} s steps"));
+        eprintln!("at {step} s steps: latch time off by {:.3e} s ({:.2e} of the allowance)", (t - base.0).abs(), (t - base.0).abs() / allow_t);
+        close(t, base.0, 0.1 * allow_t, &format!("the latch time at {step} s steps"));
+        close(v, base.1, 0.1 * allow_v, &format!("the latch's power at {step} s steps"));
+        for (k, (a, b)) in st.iter().zip(&base.2).enumerate() {
+            let allow_k = allow(&|r| r.2[k]);
+            close(*a, *b, (1e-11 * (1.0 + b.abs())).max(0.1 * allow_k), &format!("the PTC's state at {step} s steps"));
         }
     }
 }

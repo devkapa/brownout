@@ -4562,7 +4562,11 @@ fn stats_14_and_16_to_20_count_the_rail_and_the_sources_and_stay_0_in_exact_mode
     e.advance(5e-3).unwrap();
     let stats: Vec<f64> = (14..=20).filter(|&i| i != 15).map(|i| e.stat(i)).collect();
     eprintln!("stats 14, 16-20 after 5 ms: {stats:?}");
-    assert!(e.stat(14) > 100.0 && e.stat(18) > 100.0, "rail moves and events");
+    // R121: the rail's own reading binds (no static hub partition, no direct
+    // draw), 10 uV + 0.2 W0(5 V) = 1.03 mV a solve, and the rail climbs
+    // about 5 mV in 5 ms: a handful of events (4) where the 10 uV band took
+    // over 100. This counts events; the coupled-RC tests check the values.
+    assert!(e.stat(18) >= 1.0 && e.stat(18) <= 25.0, "rail events: {}", e.stat(18));
     assert!(e.stat(16) >= 1.0, "sensitivities");
     assert_eq!(e.stat(19), 10.0, "ten clock edges");
     // Since round 14 the horizon clamp solves a cell whose closed-form
@@ -20200,6 +20204,407 @@ fn a_bench_supplys_direction_is_its_programs_and_an_edit_that_flips_it_reloads()
     }
 }
 
+#[test]
+fn a_cells_rail_re_solves_where_its_readings_allow_not_every_10_uv_of_its_motion() {
+    // R121: on a draining cell's coupled path the rail solves again where a
+    // reading it moves could leave its slack, not every 10 uV of its motion
+    // (the battery SAP-1 did so about 32,000 times a simulated second, most
+    // of its cost). The coupled RC of the rail-event test: E 5, r 1, R 1k,
+    // C 1 uF, no static hub partition and no direct draw, so the rail's own
+    // reading binds: RAIL_DRIFT_V + 0.2 W0(5 V) = 10 uV + 0.2 x 5.1 mV =
+    // 1.03 mV a solve. The rail climbs (5 - 4.995) = 5 mV over 5 tau', so
+    // about 5 solves where the 10 uV band took 469; 25 leaves room for the
+    // thresholds' own events. The rail and vc stay on the coupled closed form
+    // within W0 at every host stop (each re-solves the rail).
+    let (e, r, big_r, c) = (5.0, 1.0, 1000.0, 1e-6);
+    let p = program(3, vec![battery(0, 1, 0, e, r), resistor(1, 1, 2, big_r), capacitor(2, 2, 0, c, 0.0)]);
+    let tau = (big_r + r) * c;
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        let mut worst: f64 = 0.0;
+        for k in 1..=50 {
+            let t = 5.0 * tau * k as f64 / 50.0;
+            rig.advance(t).unwrap();
+            let vc = e * (1.0 - (-t / tau).exp());
+            let u = e - (e - vc) * r / (big_r + r);
+            worst = worst.max((rig.v(1) - u).abs() / (1e-4 + 1e-3 * u.abs())).max((rig.v(2) - vc).abs() / (1e-4 + 1e-3 * vc.abs()));
+        }
+        rails::force_fixed_cell_band(false);
+        (rig.hub().stats.events, worst)
+    };
+    let (fixed_events, _) = run(true);
+    let (events, worst) = run(false);
+    eprintln!("R121 coupled RC: {events} rail events over 5 tau' ({fixed_events} on the 10 uV band), worst {worst:.3} W0 off the coupled closed form");
+    assert!(worst <= 1.0, "{worst:.3} W0 off the coupled closed form");
+    assert!(events <= 25, "{events} rail events for a 5 mV climb");
+}
+
+#[test]
+fn a_cells_rail_under_a_static_hub_divider_re_solves_within_the_dividers_slack() {
+    // R121: a static hub partition's reading caps the drift. A 1k/1k divider
+    // off the rail publishes x = u/2 + ..., s = 1/2, so its node allows
+    // 10 uV + 0.2 W0(2.5 V) / 0.5 = 10 uV + 0.2 x 2.6 mV x 2 = 1.05 mV, and its
+    // draw (i = u/2k, g = 1/2k) allows 10 uV + 0.2 (1e-9 + 1e-3 i) / g =
+    // 10 uV + 0.2 x 1e-3 x 5 V = 1.01 mV: the cap the solve sets is the least,
+    // 1.01 mV (to the bit of the rail's own, 1.03 mV, it is not).
+    let p = program(4, vec![battery(0, 1, 0, 5.0, 1.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 1000.0), resistor(4, 3, 0, 1000.0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(2e-3).unwrap();
+    let u = rig.u();
+    let i = u / 2000.0;
+    let want = rails::RAIL_DRIFT_V + rails::CELL_READING_SLACK * (1e-9 + 1e-3 * i) * 2000.0;
+    let got = rig.hub().state.cad_d;
+    eprintln!("R121 divider: drift cap {got:e} (draw's {want:e})");
+    rel(got, want, 1e-3, "the divider's draw sets the drift cap");
+}
+
+/// The cold fuzz's 212/4 (HUB=1, `f5e gen 212 4`): a 4.54 V, 0.142 ohm cell
+/// (node 1); a clock (-1.23 / 2.62 V) under a 3.59 V source holds node 4; a
+/// 74LS00 on the rail reads node 2 and drives node 5, which carries 202 uF
+/// to the clock's node 3 and 10k, 1992, 77.1k and 780 ohm.
+fn cold_212_tpl4() -> Program {
+    let mut p = program(6, vec![
+        fz(20, 0, &[1, 0], vec![1.0, 0.14230800172631905, 1.0, 0.0, 2.0, 0.05, 0.09702308315523357, 0.3875130948692837, 0.0], vec![2.0, 0.0, 4.369542024188625, 1.0, 4.543091770643159]),
+        fz(22, 1, &[3, 0], vec![65.03959593145582, 0.1440489398275677, 2.6190461492520836, -1.2282449853810524, 0.0], vec![8.0]),
+        fz(2, 2, &[4, 3], vec![3.5882207326072146], vec![]),
+        fz(1, 3, &[2, 0], vec![52827.26552003454], vec![]),
+        fz(1, 4, &[5, 0], vec![10003.00875739213], vec![]),
+        fz(30, 5, &[4, 0], vec![1.7555602377676212, 1.5269146736187449, 0.017877639897856405, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 4], vec![802.0581054080589], vec![]),
+        fz(1, 7, &[4, 5], vec![1991.8399038885404], vec![]),
+        fz(30, 8, &[4, 1], vec![2.352959122819539, 2.279231684400348, 0.01398982415467486, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 9, &[4, 4], vec![11.387496569716541], vec![]),
+        fz(3, 10, &[4, 0], vec![4.189594078994012e-6, 0.0, 0.0], vec![]),
+        fz(30, 11, &[2, 4], vec![2.106848465868395, 2.4606806565880186, 0.011047476514445497, 0.0, 0.0, 0.0], vec![]),
+        fz(3, 12, &[1, 0], vec![7.114572276168932e-7, 0.0, 0.0], vec![]),
+        fz(3, 13, &[3, 5], vec![0.00020238118248800812, 0.0, 0.0], vec![]),
+        fz(1, 14, &[4, 5], vec![77114.50092676391], vec![]),
+        fz(50, 15, &[1, 0, 2, 2, 5, 0, 0, 4, 0, 0, 4, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.50009034140198e-8], vec![0.0; 13]),
+        fz(1, 16, &[5, 0], vec![780.3067289716485], vec![]),
+        fz(1, 17, &[4, 1], vec![62.443341574611814], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00014563755017998363, 802.0581054080589], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.003146863646363051, 1991.8399038885404], vec![]),
+        fz(90, 9, &[], vec![9.0, 7.463825430456302, 11.387496569716541], vec![]),
+        fz(90, 14, &[], vec![14.0, 3.8472088922290325e-6, 77114.50092676391], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.0191189553128258, 780.3067289716485], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.01935752624267547, 62.443341574611814], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_curved_partition_on_a_cells_path_keeps_the_10_uv_band() {
+    // CAD-2 (R121): the cold fuzz's 212/4, whose 74LS00 output node 5 is a
+    // curved closed-form hub partition the cell's coupled path drives. Its
+    // coupling's error (`couple_band`) is carried from aim to aim and grows
+    // with each aim's length, about as its square; on the 10 uV band an aim
+    // lasted ~12 us. Aimed for as long as the readings allowed (0.5 mV, the
+    // LEDs' junction cap, ~1 ms), one aim left a current near zero (1 nA of
+    // tolerance) 2.9 nA of error, and every aim after failed at the bound's
+    // 1 ns floor until the 12 ms decay freed some (the sweep's run: 9,071
+    // rail events at 1 ns from 4.94 ms and 49k more from 20 ms, 18.5k -> 59k
+    // over 1.2 s, OK -> SLOW). So a board with such a partition keeps the
+    // 10 uV band, as one with a stepped hub partition does: its drift cap is
+    // `RAIL_DRIFT_V` at every solve once the partition is driven, and its
+    // rail events over 30 ms (both bursts' span) are the band's within 5 %
+    // (measured with 1 ms stops: 14,431 against 1,043 before, 1,043 after).
+    let p = cold_212_tpl4();
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        let mut caps = Vec::new();
+        for k in 1..=30 {
+            rig.advance(1e-3 * k as f64).unwrap();
+            if rig.s().closed_form.curved_on_cell_path() {
+                caps.push(rig.hub().state.cad_d);
+            }
+        }
+        rails::force_fixed_cell_band(false);
+        (rig.hub().stats.events, caps)
+    };
+    let (fixed_events, _) = run(true);
+    let (events, caps) = run(false);
+    eprintln!("212/4: {events} rail events to 30 ms ({fixed_events} on the 10 uV band); drift caps while driven {caps:?}");
+    assert!(!caps.is_empty(), "node 5 is never a curved partition on the path");
+    assert!(caps.iter().all(|&d| d == rails::RAIL_DRIFT_V), "drift caps {caps:?}");
+    assert!(events as f64 <= 1.05 * fixed_events as f64, "{events} rail events against the band's {fixed_events}");
+}
+
+#[test]
+fn a_curved_static_partitions_band_edge_is_a_rail_event_on_a_cells_path() {
+    // R121 rule 3: a curved static hub partition (1k and an LED off the rail)
+    // is solved again only once the rail has left its band (`u_p +- band`,
+    // 25 mV here), and between solves publishes its line; under the
+    // reading-aware cap (0.63 mV here, the LED draw's slack) the rail would
+    // run up to that far past the edge before a solve saw it. So the band's
+    // edges are thresholds of the path watch. A 5 V, 10 ohm cell charging
+    // 100 uF through 100 ohm: the rail climbs 4.55 -> 5 V (tau 11 ms) and
+    // crosses the band 17 times in 50 ms. Stepping event by event, the rail
+    // at every solve is within the band of the partition's last solve, the
+    // edge itself to 1e-6 of the band (located: 0.999999 measured; the 10
+    // uV band's own solves overshoot it by up to 10 uV, 1.0004), and the
+    // partition solves again at each crossing. Fails first without the
+    // thresholds: 1.0237, the cap's 0.6 mV past the edge.
+    let p = program(4, vec![battery(0, 1, 0, 5.0, 10.0), resistor(1, 1, 2, 100.0), capacitor(2, 2, 0, 100e-6, 0.0), resistor(3, 1, 3, 1000.0), led(4, 3, 0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    let (mut worst, mut resolves) = (0.0f64, 0);
+    while rig.k.time() < 0.05 {
+        let mut before = Vec::new();
+        rig.s().static_solver.nonlinear_hub_rails(rig.hub().resolve_band(), &mut before);
+        let t = rig.k.next_event_time().min(0.05);
+        rig.advance(t).unwrap();
+        let mut after = Vec::new();
+        rig.s().static_solver.nonlinear_hub_rails(rig.hub().resolve_band(), &mut after);
+        let ((up, band), (up_after, _)) = (before[0], after[0]);
+        worst = worst.max((rig.u() - up).abs() / band);
+        if up_after != up {
+            resolves += 1;
+        }
+    }
+    eprintln!("curved static partition: {} rail events, {resolves} re-solves, worst |u - u_p| / band {worst:.6}, drift cap {:.3e}", rig.hub().stats.events, rig.hub().state.cad_d);
+    assert!(rig.hub().state.cad_d > 1e-4, "the reading-aware cap is in force: {:.3e}", rig.hub().state.cad_d);
+    assert!(resolves >= 17, "{resolves} re-solves");
+    assert!(worst <= 1.0 + 1e-6, "the rail ran {worst:.6} of the band from the partition's solve");
+}
+
+#[test]
+fn a_cells_rail_with_a_direct_junction_holds_its_drift_to_half_a_millivolt() {
+    // R121: a junction straight on the rail is linearised at each solve, its
+    // current's second-order term i d^2 / (2 (n vt)^2) under 0.2 of its W0
+    // (1e-3 i) for d <= 0.02 n vt: CELL_JUNCTION_DRIFT_V, 0.5 mV.
+    // A 2.2 V, 10 ohm cell drives the LED straight to ground (its other end
+    // fixed), so the junction is a direct device of the rail.
+    let p = program(3, vec![battery(0, 1, 0, 2.2, 10.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), led(3, 1, 0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(2e-3).unwrap();
+    let got = rig.hub().state.cad_d;
+    eprintln!("R121 direct junction: drift cap {got:e}");
+    assert!(got <= rails::CELL_JUNCTION_DRIFT_V && got >= rails::RAIL_DRIFT_V, "{got:e}");
+}
+
+#[test]
+fn a_cell_feeding_a_stepped_hub_partition_keeps_the_10_uv_band() {
+    // R121 (3): a stepped hub partition reads the rail as a boundary at its
+    // plan, so until stale-rail work lands its cell keeps the 10 uV band:
+    // the run is the band's to the bit. An RC through an LED is stepped.
+    let p = program(5, vec![battery(0, 1, 0, 5.0, 1.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 330.0), led(4, 3, 4), capacitor(5, 4, 0, 1e-6, 0.0)]);
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        assert!(!rig.s().stepped.hub_partitions().is_empty(), "the LED's partition is a stepped hub partition");
+        let mut out = Vec::new();
+        for k in 1..=20 {
+            rig.advance(1e-4 * k as f64).unwrap();
+            out.extend((0..5).map(|n| rig.v(n).to_bits()));
+        }
+        rails::force_fixed_cell_band(false);
+        (out, rig.hub().stats.events)
+    };
+    assert_eq!(run(false), run(true), "a stepped hub partition's cell runs as on the 10 uV band");
+}
+
+#[test]
+fn a_cells_charge_integrates_its_current_along_the_path_between_solves() {
+    // R121: a generic cell (OCV 5 soc, 0.9 ohm) into 200 ohm, with a 1 nF RC
+    // on the rail so its closed form rides the coupled path. The RC's charge
+    // (5 nC) is nothing beside W0, so soc = e^(-5 t / (200.9 x 3600 C_ah))
+    // as in the device-state test. W0 on the cell's current, 1e-3 of
+    // 5 soc / 200.9 A over 1 s, allows `w0_soc` of state of charge; the
+    // charge integrated along the path keeps within a hundredth of it
+    // (5e-4 W0 measured). With the draws held at each solve, R121's cadence
+    // took 0.06 W0 (the 10 uV band 0.003).
+    for cap_ah in [1e-4, 1e-3, 1.0] {
+        let p = program(3, vec![generic_battery(0, 1, 0, 5.0, 0.9, cap_ah), resistor(1, 1, 0, 200.0), resistor(2, 1, 2, 1000.0), capacitor(3, 2, 0, 1e-9, 0.0)]);
+        let mut e = Engine::load(&p).unwrap();
+        for k in 1..=10 {
+            e.advance(k as f64 * 0.1).unwrap();
+        }
+        let st = e.device_state(0).unwrap().to_vec();
+        let soc = (-5.0 / (200.9 * 3600.0 * cap_ah)).exp();
+        let w0_soc = 1e-3 * (5.0 * soc / 200.9) / (3600.0 * cap_ah);
+        eprintln!("{cap_ah:e} Ah: soc {:.12} against {soc:.12}, {:.4} W0, rail events {}", st[0], (st[0] - soc).abs() / w0_soc, e.stat(18));
+        close(st[0], soc, 0.01 * w0_soc, &format!("{cap_ah:e} Ah's state of charge against the exact ODE"));
+    }
+}
+
+#[test]
+fn a_reload_carrying_a_cells_state_runs_on_its_reading_aware_cadence() {
+    // R121 with the carry (W2c): the cadence's state (drift cap, the drain
+    // line's history, its deadline) is the hub's and is not carried; a load
+    // seeded from a carry starts it afresh (no line history: the 10 uV band
+    // for its first solve) and runs on the reading-aware cadence from there.
+    // A draining generic cell (5 soc V, 0.9 ohm, 0.1 mAh) feeding a 1k / 1k
+    // divider and a 1k + 1 uF RC, carried at 2 ms, mid-transient (tau 1 ms),
+    // and run on to 0.3 s beside the engine it was taken from: every node
+    // within W0 of it at each stop, the state of charge within W0's share
+    // (1e-3 of the cell's ~2.5 mA over the run's 0.3 s, of 0.36 C), and the
+    // reload's rail events no more than the engine's own over the same span
+    // (+2) and under a tenth of the 10 uV band's (measured: 49 / 49 / 1063;
+    // nodes 0.000000 W0 apart, the SoC 1.5e-14).
+    let p = program(4, vec![generic_battery(0, 1, 0, 5.0, 0.9, 1e-4), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 1000.0), resistor(4, 3, 0, 1000.0)]);
+    let later = [3e-3, 5e-3, 0.01, 0.05, 0.1, 0.3];
+    let run_on = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(1e-3).unwrap();
+        e.advance(2e-3).unwrap();
+        let ev0 = e.stat(18);
+        let mut q = p.clone();
+        q.options.start_time = 2e-3;
+        q.carry = e.carry_take().unwrap().to_vec();
+        let mut r = Engine::load(&q).unwrap();
+        let mut worst = 0.0f64;
+        for &t in &later {
+            e.advance(t).unwrap();
+            r.advance(t).unwrap();
+            for (&g, &w) in r.voltages().iter().zip(e.voltages()) {
+                worst = worst.max((g - w).abs() / (1e-4 + 1e-3 * w.abs()));
+            }
+        }
+        let (soc_e, soc_r) = (e.device_state(0).unwrap()[0], r.device_state(0).unwrap()[0]);
+        rails::force_fixed_cell_band(false);
+        (worst, soc_e, soc_r, e.stat(18) - ev0, r.stat(18))
+    };
+    let (_, _, _, band_events, _) = run_on(true);
+    let (worst, soc_e, soc_r, ev_e, ev_r) = run_on(false);
+    eprintln!("carried cell: worst {worst:.6} W0, soc {soc_e:.15} / {soc_r:.15}, rail events from 2 ms {ev_e} / reload {ev_r} (band {band_events})");
+    assert!(worst <= 1.0, "{worst:.3} W0 off the engine the carry came from");
+    let w0_soc = 1e-3 * 2.5e-3 * 0.3 / (3600.0 * 1e-4);
+    close(soc_r, soc_e, w0_soc, "the reload's state of charge");
+    assert!(ev_r <= ev_e + 2.0 && ev_r * 10.0 < band_events, "reload {ev_r} rail events, the engine {ev_e}, the band {band_events}");
+}
+
+/// C2's tpl-6 boards (the cold fuzz's 555 astable on a cell, R121 (iii)):
+/// (seed, board). Generated by the cold fuzz (`f5e gen SEED 6`, HUB=1).
+pub(super) fn tpl6_board(seed: u32) -> Program {
+    let devices = match seed {
+        74 => vec![
+            fz(20, 0, &[1, 0], vec![1.0, 0.08014489624299273, 1.0, 0.0, 2.0, 0.05, 0.6467409768055062, 0.3405408872575632, 0.0], vec![2.0, 0.0, 3.4129251856576754, 1.0, 5.612923813683636]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![19109.23359186521], vec![]),
+            fz(1, 3, &[2, 3], vec![57706.348674877605], vec![]),
+            fz(3, 4, &[3, 0], vec![3.054718284405666e-7, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![173.2103172747406], vec![]),
+            fz(30, 7, &[5, 0], vec![3.124982423815606, 1.9621667110231864, 0.015046509461853392, 0.0, 0.0, 0.0], vec![]),
+            fz(1, 8, &[4, 0], vec![41.75356774039752], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.00011321582623333284, 19109.23359186521], vec![]),
+            fz(90, 3, &[], vec![3.0, 5.763253925957056e-6, 57706.348674877605], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.0924117524321156, 173.2103172747406], vec![]),
+            fz(90, 8, &[], vec![8.0, 0.0015862317257885857, 41.75356774039752], vec![]),
+        ],
+        45 => vec![
+            fz(20, 0, &[1, 0], vec![1.0, 2.378378171481616, 1.0, 0.0, 2.0, 0.05, 0.00982181795114197, 0.8148877855055277, 0.0], vec![2.0, 0.0, 3.1769150977208453, 1.0, 5.202871985483894]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![115.82865594485179], vec![]),
+            fz(1, 3, &[2, 3], vec![12466.436852649871], vec![]),
+            fz(3, 4, &[3, 0], vec![2.7335477516685947e-6, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![713.2009750959154], vec![]),
+            fz(30, 7, &[5, 0], vec![1.910400747228397, 2.469370008912842, 0.00923307747549982, 0.0, 0.0, 0.0], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.016048793328800402, 115.82865594485179], vec![]),
+            fz(90, 3, &[], vec![3.0, 3.538939876715632e-5, 12466.436852649871], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.0060120046647559764, 713.2009750959154], vec![]),
+        ],
+        _ => vec![
+            fz(20, 0, &[1, 0], vec![1.0, 0.1640507113440349, 1.0, 0.0, 2.0, 0.05, 0.025598695889249182, 0.9585130199046281, 0.0], vec![2.0, 0.0, 3.407415977924589, 1.0, 4.883729027350469]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![2438.301942991417], vec![]),
+            fz(1, 3, &[2, 3], vec![1014.4147930413523], vec![]),
+            fz(3, 4, &[3, 0], vec![4.682792894997451e-7, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![35.35779164099569], vec![]),
+            fz(30, 7, &[5, 0], vec![2.052254807262691, 2.245203483937718, 0.03275392131664288, 0.0, 0.0, 0.0], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.0006717191939111341, 2438.301942991417], vec![]),
+            fz(90, 3, &[], vec![3.0, 0.007860166314804299, 1014.4147930413523], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.545464089314505, 35.35779164099569], vec![]),
+        ],
+    };
+    let mut p = program(7, devices);
+    p.options.no_rail_shortcut = seed != 2;
+    p.digital_slot_count = 32;
+    p
+}
+
+/// The 555's triggers on `p` (its timing capacitor on node 3 turning from
+/// falling to rising), sampled every `dt` by the acquisition (W2b) while a
+/// host stops every `host` (0: at every event), to `t_end`; and the
+/// capacitor's slope and level at the first trigger.
+fn triggers_555(p: &Program, host: f64, dt: f64, t_end: f64) -> (Vec<f64>, f64, f64) {
+    let mut e = Engine::load(p).unwrap();
+    e.acquire(&[3], 0.0, dt, 0).unwrap();
+    let mut t = 0.0;
+    let (mut ts, mut vs) = (Vec::new(), Vec::new());
+    while t < t_end {
+        t = if host > 0.0 { (t + host).min(t_end) } else { e.next_event_time().min(t_end).max(t + 1e-12) };
+        e.advance(t).unwrap();
+        let s = e.acquire_take().to_vec();
+        let n = s[0] as usize;
+        let head = crate::observe::TAKE_HEADER + 1;
+        ts.extend_from_slice(&s[head..head + n]);
+        vs.extend_from_slice(&s[head + n..head + 2 * n]);
+    }
+    let mut out = Vec::new();
+    let (mut slope, mut level) = (0.0, 0.0);
+    for k in 1..vs.len().saturating_sub(1) {
+        if vs[k] < vs[k - 1] && vs[k + 1] > vs[k] {
+            if out.is_empty() {
+                slope = (vs[k - 1] - vs[k]) / (ts[k] - ts[k - 1]);
+                level = vs[k];
+            }
+            out.push(ts[k]);
+        }
+    }
+    (out, slope, level)
+}
+
+/// Each trigger of `got` against the fine run's `fine`, in units of the
+/// W0 tolerance of trigger `i`: `(2 i + 1) tau_w0`, `tau_w0` the time the
+/// capacitor takes to cross W0 of its trigger level (`W0_V(level) / |dV/dt|`)
+/// at the fine run's first trigger. Each period is two threshold crossings,
+/// each found within `tau_w0` of its time, so trigger `i` may sit `2 i + 1`
+/// of them off (the first crossing included). Returns the worst share and
+/// the mean period's offset in units of `2 tau_w0`.
+fn trigger_shares(got: &[f64], fine: &[f64], tau_w0: f64) -> (f64, f64) {
+    let n = got.len().min(fine.len());
+    assert!(n >= 1 && got.len() == fine.len(), "{} triggers against the fine run's {}", got.len(), fine.len());
+    let worst = (0..n).map(|i| (got[i] - fine[i]).abs() / ((2 * i + 1) as f64 * tau_w0)).fold(0.0f64, f64::max);
+    let period = if n > 1 { ((got[n - 1] - got[0]) - (fine[n - 1] - fine[0])) / (n - 1) as f64 / (2.0 * tau_w0) } else { 0.0 };
+    (worst, period)
+}
+
+/// The six host cadences (R121 (iii)): 10 us, 100 us, 1 ms, a 60 Hz frame,
+/// 100 ms and a host that stops at every event.
+const HOST_CADENCES: [f64; 6] = [1e-5, 1e-4, 1e-3, 1.0 / 60.0, 0.1, 0.0];
+
+#[test]
+fn a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence() {
+    // R121 (iii): accuracy against physics, not the 10 uV band. The cold
+    // fuzz's 2/6, a 555 astable (2438 + 2 x 1014 ohm, 468 nF: 1.45 ms) on a
+    // 4.9 V, 0.16 ohm cell, its timing capacitor riding the coupled path. The
+    // reference is the same board with a host stopping every 1 us (each stop
+    // solves the rail). tau_w0 = W0_V(1.607 V) / 3313 V/s = 0.52 us.
+    //
+    // Measured (shares of the bound, worst edge / mean period): R121 0 / 0 at
+    // every cadence (0.000 to the printed digit) once the bounded crossing
+    // search keeps a turn past its end (574767b; before it, 7.2 / 3.3 at
+    // 1 ms); the 10 uV band 7.8 / 5.7 at 10 us and 188-483 / 45-125 from
+    // 100 us on, on f18bfe5 (its crossings rode a rail held 10 uV at a time
+    // and landed late). Every cadence is held to 1 / 1.
+    let p = tpl6_board(2);
+    let (fine, slope, level) = triggers_555(&p, 1e-6, 1e-6, 0.02);
+    let tau_w0 = (1e-4 + 1e-3 * level.abs()) / slope.abs();
+    assert!(fine.len() >= 12, "{} triggers in 20 ms", fine.len());
+    for host in HOST_CADENCES {
+        let (got, _, _) = triggers_555(&p, host, 1e-6, 0.02);
+        let (edge, period) = trigger_shares(&got, &fine, tau_w0);
+        eprintln!("2/6 at host {host:e}: worst edge {edge:.3}, period {period:+.3} of the W0 bound");
+        assert!(edge <= 1.0 && period.abs() <= 1.0, "host {host:e}: edge {edge:.3}, period {period:.3}");
+    }
+}
+
 /// The cold fuzz's 113/6 (HUB=1, `f5e gen 113 6`): a 555 astable (7.79k +
 /// 2 x 30.9k, 769 nF: 37.1 ms) on a 9.09 V, 1.26 ohm cell, trapezoidal
 /// integration, on the coupled path.
@@ -20253,3 +20658,108 @@ fn a_555_trigger_on_a_cells_drain_line_alone_is_scheduled_at_every_host_cadence(
     }
 }
 
+#[test]
+fn the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence() {
+    // R121 (iii): the cold fuzz's 74/6 (19.1k + 2 x 57.7k, 305 nF: 28.5 ms)
+    // and 45/6 (116 + 2 x 12.5k, 2.73 uF: 47.4 ms), whose phase C2 lost. Both
+    // run without the rail shortcut, that is in exact mode's rail partition,
+    // which R121 does not touch: every trigger equal to the band's, to the
+    // bit. Against a 1 us run both builds miss the W0 bound from
+    // 100 us hosts on (74/6: 2.3 at 100 us to 26 at 100 ms; 45/6: 1.0 to 18):
+    // a host-cadence error of the board's own, pinned here and named in the
+    // open items, not R121's.
+    for (seed, t_end, pins) in [(74u32, 0.15, [0.25, 2.4, 16.0, 25.0, 27.0, 27.0]), (45, 0.25, [0.1, 1.1, 9.0, 17.0, 18.0, 18.0])] {
+        let p = tpl6_board(seed);
+        let (fine, slope, level) = triggers_555(&p, 1e-6, 1e-6, t_end);
+        let tau_w0 = (1e-4 + 1e-3 * level.abs()) / slope.abs();
+        for (k, host) in HOST_CADENCES.into_iter().enumerate() {
+            rails::force_fixed_cell_band(true);
+            let (band, _, _) = triggers_555(&p, host, 1e-6, t_end);
+            rails::force_fixed_cell_band(false);
+            let (got, _, _) = triggers_555(&p, host, 1e-6, t_end);
+            assert_eq!(got.iter().map(|t| t.to_bits()).collect::<Vec<_>>(), band.iter().map(|t| t.to_bits()).collect::<Vec<_>>(), "{seed}/6 at host {host:e}: the band's triggers");
+            let (edge, _) = trigger_shares(&got, &fine, tau_w0);
+            eprintln!("{seed}/6 at host {host:e}: worst edge {edge:.3} of the W0 bound");
+            assert!(edge <= pins[k], "{seed}/6 at host {host:e}: {edge:.3} past its pin {}", pins[k]);
+        }
+    }
+}
+
+#[test]
+fn a_logic_input_on_a_static_hub_divider_is_a_rail_threshold_at_its_level() {
+    // R121: between solves a static hub node does not move with the rail, so
+    // a logic input on one is a rail threshold of its own, the rail value
+    // where the input meets its level (else its flip waits up to the drift
+    // cap, about 1 mV of rail, for the next solve). A 74LS00 on a cell's rail
+    // (the coupled RC: E 5, r 1, R 1k, C 1 uF), one input on a 500 / 333.55
+    // divider off the rail, publishing a + s u. TTL levels are fixed (VIL
+    // 0.8, VIH 2.0 V against its ground), so the input meets VIH at
+    // u* = (2 - a) / s, 9 mV above the rail at load: the watch's thresholds
+    // hold it to rounding (the level's motion is found by one difference).
+    let mut logic = [0usize; 12];
+    logic[0] = 3;
+    logic[1] = 3;
+    logic[2] = 4;
+    let p = program(5, vec![
+        battery(0, 1, 0, 5.0, 1.0),
+        resistor(1, 1, 2, 1000.0),
+        capacitor(2, 2, 0, 1e-6, 0.0),
+        resistor(3, 1, 3, 500.0),
+        resistor(4, 3, 0, 333.55),
+        ls00(5, 1, 0, logic, 1e-9, 0),
+        resistor(6, 4, 0, 10000.0),
+    ]);
+    let mut rig = Rig::load(&p).unwrap();
+    rig.advance(1e-6).unwrap();
+    let u = rig.u();
+    let (a, s) = rig.s().static_solver.hub_node_line(3).expect("the divider is a static hub partition");
+    let want = (2.0 - a) / s;
+    let got = rig.s().logic_crossings(u);
+    eprintln!("u {u:.7}, input line {a:.6} + {s:.6} u, VIH at u* {want:.7}; watch {got:?}");
+    assert!(got.iter().any(|&x| (x - want).abs() <= 1e-9 * want), "VIH's rail value {want} among {got:?}");
+}
+
+#[test]
+fn a_cells_rail_solves_by_the_instant_its_crossings_were_searched_to_however_near() {
+    // CAD-3: on a draining cell's coupled path every closed-form crossing is
+    // searched only to `cell_until` (`schedule_driven_crossing`), the drift
+    // cap's passage or R121's drain-line bound `cad_t`, whichever is first,
+    // so the rail must solve by then. SHIPV-E's astable had a 555 flip move
+    // the line's slope 0.95 to 0.14 V/s across a solve 1.9e-17 s before it:
+    // `rho_dot` 4e16 V/s^2 put `cad_t` at the solve itself, and as a watch
+    // within a reached-width (1e-12 s) of the solve it read as reached and
+    // scheduled nothing; the next solve came at the drift passage 6.7 ms on,
+    // and the 555's trigger 0.33 ms on was never searched for. Here the
+    // coupled RC of the cadence tests (E 5, r 1, R 1k, C 1 uF) on a 1e-4 Ah
+    // generic cell after 0.5 ms, its last solve's line moved 1.9e-17 s
+    // earlier by 0.8 V/s: the solve at `now` sets `cad_t` within float
+    // rounding of `now`, and the rail's event is the first instant the kernel
+    // accepts, `(now + 1e-15).next_up()`, not the drift passage (fails
+    // first there: 0.42 ms on). Since CAD-4 the line's bound never comes
+    // before the 10 uV band's own passage (the band held the line that
+    // long), so a jump in the line no longer puts `cell_until` at the solve:
+    // it is the band's passage, and the rail's event is due by then.
+    let p = program(3, vec![generic_battery(0, 1, 0, 5.0, 1.0, 1e-4), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    let now = 5e-4;
+    rig.advance(now).unwrap();
+    let s = rig.k.solver_mut();
+    let hub = s.hub.as_mut().unwrap();
+    assert!(hub.state.cell_path.is_some(), "the RC rides the cell's coupled path");
+    let cd = hub.state.cell.expect("a drain line");
+    hub.state.cell = Some(rails::CellDrive { t0: now - 1.9e-17, kappa: cd.kappa, rho: cd.rho + 0.8 });
+    hub.dirty = true;
+    let drivers = std::rc::Rc::clone(&s.driver_snapshot);
+    let mut readers = Vec::new();
+    s.rail_loop(now, &drivers, &mut readers).unwrap();
+    let st = &s.hub.as_ref().unwrap().state;
+    let floor = (now + 1e-15).next_up();
+    eprintln!("cad_t {:.17}, cell_until {:.17}, event {:?}", st.cad_t, st.cell_until, st.event_t);
+    let modes = st.cell_path.as_ref().and_then(|p| p.modes.as_ref()).expect("the coupled path");
+    let (up, down) = modes.passages(Some(rails::RAIL_DRIFT_V), Some(-rails::RAIL_DRIFT_V));
+    let band = now + up.min(down);
+    assert!(st.cad_t <= now + 1e-12, "cad_t {} not at the solve", st.cad_t);
+    assert_eq!(st.cell_until, band, "cell_until at the band's passage");
+    let at = st.event_t.expect("a rail event");
+    assert!(at <= floor.max(st.cell_until), "the rail's next solve at {at:.17}, its crossings searched only to {:.17}", st.cell_until);
+}

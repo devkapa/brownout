@@ -5,7 +5,7 @@
 
 use super::led_tests::clocked_led;
 use super::newton::hooks;
-use super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2_capped, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, STOPS_2575};
+use super::rail_tests::{cold_1838_tpl1, cold_2575_tpl2_capped, cold_287_tpl3, cold_474_tpl5, cold_757_tpl0, tpl6_board, STOPS_2575};
 use super::slow_tests::{ring_behind_a_fuse, rollback_rig};
 use crate::engine::Engine;
 use crate::error::ERR_SOLVE_FAILED;
@@ -585,5 +585,53 @@ fn a_slide_restored_mid_way_goes_on_bit_identically_with_its_duty_and_exits() {
         assert!(a.0 == b.0, "stop {} at {} differs", k, after[k]);
         assert_eq!(a.1, b.1, "stop {k}: the hold");
         assert_eq!(a.2, b.2, "stop {k}: the episode");
+    }
+}
+
+#[test]
+fn a_cells_reading_aware_cadence_runs_the_same_split_by_yields_or_restored() {
+    // R121: the rail's cadence on a cell's coupled path keeps its own state
+    // (the drift cap, the drain line's history, its deadline), so a run that
+    // yields inside its host steps, and one restored from a snapshot taken
+    // mid-run, publish the bits of a plain run. The cold fuzz's 2/6: a 555
+    // astable riding the coupled path, 60 Hz frames over 0.1 s.
+    let p = tpl6_board(2);
+    let frames: Vec<f64> = (1..=6).map(|k| k as f64 / 60.0).collect();
+    let mut plain = Engine::load(&p).unwrap();
+    let mut out_plain = Vec::new();
+    for &t in &frames {
+        plain.advance(t).unwrap();
+        out_plain.push(seen(&mut plain));
+    }
+    let mut now = 0.0;
+    let mut clock = move || {
+        now += 1.0;
+        now
+    };
+    let mut split = Engine::load(&p).unwrap();
+    let mut out_split = Vec::new();
+    let mut yields = 0;
+    for &t in &frames {
+        while !split.advance_for(t, Some(crate::kernel::Budget { clock: &mut clock, budget_ms: 5.0, check_every: 1 })).unwrap() {
+            yields += 1;
+        }
+        out_split.push(seen(&mut split));
+    }
+    assert!(yields > 0, "the budget split the run");
+    assert_eq!(out_split, out_plain, "a run split by {yields} yields is the plain run");
+    let mut e = Engine::load(&p).unwrap();
+    for &t in &frames[..3] {
+        e.advance(t).unwrap();
+    }
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    for &t in &frames[3..] {
+        e.advance(t).unwrap();
+    }
+    assert_eq!(seen(&mut e), out_plain[5]);
+    assert!(table.restore(&mut e, id));
+    for (k, &t) in frames[3..].iter().enumerate() {
+        e.advance(t).unwrap();
+        assert_eq!(seen(&mut e), out_plain[3 + k], "restored, at {t}");
     }
 }

@@ -4599,13 +4599,97 @@ Constants, all from P3:35-38 unless marked new:
    follow it (path or drive), so the rail node published at a frame is the
    rail they followed. The SoC integral (point 6) holds each partition's draw on its
    own exponential between solves, leaving out its response to the path,
-   whose charge over a drift-capped interval is second order. Measured
+   whose charge over a drift-capped interval is second order.
+   **R121 (BAT-PERF) replaces the 10 uV cap on this path** by the readings'
+   own: each static hub node and draw, the direct draw and the rail may
+   move `CELL_READING_SLACK` (0.2) of its W0 past what `RAIL_DRIFT_V` let it,
+   `RAIL_DRIFT_V + 0.2 W0(r) / |dr/du|` (at most `CELL_DRIFT_MAX_V`, 50 mV;
+   `CELL_JUNCTION_DRIFT_V`, 0.5 mV, with a direct junction). The watch also
+   takes every curved hub partition's band edges (static and stepped too),
+   the scan band and the levels of the logic inputs the scan reads, as
+   thresholds; and the rail solves before the held drain line could move
+   `RAIL_DRIFT_V` (`|rho_dot| tau^2 / 2`, from the line's change since the
+   solve before) or a closed-form partition's current `C du/dt` its slack.
+   The charge integrates the cell's current `(E - u) / r` along the path.
+   A board with a stepped hub partition keeps `RAIL_DRIFT_V`, and so does
+   one with a curved closed-form hub partition the path drives: its
+   coupling error (`couple_band`) is carried from aim to aim and grows with
+   each aim's length, so aims as long as the readings allowed spent a
+   tolerance and every aim after failed at the bound's 1 ns floor (cold
+   212/4: rail events 18k -> 59k; its slow visits 50k -> 236k followed the
+   re-aims). Battery SAP-1 against wip/rc2 (9e9aa01, the band; three
+   interleaved pairs a recording, CAD-5): 526,632 -> 305,777 events and
+   -48.2 % instructions (-48.13 to -48.17 %) on the first recording,
+   703,225 -> 535,524 and -34.1 % (-34.07 to -34.09 %) on the second; the
+   band's floor under the held line (73ed3ec) costs +0.36 % on both against
+   69aa7bc; the ideal SAP-1 keeps wip/rc2's hashes bit for bit (+0.03 to
+   +0.08 % instructions). Its 555 keeps 47 triggers at six host cadences
+   within 3e-12 s of a 1 us run, and tests pin the 555's triggers against a
+   1 us run at six host cadences. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
    `e211c55`), and the SAP-1 on its battery 45 % faster than at `3ca4004`
    (point 3, cost bars). Before it (round 14, ruling R15 (a)) each
    partition was driven by its own pull and the drain's line alone, and the
    others' motion entered only first order: 193 of the multi-partition
    probe's 600 boards over W0, worst 118x.
+
+   **How an oscillator on the cadence is judged** (R127, with R128 (a) and
+   R129; in place of R121 (iii)'s "within tau_w0 of the 10 uV band").
+   Against a run stopping every 1 us, at host stops of 1 ms, 1/60 s and
+   100 ms: (1) no flip lost or gained over the whole run; (2) its period,
+   the mean over the run and the worst single period, within 1e-6 relative
+   of the 1 us run's; where the held drain line's own bound (its error
+   within `RAIL_DRIFT_V`) binds, within the shift a constant `RAIL_DRIFT_V`
+   rail error gives that board instead, `1.5 (RA + RB) C RAIL_DRIFT_V /
+   (u P)` for a 555 astable (the error on its levels alone or its source
+   alone; on both it cancels), so long as the cadence's worst single period
+   over those boards is no worse than the 10 uV band's; (3) each edge within
+   tau_w0 of the 1 us run's over the first 100 periods after anything that
+   re-phases it (the load, a trigger). Tests (release only):
+   `random_555s_on_cells_of_any_drain_meet_r127_against_1_us_runs` (300
+   boards, 28,380 flips, period 1.4e-7 mean and 2.1e-7 worst single, edges
+   within 0.043 tau_w0),
+   `a_555_on_a_cell_drained_from_full_to_flat_meets_r127` and
+   `a_555_where_the_held_lines_bound_binds_meets_r128_and_the_bands_worst_period`.
+
+   **Phase per volt of rail travel.** The cadence's edges drift from the
+   1 us run's as the rail travels; they hold no fixed offset. The cause,
+   measured (CAD-4, a probe at every solve): the path holds the drain's
+   line straight between solves, a load the oscillator switches turns that
+   line, and the cadence holds it across a whole charge phase (board 98:
+   268 us, where the band re-solves every 15 us). The solved rail leaves
+   the held line as `k dt^2`, k 3.4 to 5.2 V/s^2, in one direction and only
+   while the load is on; its mean over a phase, 1.25e-7 V, through the
+   555's `1.5 (RA + RB) C / u` (1.668e-4 s/V) gives 4.9e-8 of a period
+   against the 5e-8 measured. The 0.2 W0 slack enters only because the
+   drift cap it sets (0.6 mV there) is not reached within a phase (the
+   rail travels 0.2 mV in one), so nothing re-solves the line before the
+   flip. Board 98 of the property (RA 5248, RB 2442, C 60.7 nF, 35 ohm and
+   an LED on its output; a 28.3 uAh, 0.148 ohm cell, nothing else on the
+   rail) drained from full to flat, 4.876 to 3.425 V in 3.2 s: 14,991 flips
+   at every cadence, as at 1 us; period 4.6e-8 to 5.4e-8 mean and 7.5e-8
+   worst single; edges within 0.0103 tau_w0 over the first 100 periods;
+   accumulated phase 0.93 tau_w0 (147 ns) at 1 ms hosts and 1.10 tau_w0
+   (173 ns) at 1/60 s and 100 ms, that is 1.0e-7 to 1.19e-7 s, or 0.64 to
+   0.76 tau_w0, per volt of rail travel (the 10 uV band: 0.004 tau_w0 over
+   the run). The test pins it at 1.6 tau_w0, so a doubling fails.
+
+   **The binding boards** (R128, R129). On 24 boards where the held line's
+   own bound binds (a slow 555 switching 30 to 300 ohm or an LED, on a 2 to
+   30 uAh cell, every third a 2.7 to 3.1 V cell; 5 to 2,872 solves a run
+   ended by that bound) every flip is kept on both builds; the cadence's
+   worst single period is 4.84e-8 (board 14 at 1/60 s) against the 10 uV
+   band's 1.81e-7 (wip/rc2, 9e9aa01, board 13), the worst means 4.26e-8 and
+   1.77e-8, every board about 100 times inside its 10 uV tolerance (2.8e-6
+   to 5.9e-6). Board by board it is a trade: the cadence is worse on 42 of
+   the 72 board-cadence pairs (board 14 4.84e-8 against 8.8e-10, board 8
+   3.17e-8 against 6.3e-10, board 18 1.90e-8 against 1.42e-9) and better on
+   the rest (boards 13, 15, 16, 22: 6e-9 to 1.2e-8 against 1.0e-7 to
+   1.8e-7). The band's figures are the same at every host cadence to three
+   digits; the cadence's depend on the host's, since a host stop solves the
+   rail and starts a new held line: board 14 reads 1.03e-8 at 1 ms hosts and
+   4.84e-8 at 1/60 s, up to 4 times apart across the three. The test prints
+   the whole table against the band's figures as recorded.
 
    **The cell's fallback drive.** Couplings of mixed sign, an unstable one,
    or a system `cell_modes` otherwise declines keep round 14's drive: each
@@ -7430,6 +7514,17 @@ failures and warnings (W1g)"):
 
 ## Open items (must close before 1.0.0)
 
+- **555 triggers at coarse host cadences** (R127 (3), formerly R121 (iii);
+  Rails point 4). Against a run
+  stopping every 1 us, a 555 on a cell off the coupled path (the cold
+  fuzz's 74/6 and 45/6, no rail shortcut) lands its triggers up to 26 of
+  their W0 bounds late from 100 us hosts on, on the 10 uV band and R121
+  alike: exact mode's stepped partition's truncation (CLK). Pinned in
+  `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`.
+  2/6, on the coupled path, triggers with the 1 us run at every cadence
+  since 574767b (`a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`,
+  1 bound everywhere).
+
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as
   their companion) each solve the rail against the others' draws held, so
@@ -7552,34 +7647,42 @@ failures and warnings (W1g)"):
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest
   step leaves CC there (Rails point 9, ruling R102 (a)).
-- **Threshold-aware battery rail cadence** (rulings R105, R108). A cell's
-  rail re-solves at every 10 uV of its coupled path's motion
-  (`RAIL_DRIFT_V`), about 32,000 times a simulated second on the battery
-  SAP-1 and most of its cost (1.0-1.4 s of CPU per simulated second
-  natively). Re-solving instead on the path's own cadence (R105 C2: a time
-  step `sqrt(2 RAIL_DRIFT_V / |rho_dot|)` for the drain line's change, 10 uV
-  only with direct draws, every curved partition's band and the scan band as
-  rail thresholds, the cell's charge integrated along the path) cut that
-  cost by 51-58 % and kept the gate's tests within a tenth of W0's
-  allowance, but on 700 battery cold boards (0.3 s, against exact mode at a
-  1 us host step) it moved every 555 astable on a cell (template 6) far
-  past today's error (74/6: 0.06 to 31,354 W0 on its voltages; 45/6's rail
-  0.001 to 16.4 W0), plus five boards' currents (26/5 0.31 to 1.09 W0):
-  the 555's thresholds ride the rail, and its timing capacitor's crossings
-  were scheduled on the drain line against thresholds read at the last
-  solve, so the oscillation slips in phase. Closing it needs the cadence to
-  re-solve wherever a watched IC's rail-borne threshold could be crossed
-  within it. Variants A, B, C and C2 and their numbers: drafts
-  `battery-rail-cadence.md`; patches in int-acc-logs/r105.
-  R121's reading-aware cadence (a drift cap from the readings' slack, with
-  logic levels and band edges as rail thresholds; branch `wip/rc`) cut the
-  battery SAP-1's instructions by 48 % and 34 % on the two recorded runs
-  with its clock exact at six host cadences, and is held back for the same
-  class: on a fast-draining cell (0.5 ohm, 2e-5 Ah, the rail falling
-  0.8 V/s) a 555 astable loses 9 of 412 flips at 1/60 s and 100 ms host
-  stops, 13 of 18 swept configurations failing where the 10 uV band fails
-  none (SHIPV-E). Slow drains (1e-3 Ah and up, the SAP-1's and the cold
-  sweep's) do not show it.
+- **Threshold-aware battery rail cadence** (rulings R105, R108, R121,
+  R127, R128, R129; Rails point 4). A cell's rail re-solved at every 10 uV
+  of its coupled path's motion (`RAIL_DRIFT_V`), about 32,000 times a
+  simulated second on the battery SAP-1 and most of its cost. R121's
+  cadence now re-solves it on the readings' own slack (0.2 W0) and the
+  held drain line's bound instead: the battery SAP-1 takes 48 % and 34 %
+  fewer instructions on its two recordings (Rails point 4). What was found on the way, and
+  what closed it: a 555 on a fast-draining cell lost triggers at coarse
+  host stops (SHIPV-E: a time watch at its own instant scheduled nothing,
+  11,645 tau_w0; the rail event is now capped at the path's own bound,
+  7396c23); a crossing landed a nudge past its threshold, the solve it
+  caused stepped the threshold back and the re-aim's root was rejected
+  (also on the band; af2891a); a small cell feeding a fast monostable
+  re-solved its rail more often than the band did (SHIPV-G's M272, 35.6k
+  rail events against 14.0k; the held line's bound now never comes before
+  the band's own passage, 73ed3ec: 3.5k); every threshold the rail moves
+  or drives is pinned against a 1 us run (69aa7bc). What remains, within
+  R127 and R128 (a): the edges drift from the 1 us run's with the rail's
+  travel, 1.0e-7 to 1.19e-7 s per volt on board 98 (a period bias of about
+  5e-8; the band's phase there 0.004 tau_w0), because the held line stays
+  straight across a charge phase that turns it; on the boards where the
+  held line's bound binds the cadence trades board for board with the band
+  (worse on 42 of 72 pairs, better at the worst) and depends on the host's
+  cadence where the band does not. Re-solving where the oscillator's own
+  load switches would remove the bias at a cost not yet measured.
+- **Stale crossings at 1 us host stops** (R128; CAD-4). At host stops of
+  1 us the cadence processes more events than the band on astable and
+  counter boards (SHIPV-G's A31: 244k against 158k), none of them rail
+  events (0 on both): each stop re-aims the 555, whose crossing search
+  runs to the path's bound (up to 29 ms ahead where the band's ends at its
+  10 uV passage) and schedules a crossing the next stop supersedes, 126k
+  stale crossings against the band's 30k. Cost only, no reading moves:
+  over SHIPV-G's 600 boards at 1 us, 166 s against 142 s of wall time,
+  about 17 %. At 1 ms, 1/60 s and 100 ms stops the same boards take 0.21
+  times the band's rail events. Not tried: searching only to the next host
+  stop, or keeping a crossing a re-aim leaves where it was.
 - **Exact-mode coarse step accuracy** (ruling R102 (a), measured on
   wip/exact at 3cefe1d). Exact mode at the cold sweep's host stops (1-800,
   hub 2, its own exact-mode boards) against its own fine reference (exact

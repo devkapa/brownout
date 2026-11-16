@@ -768,6 +768,9 @@ impl PartitionedSolver {
             cap_seg: None,
             cell_path: None,
             cell_until: f64::INFINITY,
+            cad_d: rails::RAIL_DRIFT_V,
+            cad_rho_prev: None,
+            cad_t: f64::INFINITY,
             cell: None,
             a_run: 0.0,
             g_run: 0.0,
@@ -906,6 +909,103 @@ impl PartitionedSolver {
     /// its other end.
     pub(super) fn direct_at(&self, u: f64) -> (f64, f64) {
         self.direct_at_among(u, None)
+    }
+
+    /// The drift a draining cell's rail may take on its coupled path before
+    /// it solves again (R121): the least over what reads it between solves
+    /// of `RAIL_DRIFT_V + CELL_READING_SLACK W0(r) / |dr/du|`, so each reading
+    /// is off by at most that share of its W0 more than the 10 uV band let it
+    /// be: every static hub node (`x + s (u - u_p)`), every static hub
+    /// partition's draw `(i, g)`, the direct draw and the rail itself, with a
+    /// direct junction's curvature capped at `CELL_JUNCTION_DRIFT_V`. A
+    /// stepped hub partition reads the rail as a boundary at its plan (W1b
+    /// rule 6) and keeps the 10 uV band until stale-rail work lands (R121
+    /// (3)). Linear closed-form hub partitions ride the path itself; a
+    /// curved one only within its coupling bound (`couple_band`), whose
+    /// error each aim leaves to the next: an aim as long as the readings
+    /// allow left one near its tolerance, which then failed every aim at the
+    /// bound's 1 ns floor until the segment's decay freed some (cold 212/4:
+    /// a 74LS00's output node on 202 uF, a 1 nA current's tolerance spent,
+    /// decay 12 ms; rail events 18k -> 59k). Such a board keeps the 10 uV
+    /// band too (CAD-2).
+    fn cell_drift_cap(&self, u: f64, i_d: f64, g_d: f64) -> f64 {
+        let base = rails::RAIL_DRIFT_V;
+        if !self.stepped.hub_partitions().is_empty() || self.closed_form.curved_on_cell_path() {
+            return base;
+        }
+        let w0v = |v: f64| 1e-4 + 1e-3 * v.abs();
+        let w0i = |i: f64| 1e-9 + 1e-3 * i.abs();
+        let slack = rails::CELL_READING_SLACK;
+        let mut d = rails::CELL_DRIFT_MAX_V.min(base + slack * w0v(u));
+        self.static_solver.for_each_hub_line(|x, s, u_p| {
+            if s != 0.0 {
+                d = d.min(base + slack * w0v(x + s * (u - u_p)) / s.abs());
+            }
+        });
+        let hub = self.hub.as_ref().unwrap();
+        for (p, c) in hub.contrib.iter().enumerate() {
+            if c.active && c.b.is_none() && self.partition_kinds[p] == PartitionKind::Static && c.g != 0.0 {
+                d = d.min(base + slack * w0i(c.i + c.g * (u - c.u_p)) / c.g.abs());
+            }
+        }
+        // The rail node's own shunt is no reading.
+        let g_dir = g_d - static_part::NODE_RSHUNT_G;
+        if g_dir != 0.0 {
+            d = d.min(base + slack * w0i(i_d) / g_dir.abs());
+        }
+        if !hub.direct_junctions.is_empty() {
+            d = d.min(rails::CELL_JUNCTION_DRIFT_V);
+        }
+        d.max(base)
+    }
+
+    /// The rail values near `u` at which a logic input of an IC the scan
+    /// reads meets one of its levels (R121): the input on a node that moves
+    /// with the rail on a line (`supply_line`), the levels from the IC's
+    /// power at its supplies' lines, each affine in the rail between the
+    /// kinks (`rail_kinks`, also watched), so one difference over 1 mV finds
+    /// the root. Between solves the published input does not move with the
+    /// rail, so without these a flip waited for the next solve or the 20 mV
+    /// scan.
+    pub(super) fn logic_crossings(&self, u: f64) -> Vec<f64> {
+        let mut out = Vec::new();
+        let Some(hub) = self.hub.as_ref() else { return out };
+        let du = 1e-3;
+        for &d in &hub.scan_readers {
+            let Some(&pos) = self.ic_position.get(d.0 as usize).filter(|&&p| p != u32::MAX) else { continue };
+            let ic = &self.ics[pos as usize].1;
+            let (Some((av, sv)), Some((ag, sg))) = (self.supply_line(ic.vcc.node), self.supply_line(ic.gnd.node)) else { continue };
+            let p0 = digital::power::ic_power(ic, av + sv * u, ag + sg * u);
+            let p1 = digital::power::ic_power(ic, av + sv * (u + du), ag + sg * (u + du));
+            if !p0.powered || !p1.powered {
+                continue;
+            }
+            let mut th0 = vec![p0.vil, p0.vih];
+            let mut th1 = vec![p1.vil, p1.vih];
+            if let (Some(a), Some(b)) = (p0.schmitt, p1.schmitt) {
+                th0.extend([a.0, a.1]);
+                th1.extend([b.0, b.1]);
+            }
+            for pin in &ic.logic {
+                let (a, s) = match self.supply_line(pin.node) {
+                    Some(l) => l,
+                    None => (self.voltages[pin.node], 0.0),
+                };
+                for (t0, t1) in th0.iter().zip(&th1) {
+                    // A level is read against the pin less its ground.
+                    let f0 = (a + s * u) - (ag + sg * u) - t0;
+                    let f1 = (a + s * (u + du)) - (ag + sg * (u + du)) - t1;
+                    let slope = (f1 - f0) / du;
+                    if slope != 0.0 {
+                        let us = u - f0 / slope;
+                        if us.is_finite() && (us - u).abs() < rails::CELL_DRIFT_MAX_V {
+                            out.push(us);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The rail ICs (positions in `ics`, in `rail_ics` order) with a driver
@@ -1366,7 +1466,7 @@ impl PartitionedSolver {
             let hub = self.hub.as_mut().expect("a hub");
             if let HubKind::Battery(m) = &hub.kind {
                 let dt = now - hub.state.t_last;
-                hub.state.battery = rails::advance_soc(m, &hub.state.battery, hub.state.held_i, &hub.state.held_cf, dt);
+                hub.state.battery = cell_soc_after(m, &hub.state, dt);
             }
             hub.state.t_last = now;
         }
@@ -1584,6 +1684,7 @@ impl PartitionedSolver {
             }
             _ => None,
         };
+        let cad_d = if rails::cell_cadence() && cell_path.is_some() { self.cell_drift_cap(u, i_d, g_d) } else { rails::RAIL_DRIFT_V };
         let moved = (u - old_u).abs() > rails::RAIL_MOVE_EPS;
         let settle = (u - old_u).abs() > rails::SETTLE_MOVE_V || changed;
 
@@ -1593,10 +1694,66 @@ impl PartitionedSolver {
         }
         hub.state.reg = reg;
         hub.state.cap_seg = cap_seg;
+        let cell_before = hub.state.cell;
         hub.state.cell = cell;
+        let cad_on = rails::cell_cadence() && cell_path.is_some();
+        if let (Some(old), Some(new)) = (cell_before, cell) {
+            if new.t0 > old.t0 {
+                hub.state.cad_rho_prev = Some((old.t0, old.rho));
+            }
+        }
+        // R121 (R105 C2's time watch): the path holds the drain's line
+        // straight, so the rail solves again before the line's own change
+        // could put it `RAIL_DRIFT_V` off, `|rho_dot| tau^2 / 2`, `rho_dot`
+        // from the line's change since the solve before. With no such history
+        // yet, the 10 uV band.
+        let (cad_d, cad_t) = if !cad_on {
+            (cad_d, f64::INFINITY)
+        } else {
+            match (cell, hub.state.cad_rho_prev) {
+                (Some(cd), Some((t1, rho1))) if cd.t0 > t1 => {
+                    let rho_dot = ((cd.rho - rho1) / (cd.t0 - t1)).abs();
+                    // A closed-form hub partition's current follows the
+                    // rail's slope, `C du/dt`: the held line's slope errs by
+                    // `rho_dot tau`, so its current by `C rho_dot tau`, held
+                    // to the reading slack of that current's W0 (R13's 1 nF
+                    // read 3.7 W0 at 1 us without it).
+                    let slope = cell_path.as_ref().and_then(|p| p.modes.as_ref()).map_or(0.0, |m| m.slope(0.0).abs());
+                    let tau_cf = self.closed_form.hub_caps().iter().map(|&c| rails::CELL_READING_SLACK * (1e-9 + 1e-3 * c * slope) / (c * rho_dot)).fold(f64::INFINITY, f64::min);
+                    let tau = (2.0 * rails::RAIL_DRIFT_V / rho_dot).sqrt().min(tau_cf);
+                    (cad_d, if rho_dot > 0.0 { now + tau } else { f64::INFINITY })
+                }
+                _ => (rails::RAIL_DRIFT_V, f64::INFINITY),
+            }
+        };
+        hub.state.cad_d = cad_d;
+        hub.state.cad_t = cad_t;
+        // The held line's bound never comes before the 10 uV band's own
+        // passage: the band held the same line straight that long, so within
+        // it the readings err no more than they did on the band, and the rule
+        // asks only for its slack beyond that. Without the floor a small
+        // cell's line, turning with every charge of what it feeds, set
+        // `C rho_dot tau` (a 219 nF timing capacitor at the 1 nA floor of its
+        // current's W0) at 0.6 us, where the band solved every 9 us: SHIPV-G's
+        // M272 (a 3 uAh cell, a 776 Hz monostable) took 35.6k rail events to
+        // the band's 14.0k at 1 ms hosts, 17.2k to 2.0k at 1 us (CAD-4). The
+        // band's passage is searched only where the path has not moved 10 uV
+        // by the line's bound, and outside the memo the path watch reads back
+        // (searched every time, and through the memo, it cost the battery
+        // SAP-1 3 % of its instructions).
         hub.state.cell_until = cell_path.as_ref().and_then(|p| p.modes.as_ref()).map_or(f64::INFINITY, |m| {
-            let (up, down) = m.passages(Some(rails::RAIL_DRIFT_V), Some(-rails::RAIL_DRIFT_V));
-            now + up.min(down)
+            let passage = |d: f64| {
+                let (up, down) = m.passages(Some(d), Some(-d));
+                now + up.min(down)
+            };
+            let drift = passage(cad_d);
+            // Where the path has moved 10 uV by the line's bound, the band
+            // had solved by then too.
+            if !(cad_t < drift && cad_d > rails::RAIL_DRIFT_V && m.du(cad_t - now).abs() < rails::RAIL_DRIFT_V) {
+                return drift.min(cad_t);
+            }
+            let band = now + m.passage_either_unmemoised(rails::RAIL_DRIFT_V);
+            drift.min(cad_t.max(band))
         });
         hub.state.cell_path = cell_path;
         hub.state.held_i = held_i;
@@ -2391,6 +2548,20 @@ impl PartitionedSolver {
             let at = if expiry > now + 1e-15 { expiry } else { (now + 1e-15).next_up() };
             t = Some(t.map_or(at, |t| t.min(at)));
         }
+        // A draining cell's coupled path: its closed forms' crossings were
+        // searched only to `cell_until` (`schedule_driven_crossing`), so the
+        // rail solves and aims them again by then, however near (R121's time
+        // watch on the drain line's change is one of its bounds). As a
+        // watch, `cad_t` within a reached-width of the solve read as reached
+        // and scheduled nothing: on SHIPV-E's astable a 555 flip moved the
+        // line's slope 0.95 to 0.14 V/s across a solve 1.9e-17 s before it,
+        // `rho_dot` 4e16 V/s^2 put `cad_t` at the solve, the trigger 0.33 ms
+        // on was searched to there, and the rail next solved at its drift
+        // cap's passage, 6.7 ms on (the trigger 11,645 tau_w0 late, CAD-3).
+        if let Some(until) = self.hub.as_ref().filter(|h| h.state.cell_path.is_some()).map(|h| h.state.cell_until).filter(|u| u.is_finite()) {
+            let at = if until > now + 1e-15 { until } else { (now + 1e-15).next_up() };
+            t = Some(t.map_or(at, |t| t.min(at)));
+        }
         let hub = self.hub.as_mut().unwrap();
         hub.state.version += 1;
         hub.state.event_t = t;
@@ -2488,7 +2659,26 @@ impl PartitionedSolver {
                         th.push(up + band);
                         th.push(up - band);
                     }
-                    watches.push(Watch { value: u, thresholds: th, cap: Some(rails::RAIL_DRIFT_V), terms: vec![Motion::Path(path)] });
+                    let cap = if rails::cell_cadence() {
+                        // R121: every curved hub partition's band (the
+                        // static and stepped ones solve again only past it),
+                        // the scan band and the logic inputs' levels are
+                        // thresholds; the drift cap is the readings' own.
+                        let mut more = Vec::new();
+                        self.static_solver.nonlinear_hub_rails(hub.resolve_band(), &mut more);
+                        self.stepped.nonlinear_hub_rails(hub.resolve_band(), &mut more);
+                        for (up, band) in more {
+                            th.push(up + band);
+                            th.push(up - band);
+                        }
+                        th.push(hub.state.u_scan + rails::RAIL_SCAN_V);
+                        th.push(hub.state.u_scan - rails::RAIL_SCAN_V);
+                        th.extend(self.logic_crossings(u));
+                        hub.state.cad_d
+                    } else {
+                        rails::RAIL_DRIFT_V
+                    };
+                    watches.push(Watch { value: u, thresholds: th, cap: Some(cap), terms: vec![Motion::Path(path)] });
                     if draw > 0.0 && soc > 0.0 {
                         let knot = m.next_knot_below(soc).unwrap_or(0.0);
                         watches.push(Watch { value: soc, thresholds: vec![knot], cap: None, terms: vec![Motion::Line { rate: -draw / m.capacity_coulombs() }] });
@@ -3359,7 +3549,7 @@ impl PartitionedSolver {
         }
         let (model, state) = if let Some(hub) = self.hub.as_ref().filter(|h| h.device == device) {
             let m = hub.battery()?;
-            (m, rails::advance_soc(m, &hub.state.battery, hub.state.held_i, &hub.state.held_cf, now - hub.state.t_last))
+            (m, cell_soc_after(m, &hub.state, now - hub.state.t_last))
         } else if let Some(ex) = self.exact.as_ref().filter(|h| h.device == device) {
             let HubKind::Battery(m) = &ex.kind else { return None };
             (m, m.advance(&ex.battery, ex.held * (now - ex.t_last).max(0.0)).state)
@@ -4245,6 +4435,30 @@ fn sort_dedup_memo(site: usize, mut v: Vec<f64>) -> Vec<f64> {
         out.extend_from_slice(&v);
         v
     })
+}
+
+/// A cell's state `dt` after its last solve (R121, R105 C2). On its coupled
+/// path the rail between solves is known, `u0 + sum s phi_k`, and so is the
+/// cell's own current, `(E - u) / r`, with `E` on the drain's line: the
+/// charge is its integral. The draws held at the solve erred by their slope
+/// times the rail's motion, which R121's cadence lets reach a millivolt (a
+/// 0.1 mAh cell into 200 ohm read 0.06 W0 off the exact ODE's state of
+/// charge after 1 s, 0.003 on the 10 uV band). Off the path, or with no
+/// internal resistance or with an esr pole, the held draws as before.
+fn cell_soc_after(m: &BatteryModel, state: &rails::RailState, dt: f64) -> crate::devices::battery::BatteryState {
+    let soc = state.battery.soc;
+    let r = m.resistance(soc);
+    if let (Some((u0, modes)), true) = (state.cell_path.as_ref().and_then(|p| p.modes.as_deref().map(|modes| (p.u0, modes))), r > 0.0 && dt > 0.0) {
+        if modes.esr.is_none() {
+            let i0 = (m.emf(soc) - u0) / r;
+            let (de, _) = rails::soc_slopes(m, soc);
+            let e_dot = -de * i0.max(0.0) / m.capacity_coulombs();
+            let du: f64 = modes.modes.iter().map(|&(k, s)| s * rails::phi_integral(k, dt)).sum();
+            let q = i0 * dt + (0.5 * e_dot * dt * dt - du) / r;
+            return m.advance(&state.battery, q).state;
+        }
+    }
+    rails::advance_soc(m, &state.battery, state.held_i, &state.held_cf, dt)
 }
 
 /// Whether `driver` of `ic` can have a branch [`PartitionedSolver::direct_at`]
