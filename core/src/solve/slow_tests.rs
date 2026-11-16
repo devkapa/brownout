@@ -717,6 +717,45 @@ fn the_re_anchor_deadlines_are_the_bounds_own_roots() {
     close(want, 0.2203, 1e-4, "by hand");
 }
 
+#[test]
+fn a_re_anchor_deadline_is_found_from_below_in_a_few_evaluations() {
+    // THERM: the battery SAP-1's six closed-form resistors search a deadline
+    // at every rail move (about 42,000 times a simulated second each), and
+    // doubling from 1e-12 then bisecting to the last bit took 84 evaluations
+    // of the bound for a deadline of a millisecond. The deadline is a bound's
+    // root honoured from below, so it is held to `bound(δ) <= tol` and to
+    // within 2^-30 under the root, in at most 24 evaluations.
+    use super::closed_form::{largest_within, WITHIN_REL};
+    use std::cell::Cell;
+    let count = |bound: &dyn Fn(f64) -> f64, tol: f64| {
+        let n = Cell::new(0usize);
+        let got = largest_within(
+            |d| {
+                n.set(n.get() + 1);
+                bound(d)
+            },
+            tol,
+        );
+        (got, n.get())
+    };
+    // `2 δ² = 2e-6`: the root is 1e-3 s exactly.
+    let quad = |d: f64| 2.0 * d * d;
+    let (got, n) = count(&quad, 2e-6);
+    assert!(quad(got) <= 2e-6 && got <= 1e-3 && got >= 1e-3 * (1.0 - 2.0 * WITHIN_REL), "quadratic: {got}");
+    assert!(n <= 24, "quadratic: {n} evaluations");
+    // R29's shape with a knee at 2/|f| = 0.02 s: `3 δ + 4 min(δ²/2, δ/100)`
+    // at tol 1e-4 sits inside the knee, where `2 δ² + 3 δ = 1e-4`, so `δ =
+    // (-3 + sqrt(9 + 8e-4)) / 4`, with `sqrt(9 + 8e-4) = 3 (1 + 4.4444e-5 -
+    // 9.9e-10)` = 3.00013333: 3.33326e-5 s.
+    let kink = |d: f64| 3.0 * d + 4.0 * (d * d / 2.0).min(d / 100.0);
+    // Rationalized, `2 tol / (3 + sqrt(9 + 8e-4))`, which does not cancel.
+    let want = 2e-4 / (3.0 + (9.0f64 + 8e-4).sqrt());
+    close(want, 3.33326e-5, 1e-10, "by hand");
+    let (got, n) = count(&kink, 1e-4);
+    assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "kink: {got} for {want}");
+    assert!(n <= 24, "kink: {n} evaluations");
+}
+
 /// G2bv2's `p_for`: the `pMax` at which an RC of time constant `tau` fed at
 /// peak power `p_peak` ends its stress at `s_inf` (it latches iff `s_inf >=
 /// 1`): `S_inf = tau (k - 1 - ln k) / 2` with `k = p_peak / pMax`.
@@ -2270,3 +2309,127 @@ fn a_fixed_node_driver_the_load_settle_commits_last_is_in_the_solvers_table_and_
     assert_eq!(rig.i(6).to_bits(), twin.i(6).to_bits(), "the 2.5 V source's current at load: {} against {}", rig.i(6), twin.i(6));
 }
 
+
+/// THERM's board: a draining cell (OCV 4 V empty to 5 V full, 15 uAh, so
+/// its rail falls some 0.2 V a second through 220 ohm and a red LED), with
+/// both identified (the resistor profile, R_theta 340 K/W and tau 8 s; the
+/// LED's, 560 K/W and 2 s), and a rated (5 mW), identified 1 kohm into 1 mF
+/// on the same rail: a closed-form partition the rail drives (R29).
+fn draining_cell_board() -> Program {
+    let mut cell = battery(0, 1, 0, 5.0, 0.0);
+    cell.params[kinds::battery_param::CAPACITY_AH] = 15e-6;
+    cell.blob = vec![2.0, 0.0, 4.0, 1.0, 5.0];
+    program(
+        5,
+        vec![
+            cell,
+            resistor(1, 1, 2, 220.0),
+            red_led(2, 2, 0),
+            resistor(3, 1, 3, 1000.0),
+            capacitor(4, 3, 0, 1e-3),
+            thermal(1, 340.0, 8.0),
+            thermal(2, 560.0, 2.0),
+            thermal(3, 340.0, 8.0),
+            rating(3, 5e-3, 1000.0),
+        ],
+    )
+}
+
+/// `[T, P]` of devices 1, 2 and 3 at each of `checks`, the host stopping
+/// every `stop` seconds (and at each check).
+fn thermal_readouts(p: &Program, stop: f64, checks: &[f64]) -> Vec<[f64; 6]> {
+    let mut e = Engine::load(p).unwrap();
+    let (mut t, mut out) = (0.0f64, Vec::new());
+    for &check in checks {
+        while t < check {
+            t = (t + stop).min(check);
+            e.advance(t).unwrap();
+        }
+        let mut row = [0.0; 6];
+        for (k, d) in [1u32, 2, 3].into_iter().enumerate() {
+            let st = e.device_state(d).unwrap();
+            row[2 * k] = st[0];
+            row[2 * k + 1] = st[1];
+        }
+        out.push(row);
+    }
+    out
+}
+
+#[test]
+fn thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole() {
+    // THERM: every identified device on a cell's rail is re-driven at each
+    // rail move, which is what its cost is, and holds its power between
+    // moves. The cell's rail moves by its 10 uV quantum, so a static device's
+    // power is held to `2 V_R 1e-5 / R` of the instant's (220 ohm at V_R ~
+    // 3.2 V: 2.9e-7 W) and its temperature to half the relative power step
+    // of the rise, `1e-5 / V_R` = 3.1e-6. A host stop is a publish too, so
+    // the stops move both inside that. Whatever makes the visits cheaper is
+    // held to the same at host stops of 1 ms, 1/60 s and 100 ms against the
+    // same board stopped every microsecond: T within 1e-5 of the rise and P
+    // within 3e-7 W. (Measured on 9e9aa01: 2.9e-6 and 4e-9 W.)
+    let p = draining_cell_board();
+    let checks = [0.1, 0.2, 0.3];
+    let fine = thermal_readouts(&p, 1e-6, &checks);
+    for stop in [1e-3, 1.0 / 60.0, 0.1] {
+        let got = thermal_readouts(&p, stop, &checks);
+        for (c, (g, f)) in got.iter().zip(&fine).enumerate() {
+            for k in 0..3 {
+                let rise = f[2 * k] - 25.0;
+                close(g[2 * k], f[2 * k], 1e-5 * rise.abs() + 1e-12, &format!("T of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+                close(g[2 * k + 1], f[2 * k + 1], 3e-7, &format!("P of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+            }
+        }
+    }
+    // The one-pole's closed form over the fine run's own powers, held over
+    // each microsecond (`T_inf = 25 + R_theta P`, `T = T_inf + (T0 - T_inf)
+    // e^(-dt/tau)`), for the two static devices: within 2e-5 of the rise,
+    // the held quantum above twice over (the reference holds each
+    // microsecond's power from its start, the engine from its last move).
+    let mut e = Engine::load(&p).unwrap();
+    let mut temp = [25.0f64; 2];
+    let (r_theta, tau): ([f64; 2], [f64; 2]) = ([340.0, 560.0], [8.0, 2.0]);
+    let mut t = 0.0f64;
+    let mut power = [0.0f64; 2];
+    for &check in &checks {
+        while t < check - 1e-12 {
+            for k in 0..2 {
+                let t_inf = 25.0 + r_theta[k] * power[k];
+                temp[k] = t_inf + (temp[k] - t_inf) * (-1e-6 / tau[k]).exp();
+            }
+            t += 1e-6;
+            e.advance(t).unwrap();
+            for (k, d) in [1u32, 2].into_iter().enumerate() {
+                power[k] = e.device_state(d).unwrap()[1];
+            }
+        }
+        for (k, d) in [1u32, 2].into_iter().enumerate() {
+            let got = e.device_state(d).unwrap()[0];
+            close(got, temp[k], 2e-5 * (temp[k] - 25.0) + 1e-9, &format!("T of device {d} at {check} s against the one-pole"));
+        }
+    }
+}
+
+#[test]
+fn a_rated_resistor_on_a_draining_cell_latches_at_the_same_instant_at_any_host_stop() {
+    // THERM: the rated 1 kohm into 1 mF latches where its stress integral
+    // crosses 1 (S' = P/pMax - 1, pMax 5 mW, 25 mW at the start, tau 1 s:
+    // S_inf = tau (k - 1 - ln k)/2 = 1.195 for k = 5), at the same instant
+    // whatever the host's stops, within what its re-anchors allow: each holds
+    // its voltage to 1e-4 relative (DEVICE_TOL_REL), so its rate to 2e-4 and
+    // its latch time to 2e-4 of itself.
+    let p = draining_cell_board();
+    let latch = |stop: f64| {
+        let mut e = Engine::load(&p).unwrap();
+        let mut t = 0.0f64;
+        while t < 1.0 {
+            t = (t + stop).min(1.0);
+            e.advance(t).unwrap();
+        }
+        e.records(0).unwrap().chunks(7).find(|c| c[0] == 3.0).map(|c| c[3]).expect("it latches")
+    };
+    let fine = latch(1e-5);
+    for stop in [1e-3, 1.0 / 60.0, 0.1] {
+        close(latch(stop), fine, 2e-4 * fine, &format!("latch at stops of {stop} s"));
+    }
+}

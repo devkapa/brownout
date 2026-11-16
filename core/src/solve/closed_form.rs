@@ -2543,28 +2543,74 @@ fn j_prime(f: f64, k: f64, tau: f64) -> f64 {
     }
 }
 
+/// How close below its root [`largest_within`] returns: 2^-30, under the
+/// 1e-9 relative its tests hold it to.
+pub(crate) const WITHIN_REL: f64 = 1.0 / (1u64 << 30) as f64;
+
 /// The largest `δ` with `bound(δ) <= tol`, `bound` nondecreasing from 0
-/// (infinity when it never gets there), to bisection's last useful bit.
+/// (infinity when it never gets there), from below: the `δ` returned always
+/// has `bound(δ) <= tol`, and lies within [`WITHIN_REL`] of the root.
 pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
-    let mut hi = 1e-12;
-    while bound(hi) <= tol {
-        hi *= 2.0;
-        if hi > 1e12 {
-            return f64::INFINITY;
+    // The bracket is the first `1e-12 2^k` (k = 0..=79, the doublings that
+    // stay at or under 1e12) whose bound exceeds `tol`, infinity when none
+    // does: found by bisection on `k` (8 evaluations), where doubling took
+    // one per binary order of `δ`. Then the root inside it by regula falsi
+    // with the Illinois weight, each step keeping the bracket (`lo` always
+    // within the bound), to `WITHIN_REL` of `lo`: about 8 evaluations where
+    // bisection to the last bit took 53. The battery SAP-1's closed-form
+    // resistors search a deadline at every rail move, 40,000 times a
+    // simulated second each, and spent most of their visit here.
+    const LAST: i32 = 79;
+    // `1e-12 2^k`, the power of two built exactly (as each doubling was).
+    let at = |k: i32| 1e-12 * f64::from_bits(((1023 + k) as u64) << 52);
+    let f_last = bound(at(LAST)) - tol;
+    if f_last <= 0.0 {
+        return f64::INFINITY;
+    }
+    // `bound(at(lo_k)) <= tol < bound(at(hi_k))`, `lo_k = -1` standing for
+    // none tested yet; each end's `bound - tol` kept.
+    let (mut lo_k, mut hi_k) = (-1, LAST);
+    let (mut f_lo_k, mut f_hi_k) = (f64::NAN, f_last);
+    while hi_k - lo_k > 1 {
+        let mid = lo_k + (hi_k - lo_k) / 2;
+        let f = bound(at(mid)) - tol;
+        if f <= 0.0 {
+            (lo_k, f_lo_k) = (mid, f);
+        } else {
+            (hi_k, f_hi_k) = (mid, f);
         }
     }
-    let mut lo = 0.0;
-    for _ in 0..80 {
+    let (mut lo, mut f_lo) = if lo_k >= 0 { (at(lo_k), f_lo_k) } else { (0.0, bound(0.0) - tol) };
+    let (mut hi, mut f_hi) = (at(hi_k), f_hi_k);
+    // Which end the last step moved: an end left twice in a row has its
+    // value halved (Illinois), so both ends close in.
+    let mut side = 0i8;
+    for n in 0..120 {
+        if hi - lo <= WITHIN_REL * lo {
+            break;
+        }
         let mid = 0.5 * (lo + hi);
-        // Adjacent doubles: nothing is left to split, and every further
-        // pass would land on `lo` or `hi` again.
+        // Adjacent doubles: nothing is left to split.
         if mid <= lo || mid >= hi {
             break;
         }
-        if bound(mid) <= tol {
-            lo = mid;
+        // Every fourth step bisects, so a bound the secant reads badly (a
+        // kink, rounding near the root) still halves the bracket.
+        let secant = lo - f_lo * (hi - lo) / (f_hi - f_lo);
+        let x = if n % 4 == 3 || !(secant > lo && secant < hi) { mid } else { secant };
+        let f = bound(x) - tol;
+        if f <= 0.0 {
+            (lo, f_lo) = (x, f);
+            if side == -1 {
+                f_hi *= 0.5;
+            }
+            side = -1;
         } else {
-            hi = mid;
+            (hi, f_hi) = (x, f);
+            if side == 1 {
+                f_lo *= 0.5;
+            }
+            side = 1;
         }
     }
     lo

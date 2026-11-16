@@ -2202,10 +2202,18 @@ impl PartitionedSolver {
             None => (None, f64::INFINITY),
         };
         let mut out = Drives { redrive_by, ..Drives::default() };
+        // `device_volts` at `now`, from the segment just computed: the anchor
+        // search is the visit's dearest part (the battery SAP-1's closed-form
+        // resistors spent half their time on it twice), and a second search
+        // returns the same value.
+        let dv_now = match seg {
+            Some(v) => v.at(now),
+            None => self.voltages[sd.nodes[0]] - self.voltages[sd.nodes[1]],
+        };
         match sd.kind {
             kinds::RESISTOR => {
                 let r = sd.record[0];
-                let dv = self.device_volts(i, now);
+                let dv = dv_now;
                 if sd.p_max > 0.0 {
                     out.stress = Some(match seg {
                         // rate = k V^2 - 1 with k = rPower/(R^2 pMax) (point 5).
@@ -2234,7 +2242,7 @@ impl PartitionedSolver {
                         StressDrive::Segment(SegmentRate { k, c: 1.0, recovery: failures::FUSE_RECOVERY, v })
                     }
                     None => {
-                        let dv = self.device_volts(i, now);
+                        let dv = dv_now;
                         let d = failures::fuse_tripped(dv, r_normal, i_rating);
                         StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::fuse_q(dv, r_normal, i_rating) }
                     }
@@ -2247,7 +2255,7 @@ impl PartitionedSolver {
                     Some(v) if entry.tripped => params.tripped_segment(v, now),
                     Some(v) => PtcDrive::Stress(params.untripped_segment(v)),
                     None => {
-                        let current = self.device_volts(i, now).abs() / params.resistance(entry.tripped);
+                        let current = dv_now.abs() / params.resistance(entry.tripped);
                         if entry.tripped {
                             // The backward rule's cool window starts where the
                             // step does, so the step's cool time counts.
