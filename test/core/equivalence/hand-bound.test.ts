@@ -7,7 +7,7 @@
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { initCore } from "../../../src/core/wasm.js";
-import { assertHandBoundApplies, runHandBoundEntry } from "./hand-bound.js";
+import { assertHandBoundApplies, judge, runHandBoundEntry, type Run } from "./hand-bound.js";
 import { runCorpusEntry } from "./run-entry.js";
 import { buildKindTable } from "./table.js";
 import { loadSyntheticCorpus, type LoadedSyntheticEntry } from "./synthetic-fixtures.js";
@@ -49,6 +49,17 @@ describe("the handBound marker (ruling R122 (a))", () => {
     if (result.status === "fail") {
       expect(result.mismatches.some((m) => m.category === "sidecar" && m.id.startsWith("555 "))).toBe(true);
     }
+  });
+
+  it("a quantity that was not measured is a miss, not a pass", () => {
+    // One rise and one fall hold no complete cycle, so the period and the duty are not measured (NaN). Before this
+    // guard `|NaN - hand| > bound` was false and both passed.
+    const spec = named("77-").entry.handBound!;
+    const hand = { up: [5.0809e-3], down: [3.5156e-3], periodS: 3.7834e-3, duty: 0.5863, finalCount: 2 };
+    const run: Run = { up: [5.0809e-3], down: [3.5156e-3], capCurrent: [] };
+    const verdict = judge(run, { rises: 1, falls: 1, worstEdgeS: 0 }, spec, hand);
+    expect(verdict.misses.map((m) => m.id)).toEqual(["period", "duty"]);
+    expect(verdict.ratio).toBe(Infinity);
   });
 
   it("a hand value the model does not derive is a fixture error, not a verdict", () => {

@@ -113,6 +113,15 @@ function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult)
         ` of ${result.phaseCount} phase(s), which the circuit does not contain)`
       );
     case "pass":
+      // A hand-judged entry compares no voltage and no current between the engines: its zeros are not a measurement, so they are not printed.
+      if (result.handBound) {
+        return (
+          `${head} (hand-judged: timing only, no voltage or current compared between the engines; ` +
+          `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})` +
+          describeKnownDivergences(result.knownDivergences) +
+          describeHandBound(result.handBound)
+        );
+      }
       return (
         `${head} (max abs V ${fmtNum(result.maxAbsErrorVolts)}, max rel V ${fmtNum(result.maxRelErrorVolts)}, ` +
         `max abs I ${fmtNum(result.maxAbsErrorAmps)}, max rel I ${fmtNum(result.maxRelErrorAmps)}; ` +

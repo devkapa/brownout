@@ -57,7 +57,7 @@ export function assertHandBoundApplies(circuit: SimCircuit, spec: HandBoundSpec)
   }
 }
 
-interface Run {
+export interface Run {
   up: number[];
   down: number[];
   count?: number;
@@ -169,10 +169,16 @@ interface Verdict {
   readonly ratio: number;
 }
 
-function judge(run: Run, q: HandBoundQuantities, spec: HandBoundSpec, hand: HandEdges): Verdict {
+export function judge(run: Run, q: HandBoundQuantities, spec: HandBoundSpec, hand: HandEdges): Verdict {
   const misses: Verdict["misses"] = [];
   let ratio = 0;
   const note = (id: string, got: number, h: number, tol: number): void => {
+    // A quantity that was not measured (NaN: no complete cycle, a missing pulse) is a miss, never a pass.
+    if (!Number.isFinite(got)) {
+      ratio = Infinity;
+      misses.push({ id, got, hand: h, allowed: tol });
+      return;
+    }
     const r = Math.abs(got - h) / (tol > 0 ? tol : 1e-300);
     ratio = Math.max(ratio, r);
     if (Math.abs(got - h) > tol) misses.push({ id, got, hand: h, allowed: tol });
