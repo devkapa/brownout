@@ -6565,9 +6565,21 @@ its voltage off the segment it computed, and the search
 (`closed_form::largest_within`) brackets by bisection on the doubling's
 exponent (or doubles from the floor R29 hands it, its own majorant's
 root) and refines by Illinois regula falsi, always from below, to `2^-30`
-of the root (`WITHIN_REL`): 1.41 s per simulated second, bit for bit the
-same run (no re-anchor fires on the SAP-1). `bench:sap1-cost -- --catalog=
-both` times both boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
+of the root (`WITHIN_REL`): 1.41 s per simulated second. That is typically
+8 to 16 evaluations, not a bound: over 100,000 random R29 inputs (SHIPV-H)
+the search took at most 63 evaluations from 1e-12 and 65 from the floor
+(the old one: 123, typically 84), and more than 24 in about 13 % of R29
+calls and 18 % of curved ones. A floor whose bound rounds a few ulps over
+the tolerance (4.2 % of R29 calls, where the bound is its own majorant,
+`L = 0`) is tried again `2^-32` under before falling back to the search
+from 1e-12 (`FLOOR_NUDGE`; no call of the generator's falls back since).
+The run is bit for bit the same where no re-anchor fires (the SAP-1, the
+identity corpus). Where one fires, the deadline moves by up to `2^-30` of
+itself, which moves event instants: on the bench-supply cold sweep's
+133/0, 145/3 and 162/3 the trajectories differ by up to 1.2e-11 V (2.5e-9
+of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
+fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
+boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
 
 ### Known follow-ups (W1g)
 

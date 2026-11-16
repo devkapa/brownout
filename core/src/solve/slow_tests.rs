@@ -724,7 +724,10 @@ fn a_re_anchor_deadline_is_found_from_below_in_a_few_evaluations() {
     // doubling from 1e-12 then bisecting to the last bit took 84 evaluations
     // of the bound for a deadline of a millisecond. The deadline is a bound's
     // root honoured from below, so it is held to `bound(δ) <= tol` and to
-    // within 2^-30 under the root, in at most 24 evaluations.
+    // within 2^-30 under the root; these two cases take 24 evaluations or
+    // fewer. That is not a general bound (SHIPV-H): the count can run to the
+    // doubling's range, 63 from 1e-12 and 65 from a floor over 100,000
+    // random R29 inputs, more than 24 in about 13 % of them.
     use super::closed_form::{largest_within, WITHIN_REL};
     use std::cell::Cell;
     let count = |bound: &dyn Fn(f64) -> f64, tol: f64| {
@@ -773,6 +776,53 @@ fn a_re_anchor_deadline_is_found_from_below_in_a_few_evaluations() {
         assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "floor {floor}: {got} for {want}");
         assert!(n.get() <= most, "floor {floor}: {} evaluations", n.get());
     }
+}
+
+#[test]
+fn a_floor_that_rounds_over_its_own_bound_is_nudged_inside_rather_than_searched_from_1e_12() {
+    // SHIPV-H: with no lag (`L = 0`) R29's bound is its majorant, `C δ²/2`,
+    // and the floor it hands the search is that bound's own root, `sqrt(2
+    // tol / C)`, whose bound rounds an ulp or so over `tol` about half the
+    // time. Such a floor fell back to the search from 1e-12 (one evaluation
+    // more than that search alone); tried again 2^-32 under, it brackets in a
+    // doubling. Over 2,000 (C, tol) pairs: some round over (the case is
+    // exercised), each of those now costs fewer evaluations than the search
+    // from 1e-12 alone, and every answer is within the bound and within
+    // 2^-29 of the root `sqrt(2 tol / C)` (from below, to its rounding).
+    use super::closed_form::{largest_within, largest_within_above, WITHIN_REL};
+    use std::cell::Cell;
+    let mut over = 0;
+    for k in 0..2000 {
+        let c = 1.0 + k as f64 * 3.7e-4;
+        let tol = 1e-6 * (1.0 + k as f64 * 1.3e-4);
+        let bound = |d: f64| c * d * d / 2.0;
+        let floor = (2.0 * tol / c).sqrt();
+        let n = Cell::new(0usize);
+        let got = largest_within_above(
+            |d| {
+                n.set(n.get() + 1);
+                bound(d)
+            },
+            tol,
+            floor,
+        );
+        // The root as computed, which may itself round an ulp either side.
+        let root = floor;
+        assert!(bound(got) <= tol && got <= root * (1.0 + 4e-16) && got >= root * (1.0 - 2.0 * WITHIN_REL), "C {c}, tol {tol}: {got} for {root}");
+        if bound(floor) > tol {
+            over += 1;
+            let full = Cell::new(0usize);
+            largest_within(
+                |d| {
+                    full.set(full.get() + 1);
+                    bound(d)
+                },
+                tol,
+            );
+            assert!(n.get() < full.get(), "C {c}, tol {tol}: {} evaluations from the floor, {} from 1e-12", n.get(), full.get());
+        }
+    }
+    assert!(over > 0, "no floor rounded over its bound");
 }
 
 /// G2bv2's `p_for`: the `pMax` at which an RC of time constant `tau` fed at

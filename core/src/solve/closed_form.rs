@@ -2555,6 +2555,16 @@ fn j_prime(f: f64, k: f64, tau: f64) -> f64 {
 /// 1e-9 relative its tests hold it to.
 pub(crate) const WITHIN_REL: f64 = 1.0 / (1u64 << 30) as f64;
 
+/// How far under a floor whose bound rounds over the tolerance
+/// [`largest_within_above`] tries again: 2^-32 relative. Where R29's bound
+/// equals its majorant (no lag, `L = 0`, a rail-tracking device) the floor
+/// is the bound's own root and its bound rounds 1 to 4 ulps over the
+/// tolerance in 4.2 % of calls (SHIPV-H's generator, 100,000 inputs; the
+/// cancellation in `δ + (1 - e^(fδ))/|f|` takes a few more), each of which
+/// fell back to the full search from 1e-12. Nudged by 2^-40 the retry
+/// still failed in 12 of the 4,041, by 2^-36 in 4, by 2^-32 in none.
+pub(crate) const FLOOR_NUDGE: f64 = 1.0 / (1u64 << 32) as f64;
+
 /// The largest `δ` with `bound(δ) <= tol`, `bound` nondecreasing from 0
 /// (infinity when it never gets there), from below: the `δ` returned always
 /// has `bound(δ) <= tol`, and lies within [`WITHIN_REL`] of the root.
@@ -2564,10 +2574,16 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
     // does: found by bisection on `k` (8 evaluations), where doubling took
     // one per binary order of `δ`. Then the root inside it by regula falsi
     // with the Illinois weight, each step keeping the bracket (`lo` always
-    // within the bound), to `WITHIN_REL` of `lo`: about 8 evaluations where
-    // bisection to the last bit took 53. The battery SAP-1's closed-form
-    // resistors search a deadline at every rail move, 40,000 times a
-    // simulated second each, and spent most of their visit here.
+    // within the bound), to `WITHIN_REL` of `lo`: typically 8 evaluations
+    // where bisection to the last bit took 53. The battery SAP-1's
+    // closed-form resistors search a deadline at every rail move, 40,000
+    // times a simulated second each, and spent most of their visit here.
+    // There is no small bound on the count in general: the refinement's
+    // worst case is the Illinois steps plus a bisection every eighth, over
+    // the doubling's whole range. Over 100,000 random R29 inputs (SHIPV-H)
+    // it took at most 63 evaluations from 1e-12 and 65 from R29's floor
+    // (the old search: 123, typically 84), and more than 24 in about 13 % of
+    // R29 calls and 18 % of curved ones.
     const LAST: i32 = 79;
     // `1e-12 2^k`, the power of two built exactly (as each doubling was).
     let at = |k: i32| 1e-12 * f64::from_bits(((1023 + k) as u64) << 52);
@@ -2595,20 +2611,34 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
 /// [`largest_within`] from `floor`, a `δ` the caller has shown to be within
 /// the bound (its own closed-form majorant's root): doubled from there to a
 /// bracket, which is a few doublings where the root lies near it, rather
-/// than the eight evaluations of the search from 1e-12. A `floor` that
-/// rounds outside (or is not positive and finite) falls back to it.
+/// than the eight evaluations of the search from 1e-12. A `floor` whose
+/// bound rounds over `tol` is tried again [`FLOOR_NUDGE`] under it; one
+/// that is still outside (or is not positive and finite) falls back to the
+/// search from 1e-12. Either way the answer is a `δ` within the bound,
+/// refined from below.
 pub(crate) fn largest_within_above(bound: impl Fn(f64) -> f64, tol: f64, floor: f64) -> f64 {
     if !(floor > 0.0 && floor.is_finite()) {
         return largest_within(bound, tol);
     }
-    let f_floor = bound(floor) - tol;
+    let mut floor = floor;
+    let mut f_floor = bound(floor) - tol;
     if !(f_floor <= 0.0) {
-        return largest_within(bound, tol);
+        // SHIPV-H: a floor that is the bound's own root (its majorant is the
+        // bound) rounds a few ulps over it in 4.2 % of R29's calls.
+        floor *= 1.0 - FLOOR_NUDGE;
+        f_floor = bound(floor) - tol;
+        if !(f_floor <= 0.0) {
+            return largest_within(bound, tol);
+        }
     }
     let (mut lo, mut f_lo) = (floor, f_floor);
     loop {
         let hi = 2.0 * lo;
-        // `largest_within`'s horizon: past it the deadline is infinite.
+        // `largest_within`'s horizon: past it the deadline is infinite. Its
+        // grid ends at 1e-12 2^79 = 6.04e11 s, so a floor in [5e11, 6.04e11]
+        // s returns infinity here where that search can return a finite
+        // deadline. Either is a re-anchor 16,000 years of simulated time
+        // away, which no run reaches: nothing differs.
         if hi > 1e12 {
             return f64::INFINITY;
         }
