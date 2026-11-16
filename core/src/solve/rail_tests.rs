@@ -20260,6 +20260,79 @@ fn a_cells_rail_under_a_static_hub_divider_re_solves_within_the_dividers_slack()
     rel(got, want, 1e-3, "the divider's draw sets the drift cap");
 }
 
+/// The cold fuzz's 212/4 (HUB=1, `f5e gen 212 4`): a 4.54 V, 0.142 ohm cell
+/// (node 1); a clock (-1.23 / 2.62 V) under a 3.59 V source holds node 4; a
+/// 74LS00 on the rail reads node 2 and drives node 5, which carries 202 uF
+/// to the clock's node 3 and 10k, 1992, 77.1k and 780 ohm.
+fn cold_212_tpl4() -> Program {
+    let mut p = program(6, vec![
+        fz(20, 0, &[1, 0], vec![1.0, 0.14230800172631905, 1.0, 0.0, 2.0, 0.05, 0.09702308315523357, 0.3875130948692837, 0.0], vec![2.0, 0.0, 4.369542024188625, 1.0, 4.543091770643159]),
+        fz(22, 1, &[3, 0], vec![65.03959593145582, 0.1440489398275677, 2.6190461492520836, -1.2282449853810524, 0.0], vec![8.0]),
+        fz(2, 2, &[4, 3], vec![3.5882207326072146], vec![]),
+        fz(1, 3, &[2, 0], vec![52827.26552003454], vec![]),
+        fz(1, 4, &[5, 0], vec![10003.00875739213], vec![]),
+        fz(30, 5, &[4, 0], vec![1.7555602377676212, 1.5269146736187449, 0.017877639897856405, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 6, &[4, 4], vec![802.0581054080589], vec![]),
+        fz(1, 7, &[4, 5], vec![1991.8399038885404], vec![]),
+        fz(30, 8, &[4, 1], vec![2.352959122819539, 2.279231684400348, 0.01398982415467486, 0.0, 0.0, 0.0], vec![]),
+        fz(1, 9, &[4, 4], vec![11.387496569716541], vec![]),
+        fz(3, 10, &[4, 0], vec![4.189594078994012e-6, 0.0, 0.0], vec![]),
+        fz(30, 11, &[2, 4], vec![2.106848465868395, 2.4606806565880186, 0.011047476514445497, 0.0, 0.0, 0.0], vec![]),
+        fz(3, 12, &[1, 0], vec![7.114572276168932e-7, 0.0, 0.0], vec![]),
+        fz(3, 13, &[3, 5], vec![0.00020238118248800812, 0.0, 0.0], vec![]),
+        fz(1, 14, &[4, 5], vec![77114.50092676391], vec![]),
+        fz(50, 15, &[1, 0, 2, 2, 5, 0, 0, 4, 0, 0, 4, 0, 0, 5], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.50009034140198e-8], vec![0.0; 13]),
+        fz(1, 16, &[5, 0], vec![780.3067289716485], vec![]),
+        fz(1, 17, &[4, 1], vec![62.443341574611814], vec![]),
+        fz(90, 6, &[], vec![6.0, 0.00014563755017998363, 802.0581054080589], vec![]),
+        fz(90, 7, &[], vec![7.0, 0.003146863646363051, 1991.8399038885404], vec![]),
+        fz(90, 9, &[], vec![9.0, 7.463825430456302, 11.387496569716541], vec![]),
+        fz(90, 14, &[], vec![14.0, 3.8472088922290325e-6, 77114.50092676391], vec![]),
+        fz(90, 16, &[], vec![16.0, 0.0191189553128258, 780.3067289716485], vec![]),
+        fz(90, 17, &[], vec![17.0, 0.01935752624267547, 62.443341574611814], vec![]),
+    ]);
+    p.digital_slot_count = 32;
+    p
+}
+
+#[test]
+fn a_curved_partition_on_a_cells_path_keeps_the_10_uv_band() {
+    // CAD-2 (R121): the cold fuzz's 212/4, whose 74LS00 output node 5 is a
+    // curved closed-form hub partition the cell's coupled path drives. Its
+    // coupling's error (`couple_band`) is carried from aim to aim and grows
+    // with each aim's length, about as its square; on the 10 uV band an aim
+    // lasted ~12 us. Aimed for as long as the readings allowed (0.5 mV, the
+    // LEDs' junction cap, ~1 ms), one aim left a current near zero (1 nA of
+    // tolerance) 2.9 nA of error, and every aim after failed at the bound's
+    // 1 ns floor until the 12 ms decay freed some (the sweep's run: 9,071
+    // rail events at 1 ns from 4.94 ms and 49k more from 20 ms, 18.5k -> 59k
+    // over 1.2 s, OK -> SLOW). So a board with such a partition keeps the
+    // 10 uV band, as one with a stepped hub partition does: its drift cap is
+    // `RAIL_DRIFT_V` at every solve once the partition is driven, and its
+    // rail events over 30 ms (both bursts' span) are the band's within 5 %
+    // (measured with 1 ms stops: 14,431 against 1,043 before, 1,043 after).
+    let p = cold_212_tpl4();
+    let run = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut rig = Rig::load(&p).unwrap();
+        let mut caps = Vec::new();
+        for k in 1..=30 {
+            rig.advance(1e-3 * k as f64).unwrap();
+            if rig.s().closed_form.curved_on_cell_path() {
+                caps.push(rig.hub().state.cad_d);
+            }
+        }
+        rails::force_fixed_cell_band(false);
+        (rig.hub().stats.events, caps)
+    };
+    let (fixed_events, _) = run(true);
+    let (events, caps) = run(false);
+    eprintln!("212/4: {events} rail events to 30 ms ({fixed_events} on the 10 uV band); drift caps while driven {caps:?}");
+    assert!(!caps.is_empty(), "node 5 is never a curved partition on the path");
+    assert!(caps.iter().all(|&d| d == rails::RAIL_DRIFT_V), "drift caps {caps:?}");
+    assert!(events as f64 <= 1.05 * fixed_events as f64, "{events} rail events against the band's {fixed_events}");
+}
+
 #[test]
 fn a_cells_rail_with_a_direct_junction_holds_its_drift_to_half_a_millivolt() {
     // R121: a junction straight on the rail is linearised at each solve, its

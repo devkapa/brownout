@@ -4611,7 +4611,13 @@ Constants, all from P3:35-38 unless marked new:
    `RAIL_DRIFT_V` (`|rho_dot| tau^2 / 2`, from the line's change since the
    solve before) or a closed-form partition's current `C du/dt` its slack.
    The charge integrates the cell's current `(E - u) / r` along the path.
-   A board with a stepped hub partition keeps `RAIL_DRIFT_V`. Battery SAP-1:
+   A board with a stepped hub partition keeps `RAIL_DRIFT_V`, and so does
+   one with a curved closed-form hub partition the path drives: its
+   coupling error (`couple_band`) is carried from aim to aim and grows with
+   each aim's length, so aims as long as the readings allowed spent a
+   tolerance and every aim after failed at the bound's 1 ns floor (cold
+   212/4: rail events 18k -> 59k; its slow visits 50k -> 236k followed the
+   re-aims). Battery SAP-1:
    412,659 -> 197,688 events and -58 % instructions; tests pin the 555's
    triggers against a 1 us run at six host cadences. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
@@ -7454,12 +7460,6 @@ failures and warnings (W1g)"):
   The first runs in release only: on 74/6 at coarse host cadences exact
   mode's debug assertion that each call restamps from the SoC it charged
   fails (inject 51.93236607980 against 51.93236607753), at f18bfe5 too.
-- **Slow re-anchors on a cell's coupled path** (R121). A closed-form device
-  driven by the rail re-anchors its slow drive at its own tolerance
-  (W1g R21); the 10 uV re-solves used to re-aim it first. Under R121 the
-  cold fuzz's 212/4 (battery) fires 236k re-anchor closes where it took
-  50k (events 74k -> 355k, OK -> SLOW). Anchoring the drive on the path
-  itself would remove them.
 
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as

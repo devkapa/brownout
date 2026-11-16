@@ -920,10 +920,17 @@ impl PartitionedSolver {
     /// direct junction's curvature capped at `CELL_JUNCTION_DRIFT_V`. A
     /// stepped hub partition reads the rail as a boundary at its plan (W1b
     /// rule 6) and keeps the 10 uV band until stale-rail work lands (R121
-    /// (3)). Closed-form hub partitions ride the path itself.
+    /// (3)). Linear closed-form hub partitions ride the path itself; a
+    /// curved one only within its coupling bound (`couple_band`), whose
+    /// error each aim leaves to the next: an aim as long as the readings
+    /// allow left one near its tolerance, which then failed every aim at the
+    /// bound's 1 ns floor until the segment's decay freed some (cold 212/4:
+    /// a 74LS00's output node on 202 uF, a 1 nA current's tolerance spent,
+    /// decay 12 ms; rail events 18k -> 59k). Such a board keeps the 10 uV
+    /// band too (CAD-2).
     fn cell_drift_cap(&self, u: f64, i_d: f64, g_d: f64) -> f64 {
         let base = rails::RAIL_DRIFT_V;
-        if !self.stepped.hub_partitions().is_empty() {
+        if !self.stepped.hub_partitions().is_empty() || self.closed_form.curved_on_cell_path() {
             return base;
         }
         let w0v = |v: f64| 1e-4 + 1e-3 * v.abs();
