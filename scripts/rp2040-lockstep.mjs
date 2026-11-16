@@ -919,6 +919,240 @@ def cnt():
       IMAGES["mpy-wrapper"].setup(s);
     },
   },
+  // R6: register-level fuzz of PWM, ADC, both UARTs, both SPI blocks and both
+  // I2C blocks: random words, halfwords and bytes (and the atomic aliases) at
+  // every register, small wrap values so slices run, scripted ADC channel
+  // values and UART bytes, one scripted device on each of two I2C buses, and
+  // SPI answering with a XOR. Interrupts go to a handler that silences them.
+  "r6-fuzz": {
+    k: 500,
+    steps: 600_000,
+    spiXor: { 0: 0x5a, 1: 0 },
+    i2cDevices: [{ i2c: 0, address: 0x55, next: 0x10 }, { i2c: 1, address: 0x20, next: 0 }],
+    inputs: (() => {
+      const r = rng(0x6e);
+      const list = [];
+      let at = 2000;
+      for (let i = 0; i < 90; i++) {
+        at += 500 + pick(r, 5000);
+        if (i % 3 === 0) list.push({ atCycle: at, adc: [pick(r, 5), pick(r, 4096)] });
+        else if (i % 3 === 1) list.push({ atCycle: at, uartRx: [pick(r, 2), pick(r, 256)] });
+        else list.push({ atCycle: at, pin: pick(r, 16), level: pick(r, 2) });
+      }
+      return list;
+    })(),
+    setup(s) {
+      const r = rng(0x66);
+      const asm = new Asm(RAM + 0x200);
+      const PWM_B = 0x40050000, ADC_B = 0x4004c000, UART_B = [0x40034000, 0x40038000];
+      const SPI_B = [0x4003c000, 0x40040000], I2C_B = [0x40044000, 0x40048000];
+      wr32(asm, 0xe000ed08, RAM);
+      wr32(asm, 0xe000e100, (1 << 4) | (3 << 18) | (3 << 20) | (1 << 22) | (3 << 23));
+      // GPIO0-15 on the PWM function with the input buffers on.
+      for (let pin = 0; pin < 16; pin++) {
+        wr32(asm, 0x4001c000 + 4 + 4 * pin, 0x40 | 0x16);
+        wr32(asm, 0x40014000 + 8 * pin + 4, 4);
+      }
+      const op = (addr, v, size, alias) => {
+        c32(asm, 0, ((addr + (alias << 12)) >>> 0));
+        c32(asm, 1, v >>> 0);
+        asm.op(size === 4 ? T.strImm(1, 0, 0) : size === 2 ? T.strhImm(1, 0, 0) : T.strbImm(1, 0, 0));
+      };
+      const w = (addr, v) => {
+        const alias = pick(r, 5) === 0 ? 1 + pick(r, 3) : 0;
+        const size = pick(r, 8) === 0 ? (pick(r, 2) ? 2 : 1) : 4;
+        const sub = size === 4 ? 0 : size === 2 ? 2 * pick(r, 2) : pick(r, 4);
+        op(addr + sub, v, size, alias);
+      };
+      const rr = (addr) => rd32(asm, addr);
+      const small = (n) => pick(r, n);
+      for (let it = 0; it < 1100; it++) {
+        const blk = r();
+        if (blk < 0.32) {
+          const ch = pick(r, 8), base = PWM_B + 0x14 * ch;
+          const c = pick(r, 14);
+          if (c === 0) w(base + 0x10, 1 + small(80));
+          else if (c === 1) w(base + 0x0c, small(90) | (small(90) << 16));
+          else if (c === 2) w(base + 0x04, small(5) === 0 ? 0 : ((1 + small(4)) << 4) | small(16));
+          else if (c === 3 || c === 4) w(base, (small(3) ? 1 : 0) | (small(2) << 1) | (small(2) << 2) | (small(2) << 3) | (small(8) === 0 ? small(4) << 4 : 0) | (small(8) === 0 ? 0xc0 : 0));
+          else if (c === 5) w(base + 0x08, small(100));
+          else if (c === 6) w(PWM_B + 0xa0, small(256));
+          else if (c === 7) w(PWM_B + [0xa4, 0xa8, 0xac][small(3)], small(256));
+          else if (c === 8) rr(PWM_B + 0xa4 + 4 * small(4));
+          else rr(base + 4 * small(5));
+        } else if (blk < 0.46) {
+          const c = pick(r, 10);
+          if (c < 3) w(ADC_B, (small(3) ? 1 : 0) | (small(3) === 0 ? 4 : 0) | (small(5) === 0 ? 8 : 0) | (small(8) << 12) | (small(6) === 0 ? small(32) << 16 : 0) | (small(8) === 0 ? 2 : 0) | (small(4) === 0 ? 1 << 10 : 0));
+          else if (c === 3) w(ADC_B + 8, small(2) | (small(2) << 1) | (small(2) << 2) | (small(2) << 3) | (small(5) << 24) | (small(2) << 10) | (small(2) << 11));
+          else if (c === 4) w(ADC_B + 0x10, small(4) === 0 ? 0 : (small(300) << 8) | small(256));
+          else if (c === 5) w(ADC_B + [0x18, 0x1c][small(2)], small(2));
+          else rr(ADC_B + 4 * small(9));
+        } else if (blk < 0.60) {
+          const u = UART_B[small(2)];
+          const c = pick(r, 12);
+          if (c < 3) w(u, small(256));
+          else if (c === 3) w(u + 0x24, small(200));
+          else if (c === 4) w(u + 0x28, small(64));
+          else if (c === 5) w(u + 0x2c, small(256));
+          else if (c === 6) w(u + 0x30, small(2) ? 0x301 : small(0x400));
+          else if (c === 7) w(u + 0x38, small(0x800));
+          else if (c === 8) w(u + 0x44, small(0x800));
+          else rr(u + [0, 0x18, 0x24, 0x3c, 0x40, 0x30, 0xfe0][small(7)]);
+        } else if (blk < 0.76) {
+          const sp = SPI_B[small(2)];
+          const c = pick(r, 12);
+          if (c === 0) w(sp, (3 + small(13)) | (small(256) << 8) | (small(4) << 6));
+          else if (c === 1) w(sp + 4, small(16));
+          else if (c < 5) w(sp + 8, small(65536));
+          else if (c === 5) w(sp + 0x10, small(256));
+          else if (c === 6) w(sp + 0x14, small(16));
+          else if (c === 7) w(sp + 0x20, small(4));
+          else if (c === 8) w(sp + 0x24, small(4));
+          else rr(sp + [8, 0xc, 0x18, 0x1c, 0, 4][small(6)]);
+        } else {
+          const ic = I2C_B[small(2)];
+          const c = pick(r, 14);
+          if (c === 0) w(ic + 4, small(3) === 0 ? 0x55 : small(2) ? 0x20 : small(0x400));
+          else if (c === 1) w(ic, small(0x800) | 1);
+          else if (c < 5) w(ic + 0x10, small(0x800));
+          else if (c === 5) w(ic + 0x6c, small(3) ? 1 : small(8));
+          else if (c === 6) w(ic + [0x38, 0x3c][small(2)], small(20));
+          else if (c === 7) w(ic + 0xa0, small(64));
+          else if (c === 8) w(ic + [0x14, 0x18, 0x1c, 0x20][small(4)], small(0x10000));
+          else rr(ic + [0x10, 0x2c, 0x34, 0x40, 0x44, 0x54, 0x60, 0x70, 0x74, 0x78, 0x80, 0x9c][small(12)]);
+        }
+        spin(asm, 2 + pick(r, 40));
+      }
+      asm.op(T.bkpt(0x66));
+      asm.label("handler");
+      wr32(asm, PWM_B + 0xa4, 0xff);
+      wr32(asm, PWM_B + 0xa8, 0);
+      wr32(asm, PWM_B + 0xac, 0);
+      wr32(asm, ADC_B + 0x18, 0);
+      wr32(asm, ADC_B + 0x1c, 0);
+      for (const u of UART_B) { wr32(asm, u + 0x38, 0); wr32(asm, u + 0x44, 0x7ff); }
+      for (const sp of SPI_B) { wr32(asm, sp + 0x14, 0); wr32(asm, sp + 0x20, 3); }
+      asm.op(T.bx(14));
+      s.sram(0x200, asm.finish());
+      r5Vectors(s, asm);
+      s.reg(13, RAM + 0x40000);
+      s.reg(15, RAM + 0x200);
+    },
+  },
+  // R6: the wrapper's boot, then machine.Pin toggles and reads (output,
+  // pull-up and pull-down inputs, open drain, an edge interrupt) and
+  // machine.ADC reads against scripted channel values, the temperature
+  // sensor included.
+  "r6-mpy-pins": {
+    k: 5000,
+    steps: 30_000_000,
+    inputs: replSession([
+      "from machine import Pin, ADC\nimport machine",
+      "o=Pin(15, Pin.OUT)\no.value(1)\no.value(0)\no.toggle()\nprint(o.value())",
+      "i=Pin(14, Pin.IN, Pin.PULL_UP)\nprint(i.value())",
+      "print(i.value())",
+      "d=Pin(13, Pin.IN, Pin.PULL_DOWN)\nprint(d.value())",
+      "k=Pin(12, Pin.OPEN_DRAIN)\nk.value(0)\nk.value(1)\nprint(k.value())",
+      "i.irq(trigger=Pin.IRQ_RISING, handler=lambda p: print('edge', p.value()))",
+      "print(i.value(), d.value())",
+      "a0=ADC(26)\nprint(a0.read_u16())",
+      "print(a0.read_u16())",
+      "a4=ADC(4)\nprint(a4.read_u16())",
+      "a1=ADC(Pin(27))\nprint(a1.read_u16(), a0.read_u16())",
+      "print(ADC(28).read_u16(), ADC(29).read_u16())",
+      "o.value(1)\nprint(o.value(), machine.Pin(15).value())",
+    ]).concat([
+      { atCycle: 37_500_000 + 2 * 12_500_000 + 6_000_000, pin: 14, level: 0 },
+      { atCycle: 37_500_000 + 3 * 12_500_000 + 6_000_000, pin: 14, level: 1 },
+      { atCycle: 37_500_000 + 4 * 12_500_000 + 6_000_000, pin: 13, level: 1 },
+      { atCycle: 37_500_000 + 6 * 12_500_000 + 6_000_000, pin: 14, level: 0 },
+      { atCycle: 37_500_000 + 6 * 12_500_000 + 9_000_000, pin: 14, level: 1 },
+      { atCycle: 37_500_000 + 7 * 12_500_000 + 6_000_000, adc: [0, 2048] },
+      { atCycle: 37_500_000 + 8 * 12_500_000 + 6_000_000, adc: [0, 4095] },
+      { atCycle: 37_500_000 + 9 * 12_500_000 + 6_000_000, adc: [4, 700] },
+      { atCycle: 37_500_000 + 10 * 12_500_000 + 6_000_000, adc: [1, 1234] },
+      { atCycle: 37_500_000 + 10 * 12_500_000 + 7_000_000, adc: [0, 17] },
+      { atCycle: 37_500_000 + 11 * 12_500_000 + 6_000_000, adc: [2, 3000] },
+      { atCycle: 37_500_000 + 11 * 12_500_000 + 7_000_000, adc: [3, 55] },
+    ]),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
+  // R6: machine.PWM at several frequencies and duties on two slices, both
+  // channels of a slice, a servo pulse in nanoseconds, then deinit.
+  "r6-mpy-pwm": {
+    k: 5000,
+    steps: 40_000_000,
+    inputs: replSession([
+      "from machine import Pin, PWM",
+      "p=PWM(Pin(16))\np.freq(1000)\np.duty_u16(16384)",
+      "p.duty_u16(49152)",
+      "p.freq(10000)\np.duty_u16(32768)",
+      "q=PWM(Pin(17), freq=2000, duty_u16=8192)",
+      "print(p.freq(), p.duty_u16(), q.duty_u16())",
+      "p.freq(250)\np.duty_u16(1000)",
+      "p.deinit()",
+      "r=PWM(Pin(2), freq=50, duty_ns=1500000)",
+      "r.duty_ns(2000000)\nprint(r.duty_ns())",
+      "r.deinit()\nq.deinit()",
+    ]),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
+  // R6: both UARTs driven through machine.mem32 (MicroPython's machine.UART
+  // enters an interrupt storm on the reference: its TX interrupt is raised by
+  // every interrupt check, see reference_quirk_tx_interrupt_is_raised_by_any_interrupt_check):
+  // baud and line setup, bytes written and read back, bytes arriving from
+  // outside, the interrupt registers.
+  "r6-mpy-uart": {
+    k: 5000,
+    steps: 30_000_000,
+    inputs: replSession([
+      "from machine import mem32\nU=0x40034000\nV=0x40038000",
+      "mem32[U+0x24]=67\nmem32[U+0x28]=52\nmem32[U+0x2c]=0x70\nmem32[U+0x30]=0x301\nprint(hex(mem32[U+0x18]), hex(mem32[U+0xfe0]))",
+      "for c in b'hello': mem32[U]=c\nprint(hex(mem32[U+0x18]), hex(mem32[U+0x3c]))",
+      "mem32[U+0x38]=0x10\nprint(hex(mem32[U+0x40]), hex(mem32[U+0x3c]))",
+      "print(hex(mem32[U+0x18]), [mem32[U] for i in range(3)], hex(mem32[U+0x3c]))",
+      "mem32[U+0x44]=0x7ff\nprint(hex(mem32[U+0x3c]), hex(mem32[U+0x40]), mem32[U+0x24], mem32[U+0x28])",
+      "mem32[V+0x24]=10\nmem32[V+0x28]=5\nmem32[V+0x30]=0x301\nmem32[V]=0x55\nmem32[V]=0x56\nprint(hex(mem32[V+0x18]), hex(mem32[V+0x30]))",
+      "print(hex(mem32[V+0x18]), mem32[V], mem32[V], mem32[V], hex(mem32[V+0x18]))",
+      "mem32[U+0x30]=0x300\nmem32[U]=0x99\nprint(hex(mem32[U+0x30]), hex(mem32[V+0x38]))",
+    ]).concat(
+      [...'ABCDEFG'].map((c, i) => ({ atCycle: 37_500_000 + 3 * 12_500_000 + 6_000_000 + i * 20_000, uartRx: [0, c.charCodeAt(0)] })),
+      [...'zzy'].map((c, i) => ({ atCycle: 37_500_000 + 6 * 12_500_000 + 6_000_000 + i * 20_000, uartRx: [1, c.charCodeAt(0)] })),
+    ),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
+  // R6: machine.SPI answering with a XOR, and machine.I2C on a bus with one
+  // scripted device (a scan, writes, reads and register reads) and on an
+  // empty bus (a scan that finds nothing).
+  "r6-mpy-bus": {
+    k: 5000,
+    steps: 40_000_000,
+    spiXor: { 0: 0x5a },
+    i2cDevices: [{ i2c: 0, address: 0x3c, next: 0x40 }],
+    inputs: replSession([
+      "from machine import SPI, I2C, Pin",
+      "s=SPI(0, baudrate=1000000, sck=Pin(2), mosi=Pin(3), miso=Pin(4))",
+      "s.write(b'\\x01\\x02\\x03')",
+      "b=bytearray(4)\ns.write_readinto(b'\\xa5\\x5a\\xff\\x00', b)\nprint(b)",
+      "print(s.read(3, 0x11))",
+      "s.deinit()",
+      "i=I2C(0, scl=Pin(9), sda=Pin(8), freq=400000)",
+      "print(i.scan())",
+      "i.writeto(0x3c, b'\\x00\\xaf')",
+      "print(i.readfrom(0x3c, 4))",
+      "i.writeto_mem(0x3c, 0x10, b'\\x01')\nprint(i.readfrom_mem(0x3c, 0x10, 2))",
+      "j=I2C(1, scl=Pin(7), sda=Pin(6))\nprint(j.scan())",
+    ]),
+    setup(s) {
+      IMAGES["mpy-wrapper"].setup(s);
+    },
+  },
   // R2, directed: interrupts and long sleeps. Timer alarms wake the core out
   // of WFI (the clock jumps to each alarm: tens of simulated minutes pass in a
   // few steps), the RTC rolls over a year end, the 64-bit timer passes 2^32 us,
@@ -1285,6 +1519,24 @@ function jsSide() {
       },
     },
     ioEvents: (which, from = 0) => ioStreams[which].slice(from),
+    /** Runs `n` steps recording the peripheral reads (address -> [count, last value]). */
+    traceReads(n) {
+      const seenR = new Map();
+      const orig = rp.readUint32.bind(rp);
+      rp.readUint32 = (addr) => {
+        const v = orig(addr);
+        if (addr >>> 0 >= 0x40000000 && addr >>> 0 < 0x60000000) {
+          const e = seenR.get(addr >>> 0) ?? [0, 0];
+          e[0]++;
+          e[1] = v >>> 0;
+          seenR.set(addr >>> 0, e);
+        }
+        return v;
+      };
+      for (let i = 0; i < n && stop === null && step(); i++);
+      rp.readUint32 = orig;
+      return seenR;
+    },
     serial: () => Buffer.from(serial).toString("latin1"),
     run(n) {
       let done = 0;
@@ -1715,6 +1967,24 @@ function runImage(name, image, steps, k) {
     if (st.kind !== "idle") where += ` (instruction ${decodeAt(rust, pc)})`;
   }
   if (flag("stats")) console.log(`  reference activity: ${JSON.stringify(js.stats())}`);
+  if (flag("where")) {
+    const st = rust.state();
+    console.log(`  final pc ${hex(st[15])} lr ${hex(st[14])} sp ${hex(st[13])} r0-r7 ${st.slice(0, 8).map((v) => hex(v)).join(" ")}`);
+    for (let o = -12; o <= 8; o += 2) console.log(`    ${decodeAt(rust, (st[15] & ~1) + o)}`);
+    const seenPc = new Map();
+    for (let i = 0; i < 400; i++) {
+      rust.run(1);
+      const pc = rust.state()[15];
+      seenPc.set(pc, (seenPc.get(pc) ?? 0) + 1);
+    }
+    if (js.traceReads) {
+      const t = js.traceReads(400);
+      console.log(`  reference reads in the next 400 steps: ${[...t].map(([a, [n, v]]) => `${hex(a)}x${n}=${hex(v)}`).join(" ")}`);
+    }
+    console.log(`  next 400 steps visit ${[...seenPc].sort((x, y) => x[0] - y[0]).map(([pc, n]) => `${hex(pc)}x${n}`).join(" ")}`);
+  }
+  console.log(`  streams: uart ${rust.ioEvents(0).length}, spi ${rust.ioEvents(1).length}, i2c ${rust.ioEvents(2).length}; ` +
+    `pwm digests ${hex(rust.state()[108])} ${hex(rust.state()[109])}`);
   const serialRust = rust.serial();
   const state = rust.state();
   console.log(
