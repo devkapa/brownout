@@ -20334,6 +20334,43 @@ fn a_curved_partition_on_a_cells_path_keeps_the_10_uv_band() {
 }
 
 #[test]
+fn a_curved_static_partitions_band_edge_is_a_rail_event_on_a_cells_path() {
+    // R121 rule 3: a curved static hub partition (1k and an LED off the rail)
+    // is solved again only once the rail has left its band (`u_p +- band`,
+    // 25 mV here), and between solves publishes its line; under the
+    // reading-aware cap (0.63 mV here, the LED draw's slack) the rail would
+    // run up to that far past the edge before a solve saw it. So the band's
+    // edges are thresholds of the path watch. A 5 V, 10 ohm cell charging
+    // 100 uF through 100 ohm: the rail climbs 4.55 -> 5 V (tau 11 ms) and
+    // crosses the band 17 times in 50 ms. Stepping event by event, the rail
+    // at every solve is within the band of the partition's last solve, the
+    // edge itself to 1e-6 of the band (located: 0.999999 measured; the 10
+    // uV band's own solves overshoot it by up to 10 uV, 1.0004), and the
+    // partition solves again at each crossing. Fails first without the
+    // thresholds: 1.0237, the cap's 0.6 mV past the edge.
+    let p = program(4, vec![battery(0, 1, 0, 5.0, 10.0), resistor(1, 1, 2, 100.0), capacitor(2, 2, 0, 100e-6, 0.0), resistor(3, 1, 3, 1000.0), led(4, 3, 0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    let (mut worst, mut resolves) = (0.0f64, 0);
+    while rig.k.time() < 0.05 {
+        let mut before = Vec::new();
+        rig.s().static_solver.nonlinear_hub_rails(rig.hub().resolve_band(), &mut before);
+        let t = rig.k.next_event_time().min(0.05);
+        rig.advance(t).unwrap();
+        let mut after = Vec::new();
+        rig.s().static_solver.nonlinear_hub_rails(rig.hub().resolve_band(), &mut after);
+        let ((up, band), (up_after, _)) = (before[0], after[0]);
+        worst = worst.max((rig.u() - up).abs() / band);
+        if up_after != up {
+            resolves += 1;
+        }
+    }
+    eprintln!("curved static partition: {} rail events, {resolves} re-solves, worst |u - u_p| / band {worst:.6}, drift cap {:.3e}", rig.hub().stats.events, rig.hub().state.cad_d);
+    assert!(rig.hub().state.cad_d > 1e-4, "the reading-aware cap is in force: {:.3e}", rig.hub().state.cad_d);
+    assert!(resolves >= 17, "{resolves} re-solves");
+    assert!(worst <= 1.0 + 1e-6, "the rail ran {worst:.6} of the band from the partition's solve");
+}
+
+#[test]
 fn a_cells_rail_with_a_direct_junction_holds_its_drift_to_half_a_millivolt() {
     // R121: a junction straight on the rail is linearised at each solve, its
     // current's second-order term i d^2 / (2 (n vt)^2) under 0.2 of its W0
@@ -20391,6 +20428,53 @@ fn a_cells_charge_integrates_its_current_along_the_path_between_solves() {
         eprintln!("{cap_ah:e} Ah: soc {:.12} against {soc:.12}, {:.4} W0, rail events {}", st[0], (st[0] - soc).abs() / w0_soc, e.stat(18));
         close(st[0], soc, 0.01 * w0_soc, &format!("{cap_ah:e} Ah's state of charge against the exact ODE"));
     }
+}
+
+#[test]
+fn a_reload_carrying_a_cells_state_runs_on_its_reading_aware_cadence() {
+    // R121 with the carry (W2c): the cadence's state (drift cap, the drain
+    // line's history, its deadline) is the hub's and is not carried; a load
+    // seeded from a carry starts it afresh (no line history: the 10 uV band
+    // for its first solve) and runs on the reading-aware cadence from there.
+    // A draining generic cell (5 soc V, 0.9 ohm, 0.1 mAh) feeding a 1k / 1k
+    // divider and a 1k + 1 uF RC, carried at 2 ms, mid-transient (tau 1 ms),
+    // and run on to 0.3 s beside the engine it was taken from: every node
+    // within W0 of it at each stop, the state of charge within W0's share
+    // (1e-3 of the cell's ~2.5 mA over the run's 0.3 s, of 0.36 C), and the
+    // reload's rail events no more than the engine's own over the same span
+    // (+2) and under a tenth of the 10 uV band's (measured: 49 / 49 / 1063;
+    // nodes 0.000000 W0 apart, the SoC 1.5e-14).
+    let p = program(4, vec![generic_battery(0, 1, 0, 5.0, 0.9, 1e-4), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0), resistor(3, 1, 3, 1000.0), resistor(4, 3, 0, 1000.0)]);
+    let later = [3e-3, 5e-3, 0.01, 0.05, 0.1, 0.3];
+    let run_on = |fixed: bool| {
+        rails::force_fixed_cell_band(fixed);
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(1e-3).unwrap();
+        e.advance(2e-3).unwrap();
+        let ev0 = e.stat(18);
+        let mut q = p.clone();
+        q.options.start_time = 2e-3;
+        q.carry = e.carry_take().unwrap().to_vec();
+        let mut r = Engine::load(&q).unwrap();
+        let mut worst = 0.0f64;
+        for &t in &later {
+            e.advance(t).unwrap();
+            r.advance(t).unwrap();
+            for (&g, &w) in r.voltages().iter().zip(e.voltages()) {
+                worst = worst.max((g - w).abs() / (1e-4 + 1e-3 * w.abs()));
+            }
+        }
+        let (soc_e, soc_r) = (e.device_state(0).unwrap()[0], r.device_state(0).unwrap()[0]);
+        rails::force_fixed_cell_band(false);
+        (worst, soc_e, soc_r, e.stat(18) - ev0, r.stat(18))
+    };
+    let (_, _, _, band_events, _) = run_on(true);
+    let (worst, soc_e, soc_r, ev_e, ev_r) = run_on(false);
+    eprintln!("carried cell: worst {worst:.6} W0, soc {soc_e:.15} / {soc_r:.15}, rail events from 2 ms {ev_e} / reload {ev_r} (band {band_events})");
+    assert!(worst <= 1.0, "{worst:.3} W0 off the engine the carry came from");
+    let w0_soc = 1e-3 * 2.5e-3 * 0.3 / (3600.0 * 1e-4);
+    close(soc_r, soc_e, w0_soc, "the reload's state of charge");
+    assert!(ev_r <= ev_e + 2.0 && ev_r * 10.0 < band_events, "reload {ev_r} rail events, the engine {ev_e}, the band {band_events}");
 }
 
 /// C2's tpl-6 boards (the cold fuzz's 555 astable on a cell, R121 (iii)):
