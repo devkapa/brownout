@@ -13,8 +13,8 @@ small-signal AC, diagnostics, the tests that pin it, and a numbered list of
 questions. The readers are the W3 implementation workers and the W3 reviewers.
 
 **Status.** All 22 kinds are written. Nothing was built or run for this
-document except a handful of arithmetic checks (the numbers in sections 2.1
-to 2.3, 12 and 10.1 were computed with a throwaway Node script, not by the
+document except a handful of arithmetic checks (the numbers in sections 2, 3.5, 4.5,
+10.2, 10.6 and 12 were computed with a throwaway Node script, not by the
 engine); every other fact was read from the code. A fact marked "inferred" was
 read but not executed.
 
@@ -325,7 +325,7 @@ Per-parameter rules for every W3 kind (D = literal default):
   `_updateState` runs each model's `commitState` (regime and latch decisions,
   gate history), then the digital pass, then `_updateElementI` runs each
   model's `updateCurrent`, then the package thermal step and the failure
-  pass. A rejected solve (`lastConverged` false) commits nothing (`SE:6733`).
+  pass. A rejected solve (`lastConverged` false) commits nothing (`SE:6741`).
   The order matters: the thyristor, analog switch and opto publish a current
   committed in `commitState` because `updateCurrent` runs after it.
 - **Time stepping.** Backward Euler by default; `useTrapThisSolve()` selects
@@ -380,15 +380,14 @@ refined snapshots. For the W3 kinds:
   when the host uses the checked step (headless `H_MIN = 1e-8`,
   `src/host/headless.ts:81`; the worker's floor is W1 section 10.16), not
   located by root finding. At the host floor classic accepts the step.
-- `mosfetGates` `vgs`, `vgd` at `ABS_VOLTAGE` (`AS:416-430` region of the
-  snapshot walk).
+- `mosfetGates` `vgs`, `vgd` at `ABS_VOLTAGE` (`AS:181-193`).
 - `capCurrents` (thyristor and switch principal current) are snapshot-carried
   but not error-walked (W1 section 10.8; comment at `MF:540-545`).
 
 ### 1.6 Small-signal AC
 
 `acStamp(ctx, comp, ac, omega)` runs once per frequency after a DC operating
-point (W1 section 10.1; `ctx.opVoltage(node)` reads the held OP). Every W3
+point (driver `src/sim/engine/ac-analysis.ts`, not covered by W1; `ctx.opVoltage(node)` reads the held OP, `SE:5074`). Every W3
 kind carries one (`ac-isolation.test.ts:343-395`, the census). General rules:
 - `AC_GMIN = 1e-12` is added to every junction conductance, to mirror the
   transient stamp's GMIN (`SC:80-85`).
@@ -415,7 +414,7 @@ kind carries one (`ac-isolation.test.ts:343-395`, the census). General rules:
   `T_target = T_amb + P*rTheta` (`TP:513-525`); shutdown latches at
   `T >= trip` and clears at `T <= restart` (`TP:526-535`). The thermal update
   runs once per accepted step, after the commit, and not in DC-OP pseudo-steps
-  (`SE:6756-6764`). No W3 diode, transistor, thyristor, comparator or converter
+  (`SE:6766-6770`). No W3 diode, transistor, thyristor, comparator or converter
   has a thermal profile.
 - **Dissipation** (`SE:7210-7290`): linear regulators
   `(vin - vout)+ * |x[k]| + (vin - vref)+ * Iq`, zero while shut down; analog
@@ -2150,7 +2149,7 @@ Literals: `LM393_HYST = 0.001` V (`AR:1218`).
 Power: `icPowerInfo` (section 10.1): powered for `vSupply` in `[1.8, 39.6]` V,
 both supply pins wired. The output resistance of a sinking unit is
 `power.outputResistance = max(50, min(1000, vSupply/(io_max*4)))`
-(`SE:6071-6075`) = `vSupply/0.064` clamped: 50 ohm at 3.2 V and below,
+(`SE:6076-6080`) = `vSupply/0.064` clamped: 50 ohm at 3.2 V and below,
 78.125 ohm at 5 V, 187.5 ohm at 12 V, 562.5 ohm at 36 V. It is a function of
 the iterate's supply voltage.
 
