@@ -50,6 +50,8 @@ mod ic_tests;
 #[cfg(test)]
 mod led_tests;
 #[cfg(test)]
+mod psu_cold_tests;
+#[cfg(test)]
 mod rail_tests;
 #[cfg(test)]
 mod slow_tests;
@@ -4887,35 +4889,40 @@ impl PartitionedSolver {
     /// `BACK_DRIVE_SINK_A` (classic's own let-go threshold) fails the
     /// instant with `BACK_DRIVE_REASON`: the kernel rolls it back, so the
     /// readings stay at the last good instant, and the host falls back to
-    /// classic. Judged at every publish: a hub PSU in CV from the rail's
-    /// terms (`hub_delivered`), its crossing an event of its own (the rail
-    /// watch at `-BACK_DRIVE_SINK_A`); exact mode's also at each committed
-    /// step (`exact_after_publish`); any other supply (one with no limit, an
-    /// ideal source) from its KCL with the closed-form partitions read at
-    /// `now` (`fresh_supply_currents`); every supply's published current at
-    /// a synced publish. Never silent.
+    /// classic. Judged at every publish, every supply from its KCL: at a
+    /// synced publish its published current; between host stops with the
+    /// closed-form partitions read at `now` (`fresh_supply_currents`),
+    /// whose published nodes lag there. A hub PSU is judged only in CV (in
+    /// CC it delivers its limit), its crossing located by an event of its
+    /// own (the rail watch at `-BACK_DRIVE_SINK_A`), and not while a CC
+    /// exit's overshoot relaxes (`exit_relaxing`); exact mode's supply at
+    /// each committed step (`exact_after_publish`). Never silent.
+    ///
+    /// Not from the rail equation's draw: a stepped hub partition's term is
+    /// its step's rail-row residual (`rail_sensitivity`), which the rail
+    /// solve needs only to a rounding of its loop currents. A closed switch
+    /// across an esr-0 rail capacitor (cold 376 tpl 5: about 1 mohm across
+    /// 5.4 mF) carries a loop current of 70 mA past the rail and back, and
+    /// at 160 ns steps the residual read 0.41 mA of sink where the KCL of
+    /// the same commits read the supply delivering 0.5595 mA throughout.
     fn check_back_drive(&mut self, now: f64, synced: bool) -> Result<(), String> {
-        if let Some((d, delivered)) = self.hub_delivered(now) {
-            if delivered < -(BACK_DRIVE_SINK_A + crate::rails::REACHED_REL) {
-                return Err(back_drive_message(d, -delivered, now));
-            }
+        let (hub_d, exact_d, hub_cv) = (self.hub.as_ref().map(|h| h.device), self.exact.as_ref().map(|e| e.device), self.hub_psu_cv());
+        let judged = move |d: usize| exact_d != Some(d) && (hub_d != Some(d) || hub_cv == Some(d));
+        if !self.back_drive.iter().any(|&(d, _)| judged(d) || synced) {
+            return Ok(());
         }
-        let (hub_d, exact_d) = (self.hub.as_ref().map(|h| h.device), self.exact.as_ref().map(|e| e.device));
-        let own = move |d: usize| hub_d == Some(d) || exact_d == Some(d);
-        if synced {
-            for &(d, dir) in &self.back_drive {
-                let sink = dir * self.currents[d];
-                if sink > BACK_DRIVE_SINK_A {
-                    return Err(back_drive_message(d, sink, now));
-                }
+        let fresh = if synced { None } else { Some(self.fresh_supply_currents(now)) };
+        for k in 0..self.back_drive.len() {
+            let (d, dir) = self.back_drive[k];
+            if !synced && !judged(d) {
+                continue;
             }
-        } else if self.back_drive.iter().any(|&(d, _)| !own(d)) {
-            let fresh = self.fresh_supply_currents(now);
-            for &(d, dir) in &self.back_drive {
-                let sink = dir * fresh[d];
-                if !own(d) && sink > BACK_DRIVE_SINK_A {
-                    return Err(back_drive_message(d, sink, now));
-                }
+            let sink = dir * fresh.as_ref().map_or(self.currents[d], |f| f[d]);
+            if hub_cv == Some(d) && self.exit_relaxing(now, sink, synced) {
+                continue;
+            }
+            if sink > BACK_DRIVE_SINK_A {
+                return Err(back_drive_message(d, sink, now));
             }
         }
         Ok(())

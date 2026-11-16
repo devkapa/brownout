@@ -11,6 +11,13 @@ use super::*;
 use crate::devices::battery::BatteryModel;
 use crate::devices::sources::{compliance_keeps_cv, direction, Clock, Pulse, Regime};
 use crate::rails::{self, CapDemand, CapSeg, CellDrive, CfTerm, Contrib, Direct, DriftBound, HubKind, Motion, RailModes, RailState, RailStats, Watch};
+
+/// Ruling R116 (2): how far past its setpoint, relative, a CC rail at a CC
+/// exit counts as the CC phase's overshoot (`RailState::exit_sink`) rather
+/// than its rounding: an exit the closed form locates lands within 1e-11 V
+/// of a 5 V setpoint (W1gV4's bug B), a stepped step's crossing tens of mV
+/// past it (cold 400 tpl 2: 93 mV of CC rail, 365 tpl 5: 42 mV).
+const EXIT_OVER_REL: f64 = 1e-9;
 use crate::solve::closed_form::HubTerm;
 use crate::solve::live::{RampEval, Schedule, WaveSource};
 
@@ -771,6 +778,7 @@ impl PartitionedSolver {
             gates_after: Vec::new(),
             quiet_steps: 0,
             held_draw: Vec::new(),
+            exit_sink: None,
         };
         let parts = self.partition_kinds.len();
         self.hub = Some(Box::new(Hub {
@@ -1119,37 +1127,41 @@ impl PartitionedSolver {
         })
     }
 
+    /// Ruling R116 (2), decline-only: the hub's bench supply while it is in
+    /// CV, the one regime where it can be driven to sink (in CC it delivers
+    /// its limit), for `check_back_drive` to judge from its KCL.
+    pub(super) fn hub_psu_cv(&self) -> Option<usize> {
+        let hub = self.hub.as_ref()?;
+        (matches!(hub.kind, HubKind::Psu { .. }) && hub.state.reg == Regime::Cv).then_some(hub.device)
+    }
+
+    /// Ruling R116 (2), decline-only: whether the hub supply's `sink`, after
+    /// a CC to CV return the CC phase overshot, is that overshoot pulled
+    /// back (`RailState::exit_sink`): less at every publish than at the one
+    /// before, and never at a host stop, where a published sample would
+    /// read it (a drive that set in at the exit is declined there at the
+    /// latest). Sourcing again ends the watch over the exit.
+    pub(super) fn exit_relaxing(&mut self, now: f64, sink: f64, synced: bool) -> bool {
+        let Some(hub) = self.hub.as_mut() else { return false };
+        let Some((t, last)) = hub.state.exit_sink else { return false };
+        if !(sink > super::BACK_DRIVE_SINK_A) {
+            hub.state.exit_sink = None;
+            return false;
+        }
+        // A second publish at the same instant reads the same sink to its
+        // rounding (cold 135 tpl 5: 2e-10 A apart on 1.48 A): the pull-back
+        // is judged across instants.
+        if now == t {
+            return !synced;
+        }
+        hub.state.exit_sink = Some((now, sink));
+        !synced && sink < last
+    }
+
     /// What the rail capacitors would draw at the setpoint `v` while they
     /// hold the rail short of it, and the rail they hold (Rails point 5):
     /// each one's deficit is `dir (V - V_f - vc)`, read from its charge at
     /// `now`.
-    /// Ruling R116 (2), decline-only: what a hub PSU in CV delivers at its
-    /// setpoint at `now`, in its own direction, the rail equation's draw
-    /// with every rail capacitor's pull there (one past the setpoint pushes,
-    /// without bound at esr 0); `None` for any other hub or regime (CC
-    /// delivers its limit). The value the let-go watch in `rail_watches`
-    /// follows, read from the rail's own terms at `now`, so a publish
-    /// between host stops (where a closed-form partition's published nodes
-    /// lag) judges it as the rail solve does.
-    pub(super) fn hub_delivered(&self, now: f64) -> Option<(usize, f64)> {
-        let hub = self.hub.as_ref()?;
-        let HubKind::Psu { v, .. } = &hub.kind else { return None };
-        if hub.state.reg != Regime::Cv {
-            return None;
-        }
-        let (v, dir) = (*v, direction(*v));
-        let (a_p, g_p, _, _) = self.partition_totals(now);
-        let mut delivered = dir * rails::draw_at(a_p, g_p, &|u: f64| self.direct_at(u), v);
-        for (k, sign, far) in self.rail_cap_ends() {
-            let cap = &self.fixed_pair_capacitors[k];
-            let d = dir * ((v - self.voltages[far]) - sign * cap.charge(now));
-            if d != 0.0 {
-                delivered += if cap.esr > 0.0 { d / cap.esr } else { d * f64::INFINITY };
-            }
-        }
-        Some((hub.device, delivered))
-    }
-
     fn rail_cap_demand(&self, now: f64, v: f64) -> CapDemand {
         let hub = self.hub.as_ref().expect("a hub");
         let dir = direction(v);
@@ -1493,6 +1505,7 @@ impl PartitionedSolver {
         let mut u = solve_in(reg, &mut cap_seg, old_u)?;
         let mut changed = false;
         let mut keep = None;
+        let mut exit_over = false;
         if let Some((v, i_limit)) = hub.psu() {
             let demand = if reg == Regime::Cv && has_cap { self.rail_cap_demand(now, v) } else { CapDemand::none(v) };
             let (next, u_cc) = rails::next_regime(reg, v, i_limit, has_cap, a_p, g_p, &direct, u, demand, &|| self.power_edges())?;
@@ -1520,6 +1533,10 @@ impl PartitionedSolver {
                 // operating point the clamp found (ruling G): the highest at
                 // or below the setpoint, which a Newton from the setpoint
                 // need not find again.
+                // Ruling R116 (2): a CC exit this instant's CC rail has
+                // overshot past rounding (`RailState::exit_sink`), its draws
+                // not stepped here (`rail_jump`: an edge's sink is a drive).
+                exit_over = reg == Regime::Cv && !self.rail_jump && direction(v) * u - v.abs() > EXIT_OVER_REL * v.abs().max(1.0);
                 u = if reg == Regime::Cc && !has_cap { u_cc } else { solve_in(reg, &mut cap_seg, from)? };
             } else if reg == Regime::Cc && !has_cap && u_cc.to_bits() != u.to_bits() {
                 // CC kept at the operating point below the setpoint, its
@@ -1571,6 +1588,9 @@ impl PartitionedSolver {
         let settle = (u - old_u).abs() > rails::SETTLE_MOVE_V || changed;
 
         let hub = self.hub.as_mut().expect("a hub");
+        if reg != hub.state.reg && matches!(hub.kind, HubKind::Psu { .. }) {
+            hub.state.exit_sink = exit_over.then_some((f64::NEG_INFINITY, f64::INFINITY));
+        }
         hub.state.reg = reg;
         hub.state.cap_seg = cap_seg;
         hub.state.cell = cell;

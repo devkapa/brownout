@@ -1633,6 +1633,17 @@ pub struct RailState {
     /// the hold's probes (ruling R44 (a)): such a chip is released only where,
     /// powered at its edge, it would still let the segment rise.
     pub held_draw: Vec<(usize, f64)>,
+    /// Ruling R116 (2), decline-only: set at a PSU's CC to CV return that
+    /// the CC phase overshot, until the supply sources again: the instant
+    /// and the sink its supply read at the last publish judged since
+    /// (infinite before the first). Default mode cuts no step at a CC exit, so one can be found
+    /// where the CC phase has already carried a capacitor past the setpoint
+    /// (cold 400 tpl 2: an 80 ns step carried 806 nF, behind a 1 mohm switch,
+    /// 0.78 mV past it, pushed back at 0.78 A at the return, 57 mA and 3 mA
+    /// at the next two 10 ns steps, then sourcing), which CV pulls back as a
+    /// decaying sink: not a back-drive while it decays, between host stops
+    /// (`PartitionedSolver::check_back_drive`).
+    pub exit_sink: Option<(f64, f64)>,
 }
 
 /// The rail's counters (stats 14, 16-18, 20). Never rolled back.
@@ -3232,6 +3243,7 @@ impl crate::snapshot::HeapBytes for RailState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.gates_after, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.quiet_steps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.held_draw, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_sink, w); }
         n
     }
 }

@@ -20058,3 +20058,145 @@ fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
 const PINS_74: [f64; 6] = [1.0, 7.5, 52.0, 76.0, 77.0, 77.0];
 /// 45/6's: measured 0.092, 1.004, 8.98, 16.96, 17.97, 17.97.
 const PINS_45: [f64; 6] = [0.25, 1.2, 10.0, 19.0, 20.0, 20.0];
+
+// ---- PSU-3: a CC to CV return is not a back-drive (SHIPV-C finding 1) ----
+
+/// Cold 400 tpl 2 (hub 2, default mode, trapezoidal) as `f5e gen 400 2`
+/// gives it: a {5.1614 V, 1.0611 A} supply, a 74LS00 powered from node 2
+/// driving node 3 (806 nF to ground, esr 0, 4.1 kohm, and 85 ohm to the
+/// rail), and an open switch from node 3 to the rail, closed at 0.5760541 s.
+fn cold_400_tpl2() -> Program {
+    let devices = vec![
+    fz(21, 0, &[1, 0], vec![5.1614194833576965, 1.0610961607890765], vec![]),
+    fz(1, 1, &[2, 0], vec![13444.024878501617], vec![]),
+    fz(1, 2, &[3, 0], vec![4101.2643038750975], vec![]),
+    fz(1, 3, &[4, 0], vec![77266.73542871609], vec![]),
+    fz(1, 4, &[5, 0], vec![10453.82292415931], vec![]),
+    fz(3, 5, &[3, 0], vec![8.062494857565876e-7, 0.0, 0.0], vec![]),
+    fz(3, 6, &[4, 2], vec![2.8336218415684516e-5, 1.364008529426486, 0.0], vec![]),
+    fz(50, 7, &[2, 0, 5, 2, 3, 0, 0, 3, 0, 0, 3, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.7571411598837712e-7], vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    fz(1, 8, &[3, 1], vec![85.00415944954851], vec![]),
+    fz(1, 9, &[3, 3], vec![66.64283286592313], vec![]),
+    fz(30, 10, &[5, 2], vec![2.4809539034791093, 1.737248995871642, 0.016185033476250478, 0.0, 0.0, 0.0], vec![]),
+    fz(1, 11, &[1, 5], vec![257.45509187573714], vec![]),
+    fz(3, 12, &[4, 0], vec![4.332877171482469e-7, 0.2601593852557813, 0.0], vec![]),
+    fz(1, 13, &[4, 5], vec![189.2907063506247], vec![]),
+    fz(1, 14, &[1, 5], vec![33.93199400279607], vec![]),
+    fz(30, 15, &[5, 0], vec![2.163508515733173, 1.6993518215572223, 0.011929911397884078, 0.0, 0.0, 0.0], vec![]),
+    fz(1, 16, &[1, 5], vec![37.833188030375645], vec![]),
+    fz(1, 17, &[5, 0], vec![122.63905977543887], vec![]),
+    fz(1, 18, &[2, 5], vec![9004.148428685005], vec![]),
+    fz(4, 19, &[3, 1], vec![0.0], vec![]),
+    fz(1, 20, &[1, 0], vec![5.7348599590432485], vec![]),
+    fz(90, 8, &[], vec![8.0, 0.02037260826375954, 85.00415944954851], vec![]),
+    fz(90, 9, &[], vec![9.0, 0.00115285118445386, 66.64283286592313], vec![]),
+    fz(90, 11, &[], vec![11.0, 0.001459252031529941, 257.45509187573714], vec![]),
+    fz(90, 13, &[], vec![13.0, 0.0026878518752080586, 189.2907063506247], vec![]),
+    fz(90, 14, &[], vec![14.0, 0.0034800367216892107, 33.93199400279607], vec![]),
+    fz(90, 16, &[], vec![16.0, 0.00738705595623472, 37.833188030375645], vec![]),
+    fz(90, 20, &[], vec![20.0, 0.5296869571392606, 5.7348599590432485], vec![]),
+    ];
+    let mut p = program(6, devices);
+    p.options.integration = 1;
+    p
+}
+
+/// The sweep's host stops for cold 400 tpl 2 to 0.6 s, the switch's
+/// closing among them.
+const STOPS_400: [f64; 74] = [0.006272879335833357, 0.021513236372720287, 0.02181574563039535, 0.03415287785171252, 0.07706755539505539, 0.07736310386373932, 0.0775758751351421, 0.12357719574709686, 0.12466953780394845, 0.12554526637635502, 0.12717288911639035, 0.12946844477567113, 0.17649290566114054, 0.17773462403719503, 0.1781945683901899, 0.1847364692950538, 0.22044857816431213, 0.22580505183780347, 0.23084946315715107, 0.23198836733201117, 0.269823965095344, 0.27016859894959744, 0.2704701960606182, 0.27225760387400366, 0.27772667188524996, 0.2936480085108447, 0.29824363811322513, 0.2989270045514369, 0.3024022832997847, 0.3025464846106723, 0.30841933147451384, 0.32450225144296885, 0.3247833220934023, 0.32521390788670257, 0.32790831766663875, 0.3280750075691673, 0.32819320414243164, 0.34081577458342616, 0.35478450074498435, 0.36205577302465985, 0.3726025222007, 0.3737991363508972, 0.37810943853508433, 0.3825625466459182, 0.38360815806645426, 0.38538284046441706, 0.38576414627073813, 0.40710756027730216, 0.4087824128689217, 0.40918979603742334, 0.4209488379746448, 0.42134282012854424, 0.43030961332331874, 0.4315865980541378, 0.43197950795936335, 0.4328002585427756, 0.43527976139120533, 0.4372228472044324, 0.43827797684401437, 0.43900449570065636, 0.4393529207452222, 0.43967039967301447, 0.48417162981457995, 0.5232872079662017, 0.5256491254416268, 0.5278317014903853, 0.5286801630493358, 0.5349031325812053, 0.5598656001523932, 0.5601729981305285, 0.5760541149412248, 0.5768308197609522, 0.5798298310462973, 0.6];
+
+#[test]
+fn cold_400_tpl2s_cc_exit_through_its_switch_returns_to_cv_without_a_decline() {
+    // At 0.5760541149 s the switch (1 mohm) closes from the rail onto node
+    // 3, 5.05661 V on 806.25 nF: the supply enters CC at its 1.0611 A, of
+    // which 4.1 kohm takes 1.26 mA, so node 3 rises at (1.0611 - 0.0013) /
+    // 806.25 nF = 1.3145e6 V/s, the rail 1.06 mV (1.0611 A x 1 mohm) above
+    // it. The rail reaches the setpoint, CV, when node 3 is at 5.16142 -
+    // 0.00106 = 5.16036 V: (5.16036 - 5.05661) / 1.3145e6 = 78.9 ns after the
+    // closing, at 0.57605419 s. Nothing drives the rail but the supply (the
+    // chip's outputs sink into node 3 from a supply below the rail), so it
+    // never sinks: after the return node 3 settles onto the rail through 1
+    // mohm x 806 nF = 0.8 ns. At 679dc42 default mode, which cuts no step
+    // at a CC exit, found the exit at its 80 ns step's end, 0.5760542649 s,
+    // node 3 then 0.78 mV past the setpoint (5.162204 V), and declined with
+    // CV pulling it back, 0.784 A of "sink" (0.057 A and 3 mA at the next
+    // two 10 ns steps, then sourcing): the CC phase's own overshoot.
+    let p = cold_400_tpl2();
+    let (rig, err) = run_stops(&p, &[(0.5760541149412248, 19)], &STOPS_400);
+    if let Some((e, t)) = err {
+        panic!("failed at {t} s: {e:?}");
+    }
+    assert!(rig.hub().state.reg == Regime::Cv, "CV after the return");
+    close(rig.s().voltages()[1], 5.1614194833576965, 1e-9, "the rail at the setpoint");
+    assert!(rig.s().currents()[0] < 0.0, "the supply sources: {}", rig.s().currents()[0]);
+}
+
+#[test]
+fn a_cc_exit_beside_a_switched_esr0_rail_capacitor_is_judged_from_the_supplys_kcl() {
+    // Cold 376 tpl 5's rail partition: a {12.75 V, 0.237 A} supply with 5.4
+    // mF (esr 0) from the rail to node 2 and a closed switch (1 mohm) across
+    // it; 267.78 kohm from node 2 to ground, and 23 ohm through a second
+    // closed switch; its LED from the rail to node 3, 24.899 kohm from node
+    // 3 to ground and 4.2 mF (esr 0) from node 3 to node 2. 23 ohm wants
+    // 0.554 A, so the supply is in CC at its limit. The second switch opens
+    // at 50 ms (in 376 the 23 ohm burned open): CV at 12.75 V, node 2
+    // following the rail at once through the capacitor, which then
+    // discharges the 0.24 mV it held round the first switch and back (70
+    // mA at first, 1 mohm x 5.4 mF = 5.4 us), never through the supply. By
+    // KCL at the rail, node 2 and node 3, whatever those capacitors carry,
+    // the supply delivers exactly what leaves to ground: v2 / 267.78 kohm +
+    // v3 / 24.899 kohm, about 0.512 + 0.048 = 0.56 mA. At 679dc42 the check
+    // read the rail equation, whose stepped term is its step's rail-row
+    // residual: with that loop current past the rail it read a sink (1.15 mA
+    // here, 0.41 mA on 376 at 160 ns steps) where the supply's KCL read it
+    // delivering, and declined.
+    let led376 = |ci: usize, a: usize, k: usize| Device { kind: kinds::LED, component_index: ci, pins: vec![pin(a), pin(k)], params: vec![3.199904589341176, 1.6033399782931883, 0.014000081698413923, 0.0, 0.0, 0.0], blob: vec![] };
+    for exact_mode in [false, true] {
+        let p = program(5, vec![psu(0, 1, 0, 12.75, 0.237), capacitor(1, 1, 2, 5.4e-3, 0.0), switch(2, 1, 2, true), resistor(3, 2, 0, 267780.0), switch(4, 2, 4, true), resistor(5, 4, 0, 23.0), led376(6, 1, 3), capacitor(7, 3, 2, 4.2e-3, 0.0), resistor(8, 3, 0, 24899.0)]);
+        let p = if exact_mode { exact(p) } else { p };
+        let what = format!("exact {exact_mode}");
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(0.05).unwrap();
+        assert_eq!(e.device_state(0).unwrap(), &[Regime::Cc.code()], "{what}: CC");
+        close(e.currents()[0], -0.237, 1e-12, &format!("{what}: the limit"));
+        e.set_params(&[(4, 0, 0.0)]).unwrap();
+        for t in [0.051, 0.0517, 0.0935, 0.1] {
+            e.advance(t).unwrap_or_else(|er| panic!("{what}, {t:e} s: {}", er.message));
+            assert_eq!(e.device_state(0).unwrap(), &[Regime::Cv.code()], "{what}, {t:e} s: CV");
+            let v = e.voltages().to_vec();
+            let i = e.currents()[0];
+            close(i, -(v[2] / 267780.0 + v[3] / 24899.0), 1e-9, &format!("{what}, {t:e} s: the supply delivers what leaves to ground"));
+            assert!(-i > 0.5e-3, "{what}, {t:e} s: about 0.56 mA: {i}");
+        }
+    }
+}
+
+#[test]
+fn a_bench_supplys_direction_is_its_programs_and_an_edit_that_flips_it_reloads() {
+    // SHIPV-C finding 3: `back_drive` keeps each supply's direction from the
+    // build. A setpoint is not a live parameter (`kinds`: bench_psu has
+    // none), so no live edit can flip it under a built solver: the host
+    // reloads, with its carry, and the build reads the new sign. R116's
+    // probe board mirrored: -9 V through 100 ohm onto the supply's rail,
+    // 10 kohm to ground. At +5 V the supply sources (5 + 9) / 100 + 5 / 10
+    // kohm = 140.5 mA; flipped to -5 V it would sink (-5 + 9) / 100 - 5 / 10
+    // kohm = 39.5 mA, the probe's own figure: declined at the reload's
+    // first instant.
+    let board = |v: f64| program(3, vec![source(0, 1, 0, -9.0), resistor(1, 1, 2, 100.0), psu(2, 2, 0, v, 1.0), resistor(3, 2, 0, 1e4)]);
+    for exact_mode in [false, true] {
+        let what = format!("exact {exact_mode}");
+        let pick = |p: Program| if exact_mode { exact(p) } else { p };
+        let mut e = Engine::load(&pick(board(5.0))).unwrap();
+        e.advance(1e-3).unwrap();
+        close(e.currents()[2], -0.1405, 1e-9, &format!("{what}: +5 V sources 140.5 mA"));
+        let refused = e.set_params(&[(2, 0, -5.0)]).map(|_| ()).unwrap_err().clone();
+        assert_eq!(refused.code, crate::error::ERR_INVALID_ARGUMENT, "{what}: {}", refused.message);
+        let carry = e.carry_take().unwrap().to_vec();
+        let mut flipped = pick(board(-5.0));
+        flipped.carry = carry;
+        flipped.options.start_time = 1e-3;
+        let err = Engine::load(&flipped).err().unwrap_or_else(|| panic!("{what}: the flipped board loads"));
+        assert!(err.message.contains("would sink 3.9499") || err.message.contains("would sink 3.95"), "{what}: the 39.5 mA sink: {}", err.message);
+        close(decline_instant(&err), 1e-3, 0.0, &format!("{what}: declined at the reload's instant"));
+    }
+}
