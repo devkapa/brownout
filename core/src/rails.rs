@@ -458,6 +458,14 @@ impl RailModes {
         found
     }
 
+    /// The first `τ > 0` at which the rail has moved by `d` either way,
+    /// searched without touching [`Self::passages`]' memo (whose one entry
+    /// the path watch reads back at the same solve).
+    pub fn passage_either_unmemoised(&self, d: f64) -> f64 {
+        let (up, down) = self.passages_fresh(Some(d), Some(-d));
+        up.min(down)
+    }
+
     fn passages_fresh(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
         let terms: Vec<(f64, Basis)> = self.modes.iter().map(|&(k, s)| (s, Basis::Phi(k))).collect();
         let mut zeros = None;
