@@ -1,0 +1,21 @@
+{
+  "$comment": [
+    "A 555 monostable on a battery_pack (5 V, 2 ohm, 22 uF across the rail): R = 100 kohm from the rail to pin 7 (tied to THR), C = 1 uF, TRIG pulled up to the rail by 1 kohm with a push_button to ground, OUT into 1 kohm. 0.4 s; the button is pressed at 0.2 s and released at 0.25 s (host stops of 100 us, 1 ms and 1/60 s all land on both).",
+    "Not in test/fixtures/core, as 77 and 78 (core/README.md, 'The 555 period on a moving rail', OPEN); test/core/battery-555-corpus.test.ts runs it on both engines.",
+    "By hand, the pulse is C charging from empty to 2u/3 through R, a ratio that does not depend on the rail: ln 3 R C = 109.8612 ms (the textbook 1.1 R C is 110 ms, 0.13 % long).",
+    "Power-on: OUT starts high and C starts empty, so the first pulse is the same 109.8612 ms: OUT falls at 109.8612 ms. DIS discharges C in 10 ohm x 1 uF, 10 us.",
+    "The press at 0.2 s takes TRIG to about 0 V (the contact's 1 mohm against 1 kohm): below u/3, so OUT rises at 0.2 s. It is released at 0.25 s, with the pulse running, and changes nothing. OUT falls at 0.2 + 109.8612 ms = 309.8612 ms. Edges in 0.4 s: rise at 0.2, falls at 109.8612 ms and 309.8612 ms.",
+    "Rail: 2 ohm in the pack, the 555's idle draw (about 5 mA) and the charge current move it by about 10 mV; the bound used by the test is 0.25 % of the edge's time + 5 us."
+  ],
+  "hand": {
+    "rOhm": 100000,
+    "cF": 1e-06,
+    "pressS": 0.2,
+    "releaseS": 0.25,
+    "endS": 0.4,
+    "pulseS": 0.10986122886681098,
+    "firstFallS": 0.10986122886681098,
+    "rises": 1,
+    "falls": 2
+  }
+}

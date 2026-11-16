@@ -1,0 +1,29 @@
+{
+  "$comment": [
+    "A 555 astable on a battery_pack (5 V, 2 ohm) with a 22 uF decoupling capacitor across the rail, driving an LED through 330 ohm. R_A = 1 kohm, R_B = 2.2 kohm, C = 1 uF; pin 5 has 10 nF, RST is tied to the rail. 100 ms: 26 periods.",
+    "Not in test/fixtures/core: the corpus harness has no check for a 555 on a moving rail (core/README.md, 'The 555 period on a moving rail', OPEN), so its classic-against-core comparison fails here on classic's own period error. test/core/battery-555-corpus.test.ts runs this circuit on both engines at host stops of 100 us, 1 ms and 1/60 s instead.",
+    "By hand, the thresholds are 1/3 and 2/3 of the rail, and the capacitor charges toward the same rail, so a steady rail cancels: only R and C set the times.",
+    "  HIGH, C from u/3 to 2u/3 through R_A + R_B = 3.2 kohm: t_H = ln 2 (R_A + R_B) C = 2.2181 ms.",
+    "  LOW: the discharge pin (10 ohm, README NE555 point 7) pulls pin 7 down while R_A still feeds it from the rail, so C discharges through R_B + (10 ohm in parallel with R_A) = 2209.9 ohm toward u 10 / 1010 = 0.0495 V (not toward 0):",
+    "    t_L = 2209.9 ohm C ln((2/3 - k) / (1/3 - k)), k = 10 / 1010: 1.5654 ms  (0.693 R_B C alone would say 1.5249 ms).",
+    "  Period 3.7834 ms, duty 58.63 %. The textbook 0.693 (R_A + 2 R_B) C is 3.7430 ms (duty 59.26 %): 1.1 % short, all of it the discharge's 10 ohm and R_A's bleed.",
+    "  From load C starts empty and OUT starts high, so the first HIGH runs 0 to 2u/3: ln 3 (R_A + R_B) C = 3.5156 ms. Then OUT falls at 3.5156 ms, rises at 5.0809 ms and every 3.7834 ms. In 100 ms: 26 rises (the last at 99.6666 ms) and 26 falls (the last at 98.1012 ms).",
+    "The rail is not steady. The pack's 2 ohm carries the 555's idle draw (README NE555 point 7: f (1 - f) u / 20), the LED and R_A's charge current while OUT is high, and the idle draw and the discharge's u / 1010 while it is low: about 14.7 mA and 9.8 mA, so the rail sits near 4.971 V HIGH and 4.980 V LOW, 0.2 % apart. The thresholds follow it and the period shortens by about 0.17 %: by the end of the run an edge lands about 160 us (0.16 %) before its steady-rail value; the same hand model with those two rails (4.971 V HIGH, 4.980 V LOW) puts every edge within 16 us of the core's.",
+    "The decoupling capacitor holds the rail to its own 2 ohm x 22 uF = 44 us, inside RAIL_TAU_MAX (1e-4 s).",
+    "Bound used by the test: 0.25 % of the edge's time + 5 us against these hand values (the rail swing r dI / E = 2 ohm x 4.9 mA / 5 V = 0.2 %, plus the cap's own settling).",
+    "Cadence: the core's edges at host stops of 100 us, 1 ms and 1/60 s are each within tau_w0 (the time the capacitor takes to cross W0 of its trigger level, as sap1-clock-cadence.slow.test.ts bounds them) of the 1 us run's."
+  ],
+  "hand": {
+    "raOhm": 1000,
+    "rbOhm": 2200,
+    "cF": 1e-06,
+    "disOhm": 10,
+    "endS": 0.1,
+    "highS": 0.002218070977791825,
+    "lowS": 0.001565355402368664,
+    "firstFallS": 0.003515559323737951,
+    "periodS": 0.003783426380160489,
+    "rises": 26,
+    "falls": 26
+  }
+}
