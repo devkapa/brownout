@@ -5,18 +5,17 @@
  * board, depending on how often the host stopped the engine, and no gate saw
  * it: the identity check compares two builds at one cadence, and the
  * classic-against-core corpus held no 555 on a battery (fixed at 574767b).
- * The three boards in test/fixtures/core-battery-555/ close that hole:
+ * The three boards (test/fixtures/core, 77 to 79) close that hole:
  *
  *   77  an astable on a battery pack with a decoupling capacitor, driving an LED
  *   78  the same kind of astable clocking a 74LS161, so a late or lost edge is a wrong count
  *   79  a monostable triggered by a push button mid-run
  *
- * Each sidecar derives its edge times by hand (the `hand` object is what this
- * file recomputes and checks). They sit beside, not inside, test/fixtures/core:
- * the corpus harness has no check for a 555 on a moving rail (core/README.md,
- * "The 555 period on a moving rail", OPEN), and its fallback holds the timing
- * nodes to classic at phase-aligned instants, which classic's own period error
- * fails. See each sidecar's `$comment`.
+ * Each sidecar derives its edge times by hand and carries them in its
+ * `handBound` marker (ruling R122 (a)): the corpus harness judges the core
+ * against them at the app's cadence (hand-bound.ts) and records classic's
+ * distance. This file runs the same boards on both engines at the other host
+ * stops, which the harness does not sample.
  *
  * What is held:
  *   - the core, at host stops of 1 us, 100 us, 1 ms and 1/60 s: the number of
@@ -38,47 +37,18 @@ import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
 import { initCore } from "../../src/core/wasm.js";
 import { HeadlessRunner } from "../../src/host/headless.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
+import { handEdges, type HandEdges, type HandModel } from "./equivalence/hand-555.js";
+import type { HandBoundSpec } from "./equivalence/types.js";
 
-const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/core-battery-555");
-const circuitOf = (name: string): SimCircuit => JSON.parse(fs.readFileSync(path.join(DIR, `${name}.sim.json`), "utf8")) as SimCircuit;
-const sidecarOf = (name: string): { hand: Record<string, number> } => JSON.parse(fs.readFileSync(path.join(DIR, `${name}.expected.json`), "utf8"));
-
-const LN2 = Math.LN2;
-const LN3 = Math.log(3);
-/** The discharge pin's resistance (core/README.md NE555 point 7). */
+/** The discharge pin (core/README.md NE555 point 7), for the tau_w0 below. */
 const R_DIS = 10;
+
+const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/core");
+const circuitOf = (name: string): SimCircuit => JSON.parse(fs.readFileSync(path.join(DIR, `${name}.sim.json`), "utf8")) as SimCircuit;
+const sidecarOf = (name: string): { handBound: HandBoundSpec } => JSON.parse(fs.readFileSync(path.join(DIR, `${name}.expected.json`), "utf8"));
 
 interface Edit { readonly t: number; readonly id: string; readonly params: Record<string, number> }
 interface Edges { up: number[]; down: number[]; count?: number }
-interface Hand { up: number[]; down: number[]; count?: number }
-
-/** The astable's OUT edges at a steady rail: the thresholds and the charge target are the same rail, so only R and C matter. */
-function handAstable(ra: number, rb: number, c: number, end: number): Hand {
-  const tH = LN2 * (ra + rb) * c;
-  // The discharge pin pulls pin 7 to ground through 10 ohm while R_A still feeds it from the rail.
-  const k = R_DIS / (R_DIS + ra);
-  const rth = rb + (R_DIS * ra) / (R_DIS + ra);
-  const tL = rth * c * Math.log((2 / 3 - k) / (1 / 3 - k));
-  const up: number[] = [];
-  const down: number[] = [];
-  let t = LN3 * (ra + rb) * c; // from load: empty to 2/3
-  down.push(t);
-  for (;;) {
-    t += tL;
-    if (t > end) break;
-    up.push(t);
-    t += tH;
-    if (t > end) break;
-    down.push(t);
-  }
-  return { up, down, count: (1 + up.length) % 16 };
-}
-
-/** The monostable: a power-on pulse, then a pulse from each press, each ln 3 R C wide. */
-function handMonostable(r: number, c: number, press: number): Hand {
-  const width = LN3 * r * c;
-  return { up: [press], down: [width, press + width] };
-}
 
 /** Core: advances to each host stop in turn and reads the 555's OUT edges off the engine's trace. */
 function coreRun(circuit: SimCircuit, host: number, end: number, edits: readonly Edit[], counter?: string): Edges {
@@ -156,27 +126,11 @@ interface Board {
   readonly end: number;
   readonly edits: readonly Edit[];
   readonly counter?: string;
-  readonly hand: (side: Record<string, number>) => Hand;
-  /** tau_w0: the time the timing capacitor takes to cross W0 of its trigger level, the tighter of its trigger and threshold crossings, at the 5 V pack. */
-  readonly tauW0: (side: Record<string, number>) => number;
 }
 
 const BOARDS: readonly Board[] = [
-  {
-    name: "77-battery-555-astable-led",
-    end: 0.1,
-    edits: [],
-    hand: (s) => handAstable(s.raOhm!, s.rbOhm!, s.cF!, s.endS!),
-    tauW0: (s) => astableTauW0(s.raOhm!, s.rbOhm!, s.cF!),
-  },
-  {
-    name: "78-battery-555-clocks-161",
-    end: 0.1,
-    edits: [],
-    counter: "c1",
-    hand: (s) => handAstable(s.raOhm!, s.rbOhm!, s.cF!, s.endS!),
-    tauW0: (s) => astableTauW0(s.raOhm!, s.rbOhm!, s.cF!),
-  },
+  { name: "77-battery-555-astable-led", end: 0.1, edits: [] },
+  { name: "78-battery-555-clocks-161", end: 0.1, edits: [], counter: "c1" },
   {
     name: "79-battery-555-monostable-button",
     end: 0.4,
@@ -184,16 +138,19 @@ const BOARDS: readonly Board[] = [
       { t: 0.2, id: "btn", params: { closed: 1 } },
       { t: 0.25, id: "btn", params: { closed: 0 } },
     ],
-    hand: (s) => handMonostable(s.rOhm!, s.cF!, s.pressS!),
-    // C charges from empty through R toward the rail: the threshold crossing at 2u/3 is the only one that moves a pulse's end.
-    tauW0: (s) => w0((2 / 3) * 5) / ((5 - (2 / 3) * 5) / (s.rOhm! * s.cF!)),
   },
 ];
 
-function astableTauW0(ra: number, rb: number, c: number): number {
+/** tau_w0: the time the timing capacitor takes to cross W0 of its trigger level, the tighter of its trigger and threshold crossings, at the 5 V pack. */
+function tauW0(model: HandModel): number {
+  if (model.kind === "monostable") {
+    // C charges from empty through R toward the rail: the threshold crossing at 2u/3 is the only one that moves a pulse's end.
+    return w0((2 / 3) * 5) / ((5 - (2 / 3) * 5) / (model.rOhm * model.cF));
+  }
+  const { raOhm: ra, rbOhm: rb, cF: c } = model;
   const k = R_DIS / (R_DIS + ra);
   const rth = rb + (R_DIS * ra) / (R_DIS + ra);
-  const trigger = w0(5 / 3) / (((5 / 3 - 5 * k) / (rth * c)));
+  const trigger = w0(5 / 3) / ((5 / 3 - 5 * k) / (rth * c));
   const threshold = w0((2 * 5) / 3) / ((5 - (2 * 5) / 3) / ((ra + rb) * c));
   return Math.min(trigger, threshold);
 }
@@ -214,9 +171,11 @@ beforeAll(async () => {
 
 describe.each(BOARDS)("$name", (board) => {
   const circuit = circuitOf(board.name);
-  const side = sidecarOf(board.name).hand;
-  const hand = board.hand(side);
-  const tau = board.tauW0(side);
+  const spec = sidecarOf(board.name).handBound;
+  const hand: HandEdges = handEdges(spec.model, board.end);
+  const tau = tauW0(spec.model);
+  // A tolerance for each edge: the sidecar's own bound.
+  const { relative, absoluteS } = spec.bound;
   const core: Record<string, Edges> = {};
   const classic: Record<string, Edges> = {};
 
@@ -229,17 +188,10 @@ describe.each(BOARDS)("$name", (board) => {
   });
 
   it("the hand values are the sidecar's", () => {
-    if (side.periodS !== undefined) {
-      expect(hand.up.length).toBe(side.rises);
-      expect(hand.down.length).toBe(side.falls);
-      expect(Math.abs(side.highS! + side.lowS! - side.periodS)).toBeLessThan(1e-12);
-      expect(Math.abs(hand.down[0]! - side.firstFallS!)).toBeLessThan(1e-12);
-      expect(Math.abs(hand.up[1]! - hand.up[0]! - side.periodS)).toBeLessThan(1e-12);
-    } else {
-      expect(Math.abs(hand.down[0]! - side.firstFallS!)).toBeLessThan(1e-12);
-      expect(Math.abs(hand.down[1]! - hand.up[0]! - side.pulseS!)).toBeLessThan(1e-12);
-    }
-    if (side.finalCount !== undefined) expect(hand.count).toBe(side.finalCount);
+    expect(hand.up.length).toBe(spec.hand.rises);
+    expect(hand.down.length).toBe(spec.hand.falls);
+    if (spec.hand.periodS !== undefined) expect(Math.abs(hand.periodS! - spec.hand.periodS)).toBeLessThan(1e-12);
+    if (spec.hand.finalCount !== undefined) expect(hand.finalCount).toBe(spec.hand.finalCount);
   });
 
   it.each([{ label: "1 us" }, ...CADENCES])("core at host stops of $label: every OUT edge is where the hand value puts it", ({ label }) => {
@@ -247,9 +199,9 @@ describe.each(BOARDS)("$name", (board) => {
     expect(got.up.length, "rises").toBe(hand.up.length);
     expect(got.down.length, "falls").toBe(hand.down.length);
     for (const [name, g, h] of [["rise", got.up, hand.up], ["fall", got.down, hand.down]] as const) {
-      g.forEach((t, i) => expect(Math.abs(t - h[i]!), `${name} ${i} at ${h[i]!.toExponential(4)} s: core ${t.toExponential(6)} s`).toBeLessThanOrEqual(2.5e-3 * h[i]! + 5e-6));
+      g.forEach((t, i) => expect(Math.abs(t - h[i]!), `${name} ${i} at ${h[i]!.toExponential(4)} s: core ${t.toExponential(6)} s`).toBeLessThanOrEqual(relative * h[i]! + absoluteS));
     }
-    if (board.counter) expect(got.count, "the count at the end").toBe(hand.count);
+    if (board.counter) expect(got.count, "the count at the end").toBe(hand.finalCount);
   });
 
   it.each(CADENCES)("core at host stops of $label: every edge within tau_w0 of the 1 us run's, and the same count", ({ label }) => {
@@ -270,7 +222,7 @@ describe.each(BOARDS)("$name", (board) => {
       const d = (a: readonly number[], h: readonly number[]) => (a.length > 0 ? `${fmt(worst(a, h))}` : "none");
       console.log(
         `${board.name}, classic at ${label}: ${c.up.length} rises, ${c.down.length} falls` +
-          (board.counter ? `, count ${c.count} (core ${k.count}, hand ${hand.count})` : "") +
+          (board.counter ? `, count ${c.count} (core ${k.count}, hand ${hand.finalCount})` : "") +
           `; worst edge from the hand value: rises ${d(c.up, hand.up)}, falls ${d(c.down, hand.down)}` +
           `; core's: rises ${d(k.up, hand.up)}, falls ${d(k.down, hand.down)}`,
       );

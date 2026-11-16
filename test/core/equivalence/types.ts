@@ -546,6 +546,8 @@ export interface CorpusEntry {
   readonly ne555?: Ne555FixtureSpec;
   /** W1e: an LED sidecar checked against the core in addition to the plain comparison (`SidecarModel`'s own doc). `undefined` for every entry without one. */
   readonly sidecar?: SidecarModel;
+  /** Ruling R122 (a): this entry is judged against hand values (HandBoundSpec's own doc); `undefined` for every other entry. */
+  readonly handBound?: HandBoundSpec;
   /**
    * Decision 9 (floating-input buckets): true when this circuit reads at
    * least one OPEN, FLOATING_INPUT pin (classic's hashed floating model,
@@ -698,6 +700,8 @@ interface ComparedResultBase extends EntryResultBase {
   readonly maxRelErrorAmps: number;
   /** Mismatches known-divergences.ts's registry accounts for — reported here, never counted toward pass/fail. Empty for every entry until a fixture pattern in the registry actually matches. */
   readonly knownDivergences: readonly KnownDivergenceHit[];
+  /** Set only on an entry judged under R122 (a)'s marker: what the core and classic measured against the hand values. */
+  readonly handBound?: HandBoundReport;
 }
 
 export interface PassResult extends ComparedResultBase {
@@ -745,5 +749,78 @@ export interface KindRow {
   readonly phaseMissingId: number;
   /** Entries containing this kind whose `stimulus` is "verify-script" AND that carry no exported `phases` (CorpusEntry's own doc) — counted here so a pass count that is mostly unstimulated entries doesn't read as parity with devolt's own scripted check. An entry WITH phases was actually replayed (gate 2d; status "core-stimuli-pending" or, once W1b lands, a real pass/fail) and is not counted here even though the core side is still pending. */
   readonly unstimulated: number;
+  /** Passing entries judged against hand values under R122 (a)'s marker (a subset of `pass`): a pass that is the core's alone, with classic's distance recorded. */
+  readonly handJudged: number;
   readonly status: "pass" | "fail" | "untested" | "not-ported";
+}
+
+/**
+ * Ruling R122 (a): where classic is shown to be the less accurate engine for a
+ * class of circuit, the corpus judges the core against hand-derived values
+ * within a stated bound, and classic's distance from the same values is
+ * recorded as a divergence row, not asserted. A fixture opts in with this
+ * marker; without it nothing about its comparison changes. Today the one class
+ * is "555 on a cell's rail": a 555 whose pin 8 sits on a `battery_pack`'s
+ * positive node. There classic's crossing search is step-limited (a period
+ * 1.7 to 2.3 % long, depending on the host's stops) and the corpus has no
+ * model-exact sidecar (core/README.md, "The 555 period on a moving rail").
+ * The marker is refused (hand-bound.ts's `assertHandBoundApplies`) on any
+ * circuit that has no such 555, so it cannot excuse anything else.
+ */
+export interface HandBoundSpec {
+  readonly circuitClass: "555 on a cell's rail";
+  /** The 555's component id; also its digitalState key. */
+  readonly component: string;
+  /** A counter clocked by the 555 whose final digitalState value is held (reads 1 from load, adds one per rise). */
+  readonly counter?: string;
+  /** A capacitor across the cell's rail whose published current is listed (not judged): see HandBoundReport.knownFailingReadings. */
+  readonly railCapacitor?: string;
+  /** The hand model (hand-555.ts) that derives the edges. */
+  readonly model: import("./hand-555.js").HandModel;
+  /** The hand values as the sidecar's `$comment` derives them: the harness checks its own model against these, then judges the core against them. */
+  readonly hand: {
+    readonly rises: number;
+    readonly falls: number;
+    readonly periodS?: number;
+    readonly duty?: number;
+    readonly pulseS?: number;
+    readonly finalCount?: number;
+  };
+  /** An edge, the period, the duty and a pulse are within `relative * value + absoluteS` of the hand value (duty: `relative * duty`). */
+  readonly bound: { readonly relative: number; readonly absoluteS: number };
+  /** Why that bound: required, and printed with the entry. */
+  readonly justification: string;
+}
+
+/** One reading the marker does NOT excuse: listed with the numbers, never hidden. */
+export interface KnownFailingReading {
+  readonly id: string;
+  readonly quantity: "elementI";
+  readonly classic: number;
+  readonly core: number;
+  readonly note: string;
+}
+
+/** What a hand-judged entry measured: the core's and classic's quantities beside the hand values. */
+export interface HandBoundQuantities {
+  readonly rises: number;
+  readonly falls: number;
+  /** The largest |edge - hand edge| over the edges both lists hold, seconds. */
+  readonly worstEdgeS: number;
+  readonly periodS?: number;
+  readonly duty?: number;
+  readonly pulsesS?: number[];
+  readonly finalCount?: number;
+}
+
+export interface HandBoundReport {
+  readonly circuitClass: HandBoundSpec["circuitClass"];
+  readonly bound: HandBoundSpec["bound"];
+  readonly justification: string;
+  readonly hand: HandBoundQuantities;
+  readonly core: HandBoundQuantities;
+  readonly classic: HandBoundQuantities;
+  /** The core's worst quantity as a fraction of its bound (at most 1 passes). */
+  readonly coreBoundRatio: number;
+  readonly knownFailingReadings: readonly KnownFailingReading[];
 }

@@ -8,7 +8,7 @@
 
 import type { HarnessEntryOutcome } from "./table.js";
 import type { HarnessRun } from "./harness.js";
-import type { EntryResult, KindRow, KnownDivergenceHit, Mismatch } from "./types.js";
+import type { EntryResult, HandBoundReport, KindRow, KnownDivergenceHit, Mismatch } from "./types.js";
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
@@ -16,11 +16,11 @@ function yesNo(value: boolean): string {
 
 export function renderMarkdownTable(rows: readonly KindRow[]): string {
   const header =
-    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | phase-missing-id | unstimulated | status |";
-  const sep = "|---|---|---|---|---|---|---|---|---|---|---|---|";
+    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | phase-missing-id | unstimulated | hand-judged | status |";
+  const sep = "|---|---|---|---|---|---|---|---|---|---|---|---|---|";
   const lines = rows.map(
     (r) =>
-      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.phaseMissingId} | ${r.unstimulated} | ${r.status} |`,
+      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.phaseMissingId} | ${r.unstimulated} | ${r.handJudged} | ${r.status} |`,
   );
   return [header, sep, ...lines].join("\n");
 }
@@ -72,6 +72,26 @@ function describeKnownDivergences(knownDivergences: readonly KnownDivergenceHit[
     .join("");
 }
 
+/** R122 (a): what a hand-judged entry measured, the core's bound ratio and classic's distance, and the readings the marker does not excuse. */
+function describeHandBound(report: HandBoundReport | undefined): string {
+  if (!report) return "";
+  const q = (x: HandBoundReport["core"]): string =>
+    `${x.rises} rises, ${x.falls} falls, worst edge ${fmtNum(x.worstEdgeS)} s` +
+    (x.periodS !== undefined ? `, period ${fmtNum(x.periodS)} s` : "") +
+    (x.duty !== undefined ? `, duty ${x.duty.toFixed(5)}` : "") +
+    (x.pulsesS ? `, pulses ${x.pulsesS.map(fmtNum).join(" / ")} s` : "") +
+    (x.finalCount !== undefined ? `, final count ${x.finalCount}` : "");
+  const lines = [
+    `\n  - [hand-judged: ${report.circuitClass}, R122 (a); bound ${report.bound.relative} x value + ${report.bound.absoluteS} s] hand: ${q(report.hand)}`,
+    `\n  - core (${fmtNum(report.coreBoundRatio)} of the bound): ${q(report.core)}`,
+    `\n  - classic (recorded, not gated): ${q(report.classic)}`,
+    ...report.knownFailingReadings.map(
+      (k) => `\n  - [known failing reading: ${k.id} ${k.quantity}] classic ${fmtNum(k.classic)}, core ${fmtNum(k.core)}; ${k.note}`,
+    ),
+  ];
+  return lines.join("");
+}
+
 function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult): string {
   const head = `- **${entry.id}** (${entry.kinds.join(", ") || "no components"}) -> ${result.status}${describeEntryNotes(entry)}`;
   switch (result.status) {
@@ -97,11 +117,12 @@ function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult)
         `${head} (max abs V ${fmtNum(result.maxAbsErrorVolts)}, max rel V ${fmtNum(result.maxRelErrorVolts)}, ` +
         `max abs I ${fmtNum(result.maxAbsErrorAmps)}, max rel I ${fmtNum(result.maxRelErrorAmps)}; ` +
         `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})` +
-        describeKnownDivergences(result.knownDivergences)
+        describeKnownDivergences(result.knownDivergences) +
+        describeHandBound(result.handBound)
       );
     case "fail": {
       const shown = result.mismatches.map((m) => `\n  - ${describeMismatch(m)}`).join("");
-      return `${head} (${result.totalMismatches} mismatch(es)):${shown}${describeKnownDivergences(result.knownDivergences)}`;
+      return `${head} (${result.totalMismatches} mismatch(es)):${shown}${describeKnownDivergences(result.knownDivergences)}${describeHandBound(result.handBound)}`;
     }
     case "error":
       return `${head} ([${result.engine}] ${result.message})`;

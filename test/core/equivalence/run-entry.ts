@@ -58,6 +58,7 @@
  * falling edge.
  */
 
+import { runHandBoundEntry } from "./hand-bound.js";
 import os from "node:os";
 import path from "node:path";
 import { getPartLibrary } from "../../../src/parts/part-library.js";
@@ -2121,6 +2122,8 @@ export function runSidecarChecks(
 }
 
 export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
+  // Ruling R122 (a): an entry carrying the marker is judged against its hand values (hand-bound.ts); no other entry gets here.
+  if (entry.handBound) return runHandBoundEntry(entry, circuit);
   // Gate 2d's stimuli path takes priority over everything below: a
   // verify-script entry with exported phases is answering a different
   // question ("can this be validated under scripted stimuli") than the
