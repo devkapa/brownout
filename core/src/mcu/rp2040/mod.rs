@@ -126,6 +126,16 @@ pub struct ScheduledInput {
     pub level: bool,
 }
 
+/// A scripted host input of the R6 blocks: kind 0 sets ADC channel `a` to
+/// `b` (raw counts), kind 1 feeds byte `b` to UART `a`.
+#[derive(Clone, Copy, Debug)]
+pub struct ScheduledHost {
+    pub at_cycle: f64,
+    pub kind: u32,
+    pub a: f64,
+    pub b: f64,
+}
+
 /// REPL bytes the host feeds the CDC at a fixed cycle count, like a pin input.
 #[derive(Clone, Debug)]
 pub struct ScheduledRepl {
@@ -162,6 +172,7 @@ pub struct Rp2040 {
     pub steps: u64,
     pub inputs: Vec<ScheduledInput>,
     pub repl_inputs: Vec<ScheduledRepl>,
+    pub host_inputs: Vec<ScheduledHost>,
     pub pin_events: Vec<PinEvent>,
     /// When non-zero, [`Rp2040::pio_host_turn`] runs after every this-many
     /// completed steps: the stand-in for the host event loop the harness
@@ -196,6 +207,7 @@ impl Rp2040 {
             steps: 0,
             inputs: Vec::new(),
             repl_inputs: Vec::new(),
+            host_inputs: Vec::new(),
             pin_events: Vec::new(),
             host_turn_steps: 0,
         };
@@ -233,7 +245,7 @@ impl Rp2040 {
     /// Applies every scheduled input due at the current clock cycle, in the
     /// order they were scheduled.
     fn apply_due_inputs(&mut self) {
-        if self.inputs.is_empty() && self.repl_inputs.is_empty() {
+        if self.inputs.is_empty() && self.repl_inputs.is_empty() && self.host_inputs.is_empty() {
             return;
         }
         let now_cycle = self.clock.nanos / CYCLE_NANOS;
@@ -255,6 +267,19 @@ impl Rp2040 {
                 i += 1;
             }
         }
+        let mut i = 0;
+        while i < self.host_inputs.len() {
+            if self.host_inputs[i].at_cycle <= now_cycle {
+                let inp = self.host_inputs.remove(i);
+                if inp.kind == 0 {
+                    self.adc_set_channel(inp.a as usize, inp.b);
+                } else {
+                    self.uart_feed_byte(inp.a as usize, inp.b as u8);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// The earliest cycle any scheduled input is due at.
@@ -263,6 +288,7 @@ impl Rp2040 {
             .iter()
             .map(|i| i.at_cycle)
             .chain(self.repl_inputs.iter().map(|i| i.at_cycle))
+            .chain(self.host_inputs.iter().map(|i| i.at_cycle))
             .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.min(c))))
     }
 

@@ -6,7 +6,7 @@
 use super::{Rp2040, ScheduledInput, Stop};
 
 /// Words in the state record `rp_state` writes, all as f64.
-pub const STATE_WORDS: usize = 108;
+pub const STATE_WORDS: usize = 117;
 
 #[no_mangle]
 pub extern "C" fn rp_alloc(len: u32) -> *mut u8 {
@@ -385,6 +385,7 @@ fn r2_state(mach: &mut Rp2040, s: &mut [f64]) {
     s[81] = mach.rtc_read(0x18) as f64;
     s[82] = mach.rtc_read(0x1c) as f64;
     r5_state(mach, s);
+    r6_state(mach, s);
 }
 
 /// R5: the DMA channels and request lines, both PIO blocks and the pending
@@ -402,6 +403,102 @@ fn r5_state(mach: &Rp2040, s: &mut [f64]) {
     }
     // The reference's queue holds opaque callbacks: only the count compares.
     s[107] = fnv([mach.periph.pio_timers.len() as u32]) as f64;
+}
+
+/// R6: PWM, ADC, both UARTs, both SPI blocks and both I2C blocks (slots
+/// 108..117). The JS side mirrors each digest field for field.
+fn r6_state(mach: &Rp2040, s: &mut [f64]) {
+    use super::clock::{js_round, js_to_u32};
+    let now = mach.clock.nanos;
+    let pwm = &mach.periph.pwm;
+    let mut v: Vec<u32> = Vec::new();
+    for c in pwm.channels.iter() {
+        v.extend([
+            c.csr,
+            c.div,
+            c.cc,
+            c.top,
+            c.last_b_value as u32,
+            c.counting_up as u32,
+            c.cc_updated as u32,
+            c.top_updated as u32,
+            c.div_mode,
+            js_to_u32(c.tick_counter),
+            c.timer.enabled as u32,
+            c.timer.mode as u32,
+            c.timer.counter(now),
+            js_to_u32(c.alarm[0].target_value),
+            js_to_u32(c.alarm[1].target_value),
+            js_to_u32(c.timer.top_value),
+            js_to_u32(js_round(c.timer.prescaler_value * 16.0)),
+            (c.alarm[0].enabled as u32) | ((c.alarm[1].enabled as u32) << 1) | ((c.alarm[2].enabled as u32) << 2),
+        ]);
+    }
+    s[108] = fnv(v) as f64;
+    s[109] = fnv([pwm.int_raw, pwm.int_enable, pwm.int_force, pwm.gpio_value, pwm.gpio_direction as u32]) as f64;
+    let a = &mach.periph.adc;
+    let mut v: Vec<u32> = vec![
+        a.cs,
+        a.fcs,
+        a.clock_div,
+        a.int_enable,
+        a.int_force,
+        js_to_u32(a.result),
+        a.busy as u32,
+        a.current_channel,
+        a.fifo.item_count() as u32,
+    ];
+    v.extend(a.fifo.items());
+    v.extend(a.channel_values.iter().map(|&x| js_to_u32(x)));
+    s[110] = fnv(v) as f64;
+    for i in 0..2 {
+        let u = &mach.periph.uart[i];
+        let mut v = vec![u.ctrl, u.line_ctrl, u.int_mask, u.int_status, u.int_div, u.frac_div, u.rx_fifo.item_count() as u32];
+        v.extend(u.rx_fifo.items());
+        s[111 + i] = fnv(v) as f64;
+        let p = &mach.periph.spi[i];
+        let mut v = vec![
+            p.busy as u32,
+            p.control0,
+            p.control1,
+            p.dma_control,
+            p.clock_divisor,
+            p.int_raw,
+            p.int_enable,
+            p.rx_fifo.item_count() as u32,
+        ];
+        v.extend(p.rx_fifo.items());
+        v.push(p.tx_fifo.item_count() as u32);
+        v.extend(p.tx_fifo.items());
+        s[113 + i] = fnv(v) as f64;
+        let c = &mach.periph.i2c[i];
+        let mut v = vec![
+            c.state as u32,
+            c.busy as u32,
+            c.stop as u32,
+            c.pending_restart as u32,
+            c.first_byte as u32,
+            c.enable,
+            c.rx_threshold,
+            c.tx_threshold,
+            c.control,
+            c.ss_high,
+            c.ss_low,
+            c.fs_high,
+            c.fs_low,
+            c.target_address,
+            c.slave_address,
+            c.abort_source,
+            c.int_raw,
+            c.int_enable,
+            c.spikelen,
+            c.rx_fifo.item_count() as u32,
+        ];
+        v.extend(c.rx_fifo.items());
+        v.push(c.tx_fifo.item_count() as u32);
+        v.extend(c.tx_fifo.items());
+        s[115 + i] = fnv(v) as f64;
+    }
 }
 
 /// FNV-1a over the interpolators' registers, in a fixed order the harness
@@ -489,4 +586,64 @@ pub unsafe extern "C" fn rp_pin_events(m: *mut Rp2040, out: *mut f64, cap: u32) 
         s[3 * i + 2] = e.nanos;
     }
     mach.pin_events.len() as u32
+}
+
+/// The ADC input of the wrapper: raw counts for one channel (0..4).
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_adc_set(m: *mut Rp2040, channel: u32, value: f64) {
+    machine(m).adc_set_channel(channel as usize, value);
+}
+
+/// A scripted host input at a fixed cycle: kind 0 sets ADC channel `a` to
+/// `b`, kind 1 feeds byte `b` to UART `a`.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_schedule_host(m: *mut Rp2040, at_cycle: f64, kind: u32, a: f64, b: f64) {
+    machine(m).host_inputs.push(super::ScheduledHost { at_cycle, kind, a, b });
+}
+
+/// SPI block `i` answers every word with `word ^ xor`.
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_set_spi_host(m: *mut Rp2040, i: u32, xor: u32) {
+    machine(m).periph.spi[i as usize & 1].host = super::spi::SpiHost::Respond(xor);
+}
+
+/// I2C block `i` has one device at `address` (reads count up from `next_read`).
+///
+/// # Safety
+/// `m` from `rp_create`.
+#[no_mangle]
+pub unsafe extern "C" fn rp_set_i2c_device(m: *mut Rp2040, i: u32, address: u32, next_read: u32) {
+    machine(m).periph.i2c[i as usize & 1].host = super::i2c::I2cHost::Device { address, next_read };
+}
+
+/// Event streams, four f64s each, from index `from` on: `which` 0 UART
+/// (uart, kind, value, nanos), 1 SPI (spi, word, nanos, 0), 2 I2C (i2c, kind,
+/// value, nanos). Returns the stream's total length.
+///
+/// # Safety
+/// `m` from `rp_create`; `out` valid for `4 * cap` f64s.
+#[no_mangle]
+pub unsafe extern "C" fn rp_io_events_from(m: *mut Rp2040, which: u32, from: u32, out: *mut f64, cap: u32) -> u32 {
+    let mach = machine(m);
+    let rows: Vec<[f64; 4]> = match which {
+        0 => mach.periph.uart_events.iter().map(|e| [e.uart as f64, e.kind as f64, e.value, e.nanos]).collect(),
+        1 => mach.periph.spi_events.iter().map(|e| [e.spi as f64, e.value as f64, e.nanos, 0.0]).collect(),
+        _ => mach.periph.i2c_events.iter().map(|e| [e.i2c as f64, e.kind as f64, e.value as f64, e.nanos]).collect(),
+    };
+    let from = (from as usize).min(rows.len());
+    let n = (rows.len() - from).min(cap as usize);
+    let s = std::slice::from_raw_parts_mut(out, 4 * n);
+    for (i, r) in rows[from..from + n].iter().enumerate() {
+        s[4 * i..4 * i + 4].copy_from_slice(r);
+    }
+    rows.len() as u32
 }

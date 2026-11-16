@@ -47,7 +47,7 @@ const bootromPath = path.join(repoRoot, "src", "sim", "engine", "rp2040-bootrom.
 // UTC, so the reference runs in UTC.
 process.env.TZ = "UTC";
 
-const STATE_WORDS = 108;
+const STATE_WORDS = 117;
 const STATE_NAMES = [
   ...Array.from({ length: 13 }, (_, i) => `r${i}`), "sp", "lr", "pc",
   "xPSR", "MSP", "PSP", "PRIMASK", "CONTROL", "cycles", "nanos", "waiting", "eventRegistered",
@@ -64,6 +64,7 @@ const STATE_NAMES = [
   "usb.regs", "usb.dpramHash", "usb.endpointAlarms", "cdc.state", "cdc.wrapper", "serial.count", "serial.hash",
   "dma.channels", "dma.irq", "dma.dreq", "pio0.machines", "pio0.fifos", "pio0.regs", "pio1.machines", "pio1.fifos",
   "pio1.regs", "host.pioTimers",
+  "pwm.channels", "pwm.regs", "adc.digest", "uart0.digest", "uart1.digest", "spi0.digest", "spi1.digest", "i2c0.digest", "i2c1.digest",
 ];
 
 // The reference runs a PIO block 1000 steps at a time from `setTimeout(0)`
@@ -985,6 +986,7 @@ function rustSide() {
   const m = x.rp_create();
   x.rp_cdc_hold_reads(m, 1); // the wrapper's read-holding policy
   x.rp_set_host_turn(m, HOST_TURN_STEPS);
+  x.rp_adc_set(m, 4, 876); // the wrapper seeds the temperature sensor
   const mem = () => new Uint8Array(x.memory.buffer);
   const withBytes = (bytes, fn) => {
     const p = x.rp_alloc(bytes.length);
@@ -1004,6 +1006,21 @@ function rustSide() {
       reg: (n, v) => x.rp_set_reg(m, n, v >>> 0),
       input: (atCycle, pin, level) => x.rp_schedule_input(m, atCycle, pin, level),
       repl: (atCycle, text) => withBytes(Buffer.from(text, "latin1"), (p) => x.rp_schedule_repl(m, atCycle, p, text.length)),
+      host: (atCycle, kind, a, b) => x.rp_schedule_host(m, atCycle, kind, a, b),
+      spiXor: (i, xor) => x.rp_set_spi_host(m, i, xor >>> 0),
+      i2cDevice: (i, address, next) => x.rp_set_i2c_device(m, i, address, next),
+    },
+    /** I/O stream `which` (0 UART, 1 SPI, 2 I2C) from index `from` on: rows of four numbers. */
+    ioEvents(which, from = 0) {
+      const total = x.rp_io_events_from(m, which, 0, 0, 0) - from;
+      if (total <= 0) return [];
+      const p = x.rp_alloc(32 * total + 8);
+      x.rp_io_events_from(m, which, from, p, total);
+      const f = new Float64Array(x.memory.buffer, p, 4 * total);
+      const out = [];
+      for (let i = 0; i < total; i++) out.push([f[4 * i], f[4 * i + 1], f[4 * i + 2], f[4 * i + 3]]);
+      x.rp_free(p, 32 * total + 8);
+      return out;
     },
     serial() {
       const n = x.rp_serial_len(m);
@@ -1122,6 +1139,51 @@ function jsSide() {
       return exec.call(this, op);
     };
   }
+  rp.adc.channelValues[4] = 876; // the wrapper seeds the temperature sensor
+  // The R6 blocks' host callbacks: logged, then answered as the port's
+  // policies answer (see core/src/mcu/rp2040/{spi,i2c}.rs).
+  const ioStreams = [[], [], []];
+  const nowNs = () => sim.clock.nanos;
+  rp.uart.forEach((u, i) => {
+    u.onByte = (v) => ioStreams[0].push([i, 0, v, nowNs()]);
+    u.onBaudRateChange = (b) => ioStreams[0].push([i, 1, b, nowNs()]);
+  });
+  const spiXor = [0, 0];
+  rp.spi.forEach((s, i) => {
+    s.onTransmit = (v) => {
+      ioStreams[1].push([i, v, nowNs(), 0]);
+      s.completeTransmit((v ^ spiXor[i]) >>> 0);
+    };
+  });
+  const i2cDev = [null, null];
+  rp.i2c.forEach((c, i) => {
+    const log = (kind, value) => ioStreams[2].push([i, kind, value, nowNs()]);
+    c.onStart = (restart) => {
+      log(0, restart ? 1 : 0);
+      c.completeStart();
+    };
+    c.onConnect = (address, mode) => {
+      log(1, address | (mode === 1 ? 0x10000 : 0));
+      c.completeConnect(!!i2cDev[i] && i2cDev[i].address === address);
+    };
+    c.onWriteByte = (v) => {
+      log(2, v);
+      c.completeWrite(!!i2cDev[i]);
+    };
+    c.onReadByte = (ack) => {
+      log(3, ack ? 1 : 0);
+      if (i2cDev[i]) {
+        const v = i2cDev[i].next;
+        i2cDev[i].next = (v + 1) & 0xff;
+        c.completeRead(v);
+      } else c.completeRead(0xff);
+    };
+    c.onStop = () => {
+      log(4, 0);
+      c.completeStop();
+    };
+  });
+  const hostInputs = [];
   const events = [];
   rp.gpio.forEach((pin, i) => pin.addListener((state) => events.push([i, state, sim.clock.nanos])));
   const inputs = [];
@@ -1153,10 +1215,17 @@ function jsSide() {
         replSend(Buffer.from(inp.text, "latin1"));
       } else i++;
     }
+    for (let i = 0; i < hostInputs.length; ) {
+      if (hostInputs[i].atCycle <= nowCycle) {
+        const inp = hostInputs.splice(i, 1)[0];
+        if (inp.kind === 0) rp.adc.channelValues[inp.a] = inp.b;
+        else rp.uart[inp.a].feedByte(inp.b);
+      } else i++;
+    }
     if (core.waiting) {
       if (!sim.clock.nextAlarm) {
         // Nothing scheduled: a host input still to come wakes the machine.
-        const due = [...inputs, ...replInputs].map((x) => x.atCycle);
+        const due = [...inputs, ...replInputs, ...hostInputs].map((x) => x.atCycle);
         const next = due.length ? Math.min(...due) : null;
         if (next !== null && next * 8 > sim.clock.nanos) {
           sim.clock.tick(next * 8 - sim.clock.nanos);
@@ -1207,7 +1276,15 @@ function jsSide() {
       },
       input: (atCycle, pin, level) => inputs.push({ atCycle, pin, level }),
       repl: (atCycle, text) => replInputs.push({ atCycle, text }),
+      host: (atCycle, kind, a, b) => hostInputs.push({ atCycle, kind, a, b }),
+      spiXor: (i, xor) => {
+        spiXor[i] = xor >>> 0;
+      },
+      i2cDevice: (i, address, next) => {
+        i2cDev[i] = { address, next };
+      },
     },
+    ioEvents: (which, from = 0) => ioStreams[which].slice(from),
     serial: () => Buffer.from(serial).toString("latin1"),
     run(n) {
       let done = 0;
@@ -1372,6 +1449,42 @@ function jsSide() {
         ]);
       });
       s[107] = fnv([timers.length]);
+      // R6: PWM, ADC, UARTs, SPI, I2C (digests mirrored in abi.rs r6_state).
+      const b = (v) => (v ? 1 : 0);
+      s[108] = fnv(
+        rp.pwm.channels.flatMap((c) => [
+          c.csr, c.div, c.cc, c.top, b(c.lastBValue), b(c.countingUp), b(c.ccUpdated), b(c.topUpdated), c.divMode,
+          c.tickCounter >>> 0, b(c.timer.enable), c.timer.mode, c.timer.counter, c.alarmA.target >>> 0, c.alarmB.target >>> 0,
+          c.timer.top >>> 0, Math.round(c.timer.prescaler * 16) >>> 0,
+          b(c.alarmA.enable) | (b(c.alarmB.enable) << 1) | (b(c.alarmBottom.enable) << 2),
+        ]),
+      );
+      const pwm = rp.pwm;
+      s[109] = fnv([pwm.intRaw, pwm.intEnable, pwm.intForce, pwm.gpioValue, pwm.gpioDirection >>> 0]);
+      const adc = rp.adc;
+      s[110] = fnv([
+        adc.cs, adc.fcs, adc.clockDiv, adc.intEnable, adc.intForce, adc.result, b(adc.busy), adc.currentChannel,
+        adc.fifo.itemCount, ...adc.fifo.items, ...adc.channelValues,
+      ]);
+      for (let i = 0; i < 2; i++) {
+        const u = rp.uart[i];
+        s[111 + i] = fnv([
+          u.ctrlRegister, u.lineCtrlRegister, u.interruptMask, u.interruptStatus, u.intDivisor, u.fracDivisor,
+          u.rxFIFO.itemCount, ...u.rxFIFO.items,
+        ]);
+        const p = rp.spi[i];
+        s[113 + i] = fnv([
+          b(p.busy), p.control0, p.control1, p.dmaControl, p.clockDivisor, p.intRaw, p.intEnable, p.rxFIFO.itemCount,
+          ...p.rxFIFO.items, p.txFIFO.itemCount, ...p.txFIFO.items,
+        ]);
+        const c = rp.i2c[i];
+        s[115 + i] = fnv([
+          c.state, b(c.busy), b(c.stop), b(c.pendingRestart), b(c.firstByte), c.enable, c.rxThreshold, c.txThreshold,
+          c.control, c.ssClockHighPeriod, c.ssClockLowPeriod, c.fsClockHighPeriod, c.fsClockLowPeriod, c.targetAddress,
+          c.slaveAddress, c.abortSource, c.intRaw, c.intEnable, c.spikelen, c.rxFIFO.itemCount, ...c.rxFIFO.items,
+          c.txFIFO.itemCount, ...c.txFIFO.items,
+        ]);
+      }
       return s;
     },
     ramHash() {
@@ -1472,8 +1585,12 @@ function make(image) {
     image.setup(s.side);
     for (const inp of image.inputs ?? []) {
       if (inp.repl !== undefined) s.side.repl(inp.atCycle, inp.repl);
+      else if (inp.adc !== undefined) s.side.host(inp.atCycle, 0, inp.adc[0], inp.adc[1]);
+      else if (inp.uartRx !== undefined) s.side.host(inp.atCycle, 1, inp.uartRx[0], inp.uartRx[1]);
       else s.side.input(inp.atCycle, inp.pin, inp.level);
     }
+    for (const [i, xor] of Object.entries(image.spiXor ?? {})) s.side.spiXor(Number(i), xor);
+    for (const d of image.i2cDevices ?? []) s.side.i2cDevice(d.i2c, d.address, d.next);
   }
   return { rust, js };
 }
@@ -1508,6 +1625,19 @@ function compare(rust, js, withRam, flash = "dirty", seen = { n: 0 }) {
     const show = (side) => JSON.stringify(side.pinEvents(Math.max(0, seen.n - 2)).slice(0, 12));
     d.push(`pin events (from #${seen.n}, ${nr} vs ${nj} in all): rust ${show(rust)} js ${show(js)}`);
   } else seen.n = nr;
+  for (let w = 0; w < 3; w++) {
+    const from = seen.io?.[w] ?? 0;
+    const a = rust.ioEvents(w, from), c = js.ioEvents(w, from);
+    let same = a.length === c.length;
+    for (let i = 0; same && i < a.length; i++) for (let j = 0; j < 4; j++) if (a[i][j] !== c[i][j]) same = false;
+    if (!same) {
+      const show = (e) => JSON.stringify(e.slice(0, 8));
+      d.push(`${["uart", "spi", "i2c"][w]} events (from #${from}): rust ${show(a)} js ${show(c)}`);
+    } else {
+      seen.io = seen.io ?? [0, 0, 0];
+      seen.io[w] = from + a.length;
+    }
+  }
   return d;
 }
 
