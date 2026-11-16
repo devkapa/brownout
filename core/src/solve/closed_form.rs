@@ -2202,7 +2202,14 @@ impl ClosedFormSolver {
         let hub = seg.hub.as_deref();
         let dir = if d.sum(|m| m.s) < 0.0 { -1.0 } else { 1.0 };
         let within = if d.held { until - t0 } else { f64::INFINITY };
-        let single = d.single();
+        // `driven_crossing` takes one decaying mode (`k > 0`) and finds no
+        // root for a line: a cell's coupled path whose transients have all
+        // run out is the drain's line alone (`k = 0`), and a 555's trigger on
+        // it was never scheduled, landing at the next solve or host stop in
+        // every build, 1 us runs included (the cold fuzz's 113/6, 11.6 ms
+        // late at 60 Hz hosts; CAD-2). A line goes through the sum's search,
+        // which takes `k = 0` as `φ_0(τ) = τ`.
+        let single = d.single().filter(|m| m.k > 0.0);
         let mut terms: Vec<(f64, rails::Basis)> = DRIVEN_TERMS.with(|c| std::mem::take(&mut *c.borrow_mut()));
         let nominal = 1e-6 * d.u_a.abs().max(1.0);
         let gap = edges.iter().map(|&e| dir * (e - d.u_a)).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
