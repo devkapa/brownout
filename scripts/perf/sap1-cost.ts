@@ -58,6 +58,12 @@
  *   --startup=<s>       the start-up figure's warm-up (default 5), measured
  *                       too whenever it is shorter than --warmup
  *   --measure=<s>       simulated measured seconds (default 1)
+ *   --catalog=<which>   plain (the default), catalog, or both: the boards as
+ *                       the generator writes them, with the catalogUid every
+ *                       component carries when the app sends it (THERM,
+ *                       boards.ts SAP1_CATALOG_UIDS: a uid gives each
+ *                       resistor and LED a thermal record, the app's
+ *                       workload), or each in turn, reported apart
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -75,6 +81,8 @@ const repoRoot = path.resolve(path.dirname(thisFile), "..", "..");
 
 interface ChildResult {
   ratings: number;
+  /** Thermal records (code 91): one per component with a catalog identity. */
+  thermals: number;
   ratingKind: boolean;
   /** Per warm-up, in the order asked: CPU ms per simulated second. */
   frozen: number[];
@@ -115,12 +123,13 @@ async function child(tree: string, frozenFile: string, runningFile: string, warm
     const u = process.cpuUsage();
     return (u.user + u.system) / 1000;
   };
-  const out: ChildResult = { ratings: 0, ratingKind: "rating" in kinds.CORE_KIND_CODES, frozen: [], running: [] };
+  const out: ChildResult = { ratings: 0, thermals: 0, ratingKind: "rating" in kinds.CORE_KIND_CODES, frozen: [], running: [] };
   for (const [variant, file] of [["frozen", frozenFile], ["running", runningFile]] as const) {
     const circuit = JSON.parse(fs.readFileSync(file, "utf8")) as { bench: Sap1Bench };
     const compiled = compile.compileCircuit(circuit, kinds.CORE_IMPLEMENTED_KINDS, { startTimeS: 0 });
     if (!compiled.ok || !compiled.compiled) throw new Error(`${tree}: the compiler declines ${file}: ${JSON.stringify(compiled.reasons)}`);
     out.ratings = compiled.compiled.devices.filter((d) => d.kind === "rating").length;
+    out.thermals = compiled.compiled.devices.filter((d) => d.kind === "thermal").length;
     const e = new core.CoreEngine();
     if (raw !== undefined) {
       const plain = e.advance.bind(e);
@@ -204,6 +213,7 @@ async function main(): Promise<void> {
   let warmupS = 5;
   let startupS = 5;
   let measureS = 1;
+  let catalogs: ("plain" | "catalog")[] = ["plain"];
   const trees: { label: string; tree: string }[] = [];
   for (const arg of argv) {
     // `pnpm run bench:sap1-cost -- ...` can pass the separator through.
@@ -217,6 +227,11 @@ async function main(): Promise<void> {
     else if (flag === "--gate" && value === undefined) warmupS = GATE_WARMUP_S;
     else if (flag === "--startup") startupS = Number(value);
     else if (flag === "--measure") measureS = Number(value);
+    else if (flag === "--catalog") {
+      if (value === "both") catalogs = ["plain", "catalog"];
+      else if (value === "plain" || value === "catalog") catalogs = [value];
+      else throw new Error(`sap1-cost: --catalog takes plain, catalog or both, got ${String(value)}`);
+    }
     else if (flag.startsWith("--")) throw new Error(`sap1-cost: unknown flag ${arg}`);
     else if (value !== undefined) trees.push({ label: flag, tree: path.resolve(value) });
     else throw new Error(`sap1-cost: expected <label>=<tree>, got ${arg}`);
@@ -233,12 +248,15 @@ async function main(): Promise<void> {
   for (const { tree } of trees) {
     if (!fs.existsSync(path.join(tree, "src", "core", "brownout-core.wasm"))) throw new Error(`sap1-cost: ${tree} has no built src/core/brownout-core.wasm (pnpm run build:core there)`);
   }
-  const boards = new Map(powers.map((power) => [power, sap1BoardFiles({ boardsDir, generator, power })]));
+  // A supply key is the supply, with "+catalog" for the boards that carry
+  // the app's uids: each is reported as a supply of its own.
+  const supplies = powers.flatMap((power) => catalogs.map((c) => ({ key: c === "catalog" ? `${power}+catalog` : power, power, catalog: c === "catalog" })));
+  const boards = new Map(supplies.map((s) => [s.key, sap1BoardFiles({ boardsDir, generator, power: s.power, catalog: s.catalog })]));
   const tsx = path.join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   // Keyed by window, supply and label.
-  const results = new Map<string, { frozen: number[]; running: number[]; ratings: number }>();
+  const results = new Map<string, { frozen: number[]; running: number[]; ratings: number; thermals: number }>();
   for (let rep = 1; rep <= reps; rep++) {
-    for (const power of powers) {
+    for (const { key: power } of supplies) {
       const files = boards.get(power)!;
       const file = (v: string) => files.find((b) => b.variant === v)!.file;
       for (const { label, tree } of trees) {
@@ -252,13 +270,13 @@ async function main(): Promise<void> {
         const parts: string[] = [];
         windows.forEach((w, i) => {
           const key = `${w.name} ${power} ${label}`;
-          const acc = results.get(key) ?? { frozen: [], running: [], ratings: res.ratings };
+          const acc = results.get(key) ?? { frozen: [], running: [], ratings: res.ratings, thermals: res.thermals };
           acc.frozen.push(res.frozen[i]!);
           acc.running.push(res.running[i]!);
           results.set(key, acc);
           parts.push(`${w.name} (${String(w.warmupS)} s) frozen ${res.frozen[i]!.toFixed(2)} running ${res.running[i]!.toFixed(2)}`);
         });
-        console.log(`rep ${String(rep)} ${power} ${label}: ${parts.join(", ")} ms/sim-s (ratings ${String(res.ratings)}) | load ${os.loadavg()[0]!.toFixed(2)}`);
+        console.log(`rep ${String(rep)} ${power} ${label}: ${parts.join(", ")} ms/sim-s (ratings ${String(res.ratings)}, thermal ${String(res.thermals)}) | load ${os.loadavg()[0]!.toFixed(2)}`);
       }
     }
   }
@@ -275,7 +293,7 @@ async function main(): Promise<void> {
   }
 
   function report(window: string): void {
-    for (const power of powers) {
+    for (const { key: power } of supplies) {
       const base = results.get(`${window} ${power} ${trees[0]!.label}`)!;
       const [bf, br] = [median(base.frozen), median(base.running)];
       for (const { label } of trees) {
@@ -283,8 +301,8 @@ async function main(): Promise<void> {
         const [f, g] = [median(r.frozen), median(r.running)];
         const paired = (xs: number[], ys: number[]) => median(xs.map((x, i) => x / ys[i]!));
         console.log(
-          `  ${power.padEnd(8)}${label.padEnd(12)} frozen ${f.toFixed(2)} (${Math.min(...r.frozen).toFixed(2)}) ${pct(paired(r.frozen, base.frozen), 1).padStart(9)} [${pct(f, bf)}]` +
-            `   running ${g.toFixed(2)} (${Math.min(...r.running).toFixed(2)}) ${pct(paired(r.running, base.running), 1).padStart(9)} [${pct(g, br)}]   ratings ${String(r.ratings)}`,
+          `  ${power.padEnd(16)}${label.padEnd(12)} frozen ${f.toFixed(2)} (${Math.min(...r.frozen).toFixed(2)}) ${pct(paired(r.frozen, base.frozen), 1).padStart(9)} [${pct(f, bf)}]` +
+            `   running ${g.toFixed(2)} (${Math.min(...r.running).toFixed(2)}) ${pct(paired(r.running, base.running), 1).padStart(9)} [${pct(g, br)}]   ratings ${String(r.ratings)} thermal ${String(r.thermals)}`,
         );
       }
     }

@@ -6633,6 +6633,54 @@ from one load. F5's landing proposes a start-up budget with its `3ca4004`
 baseline. Every figure above was taken at 5 s of warm-up, the protocol of
 its time; the next gate run takes both.
 
+**The app's workload (THERM, 2026-11-17).** The generator's boards carry
+no `catalogUid`; the app sends one on every SAP-1 component, which gives
+its 115 resistors and 83 LEDs a thermal record (code 91), and a device
+with a thermal identity is never cold (point 2). On the battery board a
+cell's rail moves about 44,000 times a simulated second, each move
+re-driving every one of them: 3.2 M visits a second (six closed-form
+resistors on the rail, R29, some 42,000 each; 109 static resistors and 83
+static LEDs some 19,000 and 12,000 each, every LED visit rescheduling its
+band boundary). On `9e9aa01` that cost 2.05 s of CPU per simulated second
+in Node against 0.80 s without the uids. Half of it was the six
+closed-form resistors' re-anchor deadline (R29), searched twice per visit
+by doubling from 1e-12 and bisecting to the last bit. Each visit now reads
+its voltage off the segment it computed, and the search
+(`closed_form::largest_within`) brackets by bisection on the doubling's
+exponent (or doubles from the floor R29 hands it, its own majorant's
+root) and refines by Illinois regula falsi, always from below, to `2^-30`
+of the root (`WITHIN_REL`): 1.41 s per simulated second. That is typically
+8 to 16 evaluations, not a bound: over 100,000 random R29 inputs (SHIPV-H)
+the search took at most 63 evaluations from 1e-12 and 65 from the floor
+(the old one: 123, typically 84), and more than 24 in about 13 % of R29
+calls and 18 % of curved ones. A floor whose bound rounds a few ulps over
+the tolerance (4.2 % of R29 calls, where the bound is its own majorant,
+`L = 0`) is tried again `2^-32` under before falling back to the search
+from 1e-12 (`FLOOR_NUDGE`; no call of the generator's falls back since).
+The run is bit for bit the same where no re-anchor fires (the SAP-1, the
+identity corpus). Where one fires, the deadline moves by up to `2^-30` of
+itself, which moves event instants: on the bench-supply cold sweep's
+133/0, 145/3 and 162/3 the trajectories differ by up to 1.2e-11 V (2.5e-9
+of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
+fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
+boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
+
+**THERM2 (2026-11-17).** The superseded slow events are compacted out of
+the heap between instants (Kernel semantics, point 5): 1.26 s per
+simulated second in Node, the engine state flat at 1.3 MB, stat 4 at the
+plain board's. What is left of the excess (about 0.46 s a simulated
+second over 0.80) is the visits themselves, 0.35 s: R29's deadline search
+0.07, the rest of each visit's drive 0.10, its next event 0.06, the
+journal 0.07, the one-pole close and the visit's own body the rest. None
+of it is repeated work an exact change can remove: `T` is a fold of one
+`exp` per visit, a device is visited at most once an instant, and a visit
+whose device voltage did not move (3 % of them) already writes nothing.
+Deferring R29's search to its floor (THERM's option (c), 0.07 s) is exact
+for every reading but not for the no-progress guard's view of a stale
+re-anchor; skipping visits under a power or voltage bound changes
+published temperatures and powers between visits. Both await a ruling;
+the measurements are in the THERM2 notes.
+
 ### Known follow-ups (W1g)
 
 Recorded at the W1g integration. None changes a rule above until it lands.
@@ -7033,7 +7081,20 @@ Recorded at the W1g integration. None changes a rule above until it lands.
    `t_end`. A superseded event at the head of the heap (a stale token or
    version) is dropped between instants, as its handler would drop it
    inside one, so it is no instant (W1f, Rails point 4's superseded
-   events); stat 4 still counts it. Stepped partitions land exactly on
+   events); stat 4 still counts it. Between instants the heap is also
+   compacted (THERM2, `Kernel::compact_heap`): once it holds more than four
+   times what the last compaction kept plus 64, every superseded `Slow`
+   entry is dropped, unless a live entry at its exact time was pushed
+   before it (then it would pop inside that instant and mark it, so it
+   stays). The live events pop in the same `(t, seq)` order, ties included,
+   and every reading is bit for bit what lazy deletion gave; stat 4 no
+   longer counts the dropped entries. A slow device re-driven at each rail
+   move supersedes its pending event thousands of times before it is due:
+   on the battery SAP-1 as the app sends it the heap held up to 190,000
+   entries (the engine state sawed between 17 and 62 MB) and stat 4 read
+   1.14 million a simulated second; compacted, the state stays between
+   1.26 and 1.34 MB over 60 simulated seconds (1.18 to 1.27 MB without
+   catalog identities) and stat 4 reads 59,000 to 60,500 (61,200). Stepped partitions land exactly on
    `t_end` (a horizon clamp), so a readout at `t_end` is a solved value,
    not an interpolation. The readers whose nodes the clamp moved are
    evaluated in a delta cycle at `t_end`, so a digital readout at `t_end`

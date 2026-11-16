@@ -717,6 +717,114 @@ fn the_re_anchor_deadlines_are_the_bounds_own_roots() {
     close(want, 0.2203, 1e-4, "by hand");
 }
 
+#[test]
+fn a_re_anchor_deadline_is_found_from_below_in_a_few_evaluations() {
+    // THERM: the battery SAP-1's six closed-form resistors search a deadline
+    // at every rail move (about 42,000 times a simulated second each), and
+    // doubling from 1e-12 then bisecting to the last bit took 84 evaluations
+    // of the bound for a deadline of a millisecond. The deadline is a bound's
+    // root honoured from below, so it is held to `bound(δ) <= tol` and to
+    // within 2^-30 under the root; these two cases take 24 evaluations or
+    // fewer. That is not a general bound (SHIPV-H): the count can run to the
+    // doubling's range, 63 from 1e-12 and 65 from a floor over 100,000
+    // random R29 inputs, more than 24 in about 13 % of them.
+    use super::closed_form::{largest_within, WITHIN_REL};
+    use std::cell::Cell;
+    let count = |bound: &dyn Fn(f64) -> f64, tol: f64| {
+        let n = Cell::new(0usize);
+        let got = largest_within(
+            |d| {
+                n.set(n.get() + 1);
+                bound(d)
+            },
+            tol,
+        );
+        (got, n.get())
+    };
+    // `2 δ² = 2e-6`: the root is 1e-3 s exactly.
+    let quad = |d: f64| 2.0 * d * d;
+    let (got, n) = count(&quad, 2e-6);
+    assert!(quad(got) <= 2e-6 && got <= 1e-3 && got >= 1e-3 * (1.0 - 2.0 * WITHIN_REL), "quadratic: {got}");
+    assert!(n <= 24, "quadratic: {n} evaluations");
+    // R29's shape with a knee at 2/|f| = 0.02 s: `3 δ + 4 min(δ²/2, δ/100)`
+    // at tol 1e-4 sits inside the knee, where `2 δ² + 3 δ = 1e-4`, so `δ =
+    // (-3 + sqrt(9 + 8e-4)) / 4`, with `sqrt(9 + 8e-4) = 3 (1 + 4.4444e-5 -
+    // 9.9e-10)` = 3.00013333: 3.33326e-5 s.
+    let kink = |d: f64| 3.0 * d + 4.0 * (d * d / 2.0).min(d / 100.0);
+    // Rationalized, `2 tol / (3 + sqrt(9 + 8e-4))`, which does not cancel.
+    let want = 2e-4 / (3.0 + (9.0f64 + 8e-4).sqrt());
+    close(want, 3.33326e-5, 1e-10, "by hand");
+    let (got, n) = count(&kink, 1e-4);
+    assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "kink: {got} for {want}");
+    assert!(n <= 24, "kink: {n} evaluations");
+    // From a floor inside the bound (R29 passes its majorant's root): a floor
+    // within a factor 2 under the root brackets in one doubling, so 0.8 of
+    // the root finds the same root in at most 14 evaluations; a floor past
+    // the root (its bound over tol) falls back to the search from 1e-12 and
+    // finds it again.
+    use super::closed_form::largest_within_above;
+    for (floor, most) in [(0.8 * want, 14), (1.5 * want, 30)] {
+        let n = Cell::new(0usize);
+        let got = largest_within_above(
+            |d| {
+                n.set(n.get() + 1);
+                kink(d)
+            },
+            1e-4,
+            floor,
+        );
+        assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "floor {floor}: {got} for {want}");
+        assert!(n.get() <= most, "floor {floor}: {} evaluations", n.get());
+    }
+}
+
+#[test]
+fn a_floor_that_rounds_over_its_own_bound_is_nudged_inside_rather_than_searched_from_1e_12() {
+    // SHIPV-H: with no lag (`L = 0`) R29's bound is its majorant, `C δ²/2`,
+    // and the floor it hands the search is that bound's own root, `sqrt(2
+    // tol / C)`, whose bound rounds an ulp or so over `tol` about half the
+    // time. Such a floor fell back to the search from 1e-12 (one evaluation
+    // more than that search alone); tried again 2^-32 under, it brackets in a
+    // doubling. Over 2,000 (C, tol) pairs: some round over (the case is
+    // exercised), each of those now costs fewer evaluations than the search
+    // from 1e-12 alone, and every answer is within the bound and within
+    // 2^-29 of the root `sqrt(2 tol / C)` (from below, to its rounding).
+    use super::closed_form::{largest_within, largest_within_above, WITHIN_REL};
+    use std::cell::Cell;
+    let mut over = 0;
+    for k in 0..2000 {
+        let c = 1.0 + k as f64 * 3.7e-4;
+        let tol = 1e-6 * (1.0 + k as f64 * 1.3e-4);
+        let bound = |d: f64| c * d * d / 2.0;
+        let floor = (2.0 * tol / c).sqrt();
+        let n = Cell::new(0usize);
+        let got = largest_within_above(
+            |d| {
+                n.set(n.get() + 1);
+                bound(d)
+            },
+            tol,
+            floor,
+        );
+        // The root as computed, which may itself round an ulp either side.
+        let root = floor;
+        assert!(bound(got) <= tol && got <= root * (1.0 + 4e-16) && got >= root * (1.0 - 2.0 * WITHIN_REL), "C {c}, tol {tol}: {got} for {root}");
+        if bound(floor) > tol {
+            over += 1;
+            let full = Cell::new(0usize);
+            largest_within(
+                |d| {
+                    full.set(full.get() + 1);
+                    bound(d)
+                },
+                tol,
+            );
+            assert!(n.get() < full.get(), "C {c}, tol {tol}: {} evaluations from the floor, {} from 1e-12", n.get(), full.get());
+        }
+    }
+    assert!(over > 0, "no floor rounded over its bound");
+}
+
 /// G2bv2's `p_for`: the `pMax` at which an RC of time constant `tau` fed at
 /// peak power `p_peak` ends its stress at `s_inf` (it latches iff `s_inf >=
 /// 1`): `S_inf = tau (k - 1 - ln k) / 2` with `k = p_peak / pMax`.
@@ -2290,3 +2398,285 @@ fn a_fixed_node_driver_the_load_settle_commits_last_is_in_the_solvers_table_and_
     assert_eq!(rig.i(6).to_bits(), twin.i(6).to_bits(), "the 2.5 V source's current at load: {} against {}", rig.i(6), twin.i(6));
 }
 
+
+/// THERM's board: a draining cell (OCV 4 V empty to 5 V full, 15 uAh, so
+/// its rail falls some 0.2 V a second through 220 ohm and a red LED), with
+/// both identified (the resistor profile, R_theta 340 K/W and tau 8 s; the
+/// LED's, 560 K/W and 2 s), and a rated (5 mW), identified 1 kohm into 1 mF
+/// on the same rail: a closed-form partition the rail drives (R29).
+fn draining_cell_board() -> Program {
+    let mut cell = battery(0, 1, 0, 5.0, 0.0);
+    cell.params[kinds::battery_param::CAPACITY_AH] = 15e-6;
+    cell.blob = vec![2.0, 0.0, 4.0, 1.0, 5.0];
+    program(
+        5,
+        vec![
+            cell,
+            resistor(1, 1, 2, 220.0),
+            red_led(2, 2, 0),
+            resistor(3, 1, 3, 1000.0),
+            capacitor(4, 3, 0, 1e-3),
+            thermal(1, 340.0, 8.0),
+            thermal(2, 560.0, 2.0),
+            thermal(3, 340.0, 8.0),
+            rating(3, 5e-3, 1000.0),
+        ],
+    )
+}
+
+/// `[T, P]` of devices 1, 2 and 3 at each of `checks`, the host stopping
+/// every `stop` seconds (and at each check).
+fn thermal_readouts(p: &Program, stop: f64, checks: &[f64]) -> Vec<[f64; 6]> {
+    let mut e = Engine::load(p).unwrap();
+    let (mut t, mut out) = (0.0f64, Vec::new());
+    for &check in checks {
+        while t < check {
+            t = (t + stop).min(check);
+            e.advance(t).unwrap();
+        }
+        let mut row = [0.0; 6];
+        for (k, d) in [1u32, 2, 3].into_iter().enumerate() {
+            let st = e.device_state(d).unwrap();
+            row[2 * k] = st[0];
+            row[2 * k + 1] = st[1];
+        }
+        out.push(row);
+    }
+    out
+}
+
+#[test]
+fn thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole() {
+    // THERM: every identified device on a cell's rail is re-driven at each
+    // rail move, which is what its cost is, and holds its power between
+    // moves. The cell's rail moves by its 10 uV quantum, so a static device's
+    // power is held to `2 V_R 1e-5 / R` of the instant's (220 ohm at V_R ~
+    // 3.2 V: 2.9e-7 W) and its temperature to half the relative power step
+    // of the rise, `1e-5 / V_R` = 3.1e-6. A host stop is a publish too, so
+    // the stops move both inside that. Whatever makes the visits cheaper is
+    // held to the same at host stops of 1 ms, 1/60 s and 100 ms against the
+    // same board stopped every microsecond: T within 1e-5 of the rise and P
+    // within 3e-7 W. (Measured on 9e9aa01: 2.9e-6 and 4e-9 W.)
+    let p = draining_cell_board();
+    let checks = [0.1, 0.2, 0.3];
+    let fine = thermal_readouts(&p, 1e-6, &checks);
+    for stop in [1e-3, 1.0 / 60.0, 0.1] {
+        let got = thermal_readouts(&p, stop, &checks);
+        for (c, (g, f)) in got.iter().zip(&fine).enumerate() {
+            for k in 0..3 {
+                let rise = f[2 * k] - 25.0;
+                close(g[2 * k], f[2 * k], 1e-5 * rise.abs() + 1e-12, &format!("T of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+                close(g[2 * k + 1], f[2 * k + 1], 3e-7, &format!("P of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+            }
+        }
+    }
+    // The one-pole's closed form over the fine run's own powers, held over
+    // each microsecond (`T_inf = 25 + R_theta P`, `T = T_inf + (T0 - T_inf)
+    // e^(-dt/tau)`), for the two static devices: within 2e-5 of the rise,
+    // the held quantum above twice over (the reference holds each
+    // microsecond's power from its start, the engine from its last move).
+    let mut e = Engine::load(&p).unwrap();
+    let mut temp = [25.0f64; 2];
+    let (r_theta, tau): ([f64; 2], [f64; 2]) = ([340.0, 560.0], [8.0, 2.0]);
+    let mut t = 0.0f64;
+    let mut power = [0.0f64; 2];
+    for &check in &checks {
+        while t < check - 1e-12 {
+            for k in 0..2 {
+                let t_inf = 25.0 + r_theta[k] * power[k];
+                temp[k] = t_inf + (temp[k] - t_inf) * (-1e-6 / tau[k]).exp();
+            }
+            t += 1e-6;
+            e.advance(t).unwrap();
+            for (k, d) in [1u32, 2].into_iter().enumerate() {
+                power[k] = e.device_state(d).unwrap()[1];
+            }
+        }
+        for (k, d) in [1u32, 2].into_iter().enumerate() {
+            let got = e.device_state(d).unwrap()[0];
+            close(got, temp[k], 2e-5 * (temp[k] - 25.0) + 1e-9, &format!("T of device {d} at {check} s against the one-pole"));
+        }
+    }
+}
+
+#[test]
+fn a_rated_resistor_on_a_draining_cell_latches_at_the_same_instant_at_any_host_stop() {
+    // THERM: the rated 1 kohm into 1 mF latches where its stress integral
+    // crosses 1 (S' = P/pMax - 1, pMax 5 mW, 25 mW at the start, tau 1 s:
+    // S_inf = tau (k - 1 - ln k)/2 = 1.195 for k = 5), at the same instant
+    // whatever the host's stops, within what its re-anchors allow: each holds
+    // its voltage to 1e-4 relative (DEVICE_TOL_REL), so its rate to 2e-4 and
+    // its latch time to 2e-4 of itself.
+    let p = draining_cell_board();
+    let latch = |stop: f64| {
+        let mut e = Engine::load(&p).unwrap();
+        let mut t = 0.0f64;
+        while t < 1.0 {
+            t = (t + stop).min(1.0);
+            e.advance(t).unwrap();
+        }
+        e.records(0).unwrap().chunks(7).find(|c| c[0] == 3.0).map(|c| c[3]).expect("it latches")
+    };
+    let fine = latch(1e-5);
+    for stop in [1e-3, 1.0 / 60.0, 0.1] {
+        close(latch(stop), fine, 2e-4 * fine, &format!("latch at stops of {stop} s"));
+    }
+}
+
+// ---- THERM2: the superseded slow events ---------------------------------
+
+/// THERM2's board: THERM's draining cell (OCV 4 V empty to 5 V full, 15 uAh)
+/// feeding four red LEDs, each through its own resistor (220, 330, 470 and
+/// 680 ohm, every one identified: the LED profile, R_theta 560 K/W and tau
+/// 2 s; the resistor's, 340 K/W and 8 s), a static 1 kohm across the rail,
+/// and THERM's rated, identified 1 kohm into 1 mF (a closed-form partition
+/// the rail drives, R29, whose visit schedules a re-anchor). The rail falls
+/// some 0.2 V a second, so every device is re-driven at each of its 10 uV
+/// moves (some 20,000 a second), and each LED reschedules its junction band
+/// boundary at each.
+fn superseding_board() -> Program {
+    let mut cell = battery(0, 1, 0, 5.0, 0.0);
+    cell.params[kinds::battery_param::CAPACITY_AH] = 15e-6;
+    cell.blob = vec![2.0, 0.0, 4.0, 1.0, 5.0];
+    let mut devices = vec![cell];
+    for (k, r) in [220.0, 330.0, 470.0, 680.0].into_iter().enumerate() {
+        devices.push(resistor(1 + 2 * k, 1, 2 + k, r));
+        devices.push(red_led(2 + 2 * k, 2 + k, 0));
+    }
+    devices.push(resistor(9, 1, 0, 1000.0));
+    devices.push(resistor(10, 1, 6, 1000.0));
+    devices.push(capacitor(11, 6, 0, 1e-3));
+    for k in 0..4 {
+        devices.push(thermal(1 + 2 * k, 340.0, 8.0));
+        devices.push(thermal(2 + 2 * k, 560.0, 2.0));
+    }
+    devices.push(thermal(9, 340.0, 8.0));
+    devices.push(thermal(10, 340.0, 8.0));
+    devices.push(rating(10, 5e-3, 1000.0));
+    program(7, devices)
+}
+
+/// FNV-1a over the bits of every reading at each host stop: the node
+/// voltages, the device currents, every device's state (`[T, P, shutdown]`
+/// for an identified part, the cell's six numbers) and records channels 0-2.
+fn reading_hash(e: &mut Engine, h: &mut u64) {
+    let mut fold = |x: f64| *h = (*h ^ x.to_bits()).wrapping_mul(1099511628211);
+    e.voltages().iter().chain(e.currents()).for_each(|&x| fold(x));
+    for d in 0..e.device_count() {
+        if let Ok(s) = e.device_state(d) {
+            s.iter().for_each(|&x| fold(x));
+        }
+    }
+    for c in 0..3 {
+        e.records(c).unwrap().iter().for_each(|&x| fold(x));
+    }
+}
+
+/// The run to `end` stopping every `stop` seconds: its reading hash, its
+/// events popped (stat 4) and the longest the heap grew at a stop.
+fn superseding_run(p: &Program, stop: f64, end: f64) -> (u64, f64, usize) {
+    let mut e = Engine::load(p).unwrap();
+    let (mut h, mut t, mut most) = (1469598103934665603u64, 0.0f64, 0usize);
+    while t < end {
+        t = (t + stop).min(end);
+        e.advance(t).unwrap();
+        reading_hash(&mut e, &mut h);
+        most = most.max(e.debug_heap_len());
+    }
+    (h, e.stat(4), most)
+}
+
+#[test]
+fn a_draining_cells_heap_holds_few_superseded_slow_events() {
+    // THERM2: each of the four LEDs reschedules its band boundary at every
+    // rail move, and the closed-form resistor its re-anchor; lazy deletion
+    // left every superseded entry queued until its time came (the battery
+    // SAP-1 as the app sends it held up to 190,000, some 300 of them live,
+    // and its engine state sawed between 17 and 62 MB). Compaction between
+    // instants keeps the heap under `COMPACT_FACTOR` times what the last
+    // compaction kept plus `COMPACT_MIN`, and kept is at most the live
+    // entries (here under 20: four boundaries, a re-anchor, the rail's next
+    // event and a few protected ties), so under 4 * 20 + 64 = 144 at every
+    // host stop. On wip/therm (1368f5b) it grew to 40,236 in 0.5 s.
+    let (_, _, most) = superseding_run(&superseding_board(), 1.0 / 60.0, 0.5);
+    assert!(most <= crate::kernel::COMPACT_FACTOR * 20 + crate::kernel::COMPACT_MIN, "the heap grew to {most} entries");
+}
+
+#[test]
+fn a_draining_cells_events_popped_are_the_plain_boards_and_what_fires() {
+    // THERM2: stat 4 counted every superseded entry popped at its time. The
+    // same board without its thermal records schedules no slow event, so
+    // the difference is what the identified parts add: their fired slow
+    // events (stat 22, each one popped, and any instant a fire adds) and the
+    // superseded entries due before a compaction reached them (one is due
+    // every `COMPACT_FACTOR * kept + COMPACT_MIN` entries, here some 100,
+    // about a millisecond of the 80,000 reschedules a second: a re-anchor or
+    // a band boundary of a fast-heating LED is that near). Measured 7,191
+    // over 0.5 s (fired 736); held to twice the fired plus 10,000. On
+    // wip/therm (1368f5b) it was 158,940 (198,308 popped against 39,368).
+    let p = superseding_board();
+    let plain = Program { devices: p.devices.iter().filter(|d| d.kind != kinds::THERMAL).cloned().collect(), ..p.clone() };
+    let (_, popped, _) = superseding_run(&p, 1.0 / 60.0, 0.5);
+    let (_, plain_popped, _) = superseding_run(&plain, 1.0 / 60.0, 0.5);
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.5).unwrap();
+    let fired = e.stat(22);
+    assert!(popped - plain_popped <= 2.0 * fired + 10_000.0, "popped {popped}, plain {plain_popped}, fired {fired}");
+}
+
+#[test]
+fn a_draining_cells_readings_are_bit_for_bit_wip_therms_at_every_host_stop() {
+    // THERM2: dropping superseded entries, and every exact step after it,
+    // changes no reading. The reading hash (`reading_hash`) of the board run
+    // to 0.5 s at host stops of 1 ms, 1/60 s and 100 ms, pinned from
+    // wip/therm (1368f5b), where nothing was dropped.
+    let p = superseding_board();
+    let got: Vec<u64> = [1e-3, 1.0 / 60.0, 0.1].into_iter().map(|stop| superseding_run(&p, stop, 0.5).0).collect();
+    assert_eq!(got, [PIN_1MS, PIN_60, PIN_100MS], "{got:#018x?}");
+}
+const PIN_1MS: u64 = 0x3f73b8ec653030be;
+const PIN_60: u64 = 0x786a53a457e18e3d;
+const PIN_100MS: u64 = 0x72fb4513da1dc9df;
+
+#[test]
+fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_bit() {
+    // THERM2: what the compaction keeps (the heap, `compact_at`) is snapshot
+    // state. A snapshot taken with superseded entries queued, restored after
+    // compactions dropped them, runs on exactly as the first time, twice
+    // over. A carried reload starts a fresh heap from the carry, and runs
+    // as wip/therm's did.
+    let p = superseding_board();
+    let run = |e: &mut Engine, from: f64| {
+        let mut h = 1469598103934665603u64;
+        for k in 1..=12 {
+            e.advance(from + k as f64 / 60.0).unwrap();
+            reading_hash(e, &mut h);
+        }
+        h
+    };
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.1).unwrap();
+    for _ in 0..2 {
+        let snap = e.snapshot();
+        let t = e.time();
+        let first = run(&mut e, t);
+        let len_after = e.debug_heap_len();
+        e.restore(&snap);
+        assert_eq!(e.time(), t);
+        assert_eq!(run(&mut e, t), first, "the run from the restored snapshot at {t} s");
+        assert_eq!(e.debug_heap_len(), len_after, "the heap after it");
+    }
+    // A carried reload at 0.3 s (host stops of 1/60 s up to it), run on for
+    // twelve frames: pinned from wip/therm (1368f5b).
+    let mut a = Engine::load(&p).unwrap();
+    for k in 1..=18 {
+        a.advance(k as f64 / 60.0).unwrap();
+    }
+    let mut q = p.clone();
+    q.options.start_time = a.time();
+    q.carry = a.carry_take().unwrap().to_vec();
+    let mut reloaded = Engine::load(&q).unwrap();
+    let got = run(&mut reloaded, 0.3);
+    assert_eq!(got, PIN_RELOAD, "the carried reload: {got:#018x}");
+}
+const PIN_RELOAD: u64 = 0xdb2baef55fbc5743;

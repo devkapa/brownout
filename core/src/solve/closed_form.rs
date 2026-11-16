@@ -1060,7 +1060,15 @@ impl ClosedFormSolver {
         let v_inf = c + a * du_n + dd * alpha - lin / f;
         let tol = tol_abs + tol_rel * v_now.abs();
         let bound = |delta: f64| lin.abs() * (delta + (-(f * delta).exp_m1()) / f) + a.abs() * k_s * delta * delta / 2.0 + dd.abs() * k_w * (delta * delta * delta / 6.0).min(delta * delta / (2.0 * -f));
-        Some((v_inf, v_now, -1.0 / f, largest_within(bound, tol)))
+        // A majorant whose root is inside the bound, for the search to start
+        // from: with `x = |f| δ`, `x - 1 + e^(-x) <= min(x²/2, x)`, and
+        // `min(δ³/6, δ²/(2|f|)) <= δ²/(2|f|)`, so the bound is at most `C δ²/2`
+        // (`C = |A| K_s + |D| K_w/|f|`) plus `|L| |f| δ²/2` or plus `|L| δ`;
+        // each of those has its root inside, and the larger root is taken.
+        let (l_abs, c) = (lin.abs(), a.abs() * k_s + dd.abs() * k_w / -f);
+        let quad_root = (2.0 * tol / (l_abs * -f + c)).sqrt();
+        let lin_root = if c > 0.0 { 2.0 * tol / (l_abs + (l_abs * l_abs + 2.0 * c * tol).sqrt()) } else { tol / l_abs };
+        Some((v_inf, v_now, -1.0 / f, largest_within_above(bound, tol, quad_root.max(lin_root))))
     }
 
     /// Whether `partition` is aimed under a known rail (Rails point 4).
@@ -2577,28 +2585,139 @@ fn j_prime(f: f64, k: f64, tau: f64) -> f64 {
     }
 }
 
+/// How close below its root [`largest_within`] returns: 2^-30, under the
+/// 1e-9 relative its tests hold it to.
+pub(crate) const WITHIN_REL: f64 = 1.0 / (1u64 << 30) as f64;
+
+/// How far under a floor whose bound rounds over the tolerance
+/// [`largest_within_above`] tries again: 2^-32 relative. Where R29's bound
+/// equals its majorant (no lag, `L = 0`, a rail-tracking device) the floor
+/// is the bound's own root and its bound rounds 1 to 4 ulps over the
+/// tolerance in 4.2 % of calls (SHIPV-H's generator, 100,000 inputs; the
+/// cancellation in `δ + (1 - e^(fδ))/|f|` takes a few more), each of which
+/// fell back to the full search from 1e-12. Nudged by 2^-40 the retry
+/// still failed in 12 of the 4,041, by 2^-36 in 4, by 2^-32 in none.
+pub(crate) const FLOOR_NUDGE: f64 = 1.0 / (1u64 << 32) as f64;
+
 /// The largest `δ` with `bound(δ) <= tol`, `bound` nondecreasing from 0
-/// (infinity when it never gets there), to bisection's last useful bit.
+/// (infinity when it never gets there), from below: the `δ` returned always
+/// has `bound(δ) <= tol`, and lies within [`WITHIN_REL`] of the root.
 pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
-    let mut hi = 1e-12;
-    while bound(hi) <= tol {
-        hi *= 2.0;
+    // The bracket is the first `1e-12 2^k` (k = 0..=79, the doublings that
+    // stay at or under 1e12) whose bound exceeds `tol`, infinity when none
+    // does: found by bisection on `k` (8 evaluations), where doubling took
+    // one per binary order of `δ`. Then the root inside it by regula falsi
+    // with the Illinois weight, each step keeping the bracket (`lo` always
+    // within the bound), to `WITHIN_REL` of `lo`: typically 8 evaluations
+    // where bisection to the last bit took 53. The battery SAP-1's
+    // closed-form resistors search a deadline at every rail move, 40,000
+    // times a simulated second each, and spent most of their visit here.
+    // There is no small bound on the count in general: the refinement's
+    // worst case is the Illinois steps plus a bisection every eighth, over
+    // the doubling's whole range. Over 100,000 random R29 inputs (SHIPV-H)
+    // it took at most 63 evaluations from 1e-12 and 65 from R29's floor
+    // (the old search: 123, typically 84), and more than 24 in about 13 % of
+    // R29 calls and 18 % of curved ones.
+    const LAST: i32 = 79;
+    // `1e-12 2^k`, the power of two built exactly (as each doubling was).
+    let at = |k: i32| 1e-12 * f64::from_bits(((1023 + k) as u64) << 52);
+    let f_last = bound(at(LAST)) - tol;
+    if f_last <= 0.0 {
+        return f64::INFINITY;
+    }
+    // `bound(at(lo_k)) <= tol < bound(at(hi_k))`, `lo_k = -1` standing for
+    // none tested yet; each end's `bound - tol` kept.
+    let (mut lo_k, mut hi_k) = (-1, LAST);
+    let (mut f_lo_k, mut f_hi_k) = (f64::NAN, f_last);
+    while hi_k - lo_k > 1 {
+        let mid = lo_k + (hi_k - lo_k) / 2;
+        let f = bound(at(mid)) - tol;
+        if f <= 0.0 {
+            (lo_k, f_lo_k) = (mid, f);
+        } else {
+            (hi_k, f_hi_k) = (mid, f);
+        }
+    }
+    let (lo, f_lo) = if lo_k >= 0 { (at(lo_k), f_lo_k) } else { (0.0, bound(0.0) - tol) };
+    refine_within(&bound, tol, (lo, f_lo), (at(hi_k), f_hi_k))
+}
+
+/// [`largest_within`] from `floor`, a `δ` the caller has shown to be within
+/// the bound (its own closed-form majorant's root): doubled from there to a
+/// bracket, which is a few doublings where the root lies near it, rather
+/// than the eight evaluations of the search from 1e-12. A `floor` whose
+/// bound rounds over `tol` is tried again [`FLOOR_NUDGE`] under it; one
+/// that is still outside (or is not positive and finite) falls back to the
+/// search from 1e-12. Either way the answer is a `δ` within the bound,
+/// refined from below.
+pub(crate) fn largest_within_above(bound: impl Fn(f64) -> f64, tol: f64, floor: f64) -> f64 {
+    if !(floor > 0.0 && floor.is_finite()) {
+        return largest_within(bound, tol);
+    }
+    let mut floor = floor;
+    let mut f_floor = bound(floor) - tol;
+    if !(f_floor <= 0.0) {
+        // SHIPV-H: a floor that is the bound's own root (its majorant is the
+        // bound) rounds a few ulps over it in 4.2 % of R29's calls.
+        floor *= 1.0 - FLOOR_NUDGE;
+        f_floor = bound(floor) - tol;
+        if !(f_floor <= 0.0) {
+            return largest_within(bound, tol);
+        }
+    }
+    let (mut lo, mut f_lo) = (floor, f_floor);
+    loop {
+        let hi = 2.0 * lo;
+        // `largest_within`'s horizon: past it the deadline is infinite. Its
+        // grid ends at 1e-12 2^79 = 6.04e11 s, so a floor in [5e11, 6.04e11]
+        // s returns infinity here where that search can return a finite
+        // deadline. Either is a re-anchor 16,000 years of simulated time
+        // away, which no run reaches: nothing differs.
         if hi > 1e12 {
             return f64::INFINITY;
         }
+        let f_hi = bound(hi) - tol;
+        if f_hi > 0.0 {
+            return refine_within(&bound, tol, (lo, f_lo), (hi, f_hi));
+        }
+        (lo, f_lo) = (hi, f_hi);
     }
-    let mut lo = 0.0;
-    for _ in 0..80 {
+}
+
+/// The root of `bound - tol` inside `lo` (within) and `hi` (past it), each
+/// with its value, by regula falsi with the Illinois weight, each step
+/// keeping the bracket, to [`WITHIN_REL`] of `lo`; `lo` is returned.
+fn refine_within(bound: &impl Fn(f64) -> f64, tol: f64, (mut lo, mut f_lo): (f64, f64), (mut hi, mut f_hi): (f64, f64)) -> f64 {
+    // Which end the last step moved: an end left twice in a row has its
+    // value halved (Illinois), so both ends close in.
+    let mut side = 0i8;
+    for n in 0..120 {
+        if hi - lo <= WITHIN_REL * lo {
+            break;
+        }
         let mid = 0.5 * (lo + hi);
-        // Adjacent doubles: nothing is left to split, and every further
-        // pass would land on `lo` or `hi` again.
+        // Adjacent doubles: nothing is left to split.
         if mid <= lo || mid >= hi {
             break;
         }
-        if bound(mid) <= tol {
-            lo = mid;
+        // A step whose secant falls outside (rounding near the root) bisects,
+        // and so does every eighth, so a bound the secant reads badly (a
+        // kink) still halves the bracket.
+        let secant = lo - f_lo * (hi - lo) / (f_hi - f_lo);
+        let x = if n % 8 == 7 || !(secant > lo && secant < hi) { mid } else { secant };
+        let f = bound(x) - tol;
+        if f <= 0.0 {
+            (lo, f_lo) = (x, f);
+            if side == -1 {
+                f_hi *= 0.5;
+            }
+            side = -1;
         } else {
-            hi = mid;
+            (hi, f_hi) = (x, f);
+            if side == 1 {
+                f_lo *= 0.5;
+            }
+            side = 1;
         }
     }
     lo
