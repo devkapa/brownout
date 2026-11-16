@@ -4618,8 +4618,11 @@ Constants, all from P3:35-38 unless marked new:
    tolerance and every aim after failed at the bound's 1 ns floor (cold
    212/4: rail events 18k -> 59k; its slow visits 50k -> 236k followed the
    re-aims). Battery SAP-1:
-   412,659 -> 197,688 events and -58 % instructions; tests pin the 555's
-   triggers against a 1 us run at six host cadences. Measured
+   against 574767b (its clock at the true rate), 526,626 -> 304,657 events
+   and -48 % instructions on the first recording, 703,241 -> 527,974 and
+   -34 % on the second; its 555 keeps 47 triggers at six host cadences
+   within 3e-12 s of a 1 us run, and tests pin the 555's triggers against a
+   1 us run at six host cadences. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
    `e211c55`), and the SAP-1 on its battery 45 % faster than at `3ca4004`
    (point 3, cost bars). Before it (round 14, ruling R15 (a)) each
