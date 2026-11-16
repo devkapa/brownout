@@ -540,9 +540,12 @@ fn a_555_on_a_cell_drained_from_full_to_flat_meets_r127() {
     //
     // Why a bias of this size. The charge time (output high) is t_c =
     // (RA + RB) C ln((u - v1)/(u - v2)), v1 and v2 the 1/3 and 2/3 levels.
-    // If both levels and the source read a rail off by e, dt_c/de =
-    // (RA + RB) C (-1/(2u) + 2/u) = 1.5 (RA + RB) C / u = 1.668e-4 s/V at
-    // 4.2 V (the discharge, RB C ln 2, is a ratio and does not move). Read
+    // If both levels read a rail off by e and the source does not (or the
+    // source alone, with the opposite sign; on all three it cancels), dt_c/de
+    // = (RA + RB) C (-1/(2u) + 2/u) = 1.5 (RA + RB) C / u = 1.668e-4 s/V at
+    // 4.2 V (the discharge, RB C ln 2, is a ratio and does not move;
+    // `a_555_where_the_held_lines_bound_binds_meets_r128_and_the_bands_worst_period`
+    // derives both cases). Read
     // 0.2 W0 stale (0.86 mV at 4.2 V), as R127's note supposes, that would
     // be 1.43e-7 s a period of 426 us, 3.4e-4 relative: 7,000 times the
     // 5e-8 measured. So the levels are not read 0.2 W0 stale; they ride the
@@ -579,4 +582,161 @@ fn a_555_on_a_cell_drained_from_full_to_flat_meets_r127() {
         assert!(m.rephased_edge <= 1.0, "board 98 from full at host {h:e}: an edge {:.3} tau_w0 off in the first 100 periods", m.rephased_edge);
         assert!(m.any_edge <= 1.6, "board 98 from full at host {h:e}: {:.3} tau_w0 of accumulated phase", m.any_edge);
     }
+}
+
+/// Binding board `seed` (CAD-4, R128): a slow 555 astable (charge phase 3
+/// to 40 ms) switching a heavy load on its output (30 to 300 ohm, or 35 ohm
+/// and an LED on two boards in five) on a 2 to 30 uAh cell of 0.05 to 1 ohm,
+/// 60 to 100 % charged; every third board a low cell (2.7 to 3.1 V, the rail
+/// 2.84 to 3.05 V). A load switched at the 555's own flips turns the drain's
+/// line at every flip and holds it curved for a whole charge phase, so the
+/// held line's own bound (its error within `RAIL_DRIFT_V`) binds here: 5 to
+/// 2,872 solves a run ended by that bound on every board (probed, CAD-4).
+/// Returns the program, its run's end (ten periods, 0.3 to 1 s), and the
+/// charge resistance times C, `(RA + RB) C`.
+fn binding_board(seed: u64) -> (Program, f64, f64) {
+    let mut g = Rng(0x5eed_cad4_0000_0001 ^ (seed + 11).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    for _ in 0..3 {
+        g.unit();
+    }
+    let low = seed % 3 == 2;
+    let rint = g.log(0.05, 1.0);
+    let cap_ah = g.log(2e-6, 3e-5);
+    let soc = 0.6 + 0.4 * g.unit();
+    let ocv = if low { vec![2.0, 0.0, 2.7, 1.0, 3.1] } else { vec![2.0, 0.0, 3.4074, 1.0, 4.8837] };
+    let mut d = vec![dev(kinds::BATTERY_PACK, 0, &[1, 0], vec![1.0, rint, 1.0, 0.0, 2.0, 0.05, cap_ah, soc, 0.0], ocv)];
+    let (ra, rb) = (g.log(1e3, 2e4), g.log(1e3, 2e4));
+    let cc = g.log(3e-3, 4e-2) / ((ra + rb) * std::f64::consts::LN_2);
+    d.extend([n555(10, 3, 4, 6, 3, 2, 8), r(11, 1, 2, ra), r(12, 2, 3, rb), c(13, 3, 0, cc), c(14, 6, 0, 1e-8)]);
+    let led_load = g.unit() < 0.4;
+    let rload = g.log(30.0, 300.0);
+    if led_load {
+        d.extend([r(15, 4, 5, 35.0), led(16, 5, 0)]);
+    } else {
+        d.push(r(15, 4, 0, rload));
+    }
+    let t_end = (10.0 * 0.693 * (ra + 2.0 * rb) * cc).clamp(0.3, 1.0);
+    (prog(7, d), t_end, (ra + rb) * cc)
+}
+
+/// wip/rc2 (9e9aa01, the 10 uV band) on the 24 binding boards, measured by
+/// CAD-4's harness (bat-perf-logs/cad4/bind1/rc2.log in the drafts folder;
+/// the same boards and the same arithmetic as the test below): per board,
+/// at host stops of 1 ms, 1/60 s and 100 ms, the period's error relative to
+/// the 1 us run's, (mean over the run, worst single period). This test
+/// cannot run that build, so the band's figures stand as recorded.
+const BAND_9E9AA01: [[(f64, f64); 3]; 24] = [
+    [(5.959e-9, 6.688e-9), (5.962e-9, 6.692e-9), (5.962e-9, 6.688e-9)],
+    [(9.461e-9, 9.574e-9), (9.465e-9, 9.578e-9), (9.459e-9, 9.555e-9)],
+    [(2.872e-9, 2.941e-9), (2.876e-9, 2.905e-9), (2.868e-9, 2.895e-9)],
+    [(4.555e-9, 4.660e-9), (4.565e-9, 4.672e-9), (4.566e-9, 4.674e-9)],
+    [(7.676e-9, 7.687e-9), (7.686e-9, 7.697e-9), (7.688e-9, 7.701e-9)],
+    [(2.102e-9, 2.215e-9), (2.101e-9, 2.203e-9), (2.100e-9, 2.203e-9)],
+    [(6.581e-9, 6.754e-9), (6.586e-9, 6.762e-9), (6.586e-9, 6.763e-9)],
+    [(6.696e-9, 6.982e-9), (6.703e-9, 6.990e-9), (6.704e-9, 6.990e-9)],
+    [(4.187e-10, 6.241e-10), (4.513e-10, 6.273e-10), (4.540e-10, 6.228e-10)],
+    [(7.081e-9, 7.243e-9), (7.099e-9, 7.261e-9), (7.099e-9, 7.258e-9)],
+    [(3.572e-9, 3.810e-9), (3.575e-9, 3.811e-9), (3.575e-9, 3.811e-9)],
+    [(2.068e-9, 2.124e-9), (2.074e-9, 2.166e-9), (2.075e-9, 2.163e-9)],
+    [(4.849e-9, 6.045e-9), (4.852e-9, 6.053e-9), (4.852e-9, 6.054e-9)],
+    [(1.771e-8, 1.808e-7), (1.758e-8, 1.810e-7), (1.757e-8, 1.810e-7)],
+    [(5.635e-10, 8.878e-10), (5.663e-10, 8.781e-10), (5.516e-10, 7.103e-10)],
+    [(4.433e-9, 1.196e-7), (4.438e-9, 1.197e-7), (4.438e-9, 1.198e-7)],
+    [(4.267e-9, 1.041e-7), (4.275e-9, 1.042e-7), (4.276e-9, 1.042e-7)],
+    [(4.186e-9, 4.293e-9), (4.237e-9, 4.315e-9), (4.244e-9, 4.322e-9)],
+    [(1.371e-9, 1.415e-9), (1.373e-9, 1.418e-9), (1.373e-9, 1.418e-9)],
+    [(3.670e-9, 4.650e-8), (3.673e-9, 4.655e-8), (3.674e-9, 4.655e-8)],
+    [(8.782e-10, 1.588e-9), (8.917e-10, 1.359e-9), (9.036e-10, 1.359e-9)],
+    [(5.258e-9, 6.875e-9), (5.261e-9, 6.877e-9), (5.261e-9, 6.876e-9)],
+    [(7.334e-10, 1.090e-7), (7.326e-10, 1.091e-7), (7.323e-10, 1.091e-7)],
+    [(7.757e-9, 7.921e-9), (7.783e-9, 7.928e-9), (7.785e-9, 7.933e-9)],
+];
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "24 boards of 0.3 to 0.5 s against 1 us runs: about 10 min in debug (11 s a board), 56 s in release")]
+fn a_555_where_the_held_lines_bound_binds_meets_r128_and_the_bands_worst_period() {
+    // R127 (2) as R128 (a) amends it for the boards where the held drain
+    // line's own bound binds (`binding_board`), at host stops of 1 ms, 1/60 s
+    // and 100 ms against a run stopping every 1 us: (1) no flip lost or
+    // gained; (2) the period, mean over the run and worst single, within the
+    // shift a constant RAIL_DRIFT_V rail error would give that board, and
+    // within the flat 1e-6 as well (every board measured is); (3) R129: the
+    // cadence's worst single period over the set no worse than the 10 uV
+    // band's worst over the same set (`BAND_9E9AA01`). The engine is
+    // deterministic, so neither side carries run-to-run noise: a rerun gives
+    // the same figures to the last digit (CAD-5 reran CAD-4's 72 runs).
+    //
+    // The tolerance, by hand. The charge phase (output high) runs the timing
+    // capacitor from v1 = u/3 to v2 = 2u/3 through RA + RB from the rail u:
+    // t_c = (RA + RB) C ln((u - v1)/(u - v2)); the discharge runs it from v2
+    // to v1 through RB toward ground: t_d = RB C ln(v2 / v1). A rail error e
+    // on the source and both levels together cancels in every ratio and
+    // moves neither: the period sees an error only where it falls on some of
+    // these and not the others.
+    // - On the levels alone (v1 = (u + e)/3, v2 = 2(u + e)/3, source true):
+    //   dt_c/de = (RA + RB) C (-(1/3)/(u - u/3) + (2/3)/(u - 2u/3))
+    //   = (RA + RB) C (-1/(2u) + 2/u) = 1.5 (RA + RB) C / u; t_d, a ratio of
+    //   the levels, does not move.
+    // - On the source alone (levels true): dt_c/de = (RA + RB) C (1/(u -
+    //   u/3) - 1/(u - 2u/3)) = (RA + RB) C (1.5/u - 3/u) = -1.5 (RA + RB) C
+    //   / u; t_d runs toward ground and does not move.
+    // Either way |dP/de| = 1.5 (RA + RB) C / u, and the tolerance relative
+    // to the period is 1.5 (RA + RB) C RAIL_DRIFT_V / (u P), with u the 1 us
+    // run's mean rail at the host stops and P its mean period. Board 0: RA
+    // 1031, RB 3778, C 4.418 uF, (RA + RB) C = 21.25 ms; u 4.319 V, P 26.30
+    // ms: 1.5 x 21.25e-3 x 1e-5 / (4.319 x 26.30e-3) = 2.81e-6. Over the set
+    // 2.8e-6 to 5.9e-6. (An error a solve at each flip resets is not
+    // constant: carried on source and levels through one charge phase from a
+    // true start it moves t_c by 0.5 (RA + RB) C e / u and the discharge
+    // after it by RB C e / u, on the levels alone by 2 (RA + RB) C e / u and
+    // RB C e / u, at most twice the constant form. Measured, every board is
+    // about 100 times inside the constant form, so the choice decides
+    // nothing here.)
+    //
+    // Measured (CAD-4, rerun by CAD-5 to the last digit): all flips kept at
+    // every cadence; the cadence's worst single period 4.84e-8 (board 14 at
+    // 1/60 s), the band's 1.81e-7 (board 13); worst means 4.26e-8 and
+    // 1.77e-8. Board by board the cadence is worse on 42 of the 72 pairs
+    // (board 14: 4.84e-8 against 8.8e-10), better on the rest (boards 13,
+    // 15, 16, 22: 6e-9 to 1.2e-8 against 1e-7 to 1.8e-7); the band is the
+    // same at every host cadence to three digits, the cadence varies up to
+    // 4 times with it (board 14: 1.03e-8 at 1 ms, 4.84e-8 at 1/60 s).
+    let hosts = [1e-3, 1.0 / 60.0, 0.1];
+    let band_worst = BAND_9E9AA01.iter().flatten().map(|b| b.1).fold(0.0f64, f64::max);
+    let (mut worst_mean, mut worst_single, mut at) = (0.0f64, 0.0f64, (0u64, 0.0f64));
+    let mut worse_than_band = 0usize;
+    eprintln!("board host     P (s)     u (V)  tol 10uV   | cadence mean  worst     | band mean     worst");
+    for seed in 0..24u64 {
+        let (p, t_end, rc_charge) = binding_board(seed);
+        let st = stops(1e-6, t_end);
+        let mut e = Engine::load(&p).unwrap();
+        e.trace_enable(true);
+        let (mut fine, mut usum) = (Vec::new(), 0.0);
+        for &t in &st {
+            e.advance(t).unwrap();
+            fine.extend(e.trace().chunks(3).filter(|ch| ch[1] as usize == 8).map(|ch| (ch[0], ch[2])));
+            e.trace_clear();
+            usum += e.voltages()[1];
+        }
+        let u = usum / st.len() as f64;
+        assert!(fine.len() >= 18, "binding board {seed}: {} flips in the 1 us run", fine.len());
+        let last = fine.len() - 1 - (fine.len() - 1) % 2;
+        let period = (fine[last].0 - fine[0].0) / (last / 2) as f64;
+        let tol = 1.5 * rc_charge * crate::rails::RAIL_DRIFT_V / (u * period);
+        for (hi, &h) in hosts.iter().enumerate() {
+            let got = flips(&p, 8, &stops(h, t_end));
+            let m = r127(&got, &fine, 1.0, 100, &|k| k == 0).unwrap_or_else(|e| panic!("binding board {seed} at host {h:e}: {e}"));
+            let band = BAND_9E9AA01[seed as usize][hi];
+            eprintln!("{seed:>5} {h:<8.5} {period:.3e} {u:.3} {tol:.3e} | {:.3e} {:.3e} | {:.3e} {:.3e}{}", m.mean_period, m.worst_period, band.0, band.1, if m.worst_period > band.1 { "  (cadence worse)" } else { "" });
+            assert!(m.mean_period <= tol && m.worst_period <= tol, "binding board {seed} at host {h:e}: period {:.3e} mean, {:.3e} worst single, over its 10 uV tolerance {tol:.3e}", m.mean_period, m.worst_period);
+            assert!(m.mean_period <= 1e-6 && m.worst_period <= 1e-6, "binding board {seed} at host {h:e}: period {:.3e} mean, {:.3e} worst single, over 1e-6", m.mean_period, m.worst_period);
+            worse_than_band += usize::from(m.worst_period > band.1);
+            worst_mean = worst_mean.max(m.mean_period);
+            if m.worst_period > worst_single {
+                (worst_single, at) = (m.worst_period, (seed, h));
+            }
+        }
+    }
+    eprintln!("binding boards: cadence worst single {worst_single:.3e} (board {} at host {:e}), worst mean {worst_mean:.3e}; the band (9e9aa01) worst single {band_worst:.3e}; the cadence worse on {worse_than_band} of 72", at.0, at.1);
+    assert!(worst_single <= band_worst, "the cadence's worst single period over the binding boards {worst_single:.3e} (board {} at host {:e}) against the 10 uV band's {band_worst:.3e}", at.0, at.1);
 }
