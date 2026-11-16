@@ -15,8 +15,7 @@ implementation workers and the W4 reviewers. For the four boards the subject is
 the board SHELL (supply paths, pin electrical models, how emulator events enter
 the circuit and node voltages reach the emulator), not the CPU emulators.
 
-**Status.** All 17 kinds are written; the status of each is "complete" in the
-table below. Nothing was built or run for this document except a handful of
+**Status.** All 17 kinds are written (none remains to do). Nothing was built or run for this document except a handful of
 arithmetic checks (the numbers in the Uno/Nano path, the ULN/L293D clamp
 diode, the servo and motor time constants were computed with a throwaway
 Node script, not by the engine); every other fact was read from the code. A
@@ -195,9 +194,7 @@ developed in the chapter named.
 8. **Dead and misleading code to not port**: the ULN's `_drivenOutputTargets`
    case is unreachable (the ULN catalog entry has no `vcc_range`, so the
    output-sag scan never runs for it, section 9.7); `L293D_VIL` is declared and
-   never read (section 10.2); `servo` `sig` and the `speaker`/`buzzer` pins
-   are read by position or by `pins[0]`/`pins[1]` where the catalog uses ids
-   (sections 6, 7); `uln2003` appears in `PASSIVE_FAILURE_UPDATE_KINDS`
+   never read (section 10.2); `ULN_TTL_VIH` is declared and never read (section 9.1); `uln2003` appears in `PASSIVE_FAILURE_UPDATE_KINDS`
    (`SE:1417-1420`) with no failure model behind it; the HD44780 comment about
    "1M insurance stamps" (`DI:1991-1992`) describes a stamp that does not exist
    (`digital-input-impedance.test.ts` pins its absence, section 12.8).
@@ -276,7 +273,7 @@ integrate, and write `ctx.state.*`. The order inside one accepted step
 `_updateDigitalState` (the display decoders and the digital-update kinds); then
 `_updateElementI` (each model's `updateCurrent`, which for W4 only READS the
 state just committed); then thermal (none of W4) and the failure pass; then
-`_updateStaticWarnings` is load-time only. After that, `_stepSolves` advances
+`_evaluateStaticWarnings` runs at load only. After that, `_stepSolves` advances
 `simTime` and calls `_advanceMcusAfterAcceptedSolve(h)` (`SE:4546`, `4570`,
 `4626`), which samples inputs into every MCU core and steps it once (section
 14.4). The MCU therefore runs AFTER the commit of its own step and BEFORE the
@@ -488,7 +485,7 @@ None of the W4 kinds is in `SUPPLY_GATED_KINDS` except `hd44780` and `max7219`
   for `relay` and `dc_motor` (and `inductor`) through
   `inductiveWindingPins` (`SE:1084-1094`): relay `coil_a`/`coil_b`, motor
   `m1`/`m2`; the stepper is NOT checked by the engine (its catalog note and
-  tests refer to the host's static rule engine, section 5.7, Q-W4-{stepfly}).
+  tests refer to the host's static rule engine, section 5.7, Q-W4-14).
 - `missingFlybackWarning` (`SE:1117-1148`) is evaluated at load from the graph
   (`_evaluateStaticWarnings`, `SE:6639-6660`): it fires if a winding's two
   nets differ and one of them, not `gnd` and not holding a pin of a
@@ -505,7 +502,7 @@ None of the W4 kinds is in `SUPPLY_GATED_KINDS` except `hd44780` and `max7219`
   the host static diagnostics, a test-support copy at
   `test/helpers/diagnostics/static.ts:918-969` (section 5.7), not to the
   engine: a relay on an L293D with a floating VM raises NO engine warning
-  (Q-W4-{vmfly}).
+  (Q-W4-36).
 - The output-sag pass (`SE:7553-7690`) runs for every component whose catalog
   entry has `vcc_range`; its debounce is two consecutive sagging steps, and its
   one-pole exemption `_outputSagPole` applies only to the drivers in
@@ -653,14 +650,14 @@ snapshot and the bitwise oracle (not read in detail).
 
 ### 2.9 Questions
 
-- **Q-W4-{relayrelease} (release voltage, recalled).** Classic releases at
+- **Q-W4-1 (release voltage, recalled).** Classic releases at
   `|v| < 1.5 V` (30 percent of the 5 V coil rating) and pulls in at 3.5 V (70
   percent). The common SRD-05VDC-SL-C datasheet (Songle, recalled): coil 70 ohm,
   nominal 71.4 mA, pull-in at most 75 percent of nominal (3.75 V), release at
   least 10 percent (0.5 V). Classic's pull-in is inside that figure; its
   release is 1.0 V above the datasheet's minimum. **Recommend** reproduce; the
   catalog parameters are the authored values and a user can edit them.
-- **Q-W4-{relaystate} (decision from voltage, not current, and one step late).**
+- **Q-W4-2 (decision from voltage, not current, and one step late).**
   See 2.5. For a coil driven through a bipolar transistor the base-emitter and
   saturation drops make the coil voltage a few tenths of a volt below the rail,
   which is harmless; for a coil on a resistive divider the decision follows the
@@ -669,13 +666,13 @@ snapshot and the bitwise oracle (not read in detail).
   **Recommend** reproduce for 1.0.0 (committed flag applied at the next solve
   by the device-kernel regime commit, DK 1.5) and record the one-step lag in
   the port's gate; an event-located instant is a post-1.0.0 improvement.
-- **Q-W4-{relaydcop} (relay not in the OP physical-time hold).** Section 2.5:
+- **Q-W4-3 (relay not in the OP physical-time hold).** Section 2.5:
   the relay's `commitState` runs inside the DC ladder, so the OP's regime
   signature (W1 section 2.15, PLAN 1.3 "regime signature of the operating
   point") includes `energized` and can differ between ladder stages.
   **Recommend** mirror (the OP then reflects the coil voltage actually
   solved), and add `relay` to the W6a regime signature list.
-- **Q-W4-{relaynoreverse} (contact model).** A 1 mohm contact with no rating,
+- **Q-W4-4 (contact model).** A 1 mohm contact with no rating,
   no contact resistance variation and no dielectric: it passes any current and
   any voltage, and a `com` left floating is held by RSHUNT only (about 1e12
   ohm). Datasheet contact resistance is at most 100 mohm initial (SRD-05VDC,
@@ -805,7 +802,7 @@ reversal (`:568-600`). `ac-isolation` census.
 
 ### 3.9 Questions
 
-- **Q-W4-{motorload} (`loadTorque` has no sign).** `torqueNet = Kt*i - b*omega
+- **Q-W4-5 (`loadTorque` has no sign).** `torqueNet = Kt*i - b*omega
   - TL` subtracts `TL` for every `omega`: an unpowered motor with `TL > 0`
   accelerates to NEGATIVE speed (`omega = -TL/b` at equilibrium, `-100 rad/s`
   for `TL = 1e-3`, `b = 1e-5`), forever. A load torque (a gear train,
@@ -813,18 +810,18 @@ reversal (`:568-600`). `ac-isolation` census.
   stiction band, or the model should say TL is a one-way driving torque.
   **Recommend** mirror for the port (record as a registered divergence per PLAN
   decision 7), and open a classic fix separately; do not copy silently.
-- **Q-W4-{motorstab} (explicit back-EMF and forward-Euler speed).** Section
+- **Q-W4-6 (explicit back-EMF and forward-Euler speed).** Section
   3.3. The port can integrate the mechanics implicitly (a 2x2 coupled system,
   i and omega solved together, which is better conditioned and removes the
   one-step back-EMF lag) or reproduce classic. **Recommend** reproduce
   forward Euler for the gate against classic, and add the implicit form behind
   the same state record only if a coreless-motor test shows an instability;
   note the `h` limit in the port's diagnostics.
-- **Q-W4-{motorkt} (`Ke` and `Kt` independent).** A circuit with `Kt != Ke`
+- **Q-W4-7 (`Ke` and `Kt` independent).** A circuit with `Kt != Ke`
   violates energy conservation (the motor develops more mechanical power than
   it takes electrically, or the reverse). **Recommend** reproduce; add a
   catalog note rather than a new rule.
-- **Q-W4-{motordc} (OP at stall).** Section 3.3: an OP with a held `omega = 0`
+- **Q-W4-8 (OP at stall).** Section 3.3: an OP with a held `omega = 0`
   gives the stall current as the operating point; the first transient steps then
   show the current falling as the motor spins up. For a motor in a circuit with
   a supply limit this OP can differ from the settled behaviour (the current
@@ -1018,7 +1015,7 @@ scaling and brownout, angle clamps).
 
 ### 4.9 Questions
 
-- **Q-W4-{servosample} (sampled-path edge quantisation).** For a PWM source
+- **Q-W4-9 (sampled-path edge quantisation).** For a PWM source
   that is not an MCU pin (a signal generator, a 555, a clock) the servo
   decodes at step ends, timing each edge at the step START; classic's own
   step controller does not clamp `h` to the 1 to 2 ms pulse structure, so at
@@ -1027,21 +1024,21 @@ scaling and brownout, angle clamps).
   "source"). **Recommend** the core decodes servo `sig` from scheduled edges
   of its driver (a logic output's event, DK 1.5) so width is exact for any
   digital driver, and keeps the 2.0 V threshold sampling only for analog drives.
-- **Q-W4-{servothresh} (absolute 2.0 V threshold).** A servo driven from a 1.8 V
+- **Q-W4-10 (absolute 2.0 V threshold).** A servo driven from a 1.8 V
   logic output never decodes; an SG90 accepts 3 to 5 V signals (recalled).
   **Recommend** reproduce.
-- **Q-W4-{servoload} (load switches one step late and the stall load is
+- **Q-W4-11 (load switches one step late and the stall load is
   absent).** The 32 ohm moving load is stamped for the step after the shaft
   starts moving and released the step after it lands; a servo that holds an
   angle against a load, or stalls, draws the idle 15 mA. SG90 stall is about
   650 mA and idle 10 mA (recalled). The catalog note says "stall mechanics/
   current limiting ... are not modelled", so this is by design. **Recommend**
   reproduce.
-- **Q-W4-{servospeed} (speed scale up to 1.5x).** `speedScale` caps at 1.5, so a
+- **Q-W4-12 (speed scale up to 1.5x).** `speedScale` caps at 1.5, so a
   6 V supply gives `600*6/4.8 = 750 deg/s` (1.25x) and a 7.2 V rail the cap
   900 deg/s; no max-voltage failure exists even though `vcc_range.max` is 6.
   **Recommend** reproduce.
-- **Q-W4-{servoevent} (the event path needs a powered MCU and ignores the
+- **Q-W4-13 (the event path needs a powered MCU and ignores the
   signal's real voltage).** `hasEventDriver` requires `mcuPowered`; the decode
   takes the MCU's logical level even if the net is held low by a short (the
   electrical level never enters). **Recommend** reproduce; the board shell
@@ -1098,11 +1095,14 @@ hold (`EA:770-781`). The new state is written whole (`EA:783-787`).
   step loss, no resonance and no back-EMF: a stepper driven too fast simply
   counts every valid transition.
 - Counted transitions are only the full-step, two-coils-on Gray sequence
-  0 -> 1 -> 2 -> 3 -> 0 (forward) or the reverse. A one-coil-at-a-time (wave
-  drive) or half-step sequence passes through `phase = -1` (a zero sign) and
-  `lastKnownPhase` skips it: wave drive 0 -> (A only: -1) -> 1 counts as one
-  step 0 -> 1 across the gap, so wave drive is read as the corresponding
-  full-step motion. A repeated phase (`delta 0`) and a skip (`delta 2`) hold.
+  0 -> 1 -> 2 -> 3 -> 0 (forward) or the reverse. A state with either coil
+  below 1 mA is `phase = -1`, which does not update `lastKnownPhase`. So
+  wave drive (one coil on at a time: signs `(+,0)`, `(0,+)`, `(-,0)`, `(0,-)`)
+  never shows a valid phase and counts NOTHING; a half-step sequence
+  (`(+,+)`, `(0,+)`, `(-,+)`, ...) shows every second state as a valid phase and
+  counts one step per full-step-equivalent (the gap state is bridged by
+  `lastKnownPhase`, so the half-step resolution is lost). A repeated phase
+  (`delta 0`) and a skip (`delta 2`) hold.
 - The first valid phase after power-on sets `lastKnownPhase` and counts
   nothing (`prev.lastKnownPhase >= 0` is required).
 - Held in the OP ladder; the OP sets `iA`, `iB` (`SE:4389-4400`) but not the
@@ -1154,7 +1154,7 @@ position advances by 4 over the sequence 0,1,2,3,0 (`:635-698`); convergence
 
 ### 5.9 Questions
 
-- **Q-W4-{stepfly} (two flyback rule sets).** The engine's `missing_flyback`
+- **Q-W4-14 (two flyback rule sets).** The engine's `missing_flyback`
   covers inductor, relay and dc_motor (a `SimWarning`, `SE:1117`); the host's
   static diagnostics cover relay, motor, stepper coil A/B and inductor, with
   the H-bridge suppression (`test/helpers/diagnostics/static.ts:918`). A user of
@@ -1162,17 +1162,18 @@ position advances by 4 over the sequence 0,1,2,3,0 (`:635-698`); convergence
   the engine's warning (`missingFlybackWarning` is already pure, `SE:1117`, and
   the core facade derives it from the graph, W3 section 1.7), and the stepper
   stays host-only; record the difference so the catalog note is corrected.
-- **Q-W4-{stepmode} (half-step, wave drive and microstepping).** The counter
-  treats any sign pair with a zero as a gap and counts only the full-step
-  Gray sequence; a half-step drive (A+, A+B+, B+, ...) counts one step per
-  full-step equivalent only if intermediate phases are seen. Microstepping
-  (PWM currents) with all four signs present and changing slowly counts as
-  full steps at sign changes only. **Recommend** reproduce.
-- **Q-W4-{steprotor} (no rotor, no back-EMF).** A stepper with no back-EMF
+- **Q-W4-15 (half-step, wave drive and microstepping).** Section 5.3:
+  wave drive counts nothing, a half-step drive counts only the full-step
+  phases, and microstepping (PWM currents with all four signs present and
+  changing slowly) counts at sign changes only. A user wiring a ULN2003 and a
+  28BYJ-48 (a unipolar motor, not in the catalog) would see no motion.
+  **Recommend** reproduce for the gate and record it; a correct phase
+  accumulator on the coil currents is a post-1.0.0 improvement.
+- **Q-W4-16 (no rotor, no back-EMF).** A stepper with no back-EMF
   draws the full `V/R` at any speed; a real NEMA17 current falls with speed
   and a chopper driver limits it. Position leads or lags no real shaft.
   **Recommend** reproduce; the telemetry only reports commanded steps.
-- **Q-W4-{stepdead} (1 mA deadband and sign-only phase).** Coil currents below
+- **Q-W4-17 (1 mA deadband and sign-only phase).** Coil currents below
   1 mA read as zero; a driver releasing a coil to HIZ with a flyback tail
   reads zero within a few `tau`. Sign alone decides phase, so a coil at 1
   mA and one at 500 mA are the same phase. **Recommend** reproduce.
@@ -1293,20 +1294,20 @@ stopping (`:580`); one press of a button (0 to 5 V to 0) does not report a tone
 
 ### 6.9 Questions
 
-- **Q-W4-{buzzalias} (detection at step ends).** Section 6.5. The core's
+- **Q-W4-18 (detection at step ends).** Section 6.5. The core's
   event-exact edges (PLAN W4-A, "event-exact edges remove the replay") make
   the Schmitt detector see every logic edge at its true time, which would
   change `detectedHz` for MCU-driven tones from a step-quantised value to the
   exact one. **Recommend** use exact edge times for an MCU or logic driver and
   keep the sampled Schmitt for analog drive; the gate is "closer to the analytic
   answer" (PLAN decision 7 (b)).
-- **Q-W4-{buzzthresh} (active threshold).** A literal 1.5 V against typical
+- **Q-W4-19 (active threshold).** A literal 1.5 V against typical
   active buzzers that need 3 to 5.5 V and draw 25 to 35 mA (e.g. a 5 V module
   with a built-in oscillator, recalled); classic's resistor also draws `V/32`
   (156 mA at 5 V) while a real 5 V active buzzer draws about 30 mA, so the supply
   sags more than reality. **Recommend** reproduce; the catalog's `resistance`
   is authorable.
-- **Q-W4-{buzzpolar} (polarity ignored).** The active buzzer sounds for
+- **Q-W4-20 (polarity ignored).** The active buzzer sounds for
   `|v| >= 1.5` in either polarity; a real polarised active buzzer does not.
   **Recommend** reproduce.
 
@@ -1362,7 +1363,7 @@ None. Tests `wave6-drivers-audio.test.ts:609-675`: resistive stamp `I = 5/8 =
 
 ### 7.7 Questions
 
-- **Q-W4-{spkstep} (the detector breaks for host steps of 5 ms or more).** When
+- **Q-W4-21 (the detector breaks for host steps of 5 ms or more).** When
   every accepted step ends at least 5 ms after the window start
   (`h >= 5 ms`, which a quiet circuit reaches: `H_MAX = 1e-2`, `HL:83`), the
   window closes on every step, `vPeak` and `vTrough` were set to that single
@@ -1373,7 +1374,7 @@ None. Tests `wave6-drivers-audio.test.ts:609-675`: resistive stamp `I = 5/8 =
   **Recommend** reproduce for the gate, record it as a registered divergence,
   and make the core's window sample-count independent (an envelope on every
   accepted step regardless of `h`).
-- **Q-W4-{spkload} (resistive only).** A real 8 ohm speaker is 6 to 7 ohm DC
+- **Q-W4-22 (resistive only).** A real 8 ohm speaker is 6 to 7 ohm DC
   and 8 ohm nominal at 1 kHz with `Le` of order 50 uH to 1 mH and a resonance
   peak at tens to hundreds of Hz (recalled); classic is the DC resistance.
   **Recommend** reproduce (the catalog note says "AC reactance ... is ignored").
@@ -1529,13 +1530,13 @@ split). `ac-isolation` census.
 
 ### 8.9 Questions
 
-- **Q-W4-{hcstamp} (stamp and commit disagree on the open-pin rule).** The
+- **Q-W4-23 (stamp and commit disagree on the open-pin rule).** The
   stamp requires `!isOpenPin(vcc) && !isOpenPin(gnd)`; the commit and
   `updateCurrent` use only `V(vcc) - V(gnd) >= 3.0`. With `gnd` unwired the
   node floats near 0 V, `vccV` reads the full rail, the state machine runs and
   the module reports 2 mA, but nothing is drawn and ECHO is not driven.
   **Recommend** reproduce.
-- **Q-W4-{hctrig} (no minimum TRIG width, retrigger, 60 ms cycle).**
+- **Q-W4-24 (no minimum TRIG width, retrigger, 60 ms cycle).**
   Datasheet (HC-SR04, Cytron/Elecfreaks, recalled): trigger pulse at least 10 us
   TTL, 8 x 40 kHz burst, ECHO width proportional to range, measurement cycle
   over 60 ms, range 2 to 400 cm, ECHO 150 us to 25 ms and 38 ms when nothing is
@@ -1543,11 +1544,11 @@ split). `ac-isolation` census.
   us/cm` (the speed-of-sound constant used by common libraries); the 250 us delay
   is classic's own (the real module is closer to 200 us plus the burst).
   **Recommend** reproduce.
-- **Q-W4-{hcdraw} (echo is push-pull 50 ohm; 2 mA constant current).** The real
+- **Q-W4-25 (echo is push-pull 50 ohm; 2 mA constant current).** The real
   module's ECHO is a 5 V TTL push-pull with a stronger stage; the quiescent
   draw is 15 mA typical (recalled), classic uses 2 mA "typical operating
   current". **Recommend** reproduce (catalog note: "deliberately stamped").
-- **Q-W4-{hcstep} (the 100 us step cap).** Section 8.5. With event-exact edges
+- **Q-W4-26 (the 100 us step cap).** Section 8.5. With event-exact edges
   the cap goes away, but the MCU step cap still applies to a Uno/Nano/Pico
   (`MCU_H_MAX`), so the observable ECHO resolution seen by firmware is bounded by
   the MCU's `h` either way (up to 100 us, 1.7 cm, between ECHO edge and the
@@ -1658,7 +1659,7 @@ supply (`:207`), unwired GND never sinks (`:237`); channel independence
 
 ### 9.9 Questions
 
-- **Q-W4-{ulnron} (a 5 ohm resistor against a Darlington).** Classic gives
+- **Q-W4-27 (a 5 ohm resistor against a Darlington).** Classic gives
   `Vce = 0.5 V` at 100 mA, 1.0 V at 200 mA, 1.75 V at 350 mA, 2.5 V at 500 mA.
   The ULN2003A datasheet (TI, recalled): `VCE(sat)` about 0.9 V at 100 mA, 1.1
   V at 200 mA, 1.3 V at 350 mA (typical, IB 250 to 500 uA), absolute maximum
@@ -1666,19 +1667,19 @@ supply (`:207`), unwired GND never sinks (`:237`); channel independence
   current and above it at 350 mA and over, and has no current limit.
   **Recommend** reproduce (the file comment says "a deliberate
   simplification ... a future wave can replace with a Thevenin voltage-source").
-- **Q-W4-{ulnthresh} (committed thresholds are not the catalog's).** The
+- **Q-W4-28 (committed thresholds are not the catalog's).** The
   catalog says `v_il_max 1.5`, `v_ih_min 2.5`; the commit uses `>= 2.0` for high
   and `< 1.5` for low. ULN2003A datasheet: `VI(on)` 2.4 to 3 V at 200 to 300 mA
   (recalled). **Recommend** reproduce; delete the unused `ULN_TTL_VIH`.
-- **Q-W4-{ulnclamp} (the clamp diode is the generic silicon fit, not the ULN
+- **Q-W4-29 (the clamp diode is the generic silicon fit, not the ULN
   catch diode).** 0.7 V at 100 mA with a 25.7 mV/decade slope gives 0.73 V at 350
   mA; the ULN2003A datasheet gives `VF` about 1.75 V at 350 mA (recalled) and
   the diode has series resistance. A real kick therefore clamps about 1 V
   higher. The same helper serves the L293D and TB6612. **Recommend** reproduce.
-- **Q-W4-{ulninput} (no input load).** The ULN draws nothing from its input
+- **Q-W4-30 (no input load).** The ULN draws nothing from its input
   (real: about 0.9 mA at 3.85 V input, i.e. a 2.7 kohm series base resistor;
   recalled); an MCU pin driving 8 channels sees no load. **Recommend** reproduce.
-- **Q-W4-{ulnlag} (one-step lag on the sink).** The released output of a
+- **Q-W4-31 (one-step lag on the sink).** The released output of a
   channel follows its input one accepted step late (section 9.5). At `h` up to
   100 us (MCU circuits) or 10 ms (quiet circuits) this is visible in a fast
   PWM. **Recommend** the shell commits driver states as events at the input
@@ -1804,7 +1805,7 @@ through the host rule engine (`:916-1033`, section 5.7). `wave7-dcmotor.test.ts:
 
 ### 10.9 Questions
 
-- **Q-W4-{l293ron} (two ohm per side against the datasheet).** A motor
+- **Q-W4-32 (two ohm per side against the datasheet).** A motor
   between two outputs sees `2 + 2 = 4` ohm of bridge (4 V at 1 A, 2 V at 500 mA;
   the file comment justifies "0.7 V per transistor ... 1.4 ohm ... use 2 as the
   teaching value", and the catalog note says "1.4 V total drop at 1 A across
@@ -1814,23 +1815,23 @@ through the host rule engine (`:916-1033`, section 5.7). `wave7-dcmotor.test.ts:
   Classic gives 4.0 V at 1 A and its catalog note contradicts its own constant.
   **Recommend** reproduce 2 ohm for the gate and fix the catalog sentence;
   record the divergence.
-- **Q-W4-{l293dthr} (fixed 2.0 V input threshold).** `L293D_VIL` is dead; inputs use
+- **Q-W4-33 (fixed 2.0 V input threshold).** `L293D_VIL` is dead; inputs use
   2.0 V from `gnd1` however the logic supply is set. The L293D datasheet (recalled):
   `VIH` 2.3 V min (logic supply 4.5 to 7 V), `VIL` 1.5 V max. A 2.0 V threshold
   accepts inputs the part would not guarantee. **Recommend** reproduce.
-- **Q-W4-{l293sag} (output-sag thresholds from the logic supply).** Section 10.7:
+- **Q-W4-34 (output-sag thresholds from the logic supply).** Section 10.7:
   the sag test judges a VM-driven output by the logic supply's input
   thresholds. **Recommend** reproduce for the gate; a W4-D rework should pick
   limits from the output's own rail (a separate question for the host).
-- **Q-W4-{bridgeI} (published element current counts both sides).** Section
+- **Q-W4-35 (published element current counts both sides).** Section
   10.2. **Recommend** reproduce, and name the readout in the core's telemetry
   (`package-total`).
-- **Q-W4-{vmfly} (the VM-powered suppression is in the host's rules, not in
+- **Q-W4-36 (the VM-powered suppression is in the host's rules, not in
   the engine).** Section 1.10: the engine raises no warning for a winding on an
   L293D at all, floating VM or not; `wave6-hbridge.test.ts:916-1033` tests
   the host's `runDiagnostics` copy. **Recommend** the port keeps the engine
   rule only and does not carry the host rule.
-- **Q-W4-{bridgedead} (no shoot-through guard or dead time).** The committed
+- **Q-W4-37 (no shoot-through guard or dead time).** The committed
   pair changes in a single step; a real bridge has a dead time and, on the L293D,
   a shoot-through current spike. **Recommend** reproduce.
 
@@ -1904,22 +1905,22 @@ No `missing_flyback` (not a switch kind).
 
 ### 11.9 Questions
 
-- **Q-W4-{tbbrake} (PWM low is coast; the datasheet brakes).** TB6612FNG
+- **Q-W4-38 (PWM low is coast; the datasheet brakes).** TB6612FNG
   function table (Toshiba, recalled): `PWM` low with `IN1/IN2 = H/L` or `L/H`
   gives SHORT BRAKE (both outputs low), `IN1/IN2 = H/H` gives short brake for
   any `PWM`, and `L/L` with `PWM` high gives stop (off). Classic coasts for `PWM`
   low. A chopped motor drive therefore recirculates through the body diodes
   (coast) instead of the low-side FETs (brake). **Recommend** reproduce for the
   gate and record the divergence; the correct table is a four-line change.
-- **Q-W4-{tbron} (2 ohm against about 0.5 ohm).** TB6612FNG datasheet
+- **Q-W4-39 (2 ohm against about 0.5 ohm).** TB6612FNG datasheet
   (recalled): `RON(H+L)` about 0.5 ohm typical, 0.7 max, at `VM` 5 V, 1 A. Classic
   is 4 ohm across a pair, eight times the datasheet. The catalog note
   admits "R_on = 2 ohm per output side (simplified)". **Recommend** reproduce.
-- **Q-W4-{tbstby} (STBY and open inputs).** An open `stby`, `pwm`, `in` reads
+- **Q-W4-40 (STBY and open inputs).** An open `stby`, `pwm`, `in` reads
   low (`isOpenPin`), consistent with the real part's internal pull-downs on
   `STBY` and the inputs (recalled); an open `vm` gives HIZ. **Recommend**
   reproduce.
-- **Q-W4-{tbpwm} (PWM aliasing).** Section 11.3. A 20 kHz or 490 Hz PWM into
+- **Q-W4-41 (PWM aliasing).** Section 11.3. A 20 kHz or 490 Hz PWM into
   a `PWM` pin gives a duty-dependent but step-quantised enable. The core's
   event edges (PLAN W4-D) would make drive/coast exact. **Recommend** the
   shell evaluates the enable at the PWM edges, not at step ends (DK 1.5), and the
@@ -2062,34 +2063,34 @@ pull-down on its inputs, and the catalog copy matches (`:103`).
 
 ### 12.9 Questions
 
-- **Q-W4-{lcdpico} (a Pico cannot drive the display).** Section 12.5.
+- **Q-W4-42 (a Pico cannot drive the display).** Section 12.5.
   **Recommend** the shell passes events to the display for all MCU kinds
   (event-exact, PLAN W4-P: "event-exact decoders ... no replay"), recorded as a
   divergence from classic. Classic's failure to decode a Pico-driven LCD is a
   gap, not a behaviour a user relies on. Also the same decision for MAX7219.
-- **Q-W4-{lcdpower} (no reset on power loss).** The decoder keeps DDRAM, the
+- **Q-W4-43 (no reset on power loss).** The decoder keeps DDRAM, the
   address, the mode and the display flag across a supply loss. The datasheet
   (Hitachi HD44780U, recalled) resets to 8-bit, one-line, display off,
   increment, after the internal reset circuit runs (needs a rise time and a
   40 ms wait); DDRAM contents at power-on are undefined; the display must be
   initialised again. **Recommend** reproduce (the host reloading the circuit
   does not reset it either).
-- **Q-W4-{lcdtiming} (no busy flag or timing).** Every command is instantaneous,
+- **Q-W4-44 (no busy flag or timing).** Every command is instantaneous,
   `RW` is unused, `E` pulse width and setup times are not checked, a command
   sent during the 1.52 ms clear or home (recalled) is not lost. Real sketches that
   forget delays still work in classic. **Recommend** reproduce; the catalog says
   "RW read-back is not supported in v1; tie RW to GND".
-- **Q-W4-{lcdrender} (only 16x2 text, ASCII, no cursor, shift or CGRAM).**
+- **Q-W4-45 (only 16x2 text, ASCII, no cursor, shift or CGRAM).**
   Characters outside `0x20..0x7e` render as a space; the HD44780's ROM maps
   `0x5c` to a yen sign and `0x7e`/`0x7f` to arrows (catalog note), custom
   characters `0x00..0x07` are blank. The renderer's `lines` ignores display
   shift (`0x18/0x1c`) and a one-line `N = 0` mode. **Recommend** reproduce.
-- **Q-W4-{lcdaddr} (the address counter does not wrap or clamp low).** `addr`
+- **Q-W4-46 (the address counter does not wrap or clamp low).** `addr`
   can grow past `0x67` (writes stop at `ddram.length`) and can go negative with a
   decrementing entry mode; `ddram[-1] = byte` would create a non-index property
   that the state copy drops. A real counter wraps within each line's range.
   **Recommend** reproduce for the gate and clamp in the port (record it).
-- **Q-W4-{lcdload} (a constant 200 ohm load).** 25 mA at 5 V against the
+- **Q-W4-47 (a constant 200 ohm load).** 25 mA at 5 V against the
   catalog's own `icc_max 0.003` (3 mA, logic only); a lit 16x2 backlight draws
   about 20 to 40 mA, and the logic supply 1.5 mA (recalled). The load does not
   change with the display state. **Recommend** reproduce.
@@ -2176,23 +2177,23 @@ edge counted once with and without a 555; with a clocked IC on one MCU
 
 ### 13.9 Questions
 
-- **Q-W4-{maxpico} (same Pico and micro:bit gap as the LCD).** Section 12.5.
-  **Recommend** as `Q-W4-{lcdpico}`.
-- **Q-W4-{maxcs} (CLK shifts regardless of CS; latch needs at least 16 bits).**
+- **Q-W4-48 (same Pico and micro:bit gap as the LCD).** Section 12.5.
+  **Recommend** as `Q-W4-42`.
+- **Q-W4-49 (CLK shifts regardless of CS; latch needs at least 16 bits).**
   The datasheet (Maxim MAX7219, recalled) shifts on CLK rising only while
   `LOAD/CS` is low; classic shifts always and resets on the CS fall. A clock
   running while CS is high corrupts nothing because the next CS fall resets
   `shift`, but a frame of more than 16 bits (a daisy chain) latches its last 16
   bits, which is correct for the last device only. **Recommend** reproduce.
-- **Q-W4-{maxreset} (no power-on reset, rows shown with `on = false`).** The
+- **Q-W4-50 (no power-on reset, rows shown with `on = false`).** The
   registers survive a supply loss; at power-up the real chip clears its control
   registers (decode, intensity, scan limit to 0, shutdown on, test off) and the
   digit registers are random (recalled; classic zeroes them). **Recommend**
   reproduce.
-- **Q-W4-{maxdecode} (decode mode and intensity are stored, not applied).**
+- **Q-W4-51 (decode mode and intensity are stored, not applied).**
   Section 13.2. The BCD "Code B" font is not rendered; `intensity` only
   reaches the renderer. **Recommend** reproduce (catalog says so).
-- **Q-W4-{maxload} (150 ohm constant, no `Iset`).** 33 mA at 5 V against
+- **Q-W4-52 (150 ohm constant, no `Iset`).** 33 mA at 5 V against
   the catalog `icc_max 0.33` A; the real draw depends on `Iset` and the lit LEDs
   (up to 330 mA, recalled). **Recommend** reproduce.
 
@@ -2574,7 +2575,7 @@ sensor, `:34-190`), `rp2040-idle.test.ts`, `rp2040-micropython.test.ts`,
 
 ### 14.15 Questions
 
-- **Q-W4-{picopower} (a Pico is powered by its flag, not by its rails).**
+- **Q-W4-53 (a Pico is powered by its flag, not by its rails).**
   `_mcuPowered` for the Pico is `usb_power != 0` and nothing else
   (`SE:6028-6033`): a Pico with `usb_power = 0` and 3.3 V on `3v3`, or 5 V on
   `vsys` or `vbus`, does not run; and a Pico with `usb_power = 1` runs even if
@@ -2584,74 +2585,223 @@ sensor, `:34-190`), `rp2040-idle.test.ts`, `rp2040-micropython.test.ts`,
   W4-S whether the shell derives "powered" from rails (a ruling for the owner,
   because it changes which Learn circuits run; PLAN W4-S "USB and regulator
   power paths as hub rails" implies it).
-- **Q-W4-{vindead} (dead pins).** Section 14.1: Uno/Nano `vin` and `reset`,
+- **Q-W4-54 (dead pins).** Section 14.1: Uno/Nano `vin` and `reset`,
   Pico `vsys`/`vbus`/`run`/`3v3_en`, `aref`, `io_ref`. Real boards regulate `vin`
   to 5 V (7 to 12 V, recalled) and ground `reset` resets the chip. **Recommend**
   reproduce in 1.0.0; adding a VIN regulator is new behaviour (a user powering a
   board through VIN currently gets a dead board).
-- **Q-W4-{nobor} (no POR/BOR, state survives power loss).** Section 14.11.
+- **Q-W4-55 (no POR/BOR, state survives power loss).** Section 14.11.
   **Recommend** add the power-on reset to the shell as a divergence (a board
   that loses power and regains it should restart its firmware), decided with the
   emulator ports (W4-AVR4, W7-R7), since the emulator needs a reset call.
-- **Q-W4-{pinr} (one 50 ohm output for every pin).** ATmega328P (recalled): `VOH`
+- **Q-W4-56 (one 50 ohm output for every pin).** ATmega328P (recalled): `VOH`
   4.2 V min at -20 mA, `VOL` 0.9 V max at 20 mA, DC 40 mA abs max, so about
   40 to 45 ohm effective; RP2040 default 4 mA drive strength (recalled), `VOH` at
   least `IOVDD - 0.4 V`, `VOL` 0.4 V, so about 100 ohm at 4 mA, and 2, 4, 8, 12
   mA selectable; neither is 50 ohm. **Recommend** reproduce; add a catalog
   param later.
-- **Q-W4-{pinclamp} (no input clamp, leakage or load).** External voltages on
+- **Q-W4-57 (no input clamp, leakage or load).** External voltages on
   pins above the rail or below ground have no effect (no ESD diodes, no
   injection current); the only protection model is `supply_overvoltage` on the
   rail pin. **Recommend** reproduce.
-- **Q-W4-{inputth} (one threshold at 0.6 Vcc).** AVR input thresholds (recalled):
+- **Q-W4-58 (one threshold at 0.6 Vcc).** AVR input thresholds (recalled):
   `VIL` max 0.3 Vcc (1.5 V at 5 V), `VIH` min 0.6 Vcc (3.0 V at 5 V; for Vcc
   of 4.5 to 5.5 V); between them is undefined. RP2040 (recalled): `VIL` max 0.3
   `IOVDD` (0.99 V), `VIH` min 0.7 `IOVDD` (2.31 V). Classic reads a pin high at or
   above `0.6*vcc` (1.98 V for the Pico): inside the RP2040's undefined band and
   below `VIH` min. **Recommend** reproduce.
-- **Q-W4-{adc} (ADC semantics).** Section 14.8: absolute net voltage rather
+- **Q-W4-59 (ADC semantics).** Section 14.8: absolute net voltage rather
   than pin minus board ground (they differ if the board ground is not the
   reference net); the Pico's `ADC_VREF` pad ignored; the AVR reference taken from
   the wrapper's `vcc` clamp and avr8js's internal constants. **Recommend**
   W4-S reads the AVR ADC reference from the emulator state when the avr8js port
   lands (W4-AVR2) and decide the absolute-versus-relative question by test.
-- **Q-W4-{mcuh} (the 100 us step cap is the dominant timing quantiser).**
+- **Q-W4-60 (the 100 us step cap is the dominant timing quantiser).**
   Sections 14.4 and 14.5. Every effect of an MCU on the circuit is quantised
   to a step of at most 100 us, and no trial replay runs. **Recommend** the W4-S
   contract is event-exact edges (PLAN W4-AVR4: "port writes become heap events
   at their cycle's time, inputs read at the instruction that samples them"),
   with the cap and `circuitSupportsStepReplay` lifted only once the emulator
   state is in the snapshot.
-- **Q-W4-{mcuphase} (loop latency is one accepted step each way).** Section
+- **Q-W4-61 (loop latency is one accepted step each way).** Section
   14.4. A firmware loop `read pin -> write pin` sees the circuit's endpoint
   and the circuit sees the write one interval later. **Recommend** reproduce
   until W4-AVR4.
-- **Q-W4-{unofuse} (polyfuse recovery).** Section 14.3: a tripped fuse
+- **Q-W4-62 (polyfuse recovery).** Section 14.3: a tripped fuse
   never resets while a load of more than 11 mA hangs on the rail (the 45 mA
   idle load always does), whereas a real MF-MSMF050 resets after the fault is
   removed and the part has cooled; the real part also has a hold current that
   falls with temperature. Also a polyfuse exists only on the Uno in classic
   (the Nano has none, correct; a real Pico has none). **Recommend** reproduce.
-- **Q-W4-{nanoschottky} (fixed 25 C thermal voltage on the Nano and micro:bit
+- **Q-W4-63 (fixed 25 C thermal voltage on the Nano and micro:bit
   Schottkys).** `SCHOTTKY_FIT_VT_25C` is used regardless of
   `environment.temperatureC`, while every other junction follows `ctx.junctionVt()`.
   **Recommend** reproduce (the fit is at 25 C by design, `SE:1223`).
-- **Q-W4-{picoreg} (Pico regulator model).** 10 mohm output, no current limit,
+- **Q-W4-64 (Pico regulator model).** 10 mohm output, no current limit,
   no minimum input (only the `usb_power` flag), a 1 mA back-feed threshold; the
   real RT6150B buck-boost on a Pico runs in power-save mode. **Recommend**
   reproduce; in the core the regime becomes a hub rail regime (PLAN W4-S "Pico
   regulator regime").
-- **Q-W4-{microbitshell} (micro:bit shell is outputs only).** Section 14.9: no
+- **Q-W4-65 (micro:bit shell is outputs only).** Section 14.9: no
   pin inputs, no ADC, no events; the `breakout` param is ignored (pins present in
   the live component set are all it needs); `power` 0 kills the 3V pad. PLAN
   W4-S says the micro:bit bridge stays in JS "for good" (a host bridge on
   the R86 yield). **Recommend** the shell takes `setMicrobitDrive` as an
   engine-level host call (the host owns the emulator), and its pin outputs are
   stamped exactly as above.
-- **Q-W4-{empty-hex} (an empty hex keeps the old core).** Section 14.10.
+- **Q-W4-66 (an empty hex keeps the old core).** Section 14.10.
   **Recommend** reproduce and keep PLAN's carried item (Q-O56) with the shell.
-- **Q-W4-{seed} (OP ladder and boards).** The Pico regime commit runs in the OP
+- **Q-W4-67 (OP ladder and boards).** The Pico regime commit runs in the OP
   solves (`SE:6776` is outside the `_dcPhysicalTimeHold` guard) while the Uno
   polyfuse update and the overvoltage check are held (`SE:6770-6775`). The seed
   solve is repeated up to four times for a Pico back-fed from the start.
   **Recommend** mirror.
+
+---
+
+## 15. What this means for the W4 packages
+
+Each package's input from this document, in the order PLAN 2.2 lists them.
+Rulings already made are cited, not re-asked.
+
+- **W4-E: relay, dc_motor, servo, stepper.** The three coils are the same
+  linear backward-Euler companion (section 1.4), so one kernel serves them: a
+  two-terminal `R + L/h` with a Norton history source and, for the motor, a
+  back-EMF offset from committed `omega` (DK 1.2's per-device Jacobian is the
+  constant `G = 1/(R + L/h)`; no charge). The new core needs, per kind, a
+  committed record (`iCoil/energized`, `iWinding/omega`, the servo record of
+  section 4.2, `iA/iB/phase/lastKnownPhase/position`), the physical-time hold in
+  the OP ladder (section 1.8), `_commitDcOperatingPointState`'s winding
+  normalisation, and the telemetry getters absent today (PLAN D17). Servo and
+  stepper mechanics are not coupled to the circuit beyond the servo's committed
+  supply load, so they can be stepped state that never enters a Newton
+  iteration. The relay's contact and the servo's idle/moving load are
+  committed-regime stamps (DK 1.5 cross-partition driver commit); whether the
+  new core applies the contact at the instant (event) or one accepted step
+  later like classic is Q-W4-2. The servo decoder takes events from
+  Uno, Nano and Pico (section 4.5, 14.7), and the sampled path for everything
+  else is Q-W4-9.
+- **W4-A: buzzer, speaker, hcsr04.** Resistors plus detectors, all post-solve
+  and readout-only except the HC-SR04, whose ECHO is a real driver. The
+  buzzer's tone detector wants exact edge times (section 6.5, Q-W4-18);
+  the speaker's detector must be made step-independent (Q-W4-21); the
+  HC-SR04 is a one-shot event scheduler (TRIG fall plus 250 us, plus `58 us/cm`)
+  with a 2 mA constant draw and a 50 ohm push-pull to its own rail, a pull-down
+  of 1 Mohm, and a state machine the core can run entirely on its event heap;
+  the step cap and `nextScheduledEventTime` are then unnecessary
+  (section 8.5, Q-W4-26). The micro:bit echo bridge stays a host event
+  (section 14.9).
+- **W4-D: uln2003, uln2803, l293d, tb6612.** One committed-latch pattern and one
+  nonlinear element, the guarded Shockley clamp (section 1.4), which is the same
+  law as the W3 diode kernel with fixed `Is`/`vSat` (it needs no new kernel,
+  only a diode instance with `vf = ctx.junctionVf(0.7)`, 0.1 A rating, `n = 1`).
+  The drive state is an integer per output; inputs are decided from the
+  accepted step. The sizes to copy are 5 ohm (ULN) and 2 ohm per side (bridges),
+  with the divergences of Q-W4-27, Q-W4-32, Q-W4-39, the PWM
+  treatment of Q-W4-41 and Q-W4-38, and the sag thresholds of
+  Q-W4-34. The ULN has no supply pin and does not use `_icPowerInfo`.
+- **W4-P: hd44780, max7219.** Behavioural supply resistor (200 and 150 ohm) plus
+  an event decoder; the digital state machines (sections 12.2, 13.2) are the
+  content of the port. The decisions: Pico and micro:bit drivers
+  (Q-W4-42, Q-W4-48), the reset on power loss (Q-W4-43,
+  Q-W4-50), and the `0x28..0x3f` address gap (Q-W4-46).
+  Rendered output is `lines`/`rows`, not analog.
+- **W4-S: the four boards.** The shell is where classic is least regular and
+  where W4 interacts with the most other kinds: supply gating, the overvoltage
+  failure, the Uno polyfuse state, the Pico regime commit (which wants the
+  hub-rail form of PLAN W4-S), the idle-load resistor, 50 ohm pin drivers and
+  35/65 kohm pulls, the input threshold of `0.6 Vcc`, the ADC taps, the MCU
+  step cap and the missing replay. The questions of section 14.15 decide the
+  shell's contract with the emulator ports; Q-W4-53, Q-W4-54
+  and Q-W4-55 change which circuits run and need a ruling before W4-S
+  ships (PLAN decision 15 is about routing; these change behaviour).
+- **Dead and misleading code not to port:** the ULN `_drivenOutputTargets`
+  case, `ULN_TTL_VIH`, `L293D_VIL`, `PASSIVE_FAILURE_UPDATE_KINDS` for `uln2003`,
+  the HD44780 "1M insurance stamps" comment, the Hd44780State "wraps" comment,
+  `stepsPerRev` as an engine param, the catalog sentence about "1.4 V total
+  drop" on the L293D (sections 9.7, 10.2, 12.2, 5.1, 10.9).
+- **PLAN decision 7 (reference where classic is wrong or absent, recommendation
+  (b)).** In W4 it applies to the L293D/TB6612/ULN output stages (against the
+  datasheet), the TB6612 PWM coast/brake, the speaker detector, the motor load
+  torque and the HC-SR04 sampling: the closed-form or datasheet answer is the
+  reference, classic is not fixed, and each divergence is registered. PLAN
+  decision 14 (no fallback) means every W4 kind must be on the core before W6-C,
+  including a kind with no hub rail needs (all of them) and the three
+  emulator-hosted boards.
+
+---
+
+## 16. Question index
+
+Each question is stated with its recommendation in the section named. Numbers
+follow the order of first definition.
+
+| Q | Chapter | Subject |
+|---|---|---|
+| Q-W4-1 | 2 Relay: relay | release voltage, recalled |
+| Q-W4-2 | 2 Relay: relay | decision from voltage, not current, and one step late |
+| Q-W4-3 | 2 Relay: relay | relay not in the OP physical-time hold |
+| Q-W4-4 | 2 Relay: relay | contact model |
+| Q-W4-5 | 3 DC brushed motor: dc_motor | `loadTorque` has no sign |
+| Q-W4-6 | 3 DC brushed motor: dc_motor | explicit back-EMF and forward-Euler speed |
+| Q-W4-7 | 3 DC brushed motor: dc_motor | `Ke` and `Kt` independent |
+| Q-W4-8 | 3 DC brushed motor: dc_motor | OP at stall |
+| Q-W4-9 | 4 Hobby servo: servo | sampled-path edge quantisation |
+| Q-W4-10 | 4 Hobby servo: servo | absolute 2.0 V threshold |
+| Q-W4-11 | 4 Hobby servo: servo | load switches one step late; no stall load |
+| Q-W4-12 | 4 Hobby servo: servo | speed scale up to 1.5x |
+| Q-W4-13 | 4 Hobby servo: servo | event path needs a powered MCU and ignores the electrical level |
+| Q-W4-14 | 5 Bipolar stepper: stepper | two flyback rule sets |
+| Q-W4-15 | 5 Bipolar stepper: stepper | half-step, wave drive and microstepping |
+| Q-W4-16 | 5 Bipolar stepper: stepper | no rotor, no back-EMF |
+| Q-W4-17 | 5 Bipolar stepper: stepper | 1 mA deadband and sign-only phase |
+| Q-W4-18 | 6 Buzzer: buzzer | detection at step ends |
+| Q-W4-19 | 6 Buzzer: buzzer | active threshold |
+| Q-W4-20 | 6 Buzzer: buzzer | polarity ignored |
+| Q-W4-21 | 7 Speaker: speaker | the detector breaks for host steps of 5 ms or more |
+| Q-W4-22 | 7 Speaker: speaker | resistive only |
+| Q-W4-23 | 8 Ultrasonic ranger: hcsr04 | stamp and commit disagree on the open-pin rule |
+| Q-W4-24 | 8 Ultrasonic ranger: hcsr04 | no minimum TRIG width, retrigger, 60 ms cycle |
+| Q-W4-25 | 8 Ultrasonic ranger: hcsr04 | echo is push-pull 50 ohm; 2 mA constant current |
+| Q-W4-26 | 8 Ultrasonic ranger: hcsr04 | the 100 us step cap |
+| Q-W4-27 | 9 Darlington sink arrays: uln2003, uln2803 | a 5 ohm resistor against a Darlington |
+| Q-W4-28 | 9 Darlington sink arrays: uln2003, uln2803 | committed thresholds are not the catalog's |
+| Q-W4-29 | 9 Darlington sink arrays: uln2003, uln2803 | the clamp diode is the generic silicon fit |
+| Q-W4-30 | 9 Darlington sink arrays: uln2003, uln2803 | no input load |
+| Q-W4-31 | 9 Darlington sink arrays: uln2003, uln2803 | one-step lag on the sink |
+| Q-W4-32 | 10 Dual H-bridge: l293d | two ohm per side against the datasheet |
+| Q-W4-33 | 10 Dual H-bridge: l293d | fixed 2.0 V input threshold |
+| Q-W4-34 | 10 Dual H-bridge: l293d | output-sag thresholds from the logic supply |
+| Q-W4-35 | 10 Dual H-bridge: l293d | published element current counts both sides |
+| Q-W4-36 | 10 Dual H-bridge: l293d | VM-powered flyback suppression is in the host rules |
+| Q-W4-37 | 10 Dual H-bridge: l293d | no shoot-through guard or dead time |
+| Q-W4-38 | 11 Dual H-bridge: tb6612 | PWM low is coast; the datasheet brakes |
+| Q-W4-39 | 11 Dual H-bridge: tb6612 | 2 ohm against about 0.5 ohm |
+| Q-W4-40 | 11 Dual H-bridge: tb6612 | STBY and open inputs |
+| Q-W4-41 | 11 Dual H-bridge: tb6612 | PWM aliasing |
+| Q-W4-42 | 12 Character LCD controller: hd44780 | a Pico cannot drive the display |
+| Q-W4-43 | 12 Character LCD controller: hd44780 | no reset on power loss |
+| Q-W4-44 | 12 Character LCD controller: hd44780 | no busy flag or timing |
+| Q-W4-45 | 12 Character LCD controller: hd44780 | only 16x2 text, ASCII, no cursor, shift or CGRAM |
+| Q-W4-46 | 12 Character LCD controller: hd44780 | the address counter does not wrap or clamp low |
+| Q-W4-47 | 12 Character LCD controller: hd44780 | a constant 200 ohm load |
+| Q-W4-48 | 13 LED matrix driver: max7219 | same Pico and micro:bit gap as the LCD |
+| Q-W4-49 | 13 LED matrix driver: max7219 | CLK shifts regardless of CS; latch needs at least 16 bits |
+| Q-W4-50 | 13 LED matrix driver: max7219 | no power-on reset, rows shown with `on = false` |
+| Q-W4-51 | 13 LED matrix driver: max7219 | decode mode and intensity are stored, not applied |
+| Q-W4-52 | 13 LED matrix driver: max7219 | 150 ohm constant, no `Iset` |
+| Q-W4-53 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | a Pico is powered by its flag, not by its rails |
+| Q-W4-54 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | dead pins |
+| Q-W4-55 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | no POR/BOR, state survives power loss |
+| Q-W4-56 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | one 50 ohm output for every pin |
+| Q-W4-57 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | no input clamp, leakage or load |
+| Q-W4-58 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | one threshold at 0.6 Vcc |
+| Q-W4-59 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | ADC semantics |
+| Q-W4-60 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | the 100 us step cap is the dominant timing quantiser |
+| Q-W4-61 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | loop latency is one accepted step each way |
+| Q-W4-62 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | polyfuse recovery |
+| Q-W4-63 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | fixed 25 C thermal voltage on the Nano and micro:bit Schottkys |
+| Q-W4-64 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | Pico regulator model |
+| Q-W4-65 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | micro:bit shell is outputs only |
+| Q-W4-66 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | an empty hex keeps the old core |
+| Q-W4-67 | 14 Microcontroller boards: arduino_uno, arduino_nano, raspberry_pi_pico, microbit | OP ladder and boards |
