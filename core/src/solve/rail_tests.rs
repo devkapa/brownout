@@ -20589,10 +20589,11 @@ fn a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence(
     // solves the rail). tau_w0 = W0_V(1.607 V) / 3313 V/s = 0.52 us.
     //
     // Measured (shares of the bound, worst edge / mean period): R121 0 / 0 at
-    // every cadence but 1 ms, 7.2 / 3.3 there; the 10 uV band 7.8 / 5.7 at
-    // 10 us and 188-483 / 45-125 from 100 us on (its crossings rode a rail
-    // held 10 uV at a time and landed late). The 1 ms cadence is held to
-    // 8 / 4 and named in the open items; every other to 1 / 1.
+    // every cadence (0.000 to the printed digit) once the bounded crossing
+    // search keeps a turn past its end (574767b; before it, 7.2 / 3.3 at
+    // 1 ms); the 10 uV band 7.8 / 5.7 at 10 us and 188-483 / 45-125 from
+    // 100 us on, on f18bfe5 (its crossings rode a rail held 10 uV at a time
+    // and landed late). Every cadence is held to 1 / 1.
     let p = tpl6_board(2);
     let (fine, slope, level) = triggers_555(&p, 1e-6, 1e-6, 0.02);
     let tau_w0 = (1e-4 + 1e-3 * level.abs()) / slope.abs();
@@ -20601,8 +20602,7 @@ fn a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence(
         let (got, _, _) = triggers_555(&p, host, 1e-6, 0.02);
         let (edge, period) = trigger_shares(&got, &fine, tau_w0);
         eprintln!("2/6 at host {host:e}: worst edge {edge:.3}, period {period:+.3} of the W0 bound");
-        let (e_max, p_max) = if host == 1e-3 { (8.0, 4.0) } else { (1.0, 1.0) };
-        assert!(edge <= e_max && period.abs() <= p_max, "host {host:e}: edge {edge:.3}, period {period:.3}");
+        assert!(edge <= 1.0 && period.abs() <= 1.0, "host {host:e}: edge {edge:.3}, period {period:.3}");
     }
 }
 

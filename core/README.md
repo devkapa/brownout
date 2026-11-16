@@ -7454,9 +7454,11 @@ failures and warnings (W1g)"):
   stopping every 1 us, a 555 on a cell off the coupled path (the cold
   fuzz's 74/6 and 45/6, no rail shortcut) lands its triggers up to 26 of
   their W0 bounds late from 100 us hosts on, on the 10 uV band and R121
-  alike; 2/6 on the coupled path, 7.2 at 1 ms hosts only. Pinned in
-  `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`
-  and `a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`.
+  alike: exact mode's stepped partition's truncation (CLK). Pinned in
+  `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`.
+  2/6, on the coupled path, triggers with the 1 us run at every cadence
+  since 574767b (`a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`,
+  1 bound everywhere).
 
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as
