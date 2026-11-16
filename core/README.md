@@ -7571,6 +7571,15 @@ failures and warnings (W1g)"):
   re-solve wherever a watched IC's rail-borne threshold could be crossed
   within it. Variants A, B, C and C2 and their numbers: drafts
   `battery-rail-cadence.md`; patches in int-acc-logs/r105.
+  R121's reading-aware cadence (a drift cap from the readings' slack, with
+  logic levels and band edges as rail thresholds; branch `wip/rc`) cut the
+  battery SAP-1's instructions by 48 % and 34 % on the two recorded runs
+  with its clock exact at six host cadences, and is held back for the same
+  class: on a fast-draining cell (0.5 ohm, 2e-5 Ah, the rail falling
+  0.8 V/s) a 555 astable loses 9 of 412 flips at 1/60 s and 100 ms host
+  stops, 13 of 18 swept configurations failing where the 10 uV band fails
+  none (SHIPV-E). Slow drains (1e-3 Ah and up, the SAP-1's and the cold
+  sweep's) do not show it.
 - **Exact-mode coarse step accuracy** (ruling R102 (a), measured on
   wip/exact at 3cefe1d). Exact mode at the cold sweep's host stops (1-800,
   hub 2, its own exact-mode boards) against its own fine reference (exact
@@ -7601,6 +7610,55 @@ failures and warnings (W1g)"):
   to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
   45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
   `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
+- **A cell's rail capacitor in the rail's own dynamics** (ruling R124;
+  required for 1.0.0). On a battery the rail is algebraic (Rails point 7):
+  `r·C_rail` is left out, under `RAIL_TAU_MAX`. At a switching edge the rail
+  therefore steps at once and the capacitor's step charge `C dV` is in no
+  published current, where classic holds the rail and shows the capacitor
+  supplying the step: a pulse the size of the load step, decaying over
+  `r·C_rail`, in the capacitor's current and, mirrored, in the cell's.
+  Measured against classic (SHIPV-F: a 2 ohm cell, 22 uF, a 49 mA load on a
+  push button): 50 mA apart at the edge and the rail 98 mV apart (40 mA with
+  0.5 ohm esr, 32 mA with an LED load), under 1 mA after 150 to 250 us,
+  under 1 uA after 470 to 710 us; 2.2 uC per edge is not shown. A 555's own
+  edge on that cell steps 5 mA. Between edges the engines agree: the
+  capacitor reads `C dV/dt` of the published rail within 2.8e-13 A at 12,003
+  stops and KCL at the rail node closes to 5e-12 A. Beside it: the cell's
+  published current now carries the capacitor's, while its state of charge
+  counts load charge only, so the integral of the published current differs
+  from the discharged charge by the capacitor's own, at most `C V`. Closing
+  it carries a rail capacitor as a state of the rail's equation (the hub
+  work of 1.0.0), which also retires `RAIL_TAU_MAX`.
+- **A bench supply declined though nothing drives it** (ruling R123). The
+  back-drive check (`bench-psu-back-driven`, Rails point 9) reads a sink on
+  some boards whose only source is the supply: 4 of about 20,000 random
+  passive single-supply runs (SHIPV-D: cold 1141/1 1.75 mA at 17 ms, 1312/3
+  4.12 uA, 784/5 644 A at 30 ns and 1861/5 0.17 A under trapezoidal
+  integration; all default mode, and the same before `exit_sink`), and one
+  at a switch toggle (172/5, a loop-current residual in the supply's KCL).
+  The cause is not established. The advance fails and an `"auto"` host
+  finishes on classic, so no reading is wrong; the circuit loses the core.
+  To be found with the full bench-supply port (the released regime).
+- **The ideal SAP-1's cost with the display frozen** (ruling R125, against
+  R22's ceilings over `3ca4004`). At `6bfab7a`, 15 paired reps at a load of
+  about 4: steady state frozen +11.9 % (ceiling +11), running +10.8 %;
+  start-up at the 5 s sample frozen +20.7 % (ceiling +14), running +13.0 %.
+  `8f39271` in the same run reads +9.6 / +9.3 and +12.8 / +12.9 (it was
+  gated at about +10.3 / +10.8 in its own window: a run is good to about a
+  point). Native instruction counts on the same board over that span are
+  +0.36 % frozen and +0.31 % running with bit-identical readings, so the
+  rest is how the larger module runs under the host's compiler. The
+  start-up step is one of timing: all of it comes with the bench-supply
+  decline (`f18bfe5` to `679dc42`: +6.4 % at the 5 s sample), none of whose
+  code this board runs, and it reads +1.7 % sampled at 2 s, -2 % at 10 s and
+  about 0 at 20 s: the hot functions grew and finish being optimised later.
+  From here on start-up is measured as CPU over a window, the first 10
+  simulated seconds (`--warmup=0.02 --measure=10`): frozen 21.8 ms per
+  simulated second on `3ca4004`, 27.7 on `8f39271` (+27.2 %) and 28.7 on
+  `6bfab7a` (+31.2 %, 69 ms more over the 10 s, once per load); the running
+  figure after it +10.9 %. To be recovered and re-gated in the 1.0.0 kernel
+  work, which restructures those functions; no budget is set for the window
+  measure yet.
 
 ## Deferred past 1.0.0
 
