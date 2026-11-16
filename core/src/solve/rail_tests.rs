@@ -20719,3 +20719,41 @@ fn a_logic_input_on_a_static_hub_divider_is_a_rail_threshold_at_its_level() {
     eprintln!("u {u:.7}, input line {a:.6} + {s:.6} u, VIH at u* {want:.7}; watch {got:?}");
     assert!(got.iter().any(|&x| (x - want).abs() <= 1e-9 * want), "VIH's rail value {want} among {got:?}");
 }
+
+#[test]
+fn a_cells_rail_solves_by_the_instant_its_crossings_were_searched_to_however_near() {
+    // CAD-3: on a draining cell's coupled path every closed-form crossing is
+    // searched only to `cell_until` (`schedule_driven_crossing`), the drift
+    // cap's passage or R121's drain-line bound `cad_t`, whichever is first,
+    // so the rail must solve by then. SHIPV-E's astable had a 555 flip move
+    // the line's slope 0.95 to 0.14 V/s across a solve 1.9e-17 s before it:
+    // `rho_dot` 4e16 V/s^2 put `cad_t` at the solve itself, and as a watch
+    // within a reached-width (1e-12 s) of the solve it read as reached and
+    // scheduled nothing; the next solve came at the drift passage 6.7 ms on,
+    // and the 555's trigger 0.33 ms on was never searched for. Here the
+    // coupled RC of the cadence tests (E 5, r 1, R 1k, C 1 uF) on a 1e-4 Ah
+    // generic cell after 0.5 ms, its last solve's line moved 1.9e-17 s
+    // earlier by 0.8 V/s: the solve at `now` sets `cad_t` within float
+    // rounding of `now`, and the rail's event is the first instant the kernel
+    // accepts, `(now + 1e-15).next_up()`, not the drift passage (fails
+    // first there: 0.42 ms on).
+    let p = program(3, vec![generic_battery(0, 1, 0, 5.0, 1.0, 1e-4), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0)]);
+    let mut rig = Rig::load(&p).unwrap();
+    let now = 5e-4;
+    rig.advance(now).unwrap();
+    let s = rig.k.solver_mut();
+    let hub = s.hub.as_mut().unwrap();
+    assert!(hub.state.cell_path.is_some(), "the RC rides the cell's coupled path");
+    let cd = hub.state.cell.expect("a drain line");
+    hub.state.cell = Some(rails::CellDrive { t0: now - 1.9e-17, kappa: cd.kappa, rho: cd.rho + 0.8 });
+    hub.dirty = true;
+    let drivers = std::rc::Rc::clone(&s.driver_snapshot);
+    let mut readers = Vec::new();
+    s.rail_loop(now, &drivers, &mut readers).unwrap();
+    let st = &s.hub.as_ref().unwrap().state;
+    let floor = (now + 1e-15).next_up();
+    eprintln!("cad_t {:.17}, cell_until {:.17}, event {:?}", st.cad_t, st.cell_until, st.event_t);
+    assert!(st.cell_until <= now + 1e-12, "cell_until {} not at the solve", st.cell_until);
+    let at = st.event_t.expect("a rail event");
+    assert!(at <= floor.max(st.cell_until), "the rail's next solve at {at:.17}, its crossings searched only to {:.17}", st.cell_until);
+}

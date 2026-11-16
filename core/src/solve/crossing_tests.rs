@@ -61,6 +61,11 @@ fn hc74(ci: usize, logic: [usize; 12], slot: usize) -> Device {
     Device { kind: kinds::IC_74HC74, component_index: ci, pins, params: p, blob }
 }
 
+/// A 5 V clock on `pos` tracing on `slot`.
+fn clock(ci: usize, pos: usize, freq: f64, duty: f64, slot: usize) -> Device {
+    dev(kinds::CLOCK, ci, &[pos, 0], vec![freq, duty, 5.0, 0.0, 0.0], vec![slot as f64])
+}
+
 fn prog(n: usize, devices: Vec<Device>) -> Program {
     Program { carry: Vec::new(), node_count: n, options: Options::default(), digital_slot_count: 64, channel_slot_count: 0, devices }
 }
@@ -152,4 +157,42 @@ fn a_555_clocking_a_74hc74_on_a_draining_cell_flips_with_a_1_us_run() {
     d.push(hc74(7, [1, 5, 4, 1, 5, 7, 1, 0, 0, 1, 0, 0], 12));
     let p = prog(8, d);
     against_1_us("ctr", &p, 8, 0.4, &[1e-3, 1.0 / 60.0, 0.1], astable_tau_w0(4.72), 500);
+}
+
+#[test]
+fn a_555_on_a_fast_draining_cells_coupled_path_keeps_every_trigger_at_coarse_host_stops() {
+    // CAD-3, SHIPV-E's repro: the astable with a 35 ohm + LED load on its
+    // output, on a 0.5 ohm, 2e-5 Ah cell at 90 % (the rail falls 4.71 V to
+    // 4.47 V in 0.3 s, 0.8 V/s), nothing else across the rail (1e9 ohm). At
+    // the output's fall (0.29150 s) the LED's load left the drain line's
+    // slope 0.95 to 0.14 V/s across a solve 1.9e-17 s earlier; R121's time
+    // watch read that as a line changing at 4e16 V/s^2 and put its bound
+    // `cad_t` at the solve itself. The crossing search ran to that bound and
+    // found nothing; as a watch the bound read as reached and scheduled
+    // nothing, and the rail next solved at its drift cap's passage 6.7 ms on:
+    // the trigger due 0.33 ms after the fall came 6.4 ms late, and with it
+    // 9 of 412 flips were lost by 0.3 s at 1/60 s and 100 ms host stops
+    // (11,645 tau_w0). tau_w0 at 4.71 V is the trigger's, (1e-4 + 1.57e-3) /
+    // (1.57 / (1014 x 468e-9)) = 0.504 us. Fails first at 1/60 s (403 of
+    // 412 flips); with the rail solving by the instant its crossings were
+    // searched to, within 0.002 tau_w0 at every cadence.
+    let p = prog(7, astable(0.5, 2e-5, 0.9, Some(1e9), true));
+    against_1_us("astable", &p, 8, 0.3, &[1e-3, 1.0 / 60.0, 0.1], astable_tau_w0(4.71), 400);
+}
+
+#[test]
+fn a_555_on_a_cell_a_clock_charges_keeps_every_trigger_at_coarse_host_stops() {
+    // CAD-3, SHIPV-E's `charge` board: the same astable and LED load on a
+    // 0.5 ohm, 2e-5 Ah cell at 30 %, charged through 100 ohm by a 5 V, 7 Hz
+    // clock (its rail rising and falling with each half period). R121 lost a
+    // flip here and the base did not: fails first at 100 ms (411 of 412, the
+    // trigger at 0.26162 s found 0.51 ms late). The clock's own flips (slot 1) are
+    // exact at every cadence; the 555's are held to tau_w0 at the highest
+    // rail the clock can pull the cell to, 5 V (tau_w0 shrinks as the rail
+    // rises): (1e-4 + 1.667e-3) / (1.667 / (1014 x 468e-9)) = 0.503 us.
+    let mut d = vec![cell(0, 0.5, 2e-5, 0.3), clock(9, 7, 7.0, 0.5, 1), r(10, 7, 1, 100.0)];
+    d.extend(astable(0.5, 2e-5, 0.3, None, true).into_iter().skip(1));
+    let p = prog(8, d);
+    against_1_us("charge", &p, 8, 0.3, &[1e-3, 1.0 / 60.0, 0.1], astable_tau_w0(5.0), 100);
+    against_1_us("charge clock", &p, 1, 0.3, &[1e-3, 1.0 / 60.0, 0.1], 1e-12, 4);
 }

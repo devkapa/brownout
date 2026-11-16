@@ -2525,6 +2525,20 @@ impl PartitionedSolver {
             let at = if expiry > now + 1e-15 { expiry } else { (now + 1e-15).next_up() };
             t = Some(t.map_or(at, |t| t.min(at)));
         }
+        // A draining cell's coupled path: its closed forms' crossings were
+        // searched only to `cell_until` (`schedule_driven_crossing`), so the
+        // rail solves and aims them again by then, however near (R121's time
+        // watch on the drain line's change is one of its bounds). As a
+        // watch, `cad_t` within a reached-width of the solve read as reached
+        // and scheduled nothing: on SHIPV-E's astable a 555 flip moved the
+        // line's slope 0.95 to 0.14 V/s across a solve 1.9e-17 s before it,
+        // `rho_dot` 4e16 V/s^2 put `cad_t` at the solve, the trigger 0.33 ms
+        // on was searched to there, and the rail next solved at its drift
+        // cap's passage, 6.7 ms on (the trigger 11,645 tau_w0 late, CAD-3).
+        if let Some(until) = self.hub.as_ref().filter(|h| h.state.cell_path.is_some()).map(|h| h.state.cell_until).filter(|u| u.is_finite()) {
+            let at = if until > now + 1e-15 { until } else { (now + 1e-15).next_up() };
+            t = Some(t.map_or(at, |t| t.min(at)));
+        }
         let hub = self.hub.as_mut().unwrap();
         hub.state.version += 1;
         hub.state.event_t = t;
@@ -2642,9 +2656,6 @@ impl PartitionedSolver {
                         rails::RAIL_DRIFT_V
                     };
                     watches.push(Watch { value: u, thresholds: th, cap: Some(cap), terms: vec![Motion::Path(path)] });
-                    if rails::cell_cadence() && hub.state.cad_t.is_finite() {
-                        watches.push(Watch { value: now, thresholds: vec![hub.state.cad_t], cap: None, terms: vec![Motion::Line { rate: 1.0 }] });
-                    }
                     if draw > 0.0 && soc > 0.0 {
                         let knot = m.next_knot_below(soc).unwrap_or(0.0);
                         watches.push(Watch { value: soc, thresholds: vec![knot], cap: None, terms: vec![Motion::Line { rate: -draw / m.capacity_coulombs() }] });
