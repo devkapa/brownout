@@ -20523,7 +20523,6 @@ fn a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence(
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "exact mode's restamp assertion (hub.rs, 'the call restamped each step from the SoC charged here') fires on 74/6 at coarse host cadences on f18bfe5 too: a pre-existing exact-mode defect, README open item")]
 fn the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence() {
     // R121 (iii): the cold fuzz's 74/6 (19.1k + 2 x 57.7k, 305 nF: 28.5 ms)
     // and 45/6 (116 + 2 x 12.5k, 2.73 uF: 47.4 ms), whose phase C2 lost. Both

@@ -7457,9 +7457,6 @@ failures and warnings (W1g)"):
   alike; 2/6 on the coupled path, 7.2 at 1 ms hosts only. Pinned in
   `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`
   and `a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`.
-  The first runs in release only: on 74/6 at coarse host cadences exact
-  mode's debug assertion that each call restamps from the SoC it charged
-  fails (inject 51.93236607980 against 51.93236607753), at f18bfe5 too.
 
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as
