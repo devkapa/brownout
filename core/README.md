@@ -6969,7 +6969,20 @@ Recorded at the W1g integration. None changes a rule above until it lands.
    `t_end`. A superseded event at the head of the heap (a stale token or
    version) is dropped between instants, as its handler would drop it
    inside one, so it is no instant (W1f, Rails point 4's superseded
-   events); stat 4 still counts it. Stepped partitions land exactly on
+   events); stat 4 still counts it. Between instants the heap is also
+   compacted (THERM2, `Kernel::compact_heap`): once it holds more than four
+   times what the last compaction kept plus 64, every superseded `Slow`
+   entry is dropped, unless a live entry at its exact time was pushed
+   before it (then it would pop inside that instant and mark it, so it
+   stays). The live events pop in the same `(t, seq)` order, ties included,
+   and every reading is bit for bit what lazy deletion gave; stat 4 no
+   longer counts the dropped entries. A slow device re-driven at each rail
+   move supersedes its pending event thousands of times before it is due:
+   on the battery SAP-1 as the app sends it the heap held up to 190,000
+   entries (the engine state sawed between 17 and 62 MB) and stat 4 read
+   1.14 million a simulated second; compacted, the state stays between
+   1.26 and 1.34 MB over 60 simulated seconds (1.18 to 1.27 MB without
+   catalog identities) and stat 4 reads 59,000 to 60,500 (61,200). Stepped partitions land exactly on
    `t_end` (a horizon clamp), so a readout at `t_end` is a solved value,
    not an interpolation. The readers whose nodes the clamp moved are
    evaluated in a delta cycle at `t_end`, so a digital readout at `t_end`

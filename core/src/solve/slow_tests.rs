@@ -2452,3 +2452,161 @@ fn a_rated_resistor_on_a_draining_cell_latches_at_the_same_instant_at_any_host_s
         close(latch(stop), fine, 2e-4 * fine, &format!("latch at stops of {stop} s"));
     }
 }
+
+// ---- THERM2: the superseded slow events ---------------------------------
+
+/// THERM2's board: THERM's draining cell (OCV 4 V empty to 5 V full, 15 uAh)
+/// feeding four red LEDs, each through its own resistor (220, 330, 470 and
+/// 680 ohm, every one identified: the LED profile, R_theta 560 K/W and tau
+/// 2 s; the resistor's, 340 K/W and 8 s), a static 1 kohm across the rail,
+/// and THERM's rated, identified 1 kohm into 1 mF (a closed-form partition
+/// the rail drives, R29, whose visit schedules a re-anchor). The rail falls
+/// some 0.2 V a second, so every device is re-driven at each of its 10 uV
+/// moves (some 20,000 a second), and each LED reschedules its junction band
+/// boundary at each.
+fn superseding_board() -> Program {
+    let mut cell = battery(0, 1, 0, 5.0, 0.0);
+    cell.params[kinds::battery_param::CAPACITY_AH] = 15e-6;
+    cell.blob = vec![2.0, 0.0, 4.0, 1.0, 5.0];
+    let mut devices = vec![cell];
+    for (k, r) in [220.0, 330.0, 470.0, 680.0].into_iter().enumerate() {
+        devices.push(resistor(1 + 2 * k, 1, 2 + k, r));
+        devices.push(red_led(2 + 2 * k, 2 + k, 0));
+    }
+    devices.push(resistor(9, 1, 0, 1000.0));
+    devices.push(resistor(10, 1, 6, 1000.0));
+    devices.push(capacitor(11, 6, 0, 1e-3));
+    for k in 0..4 {
+        devices.push(thermal(1 + 2 * k, 340.0, 8.0));
+        devices.push(thermal(2 + 2 * k, 560.0, 2.0));
+    }
+    devices.push(thermal(9, 340.0, 8.0));
+    devices.push(thermal(10, 340.0, 8.0));
+    devices.push(rating(10, 5e-3, 1000.0));
+    program(7, devices)
+}
+
+/// FNV-1a over the bits of every reading at each host stop: the node
+/// voltages, the device currents, every device's state (`[T, P, shutdown]`
+/// for an identified part, the cell's six numbers) and records channels 0-2.
+fn reading_hash(e: &mut Engine, h: &mut u64) {
+    let mut fold = |x: f64| *h = (*h ^ x.to_bits()).wrapping_mul(1099511628211);
+    e.voltages().iter().chain(e.currents()).for_each(|&x| fold(x));
+    for d in 0..e.device_count() {
+        if let Ok(s) = e.device_state(d) {
+            s.iter().for_each(|&x| fold(x));
+        }
+    }
+    for c in 0..3 {
+        e.records(c).unwrap().iter().for_each(|&x| fold(x));
+    }
+}
+
+/// The run to `end` stopping every `stop` seconds: its reading hash, its
+/// events popped (stat 4) and the longest the heap grew at a stop.
+fn superseding_run(p: &Program, stop: f64, end: f64) -> (u64, f64, usize) {
+    let mut e = Engine::load(p).unwrap();
+    let (mut h, mut t, mut most) = (1469598103934665603u64, 0.0f64, 0usize);
+    while t < end {
+        t = (t + stop).min(end);
+        e.advance(t).unwrap();
+        reading_hash(&mut e, &mut h);
+        most = most.max(e.debug_heap_len());
+    }
+    (h, e.stat(4), most)
+}
+
+#[test]
+fn a_draining_cells_heap_holds_few_superseded_slow_events() {
+    // THERM2: each of the four LEDs reschedules its band boundary at every
+    // rail move, and the closed-form resistor its re-anchor; lazy deletion
+    // left every superseded entry queued until its time came (the battery
+    // SAP-1 as the app sends it held up to 190,000, some 300 of them live,
+    // and its engine state sawed between 17 and 62 MB). Compaction between
+    // instants keeps the heap under `COMPACT_FACTOR` times what the last
+    // compaction kept plus `COMPACT_MIN`, and kept is at most the live
+    // entries (here under 20: four boundaries, a re-anchor, the rail's next
+    // event and a few protected ties), so under 4 * 20 + 64 = 144 at every
+    // host stop. On wip/therm (1368f5b) it grew to 40,236 in 0.5 s.
+    let (_, _, most) = superseding_run(&superseding_board(), 1.0 / 60.0, 0.5);
+    assert!(most <= crate::kernel::COMPACT_FACTOR * 20 + crate::kernel::COMPACT_MIN, "the heap grew to {most} entries");
+}
+
+#[test]
+fn a_draining_cells_events_popped_are_the_plain_boards_and_what_fires() {
+    // THERM2: stat 4 counted every superseded entry popped at its time. The
+    // same board without its thermal records schedules no slow event, so
+    // the difference is what the identified parts add: their fired slow
+    // events (stat 22, each one popped, and any instant a fire adds) and the
+    // superseded entries due before a compaction reached them (one is due
+    // every `COMPACT_FACTOR * kept + COMPACT_MIN` entries, here some 100,
+    // about a millisecond of the 80,000 reschedules a second: a re-anchor or
+    // a band boundary of a fast-heating LED is that near). Measured 7,191
+    // over 0.5 s (fired 736); held to twice the fired plus 10,000. On
+    // wip/therm (1368f5b) it was 158,940 (198,308 popped against 39,368).
+    let p = superseding_board();
+    let plain = Program { devices: p.devices.iter().filter(|d| d.kind != kinds::THERMAL).cloned().collect(), ..p.clone() };
+    let (_, popped, _) = superseding_run(&p, 1.0 / 60.0, 0.5);
+    let (_, plain_popped, _) = superseding_run(&plain, 1.0 / 60.0, 0.5);
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.5).unwrap();
+    let fired = e.stat(22);
+    assert!(popped - plain_popped <= 2.0 * fired + 10_000.0, "popped {popped}, plain {plain_popped}, fired {fired}");
+}
+
+#[test]
+fn a_draining_cells_readings_are_bit_for_bit_wip_therms_at_every_host_stop() {
+    // THERM2: dropping superseded entries, and every exact step after it,
+    // changes no reading. The reading hash (`reading_hash`) of the board run
+    // to 0.5 s at host stops of 1 ms, 1/60 s and 100 ms, pinned from
+    // wip/therm (1368f5b), where nothing was dropped.
+    let p = superseding_board();
+    let got: Vec<u64> = [1e-3, 1.0 / 60.0, 0.1].into_iter().map(|stop| superseding_run(&p, stop, 0.5).0).collect();
+    assert_eq!(got, [PIN_1MS, PIN_60, PIN_100MS], "{got:#018x?}");
+}
+const PIN_1MS: u64 = 0x3f73b8ec653030be;
+const PIN_60: u64 = 0x786a53a457e18e3d;
+const PIN_100MS: u64 = 0x72fb4513da1dc9df;
+
+#[test]
+fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_bit() {
+    // THERM2: what the compaction keeps (the heap, `compact_at`) is snapshot
+    // state. A snapshot taken with superseded entries queued, restored after
+    // compactions dropped them, runs on exactly as the first time, twice
+    // over. A carried reload starts a fresh heap from the carry, and runs
+    // as wip/therm's did.
+    let p = superseding_board();
+    let run = |e: &mut Engine, from: f64| {
+        let mut h = 1469598103934665603u64;
+        for k in 1..=12 {
+            e.advance(from + k as f64 / 60.0).unwrap();
+            reading_hash(e, &mut h);
+        }
+        h
+    };
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.1).unwrap();
+    for _ in 0..2 {
+        let snap = e.snapshot();
+        let t = e.time();
+        let first = run(&mut e, t);
+        let len_after = e.debug_heap_len();
+        e.restore(&snap);
+        assert_eq!(e.time(), t);
+        assert_eq!(run(&mut e, t), first, "the run from the restored snapshot at {t} s");
+        assert_eq!(e.debug_heap_len(), len_after, "the heap after it");
+    }
+    // A carried reload at 0.3 s (host stops of 1/60 s up to it), run on for
+    // twelve frames: pinned from wip/therm (1368f5b).
+    let mut a = Engine::load(&p).unwrap();
+    for k in 1..=18 {
+        a.advance(k as f64 / 60.0).unwrap();
+    }
+    let mut q = p.clone();
+    q.options.start_time = a.time();
+    q.carry = a.carry_take().unwrap().to_vec();
+    let mut reloaded = Engine::load(&q).unwrap();
+    let got = run(&mut reloaded, 0.3);
+    assert_eq!(got, PIN_RELOAD, "the carried reload: {got:#018x}");
+}
+const PIN_RELOAD: u64 = 0xdb2baef55fbc5743;
