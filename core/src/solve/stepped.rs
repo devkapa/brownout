@@ -3098,10 +3098,26 @@ impl SteppedSolver {
     }
 
     /// The cell's state the stamp just set came from (with
-    /// [`Self::set_exact`]).
+    /// [`Self::set_exact`]). Steps this call committed that the owner has
+    /// not charged yet (`bills`) are charged on it here, in their order, and
+    /// the stamp is set from where they leave it: the owner charges the same
+    /// bills after the call and lands on the same state. A stamp pushed
+    /// between a commit and the owner's charge (74/6 at 1 us stops, its
+    /// 555's flip re-solving the rail's partition) restamped from the SoC
+    /// before that step, and exact mode's next step took E one step's
+    /// charge stale (inject 51.93236607817 against 51.93236607753, CAD-2).
     pub(crate) fn set_cell_state(&mut self, state: devices::battery::BatteryState) {
-        if let Some(cell) = self.cell.as_mut() {
-            cell.1 = state;
+        if let Some((model, cell)) = self.cell.as_mut() {
+            let mut state = state;
+            for &(_, q) in &self.bills {
+                state = model.advance(&state, q).state;
+            }
+            *cell = state;
+            if !self.bills.is_empty() {
+                if let Some(stamp) = self.exact.as_mut() {
+                    stamp.kind = ExactKind::battery(model, state.soc);
+                }
+            }
         }
     }
 

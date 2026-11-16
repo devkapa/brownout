@@ -7600,8 +7600,7 @@ failures and warnings (W1g)"):
   (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
   to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
   45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
-  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence` (release
-  only: a debug build trips the billing restamp check on 74/6 first).
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
 
 ## Deferred past 1.0.0
 

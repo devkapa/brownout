@@ -20012,11 +20012,10 @@ fn clk_exact_shares(seed: u32, t_end: f64, tau_w0: f64) -> Vec<(f64, f64, f64)> 
 }
 
 #[test]
-// Release only: in a debug build 74/6's 1 us run trips exact mode's billing
-// check first (hub.rs, "the call restamped each step from the SoC charged
-// here": the Norton injection 51.932366078 against 51.932366077 A, at
-// 679dc42 as at 574767b), a separate item.
-#[cfg_attr(debug_assertions, ignore = "exact mode's billing restamp check trips on 74/6 in debug builds (separate item)")]
+// Debug builds too: 74/6's 1 us run used to trip exact mode's billing check
+// first (hub.rs, "the call restamped each step from the SoC charged here":
+// the Norton injection 51.932366078 against 51.932366077 A), until
+// `SteppedSolver::set_cell_state` charged the call's pending bills.
 #[should_panic(expected = "exact-mode coarse step accuracy")]
 fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
     // CLK: an EXPECTED FAILURE on the open item "Exact-mode coarse step
