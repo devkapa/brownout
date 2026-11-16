@@ -6581,6 +6581,22 @@ of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
 fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
 boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
 
+**THERM2 (2026-11-17).** The superseded slow events are compacted out of
+the heap between instants (Kernel semantics, point 5): 1.26 s per
+simulated second in Node, the engine state flat at 1.3 MB, stat 4 at the
+plain board's. What is left of the excess (about 0.46 s a simulated
+second over 0.80) is the visits themselves, 0.35 s: R29's deadline search
+0.07, the rest of each visit's drive 0.10, its next event 0.06, the
+journal 0.07, the one-pole close and the visit's own body the rest. None
+of it is repeated work an exact change can remove: `T` is a fold of one
+`exp` per visit, a device is visited at most once an instant, and a visit
+whose device voltage did not move (3 % of them) already writes nothing.
+Deferring R29's search to its floor (THERM's option (c), 0.07 s) is exact
+for every reading but not for the no-progress guard's view of a stale
+re-anchor; skipping visits under a power or voltage bound changes
+published temperatures and powers between visits. Both await a ruling;
+the measurements are in the THERM2 notes.
+
 ### Known follow-ups (W1g)
 
 Recorded at the W1g integration. None changes a rule above until it lands.
