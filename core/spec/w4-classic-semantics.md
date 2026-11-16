@@ -1210,7 +1210,7 @@ V(p2))/R`. The buzzer is a plain linear resistor to the circuit; polarity does
 not matter electrically.
 
 Detector state in `icState` (default `{lastSign: NaN, lastCrossT: NaN,
-prevCrossT: NaN, envHi: NaN, envLo: NaN, detectedHz: 0}`, `SE:1635-1641`; the
+prevCrossT: NaN, envHi: NaN, envLo: NaN, detectedHz: 0}`, `SE:1644-1646`; the
 `sounding` key is added by the first commit). Per accepted step with `v =
 V(p1) - V(p2)` (`EA:1205-1285`):
 
@@ -1329,7 +1329,7 @@ Stamp `stampResistor(p1, p2, R)` (`EA:1313-1328`); current `(V(p1)-V(p2))/R`
 (`EA:1379-1387`). The comment says the voice-coil inductance is ignored.
 
 Detector (`commitState`, `EA:1339-1378`), state `{vPeak, vTrough, windowStart,
-peakToPeak, sounding}` (default `{NaN, NaN, NaN, 0}`, `SE:1642-1649`); with `v
+peakToPeak, sounding}` (default `{NaN, NaN, NaN, 0}`, `SE:1652-1653`); with `v
 = V(p1) - V(p2)` and `now = simTime + h`:
 - first sample (`windowStart` is NaN): `windowStart = now`, `vPeak = vTrough =
   v`;
@@ -1580,7 +1580,7 @@ section 1.4.
 ### 9.2 Equations
 
 State in `icState`: `in1..inN`, each 1 (sinking), 0 (released) or NaN
-(uninitialised) (`SE:1631-1634`, default NaN for every channel).
+(uninitialised) (`SE:1631-1638`, default NaN for every channel).
 
 **Stamp** (`EA:995-1051`), for each channel `ch`:
 - `outNode = pinNode(out_ch)`; skip the channel if `outNode < 0` (the output
@@ -1683,3 +1683,515 @@ supply (`:207`), unwired GND never sinks (`:237`); channel independence
   100 us (MCU circuits) or 10 ms (quiet circuits) this is visible in a fast
   PWM. **Recommend** the shell commits driver states as events at the input
   edge instant (DK 1.5).
+
+---
+
+## 10. Dual H-bridge: l293d
+
+[W4-D.] `l293dModel` (`EA:1435-1597`), the committed-drive-state design
+described in the header comment `EA:1404-1433`. Four push-pull outputs, two
+enable groups, per-output freewheel diodes. Catalog `l293d` (`CAT:7716`):
+`default_params {}`, `electrical_specs {vcc_range: {4.5, 5, 7}, io_max: 0.6}`.
+
+### 10.1 Terminals and parameters
+
+Pins by id: `en12`, `en34` (`enable`); `in1..in4` (`input`); `out1..out4`
+(`output`); `gnd1..gnd4` (`gnd`; the four are one node, `GR:134-141`
+`unionInternalPins`, "pins 4, 5, 12 and 13 are one exposed ground/heat-sink
+structure"); `vcc1` (`vcc`, the logic supply, 4.5 to 7 V); `vcc2` (`passive`,
+the motor supply "VM", 4.5 to 36 V per the catalog note). Supply roles:
+`supplyPinsForComponent` returns `vcc1` / `gnd1` (W1 section 1.3). No
+parameters are read.
+
+Constants: `H_BRIDGE_RON = 2` ohm per output side, repeated at `EA:1456`,
+`1546`, `1579`; `L293D_VIH = 2.0` V and `L293D_VIL = 1.5` V (`EA:1506-1507`) of
+which `L293D_VIL` is NEVER read; the VM-valid threshold `1.5` V (`EA:1502`);
+the drive codes `HIGH 1`, `LOW 0`, `HIZ -1` (`EA:1528-1530`); the clamp-diode
+helper of section 1.4.
+
+### 10.2 Equations
+
+State in `icState`: `{out1, out2, out3, out4, vm}`, defaults `{-1, -1, -1, -1,
+0}` (`SE:1657-1658`): every output starts HIZ.
+
+**Stamp** (`EA:1438-1492`):
+1. For each `outN`: `stampClampDiode(gnd1 -> outN)` and
+   `stampClampDiode(outN -> vcc2)` (`EA:1465-1469`), ALWAYS, in every drive state
+   including HIZ and with `vcc2` unwired (then its node is held by RSHUNT and
+   the upper diode lifts that node as `outN` rises). Anode and cathode in
+   that order: GND to OUT and OUT to VM.
+2. For each output with committed state: `1` (HIGH): `stampResistor(outN, vcc2,
+   2)` only if `vcc2` is not an open pin (`EA:1476-1480`); `0` (LOW):
+   `stampResistor(outN, gnd1, 2)` (`EA:1481-1484`); `-1`: nothing.
+Outputs whose node is the reference (`outNode < 0`) are skipped for the
+resistor (`EA:1475`) but the diodes are still stamped with a `-1` index
+(harmless).
+
+**Commit** (`EA:1493-1538`):
+- `power = ctx.icPowerInfo(comp, x)` (logic supply `vcc1`/`gnd1`);
+- `vmOpen = isOpenPin(vcc2)`; `vm = vmOpen ? 0 : V(vcc2) - V(gnd1)`; `vmValid =
+  power.powered && !vmOpen && vm >= 1.5` (`EA:1498-1502`);
+- an input or enable reads high iff it is NOT an open pin and `V(pin) -
+  V(gnd1) >= 2.0` (`EA:1512-1516`): a FIXED 2.0 V against `gnd1`, not the
+  `thresholds.vih` of the supply, no hysteresis; an open pin is low;
+- `outN = (!vmValid || !enable) ? HIZ : (inN ? HIGH : LOW)` with `en12` for
+  `out1`, `out2` and `en34` for `out3`, `out4` (`EA:1532-1535`);
+- `icState = {out1..out4, vm}`.
+
+**Current published** (`EA:1539-1571`): the SUM over the four outputs of
+`(V(vcc2) - V(outN))/2` for HIGH and `(V(outN) - V(gnd1))/2` for LOW. The motor
+current of an H-bridge pair is counted at BOTH of its outputs (one source side
+and one sink side), so the published element current is about twice the
+current through a motor driven between two outputs, and it ignores the clamp
+diodes. `HIGH` is summed without checking that `vcc2` is wired (the stamp
+checks).
+
+### 10.3 Dynamics and state
+
+Memoryless apart from the committed drive states. No slew, no dead time, no
+shoot-through (an input change swaps the committed pair in one step), no
+thermal shutdown, no current limit. The clamp pair gives both freewheeling and
+supply-pumping paths ("coast and supply pumping are solved electrically instead
+of only diagnosed", `EA:1462-1464`).
+
+### 10.4 Newton
+
+Eight guarded Shockley diodes per part (two per output), each stamped from
+`xGuess` with the `vSat` guard of section 1.4, no pnjlim; the output resistors
+are linear. An inductive load that is switched off drives the diode pair across
+a large Newton move; the guard keeps the exponent below `exp(40) ~ 2.4e17`
+(`vSat/vtN = 40`), so no overflow but a very stiff diode.
+
+### 10.5 Regimes and events
+
+Per output HIGH / LOW / HIZ, decided from the ACCEPTED step's inputs and
+applied one accepted step later. `vmValid` needs VM at least 1.5 V above `gnd1`
+AND the logic supply powered. No located instant; the `out*` keys compare
+exactly in the step controller (a flip between coarse and refined solves
+rejects the step).
+
+### 10.6 Small-signal AC
+
+`acStamp` (`EA:1572-1596`): per output both clamp diodes' `acStampClampDiode`
+tangent conductances at the held OP (anode/cathode orders as in the stamp),
+plus `stampAcAdmittance(out, vcc2, 1/2)` for HIGH (when VM is wired) or `(out,
+gnd1, 1/2)` for LOW. Not derived from the transient stamp; it reads the same
+committed state.
+
+### 10.7 Diagnostics
+
+- **`output_sag`** (`SE:7973-7988` targets; scan `SE:7576-7660`): every
+  non-HIZ output is a target; HIGH targets sag when `V(out) - V(gnd1) <
+  thresholds.vih`, LOW targets when `> thresholds.vil`, for the LOGIC supply's
+  `thresholds` (generic: at `vcc1 = 5 V`, `vil = 1.5`, `vih = 3.0`). A LOW
+  output sags above 1.5 V, i.e. above 750 mA through 2 ohm; a HIGH output
+  sags below 3 V whatever VM is, e.g. above 1 A with VM = 5 V, above 4.5 A with
+  VM = 12 V. Two sagging steps are required (`OUTPUT_SAG_DEBOUNCE_STEPS = 2`).
+  The comparison uses the logic family's thresholds on a motor-rail output,
+  because that is all `_drivenOutputTargets` knows.
+- No `missing_flyback` for loads on L293D outputs (the L293D is not a switch
+  kind).
+
+### 10.8 Tests that pin it
+
+`wave6-hbridge.test.ts`: forward drive `V_out1 = 12*100/102 = 11.7647 V` with
+100 ohm to ground and VM 12 V (`:268-325`); reverse `0.2353 V` (`:326`);
+disabled gives HIZ (`:371`); motor direction `+-11.5294 V` (`:416-514`); VM
+unconnected gives HIZ (`:515`); integrated freewheel transients (`:829-870`:
+"clamps both sides of a winding after EN12 is released"); flyback suppression
+through the host rule engine (`:916-1033`, section 5.7). `wave7-dcmotor.test.ts:
+399-478` (a motor on an L293D).
+
+### 10.9 Questions
+
+- **Q-W4-{l293ron} (two ohm per side against the datasheet).** A motor
+  between two outputs sees `2 + 2 = 4` ohm of bridge (4 V at 1 A, 2 V at 500 mA;
+  the file comment justifies "0.7 V per transistor ... 1.4 ohm ... use 2 as the
+  teaching value", and the catalog note says "1.4 V total drop at 1 A across
+  both output transistors"). The L293D datasheet (TI, recalled): `VCE(sat)`
+  source 1.4 V typical (1.8 max) at 1 A, sink 1.2 V typical (1.8 max) at 1 A, so
+  about 2.6 V typical across the pair at 1 A and 1.2 V per side at 600 mA.
+  Classic gives 4.0 V at 1 A and its catalog note contradicts its own constant.
+  **Recommend** reproduce 2 ohm for the gate and fix the catalog sentence;
+  record the divergence.
+- **Q-W4-{l293dthr} (fixed 2.0 V input threshold).** `L293D_VIL` is dead; inputs use
+  2.0 V from `gnd1` however the logic supply is set. The L293D datasheet (recalled):
+  `VIH` 2.3 V min (logic supply 4.5 to 7 V), `VIL` 1.5 V max. A 2.0 V threshold
+  accepts inputs the part would not guarantee. **Recommend** reproduce.
+- **Q-W4-{l293sag} (output-sag thresholds from the logic supply).** Section 10.7:
+  the sag test judges a VM-driven output by the logic supply's input
+  thresholds. **Recommend** reproduce for the gate; a W4-D rework should pick
+  limits from the output's own rail (a separate question for the host).
+- **Q-W4-{bridgeI} (published element current counts both sides).** Section
+  10.2. **Recommend** reproduce, and name the readout in the core's telemetry
+  (`package-total`).
+- **Q-W4-{vmfly} (the VM-powered suppression is in the host's rules, not in
+  the engine).** Section 1.10: the engine raises no warning for a winding on an
+  L293D at all, floating VM or not; `wave6-hbridge.test.ts:916-1033` tests
+  the host's `runDiagnostics` copy. **Recommend** the port keeps the engine
+  rule only and does not carry the host rule.
+- **Q-W4-{bridgedead} (no shoot-through guard or dead time).** The committed
+  pair changes in a single step; a real bridge has a dead time and, on the L293D,
+  a shoot-through current spike. **Recommend** reproduce.
+
+---
+
+## 11. Dual H-bridge: tb6612
+
+[W4-D.] `tb6612Model` (`EA:1599-1769`). The same committed push-pull bridge as
+the L293D with a PWM-and-standby truth table. Catalog `tb6612` (`CAT:7860`):
+`default_params {}`, `electrical_specs {vcc_range: {2.7, 3.3, 5.5}, io_max:
+1.2}`.
+
+### 11.1 Terminals and parameters
+
+Pins by id: `ain1`, `ain2`, `bin1`, `bin2` (`input`); `pwma`, `pwmb`
+(`input`); `stby` (`enable`); `ao1`, `ao2`, `bo1`, `bo2` (`output`); `vm`
+(`passive`, the motor supply "2.5 to 13.5 V"); `vcc` (`vcc`, logic 2.7 to
+5.5 V); `gnd`, `gnd2`, `gnd3` (`gnd`; one node, `GR:142-147`). Supply roles:
+`vcc` / `gnd`. No parameters read. Constants: `TB_RON = 2` ohm (`EA:1612`,
+`1721`, `1751`), the `vm` valid threshold `1.5` V (`EA:1652`), drive codes
+`HIZ -1`, `HIGH 1`, `LOW 0` (`EA:1673-1675`). Default state `{ao1, ao2, bo1,
+bo2: -1, vm: 0}` (`SE:1660-1661`).
+
+### 11.2 Equations
+
+**Stamp** (`EA:1602-1644`): identical in form to the L293D with `vm` and `gnd`:
+for each of `ao1, ao2, bo1, bo2` the clamp pair `stampClampDiode(gnd -> out)`
+and `stampClampDiode(out -> vm)` always, then `stampResistor(out, vm, 2)` for
+HIGH (only if `vm` is wired) or `stampResistor(out, gnd, 2)` for LOW.
+
+**Commit** (`EA:1645-1718`):
+- `power = ctx.icPowerInfo(comp, x)`; `vmVolt = vmOpen ? 0 : V(vm) - V(gnd)`;
+  `vmValid = power.powered && !vmOpen && vmVolt >= 1.5`;
+- an input reads high iff not open and `V(pin) - V(gnd) >= power.thresholds.vih`
+  (the supply-ratioed threshold: `max(2.0, 0.6*vSupply)` generic, so 2.0 V at the
+  3.3 V logic supply, 3.0 V at 5 V; there is no hysteresis: `vil` is unused);
+- channel A: if `!vmValid || !stby` both HIZ; else if `!pwma` both HIZ (coast,
+  "PWM LOW -> coast (hi-Z). In DC model PWM is a binary enable"); else by
+  `(ain1, ain2)`: `(1,0)` `ao1` HIGH `ao2` LOW; `(0,1)` `ao1` LOW `ao2` HIGH;
+  `(1,1)` both LOW (brake); `(0,0)` both HIZ (coast) (`EA:1680-1696`);
+- channel B: the same with `bin1`, `bin2`, `pwmb` (`EA:1698-1715`);
+- `icState = {ao1, ao2, bo1, bo2, vm}`.
+
+`updateCurrent` (`EA:1719-1746`) and `acStamp` (`EA:1747-1768`) are the L293D's
+with the TB names.
+
+### 11.3 to 11.6 Dynamics, Newton, regimes, AC
+
+As section 10: no memory beyond the committed states; eight guarded diodes;
+regimes HIGH/LOW/HIZ per output decided from the accepted step and applied one
+step later; no located instant. **PWM is a binary enable evaluated at step
+ends.** A PWM input at 20 kHz (period 50 us) sampled at step ends of 100 us or
+10 ms is a sampled level: the part is in drive or in coast according to the
+instant of the sample, not the duty cycle (the catalog note: "PWM duty-cycle
+averaging for speed control is a Wave 7 motor-dynamics feature -- in this model
+PWM is treated as a binary enable"). Brake `(1,1)` is decided with PWM high
+only.
+
+### 11.7 Diagnostics
+
+`output_sag` as for the L293D (`SE:7989-8010`), with the logic supply's generic
+thresholds at `vcc = 3.3 V`: `vil = max(0.8, 0.99) = 0.99`, `vih = max(2.0,
+1.98) = 2.0`; a LOW output sags above 0.99 V, i.e. above 495 mA through 2 ohm.
+No `missing_flyback` (not a switch kind).
+
+### 11.8 Tests that pin it
+
+`wave6-hbridge.test.ts`: forward `+11.5294 V` (`:560`), reverse `-11.5294 V`
+(`:611`), brake `0 V` (`:661`), coast `0 V` (`:717`), `STBY` low gives HIZ
+(`:772`), body-diode clamps during PWM coast (`:871`).
+
+### 11.9 Questions
+
+- **Q-W4-{tbbrake} (PWM low is coast; the datasheet brakes).** TB6612FNG
+  function table (Toshiba, recalled): `PWM` low with `IN1/IN2 = H/L` or `L/H`
+  gives SHORT BRAKE (both outputs low), `IN1/IN2 = H/H` gives short brake for
+  any `PWM`, and `L/L` with `PWM` high gives stop (off). Classic coasts for `PWM`
+  low. A chopped motor drive therefore recirculates through the body diodes
+  (coast) instead of the low-side FETs (brake). **Recommend** reproduce for the
+  gate and record the divergence; the correct table is a four-line change.
+- **Q-W4-{tbron} (2 ohm against about 0.5 ohm).** TB6612FNG datasheet
+  (recalled): `RON(H+L)` about 0.5 ohm typical, 0.7 max, at `VM` 5 V, 1 A. Classic
+  is 4 ohm across a pair, eight times the datasheet. The catalog note
+  admits "R_on = 2 ohm per output side (simplified)". **Recommend** reproduce.
+- **Q-W4-{tbstby} (STBY and open inputs).** An open `stby`, `pwm`, `in` reads
+  low (`isOpenPin`), consistent with the real part's internal pull-downs on
+  `STBY` and the inputs (recalled); an open `vm` gives HIZ. **Recommend**
+  reproduce.
+- **Q-W4-{tbpwm} (PWM aliasing).** Section 11.3. A 20 kHz or 490 Hz PWM into
+  a `PWM` pin gives a duty-dependent but step-quantised enable. The core's
+  event edges (PLAN W4-D) would make drive/coast exact. **Recommend** the
+  shell evaluates the enable at the PWM edges, not at step ends (DK 1.5), and the
+  gate compares average motor current to the analytic duty-cycle value, not to
+  classic (PLAN decision 7 (b)).
+
+---
+
+## 12. Character LCD controller: hd44780
+
+[W4-P.] `hd44780Model` (`DI:1889-2092`). An HD44780 16x2 text LCD as a decoder
+of E-falling-edge-latched bytes plus a behavioural supply load. All of the
+analog behaviour is one resistor. Catalog `hd44780-lcd` (`CAT:8195`):
+`default_params {}`, `electrical_specs {vcc_range {4.5, 5, 5.5}, logic_family
+"CMOS", v_input {v_il_max 0.6, v_ih_min 2.2}, icc_max 0.003}`.
+
+### 12.1 Terminals and parameters
+
+Pins by id: `vss` (`gnd`), `vdd` (`vcc`), `v0` (`passive`: contrast, never
+stamped), `rs`, `rw`, `e`, `d0..d7` (`input`), `a`, `k` (`passive`: backlight
+anode and cathode, never stamped) (`CAT:8195`; `DI:1897-1900`, `1925`). No
+parameters are read.
+
+### 12.2 Equations
+
+**Stamp** (`DI:1891-1903`): `power = ctx.icPowerInfo(comp, xGuess)`; if
+`power.powered` and `vdd` is not an open pin and `vss` is not an open pin
+(and `vddNode >= 0`), `stampResistor(vdd, vss, 200)`. Nothing else: the bus
+pins are "high-impedance logic inputs ... Driven inputs are not burdened by
+invented pull-downs" and no `_stampFloatingDigitalInputs` is called
+(W1 section 1.6). The 200 ohm load is about 25 mA at 5 V "logic + backlight
+draw" and does not depend on state, contrast or backlight. Powered window
+[4.05, 6.05] V (section 1.9).
+
+**State** `Hd44780State` (`SE:455-469`, default `SE:472-488`): `ddram`
+(104 entries filled with `0x20`), `addr` 0, `fourBit` false, `nibblePhase` 0,
+`hiNib` 0, `displayOn` false, `increment` true, `cgram` false, `twoLine`
+false, `lastE`, `lastRS`, `lastData[8]` all 0. (The comment at `SE:459` says
+the address counter "wraps within 0x00-0x27 / 0x40-0x67"; no code wraps it.)
+
+**Decode** (`updateDigital`, `DI:1907-2069`), once per accepted step in the
+digital pass:
+1. If `!power.powered`: publish `{kind "hd44780", lines [16 spaces, 16 spaces],
+   on false, cols 16, rows 2}`, keep the state, return (`DI:1915-1920`). The
+   state is NOT reset by a power loss.
+2. Events: `mergedDisplayEvents(comp, ["e","rs","d0".."d7"])` (section 1.5, item
+   4; Uno and Nano drivers only).
+3. **Event path** (`events.length > 0`, `DI:2013-2028`): for each `{displayPin,
+   level}` in order: `lvl = level === null ? 0 : level` (a Hi-Z event is a
+   LOW); `e`: if `lcdE == 1 && lvl == 0` call `latchOnEFalling()`, then `lcdE =
+   lvl`; `rs`: `lcdRs = lvl`; `dN`: `lcdD[N] = lvl`.
+4. **Sampled path** (`DI:2029-2041`): `cE = logicHigh(e)`, `lcdRs =
+   logicHigh(rs)`, `lcdD[i] = logicHigh(di)` (the `ctx.logicHigh` of W1 section
+   1.4, with the floating-input model for open pins); if `st.lastE == 1 && cE ==
+   0`, `latchOnEFalling()`; `lcdE = cE`. At most ONE E falling edge per step. With 4-bit wiring `d0..d3` are open pins
+   read through the floating-input model (W1 section 1.5), i.e. pseudo-random per
+   10 ms bucket, which matters only before the part is in 4-bit mode.
+5. `latchOnEFalling` (`DI:1993-2011`): in 8-bit mode (`!fourBit`) the byte is
+   `d7..d0` and `processByte(byte, rs)` runs at once; in 4-bit mode phase 0
+   captures `hiNib = d7 d6 d5 d4` and sets `nibblePhase = 1`; phase 1 forms
+   `(hiNib << 4) | lowNib` from `d7..d4` and runs `processByte`, then phase 0.
+6. `processByte` (`DI:1945-1985`): `rs = 1` (data): if `!cgram && addr <
+   ddram.length` then `ddram[addr] = byte; addr += increment ? 1 : -1`;
+   writes in CGRAM mode are discarded. `rs = 0` (command) in this priority:
+   `0x01` clear (fill `0x20`, `addr = 0`, `cgram = false`); `(b & 0xfe) ==
+   0x02` home (`addr = 0`, `cgram = false`); `(b & 0xfc) == 0x04` entry mode
+   (`increment = bit 1`); `(b & 0xf8) == 0x08` display control (`displayOn = bit
+   2`); `(b & 0xf0) == 0x10` cursor/display shift (accepted, ignored); `(b &
+   0xe0) == 0x20` function set (`fourBit = (b & 0x10) == 0`, `twoLine = (b &
+   0x08) != 0`); `(b & 0xc0) == 0x40` set CGRAM address (`cgram = true`); `(b &
+   0x80) == 0x80` set DDRAM address (`addr = b & 0x7f`, `cgram = false`).
+7. Commit and publish (`DI:2043-2068`): the working copies go back to
+   `state.lcds`; `lines[0] = ddram[0x00..0x0f]`, `lines[1] = ddram[0x40..0x4f]`
+   with each code mapped by `lcdCharToDisplay`: `0x20..0x7e` is its ASCII
+   character, any other code a space; `on = displayOn`.
+
+The power-on state is 8-bit mode; a 4-bit sketch's first `0x30`-style nibbles
+decode as 8-bit bytes because `d0..d3` are never driven (read as 0 on the event
+path, whose `lcdD[0..3]` stay 0), so `0x3 0x3 0x3 0x2` are the function-set
+`0x30` (8-bit) three times and then `0x20` (4-bit), exactly the datasheet's
+initialisation sequence. There is no busy flag, no execution time (every command
+is instant), no `RW` read, no cursor, no blink, no display shift, no CGRAM
+glyphs, no katakana and no contrast (`V0` and the backlight pins are
+never read).
+
+`updateCurrent` (`DI:2072-2081`): `(V(vdd) - V(vss))/200` when powered and both
+supply pins wired, else 0. `acStamp` (`DI:2082-2091`): `1/200` between `vdd` and
+`vss` when `icPowerInfoAtOp` says powered and the pins are wired.
+
+### 12.3 Dynamics and state
+
+None analog. Digital state carries across `load()` by deep copy (`SE:3244-3252`).
+The display is not reset when it loses power (`DI:1915-1920`): re-applying the
+supply shows the old DDRAM (Q below). `lcds` is snapshotted (`SE:2623`).
+
+### 12.4 Newton
+
+Linear: the 200 ohm load only; the power gate reads `xGuess` on every iterate
+(`SUPPLY_GATED_KINDS`, `SE:1383-1389`, and the chatter machinery, W1 section 8).
+
+### 12.5 Regimes and events
+
+- **Powered / not powered** (`[4.05, 6.05]` V) per Newton iterate; when
+  unpowered the display publishes dark and the decoder does nothing.
+- **Event path (exact) vs sampled path.** The event path replays every
+  cycle-ordered edge of the Uno's or Nano's pins inside one step (a whole
+  command sequence), consumed once (`_mcuEdgesPending`). The sampled path sees
+  one end-of-step snapshot and at most one `E` fall: it needs `E` to be
+  HIGH at one step end and LOW at the next.
+- **A Pico is not an event driver for a display.** `_dispDrivers` is built with
+  `includePico = false` (`SE:2482`, `7356-7360`: "the existing max7219/hd44780
+  display-decode call sites ... were never audited against Pico sub-step
+  timing"). A Pico driving an HD44780 (or a MAX7219) therefore always takes
+  the sampled path; a genuine `E` pulse of a few microseconds is shorter than
+  the capped MCU step (100 us) and is never seen by the end-of-step sample, so
+  such a display cannot be driven (Q below). The micro:bit is not an MCU core in
+  the engine (section 14.9) and takes the sampled path too.
+
+### 12.6 Small-signal AC
+
+Only the `200` ohm supply load (section above).
+
+### 12.7 Diagnostics
+
+`vcc_range` puts the part through the failure pass; `_drivenOutputTargets`
+returns nothing for it. `rail_ic_power_chatter` applies (W1 section 8).
+
+### 12.8 Tests that pin it
+
+`wave8-hd44780.test.ts`: event path with an Uno 4-bit sketch,
+`hd44780_hello.hex`, `lines[0] === "Hello, World!   "`, `lines[1]` blank, `on`
+true (`:91`); the sampled fallback with discrete sources writes `A` and sets
+`on` (`:162`); display off command gives `on` false (`:312`); open `vdd` gives
+`on` false and blank lines (`:389`). `mcu-display-replay.test.ts`: the message
+shows under the 555 split and without (`:288-317`); events counted once;
+after an Arduino loses power its last powered step's clocks count once then
+stop, even with another powered Arduino (`:318-355`).
+`digital-input-impedance.test.ts:81-110`: the part has no invented 1 Mohm
+pull-down on its inputs, and the catalog copy matches (`:103`).
+
+### 12.9 Questions
+
+- **Q-W4-{lcdpico} (a Pico cannot drive the display).** Section 12.5.
+  **Recommend** the shell passes events to the display for all MCU kinds
+  (event-exact, PLAN W4-P: "event-exact decoders ... no replay"), recorded as a
+  divergence from classic. Classic's failure to decode a Pico-driven LCD is a
+  gap, not a behaviour a user relies on. Also the same decision for MAX7219.
+- **Q-W4-{lcdpower} (no reset on power loss).** The decoder keeps DDRAM, the
+  address, the mode and the display flag across a supply loss. The datasheet
+  (Hitachi HD44780U, recalled) resets to 8-bit, one-line, display off,
+  increment, after the internal reset circuit runs (needs a rise time and a
+  40 ms wait); DDRAM contents at power-on are undefined; the display must be
+  initialised again. **Recommend** reproduce (the host reloading the circuit
+  does not reset it either).
+- **Q-W4-{lcdtiming} (no busy flag or timing).** Every command is instantaneous,
+  `RW` is unused, `E` pulse width and setup times are not checked, a command
+  sent during the 1.52 ms clear or home (recalled) is not lost. Real sketches that
+  forget delays still work in classic. **Recommend** reproduce; the catalog says
+  "RW read-back is not supported in v1; tie RW to GND".
+- **Q-W4-{lcdrender} (only 16x2 text, ASCII, no cursor, shift or CGRAM).**
+  Characters outside `0x20..0x7e` render as a space; the HD44780's ROM maps
+  `0x5c` to a yen sign and `0x7e`/`0x7f` to arrows (catalog note), custom
+  characters `0x00..0x07` are blank. The renderer's `lines` ignores display
+  shift (`0x18/0x1c`) and a one-line `N = 0` mode. **Recommend** reproduce.
+- **Q-W4-{lcdaddr} (the address counter does not wrap or clamp low).** `addr`
+  can grow past `0x67` (writes stop at `ddram.length`) and can go negative with a
+  decrementing entry mode; `ddram[-1] = byte` would create a non-index property
+  that the state copy drops. A real counter wraps within each line's range.
+  **Recommend** reproduce for the gate and clamp in the port (record it).
+- **Q-W4-{lcdload} (a constant 200 ohm load).** 25 mA at 5 V against the
+  catalog's own `icc_max 0.003` (3 mA, logic only); a lit 16x2 backlight draws
+  about 20 to 40 mA, and the logic supply 1.5 mA (recalled). The load does not
+  change with the display state. **Recommend** reproduce.
+
+---
+
+## 13. LED matrix driver: max7219
+
+[W4-P.] `max7219Model` (`DI:2095-2266`). A MAX7219 as a 16-bit serial register
+decoder plus a behavioural supply load. Catalog `max7219-matrix` (`CAT:8134`):
+`default_params {}`, `electrical_specs {vcc_range {4, 5, 5.5}, logic_family
+"CMOS", v_input {v_il_max 0.8, v_ih_min 3.5}, icc_max 0.33}`.
+
+### 13.1 Terminals and parameters
+
+Pins by id: `din`, `clk`, `cs` (`input`), `vcc` (`vcc`), `gnd` (`gnd`)
+(`CAT:8134`; `DI:2103-2104`). No `dout`, no `iset` pin, no segment or digit
+pins: the part publishes pixel rows only, never an LED current. No parameters
+are read.
+
+### 13.2 Equations
+
+**Stamp** (`DI:2097-2109`): if `power.powered` and `vcc`, `gnd` are wired,
+`stampResistor(vcc, gnd, 150)`: a fixed 33 mA at 5 V "representing a
+representative lit-matrix draw" (catalog). Powered window `[3.6, 6.05]` V
+(section 1.9). The inputs are high-impedance; there is no floating-input stamp.
+
+**State** (`defaultIcState("max7219")`, `SE:1665-1672`, set `icState`): `shift`,
+`bits`, `dig0..dig7`, `decodeMode`, `intensity`, `scanLimit`, `shutdown`,
+`displayTest` (all 0), `lastCLK` 0, `lastDIN` 0, `lastCS` 1 (CS idles high).
+
+**Decode** (`updateDigital`, `DI:2112-2243`), per accepted step:
+1. If `!power.powered`: publish `{rows: [dig0..dig7], intensity, on: false}`
+   with the REGISTERS kept (the state is not reset), and return. Note: the
+   "off" display shows its last digit registers in `rows` with `on = false`.
+2. `merged = mergedDisplayEvents(comp, ["din","clk","cs"])` (section 1.5 item 4).
+3. **Event path** (`DI:2165-2190`): for each event: `din`: `din = lvl`; `clk`:
+   on a rising edge (`clk == 0 && lvl == 1`) `shift = ((shift << 1) | din) &
+   0xffff`, `bits++`; `clk = lvl`; `cs`: on `cs == 1 && lvl == 0` `shift = 0`,
+   `bits = 0` (frame start); on `cs == 0 && lvl == 1 && bits >= 16`
+   `applyRegister((shift >> 8) & 0xff, shift & 0xff)`; `cs = lvl`. A Hi-Z event
+   is level 0. `CLK` edges while `CS` is high still shift (no gating on CS).
+4. **Sampled path** (`DI:2191-2213`): read `din`, `clk`, `cs` with
+   `ctx.logicHigh`; handle CS first (fall: reset; rise with `bits >= 16`:
+   latch), then a CLK rising edge relative to `st.lastCLK`: one edge of each kind
+   per step at most.
+5. `applyRegister(addr, data)` (`DI:2146-2163`): `0x01..0x08` set `dig0..dig7`
+   (stored as raw bytes), `0x09` `decodeMode = data`, `0x0a` `intensity = data &
+   0x0f`, `0x0b` `scanLimit = data & 0x07`, `0x0c` `shutdown = data & 1`, `0x0f`
+   `displayTest = data & 1`; `0x00` and every other address are ignored.
+6. Publish (`DI:2227-2242`): `on = shutdown == 1 || displayTest == 1`; per row `r`:
+   `displayTest ? 0xff : !on ? 0 : (r <= scanLimit ? dig[r] : 0)`;
+   `{kind "max7219", rows, intensity, on}`. `decodeMode` is stored and NOT
+   applied: only raw segment/column bytes are rendered ("BCD mode (0x09) is
+   stored but not rendered", catalog).
+
+Power-on registers: all 0 with `shutdown 0`: the display is off until `0x0c01`
+is written (`wave8-max7219.test.ts:217`). `updateCurrent` (`DI:2246-2255`):
+`(V(vcc) - V(gnd))/150` when powered; `acStamp` (`DI:2256-2265`): `1/150`.
+
+### 13.3 to 13.6 Dynamics, Newton, regimes, AC
+
+No analog dynamics; linear (the 150 ohm load and the power gate); regimes
+`powered/unpowered`, `shutdown`, `displayTest`, `scanLimit`; AC the 150 ohm
+conductance. The event-versus-sampled structure, the Pico and micro:bit
+exclusions and the carry/snapshot rules are those of section 12.5; `icState`
+(not a dedicated map) holds the registers so the generic carry and snapshot
+apply, and `lastCS`, `lastCLK`, `lastDIN` and `bits` compare exactly in the step
+controller.
+
+### 13.7 Diagnostics
+
+`vcc_range` puts it through the failure pass; no output targets;
+`rail_ic_power_chatter` applies (W1 section 8). No `Iset` or overcurrent model.
+
+### 13.8 Tests that pin it
+
+`wave8-max7219.test.ts`: event path with `max7219_frame.hex` after one 20 ms
+step (`:176`); sampled fallback `0x0c01` latches normal operation with one edge
+per step (`:217`); default shutdown off (`:286-352`); unpowered (open `vcc`)
+reports `on` false (`:353`). `mcu-display-replay.test.ts:185-267` (each clock
+edge counted once with and without a 555; with a clocked IC on one MCU
+`:268`). `digital-input-impedance.test.ts:81-110`.
+
+### 13.9 Questions
+
+- **Q-W4-{maxpico} (same Pico and micro:bit gap as the LCD).** Section 12.5.
+  **Recommend** as `Q-W4-{lcdpico}`.
+- **Q-W4-{maxcs} (CLK shifts regardless of CS; latch needs at least 16 bits).**
+  The datasheet (Maxim MAX7219, recalled) shifts on CLK rising only while
+  `LOAD/CS` is low; classic shifts always and resets on the CS fall. A clock
+  running while CS is high corrupts nothing because the next CS fall resets
+  `shift`, but a frame of more than 16 bits (a daisy chain) latches its last 16
+  bits, which is correct for the last device only. **Recommend** reproduce.
+- **Q-W4-{maxreset} (no power-on reset, rows shown with `on = false`).** The
+  registers survive a supply loss; at power-up the real chip clears its control
+  registers (decode, intensity, scan limit to 0, shutdown on, test off) and the
+  digit registers are random (recalled; classic zeroes them). **Recommend**
+  reproduce.
+- **Q-W4-{maxdecode} (decode mode and intensity are stored, not applied).**
+  Section 13.2. The BCD "Code B" font is not rendered; `intensity` only
+  reaches the renderer. **Recommend** reproduce (catalog says so).
+- **Q-W4-{maxload} (150 ohm constant, no `Iset`).** 33 mA at 5 V against
+  the catalog `icc_max 0.33` A; the real draw depends on `Iset` and the lit LEDs
+  (up to 330 mA, recalled). **Recommend** reproduce.
