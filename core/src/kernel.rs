@@ -1799,6 +1799,15 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         self.heap.len()
     }
 
+    /// Switches the THERM2 compaction off for this kernel, so a test can run
+    /// a board with and without it in the same build and compare them bit
+    /// for bit (THERM4). A threshold no heap reaches: [`Self::compact_heap`]
+    /// never runs, and a snapshot carries the threshold with it.
+    #[cfg(test)]
+    pub(crate) fn compaction_off(&mut self) {
+        self.compact_at = usize::MAX;
+    }
+
     pub fn end_host_step(&mut self) {
         self.host_step = None;
     }

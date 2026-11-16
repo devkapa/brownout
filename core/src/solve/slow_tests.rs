@@ -2448,28 +2448,49 @@ fn thermal_readouts(p: &Program, stop: f64, checks: &[f64]) -> Vec<[f64; 6]> {
 #[test]
 fn thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole() {
     // THERM: every identified device on a cell's rail is re-driven at each
-    // rail move, which is what its cost is, and holds its power between
-    // moves. The cell's rail moves by its 10 uV quantum, so a static device's
-    // power is held to `2 V_R 1e-5 / R` of the instant's (220 ohm at V_R ~
-    // 3.2 V: 2.9e-7 W) and its temperature to half the relative power step
-    // of the rise, `1e-5 / V_R` = 3.1e-6. A host stop is a publish too, so
-    // the stops move both inside that. Whatever makes the visits cheaper is
-    // held to the same at host stops of 1 ms, 1/60 s and 100 ms against the
-    // same board stopped every microsecond: T within 1e-5 of the rise and P
-    // within 3e-7 W. (Measured on 9e9aa01: 2.9e-6 and 4e-9 W.)
+    // rail solve and holds its power between solves; a host stop is a
+    // publish too. THERM4, ruling R130: a thermal part's power is no reading
+    // of the cadence's drift cap (R121, Rails point 4), so what holds it is
+    // the cap the readings set. The binding reading here is the draw `i` of
+    // the 220 ohm and LED (14 mA at a 3.1 V drop), and the rail may move `d
+    // <= RAIL_DRIFT_V + CELL_READING_SLACK W0(i) / |di/du|` before it is
+    // solved again, so `|di| <= g RAIL_DRIFT_V + 0.2 (1e-3 i + 1e-9)` with
+    // `g = |di/du| <= 1/220`: `|di|/i <= 3.2e-6 + 2e-4 + 1.4e-8 = 2.03e-4`.
+    // The resistor's held power `R i^2` is off by `2 |di|/i` = 4.1e-4 of
+    // itself at most, the LED's `V i` by `(1 + n vt / V) |di|/i` (n vt 51 mV,
+    // V 1.9 V) = 2.1e-4; the 1 kohm into 1 mF is a closed-form partition the
+    // path drives, its draw a reading with the same slack, 4.1e-4. The rail
+    // only falls, so the error has one sign over the run, and a temperature
+    // (a one-pole of the power, `T - 25 = R_theta P` filtered) is off by at
+    // most that fraction of its rise: 4.1e-4 of the rise for the resistors,
+    // 2.1e-4 for the LED, and a stop's power by as much of itself. All are
+    // inside R130's W0_T (1e-3 C + 1e-3 of the rise; the LED's junction
+    // 1e-3 C: 2.1e-4 of its 3.1 C rise is 6.6e-4 C). On the 10 uV band
+    // (9e9aa01) the bound was `2 RAIL_DRIFT_V / V_R` = 6.4e-6 of the power
+    // and the test held 1e-5 of the rise: measured 2.7e-6 C (3.0e-6 of the
+    // resistor's rise). Under the cadence (5ff6654) THERM3 measured 6.2e-5 C
+    // (6.7e-5 of the resistor's 0.92 C rise at 0.5 s) and 1.1e-4 C on the
+    // LED (3.5e-5 of its rise): the cadence moves them twenty times, inside
+    // its bound by six; a hold ten times longer fails here. Checked at host
+    // stops of 1 ms, 1/60 s and 100 ms against the same board stopped every
+    // microsecond.
     let p = draining_cell_board();
     let checks = [0.1, 0.2, 0.3];
     let fine = thermal_readouts(&p, 1e-6, &checks);
+    let held = [4.1e-4, 2.1e-4, 4.1e-4];
+    let mut worst = [0.0f64; 3];
     for stop in [1e-3, 1.0 / 60.0, 0.1] {
         let got = thermal_readouts(&p, stop, &checks);
         for (c, (g, f)) in got.iter().zip(&fine).enumerate() {
             for k in 0..3 {
                 let rise = f[2 * k] - 25.0;
-                close(g[2 * k], f[2 * k], 1e-5 * rise.abs() + 1e-12, &format!("T of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
-                close(g[2 * k + 1], f[2 * k + 1], 3e-7, &format!("P of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+                worst[k] = worst[k].max((g[2 * k] - f[2 * k]).abs() / rise.abs());
+                close(g[2 * k], f[2 * k], held[k] * rise.abs() + 1e-12, &format!("T of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
+                close(g[2 * k + 1], f[2 * k + 1], held[k] * f[2 * k + 1].abs() + 1e-12, &format!("P of device {} at {} s, stops of {stop} s", k + 1, checks[c]));
             }
         }
     }
+    eprintln!("THERM4: worst T error as a fraction of the rise, devices 1-3: {worst:?}");
     // The one-pole's closed form over the fine run's own powers, held over
     // each microsecond (`T_inf = 25 + R_theta P`, `T = T_inf + (T0 - T_inf)
     // e^(-dt/tau)`), for the two static devices: within 2e-5 of the rise,
@@ -2573,9 +2594,14 @@ fn reading_hash(e: &mut Engine, h: &mut u64) {
 }
 
 /// The run to `end` stopping every `stop` seconds: its reading hash, its
-/// events popped (stat 4) and the longest the heap grew at a stop.
-fn superseding_run(p: &Program, stop: f64, end: f64) -> (u64, f64, usize) {
+/// events popped (stat 4) and the longest the heap grew at a stop; with
+/// `compact` false, THERM2's compaction switched off for the whole run
+/// (`Engine::debug_compaction_off`, a test-only threshold no heap reaches).
+fn superseding_run_with(p: &Program, stop: f64, end: f64, compact: bool) -> (u64, f64, usize) {
     let mut e = Engine::load(p).unwrap();
+    if !compact {
+        e.debug_compaction_off();
+    }
     let (mut h, mut t, mut most) = (1469598103934665603u64, 0.0f64, 0usize);
     while t < end {
         t = (t + stop).min(end);
@@ -2584,6 +2610,10 @@ fn superseding_run(p: &Program, stop: f64, end: f64) -> (u64, f64, usize) {
         most = most.max(e.debug_heap_len());
     }
     (h, e.stat(4), most)
+}
+
+fn superseding_run(p: &Program, stop: f64, end: f64) -> (u64, f64, usize) {
+    superseding_run_with(p, stop, end, true)
 }
 
 #[test]
@@ -2627,24 +2657,35 @@ fn a_draining_cells_events_popped_are_the_plain_boards_and_what_fires() {
 #[test]
 fn a_draining_cells_readings_are_bit_for_bit_wip_therms_at_every_host_stop() {
     // THERM2: dropping superseded entries, and every exact step after it,
-    // changes no reading. The reading hash (`reading_hash`) of the board run
-    // to 0.5 s at host stops of 1 ms, 1/60 s and 100 ms, pinned from
-    // wip/therm (1368f5b), where nothing was dropped.
+    // changes no reading. THERM4 (R130): this pinned reading hashes recorded
+    // on wip/therm, where nothing was dropped and the rail moved by 10 uV;
+    // under the reading-aware cadence (R127) a draining cell's readings move
+    // by design, so a hash from another branch no longer says anything about
+    // the compaction. The same claim, in the same build: the board run to
+    // 0.5 s at host stops of 1 ms, 1/60 s and 100 ms with the compaction and
+    // with it switched off, every reading at every stop (`reading_hash`) bit
+    // for bit. The run without it must keep many more entries queued, or the
+    // comparison would not have exercised a drop.
     let p = superseding_board();
-    let got: Vec<u64> = [1e-3, 1.0 / 60.0, 0.1].into_iter().map(|stop| superseding_run(&p, stop, 0.5).0).collect();
-    assert_eq!(got, [PIN_1MS, PIN_60, PIN_100MS], "{got:#018x?}");
+    for stop in [1e-3, 1.0 / 60.0, 0.1] {
+        let (on, _, on_most) = superseding_run_with(&p, stop, 0.5, true);
+        let (off, _, off_most) = superseding_run_with(&p, stop, 0.5, false);
+        assert_eq!(on, off, "stops of {stop} s: {on:#018x} with the compaction, {off:#018x} without");
+        assert!(off_most > 4 * on_most, "stops of {stop} s: the heap grew to {off_most} entries without the compaction, {on_most} with it");
+    }
 }
-const PIN_1MS: u64 = 0x3f73b8ec653030be;
-const PIN_60: u64 = 0x786a53a457e18e3d;
-const PIN_100MS: u64 = 0x72fb4513da1dc9df;
 
 #[test]
 fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_bit() {
     // THERM2: what the compaction keeps (the heap, `compact_at`) is snapshot
     // state. A snapshot taken with superseded entries queued, restored after
     // compactions dropped them, runs on exactly as the first time, twice
-    // over. A carried reload starts a fresh heap from the carry, and runs
-    // as wip/therm's did.
+    // over, and exactly as the same board run with the compaction switched
+    // off from load. A carried reload starts a fresh heap from the carry and
+    // runs on exactly as the same reload without the compaction. (THERM4,
+    // R130: the reload was pinned to a hash recorded on wip/therm, whose rail
+    // moved by 10 uV; under the cadence the readings move by design, so the
+    // pin compares the two runs in this build instead.)
     let p = superseding_board();
     let run = |e: &mut Engine, from: f64| {
         let mut h = 1469598103934665603u64;
@@ -2655,19 +2696,24 @@ fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_
         h
     };
     let mut e = Engine::load(&p).unwrap();
+    let mut plain = Engine::load(&p).unwrap();
+    plain.debug_compaction_off();
     e.advance(0.1).unwrap();
+    plain.advance(0.1).unwrap();
     for _ in 0..2 {
         let snap = e.snapshot();
         let t = e.time();
         let first = run(&mut e, t);
         let len_after = e.debug_heap_len();
+        assert_eq!(run(&mut plain, t), first, "the run from {t} s without the compaction");
+        assert!(plain.debug_heap_len() > len_after, "the run without the compaction keeps {} entries, with it {len_after}", plain.debug_heap_len());
         e.restore(&snap);
         assert_eq!(e.time(), t);
         assert_eq!(run(&mut e, t), first, "the run from the restored snapshot at {t} s");
         assert_eq!(e.debug_heap_len(), len_after, "the heap after it");
     }
     // A carried reload at 0.3 s (host stops of 1/60 s up to it), run on for
-    // twelve frames: pinned from wip/therm (1368f5b).
+    // twelve frames, with and without the compaction.
     let mut a = Engine::load(&p).unwrap();
     for k in 1..=18 {
         a.advance(k as f64 / 60.0).unwrap();
@@ -2676,7 +2722,9 @@ fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_
     q.options.start_time = a.time();
     q.carry = a.carry_take().unwrap().to_vec();
     let mut reloaded = Engine::load(&q).unwrap();
+    let mut reloaded_plain = Engine::load(&q).unwrap();
+    reloaded_plain.debug_compaction_off();
     let got = run(&mut reloaded, 0.3);
-    assert_eq!(got, PIN_RELOAD, "the carried reload: {got:#018x}");
+    assert_eq!(run(&mut reloaded_plain, 0.3), got, "the carried reload without the compaction");
+    assert!(reloaded_plain.debug_heap_len() > reloaded.debug_heap_len(), "the reload's runs differ in what they keep queued");
 }
-const PIN_RELOAD: u64 = 0xdb2baef55fbc5743;
