@@ -1060,7 +1060,15 @@ impl ClosedFormSolver {
         let v_inf = c + a * du_n + dd * alpha - lin / f;
         let tol = tol_abs + tol_rel * v_now.abs();
         let bound = |delta: f64| lin.abs() * (delta + (-(f * delta).exp_m1()) / f) + a.abs() * k_s * delta * delta / 2.0 + dd.abs() * k_w * (delta * delta * delta / 6.0).min(delta * delta / (2.0 * -f));
-        Some((v_inf, v_now, -1.0 / f, largest_within(bound, tol)))
+        // A majorant whose root is inside the bound, for the search to start
+        // from: with `x = |f| δ`, `x - 1 + e^(-x) <= min(x²/2, x)`, and
+        // `min(δ³/6, δ²/(2|f|)) <= δ²/(2|f|)`, so the bound is at most `C δ²/2`
+        // (`C = |A| K_s + |D| K_w/|f|`) plus `|L| |f| δ²/2` or plus `|L| δ`;
+        // each of those has its root inside, and the larger root is taken.
+        let (l_abs, c) = (lin.abs(), a.abs() * k_s + dd.abs() * k_w / -f);
+        let quad_root = (2.0 * tol / (l_abs * -f + c)).sqrt();
+        let lin_root = if c > 0.0 { 2.0 * tol / (l_abs + (l_abs * l_abs + 2.0 * c * tol).sqrt()) } else { tol / l_abs };
+        Some((v_inf, v_now, -1.0 / f, largest_within_above(bound, tol, quad_root.max(lin_root))))
     }
 
     /// Whether `partition` is aimed under a known rail (Rails point 4).
@@ -2580,8 +2588,42 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
             (hi_k, f_hi_k) = (mid, f);
         }
     }
-    let (mut lo, mut f_lo) = if lo_k >= 0 { (at(lo_k), f_lo_k) } else { (0.0, bound(0.0) - tol) };
-    let (mut hi, mut f_hi) = (at(hi_k), f_hi_k);
+    let (lo, f_lo) = if lo_k >= 0 { (at(lo_k), f_lo_k) } else { (0.0, bound(0.0) - tol) };
+    refine_within(&bound, tol, (lo, f_lo), (at(hi_k), f_hi_k))
+}
+
+/// [`largest_within`] from `floor`, a `δ` the caller has shown to be within
+/// the bound (its own closed-form majorant's root): doubled from there to a
+/// bracket, which is a few doublings where the root lies near it, rather
+/// than the eight evaluations of the search from 1e-12. A `floor` that
+/// rounds outside (or is not positive and finite) falls back to it.
+pub(crate) fn largest_within_above(bound: impl Fn(f64) -> f64, tol: f64, floor: f64) -> f64 {
+    if !(floor > 0.0 && floor.is_finite()) {
+        return largest_within(bound, tol);
+    }
+    let f_floor = bound(floor) - tol;
+    if !(f_floor <= 0.0) {
+        return largest_within(bound, tol);
+    }
+    let (mut lo, mut f_lo) = (floor, f_floor);
+    loop {
+        let hi = 2.0 * lo;
+        // `largest_within`'s horizon: past it the deadline is infinite.
+        if hi > 1e12 {
+            return f64::INFINITY;
+        }
+        let f_hi = bound(hi) - tol;
+        if f_hi > 0.0 {
+            return refine_within(&bound, tol, (lo, f_lo), (hi, f_hi));
+        }
+        (lo, f_lo) = (hi, f_hi);
+    }
+}
+
+/// The root of `bound - tol` inside `lo` (within) and `hi` (past it), each
+/// with its value, by regula falsi with the Illinois weight, each step
+/// keeping the bracket, to [`WITHIN_REL`] of `lo`; `lo` is returned.
+fn refine_within(bound: &impl Fn(f64) -> f64, tol: f64, (mut lo, mut f_lo): (f64, f64), (mut hi, mut f_hi): (f64, f64)) -> f64 {
     // Which end the last step moved: an end left twice in a row has its
     // value halved (Illinois), so both ends close in.
     let mut side = 0i8;
@@ -2594,10 +2636,11 @@ pub(crate) fn largest_within(bound: impl Fn(f64) -> f64, tol: f64) -> f64 {
         if mid <= lo || mid >= hi {
             break;
         }
-        // Every fourth step bisects, so a bound the secant reads badly (a
-        // kink, rounding near the root) still halves the bracket.
+        // A step whose secant falls outside (rounding near the root) bisects,
+        // and so does every eighth, so a bound the secant reads badly (a
+        // kink) still halves the bracket.
         let secant = lo - f_lo * (hi - lo) / (f_hi - f_lo);
-        let x = if n % 4 == 3 || !(secant > lo && secant < hi) { mid } else { secant };
+        let x = if n % 8 == 7 || !(secant > lo && secant < hi) { mid } else { secant };
         let f = bound(x) - tol;
         if f <= 0.0 {
             (lo, f_lo) = (x, f);

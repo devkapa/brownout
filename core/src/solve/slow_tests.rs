@@ -754,6 +754,25 @@ fn a_re_anchor_deadline_is_found_from_below_in_a_few_evaluations() {
     let (got, n) = count(&kink, 1e-4);
     assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "kink: {got} for {want}");
     assert!(n <= 24, "kink: {n} evaluations");
+    // From a floor inside the bound (R29 passes its majorant's root): a floor
+    // within a factor 2 under the root brackets in one doubling, so 0.8 of
+    // the root finds the same root in at most 14 evaluations; a floor past
+    // the root (its bound over tol) falls back to the search from 1e-12 and
+    // finds it again.
+    use super::closed_form::largest_within_above;
+    for (floor, most) in [(0.8 * want, 14), (1.5 * want, 30)] {
+        let n = Cell::new(0usize);
+        let got = largest_within_above(
+            |d| {
+                n.set(n.get() + 1);
+                kink(d)
+            },
+            1e-4,
+            floor,
+        );
+        assert!(kink(got) <= 1e-4 && (got - want).abs() <= 2.0 * WITHIN_REL * want, "floor {floor}: {got} for {want}");
+        assert!(n.get() <= most, "floor {floor}: {} evaluations", n.get());
+    }
 }
 
 /// G2bv2's `p_for`: the `pMax` at which an RC of time constant `tau` fed at
