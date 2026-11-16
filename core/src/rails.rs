@@ -1227,14 +1227,24 @@ impl ExpSum<'_> {
     }
 
     /// The root of `dir` times the sum, increasing on `[a, b]` from `ga < 0`
-    /// to `gb >= 0`: Newton kept inside the bracket, to the last bit.
+    /// to `gb >= 0`: Newton kept inside the bracket, to the last bit. Its 200
+    /// passes may run out with the bracket still open: Newton meets the root
+    /// from below, where the sum reads a hair under 0 over hundreds of
+    /// doubles (a dead transient's last `1e-122`, under terms that cancel to
+    /// exactly 0), and walks them one at a time while `hi` is still the first
+    /// guess, far off (SHIPV-D A1: a root at 0.608 ms answered as 18.03 ms).
+    /// [`Self::close`] then finishes it. Met from above, the walk's `hi` is
+    /// already inside the sum's own rounding of the root and is kept.
     fn newton(&self, dir: f64, a: f64, b: f64, ga: f64, gb: f64) -> f64 {
         let (mut lo, mut hi) = (a, b);
         let mut t = if gb > ga { a + (b - a) * (-ga / (gb - ga)) } else { a + 0.5 * (b - a) };
+        // Whether the passes ran out, and the last one's side and state.
+        let (mut open, mut below, mut walking) = (true, false, false);
         for _ in 0..200 {
             if !(t > lo && t < hi) {
                 t = lo + 0.5 * (hi - lo);
                 if !(t > lo && t < hi) {
+                    open = false;
                     break;
                 }
             }
@@ -1244,9 +1254,11 @@ impl ExpSum<'_> {
             } else {
                 lo = t;
             }
+            below = !(g >= 0.0);
             let d = dir * self.rate(t);
             let next = if d > 0.0 { t - g / d } else { f64::NAN };
             let met = !((next - t).abs() > 4.0 * f64::EPSILON * t.abs());
+            walking = met;
             t = if next > lo && next < hi && next != t {
                 next
             } else if !met {
@@ -1259,6 +1271,42 @@ impl ExpSum<'_> {
             } else {
                 t.next_up()
             };
+        }
+        if open && !(walking && !below) {
+            return self.close(dir, lo, hi);
+        }
+        hi
+    }
+
+    /// The first double of `(lo, hi]` at which `dir` times the sum is at or
+    /// past 0, given it is below 0 at `lo` and at or past it at `hi`, for a
+    /// root expected near `lo`: steps doubling from `lo`'s own last bit
+    /// bracket it, and halving closes the bracket.
+    fn close(&self, dir: f64, lo: f64, hi: f64) -> f64 {
+        let (mut lo, mut hi) = (lo, hi);
+        let mut step = lo.next_up() - lo;
+        for _ in 0..2200 {
+            let p = lo + step;
+            if !(p > lo && p < hi) {
+                break;
+            }
+            if dir * self.at(p) >= 0.0 {
+                hi = p;
+                break;
+            }
+            lo = p;
+            step *= 2.0;
+        }
+        for _ in 0..2200 {
+            let mid = lo + 0.5 * (hi - lo);
+            if !(mid > lo && mid < hi) {
+                break;
+            }
+            if dir * self.at(mid) >= 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
         }
         hi
     }
@@ -3090,6 +3138,38 @@ mod tests {
         // first crossing; ~ (1 - 2e^(-1000 t)) / 0.01, near 100 s. Until 1 ms
         // it is not there, and the turn past the end does not invent it.
         assert_eq!(s.first_crossing_until(false, 1e-3), None);
+    }
+
+    #[test]
+    fn a_root_far_from_both_ends_of_a_wide_bracket_is_found_to_the_last_bit() {
+        // SHIPV-D A1 (property seed 2299, its numbers): two fast transients
+        // (3 us and 2.2 us) die within 0.1 ms, after which the sum is
+        // g(t) = c0 - 3.8614e-4 t - 0.0707566 e^(-3.70366 t), rising through
+        // 0 where e^(-3.70366 t) = (c0 - 3.8614e-4 t) / 0.0707566.
+        // By hand: c0 / 0.0707566 = 0.9977534, so 3.70366 t = -ln 0.9977534 +
+        // 3.8614e-4 t / c0 = 2.24907e-3 + 5.4696e-3 t, t = 2.24907e-3 /
+        // (3.70366 - 0.00547) = 608.15 us. The turn of the sum lies past the
+        // bracket's end (18.09 ms), so the piece is [0, 18.09 ms]: its first
+        // guess, on the chord, is 18.03 ms, and the root is 30 times earlier.
+        // Newton reaches it from below in five passes, where the sum reads
+        // -2.5e-122 (0.14 e^(-457166 t), under slow terms that cancel to 0)
+        // for some 450 doubles: 0.07 rounds at 1.4e-17, a slope of 0.26 makes
+        // that 5e-17 s, and a double at 0.6 ms is 1.1e-19 s. It walked 195 of
+        // them, ran out, and answered with its first guess.
+        let terms = [
+            (-0.00038614143477201434, Basis::Phi(0.0)),
+            (-1.3470040406649275, Basis::Exp(-334002.0737719126)),
+            (-0.07075663341507692, Basis::Exp(-3.703661661423753)),
+            (-0.13993789442364182, Basis::Exp(-457166.4024448495)),
+        ];
+        let s = ExpSum { c0: 7.05976754213347e-2, terms: &terms };
+        let until = 1.808767890726123e-2;
+        let got = s.first_crossing_until(true, until).expect("a root");
+        assert!((got - 608.15e-6).abs() <= 5e-9, "{got:e}");
+        // To the last bit: at or past 0 there, and below it just before
+        // (within the sum's own rounding, 64 ulps of its 0.07 terms).
+        assert!(s.at(got) >= 0.0, "g {:e}", s.at(got));
+        assert!(s.at(got - 1e-15) < 0.0);
     }
 }
 
