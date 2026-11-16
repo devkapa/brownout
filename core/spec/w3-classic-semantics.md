@@ -96,7 +96,7 @@ Registration (`DR`): zener, tvs, diode, led, bicolor, rgb, bjt, mosfet, tl431
 in the SEMICONDUCTORS block (`DR:138-146`), dcdc_converter first and then dual
 op-amp, lm386, lm393, linear_reg, lm317 in the AMPS block (`DR:151-156`), and
 jfet, scr, triac, opto_npn, analog_switch in the MODEL-FAMILIES block at the
-end (`DR:183-190`). Registration order does not decide stamp order: the stamp
+end (`DR:193-198`). Registration order does not decide stamp order: the stamp
 list order is circuit component order (section 1.3).
 
 ### Cross-cutting findings
@@ -289,7 +289,7 @@ Per-parameter rules for every W3 kind (D = literal default):
   without any stamp (`SC:741, 811-815`).
 - **Uncatalogued kinds.** Six kinds exist in `COMPONENT_KINDS` and the
   registry with no bundled catalog part: `src/circuit/types.ts:142-155`,
-  `DR:183-190`. They are reachable from SPICE import (`J` cards give njfet,
+  `DR:193-198`. They are reachable from SPICE import (`J` cards give njfet,
   `src/sim/engine/spice/netlist.ts:1045-1056, 1119-1125`) and from devolt's
   catalog. A part without a `catalogUid` for these kinds gets in-code
   literals only; `electricalSpecs` returns nothing.
@@ -388,7 +388,7 @@ refined snapshots. For the W3 kinds:
 ### 1.6 Small-signal AC
 
 `acStamp(ctx, comp, ac, omega)` runs once per frequency after a DC operating
-point (W1 section 10.x; `ctx.opVoltage(node)` reads the held OP). Every W3
+point (W1 section 10.1; `ctx.opVoltage(node)` reads the held OP). Every W3
 kind carries one (`ac-isolation.test.ts:343-395`, the census). General rules:
 - `AC_GMIN = 1e-12` is added to every junction conductance, to mirror the
   transient stamp's GMIN (`SC:80-85`).
@@ -792,3 +792,527 @@ diagnostic (`:488-521`).
   `f''/f'` bound must take the larger of `1/(nF*Vt)` and `1/(nZ*Vt)`
   (`1/Vt = 38.9 /V` at 25 C). **Recommend** `NARROWEST_BAND` until measured
   (DK question 9 (a)).
+
+---
+
+## 3. Bipolar transistors: bjt_npn, bjt_pnp
+
+[W3-T.] One model object, `bjtModel` (`SC:736-882`), kinds `["bjt_npn",
+"bjt_pnp"]`, polarity `pol = +1` for NPN and `-1` for PNP (`SC:750`).
+
+### 3.1 Terminals and parameters
+
+Pins by position `[C, B, E]` (`SC:739-748`; catalog ids `c`, `b`, `e`,
+functions collector, base, emitter). The stamp, the readout and the AC stamp
+return (stamping and reading nothing) with fewer than three pins, and the
+stamp and AC stamp also return when the BASE pin is open (`ctx.isOpenPin`,
+`SC:743, 804, 849`): a BJT with an unwired base is absent, collector and
+emitter float and the current reads 0.
+
+| Parameter | Read at | Rule (section 1.2) | Default | Catalog (`bjt-npn` CAT:971, `bjt-pnp` CAT:1014) |
+|---|---|---|---|---|
+| `Is` (A at 25 C) | `SC:751` | 1 | **1e-16** | 1e-14 both |
+| `betaF` | `SC:752` | 1 | 100 | 100 |
+| `betaR` | `SC:753` | 1 | 1 | 1 |
+| `nF` | `SC:754` | 1 | 1 | 1 |
+| `nR` | `SC:755` | 1 | 1 | 1 |
+| `earlyVoltage` (V) | `SC:756` (through `modelParam`) | 3 | 0 (no Early effect) | 75 (npn), 100 (pnp) |
+
+Specs: `i_c_max 0.6` A both, `beta_typical 100` (only `i_c_max` is read, by
+the overcurrent warning, section 3.7). `Is` temperature scaling uses `nF` for
+both junctions (`SE:3489-3496`). The per-load junction cache
+(`_rebuildJunctionCache`, `SE:3482-3504`) stores for each BJT, at the ambient
+temperature of that load: `IsT = saturationCurrentAtTemperature(Is, T, nF)`,
+`VtNF = nF*Vt`, `VtNR = nR*Vt`, `vCritBE = vCritFor(IsT, VtNF)`,
+`vCritBC = vCritFor(IsT, VtNR)` (note both critical voltages use `IsT`, which
+was scaled with `nF`). Examples at 25 C: with `Is = 1e-14`, `vCrit = 0.7253 V`;
+with `Is = 1e-16`, `vCrit = 0.8436 V`.
+
+### 3.2 Equations
+
+All from `bjtLinearization` (`EL:973-1041`), shared by the stamp
+(`stampBJT`, `EL:1071-1123`), the readout (`bjtCurrents`, `EL:1128-1162`) and
+the AC stamp. Node voltages `vB`, `vC`, `vE`; `Vt = junctionVt()`:
+- `vBE = pol*(vB - vE)`, `vBC = pol*(vB - vC)`
+- `nfVt = nF*Vt`, `nrVt = nR*Vt`, `vSatF = 40*nfVt`, `vSatR = 40*nrVt` (1.0277 V
+  at `n = 1`, 25 C)
+- `vf = min(vBE, vSatF)`, `vr = min(vBC, vSatR)`: a HARD clamp, with no
+  tangent continuation (unlike the diode law; section 3.9).
+- `eF = exp(vf/nfVt)`, `eR = exp(vr/nrVt)`; `iF = Is*(eF - 1)`,
+  `iR = Is*(eR - 1)`; `gF = Is*eF/nfVt`, `gR = Is*eR/nrVt`; `bRR = 1 + 1/betaR`.
+- Forward Early effect (`EL:1012-1015`): `va = earlyVoltage` if finite and
+  positive, else 0; `earlyRaw = 1 + pol*(vC - vE)/va` if `va > 0` else 1;
+  `earlyScale = max(0, earlyRaw)`; `earlySlope = 1/va` if `va > 0` and
+  `earlyRaw > 0`, else 0. The multiplier applies to `iF` only, not to `iR`.
+- Currents into the terminals (transport form):
+  `icF = iF*earlyScale - iR*bRR`; `ibF = iF/betaF + iR/betaR`;
+  `ib = pol*ibF`; `ic = pol*icF`; `ie = -(ib + ic)`.
+- Jacobian (row = terminal KCL, column = node voltage; identical for NPN and
+  PNP, the polarity factors cancel):
+  - `gbB = gF/betaF + gR/betaR`, `gbC = -gR/betaR`, `gbE = -gF/betaF`
+  - `gcB = gF*earlyScale - gR*bRR`, `gcC = gR*bRR + iF*earlySlope`,
+    `gcE = -gF*earlyScale - iF*earlySlope`
+  - `geX = -(gbX + gcX)` for `X in {B, C, E}` (derived from KCL so every
+    column conserves current even with the Early term)
+- Companion (`EL:1113-1120`): `iBeq = ib - gbB*vB' - gbC*vC' - gbE*vE'`, and
+  likewise `iCeq`, `iEeq`; `b[B] -= iBeq`, `b[C] -= iCeq`, `b[E] -= iEeq`;
+  the nine conductances are added at (row, col) when both are `>= 0`. The
+  primed voltages are the LIMITED effective voltages of section 3.4, not the
+  raw iterate.
+- No GMIN is stamped (the Jacobian has no `1e-12` term, and the AC stamp has
+  none either). A cut-off BJT's base and collector are held only by the
+  `1e-12 S` node shunt.
+- Reported element current (`SC:800-835`): `bjtCurrents(...).ic` at the raw
+  converged `x`, with `IsT` recomputed from `ctx.ambientTempC()` and
+  `nF`: the COLLECTOR current into the collector terminal. For a PNP it is
+  negative in forward-active operation (current leaves the collector
+  terminal). Returns 0 with an open base.
+- Not modelled (catalog `notes`, CAT:971 and following): series resistances
+  `rb`, `re`, `rc`, junction capacitance, transit time, high-injection
+  roll-off, breakdown, noise, self-heating, reverse Early.
+
+### 3.3 Dynamics and state
+
+None: the BJT is memoryless. The only state is the Newton limiter's
+previous-junction map (section 3.4), which is per-solve scratch
+(`_vPrevBJT`, cleared at `SE:6787` and in `_rebuildJunctionCache`), never
+committed and never snapshotted.
+
+### 3.4 Newton
+
+- **pnjlim on each junction independently**, then the node voltages are
+  rebuilt around the fixed emitter (`SC:758-781`):
+  `vBElim = pnjlim(vBEraw, prev.vBE, VtNF, vCritBE)`,
+  `vBClim = pnjlim(vBCraw, prev.vBC, VtNR, vCritBC)`;
+  `vB_eff = vE + pol*vBElim`; `vC_eff = vB_eff - pol*vBClim`;
+  the stamp then uses `(vB_eff, vC_eff, vE)` as the linearisation point for
+  both the Jacobian and the companion sources.
+- `pnjlim` (`NW:133-162`): if `vNew > vCrit` and `|vNew - vOld| > 2*VtN`:
+  for `vOld > 0` `arg = 1 + (vNew - vOld)/VtN`, result
+  `vOld + VtN*ln(arg)` if `arg > 0` else `vCrit`; for `vOld <= 0` result
+  `VtN*ln(vNew/VtN)`; otherwise `vNew` unchanged.
+- `prev` is `ctx.bjtPrevJunction(id) ?? {vBE: vBEraw, vBC: vBCraw}` and is
+  set to the limited values every stamp (`SC:771, 779`); on the first
+  iteration of every solve the map is empty, so pnjlim is a no-op there and
+  limits from the second iteration on.
+- If either junction was limited (`vBElim !== vBEraw || vBClim !== vBCraw`)
+  the stamp calls `ctx.markJunctionLimitedThisIteration()` (`SC:776-778`), and
+  the Newton loop refuses to accept a delta-x-converged iteration while the
+  flag is set (`NW:121-126`). The flag is reset at the start of every
+  iteration (`SE:6807-6810`).
+- Start value: the previous committed node voltages. A fresh solve with
+  nothing wired is `vBE = 0`, which `pnjlim` leaves alone.
+- DC operating point: the engine's gmin and source-stepping ladder
+  (W1 section 10) wraps these same stamps; the BJT has no ladder-specific
+  code. `dc-homotopy-pathological.test.ts:182-244` pins a bistable BJT latch
+  cold start.
+
+### 3.5 Regimes and events
+
+No discrete regime: cut-off, active, saturation and reverse-active are one
+smooth law. The only piecewise features are the `vSat` clamps and the
+`max(0, earlyRaw)` floor (collector current from `iF` vanishes at
+`vCE <= -VA`). Nothing is committed, nothing is detected, nothing is stepped
+over.
+
+At 25 C, `Is = 1e-14`, `betaF = 100`, `betaR = 1`, forcing `Ic = 150 mA` with
+`Ib = 15 mA` gives `Vbe = 0.7837 V`, `Vbc = 0.7171 V`, `Vce(sat) = 66.6 mV`
+(solved from the transport equations; `Vce(sat)` depends only on `Ic/Ib`,
+`betaF` and `betaR`, not on `Is` or on the absolute currents).
+
+### 3.6 Small-signal AC
+
+`SC:840-881`: the nine `lin` entries of `bjtLinearization` at the raw OP
+voltages, `Is` temperature-scaled as in the cache, `nF`, `nR`, Early included,
+no capacitances, no GMIN. At a converged OP `pnjlim` is inert, so this IS the
+transient Jacobian; no disagreement. (A frequency-flat transistor: no `Cbe`,
+`Cbc`, so the AC gain does not roll off.)
+
+### 3.7 Diagnostics
+
+`transistor_overcurrent` (`SC:690-731`, `SC:837-839`): a SimWarning, never a
+failure and never a stamp change. `limit = electricalSpecs(comp).i_c_max`
+(0.6 A for both catalog parts; none, no warning); `current = |elementCurrent|`
+(the collector current). `recordAccumulatedWarning(code, id, "", rate = 1 if
+current > limit else 0, recovery 0.25, h, dwell 1e-4, ...)`: a leaky integrator
+that fills at rate 1 and drains at 0.25 per second of simulated time, latching
+when it reaches `1e-4` accepted seconds of net over-rating. Message:
+"`id` is carrying N mA of collector current against its M mA rating."
+(W1 section 9.7.3.) `missing_flyback` counts `bjt_npn` and `bjt_pnp` as
+switching kinds (`SE:1069-1072`).
+
+### 3.8 Tests that pin it
+
+- `physics-reference-benchmarks.test.ts:449-474`: NPN forced-bias collector
+  current equals the forward-active Ebers-Moll value within 1 percent
+  (`Is = 1e-16`, 0.7 V).
+- `semiconductor-parasitics.test.ts:102-217`: the Early effect: transport
+  current slope `VCE/VA` and PNP symmetry (`:103`), the historical result
+  exactly when `VA` is absent or zero (`:130`), the collector Jacobian against
+  finite differences of the reported current (`:138`), the readout through the
+  engine (`:170`), the catalog default applied to an older identified save
+  (`:193`).
+- `ac-small-signal.test.ts:494-552`: common-emitter gain equals
+  `-gm*(Rc || ro)` from the engine's own OP within 2 percent.
+- `engine-warnings.test.ts:110-242`: `transistor_overcurrent`: latches once
+  when over the rating and reports value against limit, silent at 90 percent,
+  needs dwell (the load seed and one step do not announce), does not change the
+  trajectory, rolls back with `restoreState`, carries across a reload.
+- `spice-ngspice-crossval.test.ts:464-510` case 4: BJT common-emitter `.op`
+  and `.ac` against a live ngspice.
+- `dc-homotopy-pathological.test.ts:182-244`: the bistable BJT latch.
+- `wave6-hbridge`, `wave6-relay`, `wave7-dcmotor`, `wave7-servo-stepper`
+  drive loads through BJTs.
+
+### 3.9 Questions
+
+- **Q-W3-11 (`Is` default 1e-16 versus catalog 1e-14).** A BJT with no `Is`
+  param behaves as `Is = 1e-16`: `Vbe = 0.769 V` at 1 mA, against 0.651 V at the
+  catalog's `1e-14` (computed). The `bjt-npn` and `bjt-pnp` catalog entries
+  carry `Is = 1e-14`; a freshly placed part has the catalog value, a
+  hand-built or SPICE-imported circuit without `Is` gets `1e-16`. The 2N2222
+  SPICE value is 14.34 fA (recalled). **Recommend** Q-W3-1: reproduce the
+  literal in the compiler, keep a test that pins the 0.1 V gap.
+- **Q-W3-12 (hard clamp versus tangent).** The BJT clamps `exp` at
+  `vSat = 40*n*Vt` and freezes both current and conductance
+  (`Is*(e^40 - 1)` = 2.35e3 A for `Is = 1e-14`), while the diode, the JFET
+  gate, the opto LED and the MOS body diode extend along the tangent. Beyond
+  1.0277 V of `vBE` the BJT Jacobian is constant, so a Newton iterate sitting
+  there only moves by the linear solve. **Recommend** reproduce each as is;
+  do not unify (DK `MAX_T`/`Eval` kernels evaluate per device, so this is a
+  per-kernel `eval` detail, but the golden must exercise `vBE = 1.2 V`).
+- **Q-W3-13 (no series resistance: `Vce(sat)` far below the datasheet).**
+  Classic gives `Vce(sat) = 66.6 mV` at `Ic/Ib = 10`. The 2N2222A datasheet
+  (ON Semiconductor, recalled) guarantees `VCE(sat) <= 0.3 V` at 150 mA /
+  15 mA, with typical values around 0.15 V; the difference is the collector
+  and emitter bulk resistance the model lacks. This is documented in the
+  catalog `notes`, so it is a known limitation. **Recommend** reproduce.
+- **Q-W3-14 (open base removes the whole device).** `isOpenPin(base)` returns
+  from the stamp, so a BJT with a floating base stamps nothing, while a base
+  tied through any high resistance stamps the full model. A real transistor
+  with an open base still conducts `Iceo` (nA scale). **Recommend** reproduce
+  (compile as an absent device).
+- **Q-W3-15 (cache versus live params).** The stamp reads `IsT`, `VtN*` and
+  the critical voltages from the load-time cache, while `updateCurrent` and
+  `acStamp` recompute them from the live `params` and ambient temperature
+  (`SC:812-835, 840-870`). The two agree unless a param is edited in place
+  without `load()`, which direct API callers can do (comments at
+  `SE:7694` allow it for sag poles). The core fixes params at load, so
+  **recommend** no action; note it in the compile layer's contract.
+- **Q-W3-16 (limiter choice for the kernel).** DK question 10 asks classic's
+  limiting where it has one, SPICE's otherwise: for the BJT classic's is
+  pnjlim as in section 3.4 with the extra "converged only if not limited"
+  rule. **Recommend** port exactly that (state: the previous limited
+  `(vBE, vBC)` per junction per solve in `DeviceKernel::limit`'s scratch, not in
+  `State`).
+
+---
+
+## 4. MOSFETs: nmos, pmos
+
+[W3-T.] One model object, `mosfetModel` (`SC:884-1040`), kinds `["nmos",
+"pmos"]`, `pol = +1` / `-1` (`SC:897`). Level-1 Shichman-Hodges channel, an
+intrinsic body diode (bulk tied to source) and lumped `Cgs`, `Cgd`.
+
+### 4.1 Terminals and parameters
+
+Pins by position `[D, G, S]` (`SC:887-895`; catalog ids `d`, `g`, `s`). No
+open-pin gate: an unwired gate is just a floating row (held by the node shunt).
+
+| Parameter | Read at | Rule | Default | Catalog |
+|---|---|---|---|---|
+| `vto` (V, positive magnitude for both polarities) | `SC:898` | 1 | 0.7 | 0.7 |
+| `k` (A/V^2, `(KP/2)(W/L)`) | `SC:899` | 1 | 0.02 | 0.02 |
+| `lambda` (1/V) | `SC:900` | 1 | **0** | 0.02 |
+| `cgs` (F) | `SC:904` | 3 | 0 | nmos 5.5e-11, pmos 4e-11 |
+| `cgd` (F) | `SC:905` | 3 | 0 | nmos 5e-12, pmos 2e-11 |
+| `bodyDiodeVf` (V, at 1 A) | `SC:924` through `ctx.junctionVf` | 1 | 0.7 | none |
+
+Specs: `i_c_max 5` A both (`nmos` CAT:1057, `pmos` CAT:1098), read by the
+overcurrent warning. `cgs`/`cgd` are zeroed in a `dcSolveMode()` solve
+(`SC:904-905`), "the gate is open at the operating point". Neither `vto` nor `k`
+is temperature dependent.
+
+### 4.2 Equations
+
+`vGS = pol*(vG - vS)`, `vDS = pol*(vD - vS)`, `vOV = vGS - vto`
+(`EL:1228-1231`); `GMIN_M = 1e-12`. At the previous iterate:
+- **cutoff** (`vOV <= 0`): `id = 0`, `gm = 0`, `gds = GMIN_M`.
+- **triode** (`vOV > 0` and `vDS < vOV`, which INCLUDES every negative `vDS`):
+  `r = 2*vOV*vDS - vDS^2`, `m = 1 + lambda*vDS`; `id = K*r*m`;
+  `gm = 2*K*vDS*m`; `gds = K*(2*vOV - 2*vDS)*m + K*r*lambda`, floored at
+  `GMIN_M`.
+- **saturation** (`vOV > 0`, `vDS >= vOV`): `m = 1 + lambda*vDS`;
+  `id = K*vOV^2*m`; `gm = 2*K*vOV*m`; `gds = K*vOV^2*lambda`, floored at
+  `GMIN_M`.
+- The boundaries are C1-continuous at `vDS = vOV` (current, `gm`, `gds` agree
+  on both sides). At `vOV = 0` the law is NOT continuous for `vDS < 0` (finding
+  below).
+- Actual drain current `idActual = pol*id`.
+- Stamp (`EL:1262-1281`): `(d,g) += gm`, `(d,d) += gds`, `(d,s) += -gm - gds`,
+  `(s,g) += -gm`, `(s,d) += -gds`, `(s,s) += gm + gds`; companion
+  `iDeq = idActual - (gm*vG + gds*vD + (-gm - gds)*vS)` with the RAW node
+  voltages (no polarity factors: they cancel in the Jacobian), `b[d] -= iDeq`,
+  `b[s] += iDeq`. The gate row has no stamp.
+- **Body diode** (`EL:1283-1305`): NMOS anode = source, cathode = drain,
+  `vBd = vS - vD`; PMOS anode = drain, cathode = source, `vBd = vD - vS`.
+  `stampDiodeShockley(bdAnode, bdCathode, vBd, bodyDiodeIs, 1.0, thermalV)`
+  with `bodyDiodeIs = shockleyIsFromVf(bodyDiodeVf, 1.0, 1.0, thermalV)`
+  (i.e. exactly 1 A at `bodyDiodeVf`; `1.4708e-12` at 0.7 V, 25 C) and the
+  default `vSat = 40*Vt`. Nothing else (no `Cjb`, no `Rb`).
+- **Gate charge** (`EL:1307-1320`): only when `gateDynamics.h > 0` and the
+  capacitance is `> 0` (clamped `max(0, finite)`): `stampCapacitor(g, s, cgs,
+  h, vgsPrev)` and `stampCapacitor(g, d, cgd, h, vgdPrev)`, the backward-Euler
+  companion (`EL:164-176, 217-231`): conductance `C/h`, history current
+  `(C/h)*vPrev` (`b[i] += hist`, `b[j] -= hist`). `vgsPrev`, `vgdPrev` come from
+  `ctx.state.mosfetGates.get(id) ?? {vgs: 0, vgd: 0}` (`SC:906`): the
+  previous ACCEPTED solve's `(vG - vS, vG - vD)`, set by `commitState`
+  (`SC:935-945`) and never by a Newton iterate. BE in both integration
+  modes (`SC:908-914`).
+- **Reported element current** (`SC:946-975`): `idChannel` (`mosDrainCurrent`,
+  `EL:1784-1804`, the same law, no GMIN) `+ bodyDrainCurrent + cgdDrainCurrent`:
+  `bodyDrainCurrent = -pol*shockleyDiodeCurrent(bodyVoltage, bodyDiodeIs, 1, vt)`
+  with `bodyVoltage = vS - vD` (NMOS) or `vD - vS` (PMOS), default `vSat`;
+  `cgdDrainCurrent = -cgd*((vG - vD) - previousVgd)/h` (0 for `h <= 0`),
+  `previousVgd` the PRE-commit snapshot (`ctx.previousMosfetGate`,
+  `SE:6751`). The `Cgs` current never reaches the drain and is not included.
+  So the readout satisfies KCL at the drain (the body diode and the Miller
+  current are in it) but not at the source. Positive = into the drain terminal.
+
+### 4.3 Dynamics and state
+
+The only state is `mosfetGates[id] = {vgs, vgd}` (the two history voltages),
+initialised `{0, 0}` at `load()` and carried across `load()` for a same-id,
+same-kind component (`SE:3130-3141`), in the snapshot and rollback
+(`SE:2616, 2678, 2724`), and compared by the step controller at
+`ABS_VOLTAGE` (W1 section 10.14). Integration: backward Euler on `Cgs` and
+`Cgd` always; the trapezoidal rule is never used here (`SC:908-914`: "threading
+branch currents through stampMOSFET is not the trivial change Wave A2
+allows").
+
+At the first step after `load()` a gate at 5 V sees `vgsPrev = 0` unless the
+load seed already committed the gate (the seed solve runs `commitState`, so it
+normally does: `dcSolveMode` zeroes only the capacitances, not the commit).
+
+### 4.4 Newton
+
+No limiter of any kind (no `fetlim`): the square-law kinks at `vOV = 0` and
+`vDS = vOV` are evaluated at the previous iterate and the region can flip
+between iterations with no memory or hysteresis. `limitedThisIteration` is
+never set by the MOSFET. Start value: the previous committed node voltages.
+The pathological cold start `dc-homotopy-pathological.test.ts:246-299`
+(cross-coupled NMOS pair) is the only test of this behaviour and it passes via
+the engine's homotopy ladder, not via the device.
+
+### 4.5 Regimes and events
+
+Three analytic regions chosen from the iterate every Newton iteration, never
+committed: no detection of the instant, no event. The step controller does not
+see a region change (nothing is committed), only the resulting voltage error.
+
+**Findings in the law** (computed):
+1. *Reverse channel conduction is asymmetric.* For `vDS < 0` with `vOV > 0`
+   the law is the triode formula with `vOV` measured from the NAMED source
+   terminal, `id = K*(2*vOV*vDS - vDS^2)*(1 + lambda*vDS)`. A physical MOSFET
+   is source/drain symmetric; the reverse current here is
+   `K*(2*vOV*|vDS| + vDS^2)*(1 - lambda*|vDS|)` in magnitude, larger than the
+   forward value at the same `|vDS|` (for `vGS = 5 V`, `vto = 0.7`, `K = 0.02`,
+   `lambda = 0.02`: `+0.356 A` at `vDS = +3 V` (triode), `-0.654 A` at
+   `vDS = -3 V`).
+2. *`(1 + lambda*vDS)` goes negative for `vDS < -1/lambda`* (-50 V at
+   `lambda = 0.02`): the channel current then reverses sign.
+3. *Discontinuity at `vOV = 0` for `vDS < 0`.* Crossing `vGS = vto` the current
+   jumps by `-K*vDS^2*(1 + lambda*vDS)` (about 9.7 mA at `vDS = -0.7 V`,
+   0.17 A at `-3 V`), because cut-off is exactly 0 while the triode formula at
+   `vOV = 0+` is not.
+These are visible only when the drain is below the source (a freewheeling or
+reversed device); the body diode takes over beyond roughly `-0.7 V`.
+
+### 4.6 Small-signal AC
+
+`SC:979-1039`: `gm`, `gds` from the same piecewise law (the AC code
+re-derives them with identical expressions, `gds` floored at `AC_GMIN`),
+stamped as the six VCCS entries; the body diode's guarded slope
+`shockleyConductanceAtOp(vBd, bodyDiodeIs, 1, vt) + AC_GMIN` between its anode
+and cathode; and the gate charge as true `j*omega*C`
+(`stampAcAdmittance(ac, g, s, 0, omega*cgs)` and `(g, d, 0, omega*cgd)`,
+`SC:1035-1038`), with `max(0, ...)`. It is the derivative of the transient
+model with the BE companion replaced by the exact capacitor: they agree in the
+limit `omega*h -> 0` (the BE capacitor admittance is `C/h*(1 - e^{-j*omega*h})`
+sampled, not `j*omega*C`). No other disagreement.
+
+### 4.7 Diagnostics
+
+`transistor_overcurrent` as in section 3.7 with `limit = i_c_max = 5 A` and
+`current = |element current|` (the drain current including body and Miller
+parts, `SC:837, 976`; message says "drain current"). `missing_flyback` counts
+`nmos`, `pmos` as switching kinds.
+
+### 4.8 Tests that pin it
+
+- `physics-reference-benchmarks.test.ts:476-490`: NMOS triode (within 0.5
+  percent) and cut-off (below 1 nA) currents against the level-1 equations
+  (`VTO = 1`, `K = 0.01`, `VGS = 5`, `VDS = 2`).
+- `semiconductor-parasitics.test.ts:219-403`: Cgs and Cgd as conservative BE
+  companions (`:220`), the closed-form BE charge of a resistively driven gate
+  and exact rollback (`:254`), the catalog `cgs`/`cgd` default on an older save
+  (`:294`), Miller coupling of a drain step (`:325`), the body-diode current in
+  the drain readout (`:357`) and its temperature consistency (`:379`).
+- `ac-small-signal.test.ts:554-625`: common-source Miller pole within 5
+  percent.
+- `engine-warnings.test.ts:144-160`: overcurrent for a MOSFET.
+- `dc-homotopy-pathological.test.ts:246-299`: the NMOS latch.
+- `wave6-relay`, `wave6-hbridge`, `wave7-*`: MOSFET and BJT drivers.
+
+### 4.9 Questions
+
+- **Q-W3-17 (reverse conduction, section 4.5 findings 1 to 3).** The
+  port can mirror the asymmetric reverse law bit for bit, or make the
+  channel symmetric by swapping the roles of D and S when `vDS < 0`. Decision 7
+  (b) points at the analytic answer; the analytic answer for a symmetric
+  device is the symmetric law, and classic's differs by a large factor. The
+  circuits that reach it (H-bridge freewheel, synchronous rectifier) are also
+  the ones with the body diode in parallel. **Recommend** mirror classic for
+  W3-T (gate 1 identity) and open a divergence entry for the symmetric law,
+  decided after the extended-semis ngspice cases; do NOT fix silently.
+- **Q-W3-18 (catalog `lambda` 0.02 versus code default 0).** A MOSFET placed
+  from the catalog has `lambda = 0.02` (output conductance `K*vOV^2*0.02`);
+  one without the key has 0. Cited by Q-W3-1.
+- **Q-W3-19 (no Newton limiter).** SPICE limits the gate voltage step
+  (`fetlim`) and the drain-source step (`limvds`). Classic has neither; DK
+  question 10's "SPICE's otherwise" would add them. **Recommend** the port
+  adds none in W3-T (bit-identity with classic and the cold-start tests, which
+  pass without), and revisits only if the 6-cadence harness shows a
+  convergence loss; record it as a divergence if added.
+- **Q-W3-20 (gate capacitance model).** `Cgs`/`Cgd` are constant. A real
+  2N7000: `Ciss` about 20 to 60 pF, `Crss` about 5 pF, `Coss` about 25 pF
+  (recalled): classic's `55 pF` and `5 pF` are in range but the real `Cgd`
+  rises steeply at low `vDS`. Not an accuracy-gate item. **Recommend**
+  reproduce.
+- **Q-W3-21 (the readout satisfies KCL at the drain, not the source).** An
+  `elementI` consumer summing source current gets `Cgs` and body diode
+  mismatches. **Recommend** the core publishes the same drain-terminal
+  number (it is the telemetry contract) and nothing else.
+- **Q-W3-22 (body diode `vSat` is not raised).** The body diode uses
+  `vSat = 40*Vt = 1.0277 V` while its 1 A anchor is at 0.7 V, so it is the
+  generic diode; unlike the TVS (section 2.3) the anchor is below `vSat` and
+  honoured. No action; listed so the golden pins the 1 A anchor.
+
+---
+
+## 5. JFETs: njfet, pjfet
+
+[W3-F, "on the MOS pattern".] `jfetModel` (`MF:329-432`), kinds `["njfet",
+"pjfet"]`, `pol = +1` / `-1`. A depletion-mode Shichman-Hodges channel plus two
+physical gate junction diodes. No catalog entry in `default-parts.json`; the
+devolt catalog has `njfet` (`devolt:parts.json:2007`) and `pjfet`
+(`devolt:parts.json:2066`).
+
+### 5.1 Terminals and parameters
+
+Pins by id `d`, `g`, `s` (`MF:337-340`); fewer than three pins returns.
+
+| Parameter | Read at | Rule | Default | devolt catalog |
+|---|---|---|---|---|
+| `vto` (V) | `MF:319` | 1, coerced `-max(0.05, abs(vto))` | -2 | njfet -3, pjfet -4.5 |
+| `idss` (A) | `MF:320` | 1, `max(1e-9, .)` | 0.01 | njfet 0.003, pjfet 0.022 |
+| `lambda` (1/V) | `MF:324` | 1, `max(0, .)` | 0 | njfet 0.0033, pjfet 0.001 |
+| `Is` (gate junctions, A) | `MF:325` | 1, `max(1e-30, .)` | 1e-14 | none |
+
+`beta = idss/vto^2` (`MF:323`), so `Id(vGS = 0) = idss` in saturation. `vto`
+is forced negative for both channel types: a positive authored value is
+treated as `-|vto|`. Specs in the devolt catalog: njfet `i_c_max 0.005`,
+`p_max 0.31`; pjfet `i_c_max 0.07`, `p_max 0.35`; the engine reads neither (no
+overcurrent warning for the JFET).
+
+### 5.2 Equations
+
+Channel: `jfetLinearization` (`EL:1839-1874`), identical to the MOSFET law of
+section 4.2 with `vto -> vto (negative)`, `K -> beta`: `vGS = pol*(vG - vS)`,
+`vDS = pol*(vD - vS)`, `vOV = vGS - vto`; cutoff `vOV <= 0`, triode
+`vDS < vOV`, saturation otherwise; `GMIN_J = 1e-12` floors `gds`. The stamp
+(`stampJFET`, `EL:1884-1918`) is the MOSFET's six-entry VCCS pattern and
+companion without a body diode or gate charge. The findings of section 4.5
+(asymmetric reverse conduction, `(1 + lambda*vDS)` sign, the jump at
+`vOV = 0` for `vDS < 0`) apply unchanged.
+
+Gate (`MF:351-370`): two guarded Shockley diodes, `Is = isGate`, `n = N_DIODE`,
+`Vt = ctx.junctionVt()`, default `vSat = 40*Vt` (`stampDiodeShockley`, section
+1.8, no raised vSat):
+- n-JFET: gate-source anode `g`, cathode `s`; gate-drain anode `g`, cathode `d`.
+- p-JFET: gate-source anode `s`, cathode `g`; gate-drain anode `d`, cathode `g`.
+Each is evaluated at its own junction voltage `V(anode) - V(cathode)` of the
+iterate (`MF:357-368`).
+
+Reported current (`MF:374-392`): `channel - pol*gateDrain`, with
+`gateDrain = shockleyDiodeCurrent(vGd, isGate, N_DIODE, vt)`,
+`vGd = vG - vD` (n) or `vD - vG` (p), default `vSat`; the drain-terminal
+current (channel plus the gate-drain junction's contribution at the drain).
+The gate-source junction never reaches the drain node and is not reported.
+
+### 5.3 Dynamics and state
+
+None. No `Cgs`/`Cgd` ("unlike the MOSFET model there is no Cgs/Cgd here at
+all", `devolt/apps/sim/lib/sim/model-disclosure.ts`), no junction capacitance,
+no self-heating, no state.
+
+### 5.4 Newton
+
+No limiter (the comment at `MF:343-345` repeats the diode rationale: both gate
+junctions are "current-limited by the surrounding circuit"). Previous iterate,
+previous committed voltages as the start.
+
+### 5.5 Regimes and events
+
+As the MOSFET: three channel regions chosen from the iterate, no commit. The
+gate junctions are reverse-biased in normal operation (about `1e-12 S`
+leakage each) and conduct when the gate is driven about 0.6 V past the channel.
+
+### 5.6 Small-signal AC
+
+`MF:394-432`: channel `gm`, `gds` from `jfetLinearization` (so the GMIN floor
+is included) as the six entries, and the two gate junctions'
+`shockleyConductanceAtOp + AC_GMIN` between `g,s` and `g,d`. The derivative of
+the transient stamp; no disagreement.
+
+### 5.7 Diagnostics
+
+None.
+
+### 5.8 Tests that pin it
+
+`extended-semis.test.ts:203-290` ("njfet — Shichman-Hodges channel physics"):
+`idss` at `vGS = 0` in saturation within 1 percent (`:204`), pinch-off leakage
+only (`:213`), saturation transfer curve against
+`beta*(vGS - vto)^2*(1 + lambda*vDS)` within 1 percent (`:223`), forward gate
+drive conducts through the gate junctions (`:244`), common-source gain
+`gm*RL` within 2 percent (`:277`). `spice-ngspice-crossval.test.ts:550-581`
+case 6: self-biased JFET `.op` against ngspice. `extended-integration.test.ts`
+mega-fixture. SPICE import: `spice/netlist.ts:1045-1056, 1119-1125`
+(`J` cards give `njfet`; model type `pjf` gives `pjfet`).
+
+### 5.9 Questions
+
+- **Q-W3-23 (shared reverse-conduction defect).** The JFET inherits
+  section 4.5's three findings. A JFET is symmetric (source/drain
+  interchangeable); classic's reverse mode is not. Same recommendation as
+  Q-W3-17.
+- **Q-W3-24 (`idss`/`vto` cannot both match a datasheet).** The devolt
+  catalog's `model-disclosure` already says that a JFET's typical `gm` and
+  typical cut-off cannot both be matched by the square law; the pjfet
+  defaults (`vto -4.5`, `idss 0.022`) are a "cross-checked midpoint" for the
+  J175 whose datasheet gives no typical values (devolt `model-disclosure.ts`
+  `pjfet` entry). **Recommend** none for the port.
+- **Q-W3-25 (the six uncatalogued kinds and `catalogUid`).** None of njfet,
+  pjfet, scr, triac, opto_npn, analog_switch has a bundled catalog entry, so
+  the core's compile layer, which gets its catalog from the same bundle,
+  has no `default_params` for them and no `electrical_specs`; devolt's
+  catalog (injected at runtime through `setPartLibrary`) has them.
+  **Recommend** the compile layer reads literals only (as classic does) and
+  PLAN decision 6 (the unnamed kinds into W3, recommended yes) adds them to
+  the support table; a catalog sync between brownout's bundle and devolt's
+  is a separate item.
+- **Q-W3-26 (one `Is` for both gate junctions).** The gate-source and
+  gate-drain diodes share `Is` (default 1e-14: a 0.651 V drop at 1 mA, as a
+  silicon junction). A real JFET's two junctions are one structure, so this is
+  reasonable. **Recommend** none; the golden pins both anchors.
