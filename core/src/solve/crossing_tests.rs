@@ -336,6 +336,49 @@ fn a_555_reset_an_led_knee_and_a_fuse_on_a_draining_cells_path_cross_with_a_1_us
     }
 }
 
+/// Rail events (stat 18) of `p` run to `t_end` with the host stopping every
+/// `h`, on R121's cadence or on the 10 uV band.
+fn rail_events(p: &Program, h: f64, t_end: f64, band: bool) -> f64 {
+    crate::rails::force_fixed_cell_band(band);
+    let mut e = Engine::load(p).unwrap();
+    for t in stops(h, t_end) {
+        e.advance(t).unwrap();
+    }
+    crate::rails::force_fixed_cell_band(false);
+    e.stat(18)
+}
+
+#[test]
+fn a_small_cell_feeding_a_fast_monostable_solves_its_rail_no_more_often_than_the_band() {
+    // CAD-4, SHIPV-G's M272: a 555 monostable (RT 1379 ohm, 219 nF, 4.7 k
+    // on its output) fired by a 776 Hz clock, on a 3 uAh, 0.109 ohm cell at
+    // 92 % with nothing else across the rail. The band solves every 10 uV
+    // of the rail's path: the rail falls from E(0.919) = 3.4074 + 0.919 x
+    // 1.4763 = 4.764 V to 4.621 V by 0.1275 s, 0.143 V, so about 14,300
+    // solves (14.0k measured at 1 ms hosts; 2.0k at 1 us, where every stop
+    // solves it). R121's time watch held the drain's line straight only as
+    // long as `C rho_dot tau` kept the timing capacitor's current within
+    // 0.2 of its W0, whose 1 nA floor binds: the line turns with every
+    // charge of the 219 nF capacitor (its 0.30 ms time constant), rho_dot
+    // about 1e3 V/s^2, so tau = 0.2 x 1.07 nA / (219 nF x 1e3 V/s^2) = 1 us
+    // (0.6 us probed), and the cadence took 35.6k rail events at 1 ms hosts
+    // (17.2k at 1 us). The band held the same line straight for its whole
+    // 9 us passage, so within it the readings err no more than the band's;
+    // the bound now never falls short of the band's passage. Margin: the
+    // cadence also lands its own thresholds (the scan band every 20 mV of
+    // travel, the curved partitions' bands, the logic levels), each passed
+    // once per such travel; 100 covers them (SHIPV-G's 600 boards: none
+    // above the band at coarse hosts, at most 87 above at 1 us).
+    let d = vec![cell(0, 0.10869160147277165, 3.006505746061428e-6, 0.9189997502889509), n555(10, 5, 4, 6, 3, 3, 8), r(11, 1, 3, 1378.697367889984), c(12, 3, 0, 2.1865801889116618e-7), c(13, 6, 0, 1e-8), clock(14, 5, 776.4704769516004, 0.9, 1), r(15, 4, 0, 4700.0)];
+    let p = prog(7, d);
+    let t_end = 0.12747014170965318;
+    for h in [1e-3, 1.0 / 60.0, 0.1, 1e-6] {
+        let (cad, band) = (rail_events(&p, h, t_end, false), rail_events(&p, h, t_end, true));
+        eprintln!("M272 at host {h:e}: {cad} rail events on the cadence, {band} on the band");
+        assert!(cad <= band + 100.0, "M272 at host {h:e}: {cad} rail events on the cadence against the band's {band}");
+    }
+}
+
 /// `got`'s flips against `fine`'s: the worst offset as a share of
 /// `tau_w0`, or why they do not pair (a flip lost or gained, or a level
 /// out of turn).

@@ -20736,7 +20736,10 @@ fn a_cells_rail_solves_by_the_instant_its_crossings_were_searched_to_however_nea
     // earlier by 0.8 V/s: the solve at `now` sets `cad_t` within float
     // rounding of `now`, and the rail's event is the first instant the kernel
     // accepts, `(now + 1e-15).next_up()`, not the drift passage (fails
-    // first there: 0.42 ms on).
+    // first there: 0.42 ms on). Since CAD-4 the line's bound never comes
+    // before the 10 uV band's own passage (the band held the line that
+    // long), so a jump in the line no longer puts `cell_until` at the solve:
+    // it is the band's passage, and the rail's event is due by then.
     let p = program(3, vec![generic_battery(0, 1, 0, 5.0, 1.0, 1e-4), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 0, 1e-6, 0.0)]);
     let mut rig = Rig::load(&p).unwrap();
     let now = 5e-4;
@@ -20753,7 +20756,11 @@ fn a_cells_rail_solves_by_the_instant_its_crossings_were_searched_to_however_nea
     let st = &s.hub.as_ref().unwrap().state;
     let floor = (now + 1e-15).next_up();
     eprintln!("cad_t {:.17}, cell_until {:.17}, event {:?}", st.cad_t, st.cell_until, st.event_t);
-    assert!(st.cell_until <= now + 1e-12, "cell_until {} not at the solve", st.cell_until);
+    let modes = st.cell_path.as_ref().and_then(|p| p.modes.as_ref()).expect("the coupled path");
+    let (up, down) = modes.passages(Some(rails::RAIL_DRIFT_V), Some(-rails::RAIL_DRIFT_V));
+    let band = now + up.min(down);
+    assert!(st.cad_t <= now + 1e-12, "cad_t {} not at the solve", st.cad_t);
+    assert_eq!(st.cell_until, band, "cell_until at the band's passage");
     let at = st.event_t.expect("a rail event");
     assert!(at <= floor.max(st.cell_until), "the rail's next solve at {at:.17}, its crossings searched only to {:.17}", st.cell_until);
 }

@@ -1728,9 +1728,26 @@ impl PartitionedSolver {
         };
         hub.state.cad_d = cad_d;
         hub.state.cad_t = cad_t;
+        // The held line's bound never comes before the 10 uV band's own
+        // passage: the band held the same line straight that long, so
+        // within it the readings err no more than they did on the band, and
+        // the rule asks only for its slack beyond that. Without the floor a
+        // small cell's line, turning with every flip of what it feeds, set
+        // `C rho_dot tau` (a 219 nF timing capacitor at the 1 nA floor of
+        // its current's W0) at 0.6 us, where the band solved every 9 us:
+        // SHIPV-G's M272 (a 3 uAh cell, a 776 Hz monostable) took 35.6k rail
+        // events to the band's 14.0k at 1 ms hosts, 17.2k to 2.0k at 1 us
+        // (CAD-4). The band's passage is found first so that the drift cap's,
+        // which the path watch asks for again, is the one memoised.
         hub.state.cell_until = cell_path.as_ref().and_then(|p| p.modes.as_ref()).map_or(f64::INFINITY, |m| {
+            let band = if cad_t.is_finite() {
+                let (up, down) = m.passages(Some(rails::RAIL_DRIFT_V), Some(-rails::RAIL_DRIFT_V));
+                now + up.min(down)
+            } else {
+                f64::INFINITY
+            };
             let (up, down) = m.passages(Some(cad_d), Some(-cad_d));
-            (now + up.min(down)).min(cad_t)
+            (now + up.min(down)).min(cad_t.max(band))
         });
         hub.state.cell_path = cell_path;
         hub.state.held_i = held_i;
