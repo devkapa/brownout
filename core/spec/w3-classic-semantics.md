@@ -2380,3 +2380,496 @@ cathode near 12 V (`:505`).
 - **Q-W3-62 (`cathNode < 0` returns everything).** With the cathode on the
   ground node no stamp is written, including the REF bias. **Recommend**
   reproduce (the case is degenerate).
+
+---
+
+## 13. Linear regulators: linear_reg, lm317
+
+[W3-R; needs W3-H and W3-G; DK 2.1.] Two model objects sharing the same
+regime machinery and `stampLinearRegulator`/`regulatorRegime`
+(`EL:1626-1781`): `linearRegModel` (`AR:1277-1408`, three catalog parts) and
+`lm317Model` (`AR:1410-1530`). Each owns one branch row keyed by the component
+id (`branchRows`, `AR:1282, 1413`), always allocated.
+
+### 13.1 Terminals and parameters
+
+Pins by id: `linear_reg` `in`, `gnd`, `out`; `lm317` `in`, `adj`, `out`
+(`AR:1290-1292, 1422-1424`); fewer than three pins or no branch row returns.
+The "reference pin" is `gnd` for the fixed regulator and `adj` for the LM317.
+
+| Parameter | linear_reg | lm317 | Read at |
+|---|---|---|---|
+| regulated voltage above the reference pin | `vout` 5.0 | `vref` 1.25 | `AR:1293, 1425` |
+| `vdropout` (V, fixed headroom) | 2.0 | 2.0 | `AR:1294, 1426` |
+| `iLimit` (A) | 1.0 | 1.5 | `AR:1295, 1427` |
+| `quiescentCurrent` (A) | explicit param else exact-uid table | same | `SE:1169-1177` |
+
+None is clamped: the values go straight into the regime logic. Catalog parts
+(`vout`, `vdropout`, `iLimit`): `reg-7805` (CAT:6861) 5, 2, 1;
+`reg-ams1117-33` (CAT:6921) 3.3, 1.1, 0.8; `reg-ams1117-50` (CAT:6981) 5, 1.1,
+0.8; `lm317` (CAT:7041) `vref 1.25`, 2, 1.5. `p_max` 15, 1, 1, 20 W (not read).
+`regulatorQuiescentCurrent` (`SE:1157-1177`): the explicit param if finite
+and `>= 0`; else, only when `catalogUid` resolves to a part of this kind with the
+same uid, the table `reg-7805 6.5 mA`, `reg-ams1117-33 5 mA`,
+`reg-ams1117-50 5 mA`, `lm317 50 uA` (the LM317 adjustment-pin current); else
+0.
+
+### 13.2 Equations
+
+Branch row `k`; `stampLinearRegulator` (`EL:1626-1672`), regime `r` in
+{0 REG, 1 DROPOUT, 2 CC, 3 OFF}, `R` the reference pin node:
+- Always: `add(out, k, +1)` and `add(in, k, -1)`, so the pass current
+  `I = -x[k]` is delivered to `out` and drawn from `in`
+  (`x[k]` is NEGATIVE while delivering; `elementI = x[k]`,
+  `publishRegulatorBranchCurrent`, `AR:332-344`; tests take `abs`).
+- REG: `add(k, out, 1)`, `add(k, R, -1)`, `b[k] = Vreg`: `V_out - V_R = Vreg`.
+- DROPOUT: `add(k, out, 1)`, `add(k, in, -1)`, `b[k] = -vdropout`:
+  `V_out - V_in = -vdropout`.
+- CC: `add(k, k, 1)`, `b[k] = -iLimit`: `x[k] = -iLimit`.
+- OFF: `add(k, k, 1)`, `b[k] = 0`: `x[k] = 0` (both terminals independent).
+- Quiescent: unless shut down or `r = 3` and `iq > 0`:
+  `stampCurrentSource(R, in, iq)`: a constant `iq` drawn from `in` into the
+  reference pin (`AR:1342-1345, 1472-1475`).
+- LM317 only: `stampResistor(adj, ground, 1e5)` always (`AR:1430`), a 100 kohm
+  adjust-pin pull-down.
+- There is no output impedance in REG (an ideal source behind the branch), no
+  line or ripple rejection model, and `x[k]` is unconstrained in sign: an
+  output driven above its setpoint by another source makes `x[k] > 0` (the
+  regulator SINKS current into its input). The REG row never checks the sign
+  (see Q-W3-65, H7).
+
+### 13.3 Per-solve regime selection and the commit
+
+**At every stamp** (`AR:1296-1341`, LM317 mirrored `AR:1431-1471`), with
+`key = "linear_reg:" + id` (or `lm317:`), iterate voltages `vIn`, `vR`, `vOut`
+and `H = vIn - vR`:
+1. `thermalShutdown = thermalDevices[id]?.thermalShutdown === true` (the
+   COMMITTED flag from the last accepted step, section 1.7).
+2. `reg0 = thermalShutdown ? 3 : (finite(st.reg) ? st.reg : 0)`: an
+   uninitialised `NaN` regime stamps as REG.
+3. `headroomReg = (!shutdown && reg0 !== 2) ? regulatorHeadroomRegime(key, reg0,
+   H, Vreg, vdropout) : reg0` (section 1.4): from a committed CC the headroom
+   selection is skipped.
+4. `entryClamp = headroomReg !== 2 && headroomReg !== 3 &&
+   useCurrentLimitEntryClamp(key, x[k]_guess, iLimit)`;
+   `currentReg = entryClamp ? 2 : headroomReg`.
+5. `compliance = max(0, min(Vreg, H - vdropout))`;
+   `complianceClamp = currentReg === 2 && useCurrentLimitComplianceClamp(key,
+   vOut - vR, compliance, 0)`.
+6. `stampReg = complianceClamp ? (H <= vdropout ? 3 : H < Vreg + vdropout ? 1 :
+   0) : currentReg`; stamp as above.
+Note the `<= vdropout` here is not `<= max(0, vdropout)` as in
+`regulatorRegime` (they differ only for a negative `vdropout`).
+
+**At commit** (`AR:1347-1372`): `newReg = thermalShutdown ? 3 : (entryClampActive
+&& !complianceClampActive) ? 2 : regulatorRegime(st.reg, x[k], vIn, vR, Vreg,
+vdropout, iLimit, complianceClampActive)`; `icState.set(id, {reg: newReg})`.
+`regulatorRegime` (`EL:1723-1781`), `H = vIn - vR`, `absI = |x[k]|`:
+- `H <= max(0, vdropout)`: OFF (3).
+- `prev` non-finite: `H < Vreg + vdropout ? DROPOUT : REG`.
+- from REG: `absI > iLimit*1.001` gives CC; `H < Vreg + vdropout` gives DROPOUT; else REG.
+- from DROPOUT: `H >= Vreg + vdropout` gives REG; `absI > iLimit*1.001` gives CC; else DROPOUT.
+- from OFF: `H >= Vreg + vdropout ? REG : DROPOUT` (never straight to CC).
+- from CC: stay unless `complianceSelected`; then `H < Vreg + vdropout ?
+  DROPOUT : REG` (delta `f198ed9` of the W1 table).
+The `1.001` margin and the exit-exactly-with-the-solve rule are the fixes of
+W1 deltas `b872148` and `f198ed9`.
+
+### 13.4 Dynamics and state
+
+State `icState[id] = {reg}` (committed regime, `NaN` initially,
+`defaultIcState`, `SE:1628-1630`), carried across `load()` by id and kind and
+compared EXACTLY by the step controller. No capacitor, no pole: the output
+follows the regulated target instantaneously within a solve. Thermal state
+(`thermalDevices`) only for the exact catalog uids of section 1.7, one-pole
+`T' = T_t + (T - T_t)*exp(-dt/tau)`, `T_t = T_amb + P*rTheta`, `P = (vin -
+vout)+*|x[k]| + (vin - vref)+*Iq`, trip at `>= 150 C` (7805, LM317) or
+`165 C` (AMS1117) and restart at `<= 135`/`145 C`; while shut down, dissipation
+is 0 and the part stamps OFF with no quiescent draw. The shutdown flag is
+read at the NEXT stamp (a one-step lag).
+
+### 13.5 Newton and events
+
+No limiter. The per-solve sets (section 1.4) are the active set: they choose
+CC or the compliance branch from the iterate, cleared at the start of every
+solve. The first call of each key per solve returns the accepted regime, so
+iteration 1 always stamps the previous accepted topology. Convergence is over
+every unknown including `x[k]` (an A-scale current converges at
+`1e-6 + 1e-3*|x|`).
+
+Events: regime changes happen in the commit (section 13.3) from the accepted
+solve, and the stamp that follows uses them. The step controller rejects a
+step whose coarse and refined `reg` disagree (exact compare) and halves it
+toward the host floor. The cold-start and overload fixes
+(`regulator-cc-exit.test.ts`) exist to stop `reg` flipping every step at the
+host's 10 to 12 ns floor.
+
+### 13.6 Small-signal AC
+
+`AR:1376-1407` (linear_reg), `AR:1503-1529` (lm317): `add(out, k, 1)`,
+`add(in, k, -1)`; REG: `add(k, out, 1)`, `add(k, R, -1)`; DROPOUT:
+`add(k, out, 1)`, `add(k, in, -1)`; CC and OFF: `add(k, k, 1)` (`dI = 0`); the
+committed regime from `icState` (OFF if shut down). lm317 adds the `1/1e5`
+adjust pull-down. The derivative of the transient rows; the quiescent source
+is constant and vanishes. The result is an IDEAL servo: zero output
+impedance, infinite ripple rejection and no bandwidth (comment
+`AR:1377-1385`); the transient has the same idealisation, so there is no
+disagreement, only a model limit.
+
+### 13.7 Diagnostics
+
+No engine warning or failure. Package thermal text only (exact uid). The
+failure pass does not include them (no `vcc_range`). `missing_flyback` does
+not apply.
+
+### 13.8 Tests that pin it
+
+- `wave5-regulators.test.ts`: catalog (`:88-150`); 7805 REG at 9 V / 100 ohm
+  (5.0 V +-50 mV, 50 mA, `elementI` about the load, `:151-203`); DROPOUT at
+  6 V (4.0 V +-100 mV, `:205-240`); unpowered and low input never negative
+  (`:241-267`); same-solve headroom transitions: OFF in the accepted step when
+  `in` is disconnected, cold-load into OFF, 10 V -> 6 V dropout and recovery
+  without an 8 V frame (`:269-350`); an externally biased output stays
+  high-impedance with zero pass current (`:351-383`); CC at 2 ohm: 1.0 A +-0.1
+  A, 2 V (`:384-427`); recovery CC -> REG (`:428-531`); LM317 same-step
+  recovery and entry (`:532-616`), headroom transitions (`:617-700`), AMS1117
+  (`:701-732`), LM317 divider 240/720: 5.0 V +-100 mV and `Vout - Vadj` 1.25 V
+  (`:733-792`).
+- `regulator-cc-exit.test.ts`: slight overload holds `reg 2` on every fixed
+  step and under the headless runner for 50 ms (`:218-346`); CC to DROPOUT
+  without a reload (`:347-446`); the cold start into 10 ohm + 100 uF at a 0.1 A
+  limit (`:447-696`); 100 uF output capacitor cases (`:697-749`); a millionth
+  over the limit (`:750-`).
+- `thermal-engine-physics.test.ts:239`: a 7805 shuts down, cools with
+  hysteresis and restarts.
+- `ac-isolation.test.ts` census; `physics-reference-benchmarks.test.ts` rail
+  current accounting.
+- The acceptance cases in `ACC` (not tests; classic fails them).
+
+### 13.9 Questions
+
+- **Q-W3-63 (placement, PLAN decision 3, DK question 4).** DK recommends one
+  regime kernel with hub placement when the gnd pin is fixed and in-partition
+  placement otherwise. Everything in sections 13.3 and 13.5 is solve-internal
+  (the per-solve sets), so the kernel form needs a `regime_of`/`flips` loop that
+  re-decides within the rail solve. **Recommend** DK's answer, and port the
+  per-solve selection as the regime loop, with the commit rule as the
+  step-end regime and the stamp-time selection as the in-solve set.
+- **Q-W3-64 (the 16 acceptance cases, `ACC`).** Classic 0.6.4 fails the
+  limited-supply, series-diode and cascade cases listed there (classic: 0 V,
+  CV, 20,000-step cap; 1.26 A through a 0.5 A limit; stalls at the step cap;
+  output driven to -3 V). The correct outcomes are closed forms (for example
+  `Vout = (L - Iq)*R`, `Vin = Vout + vdrop`: 6.350 V / 4.350 V). Decision 7
+  (b) makes closed forms the reference and says classic is not fixed.
+  **Recommend** the port is gated on `ACC`'s closed forms, not on classic, for
+  these cases, and on classic bit-identity for every case classic solves.
+- **Q-W3-65 (H7, reverse current; BL:3817).** The REG and DROPOUT rows leave
+  `x[k]` free in sign (section 13.2). A source on the output above the
+  regulator's setpoint makes it sink current into its input with no limit
+  (H7: "reverse current past its limit"); The entry clamp tests `|guess| > limit` (`SE:2210-2224`), which is symmetric
+  in sign, so a reverse overload also enters CC, whose row then pins `x[k] =
+  -iLimit`, a FORWARD current (inferred from the code, not run). A real 7805 cannot sink; the datasheet requires
+  an external diode. Also named by H7: a negative setpoint flickers (a
+  `vout < 0` makes `compliance = max(0, min(Vreg, .)) = 0`, so the compliance
+  clamp is true at `vOut - vR >= 0`, and the regime logic compares `H < Vreg +
+  vdropout` against a negative `Vreg`) and an "explicit resistance 0" case.
+  The root cause is read from the code, not run. **Recommend** the port
+  adds a sign rule (a regulator that cannot sink: OFF or high-impedance when
+  `x[k] > 0`) under decision 7 (b) and registers it, because ACC D1 and b2
+  already require the same property ("reverse pass current in it means the
+  input is gone").
+- **Q-W3-66 (fixed dropout).** `vdropout` is constant. A 7805 (TI, recalled)
+  has `VI - VO = 2 V` typ at 1 A and about 1.7 V at 500 mA; an AMS1117-3.3
+  about 1.1 V at 800 mA falling at light load; an LM317 about 1.5 to 2.2 V
+  rising with current. Classic: constant, the catalog value. **Recommend**
+  reproduce.
+- **Q-W3-67 (no output impedance, line/load regulation, ripple rejection,
+  minimum load).** An LM317 needs 3.5 mA typ (10 mA max) minimum load and a
+  7805 has 100 mV load regulation at 1.5 A, 60 to 80 dB ripple rejection (TI,
+  recalled); classic is an ideal source. The catalog notes disclose it.
+  **Recommend** reproduce.
+- **Q-W3-68 (CC is a hard current source; no foldback).** A real 7805
+  folds back with its SOA protection (short-circuit current about 750 mA,
+  recalled) and the LM317 limit is 1.5 A min / 2.2 A typ; classic's
+  `iLimit` is one constant. **Recommend** reproduce.
+- **Q-W3-69 (thermal shutdown, one-step lag; assumed restart).** The trip points are the profile's
+  (150/135 C for the 7805 and LM317, 165/145 C for the AMS1117, `TP:163-219`);
+  the catalog notes say the restart point, the time constant and (for the
+  AMS1117) the 165 C protection point above its 150 C absolute rating are
+  "explicit model assumptions". The flag is read one step
+  late. **Recommend** reproduce through the same one-pole record
+  (`TP:513-535`); W3-R needs the thermal records of PLAN "Heat on other
+  kinds (`unsupported-feature:thermal`)".
+- **Q-W3-70 (Iq only with an exact `catalogUid`).** An identity-less
+  `linear_reg` draws no quiescent current. **Recommend** reproduce
+  (compile reads `catalogUid` as classic does).
+- **Q-W3-71 (LM317 adjust-pin network).** The 100 kohm pull-down and the
+  50 uA source (only with the exact uid) are both present; at `V_adj = 1.25 V`
+  they are 12.5 uA out of `adj` and 50 uA into it. **Recommend** reproduce.
+- **Q-W3-72 (stamp-time versus commit-time thresholds).** The stamp uses
+  `H <= vdropout` and `H < Vreg + vdropout`; the commit uses `H <= max(0,
+  vdropout)`. **Recommend** reproduce (a golden with `vdropout = -0.1`).
+- **Q-W3-73 (initial regime).** A fresh regulator stamps REG in iteration
+  1 (NaN maps to 0) while the commit picks DROPOUT or REG from `H` (OFF if
+  `H <= vdropout`). **Recommend** reproduce.
+
+---
+
+## 14. DC-DC converter: dcdc_converter
+
+[W3-X; needs W3-H, W3-G and PLAN decision 8.] `dcdcConverterModel`
+(`AR:461-757`), one catalog part `dcdc-buck-5v` (CAT:7209). A behavioural
+non-isolated buck: a regulated output with a constant-power input and an
+input window. One branch row (the output side, `AR:467`).
+
+### 14.1 Terminals and parameters
+
+Pins by id `in_pos`, `in_neg`, `out_pos`, `out_neg` (`AR:498-502`); fewer
+than four pins or no branch row returns. `IN-` and `OUT-` are ONE net: `buildNets` unions the two pins whenever
+`catalogUid` is undefined or `dcdc-buck-5v` (`src/sim/engine/graph.ts:149-159`,
+`unionInternalPins`), so the model never sees them as separate nodes and a
+source wired between them is a shorted constraint
+(`wave5-converters-batteries.test.ts:275` asserts the load does not converge).
+
+| Parameter | Read at | Rule | Default | Catalog |
+|---|---|---|---|---|
+| `vout` (V) | `AR:495, 644` | `max(0, .)` | 5.0 | 5 |
+| `iLimit` (A) | `AR:494, 643` | `max(0, .)` | 2.0 | 2 (`iLimit_max 2`) |
+| `eta` | `AR:575, 645` | clamp `[0.01, 1]` | 0.85 | 0.85 |
+| `vinMin`, `vinMax` (V) | `AR:307-311` | `params ?? vcc_range ?? 7 / 35`; `min = max(0, .)` (non-finite gives 7), `max = max(min, .)` (non-finite gives `max(min, 35)`) | 7, 35 | `vcc_range {7, 12, 35}` |
+| `vdropout` (V) | `AR:321-325` | `modelParam` only when `catalogPart(comp).uid === "dcdc-buck-5v"`, else the buck dropout feature is OFF; non-finite gives 1.5, else `max(0, .)` | 1.5 | 1.5 |
+
+The buck dropout (the "identified buck" path) therefore exists only with the
+exact catalog uid: a `dcdc_converter` without it is the "legacy behavioural
+converter" (`buckDropout === null`).
+
+### 14.2 Equations
+
+Define at the iterate `vin = V(in_pos) - V(in_neg)`, `vOutG = V(out_pos) -
+V(out_neg)`, `x[k]` the output branch current (negative while delivering;
+`out_pos` row `+1`, `out_neg` row `-1`, `AR:542-543`):
+1. **Input window** (`AR:507-511`): `inputPowered = finite(vin) && vin >=
+   vinMin && vin <= vinMax`. Evaluated on the ITERATE, so removing or reversing
+   the input disables the source in the same solve.
+2. **Committed regime** `reg0 = inputPowered ? (st.reg === 3 ? 0 : st.reg) : 3`:
+   leaving OFF is immediate, with no hysteresis.
+3. `requiredBuckVoltageReg = (buck && vin < vout + vdropout) ? 1 : 0`.
+4. `voltageReg = (buck && inputPowered && reg0 !== 2) ?
+   regulatorHeadroomRegime("dcdc_headroom:" + id, reg0, vin, vout, vdropout) :
+   reg0` (section 1.4).
+5. `complianceVoltage = buck ? min(vout, max(0, vin - vdropout)) : vout`;
+   `entryClamp = voltageReg !== 2 && voltageReg !== 3 &&
+   useCurrentLimitEntryClamp("dcdc_converter:" + id, x[k]_guess, iLimit)`;
+   `currentLimited = voltageReg === 2 || entryClamp`;
+   `complianceClamp = currentLimited && useCurrentLimitComplianceClamp(key,
+   vOutG, complianceVoltage, 0)`.
+6. `reg = complianceClamp ? requiredBuckVoltageReg : currentLimited ? 2 :
+   voltageReg`.
+7. **Output row** by `reg`: 3: `add(k, k, 1)`; 2: `add(k, k, 1)`,
+   `b[k] = -iLimit`; 1 (buck only): `add(k, out+, 1)`, `add(k, out-, -1)`,
+   `add(k, in+, -1)`, `add(k, in-, +1)`, `b[k] = -vdropout`; else (REG):
+   `add(k, out+, 1)`, `add(k, out-, -1)`, `b[k] = vout`.
+8. **Input current** `iin` (`AR:581-593`): with `activeSetPowerCoupling =
+   inputPowered && (currentLimited || buck)`:
+   `iin = min(max(0, vOutG), complianceVoltage) * min(|x[k]_guess|, iLimit) /
+   (eta*vin)`; otherwise the committed `st.iin` (the "legacy behavioural
+   converter" path, one step stale). Stamped, if `inputPowered`, as
+   `stampCurrentSource(in_neg, in_pos, iin)`: `iin` is drawn from `in_pos` into
+   `in_neg`.
+Reported element current: `x[k]` (`AR:706-716`), the output branch current,
+negative while delivering.
+
+### 14.3 Commit and state
+
+`icState[id] = {reg, iin}` (initial `{reg: 3, iin: 0}`, `SE:3321-3326`: "Start
+OFF: the nonlinear solve promotes it to REG only after the input is proven
+inside the declared operating range"). The commit (`AR:632-705`): `iOut =
+|x[k]|`, `vOut = |V(out+) - V(out-)|`, `vin` committed, `inputPowered` by the
+committed `vin`, `buckVoltageReg = (buck && vin < vout + vdropout) ? 1 : 0`:
+- `!inputPowered`: 3.
+- else if the entry clamp is active and the compliance clamp is not: 2.
+- else if `prev === 2`: `complianceClampActive ? buckVoltageReg : 2`.
+- else: `iOut > iLimit*1.001 ? 2 : buckVoltageReg`.
+`iin = inputPowered ? vOut*iOut/(eta*vin) : 0`. (The comment says `max(Vin,
+0.1)`; the code divides by `vin` itself, so `vinMin = 0` with `vin = 0` and
+`vOut*iOut = 0` stores NaN, which the stamp's `Number.isFinite(st.iin)` guard
+treats as 0.)
+
+### 14.4 Newton and events
+
+The per-solve sets of section 1.4 as the regulators; no limiter. `iin` couples
+output power back to the input inside the solve for the buck and every CC
+transition ("no accepted load/headroom step can create or lose a frame of
+energy"). UVLO has NO hysteresis: the window is tested on the iterate and again
+at commit. The step controller compares `reg` exactly and `iin` at 10 nA.
+
+### 14.5 Small-signal AC
+
+`AR:717-756`: output side only: `add(out+, k, 1)`, `add(out-, k, -1)`; REG:
+`add(k, out+, 1)`, `add(k, out-, -1)`; DROPOUT: that plus `add(k, in+, -1)`,
+`add(k, in-, 1)`; CC/OFF: `add(k, k, 1)`; from the committed `reg` (default
+3). **The input side is an AC open** (no stamp). The transient has
+`Iin = Pout/(eta*vin)`, whose derivative would be the buck's negative
+incremental input resistance `-vin^2*eta/Pout` plus input-to-output coupling
+(audio susceptibility); the code comment calls omitting it "a deliberate
+simplification, not a stamp derivative" because the derivative is "ambiguous
+at the REG fixed point, which sits exactly on the bounded-output clamp
+corner". No control-loop bandwidth.
+
+### 14.6 Diagnostics
+
+None from the engine (no thermal profile for `dcdc-buck-5v`; no
+`supply_overvoltage`: that is for MCU boards). `vcc_range` makes the part a
+failure-pass member but `_drivenOutputTargets` has no case.
+
+### 14.7 Tests that pin it
+
+`wave5-converters-batteries.test.ts`: non-isolated common return (`:274-310`),
+averaged buck headroom: cannot boost 12 V to 12 or 20 V, recovers from dropout
+in the first accepted step, balances input power on a sub-limit CV load step
+(`:311-385`); REG at 12 V -> 5 V / 10 ohm: 5.0 V, 0.5 A, `Iin` about 0.245 A
+(`:386-464`); CC at `iLimit 1`, 2 ohm (`:465-520`); same-step CC compliance
+recovery and input-power balance (`:521-615`); OFF outside 7 to 35 V at 0, 5,
+-12, 36 V and recovery (`:616-660`). `regulator-cc-exit.test.ts` covers the
+dcdc exit rule (the `f198ed9` delta). `ac-isolation` census.
+
+### 14.8 Questions
+
+- **Q-W3-74 (behind a limited supply: no static operating point; D3; PLAN
+  decision 8).** Classic: `Iin = Pout/(eta*vin)` is a constant-power
+  load; behind a current-limited supply the input sags as the load
+  draws more, the window test (`vin >= 7`) turns the converter OFF, the input
+  recovers, it turns ON again: no hysteresis, no static point (ACC "dcdc_converter
+  behind a limited PSU", W1 section 8.4.4). **Recommend** decision 8 (a),
+  UVLO with hysteresis, as two regimes in the kernel. The hysteresis figure
+  is not in any catalog: the module is LM2596-class (no UVLO pin; datasheet
+  minimum input about 4.5 V plus dropout, recalled) so **the owner must supply
+  it or accept `turn-on = vinMin`, `turn-off = vinMin - 0.5 V`**.
+- **Q-W3-75 (unidentified converters).** Without the exact uid the buck
+  dropout is off, `reg` is never 1, and the "legacy" input current is the
+  committed one: a `dcdc_converter` with `vout = 12` and `vin = 8` regulates 12 V
+  (a boost, which the catalog says it cannot do). **Recommend** reproduce for
+  compatibility; the port's compile layer reads the same identity.
+- **Q-W3-76 (AC drops the input negative resistance).** Section 14.5.
+  **Recommend** a recorded override: the kernel's derived AC would include
+  `-vin^2*eta/Pout` on the input pair; keep classic's open input for gate 1.
+- **Q-W3-77 (`iin` division).** Section 14.3. **Recommend** reproduce the
+  `Number.isFinite` guard; do not divide by `max(vin, 0.1)` as the comment says
+  unless the owner rules it.
+- **Q-W3-78 (the window is absolute).** `vinMax = 35` turns the output OFF
+  with no overvoltage warning; a reversed input also OFF. **Recommend**
+  reproduce.
+- **Q-W3-79 (hub placement for the output).** DK 2.1 makes the output a
+  CV hub and the input a constant-power kernel with UVLO regimes. The input
+  current depends on the output voltage and current guesses (item 8), which in a
+  hub design are the rail's own unknowns. **Recommend** keep item 8 as the
+  kernel's `eval` and do not approximate it with the committed `iin` for the
+  buck (the tests at `:359` and `:579` need present-solve balance).
+
+---
+
+## 15. What this means for the W3 packages
+
+A short map from the findings to PLAN section 2.1 (nothing here is new
+information; it is the chapters above in package order).
+
+| Package | Reads | Classic facts that bound the port |
+|---|---|---|
+| W3-D1 (diode, schottky) | 2.1 | Plain guarded Shockley, ambient temperature, no limiter, no capacitance; one body with the LED (W1 chapter 6), and the kind differs from the LED only in defaults (`isLed` false). The LED kernel's law constructor serves both with `n = 1`, `vf = 0.7/0.3`, `iRated = specs.if_max` (1 A for both catalog parts) and ambient Vt/Vf. |
+| W3-D2 (zener, tvs) | 2.2, 2.3, 1.8 | A second law (breakdown) with `iz_knee` anchor, `nZ = 1`, reverse tangent at 128 mV, forward guard that does not honour a 1.1 V anchor (TVS). |
+| W3-N | 1.3, 3.4, 8.3 | A kernel returns currents and Jacobian per terminal; BJT limiting is pnjlim with a "limited this iteration" gate on convergence; the opto has an internal unknown with a warm start. |
+| W3-T (bjt, mos) | 3, 4 | Ebers-Moll with Early; level-1 with body diode and BE gate charges; asymmetric reverse conduction. No open-pin gate except the BJT base. |
+| W3-G | 1.4, 6.5, 10.5, 11.5, 13.5 | Two mechanisms: in-solve active sets (regulators, dcdc, op-amp clamps) and post-solve committed latches (thyristors, switch, lm393, opto lag). Neither locates instants. |
+| W3-O (op-amps) | 10 | BE pole in closed form with state in the RHS; slew before rail; current mode with 0.98 hysteresis; seeds without dynamics. |
+| W3-C (lm393) | 11, 12 | lm393 is a latch with `+-1 mV` and one-step lag; TL431 is smooth and independent of the cathode voltage. |
+| W3-F (jfet, opto, scr, triac, switch) | 5, 6, 7, 8, 9 | JFET as MOS with two gate diodes; latches as above; no bundled catalog entries. |
+| W3-R, W3-X | 13, 14, `ACC` | Regime selection per solve plus a commit rule; thermal shutdown from a one-step-late flag; the dcdc has no UVLO hysteresis. |
+
+---
+
+## 16. Question index
+
+Numbers are stable (`Q-W3-n`); the text is in the chapter named. "Rec" is the
+recommendation recorded there.
+
+| Q | Chapter | Subject | Rec |
+|---|---|---|---|
+| Q-W3-1 | 1.2 / 2.1 | parameter reads: literal versus catalog default | reproduce each read rule; log mismatches |
+| Q-W3-2 | 2.1 | junction GMIN is a real shunt, readout excludes it | reproduce |
+| Q-W3-3 | 2.1 | `vf` is the drop at `if_max`, not at 10 mA | reproduce; catalog is Dev's |
+| Q-W3-4 | 2.1 | no series resistance; guard constants | reproduce; pin `vSat` in goldens |
+| Q-W3-5 | 2.1 | no junction capacitance, no recovery | keep absent |
+| Q-W3-6 | 2.2 | zener `vz` anchored at 5 mA; 13x too stiff vs 1N4733A | reproduce; flag to Dev |
+| Q-W3-7 | 2.2 | forward guard bites above `vf` 1.03 V | reproduce; golden at `vf = 1.2` |
+| Q-W3-8 | 2.3 | TVS forward drop 1.43 V at 0.1 A, not 1.1 V | reproduce; golden |
+| Q-W3-9 | 2.3 | TVS clamp too low at 38 A; `p_max` 0.4 W | reproduce; flag catalog |
+| Q-W3-10 | 2.3 | curvature bound for the two-exponential law | `NARROWEST_BAND` |
+| Q-W3-11 | 3.9 | BJT `Is` default 1e-16 vs catalog 1e-14 | reproduce (Q-W3-1) |
+| Q-W3-12 | 3.9 | BJT hard clamp versus tangent elsewhere | reproduce each |
+| Q-W3-13 | 3.9 | `Vce(sat)` 66.6 mV vs datasheet 0.3 V max | reproduce |
+| Q-W3-14 | 3.9 | open base removes the device | reproduce |
+| Q-W3-15 | 3.9 | cache versus live params | none (params fixed at load) |
+| Q-W3-16 | 3.9 | limiter choice for the kernel | classic's pnjlim |
+| Q-W3-17 | 4.9 | MOSFET reverse conduction asymmetric, discontinuous | mirror; open divergence |
+| Q-W3-18 | 4.9 | `lambda` 0.02 vs 0 | Q-W3-1 |
+| Q-W3-19 | 4.9 | no `fetlim` | add none |
+| Q-W3-20 | 4.9 | constant `Cgs`/`Cgd` | reproduce |
+| Q-W3-21 | 4.9 | readout is drain-KCL only | same contract |
+| Q-W3-22 | 4.9 | body-diode `vSat` not raised | pin in golden |
+| Q-W3-23 | 5.9 | JFET inherits Q-W3-17 | as Q-W3-17 |
+| Q-W3-24 | 5.9 | square law cannot fit `gm` and cut-off together | none |
+| Q-W3-25 | 5.9 | six kinds absent from the bundled catalog | literals only; support table |
+| Q-W3-26 | 5.9 | one `Is` for both gate junctions | none |
+| Q-W3-27 | 6.9 | SCR max-value triggers, no `IL` | reproduce; disclose |
+| Q-W3-28 | 6.9 | locate the firing instant or not | locate (DK 1.5); divergence |
+| Q-W3-29 | 6.9 | one-step `vtm` source after a flip | reproduce `eval`; moot with location |
+| Q-W3-30 | 6.9 | strict comparisons | reproduce |
+| Q-W3-31 | 7.9 | triac quadrants, `IGT`, `IH` | reproduce |
+| Q-W3-32 | 7.9 | `pol` from the commit step's `v12` | reproduce; follows Q-W3-28 |
+| Q-W3-33 | 7.9 | hold boundary includes `vtm` | reproduce |
+| Q-W3-34 | 8.9 | opto AC is not the transient derivative | recorded override |
+| Q-W3-35 | 8.9 | opto one-step lag | keep for gate 1 |
+| Q-W3-36 | 8.9 | fixed `ctr` | reproduce |
+| Q-W3-37 | 8.9 | `iRated` not `if_max` | reproduce |
+| Q-W3-38 | 8.9 | internal node convergence and warm start | reproduce both |
+| Q-W3-39 | 9.8 | fixed TTL thresholds, no supply | reproduce |
+| Q-W3-40 | 9.8 | `ron` vs CD4066 | none |
+| Q-W3-41 | 9.8 | control one-step lag | locate when boundary-driven |
+| Q-W3-42 | 10.9 | op-amp pole form (state in RHS vs unknown) | either; prove bit-comparable |
+| Q-W3-43 | 10.9 | clamp heuristics vs proper active set | proper loop; divergence only if a gate-2 case moves |
+| Q-W3-44 | 10.9 | locate clamp entry instants | locate |
+| Q-W3-45 | 10.9 | AC continuous vs BE | recorded override |
+| Q-W3-46 | 10.9 | seed rule | reproduce |
+| Q-W3-47 | 10.9 | LM358 oscillator does not start | probe, then decide |
+| Q-W3-48 | 10.9 | swing and limits vs datasheets | none |
+| Q-W3-49 | 10.9 | lm386 gain pins, input impedance | reproduce |
+| Q-W3-50 | 10.9 | supply-return sign lag | reproduce |
+| Q-W3-51 | 11.9 | lm393 form (DK 6) | driver commit |
+| Q-W3-52 | 11.9 | propagation delay | zero at located crossing; datasheet delay owner's option |
+| Q-W3-53 | 11.9 | `+-1 mV` hysteresis | reproduce |
+| Q-W3-54 | 11.9 | sink not current-limited | reproduce |
+| Q-W3-55 | 11.9 | input common-mode | reproduce |
+| Q-W3-56 | 11.9 | unit 2 current unpublished | same contract |
+| Q-W3-57 | 12.9 | TL431 cathode unbounded negative | mirror; register divergence |
+| Q-W3-58 | 12.9 | anchor at 1 mA vs 10 mA | reproduce |
+| Q-W3-59 | 12.9 | dynamic impedance 6x datasheet | reproduce |
+| Q-W3-60 | 12.9 | no reverse diode | reproduce |
+| Q-W3-61 | 12.9 | TL431 needs no W3-G | move to W3-T |
+| Q-W3-62 | 12.9 | cathode on ground returns | reproduce |
+| Q-W3-63 | 13.9 | regulator placement (DK 4) | DK's rec |
+| Q-W3-64 | 13.9 | the 16 acceptance cases | closed forms as reference |
+| Q-W3-65 | 13.9 | H7 reverse current, negative setpoint | add a no-sink rule; register |
+| Q-W3-66 | 13.9 | fixed dropout | reproduce |
+| Q-W3-67 | 13.9 | ideal source, no PSRR or min load | reproduce |
+| Q-W3-68 | 13.9 | hard CC, no foldback | reproduce |
+| Q-W3-69 | 13.9 | thermal shutdown lag and assumed restart | reproduce |
+| Q-W3-70 | 13.9 | Iq only with exact uid | reproduce |
+| Q-W3-71 | 13.9 | LM317 adjust network | reproduce |
+| Q-W3-72 | 13.9 | `<= vdropout` vs `<= max(0, vdropout)` | reproduce |
+| Q-W3-73 | 13.9 | initial regime NaN | reproduce |
+| Q-W3-74 | 14.8 | dcdc behind a limited supply (decision 8) | UVLO hysteresis; figure from owner |
+| Q-W3-75 | 14.8 | unidentified converter can boost | reproduce |
+| Q-W3-76 | 14.8 | dcdc AC input open | recorded override |
+| Q-W3-77 | 14.8 | `iin` division | reproduce the guard |
+| Q-W3-78 | 14.8 | window absolute, no warning | reproduce |
+| Q-W3-79 | 14.8 | hub placement and present-solve `iin` | keep `eval`, no committed approximation |
