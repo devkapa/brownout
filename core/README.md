@@ -6549,6 +6549,26 @@ from one load. F5's landing proposes a start-up budget with its `3ca4004`
 baseline. Every figure above was taken at 5 s of warm-up, the protocol of
 its time; the next gate run takes both.
 
+**The app's workload (THERM, 2026-11-17).** The generator's boards carry
+no `catalogUid`; the app sends one on every SAP-1 component, which gives
+its 115 resistors and 83 LEDs a thermal record (code 91), and a device
+with a thermal identity is never cold (point 2). On the battery board a
+cell's rail moves about 44,000 times a simulated second, each move
+re-driving every one of them: 3.2 M visits a second (six closed-form
+resistors on the rail, R29, some 42,000 each; 109 static resistors and 83
+static LEDs some 19,000 and 12,000 each, every LED visit rescheduling its
+band boundary). On `9e9aa01` that cost 2.05 s of CPU per simulated second
+in Node against 0.80 s without the uids. Half of it was the six
+closed-form resistors' re-anchor deadline (R29), searched twice per visit
+by doubling from 1e-12 and bisecting to the last bit. Each visit now reads
+its voltage off the segment it computed, and the search
+(`closed_form::largest_within`) brackets by bisection on the doubling's
+exponent (or doubles from the floor R29 hands it, its own majorant's
+root) and refines by Illinois regula falsi, always from below, to `2^-30`
+of the root (`WITHIN_REL`): 1.41 s per simulated second, bit for bit the
+same run (no re-anchor fires on the SAP-1). `bench:sap1-cost -- --catalog=
+both` times both boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
+
 ### Known follow-ups (W1g)
 
 Recorded at the W1g integration. None changes a rule above until it lands.
