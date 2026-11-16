@@ -23,6 +23,13 @@
  * so tau_w0 = 1.07 us. (The threshold, charging through R_A + R_B at
  * (u / 3) / 2000 ohm = 0.805 mA, 805 V/s, has W0_V(3.22) / 805 = 4.1 us: the
  * trigger's is the tighter, held for both.)
+ *
+ * Within the bound, not at zero. The recorded battery SAP-1 (bat-perf's
+ * bat.rec, 3.0 s on) lands one trigger in 47 (#24 at 3.05207 s) 0.67 us,
+ * 0.60 tau_w0, late at 100 us and 1 ms stops only. It is aimed at the 3.0520 s
+ * stop, 67 us ahead, and that aim follows the coupled path's rail within its
+ * linearisation: 1.0 mV of capacitor at 1526 V/s. Stops every 10 us aim it
+ * again before the trigger. That is the path's own within-W0 allowance, kept.
  */
 import fs from "node:fs";
 import path from "node:path";

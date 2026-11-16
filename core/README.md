@@ -7507,7 +7507,16 @@ failures and warnings (W1g)"):
   before any cut, the same reading at the same stop on both builds (249/5,
   289/2 and 744/2 at the first stop, 254/0, 450/1), or lowered by R102 but
   not to W0 (741/3 582 to 470, 758/2 117 to 9.7, 88/2 70 to 7.1). The rest
-  are not classified yet.
+  are not classified yet. CLK adds the class's oscillators, whose phase
+  carries the step error from one period to the next: the cold fuzz's 74/6
+  and 45/6, 555s on a cell without the rail shortcut, flip at their own
+  times on a trajectory the steps let drift. 74/6's capacitor at 2 ms reads
+  0.33863 V at 1 ms host stops (21 steps) against 0.33960 V at 1 us stops
+  (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
+  to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
+  45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence` (release
+  only: a debug build trips the billing restamp check on 74/6 first).
 
 ## Deferred past 1.0.0
 

@@ -19951,3 +19951,110 @@ fn a_555_on_a_cells_coupled_path_lands_every_flip_at_its_own_time_at_every_host_
         }
     }
 }
+
+/// The cold fuzz's tpl-6 boards 74/6 and 45/6 (`f5e gen SEED 6`, HUB=1),
+/// run without the rail shortcut (exact mode): a 555 astable on a cell whose
+/// timing capacitor is a stepped partition's (CLK).
+fn clk_board_exact(seed: u32) -> Program {
+    let devices = match seed {
+        74 => vec![
+            fz(20, 0, &[1, 0], vec![1.0, 0.08014489624299273, 1.0, 0.0, 2.0, 0.05, 0.6467409768055062, 0.3405408872575632, 0.0], vec![2.0, 0.0, 3.4129251856576754, 1.0, 5.612923813683636]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![19109.23359186521], vec![]),
+            fz(1, 3, &[2, 3], vec![57706.348674877605], vec![]),
+            fz(3, 4, &[3, 0], vec![3.054718284405666e-7, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![173.2103172747406], vec![]),
+            fz(30, 7, &[5, 0], vec![3.124982423815606, 1.9621667110231864, 0.015046509461853392, 0.0, 0.0, 0.0], vec![]),
+            fz(1, 8, &[4, 0], vec![41.75356774039752], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.00011321582623333284, 19109.23359186521], vec![]),
+            fz(90, 3, &[], vec![3.0, 5.763253925957056e-6, 57706.348674877605], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.0924117524321156, 173.2103172747406], vec![]),
+            fz(90, 8, &[], vec![8.0, 0.0015862317257885857, 41.75356774039752], vec![]),
+        ],
+        _ => vec![
+            fz(20, 0, &[1, 0], vec![1.0, 2.378378171481616, 1.0, 0.0, 2.0, 0.05, 0.00982181795114197, 0.8148877855055277, 0.0], vec![2.0, 0.0, 3.1769150977208453, 1.0, 5.202871985483894]),
+            fz(40, 1, &[1, 0, 3, 4, 1, 6, 3, 2], vec![2.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            fz(1, 2, &[1, 2], vec![115.82865594485179], vec![]),
+            fz(1, 3, &[2, 3], vec![12466.436852649871], vec![]),
+            fz(3, 4, &[3, 0], vec![2.7335477516685947e-6, 0.0, 0.0], vec![]),
+            fz(3, 5, &[6, 0], vec![1e-8, 0.0, 0.0], vec![]),
+            fz(1, 6, &[4, 5], vec![713.2009750959154], vec![]),
+            fz(30, 7, &[5, 0], vec![1.910400747228397, 2.469370008912842, 0.00923307747549982, 0.0, 0.0, 0.0], vec![]),
+            fz(90, 2, &[], vec![2.0, 0.016048793328800402, 115.82865594485179], vec![]),
+            fz(90, 3, &[], vec![3.0, 3.538939876715632e-5, 12466.436852649871], vec![]),
+            fz(90, 6, &[], vec![6.0, 0.0060120046647559764, 713.2009750959154], vec![]),
+        ],
+    };
+    let mut p = program(7, devices);
+    p.options.no_rail_shortcut = true;
+    p.digital_slot_count = 32;
+    p
+}
+
+/// CLK's measurement on the exact-mode 555s: each cadence's worst flip
+/// against the 1 us run, in tau_w0, for (triggers, thresholds).
+fn clk_exact_shares(seed: u32, t_end: f64, tau_w0: f64) -> Vec<(f64, f64, f64)> {
+    let p = clk_board_exact(seed);
+    let (fine_up, fine_down) = clk_flips(&p, 8, 1e-6, t_end);
+    CLK_HOSTS
+        .iter()
+        .map(|&host| {
+            let (up, down) = clk_flips(&p, 8, host, t_end);
+            // Index-matched over the flips both runs have: a late run's last
+            // flip may fall past `t_end`, which the shares below show.
+            let worst = |g: &[f64], f: &[f64]| g.iter().zip(f).map(|(a, b)| (a - b).abs() / tau_w0).fold(0.0f64, f64::max);
+            let (u, d) = (worst(&up, &fine_up), worst(&down, &fine_down));
+            eprintln!("{seed}/6 at host {host:e}: worst trigger {u:.3}, threshold {d:.3} tau_w0 ({} / {} flips, the 1 us run {} / {})", up.len(), down.len(), fine_up.len(), fine_down.len());
+            (host, u, d)
+        })
+        .collect()
+}
+
+#[test]
+// Release only: in a debug build 74/6's 1 us run trips exact mode's billing
+// check first (hub.rs, "the call restamped each step from the SoC charged
+// here": the Norton injection 51.932366078 against 51.932366077 A, at
+// 679dc42 as at 574767b), a separate item.
+#[cfg_attr(debug_assertions, ignore = "exact mode's billing restamp check trips on 74/6 in debug builds (separate item)")]
+#[should_panic(expected = "exact-mode coarse step accuracy")]
+fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
+    // CLK: an EXPECTED FAILURE on the open item "Exact-mode coarse step
+    // accuracy". Without the rail shortcut these 555s' timing capacitors are
+    // stepped partitions, whose step-doubling controller holds each step to
+    // W0 (`REL_TOL`, `ABS_VOLTAGE`) and lets the steps grow with the host's
+    // stops; a 1 us host cuts every step to 1 us. The flips are found at
+    // their own times on a trajectory that has drifted: 74/6's capacitor at
+    // 2 ms reads 0.33863 V at 1 ms stops (21 steps) against 0.33960 V at 1 us
+    // stops (2054 steps), 2.2 W0, before any flip; its period runs up to
+    // 1.45 % long. The error-control work flips this test.
+    //
+    // tau_w0 by hand, the trigger's (the capacitor discharging through R_B
+    // into DIS's 10 ohm, DIS's node held at u R_DIS / (R_A + R_DIS)):
+    // - 74/6: u = 4.1617 V, level u / 3 = 1.3872 V, DIS node 2.2 mV,
+    //   (1.3872 - 0.0022) / 57716 ohm / 305.47 nF = 78.56 V/s;
+    //   W0_V(1.3872) = 1.4872 mV: tau_w0 = 18.93 us.
+    // - 45/6: u = 4.7268 V, level 1.5756 V, DIS node 4.7268 x 10 / 125.83 =
+    //   0.3757 V, (1.5756 - 0.3757) / 12476 ohm / 2.7335 uF = 35.19 V/s;
+    //   W0_V(1.5756) = 1.6756 mV: tau_w0 = 47.62 us.
+    // Pins (measured at 574767b, worst flip in tau_w0 at 10 us, 100 us,
+    // 1 ms, 1/60 s, 100 ms, every event; triggers / thresholds), rounded up:
+    // a share past its pin is a regression, not this item.
+    let cases: [(u32, f64, f64, [f64; 6]); 2] = [(74, 0.15, 1.4872e-3 / 78.56, PINS_74), (45, 0.25, 1.6756e-3 / 35.19, PINS_45)];
+    let mut over = Vec::new();
+    for (seed, t_end, tau_w0, pins) in cases {
+        for (k, (host, up, down)) in clk_exact_shares(seed, t_end, tau_w0).into_iter().enumerate() {
+            assert!(up.max(down) <= pins[k], "{seed}/6 at host {host:e}: {up:.3} / {down:.3} tau_w0, past its pin {}", pins[k]);
+            if up.max(down) > 1.0 {
+                over.push(format!("{seed}/6 at {host:e}: {:.2}", up.max(down)));
+            }
+        }
+    }
+    assert!(over.is_empty(), "exact-mode coarse step accuracy: flips past tau_w0 of a 1 us run: {}", over.join(", "));
+}
+
+/// 74/6's pins: measured 0.62, 6.76, 47.3, 68.5, 70.0, 70.0 (the worse of
+/// trigger and threshold), about 10 % over, 1.0 where it passes.
+const PINS_74: [f64; 6] = [1.0, 7.5, 52.0, 76.0, 77.0, 77.0];
+/// 45/6's: measured 0.092, 1.004, 8.98, 16.96, 17.97, 17.97.
+const PINS_45: [f64; 6] = [0.25, 1.2, 10.0, 19.0, 20.0, 20.0];
