@@ -4051,6 +4051,17 @@ impl PartitionedSolver {
         }
     }
 
+    /// Whether every rail capacitor on a cell publishes at most
+    /// [`LAZY_I_LIMIT`] at `now` (a NaN fails), for [`Self::lazy_publish_ok`].
+    #[inline(never)]
+    fn cell_caps_bounded(&self, now: f64) -> bool {
+        let Some(hub) = self.hub.as_ref().filter(|h| h.state.cap_seg.is_none() && matches!(h.kind, crate::rails::HubKind::Battery(_))) else { return true };
+        hub.caps.iter().all(|&(k, _)| {
+            let cap = &self.fixed_pair_capacitors[k as usize];
+            (cap.c * self.cell_cap_rate(cap, now)).abs() <= LAZY_I_LIMIT
+        })
+    }
+
     /// `d(dV)/dt` at `now` of a rail capacitor on a cell (Rails point 7,
     /// CAPI): the rail is algebraic and the capacitor's charge follows it, so
     /// this is the rail's own rate as the solver publishes it, signed by the
@@ -4419,13 +4430,8 @@ impl PartitionedSolver {
         }
         // A cell's rail capacitors publish `C dV/dt` of the rail, bounded
         // only by the rail's own rate at `now` (CAPI).
-        if let Some(hub) = self.hub.as_ref().filter(|h| h.state.cap_seg.is_none() && matches!(h.kind, crate::rails::HubKind::Battery(_))) {
-            for &(k, _) in &hub.caps {
-                let cap = &self.fixed_pair_capacitors[k as usize];
-                if !((cap.c * self.cell_cap_rate(cap, now)).abs() <= LAZY_I_LIMIT) {
-                    return false;
-                }
-            }
+        if self.hub.is_some() && !self.cell_caps_bounded(now) {
+            return false;
         }
         // The claim the bounds rest on, checked on every call of a debug
         // build: no write has left a value above them.
