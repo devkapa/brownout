@@ -336,66 +336,6 @@ fn a_555_reset_an_led_knee_and_a_fuse_on_a_draining_cells_path_cross_with_a_1_us
     }
 }
 
-/// Rail events (stat 18) of `p` run to `t_end` with the host stopping every
-/// `h`, on R121's cadence or on the 10 uV band.
-fn rail_events(p: &Program, h: f64, t_end: f64, band: bool) -> f64 {
-    crate::rails::force_fixed_cell_band(band);
-    let mut e = Engine::load(p).unwrap();
-    for t in stops(h, t_end) {
-        e.advance(t).unwrap();
-    }
-    crate::rails::force_fixed_cell_band(false);
-    e.stat(18)
-}
-
-#[test]
-fn a_small_cell_feeding_a_fast_monostable_solves_its_rail_no_more_often_than_the_band() {
-    // CAD-4, SHIPV-G's M272: a 555 monostable (RT 1379 ohm, 219 nF, 4.7 k
-    // on its output) fired by a 776 Hz clock, on a 3 uAh, 0.109 ohm cell at
-    // 92 % with nothing else across the rail. The band solves every 10 uV
-    // of the rail's path: the rail falls from E(0.919) = 3.4074 + 0.919 x
-    // 1.4763 = 4.764 V to 4.621 V by 0.1275 s, 0.143 V, so about 14,300
-    // solves (14.0k measured at 1 ms hosts; 2.0k at 1 us, where every stop
-    // solves it). R121's time watch held the drain's line straight only as
-    // long as `C rho_dot tau` kept the timing capacitor's current within
-    // 0.2 of its W0, whose 1 nA floor binds: the line turns with every
-    // charge of the 219 nF capacitor (its 0.30 ms time constant), rho_dot
-    // about 1e3 V/s^2, so tau = 0.2 x 1.07 nA / (219 nF x 1e3 V/s^2) = 1 us
-    // (0.6 us probed), and the cadence took 35.6k rail events at 1 ms hosts
-    // (17.2k at 1 us). The band held the same line straight for its whole
-    // 9 us passage, so within it the readings err no more than the band's;
-    // the bound now never falls short of the band's passage. Margin: the
-    // cadence also lands its own thresholds (the scan band every 20 mV of
-    // travel, the curved partitions' bands, the logic levels), each passed
-    // once per such travel; 100 covers them (SHIPV-G's 600 boards: none
-    // above the band at coarse hosts, at most 87 above at 1 us).
-    let d = vec![cell(0, 0.10869160147277165, 3.006505746061428e-6, 0.9189997502889509), n555(10, 5, 4, 6, 3, 3, 8), r(11, 1, 3, 1378.697367889984), c(12, 3, 0, 2.1865801889116618e-7), c(13, 6, 0, 1e-8), clock(14, 5, 776.4704769516004, 0.9, 1), r(15, 4, 0, 4700.0)];
-    let p = prog(7, d);
-    let t_end = 0.12747014170965318;
-    for h in [1e-3, 1.0 / 60.0, 0.1, 1e-6] {
-        let (cad, band) = (rail_events(&p, h, t_end, false), rail_events(&p, h, t_end, true));
-        eprintln!("M272 at host {h:e}: {cad} rail events on the cadence, {band} on the band");
-        assert!(cad <= band + 100.0, "M272 at host {h:e}: {cad} rail events on the cadence against the band's {band}");
-    }
-}
-
-/// `got`'s flips against `fine`'s: the worst offset as a share of
-/// `tau_w0`, or why they do not pair (a flip lost or gained, or a level
-/// out of turn).
-fn share_of(got: &[(f64, f64)], fine: &[(f64, f64)], tau_w0: f64) -> Result<f64, String> {
-    if got.len() != fine.len() {
-        return Err(format!("{} flips against {}", got.len(), fine.len()));
-    }
-    let mut worst = 0.0f64;
-    for (g, f) in got.iter().zip(fine) {
-        if g.1 != f.1 {
-            return Err(format!("flip to {} at {} against {} at {}", g.1, g.0, f.1, f.0));
-        }
-        worst = worst.max((g.0 - f.0).abs() / tau_w0);
-    }
-    Ok(worst)
-}
-
 /// A small deterministic generator (xorshift64*).
 struct Rng(u64);
 
@@ -450,47 +390,193 @@ fn property_board(seed: u64) -> (Program, f64) {
     (prog(7, d), tau)
 }
 
+/// Rail events (stat 18) of `p` run to `t_end` with the host stopping every
+/// `h`, on R121's cadence or on the 10 uV band.
+fn rail_events(p: &Program, h: f64, t_end: f64, band: bool) -> f64 {
+    crate::rails::force_fixed_cell_band(band);
+    let mut e = Engine::load(p).unwrap();
+    for t in stops(h, t_end) {
+        e.advance(t).unwrap();
+    }
+    crate::rails::force_fixed_cell_band(false);
+    e.stat(18)
+}
+
+#[test]
+fn a_small_cell_feeding_a_fast_monostable_solves_its_rail_no_more_often_than_the_band() {
+    // CAD-4, SHIPV-G's M272: a 555 monostable (RT 1379 ohm, 219 nF, 4.7 k
+    // on its output) fired by a 776 Hz clock, on a 3 uAh, 0.109 ohm cell at
+    // 92 % with nothing else across the rail. The band solves every 10 uV
+    // of the rail's path: the rail falls from E(0.919) = 3.4074 + 0.919 x
+    // 1.4763 = 4.764 V to 4.621 V by 0.1275 s, 0.143 V, so about 14,300
+    // solves (14.0k measured at 1 ms hosts; 2.0k at 1 us, where every stop
+    // solves it). R121's time watch held the drain's line straight only as
+    // long as `C rho_dot tau` kept the timing capacitor's current within
+    // 0.2 of its W0, whose 1 nA floor binds: the line turns with every
+    // charge of the 219 nF capacitor (its 0.30 ms time constant), rho_dot
+    // about 1e3 V/s^2, so tau = 0.2 x 1.07 nA / (219 nF x 1e3 V/s^2) = 1 us
+    // (0.6 us probed), and the cadence took 35.6k rail events at 1 ms hosts
+    // (17.2k at 1 us). The band held the same line straight for its whole
+    // 9 us passage, so within it the readings err no more than the band's;
+    // the bound now never falls short of the band's passage. Margin: the
+    // cadence also lands its own thresholds (the scan band every 20 mV of
+    // travel, the curved partitions' bands, the logic levels), each passed
+    // once per such travel; 100 covers them (SHIPV-G's 600 boards: none
+    // above the band at coarse hosts, at most 87 above at 1 us).
+    let d = vec![cell(0, 0.10869160147277165, 3.006505746061428e-6, 0.9189997502889509), n555(10, 5, 4, 6, 3, 3, 8), r(11, 1, 3, 1378.697367889984), c(12, 3, 0, 2.1865801889116618e-7), c(13, 6, 0, 1e-8), clock(14, 5, 776.4704769516004, 0.9, 1), r(15, 4, 0, 4700.0)];
+    let p = prog(7, d);
+    let t_end = 0.12747014170965318;
+    for h in [1e-3, 1.0 / 60.0, 0.1, 1e-6] {
+        let (cad, band) = (rail_events(&p, h, t_end, false), rail_events(&p, h, t_end, true));
+        eprintln!("M272 at host {h:e}: {cad} rail events on the cadence, {band} on the band");
+        assert!(cad <= band + 100.0, "M272 at host {h:e}: {cad} rail events on the cadence against the band's {band}");
+    }
+}
+
+/// How an oscillator's flips at a coarse host stand against the 1 us
+/// run's, as R127 judges them (the coordinator's ruling, replacing R121
+/// (iii)'s "within tau_w0 of the band"): (1) the same flips over the whole
+/// run; (2) its period, the mean over the run and the worst single one,
+/// relative to the 1 us run's; (3) the worst edge, as a share of `tau_w0`,
+/// over the first `per` periods after each edge `rephased` names (an edge
+/// something outside the oscillator set: the load, a trigger), and over the
+/// whole run for the record.
+struct R127 {
+    mean_period: f64,
+    worst_period: f64,
+    rephased_edge: f64,
+    any_edge: f64,
+}
+
+fn r127(got: &[(f64, f64)], fine: &[(f64, f64)], tau_w0: f64, per: usize, rephased: &dyn Fn(usize) -> bool) -> Result<R127, String> {
+    if got.len() != fine.len() {
+        return Err(format!("{} flips against the 1 us run's {}", got.len(), fine.len()));
+    }
+    if let Some(k) = got.iter().zip(fine).position(|(g, f)| g.1 != f.1) {
+        return Err(format!("flip {k} to {} at {} against {} at {}", got[k].1, got[k].0, fine[k].1, fine[k].0));
+    }
+    // A period is between two edges of the same level (two flips apart).
+    let (mut worst_period, mut n) = (0.0f64, 0usize);
+    for k in 2..fine.len() {
+        let (pg, pf) = (got[k].0 - got[k - 2].0, fine[k].0 - fine[k - 2].0);
+        worst_period = worst_period.max(((pg - pf) / pf).abs());
+        n += 1;
+    }
+    let mean_period = if n == 0 {
+        0.0
+    } else {
+        let last = fine.len() - 1 - (fine.len() - 1) % 2;
+        let (pg, pf) = (got[last].0 - got[0].0, fine[last].0 - fine[0].0);
+        ((pg - pf) / pf).abs()
+    };
+    let (mut rephased_edge, mut any_edge, mut since) = (0.0f64, 0.0f64, usize::MAX);
+    for (k, (g, f)) in got.iter().zip(fine).enumerate() {
+        if rephased(k) {
+            since = 0;
+        }
+        let share = (g.0 - f.0).abs() / tau_w0;
+        if since < 2 * per {
+            rephased_edge = rephased_edge.max(share);
+        }
+        any_edge = any_edge.max(share);
+        since = since.saturating_add(1);
+    }
+    Ok(R127 { mean_period, worst_period, rephased_edge, any_edge })
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "300 boards against 1 us runs: release only")]
-fn random_555s_on_cells_of_any_drain_keep_every_flip_within_tau_w0_and_no_farther_than_the_band() {
-    // CAD-3 item 3: 300 random 555 astables and monostables (`property_board`)
-    // on cells from 1e-6 Ah (empty within the run under a 100 ohm load) to
-    // 1 Ah, at host stops of 1 ms, 1/60 s and 100 ms against a run stopping
-    // every 1 us, to 80 ms: no flip lost or gained, every flip within the
-    // 555's tau_w0, and none farther from the 1 us run than the same board
-    // on the 10 uV band (`force_fixed_cell_band`, the build before R121 with
-    // this branch's base fix) by more than R121's reading slack: a reading
-    // between solves may err `CELL_READING_SLACK` (0.2) W0 more than on the
-    // band, which at a threshold is 0.2 tau_w0 of its crossing's time.
-    // Measured: no flip lost in 28,380; worst 0.038 tau_w0; three boards
-    // (10, 98, 262) sit 0.012 to 0.038 tau_w0 off where the band sits at
-    // 0.0001 or less, at every cadence alike (1 ms included), the cadence's
-    // own slack rather than a host effect.
+fn random_555s_on_cells_of_any_drain_meet_r127_against_1_us_runs() {
+    // CAD-3 item 3, judged by R127 (CAD-4): 300 random 555 astables and
+    // monostables (`property_board`) on cells from 1e-6 Ah (empty within
+    // the run under a 100 ohm load) to 1 Ah, at host stops of 1 ms, 1/60 s
+    // and 100 ms against a run stopping every 1 us, to 80 ms: (1) no flip
+    // lost or gained; (2) the period, the mean over the run and the worst
+    // single one, within 1e-6 relative of the 1 us run's; (3) every edge
+    // within the 555's tau_w0 over the first 100 periods after a re-phase.
+    // An astable is phased once, at the load (its first edge); a
+    // monostable by every trigger (each clock edge that fires it), so all
+    // of its edges count.
+    //
+    // The cadence's edges drift from the 1 us run's as the rail travels,
+    // not by a fixed offset as CAD-3 had it: board 98 (a 28 uAh, 0.148 ohm
+    // cell, an LED on the 555's output) is 0.038 tau_w0 off at 80 ms and
+    // 0.93 to 1.10 tau_w0 off over a full discharge, a period bias of about
+    // 5e-8 (`a_555_on_a_cell_drained_from_full_to_flat_meets_r127` derives
+    // it). Measured (CAD-4): 28,380 flips, none lost; period 1.4e-7 mean
+    // and 2.1e-7 worst single, relative; edges within 0.043 tau_w0.
     let hosts = [1e-3, 1.0 / 60.0, 0.1];
     let t_end = 0.08;
-    let (mut boards, mut worst, mut flips_seen, mut farther) = (0, 0.0f64, 0usize, Vec::new());
+    let (mut flips_seen, mut worst) = (0usize, (0.0f64, 0.0f64, 0.0f64, 0.0f64));
     for seed in 0..300u64 {
         let (p, tau) = property_board(seed);
         let fine = flips(&p, 8, &stops(1e-6, t_end));
         flips_seen += fine.len();
+        let mono = seed % 2 == 1;
         for &h in &hosts {
             let got = flips(&p, 8, &stops(h, t_end));
-            crate::rails::force_fixed_cell_band(true);
-            let band = flips(&p, 8, &stops(h, t_end));
-            crate::rails::force_fixed_cell_band(false);
-            let head = share_of(&got, &fine, tau).unwrap_or_else(|e| panic!("board {seed} at host {h:e}: {e}"));
-            let base = share_of(&band, &fine, tau);
-            assert!(head <= 1.0, "board {seed} at host {h:e}: a flip {head:.3} tau_w0 off the 1 us run (band: {base:?})");
-            if base.as_ref().is_ok_and(|&b| head > b + crate::rails::CELL_READING_SLACK) {
-                farther.push((seed, h, head, base.clone().unwrap()));
-            }
-            worst = worst.max(head);
+            let m = r127(&got, &fine, tau, 100, &|k| mono || k == 0).unwrap_or_else(|e| panic!("board {seed} at host {h:e}: {e}"));
+            assert!(m.mean_period <= 1e-6 && m.worst_period <= 1e-6, "board {seed} at host {h:e}: period {:.3e} mean, {:.3e} worst single, relative", m.mean_period, m.worst_period);
+            assert!(m.rephased_edge <= 1.0, "board {seed} at host {h:e}: an edge {:.3} tau_w0 off within 100 periods of a re-phase", m.rephased_edge);
+            worst = (worst.0.max(m.mean_period), worst.1.max(m.worst_period), worst.2.max(m.rephased_edge), worst.3.max(m.any_edge));
         }
-        boards += 1;
     }
-    eprintln!("{boards} boards, {flips_seen} flips in the 1 us runs, worst {worst:.4} tau_w0");
-    for (seed, h, head, b) in &farther {
-        eprintln!("  farther than the band: board {seed} at host {h:e}: {head:.4} against {b:.4} tau_w0");
+    eprintln!("R127 over 300 boards, {flips_seen} flips in the 1 us runs: period {:.3e} mean, {:.3e} worst single; edges {:.4} tau_w0 after a re-phase, {:.4} anywhere", worst.0, worst.1, worst.2, worst.3);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "3.2 s against a 1 us run: release only")]
+fn a_555_on_a_cell_drained_from_full_to_flat_meets_r127() {
+    // R127 on board 98 of the property (an astable, RA 5248, RB 2442,
+    // C 60.7 nF, 35 ohm + LED on its output, a 28.3 uAh, 0.148 ohm cell,
+    // nothing else across the rail) charged full: the rail falls 4.876 to
+    // 3.425 V in 3.2 s and stays there. Measured (CAD-4): 14,991 flips at
+    // every cadence, as at 1 us; period 4.6e-8 to 5.4e-8 mean and 7.5e-8
+    // worst single, relative; edges within 0.0103 tau_w0 (157 ns) over
+    // the first 100 periods; accumulated phase 0.93 tau_w0 (147 ns) at
+    // 1 ms hosts and 1.10 tau_w0 (173 ns) at 1/60 s and 100 ms, 1.0e-7 to
+    // 1.19e-7 s per volt of rail travel (0.64 to 0.76 tau_w0 per volt). The
+    // pin, 1.6 tau_w0, fails a doubling. The 10 uV band: 0.004 tau_w0.
+    //
+    // Why a bias of this size. The charge time (output high) is t_c =
+    // (RA + RB) C ln((u - v1)/(u - v2)), v1 and v2 the 1/3 and 2/3 levels.
+    // If both levels and the source read a rail off by e, dt_c/de =
+    // (RA + RB) C (-1/(2u) + 2/u) = 1.5 (RA + RB) C / u = 1.668e-4 s/V at
+    // 4.2 V (the discharge, RB C ln 2, is a ratio and does not move). Read
+    // 0.2 W0 stale (0.86 mV at 4.2 V), as R127's note supposes, that would
+    // be 1.43e-7 s a period of 426 us, 3.4e-4 relative: 7,000 times the
+    // 5e-8 measured. So the levels are not read 0.2 W0 stale; they ride the
+    // cell's path, and the path's own error is what they see. Probed at
+    // every solve over 0.4 s (CAD-4, b98-cadpath.log), the solved rail
+    // stands above the path's prediction by e = k dt^2 with k = 3.4 to 5.2
+    // V/s^2 at every interval length, one-signed, only while the output is
+    // high (rho -0.75 V/s; -0.09 V/s low): the drain's line held straight,
+    // `rho_dot tau^2 / 2` with rho_dot about 8 V/s^2 (the LED's current
+    // falls with the rail). The 0.2 W0 slack enters through the drift cap
+    // (0.6 mV), which the rail's 0.2 mV travel in a charge phase never
+    // reaches: the cadence holds the line over the whole phase (268 us, the
+    // 10 uV band 15 us), the error reaching 3.75e-7 V by the flip, 1.25e-7 V
+    // on average over the phase (a parabola's third). 1.668e-4 s/V x
+    // 1.25e-7 V = 2.1e-11 s a period, 4.9e-8 relative: the measured bias.
+    // The held line's own bound (`tau`, its error within RAIL_DRIFT_V) does
+    // not bind here (1.6 ms); at that bound the same arithmetic gives
+    // 1.668e-4 x 10 uV / 3 / 426 us = 1.3e-6, above R127's 1e-6.
+    let (mut p, tau) = property_board(98);
+    p.devices[0].params[7] = 1.0;
+    let t_end = 3.2;
+    let fine = flips(&p, 8, &stops(1e-6, t_end));
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(1e-6).unwrap();
+    let u0 = e.voltages()[1];
+    e.advance(t_end).unwrap();
+    let travel = u0 - e.voltages()[1];
+    for h in [1e-3, 1.0 / 60.0, 0.1] {
+        let got = flips(&p, 8, &stops(h, t_end));
+        let m = r127(&got, &fine, tau, 100, &|k| k == 0).unwrap_or_else(|e| panic!("board 98 from full at host {h:e}: {e}"));
+        let phase = got.last().unwrap().0 - fine.last().unwrap().0;
+        eprintln!("board 98 from full at host {h:e}: {} flips, rail {u0:.4} V down {travel:.4} V; period {:.3e} mean, {:.3e} worst single; edges {:.4} tau_w0 in the first 100 periods, {:.4} anywhere; phase {phase:.3e} s = {:.4} tau_w0, {:.3e} s = {:.4} tau_w0 per volt", got.len(), m.mean_period, m.worst_period, m.rephased_edge, m.any_edge, phase / tau, phase / travel, phase / tau / travel);
+        assert!(m.mean_period <= 1e-6 && m.worst_period <= 1e-6, "board 98 from full at host {h:e}: period {:.3e} mean, {:.3e} worst single", m.mean_period, m.worst_period);
+        assert!(m.rephased_edge <= 1.0, "board 98 from full at host {h:e}: an edge {:.3} tau_w0 off in the first 100 periods", m.rephased_edge);
+        assert!(m.any_edge <= 1.6, "board 98 from full at host {h:e}: {:.3} tau_w0 of accumulated phase", m.any_edge);
     }
-    assert!(farther.is_empty(), "{} board-cadences farther from the 1 us run than the band", farther.len());
 }
