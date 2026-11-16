@@ -589,12 +589,30 @@ also call, bit-identical.
   run the advance fails (A failed advance), the readings stay at the last
   good instant, and the host falls back to classic, which models the let-go.
   Never a silent sink. How the crossing is found (`check_back_drive`):
-  - a limited supply (a hub rail in CV) from the rail's own terms at every
-    publish (`hub_delivered`: the draw at `V`, every rail capacitor's pull
-    there with it, one past the setpoint pushing), its crossing an event of
-    its own: a rail watch at `-BACK_DRIVE_SINK_A` beside the CC entry's
-    (Rails point 4), with the running ramps' lines, so the failing instant
-    is the crossing's at any host cadence;
+  every supply is judged from its own KCL, at a synced publish (the load's
+  settle, each horizon clamp) its published current, between host stops
+  with the closed-form partitions read at the instant
+  (`fresh_supply_currents`, on copies), whose published nodes lag there.
+  Not from the rail equation's draw: a stepped hub partition's term is its
+  step's rail-row residual, good to a rounding of the loop currents past
+  the rail, and a closed switch across an esr-0 rail capacitor carries
+  tens of mA round it (cold 376 tpl 5 read 0.41 mA of sink there while the
+  supply delivered 0.56 mA). Then:
+  - a limited supply (a hub rail) only in CV (in CC it delivers its limit),
+    its crossing an event of its own: a rail watch at `-BACK_DRIVE_SINK_A`
+    beside the CC entry's (Rails point 4), from the rail's terms with the
+    running ramps' lines, so the publish that judges it is the crossing's
+    at any host cadence. Not while a CC exit's overshoot is pulled back
+    (`RailState::exit_sink`): default mode cuts no step at a CC exit, so
+    the exit is found where the CC phase has already carried a capacitor
+    past the setpoint, and CV pulls it back as a sink that decays within a
+    few steps (cold 400 tpl 2: an 80 ns step carried 806 nF behind a 1 mohm
+    switch 0.78 mV past it: 0.78 A, 57 mA, 3 mA, then sourcing). Armed only
+    where the CC rail at the exit is past the setpoint by more than 1e-9 of
+    it and the exit is not an edge's (`rail_jump`); while armed a sink must
+    fall at every instant, and never at a host stop, where a published
+    sample would read it (a drive that sets in at such an exit is declined
+    there at the latest);
   - in exact mode, at each committed step of the rail's partition, where the
     CC entry is judged (`exact_after_publish`), a stepped step cut where the
     source row's current crosses the threshold (`Cross::Sink`, beside the
@@ -602,13 +620,27 @@ also call, bit-identical.
     junction and no chip's supply (there the row's current is continuous in
     the step; across a branch the step's end can read a sink its commit
     does not, so the decline is the commit's);
-  - an unlimited supply (a fixed node) from its KCL at every publish, the
-    closed-form partitions read at the instant (`fresh_supply_currents`, on
-    copies), so between host stops the crossing is caught at the first
-    instant past it, not located: a ramp between two instants is found at
-    the second;
-  - every supply's published current at a synced publish (the load's
-    settle, each horizon clamp).
+  - an unlimited supply (a fixed node) at every publish only: its crossing
+    is no event, so it is caught at the first instant the core computes
+    past it, not located, and a sink that begins and ends between two
+    computed instants would not be seen at all (SHIPV-C finding 2). Measured
+    (PSU-3, ship-logs/psu3-measure-b*.txt): a 10 V step through one or two
+    RC band-pass stages (100 nF to 100 uF) onto a 5 V supply with a 30
+    kohm to 300 kohm load, host stops of 10 us, 1 ms, 1/60 s and 100 ms,
+    both modes. No sink went unseen: the partitions' own instants (a
+    closed-form partition's re-aims) fall inside every window, which last
+    50 us to over a second. The decline came late, past the 10 us
+    reference: by up to 0.73 ms at 1 ms stops (19 uA, a 1 uF stage, where
+    the limited supply in exact mode is located at 13.0855 ms), and by up
+    to 7.6 ms at 1/60 s stops (2.9 uA, a 100 uF stage). Until then no host
+    stop fell past the onset, so no published sample read the sink. A
+    window shorter than the gap between two computed instants would still
+    pass unseen. It is not made an event: the KCL current of a fixed node
+    is known along the closed-form motions but a stepped partition's only
+    at its commits, so the watch would be sound only on part of the boards.
+    Default mode's limited supply on a two-stage band-pass is located no
+    better (13.757 ms at 1 ms stops, as at 679dc42): the rail watch's terms
+    follow one exponential for each closed-form partition.
   A board with no bench supply runs none of it (`back_drive` empty).
 - **Validation** (`kinds.rs`, `-1`): `V` finite; `iLimit` finite and `>=
   0` (the compiler never emits a negative one).
