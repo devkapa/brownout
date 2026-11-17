@@ -7893,6 +7893,32 @@ failures and warnings (W1g)"):
   figure after it +10.9 %. To be recovered and re-gated in the 1.0.0 kernel
   work, which restructures those functions; no budget is set for the window
   measure yet.
+  Re-measured at the release's head `7720ad4` on a quieter machine (load
+  1.1, 15 paired reps): steady frozen +11.6 %, running +12.5 %; start-up at
+  the 5 s sample frozen +20.9 %, running +12.1 %; `8f39271` in that run
+  +9.3 / +10.3 and +13.7 / +10.1. So the running figure is over the ceiling
+  too (+12.5 against +11), and the +10.8 % above was read low under load.
+  It is not this head's doing: against `9e9aa01` directly (21 paired reps)
+  it is +0.3 % frozen and +0.3 % running at steady state, +1.1 % and +0.5 %
+  at start-up. The ideal board runs at about 13.8 ms of CPU per simulated
+  second, 70 times real time.
+- **The SAP-1 as an app sends it** (ruling R126 (3)). The figures above are
+  for boards without catalog identities, which no app sends: with them
+  every resistor and LED has a thermal record (198 on the SAP-1), and
+  `bench:sap1-cost -- --catalog=catalog` times that. At `7720ad4`, CPU ms
+  per simulated second with the program running: ideal 46 frozen and 49
+  running (the plain board: 10.5 and 13.8), battery 974 frozen and 1,306
+  running at steady state (the plain board: 433 and 698; `9e9aa01` with
+  identities: 2,551 and 3,011 at the 5 s sample, against this head's 1,022
+  and 1,352 there). With empty RAM, which halts the computer, the battery
+  board costs 382. So an app's battery SAP-1 running its program is below
+  real time on this release, and its thermal records still cost it 1.9
+  times the plain board: a part's visit at each move of its nodes, which
+  the cadence removes for the rail's drift and not for the board's own
+  switching. The speed gate has no ceiling for these boards yet; one is to
+  be set on them, and real time for the battery board is the target of the
+  1.0.0 work (a thermal part's power as a reading with a bound, the item
+  under Readouts, or its visits made lazy).
 
 ## Deferred past 1.0.0
 
