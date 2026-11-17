@@ -1698,6 +1698,51 @@ message builders live in `src/core/failures.ts`, which the facade calls):
   `FinalizationRegistry`. `snapshotBytes()` reads
   `bo_engine_snapshot_bytes`. The stats are not part of a snapshot.
 
+**Thermal readouts on a draining cell** (THERM3, THERM4; ruling R130).
+Under the reading-aware cadence (Rails point 4) a thermal part's power is
+held from the last rail solve, to a bound of about 4e-4 of itself that keeps
+one sign (the part's power is no reading of the cadence's cap, and the rail
+only falls). Against the same board stopped every 1 us, at any host stop,
+`T` and `P` (`getThermalState`, `getPartTemperature`) are held to ruling
+R130:
+- a part's temperature within W0_T = 1e-3 C + 1e-3 of its rise over
+  ambient; an LED's junction temperature, the one temperature that feeds a
+  law (W1g point 4), within a tenth of `THERMAL_BAND_C`, 1e-3 C;
+- its power within 1e-3 of itself (+ 1e-9 W);
+- a re-arm or latch instant within the time its temperature or stress
+  takes to cross that tolerance at its rate there;
+- no re-arm or latch lost or gained.
+
+It is accepted because the worst error measured (0.016 C, about 4e-4 of the
+rise) is far below what a package's thermal resistance is known to, no event
+is lost, and the battery SAP-1 keeps real time. The bound alone does not
+give an LED's 1e-3 C on a rise past about 5 C (2e-4 of a 9.7 C rise is 2e-3
+C); what holds it there is measured, not bounded (open item, "A thermal
+part's power as a reading"). Measured (worst over host stops of 1 ms,
+1/60 s and 100 ms against the 1 us run; the 10 uV band, 9e9aa01's rule, in
+brackets):
+
+| board | T error | of the rise | P at a stop | events |
+|---|---|---|---|---|
+| 220 ohm + LED, 15 uAh (THERM's) | 6.2e-5 C (2.7e-6) | 6.7e-5 (3.0e-6) | 1.1e-5 | 313 re-arms equal, worst 2.0e-5 s (8.9e-7); latch 1.6e-6 s (7.8e-8) |
+| hot 240 ohm, 31 C rise, 1 mAh | 3.5e-3 C (6.2e-5) | 1.1e-4 (2.0e-6) | 3.0e-11 | - |
+| the same, 10 uAh (0.56 V/s) | 4.9e-3 C (4.7e-5) | 2.0e-4 (1.9e-6) | 2.2e-9 | - |
+| 150 ohm + LED at 21 mA, 1 mAh: R / LED | 5.0e-5 / 1.5e-5 C | 2.8e-6 / 1.4e-6 | 2.5e-11 | 1,129 re-arms equal, worst 3.9e-6 s (2.9e-6) |
+| the same, 10 uAh: R / LED | 2.4e-3 / 8.9e-4 C (3.8e-5 / 1.4e-5) | 1.8e-4 / 9.2e-5 | 1.6e-5 | 969 re-arms equal, worst 2.7e-4 s (4.4e-6), 0.89 of R130's allowance |
+| 96 ohm rated 0.1 W, latching, 1 mAh | 7.5e-3 C (1.2e-4) | 1.9e-4 (2.8e-6) | 5.2e-11 | latch 1.75e-4 s (2.5e-6), R130 1.2e-3 s |
+| the same, 25 uAh | 1.6e-2 C (1.6e-4) | 3.9e-4 (3.8e-6) | 1.2e-9 | latch 3.6e-4 s early (3.5e-6), R130 1.9e-3 s |
+| 555 astable switching 150 ohm + LED, 8 uAh | 2.5e-5 C (4.5e-4) | 4.9e-6 (1.5e-4) | 1.7e-5 | 7,570 flips and 388 re-arms equal, worst re-arm 6.0e-5 s |
+
+The battery SAP-1 as the app sends it (app-circuit.rec plus 8 s at 1/60 s
+frames, 198 identified parts, 45 of them rising more than 1 C, the hottest
+11.6 C): every temperature within 6.2e-4 C of the band's (1.2e-4 of a 5.3 C
+rise), every power at a frame within 6.4e-5 of it (6.9e-7 W); 3.33 s of CPU
+per 10 simulated seconds natively, the band 9.68 s. Tests:
+`solve/thermal_cadence_tests.rs` (every board above but THERM's, release
+only) and `thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole`
+(THERM's, held to the bound itself: 4.1e-4 of a resistor's rise, 2.1e-4 of
+the LED's).
+
 ## Kernel semantics: the static solve (W0)
 
 1. **Fixed nodes.** Node 0 is fixed at 0 V. A `voltage_source` with one
@@ -4604,7 +4649,16 @@ Constants, all from P3:35-38 unless marked new:
    own: each static hub node and draw, the direct draw and the rail may
    move `CELL_READING_SLACK` (0.2) of its W0 past what `RAIL_DRIFT_V` let it,
    `RAIL_DRIFT_V + 0.2 W0(r) / |dr/du|` (at most `CELL_DRIFT_MAX_V`, 50 mV;
-   `CELL_JUNCTION_DRIFT_V`, 0.5 mV, with a direct junction). The watch also
+   `CELL_JUNCTION_DRIFT_V`, 0.5 mV, with a direct junction). **A thermal
+   part's power is not one of these readings** (THERM3, ruling R130): an
+   identified part is re-driven at each rail solve and holds the power of
+   the last one until the next, so a resistor carrying a draw `i` of
+   conductance `g = |di/du|` holds `R i^2` to `2 (g RAIL_DRIFT_V + 0.2
+   W0(i)) / i` of itself, about 4e-4 (an LED's `V i` about 2e-4; on the
+   10 uV band `2 g RAIL_DRIFT_V / i`, about 4e-6 at 5 V). The rail only
+   falls, so the error keeps one sign, and a temperature, a one-pole of the
+   power, errs by up to that fraction of its rise. What a thermal readout is
+   held to is in "Readouts"; making the power a reading is an open item. The watch also
    takes every curved hub partition's band edges (static and stepped too),
    the scan band and the levels of the logic inputs the scan reads, as
    thresholds; and the rail solves before the held drain line could move
@@ -7733,6 +7787,22 @@ failures and warnings (W1g)"):
   (worse on 42 of 72 pairs, better at the worst) and depends on the host's
   cadence where the band does not. Re-solving where the oscillator's own
   load switches would remove the bias at a cost not yet measured.
+- **A thermal part's power as a reading of the cadence's cap** (THERM3,
+  ruling R130; Rails point 4, Readouts). A thermal part's power is held
+  from the last rail solve, one-signed, to about 4e-4 of itself, some forty
+  times the 10 uV band's; R130 accepts it, but by the bound alone an LED's
+  junction is held to its 1e-3 C only on a rise under about 5 C (measured
+  8.9e-4 C on a 9.7 C rise). Bounding it: the part's power (or its
+  temperature) as one more reading, `dP <= W_T / R_theta` with `W_T` a
+  share of `THERMAL_BAND_C`, its sensitivity `dP/du` from its pin lines
+  (R30's `c + sigma u`). On a 30 C rise that is a relative slack of 3e-5,
+  `CELL_READING_SLACK` about 0.015 for that part, so the reading must scale
+  with each part's rise, not a global slack. Cost, from a proxy (every
+  reading's slack 0.2 -> 0.04, scratch only): the battery SAP-1's rail
+  events per 10 s 2,637 -> 25,336, native CPU 3.33 -> 3.75 s (+12 %), its
+  temperatures within 1.7e-4 C of the band's; the fast boards' errors fall
+  five times (hot 1.0e-3 C, latching 3.3e-3 C, re-arms 6.3e-5 s). A
+  per-part reading's own cost is not measured.
 - **Stale crossings at 1 us host stops** (R128; CAD-4). At host stops of
   1 us the cadence processes more events than the band on astable and
   counter boards (SHIPV-G's A31: 244k against 158k), none of them rail

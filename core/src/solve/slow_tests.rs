@@ -2471,7 +2471,12 @@ fn thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_
     // resistor's rise). Under the cadence (5ff6654) THERM3 measured 6.2e-5 C
     // (6.7e-5 of the resistor's 0.92 C rise at 0.5 s) and 1.1e-4 C on the
     // LED (3.5e-5 of its rise): the cadence moves them twenty times, inside
-    // its bound by six; a hold ten times longer fails here. Checked at host
+    // its bound by six (this test prints its worst). A hold ten times longer
+    // fails here (THERM4, scratch only: each part's power rewritten at every
+    // tenth rail solve): the resistor's power at 0.1 s, 1 ms stops, 4.2e-4
+    // off, and with that check removed the LED's temperature 2.2e-4 of its
+    // rise. (Ten times the slack does not move them past 1.6e-4: on this
+    // board other edges of the watch end the hold first.) Checked at host
     // stops of 1 ms, 1/60 s and 100 ms against the same board stopped every
     // microsecond.
     let p = draining_cell_board();

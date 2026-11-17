@@ -71,6 +71,8 @@ mod window_tests;
 mod cap_tests;
 #[cfg(test)]
 mod crossing_tests;
+#[cfg(test)]
+mod thermal_cadence_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
