@@ -2128,6 +2128,41 @@ op-amps.
   couples to both `out` and one rail) but the supply-current split between V+
   and V- is a step stale. **Recommend** reproduce for W3-O identity; the kernel
   form decides the rail inside the solve if it can.
+- **Q-W3-80 (the follower's operating point depends on the rail's source
+  resistance; observed 2026-11-17 on a production board, numbered out of
+  section order).** An LM358 follower fed 2.130 V from a divider, an LM386
+  after it, both on a `battery_pack` (9 V, charge 1): `dcOperatingPoint`
+  reports the follower's output at 2.206 V (its input, correct) with
+  `rInternal` at 0.5 ohm and below, at 3.346 V with 1.0 and 1.5 ohm, and at
+  0.020 V when a capacitor is added across the battery, which cannot change
+  a DC solution. So the regime search (`regimeIterations` 8 each time) lands
+  on different output regimes for the same DC circuit. Not traced to a line.
+  **Recommend** the port derive the follower's operating point by hand for
+  this board and treat classic's 3.346 V and 0.020 V as defects, not
+  semantics to copy.
+- **Q-W3-81 (two op-amps on a resistive rail pin the step near 20 ns).** On
+  the same board the transient takes 15 steps per 5 ms with `rInternal`
+  0.001 ohm; about 20 ns steps (20,000 per 0.2 to 0.4 ms) at 0.1, 0.5 and
+  1.0 ohm; and reaches the 10 ns floor at t = 13.26 us with 1.5 ohm (782
+  accepted, 60 failed), with or without the DC settle first. A decoupling
+  capacitor across the battery (100 uF, 10 uF, 0.1 uF) removes the failure
+  and not the 20 ns steps. Removing either op-amp makes it run. The LM386
+  is at its low output clamp throughout (2.13 V DC in at a gain of 20, out
+  at 0.020 V). Suspects, none tested: the supply-return sign lag of Q-W3-50
+  with the rail now moving on that current; the output clamp or current
+  limit regime changing with the rail each step. Whether the circuit has a
+  real oscillation there is not established. **Recommend** the port solve
+  the supply return inside the step (Q-W3-50's kernel form) and pin this
+  board at host stops of 1 ms and 1/60 s against a hand operating point.
+- **Q-W3-82 (an LM386 at its low clamp on that board).** The LM386's output
+  reads 0.020 V throughout, its low clamp, with the follower's 2.13 V
+  somewhere on its input network. I did not trace which input pin the DC
+  level reaches or through what, so whether the clamp and its polarity are
+  what the model should give is open. The model has no half-supply output
+  bias and no input network (Q-W3-49), so it cannot be checked against the
+  part's own behaviour without them. **Recommend** settle with Q-W3-49;
+  until then treat this board's LM386 reading as unverified, not as a
+  reference.
 
 ---
 
