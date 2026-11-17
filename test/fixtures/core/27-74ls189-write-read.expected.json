@@ -1,0 +1,58 @@
+{
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_we",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_we",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "dip_addr",
+          "params": {
+            "sw1": 0,
+            "sw2": 1,
+            "sw3": 0,
+            "sw4": 1
+          }
+        }
+      ],
+      "durationS": 0.002
+    },
+    {
+      "set": [
+        {
+          "id": "dip_addr",
+          "params": {
+            "sw1": 1,
+            "sw2": 0,
+            "sw3": 1,
+            "sw4": 0
+          }
+        }
+      ],
+      "durationS": 0.002
+    }
+  ]
+}

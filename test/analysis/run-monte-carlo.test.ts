@@ -23,12 +23,22 @@
  *   survive small run counts.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { runMonteCarlo, runMonteCarloAsync } from "../../src/analysis/run-monte-carlo.js";
+import { runMonteCarlo as runMonteCarloImpl, runMonteCarloAsync as runMonteCarloAsyncImpl, type MonteCarloHooks } from "../../src/analysis/run-monte-carlo.js";
 import { validateJobSpec } from "../../src/analysis/jobs.js";
 import type { MonteCarloSpec } from "../../src/analysis/jobs.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 import { SimEngine } from "../../src/sim/engine/sim-engine.js";
+import { initCore } from "../../src/core/wasm.js";
+import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { ENGINE_MODES, expectedEngine, matrixOptions } from "../helpers/analysis-engine-matrix.js";
+
+// The core must be up before the "auto" column runs: a core that was never
+// initialised makes `auto` fall back to classic, which would pass these
+// tests while proving nothing. expectedEngine() below fails that loudly.
+await initCore();
+
 
 // ─── Circuit builder helpers ──────────────────────────────────────────────────
 
@@ -175,342 +185,213 @@ function findNetId(circuit: SimCircuit, compId: string, pinId: string): string {
 
 // ─── Test a: divider values within analytical worst-case bounds ───────────────
 
-describe("monte-carlo: resistor divider values within worst-case bounds", () => {
-  it("all run values are within [2.375, 2.625] V and stddev > 0", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
-
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 30,
-      seed: 42,
-      settleTimeS: 0.02,
-      outputs: [{ netId: midNet }],
-    };
-
-    const result = runMonteCarlo(spec, circuit);
-
-    expect(result.cancelled).toBe(false);
-    expect(result.runs).toBe(30);
-    expect(result.outputs).toHaveLength(1);
-    expect(result.outputs[0]!.values).toHaveLength(30);
-
-    // Every individual run must be within the worst-case tolerance band.
-    const V_MIN = 2.375;
-    const V_MAX = 2.625;
-    for (const v of result.outputs[0]!.values) {
-      expect(v).toBeGreaterThan(V_MIN - 0.01);
-      expect(v).toBeLessThan(V_MAX + 0.01);
-    }
-
-    // With 30 runs and two independently perturbed resistors, stddev must be
-    // non-zero — perturbations are producing genuinely different voltages.
-    expect(result.outputs[0]!.stddev).toBeGreaterThan(0);
-  });
-
-  it("mean is within ±5% of 2.5 V (nominal divider output)", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
-
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 30,
-      seed: 99,
-      settleTimeS: 0.02,
-      outputs: [{ netId: midNet }],
-    };
-
-    const result = runMonteCarlo(spec, circuit);
-    // 5% of 2.5 V = 0.125 V — a very loose bound that holds unless the PRNG
-    // is badly biased or the perturbation sign convention is wrong.
-    expect(result.outputs[0]!.mean).toBeCloseTo(2.5, 0);
-  });
-});
-
-// ─── Test b: determinism — same seed → identical values, diff seed → different ─
-
-describe("monte-carlo: determinism", () => {
-  it("same seed twice produces identical values arrays", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
-
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 20,
-      seed: 7,
-      settleTimeS: 0.02,
-      outputs: [{ netId: midNet }],
-    };
-
-    const r1 = runMonteCarlo(spec, circuit);
-    const r2 = runMonteCarlo(spec, circuit);
-
-    expect(r1.outputs[0]!.values).toEqual(r2.outputs[0]!.values);
-  });
-
-  it("different seed produces at least one differing value", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
-
-    const specA: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 20,
-      seed: 1,
-      settleTimeS: 0.02,
-      outputs: [{ netId: midNet }],
-    };
-    const specB: MonteCarloSpec = { ...specA, seed: 2 };
-
-    const rA = runMonteCarlo(specA, circuit);
-    const rB = runMonteCarlo(specB, circuit);
-
-    const allSame = rA.outputs[0]!.values.every((v, i) => v === rB.outputs[0]!.values[i]);
-    expect(allSame).toBe(false);
-  });
-});
-
-// ─── Test c: order-independence ───────────────────────────────────────────────
-
-describe("monte-carlo: order-independence", () => {
-  it("reversing the components array produces the same per-run values", () => {
-    // The perturbation key includes the component id, not its array index.
-    // A structurally identical circuit with components re-ordered must produce
-    // the same output — otherwise "same seed" would be a fragile contract.
-    const circuitNormal = voltageDividerCircuit();
-    const circuitReversed = voltageDividerReversedCircuit();
-
-    // Find the mid-net id from both circuits to confirm they resolve identically.
-    const midNetNormal = findNetId(circuitNormal, "r_top", "b");
-    const midNetReversed = findNetId(circuitReversed, "r_top", "b");
-
-    const specNormal: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 20,
-      seed: 42,
-      settleTimeS: 0.02,
-      outputs: [{ netId: midNetNormal }],
-    };
-    const specReversed: MonteCarloSpec = { ...specNormal, outputs: [{ netId: midNetReversed }] };
-
-    const rNormal = runMonteCarlo(specNormal, circuitNormal);
-    const rReversed = runMonteCarlo(specReversed, circuitReversed);
-
-    // Per-run values must be bit-identical.
-    expect(rNormal.outputs[0]!.values).toEqual(rReversed.outputs[0]!.values);
-  });
-});
-
-// ─── Test d: vf variation — LED node voltage spreads across runs ──────────────
-
-describe("monte-carlo: vf variation for LED", () => {
-  it("LED-anode node values spread across runs (stddev > 0)", () => {
-    const circuit = ledResistorCircuit();
-    const anodeNet = findNetId(circuit, "led1", "anode");
-
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 30,
-      seed: 13,
-      settleTimeS: 0.05,
-      outputs: [{ netId: anodeNet }],
-    };
-
-    const result = runMonteCarlo(spec, circuit);
-
-    expect(result.cancelled).toBe(false);
-
-    // The LED must actually be conducting: a non-conducting LED pins the anode
-    // to ~5 V (the rail).  Conducting clamps it near vf, well under 4 V.  This
-    // guards against the kind/vf fixture regressing to a non-stamped element.
-    expect(result.outputs[0]!.mean).toBeLessThan(4);
-
-    // Perturbing vf changes the forward bias and the anode voltage.  Floor the
-    // spread well above float noise (a resistor-only perturbation produced
-    // ~6.6e-8 V) so the test cannot pass without the vf draw actually moving it.
-    expect(result.outputs[0]!.stddev).toBeGreaterThan(0.01);
-
-    // All values must be physically plausible: between 0 V and 5 V.
-    for (const v of result.outputs[0]!.values) {
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThanOrEqual(5);
-    }
-  });
-
-  it("uses exact same-kind catalog identity for the nominal forward voltage", () => {
-    const redCircuit = catalogLedCircuit("led-red");
-    const blueCircuit = catalogLedCircuit("led-blue");
-    const redNet = findNetId(redCircuit, "led1", "anode");
-    const blueNet = findNetId(blueCircuit, "led1", "anode");
-    const baseSpec = {
-      kind: "monte-carlo" as const,
-      runs: 12,
-      seed: 21,
-      settleTimeS: 0.03,
-    };
-
-    const red = runMonteCarlo({ ...baseSpec, outputs: [{ netId: redNet }] }, redCircuit);
-    const blue = runMonteCarlo({ ...baseSpec, outputs: [{ netId: blueNet }] }, blueCircuit);
-
-    expect(red.outputs[0]!.mean).toBeGreaterThan(1.5);
-    expect(blue.outputs[0]!.mean).toBeGreaterThan(red.outputs[0]!.mean + 0.7);
-  });
-});
-
-// ─── Test d2: rgb_led per-emitter vf variation ────────────────────────────────
-
-/**
- * bench_psu → resistor → rgb_led red anode (r_a); com_k → gnd.
- *
- * The red channel conducts, so the r_a node settles near vf_r.  The per-emitter
- * vf_r/vf_g/vf_b are seeded into the catalog default_params, so a placed rgb_led
- * carries them in params and the runner perturbs them — without that seeding the
- * engine reads its hardcoded vf_r default and tolerance has no effect.
- */
-function rgbLedCircuit(): SimCircuit {
-  return {
-    components: [
-      {
-        id: "psu1",
-        kind: "bench_psu",
-        pins: [{ id: "pos" }, { id: "neg" }],
-        params: { voltage: 5, iLimit: 1 },
-      },
-      {
-        id: "r1",
-        kind: "resistor",
-        pins: [{ id: "a" }, { id: "b" }],
-        params: { resistance: 470 },
-      },
-      {
-        id: "led1",
-        kind: "rgb_led",
-        pins: [{ id: "r_a" }, { id: "g_a" }, { id: "b_a" }, { id: "com_k" }],
-        // Per-emitter Vf carried in params (mirrors what placement seeds from
-        // default_params) so the runner's vf_r/vf_g/vf_b loop perturbs them.
-        params: { vf_r: 1.8, vf_g: 2.0, vf_b: 3.0 },
-      },
-    ],
-    wires: [
-      { from_component: "psu1", from_pin: "pos", to_component: "r1", to_pin: "a" },
-      { from_component: "r1", from_pin: "b", to_component: "led1", to_pin: "r_a" },
-      { from_component: "led1", from_pin: "com_k", to_component: "psu1", to_pin: "neg" },
-    ],
+// Every test below runs twice: engine pinned to classic, and `auto` with the
+// core's gate widened (see run-sweep.test.ts).
+describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
+  const runMonteCarlo = (spec: MonteCarloSpec, circuit: SimCircuit, hooks?: MonteCarloHooks) => {
+    const result = runMonteCarloImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
+    expect(result.engine).toBe(expectedEngine(mode, circuit));
+    return result;
   };
-}
+  const runMonteCarloAsync = async (spec: MonteCarloSpec, circuit: SimCircuit, hooks?: MonteCarloHooks) => {
+    const result = await runMonteCarloAsyncImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
+    expect(result.engine).toBe(expectedEngine(mode, circuit));
+    return result;
+  };
 
-describe("monte-carlo: rgb_led per-emitter vf variation", () => {
-  it("red-anode node values spread across runs once vf_r is perturbed", () => {
-    const circuit = rgbLedCircuit();
-    const anodeNet = findNetId(circuit, "led1", "r_a");
+  describe("monte-carlo: resistor divider values within worst-case bounds", () => {
+    it("all run values are within [2.375, 2.625] V and stddev > 0", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
 
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 30,
-      seed: 5,
-      settleTimeS: 0.05,
-      outputs: [{ netId: anodeNet }],
-    };
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 30,
+        seed: 42,
+        settleTimeS: 0.02,
+        outputs: [{ netId: midNet }],
+      };
 
-    const result = runMonteCarlo(spec, circuit);
-    expect(result.cancelled).toBe(false);
-    // Conducting channel clamps the anode near vf_r (~1.8 V), well under the rail.
-    expect(result.outputs[0]!.mean).toBeLessThan(4);
-    // Real spread from the vf_r draw, not float noise.
-    expect(result.outputs[0]!.stddev).toBeGreaterThan(0.005);
-  });
-});
+      const result = runMonteCarlo(spec, circuit);
 
-// ─── Test e: cancellation ─────────────────────────────────────────────────────
+      expect(result.cancelled).toBe(false);
+      expect(result.runs).toBe(30);
+      expect(result.outputs).toHaveLength(1);
+      expect(result.outputs[0]!.values).toHaveLength(30);
 
-describe("monte-carlo: cancellation", () => {
-  it("shouldCancel after 5 runs → cancelled=true, values truncated to 5", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
+      // Every individual run must be within the worst-case tolerance band.
+      const V_MIN = 2.375;
+      const V_MAX = 2.625;
+      for (const v of result.outputs[0]!.values) {
+        expect(v).toBeGreaterThan(V_MIN - 0.01);
+        expect(v).toBeLessThan(V_MAX + 0.01);
+      }
 
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 30,
-      seed: 1,
-      settleTimeS: 0.01,
-      outputs: [{ netId: midNet }],
-    };
-
-    const onPoint = vi.fn();
-    let completedRuns = 0;
-
-    const result = runMonteCarlo(spec, circuit, {
-      onPoint(r, total) {
-        completedRuns++;
-        onPoint(r, total);
-      },
-      shouldCancel() {
-        return completedRuns >= 5;
-      },
+      // With 30 runs and two independently perturbed resistors, stddev must be
+      // non-zero — perturbations are producing genuinely different voltages.
+      expect(result.outputs[0]!.stddev).toBeGreaterThan(0);
     });
 
-    expect(result.cancelled).toBe(true);
-    expect(result.runs).toBe(5);
-    expect(result.outputs[0]!.values).toHaveLength(5);
-    expect(result.pointFailures).toHaveLength(5);
-    expect(onPoint).toHaveBeenCalledTimes(5);
+    it("mean is within ±5% of 2.5 V (nominal divider output)", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 30,
+        seed: 99,
+        settleTimeS: 0.02,
+        outputs: [{ netId: midNet }],
+      };
+
+      const result = runMonteCarlo(spec, circuit);
+      // 5% of 2.5 V = 0.125 V — a very loose bound that holds unless the PRNG
+      // is badly biased or the perturbation sign convention is wrong.
+      expect(result.outputs[0]!.mean).toBeCloseTo(2.5, 0);
+    });
   });
 
-  it("pointFailures length matches values length after cancellation", () => {
-    const circuit = voltageDividerCircuit();
-    const midNet = findNetId(circuit, "r_top", "b");
+  // ─── Test b: determinism — same seed → identical values, diff seed → different ─
 
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 50,
-      seed: 2,
-      settleTimeS: 0.01,
-      outputs: [{ netId: midNet }],
-    };
+  describe("monte-carlo: determinism", () => {
+    it("same seed twice produces identical values arrays", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
 
-    let n = 0;
-    const result = runMonteCarlo(spec, circuit, {
-      onPoint() { n++; },
-      shouldCancel() { return n >= 8; },
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 20,
+        seed: 7,
+        settleTimeS: 0.02,
+        outputs: [{ netId: midNet }],
+      };
+
+      const r1 = runMonteCarlo(spec, circuit);
+      const r2 = runMonteCarlo(spec, circuit);
+
+      expect(r1.outputs[0]!.values).toEqual(r2.outputs[0]!.values);
     });
 
-    expect(result.pointFailures).toHaveLength(result.runs);
-    expect(result.outputs[0]!.values).toHaveLength(result.runs);
-  });
-});
+    it("different seed produces at least one differing value", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
 
-// ─── Test f: zero-tolerance circuit rejected by validateJobSpec ───────────────
+      const specA: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 20,
+        seed: 1,
+        settleTimeS: 0.02,
+        outputs: [{ netId: midNet }],
+      };
+      const specB: MonteCarloSpec = { ...specA, seed: 2 };
 
-describe("monte-carlo: zero-tolerance circuit validation", () => {
-  it("validateJobSpec rejects a circuit with only signal_gen (no toleranced components)", () => {
-    // The runner itself is not tested here — the spec-level guard is the correct
-    // place to enforce this, so the runner never needs to handle the edge case.
-    const noTolCircuit: SimCircuit = {
-      components: [
-        {
-          id: "sg1",
-          kind: "signal_gen",
-          pins: [{ id: "pos" }, { id: "neg" }],
-          params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 50, enabled: 1 },
-        },
-      ],
-      wires: [],
-    };
+      const rA = runMonteCarlo(specA, circuit);
+      const rB = runMonteCarlo(specB, circuit);
 
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 20,
-      seed: 1,
-      settleTimeS: 0.02,
-      outputs: [{ netId: "n0" }],
-    };
-
-    const err = validateJobSpec(spec, noTolCircuit);
-    expect(err).not.toBeNull();
-    expect(err).toMatch(/tolerance/i);
+      const allSame = rA.outputs[0]!.values.every((v, i) => v === rB.outputs[0]!.values[i]);
+      expect(allSame).toBe(false);
+    });
   });
 
-  it("validateJobSpec accepts a circuit that has a resistor (tolerance available)", () => {
-    const tolCircuit: SimCircuit = {
+  // ─── Test c: order-independence ───────────────────────────────────────────────
+
+  describe("monte-carlo: order-independence", () => {
+    it("reversing the components array produces the same per-run values", () => {
+      // The perturbation key includes the component id, not its array index.
+      // A structurally identical circuit with components re-ordered must produce
+      // the same output — otherwise "same seed" would be a fragile contract.
+      const circuitNormal = voltageDividerCircuit();
+      const circuitReversed = voltageDividerReversedCircuit();
+
+      // Find the mid-net id from both circuits to confirm they resolve identically.
+      const midNetNormal = findNetId(circuitNormal, "r_top", "b");
+      const midNetReversed = findNetId(circuitReversed, "r_top", "b");
+
+      const specNormal: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 20,
+        seed: 42,
+        settleTimeS: 0.02,
+        outputs: [{ netId: midNetNormal }],
+      };
+      const specReversed: MonteCarloSpec = { ...specNormal, outputs: [{ netId: midNetReversed }] };
+
+      const rNormal = runMonteCarlo(specNormal, circuitNormal);
+      const rReversed = runMonteCarlo(specReversed, circuitReversed);
+
+      // Per-run values must be bit-identical.
+      expect(rNormal.outputs[0]!.values).toEqual(rReversed.outputs[0]!.values);
+    });
+  });
+
+  // ─── Test d: vf variation — LED node voltage spreads across runs ──────────────
+
+  describe("monte-carlo: vf variation for LED", () => {
+    it("LED-anode node values spread across runs (stddev > 0)", () => {
+      const circuit = ledResistorCircuit();
+      const anodeNet = findNetId(circuit, "led1", "anode");
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 30,
+        seed: 13,
+        settleTimeS: 0.05,
+        outputs: [{ netId: anodeNet }],
+      };
+
+      const result = runMonteCarlo(spec, circuit);
+
+      expect(result.cancelled).toBe(false);
+
+      // The LED must actually be conducting: a non-conducting LED pins the anode
+      // to ~5 V (the rail).  Conducting clamps it near vf, well under 4 V.  This
+      // guards against the kind/vf fixture regressing to a non-stamped element.
+      expect(result.outputs[0]!.mean).toBeLessThan(4);
+
+      // Perturbing vf changes the forward bias and the anode voltage.  Floor the
+      // spread well above float noise (a resistor-only perturbation produced
+      // ~6.6e-8 V) so the test cannot pass without the vf draw actually moving it.
+      expect(result.outputs[0]!.stddev).toBeGreaterThan(0.01);
+
+      // All values must be physically plausible: between 0 V and 5 V.
+      for (const v of result.outputs[0]!.values) {
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(5);
+      }
+    });
+
+    it("uses exact same-kind catalog identity for the nominal forward voltage", () => {
+      const redCircuit = catalogLedCircuit("led-red");
+      const blueCircuit = catalogLedCircuit("led-blue");
+      const redNet = findNetId(redCircuit, "led1", "anode");
+      const blueNet = findNetId(blueCircuit, "led1", "anode");
+      const baseSpec = {
+        kind: "monte-carlo" as const,
+        runs: 12,
+        seed: 21,
+        settleTimeS: 0.03,
+      };
+
+      const red = runMonteCarlo({ ...baseSpec, outputs: [{ netId: redNet }] }, redCircuit);
+      const blue = runMonteCarlo({ ...baseSpec, outputs: [{ netId: blueNet }] }, blueCircuit);
+
+      expect(red.outputs[0]!.mean).toBeGreaterThan(1.5);
+      expect(blue.outputs[0]!.mean).toBeGreaterThan(red.outputs[0]!.mean + 0.7);
+    });
+  });
+
+  // ─── Test d2: rgb_led per-emitter vf variation ────────────────────────────────
+
+  /**
+   * bench_psu → resistor → rgb_led red anode (r_a); com_k → gnd.
+   *
+   * The red channel conducts, so the r_a node settles near vf_r.  The per-emitter
+   * vf_r/vf_g/vf_b are seeded into the catalog default_params, so a placed rgb_led
+   * carries them in params and the runner perturbs them — without that seeding the
+   * engine reads its hardcoded vf_r default and tolerance has no effect.
+   */
+  function rgbLedCircuit(): SimCircuit {
+    return {
       components: [
         {
           id: "psu1",
@@ -522,51 +403,269 @@ describe("monte-carlo: zero-tolerance circuit validation", () => {
           id: "r1",
           kind: "resistor",
           pins: [{ id: "a" }, { id: "b" }],
-          params: { resistance: 1000 },
+          params: { resistance: 470 },
+        },
+        {
+          id: "led1",
+          kind: "rgb_led",
+          pins: [{ id: "r_a" }, { id: "g_a" }, { id: "b_a" }, { id: "com_k" }],
+          // Per-emitter Vf carried in params (mirrors what placement seeds from
+          // default_params) so the runner's vf_r/vf_g/vf_b loop perturbs them.
+          params: { vf_r: 1.8, vf_g: 2.0, vf_b: 3.0 },
         },
       ],
       wires: [
         { from_component: "psu1", from_pin: "pos", to_component: "r1", to_pin: "a" },
-        { from_component: "r1", from_pin: "b", to_component: "psu1", to_pin: "neg" },
+        { from_component: "r1", from_pin: "b", to_component: "led1", to_pin: "r_a" },
+        { from_component: "led1", from_pin: "com_k", to_component: "psu1", to_pin: "neg" },
       ],
     };
+  }
 
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 20,
-      seed: 1,
-      settleTimeS: 0.02,
-      outputs: [{ netId: "n0" }],
-    };
+  describe("monte-carlo: rgb_led per-emitter vf variation", () => {
+    it("red-anode node values spread across runs once vf_r is perturbed", () => {
+      const circuit = rgbLedCircuit();
+      const anodeNet = findNetId(circuit, "led1", "r_a");
 
-    expect(validateJobSpec(spec, tolCircuit)).toBeNull();
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 30,
+        seed: 5,
+        settleTimeS: 0.05,
+        outputs: [{ netId: anodeNet }],
+      };
+
+      const result = runMonteCarlo(spec, circuit);
+      expect(result.cancelled).toBe(false);
+      // Conducting channel clamps the anode near vf_r (~1.8 V), well under the rail.
+      expect(result.outputs[0]!.mean).toBeLessThan(4);
+      // Real spread from the vf_r draw, not float noise.
+      expect(result.outputs[0]!.stddev).toBeGreaterThan(0.005);
+    });
+  });
+
+  // ─── Test e: cancellation ─────────────────────────────────────────────────────
+
+  describe("monte-carlo: cancellation", () => {
+    it("shouldCancel after 5 runs → cancelled=true, values truncated to 5", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 30,
+        seed: 1,
+        settleTimeS: 0.01,
+        outputs: [{ netId: midNet }],
+      };
+
+      const onPoint = vi.fn();
+      let completedRuns = 0;
+
+      const result = runMonteCarlo(spec, circuit, {
+        onPoint(r, total) {
+          completedRuns++;
+          onPoint(r, total);
+        },
+        shouldCancel() {
+          return completedRuns >= 5;
+        },
+      });
+
+      expect(result.cancelled).toBe(true);
+      expect(result.runs).toBe(5);
+      expect(result.outputs[0]!.values).toHaveLength(5);
+      expect(result.pointFailures).toHaveLength(5);
+      expect(onPoint).toHaveBeenCalledTimes(5);
+    });
+
+    it("pointFailures length matches values length after cancellation", () => {
+      const circuit = voltageDividerCircuit();
+      const midNet = findNetId(circuit, "r_top", "b");
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 50,
+        seed: 2,
+        settleTimeS: 0.01,
+        outputs: [{ netId: midNet }],
+      };
+
+      let n = 0;
+      const result = runMonteCarlo(spec, circuit, {
+        onPoint() { n++; },
+        shouldCancel() { return n >= 8; },
+      });
+
+      expect(result.pointFailures).toHaveLength(result.runs);
+      expect(result.outputs[0]!.values).toHaveLength(result.runs);
+    });
+  });
+
+  // ─── Test f: zero-tolerance circuit rejected by validateJobSpec ───────────────
+
+  describe("monte-carlo: zero-tolerance circuit validation", () => {
+    it("validateJobSpec rejects a circuit with only signal_gen (no toleranced components)", () => {
+      // The runner itself is not tested here — the spec-level guard is the correct
+      // place to enforce this, so the runner never needs to handle the edge case.
+      const noTolCircuit: SimCircuit = {
+        components: [
+          {
+            id: "sg1",
+            kind: "signal_gen",
+            pins: [{ id: "pos" }, { id: "neg" }],
+            params: { waveform: "sine", frequency: 1000, amplitude: 1, offset: 0, rSource: 50, enabled: 1 },
+          },
+        ],
+        wires: [],
+      };
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 20,
+        seed: 1,
+        settleTimeS: 0.02,
+        outputs: [{ netId: "n0" }],
+      };
+
+      const err = validateJobSpec(spec, noTolCircuit);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/tolerance/i);
+    });
+
+    it("validateJobSpec accepts a circuit that has a resistor (tolerance available)", () => {
+      const tolCircuit: SimCircuit = {
+        components: [
+          {
+            id: "psu1",
+            kind: "bench_psu",
+            pins: [{ id: "pos" }, { id: "neg" }],
+            params: { voltage: 5, iLimit: 1 },
+          },
+          {
+            id: "r1",
+            kind: "resistor",
+            pins: [{ id: "a" }, { id: "b" }],
+            params: { resistance: 1000 },
+          },
+        ],
+        wires: [
+          { from_component: "psu1", from_pin: "pos", to_component: "r1", to_pin: "a" },
+          { from_component: "r1", from_pin: "b", to_component: "psu1", to_pin: "neg" },
+        ],
+      };
+
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 20,
+        seed: 1,
+        settleTimeS: 0.02,
+        outputs: [{ netId: "n0" }],
+      };
+
+      expect(validateJobSpec(spec, tolCircuit)).toBeNull();
+    });
+  });
+
+  describe("monte-carlo convergence safety", () => {
+    it("rejects a run instead of including a failed iterate in its statistics", () => {
+      const circuit: SimCircuit = {
+        components: [
+          { id: "v5", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
+          { id: "v3", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 3 } },
+          { id: "load", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
+        ],
+        wires: [
+          { from_component: "v5", from_pin: "pos", to_component: "v3", to_pin: "pos" },
+          { from_component: "v5", from_pin: "neg", to_component: "v3", to_pin: "neg" },
+          { from_component: "v5", from_pin: "pos", to_component: "load", to_pin: "a" },
+          { from_component: "load", from_pin: "b", to_component: "v5", to_pin: "neg" },
+        ],
+      };
+      const outputNet = findNetId(circuit, "load", "a");
+      const spec: MonteCarloSpec = {
+        kind: "monte-carlo",
+        runs: 2,
+        seed: 7,
+        settleTimeS: 50e-6,
+        outputs: [{ netId: outputNet }],
+      };
+
+      expect(() => runMonteCarlo(spec, circuit)).toThrow(/did not converge.*rolled back.*rejected/i);
+    });
+  });
+
+  // ── A 555 astable under tolerance: the whole circuit is core-supported ──────
+  describe("monte-carlo: 555 astable", () => {
+    const astable = JSON.parse(
+      readFileSync(new URL("../fixtures/core/31-ne555-astable-led.sim.json", import.meta.url), "utf8"),
+    ) as SimCircuit;
+
+    it("every run's tail-mean cap voltage sits inside the 1/3..2/3 swing, on the engine the matrix expects", () => {
+      const net = findNetId(astable, "ct", "a");
+      const spec: MonteCarloSpec = { kind: "monte-carlo", runs: 12, seed: 3, settleTimeS: 0.02, outputs: [{ netId: net }] };
+      const result = runMonteCarlo(spec, astable);
+      expect(result.runs).toBe(12);
+      for (const v of result.outputs[0]!.values) {
+        // The sawtooth swings 1.667..3.333 V; its tail mean cannot leave it.
+        expect(v).toBeGreaterThan(1.667);
+        expect(v).toBeLessThan(3.334);
+      }
+      // The tolerance really perturbed the timing: the runs are not all equal.
+      expect(result.outputs[0]!.stddev).toBeGreaterThan(0);
+    });
   });
 });
 
-describe("monte-carlo convergence safety", () => {
-  it("rejects a run instead of including a failed iterate in its statistics", () => {
-    const circuit: SimCircuit = {
-      components: [
-        { id: "v5", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5 } },
-        { id: "v3", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 3 } },
-        { id: "load", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
-      ],
-      wires: [
-        { from_component: "v5", from_pin: "pos", to_component: "v3", to_pin: "pos" },
-        { from_component: "v5", from_pin: "neg", to_component: "v3", to_pin: "neg" },
-        { from_component: "v5", from_pin: "pos", to_component: "load", to_pin: "a" },
-        { from_component: "load", from_pin: "b", to_component: "v5", to_pin: "neg" },
-      ],
-    };
-    const outputNet = findNetId(circuit, "load", "a");
-    const spec: MonteCarloSpec = {
-      kind: "monte-carlo",
-      runs: 2,
-      seed: 7,
-      settleTimeS: 50e-6,
-      outputs: [{ netId: outputNet }],
-    };
+// ─── The engine report ─────────────────────────────────────────────────────────
 
-    expect(() => runMonteCarlo(spec, circuit)).toThrow(/did not converge.*rolled back.*rejected/i);
+describe("engine report", () => {
+  const spec: MonteCarloSpec = { kind: "monte-carlo", runs: 10, seed: 1, settleTimeS: 0.01, outputs: [{ netId: "n1" }] };
+
+  it("with no options a circuit of promoted kinds runs on the core (auto, the package's own kind list)", () => {
+    const result = runMonteCarloImpl(spec, voltageDividerCircuit());
+    expect(result.engine).toBe("core");
+    expect(result.fallbackReasons).toEqual([]);
+  });
+
+  it("an empty kind list makes the run classic and names every kind", () => {
+    const result = runMonteCarloImpl(spec, voltageDividerCircuit(), { coreSupportedKinds: new Set() });
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["unsupported-kind:bench_psu", "unsupported-kind:resistor"]);
+  });
+
+  it("with the gate widened a supported circuit runs on the core, for the sync and async runners", async () => {
+    const widened = { coreSupportedKinds: CORE_IMPLEMENTED_KINDS } as const;
+    const sync = runMonteCarloImpl(spec, voltageDividerCircuit(), widened);
+    expect(sync.engine).toBe("core");
+    expect(sync.fallbackReasons).toEqual([]);
+    expect((await runMonteCarloAsyncImpl(spec, voltageDividerCircuit(), widened)).engine).toBe("core");
+  });
+
+  it("a circuit with a kind the core lacks (a signal_gen) falls back on auto and names it", () => {
+    const circuit = ledResistorCircuit();
+    circuit.components.push({
+      id: "x1",
+      kind: "signal_gen",
+      pins: [{ id: "pos" }, { id: "neg" }],
+      params: {},
+    });
+    const result = runMonteCarloImpl(spec, circuit, { coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
+  });
+
+  it("the core and classic agree on the divider's distribution to the W0 band (same seed, same perturbations)", () => {
+    const circuit = voltageDividerCircuit();
+    const net = findNetId(circuit, "r_top", "b");
+    const s: MonteCarloSpec = { ...spec, runs: 20, outputs: [{ netId: net }] };
+    const classic = runMonteCarloImpl(s, circuit, { engine: "classic" });
+    const core = runMonteCarloImpl(s, circuit, { engine: "core", coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    expect(core.engine).toBe("core");
+    for (let i = 0; i < 20; i++) {
+      const a = classic.outputs[0]!.values[i]!;
+      const b = core.outputs[0]!.values[i]!;
+      expect(Math.abs(a - b)).toBeLessThan(100e-6 + 1e-3 * Math.abs(a));
+    }
   });
 });

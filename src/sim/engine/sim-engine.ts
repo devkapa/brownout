@@ -62,6 +62,7 @@ import {
 } from "../thermal-physics.js";
 import type { DisplayInfo, Hcsr04EchoEvent } from "../messages.js";
 import type { ComponentKind, ElectricalSpecs, PartDefinition } from "../../circuit/types.js";
+import { RAM_CONTENTS_SHAPE, isRamKind, ramPreloadWords, type RamKind } from "../../circuit/types.js";
 import {
   getDeviceModel,
   type AcDeviceContext,
@@ -79,6 +80,11 @@ import {
 // declares sideEffects:false, which licenses bundlers to prune import-only
 // edges — pruning here would silently unregister every builtin device.
 import { registerBuiltinDeviceModels } from "./devices/index.js";
+import {
+  benchPsuCrossingFraction,
+  benchPsuSinkRegimeWanted,
+  setBenchPsuSinkRegime,
+} from "./devices/sources.js";
 registerBuiltinDeviceModels();
 
 export type { Net };
@@ -500,6 +506,20 @@ function digitalDelayKeys(pinId: string): readonly [string, string, string] {
   return keys;
 }
 
+// Exported for the core compiler (core/README.md, "ROM image"), which must
+// decode `contents` with this exact code: atob's leniency (whitespace,
+// missing padding) and its throws decide which bytes classic loads.
+export function eepromImageBytes(size: number, contentsB64: string): Uint8Array {
+  const bytes = new Uint8Array(size).fill(0xff);
+  if (contentsB64) {
+    try {
+      const raw = Uint8Array.from(atob(contentsB64), (ch) => ch.charCodeAt(0));
+      bytes.set(raw.subarray(0, size));
+    } catch { /* invalid base64 -> keep 0xff fill */ }
+  }
+  return bytes;
+}
+
 // Exported as the DeviceStateMaps.eeproms value type; the map, its load()
 // initialisation (contents/SDP seeding), and snapshot/rollback stay here.
 export interface EepromState {
@@ -511,6 +531,8 @@ export interface EepromState {
   pendingAddr: number | null;
   pendingByte: number | null;
   pollReads: number;
+  /** /OE and /CE were both low at the last committed step; a read cycle is the false-to-true edge. */
+  prevReadCycle: boolean;
   sdpEnabled: boolean;
   sdpUnlocked: boolean;
   sdpStep: 0 | 1 | 2 | 3;
@@ -632,7 +654,7 @@ export interface SimFailure {
  * Stable engine warning codes. Additive: hosts key labels on these strings,
  * so a code is never renamed once published.
  */
-export type SimWarningCode = "transistor_overcurrent" | "missing_flyback";
+export type SimWarningCode = "transistor_overcurrent" | "missing_flyback" | "rail_ic_power_chatter";
 
 /**
  * A latched, session-only advisory: a condition the engine measured (or saw
@@ -654,6 +676,8 @@ export interface SimWarning {
   value?: number;
   /** The rating the measurement was held against, in the same unit as value. */
   limit?: number;
+  /** A short line with the numbers behind the message, for a host's hover or detail view. */
+  detail?: string;
 }
 
 export interface SolverDiagnosticsSnapshot {
@@ -920,7 +944,7 @@ function netFingerprint(net: Net, excludeCompId: string): string {
  * Normalised so swapping net0/net1 gives the same key; `flipped` tells
  * the caller whether to negate the stored value (for polarity consistency).
  */
-function netPairKey(
+export function netPairKey(
   net0: Net,
   net1: Net,
   excludeCompId: string,
@@ -1004,6 +1028,29 @@ function failureKeyComponentId(key: string): string | null {
 // disjoint, so the keys cannot collide), which gives warnings the identical
 // snapshot/rollback, load carry-forward (failureKeyComponentId) and reset
 // semantics without a second accumulator.
+/**
+ * `rail_ic_power_chatter`'s message, the text Dev approved (rulings R89 and
+ * R92), in this one place for both engines: the core's facade
+ * (src/core/failures.ts) builds its warning from these two functions. The
+ * message names the chip; the detail line (a host's hover) carries the
+ * numbers.
+ */
+export function railIcPowerChatterMessage(componentId: string): string {
+  return `${componentId} isn't getting enough power to work properly.`;
+}
+
+/**
+ * `rail_ic_power_chatter`'s detail line: the level the chip's supply is stuck
+ * at and, when its rail is a current-limited supply at its limit, that limit;
+ * a `limit` that is not finite (a cell, an ideal source) leaves the clause
+ * out. Volts and milliamps to three significant figures.
+ */
+export function railIcPowerChatterDetail(floor: number, limit: number): string {
+  const head = `Supply stuck at ${Number(floor.toPrecision(3))} V`;
+  if (!Number.isFinite(limit)) return head;
+  return `${head} (limit ${Number((limit * 1000).toPrecision(3))} mA)`;
+}
+
 function warningKey(code: SimWarningCode, componentId: string, pinId = ""): string {
   return `${code}\x00${componentId}\x00${pinId}`;
 }
@@ -1054,6 +1101,51 @@ function formatInductance(henries: number): string {
   return `${(henries * 1e6).toFixed(1)} uH`;
 }
 
+/** The loaded graph as `missingFlybackWarning` reads it: pin to net, net to pins, and component kinds. */
+export interface FlybackTopology {
+  netIdForPin(componentId: string, pinId: string): string | null;
+  pinsOnNet(netId: string): readonly Net["pins"][number][];
+  kindOf(componentId: string): string;
+}
+
+/**
+ * The missing_flyback warning `comp` carries on this topology, or null when it
+ * carries none. Pure, so that brownout/core's facade derives the same warning
+ * from the same graph (core/README.md, W1g point 11) rather than a copy of
+ * this rule; `_evaluateStaticWarnings` latches or drops what it returns.
+ */
+export function missingFlybackWarning(comp: SimComponent, since: number, topology: FlybackTopology): SimWarning | null {
+  const winding = inductiveWindingPins(comp);
+  if (!winding) return null;
+  let switchedBy: string | null = null;
+  const netA = topology.netIdForPin(comp.id, winding.pins[0]);
+  const netB = topology.netIdForPin(comp.id, winding.pins[1]);
+  if (netA && netB && netA !== netB) {
+    for (const netId of [netA, netB]) {
+      const pins = topology.pinsOnNet(netId);
+      if (netId === "gnd" || pins.some(([cid]) => FLYBACK_RAIL_KINDS.has(topology.kindOf(cid)))) continue;
+      const sw = pins.find(([cid]) => cid !== comp.id && FLYBACK_SWITCH_KINDS.has(topology.kindOf(cid)));
+      if (!sw) continue;
+      if (pins.some(([cid]) => FLYBACK_CLAMP_KINDS.has(topology.kindOf(cid)))) continue;
+      switchedBy = sw[0];
+      break;
+    }
+  }
+  if (!switchedBy) return null;
+  const inductance = comp.kind === "inductor"
+    ? Math.max(1e-12, Number(comp.params.inductance ?? 1e-3))
+    : undefined;
+  const label = inductance === undefined ? comp.id : `${comp.id} (${formatInductance(inductance)})`;
+  return {
+    componentId: comp.id,
+    code: "missing_flyback",
+    since,
+    ...(inductance === undefined ? {} : { value: inductance }),
+    message:
+      `${label} is switched by ${switchedBy} with no diode across its ${winding.noun}, so turning ${switchedBy} off will drive an inductive voltage spike into it.`,
+  };
+}
+
 // Gate output resistance: 50 Ω minimum → stiff enough for typical LED/resistor
 // loads while avoiding ill-conditioned MNA rows. Wave D raises this per family
 // when catalog io_max says the chip cannot source/sink much current.
@@ -1082,6 +1174,11 @@ export function regulatorQuiescentCurrent(comp: SimComponent): number {
   if (!exactPart || exactPart.uid !== comp.catalogUid) return 0;
   return REGULATOR_QUIESCENT_CURRENT_A[exactPart.uid] ?? 0;
 }
+
+// bench_psu let-go / take-back crossings per transient interval, and the
+// latest point in an interval a crossing is placed (see _solveSegment).
+const BENCH_PSU_MAX_SPLITS = 4;
+const BENCH_PSU_SPLIT_MAX_FRAC = 0.98;
 
 const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
   "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
@@ -1403,7 +1500,9 @@ function modelParam(
   return exactPart.default_params?.[key] ?? fallback;
 }
 
-const FLOATING_INPUT_FUNCTIONS = new Set<string>([
+// Exported for compile/ics.ts (core/README.md's W1c "IC blob" FLOATING_INPUT
+// rule — reused, never re-derived).
+export const FLOATING_INPUT_FUNCTIONS = new Set<string>([
   "input", "clock", "reset", "enable", "load", "io", "tri_state",
 ]);
 
@@ -1425,6 +1524,53 @@ export interface IcPowerInfo {
   thresholds: LogicThresholds;
   outputResistance: number;
   propagationDelay: number;
+}
+
+// A RAM's power-on preload (`params.contents`, src/circuit/types.ts RAM_KINDS;
+// coordinator ruling 2026-11-13). The decoded words ride in the chip's own
+// icState as `preload0..`, written once at load: the model then needs no
+// lookup, snapshot and rollback copy them with the live words, and load()
+// tells a reload onto the same contents (carry the live words) from one onto
+// other contents (start from them) without trusting the old circuit object,
+// which a host may have edited in place. A chip with no contents has no such
+// slot, so its state is exactly what it was before the field existed.
+const RAM_PRELOAD_SLOT = "preload";
+
+/** A RAM's state as it powers up: the kind's defaults, with the preload (when it has one) in the live words and in the preload slots. */
+function ramPowerOnState(kind: RamKind, preload: readonly number[] | null): Record<string, number> {
+  const st = defaultIcState(kind);
+  preload?.forEach((word, i) => {
+    st[`mem${i}`] = word;
+    st[`${RAM_PRELOAD_SLOT}${i}`] = word;
+  });
+  return st;
+}
+
+/** Whether `st` was loaded from `preload` (null: from no contents). */
+function ramStateHoldsPreload(st: Readonly<Record<string, number>>, preload: readonly number[] | null): boolean {
+  if (!preload) return st[`${RAM_PRELOAD_SLOT}0`] === undefined;
+  return preload.every((word, i) => st[`${RAM_PRELOAD_SLOT}${i}`] === word);
+}
+
+/**
+ * A RAM losing power: the state with its live words back at the preload, or
+ * null when there is nothing to change (no preload, or the words already
+ * match). Called from the committed pass that finds the chip unpowered, so
+ * the words are already the preload when the solve that powers the chip up
+ * stamps its outputs. Everything else in the state (the /WE history, the
+ * output delay slots) is left frozen, as an unpowered chip's always was.
+ * Exported for the RAM models (devices/digital-ics.ts).
+ */
+export function ramStateAfterPowerLoss(kind: RamKind, st: Readonly<Record<string, number>>): Record<string, number> | null {
+  if (st[`${RAM_PRELOAD_SLOT}0`] === undefined) return null;
+  let next: Record<string, number> | null = null;
+  for (let i = 0; i < RAM_CONTENTS_SHAPE[kind].words; i++) {
+    const word = st[`${RAM_PRELOAD_SLOT}${i}`];
+    if (word === undefined || st[`mem${i}`] === word) continue;
+    next ??= { ...st };
+    next[`mem${i}`] = word;
+  }
+  return next;
 }
 
 // Exported for migrated device modules that fall back to per-kind defaults
@@ -1549,7 +1695,9 @@ export function defaultIcState(kind: string): Record<string, number> {
   }
 }
 
-function specsForComponent(comp: SimComponent): ElectricalSpecs | undefined {
+// Exported for compile/ics.ts (core/README.md's W1c IC params — reused,
+// never re-derived).
+export function specsForComponent(comp: SimComponent): ElectricalSpecs | undefined {
   return partFor(comp)?.electrical_specs ?? undefined;
 }
 
@@ -1561,13 +1709,102 @@ export function analogIcQuiescentCurrent(comp: SimComponent): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function supplyPinsForComponent(comp: SimComponent): { vccPin: string | null; gndPin: string | null } {
+// Exported for compile/ics.ts (core/README.md's W1c IC pin table — reused,
+// never re-derived).
+export function supplyPinsForComponent(comp: SimComponent): { vccPin: string | null; gndPin: string | null } {
   const part = partFor(comp);
   const vccPin = part?.pin_layout.find((p) => p.function === "vcc" || p.id === "vcc")?.id
     ?? (comp.kind === "ne555" ? "8" : null);
   const gndPin = part?.pin_layout.find((p) => p.function === "gnd" || p.id === "gnd")?.id
     ?? (comp.kind === "ne555" ? "1" : null);
   return { vccPin, gndPin };
+}
+
+// The body of `_thermalProfile` below, without its per-component cache.
+// Exported for compile/leds.ts (core/README.md's LEDs point 3: the compiler
+// declines a plain `led` whose `catalogUid` this function accepts, until
+// W1g ports self-heating) and for W1g, which needs the same uncached lookup
+// for its own held-temperature state. A pure function of `comp.catalogUid`
+// and `comp.kind` (through `partFor`'s identity check) — `_thermalProfile`
+// now only adds the cache around it, so this is a pure refactor with no
+// behavior change for classic (the eepromImageBytes precedent).
+export function thermalProfileForComponent(comp: SimComponent): ThermalDeviceProfile | undefined {
+  if (!comp.catalogUid) return undefined;
+  // Thermal identity must pass the same UID/kind validation as electrical
+  // identity. A stale or kind-mismatched UID must not lend another package's
+  // temperature/shutdown behavior to a custom component.
+  if (!partFor(comp)) return undefined;
+  const resolved = resolveThermalProfile({ catalogUid: comp.catalogUid });
+  return resolved.source === "exact-catalog-uid" ? resolved.profile : undefined;
+}
+
+export interface BatteryModelResolution {
+  profile: BatteryPhysicsProfile;
+  nominalVoltageScale: number;
+  referenceInternalResistanceOhm: number | undefined;
+}
+
+// The body of `_batteryModel` below, without its per-component cache.
+// Exported for compile/sources.ts (core/README.md's Battery record: the
+// compiler reads the model classic itself builds, never a re-derived one)
+// and called by `_batteryModel`, so a change here changes both. A pure
+// function of `comp` (identity through `partFor`, then `comp.params`).
+export function batteryModelForComponent(comp: SimComponent): BatteryModelResolution {
+  // Only an explicit identity may contribute catalog defaults. Identity-less
+  // legacy/custom sources stay generic and preserve their authored ideality.
+  const defaults = comp.catalogUid ? partFor(comp)?.default_params : undefined;
+  const configuredVoltage = Math.max(
+    0,
+    Number(comp.params.voltage ?? defaults?.voltage ?? 5),
+  );
+  const rawResistance = comp.params.rInternal ?? defaults?.rInternal;
+  const configuredResistance = rawResistance === undefined
+    ? undefined
+    : Math.max(0, Number(rawResistance));
+  const resolution = resolveBatteryProfile({
+    // Missing identity intentionally stays generic; never infer chemistry
+    // from kind or catalog ordering for a legacy/custom source.
+    catalogUid: comp.catalogUid,
+    fallbackNominalVoltageV: configuredVoltage,
+    fallbackCapacityAh: Number(comp.params.capacityAh ?? 1),
+    fallbackFreshInternalResistanceOhm: configuredResistance ?? 0,
+  });
+  const capacityAh = Math.max(
+    1e-12,
+    Number(comp.params.capacityAh ?? resolution.profile.referenceCapacityAh),
+  );
+  const profile = capacityAh === resolution.profile.referenceCapacityAh
+    ? resolution.profile
+    : { ...resolution.profile, referenceCapacityAh: capacityAh };
+  return {
+    profile,
+    nominalVoltageScale: profile.nominalVoltageV > 0
+      ? configuredVoltage / profile.nominalVoltageV
+      : 1,
+    referenceInternalResistanceOhm: configuredResistance,
+  };
+}
+
+// The authored initial charge, before `createBatteryState` clamps it (a NaN
+// stays NaN here and becomes 0 there). The first line of
+// `_batteryOperatingPoint`, exported for the same compiler.
+export function authoredBatteryCharge(comp: SimComponent): number {
+  return Math.max(0, Math.min(1, Number(comp.params.charge ?? 1)));
+}
+
+// The operating-point call of `_batteryOperatingPoint` below, exported for the
+// same compiler (which needs the load's `modelTemperatureC` and
+// `temperatureWasClamped`, constant per load).
+export function batteryOperatingPointFor(
+  model: BatteryModelResolution,
+  soc: number,
+  ambientTemperatureC: number,
+) {
+  return batteryOperatingPoint(model.profile, {
+    soc,
+    ambientTemperatureC,
+    referenceInternalResistanceOhm: model.referenceInternalResistanceOhm,
+  });
 }
 
 export function thresholdsFor(specs: ElectricalSpecs | undefined, vSupply: number): LogicThresholds {
@@ -1587,7 +1824,9 @@ export function thresholdsFor(specs: ElectricalSpecs | undefined, vSupply: numbe
   return { vil: Math.max(0.8, 0.3 * vSupply), vih: Math.max(2.0, 0.6 * vSupply) };
 }
 
-function propagationDelayForComponent(comp: SimComponent): number {
+// Exported for compile/ics.ts (core/README.md's W1c IC param 12, `delay` —
+// reused, never re-derived).
+export function propagationDelayForComponent(comp: SimComponent): number {
   // Prefer the catalog-declared value so individual parts can override the
   // family default without touching engine code.  Fall back to prefix map
   // for parts that carry no prop_delay_ns (all legacy parts as of this wave).
@@ -1698,6 +1937,11 @@ export class SimEngine {
   // HOST_MIN_STEP_S, for every solve inside it (a 555's split sub-steps
   // included, whatever their own length).
   private _stepAtHostFloor = false;
+  // The supply-gated parts whose power reading alternated through a solve at
+  // the hosts' floor that the hold procedure could not settle, each with its
+  // power-on level (V): a step that ends unconverged latches
+  // rail_ic_power_chatter for them (_latchPowerChatter).
+  private _powerChatter: Map<string, number> | null = null;
   // While a step() runs: when it started, and each supply-gated part's power
   // reading at that moment (the first iterate of the step's first solve).
   // A 555's split re-solves the step from that moment, then from points
@@ -1826,18 +2070,18 @@ export class SimEngine {
   private _openPinsByComp = new Map<string, Set<string>>();
   private _floatingNoiseCache = new Map<string, Map<string, { bucket: number; n: number }>>();
   private _thermalProfileCache = new Map<string, ThermalDeviceProfile | undefined>();
-  private _batteryModelCache = new Map<string, {
-    profile: BatteryPhysicsProfile;
-    nominalVoltageScale: number;
-    referenceInternalResistanceOhm: number | undefined;
-  }>();
+  private _batteryModelCache = new Map<string, BatteryModelResolution>();
   private _hasNe555 = false;
   private _hasHcsr04 = false;
   private _ne555Components: SimComponent[] = [];
   private _mcuComponents: SimComponent[] = [];
+  /** Ideal voltage sources sharing a node pair with another (load-time). */
+  private _parallelIdealSourceIds = new Set<string>();
   /** Set when a commit switches a Pico regulator's regime; load() re-solves
    *  its seed so the published operating point is in the committed regime. */
   private _picoRegimeFlipped = false;
+  /** bench_psu components, compiled at load (let-go / take-back crossings). */
+  private _benchPsuComponents: SimComponent[] = [];
   /** Boards with an MCU supply absolute maximum (MCU_SUPPLY_ABS_MAX). */
   private _supplyRatedComponents: SimComponent[] = [];
   private _stateUpdateComponents: SimComponent[] = [];
@@ -2038,69 +2282,21 @@ export class SimEngine {
     if (this._thermalProfileCache.has(comp.id)) {
       return this._thermalProfileCache.get(comp.id);
     }
-    if (!comp.catalogUid) {
-      this._thermalProfileCache.set(comp.id, undefined);
-      return undefined;
-    }
-    // Thermal identity must pass the same UID/kind validation as electrical
-    // identity. A stale or kind-mismatched UID must not lend another package's
-    // temperature/shutdown behavior to a custom component.
-    if (!partFor(comp)) {
-      this._thermalProfileCache.set(comp.id, undefined);
-      return undefined;
-    }
-    const resolved = resolveThermalProfile({ catalogUid: comp.catalogUid });
-    const profile = resolved.source === "exact-catalog-uid" ? resolved.profile : undefined;
+    const profile = thermalProfileForComponent(comp);
     this._thermalProfileCache.set(comp.id, profile);
     return profile;
   }
 
-  private _batteryModel(comp: SimComponent): {
-    profile: BatteryPhysicsProfile;
-    nominalVoltageScale: number;
-    referenceInternalResistanceOhm: number | undefined;
-  } {
+  private _batteryModel(comp: SimComponent): BatteryModelResolution {
     const cached = this._batteryModelCache.get(comp.id);
     if (cached) return cached;
-    // Only an explicit identity may contribute catalog defaults. Identity-less
-    // legacy/custom sources stay generic and preserve their authored ideality.
-    const defaults = comp.catalogUid ? partFor(comp)?.default_params : undefined;
-    const configuredVoltage = Math.max(
-      0,
-      Number(comp.params.voltage ?? defaults?.voltage ?? 5),
-    );
-    const rawResistance = comp.params.rInternal ?? defaults?.rInternal;
-    const configuredResistance = rawResistance === undefined
-      ? undefined
-      : Math.max(0, Number(rawResistance));
-    const resolution = resolveBatteryProfile({
-      // Missing identity intentionally stays generic; never infer chemistry
-      // from kind or catalog ordering for a legacy/custom source.
-      catalogUid: comp.catalogUid,
-      fallbackNominalVoltageV: configuredVoltage,
-      fallbackCapacityAh: Number(comp.params.capacityAh ?? 1),
-      fallbackFreshInternalResistanceOhm: configuredResistance ?? 0,
-    });
-    const capacityAh = Math.max(
-      1e-12,
-      Number(comp.params.capacityAh ?? resolution.profile.referenceCapacityAh),
-    );
-    const profile = capacityAh === resolution.profile.referenceCapacityAh
-      ? resolution.profile
-      : { ...resolution.profile, referenceCapacityAh: capacityAh };
-    const model = {
-      profile,
-      nominalVoltageScale: profile.nominalVoltageV > 0
-        ? configuredVoltage / profile.nominalVoltageV
-        : 1,
-      referenceInternalResistanceOhm: configuredResistance,
-    };
+    const model = batteryModelForComponent(comp);
     this._batteryModelCache.set(comp.id, model);
     return model;
   }
 
   private _batteryOperatingPoint(comp: SimComponent) {
-    const authoredCharge = Math.max(0, Math.min(1, Number(comp.params.charge ?? 1)));
+    const authoredCharge = authoredBatteryCharge(comp);
     const state = this.state.batteries.get(comp.id)
       ?? {
         ...createBatteryState(authoredCharge),
@@ -2108,11 +2304,7 @@ export class SimEngine {
         catalogUid: comp.catalogUid ?? null,
       };
     const model = this._batteryModel(comp);
-    const point = batteryOperatingPoint(model.profile, {
-      soc: state.soc,
-      ambientTemperatureC: this._ambientTempC(),
-      referenceInternalResistanceOhm: model.referenceInternalResistanceOhm,
-    });
+    const point = batteryOperatingPointFor(model, state.soc, this._ambientTempC());
     return { state, ...model, point };
   }
 
@@ -2197,6 +2389,7 @@ export class SimEngine {
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
+      sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
       vAt: (x, row) => engine._vAt(x, row),
       get mna() {
         return engine.mna;
@@ -2719,6 +2912,23 @@ export class SimEngine {
     this.nets = buildNets(circuit);
     this._buildMatrix();
     this._compileRuntimeMetadata(circuit);
+    // Ideal voltage-source branches that share one node pair: a singular
+    // system unless one of them has a series resistance (see bench_psu).
+    this._parallelIdealSourceIds = new Set();
+    const byNodePair = new Map<string, string[]>();
+    for (const c of circuit.components) {
+      if ((c.kind !== "bench_psu" && c.kind !== "voltage_source") || c.pins.length < 2) continue;
+      const a = this._pinNode(c.id, c.pins[0]!.id);
+      const b = this._pinNode(c.id, c.pins[1]!.id);
+      if (a === b) continue;
+      const pair = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const ids = byNodePair.get(pair);
+      if (ids) ids.push(c.id);
+      else byNodePair.set(pair, [c.id]);
+    }
+    for (const ids of byNodePair.values()) {
+      if (ids.length > 1) for (const id of ids) this._parallelIdealSourceIds.add(id);
+    }
     this._compileIsolatedSectionAnchors(circuit);
 
     // Drop program-driven micro:bit pin drives for boards deleted from the
@@ -2931,7 +3141,7 @@ export class SimEngine {
       }
 
       if (c.kind === "battery_pack") {
-        const authoredCharge = Math.max(0, Math.min(1, Number(c.params.charge ?? 1)));
+        const authoredCharge = authoredBatteryCharge(c);
         const catalogUid = c.catalogUid ?? null;
         const previous = prevBatteries.get(c.id);
         this.state.batteries.set(
@@ -3086,7 +3296,19 @@ export class SimEngine {
         const carried = oldKindById.get(c.id) === c.kind
           ? prevIcState.get(c.id)
           : undefined;
-        this.state.icState.set(c.id, carried ?? defaultIcState(c.kind));
+        if (isRamKind(c.kind)) {
+          // A RAM carries its live words only onto the contents it was
+          // loaded from, as an EEPROM carries its image only onto the same
+          // contentsHash below; onto other contents (or none) it starts from
+          // them. With no contents before and after this is the plain carry.
+          const preload = ramPreloadWords(c.kind, c.params.contents);
+          this.state.icState.set(
+            c.id,
+            carried && ramStateHoldsPreload(carried, preload) ? carried : ramPowerOnState(c.kind, preload),
+          );
+        } else {
+          this.state.icState.set(c.id, carried ?? defaultIcState(c.kind));
+        }
       }
       // W5.1 — bench_psu iLimit: initialise icState only when limiting is active.
       // When iLimit is absent or <= 0 the bench_psu behaves as an ideal voltage
@@ -3165,13 +3387,7 @@ export class SimEngine {
           prev.sdpEnabled = sdpEnabled;
           this.state.eeproms.set(c.id, prev);
         } else {
-          const bytes = new Uint8Array(size).fill(0xff);
-          if (contentsB64) {
-            try {
-              const raw = Uint8Array.from(atob(contentsB64), (ch) => ch.charCodeAt(0));
-              bytes.set(raw.subarray(0, size));
-            } catch { /* invalid base64 -> keep 0xff fill */ }
-          }
+          const bytes = eepromImageBytes(size, contentsB64);
           this.state.eeproms.set(c.id, {
             bytes,
             contentsHash: hash,
@@ -3181,6 +3397,7 @@ export class SimEngine {
             pendingAddr: null,
             pendingByte: null,
             pollReads: 0,
+            prevReadCycle: false,
             sdpEnabled,
             sdpUnlocked: false,
             sdpStep: 0,
@@ -3216,11 +3433,15 @@ export class SimEngine {
     const initializedIndsV = new Map(this.state.indsV);
     this._picoRegimeFlipped = false;
     this._solve(1e-12);
-    // A Pico regulator's regime is committed from a solve, so a supply
-    // back-feeding its 3V3 pin is only seen after the seed solve; solve the
-    // seed again from the authored initial conditions in the committed
-    // regime. Bounded: each pass can only switch a regulator off or on.
-    for (let pass = 0; pass < 2 && this._picoRegimeFlipped && this.lastConverged; pass++) {
+    // A Pico regulator's or a bench supply's let-go regime is decided on a
+    // converged solve, so a supply back-feeding it is only seen after the
+    // seed solve; solve the seed again from the authored initial conditions
+    // in the decided regime. Bounded: each pass switches a regulator or a
+    // supply off or on, and a chain of parallel supplies settles in a few.
+    for (let pass = 0; pass < 4 && this.lastConverged; pass++) {
+      const psuSwitches = this._lastX ? this._benchPsuSwitches(this._lastX) : [];
+      if (!this._picoRegimeFlipped && psuSwitches.length === 0) break;
+      for (const { comp, want } of psuSwitches) setBenchPsuSinkRegime(this._deviceCtx, comp, want);
       this._picoRegimeFlipped = false;
       this.state.caps = new Map(initializedCaps);
       this.state.inds = new Map(initializedInds);
@@ -3509,15 +3730,31 @@ export class SimEngine {
   private _dcRegimeSettle(maxOuterRegimeIters: number, counters: DcOpCounters): boolean {
     this._homotopyGminG = 0;
     this._homotopySourceScale = 1;
+    let psuSettled = true;
     for (let outer = 0; outer < maxOuterRegimeIters; outer++) {
       const before = this._dcCommittedRegimeSignature();
+      const psuBefore = this._benchPsuRegimeSignature();
       this._solve(DC_OP_COMPANION_H);
       counters.iterations += this.lastIters;
       counters.regimeIterations += 1;
       if (!this.lastConverged) return false;
       if (this._dcCommittedRegimeSignature() === before) return true;
+      psuSettled = this._benchPsuRegimeSignature() === psuBefore;
     }
-    return true;
+    // A bench supply still letting go and taking back at the cap has no
+    // operating point at this stage (unlike an astable latch, whose last
+    // phase is self-consistent): decline it rather than accept a supply
+    // caught mid-switch.
+    return psuSettled;
+  }
+
+  /** Committed let-go / CC / CV regime of every bench supply. */
+  private _benchPsuRegimeSignature(): string {
+    let sig = "";
+    for (const comp of this._benchPsuComponents) {
+      sig += `${comp.id}=${this.state.icState.get(comp.id)?.reg ?? 0};`;
+    }
+    return sig;
   }
 
   /**
@@ -4286,9 +4523,12 @@ export class SimEngine {
     // h, not about the shorter sub-steps the 555 split solves within it.
     this._stepAtHostFloor = h <= HOST_MIN_STEP_S;
     this._stepStart = { time: this.simTime, power: null };
+    this._powerChatter = null;
     try {
       this._stepSolves(h);
+      if (!this.lastConverged && this._powerChatter !== null) this._latchPowerChatter(this._powerChatter);
     } finally {
+      this._powerChatter = null;
       this._stepAtHostFloor = false;
       this._stepStart = null;
     }
@@ -4300,7 +4540,7 @@ export class SimEngine {
     const has555 = this._hasNe555;
 
     if (!has555) {
-      this._solve(h, true);
+      this._solveSegment(h);
       if (!this.lastConverged) return;
       this.simTime += h;
       this._advanceMcusAfterAcceptedSolve(h);
@@ -4315,7 +4555,7 @@ export class SimEngine {
     const preNe555s = new Map(this.state.ne555s);
     const snap = this.saveState();
 
-    this._solve(h, true);
+    this._solveSegment(h);
 
     // A failed electrical trial is not a physical interval. In particular, do
     // not sample inputs or advance an external CPU that saveState cannot rewind.
@@ -4336,7 +4576,7 @@ export class SimEngine {
     this.restoreState(snap);
     this.simTime = snap.simTime;
 
-    this._solve(h * frac, true);
+    this._solveSegment(h * frac);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4356,7 +4596,7 @@ export class SimEngine {
         // The split is clamped to 98% of the step, so a crossing in the last
         // 2% leaves the first sub-step short of it. Carry on to one guard
         // short of the step end and let the switch land there instead.
-        this._solve(rest - guard, true);
+        this._solveSegment(rest - guard);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4366,7 +4606,7 @@ export class SimEngine {
       }
       if (this._ne555Switched(preNe555s)) {
         this._stepBreakpoints.push({ time: this.simTime, netV: { ...this.netV } });
-        this._solve(guard, true);
+        this._solveSegment(guard);
         if (!this.lastConverged) {
           this._restoreFailedSplitTrial(snap);
           return;
@@ -4377,7 +4617,7 @@ export class SimEngine {
       }
     }
 
-    if (rest > 0) this._solve(rest, true);
+    if (rest > 0) this._solveSegment(rest);
     if (!this.lastConverged) {
       this._restoreFailedSplitTrial(snap);
       return;
@@ -4385,6 +4625,83 @@ export class SimEngine {
     this.simTime = snap.simTime + h;
     this._advanceMcusAfterAcceptedSolve(h);
     this._beNextStep = false;
+  }
+
+  /** bench_psu let-go / take-back switches a converged solution asks for. */
+  private _benchPsuSwitches(x: Float64Array): { comp: SimComponent; want: 0 | 3 }[] {
+    const out: { comp: SimComponent; want: 0 | 3 }[] = [];
+    for (const comp of this._benchPsuComponents) {
+      const want = benchPsuSinkRegimeWanted(this._deviceCtx, comp, x);
+      if (want !== null) out.push({ comp, want });
+    }
+    return out;
+  }
+
+  /**
+   * One transient interval of length h, solved with every bench supply's
+   * let-go regime frozen. When the converged endpoint asks a supply to let go
+   * or take back its output, that is a crossing inside the interval, not a
+   * switch at its end: roll back, solve up to the earliest crossing in the
+   * old regime, switch the supplies crossing there, and solve the rest in
+   * the new one (backward Euler across the discontinuity, as the 555 split
+   * does). Up to BENCH_PSU_MAX_SPLITS crossings per interval; a further one
+   * waits for the next interval. simTime is back at its entry value on
+   * return, as after a plain _solve, and nothing outside the electrical
+   * state is advanced, so a rolled-back trial stays firmware-neutral.
+   */
+  private _solveSegment(h: number): void {
+    if (this._benchPsuComponents.length === 0) {
+      this._solve(h, true);
+      return;
+    }
+    const t0 = this.simTime;
+    let remaining = h;
+    // The interval's entry state. Once a split has committed its first
+    // segment and switched a supply, a later failed solve must roll all of it
+    // back, as _restoreFailedSplitTrial does for the 555 split, so a failed
+    // trial keeps the last trusted state for direct step() callers too.
+    let entry: StateSnapshot | null = null;
+    try {
+      for (let split = 0; ; split++) {
+        const x0 = this._lastX ? new Float64Array(this._lastX) : null;
+        const snap = split < BENCH_PSU_MAX_SPLITS ? this.saveState() : null;
+        entry ??= snap;
+        this._solve(remaining, true);
+        if (!this.lastConverged) {
+          if (split > 0 && entry) this._restoreFailedSplitTrial(entry);
+          return;
+        }
+        if (!snap) return;
+        const x1 = this._lastX!;
+        const switches = this._benchPsuSwitches(x1);
+        if (switches.length === 0) return;
+        let frac = 1;
+        const fracs = switches.map(({ comp, want }) =>
+          benchPsuCrossingFraction(this._deviceCtx, comp, want, x0, x1));
+        for (const f of fracs) frac = Math.min(frac, f);
+        // Leave the new regime some of the interval, as the 555 split does.
+        frac = Math.min(frac, BENCH_PSU_SPLIT_MAX_FRAC);
+        const simTimeBefore = this.simTime;
+        this.restoreState(snap);
+        this.simTime = simTimeBefore;
+        const first = remaining * frac;
+        if (first > 0) {
+          this._solve(first, true);
+          if (!this.lastConverged) {
+            this._restoreFailedSplitTrial(entry!);
+            return;
+          }
+          this.simTime += first;
+          remaining -= first;
+        }
+        switches.forEach(({ comp, want }, i) => {
+          if (fracs[i]! <= frac + 1e-9) setBenchPsuSinkRegime(this._deviceCtx, comp, want);
+        });
+        this._beNextStep = true;
+      }
+    } finally {
+      this.simTime = t0;
+    }
   }
 
   /**
@@ -4753,6 +5070,7 @@ export class SimEngine {
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
+      sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
       opVoltage: (row) =>
         engine._lastX ? engine._vAt(engine._lastX, row) : 0,
       opPinVoltage: (compId, pinId) =>
@@ -5431,6 +5749,7 @@ export class SimEngine {
     this._hasNe555 = this._ne555Components.length > 0;
     this._hasHcsr04 = circuit.components.some((component) => component.kind === "hcsr04");
     this._mcuComponents = circuit.components.filter((component) => isMcuBoardKind(component.kind));
+    this._benchPsuComponents = circuit.components.filter((component) => component.kind === "bench_psu");
     this._supplyRatedComponents = circuit.components.filter((component) => component.kind in MCU_SUPPLY_ABS_MAX);
     // H11 readback: nets only change on load(), so the per-load candidate
     // scan (and its diagnostics counter) restart here.
@@ -6167,7 +6486,8 @@ export class SimEngine {
     // that left `immediate` — a 74LS245 whose /OE released the bus — must
     // drop its value/pending/due slots rather than advertise a stage that the
     // transient stamp no longer writes. Re-enabling later re-seeds from the
-    // immediate level, exactly like the first driven step.
+    // immediate level, exactly like the first driven step. The 74LS157 never
+    // leaves `immediate` now (Q-O64): its strobe forces Y LOW instead.
     for (const key of Object.keys(st)) {
       let pinId: string | null = null;
       if (key.startsWith(DIGITAL_DELAY_PREFIX)) {
@@ -6242,6 +6562,41 @@ export class SimEngine {
     this._unannouncedWarnings.push(key);
   }
 
+  /**
+   * rail_ic_power_chatter: each part of `chatter` (id -> its power-on level)
+   * alternated at the hosts' floor with no state that holds. The warning
+   * names the part; its detail line gives the level and, when a
+   * current-limited bench supply sits on the part's vcc net, that supply's
+   * limit: a part starved on such a rail has the supply at its limit, since
+   * below the limit the supply would hold the rail at its setpoint.
+   */
+  private _latchPowerChatter(chatter: ReadonlyMap<string, number>): void {
+    for (const [id, level] of chatter) {
+      const comp = this._componentById.get(id);
+      if (!comp) continue;
+      const { vccPin } = supplyPinsForComponent(comp);
+      const netId = vccPin ? this._netIdForPin(id, vccPin) : null;
+      const pins = netId ? this.nets.find((net) => net.id === netId)?.pins ?? [] : [];
+      let limit = Number.NaN;
+      for (const [cid] of pins) {
+        const other = cid === id ? undefined : this._componentById.get(cid);
+        const iLimit = other?.kind === "bench_psu" ? Number(other.params.iLimit ?? 0) : 0;
+        if (iLimit > 0 && Number.isFinite(iLimit)) {
+          limit = iLimit;
+          break;
+        }
+      }
+      this._latchWarning(warningKey("rail_ic_power_chatter", id), {
+        componentId: id,
+        code: "rail_ic_power_chatter",
+        since: this.simTime,
+        value: level,
+        message: railIcPowerChatterMessage(id),
+        detail: railIcPowerChatterDetail(level, limit),
+      });
+    }
+  }
+
   private _pruneUnannouncedWarnings(): void {
     this._unannouncedWarnings = this._unannouncedWarnings.filter((key) => this.state.warnings.has(key));
   }
@@ -6285,39 +6640,16 @@ export class SimEngine {
     const circuit = this.circuit;
     if (!circuit) return;
     const pinsByNet = new Map(this.nets.map((net) => [net.id, net.pins]));
-    const kindOf = (componentId: string): string => this._componentById.get(componentId)?.kind ?? "";
+    const topology: FlybackTopology = {
+      netIdForPin: (componentId, pinId) => this._netIdForPin(componentId, pinId),
+      pinsOnNet: (netId) => pinsByNet.get(netId) ?? [],
+      kindOf: (componentId) => this._componentById.get(componentId)?.kind ?? "",
+    };
     for (const comp of circuit.components) {
-      const winding = inductiveWindingPins(comp);
       const key = warningKey("missing_flyback", comp.id);
-      let switchedBy: string | null = null;
-      if (winding) {
-        const netA = this._netIdForPin(comp.id, winding.pins[0]);
-        const netB = this._netIdForPin(comp.id, winding.pins[1]);
-        if (netA && netB && netA !== netB) {
-          for (const netId of [netA, netB]) {
-            const pins = pinsByNet.get(netId) ?? [];
-            if (netId === "gnd" || pins.some(([cid]) => FLYBACK_RAIL_KINDS.has(kindOf(cid)))) continue;
-            const sw = pins.find(([cid]) => cid !== comp.id && FLYBACK_SWITCH_KINDS.has(kindOf(cid)));
-            if (!sw) continue;
-            if (pins.some(([cid]) => FLYBACK_CLAMP_KINDS.has(kindOf(cid)))) continue;
-            switchedBy = sw[0];
-            break;
-          }
-        }
-      }
-      if (switchedBy && winding) {
-        const inductance = comp.kind === "inductor"
-          ? Math.max(1e-12, Number(comp.params.inductance ?? 1e-3))
-          : undefined;
-        const label = inductance === undefined ? comp.id : `${comp.id} (${formatInductance(inductance)})`;
-        this._latchWarning(key, {
-          componentId: comp.id,
-          code: "missing_flyback",
-          since: this.simTime,
-          ...(inductance === undefined ? {} : { value: inductance }),
-          message:
-            `${label} is switched by ${switchedBy} with no diode across its ${winding.noun}, so turning ${switchedBy} off will drive an inductive voltage spike into it.`,
-        });
+      const warning = missingFlybackWarning(comp, this.simTime, topology);
+      if (warning) {
+        this._latchWarning(key, warning);
       } else {
         this.state.warnings.delete(key);
       }
@@ -6571,6 +6903,18 @@ export class SimEngine {
       const starved = alternating.filter((comp) => !this._icPowerInfo(comp, onProbe.x).powered);
       if (starved.length === 0) {
         this._holdOffCounts.partsHold += 1;
+        // At the floor there is no shorter step to try: powered at an
+        // instant the part holds its supply, but over the shortest step its
+        // own draw takes the supply back under its power-on level, and
+        // unpowered the supply rises past it again. No state holds, and
+        // holding the part either way would be a state the circuit cannot
+        // be in, so the step fails as before and the engine says why.
+        if (this._stepAtHostFloor) {
+          this._powerChatter ??= new Map();
+          for (const comp of alternating) {
+            this._powerChatter.set(comp.id, 0.9 * (specsForComponent(comp)?.vcc_range?.min ?? 2.0));
+          }
+        }
         return null;
       }
       const offPower = new Map(probePower);

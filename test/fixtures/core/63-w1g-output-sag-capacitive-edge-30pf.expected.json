@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "durationS": 0.0186,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 0.02,
+    "checks": [
+      {
+        "check": "sag-edges",
+        "ic": "u1",
+        "pin": "1y",
+        "capacitor": "c1",
+        "source": "clk"
+      }
+    ],
+    "classicS": []
+  }
+}

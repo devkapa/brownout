@@ -1,0 +1,511 @@
+{
+  "id": "core-w1d-29-28c16-write-poll",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "u2",
+      "kind": "28c16",
+      "pins": [
+        {
+          "id": "a7"
+        },
+        {
+          "id": "a6"
+        },
+        {
+          "id": "a5"
+        },
+        {
+          "id": "a4"
+        },
+        {
+          "id": "a3"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "a1"
+        },
+        {
+          "id": "a0"
+        },
+        {
+          "id": "/oe"
+        },
+        {
+          "id": "a10"
+        },
+        {
+          "id": "/ce"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "io0"
+        },
+        {
+          "id": "io1"
+        },
+        {
+          "id": "io2"
+        },
+        {
+          "id": "io3"
+        },
+        {
+          "id": "io4"
+        },
+        {
+          "id": "io5"
+        },
+        {
+          "id": "io6"
+        },
+        {
+          "id": "io7"
+        },
+        {
+          "id": "a9"
+        },
+        {
+          "id": "a8"
+        },
+        {
+          "id": "/we"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {
+        "contents": ""
+      }
+    },
+    {
+      "id": "sw_we",
+      "kind": "switch",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "closed": 0
+      }
+    },
+    {
+      "id": "r_we",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "sw_oe",
+      "kind": "switch",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "closed": 0
+      }
+    },
+    {
+      "id": "r_oe",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io0",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io3",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io4",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io5",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_io6",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000000
+      }
+    },
+    {
+      "id": "r_io7",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "/ce"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "sw_we",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "sw_we",
+      "from_pin": "b",
+      "to_component": "u2",
+      "to_pin": "/we"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "/we",
+      "to_component": "r_we",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_we",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "sw_oe",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "sw_oe",
+      "from_pin": "b",
+      "to_component": "u2",
+      "to_pin": "/oe"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "/oe",
+      "to_component": "r_oe",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_oe",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "a0"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u2",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a3"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a4"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a5"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a6"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a7"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a8"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a9"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u2",
+      "to_pin": "a10"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io0",
+      "to_component": "r_io0",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io0",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io1",
+      "to_component": "r_io1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io1",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io2",
+      "to_component": "r_io2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io2",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io3",
+      "to_component": "r_io3",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io3",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io4",
+      "to_component": "r_io4",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io4",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io5",
+      "to_component": "r_io5",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io5",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io6",
+      "to_component": "r_io6",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io6",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u2",
+      "from_pin": "io7",
+      "to_component": "r_io7",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_io7",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    }
+  ]
+}

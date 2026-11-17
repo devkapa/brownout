@@ -1,0 +1,11 @@
+{
+  "id": "core-w0-parallel-ideal-sources",
+  "components": [
+    { "id": "vsrc1", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "vsrc2", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 9 } }
+  ],
+  "wires": [
+    { "from_component": "vsrc1", "from_pin": "pos", "to_component": "vsrc2", "to_pin": "pos" },
+    { "from_component": "vsrc1", "from_pin": "neg", "to_component": "vsrc2", "to_pin": "neg" }
+  ]
+}

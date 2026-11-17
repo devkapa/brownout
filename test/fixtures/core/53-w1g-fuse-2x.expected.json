@@ -1,0 +1,17 @@
+{
+  "status": "pass",
+  "durationS": 0.14,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 0.14,
+    "checks": [
+      {
+        "check": "fuse",
+        "fuse": "f1"
+      }
+    ],
+    "classicS": [
+      0.10179648250000002
+    ]
+  }
+}

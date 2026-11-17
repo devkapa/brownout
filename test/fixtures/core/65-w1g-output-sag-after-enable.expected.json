@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "durationS": 0.004,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 0.004,
+    "checks": [
+      {
+        "check": "enable-sag",
+        "ic": "u1",
+        "pin": "b1",
+        "enable": "oe",
+        "load": "load"
+      }
+    ],
+    "classicS": [
+      0.0017372899999999998
+    ]
+  }
+}

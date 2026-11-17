@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "A push_button in series with two 1 kohm resistors across 5 V, pressed for the middle of three 20 ms phases and released for the last.",
+    "By hand: open, the divider carries nothing and every node below the button is 0 V. Closed, the button is 1 mohm (the switch family's contact), so 5 V falls over 2000.001 ohm and the middle node (r1 to r2) is 5 * 1000 / 2000.001 = 2.499999 V with 2.5 mA in both resistors.",
+    "  phase 0  closed 0 (open)      middle node 0 V, 0 mA",
+    "  phase 1  closed 1 (pressed)   middle node 2.499999 V, 2.5 mA",
+    "  phase 2  closed 0 (released)  middle node 0 V, 0 mA",
+    "The dynamics are none (no capacitor), so the harness's 1 ms classic step is exact. test/core/promoted-kinds-fixtures.test.ts checks these values on both engines."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.02
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.02
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.02
+    }
+  ]
+}

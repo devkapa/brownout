@@ -1,0 +1,67 @@
+{
+  "id": "core-w1f-48-battery-drain",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "bat",
+      "kind": "battery_pack",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5,
+        "rInternal": 0.9,
+        "capacityAh": 0.0001
+      }
+    },
+    {
+      "id": "rl",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "bat",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "bat",
+      "from_pin": "pos",
+      "to_component": "rl",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

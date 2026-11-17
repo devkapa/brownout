@@ -1,0 +1,20 @@
+{
+  "$comment": [
+    "A 74LS47 driving a common-anode display (seg7_ca) through 330 ohm per segment. Six pulse sources walk its inputs through lamp test, blanking, zero suppression and five codes.",
+    "The controls /LT, /BI (pin rbo_n) and /RBI idle at 5 V and pulse to 0 V; the BCD inputs A, B and C (one source), D idle at 0 V and pulse to 5 V. Every edge takes 1 us.",
+    "By hand, from the DM74LS47 function table (blanking wins over lamp test, lamp test over the code; /RBI low blanks a zero only):",
+    "   0    to  2.5 ms  nothing asserted       code 0    a b c d e f lit, g dark",
+    "   2.5 to  7.5 ms  /LT low                lamp test all seven lit",
+    "   7.5 to 12.5 ms  /BI low                blanked   all dark",
+    "  12.5 to 15   ms  /RBI low, code 0       zero suppressed, all dark",
+    "  15   to 17.5 ms  /RBI low, A high       code 1    b c lit (/RBI does not blank a 1)",
+    "  17.5 to 22.5 ms  A and D high           code 9    a b c f g lit (the LS47's 9 has no bottom bar)",
+    "  22.5 to 27.5 ms  B and C high           code 6    c d e f g lit (the LS47's 6 has no top bar)",
+    "  27.5 to 32.5 ms  B, C and D high        code 14   d e f g lit",
+    "  32.5 to 37.5 ms  A, B and C high        code 7    a b c lit",
+    "The harness samples at 0, 5, 10 and 20 ms: code 0, lamp test, blanked, code 9. test/core/promoted-kinds-fixtures.test.ts reads every interval at its middle on both engines.",
+    "A lit segment: 5 V, less the display's forward drop (about 2 V at this current) and the output's low level (a few tenths of a volt), across 330 ohm, so about (5 - 2.0 - 0.3) / 330 = 8 mA. A dark one carries none, so the supply's current is 8 mA per lit segment plus the chip's own."
+  ],
+  "status": "pass",
+  "durationS": 0.02
+}

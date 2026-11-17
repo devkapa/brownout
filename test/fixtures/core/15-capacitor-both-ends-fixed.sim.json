@@ -1,0 +1,15 @@
+{
+  "id": "core-w1b-capacitor-both-ends-fixed",
+  "components": [
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "vsrc1", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "vsrc2", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 3 } },
+    { "id": "c1", "kind": "capacitor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "capacitance": 0.000001 } }
+  ],
+  "wires": [
+    { "from_component": "vsrc1", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vsrc2", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vsrc1", "from_pin": "pos", "to_component": "c1", "to_pin": "a" },
+    { "from_component": "vsrc2", "from_pin": "pos", "to_component": "c1", "to_pin": "b" }
+  ]
+}

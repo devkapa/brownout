@@ -21,3 +21,5 @@ export * from "./run-small-signal-ac-sweep.js";
 export * from "./run-monte-carlo.js";
 export * from "./job-messages.js";
 export * from "./checked-step.js";
+// W2e: the engine the transient analyses step through (classic or the core).
+export * from "./engine.js";

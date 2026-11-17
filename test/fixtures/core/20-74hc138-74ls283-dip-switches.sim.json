@@ -1,0 +1,455 @@
+{
+  "id": "core-w1c-74hc138-74ls283-dip-switches",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "dip",
+      "kind": "dip_switch",
+      "pins": [
+        {
+          "id": "a1"
+        },
+        {
+          "id": "b1"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "b2"
+        },
+        {
+          "id": "a3"
+        },
+        {
+          "id": "b3"
+        },
+        {
+          "id": "a4"
+        },
+        {
+          "id": "b4"
+        },
+        {
+          "id": "a5"
+        },
+        {
+          "id": "b5"
+        }
+      ],
+      "params": {
+        "positions": 5,
+        "sw1": 1,
+        "sw2": 1,
+        "sw3": 1,
+        "sw4": 1,
+        "sw5": 1
+      }
+    },
+    {
+      "id": "hc138",
+      "kind": "74hc138",
+      "pins": [
+        {
+          "id": "a0"
+        },
+        {
+          "id": "a1"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "e1n"
+        },
+        {
+          "id": "e2n"
+        },
+        {
+          "id": "e3"
+        },
+        {
+          "id": "y7n"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "y6n"
+        },
+        {
+          "id": "y5n"
+        },
+        {
+          "id": "y4n"
+        },
+        {
+          "id": "y3n"
+        },
+        {
+          "id": "y2n"
+        },
+        {
+          "id": "y1n"
+        },
+        {
+          "id": "y0n"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "ls283",
+      "kind": "74ls283",
+      "pins": [
+        {
+          "id": "s2"
+        },
+        {
+          "id": "b2"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "s1"
+        },
+        {
+          "id": "a1"
+        },
+        {
+          "id": "b1"
+        },
+        {
+          "id": "c0"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "c4"
+        },
+        {
+          "id": "s4"
+        },
+        {
+          "id": "b4"
+        },
+        {
+          "id": "a4"
+        },
+        {
+          "id": "s3"
+        },
+        {
+          "id": "a3"
+        },
+        {
+          "id": "b3"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r_a0",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_a1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_a2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_addA1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_addB1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "dip",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "dip",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "dip",
+      "to_pin": "a3"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "dip",
+      "to_pin": "a4"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "dip",
+      "to_pin": "a5"
+    },
+    {
+      "from_component": "dip",
+      "from_pin": "b1",
+      "to_component": "hc138",
+      "to_pin": "a0"
+    },
+    {
+      "from_component": "r_a0",
+      "from_pin": "a",
+      "to_component": "hc138",
+      "to_pin": "a0"
+    },
+    {
+      "from_component": "r_a0",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "dip",
+      "from_pin": "b2",
+      "to_component": "hc138",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "r_a1",
+      "from_pin": "a",
+      "to_component": "hc138",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "r_a1",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "dip",
+      "from_pin": "b3",
+      "to_component": "hc138",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "r_a2",
+      "from_pin": "a",
+      "to_component": "hc138",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "r_a2",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "hc138",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "hc138",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "hc138",
+      "to_pin": "e1n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "hc138",
+      "to_pin": "e2n"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "hc138",
+      "to_pin": "e3"
+    },
+    {
+      "from_component": "dip",
+      "from_pin": "b4",
+      "to_component": "ls283",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "r_addA1",
+      "from_pin": "a",
+      "to_component": "ls283",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "r_addA1",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "dip",
+      "from_pin": "b5",
+      "to_component": "ls283",
+      "to_pin": "b1"
+    },
+    {
+      "from_component": "r_addB1",
+      "from_pin": "a",
+      "to_component": "ls283",
+      "to_pin": "b1"
+    },
+    {
+      "from_component": "r_addB1",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "a3"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "a4"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "b2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "b3"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "b4"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "c0"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "ls283",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "ls283",
+      "to_pin": "gnd"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+[toolchain]
+# The single source of the core's Rust version. Pinned exactly so the shipped
+# wasm is reproducible; both workflows read `channel` from this file and
+# install it, so bumping it here bumps CI too.
+channel = "1.95.0"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]

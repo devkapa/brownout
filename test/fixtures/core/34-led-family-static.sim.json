@@ -1,0 +1,922 @@
+{
+  "id": "core-w1e-34-led-family-static",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "d1",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 1.8,
+        "iRated": 0.02
+      }
+    },
+    {
+      "id": "r_d1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 220
+      }
+    },
+    {
+      "id": "d2",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 1.8,
+        "iRated": 0.02
+      }
+    },
+    {
+      "id": "r_d2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "d3",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 2,
+        "iRated": 0.02
+      }
+    },
+    {
+      "id": "r_d3",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "d4",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 3,
+        "iRated": 0.02
+      }
+    },
+    {
+      "id": "r_d4",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "d5",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 3.2,
+        "iRated": 0.02
+      }
+    },
+    {
+      "id": "r_d5",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "bi",
+      "kind": "bicolor_led",
+      "pins": [
+        {
+          "id": "a1"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf1": 1.8,
+        "vf2": 2
+      }
+    },
+    {
+      "id": "r_bi1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "r_bi2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "rgb",
+      "kind": "rgb_led",
+      "pins": [
+        {
+          "id": "r_a"
+        },
+        {
+          "id": "g_a"
+        },
+        {
+          "id": "b_a"
+        },
+        {
+          "id": "com_k"
+        }
+      ],
+      "params": {
+        "vf_r": 1.8,
+        "vf_g": 2,
+        "vf_b": 3
+      }
+    },
+    {
+      "id": "r_rgb0",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "r_rgb1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "r_rgb2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000000000
+      }
+    },
+    {
+      "id": "s7",
+      "kind": "seg7_cc",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "e"
+        },
+        {
+          "id": "f"
+        },
+        {
+          "id": "g"
+        },
+        {
+          "id": "dp"
+        },
+        {
+          "id": "com"
+        },
+        {
+          "id": "com2"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r_s7com",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10
+      }
+    },
+    {
+      "id": "r_s7a",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_s7b",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_s7c",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "sa",
+      "kind": "seg7_ca",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "e"
+        },
+        {
+          "id": "f"
+        },
+        {
+          "id": "g"
+        },
+        {
+          "id": "dp"
+        },
+        {
+          "id": "com"
+        },
+        {
+          "id": "com2"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r_sab",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "r_sac",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    },
+    {
+      "id": "bu",
+      "kind": "led",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "k"
+        }
+      ],
+      "params": {
+        "vf": 1.8,
+        "iRated": 0.02,
+        "burnt": 1
+      }
+    },
+    {
+      "id": "r_bu",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "bu_rgb",
+      "kind": "rgb_led",
+      "pins": [
+        {
+          "id": "r_a"
+        },
+        {
+          "id": "g_a"
+        },
+        {
+          "id": "b_a"
+        },
+        {
+          "id": "com_k"
+        }
+      ],
+      "params": {
+        "burnt": "0"
+      }
+    },
+    {
+      "id": "r_bu_rgb",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 150
+      }
+    },
+    {
+      "id": "s0",
+      "kind": "seg7_cc",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "e"
+        },
+        {
+          "id": "f"
+        },
+        {
+          "id": "g"
+        },
+        {
+          "id": "dp"
+        },
+        {
+          "id": "com"
+        },
+        {
+          "id": "com2"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "s2",
+      "kind": "seg7_cc",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        },
+        {
+          "id": "d"
+        },
+        {
+          "id": "e"
+        },
+        {
+          "id": "f"
+        },
+        {
+          "id": "g"
+        },
+        {
+          "id": "dp"
+        },
+        {
+          "id": "com2"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "r_s2",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 330
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_d1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d1",
+      "from_pin": "b",
+      "to_component": "d1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d1",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_d2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d2",
+      "from_pin": "b",
+      "to_component": "d2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d2",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_d3",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d3",
+      "from_pin": "b",
+      "to_component": "d3",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d3",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_d4",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d4",
+      "from_pin": "b",
+      "to_component": "d4",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d4",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_d5",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_d5",
+      "from_pin": "b",
+      "to_component": "d5",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "d5",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_bi1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_bi1",
+      "from_pin": "b",
+      "to_component": "bi",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_bi2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_bi2",
+      "from_pin": "b",
+      "to_component": "bi",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "bi",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_rgb0",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_rgb0",
+      "from_pin": "b",
+      "to_component": "rgb",
+      "to_pin": "r_a"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_rgb1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_rgb1",
+      "from_pin": "b",
+      "to_component": "rgb",
+      "to_pin": "g_a"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_rgb2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_rgb2",
+      "from_pin": "b",
+      "to_component": "rgb",
+      "to_pin": "b_a"
+    },
+    {
+      "from_component": "rgb",
+      "from_pin": "com_k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "s7",
+      "from_pin": "com",
+      "to_component": "r_s7com",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_s7com",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_s7a",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_s7a",
+      "from_pin": "b",
+      "to_component": "s7",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_s7b",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_s7b",
+      "from_pin": "b",
+      "to_component": "s7",
+      "to_pin": "b"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_s7c",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_s7c",
+      "from_pin": "b",
+      "to_component": "s7",
+      "to_pin": "c"
+    },
+    {
+      "from_component": "sa",
+      "from_pin": "com",
+      "to_component": "vcc",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "r_sab",
+      "from_pin": "a",
+      "to_component": "sa",
+      "to_pin": "b"
+    },
+    {
+      "from_component": "r_sab",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "r_sac",
+      "from_pin": "a",
+      "to_component": "sa",
+      "to_pin": "c"
+    },
+    {
+      "from_component": "r_sac",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_bu",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_bu",
+      "from_pin": "b",
+      "to_component": "bu",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "bu",
+      "from_pin": "k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_bu_rgb",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_bu_rgb",
+      "from_pin": "b",
+      "to_component": "bu_rgb",
+      "to_pin": "r_a"
+    },
+    {
+      "from_component": "bu_rgb",
+      "from_pin": "com_k",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "r_s2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_s2",
+      "from_pin": "b",
+      "to_component": "s2",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "s2",
+      "from_pin": "com2",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

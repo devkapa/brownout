@@ -1,0 +1,114 @@
+{
+  "id": "core-w1f-43-psu-cc-load-step",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "psu",
+      "kind": "bench_psu",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5,
+        "iLimit": 0.1
+      }
+    },
+    {
+      "id": "rl",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100
+      }
+    },
+    {
+      "id": "sw",
+      "kind": "switch",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "closed": 0
+      }
+    },
+    {
+      "id": "rs",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 25
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "psu",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "psu",
+      "from_pin": "pos",
+      "to_component": "rl",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "psu",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "sw",
+      "from_pin": "b",
+      "to_component": "rs",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rs",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

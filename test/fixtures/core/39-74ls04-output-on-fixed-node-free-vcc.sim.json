@@ -1,0 +1,39 @@
+{
+  "id": "core-w1e-74ls04-output-on-fixed-node-free-vcc",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "vf", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 4.5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    {
+      "id": "u2",
+      "kind": "74ls04",
+      "pins": [
+        { "id": "1a" }, { "id": "1y" }, { "id": "2a" }, { "id": "2y" },
+        { "id": "3a" }, { "id": "3y" }, { "id": "gnd" }, { "id": "4y" },
+        { "id": "4a" }, { "id": "5y" }, { "id": "5a" }, { "id": "6y" },
+        { "id": "6a" }, { "id": "vcc" }
+      ],
+      "params": {}
+    },
+    { "id": "rf", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 1000 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vf", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "rf", "to_pin": "a" },
+    { "from_component": "rf", "from_pin": "b", "to_component": "u2", "to_pin": "vcc" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "gnd" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "2a" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "3a" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "4a" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "5a" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "6a" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "2y" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "3y" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "4y" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "5y" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "6y" },
+    { "from_component": "vf", "from_pin": "pos", "to_component": "u2", "to_pin": "1y" },
+    { "from_component": "gnd", "from_pin": "gnd", "to_component": "u2", "to_pin": "1a" }
+  ]
+}

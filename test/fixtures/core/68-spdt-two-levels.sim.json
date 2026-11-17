@@ -1,0 +1,137 @@
+{
+  "id": "core-w2-68-spdt-two-levels",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "v_hi",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 9
+      }
+    },
+    {
+      "id": "v_lo",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 3
+      }
+    },
+    {
+      "id": "sw",
+      "kind": "spdt_switch",
+      "pins": [
+        {
+          "id": "com"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "c"
+        }
+      ],
+      "params": {
+        "position": 0
+      }
+    },
+    {
+      "id": "r1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100000
+      }
+    },
+    {
+      "id": "c1",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "v_hi",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_lo",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_hi",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "b"
+    },
+    {
+      "from_component": "v_lo",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "c"
+    },
+    {
+      "from_component": "sw",
+      "from_pin": "com",
+      "to_component": "r1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r1",
+      "from_pin": "b",
+      "to_component": "c1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

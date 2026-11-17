@@ -1,0 +1,66 @@
+{
+  "id": "core-w2-71-ptc-fuse-trips-and-recovers",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 0.5
+      }
+    },
+    {
+      "id": "p1",
+      "kind": "ptc_fuse",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "rNormal": 0.5,
+        "iHold": 0.5
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "p1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "p1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

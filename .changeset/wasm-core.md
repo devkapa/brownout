@@ -1,0 +1,73 @@
+---
+"brownout": minor
+---
+
+brownout now includes a second simulation engine, the core: the transient solver rewritten in Rust and compiled to WebAssembly. It is event-driven, so a board that is mostly logic chips (an 8-bit breadboard computer, for example) no longer costs a whole-circuit solve at every time step. The classic TypeScript engine is still in the package, unchanged, and it is the fallback for every circuit the core does not cover.
+
+**What runs on the core.** A circuit runs on the core only when every part in it is one of these:
+
+- resistors, capacitors, and the switches (`switch`, `push_button`, `spdt_switch`, `dip_switch`);
+- `fuse` and `ptc_fuse`;
+- the sources: `voltage_source`, `battery_pack`, `bench_psu`, `clock`, `clock_gen`, `pulse_source`, `pulse_gen`;
+- `led`, `rgb_led`, `bicolor_led` and the 7-segment displays (`seg7_cc`, `seg7_ca`);
+- the `ne555`;
+- logic: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245`, `74ls161`, `74ls173`, `74hc74`;
+- memory: `74ls189`, `28c16`, `28c256`.
+
+One part outside that list sends the whole circuit to the classic engine: transistors, diodes, op-amps, regulators, inductors, relays, motors, potentiometers, sensors, the remaining logic chips, and the Arduino, Pico and micro:bit boards are all classic-only in this release. The two engines never share a circuit. The core also turns down a few wirings of supported parts (more than one battery or current-limited supply in a circuit, for instance) and says why.
+
+On the core, a run keeps what a host expects from classic: live switch and source-voltage changes without a reload, state carried across an edit (capacitor charge, latches, battery charge, failures, EEPROM contents), snapshots, failures and warnings, the EEPROM write readback, scope samples and LED light averages.
+
+**The core is on where it is supported, once a host has loaded it.** A host turns the core on by awaiting `initCore()`; a host that never does runs on the classic engine exactly as before. After that:
+
+- The sweep and Monte Carlo runners default to `engine: "auto"`, so they run on the core whenever every part of the circuit is on brownout's supported list, and on classic otherwise. The result says which (`engine`) and why (`fallbackReasons`).
+- `HeadlessRunner` still defaults to `"classic"`. Ask for `"auto"` to get the same choice there:
+
+```ts
+import { initCore } from "brownout/core";
+import { HeadlessRunner } from "brownout/host";
+
+await initCore(); // once; loads the wasm that ships in the package
+const runner = new HeadlessRunner({ engine: "auto" });
+runner.load(circuit);
+runner.activeEngine; // "core", or "classic" after a fallback
+runner.engineFallbackReasons; // why, for example ["unsupported-kind:bjt_npn"]
+```
+
+The supported list (`CORE_SUPPORTED_KINDS`) is the list of parts above: every kind the core runs has cleared the two-engine comparison. The two names stay separate because a kind added to the core later is implemented (`CORE_IMPLEMENTED_KINDS`) before it is supported, and until then a circuit holding it runs on classic under `"auto"`, with `unsupported-kind:<kind>` as the reason. A host can pass its own list as `coreSupportedKinds`.
+
+`HeadlessRunner` takes three values for `engine`:
+
+- `"classic"` (the default): the classic engine, always.
+- `"auto"`: the core when it can take the circuit, classic otherwise, and classic again if the core fails part-way through a run (below).
+- `"core"`: chooses at `load()` as `"auto"` does, but once a circuit is running on the core it stays there, and a failure is reported to the caller instead of being covered by classic.
+
+`CoreEngine` (also from `brownout/core`) is the engine itself, for a host that runs its own loop. The sweep and Monte Carlo runners take `engine` and a `coreSupportedKinds` hook option in the same way; there `"core"` never falls back at all and throws when the core cannot run the analysis.
+
+**When the core cannot take a circuit**, `HeadlessRunner` (on `"auto"` or `"core"`) loads it on classic instead and lists the reasons: `unsupported-kind:<kind>`, `unsupported-feature:<what>:<id>`, `malformed:<id>:<what>`, `topology:<message>`, `livelock:<message>`, `solve-failed:<message>`, `bench-psu-back-driven` for a `bench_psu` that the circuit drives to sink, with or without a current limit (classic models a supply that sources only and lets go; the core does not), `carry:<reason>` for an edit whose state could not be carried, and `core-not-initialized` or `core-poisoned` when the wasm is not ready. `CoreEngine.load()` throws `CoreUnsupportedError` with the same reasons.
+
+**When the core fails in the middle of a run** (a solve that does not converge, logic that never settles, or a crash inside the wasm), what happens depends on what the host asked for:
+
+- `HeadlessRunner` on `"auto"` finishes the run on classic. No state is carried from one engine to the other, so classic starts again from the load: it loads every circuit the runner gave the core, runs again every `run()` the core had completed, then the run that failed. The readings afterwards are the ones a classic runner gives for the same calls. `activeEngine` becomes `"classic"` and `engineFallbackReasons` says why, for example `["mid-run:solve-failed:<message>", "restarted-from-load"]`, `["mid-run:bench-psu-back-driven", "restarted-from-load"]` (a bench supply driven to sink part-way through) or `["core-trap", "restarted-from-load"]`. The runner then stays on classic for the rest of its life, because classic carries element state across `load()`; each later `load()` records `staying-classic-after-fallback`. The cost is the time to simulate that history a second time, and `onSample` is called at the end of each core run instead of during it.
+- A sweep or Monte Carlo run on `"auto"` is run again from its first point on classic, so one result never mixes engines. `onRestart(reasons)` is called first, and the result carries `engine: "classic"` and the reasons.
+- On an explicit `"core"`, nothing is covered. `HeadlessRunner.run()` returns `hitMinStep: true` with the readings of the last instant the core completed, an analysis throws its convergence error, and a crash throws `CoreTrapError`.
+- `CoreEngine` itself stops at the last instant it completed with `lastConverged === false` and `lastAdvanceFailure` set; it never throws for a failed solve.
+
+After a crash inside the wasm the module is unusable until `initCore()` is awaited again; until then every core request falls back with `core-poisoned`.
+
+**Things that differ on the core.**
+
+- Results agree with classic within the tolerances the equivalence tests use (`core/README.md` in the repository, "Equivalence harness rules"). They are not bit-identical.
+- There is no fixed time step. A fixed-step headless run samples on the grid you ask for, but the core chooses its own steps in between. The classic solver's diagnostics (Newton iterations, matrix size, residual) read zero.
+- Step breakpoints (`captureStepBreakpoints`) are classic-only.
+- The `SolverDiagnostics` message type (`sim/messages`, reached through `brownout/internals/*`) is now a union: classic's fields as before, or the core's counters under `core` when `engine === "core"`. TypeScript that reads classic's fields from it has to narrow on `engine` first.
+- A `bench_psu` driven above its setpoint by another source, which classic lets go of, is declined by the core at the instant it would sink more than 1 uA, with or without a current limit: with `bench-psu-back-driven` at load, or `mid-run:bench-psu-back-driven` part-way through a run, and `"auto"` runs the circuit on classic.
+- The exact rail mode (`noRailShortcut`) is chosen when a circuit is loaded and cannot be changed afterwards.
+- A capacitor wired directly across a `battery_pack`: the core treats the battery's rail as settling at once (a circuit whose battery resistance times the capacitance across it is over 100 us is declined at load). So just after a load switches, the capacitor's current and the battery's do not show the brief pulse classic shows, which is the size of the load step and gone within about half a millisecond. Between switching edges the two engines agree.
+- On a battery-powered circuit the core re-solves the battery's rail where the readings it moves could change by a fifth of the comparison tolerance, not at every 10 uV. A part's power is held between those solves, so its published temperature and power can differ from a run with 1 us steps by up to 0.001 degC plus 0.1 % of its rise over ambient, and 0.1 % of its power. No failure, warning or LED event is lost or gained by it; an oscillator keeps every edge, and its period stayed within one part in a million on every circuit measured.
+- A `bench_psu` is occasionally declined with `bench-psu-back-driven` although nothing drives it (4 of about 20,000 random circuits in testing). Under `"auto"` such a circuit runs on classic; no reading is wrong.
+- `CoreEngine.saveState()` returns a snapshot of the whole engine and `restoreState(snapshot)` puts it back. Call `snapshot.dispose()` when you are done with one; a `load()` retires every snapshot taken before it.
+
+**Speed, and where it stops.** On Ben Eater's SAP-1 with an ideal 5 V supply the core takes about 14 ms of CPU for a simulated second (about 50 ms when every part carries a catalog identity, as an app's parts do), so it runs many times faster than real time. On a battery the same computer is slower, because the battery's rail moves and everything on it is re-solved as it does: with its program running and catalog identities on its parts it takes about 1.3 s of CPU per simulated second, so a host that paces to real time shows it at roughly half speed. With the computer halted the battery board takes about 0.4 s. Battery-powered boards in real time is the next piece of work.
+
+**Loading the wasm.** The binary is `dist/core/brownout-core.wasm`, about 1.9 MB (0.7 MB gzipped), also exported as `brownout/core.wasm`. `initCore()` finds it by itself in Node, and in webpack and Vite client or worker bundles. In a Next.js server bundle, add `brownout` to `serverExternalPackages` or pass the bytes to `initCore()` yourself. The wasm is loaded only when a host calls `initCore()`; a host that never does runs exactly as before.

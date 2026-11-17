@@ -46,6 +46,18 @@
  * MCU circuits are handled exactly as the worker handles them: the external
  * CPU emulators are not snapshot-rewindable, so a circuit containing one gets
  * the conservative controller with no trial replay, capped at MCU_H_MAX.
+ *
+ * ENGINE SELECTION (brownout/core, W0)
+ * `HeadlessRunnerOptions.engine` opts a runner into trying the Rust/WASM
+ * core (brownout/core) instead of the classic engine above. This is ADDITIVE:
+ * with `engine` absent or `"classic"`, every code path below is exactly what
+ * it was before the core existed — same fields, same control flow, same
+ * error messages. In `"core"` mode, `load()`/`run()` take a completely
+ * different path (see `_tryLoadCore`/`_runCore`): the adaptive step
+ * controller above is entirely a classic-engine concern and has no
+ * involvement once `activeEngine` is `"core"`. `"auto"` loads as `"core"`
+ * does and adds one thing: a core failure in the middle of a run is replayed
+ * on classic (see `_runCoreOrReplay`).
  */
 
 import { estimateStepError, nextStepFactor } from "../sim/adaptive-step.js";
@@ -58,6 +70,12 @@ import type {
   SimWarning,
   SolverDiagnosticsSnapshot,
 } from "../sim/engine/sim-engine.js";
+import { CoreEngine } from "../core/engine.js";
+import { CoreUnsupportedError } from "../core/errors.js";
+import { CORE_SUPPORTED_KINDS } from "../core/kinds.js";
+import { coreAdvanceFailureReason, coreFailureReasons, unsupportedCoreKindReasons } from "../core/select.js";
+import { coreReady, coreStatus } from "../core/wasm.js";
+import type { EngineReadout } from "../core/surface.js";
 
 // Adaptive step-size bounds (seconds) — sim.worker.ts values verbatim.
 const H_MIN = 1e-8;
@@ -352,6 +370,59 @@ export interface HeadlessRunnerOptions {
    * Default "be", matching that handler's default.
    */
   integrationMethod?: "be" | "trap";
+  /**
+   * Which engine drives load()/run(). Default "classic" — every existing
+   * caller is unaffected; the classic path below is byte-for-byte what it
+   * was before this option existed.
+   *
+   * "core" attempts the Rust/WASM core (brownout/core) first and falls back
+   * to classic when: `initCore()` hasn't been awaited yet
+   * ("core-not-initialized"), the live instance is poisoned by an earlier
+   * trap and hasn't been re-initialised yet ("core-poisoned" — a fresh
+   * `CoreEngine` is built automatically the next time `initCore()` succeeds
+   * again, so this is transient, not permanent), or the circuit uses a kind
+   * not in `coreSupportedKinds` (`"unsupported-kind:<kind>"`, one per kind),
+   * or the core itself rejects the circuit's topology (`"topology:<message>"`)
+   * or a malformed parameter (`compileCircuit`'s own `"malformed:<id>:<what>"`).
+   * See `activeEngine` / `engineFallbackReasons` to observe which happened.
+   * Once a circuit is running on the core, `"core"` keeps it there: a failed
+   * advance is reported on the run's result (`hitMinStep`), and a trap is
+   * thrown to the caller.
+   *
+   * "auto" chooses at each `load()` exactly as "core" does (until a run has
+   * fallen back, see below), and also covers
+   * the run: when the core fails part-way (an advance that does not converge,
+   * a livelock, a trap or a poisoned instance), the runner finishes on
+   * classic and records why. No state is carried between the two engines, so
+   * the replay starts from the load: classic loads every circuit this runner
+   * gave the core since classic last ran, runs again every `run()` the core
+   * completed, then the run that failed, whose samples all come from classic.
+   * The readings afterwards are the ones a classic runner gives for the same
+   * calls. `engineFallbackReasons` is then the failure
+   * (`"mid-run:solve-failed:<message>"`, `"mid-run:livelock:<message>"`,
+   * `"core-trap"`, ...) followed by `"restarted-from-load"`, and by
+   * `"replay-incomplete"` if classic stopped early in one of the earlier
+   * runs. After that the runner stays on classic for the rest of its life:
+   * classic carries element state across `load()`, and a core load of the
+   * same circuit would start it cold. Each later `load()` records
+   * `"staying-classic-after-fallback"` as its reason. To make this possible the runner
+   * keeps a copy of each circuit loaded on the core and the options of each
+   * run, and it holds a run's samples until the core has finished that run,
+   * so `onSample` is called at the end of a core run rather than during it.
+   * A circuit is replayed as `load()` took it: an edit made in place and
+   * never loaded reached neither engine.
+   */
+  engine?: "classic" | "core" | "auto";
+  /**
+   * Overrides which kinds `engine: "core"` and `"auto"` are allowed to route to the core.
+   * Defaults to `CORE_SUPPORTED_KINDS`, the kinds that have cleared
+   * brownout's accuracy gates (kinds.ts). This option exists for
+   * the dual-engine equivalence harness and this package's own tests: passing
+   * a wider set (e.g. `CORE_IMPLEMENTED_KINDS`) routes kinds that have NOT
+   * cleared those gates to the core, which is exactly what proving them out
+   * requires but is never something a normal host should do.
+   */
+  coreSupportedKinds?: ReadonlySet<string>;
 }
 
 export interface HeadlessRunOptions {
@@ -363,7 +434,9 @@ export interface HeadlessRunOptions {
    * worker's manualStepH path: no controller overrides the caller's step,
    * but the source step ceiling still caps it, and steps still land on
    * source and device events, so the samples around an event are not
-   * evenly spaced (see HeadlessSample.h).
+   * evenly spaced (see HeadlessSample.h). On the core this is a uniform grid
+   * of `fixedStepS` (never coarser than the source step ceiling) with one
+   * sample per grid point; `adaptive: true` there is one advance, one sample.
    */
   adaptive?: boolean;
   /** Step size (s) when `adaptive` is false. Required in that mode; clamped to [H_MIN, H_MAX]. */
@@ -418,6 +491,55 @@ export interface HeadlessRunResult {
   hitStepCap: boolean;
 }
 
+/** What a runner on "auto" keeps while the core runs, so a failed run can be replayed on classic from the load. */
+type CoreHistoryEntry =
+  | { readonly kind: "load"; readonly circuit: SimCircuit; readonly integrationMethod: "be" | "trap"; readonly simTime: number }
+  | { readonly kind: "run"; readonly options: HeadlessRunOptions };
+
+/**
+ * Structural equality for the plain data a SimCircuit is made of. Object.is on
+ * leaves, so a NaN equals itself and 0 differs from -0: two values this calls
+ * equal are the same to the engine, and anything doubtful reads as different.
+ */
+function sameData(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => sameData(item, b[i]));
+  }
+  const keysA = Object.keys(a);
+  if (keysA.length !== Object.keys(b).length) return false;
+  const recordB = b as Record<string, unknown>;
+  return keysA.every(
+    (key) => Object.prototype.hasOwnProperty.call(b, key) && sameData((a as Record<string, unknown>)[key], recordB[key]),
+  );
+}
+
+/**
+ * A private copy of `circuit` for the replay history, sharing with `previous`
+ * (the copy kept for the last load) every part, and the wires, that did not
+ * change. Reloading an unchanged circuit keeps no new copy at all and a live
+ * edit keeps only the parts it touched, so the history grows by what changed,
+ * not by the size of the circuit at each load. Nothing in a kept copy is ever
+ * edited (the replay loads a clone of it), so sharing cannot leak one load's
+ * data into another.
+ */
+function retainCircuit(previous: SimCircuit | undefined, circuit: SimCircuit): SimCircuit {
+  if (previous !== undefined && sameData(previous, circuit)) return previous;
+  const copy = structuredClone(circuit);
+  if (previous === undefined) return copy;
+  const earlier = new Map(previous.components.map((component) => [component.id, component]));
+  return {
+    ...copy,
+    components: copy.components.map((component) => {
+      const kept = earlier.get(component.id);
+      return kept !== undefined && sameData(kept, component) ? kept : component;
+    }),
+    wires: sameData(previous.wires, copy.wires) ? previous.wires : copy.wires,
+  };
+}
+
 interface StepAttempt {
   accepted: boolean;
   iters: number;
@@ -446,23 +568,95 @@ export class HeadlessRunner {
   /** Whether the last error estimate said the circuit is changing (see ACTIVE_H_MAX). */
   private _changing = true;
 
+  private readonly _engineChoice: "classic" | "core" | "auto";
+  private readonly _coreSupportedKinds: ReadonlySet<string>;
+  /**
+   * Created lazily on the first successful core load, then reused across
+   * every later load() call — see HeadlessRunnerOptions.engine's doc comment.
+   * `_tryLoadCore` drops and replaces it (best-effort dispose(), then a fresh
+   * `new CoreEngine()`) the moment `isCurrent()` says it no longer belongs to
+   * the live core instance — e.g. a trap poisoned the instance and the host
+   * re-initialised — so this field can silently change identity across two
+   * `load()` calls; nothing outside `_tryLoadCore` may assume otherwise.
+   * Never explicitly disposed by this class on its own initiative: HeadlessRunner
+   * has no existing lifecycle/close hook to hang a deterministic dispose() off
+   * of (it never needed one for the classic engine), so this relies on
+   * CoreEngine's own FinalizationRegistry safety net instead. A host that
+   * wants deterministic disposal should own a CoreEngine directly rather than
+   * go through this convenience path.
+   */
+  private _coreEngine: CoreEngine | null = null;
+  private _activeEngine: "classic" | "core" = "classic";
+  private _engineFallbackReasons: string[] = [];
+  /**
+   * "auto" only: every load and completed run since the core took over from
+   * classic, oldest first. Its first entry is always a load. Empty whenever
+   * classic is the active engine: classic's own state is then current, and a
+   * replay has nothing to redo.
+   */
+  private _coreHistory: CoreHistoryEntry[] = [];
+  /**
+   * "auto" only: set when a run fell back to classic part-way, and never
+   * cleared. Classic carries element state across load() and the core
+   * cannot be given classic's, so every later load stays on classic.
+   */
+  private _stayClassic = false;
+
   constructor(options?: HeadlessRunnerOptions) {
     this._integrationMethod = options?.integrationMethod ?? "be";
+    this._engineChoice = options?.engine ?? "classic";
+    this._coreSupportedKinds = options?.coreSupportedKinds ?? CORE_SUPPORTED_KINDS;
   }
 
   /**
-   * The hosted engine, for readouts this class does not wrap (getServoState,
-   * getPtcTripped, dcOperatingPoint, ...). Stepping it directly bypasses the
-   * controller and desynchronizes `adaptiveH` from the state it was measured
-   * against; use run() to advance time.
+   * The hosted classic engine, for readouts this class does not wrap
+   * (getServoState, getPtcTripped, dcOperatingPoint, ...). Stepping it
+   * directly bypasses the controller and desynchronizes `adaptiveH` from the
+   * state it was measured against; use run() to advance time.
+   *
+   * Throws in core mode: the classic SimEngine held here is never loaded and
+   * never runs while `activeEngine === "core"` (see load()), so returning it
+   * would silently hand back a stale, unloaded engine instead of the one
+   * actually simulating the circuit. Use `readout` for the active engine's
+   * read surface, or construct/hold your own CoreEngine for core-specific APIs.
    */
   get engine(): SimEngine {
+    if (this._activeEngine === "core") {
+      throw new Error(
+        'HeadlessRunner.engine: the classic SimEngine is not running this circuit (engine: "core" ' +
+          "landed on the core — see activeEngine). Use `readout` for the active engine's read " +
+          "surface instead.",
+      );
+    }
     return this._engine;
   }
 
-  /** Simulation time (s). */
+  /** Which engine actually loaded the current circuit. "classic" until a "core" load succeeds; reverts to "classic" on any fallback. */
+  get activeEngine(): "classic" | "core" {
+    return this._activeEngine;
+  }
+
+  /**
+   * Why load() fell back to classic, in the vocabulary select.ts/compile.ts/
+   * CoreUnsupportedError all share (`"core-not-initialized"`,
+   * `"core-poisoned"`, `"unsupported-kind:<kind>"`, `"malformed:<id>:<what>"`,
+   * `"topology:<message>"`). Empty when `engine: "core"` landed on the core,
+   * or when `engine` is `"classic"`/absent (no fallback was ever attempted).
+   * Under `"auto"` it is also why a run() left the core part-way: the
+   * failure, then `"restarted-from-load"` (see HeadlessRunnerOptions.engine).
+   */
+  get engineFallbackReasons(): readonly string[] {
+    return this._engineFallbackReasons;
+  }
+
+  /** The active engine's read-only surface — works in both classic and core mode, unlike `engine` (classic-only). */
+  get readout(): EngineReadout {
+    return this._activeEngine === "core" ? (this._coreEngine as CoreEngine) : this._engine;
+  }
+
+  /** Simulation time (s), from whichever engine is active. */
   get simTime(): number {
-    return this._engine.simTime;
+    return this.readout.simTime;
   }
 
   /**
@@ -477,6 +671,91 @@ export class HeadlessRunner {
    */
   load(source: SimCircuit | string): void {
     const circuit = typeof source === "string" ? parseSpiceNetlist(source).circuit : source;
+
+    // Carry the runner's OBSERVABLE clock across an engine switch. Classic
+    // SimEngine and the CoreEngine facade each keep their own independent
+    // clock (engine.ts's own note: a live-edit reload must keep the facade's
+    // simTime moving forward exactly like classic does), and neither engine
+    // knows the other exists. Without this, a reload that changes
+    // `activeEngine` — a live edit that adds/removes an unsupported kind —
+    // would make `this.simTime` jump to whatever the OTHER engine's clock
+    // last read (0, on its first use), rather than continuing from where the
+    // circuit actually was. There is no prior time to preserve on the very
+    // FIRST load (`this._circuit` is still null), and when the active engine
+    // does NOT change this reduces to a no-op — a classic-only caller (or a
+    // core-mode caller staying on the same engine) sees exactly what it saw
+    // before this existed.
+    const previousEngine = this._circuit !== null ? this._activeEngine : null;
+    let carryTime: number | undefined;
+    if (previousEngine !== null) {
+      try {
+        carryTime = this.readout.simTime;
+      } catch {
+        // The previously active engine can no longer report its own time —
+        // e.g. the core was poisoned by a trap (during an earlier run()) since
+        // the last load(). There is nothing trustworthy to carry over; the
+        // load attempt below sorts out fallback/recovery on its own account
+        // (see _tryLoadCore's "core-poisoned" reason), so this just skips the
+        // seed rather than letting an unrelated read throw out of load().
+        carryTime = undefined;
+      }
+    }
+
+    if (this._engineChoice !== "classic") {
+      // A runner that fell back mid-run has classic's state, which carries
+      // across loads; a core load would start the same circuit cold.
+      const fallbackReasons = this._stayClassic
+        ? ["staying-classic-after-fallback"]
+        : this._tryLoadCore(circuit, previousEngine === "classic" ? carryTime : undefined);
+      if (fallbackReasons === null) {
+        if (this._engineChoice === "auto") {
+          // A copy: a host may edit its circuit object in place and load it
+          // again, and the replay must load what the core was given each time.
+          let previousCircuit: SimCircuit | undefined;
+          if (previousEngine === "core") {
+            for (let i = this._coreHistory.length - 1; i >= 0 && previousCircuit === undefined; i--) {
+              const earlier = this._coreHistory[i]!;
+              if (earlier.kind === "load") previousCircuit = earlier.circuit;
+            }
+          }
+          const entry: CoreHistoryEntry = {
+            kind: "load",
+            circuit: retainCircuit(previousCircuit, circuit),
+            integrationMethod: this._integrationMethod,
+            simTime: (this._coreEngine as CoreEngine).simTime,
+          };
+          // From classic (or a first load) the history starts here; a reload
+          // on the core, which carries the core's state, continues it.
+          if (previousEngine === "core") this._coreHistory.push(entry);
+          else this._coreHistory = [entry];
+        }
+        // Landed on the core. Deliberately do NOT touch the classic engine
+        // (or _adaptiveH/_changing/_errorReplay, which are meaningless for
+        // the core) — a caller that later switches back to "classic" must
+        // not be surprised by leftover state from a run that never actually
+        // happened on the classic engine.
+        this._circuit = circuit;
+        this._activeEngine = "core";
+        this._engineFallbackReasons = [];
+        return;
+      }
+      this._engineFallbackReasons = fallbackReasons;
+    } else {
+      this._engineFallbackReasons = [];
+    }
+    // Classic runs from here, so its own state is current: nothing to replay.
+    this._coreHistory = [];
+
+    // Classic path: byte-for-byte what this method was before engine
+    // selection existed, and the fallback path when "core" mode couldn't
+    // take the circuit — except for seeding the classic clock when the
+    // PREVIOUS load actually ran on the core (see the carryTime comment
+    // above). That seed must land BEFORE load(), which is what a caller
+    // switching engines by hand would do too.
+    this._activeEngine = "classic";
+    if (previousEngine === "core" && carryTime !== undefined) {
+      this._engine.simTime = carryTime;
+    }
     // Method before load: the seed solve reads it (see the option's doc).
     this._engine.setIntegrationMethod(this._integrationMethod);
     this._engine.load(circuit);
@@ -486,13 +765,96 @@ export class HeadlessRunner {
     this._errorReplay = circuitSupportsStepReplay(circuit);
   }
 
-  /** Net id carrying a component pin, or undefined if the pin is unwired/unknown. */
-  netIdFor(componentId: string, pinId: string): string | undefined {
-    return this._engine.getNetIdForPin(componentId, pinId);
+  /**
+   * Attempts to load `circuit` onto the core engine, creating one (or
+   * replacing a superseded one — see below) as needed. Returns `null` on
+   * success, or the fallback reasons to report (and to fall back to classic
+   * over) otherwise. Only a genuinely unexpected error (anything but
+   * `CoreUnsupportedError`) propagates, per HeadlessRunnerOptions.engine's
+   * doc comment.
+   *
+   * `seedSimTime`, when given (a "classic to core" engine switch — see
+   * load()), is passed through to `CoreEngine.load()`'s own `options.simTime`
+   * so the newly-core circuit starts at the runner's carried-over time
+   * instead of wherever this engine's own clock last stood.
+   *
+   * Always passes `this._integrationMethod` through too: W1b gave the core
+   * real dynamics (capacitors, stepped partitions choosing BE/trapezoidal via
+   * the program's INTEGRATION option — load-time only, like classic's own
+   * seed), so a caller's requested method must reach the compiled program
+   * here, not just the classic engine's `setIntegrationMethod`.
+   */
+  private _tryLoadCore(circuit: SimCircuit, seedSimTime?: number): string[] | null {
+    if (!coreReady()) {
+      // Tell "nobody has awaited initCore() yet" apart from "it WAS ready
+      // and a trap poisoned it" — the two need different host responses (the
+      // latter implies initCore() should be called AGAIN, not for the first
+      // time).
+      return [coreStatus() === "poisoned" ? "core-poisoned" : "core-not-initialized"];
+    }
+    const unsupported = unsupportedCoreKindReasons(circuit, this._coreSupportedKinds);
+    if (unsupported.length > 0) return unsupported;
+    try {
+      // A cached engine from an earlier, now-superseded core instance (a trap
+      // poisoned it and the host re-initialised — core/README.md, "Traps")
+      // can never load again: its handle table belongs to a generation that
+      // no longer exists, so every call on it throws CoreStaleInstanceError
+      // (see CoreEngine's own generation check). Drop it and build a fresh
+      // one instead of letting that become a permanent failure for this
+      // runner.
+      if (this._coreEngine && !this._coreEngine.isCurrent()) {
+        try {
+          this._coreEngine.dispose();
+        } catch {
+          // Best-effort — see CoreEngine.dispose()'s own doc comment.
+        }
+        this._coreEngine = null;
+      }
+      this._coreEngine ??= new CoreEngine();
+      this._coreEngine.load(circuit, undefined, {
+        integrationMethod: this._integrationMethod,
+        ...(seedSimTime !== undefined ? { simTime: seedSimTime } : {}),
+      });
+      return null;
+    } catch (err) {
+      if (err instanceof CoreUnsupportedError) return [...err.reasons];
+      throw err;
+    }
   }
 
-  /** Committed readout at the current instant. All maps are copies; the engine's own are live. */
+  /** Net id carrying a component pin, or undefined if the pin is unwired/unknown — from whichever engine is active. */
+  netIdFor(componentId: string, pinId: string): string | undefined {
+    return this.readout.getNetIdForPin(componentId, pinId);
+  }
+
+  /** Committed readout at the current instant, from whichever engine is active. All maps are copies; the engines' own are live. */
   snapshot(): HeadlessSnapshot {
+    if (this._activeEngine === "core") {
+      const readout = this.readout;
+      return {
+        simTime: readout.simTime,
+        converged: readout.lastConverged,
+        netV: { ...readout.getNetV() },
+        elementI: { ...readout.getElementI() },
+        digitalState: { ...readout.digitalState },
+        failures: readout.getFailures(),
+        warnings: readout.getWarnings(),
+        // The core has no Newton/MNA loop in W0 — these describe the
+        // CLASSIC solver and have no core meaning yet. lastConverged is the
+        // one field that still means something (true after a successful
+        // load()/advance()); every numeric field reads as its neutral zero
+        // rather than a fabricated non-zero number.
+        solver: {
+          lastIters: 0,
+          lastConverged: readout.lastConverged,
+          lastSolveUs: 0,
+          lastMatrixSize: 0,
+          lastMatrixSingular: false,
+          lastMatrixIllConditioned: false,
+          lastRelativeResidual: 0,
+        },
+      };
+    }
     return {
       simTime: this._engine.simTime,
       converged: this._engine.lastConverged,
@@ -597,19 +959,40 @@ export class HeadlessRunner {
     return sourceEventDescriptors(circuit);
   }
 
-  /** Apply a run's integrationMethod request. See HeadlessRunOptions.integrationMethod for why t=0 is the only legal point. */
+  /**
+   * Apply a run's integrationMethod request. See
+   * HeadlessRunOptions.integrationMethod for why t=0 is the only legal point.
+   * The legality rule is the SAME regardless of which engine is active —
+   * `this.simTime` reads whichever one is (see the `simTime` getter). W1b
+   * gave the core real dynamics (capacitors; stepped partitions pick BE or
+   * trapezoidal from the program's INTEGRATION option), so — unlike W0/W1a,
+   * when the core had nothing to seed and this only recorded the request —
+   * core mode now needs the SAME re-seed classic gets: load() again, whose
+   * `_tryLoadCore` bakes `_integrationMethod` into the program (see its own
+   * doc comment). Lossless at t=0: nothing has been stepped yet on either
+   * engine.
+   */
   private applyIntegrationMethod(method: "be" | "trap", circuit: SimCircuit): void {
     if (method === this._integrationMethod) return;
-    if (this._engine.simTime !== 0) {
+    if (this.simTime !== 0) {
       throw new Error(
         `HeadlessRunner: cannot switch integrationMethod to "${method}" at ` +
-        `t=${String(this._engine.simTime)} s. The method must be in force before the ` +
+        `t=${String(this.simTime)} s. The method must be in force before the ` +
         "load seed solve and the first step's backward-Euler anchoring, so switching " +
         "mid-run would re-seed the circuit and discard the state already computed. " +
         "Select it in the constructor, or on a run that starts at t=0.",
       );
     }
     this._integrationMethod = method;
+    if (this._activeEngine === "core") {
+      // Re-run engine selection rather than reloading the core directly, so
+      // the program is rebuilt under the new method through the one path
+      // that also handles a core that cannot take it (load() then falls
+      // back to classic, seeded under the new method, with the reasons
+      // recorded). run() branches on activeEngine only after this call.
+      this.load(circuit);
+      return;
+    }
     this._engine.setIntegrationMethod(method);
     // Re-seed under the new method. Lossless: nothing has been stepped yet.
     this._engine.load(circuit);
@@ -627,7 +1010,41 @@ export class HeadlessRunner {
     if (!Number.isFinite(durationS) || durationS <= 0) {
       throw new Error(`HeadlessRunner: durationS must be a positive finite number of seconds, got ${String(durationS)}.`);
     }
+
+    // Applied before the engine branch: in core mode it can reload, and a
+    // reload that falls back to classic changes which branch runs.
     if (options.integrationMethod) this.applyIntegrationMethod(options.integrationMethod, circuit);
+
+    if (this._activeEngine === "core") {
+      // adaptive:true ignores fixedStepS/maxSteps on the core (one advance,
+      // one sample); adaptive:false samples a fixed grid (_runCoreGrid). A
+      // caller's misuse must still be caught the same way — this is the SAME check the
+      // classic path below runs, duplicated rather than factored out, so the
+      // classic block stays byte-for-byte what it was before "core" mode
+      // existed (diff it against `git show HEAD:src/host/headless.ts`).
+      if (!(options.adaptive ?? true)) {
+        const requested = options.fixedStepS;
+        if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
+          throw new Error(
+            "HeadlessRunner: run({ adaptive: false }) requires a positive fixedStepS — with the " +
+            "controller off there is nothing to choose a step size.",
+          );
+        }
+      }
+      if (this._engineChoice === "auto") return this._runCoreOrReplay(circuit, options);
+      if (!(options.adaptive ?? true)) {
+        // Fixed-grid sampling (W2, D15 (a)): the grid classic would step on,
+        // advanced to point by point on the core.
+        return this._runCoreGrid(
+          this._coreEngine as CoreEngine,
+          durationS,
+          Math.min(Math.max(H_MIN, Math.min(H_MAX, options.fixedStepS!)), sourceStepLimit(circuit)),
+          options.maxSteps ?? DEFAULT_MAX_STEPS,
+          onSample,
+        );
+      }
+      return this._runCore(this._coreEngine as CoreEngine, durationS, onSample);
+    }
 
     const adaptive = options.adaptive ?? true;
     let fixedH: number | null = null;
@@ -787,6 +1204,232 @@ export class HeadlessRunner {
       errorControlled: errorControlEnabled,
       hitMinStep,
       hitStepCap,
+    };
+  }
+
+  /**
+   * run()'s core path under `engine: "auto"` (ruling R116): the same two core
+   * runs as under "core", and a replay on classic when the core fails in
+   * one. A failure is an advance that did not converge (`hitMinStep` from
+   * either core run) or a thrown core failure (a trap, a poisoned or stale
+   * instance, a load code); a caller bug (a RangeError) still surfaces.
+   *
+   * The run's samples are held until the core has finished it, so a failed
+   * run delivers classic's samples only, each once.
+   */
+  private _runCoreOrReplay(circuit: SimCircuit, options: HeadlessRunOptions): HeadlessRunResult {
+    const engine = this._coreEngine as CoreEngine;
+    const { durationS, onSample } = options;
+    const held: HeadlessSample[] = [];
+    const hold = onSample ? (sample: HeadlessSample): void => void held.push(sample) : undefined;
+    let reasons: readonly string[];
+    try {
+      const result = (options.adaptive ?? true)
+        ? this._runCore(engine, durationS, hold)
+        : this._runCoreGrid(
+            engine,
+            durationS,
+            Math.min(Math.max(H_MIN, Math.min(H_MAX, options.fixedStepS!)), sourceStepLimit(circuit)),
+            options.maxSteps ?? DEFAULT_MAX_STEPS,
+            hold,
+          );
+      if (!result.hitMinStep) {
+        // Recorded before delivery: the core has run it, so a callback that
+        // throws must not leave it out of a later replay.
+        const { onSample: _unused, ...replayable } = options;
+        this._coreHistory.push({ kind: "run", options: replayable });
+        if (onSample) for (const sample of held) onSample(sample);
+        return result;
+      }
+      reasons = [coreAdvanceFailureReason(engine.lastAdvanceFailure)];
+    } catch (err) {
+      const mapped = coreFailureReasons(err);
+      if (mapped === null) throw err;
+      reasons = mapped;
+    }
+    this._replayOnClassic(reasons);
+    // Classic is the active engine now: this is its own run of the failed span.
+    return this.run(options);
+  }
+
+  /**
+   * Puts classic where it would be had every call in `_coreHistory` gone to
+   * it: each load (classic's own load carries its state from one to the
+   * next), each completed run, in order. No state crosses from the core (W2
+   * design D9b (a)); what the core computed is dropped.
+   *
+   * The first load is seeded with the time the core was given for it, the
+   * same seed load() gives classic on any other switch from the core.
+   */
+  private _replayOnClassic(reasons: readonly string[]): void {
+    const history = this._coreHistory;
+    this._coreHistory = [];
+    this._stayClassic = true;
+    this._activeEngine = "classic";
+    let incomplete = false;
+    let seeded = false;
+    for (const entry of history) {
+      if (entry.kind === "load") {
+        if (!seeded) {
+          this._engine.simTime = entry.simTime;
+          seeded = true;
+        }
+        this._integrationMethod = entry.integrationMethod;
+        this._engine.setIntegrationMethod(entry.integrationMethod);
+        // A clone: kept copies share parts with each other and are never given
+        // to an engine.
+        const circuit = structuredClone(entry.circuit);
+        this._engine.load(circuit);
+        this._circuit = circuit;
+        this._adaptiveH = H_INITIAL;
+        this._changing = true;
+        this._errorReplay = circuitSupportsStepReplay(circuit);
+      } else {
+        const replayed = this.run(entry.options);
+        if (replayed.hitMinStep || replayed.hitStepCap) incomplete = true;
+      }
+    }
+    this._engineFallbackReasons = [...reasons, "restarted-from-load", ...(incomplete ? ["replay-incomplete"] : [])];
+  }
+
+  /**
+   * run()'s core-mode path for `adaptive: false` (W2 design 2.7, D15 (a)):
+   * Learn's fixed-`dt` sampling. The grid spacing `gridH` is what classic's
+   * fixed-step loop steps at away from events (`min(fixedStepS, H_MAX, the
+   * source step ceiling)`, computed by the caller), so the core is never
+   * sampled coarser than classic is stepped. The core advances to each grid
+   * point and `onSample` fires after each, with the solved values at that
+   * point (not interpolated from a later one). Classic's extra steps that land
+   * on source edges are a step-size artifact and are not reproduced: the core
+   * handles those instants inside its own advance.
+   *
+   * The grid is anchored at the run's start time and each point is computed as
+   * `start + k * gridH`, not by accumulating, so it does not drift; the last
+   * point is exactly `start + durationS` and may be a short step. `maxSteps`
+   * bounds the number of grid points as it bounds classic's attempted steps.
+   *
+   * Each advance is a clamp on the core's trajectory (D6); the corpus gate at
+   * 1/60 s, 1 ms and 10 ms frames is what keeps that within W0.
+   *
+   * A failed advance stops the run there: the failed point gets no sample
+   * (the readouts are still the last trusted instant), `failedSteps` is 1 and
+   * `hitMinStep` is set, the same honest-failure signal `_runCore` uses.
+   */
+  private _runCoreGrid(
+    engine: CoreEngine,
+    durationS: number,
+    gridH: number,
+    maxSteps: number,
+    onSample: ((sample: HeadlessSample) => void) | undefined,
+  ): HeadlessRunResult {
+    const startTime = engine.simTime;
+    // Same float slack as the classic loop, so an exact multiple of the step
+    // does not grow one extra ~1e-16 s point.
+    const tolerance = Math.max(1e-15, durationS * 1e-12);
+    const wanted = Math.max(1, Math.ceil((durationS - tolerance) / gridH));
+    // A NaN cap never trips classic's `stepCount >= maxSteps`, so it is no cap.
+    const cap = Number.isNaN(maxSteps) ? Number.POSITIVE_INFINITY : maxSteps;
+    const points = Math.min(wanted, cap);
+    const hitStepCap = wanted > cap;
+
+    let accepted = 0;
+    let failed = false;
+    let previous = startTime;
+    for (let k = 1; k <= points; k++) {
+      const target = k === wanted ? startTime + durationS : startTime + k * gridH;
+      engine.advance(target);
+      if (!engine.lastConverged) {
+        failed = true;
+        break;
+      }
+      accepted += 1;
+      if (onSample) {
+        onSample({
+          simTime: engine.simTime,
+          h: engine.simTime - previous,
+          netV: { ...engine.getNetV() },
+          elementI: { ...engine.getElementI() },
+        });
+      }
+      previous = engine.simTime;
+    }
+
+    const simulatedS = !failed && !hitStepCap ? durationS : engine.simTime - startTime;
+    return {
+      simTime: engine.simTime,
+      simulatedS,
+      acceptedSteps: accepted,
+      rejectedSteps: 0,
+      failedSteps: failed ? 1 : 0,
+      maxLocalErrorRatio: 0,
+      finalH: gridH,
+      errorControlled: false,
+      hitMinStep: failed,
+      hitStepCap,
+    };
+  }
+
+  /**
+   * run()'s core-mode path. The core has no step loop in W0/W1a —
+   * bo_engine_advance jumps straight to tEnd (core/README.md, "W0 kernel
+   * semantics" #6: "Everything in W0 is static, so advancing only moves
+   * time") — so there is nothing here for adaptive/fixedStepS/maxSteps to
+   * control, and integrationMethod has already been validated/recorded (not
+   * applied — the core has no dynamics to seed) by run() before this is
+   * called; run() validates all of them (misuse is still caught) but this
+   * method ignores every one of them. (`adaptive: false` is `_runCoreGrid`'s.)
+   *
+   * NON-CONVERGENCE. `CoreEngine.advance` does not throw for a -4/-7 result
+   * (core/README.md, "A failed advance") — it sets `lastConverged = false`
+   * and reads `simTime` back as however far Rust actually got. This method's
+   * own doc-inherited contract ("Throws only on misuse; solver trouble is
+   * reported on the result", run()'s doc comment) therefore holds here too:
+   * a non-converged advance is reported via `hitMinStep`/`simulatedS`, the
+   * SAME honest-failure signal the classic step loop above uses when it hits
+   * the H_MIN floor, rather than propagating a `CoreLoadError` out of run().
+   */
+  private _runCore(
+    engine: CoreEngine,
+    durationS: number,
+    onSample: ((sample: HeadlessSample) => void) | undefined,
+  ): HeadlessRunResult {
+    const startTime = engine.simTime;
+    engine.advance(startTime + durationS);
+    const converged = engine.lastConverged;
+    // On non-convergence `engine.simTime` is however far Rust actually got
+    // (the last instant it completed), not `startTime + durationS`, so the
+    // gap between them IS how much of the requested duration was actually
+    // simulated.
+    const simulatedS = converged ? durationS : engine.simTime - startTime;
+
+    if (onSample) {
+      // No per-step sample grid exists in the core in W0/W1a (one jump, not a
+      // step loop): onSample fires exactly ONCE, at the run's end, with
+      // h = simulatedS (== durationS on convergence). W2's acquisition
+      // subsystem replaces this with the core's real sample points. The
+      // readouts are always the last CONVERGED instant's — CoreEngine.advance
+      // never republishes them on a non-convergent call — so this is exactly
+      // the "last trusted state is preserved" guarantee hitMinStep's own doc
+      // comment describes for the classic path.
+      onSample({
+        simTime: engine.simTime,
+        h: simulatedS,
+        netV: { ...engine.getNetV() },
+        elementI: { ...engine.getElementI() },
+      });
+    }
+
+    return {
+      simTime: engine.simTime,
+      simulatedS,
+      acceptedSteps: 0,
+      rejectedSteps: 0,
+      failedSteps: 0,
+      maxLocalErrorRatio: 0,
+      finalH: 0,
+      errorControlled: false,
+      hitMinStep: !converged,
+      hitStepCap: false,
     };
   }
 }

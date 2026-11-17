@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "An spdt_switch choosing between 9 V (throw b, position 0) and 3 V (throw c, position 1) for a 100 kohm resistor into 1 uF, thrown twice mid-run.",
+    "By hand: the time constant is R C = 100 ms (the contact's 1 mohm adds one part in a hundred million), and each 20 ms phase is v(t) = level + (v_start - level) exp(-t / 100 ms), with exp(-0.2) = 0.818731.",
+    "  phase 0  position 0: from 0 V toward 9 V      v = 9 (1 - e^-0.2)               = 1.631423 V",
+    "  phase 1  position 1: toward 3 V               v = 3 + (1.631423 - 3) e^-0.2    = 1.879504 V",
+    "  phase 2  position 0: toward 9 V               v = 9 + (1.879504 - 9) e^-0.2    = 3.170231 V",
+    "The resistor's current at the end of each phase is (level - v) / 100 kohm: 73.686 uA, 11.205 uA and 58.298 uA, and the switch's common pin sits on the level it selects (9 V, 3 V, 9 V).",
+    "The 100 ms time constant keeps the harness's 1 ms classic step small against the curve, as fixture 13's does.",
+    "test/core/promoted-kinds-fixtures.test.ts checks these values on both engines."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.02
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "position": 1
+          }
+        }
+      ],
+      "durationS": 0.02
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "position": 0
+          }
+        }
+      ],
+      "durationS": 0.02
+    }
+  ]
+}

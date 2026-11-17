@@ -1,0 +1,5 @@
+---
+"brownout": minor
+---
+
+A 74LS189 RAM can now start with contents. Give it `params.contents` (base64 of sixteen bytes, one 4-bit word per address, address 0 first) and it holds those words when it powers up, on the classic engine and on the Rust/WASM core, so a saved SAP-1 runs its program from load with no switch presses. It is a power-on preload, not non-volatile memory: writes during a run change the live contents only, and when the chip loses power (its supply leaves its window) the written words go and the preload is back at the next power-up. Like an EEPROM's `contents` it changes only through a reload; a reload that leaves the chip's contents alone keeps the live words, and one that changes them starts from the new ones. A 74LS189 without `contents` behaves exactly as before: blank (`0xF`) at load, and its words frozen through an outage. New exports: `RAM_KINDS`, `isRamKind`, `RAM_CONTENTS_SHAPE`, `encodeRamContents`, `ramPreloadWords` (the lenient decode both engines load with) and `ramContentsError` (the strict check for an editor).

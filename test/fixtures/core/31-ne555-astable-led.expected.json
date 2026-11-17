@@ -1,0 +1,17 @@
+{
+  "status": "pass",
+  "durationS": 0.02,
+  "ne555": {
+    "component": "u1",
+    "mode": "astable",
+    "capacitor": "ct",
+    "minPhases": 16
+  },
+  "digital": {
+    "clockKey": "u1",
+    "projection": ["u1"],
+    "anchor": { "u1": 1 },
+    "offsetBoundCycles": 0,
+    "minComparedCycles": 8
+  }
+}

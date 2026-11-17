@@ -1,0 +1,17 @@
+{
+  "id": "core-w0-floating-source",
+  "components": [
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "vsrc1", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 10 } },
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 1000 } },
+    { "id": "vsrc2", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 6 } },
+    { "id": "r2", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 1000 } }
+  ],
+  "wires": [
+    { "from_component": "vsrc1", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vsrc1", "from_pin": "pos", "to_component": "r1", "to_pin": "a" },
+    { "from_component": "r1", "from_pin": "b", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vsrc2", "from_pin": "pos", "to_component": "r2", "to_pin": "a" },
+    { "from_component": "r2", "from_pin": "b", "to_component": "vsrc2", "to_pin": "neg" }
+  ]
+}

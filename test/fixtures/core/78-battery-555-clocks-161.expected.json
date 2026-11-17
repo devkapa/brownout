@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "A 555 astable (R_A = 1.5 kohm, R_B = 1 kohm, C = 1 uF) on a battery_pack (5 V, 0.9 ohm: the SAP-1's pack) with a 47 uF decoupling capacitor across the rail, clocking a 74LS161 (enabled, never cleared or loaded, powered from the same rail). A clock edge that comes late or is lost shows as a wrong count at the end. 100 ms.",
+    "Judged under ruling R122 (a), the handBound marker below: the core against these hand values within the stated bound; classic's distance from them is a divergence row, not a gate (circuit class '555 on a cell's rail': core/README.md, 'The 555 period on a moving rail'). test/core/battery-555-corpus.test.ts also runs the board on both engines at host stops of 100 us, 1 ms and 1/60 s.",
+    "By hand (steady rail; thresholds and charge target are both the rail): t_H = ln 2 (R_A + R_B) C = 1.7329 ms; the discharge goes through R_B + (10 ohm in parallel with R_A) = 1009.9 ohm toward u 10 / 1510: t_L = 0.7102 ms (0.693 R_B C alone: 0.6931 ms); period 2.4431 ms, duty 70.93 %. The textbook 0.693 (R_A + 2 R_B) C is 2.4260 ms.",
+    "The first HIGH runs from an empty C: ln 3 (R_A + R_B) C = 2.7465 ms. The 555's OUT is high at load, and the counter's clock memory starts LOW, so the counter reads 1 from load (core/spec/w1-classic-semantics.md, 'Initial edges', as fixtures 67 and 73) and adds one at each rise. Rises at 3.4567 ms and every 2.4431 ms: 40 in 100 ms, the last at 98.7371 ms, the next past 100 ms.",
+    "Final count: (1 + 40) mod 16 = 9, QD QC QB QA = 1001, with the last rise 1.3 ms before the end and the next 1.2 ms after it.",
+    "The rail's sag (the 555 and the counter draw about 10 to 15 mA through 0.9 ohm) moves edges by under 0.1 % of their time; the test's bound is 0.25 % + 5 us, and the count has to be exact.",
+    "The rail capacitor's published current is judged at every stop against C dV/dt of the core's own published rail (the right-hand rate), within W0's 1 nA + 1e-3 relative (CAPI, core/README.md Rails point 7: the rail is algebraic and the capacitor follows it; before CAPI the core published 0 there). Classic's readings are recorded beside it, not gated."
+  ],
+  "status": "pass",
+  "durationS": 0.1,
+  "handBound": {
+    "circuitClass": "555 on a cell's rail",
+    "component": "u1",
+    "railCapacitor": "cdec",
+    "model": {
+      "kind": "astable",
+      "raOhm": 1500,
+      "rbOhm": 1000,
+      "cF": 1e-06,
+      "disOhm": 10
+    },
+    "hand": {
+      "rises": 40,
+      "falls": 40,
+      "periodS": 0.0024430849924134534,
+      "duty": 0.7092949925119112,
+      "finalCount": 9
+    },
+    "bound": {
+      "relative": 0.0025,
+      "absoluteS": 5e-06
+    },
+    "justification": "The hand model holds the rail steady; the rail is not. The pack's 0.9 ohm carries a draw that changes with OUT's level (a few mA between the phases, the counter's draw included), so the rail moves a few mV between the phases (under 0.1 %) and the thresholds, which are fractions of the rail, move with it. That shifts an edge by about that fraction of its time (measured worst 0.05 % at the last edge); 0.25 % covers it with margin, and 5 us covers the rail capacitor's own settling (0.9 ohm x 47 uF = 42 us). Classic is judged against the same values and its distance is recorded in the entry's divergence rows, at the app's 1/60 s stops, in numbers: 77 an edge up to 1.4 ms off, a rise lost in 100 ms; 78 up to 1.6 ms, a final count of 8 against 9; 79 a pulse end 0.56 ms late (a step-limited crossing search). So the bound is not set to admit classic.",
+    "counter": "c1"
+  }
+}

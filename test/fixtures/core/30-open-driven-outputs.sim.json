@@ -1,0 +1,84 @@
+{
+  "id": "core-w1d-30-open-driven-outputs",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    {
+      "id": "u173",
+      "kind": "74ls173",
+      "pins": [
+        { "id": "/clr" }, { "id": "clk" }, { "id": "m" }, { "id": "n" }, { "id": "g1" }, { "id": "g2" },
+        { "id": "d1" }, { "id": "d2" }, { "id": "d3" }, { "id": "d4" },
+        { "id": "q1" }, { "id": "q2" }, { "id": "q3" }, { "id": "q4" },
+        { "id": "gnd" }, { "id": "vcc" }
+      ],
+      "params": {}
+    },
+    {
+      "id": "rq1",
+      "kind": "resistor",
+      "pins": [{ "id": "a" }, { "id": "b" }],
+      "params": { "resistance": 10000 }
+    },
+    {
+      "id": "u245",
+      "kind": "74ls245",
+      "pins": [
+        { "id": "dir" }, { "id": "a1" }, { "id": "a2" }, { "id": "a3" }, { "id": "a4" },
+        { "id": "a5" }, { "id": "a6" }, { "id": "a7" }, { "id": "a8" }, { "id": "gnd" },
+        { "id": "b8" }, { "id": "b7" }, { "id": "b6" }, { "id": "b5" }, { "id": "b4" },
+        { "id": "b3" }, { "id": "b2" }, { "id": "b1" }, { "id": "/oe" }, { "id": "vcc" }
+      ],
+      "params": {}
+    },
+    { "id": "rb2", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb3", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb4", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb5", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb6", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb7", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } },
+    { "id": "rb8", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 10000 } }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u173", "to_pin": "vcc" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "/clr" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "clk" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "m" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "n" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "g1" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "g2" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "d1" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "d2" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "d3" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u173", "to_pin": "d4" },
+    { "from_component": "u173", "from_pin": "q1", "to_component": "rq1", "to_pin": "a" },
+    { "from_component": "rq1", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "vcc" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "/oe" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "dir" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "a1" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "a2" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "a3" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "a4" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "a5" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "a6" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "u245", "to_pin": "a7" },
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "u245", "to_pin": "a8" },
+    { "from_component": "u245", "from_pin": "b2", "to_component": "rb2", "to_pin": "a" },
+    { "from_component": "rb2", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b3", "to_component": "rb3", "to_pin": "a" },
+    { "from_component": "rb3", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b4", "to_component": "rb4", "to_pin": "a" },
+    { "from_component": "rb4", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b5", "to_component": "rb5", "to_pin": "a" },
+    { "from_component": "rb5", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b6", "to_component": "rb6", "to_pin": "a" },
+    { "from_component": "rb6", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b7", "to_component": "rb7", "to_pin": "a" },
+    { "from_component": "rb7", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" },
+    { "from_component": "u245", "from_pin": "b8", "to_component": "rb8", "to_pin": "a" },
+    { "from_component": "rb8", "from_pin": "b", "to_component": "vcc", "to_pin": "neg" }
+  ]
+}

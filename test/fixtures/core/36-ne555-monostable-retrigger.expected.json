@@ -1,0 +1,36 @@
+{
+  "status": "pass",
+  "ne555": {
+    "component": "u1",
+    "mode": "monostable",
+    "capacitor": "ct",
+    "minPhases": 3
+  },
+  "phases": [
+    {
+      "durationS": 0.5
+    },
+    {
+      "set": [
+        {
+          "id": "btn",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "btn",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.4
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "$comment": [
+    "Half 1 of a 74HC74 wired as a toggle (D to /Q), with /PRE, /CLR and the clock from pulse sources; half 2 is parked (clock and D low, /PRE and /CLR high).",
+    "/PRE is low until 1 ms; the clock rises at 2.5, 7.5, 12.5 and 17.5 ms (1 ms high, 5 ms period); /CLR is low from 10.5 to 11.5 ms. Every edge takes 1 us.",
+    "By hand, from the function table (an asynchronous /PRE or /CLR overrides the clock; a rising edge copies D, which is /Q, so Q toggles):",
+    "   0    to  1    ms  /PRE low           Q = 1   /Q = 0",
+    "   1    to  2.5  ms  held               Q = 1",
+    "   2.5  to  7.5  ms  edge 2.5           Q = 0   /Q = 1",
+    "   7.5  to 10.5  ms  edge 7.5           Q = 1",
+    "  10.5  to 11.5  ms  /CLR low           Q = 0   /Q = 1",
+    "  11.5  to 12.5  ms  held               Q = 0",
+    "  12.5  to 17.5  ms  edge 12.5          Q = 1",
+    "  17.5  ms on        edge 17.5          Q = 0",
+    "The harness samples at 0, 5, 10 and 20 ms: Q = 1 (set), 0 (toggled), 1 (toggled), 0 (toggled); /CLR's effect falls between samples and test/core/promoted-kinds-fixtures.test.ts reads every interval above on both engines."
+  ],
+  "status": "pass",
+  "durationS": 0.02
+}

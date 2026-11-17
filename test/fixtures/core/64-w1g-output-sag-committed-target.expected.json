@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "durationS": 0.0002,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 0.0002,
+    "checks": [
+      {
+        "check": "committed-target",
+        "ic": "u1",
+        "pin": "b1",
+        "enable": "oe"
+      }
+    ],
+    "classicS": [
+      1e-8
+    ]
+  }
+}

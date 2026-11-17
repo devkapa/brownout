@@ -2230,7 +2230,25 @@
         },
         "io_max": 0.008,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 13,
+            "tphl": 18
+          },
+          "clr_q": {
+            "tphl": 20
+          },
+          "clk_rco": {
+            "tplh": 20,
+            "tphl": 18
+          },
+          "ent_rco": {
+            "tplh": 9,
+            "tphl": 9
+          }
+        },
+        "switching_source": "TI SDLS060 p.15, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
       }
     },
     {
@@ -2381,7 +2399,23 @@
         },
         "io_max": 0.008,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 17,
+            "tphl": 22
+          },
+          "clr_q": {
+            "tphl": 26
+          },
+          "mn": {
+            "tpzh": 15,
+            "tpzl": 18,
+            "tphz": 11,
+            "tplz": 11
+          }
+        },
+        "switching_source": "TI SDLS067A p.8, typical, VCC 5 V, RL 667 Ohm"
       }
     },
     {
@@ -2532,7 +2566,18 @@
         },
         "io_max": 0.008,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "addr_o": {
+            "tplh": 37,
+            "tphl": 37
+          },
+          "cs": {
+            "tpzh": 10,
+            "tpzl": 10
+          }
+        },
+        "switching_source": "54LS/74LS189 AC table p.3, typical; /WE access and every disable are unpublished for the LS part"
       }
     },
     {
@@ -2683,7 +2728,14 @@
         },
         "io_max": 0.008,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "strobe": {
+            "tplh": 13,
+            "tphl": 14
+          }
+        },
+        "switching_source": "TI SDLS058 p.5, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
       }
     },
     {
@@ -2834,7 +2886,14 @@
         },
         "io_max": 0.008,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "strobe": {
+            "tplh": 13,
+            "tphl": 14
+          }
+        },
+        "switching_source": "TI SDLS058 p.5, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
       }
     },
     {
@@ -3168,7 +3227,16 @@
         },
         "io_max": 0.024,
         "logic_family": "LS-TTL",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "oe": {
+            "tpzh": 25,
+            "tpzl": 27,
+            "tphz": 15,
+            "tplz": 15
+          }
+        },
+        "switching_source": "TI SN74LS245 7.6, typical, VCC 5 V, RL 667 Ohm, CL 45 pF (disable 5 pF)"
       }
     },
     {
@@ -4053,7 +4121,18 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 25,
-        "notes": "Both /PRE and /CLR LOW simultaneously is an undefined state per the TI SN74HC74 datasheet (SCLS108) — Q and /Q both go HIGH while asserted, which is logically inconsistent. Do not rely on this state."
+        "notes": "Both /PRE and /CLR LOW simultaneously is an undefined state per the TI SN74HC74 datasheet (SCLS108) — Q and /Q both go HIGH while asserted, which is logically inconsistent. Do not rely on this state.",
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 20,
+            "tphl": 20
+          },
+          "pre_clr_q": {
+            "tplh": 20,
+            "tphl": 20
+          }
+        },
+        "switching_source": "TI SCLS094F 6.9, typical at VCC 4.5 V (the table has no 5 V column)"
       }
     },
     {
@@ -4730,7 +4809,26 @@
           "nominal": 5,
           "max": 5.5
         },
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "addr_io": {
+            "tplh": 150,
+            "tphl": 150
+          },
+          "ce": {
+            "tpzh": 150,
+            "tpzl": 150,
+            "tphz": 50,
+            "tplz": 50
+          },
+          "oe": {
+            "tpzh": 70,
+            "tpzl": 70,
+            "tphz": 50,
+            "tplz": 50
+          }
+        },
+        "switching_source": "Atmel AT28C16-15 p.5, MAXIMA (no typical is published)"
       }
     },
     {
@@ -4978,7 +5076,26 @@
           "nominal": 5,
           "max": 5.5
         },
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "addr_io": {
+            "tplh": 150,
+            "tphl": 150
+          },
+          "ce": {
+            "tpzh": 150,
+            "tpzl": 150,
+            "tphz": 50,
+            "tplz": 50
+          },
+          "oe": {
+            "tpzh": 70,
+            "tpzl": 70,
+            "tphz": 50,
+            "tplz": 50
+          }
+        },
+        "switching_source": "Atmel AT28C256 doc0006M 9, grade -15, MAXIMA (no typical is published)"
       }
     },
     {

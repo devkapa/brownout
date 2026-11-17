@@ -58,6 +58,15 @@ import {
   type SimCircuit,
 } from "../sim-engine.js";
 import { runSmallSignalAc } from "../ac-analysis.js";
+// engine-base, not engine: the `./spice` entry must not pull the core compiler
+// and wasm loader into its module graph for an analysis that is classic anyway.
+import {
+  adoptClassicEngine,
+  planForcedClassic,
+  type AnalysisEngineKind,
+  type AnalysisEngineOptions,
+} from "../../../analysis/engine-base.js";
+import { AnalysisConvergenceError } from "../../../analysis/checked-step.js";
 import {
   parseSpiceNetlist,
   SpiceParseError,
@@ -70,7 +79,7 @@ import {
 
 // ── Result types ────────────────────────────────────────────────────────────
 
-export interface RunSpiceOptions {
+export interface RunSpiceOptions extends AnalysisEngineOptions {
   /** Transient companion method; default "trap" (see the header). */
   integrationMethod?: "be" | "trap";
   /** Ceiling on .tran step count (default 1e6): a typo'd tstep must fail
@@ -130,11 +139,28 @@ export interface SpiceAcResult {
 export interface SpiceRunResult {
   title: string;
   warnings: string[];
+  /**
+   * The engine the `.tran` stepped on (the one analysis that advances a
+   * transient; `.op`, `.dc` and `.ac` solve the DC or linearized system on
+   * classic regardless). "classic" when the netlist has no `.tran`.
+   */
+  engine: AnalysisEngineKind;
+  /** Why `.tran` is on classic when it was not asked to be; empty otherwise. */
+  fallbackReasons: string[];
   op?: SpiceOpResult;
   tran?: SpiceTranResult;
   dc?: SpiceDcResult;
   ac?: SpiceAcResult;
 }
+
+/**
+ * Why `.tran` is classic even where the core supports every part: the core
+ * starts cold, but a `.tran` starts from a DC operating point or `.ic`/`IC=`
+ * seeds, which reach the core only through the v4 CARRY block (W2c). Deleting
+ * this string, and routing the seeded start through that block, is the
+ * switch-over.
+ */
+const TRAN_FORCED_CLASSIC_REASONS = ["tran-needs-carry-seed"] as const;
 
 const DEFAULT_MAX_TRAN_STEPS = 1_000_000;
 const DEFAULT_MAX_SWEEP_POINTS = 100_000;
@@ -281,7 +307,8 @@ function runTranAnalysis(
   method: "be" | "trap",
   maxSteps: number,
   warnings: string[],
-): SpiceTranResult {
+  engineOptions: AnalysisEngineOptions | undefined,
+): { tran: SpiceTranResult; engine: AnalysisEngineKind; fallbackReasons: string[] } {
   // tstop is honored, never overshot: floor(tstop/tstep) fixed steps, with
   // the same relative guard as .dc so an exact multiple that lands just
   // under an integer in f64 still counts as exact. ngspice's adaptive
@@ -302,6 +329,13 @@ function runTranAnalysis(
       `runSpice: .tran asks for ${steps} steps (tstop/tstep), above the ${maxSteps} cap — `
       + "raise maxTranSteps explicitly if this is intentional",
     );
+  }
+
+  // The engine choice for this run, made before any solve (D14). Today it is
+  // always classic; the seeded start below only exists for classic.
+  const plan = planForcedClassic(engineOptions?.engine, TRAN_FORCED_CLASSIC_REASONS);
+  if (plan.engine !== "classic") {
+    throw new Error("runSpice: .tran has no seeded start on the core yet (see TRAN_FORCED_CLASSIC_REASONS)");
   }
 
   const ic = parsed.initialConditions;
@@ -346,9 +380,14 @@ function runTranAnalysis(
   };
 
   record(0);
+  // Seeded above, so adopted rather than coldLoaded; unchecked, as .tran
+  // always stepped (a failed step ends the run, there is nothing to roll back to).
+  const stepper = adoptClassicEngine(engine);
   for (let i = 1; i <= steps; i++) {
-    engine.step(analysis.tstepS);
-    if (!engine.lastConverged) {
+    try {
+      stepper.advanceTo(stepper.simTime + analysis.tstepS, { stepS: analysis.tstepS });
+    } catch (err) {
+      if (!(err instanceof AnalysisConvergenceError)) throw err;
       throw new Error(
         `runSpice: .tran solve failed to converge at t = ${(i * analysis.tstepS).toExponential(6)} s `
         + `(step ${i} of ${steps})`,
@@ -356,7 +395,11 @@ function runTranAnalysis(
     }
     record(i * analysis.tstepS);
   }
-  return { timeS, nodeVoltages };
+  return {
+    tran: { timeS, nodeVoltages },
+    engine: plan.engine,
+    fallbackReasons: plan.fallbackReasons,
+  };
 }
 
 // ── .dc ─────────────────────────────────────────────────────────────────────
@@ -524,7 +567,7 @@ export function runSpice(netlistText: string, options?: RunSpiceOptions): SpiceR
   const maxSweepPoints = options?.maxSweepPoints ?? DEFAULT_MAX_SWEEP_POINTS;
 
   const warnings = [...parsed.warnings];
-  const result: SpiceRunResult = { title: parsed.title, warnings };
+  const result: SpiceRunResult = { title: parsed.title, warnings, engine: "classic", fallbackReasons: [] };
   if (parsed.analyses.length === 0) {
     warnings.push("netlist declares no analysis directive (.op/.tran/.dc/.ac) — parsed but nothing ran");
   }
@@ -534,8 +577,13 @@ export function runSpice(netlistText: string, options?: RunSpiceOptions): SpiceR
         result.op = runOpAnalysis(parsed, method);
         break;
       case "tran":
-        result.tran = runTranAnalysis(parsed, analysis, method, maxTranSteps, warnings);
+      {
+        const run = runTranAnalysis(parsed, analysis, method, maxTranSteps, warnings, options);
+        result.tran = run.tran;
+        result.engine = run.engine;
+        result.fallbackReasons = run.fallbackReasons;
         break;
+      }
       case "dc":
         result.dc = runDcAnalysis(parsed, analysis, method, maxSweepPoints);
         break;

@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "durationS": 3,
+  "sidecar": {
+    "kind": "slow",
+    "horizonS": 3,
+    "checks": [
+      {
+        "check": "led-overdrive",
+        "led": "led1",
+        "resistor": "r1",
+        "source": "vcc"
+      }
+    ],
+    "classicS": [
+      2.7066604824999643
+    ]
+  }
+}

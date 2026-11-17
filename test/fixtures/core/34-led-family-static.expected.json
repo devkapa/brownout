@@ -1,0 +1,216 @@
+{
+  "status": "pass",
+  "durationS": 0.001,
+  "sidecar": {
+    "kind": "led-static",
+    "cells": [
+      {
+        "device": "d1",
+        "pin": "a",
+        "resistor": "r_d1",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 1.8
+      },
+      {
+        "device": "d2",
+        "pin": "a",
+        "resistor": "r_d2",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 1.8
+      },
+      {
+        "device": "d3",
+        "pin": "a",
+        "resistor": "r_d3",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 1.8
+      },
+      {
+        "device": "d4",
+        "pin": "a",
+        "resistor": "r_d4",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 1.8
+      },
+      {
+        "device": "d5",
+        "pin": "a",
+        "resistor": "r_d5",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 1.8
+      },
+      {
+        "device": "bi",
+        "pin": "a1",
+        "resistor": "r_bi1",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf1",
+        "vfDefault": 1.8,
+        "channel": 0
+      },
+      {
+        "device": "bi",
+        "pin": "a2",
+        "resistor": "r_bi2",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf2",
+        "vfDefault": 2,
+        "channel": 1
+      },
+      {
+        "device": "rgb",
+        "pin": "r_a",
+        "resistor": "r_rgb0",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf_r",
+        "vfDefault": 1.8,
+        "channel": 0
+      },
+      {
+        "device": "rgb",
+        "pin": "g_a",
+        "resistor": "r_rgb1",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf_g",
+        "vfDefault": 2,
+        "channel": 1
+      },
+      {
+        "device": "rgb",
+        "pin": "b_a",
+        "resistor": "r_rgb2",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf_b",
+        "vfDefault": 3,
+        "channel": 2
+      },
+      {
+        "device": "s7",
+        "pin": "a",
+        "resistor": "r_s7a",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 0,
+        "commonGroup": "s7"
+      },
+      {
+        "device": "s7",
+        "pin": "b",
+        "resistor": "r_s7b",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 1,
+        "commonGroup": "s7"
+      },
+      {
+        "device": "s7",
+        "pin": "c",
+        "resistor": "r_s7c",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 2,
+        "commonGroup": "s7"
+      },
+      {
+        "device": "sa",
+        "pin": "b",
+        "resistor": "r_sab",
+        "source": "vcc",
+        "orientation": "cathode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 1
+      },
+      {
+        "device": "sa",
+        "pin": "c",
+        "resistor": "r_sac",
+        "source": "vcc",
+        "orientation": "cathode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 2
+      },
+      {
+        "device": "s2",
+        "pin": "a",
+        "resistor": "r_s2",
+        "source": "vcc",
+        "orientation": "anode-node",
+        "vfParam": "vf",
+        "vfDefault": 2,
+        "channel": 0
+      }
+    ],
+    "commonGroups": [
+      {
+        "id": "s7",
+        "device": "s7",
+        "pin": "com",
+        "resistor": "r_s7com"
+      }
+    ],
+    "devices": [
+      {
+        "device": "d1"
+      },
+      {
+        "device": "d2"
+      },
+      {
+        "device": "d3"
+      },
+      {
+        "device": "d4"
+      },
+      {
+        "device": "d5"
+      },
+      {
+        "device": "bi"
+      },
+      {
+        "device": "rgb"
+      },
+      {
+        "device": "s7"
+      },
+      {
+        "device": "sa"
+      },
+      {
+        "device": "bu"
+      },
+      {
+        "device": "bu_rgb"
+      },
+      {
+        "device": "s0"
+      },
+      {
+        "device": "s2"
+      }
+    ]
+  }
+}

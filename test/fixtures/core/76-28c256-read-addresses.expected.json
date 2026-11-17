@@ -1,0 +1,101 @@
+{
+  "$comment": [
+    "Fixture 28 with a 28C256 in place of the 28C16: a dip switch drives A0, A1 and A2, A3 to A14 are on GND, /OE and /CE are low and /WE is high, and each data pin has 10 kohm to GND.",
+    "The image is the eight bytes 00 11 22 33 44 55 66 77 (contents ABEiM0RVZnc=), so the word at address k is 0x11 * k: the data pins read the bits of k * 17.",
+    "A 28C256's pull-downs take the lines to 0 V for a 0 bit and the chip drives 5 V (its HIGH level) for a 1 bit. Eight phases of 1 ms read addresses 0, 1, 2, 3, 4, 5, 6 and 7 in that order (the dip switch positions are the phases' sets).",
+    "test/core/promoted-kinds-fixtures.test.ts reads the eight words on both engines."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 0,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 0,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 0,
+            "sw2": 1,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    },
+    {
+      "set": [
+        {
+          "id": "dip",
+          "params": {
+            "sw1": 1,
+            "sw2": 1,
+            "sw3": 1
+          }
+        }
+      ],
+      "durationS": 0.001
+    }
+  ]
+}
