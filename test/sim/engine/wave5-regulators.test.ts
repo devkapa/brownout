@@ -850,7 +850,11 @@ describe("bench_psu — same-step CC compliance recovery", () => {
   ])("bounds $label at 10 V on the first accepted step", ({ resistance, expectedCurrent, stressMustRecover }) => {
     const engine = runEngine(circuitWithLoad(2), 10);
     expect(netVoltage(engine, "psu", "pos")).toBeCloseTo(1, 6);
-    const stressBefore = engine.saveState().failureStress.get("resistor_overload\0rl\0") ?? 0;
+    // Read only where it is compared below, so the 100 ohm case, which never
+    // uses it, needs nothing from saveState().failureStress.
+    const stressBefore = stressMustRecover
+      ? (engine.saveState().failureStress.get("resistor_overload\0rl\0") ?? 0)
+      : 0;
 
     engine.load(circuitWithLoad(resistance));
     engine.step(1e-4);
